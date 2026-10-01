@@ -140,6 +140,8 @@ pub struct WgpuBackend<
     /// What each stage of the build took: the adapter, the device, the
     /// surface's configuration, and the textures, shaders and pipelines.
     pub(super) build_timings: Vec<(&'static str, Duration)>,
+    /// The adapter the build drew with, given or requested.
+    pub(super) adapter_info: wgpu::AdapterInfo,
     pub(super) device: Device,
     pub(super) queue: Queue,
 
@@ -294,6 +296,13 @@ impl<'f, 's, P: PostProcessor, S: RenderSurface<'s>> WgpuBackend<'f, 's, P, S> {
     /// and the pipelines, the post processor's included).
     pub fn build_timings(&self) -> &[(&'static str, Duration)] {
         &self.build_timings
+    }
+
+    /// The adapter the backend draws with: the one handed to
+    /// [`Builder::with_device`](crate::Builder::with_device) when the build
+    /// took it, else the one the build requested for itself.
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter_info
     }
 
     /// Update the fonts used for rendering. This will cause a full repaint of

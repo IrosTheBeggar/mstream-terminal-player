@@ -37,6 +37,10 @@ mod serve;
 /// no GPU path yet, and none of this belongs in it until it does.
 #[cfg(not(target_arch = "wasm32"))]
 mod shader;
+/// The wgpu instance and adapter every window and probe draws with: on
+/// Windows, DX12 or Vulkan alone, never GL.
+#[cfg(not(target_arch = "wasm32"))]
+mod gpu_pick;
 /// The visualizer's window: a child process of the player (PLAN.md, Phase
 /// 11.1; docs/ux-contracts/visualizer-window.md).
 #[cfg(not(target_arch = "wasm32"))]

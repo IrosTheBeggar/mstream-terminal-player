@@ -99,11 +99,16 @@ const CELL_GUESS_PT: f64 = 8.0;
 /// loop stops spinning on it and sleeps between checks instead.
 const STALLED_REDRAW: Duration = Duration::from_millis(100);
 /// How long the window stays hidden on Windows waiting for its first
-/// presented frame before it is shown anyway, blank: longer than a cold
-/// start's first present (1.6–2.8 s in the stats lever's runs there), and
-/// short enough that a first frame that never comes still leaves a window
-/// to close.
+/// presented frame before it is shown anyway — with a frame drawn into it
+/// if the backend has come by then, else blank until it does: longer than
+/// a cold start's first present (1.6–2.8 s in the stats lever's runs
+/// there), and short enough that a first frame that never comes still
+/// leaves a window to close.
 const SHOW_BY: Duration = Duration::from_secs(4);
+/// How often the loop looks at the early threads while the backend waits
+/// on them: a wake every few milliseconds for the moments they take, so the
+/// backend follows them by no more than that.
+const EARLY_POLL: Duration = Duration::from_millis(4);
 /// The frame the fidelity dump waits for: the first has the window at its
 /// opening size, the resize to the grid lands a frame or two later.
 const DUMP_AT_FRAME: u32 = 5;
@@ -384,7 +389,7 @@ struct App {
     /// The startup's stopwatch (the stats lever's): it runs from the
     /// event loop's creation to the backend's first frame.
     lap: Lap,
-    /// The startup's work begun before the loop, until `open` joins it.
+    /// The startup's work begun before the loop, until `build` joins it.
     early: Early,
     /// When the quit was decided, with the stats lever: the way out's
     /// clock, which the teardown laps (`exit_laps`) and leaves running.
@@ -409,12 +414,15 @@ fn exit_report(laps: &[(&'static str, Duration)]) {
 
 /// The startup's work that needs no window, begun on threads of its own
 /// before the event loop runs: the faces, and the GPU's instance, adapter
-/// and device. The window is on screen from its creation in `resumed`,
-/// blank until the first present, and the loop answers nothing meanwhile
-/// (on Windows, the white window the Windows report saw for two to three
-/// seconds, which DWM marks Not Responding under load); this work then
-/// overlaps the event loop's start and the window's creation instead of
-/// following them, and `open` only joins it.
+/// and device. It overlaps the event loop's start and the window's
+/// creation instead of following them. The backend is built from it once
+/// both threads are done: at once in `open` when they already are (on this
+/// Mac, warm or cold, they are), else from the loop, which polls them
+/// (`about_to_wait`) rather than block on a join. A blocked loop answered
+/// nothing — on Windows, the white window the Windows report saw for two to
+/// three seconds, which DWM marks Not Responding under load — and could not
+/// show a hidden window by its deadline either: a loaded run there showed
+/// it 17 s after it was made, blank.
 struct Early {
     faces: Option<JoinHandle<Result<Faces, String>>>,
     gpu: Option<JoinHandle<Gpu>>,
@@ -431,8 +439,16 @@ impl Early {
     fn gpu(display: OwnedDisplayHandle) -> Option<JoinHandle<Gpu>> {
         std::thread::Builder::new()
             .name("window-gpu".into())
-            .spawn(move || Gpu::prepare(display))
+            .spawn(move || Gpu::prepare(Box::new(display)))
             .ok()
+    }
+
+    /// Both threads are done (or never started): joining them now does not
+    /// wait. A thread that panicked is done too, and its work is redone on
+    /// the loop's thread when it is joined.
+    fn ready(&self) -> bool {
+        self.faces.as_ref().is_none_or(JoinHandle::is_finished)
+            && self.gpu.as_ref().is_none_or(JoinHandle::is_finished)
     }
 }
 
@@ -482,93 +498,31 @@ struct Gpu {
 }
 
 impl Gpu {
-    fn prepare(display: OwnedDisplayHandle) -> Gpu {
-        let picked = Picked::pick(Box::new(display));
+    /// The instance and adapter by the rule every window of ours follows
+    /// ([`crate::gpu_pick`]: on Windows DX12 or Vulkan alone, hardware
+    /// before WARP, never GL), then a device from that adapter. `display`
+    /// is the event loop's on the early thread, or the window's when that
+    /// thread did not run; the two are the same display, and on Wayland and
+    /// X11 the instance needs it before a surface can exist.
+    fn prepare(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> Gpu {
+        let options = wgpu::RequestAdapterOptions::default();
+        let choice = crate::gpu_pick::choose(Some(display), |instance| {
+            let adapter = block_on(instance.request_adapter(&options)).ok()?.ok()?;
+            Some((adapter, ()))
+        });
         let started = Instant::now();
-        let device = picked.adapter.and_then(|adapter| {
+        let device = choice.found.and_then(|(adapter, ())| {
             let descriptor =
                 wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() };
             let (device, queue) = block_on(adapter.request_device(&descriptor)).ok()?.ok()?;
             Some((adapter, device, queue))
         });
-        let mut took = picked.took;
-        took.push(("gpu.device", started.elapsed()));
-        Gpu { instance: picked.instance, device, took }
-    }
-
-    /// The instance alone, the builder to find the rest.
-    fn without_device(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> Gpu {
-        Gpu { instance: Picked::pick(display).instance, device: None, took: Vec::new() }
-    }
-}
-
-/// An instance, the adapter it answered with if any, and what the two took
-/// (`gpu.instance`, `gpu.adapter`), from [`Picked::pick`].
-struct Picked {
-    instance: wgpu::Instance,
-    adapter: Option<wgpu::Adapter>,
-    took: Vec<(&'static str, Duration)>,
-}
-
-impl Picked {
-    /// The instance the window draws with, and its adapter. wgpu brings up
-    /// every backend in the instance's mask when the instance is made, and
-    /// `request_adapter` with no preference answers the first adapter it
-    /// finds, so the choice is made with the mask. On Windows that is DX12
-    /// alone first, and Vulkan alone only when DX12 has no adapter: never
-    /// GL, and never the two together. The GL backend costs nothing to draw
-    /// with and much to have in the process: its hidden window puts a hook
-    /// on the window procedures (opengl32 in the stack of PR #41's Windows
-    /// retest), and with it a keyboard-layout change request posted to the
-    /// player's window — what the taskbar's language indicator posts —
-    /// never returned from `DefWindowProc`, on Windows 10, every time;
-    /// with DX12 alone or Vulkan alone the same request switches the
-    /// layout and the window answers. DX12 before Vulkan because of the
-    /// stats lever: on a hybrid box the Vulkan instance alone took half a
-    /// second against DX12's 50 ms, and a mask holding both would have
-    /// paid for Vulkan and been answered by it. `WGPU_BACKEND` still
-    /// overrides the mask, through wgpu's own reading of it; Linux and
-    /// macOS keep the env descriptor as before, where the display handle
-    /// it carries is what Wayland and X11 need to make a surface later.
-    fn pick(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> Picked {
-        let options = wgpu::RequestAdapterOptions::default();
-        if cfg!(windows) && wgpu::Backends::from_env().is_none() {
-            let mut took = vec![("gpu.instance", Duration::ZERO), ("gpu.adapter", Duration::ZERO)];
-            let mut picked = None;
-            for backends in [wgpu::Backends::DX12, wgpu::Backends::VULKAN] {
-                // `with_env` keeps the mask given here, since `WGPU_BACKEND`
-                // is unset on this path, and still reads the rest of wgpu's
-                // environment (validation, backend options).
-                let descriptor = wgpu::InstanceDescriptor {
-                    backends,
-                    ..wgpu::InstanceDescriptor::new_without_display_handle()
-                }
-                .with_env();
-                let started = Instant::now();
-                let instance = wgpu::Instance::new(descriptor);
-                took[0].1 += started.elapsed();
-                let started = Instant::now();
-                let adapter =
-                    block_on(instance.request_adapter(&options)).ok().and_then(Result::ok);
-                took[1].1 += started.elapsed();
-                let found = adapter.is_some();
-                picked = Some((instance, adapter));
-                if found {
-                    break;
-                }
-            }
-            let (instance, adapter) = picked.expect("two backends were tried");
-            return Picked { instance, adapter, took };
-        }
-        let started = Instant::now();
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(display),
-        );
-        let instance_took = started.elapsed();
-        let started = Instant::now();
-        let adapter = block_on(instance.request_adapter(&options)).ok().and_then(Result::ok);
-        let took = vec![("gpu.instance", instance_took), ("gpu.adapter", started.elapsed())];
-        Picked { instance, adapter, took }
+        let took = vec![
+            ("gpu.instance", choice.instance_took),
+            ("gpu.adapter", choice.adapter_took),
+            ("gpu.device", started.elapsed()),
+        ];
+        Gpu { instance: choice.instance, device, took }
     }
 }
 
@@ -583,7 +537,10 @@ impl Host for WindowHost<'_> {
 }
 
 impl App {
-    /// The window, and the backend that draws cells onto it.
+    /// The window, and the backend that draws cells onto it: the backend at
+    /// once if the early threads are done, else as soon as they are, from
+    /// the loop (`about_to_wait`), which goes on answering the window
+    /// meanwhile.
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         let (cols, rows) = self.grid;
         let opening = LogicalSize::new(f64::from(cols) * CELL_GUESS_PT, f64::from(rows) * FONT_PT);
@@ -601,12 +558,27 @@ impl App {
         self.lap.mark(&mut self.stats, "window");
         self.opened_at = Some(Instant::now());
         self.shown = !cfg!(windows);
+        self.window = Some(window);
+        if self.early.ready() { self.build() } else { Ok(()) }
+    }
+
+    /// The backend onto the window `open` made, from what the early threads
+    /// found, then the window sized to the grid and the first frame asked
+    /// for. Called once both threads are done, so the joins do not wait.
+    fn build(&mut self) -> Result<(), String> {
+        let Some(window) = self.window.clone() else { return Ok(()) };
+        // The loop's wait for the early threads, when it had to wait: none
+        // when `open` builds at once. The joins after it then wait for
+        // nothing, and their stages say so.
+        self.lap.mark(&mut self.stats, "threads.wait");
+        let (cols, rows) = self.grid;
+        // Read now rather than at the window's creation: the loop may have
+        // run in between, and a scale change then found no backend to tell.
         self.scale = window.scale_factor();
         let font_px = font_px(self.scale);
-        // What `run` began before the loop, joined: the faces, and the GPU's
-        // instance, adapter and device. Whatever did not come (a thread that
-        // could not start, or panicked) is done here instead, as it all was
-        // before; the window waits the same either way.
+        // What `run` began before the loop: the faces, and the GPU's
+        // instance, adapter and device. Whatever did not come (a thread
+        // that could not start, or panicked) is done here instead.
         let faces = self.early.faces.take().and_then(|thread| thread.join().ok());
         let faces = match faces {
             Some(found) => found?,
@@ -614,18 +586,8 @@ impl App {
         };
         self.lap.mark(&mut self.stats, "faces.wait");
         let gpu = self.early.gpu.take().and_then(|thread| thread.join().ok());
-        // The display handle goes in with the instance, as the visualizer's
-        // window does it: on Wayland and X11 the backend needs it before a
-        // surface can exist. The event loop's handle (what `run` gave the
-        // early thread) is the same display as the window's.
-        let gpu = gpu.unwrap_or_else(|| Gpu::without_device(Box::new(window.clone())));
+        let gpu = gpu.unwrap_or_else(|| Gpu::prepare(Box::new(window.clone())));
         self.lap.mark(&mut self.stats, "gpu.wait");
-        // Which adapter, through which backend: the one line a report needs
-        // (otherwise it is only in wgpu's own log, at debug level).
-        if let Some((adapter, _, _)) = &gpu.device {
-            let info = adapter.get_info();
-            eprintln!("gui --window: drawing with {} through {:?}", info.name, info.backend);
-        }
         if let Some(stats) = self.stats.as_mut() {
             for (stage, took) in faces.took.iter().chain(&gpu.took) {
                 stats.stage(&format!("early.{stage}"), *took);
@@ -655,6 +617,13 @@ impl App {
         let backend = block_on(builder.build_with_target(window.clone()))?
             .map_err(|e| format!("the window has nothing to draw with: {e}"))?;
         self.lap.mark(&mut self.stats, "backend");
+        // Which adapter, through which backend: the one line a report needs
+        // (otherwise it is only in wgpu's own log, at debug level). Asked of
+        // the backend, since the build drops the adapter it was given when
+        // that cannot present to the window, and requests its own.
+        let info = backend.adapter_info();
+        let software = if info.device_type == wgpu::DeviceType::Cpu { ", in software" } else { "" };
+        eprintln!("gui --window: drawing with {} through {:?}{software}", info.name, info.backend);
         if let Some(stats) = self.stats.as_mut() {
             for (stage, took) in backend.build_timings() {
                 stats.stage(&format!("backend.{stage}"), *took);
@@ -708,7 +677,6 @@ impl App {
 
         window.request_redraw();
         self.asked = Some(Instant::now());
-        self.window = Some(window);
         self.terminal = Some(terminal);
         self.lap.mark(&mut self.stats, "sizing");
         Ok(())
@@ -733,6 +701,12 @@ impl App {
     /// The loop's frame half, and the time the next one is wanted by. The
     /// clock is read only for the stats lever.
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        if self.terminal.is_none() {
+            // A redraw before the backend exists (the window was asked to
+            // repaint as it came into view) draws nothing and is not timed.
+            self.asked = None;
+            return;
+        }
         let started = self.stats.is_some().then(Instant::now);
         self.redraw_inner(event_loop, started);
         if let (Some(stats), Some(started)) = (self.stats.as_mut(), started) {
@@ -791,24 +765,33 @@ impl App {
     /// The window onto the screen — on Windows, where `open` made it hidden
     /// — after its first presented frame, or at the deadline without one.
     /// Windows sends no `Occluded(false)` for a window coming into view, so
-    /// the full repaint that event brings on macOS is asked for here, and
-    /// the stats lever is told that the next present is the first one seen.
+    /// the full repaint that event brings on macOS is asked for here. The
+    /// stats lever is told what is seen: the frame just presented, when it
+    /// was the one that showed the window, else the next one presented.
     fn show(&mut self, presented: bool) {
         self.shown = true;
         let Some(window) = &self.window else { return };
         window.set_visible(true);
         if let Some(opened) = self.opened_at {
-            let why =
-                if presented { "after its first present" } else { "at the deadline, unpresented" };
+            let why = match (presented, self.terminal.is_some()) {
+                (true, _) => "after its first present",
+                (false, true) => "at the deadline, unpresented",
+                (false, false) => "at the deadline, before the GPU was ready",
+            };
             eprintln!(
                 "gui --window: shown {:.0} ms after the window was made, {why}",
                 opened.elapsed().as_secs_f64() * 1000.0,
             );
         }
         if let Some(stats) = self.stats.as_mut() {
-            stats.visible();
+            if presented { stats.seen_as_presented() } else { stats.visible() }
         }
         self.repaint_all();
+    }
+
+    /// The hidden window's deadline has passed.
+    fn show_due(&self) -> bool {
+        self.opened_at.is_some_and(|at| at.elapsed() >= SHOW_BY)
     }
 
     /// One input through the loop's input half; false once it quit. A
@@ -1316,17 +1299,39 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             return;
         }
+        // Until the backend exists the loop polls the early threads, and
+        // builds it on the turn they are done; meanwhile it answers the
+        // window, and a hidden one is shown by its deadline, blank, rather
+        // than kept off screen for as long as the GPU takes.
+        if self.terminal.is_none() {
+            if !self.early.ready() {
+                if !self.shown && self.show_due() {
+                    self.show(false);
+                }
+                event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + EARLY_POLL));
+                return;
+            }
+            if let Err(e) = self.build() {
+                eprintln!("gui --window: {e}");
+                self.exit_code = 1;
+                event_loop.exit();
+                return;
+            }
+        }
         // A hidden window gets no WM_PAINT, so a redraw asked of it never
         // comes back as `RedrawRequested`: until the window is shown the
         // frames are the loop's own, one a turn, and the first that presents
-        // shows it (`show`). None by the deadline shows it anyway.
+        // shows it (`redraw_inner`). The deadline's turn draws one too
+        // before it shows the window anyway, so a backend that came late
+        // still puts a frame in it.
         if !self.shown {
-            if self.opened_at.is_some_and(|at| at.elapsed() >= SHOW_BY) {
+            self.redraw(event_loop);
+            if !self.shown {
+                if !self.show_due() {
+                    event_loop.set_control_flow(ControlFlow::Poll);
+                    return;
+                }
                 self.show(false);
-            } else {
-                self.redraw(event_loop);
-                event_loop.set_control_flow(ControlFlow::Poll);
-                return;
             }
         }
         let now = Instant::now();

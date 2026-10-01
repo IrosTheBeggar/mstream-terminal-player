@@ -12,8 +12,11 @@
 //! `graphics-probe`: a diagnostic for the layer that only misbehaves on
 //! somebody else's machine.
 //!
-//! `WGPU_BACKEND=gl` (or `vulkan`, `metal`, `dx12`) pins the backend, which
-//! is how a machine with two is asked about each.
+//! It draws with the instance the visualizer's window would (`gpu_pick`:
+//! on Windows DX12, or Vulkan where DX12 has only its software adapter, and
+//! never GL), and lists that instance's adapters. `WGPU_BACKEND=gl` (or
+//! `vulkan`, `metal`, `dx12`) pins the backend, which is how a machine with
+//! two is asked about each.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -50,9 +53,31 @@ pub struct VizProbeArgs {
 
 pub fn run(args: VizProbeArgs) -> i32 {
     println!("viz-probe: the visualizer presets, on this machine's GPU\n");
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    // The instance the visualizer's window would draw with (`gpu_pick`: on
+    // Windows DX12 or Vulkan alone, never GL, unless `WGPU_BACKEND` says),
+    // so the probe asks the driver the window would get. The last failure
+    // is kept to say why, when none would serve.
+    let options = wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    };
+    let mut failed = None;
+    let choice = crate::gpu_pick::choose(None, |instance| {
+        match block_on(instance.request_adapter(&options)) {
+            Ok(Ok(adapter)) => Some((adapter, ())),
+            Ok(Err(e)) => {
+                failed = Some(format!("no adapter would serve: {e}"));
+                None
+            }
+            Err(e) => {
+                failed = Some(e.to_string());
+                None
+            }
+        }
+    });
 
-    let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::all())).unwrap_or_default();
+    let adapters =
+        block_on(choice.instance.enumerate_adapters(wgpu::Backends::all())).unwrap_or_default();
     if adapters.is_empty() {
         println!("no GPU adapters. The window visualizer needs one; the terminal visualizer does not.");
         return 1;
@@ -62,20 +87,9 @@ pub fn run(args: VizProbeArgs) -> i32 {
         println!("  {}", describe(&adapter.get_info()));
     }
 
-    let options = wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    };
-    let adapter = match block_on(instance.request_adapter(&options)) {
-        Ok(Ok(adapter)) => adapter,
-        Ok(Err(e)) => {
-            println!("\nno adapter would serve: {e}");
-            return 1;
-        }
-        Err(e) => {
-            println!("\n{e}");
-            return 1;
-        }
+    let Some((adapter, ())) = choice.found else {
+        println!("\n{}", failed.unwrap_or_else(|| "no adapter would serve".to_string()));
+        return 1;
     };
     let info = adapter.get_info();
     println!("\nusing {}; the presets are compiled to {}\n", info.name, language(info.backend));

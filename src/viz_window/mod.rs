@@ -189,21 +189,41 @@ impl App {
         let window = Arc::new(
             event_loop.create_window(attributes).map_err(|e| format!("the window would not open: {e}"))?,
         );
-        // The display handle goes in with the instance: on Wayland and X11
-        // the backend needs it before a surface can exist.
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())));
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|e| format!("the window has no drawing surface: {e}"))?;
-        let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        };
-        let adapter = match block_on(instance.request_adapter(&options)) {
-            Ok(Ok(adapter)) => adapter,
-            Ok(Err(e)) => return Err(format!("no GPU would draw the window: {e}")),
-            Err(e) => return Err(e.to_string()),
+        // The instance by the rule the player's own window follows
+        // (`gpu_pick`: on Windows DX12 or Vulkan alone, never GL, whose
+        // presence in a process froze its window on a keyboard-layout
+        // change), a surface on the window from it, and an adapter that can
+        // present to that. The display handle goes in with the instance: on
+        // Wayland and X11 the backend needs it before a surface can exist.
+        // The last failure is kept to say why, when no instance would do.
+        let mut failed = None;
+        let choice = crate::gpu_pick::choose(Some(Box::new(window.clone())), |instance| {
+            let surface = match instance.create_surface(window.clone()) {
+                Ok(surface) => surface,
+                Err(e) => {
+                    failed = Some(format!("the window has no drawing surface: {e}"));
+                    return None;
+                }
+            };
+            let options = wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            };
+            match block_on(instance.request_adapter(&options)) {
+                Ok(Ok(adapter)) => Some((adapter, surface)),
+                Ok(Err(e)) => {
+                    failed = Some(format!("no GPU would draw the window: {e}"));
+                    None
+                }
+                Err(e) => {
+                    failed = Some(e.to_string());
+                    None
+                }
+            }
+        });
+        let Some((adapter, surface)) = choice.found else {
+            return Err(failed.unwrap_or_else(|| "no GPU would draw the window".to_string()));
         };
         let gpu = Gpu::new(&adapter)?;
 

@@ -282,12 +282,15 @@ mod tests {
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("viz-overlay"));
         std::fs::create_dir_all(&dir).unwrap();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let options = wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         };
-        let adapter = block_on(instance.request_adapter(&options)).unwrap().expect("a GPU");
+        // The adapter the window would draw with (`gpu_pick`).
+        let choice = crate::gpu_pick::choose(None, |instance| {
+            Some((block_on(instance.request_adapter(&options)).ok()?.ok()?, ()))
+        });
+        let (adapter, ()) = choice.found.expect("a GPU");
         let gpu = Gpu::new(&adapter).unwrap();
         const SCALE: f32 = 2.0;
         let points = vec2(960.0, 540.0);

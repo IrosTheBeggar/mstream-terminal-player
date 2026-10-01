@@ -12,8 +12,8 @@ The GUI's own window (`src/gui/window/`) draws through this backend, and it need
 0.6.0 does not have: the surface format and the blit's sRGB decode, the face index of a font
 collection, a font id that does not read the whole font, failed presents (and how loudly they
 are logged), fallback glyphs that fit their cells, a wide glyph narrowed without shifting the
-row, a public offscreen path for tests, the build's stage timings and a device made before
-the window. They land here, one change
+row, a public offscreen path for tests, the build's stage timings, a device made before
+the window and the adapter in use. They land here, one change
 at a time, each recorded below, until an upstream release carries them and the patch entry can
 go.
 
@@ -162,6 +162,13 @@ go.
     own while the event loop starts and the window opens (`src/gui/window/mod.rs`, `Gpu`), so
     the window's `resumed`, where it sits blank, no longer waits for them (on Vulkan with two
     GPUs, the slowest steps of the startup).
+13. **The backend says which adapter it draws with** (`backend/builder.rs`,
+    `backend/wgpu_backend.rs`). The build keeps the adapter's `AdapterInfo`, and
+    `WgpuBackend::adapter_info() -> &wgpu::AdapterInfo` returns it. Why: with change 12 the
+    caller cannot tell which adapter is in use: the one it handed over is dropped when it
+    cannot present to the surface, and the build then requests another. The player prints
+    the name and backend once the backend is built (`src/gui/window/mod.rs`), the one line a
+    report from another machine needs. One `get_info` per build.
 
 ### Tests
 

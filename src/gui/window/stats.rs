@@ -134,8 +134,11 @@ pub(super) struct Stats {
     first_present: Option<Duration>,
     /// The first such frame after the window came into view: on macOS the
     /// very first present finds the window occluded and is dropped, so
-    /// this is when the player could first be seen.
+    /// this is when the player could first be seen. On Windows the window
+    /// is shown by its first present, and that present is this one.
     first_visible: Option<Duration>,
+    /// The last frame that handed the backend a cell.
+    last_present: Option<Duration>,
     /// The window has said it is in view, and no present since.
     visible_pending: bool,
     frames: u64,
@@ -157,12 +160,16 @@ impl Stats {
     /// clock started now (`window::run`'s entry); `None`, and no clock
     /// read, without it.
     pub(super) fn from_env() -> Option<Self> {
-        let path = PathBuf::from(std::env::var_os("MSTREAM_WINDOW_STATS")?);
-        Some(Self {
+        Some(Self::new(PathBuf::from(std::env::var_os("MSTREAM_WINDOW_STATS")?)))
+    }
+
+    fn new(path: PathBuf) -> Self {
+        Self {
             path,
             started: Instant::now(),
             first_present: None,
             first_visible: None,
+            last_present: None,
             visible_pending: false,
             frames: 0,
             unchanged: 0,
@@ -172,7 +179,7 @@ impl Stats {
             frame_ms: Vec::new(),
             redraw_ms: Vec::new(),
             stages: Vec::new(),
-        })
+        }
     }
 
     /// One stage of the startup and what it took.
@@ -184,6 +191,19 @@ impl Stats {
     pub(super) fn visible(&mut self) {
         if self.first_visible.is_none() {
             self.visible_pending = true;
+        }
+    }
+
+    /// The window was shown by the frame just presented (a hidden window,
+    /// on Windows): that present is the first seen, not the repaint the
+    /// show asks for after it. With no present yet, the next one is.
+    pub(super) fn seen_as_presented(&mut self) {
+        if self.first_visible.is_some() {
+            return;
+        }
+        match self.last_present {
+            Some(at) => self.first_visible = Some(at),
+            None => self.visible_pending = true,
         }
     }
 
@@ -199,6 +219,7 @@ impl Stats {
         }
         self.present_flush_ms.push(ms(flush));
         let since = self.started.elapsed();
+        self.last_present = Some(since);
         if self.first_present.is_none() {
             self.first_present = Some(since);
             self.stage("first_draw", frame);
@@ -328,5 +349,40 @@ mod tests {
         assert_eq!(draw(&mut terminal, "hellp"), 1);
         // Without the lever no flush is timed.
         assert_eq!(terminal.backend_mut().take_cells().1, Duration::ZERO);
+    }
+
+    /// A hidden window shown by its first present (Windows) is first seen
+    /// at that present: the repaint the show asks for comes a frame later
+    /// and is not it. A frame that drew no cell presented nothing.
+    #[test]
+    fn a_window_shown_by_its_present_is_seen_at_that_present() {
+        let mut stats = Stats::new(PathBuf::new());
+        stats.frame(0, Duration::ZERO, Duration::ZERO);
+        assert_eq!(stats.first_present, None);
+        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        stats.seen_as_presented();
+        assert!(stats.first_visible.is_some());
+        assert_eq!(stats.first_visible, stats.first_present);
+        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        assert_eq!(stats.first_visible, stats.first_present);
+    }
+
+    /// A window that comes into view (macOS's `Occluded(false)`, or one
+    /// shown at the deadline unpresented) is first seen at the next present
+    /// after it, not at an unchanged frame and not at the one before.
+    #[test]
+    fn a_window_coming_into_view_is_seen_at_the_next_present() {
+        let mut stats = Stats::new(PathBuf::new());
+        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        stats.visible();
+        stats.frame(0, Duration::ZERO, Duration::ZERO);
+        assert_eq!(stats.first_visible, None);
+        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        assert!(stats.first_visible.is_some_and(|seen| Some(seen) >= stats.first_present));
+        // Shown with nothing presented yet: the first present is the one.
+        let mut stats = Stats::new(PathBuf::new());
+        stats.seen_as_presented();
+        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        assert_eq!(stats.first_visible, stats.first_present);
     }
 }

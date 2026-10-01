@@ -633,6 +633,7 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
         Ok(WgpuBackend {
             post_process,
             build_timings: timings,
+            adapter_info: adapter.get_info(),
             cells: vec![],
             dirty_rows: vec![],
             dirty_cells: BitVec::new(),
