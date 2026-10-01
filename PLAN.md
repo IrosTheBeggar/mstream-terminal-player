@@ -2869,7 +2869,8 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 ### Phase 13 — The window spike: the GUI in a window of its own (2026-09-29/30)
 
 > **Status: spike done, decision GO WITH CONDITIONS — nothing ships from it yet; the
-> conditions and the Windows run are worked (below) and the flag stays hidden.** Five
+> conditions and the Windows run are worked (below), and the window is now the desktop
+> flavour's default, compiled out of the terminal flavour (lanes 7–9).** Five
 > commits on `claude/desktop-app-packaging-8ee4ff` (4e10926 render, 4685214 loop, de04c35
 > input, 4d6b4df stats, c59cbdb art) plus the keyboard check's fix, on top of v0.8.0, pushed
 > as PR #41 (not for merge); the condition lanes and the Windows machine's two fixes followed
@@ -3008,7 +3009,7 @@ reviewers' caveats restored):
 | Integration cost | partial | About 186 lines across 6 files at step 4 (all seams: the flag, the loop halves, `start`/`finish`, the palette pin, two visibilities), within the ~200 the criterion named; step 5 added graphics.rs (+61) and cover.rs (+10, the shared slot's hosted branch), about 257 lines across 8 files, over it. The raw stat reads +409/−213 because the loop body moved into `frame`/`input`. No room or widget file touched. |
 | Performance | pass, with caveats | Steady idle CPU equal to the terminal's; p95 under 5 ms; a warm first frame under 200 ms. Caveats: maxima 16–18 ms; a cold launch about 1 s; the visualizer tab costs 2.7–2.9× the terminal; art unmeasured in release. |
 | Footprint | pass | +1.1 MB, no new frameworks (before the art); Linux NEEDED unchanged, plus the libxkbcommon-x11 runtime load; the build and test times above are the larger cost. |
-| Platform | partial | macOS Metal proven end to end; Linux X11 under Xvfb on a CPU rasteriser, text only, on the pre-art tree (no Wayland, no real driver, no x86_64); Windows untouched. |
+| Platform | partial | macOS Metal proven end to end; Linux X11 under Xvfb on a CPU rasteriser, text only, on the pre-art tree (no Wayland, no real driver, no x86_64); Windows untouched at the spike's end (the Windows 10 run and retest below came with the conditions). |
 
 **What the crates taught.** ratatui-wgpu 0.6: `RenderSurface` is sealed (its `Sealed` bound
 in `src/backend/mod.rs`; the headless surface is test-only), so a real window is required;
@@ -3178,6 +3179,72 @@ still paints a cover for one short frame; the tag characters in emoji flag seque
 paste still drops; on Windows, 150%, a move between scales and the IMEs, untestable there
 without elevation.
 
+**Two products from one crate (2026-10-01).** The owner's decision: the codebase is dual
+purpose, a terminal player and a desktop player. The DESKTOP releases, a new asset family
+`mstream-player-desktop-*` (win32-x64, darwin-x64, darwin-arm64, linux-x64) with per-OS app
+packages to follow, open the GUI in its own window; the TERMINAL releases (the unsuffixed
+binaries, deb and rpm, the Homebrew formula, Scoop, the one-line installers, `cargo install`)
+are the terminal player with the window compiled out. mStream's binary bundles ship the
+desktop binary; every other mStream install gets the terminal one. On Windows no console
+flash where it can be avoided. Three lanes put it in, the same shape as the condition lanes:
+- *Lane 7 (4e172c3)* — Cargo features: `window` pulls ratatui-wgpu, memmap2 and arboard,
+  the only crates the window alone uses; `desktop` enables it and carries the desktop
+  defaults; `default = []`, so a plain build, `cargo install` and today's release legs are
+  the terminal player, whose `gui --window` is clap's usage error as on v0.9.0 (a test in
+  both flavours). The patch section cannot follow a feature, so the vendored winit reaches
+  both flavours through the visualizer; the vendored ratatui-wgpu reaches the desktop only,
+  and it had pulled wgpu's default features (webgpu, naga's wgsl-out) back in — change 14
+  trims it to std and wgsl, and the terminal flavour's wgpu and naga feature sets equal
+  main's on all three targets. CI tests both flavours on ubuntu and windows, adds a macOS
+  leg for the desktop flavour, lavapipe for the render tests on ubuntu, the linkage guard on
+  both flavours' Linux release builds, a guard that the terminal flavour pulls none of the
+  window's crates, and the wasm check with the feature on.
+- *Lane 8 (2424a3d)* — the desktop flavour's contract. The rule: an explicit argv means the
+  same in both flavours; only an empty argv differs, the window in the desktop flavour and
+  the TUI in the terminal one, with the TUI as the fallback where no window can be
+  expected (no DISPLAY, WAYLAND_DISPLAY or WAYLAND_SOCKET on a Unix other than macOS; SSH
+  with a tty) and Finder's `-psn_*` arguments counted as none. A first run with no saved
+  server shows the Library screen's "no server saved" line and the Add a server button.
+  The empty-argv launch takes `<config dir>/desktop-player.lock` with the launcher's
+  sidecar (sharing the tray's path is open); the sidecar's host reads "window"; `--version`
+  adds a `features: window` line under the unchanged first one; exit 3 wherever no window
+  can open at all, for a launcher to fall back on; on Windows FreeConsole when the console
+  is ours alone, and a GUI-subsystem stub bin, mstream-player-launch (packaged as "mStream
+  Player.exe"), that starts the player with CREATE_NO_WINDOW so a shortcut opens the window
+  and nothing else. Terminal flavour unchanged (1056 tests, the expect leg, a bare launch
+  shows the wizard); desktop 1120 tests, the window on an empty argv in ~210 ms warm.
+- *Lane 9 (a4328e9)* — release.yml: the leg steps once in build-binary.yml (workflow_call);
+  `build` is the six terminal legs unchanged in effect; `build-desktop` the four desktop
+  legs with `--features desktop`, signed and notarized alike, held back from stable tags
+  until the repository variable DESKTOP_RELEASES is 'true'; a tag with a '-' is a
+  pre-release, never latest, and `channels` runs only for a stable tag (before this, an rc
+  tag would have bumped the formula and Scoop and been served by the installers' latest);
+  the desktop binaries join manifest.json through the existing loop, apiVersion unchanged.
+  Only an rc-tag run proves the reusable call, the secrets reaching the sign step, the
+  cross container and the Windows desktop leg.
+
+**From here, in order.** An rc tag at this head to prove both families and the gate (the
+release must come out marked pre-release, channels skipped, latest still v0.9.0); the
+vendored-crate review with an upstream exit for ratatui-wgpu's changes; the merge with the
+window compiled out of the terminal flavour; the Linux leg on real hardware for the desktop
+linux-x64 build (X11 and Wayland, the .desktop entry's app_id); the macOS and Windows
+checklist rows as the desktop release's gate, including a tray-spawned run and the stub's
+double-click; the open window conditions (symbol and emoji faces, Hangul line height, the
+cover flash after a modal, input before the backend exists); app identity (icon, app_id or
+WM_CLASS, activation policy, an AUMID, the second instance focusing the holder by pid);
+icons and the desktop entry; the desktop packages (a signed and stapled .app, the Windows
+zip with the stub, the Linux tarball); the rest of the release workflow (a package-desktop
+job, Windows signing once a certificate exists, lifting the hold-back, a notify path that
+fires); a Homebrew cask and a Scoop manifest for the desktop product; the README split into
+two products; the stable player release; on mStream's side, the manifest updater taking the
+desktop names and refusing pre-release tags, the bundler preferring the desktop entry while
+the runtime fetch keeps the terminal one, the launcher probing `features: window` and
+starting the window directly, the three-way coexistence check, and the mStream release. An
+updater for hand-downloaded zips comes after the first desktop release. Still open for the
+owner: the .app bundle id, a shared lock with the tray, close as quit or keep playing,
+vendored winit in terminal releases without an upstream exit, the packaging tool, Ghostty's
+role for the setup and admin faces, the Windows certificate.
+
 **The manual checklist** (`docs/window-spike/checklist.md` has every item with its expected
 result; the shape): macOS — launch from Terminal and iTerm; the key walk (digits, arrows,
 Home/End, PageUp/Down, Tab and Shift+Tab, Enter, Esc, Backspace, Space, T); key repeat on
@@ -3230,7 +3297,8 @@ that this Mac cannot test because no Korean source is enabled. Esc discards a co
 its second press, also native. Also observed: with the Japanese IME
 on and no text field focused, the digit `2` went into a full-width composition (`２`) instead
 of switching rooms — a terminal composes the same way, but it is the case for gating IME to
-focused text fields. Windows remains unrun.
+focused text fields. Windows remained unrun at the time; the Windows run and retest
+above came with the conditions.
 
 **Driving it.** The levers above plus `MSTREAM_WINDOW_DUMP=<dir>` (the backend's text against
 a `TestBackend` render of the same Gui — reliable only with no server, since a live listing
@@ -3246,7 +3314,8 @@ with the conditions above and the flag hidden until the gate clears. The budget 
 about 2.7–2.9× the terminal's CPU in the visualizer tab and about 78 MB more resident
 memory, in exchange for one executable per platform with no bundled terminal and pixel art
 wherever a GPU rasterises — a claim proven on macOS, run once on Linux under a CPU
-rasteriser, and not yet run on Windows. The terminal-host route (Ghostty on macOS, Windows
+rasteriser, and (at the time of the verdict) not yet run on Windows; the Windows 10 run and
+retest above came later and passed. The terminal-host route (Ghostty on macOS, Windows
 Terminal on Windows, the user's terminal on Linux) ships today and does not depend on this,
 so the author's proposal is a phase of its own rather than a rider on the packaging work,
 starting with the manual checklist on macOS and Windows; if dead keys or IME fail there, the
