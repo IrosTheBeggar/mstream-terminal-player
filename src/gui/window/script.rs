@@ -17,6 +17,11 @@
 //!   (`ctrl C` is Ctrl+Shift+C). `<place>` is the US letter at the key's
 //!   place, for a layout whose letters are not Latin: `ctrl с c` is the
 //!   Russian layout's Ctrl+С. It defaults to the character's own letter.
+//! - `alt <key> [<text>]` / `ctrlalt <key> [<text>]`: the letter key `<key>`
+//!   with Alt (Option) held, or with Ctrl and Alt (a left Ctrl+Alt, which
+//!   Windows reads as AltGr), and `<text>` as what the OS composed for it:
+//!   `alt l ¬` is a Mac's Option+L, `alt q @` a German AltGr+Q, `ctrlalt q`
+//!   a US Ctrl+Alt+Q, which composes nothing
 //! - `ime <utf8>` / `preedit <utf8>`: an input method's commit, or its
 //!   composition in progress
 //! - `move <col>,<row>`: the pointer to the centre of that cell, as the
@@ -48,8 +53,9 @@
 //! - `frame`: nothing until the next frame, which comes when the loop's own
 //!   wait says (a `wait` would bring it forward): how a run reads the
 //!   cadence, from the dumps on either side
-//! - `dump <path>`: the window's text, then the pointer's state and the
-//!   covers painted as pictures
+//! - `dump <path>`: the window's text, then the pointer's state, the
+//!   covers painted as pictures and the last press: its cell, the action
+//!   the GUI's hit found there (or none) and whether a drag began
 //! - `say <text>`: the text on stderr, for whatever is watching
 //! - `quit`: as if the close button was pressed
 //!
@@ -230,6 +236,31 @@ fn parse_line(line: &str) -> Result<Vec<Step>, String> {
                 bare: c.to_lowercase().next(),
                 physical: place,
                 mods: Mods { ctrl: true, shift: c.is_uppercase(), ..Mods::default() },
+                pressed: true,
+                repeat: false,
+            })])
+        }
+        "alt" | "ctrlalt" => {
+            let mut words = arg.split_whitespace();
+            let key = words
+                .next()
+                .and_then(|word| {
+                    let mut chars = word.chars();
+                    chars.next().filter(|c| c.is_ascii_alphabetic() && chars.next().is_none())
+                })
+                .ok_or("alt wants a letter key")?
+                .to_ascii_lowercase();
+            let text = words.next().map(str::to_string);
+            if words.next().is_some() {
+                return Err("alt wants a key and at most the text it composed".into());
+            }
+            let ctrl = command == "ctrlalt";
+            Ok(vec![tap(Raw::Key {
+                named: None,
+                text,
+                bare: Some(key),
+                physical: Some(key),
+                mods: Mods { ctrl, alt: true, ..Mods::default() },
                 pressed: true,
                 repeat: false,
             })])
@@ -500,6 +531,22 @@ quit
                 button(false),
             ]
         );
+    }
+
+    #[test]
+    fn alt_chords_parse_with_the_text_composed_or_none() {
+        let (steps, errors) = parse("alt l ¬\nctrlalt q\nalt 1 x\nalt q @ extra\n");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        let pressed = |step: &Step| match step {
+            Step::Inputs(inputs) => match &inputs[0] {
+                Input::Raw(Raw::Key { text, bare, mods, .. }) => (text.clone(), *bare, *mods),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        let alt = Mods { alt: true, ..Mods::default() };
+        assert_eq!(pressed(&steps[0]), (Some("¬".into()), Some('l'), alt));
+        assert_eq!(pressed(&steps[1]), (None, Some('q'), Mods { ctrl: true, ..alt }));
     }
 
     #[test]

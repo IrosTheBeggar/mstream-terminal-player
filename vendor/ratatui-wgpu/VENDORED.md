@@ -12,7 +12,8 @@ The GUI's own window (`src/gui/window/`) draws through this backend, and it need
 0.6.0 does not have: the surface format and the blit's sRGB decode, the face index of a font
 collection, a font id that does not read the whole font, failed presents (and how loudly they
 are logged), fallback glyphs that fit their cells, a wide glyph narrowed without shifting the
-row, and a public offscreen path for tests. They land here, one change
+row, a public offscreen path for tests, the build's stage timings and a device made before
+the window. They land here, one change
 at a time, each recorded below, until an upstream release carries them and the patch entry can
 go.
 
@@ -122,7 +123,12 @@ go.
    headless surface's is that it is not configured), and `render` logs it: at `warn!` when it
    starts an outage (no present was owed yet), at `debug!` for the retries while one is, and a
    `debug!` line when a present succeeds again and pays the debt. The trait is sealed by its
-   private token, so nothing outside the crate implemented it.
+   private token, so nothing outside the crate implemented it. One line is new rather than
+   quieter: upstream's headless surface returned `None` without a word when it had not been
+   configured, and `render` gave up as silently; it now goes through the same arm, so an
+   unconfigured headless surface logs `Failed to acquire surface texture: the headless surface
+   is not configured; ...` at `warn!` once, where upstream logged nothing. The player's render
+   tests configure theirs before drawing, so it does not show there.
 10. **A narrower cell over a wide one erases the whole wide glyph** (`backend/wgpu_backend.rs`,
     `draw`). Drawing a wide cell fills the cells it covers with an empty continuation
     (`NULL_CELL`, symbol `""`), which shapes to nothing. Upstream overwrote only the cell it was
@@ -137,6 +143,25 @@ go.
     in cell 4). Now, when the cell written is narrower than the one it replaces, the
     continuation cells it no longer covers become blanks (`Cell::EMPTY`), as a terminal's are.
     Only continuations are touched, so a cell ratatui did send is never overwritten.
+11. **The build says what each stage took** (`backend/builder.rs`,
+    `backend/wgpu_backend.rs`). `build_with_render_surface` laps a clock after the adapter, the
+    device, the surface's configuration and the rest (the textures, the shaders and the
+    pipelines, the post processor's `compile` included, which moved out of the struct literal
+    into a `let` so it can be timed), and the backend keeps the list:
+    `WgpuBackend::build_timings() -> &[(&'static str, Duration)]`. Why: the player's window on
+    Windows 10 stayed white for two to three seconds before its first present (0.15 s on a
+    Mac), and the stats lever (`MSTREAM_WINDOW_STATS`) now names the stage. Four clock reads per
+    build; nothing else changes.
+12. **A device made before the window** (`backend/builder.rs`). `Builder::with_device(adapter,
+    device, queue)` hands the build an adapter, and a device and queue requested from it, made
+    with the same instance as `with_instance`'s. The build uses them when the adapter supports
+    the surface (`Adapter::is_surface_supported`; a headless surface takes them as they are),
+    with the device's own limits in place of `with_limits`; otherwise it requests its own as
+    before, and the timings say `adapter (given)`/`device (given)` or `adapter`/`device`. Why:
+    the adapter and the device need no window, and the player requests them on a thread of its
+    own while the event loop starts and the window opens (`src/gui/window/mod.rs`, `Gpu`), so
+    the window's `resumed`, where it sits blank, no longer waits for them (on Vulkan with two
+    GPUs, the slowest steps of the startup).
 
 ### Tests
 

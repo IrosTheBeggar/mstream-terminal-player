@@ -2,7 +2,9 @@
 //! that writes what the window's frames cost as JSON when the window
 //! closes. It is how the spike weighs the window against the terminal
 //! without a profiler: how long the window took to put its first frame on
-//! the GPU, how many frames it drew and how many of those changed no cell,
+//! the GPU and what each stage of the startup before it cost (the faces
+//! found, the GPU's adapter and device, the pipelines, the first draw), how
+//! many frames it drew and how many of those changed no cell,
 //! and the spread of three timings — the backend's flush (where
 //! ratatui-wgpu shapes the dirty rows, encodes and presents), the loop's
 //! whole `frame` half (the tick, the render into the buffer and that
@@ -145,6 +147,9 @@ pub(super) struct Stats {
     present_flush_ms: Vec<f64>,
     frame_ms: Vec<f64>,
     redraw_ms: Vec<f64>,
+    /// The startup's stages in the order they ran, each with what it took:
+    /// what a window blank for seconds on one machine spent them on.
+    stages: Vec<(String, f64)>,
 }
 
 impl Stats {
@@ -166,7 +171,13 @@ impl Stats {
             present_flush_ms: Vec::new(),
             frame_ms: Vec::new(),
             redraw_ms: Vec::new(),
+            stages: Vec::new(),
         })
+    }
+
+    /// One stage of the startup and what it took.
+    pub(super) fn stage(&mut self, name: &str, took: Duration) {
+        self.stages.push((name.to_string(), ms(took)));
     }
 
     /// The window came into view: the next present is the first seen.
@@ -188,7 +199,17 @@ impl Stats {
         }
         self.present_flush_ms.push(ms(flush));
         let since = self.started.elapsed();
-        self.first_present.get_or_insert(since);
+        if self.first_present.is_none() {
+            self.first_present = Some(since);
+            self.stage("first_draw", frame);
+            let stages: Vec<String> =
+                self.stages.iter().map(|(name, took)| format!("{name} {took:.1}")).collect();
+            eprintln!(
+                "gui --window: first present at {:.1} ms; stages (ms): {}",
+                ms(since),
+                stages.join(", ")
+            );
+        }
         if self.visible_pending {
             self.visible_pending = false;
             self.first_visible = Some(since);
@@ -210,6 +231,11 @@ impl Stats {
             "wall_ms": ms(wall),
             "first_present_ms": self.first_present.map(ms),
             "first_visible_present_ms": self.first_visible.map(ms),
+            "startup_ms": self
+                .stages
+                .iter()
+                .map(|(name, took)| serde_json::json!({ "stage": name, "ms": took }))
+                .collect::<Vec<_>>(),
             "frames": self.frames,
             "frames_unchanged": self.unchanged,
             "frames_per_s": self.frames as f64 / wall.as_secs_f64().max(f64::EPSILON),
@@ -224,6 +250,25 @@ impl Stats {
         match std::fs::write(&self.path, text) {
             Ok(()) => eprintln!("gui --window: stats to {}", self.path.display()),
             Err(e) => eprintln!("gui --window: stats to {}: {e}", self.path.display()),
+        }
+    }
+}
+
+/// A stopwatch for the startup's stages, running only with the lever: each
+/// mark records the time since the last one (or since it started) as a
+/// stage, so the stages add up to the time they cover.
+pub(super) struct Lap(Option<Instant>);
+
+impl Lap {
+    pub(super) fn start(stats: &Option<Stats>) -> Self {
+        Lap(stats.is_some().then(Instant::now))
+    }
+
+    pub(super) fn mark(&mut self, stats: &mut Option<Stats>, name: &str) {
+        if let (Some(at), Some(stats)) = (self.0.as_mut(), stats.as_mut()) {
+            let now = Instant::now();
+            stats.stage(name, now - *at);
+            *at = now;
         }
     }
 }

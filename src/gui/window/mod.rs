@@ -40,10 +40,11 @@
 //! a move to a screen of another scale re-sizes the type; and a drag on the
 //! window's edge steps by whole cells, where the platform allows it.
 //!
-//! What the terminal's main does on the way out, the window does in its
-//! teardown, because on macOS a Cmd-Q never returns from the event loop:
-//! the launcher's instance lock is dropped there. A panic is printed
-//! without the terminal hook's escapes, with where the log is.
+//! What the terminal's main does on the way out, the window does itself:
+//! the launcher's instance lock is dropped after the App, or in `exiting`
+//! when a Cmd-Q on macOS ends the process without returning from the event
+//! loop. A panic is printed without the terminal hook's escapes, with
+//! where the log is.
 
 mod covers;
 mod input;
@@ -55,6 +56,7 @@ mod stats;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
@@ -67,14 +69,14 @@ use unicode_width::UnicodeWidthStr;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use covers::{Board, CoverPost};
 use input::{Grid, Raw, Translator};
 use script::{Input, Script, Step};
-use stats::{Counted, Stats};
+use stats::{Counted, Lap, Stats};
 
 use super::{Channels, Ctx, Flow, Gui, Host, finish, frame, input, render};
 use crate::instance::Instance;
@@ -105,13 +107,17 @@ type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static, CoverPost>>
 /// The player in a window, from a Gui and workers that `gui::start` has
 /// already brought up; the exit code is the terminal's (0, or 1 when a
 /// frame failed), or 1 when there is no window to open. `instance` is the
-/// launcher's instance lock, if this run holds one: dropped at the
-/// teardown, after the player's own, so its sidecar goes on every way out
-/// — the Cmd-Q that ends the process inside AppKit included.
+/// launcher's instance lock, if this run holds one: dropped last, after the
+/// App, so its sidecar goes on every way out — the Cmd-Q that ends the
+/// process inside AppKit included, where `exiting` drops it.
 pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) -> i32 {
     // First, so the stats' clock (when the lever is set) starts at entry.
-    let stats = Stats::from_env();
+    let mut stats = Stats::from_env();
+    let mut lap = Lap::start(&stats);
     install_panic_hook();
+    // The faces first, on their own thread, so the search overlaps all of
+    // the event loop's start and the window's creation.
+    let faces = Early::faces(rust_i18n::locale().to_string());
     let grid = opening_grid();
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
@@ -122,6 +128,8 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
             return 1;
         }
     };
+    lap.mark(&mut stats, "event_loop");
+    let early = Early { faces, gpu: Early::gpu(event_loop.owned_display_handle()) };
     let dump = std::env::var_os("MSTREAM_WINDOW_DUMP").map(PathBuf::from);
     // Covers are the window's to draw: every Graphics the GUI forks for a
     // slot is forked from this one, so they all record onto the board.
@@ -155,6 +163,12 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
         stats,
         instance,
         restore_at: None,
+        last_press: None,
+        lap,
+        early,
+        quit_at: None,
+        exit_laps: Vec::new(),
+        exit_clock: None,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("gui --window: {e}");
@@ -163,7 +177,23 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     // `exiting` has torn down already on every way out winit reports; this
     // is for the one it does not.
     app.teardown();
-    app.exit_code
+    // The lock goes last, as main drops it after the terminal's run: after
+    // the App, its workers' channels and the control face are gone, so a
+    // second player the launcher starts once the sidecar is gone finds
+    // this one's queue saved and its port free.
+    let instance = app.instance.take();
+    let code = app.exit_code;
+    let mut laps = std::mem::take(&mut app.exit_laps);
+    let clock = app.exit_clock.take();
+    drop(app);
+    let app_dropped = Instant::now();
+    drop(instance);
+    if let Some(at) = clock {
+        laps.push(("app", app_dropped - at));
+        laps.push(("lock", app_dropped.elapsed()));
+    }
+    exit_report(&laps);
+    code
 }
 
 /// What winit's X11 keyboard needs and loads only at run time, through
@@ -327,10 +357,146 @@ struct App {
     min_surface: PhysicalSize<u32>,
     /// What the frames cost, while `MSTREAM_WINDOW_STATS` is set.
     stats: Option<Stats>,
-    /// The launcher's instance lock, held until the teardown is done.
+    /// The launcher's instance lock, held until the App is gone.
     instance: Option<Instance>,
     /// When the script's `minimise` restores the window.
     restore_at: Option<Instant>,
+    /// The last button press, as the dump reports it: the cell, what the
+    /// GUI's hit found there, and whether a drag began. A press on the
+    /// queue's grip that reads as the row's click shows up here.
+    last_press: Option<String>,
+    /// The startup's stopwatch (the stats lever's): it runs from the
+    /// event loop's creation to the backend's first frame.
+    lap: Lap,
+    /// The startup's work begun before the loop, until `open` joins it.
+    early: Early,
+    /// When the quit was decided, with the stats lever: the way out's
+    /// clock, which the teardown laps (`exit_laps`) and leaves running.
+    quit_at: Option<Instant>,
+    exit_laps: Vec<(&'static str, Duration)>,
+    exit_clock: Option<Instant>,
+}
+
+/// The way out's steps and what each took, on stderr, just before the
+/// process exits: the time from the quit to the event loop's return, the
+/// GPU and window dropped, the player's own teardown, the App and the lock.
+fn exit_report(laps: &[(&'static str, Duration)]) {
+    if laps.is_empty() {
+        return;
+    }
+    let steps: Vec<String> = laps
+        .iter()
+        .map(|(stage, took)| format!("{stage} {:.1}", took.as_secs_f64() * 1000.0))
+        .collect();
+    eprintln!("gui --window: way out (ms): {}", steps.join(", "));
+}
+
+/// The startup's work that needs no window, begun on threads of its own
+/// before the event loop runs: the faces, and the GPU's instance, adapter
+/// and device. The window is on screen from its creation in `resumed`,
+/// blank until the first present, and the loop answers nothing meanwhile
+/// (on Windows, the white window the Windows report saw for two to three
+/// seconds, which DWM marks Not Responding under load); this work then
+/// overlaps the event loop's start and the window's creation instead of
+/// following them, and `open` only joins it.
+struct Early {
+    faces: Option<JoinHandle<Result<Faces, String>>>,
+    gpu: Option<JoinHandle<Gpu>>,
+}
+
+impl Early {
+    fn faces(lang: String) -> Option<JoinHandle<Result<Faces, String>>> {
+        std::thread::Builder::new()
+            .name("window-faces".into())
+            .spawn(move || find_faces(&lang))
+            .ok()
+    }
+
+    fn gpu(display: OwnedDisplayHandle) -> Option<JoinHandle<Gpu>> {
+        std::thread::Builder::new()
+            .name("window-gpu".into())
+            .spawn(move || Gpu::prepare(display))
+            .ok()
+    }
+}
+
+/// The regular faces the window draws with, and what finding them took.
+struct Faces {
+    /// Hack first for everything it has, then a system face for the few
+    /// symbols it lacks, then the borrowed faces for kana, hanzi and
+    /// hangul, whatever the language. `with_regular_fonts` keeps that
+    /// order, where `with_fonts` would sort by width and could put a
+    /// borrowed face's own Latin in front of Hack's. Hack is also the
+    /// builder's last resort, which is what bold and italic cells fall back
+    /// to with faked styles.
+    fonts: Vec<Font<'static>>,
+    took: Vec<(&'static str, Duration)>,
+}
+
+/// The faces, found at the known paths each platform keeps them at
+/// ([`symbol_faces`], [`script_faces`]): a handful of files mapped, never
+/// a scan of the fonts folder, which on Windows holds hundreds.
+fn find_faces(lang: &str) -> Result<Faces, String> {
+    let mut took = Vec::with_capacity(3);
+    let mut clock = Instant::now();
+    let mut lap = |stage: &'static str| {
+        let now = Instant::now();
+        took.push((stage, now - clock));
+        clock = now;
+    };
+    let mut fonts = vec![hack()?];
+    lap("faces.hack");
+    fonts.extend(symbol_fallback());
+    lap("faces.symbols");
+    fonts.extend(script_fallbacks(lang));
+    lap("faces.scripts");
+    Ok(Faces { fonts, took })
+}
+
+/// The GPU before the window: the instance, and an adapter with a device
+/// and queue requested from it, which the builder takes if the adapter can
+/// present to the window's surface and otherwise replaces with its own.
+/// None of it needs the window, and on Windows (Vulkan, two GPUs) it is the
+/// likeliest part of the blank seconds: here it costs about 15 ms, and the
+/// stats lever's `early.gpu.*` stages say what it costs there. On Windows
+/// wgpu's GL backend makes its hidden window on a thread of its own, so
+/// this thread ending takes nothing with it.
+struct Gpu {
+    instance: wgpu::Instance,
+    device: Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
+    took: Vec<(&'static str, Duration)>,
+}
+
+impl Gpu {
+    fn prepare(display: OwnedDisplayHandle) -> Gpu {
+        let started = Instant::now();
+        let mut gpu = Gpu::without_device(Box::new(display));
+        let instance_took = started.elapsed();
+        let options = wgpu::RequestAdapterOptions::default();
+        let adapter = block_on(gpu.instance.request_adapter(&options)).ok().and_then(Result::ok);
+        let adapter_took = started.elapsed() - instance_took;
+        gpu.device = adapter.and_then(|adapter| {
+            let descriptor =
+                wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() };
+            let (device, queue) = block_on(adapter.request_device(&descriptor)).ok()?.ok()?;
+            Some((adapter, device, queue))
+        });
+        let device_took = started.elapsed() - instance_took - adapter_took;
+        gpu.took = vec![
+            ("gpu.instance", instance_took),
+            ("gpu.adapter", adapter_took),
+            ("gpu.device", device_took),
+        ];
+        gpu
+    }
+
+    /// The instance alone, the builder to find the rest.
+    fn without_device(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> Gpu {
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(display),
+        );
+        Gpu { instance, device: None, took: Vec::new() }
+    }
 }
 
 /// The window as the loop's [`Host`]: the pointer over something
@@ -354,43 +520,60 @@ impl App {
                 .create_window(attributes)
                 .map_err(|e| format!("the window would not open: {e}"))?,
         );
+        self.lap.mark(&mut self.stats, "window");
         self.scale = window.scale_factor();
         let font_px = font_px(self.scale);
+        // What `run` began before the loop, joined: the faces, and the GPU's
+        // instance, adapter and device. Whatever did not come (a thread that
+        // could not start, or panicked) is done here instead, as it all was
+        // before; the window waits the same either way.
+        let faces = self.early.faces.take().and_then(|thread| thread.join().ok());
+        let faces = match faces {
+            Some(found) => found?,
+            None => find_faces(&rust_i18n::locale())?,
+        };
+        self.lap.mark(&mut self.stats, "faces.wait");
+        let gpu = self.early.gpu.take().and_then(|thread| thread.join().ok());
         // The display handle goes in with the instance, as the visualizer's
         // window does it: on Wayland and X11 the backend needs it before a
-        // surface can exist.
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
-        );
+        // surface can exist. The event loop's handle (what `run` gave the
+        // early thread) is the same display as the window's.
+        let gpu = gpu.unwrap_or_else(|| Gpu::without_device(Box::new(window.clone())));
+        self.lap.mark(&mut self.stats, "gpu.wait");
+        if let Some(stats) = self.stats.as_mut() {
+            for (stage, took) in faces.took.iter().chain(&gpu.took) {
+                stats.stage(&format!("early.{stage}"), *took);
+            }
+        }
         let size = window.inner_size();
         let dimensions = Dimensions {
             width: NonZeroU32::new(size.width.max(1)).expect("at least one"),
             height: NonZeroU32::new(size.height.max(1)).expect("at least one"),
         };
-        // Hack first for everything it has, then a system face for the few
-        // symbols it lacks, then the borrowed faces for kana, hanzi and
-        // hangul, whatever the language. `with_regular_fonts`
-        // keeps that order, where `with_fonts` would sort by width and could
-        // put a borrowed face's own Latin in front of Hack's. Hack is also
-        // the builder's last resort, which is what bold and italic cells
-        // fall back to with faked styles.
-        let mut faces = vec![hack()?];
-        faces.extend(symbol_fallback());
-        faces.extend(script_fallbacks(&rust_i18n::locale()));
-        self.faces.clone_from(&faces);
+        self.faces.clone_from(&faces.fonts);
         // The pinned truecolour palette always has a ground; black is only
         // the answer to a palette that somehow resolved without one.
         let theme = th();
-        let builder = Builder::<CoverPost>::from_font_and_user_data(hack()?, self.board.clone())
-            .with_regular_fonts(faces)
-            .with_font_size_px(font_px)
-            .with_width_and_height(dimensions)
-            .with_bg_color(theme.ground.unwrap_or(Color::Black))
-            .with_fg_color(theme.text)
-            .with_color_table(named_colours(theme))
-            .with_instance(instance);
+        let mut builder =
+            Builder::<CoverPost>::from_font_and_user_data(hack()?, self.board.clone())
+                .with_regular_fonts(faces.fonts)
+                .with_font_size_px(font_px)
+                .with_width_and_height(dimensions)
+                .with_bg_color(theme.ground.unwrap_or(Color::Black))
+                .with_fg_color(theme.text)
+                .with_color_table(named_colours(theme))
+                .with_instance(gpu.instance);
+        if let Some((adapter, device, queue)) = gpu.device {
+            builder = builder.with_device(adapter, device, queue);
+        }
         let backend = block_on(builder.build_with_target(window.clone()))?
             .map_err(|e| format!("the window has nothing to draw with: {e}"))?;
+        self.lap.mark(&mut self.stats, "backend");
+        if let Some(stats) = self.stats.as_mut() {
+            for (stage, took) in backend.build_timings() {
+                stats.stage(&format!("backend.{stage}"), *took);
+            }
+        }
         let timed = self.stats.is_some();
         let mut terminal =
             Terminal::new(Counted::new(backend, timed)).map_err(|e| e.to_string())?;
@@ -441,6 +624,7 @@ impl App {
         self.asked = Some(Instant::now());
         self.window = Some(window);
         self.terminal = Some(terminal);
+        self.lap.mark(&mut self.stats, "sizing");
         Ok(())
     }
 
@@ -476,6 +660,9 @@ impl App {
         else {
             return;
         };
+        if self.frames == 0 {
+            self.lap.mark(&mut self.stats, "to_first_frame");
+        }
         self.board.begin_frame();
         let framed = frame(terminal, &mut self.gui, &mut self.ctx, &mut WindowHost(window));
         let (cells, flush) = terminal.backend_mut().take_cells();
@@ -517,8 +704,10 @@ impl App {
         if self.quit_flushed {
             return false;
         }
+        let fed = self.stats.is_some().then(Instant::now);
         if input(&mut self.gui, &mut self.ctx, event) == Flow::Quit {
             self.quit_flushed = true;
+            self.quit_at = fed;
             event_loop.exit();
             return false;
         }
@@ -615,12 +804,33 @@ impl App {
             }
         }
         let Some(grid) = self.grid() else { return };
-        for event in self.translator.translate(raw, grid) {
+        // A press is recorded for the script's dumps as the GUI is about to
+        // read it: the cell, and what the last frame registered there,
+        // before the press acts.
+        let press = match raw {
+            Raw::Button { button, down: true } if self.script.is_some() => {
+                let (x, y) = self.translator.pointer(grid);
+                let hit = self.gui.ui.hit(ratatui::layout::Position { x, y });
+                let hit = hit.map_or_else(|| "none".to_string(), |act| format!("{act:?}"));
+                Some(format!("{button:?} at {x},{y}, hit {hit}"))
+            }
+            _ => None,
+        };
+        let events = self.translator.translate(raw, grid);
+        let mut fed = true;
+        for event in events {
             if !self.feed(event_loop, event) {
-                return;
+                fed = false;
+                break;
             }
         }
-        self.ask_redraw();
+        if let Some(press) = press {
+            let drag = if self.gui.actions.drag.is_some() { "drag began" } else { "no drag" };
+            self.last_press = Some(format!("{press}, {drag}"));
+        }
+        if fed {
+            self.ask_redraw();
+        }
     }
 
     /// The grid as the backend holds it now: the whole surface and the
@@ -719,6 +929,7 @@ impl App {
                 // last one's wait runs out: nothing is asked for here.
                 Step::Frame => break,
                 Step::Quit => {
+                    self.quit_at = self.stats.is_some().then(Instant::now);
                     event_loop.exit();
                     break;
                 }
@@ -818,7 +1029,7 @@ impl App {
         };
         text.push_str(&format!(
             "-- pointer {},{} at {:.1},{:.1} px; surface {}×{} px; cursor {}; preedit {:?}; \
-             held {:?}; ime {}; minimised {minimised}; covers {covers}\n",
+             held {:?}; ime {}; minimised {minimised}; covers {covers}; last press {}\n",
             pointer.0,
             pointer.1,
             self.translator.pixel().0,
@@ -833,6 +1044,7 @@ impl App {
                 (true, None) => "on".to_string(),
                 (true, Some(((x, y), (w, h)))) => format!("on at {x},{y} px, {w}×{h}"),
             },
+            self.last_press.as_deref().unwrap_or("none"),
         ));
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
@@ -856,18 +1068,31 @@ impl App {
             let covers = self.terminal.as_ref().map(|t| t.backend().post_processor().report());
             stats.write(covers);
         }
+        // With the stats lever, what each step of the way out took, from the
+        // quit itself: a quit that takes seconds on one machine says where.
+        let mut clock = self.quit_at.take();
+        let mut lap = |laps: &mut Vec<(&'static str, Duration)>, stage: &'static str| {
+            if let Some(at) = clock.as_mut() {
+                let now = Instant::now();
+                laps.push((stage, now - *at));
+                *at = now;
+            }
+        };
+        let mut laps = Vec::new();
+        lap(&mut laps, "loop");
         self.terminal = None;
+        lap(&mut laps, "gpu");
         self.window = None;
+        lap(&mut laps, "window");
         if !self.quit_flushed {
             self.ctx.saver.flush(&self.gui.app);
         }
         finish(&mut self.gui, &self.ctx);
-        // Last, as main drops it after the terminal's run: a second player
-        // the launcher starts once the sidecar is gone finds this one's
-        // queue saved. Here rather than in main, because a Cmd-Q on macOS
-        // never returns from the event loop: AppKit ends the process once
-        // `exiting` (this teardown's caller) returns.
-        self.instance = None;
+        lap(&mut laps, "finish");
+        self.exit_laps = laps;
+        self.exit_clock = clock;
+        // The instance lock is not dropped here: `run` drops it after the
+        // App, or `exiting` does when the platform ends the process.
     }
 }
 
@@ -876,6 +1101,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+        self.lap.mark(&mut self.stats, "to_resumed");
         if let Err(e) = self.open(event_loop) {
             eprintln!("gui --window: {e}");
             self.exit_code = 1;
@@ -889,7 +1115,10 @@ impl ApplicationHandler for App {
     // it.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.quit_at = self.stats.is_some().then(Instant::now);
+                event_loop.exit();
+            }
             // The new size to the surface, then a whole repaint: ratatui-wgpu
             // marks rows clean even when a present fails, and a present
             // against a surface mid-resize can, so the next frame draws
@@ -1000,8 +1229,17 @@ impl ApplicationHandler for App {
         event_loop.set_control_flow(flow);
     }
 
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
         self.teardown();
+        // An exit the window asked for (a quit key, the close button, the
+        // script) returns from the event loop, and `run` drops the lock
+        // after the App. One it did not ask for is the platform's: a Cmd-Q
+        // on macOS never returns, AppKit ending the process once this
+        // returns, so the lock goes now or its sidecar stays behind.
+        if !event_loop.exiting() {
+            self.instance = None;
+            exit_report(&self.exit_laps);
+        }
     }
 }
 

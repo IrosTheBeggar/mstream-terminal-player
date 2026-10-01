@@ -3090,6 +3090,9 @@ pub fn run(
             return 1;
         }
         theme::pin_truecolor();
+        // And the glyphs: the window draws with its own faces, so a plain
+        // console behind it must not select the CP437 stand-ins.
+        theme::pin_modern_glyphs();
         let (gui, channels) = start(server, token, torrent, bundled, control);
         return window::run(gui, channels, instance.take());
     }

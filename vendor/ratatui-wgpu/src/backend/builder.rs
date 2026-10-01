@@ -94,6 +94,7 @@ pub struct Builder<'a, P: PostProcessor = DefaultPostProcessor> {
     user_data: P::UserData,
     fonts: Fonts<'a>,
     instance: Option<Instance>,
+    device: Option<(wgpu::Adapter, Device, wgpu::Queue)>,
     limits: Option<Limits>,
     present_mode: Option<PresentMode>,
     width: NonZeroU32,
@@ -116,6 +117,7 @@ where
         Self {
             user_data: Default::default(),
             instance: None,
+            device: None,
             fonts: Fonts::new(font, 24),
             limits: None,
             present_mode: None,
@@ -141,6 +143,7 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
         Self {
             user_data,
             instance: None,
+            device: None,
             fonts: Fonts::new(font, 24),
             limits: None,
             present_mode: None,
@@ -162,6 +165,24 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
         instance: Instance,
     ) -> Self {
         self.instance = Some(instance);
+        self
+    }
+
+    /// Use an adapter, and a device and queue already requested from it,
+    /// when building the backend: what a caller can do before it has a
+    /// window, with the same [`wgpu::Instance`] it passes to
+    /// [`Builder::with_instance`]. They are used when the adapter supports
+    /// the surface the build is for; otherwise the build requests its own,
+    /// as without this. The device's own limits stand in for
+    /// [`Builder::with_limits`].
+    #[must_use]
+    pub fn with_device(
+        mut self,
+        adapter: wgpu::Adapter,
+        device: Device,
+        queue: wgpu::Queue,
+    ) -> Self {
+        self.device = Some((adapter, device, queue));
         self
     }
 
@@ -422,27 +443,55 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
             })
         });
 
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: surface.wgpu_surface(Token),
-                ..Default::default()
-            })
-            .await
-            .map_err(Error::AdapterRequestFailed)?;
-
-        let limits = if let Some(limits) = self.limits {
-            min_limits(&adapter, limits)
-        } else {
-            adapter.limits()
+        // What each stage of the build cost, for the caller to report
+        // (`WgpuBackend::build_timings`): a window that stays blank for
+        // seconds on one machine and not another says which stage it was.
+        let mut timings = Vec::with_capacity(4);
+        let mut clock = Instant::now();
+        let mut lap = |stage: &'static str| {
+            let now = Instant::now();
+            timings.push((stage, now - clock));
+            clock = now;
         };
 
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                required_limits: limits.clone(),
-                ..Default::default()
-            })
-            .await
-            .map_err(Error::DeviceRequestFailed)?;
+        // A device the caller requested before there was a surface serves
+        // if its adapter can present to this one.
+        let given = self.device.take().filter(|(adapter, ..)| {
+            surface
+                .wgpu_surface(Token)
+                .is_none_or(|wgpu_surface| adapter.is_surface_supported(wgpu_surface))
+        });
+        let (adapter, limits, device, queue) = if let Some((adapter, device, queue)) = given {
+            let limits = device.limits();
+            lap("adapter (given)");
+            lap("device (given)");
+            (adapter, limits, device, queue)
+        } else {
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    compatible_surface: surface.wgpu_surface(Token),
+                    ..Default::default()
+                })
+                .await
+                .map_err(Error::AdapterRequestFailed)?;
+            lap("adapter");
+
+            let limits = if let Some(limits) = self.limits {
+                min_limits(&adapter, limits)
+            } else {
+                adapter.limits()
+            };
+
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_limits: limits.clone(),
+                    ..Default::default()
+                })
+                .await
+                .map_err(Error::DeviceRequestFailed)?;
+            lap("device");
+            (adapter, limits, device, queue)
+        };
 
         let mut surface_config = surface
             .get_default_config(
@@ -480,6 +529,7 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
         }
 
         surface.configure(&device, &surface_config, Token);
+        lap("configure");
 
         let (inset_width, inset_height) = match self.viewport {
             Viewport::Full => (0, 0),
@@ -572,13 +622,17 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
         let reset_fg = self.colors.c2c(self.reset_fg, [0, 0, 0]);
         let reset_bg = self.colors.c2c(self.reset_bg, [255, 255, 255]);
 
+        let post_process = P::compile(
+            &device,
+            &wgpu_state.text_dest_view,
+            &surface_config,
+            self.user_data,
+        );
+        lap("pipelines");
+
         Ok(WgpuBackend {
-            post_process: P::compile(
-                &device,
-                &wgpu_state.text_dest_view,
-                &surface_config,
-                self.user_data,
-            ),
+            post_process,
+            build_timings: timings,
             cells: vec![],
             dirty_rows: vec![],
             dirty_cells: BitVec::new(),

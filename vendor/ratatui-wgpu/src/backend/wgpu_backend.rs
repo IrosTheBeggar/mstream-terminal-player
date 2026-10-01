@@ -137,6 +137,9 @@ pub struct WgpuBackend<
     /// A frame was composited but never presented, because the surface had
     /// no texture to give: the next flush presents even if nothing changed.
     pub(super) present_owed: bool,
+    /// What each stage of the build took: the adapter, the device, the
+    /// surface's configuration, and the textures, shaders and pipelines.
+    pub(super) build_timings: Vec<(&'static str, Duration)>,
     pub(super) device: Device,
     pub(super) queue: Queue,
 
@@ -284,6 +287,13 @@ impl<'f, 's, P: PostProcessor, S: RenderSurface<'s>> WgpuBackend<'f, 's, P, S> {
     ) {
         self.dirty_rows.clear();
         self.colors = new_colors;
+    }
+
+    /// What each stage of the build took, in order: `adapter`, `device`,
+    /// `configure` (the surface) and `pipelines` (the textures, the shaders
+    /// and the pipelines, the post processor's included).
+    pub fn build_timings(&self) -> &[(&'static str, Duration)] {
+        &self.build_timings
     }
 
     /// Update the fonts used for rendering. This will cause a full repaint of

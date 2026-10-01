@@ -31,6 +31,7 @@
 //! default, and there is never a two-tone border.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use ratatui::style::Color;
 
@@ -69,6 +70,75 @@ pub enum Tier {
     Ansi,
 }
 
+/// Bare classic conhost - a stock cmd/PowerShell console window. It
+/// exports none of the identifying variables every richer Windows
+/// terminal sets (Windows Terminal: WT_SESSION; WezTerm: TERM_PROGRAM;
+/// Alacritty: TERM; ConEmu: ConEmuANSI). Callers degrade gracefully
+/// there: graphics queries go unanswered - and leak a blocked stdin
+/// reader that eats all input (see tui::graphics) - and the legacy
+/// fonts draw many glyphs as '?'. Resolved once, from the environment,
+/// unless [`pin_modern_glyphs`] answered first.
+pub(crate) fn legacy_conhost() -> bool {
+    legacy_conhost_in(&GLYPHS, cfg!(windows), |var| std::env::var(var).ok())
+}
+
+/// The glyph tier, once resolved: [`UNASKED`], [`LEGACY`] or [`MODERN`]. An
+/// atomic rather than a `OnceLock`, so a pin lands even after something
+/// has asked: a test binary resolves it from a bare CI console before the
+/// frame tests pin it.
+static GLYPHS: AtomicU8 = AtomicU8::new(UNASKED);
+const UNASKED: u8 = 0;
+const LEGACY: u8 = 1;
+const MODERN: u8 = 2;
+
+/// The GUI's own window draws with its own faces, which carry every glyph
+/// the kit names — the console that launched it is not where it draws, so
+/// a plain conhost must not turn its checkboxes, carets and arrows into the
+/// CP437 stand-ins (PR #41's Windows report: `[>]`, `repeat` boxes, a
+/// placeholder visualizer tab). Only the window path calls this, beside
+/// [`pin_truecolor`], before anything draws; the frame tests use it too.
+pub(crate) fn pin_modern_glyphs() {
+    GLYPHS.store(MODERN, Ordering::Relaxed);
+}
+
+/// Frame tests name the fancy glyphs. A bare CI console — windows-latest
+/// exports none of the identifying variables — would flip every checkbox,
+/// caret and arrow to the CP437 stand-ins, so those tests pin the answer.
+#[cfg(test)]
+pub(crate) fn pin_modern_terminal() {
+    pin_modern_glyphs();
+}
+
+/// [`legacy_conhost`] against a given cell and environment: the first
+/// answer stays, unless a pin replaced it.
+fn legacy_conhost_in(
+    cell: &AtomicU8,
+    windows: bool,
+    env: impl Fn(&str) -> Option<String>,
+) -> bool {
+    match cell.load(Ordering::Relaxed) {
+        LEGACY => true,
+        MODERN => false,
+        _ => {
+            let found = if legacy_conhost_for(windows, env) { LEGACY } else { MODERN };
+            // A pin that landed while the environment was read wins.
+            match cell.compare_exchange(UNASKED, found, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => found == LEGACY,
+                Err(now) => now == LEGACY,
+            }
+        }
+    }
+}
+
+/// Pure form - unit-tested; the env reads live in [`legacy_conhost`].
+pub(crate) fn legacy_conhost_for(windows: bool, env: impl Fn(&str) -> Option<String>) -> bool {
+    windows
+        && env("WT_SESSION").is_none()
+        && env("TERM_PROGRAM").is_none()
+        && env("TERM").is_none()
+        && env("ConEmuANSI").is_none()
+}
+
 /// Pure capability decision — unit-tested; the env reads live in [`tier`].
 ///
 /// `windows_vt`: compiled for Windows. Windows 10+ consoles — Windows
@@ -81,42 +151,6 @@ pub enum Tier {
 /// Truecolor there — but only as the FLOOR: the override always wins, an
 /// explicit `COLORTERM`/`TERM` (MSYS and mintty shells set them) keeps
 /// meaning what it says, and `TERM=dumb` stays dumb.
-/// Bare classic conhost - a stock cmd/PowerShell console window. It
-/// exports none of the identifying variables every richer Windows
-/// terminal sets (Windows Terminal: WT_SESSION; WezTerm: TERM_PROGRAM;
-/// Alacritty: TERM; ConEmu: ConEmuANSI). Callers degrade gracefully
-/// there: graphics queries go unanswered - and leak a blocked stdin
-/// reader that eats all input (see tui::graphics) - and the legacy
-/// fonts draw many glyphs as '?'.
-pub(crate) fn legacy_conhost() -> bool {
-    #[cfg(test)]
-    if PIN_MODERN.load(std::sync::atomic::Ordering::Relaxed) {
-        return false;
-    }
-    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ONCE.get_or_init(|| legacy_conhost_for(cfg!(windows), |var| std::env::var(var).ok()))
-}
-
-/// Frame tests name the fancy glyphs. A bare CI console — windows-latest
-/// exports none of the identifying variables — would flip every checkbox,
-/// caret and arrow to the CP437 stand-ins, so those tests pin the answer.
-#[cfg(test)]
-static PIN_MODERN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(test)]
-pub(crate) fn pin_modern_terminal() {
-    PIN_MODERN.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Pure form - unit-tested; the env reads live in [`legacy_conhost`].
-pub(crate) fn legacy_conhost_for(windows: bool, env: impl Fn(&str) -> Option<String>) -> bool {
-    windows
-        && env("WT_SESSION").is_none()
-        && env("TERM_PROGRAM").is_none()
-        && env("TERM").is_none()
-        && env("ConEmuANSI").is_none()
-}
-
 pub fn tier_for(
     override_var: Option<&str>,
     colorterm: Option<&str>,
@@ -294,6 +328,25 @@ mod tests {
         assert!(!legacy_conhost_for(true, ala));
         let conemu = |v: &str| (v == "ConEmuANSI").then(|| "ON".to_string());
         assert!(!legacy_conhost_for(true, conemu));
+    }
+
+    /// The window's pin: an environment that reads as bare conhost still
+    /// draws the modern glyphs once pinned, whether the pin came before
+    /// anything asked or after the environment had answered.
+    #[test]
+    fn the_window_pins_the_modern_glyphs_over_a_bare_conhost() {
+        let bare = |_: &str| None;
+        let unpinned = AtomicU8::new(UNASKED);
+        assert!(legacy_conhost_in(&unpinned, true, bare), "unpinned, the env answers");
+        assert!(legacy_conhost_in(&unpinned, false, bare), "and the answer stays");
+        let early = AtomicU8::new(UNASKED);
+        early.store(MODERN, Ordering::Relaxed);
+        assert!(!legacy_conhost_in(&early, true, bare));
+        unpinned.store(MODERN, Ordering::Relaxed);
+        assert!(!legacy_conhost_in(&unpinned, true, bare), "a late pin still lands");
+        // The live cell, through the window's own call.
+        pin_modern_glyphs();
+        assert!(!legacy_conhost());
     }
 
     #[test]

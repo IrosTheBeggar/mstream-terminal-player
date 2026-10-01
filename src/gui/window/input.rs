@@ -405,48 +405,43 @@ pub(super) const PASTE_MAX: usize = 4096;
 /// line — every field is one line, and the newline a terminal would type
 /// next is an Enter, which would submit the field halfway through; the
 /// Unicode line and paragraph separators end the line as a newline does.
-/// Control characters and Unicode's format characters are dropped: the
-/// invisible ones that ride along in copied text (a zero-width space, a
-/// byte-order mark, a soft hyphen, bidi marks and overrides) would sit in
-/// a search or an address unseen and make it miss, or reorder how the
-/// field draws. Spaces of every kind stay. At most [`PASTE_MAX`]
-/// characters are typed.
+/// A tab becomes a space, as a one-line field has no columns to align;
+/// other control characters are dropped, and so are the invisible format
+/// characters that ride along in copied text and are never part of what it
+/// says ([`is_stray_format`]). Spaces of every kind stay. At most
+/// [`PASTE_MAX`] characters are typed.
 fn paste(text: &str) -> Vec<TermEvent> {
     let line = text.split(['\n', '\r', '\u{2028}', '\u{2029}']).next().unwrap_or("");
     line.chars()
-        .filter(|&c| !c.is_control() && !is_format(c))
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .filter(|&c| !c.is_control() && !is_stray_format(c))
         .take(PASTE_MAX)
         .map(|c| TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
         .collect()
 }
 
-/// Whether a character is in Unicode's Format category (Cf), as of Unicode
-/// 16: listed here rather than pulled from a properties crate for one
-/// question. The zero-width joiner is one, so an emoji family pasted
-/// arrives as its members side by side; a field's text is a search or a
-/// name, where that costs nothing.
-fn is_format(c: char) -> bool {
+/// Whether a character is one of Unicode's format characters (Cf) that are
+/// never part of the text they sit in: a byte-order mark, a zero-width
+/// space, a soft hyphen, the bidi marks, embeddings, overrides and isolates,
+/// the invisible maths operators, the interlinear annotation marks and the
+/// tag characters. In a search or an address they sit unseen and make it
+/// miss, or reorder how the field draws. The rest of Cf stays, because it
+/// is spelling: the zero-width non-joiner and joiner (Persian and Indic
+/// words, emoji sequences), the word joiner, the Arabic number signs, the
+/// Mongolian vowel separator and the hieroglyph and shorthand controls.
+/// Listed here rather than pulled from a properties crate for one question.
+fn is_stray_format(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
-            | '\u{0600}'..='\u{0605}'
             | '\u{061C}'
-            | '\u{06DD}'
-            | '\u{070F}'
-            | '\u{0890}'..='\u{0891}'
-            | '\u{08E2}'
-            | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
+            | '\u{200B}'
+            | '\u{200E}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
+            | '\u{2061}'..='\u{2064}'
             | '\u{2066}'..='\u{206F}'
             | '\u{FEFF}'
             | '\u{FFF9}'..='\u{FFFB}'
-            | '\u{110BD}'
-            | '\u{110CD}'
-            | '\u{13430}'..='\u{1343F}'
-            | '\u{1BCA0}'..='\u{1BCA3}'
-            | '\u{1D173}'..='\u{1D17A}'
             | '\u{E0001}'
             | '\u{E0020}'..='\u{E007F}'
     )
@@ -513,6 +508,22 @@ fn key(
         };
         return vec![press(code)];
     }
+    // Alt held, with or without Ctrl, is a question for the layout, not the
+    // keymap: AltGr types `@` or `€` on a German layout, and Option on a Mac
+    // types `¬` or `œ`. winit on Windows reports AltGr as Alt alone (it
+    // clears Ctrl for the right Alt) but a left Ctrl+Alt, which Windows
+    // also treats as AltGr, as both. So only what the OS composed is typed,
+    // as plain characters a field takes as text. When it composed nothing
+    // of its own (no text, or the key's own letter echoed back, as Windows
+    // does for Alt+Q on a US layout) the chord is nothing: falling back to
+    // the letter typed a bare `q` for Ctrl+Alt+Q, and the GUI quits on `q`
+    // whatever the modifier (PR #41's Windows report).
+    if mods.alt {
+        return alt_composed(text, bare, physical)
+            .into_iter()
+            .map(|c| TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+            .collect();
+    }
     if mods.ctrl
         && let Some(letter) = ctrl_letter(text, bare, physical)
     {
@@ -532,6 +543,18 @@ fn key(
     }
     let lowered = |c: char| if mods.ctrl { lower(c) } else { c };
     printable.into_iter().map(|c| press(KeyCode::Char(lowered(c)))).collect()
+}
+
+/// The characters an Alt chord composed: the printable text, unless it is
+/// just the key's own character again (in either case, so Shift+Alt+Q's `Q`
+/// is an echo too) — the key at its place when the layout names none.
+fn alt_composed(text: Option<&str>, bare: Option<char>, physical: Option<char>) -> Vec<char> {
+    let printable: Vec<char> = text.unwrap_or("").chars().filter(|c| !c.is_control()).collect();
+    let own = bare.or(physical).map(lower);
+    match printable.as_slice() {
+        [c] if Some(lower(*c)) == own => Vec::new(),
+        _ => printable,
+    }
 }
 
 /// The letter Ctrl is held with, as a terminal reads it: a terminal sends
@@ -1208,6 +1231,77 @@ mod tests {
         assert_eq!(t.pixel(), (332.0, 120.0), "a ratio that is no number moves nothing");
     }
 
+    /// An Alt chord types only what the OS composed for it, plainly, and
+    /// nothing when it composed nothing: never the key's letter, so no Alt
+    /// chord can quit the player.
+    #[test]
+    fn an_alt_chord_types_only_what_the_os_composed() {
+        let key = |text: Option<&str>, bare: char, mods| Raw::Key {
+            named: None,
+            text: text.map(str::to_string),
+            bare: Some(bare),
+            physical: Some('q'),
+            mods,
+            pressed: true,
+            repeat: false,
+        };
+        let alt = Mods { alt: true, ..Mods::default() };
+        let ctrl_alt = Mods { ctrl: true, alt: true, ..Mods::default() };
+        // Alt+Q with no text, and Windows' echo of the letter: nothing.
+        assert!(one(key(None, 'q', alt)).is_empty());
+        assert!(one(key(Some("q"), 'q', alt)).is_empty());
+        assert!(one(key(Some("Q"), 'q', Mods { shift: true, ..alt })).is_empty());
+        // AltGr+Q on a German layout (Alt alone from the right key): `@`.
+        assert_eq!(one(key(Some("@"), 'q', alt)), [(KeyCode::Char('@'), NONE)]);
+        // A left Ctrl+Alt, Windows' AltGr: AltGr+E's `€`, plainly.
+        assert_eq!(one(key(Some("€"), 'e', ctrl_alt)), [(KeyCode::Char('€'), NONE)]);
+        // Ctrl+Alt+Q on a US layout composes nothing: not a `q`, nor a Ctrl+Q.
+        assert!(one(key(None, 'q', ctrl_alt)).is_empty());
+        assert!(one(key(Some("q"), 'q', ctrl_alt)).is_empty());
+        assert!(one(key(Some("\u{11}"), 'q', ctrl_alt)).is_empty());
+        // A Mac's Option+L: `¬`. Command stays the platform's.
+        assert_eq!(one(key(Some("¬"), 'l', alt)), [(KeyCode::Char('¬'), NONE)]);
+        assert!(one(key(Some("¬"), 'l', Mods { logo: true, ..alt })).is_empty());
+        // A layout that names no character for the key: its place is its own.
+        let placeless = Raw::Key {
+            named: None,
+            text: Some("q".into()),
+            bare: None,
+            physical: Some('q'),
+            mods: alt,
+            pressed: true,
+            repeat: false,
+        };
+        assert!(one(placeless).is_empty());
+        // Alt with a named key is still that key.
+        assert_eq!(
+            one(press(Some(Named::Enter), Some("\r"), alt)),
+            [(KeyCode::Enter, KeyModifiers::ALT)]
+        );
+    }
+
+    /// Option+E on a Mac is a dead key: the key itself has no text, and the
+    /// accent arrives through the input method's commit, as any IME text.
+    #[test]
+    fn a_dead_option_key_still_composes_through_the_ime() {
+        let mut t = Translator::new();
+        let option_e = Raw::Key {
+            named: None,
+            text: None,
+            bare: Some('e'),
+            physical: Some('e'),
+            mods: Mods { alt: true, ..Mods::default() },
+            pressed: true,
+            repeat: false,
+        };
+        assert!(t.translate(option_e, GRID).is_empty());
+        assert!(t.translate(Raw::ImePreedit("´".into()), GRID).is_empty());
+        assert_eq!(
+            codes(&t.translate(Raw::ImeCommit("é".into()), GRID)),
+            [(KeyCode::Char('é'), NONE)]
+        );
+    }
+
     #[test]
     fn a_paste_types_its_first_line() {
         assert_eq!(
@@ -1218,9 +1312,10 @@ mod tests {
             one(Raw::Paste("日本\r\nsecond line".into())),
             [(KeyCode::Char('日'), NONE), (KeyCode::Char('本'), NONE)]
         );
+        // A tab is a space in a one-line field.
         assert_eq!(
             one(Raw::Paste("a\tb\n".into())),
-            [(KeyCode::Char('a'), NONE), (KeyCode::Char('b'), NONE)]
+            [(KeyCode::Char('a'), NONE), (KeyCode::Char(' '), NONE), (KeyCode::Char('b'), NONE)]
         );
         assert!(one(Raw::Paste("\nafter".into())).is_empty(), "an empty first line types nothing");
     }
@@ -1243,10 +1338,19 @@ mod tests {
                 })
                 .collect()
         };
-        // A byte-order mark, zero-width space, soft hyphen, bidi override
-        // and isolate, word joiner and a tag character: all gone.
-        let dirty = "\u{FEFF}mu\u{200B}sic\u{00AD} \u{202E}rev\u{2066}x\u{2069}\u{2060}\u{E0041}";
+        // A byte-order mark, zero-width space, soft hyphen, bidi mark,
+        // override and isolate, and a tag character: all gone.
+        let dirty = "\u{FEFF}mu\u{200B}sic\u{00AD} \u{202E}rev\u{2066}x\u{2069}\u{200F}\u{E0041}";
         assert_eq!(typed(dirty), "music revx");
+        // The joiners are spelling, and stay: a Persian word's non-joiner
+        // (می‌خواهم), a ZWJ emoji family, a word joiner.
+        let persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}";
+        assert_eq!(typed(persian), persian);
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(typed(family), family);
+        assert_eq!(typed("a\u{2060}b"), "a\u{2060}b");
+        // Devanagari's explicit half form: क्‍ष keeps its joiner.
+        assert_eq!(typed("\u{0915}\u{094D}\u{200D}\u{0937}"), "\u{0915}\u{094D}\u{200D}\u{0937}");
         // Spaces stay, the no-break and ideographic ones included.
         assert_eq!(typed("a b\u{00A0}c\u{3000}d"), "a b\u{00A0}c\u{3000}d");
         // A line separator ends the line; so does a paragraph separator.
