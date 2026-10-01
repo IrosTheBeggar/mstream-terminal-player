@@ -456,11 +456,9 @@ fn find_faces(lang: &str) -> Result<Faces, String> {
 /// The GPU before the window: the instance, and an adapter with a device
 /// and queue requested from it, which the builder takes if the adapter can
 /// present to the window's surface and otherwise replaces with its own.
-/// None of it needs the window, and on Windows (Vulkan, two GPUs) it is the
+/// None of it needs the window, and on Windows (two GPUs) it is the
 /// likeliest part of the blank seconds: here it costs about 15 ms, and the
-/// stats lever's `early.gpu.*` stages say what it costs there. On Windows
-/// wgpu's GL backend makes its hidden window on a thread of its own, so
-/// this thread ending takes nothing with it.
+/// stats lever's `early.gpu.*` stages say what it costs there.
 struct Gpu {
     instance: wgpu::Instance,
     device: Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
@@ -469,33 +467,92 @@ struct Gpu {
 
 impl Gpu {
     fn prepare(display: OwnedDisplayHandle) -> Gpu {
+        let picked = Picked::pick(Box::new(display));
         let started = Instant::now();
-        let mut gpu = Gpu::without_device(Box::new(display));
-        let instance_took = started.elapsed();
-        let options = wgpu::RequestAdapterOptions::default();
-        let adapter = block_on(gpu.instance.request_adapter(&options)).ok().and_then(Result::ok);
-        let adapter_took = started.elapsed() - instance_took;
-        gpu.device = adapter.and_then(|adapter| {
+        let device = picked.adapter.and_then(|adapter| {
             let descriptor =
                 wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() };
             let (device, queue) = block_on(adapter.request_device(&descriptor)).ok()?.ok()?;
             Some((adapter, device, queue))
         });
-        let device_took = started.elapsed() - instance_took - adapter_took;
-        gpu.took = vec![
-            ("gpu.instance", instance_took),
-            ("gpu.adapter", adapter_took),
-            ("gpu.device", device_took),
-        ];
-        gpu
+        let mut took = picked.took;
+        took.push(("gpu.device", started.elapsed()));
+        Gpu { instance: picked.instance, device, took }
     }
 
     /// The instance alone, the builder to find the rest.
     fn without_device(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> Gpu {
+        Gpu { instance: Picked::pick(display).instance, device: None, took: Vec::new() }
+    }
+}
+
+/// An instance, the adapter it answered with if any, and what the two took
+/// (`gpu.instance`, `gpu.adapter`), from [`Picked::pick`].
+struct Picked {
+    instance: wgpu::Instance,
+    adapter: Option<wgpu::Adapter>,
+    took: Vec<(&'static str, Duration)>,
+}
+
+impl Picked {
+    /// The instance the window draws with, and its adapter. wgpu brings up
+    /// every backend in the instance's mask when the instance is made, and
+    /// `request_adapter` with no preference answers the first adapter it
+    /// finds, so the choice is made with the mask. On Windows that is DX12
+    /// alone first, and Vulkan alone only when DX12 has no adapter: never
+    /// GL, and never the two together. The GL backend costs nothing to draw
+    /// with and much to have in the process: its hidden window puts a hook
+    /// on the window procedures (opengl32 in the stack of PR #41's Windows
+    /// retest), and with it a keyboard-layout change request posted to the
+    /// player's window — what the taskbar's language indicator posts —
+    /// never returned from `DefWindowProc`, on Windows 10, every time;
+    /// with DX12 alone or Vulkan alone the same request switches the
+    /// layout and the window answers. DX12 before Vulkan because of the
+    /// stats lever: on a hybrid box the Vulkan instance alone took half a
+    /// second against DX12's 50 ms, and a mask holding both would have
+    /// paid for Vulkan and been answered by it. `WGPU_BACKEND` still
+    /// overrides the mask, through wgpu's own reading of it; Linux and
+    /// macOS keep the env descriptor as before, where the display handle
+    /// it carries is what Wayland and X11 need to make a surface later.
+    fn pick(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> Picked {
+        let options = wgpu::RequestAdapterOptions::default();
+        if cfg!(windows) && wgpu::Backends::from_env().is_none() {
+            let mut took = vec![("gpu.instance", Duration::ZERO), ("gpu.adapter", Duration::ZERO)];
+            let mut picked = None;
+            for backends in [wgpu::Backends::DX12, wgpu::Backends::VULKAN] {
+                // `with_env` keeps the mask given here, since `WGPU_BACKEND`
+                // is unset on this path, and still reads the rest of wgpu's
+                // environment (validation, backend options).
+                let descriptor = wgpu::InstanceDescriptor {
+                    backends,
+                    ..wgpu::InstanceDescriptor::new_without_display_handle()
+                }
+                .with_env();
+                let started = Instant::now();
+                let instance = wgpu::Instance::new(descriptor);
+                took[0].1 += started.elapsed();
+                let started = Instant::now();
+                let adapter =
+                    block_on(instance.request_adapter(&options)).ok().and_then(Result::ok);
+                took[1].1 += started.elapsed();
+                let found = adapter.is_some();
+                picked = Some((instance, adapter));
+                if found {
+                    break;
+                }
+            }
+            let (instance, adapter) = picked.expect("two backends were tried");
+            return Picked { instance, adapter, took };
+        }
+        let started = Instant::now();
         let instance = wgpu::Instance::new(
             wgpu::InstanceDescriptor::new_with_display_handle_from_env(display),
         );
-        Gpu { instance, device: None, took: Vec::new() }
+        let instance_took = started.elapsed();
+        let started = Instant::now();
+        let adapter = block_on(instance.request_adapter(&options)).ok().and_then(Result::ok);
+        let took = vec![("gpu.instance", instance_took), ("gpu.adapter", started.elapsed())];
+        Picked { instance, adapter, took }
     }
 }
 
@@ -540,6 +597,12 @@ impl App {
         // early thread) is the same display as the window's.
         let gpu = gpu.unwrap_or_else(|| Gpu::without_device(Box::new(window.clone())));
         self.lap.mark(&mut self.stats, "gpu.wait");
+        // Which adapter, through which backend: the one line a report needs
+        // (otherwise it is only in wgpu's own log, at debug level).
+        if let Some((adapter, _, _)) = &gpu.device {
+            let info = adapter.get_info();
+            eprintln!("gui --window: drawing with {} through {:?}", info.name, info.backend);
+        }
         if let Some(stats) = self.stats.as_mut() {
             for (stage, took) in faces.took.iter().chain(&gpu.took) {
                 stats.stage(&format!("early.{stage}"), *took);
