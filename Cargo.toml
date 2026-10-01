@@ -26,7 +26,14 @@ default-run = "mstream-player"
 # on wasm32, where no gui exists.
 [features]
 default = []
-window = ["dep:ratatui-wgpu", "dep:memmap2", "dep:arboard"]
+window = [
+    "dep:ratatui-wgpu",
+    "dep:memmap2",
+    "dep:arboard",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+]
 # windows-sys is the desktop flavour's on Windows alone (the console it
 # leaves on a double-click, the stub's one message box); a feature may name
 # a target-specific dependency, which other targets simply never build.
@@ -264,10 +271,39 @@ rfd = { version = "0.15", default-features = false }
 # stub's MessageBoxW (whose HWND is Foundation's). The 0.61 line is already
 # in the tree (winit, mio and others bring it), so this adds features, not
 # a crate. Optional: only the `desktop` feature builds it.
+#
+# Win32_UI_Shell is SetCurrentProcessExplicitAppUserModelID alone (the
+# player's window and the stub name one taskbar identity, src/identity.rs);
+# WindowsAndMessaging also brings what a refused second launch needs to
+# bring the holder's window forward (desktop.rs).
 windows-sys = { version = "0.61", optional = true, features = [
     "Win32_Foundation",
     "Win32_System_Console",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+] }
+
+# The desktop window's AppKit calls, which winit has no API for: the Dock
+# icon of a bare (unbundled) binary, set from the embedded PNG, and a
+# refused second launch activating the player that holds the lock
+# (NSRunningApplication). The exact versions arboard already brings on
+# macOS (its NSPasteboard), so these add features, not crates: the
+# AppKit classes named below, and `libc` for the pid lookup's pid_t.
+# objc2-foundation is in the tree with its default features already.
+# Optional: the `window` feature.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.4", optional = true }
+objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "libc",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+    "NSRunningApplication",
+] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "NSData",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

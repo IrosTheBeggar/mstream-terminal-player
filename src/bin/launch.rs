@@ -21,6 +21,14 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+/// The app's identity, shared with the player by path: one file, so the
+/// AppUserModelID the stub names and the one the player's window names
+/// cannot differ (its tests run in this bin's test build too). The stub
+/// reads only the AUMID.
+#[cfg(any(windows, test))]
+#[path = "../identity.rs"]
+mod identity;
+
 #[cfg(windows)]
 fn main() {
     use std::os::windows::process::CommandExt;
@@ -31,6 +39,11 @@ fn main() {
     /// value; std has no name for it.)
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+    // The taskbar identity first, before a message box can show: the
+    // player's window names the same one (identity.rs has the pairing
+    // rule), so a shortcut to this stub and the window it opens are one
+    // taskbar button, and a pin relaunches through the stub.
+    identity::set_windows_aumid();
     let player = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("mstream-player.exe")))
@@ -53,10 +66,30 @@ fn main() {
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn();
-    if let Err(e) = spawned {
-        tell(&format!("mStream Player could not start {}: {e}", player.display()));
-        std::process::exit(1);
+    match spawned {
+        Ok(child) => allow_foreground(child.id()),
+        Err(e) => {
+            tell(&format!("mStream Player could not start {}: {e}", player.display()));
+            std::process::exit(1);
+        }
     }
+}
+
+/// Lend the player the stub's right to the foreground. Explorer gave it to
+/// the stub with the click; a process the stub starts does not inherit it,
+/// and a second launch that finds the player open needs it to bring the
+/// holder's window forward (desktop.rs) rather than only flash its button.
+/// The player is named, not any process (ASFW_ANY), and the right lapses
+/// with the user's next input. Granted just after the spawn: the player
+/// reaches its instance lock only after its loader, runtime and argv are
+/// done, far later than this one call; were it ever earlier, the cost is
+/// the flash.
+#[cfg(windows)]
+fn allow_foreground(pid: u32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+    // SAFETY: no pointers; a refusal (the stub did not have the foreground
+    // to lend) is harmless.
+    unsafe { AllowSetForegroundWindow(pid) };
 }
 
 /// One line in a message box: a GUI-subsystem program has nowhere else to

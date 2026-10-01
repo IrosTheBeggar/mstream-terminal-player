@@ -59,6 +59,10 @@ mod admin;
 /// default instance lock, and the console a double-click leaves behind.
 #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
 mod desktop;
+/// The desktop app's identity: its app id and Windows AppUserModelID,
+/// shared with the Windows launcher stub. Only the window's builds.
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+mod identity;
 
 /// The browser build (see its module note). Everything below this line that
 /// swaps a module out for a hand-written stand-in exists so the App, the
@@ -518,12 +522,21 @@ fn main() {
         Ok(instance::Claim::Taken(who)) => {
             let line = instance::already_open_line(who.as_ref());
             println!("{line}");
+            // The desktop flavour also brings the holder's window to the
+            // front, when the holder draws in one (its sidecar's host): a
+            // holder in a terminal is that terminal's to show, as before.
+            // The line stays, for whoever started this one in a terminal.
+            #[cfg(feature = "desktop")]
+            let focused = who
+                .as_ref()
+                .filter(|holder| holder.host == "window")
+                .map(|holder| desktop::focus_window_holder(holder.pid));
             // A double-clicked app's stdout reaches nobody; the debug log,
-            // when one is on, keeps the line. (Focusing the holder is a
-            // later step.) The launcher's flag keeps v0.9.0's stdout alone.
+            // when one is on, keeps the line. The launcher's flag keeps
+            // v0.9.0's stdout alone.
             #[cfg(feature = "desktop")]
             if desktop_window {
-                desktop::log_refusal(&line);
+                desktop::log_refusal(&line, focused);
             }
             std::process::exit(0);
         }

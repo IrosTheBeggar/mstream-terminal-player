@@ -47,6 +47,7 @@
 //! where the log is.
 
 mod covers;
+mod icon;
 mod input;
 #[cfg(test)]
 mod render_tests;
@@ -137,6 +138,14 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     let mut stats = Stats::from_env();
     let mut lap = Lap::start(&stats);
     install_panic_hook();
+    // The taskbar identity the launcher stub also names (identity.rs), set
+    // before any window exists: the taskbar reads it when one first shows.
+    #[cfg(all(windows, feature = "desktop"))]
+    crate::identity::set_windows_aumid();
+    // The window icon's decode, overlapping the loop's start like the faces
+    // (icon.rs; on macOS AppKit decodes the Dock's copy itself).
+    #[cfg(not(target_os = "macos"))]
+    let icon = icon::decode_early();
     // The faces first, on their own thread, so the search overlaps all of
     // the event loop's start and the window's creation.
     let faces = Early::faces(rust_i18n::locale().to_string());
@@ -151,7 +160,12 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
         }
     };
     lap.mark(&mut stats, "event_loop");
-    let early = Early { faces, gpu: Early::gpu(event_loop.owned_display_handle()) };
+    let early = Early {
+        faces,
+        gpu: Early::gpu(event_loop.owned_display_handle()),
+        #[cfg(not(target_os = "macos"))]
+        icon,
+    };
     let dump = std::env::var_os("MSTREAM_WINDOW_DUMP").map(PathBuf::from);
     // Covers are the window's to draw: every Graphics the GUI forks for a
     // slot is forked from this one, so they all record onto the board.
@@ -451,6 +465,11 @@ fn exit_report(laps: &[(&'static str, Duration)]) {
 struct Early {
     faces: Option<JoinHandle<Result<Faces, String>>>,
     gpu: Option<JoinHandle<Gpu>>,
+    /// The window icon's pixels (icon.rs). Not part of [`Early::ready`]: a
+    /// window opens without its icon rather than wait for one, and takes it
+    /// as soon as the decode is done ([`Early::icon`]).
+    #[cfg(not(target_os = "macos"))]
+    icon: Option<JoinHandle<Option<icon::Rgba>>>,
 }
 
 impl Early {
@@ -474,6 +493,19 @@ impl Early {
     fn ready(&self) -> bool {
         self.faces.as_ref().is_none_or(JoinHandle::is_finished)
             && self.gpu.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// The window icon, once: at once when the decode is done, or when
+    /// `wait` says to join it (the backend's build, which follows the far
+    /// longer GPU thread, so the join finds it done); else `None` and the
+    /// thread kept for the next ask.
+    #[cfg(not(target_os = "macos"))]
+    fn icon(&mut self, wait: bool) -> Option<winit::window::Icon> {
+        if !wait && !self.icon.as_ref().is_some_and(JoinHandle::is_finished) {
+            return None;
+        }
+        let decoded = self.icon.take()?.join().ok().flatten()?;
+        icon::winit_icon(decoded)
     }
 }
 
@@ -570,6 +602,28 @@ impl App {
         let (cols, rows) = self.grid;
         let opening = LogicalSize::new(f64::from(cols) * CELL_GUESS_PT, f64::from(rows) * FONT_PT);
         let attributes = Window::default_attributes().with_title(TITLE).with_inner_size(opening);
+        // The app id, as both halves of X11's WM_CLASS and as Wayland's
+        // app_id: what a desktop shell matches to the desktop entry of the
+        // same name, for its icon and its dock grouping (identity.rs). One
+        // call serves both: winit's X11 and Wayland `with_name` set the
+        // same attribute, which whichever backend the session picks reads
+        // (Wayland takes the first name and ignores the second).
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        let attributes = {
+            use crate::identity::APP_ID;
+            use winit::platform::x11::WindowAttributesExtX11;
+            attributes.with_name(APP_ID, APP_ID)
+        };
+        // The icon with the window when its decode is done by now (the
+        // build sets it otherwise, before the first frame).
+        #[cfg(not(target_os = "macos"))]
+        let attributes = attributes.with_window_icon(self.early.icon(false));
         // On Windows the window is made hidden and `show` puts it on screen
         // once a frame has been presented to it; the other platforms show
         // it now, as before (macOS presents into it within a frame, and
@@ -613,6 +667,10 @@ impl App {
         let gpu = self.early.gpu.take().and_then(|thread| thread.join().ok());
         let gpu = gpu.unwrap_or_else(|| Gpu::prepare(Box::new(window.clone())));
         self.lap.mark(&mut self.stats, "gpu.wait");
+        #[cfg(not(target_os = "macos"))]
+        if let Some(icon) = self.early.icon(true) {
+            window.set_window_icon(Some(icon));
+        }
         if let Some(stats) = self.stats.as_mut() {
             for (stage, took) in faces.took.iter().chain(&gpu.took) {
                 stats.stage(&format!("early.{stage}"), *took);
@@ -1225,6 +1283,13 @@ impl ApplicationHandler for App {
             return;
         }
         self.lap.mark(&mut self.stats, "to_resumed");
+        // The Dock icon of a bare binary, before its window: the earliest
+        // point AppKit keeps it (icon.rs).
+        #[cfg(target_os = "macos")]
+        {
+            icon::set_dock_icon();
+            self.lap.mark(&mut self.stats, "dock_icon");
+        }
         if let Err(e) = self.open(event_loop) {
             eprintln!("gui --window: {e}");
             self.exit_code = NO_WINDOW;
