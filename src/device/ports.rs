@@ -56,6 +56,22 @@ pub(crate) fn candidates() -> Result<Vec<Candidate>, DeviceError> {
     Ok(filter(ports))
 }
 
+/// The other serial ports — everything that is not a Core2's bridge, by
+/// name — for the page to list when it finds no board: the usual answer
+/// to "is the driver installed?" is a port with another bridge, or none.
+pub(crate) fn others() -> Vec<String> {
+    serialport::available_ports().map(others_of).unwrap_or_default()
+}
+
+pub(crate) fn others_of(ports: Vec<SerialPortInfo>) -> Vec<String> {
+    let core2: Vec<String> = filter(ports.clone()).into_iter().map(|c| c.port).collect();
+    ports
+        .into_iter()
+        .map(|p| p.port_name)
+        .filter(|name| !core2.contains(name) && !name.starts_with("/dev/tty."))
+        .collect()
+}
+
 /// The Core2-shaped ports among `ports`, in the order the OS listed them.
 /// macOS lists every bridge twice — `/dev/cu.*` and `/dev/tty.*` — and the
 /// tty side blocks on carrier detect, so only the cu side counts.
@@ -133,6 +149,8 @@ mod tests {
             usb("/dev/tty.usbserial-5", 0x1A86, 0x55D4, Some("x")),
             usb("/dev/cu.usbserial-5", 0x1A86, 0x55D4, Some("x")),
         ];
+        let others = others_of(ports.clone());
+        assert_eq!(others, ["COM5", "COM1"], "the CH340 and the PCI port; never a Core2, never a tty twin");
         let found = filter(ports);
         let names: Vec<&str> = found.iter().map(|c| c.port.as_str()).collect();
         assert_eq!(names, ["COM3", "COM4", "/dev/cu.usbserial-5"]);

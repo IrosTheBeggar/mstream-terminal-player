@@ -19,10 +19,18 @@ expect {
 }
 drain 1
 send "\r"
-# The fake's write takes about a second; Done is the title that follows.
+# The fake's write takes about a second; Done is the title that follows,
+# with every step ticked.
 expect {
   "Done" {}
   timeout { puts "NO-DONE"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
+drain 1
+# l opens the run's log under the content: the toggle flips to Hide.
+send "l"
+expect {
+  "Hide logs" {}
+  timeout { puts "NO-LOG"; exec kill -9 [exp_pid]; expect eof; exit 4 }
 }
 drain 1
 send "\r"

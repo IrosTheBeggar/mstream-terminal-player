@@ -5,6 +5,10 @@
 //! from another, so the page keeps drawing while the board is busy and
 //! can leave at any point before the write begins (the board is restarted
 //! on the way out, never left in its bootloader).
+//!
+//! Beside the steps it reports the details the page's busy line never
+//! says — which baud answered, what the descriptor held, how many chunks
+//! a segment takes — as `Event::Log` lines, for the page's log.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -12,7 +16,7 @@ use rust_i18n::t;
 
 use super::DeviceError;
 use super::engine::{BAUDS, DeviceInfo, Engine, Link, Report};
-use super::firmware::{AppDesc, Firmware, Source};
+use super::firmware::{AppDesc, Firmware, Origin, Source};
 use super::ports::{self, Candidate, Pick};
 
 /// What the page tells the worker.
@@ -20,7 +24,7 @@ use super::ports::{self, Candidate, Pick};
 pub(crate) enum Cmd {
     /// Several boards: this port.
     Pick(String),
-    /// No board: look again.
+    /// No board, or several: look again.
     Rescan,
     /// Write, erasing the whole flash first or not.
     Go { erase: bool },
@@ -34,8 +38,10 @@ pub(crate) enum Event {
     Phase(Phase),
     /// A download's bytes so far, and its total when the server said.
     Download { done: u64, total: Option<u64> },
-    Firmware { version: String, origin: String, bytes: usize },
-    NoDevice,
+    Firmware { version: String, origin: String, bytes: usize, kind: Origin },
+    /// Nothing Core2-shaped; `others` are the serial ports that are there
+    /// (the usual answer to "is the driver installed?").
+    NoDevice { others: Vec<String> },
     Several(Vec<Candidate>),
     Board(DeviceInfo),
     /// The board read; the worker now waits for `Cmd::Go` or `Cmd::Quit`.
@@ -45,6 +51,8 @@ pub(crate) enum Event {
     /// Quit answered while the board was held: it was restarted untouched.
     Cancelled,
     Failed(DeviceError),
+    /// A detail for the page's log, drawn nowhere else.
+    Log(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +106,7 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// `install, erase first` — one line for `--yes`.
+    /// `install, erase first` — one line for `--yes` and the log.
     pub fn describe(&self) -> String {
         let kind = match &self.kind {
             Kind::Install { .. } => "install",
@@ -140,6 +148,11 @@ pub(crate) fn on_board_text(on_board: Option<&AppDesc>) -> String {
         Some(desc) => t!("dev.on_board_other", name = desc.project).to_string(),
         None => t!("dev.on_board_unknown").to_string(),
     }
+}
+
+/// `1,118` — a count with its thousands marked, for the log.
+pub(crate) fn grouped(n: usize) -> String {
+    crate::admin::fmt_count(n as u64)
 }
 
 /// How the page gets its engine: a factory, so a retry gets a fresh one
@@ -194,6 +207,7 @@ pub(crate) fn run(
         version: firmware.version.clone(),
         origin: firmware.origin.clone(),
         bytes: firmware.bytes(),
+        kind: firmware.kind,
     });
 
     // 2. The board.
@@ -203,7 +217,7 @@ pub(crate) fn run(
 
     // 3. Reach it, read it, plan.
     tell(Event::Phase(Phase::Connecting));
-    let mut link = match open(engine, &candidate, None) {
+    let mut link = match open(engine, &candidate, None, events) {
         Ok(link) => link,
         Err(e) => {
             tell(Event::Failed(e));
@@ -220,6 +234,7 @@ pub(crate) fn run(
             return;
         }
     };
+    tell(Event::Log(descriptor_line(on_board.as_ref())));
     let plan = plan(on_board.as_ref(), &firmware.version, erase_asked);
     if !tell(Event::Probed { on_board, plan }) {
         let _ = link.restart();
@@ -251,7 +266,9 @@ pub(crate) fn run(
             return;
         }
     };
+    tell(Event::Log(t!(if skipped { "dev.log_same" } else { "dev.log_checked" }).to_string()));
     tell(Event::Phase(Phase::Restarting));
+    tell(Event::Log(t!("dev.log_restart", secs = super::engine::BOOT_LISTEN.as_secs()).to_string()));
     match link.restart() {
         Ok(boot) => {
             tell(Event::Done { version: firmware.version, skipped, boot });
@@ -262,7 +279,29 @@ pub(crate) fn run(
     }
 }
 
+/// The descriptor as the log says it: the address it was read from, then
+/// what it held — a firmware's name and version (ours or not), or nothing
+/// readable.
+fn descriptor_line(on_board: Option<&AppDesc>) -> String {
+    let at = format!("{:X}", super::firmware::APP_OFFSET + AppDesc::OFFSET_IN_APP);
+    match on_board {
+        Some(desc) => {
+            let mut what = format!("{} {}", desc.project, desc.version);
+            if !desc.idf.is_empty() {
+                what.push_str(&format!(" · idf {}", desc.idf));
+            }
+            if !desc.elf8.is_empty() {
+                what.push_str(&format!(" · elf {}", desc.elf8));
+            }
+            t!("dev.log_desc", at = at, desc = what).to_string()
+        }
+        None => t!("dev.log_desc_none", at = at).to_string(),
+    }
+}
+
 /// The board to write, asking the page when there is none or several.
+/// The page asks again every couple of seconds while it waits, so a
+/// board plugged in (or the wrong one unplugged) is picked up by itself.
 fn find_board(
     engine: &dyn Engine,
     port: Option<&str>,
@@ -281,9 +320,13 @@ fn find_board(
             }
         };
         match ports::pick(&found, port) {
-            Pick::One(candidate) => return Some(candidate),
+            Pick::One(candidate) => {
+                let line = t!("dev.log_one_board", board = candidate.describe()).to_string();
+                let _ = events.send(Event::Log(line));
+                return Some(candidate);
+            }
             Pick::None => {
-                let _ = events.send(Event::NoDevice);
+                let _ = events.send(Event::NoDevice { others: engine.others() });
                 match cmds.recv() {
                     Ok(Cmd::Rescan) => continue,
                     _ => return None,
@@ -307,13 +350,30 @@ fn find_board(
 /// Reach the bootloader at the fastest baud the link holds: a failure to
 /// sync at one speed (a bridge or a cable that cannot keep it) tries the
 /// next one down; a port that is busy, forbidden or gone is final. `below`
-/// starts the ladder under a speed that already failed mid-write.
-fn open(engine: &dyn Engine, candidate: &Candidate, below: Option<u32>) -> Result<Box<dyn Link>, DeviceError> {
+/// starts the ladder under a speed that already failed mid-write. Every
+/// rung goes to the log — the one place the ladder is ever visible.
+fn open(
+    engine: &dyn Engine,
+    candidate: &Candidate,
+    below: Option<u32>,
+    events: &Sender<Event>,
+) -> Result<Box<dyn Link>, DeviceError> {
     let mut last = None;
     for baud in BAUDS.iter().copied().filter(|b| below.is_none_or(|limit| *b < limit)) {
         match engine.open(candidate, baud) {
-            Ok(link) => return Ok(link),
-            Err(e @ DeviceError::NoSync { .. }) => last = Some(e),
+            Ok(link) => {
+                let _ = events.send(Event::Log(t!("dev.log_baud_ok", baud = baud).to_string()));
+                return Ok(link);
+            }
+            Err(e @ DeviceError::NoSync { .. }) => {
+                let detail = match &e {
+                    DeviceError::NoSync { detail, .. } => detail.clone(),
+                    _ => String::new(),
+                };
+                let line = t!("dev.log_baud_no", baud = baud, err = detail).to_string();
+                let _ = events.send(Event::Log(line));
+                last = Some(e);
+            }
             Err(e) => return Err(e),
         }
     }
@@ -334,29 +394,45 @@ fn write(
     firmware: &Firmware,
     events: &Sender<Event>,
 ) -> Result<(Box<dyn Link>, bool), DeviceError> {
+    let list: Vec<String> = firmware
+        .segments
+        .iter()
+        .map(|s| format!("0x{:X} · {} B", s.offset, grouped(s.data.len())))
+        .collect();
+    let _ = events.send(Event::Log(t!("dev.log_segments", list = list.join("; ")).to_string()));
     loop {
         let _ = events.send(Event::Phase(Phase::Comparing));
         let mut phase = Phase::Comparing;
         let result = link.write(&firmware.segments, &mut |report| {
             let next = match report {
-                Report::Percent(_) => Phase::Writing,
+                Report::Percent(_) | Report::Chunks { .. } => Phase::Writing,
                 Report::Verifying => Phase::Verifying,
             };
             if next != phase {
                 phase = next;
                 let _ = events.send(Event::Phase(next));
             }
-            if let Report::Percent(pct) = report {
-                let _ = events.send(Event::Progress(pct));
+            match report {
+                Report::Percent(pct) => {
+                    let _ = events.send(Event::Progress(pct));
+                }
+                Report::Chunks { addr, chunks } => {
+                    let line = t!("dev.log_chunks", at = format!("{addr:X}"), n = grouped(chunks));
+                    let _ = events.send(Event::Log(line.to_string()));
+                }
+                Report::Verifying => {}
             }
         });
         match result {
             Ok(skipped) => return Ok((link, skipped)),
             Err(e @ DeviceError::Link(_)) if link.info().baud > BAUDS[BAUDS.len() - 1] => {
                 let failed_at = link.info().baud;
+                let next = BAUDS.iter().copied().find(|b| *b < failed_at).unwrap_or(BAUDS[BAUDS.len() - 1]);
+                let line = t!("dev.log_retry", baud = failed_at, next = next).to_string();
+                let _ = events.send(Event::Log(line));
                 drop(link);
                 let _ = events.send(Event::Phase(Phase::Connecting));
-                link = open(engine, candidate, Some(failed_at)).map_err(|_| e)?;
+                link = open(engine, candidate, Some(failed_at), events).map_err(|_| e)?;
             }
             Err(e) => return Err(e),
         }
@@ -403,6 +479,15 @@ mod tests {
         assert!(on_board_text(None).contains("nothing"));
     }
 
+    #[test]
+    fn the_descriptor_line_names_the_address_and_what_it_held() {
+        rust_i18n::set_locale("en");
+        let line = descriptor_line(Some(&ours("v0.4.0")));
+        assert_eq!(line, "0x10020: mstream-mp3-player v0.4.0 · idf v5.5.5 · elf 00");
+        assert_eq!(descriptor_line(None), "0x10020: nothing readable");
+        assert_eq!(grouped(2_289_360), "2,289,360");
+    }
+
     /// A worker on the fake, driven to the end: every report in order.
     fn drive(spec: &str, source: Source, port: Option<&str>, answer: Cmd) -> Vec<Event> {
         let (cmd_tx, cmd_rx) = channel();
@@ -434,6 +519,15 @@ mod tests {
         path
     }
 
+    fn logs(seen: &[Event]) -> Vec<&str> {
+        seen.iter()
+            .filter_map(|e| match e {
+                Event::Log(line) => Some(line.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a_write_runs_firmware_board_probe_go_write_restart() {
         rust_i18n::set_locale("en");
@@ -460,7 +554,7 @@ mod tests {
                 Phase::Restarting,
             ]
         );
-        assert!(seen.iter().any(|e| matches!(e, Event::Firmware { version, .. } if version == "v0.5.0")));
+        assert!(seen.iter().any(|e| matches!(e, Event::Firmware { version, kind: Origin::File, .. } if version == "v0.5.0")));
         let update = Kind::Update { from: "v0.4.0".into() };
         assert!(seen.iter().any(|e| matches!(e, Event::Probed { plan, .. } if plan.kind == update)));
         assert!(seen.iter().any(|e| matches!(e, Event::Progress(100))));
@@ -469,6 +563,15 @@ mod tests {
         };
         assert_eq!(version, "v0.5.0");
         assert!(boot.contains("v0.5.0"), "{boot}");
+        // The log's details, in order: the board, the baud, the
+        // descriptor, the segments, the check, the restart.
+        let log = logs(&seen);
+        assert!(log[0].starts_with("1 port with a Core2's bridge: FAKE0"), "{log:?}");
+        assert_eq!(log[1], "921600 baud: the bootloader answered");
+        assert!(log[2].starts_with("0x10020: mstream-mp3-player v0.4.0"), "{log:?}");
+        assert!(log[3].starts_with("to write: 0x0 · "), "{log:?}");
+        assert_eq!(log[4], "written and checked — the checksum matches");
+        assert!(log[5].starts_with("reset — listening"), "{log:?}");
     }
 
     #[test]
@@ -500,9 +603,10 @@ mod tests {
         let (event_tx, event_rx) = channel();
         let src = Source::Local(image.clone());
         std::thread::spawn(move || run(&Fake::new("nodevice"), &src, None, None, &cmd_rx, &event_tx));
-        assert!(event_rx.iter().any(|e| e == Event::NoDevice));
+        let first = event_rx.iter().find(|e| matches!(e, Event::NoDevice { .. })).unwrap();
+        assert_eq!(first, Event::NoDevice { others: vec!["FAKECOM1".into()] }, "the other ports come along");
         cmd_tx.send(Cmd::Rescan).unwrap();
-        assert!(event_rx.iter().any(|e| e == Event::NoDevice), "looked again, still nothing");
+        assert!(event_rx.iter().any(|e| matches!(e, Event::NoDevice { .. })), "looked again, still nothing");
         drop(cmd_tx);
         assert!(event_rx.iter().next().is_none(), "the worker ends when the page is gone");
         let _ = std::fs::remove_file(&image);
@@ -518,11 +622,24 @@ mod tests {
 
     #[test]
     fn a_held_port_and_a_dying_write_are_reported_as_what_they_are() {
+        rust_i18n::set_locale("en");
         let image = image_file("held", "v0.5.1");
         let busy = drive("busy", Source::Local(image.clone()), None, Cmd::Quit);
         assert!(matches!(busy.last(), Some(Event::Failed(DeviceError::Busy { .. }))));
         let dying = drive("failwrite", Source::Local(image.clone()), None, Cmd::Go { erase: false });
         assert!(matches!(dying.last(), Some(Event::Failed(DeviceError::Link(_)))));
+        // The ladder's lower rungs were tried before giving up, and the log says so.
+        let log = logs(&dying);
+        assert!(log.iter().any(|l| l.starts_with("the link failed at 921600 baud — trying 460800")), "{log:?}");
+        assert!(log.iter().any(|l| l.starts_with("the link failed at 460800 baud — trying 115200")), "{log:?}");
         let _ = std::fs::remove_file(&image);
+
+        // A board that never answers: three rungs, three log lines, then the failure.
+        let silent_image = image_file("silent", "v0.5.1");
+        let silent = drive("nosync", Source::Local(silent_image.clone()), None, Cmd::Quit);
+        let _ = std::fs::remove_file(&silent_image);
+        assert!(matches!(silent.last(), Some(Event::Failed(DeviceError::NoSync { .. }))));
+        let rungs = logs(&silent).iter().filter(|l| l.contains("baud: no answer")).count();
+        assert_eq!(rungs, 3, "{:?}", logs(&silent));
     }
 }
