@@ -248,8 +248,10 @@ fn run_tui<S: Screen>(screen: &mut S) -> i32 {
     run_tui_as(screen, "mStream Admin")
 }
 
-/// [`run_tui`] under a window title of the page's own.
-fn run_tui_as<S: Screen>(screen: &mut S, title: &str) -> i32 {
+/// [`run_tui`] under a window title of the page's own. Crate-visible for
+/// the pages that borrow this session without being rooms: the stats page
+/// here, the MP3 player's flash page (src/device/page.rs).
+pub(crate) fn run_tui_as<S: Screen>(screen: &mut S, title: &str) -> i32 {
     let _title = crate::tui::WindowTitle::claim(title);
 
     // Claim the window background BEFORE ratatui takes the terminal — the
