@@ -190,10 +190,13 @@ pub trait RenderSurface<'s>: private::Sealed {
         _token: private::Token,
     );
 
+    /// The texture to draw this frame into, or why the surface has none to
+    /// give. The caller logs the reason (see `WgpuBackend::render`): it knows
+    /// whether this failure starts an outage or continues one.
     fn get_current_texture(
         &self,
         _token: private::Token,
-    ) -> Option<Self::Target>;
+    ) -> Result<Self::Target, String>;
 }
 
 pub struct RenderTarget {
@@ -233,22 +236,19 @@ impl<'s> RenderSurface<'s> for Surface<'s> {
     fn get_current_texture(
         &self,
         _token: private::Token,
-    ) -> Option<Self::Target> {
+    ) -> Result<Self::Target, String> {
         let output = match self.get_current_texture() {
             CurrentSurfaceTexture::Success(output) | CurrentSurfaceTexture::Suboptimal(output) => {
                 output
             }
-            unavailable => {
-                error!("Failed to acquire surface texture: {unavailable:?}");
-                return None;
-            }
+            unavailable => return Err(format!("{unavailable:?}")),
         };
 
         let view = output
             .texture
             .create_view(&TextureViewDescriptor::default());
 
-        Some(RenderTarget {
+        Ok(RenderTarget {
             texture: output,
             view,
         })
@@ -368,10 +368,13 @@ impl RenderSurface<'static> for HeadlessSurface {
     fn get_current_texture(
         &self,
         _token: private::Token,
-    ) -> Option<Self::Target> {
-        self.texture.as_ref().map(|t| HeadlessTarget {
-            view: t.create_view(&TextureViewDescriptor::default()),
-        })
+    ) -> Result<Self::Target, String> {
+        self.texture
+            .as_ref()
+            .map(|t| HeadlessTarget {
+                view: t.create_view(&TextureViewDescriptor::default()),
+            })
+            .ok_or_else(|| "the headless surface is not configured".to_string())
     }
 }
 

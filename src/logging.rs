@@ -746,6 +746,15 @@ pub fn active() -> Option<PathBuf> {
     if state.write { state.path.clone() } else { None }
 }
 
+/// [`active`] for a panic hook: none, rather than a wait or a second
+/// panic, when the state is held or poisoned — the panic may have come
+/// from inside this module, on a thread holding it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn active_now() -> Option<PathBuf> {
+    let state = STATE.try_lock().ok()?;
+    if state.write { state.path.clone() } else { None }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

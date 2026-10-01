@@ -197,6 +197,16 @@ impl<A: Clone> Surface<A> {
         self.covered.iter().any(|over| over.intersects(rect))
     }
 
+    /// Whether this frame's overlays stand anywhere other than last
+    /// frame's did: one opened, closed or moved. A pixel surface drew this
+    /// frame by last frame's footprints, so a cover under a modal that just
+    /// opened is still a picture painted over it, until the next frame
+    /// draws it as text; a shell that sees this asks for that frame soon
+    /// rather than at its idle poll.
+    pub fn overlays_moved(&self) -> bool {
+        self.overlays != self.covered
+    }
+
     /// Whether an overlay OTHER than `own` stood over any part of `rect`
     /// last frame — the question a pixel surface INSIDE a modal asks: its
     /// own frame always covers it, and only something drawn over the modal
@@ -1109,12 +1119,18 @@ fn input_marks() -> (char, char) {
 /// key. Also the caret's offset from the line's start, in cells, for a
 /// shell that places a candidate list by it. With no composition the
 /// line is exactly [`input_display_blink`]'s.
+///
+/// A masked field (a password) hands its value in masked already, and
+/// its mark as `mask`: the composition is drawn as that mark, one per
+/// character, like the value around it — never in clear beside a row of
+/// bullets.
 pub fn input_display_composing(
     value: &str,
     cursor: usize,
     width: u16,
     on: bool,
     composition: &str,
+    mask: Option<char>,
 ) -> (String, u16) {
     let (caret, clip) = input_marks();
     let (line, at) = if composition.is_empty() {
@@ -1122,6 +1138,10 @@ pub fn input_display_composing(
     } else {
         let cursor = cursor.min(value.chars().count());
         let byte = value.char_indices().nth(cursor).map_or(value.len(), |(i, _)| i);
+        let composition: String = match mask {
+            Some(mark) => composition.chars().map(|_| mark).collect(),
+            None => composition.to_string(),
+        };
         let spliced = format!("{}{composition}{}", &value[..byte], &value[byte..]);
         input_window(&spliced, cursor + composition.chars().count(), width, caret, clip)
     };
@@ -1144,6 +1164,16 @@ pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, c
 /// clip marks never land on the caret: a window that starts past the
 /// value's start keeps the caret at least one in, and one that stops short
 /// of its end keeps it at least one short.
+///
+/// The window is measured in cells, not characters: `width` is the cells
+/// the field has, and a wide character (kana, hanzi, hangul) takes two of
+/// them. Counting characters let a line of CJK run to twice the field's
+/// width, past its border, and put the caret's cell outside the field.
+/// That was wrong in a terminal as much as in the GUI's window, so this is
+/// a correctness fix both share; for text of narrow characters only, the
+/// window is what it always was. A wide character that does not fit
+/// beside a clip mark is left out whole, so a line may come up a cell
+/// short of `width`, never over it.
 fn input_window(
     value: &str,
     cursor: usize,
@@ -1158,19 +1188,44 @@ fn input_window(
     let mut chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
     chars.insert(cursor, caret);
-    let total = chars.len();
-    if total <= w {
+    let cells = |range: std::ops::Range<usize>| -> usize {
+        chars[range].iter().map(|&c| char_width(c)).sum()
+    };
+    let n = chars.len();
+    if cells(0..n) <= w {
         return (chars.into_iter().collect(), cursor);
     }
-    let start = cursor.saturating_sub(w.saturating_sub(2)).min(total - w);
-    let mut out: Vec<char> = chars[start..start + w].to_vec();
+    // The window is chars[start..end] between the clip marks it needs: one
+    // before when it starts past the value's start, one after when it
+    // stops short of its end.
+    let fits = |start: usize, end: usize| {
+        cells(start..end) + usize::from(start > 0) + usize::from(end < n) <= w
+    };
+    // The caret is the window's last character before the trailing clip —
+    // unless what follows it would take no more than the clip's own cell,
+    // when it shows instead — and the window reaches back from there as
+    // far as fits. One that reaches the value's start has room left after
+    // the caret, which the text after it takes.
+    let mut end = cursor + 1;
+    if cells(end..n) <= 1 {
+        end = n;
+    }
+    let mut start = end;
+    while start > 0 && fits(start - 1, end) {
+        start -= 1;
+    }
+    while start == 0 && end < n && fits(0, end + 1) {
+        end += 1;
+    }
+    let mut out = String::new();
     if start > 0 {
-        out[0] = clip;
+        out.push(clip);
     }
-    if start + w < total {
-        out[w - 1] = clip;
+    out.extend(&chars[start..end]);
+    if end < n {
+        out.push(clip);
     }
-    (out.into_iter().collect(), cursor - start)
+    (out, cursor - start + usize::from(start > 0))
 }
 
 // ── The pointer contract (OSC 22) ────────────────────────────────────────────
@@ -1239,6 +1294,29 @@ mod tests {
         assert!(s.covered_last_frame(inside), "the modal-inertness clear keeps the footprints");
         s.begin_frame();
         assert!(!s.covered_last_frame(inside), "and the frame after it leaves is clear");
+    }
+
+    /// The footprints moving is what a shell watches to bring the next
+    /// frame forward: the frame an overlay opens on, the frame it closes on
+    /// and the frame it moves on, never a frame that repeats the last.
+    #[test]
+    fn the_overlays_moving_is_told_on_the_frame_they_move() {
+        let mut s: Surface<u8> = Surface::new();
+        let modal = Rect { x: 0, y: 0, width: 10, height: 10 };
+        s.begin_frame();
+        assert!(!s.overlays_moved(), "nothing then nothing");
+        s.overlay(modal);
+        assert!(s.overlays_moved(), "the frame a modal opens on");
+        s.begin_frame();
+        s.overlay(modal);
+        assert!(!s.overlays_moved(), "the same modal again is still");
+        s.begin_frame();
+        s.overlay(Rect { x: 1, ..modal });
+        assert!(s.overlays_moved(), "a moved one");
+        s.begin_frame();
+        assert!(s.overlays_moved(), "the frame it closes on");
+        s.begin_frame();
+        assert!(!s.overlays_moved());
     }
 
     #[test]
@@ -1349,6 +1427,39 @@ mod tests {
         assert_eq!(input_display_with_fancy("123456789", 4, 10), "1234▏56789");
     }
 
+    /// The window counts cells: wide text fits the field it is drawn in,
+    /// in a terminal and in the window alike, and the caret's cell the
+    /// composing line reports stays inside it. Counting characters, ten
+    /// kana in a ten-cell field drew twenty cells and put the caret at 20.
+    #[test]
+    fn wide_text_windows_by_cells_and_keeps_the_caret_in_the_field() {
+        let w = |line: &str| line.chars().map(char_width).sum::<usize>();
+        let kana = "あいうえおかきくけこ";
+        // At the end: the clip, as many kana as fit, the caret.
+        assert_eq!(input_display_with_fancy(kana, 10, 10), "…きくけこ▏");
+        // At the start: the caret, the kana that fit, the clip.
+        assert_eq!(input_display_with_fancy(kana, 0, 10), "▏あいうえ…");
+        // Mid-value: the caret one short of the trailing clip. A fourth
+        // kana before it would make eleven cells, so the line is nine.
+        assert_eq!(input_display_with_fancy(kana, 6, 10), "…えおか▏…");
+        // Narrow and wide together, cursor anywhere: never past the field.
+        let mixed = "ab日本cd語ef한국gh";
+        for width in 3..20u16 {
+            for cursor in 0..=mixed.chars().count() {
+                let shown = input_display_with_fancy(mixed, cursor, width);
+                assert!(w(&shown) <= width as usize, "{shown:?} at {cursor} in {width}");
+                assert!(shown.contains('▏'), "the caret always shows: {shown:?}");
+            }
+        }
+        // A composition of kana: the caret's reported cell is in the field.
+        for width in [6u16, 10, 15] {
+            let (line, at) = input_display_composing("東京", 2, width, true, "にほんご", None);
+            assert!(w(&line) <= width as usize, "{line:?} in {width}");
+            assert!(at < width, "the caret's cell {at} is past a {width}-cell field: {line:?}");
+            assert!(line.ends_with('▏'), "the caret follows the composition: {line:?}");
+        }
+    }
+
     #[test]
     fn the_caret_withheld_leaves_its_cell_so_the_line_never_shifts() {
         assert_eq!(input_display_blink("1234", 2, 10, false), "12 34");
@@ -1368,7 +1479,7 @@ mod tests {
         // No composition: the very line the blinking caret draws, either
         // phase, and the caret's cell after the text before it.
         for on in [true, false] {
-            let (line, at) = input_display_composing("abcd", 2, 20, on, "");
+            let (line, at) = input_display_composing("abcd", 2, 20, on, "", None);
             assert_eq!(line, input_display_blink("abcd", 2, 20, on));
             assert_eq!(at, 2);
         }
@@ -1376,18 +1487,35 @@ mod tests {
         // in at the cursor and the caret follows it, solid even in the
         // blink's off phase. Kana are two cells each.
         let caret = input_display_blink("", 0, 5, true);
-        let shown = input_display_composing("", 0, 20, false, "にほん");
+        let shown = input_display_composing("", 0, 20, false, "にほん", None);
         assert_eq!(shown, (format!("にほん{caret}"), 6));
-        assert_eq!(input_display_composing("ab", 1, 20, true, "x"), (format!("ax{caret}b"), 2));
-        let shown = input_display_composing("ab", 0, 20, false, "日");
+        let shown = input_display_composing("ab", 1, 20, true, "x", None);
+        assert_eq!(shown, (format!("ax{caret}b"), 2));
+        let shown = input_display_composing("ab", 0, 20, false, "日", None);
         assert_eq!(shown, (format!("日{caret}ab"), 2));
         // The value itself is not touched; a cursor past the end is the
         // end; a long composition windows around the caret like any text.
-        assert_eq!(input_display_composing("ab", 9, 20, true, "c").0, format!("abc{caret}"));
-        let (line, at) = input_display_composing("0123456789", 10, 8, true, "abcdef");
+        assert_eq!(input_display_composing("ab", 9, 20, true, "c", None).0, format!("abc{caret}"));
+        let (line, at) = input_display_composing("0123456789", 10, 8, true, "abcdef", None);
         assert_eq!(line.chars().count(), 8);
         assert!(line.ends_with(&format!("cdef{caret}")), "{line}");
         assert_eq!(at, 7);
+    }
+
+    /// A masked field's composition is drawn as its mark, one per
+    /// character: nothing an input method composes for a password shows in
+    /// clear. The value comes in masked already, as the field draws it.
+    #[test]
+    fn a_masked_fields_composition_is_drawn_masked() {
+        let caret = input_display_blink("", 0, 5, true);
+        let (line, at) = input_display_composing("••", 2, 20, true, "にほ", Some('•'));
+        assert_eq!((line.as_str(), at), (format!("••••{caret}").as_str(), 4));
+        assert!(!line.contains('に') && !line.contains('ほ'), "{line}");
+        // Mid-value too, and an unmasked field is untouched.
+        let (line, _) = input_display_composing("•••", 1, 20, false, "pw", Some('•'));
+        assert_eq!(line, format!("•••{caret}••"));
+        let plain = input_display_composing("ab", 2, 20, true, "pw", None).0;
+        assert_eq!(plain, format!("abpw{caret}"));
     }
 
     #[test]

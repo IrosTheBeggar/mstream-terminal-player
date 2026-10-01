@@ -446,7 +446,7 @@ fn main() {
         Some(Command::Gui(args)) => args.serve_port.map(|port| (port, fresh_token())),
         _ => None,
     };
-    let instance = match instance::claim(lock_path, face, control.as_ref().map(|(port, token)| (*port, token.as_str()))) {
+    let mut instance = match instance::claim(lock_path, face, control.as_ref().map(|(port, token)| (*port, token.as_str()))) {
         Ok(instance::Claim::Held(held)) => Some(held),
         Ok(instance::Claim::Unlocked) => None,
         Ok(instance::Claim::Taken(who)) => {
@@ -503,6 +503,9 @@ fn main() {
                 args.bundled_server,
                 control.map(|(port, token)| gui::control::Face { port, token }),
                 args.window,
+                // The window takes the lock to drop at its own teardown
+                // (gui::run says why); the terminal leaves it for here.
+                &mut instance,
             );
             drop(instance);
             std::process::exit(code);

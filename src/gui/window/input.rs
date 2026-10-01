@@ -393,16 +393,63 @@ impl Translator {
     }
 }
 
+/// The most characters one paste types. Every field is a line — a search,
+/// a name, a server's address, a ticket — and the longest thing anyone
+/// pastes into one, an iroh ticket, is a few hundred; a clipboard holding a
+/// whole document would otherwise become that many key events in one
+/// frame, each a field edit and a redraw's worth of work.
+pub(super) const PASTE_MAX: usize = 4096;
+
 /// Pasted text as a terminal types it without bracketed paste (which the
 /// GUI never asks for): one character a key, no modifiers. Only the first
 /// line — every field is one line, and the newline a terminal would type
-/// next is an Enter, which would submit the field halfway through.
+/// next is an Enter, which would submit the field halfway through; the
+/// Unicode line and paragraph separators end the line as a newline does.
+/// Control characters and Unicode's format characters are dropped: the
+/// invisible ones that ride along in copied text (a zero-width space, a
+/// byte-order mark, a soft hyphen, bidi marks and overrides) would sit in
+/// a search or an address unseen and make it miss, or reorder how the
+/// field draws. Spaces of every kind stay. At most [`PASTE_MAX`]
+/// characters are typed.
 fn paste(text: &str) -> Vec<TermEvent> {
-    let line = text.split(['\n', '\r']).next().unwrap_or("");
+    let line = text.split(['\n', '\r', '\u{2028}', '\u{2029}']).next().unwrap_or("");
     line.chars()
-        .filter(|c| !c.is_control())
+        .filter(|&c| !c.is_control() && !is_format(c))
+        .take(PASTE_MAX)
         .map(|c| TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
         .collect()
+}
+
+/// Whether a character is in Unicode's Format category (Cf), as of Unicode
+/// 16: listed here rather than pulled from a properties crate for one
+/// question. The zero-width joiner is one, so an emoji family pasted
+/// arrives as its members side by side; a field's text is a search or a
+/// name, where that costs nothing.
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 /// Whether a key is the platform's paste chord: Cmd+V on a Mac; Ctrl+V,
@@ -1176,6 +1223,38 @@ mod tests {
             [(KeyCode::Char('a'), NONE), (KeyCode::Char('b'), NONE)]
         );
         assert!(one(Raw::Paste("\nafter".into())).is_empty(), "an empty first line types nothing");
+    }
+
+    /// A paste types at most [`PASTE_MAX`] characters, drops the invisible
+    /// format characters copied text carries, keeps every kind of space,
+    /// and ends at a Unicode line or paragraph separator as at a newline.
+    #[test]
+    fn a_paste_is_capped_and_types_no_invisible_characters() {
+        let huge = "x".repeat(PASTE_MAX * 3);
+        assert_eq!(one(Raw::Paste(huge)).len(), PASTE_MAX);
+        let wide = "日".repeat(PASTE_MAX + 1);
+        assert_eq!(one(Raw::Paste(wide)).len(), PASTE_MAX, "characters, not bytes");
+        let typed = |text: &str| -> String {
+            one(Raw::Paste(text.into()))
+                .into_iter()
+                .map(|(code, _)| match code {
+                    KeyCode::Char(c) => c,
+                    other => panic!("{other:?} is not typed text"),
+                })
+                .collect()
+        };
+        // A byte-order mark, zero-width space, soft hyphen, bidi override
+        // and isolate, word joiner and a tag character: all gone.
+        let dirty = "\u{FEFF}mu\u{200B}sic\u{00AD} \u{202E}rev\u{2066}x\u{2069}\u{2060}\u{E0041}";
+        assert_eq!(typed(dirty), "music revx");
+        // Spaces stay, the no-break and ideographic ones included.
+        assert_eq!(typed("a b\u{00A0}c\u{3000}d"), "a b\u{00A0}c\u{3000}d");
+        // A line separator ends the line; so does a paragraph separator.
+        assert_eq!(typed("first\u{2028}second"), "first");
+        assert_eq!(typed("one\u{2029}two"), "one");
+        // Format characters do not count toward the cap.
+        let padded = "\u{200B}".repeat(10) + &"y".repeat(PASTE_MAX);
+        assert_eq!(typed(&padded).len(), PASTE_MAX);
     }
 
     #[test]

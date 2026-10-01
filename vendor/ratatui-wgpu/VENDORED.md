@@ -10,8 +10,9 @@ Upstream: [ratatui-wgpu 0.6.0](https://crates.io/crates/ratatui-wgpu/0.6.0) from
 
 The GUI's own window (`src/gui/window/`) draws through this backend, and it needs fixes that
 0.6.0 does not have: the surface format and the blit's sRGB decode, the face index of a font
-collection, a font id that does not read the whole font, failed presents, fallback glyphs that
-fit their cells, and a public offscreen path for tests. They land here, one change
+collection, a font id that does not read the whole font, failed presents (and how loudly they
+are logged), fallback glyphs that fit their cells, a wide glyph narrowed without shifting the
+row, and a public offscreen path for tests. They land here, one change
 at a time, each recorded below, until an upstream release carries them and the patch entry can
 go.
 
@@ -112,6 +113,31 @@ go.
    enlarged their kana and hanzi too; they now draw at their line's size as well. That is
    arithmetic, not measured: Linux was not run.
 
+9. **A failed acquire is logged once per outage** (`backend/mod.rs`, `backend/wgpu_backend.rs`).
+   Upstream's `RenderSurface::get_current_texture` logged `error!("Failed to acquire surface
+   texture")` itself, on every call; with change 5 every flush retries while a present is owed,
+   so an occluded window wrote about ten error lines a second into the player's log (at the
+   window's 100 ms poll), for as long as it stayed hidden. The trait method now returns
+   `Result<Target, String>`, the reason being wgpu's `CurrentSurfaceTexture` variant (the
+   headless surface's is that it is not configured), and `render` logs it: at `warn!` when it
+   starts an outage (no present was owed yet), at `debug!` for the retries while one is, and a
+   `debug!` line when a present succeeds again and pays the debt. The trait is sealed by its
+   private token, so nothing outside the crate implemented it.
+10. **A narrower cell over a wide one erases the whole wide glyph** (`backend/wgpu_backend.rs`,
+    `draw`). Drawing a wide cell fills the cells it covers with an empty continuation
+    (`NULL_CELL`, symbol `""`), which shapes to nothing. Upstream overwrote only the cell it was
+    given, so a narrow cell landing on a wide glyph's first cell left the continuation behind:
+    ratatui's diff does not send that cell when it is a blank in both frames (ratatui-core 0.1's
+    `BufferDiff` counts on a terminal erasing all of a wide character when any of it is
+    overwritten, and only forces the trailing cells for a styled blank or a VS16 emoji), so the
+    row's string lost a cell and every glyph after it on the row drew one cell to the left of
+    its own. Seen as a field's text leaving residue and its border shifting after CJK in it was
+    edited; reproduced headless (`src/gui/window/render_tests.rs`,
+    `a_wide_glyph_narrowed_leaves_no_residue`: `│日本│` redrawn as `│ab  │` drew the last `│`
+    in cell 4). Now, when the cell written is narrower than the one it replaces, the
+    continuation cells it no longer covers become blanks (`Cell::EMPTY`), as a terminal's are.
+    Only continuations are touched, so a cell ratatui did send is never overwritten.
+
 ### Tests
 
 The `#[cfg(test)] mod tests` of `backend/wgpu_backend.rs` (golden-image tests) and of
@@ -125,4 +151,6 @@ The reported wide-glyph shift (cells after CJK drawn about two cells left) does 
 in this code: `render_tests.rs` draws `AB日本CD` with Hack and Hiragino, on a first frame and
 as partial updates in and out of CJK, and C and D land in cells 6 and 7 pixel for pixel. The
 dump's `get_text` spells the cell after a wide glyph as an empty string, so its text puts C
-two characters early; that is likely all the report saw. No shaping change was made.
+two characters early; that is likely all the report saw. No shaping change was made. A shift of
+one cell did reproduce later, in another case — a wide glyph replaced by narrow cells, with
+something after it on the row — and is change 10.

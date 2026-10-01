@@ -352,3 +352,58 @@ fn a_borrowed_glyph_fits_its_box() {
         }
     }
 }
+
+/// A wide glyph replaced by narrow ones leaves no residue and moves
+/// nothing: the reported trace at a field's right edge, and its border
+/// shifted, after CJK text in it was edited. `日本` fills cells 0..3; the
+/// next frame puts `ab` in cells 0 and 1 and blanks after, and every cell
+/// must be what a fresh frame of `ab` draws. ratatui's diff sends the
+/// blank of cell 2 (it differs from 本) but not of cell 3, which was the
+/// wide glyph's continuation and is a blank in both buffers: a terminal
+/// erased all of 本 when cell 2 was written. The backend kept cell 3 as
+/// the empty continuation, which shapes to nothing, so whatever followed
+/// on the row drew one cell left: `│日本│` redrawn as `│ab  │` put its
+/// last `│` in cell 4 (VENDORED.md, change 10). Also a wide glyph moved
+/// by one cell, and one replaced by narrow text and a blank.
+#[test]
+fn a_wide_glyph_narrowed_leaves_no_residue() {
+    let japanese = japanese_face();
+    let faces = || {
+        let mut faces = vec![hack().unwrap()];
+        faces.extend(japanese.as_ref().and_then(|(_, bytes, index)| Font::new_at(bytes, *index)));
+        faces
+    };
+    let cases = [
+        ("日本", "ab"),
+        ("│日本│", "│ab  │"),
+        ("日本│", "ab  │"),
+        ("日本", "a日"),
+        ("日本語│", "a b   │"),
+    ];
+    for (before, after) in cases {
+        let frames = vec![vec![Line::from(before)], vec![Line::from(after)]];
+        let Some(frame) = frame_or_skip(render(faces(), 20, frames, TextureFormat::Rgba8Unorm))
+        else {
+            return;
+        };
+        let fresh = vec![vec![Line::from(after)]];
+        let Some(fresh) = frame_or_skip(render(faces(), 20, fresh, TextureFormat::Rgba8Unorm))
+        else {
+            return;
+        };
+        for col in 0..20 {
+            assert!(
+                frame.cell(col, 0) == fresh.cell(col, 0),
+                "{before:?} then {after:?}: cell {col} is not what a fresh {after:?} draws there"
+            );
+        }
+    }
+    // The case as reported, by ink: nothing of 本 after `ab`.
+    let frames = vec![vec![Line::from("日本")], vec![Line::from("ab")]];
+    let Some(frame) = frame_or_skip(render(faces(), 20, frames, TextureFormat::Rgba8Unorm)) else {
+        return;
+    };
+    for col in 2..20 {
+        assert!(!frame.inked(col, 0), "residue of 本 in cell {col}");
+    }
+}

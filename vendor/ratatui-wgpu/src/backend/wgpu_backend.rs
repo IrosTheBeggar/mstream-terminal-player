@@ -377,14 +377,31 @@ impl<'f, 's, P: PostProcessor, S: RenderSurface<'s>> WgpuBackend<'f, 's, P, S> {
             }
         }
 
-        let Some(texture) = self.surface.get_current_texture(Token) else {
-            // Submit the text pass anyway, so the composite holds this
-            // frame's cells (their rows are no longer dirty and will not be
-            // drawn again), and owe the present: upstream dropped both, and a
-            // window whose content then stood still kept the stale frame.
-            self.queue.submit(Some(encoder.finish()));
-            self.present_owed = true;
-            return;
+        let texture = match self.surface.get_current_texture(Token) {
+            Ok(texture) => texture,
+            Err(reason) => {
+                // Said once per outage: the first failure at warn, the
+                // retries every flush makes while the present is owed (an
+                // occluded window: ten a second at a 100 ms poll) at debug,
+                // until a present succeeds. Upstream logged every one at
+                // error.
+                if self.present_owed {
+                    debug!("Still no surface texture to present into: {reason}");
+                } else {
+                    warn!(
+                        "Failed to acquire surface texture: {reason}; the present is owed \
+                         until the surface gives one"
+                    );
+                }
+                // Submit the text pass anyway, so the composite holds this
+                // frame's cells (their rows are no longer dirty and will not
+                // be drawn again), and owe the present: upstream dropped
+                // both, and a window whose content then stood still kept the
+                // stale frame.
+                self.queue.submit(Some(encoder.finish()));
+                self.present_owed = true;
+                return;
+            }
         };
 
         self.post_process.process(
@@ -397,6 +414,9 @@ impl<'f, 's, P: PostProcessor, S: RenderSurface<'s>> WgpuBackend<'f, 's, P, S> {
 
         self.queue.submit(Some(encoder.finish()));
         texture.present(&self.queue, Token);
+        if self.present_owed {
+            debug!("The surface gave a texture again; the owed present is made");
+        }
         self.present_owed = false;
     }
 }
@@ -437,9 +457,28 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
             self.slow_blinking
                 .set(index, cell.modifier.contains(Modifier::SLOW_BLINK));
 
+            // A narrower cell over a wide one erases the whole of it, as a
+            // terminal does when a character lands on a wide glyph's first
+            // half: the continuation cells the new cell does not cover
+            // become blanks. ratatui's diff counts on that (a blank there
+            // in both frames is not sent), and upstream left them as the
+            // empty continuation, which shapes to nothing, so every glyph
+            // after them on the row drew a cell to the left of its own:
+            // `│日本│` redrawn as `│ab  │` put the last `│` in cell 4.
+            let width = cell.symbol().width().max(1);
+            let old_width = self.cells[index].symbol().width().max(1);
+            if old_width > width {
+                let start = (index + width).min(self.cells.len());
+                let end = (index + old_width).min(self.cells.len());
+                for covered in &mut self.cells[start..end] {
+                    if *covered == NULL_CELL {
+                        *covered = Cell::EMPTY;
+                    }
+                }
+            }
+
             self.cells[index] = cell.clone();
 
-            let width = cell.symbol().width().max(1);
             let start = (index + 1).min(self.cells.len());
             let end = (index + width).min(self.cells.len());
             self.cells[start..end].fill(NULL_CELL);

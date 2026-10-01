@@ -37,7 +37,13 @@
 //! input method is on only while a field has the keyboard, so a Japanese
 //! keyboard's digits still switch rooms; Cmd+V (Ctrl+V elsewhere) types the
 //! clipboard into the field; a button let go outside the window lets go;
-//! and a move to a screen of another scale re-sizes the type.
+//! a move to a screen of another scale re-sizes the type; and a drag on the
+//! window's edge steps by whole cells, where the platform allows it.
+//!
+//! What the terminal's main does on the way out, the window does in its
+//! teardown, because on macOS a Cmd-Q never returns from the event loop:
+//! the launcher's instance lock is dropped there. A panic is printed
+//! without the terminal hook's escapes, with where the log is.
 
 mod covers;
 mod input;
@@ -71,6 +77,7 @@ use script::{Input, Script, Step};
 use stats::{Counted, Stats};
 
 use super::{Channels, Ctx, Flow, Gui, Host, finish, frame, input, render};
+use crate::instance::Instance;
 use crate::kit::theme::th;
 use crate::runtime::block_on;
 
@@ -97,18 +104,14 @@ type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static, CoverPost>>
 
 /// The player in a window, from a Gui and workers that `gui::start` has
 /// already brought up; the exit code is the terminal's (0, or 1 when a
-/// frame failed), or 1 when there is no window to open.
-pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
+/// frame failed), or 1 when there is no window to open. `instance` is the
+/// launcher's instance lock, if this run holds one: dropped at the
+/// teardown, after the player's own, so its sidecar goes on every way out
+/// — the Cmd-Q that ends the process inside AppKit included.
+pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) -> i32 {
     // First, so the stats' clock (when the lever is set) starts at entry.
     let stats = Stats::from_env();
-    // No panic hook of the terminal's kind: `tui::install_panic_hook` hands
-    // mouse capture back and pops a window title the player pushed — with
-    // no terminal claimed, the first is noise on whatever launched the
-    // window and the second pops a title that is not ours. The default
-    // hook prints every panic, the audio thread's caught ones included,
-    // which with no screen to deface is what a window wants; that thread
-    // still reports its own death as an event, as it does under the
-    // terminal.
+    install_panic_hook();
     let grid = opening_grid();
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
@@ -150,6 +153,8 @@ pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
         quit_flushed: false,
         min_surface: PhysicalSize::new(1, 1),
         stats,
+        instance,
+        restore_at: None,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("gui --window: {e}");
@@ -159,6 +164,102 @@ pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
     // is for the one it does not.
     app.teardown();
     app.exit_code
+}
+
+/// What winit's X11 keyboard needs and loads only at run time, through
+/// xkbcommon-dl, by the two names it tries; it panics (exit 101, a
+/// backtrace hint and no word of what to install) before any window opens
+/// when neither loads. The `.so.0` is the runtime package's file, the bare
+/// name the -dev package's link.
+#[cfg(target_os = "linux")]
+const XKB_X11: [&std::ffi::CStr; 2] = [c"libxkbcommon-x11.so.0", c"libxkbcommon-x11.so"];
+
+/// On an X11 session, the line to leave on when libxkbcommon-x11 cannot be
+/// loaded, naming the package that brings it; `None` when it loads or the
+/// session is not X11. The session is read as winit reads it: Wayland
+/// when `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` is set (winit's Wayland path
+/// needs no xkbcommon-x11), X11 when only `DISPLAY` is; with neither,
+/// winit's own error says there is no display. The deb and rpm recommend
+/// the package rather than require it (Cargo.toml says why), so a desktop
+/// without it is a case to meet with words, not a crash.
+///
+/// `gui::run` asks before the player starts, so a window that cannot open
+/// leaves before any worker, audio device or connection is up.
+#[cfg(target_os = "linux")]
+pub(super) fn x11_keyboard_missing() -> Option<String> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    if set("WAYLAND_DISPLAY") || set("WAYLAND_SOCKET") || !set("DISPLAY") {
+        return None;
+    }
+    if XKB_X11.iter().any(|name| loads(name)) {
+        return None;
+    }
+    Some(
+        "gui --window: the window needs libxkbcommon-x11, which is not installed — install \
+         libxkbcommon-x11-0 (Debian, Ubuntu) or libxkbcommon-x11 (Fedora), or run \
+         `mstream-player gui` in a terminal"
+            .to_string(),
+    )
+}
+
+/// Whether the dynamic loader can open a library by name: opened, then
+/// closed again at once, for xkbcommon-dl to open for itself. The loader
+/// is libc's own (`dlopen` is in glibc's libc.so.6 since 2.34, and in
+/// musl's libc), declared here rather than through a crate for these two
+/// calls; the binary links it already for every other `dlopen` its
+/// dependencies make.
+#[cfg(target_os = "linux")]
+fn loads(name: &std::ffi::CStr) -> bool {
+    use std::ffi::{c_char, c_int, c_void};
+    unsafe extern "C" {
+        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> c_int;
+    }
+    /// Resolve symbols as they are used, and keep them out of the global
+    /// namespace: the probe binds nothing.
+    const RTLD_LAZY: c_int = 0x0001;
+    // SAFETY: `name` is a NUL-terminated C string that outlives the call,
+    // and a handle dlopen returns is closed exactly once. Opening runs the
+    // library's initialisers, which xkbcommon's are not beyond: it is the
+    // library winit opens in the next breath anyway.
+    unsafe {
+        let handle = dlopen(name.as_ptr(), RTLD_LAZY);
+        if handle.is_null() {
+            return false;
+        }
+        dlclose(handle);
+    }
+    true
+}
+
+/// The window's panic hook, chained in front of the one in place (the
+/// default, which prints the message and where). Not the terminal's
+/// (`tui::install_panic_hook`): that one hands mouse capture back and pops
+/// a window title the player pushed, and with no terminal claimed the
+/// first is escape noise on whatever launched the window and the second
+/// pops a title that is not ours. What it shares is the filter: a panic on
+/// a thread whose panics are caught (the audio thread's, which becomes an
+/// AudioFailed the GUI shows; the decoder's prepare) is not printed, since
+/// the player goes on and says so itself. Any other panic is printed, then
+/// where the log is, if one is being written, for whoever files the bug.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if crate::tui::worker::panics_are_caught(std::thread::current().name()) {
+            return;
+        }
+        previous(info);
+        if let Some(note) = panic_log_note(crate::logging::active_now().as_deref()) {
+            eprintln!("{note}");
+        }
+    }));
+}
+
+/// The line after a panic's own that says where the log is: only for a
+/// log file that is there to be read.
+fn panic_log_note(log: Option<&Path>) -> Option<String> {
+    let log = log.filter(|path| path.is_file())?;
+    Some(format!("mstream-player: the log is at {}", log.display()))
 }
 
 /// The grid to open at: `MSTREAM_WINDOW_SIZE=<cols>,<rows>`, or [`GRID`].
@@ -226,6 +327,10 @@ struct App {
     min_surface: PhysicalSize<u32>,
     /// What the frames cost, while `MSTREAM_WINDOW_STATS` is set.
     stats: Option<Stats>,
+    /// The launcher's instance lock, held until the teardown is done.
+    instance: Option<Instance>,
+    /// When the script's `minimise` restores the window.
+    restore_at: Option<Instant>,
 }
 
 /// The window as the loop's [`Host`]: the pointer over something
@@ -328,6 +433,7 @@ impl App {
         // `resized` holds the surface to it for any that do not.
         self.min_surface = PhysicalSize::new(cell.0.max(1), cell.1.max(1));
         window.set_min_inner_size(Some(self.min_surface));
+        snap_to_cells(&window, self.min_surface, self.scale);
         // The input method stays off until a field has the keyboard
         // (`sync_ime`, after each frame); winit opens a window with it off.
 
@@ -599,6 +705,19 @@ impl App {
                     self.ask_redraw();
                     break;
                 }
+                // Hidden as Cmd+M hides it; `about_to_wait` restores it on
+                // the loop's clock, which turns whether or not redraws come.
+                Step::Minimise(time) => {
+                    let Some(window) = self.window.clone() else { break };
+                    eprintln!("gui --window: script minimises for {} ms", time.as_millis());
+                    window.set_minimized(true);
+                    self.restore_at = Some(Instant::now() + time);
+                    self.ask_redraw();
+                    break;
+                }
+                // The next step after the next frame, which comes when the
+                // last one's wait runs out: nothing is asked for here.
+                Step::Frame => break,
                 Step::Quit => {
                     event_loop.exit();
                     break;
@@ -657,6 +776,7 @@ impl App {
         self.min_surface = PhysicalSize::new(cell.0.max(1), cell.1.max(1));
         if let Some(window) = &self.window {
             window.set_min_inner_size(Some(self.min_surface));
+            snap_to_cells(window, self.min_surface, scale);
         }
         // The surface to the new size now, not when the platform answers:
         // the backend's cells and its text texture are sized by the cell,
@@ -680,9 +800,25 @@ impl App {
         let mut text = terminal.backend().get_text();
         let pointer = grid.map_or((0, 0), |grid| self.translator.pointer(grid));
         let surface = grid.map_or((0, 0), |grid| (grid.width, grid.height));
+        // The covers this frame painted as pictures, as x,y w×h in cells.
+        let placed = self.board.placed_rects();
+        let covers = if placed.is_empty() {
+            "none".to_string()
+        } else {
+            let rects: Vec<String> = placed
+                .iter()
+                .map(|r| format!("{},{} {}×{}", r.x, r.y, r.width, r.height))
+                .collect();
+            format!("{} at {}", placed.len(), rects.join(" "))
+        };
+        let minimised = match self.window.as_ref().and_then(|window| window.is_minimized()) {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        };
         text.push_str(&format!(
             "-- pointer {},{} at {:.1},{:.1} px; surface {}×{} px; cursor {}; preedit {:?}; \
-             held {:?}; ime {}\n",
+             held {:?}; ime {}; minimised {minimised}; covers {covers}\n",
             pointer.0,
             pointer.1,
             self.translator.pixel().0,
@@ -726,6 +862,12 @@ impl App {
             self.ctx.saver.flush(&self.gui.app);
         }
         finish(&mut self.gui, &self.ctx);
+        // Last, as main drops it after the terminal's run: a second player
+        // the launcher starts once the sidecar is gone finds this one's
+        // queue saved. Here rather than in main, because a Cmd-Q on macOS
+        // never returns from the event loop: AppKit ends the process once
+        // `exiting` (this teardown's caller) returns.
+        self.instance = None;
     }
 }
 
@@ -831,6 +973,16 @@ impl ApplicationHandler for App {
             return;
         }
         let now = Instant::now();
+        if let Some(at) = self.restore_at.filter(|&at| now >= at) {
+            self.restore_at = None;
+            if let Some(window) = &self.window {
+                window.set_minimized(false);
+                eprintln!(
+                    "gui --window: script restores the window, {} ms late",
+                    now.duration_since(at).as_millis()
+                );
+            }
+        }
         if self.asked.is_none() && now >= self.next_frame {
             self.ask_redraw();
         }
@@ -838,6 +990,12 @@ impl ApplicationHandler for App {
             Some(at) if now.duration_since(at) < STALLED_REDRAW => ControlFlow::Poll,
             Some(_) => ControlFlow::WaitUntil(now + STALLED_REDRAW),
             None => ControlFlow::WaitUntil(self.next_frame),
+        };
+        let flow = match (flow, self.restore_at) {
+            (ControlFlow::WaitUntil(wake), Some(restore)) => {
+                ControlFlow::WaitUntil(wake.min(restore))
+            }
+            (flow, _) => flow,
         };
         event_loop.set_control_flow(flow);
     }
@@ -882,6 +1040,21 @@ fn named_colours(theme: &crate::kit::theme::Theme) -> ColorTable {
         LIGHTCYAN: [0x29, 0xb8, 0xdb],
         WHITE: [0xe5, 0xe5, 0xe5],
     }
+}
+
+/// A dragged resize in whole cells, as a terminal window's is: the
+/// platform is asked to step the window's size by one cell, so a drag
+/// never leaves a sliver of a column or row at the edge. Given in logical
+/// units (the cell over the display's scale), which is how the platforms
+/// that honour it keep it — macOS (the content view's resize increments)
+/// and X11 (the WM_NORMAL_HINTS size increments, which the window manager
+/// may or may not respect). Windows and Wayland ignore it, and a drag there
+/// may leave a part-cell margin the backend draws as ground. Set at open
+/// and again whenever the scale changes the cell.
+fn snap_to_cells(window: &Window, cell: PhysicalSize<u32>, scale: f64) {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let step = LogicalSize::new(f64::from(cell.width) / scale, f64::from(cell.height) / scale);
+    window.set_resize_increments(Some(step));
 }
 
 /// The type size in pixels at a display scale: [`FONT_PT`] points, so a
@@ -1306,6 +1479,62 @@ mod tests {
             needless.is_empty(),
             "{needless} is in BEYOND_HACK but Hack has it, or the GUI no longer draws it"
         );
+    }
+
+    /// The probe finds what the loader can open and not what it cannot:
+    /// glibc's libc itself is always there; a name no system has is not.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn the_loader_probe_tells_a_library_from_none() {
+        assert!(loads(c"libc.so.6"), "libc is loaded already");
+        assert!(!loads(c"libmstream-no-such-library.so.0"));
+    }
+
+    /// After a panic, the log's path is said only for a file that is
+    /// there: none when no log is written, none for one since removed.
+    #[test]
+    fn a_panic_names_the_log_only_when_there_is_one() {
+        assert_eq!(panic_log_note(None), None);
+        let dir = std::env::temp_dir().join(format!("mstream-panic-note-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("player.log");
+        assert_eq!(panic_log_note(Some(&log)), None, "a path with no file");
+        std::fs::write(&log, "a line\n").unwrap();
+        let note = panic_log_note(Some(&log)).unwrap();
+        assert!(note.ends_with(&log.display().to_string()), "{note}");
+        assert_eq!(panic_log_note(Some(&dir)), None, "a directory is not a log");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `cargo test the_window_panic_hook -- --ignored` — swaps the
+    /// process-global panic hook, so it must run alone. A caught thread's
+    /// panic (the audio thread's) reaches nothing; another thread's reaches
+    /// the hook before it, and the hook writes no escapes of its own.
+    #[test]
+    #[ignore = "swaps the process-global panic hook; run alone"]
+    fn the_window_panic_hook_stands_back_for_caught_panics_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let base_ran = Arc::new(AtomicUsize::new(0));
+        let counting = base_ran.clone();
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |_| {
+            counting.fetch_add(1, Ordering::SeqCst);
+        }));
+        install_panic_hook();
+        let _ = std::thread::Builder::new()
+            .name("smoke-ordinary".into())
+            .spawn(|| panic!("ordinary"))
+            .unwrap()
+            .join();
+        assert_eq!(base_ran.load(Ordering::SeqCst), 1, "chained through to the previous hook");
+        let _ = std::thread::Builder::new()
+            .name(crate::tui::worker::AUDIO_THREAD.into())
+            .spawn(|| panic!("caught elsewhere"))
+            .unwrap()
+            .join();
+        assert_eq!(base_ran.load(Ordering::SeqCst), 1, "stood back for the audio thread");
+        let _ = std::panic::take_hook();
+        std::panic::set_hook(original);
     }
 
     /// The named colours a role owns come from the palette, the others from

@@ -26,6 +26,9 @@
 //!   which the window's own grid had no part in choosing
 //! - `click <col>,<row>` / `rclick <col>,<row>`: move there, then the left
 //!   (right) button down and up
+//! - `press <col>,<row>` / `release`: a `click` in halves, move there and
+//!   the left button down, then up where the pointer is — for a run that
+//!   dumps the frame between them
 //! - `drag <c1>,<r1> <c2>,<r2> [leave]`: down at the first cell, a few
 //!   moves, up at the second — or, with `leave`, no up: the pointer leaves
 //!   the window there instead, as a release outside it would look
@@ -37,7 +40,16 @@
 //! - `scale <factor>`: what the window does when the platform says the
 //!   display's scale changed (a move to another screen), at that factor:
 //!   the type re-sized and the window re-fitted to the same grid
-//! - `dump <path>`: the window's text, then the pointer's state
+//! - `minimise <ms>`: the window minimised (as Cmd+M or the yellow button
+//!   does it), and restored that long after by the loop's own clock, which
+//!   runs whether or not the platform delivers redraws to a hidden window.
+//!   The script goes on meanwhile, as far as frames come to run it: a
+//!   `dump` every second after it shows whether they do
+//! - `frame`: nothing until the next frame, which comes when the loop's own
+//!   wait says (a `wait` would bring it forward): how a run reads the
+//!   cadence, from the dumps on either side
+//! - `dump <path>`: the window's text, then the pointer's state and the
+//!   covers painted as pictures
 //! - `say <text>`: the text on stderr, for whatever is watching
 //! - `quit`: as if the close button was pressed
 //!
@@ -64,6 +76,10 @@ pub(super) enum Step {
     Resize(u32, u32),
     /// A display scale factor, as if the window had moved to that screen.
     Scale(f64),
+    /// Minimised for this long, then restored.
+    Minimise(Duration),
+    /// The next frame, at the loop's pace.
+    Frame,
     Quit,
 }
 
@@ -242,6 +258,14 @@ fn parse_line(line: &str) -> Result<Vec<Step>, String> {
                 one(Input::Raw(Raw::Button { button, down: false })),
             ])
         }
+        "press" => {
+            let (col, row) = cell(arg.trim())?;
+            Ok(vec![
+                one(Input::MoveTo(col, row)),
+                one(Input::Raw(Raw::Button { button: Button::Left, down: true })),
+            ])
+        }
+        "release" => Ok(vec![one(Input::Raw(Raw::Button { button: Button::Left, down: false }))]),
         "movepx" | "clickpx" => {
             let (x, y) = pixel(arg.trim())?;
             let mut steps = vec![one(Input::Raw(Raw::Move { x, y }))];
@@ -319,6 +343,11 @@ fn parse_line(line: &str) -> Result<Vec<Step>, String> {
             Ok(vec![Step::Scale(factor)])
         }
         "say" => Ok(vec![Step::Say(arg.to_string())]),
+        "minimise" | "minimize" => {
+            let ms: u64 = arg.trim().parse().map_err(|_| "minimise wants milliseconds")?;
+            Ok(vec![Step::Minimise(Duration::from_millis(ms))])
+        }
+        "frame" => Ok(vec![Step::Frame]),
         "quit" => Ok(vec![Step::Quit]),
         _ => Err("no such command".into()),
     }
@@ -450,6 +479,27 @@ quit
         assert_eq!(steps[6], Step::Inputs(vec![Input::Raw(Raw::Leave)]));
         assert_eq!(steps[7], Step::Inputs(vec![Input::Raw(Raw::Leave)]));
         assert_eq!(steps[8..], [Step::Scale(1.0), Step::Scale(2.0)]);
+    }
+
+    #[test]
+    fn a_minimise_a_frame_and_a_click_in_halves_parse() {
+        let (steps, errors) = parse(
+            "minimise 20000\nminimize 5\nminimise\nminimise soon\nframe\npress 3,4\nrelease\n",
+        );
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        let button =
+            |down| Step::Inputs(vec![Input::Raw(Raw::Button { button: Button::Left, down })]);
+        assert_eq!(
+            steps,
+            [
+                Step::Minimise(Duration::from_secs(20)),
+                Step::Minimise(Duration::from_millis(5)),
+                Step::Frame,
+                Step::Inputs(vec![Input::MoveTo(3, 4)]),
+                button(true),
+                button(false),
+            ]
+        );
     }
 
     #[test]

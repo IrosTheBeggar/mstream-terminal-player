@@ -72,6 +72,9 @@ const MIN_W: u16 = 100;
 const MIN_H: u16 = 24;
 
 const POLL: Duration = Duration::from_millis(100);
+/// The next frame's wait while work is owed: covers upgrading to pixels,
+/// or overlays that moved under covers drawn by the old footprints.
+const HOT: Duration = Duration::from_millis(10);
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
@@ -1205,11 +1208,42 @@ pub(super) fn text_field(
     width: u16,
     style: Style,
 ) {
+    field(frame, ui, (x, y), value, cursor, width, style, None);
+}
+
+/// [`text_field`] for a value drawn masked (a password), handed in masked
+/// already: an input method's composition is drawn as `mark` too.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn masked_field(
+    frame: &mut Frame,
+    ui: &mut Surface<Act>,
+    x: u16,
+    y: u16,
+    masked: &str,
+    cursor: usize,
+    width: u16,
+    style: Style,
+    mark: char,
+) {
+    field(frame, ui, (x, y), masked, cursor, width, style, Some(mark));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn field(
+    frame: &mut Frame,
+    ui: &mut Surface<Act>,
+    (x, y): (u16, u16),
+    value: &str,
+    cursor: usize,
+    width: u16,
+    style: Style,
+    mask: Option<char>,
+) {
     let on = ui.caret();
     // A composition is only ever set by the window (window/mod.rs), for the
     // field that has the keyboard, which is this one; the cell the caret
     // lands in is where the window floats the input method's candidates.
-    let (line, caret) = input_display_composing(value, cursor, width, on, ui.composition());
+    let (line, caret) = input_display_composing(value, cursor, width, on, ui.composition(), mask);
     put(frame, x, y, &line, style);
     ui.note_caret(Position { x: x.saturating_add(caret), y });
 }
@@ -2565,6 +2599,14 @@ where
         refresh_book(gui);
     }
     terminal.draw(|frame| render(frame, gui))?;
+    // A modal, dropdown or tooltip opened, closed or moved: the covers drew
+    // this frame by last frame's footprints, so one under a modal that just
+    // opened is still a picture over it (and one a modal just left is still
+    // text). The next frame, which draws them by these, comes at the hot
+    // pace rather than a poll later — one 10 ms frame, not 100.
+    if gui.ui.overlays_moved() {
+        gui.hot = true;
+    }
 
     while let Ok(ev) = ctx.channels.event_rx.try_recv() {
         // The servers layer looks first: session answers that would
@@ -2616,7 +2658,7 @@ where
     // turn's ~50 ms of encode work across a second of ticks. A blinking
     // caret wants its next frame ON the flip, not a poll tick after it.
     let wait = if gui.hot {
-        Duration::from_millis(10)
+        HOT
     } else if gui.app.drawing_audio() || vizwin::is_open(gui) {
         // The visualizer tab, moving: the TUI's thirty frames a second —
         // and the visualizer window's feed, at the same pace.
@@ -3018,6 +3060,11 @@ pub(crate) fn refresh_book(gui: &mut Gui) {
     gui.app.servers = tui::known_servers(&gui.config, &credentials);
 }
 
+/// `instance` is the launcher's instance lock, when this run claimed one.
+/// The terminal leaves it where it is, for main to drop on the way out as
+/// it always has; the window takes it, because on macOS a Cmd-Q ends the
+/// process inside AppKit once the window's `exiting` handler returns, and
+/// nothing after `run` would run to remove the lock's sidecar.
 pub fn run(
     server: Option<String>,
     token: Option<String>,
@@ -3025,6 +3072,7 @@ pub fn run(
     bundled: Option<String>,
     control: Option<control::Face>,
     window: bool,
+    instance: &mut Option<crate::instance::Instance>,
 ) -> i32 {
     // The language first — the wizard's rule, from the system locale — so
     // the ten locales the strings carry reach the screen.
@@ -3034,9 +3082,16 @@ pub fn run(
     // a native window. The palette is pinned first, because the window is
     // not the terminal that launched it and nothing has resolved it yet.
     if window {
+        // A window that cannot open on this desktop says so and leaves
+        // before the player starts (window/mod.rs has the one case).
+        #[cfg(target_os = "linux")]
+        if let Some(line) = window::x11_keyboard_missing() {
+            eprintln!("{line}");
+            return 1;
+        }
         theme::pin_truecolor();
         let (gui, channels) = start(server, token, torrent, bundled, control);
-        return window::run(gui, channels);
+        return window::run(gui, channels, instance.take());
     }
     let (mut gui, channels) = start(server, token, torrent, bundled, control);
 
@@ -3477,6 +3532,99 @@ mod tests {
             cover_row.chars().all(|c| "█▀▄".contains(c)),
             "the mosaic holds the cells: {cover_row:?}"
         );
+    }
+
+    /// The loop's own Ctx, on channels nothing answers: what the frame
+    /// half dispatches goes nowhere, which a test of its wait wants.
+    fn quiet_ctx(gui: &Gui) -> Ctx {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (audio_tx, _) = std::sync::mpsc::channel();
+        let (api_tx, _) = std::sync::mpsc::channel();
+        Ctx::new(&gui.app, Channels { event_rx, audio_tx, api_tx, event_tx, control: None })
+    }
+
+    struct NoHost;
+    impl Host for NoHost {
+        fn pointer(&mut self, _hand: bool) {}
+    }
+
+    /// A TestBackend with the loop's error type: the frame half is generic
+    /// over backends that fail as io does (the terminal's and the
+    /// window's), and a TestBackend never fails at all.
+    struct IoTest(TestBackend);
+
+    impl ratatui::backend::Backend for IoTest {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+        {
+            self.0.draw(content).map_err(|never| match never {})
+        }
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            self.0.hide_cursor().map_err(|never| match never {})
+        }
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            self.0.show_cursor().map_err(|never| match never {})
+        }
+        fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+            self.0.get_cursor_position().map_err(|never| match never {})
+        }
+        fn set_cursor_position<P: Into<Position>>(&mut self, at: P) -> std::io::Result<()> {
+            self.0.set_cursor_position(at).map_err(|never| match never {})
+        }
+        fn clear(&mut self) -> std::io::Result<()> {
+            self.0.clear().map_err(|never| match never {})
+        }
+        fn clear_region(&mut self, kind: ratatui::backend::ClearType) -> std::io::Result<()> {
+            self.0.clear_region(kind).map_err(|never| match never {})
+        }
+        fn size(&self) -> std::io::Result<ratatui::layout::Size> {
+            self.0.size().map_err(|never| match never {})
+        }
+        fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> {
+            self.0.window_size().map_err(|never| match never {})
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush().map_err(|never| match never {})
+        }
+    }
+
+    /// A modal opened over a cover: the cover drew that frame by last
+    /// frame's footprints — a picture, over the modal, in a window or a
+    /// pixel terminal — so the frame half asks for the next one at the hot
+    /// pace, which draws it as text under the modal, rather than leaving
+    /// the picture on top for a whole idle poll. Then it settles.
+    #[test]
+    fn a_modal_opened_over_a_cover_brings_the_next_frame_forward() {
+        use ratatui_image::picker::ProtocolType;
+        let mut gui = browsing_gui();
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        let mut playing = track("music/a.mp3", "Night Drive", 252.0);
+        playing.metadata.album_art = Some("aa.jpeg".into());
+        gui.app.now_playing = Some(playing);
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let art = crate::tui::art::decode(&bytes.into_inner()).unwrap();
+        gui.app.art.insert("aa.jpeg".into(), Some(art));
+        let mut ctx = quiet_ctx(&gui);
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+        let mut wait = |gui: &mut Gui| frame(&mut terminal, gui, &mut ctx, &mut NoHost).unwrap();
+        // Settled: whatever the first frames owed (a cover's upgrade to
+        // pixels runs hot too), the page at rest waits longer than that.
+        assert!((0..20).any(|_| wait(&mut gui) > HOT), "the page settles");
+
+        // The track-actions sheet, a modal over the page and the card.
+        gui.act(Act::More(Tab::Files, 2));
+        assert_eq!(wait(&mut gui), HOT, "the frame the modal opens on asks for the next at once");
+        assert!(wait(&mut gui) > HOT, "and the next, the same footprints again, does not");
+
+        // Closing it is a move of the footprints too.
+        gui.act(Act::SheetClose);
+        assert_eq!(wait(&mut gui), HOT, "the frame the modal closes on");
+        assert!(wait(&mut gui) > HOT);
     }
 
     #[test]

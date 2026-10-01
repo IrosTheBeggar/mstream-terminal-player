@@ -137,6 +137,12 @@ impl Board {
     pub(super) fn begin_frame(&self) {
         self.lock().placed.clear();
     }
+
+    /// Where this frame's covers are painted, in cells: what the script's
+    /// dump says, so a run can tell a picture from the text under a modal.
+    pub(super) fn placed_rects(&self) -> Vec<Rect> {
+        self.lock().placed.iter().map(|placed| placed.rect).collect()
+    }
 }
 
 impl PictureHost for Board {
