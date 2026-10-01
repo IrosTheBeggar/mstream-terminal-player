@@ -131,6 +131,18 @@ fn frame_or_skip(rendered: Result<Frame, String>) -> Option<Frame> {
     }
 }
 
+/// One GPU at a time: the test harness runs tests on several threads, and
+/// on a Windows box with an NVIDIA driver one test's Vulkan device going
+/// down inside the driver while another's instance brings a WGL context up
+/// in the same DLL never came back (the Windows run of 2026-10-01: four
+/// hangs in four runs, every test passing on its own). The lock is poisoned
+/// by a panicking test, which is no reason for the next to fail.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    GPU.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A system face with Japanese in it, as the window would borrow for `ja`,
 /// with where it came from; `None` on a system without one.
 fn japanese_face() -> Option<(String, &'static [u8], u32)> {
@@ -152,6 +164,7 @@ fn japanese_face() -> Option<(String, &'static [u8], u32)> {
 /// since the frame before, which reach the backend as partial updates.
 #[test]
 fn a_wide_glyph_leaves_the_cells_after_it_in_place() {
+    let _gpu = one_at_a_time();
     let japanese = japanese_face();
     match &japanese {
         Some((path, _, index)) => eprintln!("CJK face: {path} (face {index})"),
@@ -225,6 +238,7 @@ fn a_wide_glyph_leaves_the_cells_after_it_in_place() {
 /// gold to within one level.
 #[test]
 fn colours_reach_the_surface_unchanged() {
+    let _gpu = one_at_a_time();
     for format in [
         TextureFormat::Rgba8Unorm,
         TextureFormat::Rgba8UnormSrgb,
@@ -248,6 +262,7 @@ fn colours_reach_the_surface_unchanged() {
 /// A collection's later faces open by index, and are faces of their own.
 #[test]
 fn a_collection_opens_at_any_face() {
+    let _gpu = one_at_a_time();
     let Some((_, bytes)) = cjk_faces("zh")
         .into_iter()
         .chain(cjk_faces("ja"))
@@ -270,6 +285,7 @@ fn a_collection_opens_at_any_face() {
 /// is its narrowest face's, and the grid is Hack's.
 #[test]
 fn every_script_draws_in_an_english_window() {
+    let _gpu = one_at_a_time();
     let text = "日本語テスト한국어简体中文";
     let row = || vec![vec![Line::from(text)]];
     let Some(alone) = frame_or_skip(render(vec![hack().unwrap()], 30, row(), TextureFormat::Rgba8Unorm)) else { return };
@@ -323,6 +339,7 @@ fn ink_extent(frame: &Frame, col: u32, cols: u32) -> Option<([u32; 2], [u32; 2])
 /// clear. Checked at the tests' size and at the window's (32 px, scale 2).
 #[test]
 fn a_borrowed_glyph_fits_its_box() {
+    let _gpu = one_at_a_time();
     let text = "日本語テスト한국어简体中文";
     if script_fallbacks("en").is_empty() {
         eprintln!("no system CJK face: the scripts draw as boxes, nothing to check");
@@ -367,6 +384,7 @@ fn a_borrowed_glyph_fits_its_box() {
 /// by one cell, and one replaced by narrow text and a blank.
 #[test]
 fn a_wide_glyph_narrowed_leaves_no_residue() {
+    let _gpu = one_at_a_time();
     let japanese = japanese_face();
     let faces = || {
         let mut faces = vec![hack().unwrap()];
