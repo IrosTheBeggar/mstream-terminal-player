@@ -89,7 +89,7 @@ jobs:
   # only once the repository variable DESKTOP_RELEASES is 'true', so the
   # first stable tag after this lands does not ship untested desktop assets.
   # The owner sets the variable (Settings > Secrets and variables > Actions >
-  # Variables) once the desktop gates in PLAN.md (Phase 13) pass. A
+  # Variables) once the desktop gates in PLAN.md (Phase 14) pass. A
   # workflow_dispatch from a branch is not a tag and publishes nothing, so
   # it builds both families as a dry run.
   build-desktop:

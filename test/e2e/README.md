@@ -2,7 +2,7 @@
 
 `bash test/e2e/run.sh` drives the real binary through the real event
 loop with expect(1), against a **stateful fake mStream**
-(`fake_mstream.py`) — no Node, no real server, no audio files. Eight
+(`fake_mstream.py`) — no Node, no real server, no audio files. Nine
 scenarios, each on a fresh fake and a fresh `$HOME`:
 
 - **A** — the full English walk (folders → extras → login → Done), then
@@ -32,6 +32,11 @@ scenarios, each on a fresh fake and a fresh `$HOME`:
   one of its tabs rather than a nav room, Esc returns to the Library
   screen, `q` quits clean. The review's key-routing bug showed with no
   server; this leg would have caught it.
+- **I** — the MP3 player's flash page (`mstream-player device flash`)
+  against the scripted board (`MSTREAM_DEVICE_FAKE=ours:v0.4.0`) and a
+  miniature merged image: the question names the update, Enter writes,
+  Done follows. Then, without expect, `device list` on two fake boards,
+  `--yes` writing a fresh board end to end, and a held port refused.
 
 ## The two harness laws (learned the hard way)
 

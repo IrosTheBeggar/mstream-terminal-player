@@ -136,6 +136,23 @@ clap = { version = "4", features = ["derive", "env"] }
 # for its lifetime (src/instance.rs). flock on unix, LockFileEx on Windows —
 # the same crate the mStream tray launcher tries it with.
 fslock = "0.2"
+# The MP3 player's flasher (`mstream-player device flash`, src/device): the
+# ESP32 serial bootloader protocol — the sync, the RAM stub, compressed
+# writes, the MD5 check — from the esp-rs team's own tool, as a library.
+# default-features = false leaves out its `cli` (clap, indicatif, dialoguer:
+# the espflash program's own UI); `serialport` is the feature that talks to
+# a port at all. It takes the serialport crate with ITS defaults off, which
+# matters on Linux: the default `libudev` feature hard-links libudev.so.1,
+# and test/linkage.sh refuses a binary that needs it (the NAS boxes).
+# 4.6 wants rustc 1.95, the floor egui 0.36 set above.
+espflash = { version = "4.6", default-features = false, features = ["serialport"] }
+# Listing the ports and opening the one that is a Core2 — named here too so
+# the player enumerates without going through espflash. Defaults off for
+# the libudev reason above; without it Linux still reads VID/PID, serial
+# and product from /sys/class/tty.
+serialport = { version = "4.10", default-features = false }
+# The firmware's checksum, checked before anything is written to a board.
+sha2 = "0.11"
 stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).

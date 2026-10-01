@@ -559,6 +559,48 @@ A server older than 6.27 has no Stats API, and the page says that instead. The p
 reports its own plays (see Play reporting below), and the log names them *this player*;
 a total under a minute reads in seconds.
 
+## MP3 player (M5Stack Core2)
+
+```
+mstream-player device list                        # the Core2-shaped boards on USB
+mstream-player device flash                       # install or update the player firmware on one
+mstream-player device flash --firmware .pio/build/core2   # a build of your own (or its *-full.bin)
+mstream-player device flash --release v0.5.0      # a particular release
+mstream-player device flash --yes --port COM3     # no screen, no questions
+```
+
+The [mStream MP3 player](https://github.com/IrosTheBeggar/mstream-mp3-player) is an M5Stack
+Core2 running its own firmware, and this is how the firmware gets onto one, over the board's
+USB cable. The page finds the board by the USB serial chip M5Stack ships (a CH9102 or a
+CP2104), reaches its bootloader, reads what is on it — the firmware names itself and its
+version inside the image — and asks: the board and port as read, what is on it, what will go
+on it (the SD card is never touched), and whether to erase the whole flash first (`e`). The
+default erases over anything that is not this firmware (a new board's demo, another project)
+and never over an earlier version of it: the settings, the paired headphones and the touch
+calibration live above the image and survive an update. Then the write, checked by checksum,
+and the board restarts into it; the page shows the first line it says, and how music gets onto
+the card. A step line under the subtitle (Firmware · Board · Write · Restart) says where the
+run is, the write says how long it has left, and `l` opens the run's log under the content —
+every report with a clock, plus what the busy line never says: which baud answered, what the
+descriptor held, the segments and their chunks, the checksum. The log opens by itself when
+something fails. With no board plugged in the page watches the USB ports every two seconds
+and lists the serial ports it did see, so plugging the Core2 in is enough; with several, the
+list follows the ports. No mStream session is involved, and a write cannot be left halfway —
+Esc before it restarts the board into what it had.
+
+The firmware comes from the firmware repository's GitHub Releases: the release this player
+pins (its tag and checksum sit in `src/device/firmware.rs`, bumped with player releases),
+`--release <tag>` for another one (checked against that release's `SHA256SUMS`), or
+`--firmware` for a file — a release's `*-full.bin`, or a build directory with its
+`firmware.factory.bin`. Downloads are kept under the player's cache directory and re-checked
+every time; `MSTREAM_FIRMWARE_BASE` points them at a mirror. `--erase` and `--no-erase` decide
+the erase instead of the board; `--yes` prints each step and writes without a screen.
+
+Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
+account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported
+as such. `MSTREAM_DEVICE_FAKE=<word>` runs everything against a scripted board, for tests:
+`fresh`, `ours:<version>`, `other`, `nodevice`, `two`, `busy`, `nosync`, `failwrite`.
+
 ## Now playing
 
 `0` gives the whole terminal over to what's playing:
