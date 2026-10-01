@@ -1912,6 +1912,7 @@ dev:
   logs_hide: "▾ Скрыть журнал"
   log_go: "запись: %{plan}"
   log_again: "r — заново"
+  log_named_port: "порт, указанный вручную: %{port}"
   log_one_board: "1 порт с мостом Core2: %{board}"
   log_baud_ok: "%{baud} бод: загрузчик ответил"
   log_baud_no: "%{baud} бод: нет ответа (%{err})"

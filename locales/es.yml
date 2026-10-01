@@ -1912,6 +1912,7 @@ dev:
   logs_hide: "▾ Ocultar registro"
   log_go: "escribir: %{plan}"
   log_again: "r — empezando de nuevo"
+  log_named_port: "el puerto indicado a mano: %{port}"
   log_one_board: "1 puerto con puente de Core2: %{board}"
   log_baud_ok: "%{baud} baudios: el cargador de arranque respondió"
   log_baud_no: "%{baud} baudios: sin respuesta (%{err})"

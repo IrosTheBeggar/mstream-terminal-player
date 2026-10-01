@@ -1912,6 +1912,7 @@ dev:
   logs_hide: "▾ ログを隠す"
   log_go: "書き込み: %{plan}"
   log_again: "r — 最初からやり直し"
+  log_named_port: "手動で指定したポート: %{port}"
   log_one_board: "Core2ブリッジのポート1つ: %{board}"
   log_baud_ok: "%{baud} baud: ブートローダーが応答"
   log_baud_no: "%{baud} baud: 応答なし (%{err})"

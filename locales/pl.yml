@@ -1912,6 +1912,7 @@ dev:
   logs_hide: "▾ Ukryj dziennik"
   log_go: "zapis: %{plan}"
   log_again: "r — od nowa"
+  log_named_port: "port podany ręcznie: %{port}"
   log_one_board: "1 port z mostkiem Core2: %{board}"
   log_baud_ok: "%{baud} baud: bootloader odpowiedział"
   log_baud_no: "%{baud} baud: brak odpowiedzi (%{err})"

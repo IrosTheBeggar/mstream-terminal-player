@@ -1912,6 +1912,7 @@ dev:
   logs_hide: "▾ Masquer le journal"
   log_go: "écriture : %{plan}"
   log_again: "r — on recommence"
+  log_named_port: "le port indiqué à la main : %{port}"
   log_one_board: "1 port avec un pont de Core2 : %{board}"
   log_baud_ok: "%{baud} bauds : le chargeur d'amorçage a répondu"
   log_baud_no: "%{baud} bauds : pas de réponse (%{err})"

@@ -1912,6 +1912,7 @@ dev:
   logs_hide: "▾ 隐藏日志"
   log_go: "写入：%{plan}"
   log_again: "r — 重新开始"
+  log_named_port: "手动指定的端口：%{port}"
   log_one_board: "1 个带 Core2 桥接芯片的端口：%{board}"
   log_baud_ok: "%{baud} 波特：引导加载程序已响应"
   log_baud_no: "%{baud} 波特：无响应 (%{err})"

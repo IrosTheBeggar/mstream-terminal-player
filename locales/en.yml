@@ -1912,6 +1912,7 @@ dev:
   logs_hide: "▾ Hide logs"
   log_go: "write: %{plan}"
   log_again: "r — starting over"
+  log_named_port: "the port named by hand: %{port}"
   log_one_board: "1 port with a Core2's bridge: %{board}"
   log_baud_ok: "%{baud} baud: the bootloader answered"
   log_baud_no: "%{baud} baud: no answer (%{err})"

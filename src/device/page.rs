@@ -694,7 +694,9 @@ fn render(frame: &mut Frame, page: &mut Page) {
             for key in ["dev.no_device_cable", "dev.no_device_driver"] {
                 y = wrapped(frame, x, y, column_w, &format!("• {}", t!(key)), dim());
             }
-            y = wrapped(frame, x, y, column_w, &format!("  {}", t!("dev.no_device_driver_2")), dim());
+            // The driver hint's second line, indented under its bullet: drawn
+            // whole, since a wrap would trim the indent away.
+            y = line(frame, x, y, column_w, &format!("  {}", t!("dev.no_device_driver_2")), dim());
             y = wrapped(frame, x, y, column_w, &format!("• {}", t!("dev.no_device_linux")), dim()) + 1;
             let seen = if page.others.is_empty() {
                 vec![

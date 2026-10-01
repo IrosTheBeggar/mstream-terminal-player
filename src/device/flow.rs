@@ -321,7 +321,13 @@ fn find_board(
         };
         match ports::pick(&found, port) {
             Pick::One(candidate) => {
-                let line = t!("dev.log_one_board", board = candidate.describe()).to_string();
+                // A port named by hand may not be a Core2's bridge at all;
+                // the log says which it was.
+                let line = if candidate.bridge == "?" {
+                    t!("dev.log_named_port", port = candidate.port).to_string()
+                } else {
+                    t!("dev.log_one_board", board = candidate.describe()).to_string()
+                };
                 let _ = events.send(Event::Log(line));
                 return Some(candidate);
             }
@@ -597,6 +603,13 @@ mod tests {
         assert!(
             named.iter().any(|e| matches!(e, Event::Board(info) if info.port == "FAKE0")),
             "the listed board, found by its name whatever the case: {named:?}"
+        );
+        rust_i18n::set_locale("en");
+        let bare = drive("nodevice", Source::Local(image.clone()), Some("COM9"), Cmd::Quit);
+        assert!(
+            logs(&bare).contains(&"the port named by hand: COM9"),
+            "an unlisted --port is opened as named, and the log says so, not that it is a Core2's: {:?}",
+            logs(&bare)
         );
 
         let (cmd_tx, cmd_rx) = channel();

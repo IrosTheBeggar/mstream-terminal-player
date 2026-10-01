@@ -1912,6 +1912,7 @@ dev:
   logs_hide: "▾ Ocultar registo"
   log_go: "escrever: %{plan}"
   log_again: "r — a recomeçar"
+  log_named_port: "a porta indicada à mão: %{port}"
   log_one_board: "1 porta com ponte de Core2: %{board}"
   log_baud_ok: "%{baud} baud: o bootloader respondeu"
   log_baud_no: "%{baud} baud: sem resposta (%{err})"
