@@ -2871,10 +2871,10 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > **Status 2026-10-01: built, unreleased** — the page, the `--yes` line mode, `device list`,
 > the fake board and its e2e leg; then the page's UX from the design cards (mStream
 > `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time left,
-> what to do next, the port watch, and the log behind `l`. The firmware's first release
-> (v0.5.0) is still to come; until it does, the pin in `src/device/firmware.rs` is empty and
-> `--firmware` / `--release` are the ways in. The mStream launcher's menu item is the next
-> slice there.
+> what to do next, the port watch, and the log behind `l`. The firmware's first release,
+> v0.5.0 (1 Oct 2026), is the pin in `src/device/firmware.rs` — `device flash` with no flags
+> writes it; `--firmware` / `--release` still override. The mStream launcher's menu item is
+> the next slice there.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
