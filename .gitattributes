@@ -2,3 +2,6 @@
 # is CRLF everywhere else — so the exception is pinned here rather than
 # left to whatever core.autocrlf a clone happens to have.
 *.sh text eol=lf
+# Third-party crates built from vendor/ (Cargo.toml's [patch.crates-io]):
+# not ours, so kept out of GitHub's language statistics.
+vendor/** linguist-vendored

@@ -302,3 +302,23 @@ naga = { version = "30", features = ["glsl-in", "wgsl-in", "msl-out", "hlsl-out"
 [build-dependencies]
 # Windows icon + VersionInfo embedding (build.rs; no-op for other targets).
 winresource = "0.1"
+
+# Two crates built from copies in vendor/ rather than from crates.io, each
+# for a defect upstream has not shipped a fix for (vendor/*/VENDORED.md says
+# exactly what differs). A patch, not a path dependency, so the version
+# lines above stay the contract and everything else in the tree that wants
+# the same crate — egui-winit wants winit — gets the patched copy too: one
+# winit, one ratatui-wgpu. Drop an entry once a release carries its fix.
+[patch.crates-io]
+# The GUI window's renderer. Vendored unchanged for now, as the place its
+# fixes land (surface format, face index, wide-glyph shaping, failed
+# presents).
+ratatui-wgpu = { path = "vendor/ratatui-wgpu" }
+# macOS IME: 0.30.13 drops an ASCII key typed right after an input
+# method's commit (Korean `한` then `;` or a digit loses that key) and
+# doubles a Space typed with no composition. The fix is rust-windowing/
+# winit PR #4478, backported to the 0.30 layout; VENDORED.md has the
+# hunks. Japanese and Chinese are untouched by it: their confirm keys
+# never leave the input method (the Kotoeri candidate list takes an Enter
+# of its own, which is native, not a defect).
+winit = { path = "vendor/winit" }

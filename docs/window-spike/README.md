@@ -22,7 +22,9 @@ to 1000 px wide; the text under each name says which step and scenario produced 
   gap, an en locale has no CJK face so the two glyphs draw as bars.
 - `6-keys-japanese-preedit.log` — the window's stderr for the Japanese probe: the composition
   `n に にh にほ にほn にほん`, then no commit on the first Enter or a Right arrow, then `preedit ""`
-  on Esc — the winit 0.30.13 commit-key defect.
+  on Esc. Not a winit defect, as first thought: Space had opened Kotoeri's candidate list, and
+  the first Enter only closes it. A plain `NSTextView` does the same; without the Space one
+  Enter commits (vendor/winit/VENDORED.md).
 - `stats-*.json` — step 4's `MSTREAM_WINDOW_STATS` reports, release build, ~25 s each against
   demo.mstream.io: idle, the Albums wall, playback on the Library screen, Now Playing, and
   Now Playing's Visualizer tab (the one 33 ms screen); `stats-wall-with-covers-debug.json` is

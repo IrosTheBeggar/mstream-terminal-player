@@ -15,7 +15,7 @@ recorded, not a surprise. Expected numbers are from a release build on an M-seri
 
 5. macOS, dead keys: switch to US International or ABC Extended, type Option+e then e, and ` then a, in the search box. Expected: é and à land as single characters, with no stray accent or duplicate.
 
-6. macOS, IME: enable Japanese Romaji and type 'nihon' then Space and Enter in the search box, then repeat with Pinyin 'zhongguo'. Expected: the committed 日本 / 中国 land once, and Enter commits without also submitting twice. Note where the candidate window appears (known gap: top-left) and whether any inline preedit is visible (known gap: none).
+6. macOS, IME: enable Japanese Romaji and type 'nihon' then Space until 日本 is highlighted, then Enter in the search box, then repeat with Pinyin 'zhongguo' and Space. Expected: the committed 日本 / 中国 land once, and nothing submits twice. Kotoeri needs two Enters after a Space, the first closing its candidate list, exactly as a plain AppKit NSTextView does; 'nihon' then Enter with no Space commits on one. Note where the candidate window appears (known gap: top-left) and whether any inline preedit is visible (known gap: none).
 
 7. macOS, CJK titles in en: with an English UI, browse to a folder whose track titles contain Japanese, Chinese or Korean. Expected (known gap): these draw as boxes today. Confirm, and confirm again after any CJK-fallback fix.
 

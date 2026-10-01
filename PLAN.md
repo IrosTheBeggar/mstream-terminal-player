@@ -3001,7 +3001,7 @@ reviewers' caveats restored):
 | Rendering fidelity | partial | Every cell reaches the backend (EQUAL on both platforms); pixels judged on macOS screenshots only, no tofu in en/ja/zh. Gaps: an en locale loads no CJK face, so CJK titles draw as boxes and Korean is tofu everywhere; after a wide glyph the rest of the row shifts left (the crate shapes a row as one string and the cell after a wide glyph is empty — a cover-box corner landed two cells left in the IME scenario), a crate defect needing a patch or a workaround; the darks come out darker (below). |
 | Plain input | pass, with caveats | Driven end to end at 2× scale through the lever: Enter, Esc, Backspace, Down, Tab and Shift+Tab, digits and letters as text, Ctrl, clicks to the bottom row, wheel, drag; then at a real keyboard (the operator) and as real OS key events: every standard key, key repeat, Option chords, Cmd chords, Ctrl on a Russian layout. Unit-tested only: Home/End, Page keys, Left/Right, F-keys; 1× scale untested. |
 | Dead keys and AltGr | partial | Dead keys pass on macOS at a real keyboard; the German layout's Option chords pass as real key events. Windows AltGr untested, and confirmed from the code: a left Ctrl+Alt standing in for AltGr there falls through to the bare Latin key (German `@` becomes Ctrl+q). The Dvorak Ctrl+punctuation remap was found at the keyboard and fixed. |
-| IME | partial, one defect | Real sessions at last: Pinyin composes and Space commits `中国` (attachment flaky in two of five runs); Japanese composes and converts but the first Enter is swallowed by winit 0.30.13 and only a second Enter commits, Esc discards — an upstream defect below the GUI. Synthetic commits land as text; preedit is not drawn; the candidate window sits at the origin; unverified that IME is enabled only while a text field has focus and that Enter during a composition is not delivered twice. |
+| IME | partial | Real sessions at last: Pinyin composes and Space commits `中国` (attachment flaky in two of five runs); Japanese composes, one Enter commits without Space, and after Space the candidate list takes an Enter of its own — native Kotoeri, matched by an AppKit control. Synthetic commits land as text; preedit is not drawn; the candidate window sits at the origin; unverified that IME is enabled only while a text field has focus and that Enter during a composition is not delivered twice. |
 | Integration cost | partial | About 186 lines across 6 files at step 4 (all seams: the flag, the loop halves, `start`/`finish`, the palette pin, two visibilities), within the ~200 the criterion named; step 5 added graphics.rs (+61) and cover.rs (+10, the shared slot's hosted branch), about 257 lines across 8 files, over it. The raw stat reads +409/−213 because the loop body moved into `frame`/`input`. No room or widget file touched. |
 | Performance | pass, with caveats | Steady idle CPU equal to the terminal's; p95 under 5 ms; a warm first frame under 200 ms. Caveats: maxima 16–18 ms; a cold launch about 1 s; the visualizer tab costs 2.7–2.9× the terminal; art unmeasured in release. |
 | Footprint | pass | +1.1 MB, no new frameworks (before the art); Linux NEEDED unchanged, plus the libxkbcommon-x11 runtime load; the build and test times above are the larger cost. |
@@ -3035,8 +3035,8 @@ reviewers' minors worth carrying): the gamma fix and the colour table; an always
 fallback with collection indices, and the wide-glyph row shift patched or worked around; the
 libxkbcommon-x11 panic turned into a clean error and the dependency documented; a panic hook
 of the window's own and Cmd-Q routed through `finish`; paste; the IME candidate window at the
-caret, preedit drawn, IME gated to focused text fields, and winit carried with the #4478-class
-commit-key fix (or a newer winit) so one Enter commits a Japanese composition; held buttons cleared on `CursorLeft`
+caret, preedit drawn, IME gated to focused text fields (winit is now vendored with the #4478 Korean backport,
+untested here for want of a Korean source); held buttons cleared on `CursorLeft`
 and focus loss; `ScaleFactorChanged`; a periodic or resize-triggered full repaint for failed
 presents; playback and queue advance proven while hidden or minimised; the overlay rule's
 one-frame lag; nearest-neighbour sampling for the QR code; mipmaps or a sharper resample for
@@ -3084,15 +3084,17 @@ earlier refusal was a source outside the enabled set), and the IME rows ran the 
 from screen dumps every two seconds and the window's preedit log. **Pinyin passes**: typing
 `zhongguo` composes (`zhong guo` in the log, nothing typed into the box), Space commits `中国`
 into the search box, twice out of two runs — though in two earlier runs the input method never
-attached and the letters arrived as Latin text, so attachment is flaky. **Japanese fails on the
-commit key**: `nihon` composes (`にほん`), Space converts (`日本` in one run), and then the first
-Enter does nothing at all — no commit, no preedit change, the box stays empty for eight seconds
-and through a Right arrow — a second Enter commits the text, and Esc discards it. That is winit
-0.30.13's own macOS IME handling, the family of defects rust-windowing/winit#4478 addresses (the
-Committed-state early return in `doCommandBySelector` that swallows keys around a commit; open
-against master, backported by hand in forks, not in any 0.30 release), and it sits below the
-GUI: egui text fields would inherit it, since egui-winit rides the same events. The fix is a
-vendored winit with the backport, or a newer winit line. Also observed: with the Japanese IME
+attached and the letters arrived as Latin text, so attachment is flaky. **Japanese behaves as the system does, which the first reading
+got wrong**: `nihon` composes (`にほん`), and then what Enter does depends on whether Space was
+pressed. Without Space, one Enter commits and the next submits the search. After Space, which
+opens Kotoeri's candidate list, the first Enter only closes the list and the second commits —
+and a plain AppKit text view, built as a control and fed the same posted keys, does exactly the
+same, as does stock winit against the backported one. The first write-up called this a winit
+0.30.13 defect of the rust-windowing/winit#4478 class; it is not, and #4478 touches only the
+Korean paths. That backport is carried anyway (lane 1 of the conditions vendored winit for it):
+it fixes documented Korean losses — an ASCII key typed right after a commit, a doubled Space —
+that this Mac cannot test because no Korean source is enabled. Esc discards a composition on
+its second press, also native. Also observed: with the Japanese IME
 on and no text field focused, the digit `2` went into a full-width composition (`２`) instead
 of switching rooms — a terminal composes the same way, but it is the case for gating IME to
 focused text fields. Windows remains unrun.
