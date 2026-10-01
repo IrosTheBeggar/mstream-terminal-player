@@ -5,7 +5,7 @@ Phase 13). Written by the spike's criteria judge on 2026-09-30 from the evidence
 each item names its expected result, and the known gaps are marked as such so a failure there is
 recorded, not a surprise. Expected numbers are from a release build on an M-series Mac.
 
-1. macOS, launch: run `mstream-player gui --window --server https://demo.mstream.io` from Finder-launched Terminal and from iTerm. Expected: a titled 'mStream Player' window appears in under 1 s, drawn at 100×30, with no terminal escape garbage in the launching shell.
+1. macOS, launch: with a `--features desktop` build, run `mstream-player gui --window --server https://demo.mstream.io` from Finder-launched Terminal and from iTerm. Expected: a titled 'mStream Player' window appears in under 1 s, drawn at 100×30, with no terminal escape garbage in the launching shell.
 
 2. macOS, keys: at a real keyboard, press 1–9, then Down/Up, Left/Right, Home/End, PageUp/PageDown, Tab and Shift+Tab, Enter, Esc, Backspace, Space and T. Expected: each behaves exactly as in `gui` in a terminal (same room, same focus movement; Shift+Tab moves focus backwards).
 
@@ -31,7 +31,7 @@ recorded, not a surprise. Expected numbers are from a release build on an M-seri
 
 13. macOS, occlusion: minimise the window and restore it, then switch Spaces and back. Expected: a full, correct repaint with no blank rows (the Occluded(false) repaint workaround).
 
-14. Windows, launch: on Windows 11 at 100% and at 150% scaling, run `mstream-player.exe gui --window --server https://demo.mstream.io` from PowerShell and from Windows Terminal. Expected: the window opens in under 1 s on DX12 (or Vulkan), the text is crisp at both scales, and no console escape garbage appears.
+14. Windows, launch: on Windows 11 at 100% and at 150% scaling, with a `--features desktop` build, run `mstream-player.exe gui --window --server https://demo.mstream.io` from PowerShell and from Windows Terminal. Expected: the window opens in under 1 s on DX12 (or Vulkan), the text is crisp at both scales, and no console escape garbage appears.
 
 15. Windows, keys: repeat the key walk: digits, arrows, Home/End, PgUp/PgDn, Tab/Shift+Tab, Esc, Enter, Backspace, and Ctrl+C to quit. Expected: the same behaviour as the terminal GUI, and Ctrl+C quits cleanly with the config written.
 

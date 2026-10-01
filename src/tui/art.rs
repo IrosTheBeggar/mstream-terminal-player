@@ -49,6 +49,8 @@ pub struct Art {
     /// be blended (a QR code's modules), where a photograph wants
     /// smoothing. Only a renderer that scales the picture itself reads it
     /// (the GUI's window); a terminal's protocols scale as they do.
+    // Set in every build (setup's QR code), read only by the window.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
     crisp: bool,
 }
 
@@ -103,6 +105,9 @@ impl Art {
 
     /// Whether the picture's pixels should stay squares when it is drawn
     /// scaled — nearest-neighbour, not blended.
+    // Read only by the window's sampler; the terminal flavour sets the flag
+    // (setup's QR code) and never asks.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub fn is_crisp(&self) -> bool {
         self.crisp
     }

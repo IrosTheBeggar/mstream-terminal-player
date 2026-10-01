@@ -3238,7 +3238,8 @@ can land between the two draws). Screenshots of a background window: a swiftc
 `CGWindowListCopyWindowInfo` lister for the id, then `screencapture -l <id> -x -o`; quit
 through `NSRunningApplication.terminate` for the Cmd-Q path. Every cargo call on this Mac is
 `cargo +1.98.1` (stable is 1.94.1; egui 0.36 wants 1.95). The scratch drivers do not survive
-a session; the levers and `docs/window-spike/` do.
+a session; the levers and `docs/window-spike/` do. Only a `--features desktop` build has the
+window (`cargo +1.98.1 build --features desktop`); a plain build has no `gui --window`.
 
 **Recommendation** (the judge's verdict; the framing that follows it is the author's). Go,
 with the conditions above and the flag hidden until the gate clears. The budget of going:

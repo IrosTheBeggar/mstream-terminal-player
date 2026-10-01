@@ -39,7 +39,11 @@ use std::time::{Duration, Instant};
 pub struct Choice<T> {
     pub instance: wgpu::Instance,
     pub found: Option<(wgpu::Adapter, T)>,
+    // Read only by the GUI window's startup stats; two clock reads, so the
+    // terminal build measures them too rather than splitting `choose`.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub instance_took: Duration,
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub adapter_took: Duration,
 }
 

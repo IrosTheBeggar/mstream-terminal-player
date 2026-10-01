@@ -1,5 +1,5 @@
 //! `mstream-player gui --window`: the GUI in a native window of its own —
-//! the window-mode spike.
+//! the window-mode spike. Built only with `--features desktop` (or `window`).
 //!
 //! Step 1 asked whether the GUI's cell buffer survives the trip into a
 //! window: the same `render` the terminal loop calls fills a ratatui buffer,

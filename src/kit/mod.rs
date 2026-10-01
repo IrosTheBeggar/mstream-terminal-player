@@ -262,6 +262,9 @@ impl<A: Clone> Surface<A> {
     /// The cell of the field with the keyboard this frame, if one has it:
     /// a field drawn in the topmost layer. None while a modal with no
     /// field of its own is up over a page's focused field.
+    // The GUI window places its IME box here; the frame tests read it in
+    // every build, the player only in one with the `window` feature.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub fn caret_at(&self) -> Option<Position> {
         self.caret_at
     }
@@ -276,6 +279,8 @@ impl<A: Clone> Surface<A> {
     }
 
     /// The input method's uncommitted text, or none (empty).
+    // Only the GUI window has an input method to report (and the tests).
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub fn set_composition(&mut self, text: &str) {
         if self.composition != text {
             self.composition.clear();

@@ -35,6 +35,9 @@ mod stats;
 mod torrent;
 mod torrent_meta;
 mod vizwin;
+// The GUI's own window: the desktop flavour's (`--features desktop`, or
+// `window` alone); the terminal releases are built without it.
+#[cfg(feature = "window")]
 mod window;
 
 use std::sync::mpsc::{Receiver, Sender};
@@ -3081,6 +3084,11 @@ pub fn run(
     // terminal (gui/window/): the same player, started the same way, in
     // a native window. The palette is pinned first, because the window is
     // not the terminal that launched it and nothing has resolved it yet.
+    // Only a build with the `window` feature has one; without it main
+    // passes false, and the terminal path below is the whole of `run`.
+    #[cfg(not(feature = "window"))]
+    let _ = (window, instance);
+    #[cfg(feature = "window")]
     if window {
         // A window that cannot open on this desktop says so and leaves
         // before the player starts (window/mod.rs has the one case).

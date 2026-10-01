@@ -11,6 +11,19 @@ repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
 # — audio device, threads, sockets, filesystem — either stubbed or compiled
 # out. Everything in plain [dependencies] must build for both.
 
+# One codebase, two products. The terminal releases (the plain binaries,
+# deb/rpm, Homebrew, Scoop, the install scripts, `cargo install`) build
+# with no features: the terminal player, its visualizer window included,
+# with the GUI's own window compiled out, so `gui --window` does not exist
+# there. The desktop releases build with `--features desktop`, which opens
+# the GUI in a window of its own. `window` is that window alone, for a
+# source build that wants `gui --window` without the desktop defaults that
+# `desktop` will carry; both are inert on wasm32, where no gui exists.
+[features]
+default = []
+window = ["dep:ratatui-wgpu", "dep:memmap2", "dep:arboard"]
+desktop = ["window"]
+
 [dependencies]
 # i18n: compile-time-embedded YAML locales (locales/*.yml), t!() with
 # interpolation and per-call locale. Every target: the shared App's Auto
@@ -185,14 +198,15 @@ skrifa = { version = "0.44", default-features = false, features = ["std"] }
 # leaves out `ahash`, which would bring ahash's compile-time-rng
 # (const-random, tiny-keccak) and flip the ahash egui shares onto it, and
 # `png`, which decodes colour bitmap glyphs from emoji faces the window is
-# never handed.
-ratatui-wgpu = { version = "0.6", default-features = false }
+# never handed. Optional: only the `window` feature builds it.
+ratatui-wgpu = { version = "0.6", default-features = false, optional = true }
 # The window's system fallback faces (CJK, symbols) are mapped rather than
 # read: the backend wants 'static bytes, and a leaked map gives them without
 # tens of megabytes of collections landing in the heap; only the pages a
 # glyph lookup touches become resident. Already in the tree under
-# smithay-client-toolkit; named here for the window's direct use.
-memmap2 = "0.9"
+# smithay-client-toolkit; named here for the window's direct use, and
+# optional with it (the `window` feature).
+memmap2 = { version = "0.9", optional = true }
 # The window's paste (Cmd+V on a Mac, Ctrl+V elsewhere, into a text field):
 # the window gets no bracketed paste from a terminal, so it reads the
 # system clipboard itself. default-features = false leaves out
@@ -204,8 +218,8 @@ memmap2 = "0.9"
 # x11rb's pure-Rust X11 connection (no libX11, nothing in NEEDED). The
 # Linux gap: a Wayland session pastes only through XWayland's clipboard,
 # which the desktops keep in step with Wayland's; with no XWayland a paste
-# finds nothing and says so on stderr.
-arboard = { version = "3", default-features = false }
+# finds nothing and says so on stderr. Optional: the `window` feature.
+arboard = { version = "3", default-features = false, optional = true }
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend
@@ -276,9 +290,10 @@ codegen-units = 1
 # (--no-build --no-strip --target <triple>); nothing here compiles anything.
 # The dependency alternative below is the noble rename of libasound2 — the
 # whole point of shipping a .deb is that ALSA arrives with it.
-# libxkbcommon-x11-0 is what `gui --window` loads at run time on an X11
-# session (winit's keyboard, through xkbcommon-dl; without it the window
-# says what to install and exits 1). Recommended, not required: the
+# libxkbcommon-x11-0 is what a winit window loads at run time on an X11
+# session (winit's keyboard, through xkbcommon-dl): the visualizer's in
+# every build, the GUI's in the desktop one, which says what to install
+# and exits 1 without it. Recommended, not required: the
 # headless jukebox and the terminal faces open no window, and a server
 # install should not pull X11 libraries for one. apt installs recommends by
 # default, so a desktop gets it.
@@ -341,10 +356,14 @@ winresource = "0.1"
 # lines above stay the contract and everything else in the tree that wants
 # the same crate — egui-winit wants winit — gets the patched copy too: one
 # winit, one ratatui-wgpu. Drop an entry once a release carries its fix.
+# The table holds for both flavours (a patch cannot follow a feature): the
+# terminal build never builds ratatui-wgpu, and its winit, through the
+# visualizer window, is the vendored one as well.
 [patch.crates-io]
-# The GUI window's renderer. Vendored unchanged for now, as the place its
-# fixes land (surface format, face index, wide-glyph shaping, failed
-# presents).
+# The GUI window's renderer, and the place its fixes land: fourteen
+# recorded changes so far (surface format, face index, wide-glyph shaping,
+# failed presents, a device made before the window, its wgpu kept to the
+# feature set above, and more); VENDORED.md lists each.
 ratatui-wgpu = { path = "vendor/ratatui-wgpu" }
 # macOS IME: 0.30.13 drops an ASCII key typed right after an input
 # method's commit (Korean `한` then `;` or a digit loses that key) and

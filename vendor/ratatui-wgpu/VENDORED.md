@@ -13,9 +13,9 @@ The GUI's own window (`src/gui/window/`) draws through this backend, and it need
 collection, a font id that does not read the whole font, failed presents (and how loudly they
 are logged), fallback glyphs that fit their cells, a wide glyph narrowed without shifting the
 row, a public offscreen path for tests, the build's stage timings, a device made before
-the window and the adapter in use. They land here, one change
-at a time, each recorded below, until an upstream release carries them and the patch entry can
-go.
+the window and the adapter in use, and a wgpu that keeps to the player's feature set. They
+land here, one change at a time, each recorded below, until an upstream release carries them
+and the patch entry can go.
 
 ## What differs from 0.6.0
 
@@ -169,6 +169,14 @@ go.
     cannot present to the surface, and the build then requests another. The player prints
     the name and backend once the backend is built (`src/gui/window/mod.rs`), the one line a
     report from another machine needs. One `get_info` per build.
+14. **wgpu without its default features** (`Cargo.toml`). The published manifest takes
+    `wgpu = "30.0.0"` with its defaults, which turn on `webgpu` (the browser backend) and,
+    through it, naga's `wgsl-out`: exactly what the player's own `default-features = false`
+    on wgpu keeps out, and features are additive, so the window brought them back for the
+    whole build. It now asks for `std` and `wgsl` only (`include_wgsl!` needs `wgsl`); the
+    backends (Metal, DX12, Vulkan, GLES) come from the player's line, as before. Why: the
+    desktop build's wgpu is then the terminal build's, feature for feature (`cargo tree -e
+    features -i wgpu`), and no browser backend is compiled into a native binary.
 
 ### Tests
 

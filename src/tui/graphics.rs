@@ -25,7 +25,10 @@
 //! the word "image", so a halfblocks-only answer is treated as a no.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Graphics, PictureHost};
+pub use native::Graphics;
+// The GUI window's cover renderer is the one host (gui/window/covers.rs).
+#[cfg(all(not(target_arch = "wasm32"), feature = "window"))]
+pub use native::PictureHost;
 #[cfg(target_arch = "wasm32")]
 pub use stub::Graphics;
 
@@ -323,6 +326,7 @@ mod native {
         /// A `Graphics` whose every cover goes to `host`, which draws it
         /// beside the cells — the GUI window's. No terminal is asked
         /// anything: the window is not one.
+        #[cfg(feature = "window")]
         pub fn hosted(host: std::sync::Arc<dyn PictureHost>) -> Graphics {
             Graphics { host: Some(host), ..Graphics::disabled() }
         }

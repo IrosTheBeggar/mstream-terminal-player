@@ -3,6 +3,7 @@
 What PLAN.md's Phase 13 cites, kept beside it because the session scratchpad that produced it
 does not persist. Screenshots are the real window on the dev Mac (Retina, scale 2), downscaled
 to 1000 px wide; the text under each name says which step and scenario produced it.
+The window is in `--features desktop` builds only (`cargo build --features desktop`).
 
 - `1-render-ja.png` — step 1: the demo Library screen in Japanese, Hack plus Hiragino, no tofu.
 - `2-live-files.png` — step 2: the real workers in the window, the Files room listing

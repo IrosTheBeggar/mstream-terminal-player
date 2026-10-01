@@ -97,6 +97,8 @@ const MODERN: u8 = 2;
 /// CP437 stand-ins (PR #41's Windows report: `[>]`, `repeat` boxes, a
 /// placeholder visualizer tab). Only the window path calls this, beside
 /// [`pin_truecolor`], before anything draws; the frame tests use it too.
+// Without the `window` feature only the frame tests call it.
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
 pub(crate) fn pin_modern_glyphs() {
     GLYPHS.store(MODERN, Ordering::Relaxed);
 }
@@ -243,6 +245,7 @@ pub fn th() -> &'static Theme {
 /// the environment `tier` reads describes that terminal, not the window.
 /// Only the window path calls this, before anything has asked [`th`]; a
 /// palette already resolved stays as it is.
+#[cfg(feature = "window")]
 pub(crate) fn pin_truecolor() {
     let _ = THEME.get_or_init(|| palette(Tier::Truecolor));
 }

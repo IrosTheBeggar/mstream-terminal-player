@@ -351,7 +351,10 @@ struct GuiArgs {
     /// The spike's own window: the GUI in a native window through
     /// ratatui-wgpu instead of this terminal (gui/window/) — the real
     /// player, workers and all, with the window's keys, pointer, wheel and
-    /// IME translated into the GUI's own events.
+    /// IME translated into the GUI's own events. Only in a build with the
+    /// `window` feature (the desktop releases): the terminal releases'
+    /// CLI is v0.9.0's, where `gui --window` is a usage error.
+    #[cfg(feature = "window")]
     #[arg(long, hide = true)]
     window: bool,
 }
@@ -500,13 +503,18 @@ fn main() {
             std::process::exit(code);
         }
         (Some(Command::Gui(args)), _) => {
+            // The flag exists only where the window does (GuiArgs::window).
+            #[cfg(feature = "window")]
+            let window = args.window;
+            #[cfg(not(feature = "window"))]
+            let window = false;
             let code = gui::run(
                 args.conn.server,
                 args.conn.token,
                 args.torrent,
                 args.bundled_server,
                 control.map(|(port, token)| gui::control::Face { port, token }),
-                args.window,
+                window,
                 // The window takes the lock to drop at its own teardown
                 // (gui::run says why); the terminal leaves it for here.
                 &mut instance,
@@ -618,5 +626,35 @@ mod tests {
         assert_eq!(crossfade_seconds("0").unwrap(), 0.0, "off is a legal ask");
         assert_eq!(crossfade_seconds("4.5").unwrap(), 4.5);
         assert!(crossfade_seconds("30").is_ok(), "the boundary is inclusive");
+    }
+
+    /// The two flavours' CLIs (Cargo.toml's [features]): the terminal
+    /// releases have no `gui --window`, so asking for one is clap's usage
+    /// error, as on v0.9.0; a build with the window parses it.
+    #[test]
+    fn gui_window_exists_only_where_the_window_does() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+        let parsed = Cli::try_parse_from(["mstream-player", "gui", "--window"]);
+        #[cfg(not(feature = "window"))]
+        {
+            let err = parsed.err().expect("the terminal flavour has no --window");
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+            assert_eq!(err.exit_code(), 2);
+        }
+        #[cfg(feature = "window")]
+        {
+            let Some(Command::Gui(args)) = parsed.expect("the window flavour parses it").command
+            else {
+                panic!("`gui --window` is the gui command");
+            };
+            assert!(args.window);
+            let Some(Command::Gui(args)) =
+                Cli::try_parse_from(["mstream-player", "gui"]).unwrap().command
+            else {
+                panic!("`gui` is the gui command");
+            };
+            assert!(!args.window, "the terminal is still the default face");
+        }
     }
 }
