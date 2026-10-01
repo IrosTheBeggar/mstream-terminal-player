@@ -55,7 +55,20 @@ pub(crate) struct Segment {
 pub(crate) struct Firmware {
     pub version: String,
     pub origin: String,
+    pub kind: Origin,
     pub segments: Vec<Segment>,
+}
+
+/// Where an image came from, as the one word the page's header puts
+/// beside the version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// A release, downloaded now.
+    Release,
+    /// A release, from the copy kept earlier.
+    Cached,
+    /// A file, or a build directory.
+    File,
 }
 
 impl Firmware {
@@ -190,6 +203,7 @@ fn local(path: &Path) -> Result<Firmware, DeviceError> {
     Ok(Firmware {
         version: desc.version,
         origin: t!("dev.origin_file", path = shown).to_string(),
+        kind: Origin::File,
         segments: vec![segment(layout, bytes)],
     })
 }
@@ -269,6 +283,7 @@ fn release(
         return Ok(Firmware {
             version: desc.version,
             origin: t!("dev.origin_cached", tag = tag).to_string(),
+            kind: Origin::Cached,
             segments: vec![segment(layout, bytes)],
         });
     }
@@ -290,6 +305,7 @@ fn release(
     Ok(Firmware {
         version: desc.version,
         origin: t!("dev.origin_release", tag = tag).to_string(),
+        kind: Origin::Release,
         segments: vec![segment(layout, bytes)],
     })
 }

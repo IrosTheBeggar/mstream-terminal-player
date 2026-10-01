@@ -25,7 +25,7 @@ use super::ports::{self, Candidate};
 pub(crate) const SYNC_BAUD: u32 = 115_200;
 pub(crate) const BAUDS: [u32; 3] = [921_600, 460_800, 115_200];
 /// How long to listen for the firmware's first line after the restart.
-const BOOT_LISTEN: Duration = Duration::from_secs(6);
+pub(crate) const BOOT_LISTEN: Duration = Duration::from_secs(6);
 /// The firmware's first serial line starts with its name (main.cpp).
 const BOOT_LINE_START: &str = "mstream-mp3-player";
 
@@ -60,6 +60,9 @@ impl DeviceInfo {
 pub(crate) enum Report {
     /// The written share of all the bytes, in whole percent.
     Percent(u8),
+    /// A segment's write begins: where, and in how many chunks espflash
+    /// will send it (the log's line; the percent counts bytes).
+    Chunks { addr: u32, chunks: usize },
     /// Written; the board is computing the checksum.
     Verifying,
 }
@@ -81,6 +84,11 @@ pub(crate) trait Link {
 
 pub(crate) trait Engine {
     fn candidates(&self) -> Result<Vec<Candidate>, DeviceError>;
+    /// The serial ports that are NOT a Core2's bridge, by name — what the
+    /// page lists when it finds no board.
+    fn others(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Reach the board's bootloader on `candidate`, and raise the link to
     /// `baud` for the writes.
     fn open(&self, candidate: &Candidate, baud: u32) -> Result<Box<dyn Link>, DeviceError>;
@@ -102,6 +110,10 @@ pub(crate) struct Esp;
 impl Engine for Esp {
     fn candidates(&self) -> Result<Vec<Candidate>, DeviceError> {
         ports::candidates()
+    }
+
+    fn others(&self) -> Vec<String> {
+        ports::others()
     }
 
     fn open(&self, candidate: &Candidate, baud: u32) -> Result<Box<dyn Link>, DeviceError> {
@@ -240,9 +252,10 @@ impl<'a> Percent<'a> {
 }
 
 impl ProgressCallbacks for Percent<'_> {
-    fn init(&mut self, _addr: u32, chunks: usize) {
+    fn init(&mut self, addr: u32, chunks: usize) {
         self.chunks = chunks.max(1);
         self.written = true;
+        (self.report)(Report::Chunks { addr, chunks });
     }
 
     fn update(&mut self, current: usize) {
@@ -419,6 +432,15 @@ pub(crate) mod fake {
             })
         }
 
+        /// A desk with no Core2 still has a port on it — the page's
+        /// "ports seen" line has something to say in the e2e leg.
+        fn others(&self) -> Vec<String> {
+            match self.spec {
+                Spec::NoDevice => vec!["FAKECOM1".to_string()],
+                _ => Vec::new(),
+            }
+        }
+
         fn open(&self, candidate: &Candidate, baud: u32) -> Result<Box<dyn Link>, DeviceError> {
             match self.spec {
                 Spec::Busy => {
@@ -551,8 +573,15 @@ mod tests {
         }
         assert_eq!(
             seen,
-            [Report::Percent(12), Report::Verifying, Report::Percent(50), Report::Percent(100)],
-            "one report per changed percent, across segments, in bytes"
+            [
+                Report::Chunks { addr: 0, chunks: 4 },
+                Report::Percent(12),
+                Report::Verifying,
+                Report::Chunks { addr: 0x10000, chunks: 3 },
+                Report::Percent(50),
+                Report::Percent(100),
+            ],
+            "one report per changed percent, across segments, in bytes; each segment's chunks once"
         );
         // The first segment skipped (no init), the second written whole.
         let mut seen = Vec::new();
@@ -566,7 +595,11 @@ mod tests {
             p.finish(false);
             assert!(p.written);
         }
-        assert_eq!(seen, [Report::Percent(100)], "the skipped segment counts as done");
+        assert_eq!(
+            seen,
+            [Report::Chunks { addr: 0x10000, chunks: 2 }, Report::Percent(100)],
+            "the skipped segment counts as done"
+        );
     }
 
     #[test]

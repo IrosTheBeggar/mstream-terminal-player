@@ -10,7 +10,8 @@
 //! reads what it is, [`engine`] talks to the board (espflash as a library,
 //! or a fake for the tests), [`flow`] runs the whole write in a worker
 //! thread and reports each step, and [`page`] draws those reports on the
-//! admin hub's terminal session. `--yes` prints them as lines instead.
+//! admin hub's terminal session — with a step line, and a log of every
+//! report behind `l`. `--yes` prints the steps as lines instead.
 
 mod engine;
 mod firmware;
@@ -150,13 +151,16 @@ fn lines(args: FlashArgs) -> i32 {
                     }
                 }
             }
-            Event::Firmware { version, origin, bytes } => {
+            Event::Firmware { version, origin, bytes, .. } => {
                 last_pct = None;
                 println!("firmware: {version} ({origin}, {} KB)", bytes / 1024);
             }
-            Event::NoDevice => {
+            Event::NoDevice { others } => {
                 println!("{}", t!("dev.no_device_title"));
                 println!("{}", t!("dev.no_device_body"));
+                if !others.is_empty() {
+                    println!("{} {}", t!("dev.ports_seen"), others.join(", "));
+                }
                 return 1;
             }
             Event::Several(found) => {
@@ -202,6 +206,9 @@ fn lines(args: FlashArgs) -> i32 {
                 }
                 return 1;
             }
+            // The page's log lines: the line mode prints the steps, not
+            // the details (a --verbose can, later).
+            Event::Log(_) => {}
         }
     }
 }

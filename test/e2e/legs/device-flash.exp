@@ -19,10 +19,20 @@ expect {
 }
 drain 1
 send "\r"
-# The fake's write takes about a second; Done is the title that follows.
+# The fake's write takes about a second; Done is the title that follows,
+# with every step ticked.
 expect {
   "Done" {}
   timeout { puts "NO-DONE"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
+drain 1
+# l opens the run's log under the content: the toggle flips to Hide. Only
+# the cells that change reach the terminal (ratatui's diff), and " logs"
+# stays where it was — so the word that is new is all that can be matched.
+send "l"
+expect {
+  "Hide" {}
+  timeout { puts "NO-LOG"; exec kill -9 [exp_pid]; expect eof; exit 4 }
 }
 drain 1
 send "\r"

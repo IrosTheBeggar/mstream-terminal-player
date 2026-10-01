@@ -2868,10 +2868,13 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 
 ### Phase 13 — The MP3 player's flasher (`mstream-player device flash`)
 
-> **Status 2026-09-30: built, unreleased** — the page, the `--yes` line mode, `device list`,
-> the fake board and its e2e leg. The firmware's first release (v0.5.0) is still to come; until
-> it does, the pin in `src/device/firmware.rs` is empty and `--firmware` / `--release` are the
-> ways in. The mStream launcher's menu item is the next slice there.
+> **Status 2026-10-01: built, unreleased** — the page, the `--yes` line mode, `device list`,
+> the fake board and its e2e leg; then the page's UX from the design cards (mStream
+> `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time left,
+> what to do next, the port watch, and the log behind `l`. The firmware's first release
+> (v0.5.0) is still to come; until it does, the pin in `src/device/firmware.rs` is empty and
+> `--firmware` / `--release` are the ways in. The mStream launcher's menu item is the next
+> slice there.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this

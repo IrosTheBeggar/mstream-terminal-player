@@ -574,12 +574,19 @@ Core2 running its own firmware, and this is how the firmware gets onto one, over
 USB cable. The page finds the board by the USB serial chip M5Stack ships (a CH9102 or a
 CP2104), reaches its bootloader, reads what is on it — the firmware names itself and its
 version inside the image — and asks: the board and port as read, what is on it, what will go
-on it, and whether to erase the whole flash first (`e`). The default erases over anything that
-is not this firmware (a new board's demo, another project) and never over an earlier version
-of it: the settings, the paired headphones and the touch calibration live above the image and
-survive an update. Then the write, checked by checksum, and the board restarts into it; the
-page shows the first line it says. No mStream session is involved, and a write cannot be left
-halfway — Esc before it restarts the board into what it had.
+on it (the SD card is never touched), and whether to erase the whole flash first (`e`). The
+default erases over anything that is not this firmware (a new board's demo, another project)
+and never over an earlier version of it: the settings, the paired headphones and the touch
+calibration live above the image and survive an update. Then the write, checked by checksum,
+and the board restarts into it; the page shows the first line it says, and how music gets onto
+the card. A step line under the subtitle (Firmware · Board · Write · Restart) says where the
+run is, the write says how long it has left, and `l` opens the run's log under the content —
+every report with a clock, plus what the busy line never says: which baud answered, what the
+descriptor held, the segments and their chunks, the checksum. The log opens by itself when
+something fails. With no board plugged in the page watches the USB ports every two seconds
+and lists the serial ports it did see, so plugging the Core2 in is enough; with several, the
+list follows the ports. No mStream session is involved, and a write cannot be left halfway —
+Esc before it restarts the board into what it had.
 
 The firmware comes from the firmware repository's GitHub Releases: the release this player
 pins (its tag and checksum sit in `src/device/firmware.rs`, bumped with player releases),
