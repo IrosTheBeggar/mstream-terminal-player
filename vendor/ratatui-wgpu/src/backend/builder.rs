@@ -64,6 +64,7 @@ use crate::backend::build_wgpu_state;
 use crate::backend::private::Token;
 use crate::backend::wgpu_backend::WgpuBackend;
 use crate::backend::Dimensions;
+use crate::backend::HeadlessSurface;
 use crate::backend::PostProcessor;
 use crate::backend::RenderSurface;
 use crate::backend::TextBgVertexMember;
@@ -388,20 +389,24 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
         self.build_with_render_surface(surface).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn build_headless(
-        self
-    ) -> Result<WgpuBackend<'a, 'static, P, super::HeadlessSurface>> {
-        self.build_with_render_surface(super::HeadlessSurface::default())
+    /// Build a backend that draws offscreen, into an `Rgba8Unorm` texture,
+    /// with no window: for tests, which read the frame back with
+    /// [`WgpuBackend::read_pixels`]. The adapter is wgpu's default for the
+    /// instance (see [`Builder::with_instance`]); this fails where there is
+    /// none.
+    pub async fn build_headless(self) -> Result<WgpuBackend<'a, 'static, P, HeadlessSurface>> {
+        self.build_with_render_surface(HeadlessSurface::default())
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn build_headless_with_format(
+    /// [`Builder::build_headless`] with a chosen texture format — an sRGB
+    /// one, say, to see what a window whose surface is sRGB would show. See
+    /// [`HeadlessSurface::new`] for the formats it takes.
+    pub async fn build_headless_with_format(
         self,
         format: TextureFormat,
-    ) -> Result<WgpuBackend<'a, 'static, P, super::HeadlessSurface>> {
-        self.build_with_render_surface(super::HeadlessSurface::new(format))
+    ) -> Result<WgpuBackend<'a, 'static, P, HeadlessSurface>> {
+        self.build_with_render_surface(HeadlessSurface::new(format))
             .await
     }
 
@@ -447,6 +452,28 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
                 Token,
             )
             .ok_or(Error::SurfaceConfigurationRequestFailed)?;
+
+        // wgpu lists a surface's sRGB formats first, so its default is one,
+        // and the colours this backend is given are already sRGB-encoded
+        // bytes: on an sRGB surface the post processor has to decode them for
+        // the store to encode them again. The linear twin of the same format,
+        // where the surface offers it, lets the bytes through untouched.
+        // Only a listed format: configuring one the surface lacks panics.
+        if let Some(wgpu_surface) = surface.wgpu_surface(Token) {
+            let linear = surface_config.format.remove_srgb_suffix();
+            if linear != surface_config.format
+                && wgpu_surface
+                    .get_capabilities(&adapter)
+                    .formats
+                    .contains(&linear)
+            {
+                info!(
+                    "surface format {:?} for the default {:?}",
+                    linear, surface_config.format
+                );
+                surface_config.format = linear;
+            }
+        }
 
         if let Some(mode) = self.present_mode {
             surface_config.present_mode = mode;
@@ -563,6 +590,7 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
             surface,
             _surface: PhantomData,
             surface_config,
+            present_owed: false,
             device,
             queue,
             plan_cache: PlanCache::new(self.fonts.count().max(2)),

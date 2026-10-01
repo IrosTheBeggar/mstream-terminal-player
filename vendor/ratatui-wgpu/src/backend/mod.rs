@@ -5,24 +5,20 @@ use std::num::NonZeroU32;
 
 use wgpu::Adapter;
 use wgpu::BindGroup;
-#[cfg(test)]
 use wgpu::Buffer;
-#[cfg(test)]
 use wgpu::BufferDescriptor;
-#[cfg(test)]
 use wgpu::BufferUsages;
 use wgpu::CommandEncoder;
+use wgpu::CommandEncoderDescriptor;
 use wgpu::CurrentSurfaceTexture;
 use wgpu::Device;
 use wgpu::Extent3d;
 use wgpu::Queue;
 use wgpu::RenderPipeline;
 use wgpu::Surface;
-#[cfg(test)]
 use wgpu::SurfaceColorSpace;
 use wgpu::SurfaceConfiguration;
 use wgpu::SurfaceTexture;
-#[cfg(test)]
 use wgpu::Texture;
 use wgpu::TextureDescriptor;
 use wgpu::TextureDimension;
@@ -114,9 +110,7 @@ pub enum Viewport {
 mod private {
     use wgpu::Surface;
 
-    #[cfg(test)]
     use crate::backend::HeadlessSurface;
-    #[cfg(test)]
     use crate::backend::HeadlessTarget;
     use crate::backend::RenderTarget;
 
@@ -126,11 +120,7 @@ mod private {
 
     impl Sealed for Surface<'_> {}
     impl Sealed for RenderTarget {}
-
-    #[cfg(test)]
     impl Sealed for HeadlessTarget {}
-
-    #[cfg(test)]
     impl Sealed for HeadlessSurface {}
 }
 
@@ -167,7 +157,6 @@ impl RenderTexture for RenderTarget {
     }
 }
 
-#[cfg(test)]
 impl RenderTexture for HeadlessTarget {
     fn get_view(
         &self,
@@ -266,24 +255,31 @@ impl<'s> RenderSurface<'s> for Surface<'s> {
     }
 }
 
-#[cfg(test)]
-pub(crate) struct HeadlessTarget {
+/// The target a [`HeadlessSurface`] hands the post processor each frame.
+pub struct HeadlessTarget {
     view: TextureView,
 }
 
-#[cfg(test)]
-pub(crate) struct HeadlessSurface {
+/// An offscreen surface: frames render into a texture that
+/// [`WgpuBackend::read_pixels`](crate::WgpuBackend::read_pixels) reads back,
+/// so a backend can be drawn and checked without a window. Build one with
+/// [`Builder::build_headless`](crate::Builder::build_headless).
+pub struct HeadlessSurface {
     pub(crate) texture: Option<Texture>,
     pub(crate) buffer: Option<Buffer>,
+    /// Bytes per row of `buffer`: a row of pixels padded up to the
+    /// alignment a texture-to-buffer copy demands.
     pub(crate) buffer_width: u32,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) format: TextureFormat,
 }
 
-#[cfg(test)]
 impl HeadlessSurface {
-    fn new(format: TextureFormat) -> Self {
+    /// A surface of the given format. It must be a four-byte colour format
+    /// that can be rendered to and copied from: the `Rgba8` and `Bgra8`
+    /// families, linear or sRGB.
+    pub fn new(format: TextureFormat) -> Self {
         Self {
             format,
             ..Default::default()
@@ -291,7 +287,6 @@ impl HeadlessSurface {
     }
 }
 
-#[cfg(test)]
 impl Default for HeadlessSurface {
     fn default() -> Self {
         Self {
@@ -305,7 +300,6 @@ impl Default for HeadlessSurface {
     }
 }
 
-#[cfg(test)]
 impl RenderSurface<'static> for HeadlessSurface {
     type Target = HeadlessTarget;
 
@@ -357,7 +351,10 @@ impl RenderSurface<'static> for HeadlessSurface {
             view_formats: &[],
         }));
 
-        self.buffer_width = config.width * 4;
+        // A copy into a buffer writes rows at a multiple of 256 bytes; upstream
+        // used the bare row, which only worked for widths that are a multiple
+        // of 64 pixels.
+        self.buffer_width = (config.width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         self.buffer = Some(device.create_buffer(&BufferDescriptor {
             label: None,
             size: (self.buffer_width * config.height) as u64,
@@ -375,6 +372,72 @@ impl RenderSurface<'static> for HeadlessSurface {
         self.texture.as_ref().map(|t| HeadlessTarget {
             view: t.create_view(&TextureViewDescriptor::default()),
         })
+    }
+}
+
+impl<P: PostProcessor> crate::WgpuBackend<'_, 'static, P, HeadlessSurface> {
+    /// The last presented frame as RGBA bytes, four per pixel, row by row
+    /// from the top left: the bytes the surface holds, so an sRGB surface
+    /// reads back encoded values, as a screen would show them. `None` when
+    /// nothing has been configured or the copy could not be mapped.
+    pub fn read_pixels(&self) -> Option<Vec<u8>> {
+        let surface = &self.surface;
+        let texture = surface.texture.as_ref()?;
+        let buffer = surface.buffer.as_ref()?;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(surface.buffer_width),
+                    rows_per_image: Some(surface.height),
+                },
+            },
+            Extent3d {
+                width: surface.width,
+                height: surface.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (send, recv) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |mapped| {
+            let _ = send.send(mapped);
+        });
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok()?;
+        recv.recv().ok()?.ok()?;
+
+        let row_bytes = surface.width as usize * 4;
+        let mut pixels = Vec::with_capacity(row_bytes * surface.height as usize);
+        {
+            let mapped = slice.get_mapped_range().ok()?;
+            for row in mapped.chunks(surface.buffer_width as usize) {
+                pixels.extend_from_slice(&row[..row_bytes]);
+            }
+        }
+        buffer.unmap();
+
+        if matches!(
+            surface.format,
+            TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb
+        ) {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+        Some(pixels)
     }
 }
 

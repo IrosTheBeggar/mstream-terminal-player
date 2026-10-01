@@ -187,6 +187,12 @@ skrifa = { version = "0.44", default-features = false, features = ["std"] }
 # `png`, which decodes colour bitmap glyphs from emoji faces the window is
 # never handed.
 ratatui-wgpu = { version = "0.6", default-features = false }
+# The window's system fallback faces (CJK, symbols) are mapped rather than
+# read: the backend wants 'static bytes, and a leaked map gives them without
+# tens of megabytes of collections landing in the heap; only the pages a
+# glyph lookup touches become resident. Already in the tree under
+# smithay-client-toolkit; named here for the window's direct use.
+memmap2 = "0.9"
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend

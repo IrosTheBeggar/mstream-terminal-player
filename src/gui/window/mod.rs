@@ -33,6 +33,8 @@
 
 mod covers;
 mod input;
+#[cfg(test)]
+mod render_tests;
 mod script;
 mod stats;
 
@@ -46,7 +48,7 @@ use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::Event as TermEvent;
 use ratatui::style::Color;
-use ratatui_wgpu::{Builder, Dimensions, Font, WgpuBackend};
+use ratatui_wgpu::{Builder, ColorTable, Dimensions, Font, WgpuBackend};
 use unicode_width::UnicodeWidthStr;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -63,7 +65,6 @@ use stats::{Counted, Stats};
 use super::{Channels, Ctx, Flow, Gui, Host, finish, frame, input, render};
 use crate::kit::theme::th;
 use crate::runtime::block_on;
-use crate::viz_window::overlay::cjk_faces;
 
 const TITLE: &str = "mStream Player";
 /// The text size in points; the backend is handed pixels, so this is
@@ -90,7 +91,8 @@ type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static, CoverPost>>
 /// already brought up; the exit code is the terminal's (0, or 1 when a
 /// frame failed), or 1 when there is no window to open.
 pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
-    let started = Instant::now();
+    // First, so the stats' clock (when the lever is set) starts at entry.
+    let stats = Stats::from_env();
     // No panic hook of the terminal's kind: `tui::install_panic_hook` hands
     // mouse capture back and pops a window title the player pushed — with
     // no terminal claimed, the first is noise on whatever launched the
@@ -135,7 +137,7 @@ pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
         script_until: None,
         quit_flushed: false,
         min_surface: PhysicalSize::new(1, 1),
-        stats: Stats::from_env(started),
+        stats,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("gui --window: {e}");
@@ -237,14 +239,15 @@ impl App {
             height: NonZeroU32::new(size.height.max(1)).expect("at least one"),
         };
         // Hack first for everything it has, then a system face for the few
-        // symbols it lacks, then the borrowed CJK face. `with_regular_fonts`
+        // symbols it lacks, then the borrowed faces for kana, hanzi and
+        // hangul, whatever the language. `with_regular_fonts`
         // keeps that order, where `with_fonts` would sort by width and could
         // put a borrowed face's own Latin in front of Hack's. Hack is also
         // the builder's last resort, which is what bold and italic cells
         // fall back to with faked styles.
         let mut faces = vec![hack()?];
         faces.extend(symbol_fallback());
-        faces.extend(cjk_fallback(&rust_i18n::locale()));
+        faces.extend(script_fallbacks(&rust_i18n::locale()));
         // The pinned truecolour palette always has a ground; black is only
         // the answer to a palette that somehow resolved without one.
         let theme = th();
@@ -254,10 +257,13 @@ impl App {
             .with_width_and_height(dimensions)
             .with_bg_color(theme.ground.unwrap_or(Color::Black))
             .with_fg_color(theme.text)
+            .with_color_table(named_colours(theme))
             .with_instance(instance);
         let backend = block_on(builder.build_with_target(window.clone()))?
             .map_err(|e| format!("the window has nothing to draw with: {e}"))?;
-        let mut terminal = Terminal::new(Counted::new(backend)).map_err(|e| e.to_string())?;
+        let timed = self.stats.is_some();
+        let mut terminal =
+            Terminal::new(Counted::new(backend, timed)).map_err(|e| e.to_string())?;
 
         // The cell's width comes back from the backend, not from
         // arithmetic here: it is the narrowest of the faces it was given,
@@ -330,16 +336,17 @@ impl App {
         }
     }
 
-    /// The loop's frame half, and the time the next one is wanted by.
+    /// The loop's frame half, and the time the next one is wanted by. The
+    /// clock is read only for the stats lever.
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        let started = Instant::now();
+        let started = self.stats.is_some().then(Instant::now);
         self.redraw_inner(event_loop, started);
-        if let Some(stats) = self.stats.as_mut() {
+        if let (Some(stats), Some(started)) = (self.stats.as_mut(), started) {
             stats.redraw(started.elapsed());
         }
     }
 
-    fn redraw_inner(&mut self, event_loop: &ActiveEventLoop, started: Instant) {
+    fn redraw_inner(&mut self, event_loop: &ActiveEventLoop, started: Option<Instant>) {
         self.asked = None;
         let (Some(window), Some(terminal)) = (self.window.as_deref(), self.terminal.as_mut())
         else {
@@ -348,7 +355,7 @@ impl App {
         self.board.begin_frame();
         let framed = frame(terminal, &mut self.gui, &mut self.ctx, &mut WindowHost(window));
         let (cells, flush) = terminal.backend_mut().take_cells();
-        if let Some(stats) = self.stats.as_mut() {
+        if let (Some(stats), Some(started)) = (self.stats.as_mut(), started) {
             stats.frame(cells, flush, started.elapsed());
         }
         match framed {
@@ -662,6 +669,43 @@ impl ApplicationHandler for App {
     }
 }
 
+/// What the sixteen named ANSI colours draw as. A terminal answers a named
+/// colour from its own scheme; the window has none, and ratatui-wgpu's
+/// default table is the SVG keywords (Blue is #0000ff, Gray #808080), which
+/// is no terminal's. The names the kit's ANSI tier gives a role (theme.rs:
+/// LightBlue the accent, Cyan the bright, DarkGray the dim, Yellow the
+/// gold, Green ok, Red danger, Black on-accent) take that role's colour from
+/// the palette the window runs on, so a named colour in the visualizer (its
+/// default theme is Cyan, DarkGray and Blue) or in the kit matches the
+/// colours around it. The rest, and any role the palette gives no RGB, are
+/// VS Code's integrated-terminal defaults for a dark theme
+/// (`terminal.ansi*`): a standard terminal palette, legible on a dark
+/// ground.
+fn named_colours(theme: &crate::kit::theme::Theme) -> ColorTable {
+    let role = |colour: Color, standard: [u8; 3]| match colour {
+        Color::Rgb(r, g, b) => [r, g, b],
+        _ => standard,
+    };
+    ColorTable {
+        BLACK: role(theme.on_accent, [0x00, 0x00, 0x00]),
+        RED: role(theme.danger, [0xcd, 0x31, 0x31]),
+        GREEN: role(theme.ok, [0x0d, 0xbc, 0x79]),
+        YELLOW: role(theme.gold, [0xe5, 0xe5, 0x10]),
+        BLUE: [0x24, 0x72, 0xc8],
+        MAGENTA: [0xbc, 0x3f, 0xbc],
+        CYAN: role(theme.bright, [0x11, 0xa8, 0xcd]),
+        GRAY: [0xe5, 0xe5, 0xe5],
+        DARKGRAY: role(theme.dim, [0x66, 0x66, 0x66]),
+        LIGHTRED: [0xf1, 0x4c, 0x4c],
+        LIGHTGREEN: [0x23, 0xd1, 0x8b],
+        LIGHTYELLOW: [0xf5, 0xf5, 0x43],
+        LIGHTBLUE: role(theme.accent, [0x3b, 0x8e, 0xea]),
+        LIGHTMAGENTA: [0xd6, 0x70, 0xd6],
+        LIGHTCYAN: [0x29, 0xb8, 0xdb],
+        WHITE: [0xe5, 0xe5, 0xe5],
+    }
+}
+
 /// egui's monospace face, already in the binary for the visualizer's
 /// controls: the window's terminal font.
 fn hack() -> Result<Font<'static>, String> {
@@ -679,7 +723,7 @@ const BEYOND_HACK: &str = "★☆✓";
 /// Where each platform keeps a face with [`BEYOND_HACK`]'s glyphs, best
 /// first. A monospace face leads where there is one, so the stars keep a
 /// terminal's shapes: Menlo and DejaVu Sans Mono are Hack's own ancestors.
-/// Every path is face 0, the only face ratatui-wgpu opens.
+/// Every path is read at face 0, which in each of these is the regular one.
 fn symbol_faces() -> Vec<PathBuf> {
     let paths: &[&str] = if cfg!(target_os = "macos") {
         &[
@@ -700,14 +744,39 @@ fn symbol_faces() -> Vec<PathBuf> {
             "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
         ]
     };
-    // Windows' font folder is under wherever Windows is.
-    let windows = std::env::var_os("WINDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
-    paths
-        .iter()
-        .map(|path| if cfg!(windows) { windows.join(path) } else { PathBuf::from(path) })
-        .collect()
+    paths.iter().map(|path| system_path(path)).collect()
+}
+
+/// A font path as the platform spells it: Windows' font folder is under
+/// wherever Windows is, every other list is absolute already.
+fn system_path(path: &str) -> PathBuf {
+    if cfg!(windows) {
+        std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("C:\\Windows"))
+            .join(path)
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+/// A system font file, mapped for the rest of the process. The backend
+/// borrows its faces for as long as it lives, and it lives as long as the
+/// process, so the map is leaked to say so. Mapped rather than read: the
+/// CJK collections run to tens of megabytes (Apple SD Gothic Neo is 55),
+/// and a read would put all of it on the heap where a map makes resident
+/// only the pages a glyph lookup touches, and those are clean pages the
+/// system can drop and fetch again.
+fn map_font(path: &Path) -> Option<&'static [u8]> {
+    let file = std::fs::File::open(path).ok()?;
+    // SAFETY: the map is read-only and the file is a system font, which
+    // nothing rewrites while the player runs. Were one replaced in place,
+    // the map would show the new bytes (or fault on a truncation): the
+    // exposure every program accepts that maps its fonts, which through the
+    // platform's own font stack is every program.
+    let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let map: &'static memmap2::Mmap = Box::leak(Box::new(map));
+    Some(&map[..])
 }
 
 /// The glyphs of `wanted` that a face has no glyph for, read the way the
@@ -721,12 +790,14 @@ fn missing_from(bytes: &[u8], wanted: &str) -> Option<String> {
 
 /// The system face that fills in [`BEYOND_HACK`], for every language: the
 /// first on the platform's list that has all of it, or failing that the
-/// one that has the most, so as few cells as possible are boxes.
+/// one that has the most, so as few cells as possible are boxes. The maps
+/// of the faces passed over are leaked too; they are a handful of small
+/// files' address space, nothing resident past the character map read.
 fn symbol_fallback() -> Option<Font<'static>> {
-    let mut best: Option<(PathBuf, Vec<u8>, String)> = None;
+    let mut best: Option<(PathBuf, &'static [u8], String)> = None;
     for path in symbol_faces() {
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        let Some(missing) = missing_from(&bytes, BEYOND_HACK) else { continue };
+        let Some(bytes) = map_font(&path) else { continue };
+        let Some(missing) = missing_from(bytes, BEYOND_HACK) else { continue };
         let better = best
             .as_ref()
             .is_none_or(|(_, _, fewest)| missing.chars().count() < fewest.chars().count());
@@ -742,9 +813,6 @@ fn symbol_fallback() -> Option<Font<'static>> {
         eprintln!("gui --window: no system face has {BEYOND_HACK}; they will be boxes");
         return None;
     };
-    // Leaked for the reason the CJK face is (below): the backend borrows
-    // it for as long as the process lives.
-    let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
     let font = Font::new(bytes)?;
     if missing.is_empty() {
         eprintln!("gui --window: {BEYOND_HACK} from {}", path.display());
@@ -754,34 +822,164 @@ fn symbol_fallback() -> Option<Font<'static>> {
     Some(font)
 }
 
-/// A system face for Japanese or Chinese, found where the visualizer's
-/// controls find theirs; `None` for every other language, which Hack
-/// covers. ratatui-wgpu opens the first face of a collection only, so a
-/// face deeper in one — Noto's Chinese, on Linux — is passed over for the
-/// next choice.
-fn cjk_fallback(lang: &str) -> Option<Font<'static>> {
-    for (path, index) in cjk_faces(lang) {
-        if index != 0 {
+/// The scripts Hack has nothing for, each with the system faces that draw
+/// it, best first: a file and the family to find in it. A family rather
+/// than a face index, because collections differ in order between
+/// platforms and versions (Noto CJK's is JP 0, KR 1, SC 2, TC 3 in the
+/// Debian and Arch packages; Yu Gothic UI shares YuGothR.ttc with Yu
+/// Gothic): the face is found by its name and opened at its index.
+fn script_faces() -> [(&'static str, Vec<(PathBuf, &'static str)>); 3] {
+    let list = |faces: &[(&str, &'static str)]| -> Vec<(PathBuf, &'static str)> {
+        faces.iter().map(|&(path, family)| (system_path(path), family)).collect()
+    };
+    if cfg!(target_os = "macos") {
+        // Arial Unicode last for all three: every Mac has it in
+        // Supplemental, and it has kana, hanzi and hangul alike.
+        let arial = ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "Arial Unicode MS");
+        [
+            (
+                "ja",
+                list(&[("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", "Hiragino Sans"), arial]),
+            ),
+            (
+                "zh",
+                list(&[
+                    ("/System/Library/Fonts/Hiragino Sans GB.ttc", "Hiragino Sans GB"),
+                    ("/System/Library/Fonts/STHeiti Light.ttc", "Heiti SC"),
+                    arial,
+                ]),
+            ),
+            (
+                "ko",
+                list(&[
+                    ("/System/Library/Fonts/AppleSDGothicNeo.ttc", "Apple SD Gothic Neo"),
+                    ("/System/Library/Fonts/Supplemental/AppleGothic.ttf", "AppleGothic"),
+                    arial,
+                ]),
+            ),
+        ]
+    } else if cfg!(windows) {
+        [
+            (
+                "ja",
+                list(&[
+                    ("Fonts/YuGothR.ttc", "Yu Gothic UI"),
+                    ("Fonts/meiryo.ttc", "Meiryo UI"),
+                    ("Fonts/msgothic.ttc", "MS Gothic"),
+                ]),
+            ),
+            (
+                "zh",
+                list(&[("Fonts/msyh.ttc", "Microsoft YaHei UI"), ("Fonts/simsun.ttc", "SimSun")]),
+            ),
+            ("ko", list(&[("Fonts/malgun.ttf", "Malgun Gothic"), ("Fonts/gulim.ttc", "Gulim")])),
+        ]
+    } else {
+        let noto = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc",
+        ];
+        // WenQuanYi and Droid's fallback carry hangul as well as hanzi and
+        // kana, so they stand behind every script.
+        let others = [
+            ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", "WenQuanYi Micro Hei"),
+            ("/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc", "WenQuanYi Micro Hei"),
+            ("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", "Droid Sans Fallback"),
+        ];
+        let with = |family: &'static str, extra: &[(&'static str, &'static str)]| {
+            let faces: Vec<(&str, &'static str)> = noto
+                .iter()
+                .map(|&path| (path, family))
+                .chain(extra.iter().copied())
+                .chain(others)
+                .collect();
+            list(&faces)
+        };
+        [
+            ("ja", with("Noto Sans CJK JP", &[])),
+            ("zh", with("Noto Sans CJK SC", &[])),
+            (
+                "ko",
+                with(
+                    "Noto Sans CJK KR",
+                    &[("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "NanumGothic")],
+                ),
+            ),
+        ]
+    }
+}
+
+/// The face of `family` in a font file, by index: one whose family name
+/// (the legacy or the typographic one) is `family`, the regular one when
+/// the family has several weights, else the first.
+fn face_of(bytes: &[u8], family: &str) -> Option<u32> {
+    use skrifa::MetadataProvider;
+    use skrifa::string::StringId;
+    let named = |face: &skrifa::FontRef, id: StringId, name: &str| {
+        face.localized_strings(id).any(|s| s.chars().eq(name.chars()))
+    };
+    let file = skrifa::raw::FileRef::new(bytes).ok()?;
+    let mut first = None;
+    for (index, face) in file.fonts().enumerate() {
+        let Ok(face) = face else { continue };
+        if !named(&face, StringId::FAMILY_NAME, family)
+            && !named(&face, StringId::TYPOGRAPHIC_FAMILY_NAME, family)
+        {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        // The backend borrows its faces for as long as it lives, and it
-        // lives as long as the process: the bytes are leaked to say so.
-        let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-        match Font::new(bytes) {
+        let index = index as u32;
+        if named(&face, StringId::SUBFAMILY_NAME, "Regular") {
+            return Some(index);
+        }
+        first.get_or_insert(index);
+    }
+    first
+}
+
+/// The faces for kana, hanzi and hangul, for every language: a title or an
+/// artist's name is in whatever script it was tagged in, not the one the
+/// player speaks, so an English player draws a Korean album too. The
+/// locale's own script leads, so the characters the scripts share (the
+/// Han ideographs) take its forms; then Japanese, Chinese, Korean. One
+/// face per script, the first of its list that the system has. The maps
+/// cost address space, not memory: nothing of a face is resident until a
+/// glyph from it is drawn.
+fn script_fallbacks(lang: &str) -> Vec<Font<'static>> {
+    let mut scripts = script_faces();
+    scripts.sort_by_key(|(script, _)| *script != lang);
+    let mut opened: Vec<(PathBuf, u32)> = Vec::new();
+    let mut fonts = Vec::new();
+    for (script, faces) in scripts {
+        let found = faces.into_iter().find_map(|(path, family)| {
+            let bytes = map_font(&path)?;
+            let index = face_of(bytes, family)?;
+            Some((path, index, bytes))
+        });
+        let Some((path, index, bytes)) = found else {
+            eprintln!("gui --window: no system face for {script}; its glyphs will be boxes");
+            continue;
+        };
+        // Arial Unicode (or WenQuanYi) standing in for two scripts is one
+        // face: the second copy would only be searched after the first.
+        if opened.contains(&(path.clone(), index)) {
+            eprintln!("gui --window: {script} glyphs from {} (already open)", path.display());
+            continue;
+        }
+        match Font::new_at(bytes, index) {
             Some(font) => {
-                eprintln!("gui --window: {lang} glyphs from {}", path.display());
-                return Some(font);
+                eprintln!("gui --window: {script} glyphs from {} face {index}", path.display());
+                opened.push((path, index));
+                fonts.push(font);
             }
-            None => {
-                eprintln!("gui --window: {} is not a face the backend can read", path.display())
-            }
+            None => eprintln!(
+                "gui --window: {} face {index} is not a face the backend can read",
+                path.display()
+            ),
         }
     }
-    if matches!(lang, "ja" | "zh") {
-        eprintln!("gui --window: no system face for {lang}; its glyphs will be boxes");
-    }
-    None
+    fonts
 }
 
 /// The fidelity check: what the window holds, as text, beside the same Gui
@@ -907,6 +1105,33 @@ mod tests {
         );
     }
 
+    /// The named colours a role owns come from the palette, the others from
+    /// the standard table, and none is the SVG keyword the crate defaults to.
+    #[test]
+    fn named_colours_take_the_palettes_roles() {
+        let rgb = |r, g, b| Color::Rgb(r, g, b);
+        let theme = crate::kit::theme::Theme {
+            accent: rgb(1, 0, 0),
+            bright: rgb(2, 0, 0),
+            dim: rgb(3, 0, 0),
+            gold: rgb(4, 0, 0),
+            ok: rgb(5, 0, 0),
+            danger: rgb(6, 0, 0),
+            text: rgb(7, 0, 0),
+            ground: None,
+            ground_rgb: None,
+            on_accent: Color::Black,
+        };
+        let table = named_colours(&theme);
+        assert_eq!(
+            [table.LIGHTBLUE, table.CYAN, table.DARKGRAY, table.YELLOW, table.GREEN, table.RED],
+            [[1, 0, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0], [5, 0, 0], [6, 0, 0]]
+        );
+        // A role the palette names rather than spells takes the standard.
+        assert_eq!(table.BLACK, [0, 0, 0]);
+        assert_eq!(table.BLUE, [0x24, 0x72, 0xc8], "not the SVG #0000ff");
+    }
+
     /// On a Mac the fallback is always there: Menlo ships with the system
     /// and has every glyph Hack lacks.
     #[cfg(target_os = "macos")]
@@ -916,5 +1141,23 @@ mod tests {
         let bytes = std::fs::read(&first).unwrap();
         assert_eq!(missing_from(&bytes, BEYOND_HACK).as_deref(), Some(""), "{}", first.display());
         assert!(symbol_fallback().is_some());
+    }
+
+    /// On a Mac every script has its face, found by name at the index the
+    /// collection keeps it: Hiragino Sans and Hiragino Sans GB lead their
+    /// files, Apple SD Gothic Neo's regular is the first of eighteen.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_finds_a_face_for_every_script() {
+        for (script, faces) in script_faces() {
+            let (path, family) = &faces[0];
+            let bytes = map_font(path).unwrap();
+            assert_eq!(face_of(bytes, family), Some(0), "{script}: {}", path.display());
+        }
+        let menlo = map_font(Path::new("/System/Library/Fonts/Menlo.ttc")).unwrap();
+        assert_eq!(face_of(menlo, "Hiragino Sans"), None, "a family the file lacks");
+        // One face each, in the locale's order: three for any language.
+        assert_eq!(script_fallbacks("en").len(), 3);
+        assert_eq!(script_fallbacks("ko").len(), 3);
     }
 }

@@ -13,8 +13,9 @@
 //! always draws through: ratatui hands a backend only the cells that
 //! differ from the last frame, so the cells it is handed say whether a
 //! frame changed anything, which nothing else outside ratatui-wgpu can.
-//! It costs a counter per changed cell; the timings are kept only while
-//! the lever is set.
+//! It costs a counter per changed cell. The timings cost clock reads, so
+//! without the lever there are none: no flush is timed and no redraw is
+//! clocked (`Counted::new` is told, and the window holds no [`Stats`]).
 
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
@@ -24,23 +25,27 @@ use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 
-/// A backend that says how many cells each draw handed it and how long
-/// its last flush took; everything else goes straight through. Deref
-/// reaches the wrapped backend's own methods (`get_text`, `resize`).
+/// A backend that says how many cells each draw handed it and, when it is
+/// timing, how long its last flush took; everything else goes straight
+/// through. Deref reaches the wrapped backend's own methods (`get_text`,
+/// `resize`).
 pub(super) struct Counted<B> {
     inner: B,
     /// Cells handed to `draw` since [`Counted::take_cells`] last asked.
     cells: u64,
-    /// The last flush's time.
+    /// Whether flushes are timed: only while the stats lever is set.
+    timed: bool,
+    /// The last flush's time; zero when not timing.
     flushed: Duration,
 }
 
 impl<B> Counted<B> {
-    pub(super) fn new(inner: B) -> Self {
-        Self { inner, cells: 0, flushed: Duration::ZERO }
+    pub(super) fn new(inner: B, timed: bool) -> Self {
+        Self { inner, cells: 0, timed, flushed: Duration::ZERO }
     }
 
-    /// The cells drawn since the last call, and the last flush's time.
+    /// The cells drawn since the last call, and the last flush's time
+    /// (zero when not timing).
     pub(super) fn take_cells(&mut self) -> (u64, Duration) {
         (std::mem::take(&mut self.cells), self.flushed)
     }
@@ -107,6 +112,9 @@ impl<B: Backend> Backend for Counted<B> {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
+        if !self.timed {
+            return self.inner.flush();
+        }
         let started = Instant::now();
         let flushed = self.inner.flush();
         self.flushed = started.elapsed();
@@ -140,12 +148,14 @@ pub(super) struct Stats {
 }
 
 impl Stats {
-    /// The lever's stats when `MSTREAM_WINDOW_STATS` names a file.
-    pub(super) fn from_env(started: Instant) -> Option<Self> {
+    /// The lever's stats when `MSTREAM_WINDOW_STATS` names a file, their
+    /// clock started now (`window::run`'s entry); `None`, and no clock
+    /// read, without it.
+    pub(super) fn from_env() -> Option<Self> {
         let path = PathBuf::from(std::env::var_os("MSTREAM_WINDOW_STATS")?);
         Some(Self {
             path,
-            started,
+            started: Instant::now(),
             first_present: None,
             first_visible: None,
             visible_pending: false,
@@ -263,7 +273,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         use ratatui::widgets::Paragraph;
-        let mut terminal = Terminal::new(Counted::new(TestBackend::new(10, 2))).unwrap();
+        let mut terminal = Terminal::new(Counted::new(TestBackend::new(10, 2), false)).unwrap();
         let draw = |terminal: &mut Terminal<Counted<TestBackend>>, text: &str| {
             terminal.draw(|frame| frame.render_widget(Paragraph::new(text), frame.area())).unwrap();
             terminal.backend_mut().take_cells().0
@@ -271,5 +281,7 @@ mod tests {
         assert!(draw(&mut terminal, "hello") > 0);
         assert_eq!(draw(&mut terminal, "hello"), 0);
         assert_eq!(draw(&mut terminal, "hellp"), 1);
+        // Without the lever no flush is timed.
+        assert_eq!(terminal.backend_mut().take_cells().1, Duration::ZERO);
     }
 }

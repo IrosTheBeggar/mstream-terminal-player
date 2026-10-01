@@ -16,12 +16,32 @@ pub struct Font<'a> {
 
 impl<'a> Font<'a> {
     /// Create a new Font from data. Returns [`None`] if the font cannot
-    /// be parsed.
+    /// be parsed. For a collection (`.ttc`) this is its first face; see
+    /// [`Font::new_at`] for the others.
     pub fn new(data: &'a [u8]) -> Option<Self> {
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write(data);
+        Self::new_at(data, 0)
+    }
 
-        Face::from_slice(data, 0).map(|font| {
+    /// Create a new Font from the face at `index` of a font collection
+    /// (`.ttc`/`.otc`); index 0 of a single font is the font itself. Returns
+    /// [`None`] if there is no such face or it cannot be parsed.
+    pub fn new_at(
+        data: &'a [u8],
+        index: u32,
+    ) -> Option<Self> {
+        let mut hasher = RandomState::new().build_hasher();
+        // A bounded prefix and the length, not every byte: the bytes may be a
+        // memory-mapped system collection of tens of megabytes, and reading
+        // all of it here would fault the whole file into memory just to name
+        // it. `RandomState::new` advances its keys on every call, so ids are
+        // distinct per construction whatever is hashed.
+        hasher.write(&data[..data.len().min(64 * 1024)]);
+        hasher.write_usize(data.len());
+        // The faces of one collection share its bytes; the index keeps their
+        // ids, and so their cached glyphs, apart.
+        hasher.write_u32(index);
+
+        Face::from_slice(data, index).map(|font| {
             let advance = font
                 .glyph_hor_advance(font.glyph_index('m').unwrap_or_default())
                 .unwrap_or_default() as f32;

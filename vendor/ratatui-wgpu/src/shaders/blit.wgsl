@@ -26,13 +26,23 @@ struct Uniforms {
 @group(0) @binding(2)
 var<uniform> uniforms: Uniforms;
 
+// The exact sRGB decode (IEC 61966-2-1), the inverse of what an sRGB target
+// applies on store, so an encoded byte comes back out as itself. A plain
+// pow(2.2) is not that inverse and darkens the darks: #12131c stored as
+// #0a0b16.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((c + vec3(0.055)) / 1.055, vec3(2.4));
+    return select(high, low, c <= vec3(0.04045));
+}
+
 @fragment
 fn fs_main(@builtin(position) gl_Position: vec4<f32>) -> FragmentOutput {
     let target_size = select(vec2<f32>(textureDimensions(Texture)), uniforms.screen_size, uniforms.preserve_aspect == 0u);
     let uv = gl_Position.xy / target_size;
-    let factor = select(2.2, 1.0, uniforms.use_srgb == 0u);
 
-    let color = pow(textureSample(Texture, Sampler, uv), vec4(vec3(factor), 1.0));
+    let sampled = textureSample(Texture, Sampler, uv);
+    let color = select(sampled, vec4(srgb_to_linear(sampled.rgb), sampled.a), uniforms.use_srgb != 0u);
 
     return FragmentOutput(select(color, vec4(0.0, 0.0, 0.0, 0.0), uv.x > 1.0 || uv.y > 1.0));
 }

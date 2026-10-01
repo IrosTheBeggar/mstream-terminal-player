@@ -24,11 +24,21 @@
 //! the slack left showing the blank ground round it — but to the pixel
 //! rather than to the cell.
 //!
-//! Textures are cached by art id and bounded ([`KEEP`]). A cover arrives as
-//! its 128 px thumbnail, which uploads in microseconds, and a box that
-//! wants more pixels than that has the source decoded on a worker thread,
-//! so the frame the keyboard waits on never decodes a jpeg; the sharper
-//! texture replaces the thumbnail's when it lands.
+//! Textures are cached by art and size, bounded by count ([`KEEP`]) and by
+//! bytes ([`KEEP_BYTES`]). A cover arrives as its 128 px thumbnail, which
+//! uploads in microseconds, and a box that wants more pixels than that has
+//! the source decoded on a worker thread, so the frame the keyboard waits
+//! on never decodes a jpeg; the sharper texture supersedes the thumbnail's
+//! when it lands. A box less than half a texture's size has the source
+//! resampled down to it on the same worker, because the textures have no
+//! mipmaps and a texture sampled much smaller than itself skips texels and
+//! shimmers as the picture moves. One art drawn at two sizes at once (the
+//! wall's tile and the queue row's) keeps a texture for each.
+//!
+//! A hard-edged picture ([`Art::is_crisp`], the pairing QR code) is drawn
+//! through a nearest-neighbour sampler and resampled by nearest neighbour,
+//! so its modules stay squares; it arrives as its source's own pixels
+//! rather than the thumbnail, a small PNG decoded on first sight.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Sender, channel};
@@ -47,13 +57,25 @@ use crate::tui::graphics::PictureHost;
 
 /// How many cover textures stay on the GPU. The wall's page and the queue
 /// panel together are under twenty; this keeps a page turn back and forth
-/// from uploading again, and bounds the memory to a few dozen covers at
-/// most a few megabytes each.
+/// from uploading again.
 const KEEP: usize = 48;
+
+/// And how many bytes of them, beside [`KEEP`]: a texture is as large as
+/// the box it was decoded for, so on a large display a page of big tiles
+/// is several megabytes a cover (a 1000 px square is 4 MB), and a count
+/// alone would let 48 of those hold 190 MB of GPU memory. 64 MB is a full
+/// wall at that size plus the queue's small ones; past it the textures
+/// drawn longest ago go first. A frame's own covers are never evicted, so
+/// one frame that needs more than this keeps it until they leave.
+const KEEP_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A box that wants this much more than the texture holds asks for the
 /// source: a few percent is rounding, not blur.
 const SHARPER: f32 = 1.05;
+
+/// A texture more than this many times its box on both sides is resampled
+/// down to the box: past 2:1 a sample without mipmaps skips texels.
+const SMALLER: f32 = 2.0;
 
 /// One cover this frame: which art, in which cells, on which grid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,15 +85,23 @@ struct Placed {
     grid: (u16, u16),
 }
 
-/// Pixels on their way to a texture: RGBA rows, and the source bytes a
-/// sharper texture could still be decoded from.
+/// Pixels on their way to a texture: RGBA rows, whether they are as
+/// large as the picture gets, and, on an art's first sighting, what its
+/// other sizes would be decoded from.
 struct Pixels {
     art: u64,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
-    /// Empty when these ARE the source's pixels, or there is no source.
+    /// These are the source's own pixels, or there is no source: no
+    /// texture of this art can be larger.
+    native: bool,
+    /// The bytes other sizes are decoded from; only a first sighting
+    /// carries them, and only when the art kept its source.
     source: Option<Arc<[u8]>>,
+    /// Hard-edged ([`Art::is_crisp`]): sampled and resampled by nearest
+    /// neighbour.
+    crisp: bool,
 }
 
 /// What the drawing path and the post-processor share. Both run on the
@@ -91,7 +121,7 @@ struct Inner {
     known: HashSet<u64>,
     /// First sightings' thumbnails, for the next process to upload.
     arrivals: Vec<Pixels>,
-    /// The worker's sharper decodes, likewise.
+    /// The worker's resamples, likewise.
     decoded: Vec<Pixels>,
 }
 
@@ -119,24 +149,52 @@ impl PictureHost for Board {
     }
 }
 
-/// The art's thumbnail as RGBA, with its source for a sharper decode.
+/// The art's first texture as RGBA, with its source for other sizes: the
+/// thumbnail, or for a hard-edged picture the source's own pixels — the
+/// thumbnail is an area-averaged shrink that would blur a QR code's
+/// modules, and the code's PNG is a few kilobytes that decode in well
+/// under a millisecond, so this is the one decode the drawing thread does.
 fn thumbnail(art: &Art) -> Pixels {
-    let rgba = art.rgb().as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
     let source = (!art.source().is_empty()).then(|| Arc::from(art.source()));
-    Pixels { art: art.id(), width: art.width(), height: art.height(), rgba, source }
+    let crisp = art.is_crisp();
+    if crisp && let Some(image) = source.as_deref().and_then(|s| image::load_from_memory(s).ok()) {
+        let rgba = image.into_rgba8();
+        let (width, height) = rgba.dimensions();
+        let rgba = rgba.into_raw();
+        return Pixels { art: art.id(), width, height, rgba, native: true, source, crisp };
+    }
+    let rgba = art.rgb().as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
+    let native = source.is_none();
+    Pixels { art: art.id(), width: art.width(), height: art.height(), rgba, native, source, crisp }
 }
 
-/// One cover texture on the GPU.
-struct Entry {
+/// One texture of a cover on the GPU.
+struct Texture {
     bind: wgpu::BindGroup,
     size: (u32, u32),
-    /// Where a sharper texture would come from; `None` once this is as
-    /// sharp as the source gets.
-    source: Option<Arc<[u8]>>,
-    /// A sharper decode is on the worker.
-    asked: bool,
     /// The process that last drew it, for eviction.
     used: u64,
+}
+
+impl Texture {
+    fn bytes(&self) -> u64 {
+        u64::from(self.size.0) * u64::from(self.size.1) * 4
+    }
+}
+
+/// One art's textures, a size each, and where more sizes come from.
+struct Cover {
+    /// The bytes other sizes are decoded from; `None` when the art kept
+    /// none, which leaves it at its thumbnail.
+    source: Option<Arc<[u8]>>,
+    crisp: bool,
+    /// The source's own size, once a texture of it has landed: no larger
+    /// one exists to ask for.
+    native: Option<(u32, u32)>,
+    textures: Vec<Texture>,
+    /// A resample of this art is on the worker: one at a time, so a box
+    /// being dragged larger asks again only once the last one lands.
+    asked: bool,
 }
 
 /// What the decode worker is asked: this source, fitted to no more than
@@ -145,6 +203,7 @@ struct Request {
     art: u64,
     source: Arc<[u8]>,
     want: (u32, u32),
+    crisp: bool,
 }
 
 /// ratatui-wgpu's text blit, then the covers over it.
@@ -158,11 +217,13 @@ pub(super) struct CoverPost {
     pipeline: RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// Nearest-neighbour, for hard-edged pictures.
+    crisp_sampler: wgpu::Sampler,
     /// Unorm-sRGB on an sRGB surface, so the sample is linear and the
     /// surface's sRGB store writes the cover's own bytes back out; plain
     /// Unorm on a surface that stores what it is given.
     format: TextureFormat,
-    textures: HashMap<u64, Entry>,
+    covers: HashMap<u64, Cover>,
     vertices: wgpu::Buffer,
     /// The covers the vertex buffer has room for.
     room: usize,
@@ -182,11 +243,14 @@ const VERTICES_PER_COVER: u64 = 6;
 impl CoverPost {
     /// What the covers cost, for the stats lever.
     pub(super) fn report(&self) -> serde_json::Value {
+        let textures = || self.covers.values().flat_map(|cover| &cover.textures);
         serde_json::json!({
             "processed": self.processed,
-            "textures": self.textures.len(),
+            "covers": self.covers.len(),
+            "textures": textures().count(),
+            "texture_bytes": textures().map(Texture::bytes).sum::<u64>(),
             "uploads": self.uploads,
-            "sharper_decodes_asked": self.decodes,
+            "resamples_asked": self.decodes,
         })
     }
 
@@ -199,8 +263,12 @@ impl CoverPost {
         })
     }
 
-    /// A texture for `pixels`, replacing any the art had.
+    /// A texture for `pixels` beside the art's others. It supersedes the
+    /// art's smaller ones down to half its size: any box those served, it
+    /// serves without a resample, so a box grown in steps keeps one
+    /// texture, not one a step.
     fn upload(&mut self, queue: &Queue, pixels: Pixels) {
+        let Some(cover) = self.covers.get(&pixels.art) else { return };
         let size = wgpu::Extent3d {
             width: pixels.width,
             height: pixels.height,
@@ -232,26 +300,35 @@ impl CoverPost {
             size,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = if cover.crisp { &self.crisp_sampler } else { &self.sampler };
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Cover Bindings"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
             ],
         });
-        let used = self.textures.get(&pixels.art).map_or(self.processed, |old| old.used);
         self.uploads += 1;
-        self.textures.insert(
-            pixels.art,
-            Entry {
-                bind,
-                size: (pixels.width, pixels.height),
-                source: pixels.source,
-                asked: false,
-                used,
-            },
-        );
+        let size = (pixels.width, pixels.height);
+        let Some(cover) = self.covers.get_mut(&pixels.art) else { return };
+        if pixels.native {
+            cover.native = Some(size);
+        }
+        let superseded = |t: &Texture| {
+            t.size.0 <= size.0
+                && t.size.1 <= size.1
+                && t.size.0.saturating_mul(2) >= size.0
+                && t.size.1.saturating_mul(2) >= size.1
+        };
+        cover.textures.retain(|t| !superseded(t));
+        cover.textures.push(Texture { bind, size, used: self.processed });
     }
 
     /// Hand a source to the decode worker, starting it on first use. The
@@ -262,9 +339,18 @@ impl CoverPost {
             let board = self.board.clone();
             let spawned = std::thread::Builder::new().name("window-covers".into()).spawn(move || {
                 while let Ok(request) = rx.recv() {
-                    if let Some(pixels) = sharper(&request) {
-                        board.lock().decoded.push(pixels);
-                    }
+                    // A source that will not decode still answers, so the
+                    // art is not left waiting on the worker for good.
+                    let pixels = resample(&request).unwrap_or(Pixels {
+                        art: request.art,
+                        width: 0,
+                        height: 0,
+                        rgba: Vec::new(),
+                        native: true,
+                        source: None,
+                        crisp: request.crisp,
+                    });
+                    board.lock().decoded.push(pixels);
                 }
             });
             if spawned.is_err() {
@@ -278,41 +364,66 @@ impl CoverPost {
         }
     }
 
-    /// Drop the textures drawn longest ago past [`KEEP`], never one this
-    /// frame drew, and tell the board so their next sighting brings pixels.
+    /// Drop the textures drawn longest ago until [`KEEP`] and
+    /// [`KEEP_BYTES`] both hold, never one this frame drew; an art left
+    /// with none is forgotten, and the board told, so its next sighting
+    /// brings pixels.
     fn evict(&mut self) {
-        if self.textures.len() <= KEEP {
+        let mut count = 0;
+        let mut bytes = 0;
+        let mut ages: Vec<(u64, u64, (u32, u32), u64)> = Vec::new();
+        for (&art, cover) in &self.covers {
+            for texture in &cover.textures {
+                count += 1;
+                bytes += texture.bytes();
+                if texture.used < self.processed {
+                    ages.push((texture.used, art, texture.size, texture.bytes()));
+                }
+            }
+        }
+        if count <= KEEP && bytes <= KEEP_BYTES {
             return;
         }
-        let mut ages: Vec<(u64, u64)> = self
-            .textures
-            .iter()
-            .filter(|(_, entry)| entry.used < self.processed)
-            .map(|(&art, entry)| (entry.used, art))
-            .collect();
         ages.sort_unstable();
-        let excess = self.textures.len() - KEEP;
         let mut inner = self.board.lock();
-        for (_, art) in ages.into_iter().take(excess) {
-            self.textures.remove(&art);
-            inner.known.remove(&art);
+        for (_, art, size, weight) in ages {
+            if count <= KEEP && bytes <= KEEP_BYTES {
+                break;
+            }
+            let Some(cover) = self.covers.get_mut(&art) else { continue };
+            cover.textures.retain(|t| t.size != size);
+            count -= 1;
+            bytes -= weight;
+            if cover.textures.is_empty() {
+                self.covers.remove(&art);
+                inner.known.remove(&art);
+            }
         }
     }
 }
 
 /// The source decoded and, when it has more pixels than the box wants,
 /// fitted down to the box — a texture sampled without mipmaps aliases when
-/// it is shrunk much. Keeps the source only when it was shrunk, so a box
-/// that grows later can still ask for more.
-fn sharper(request: &Request) -> Option<Pixels> {
+/// it is shrunk much. One path for both directions: a box larger than the
+/// texture it had gets the source's pixels up to the box, a box much
+/// smaller gets them fitted down to it. A photograph is filtered (a
+/// triangle filter, widened with the ratio, so a large shrink averages
+/// every source pixel); a hard-edged picture is sampled nearest, so its
+/// modules stay solid.
+fn resample(request: &Request) -> Option<Pixels> {
     let decoded = image::load_from_memory(&request.source).ok()?;
     let (w, h) = (decoded.width(), decoded.height());
     let (want_w, want_h) = (request.want.0.max(1), request.want.1.max(1));
-    let (image, source) = if w > want_w || h > want_h {
-        let fitted = decoded.resize(want_w, want_h, image::imageops::FilterType::Triangle);
-        (fitted, Some(request.source.clone()))
+    let native = w <= want_w && h <= want_h;
+    let image = if native {
+        decoded
     } else {
-        (decoded, None)
+        let filter = if request.crisp {
+            image::imageops::FilterType::Nearest
+        } else {
+            image::imageops::FilterType::Triangle
+        };
+        decoded.resize(want_w, want_h, filter)
     };
     let rgba = image.into_rgba8();
     Some(Pixels {
@@ -320,8 +431,41 @@ fn sharper(request: &Request) -> Option<Pixels> {
         width: rgba.width(),
         height: rgba.height(),
         rgba: rgba.into_raw(),
-        source,
+        native,
+        source: None,
+        crisp: request.crisp,
     })
+}
+
+/// Which of a cover's textures (by their `sizes`) draws a box of `want`
+/// pixels, and what size to ask the worker for, if anything. The smallest
+/// texture that fills the box (within [`SHARPER`]) draws it; failing one,
+/// the largest there is, and a larger one is asked for unless that is the
+/// source's own size (`native`). A texture more than [`SMALLER`] times the
+/// box on both sides asks for one the box's size. Nothing is asked unless
+/// `can_ask` (the art has a source and no resample out).
+fn choose(
+    sizes: &[(u32, u32)],
+    native: Option<(u32, u32)>,
+    can_ask: bool,
+    want: (f32, f32),
+) -> Option<(usize, Option<(u32, u32)>)> {
+    let fills = |(w, h): (u32, u32)| w as f32 * SHARPER >= want.0 && h as f32 * SHARPER >= want.1;
+    let area = |i: &usize| u64::from(sizes[*i].0) * u64::from(sizes[*i].1);
+    let filling = (0..sizes.len()).filter(|&i| fills(sizes[i])).min_by_key(area);
+    let chosen = filling.or_else(|| (0..sizes.len()).max_by_key(area))?;
+    let (w, h) = sizes[chosen];
+    let box_size = (want.0.ceil().max(1.0) as u32, want.1.ceil().max(1.0) as u32);
+    let ask = if !can_ask {
+        None
+    } else if filling.is_none() {
+        (native != Some((w, h))).then_some(box_size)
+    } else if w as f32 > want.0 * SMALLER && h as f32 > want.1 * SMALLER {
+        Some(box_size)
+    } else {
+        None
+    };
+    Some((chosen, ask))
 }
 
 /// The cover's quad in surface pixels: the cell rect's share of the grid,
@@ -386,6 +530,20 @@ impl PostProcessor for CoverPost {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        // Nearest both ways for a hard-edged picture (a QR code): a module
+        // is a square of one colour, and a blend at its edge is a grey
+        // fringe a scanner has to see through. Its uneven steps at a
+        // non-integer scale are a pixel at most.
+        let crisp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Crisp Cover Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Cover Shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -441,8 +599,9 @@ impl PostProcessor for CoverPost {
             pipeline,
             layout,
             sampler,
+            crisp_sampler,
             format,
-            textures: HashMap::new(),
+            covers: HashMap::new(),
             vertices: CoverPost::vertex_buffer(device, room),
             room,
             drawn: Vec::new(),
@@ -481,40 +640,61 @@ impl PostProcessor for CoverPost {
             let decoded = std::mem::take(&mut inner.decoded);
             (inner.placed.clone(), arrivals, decoded)
         };
-        for pixels in arrivals {
+        for mut pixels in arrivals {
+            let cover = Cover {
+                source: pixels.source.take(),
+                crisp: pixels.crisp,
+                native: None,
+                textures: Vec::new(),
+                asked: false,
+            };
+            self.covers.insert(pixels.art, cover);
             self.upload(queue, pixels);
         }
-        // A sharper decode for art evicted while it was on the worker
-        // has nowhere to go; the next sighting starts over.
+        // A resample for art evicted while it was on the worker has nowhere
+        // to go; the next sighting starts over. One that failed (no pixels)
+        // only lets the art ask again.
         for pixels in decoded {
-            if self.textures.contains_key(&pixels.art) {
+            let Some(cover) = self.covers.get_mut(&pixels.art) else { continue };
+            cover.asked = false;
+            if pixels.width > 0 && pixels.height > 0 {
                 self.upload(queue, pixels);
+            } else {
+                cover.source = None;
             }
         }
 
         let surface = (surface_config.width as f32, surface_config.height as f32);
         let mut floats: Vec<f32> = Vec::with_capacity(placed.len() * 24);
-        let mut draws: Vec<u64> = Vec::with_capacity(placed.len());
+        let mut draws: Vec<wgpu::BindGroup> = Vec::with_capacity(placed.len());
         let mut asks = Vec::new();
-        for cover in &placed {
-            let Some(entry) = self.textures.get_mut(&cover.art) else { continue };
-            entry.used = self.processed;
-            let [left, top, right, bottom] = quad(cover, surface, entry.size);
+        for placed_cover in &placed {
+            let Some(cover) = self.covers.get_mut(&placed_cover.art) else { continue };
+            // The box itself, before the picture is fitted in it, picks the
+            // texture: the fit depends on the picture's shape, which every
+            // size of it shares.
+            let Some(first) = cover.textures.first() else { continue };
+            let [left, top, right, bottom] = quad(placed_cover, surface, first.size);
             if right <= left || bottom <= top {
                 continue;
             }
             let (w, h) = (right - left, bottom - top);
-            if !entry.asked
-                && let Some(source) = &entry.source
-                && (w > entry.size.0 as f32 * SHARPER || h > entry.size.1 as f32 * SHARPER)
-            {
-                entry.asked = true;
+            let sizes: Vec<(u32, u32)> = cover.textures.iter().map(|t| t.size).collect();
+            let can_ask = !cover.asked && cover.source.is_some();
+            let Some((chosen, ask)) = choose(&sizes, cover.native, can_ask, (w, h)) else {
+                continue;
+            };
+            if let (Some(want), Some(source)) = (ask, &cover.source) {
+                cover.asked = true;
                 asks.push(Request {
-                    art: cover.art,
+                    art: placed_cover.art,
                     source: source.clone(),
-                    want: (w.ceil() as u32, h.ceil() as u32),
+                    want,
+                    crisp: cover.crisp,
                 });
             }
+            let texture = &mut cover.textures[chosen];
+            texture.used = self.processed;
             let ndc = |x: f32, y: f32| [x / surface.0 * 2.0 - 1.0, 1.0 - y / surface.1 * 2.0];
             let (tl, tr) = (ndc(left, top), ndc(right, top));
             let (bl, br) = (ndc(left, bottom), ndc(right, bottom));
@@ -528,7 +708,7 @@ impl PostProcessor for CoverPost {
             ] {
                 floats.extend_from_slice(&[corner[0], corner[1], uv[0], uv[1]]);
             }
-            draws.push(cover.art);
+            draws.push(texture.bind.clone());
         }
         for request in asks {
             self.ask(request);
@@ -554,10 +734,9 @@ impl PostProcessor for CoverPost {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
-            for (i, art) in draws.iter().enumerate() {
-                let Some(entry) = self.textures.get(art) else { continue };
+            for (i, bind) in draws.iter().enumerate() {
                 let first = i as u32 * VERTICES_PER_COVER as u32;
-                pass.set_bind_group(0, &entry.bind, &[]);
+                pass.set_bind_group(0, bind, &[]);
                 pass.draw(first..first + VERTICES_PER_COVER as u32, 0..1);
             }
         }
@@ -625,6 +804,57 @@ mod tests {
         // 6×8 cells: 120×240 px; the square is 120 a side, 60 px each way.
         let q = quad(&placed(0, 0, 6, 8), (2000.0, 900.0), (128, 128));
         assert_eq!(q, [0.0, 60.0, 120.0, 180.0]);
+    }
+
+    #[test]
+    fn the_smallest_texture_that_fills_the_box_draws_it() {
+        let sizes = [(128, 128), (300, 300), (600, 600)];
+        assert_eq!(choose(&sizes, None, true, (250.0, 250.0)), Some((1, None)));
+        assert_eq!(choose(&sizes, None, true, (120.0, 120.0)), Some((0, None)));
+        // Within a few percent is a fill, not a blur.
+        assert_eq!(choose(&sizes, None, true, (310.0, 310.0)), Some((1, None)));
+    }
+
+    #[test]
+    fn a_box_larger_than_every_texture_asks_for_the_source_once() {
+        let sizes = [(128, 128)];
+        assert_eq!(choose(&sizes, None, true, (400.0, 400.0)), Some((0, Some((400, 400)))));
+        assert_eq!(choose(&sizes, None, false, (400.0, 400.0)), Some((0, None)), "one out");
+        // The source's own size is as large as it gets.
+        assert_eq!(choose(&sizes, Some((128, 128)), true, (400.0, 400.0)), Some((0, None)));
+    }
+
+    #[test]
+    fn a_box_under_half_a_texture_asks_for_its_own_size() {
+        let sizes = [(600, 600)];
+        assert_eq!(choose(&sizes, None, true, (250.5, 250.5)), Some((0, Some((251, 251)))));
+        // Half or more draws from the texture as it is.
+        assert_eq!(choose(&sizes, None, true, (300.0, 300.0)), Some((0, None)));
+        // Once the small one is there, it draws, and nothing more is asked.
+        let sizes = [(600, 600), (251, 251)];
+        assert_eq!(choose(&sizes, None, true, (250.5, 250.5)), Some((1, None)));
+    }
+
+    #[test]
+    fn a_shrink_is_filtered_and_a_crisp_shrink_keeps_its_squares() {
+        // Two-pixel stripes, 8 px a side: a filtered shrink to 2 px blends
+        // them to grey; a crisp one keeps black and white.
+        let stripe = |x: u32, _| image::Luma([if x % 4 < 2 { 0 } else { 255 }]);
+        let image = image::GrayImage::from_fn(8, 8, stripe);
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(image)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let source: Arc<[u8]> = Arc::from(png);
+        let request = |crisp| Request { art: 1, source: source.clone(), want: (2, 2), crisp };
+        let soft = resample(&request(false)).unwrap();
+        let hard = resample(&request(true)).unwrap();
+        assert_eq!((soft.width, soft.height, soft.native), (2, 2, false));
+        assert!(hard.rgba.chunks(4).all(|px| px[0] == 0 || px[0] == 255), "{:?}", hard.rgba);
+        assert!(soft.rgba.chunks(4).any(|px| px[0] != 0 && px[0] != 255), "{:?}", soft.rgba);
+        // A box larger than the source gets the source as it is.
+        let whole = resample(&Request { want: (20, 20), ..request(false) }).unwrap();
+        assert_eq!((whole.width, whole.height, whole.native), (8, 8, true));
     }
 
     #[test]
