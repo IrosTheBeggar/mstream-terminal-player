@@ -3265,6 +3265,14 @@ flash where it can be avoided. Three lanes put it in, the same shape as the cond
   names itself on X11 and Wayland, and on macOS sets the Dock image, so the bare binary
   shows the logo (first present unchanged); a refused second launch raises the holder's
   window on macOS and Windows (never a call that waits on it), the line still printed.
+- *Lane 11* — the packages: a package-desktop job (skipped with build-desktop) assembles
+  "mStream Player.app" from the signed binary (bundle id io.mstream.player, the Bonjour
+  and local-network keys, the minimum OS from the binary's own load command), signs it
+  inside-out, notarizes, staples and ships it as a .app.zip; a Windows zip with the player,
+  the launcher stub as "mStream Player.exe", the icon and an unsigned-build note; a
+  deterministic Linux tarball with the desktop entry and icons. Scripts under scripts/
+  run the same code here and in CI; the .app assembled from the debug binary opened from
+  Finder with its id, name and logo. Only the rc-tag run proves the signing and the plumbing.
 
 **From here, in order.** An rc tag at this head to prove both families and the gate (the
 release must come out marked pre-release, channels skipped, latest still v0.9.0); the
@@ -3273,9 +3281,8 @@ window compiled out of the terminal flavour; the Linux leg on real hardware for 
 linux-x64 build (X11 and Wayland, the .desktop entry's app_id); the macOS and Windows
 checklist rows as the desktop release's gate, including a tray-spawned run and the stub's
 double-click; the open window conditions (symbol and emoji faces, Hangul line height, the
-cover flash after a modal, input before the backend exists); the desktop packages (a signed and stapled .app, the Windows
-zip with the stub, the Linux tarball); the rest of the release workflow (a package-desktop
-job, Windows signing once a certificate exists, lifting the hold-back, a notify path that
+cover flash after a modal, input before the backend exists); the rest of the release workflow
+(Windows signing once a certificate exists, lifting the hold-back, a notify path that
 fires); a Homebrew cask and a Scoop manifest for the desktop product; the README split into
 two products; the stable player release; on mStream's side, the manifest updater taking the
 desktop names and refusing pre-release tags, the bundler preferring the desktop entry while
