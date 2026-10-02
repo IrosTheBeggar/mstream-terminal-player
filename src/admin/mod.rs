@@ -478,8 +478,10 @@ pub(crate) trait HostedRoom {
     /// A mouse event over the room ([`drive_pointer`]).
     fn mouse(&mut self, mouse: MouseEvent) -> Option<Outcome>;
 
-    /// The pointer left the room (focus moved away, or the room closed),
-    /// so no hover and no tooltip stays behind.
+    /// The pointer left the room (focus moved away, the room was hidden,
+    /// or it closed), so no hover, no tooltip and no press stays behind: a
+    /// scrollbar arrow held as the room went from view would otherwise go
+    /// on stepping, and a thumb go on following, with no release to come.
     fn leave(&mut self);
 
     /// The host's frame is on screen: fold in what the worker finished and
@@ -522,6 +524,7 @@ impl<S: Screen + 'static> HostedRoom for S {
         let ui = self.ui();
         ui.pointer = None;
         ui.dismiss_tooltip();
+        ui.release();
     }
 
     fn after_frame(&mut self) -> bool {
@@ -1174,6 +1177,26 @@ mod tests {
         assert_eq!(probe.ui.pointer, None);
         assert!(probe.ui.ripe_tooltip().is_none());
         assert!(!probe.ui.hovering_clickable());
+    }
+
+    #[test]
+    fn leave_lets_go_of_a_held_arrow_and_a_dragged_thumb() {
+        // The host hides a room mid-press (the GUI's `L` while an arrow is
+        // held): no release will reach it, so leaving ends the capture.
+        let mut probe = drawn();
+        drive_pointer(&mut probe, mouse(MouseEventKind::Down(MouseButton::Left), 10, 7));
+        let acts = probe.acts.len();
+        HostedRoom::leave(&mut probe);
+        drive_pointer(&mut probe, mouse(MouseEventKind::Drag(MouseButton::Left), 10, 9));
+        assert_eq!(probe.acts.len(), acts, "the thumb no longer follows the hand");
+
+        drive_pointer(&mut probe, mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        assert_eq!(probe.acts.last(), Some(&FWD), "the press itself steps");
+        let acts = probe.acts.len();
+        HostedRoom::leave(&mut probe);
+        std::thread::sleep(crate::kit::ARROW_DELAY + Duration::from_millis(20));
+        probe.after_frame();
+        assert_eq!(probe.acts.len(), acts, "and the held arrow stops with the leave");
     }
 
     #[test]
