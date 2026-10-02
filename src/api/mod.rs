@@ -1647,6 +1647,17 @@ impl Client {
         wait(self.admin_discovery_activity_async(since))
     }
 
+    /// The server's main log ring past `since` (0 = everything it holds).
+    /// The route has no level or limit parameter, so the player filters.
+    pub async fn admin_logs_recent_async(&self, since: u64) -> Result<LogTail, ApiError> {
+        self.get(&format!("api/v1/admin/logs/recent?since={since}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_logs_recent(&self, since: u64) -> Result<LogTail, ApiError> {
+        wait(self.admin_logs_recent_async(since))
+    }
+
     /// Join the discovery network, optionally opening the federation
     /// request inbox in the same breath (which turns federation on). The
     /// server may download its sidecar before answering, so this gets the
