@@ -163,6 +163,9 @@ stop_fake
 # launched the GUI until this leg.
 ARGS=(gui)
 leg gui-now gui-now.exp "$WORK/h8" "$WORK/gui-now.out"
+# The Admin tab on the same seat: M opens it on its no-session sentence,
+# Esc in the hallway comes back to the Library, q quits.
+leg gui-admin gui-admin.exp "$WORK/h10" "$WORK/gui-admin.out"
 
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
 # No fake mStream at all: the page talks to a board, and the board is the

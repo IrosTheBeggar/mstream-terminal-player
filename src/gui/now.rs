@@ -149,6 +149,8 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Esc | KeyCode::Char('0') => return gui.act(Act::Screen(Screen::Library)),
         // The Stats screen, from anywhere (stats-screen contract, entry 2).
         KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
+        // The Admin tab, from anywhere (admin-screen contract, clause 1).
+        KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The strip's numbers pick its tabs — a digit past the strip does
         // nothing, the App bounds-checks — and Tab, Shift-Tab cycle them.

@@ -8,16 +8,16 @@
 //! GUI's footer.
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Position, Rect};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use ratatui::layout::Rect;
 use rust_i18n::t;
 
 use super::{Act, DJ_NAV, Gui, Screen, put};
 use crate::admin::stats::{self as page, Page};
-use crate::admin::{Outcome, Screen as Hosted};
+use crate::admin::{Outcome, Screen as Hosted, drive_pointer};
 use crate::api::Client;
 use crate::kit::dim;
-use crate::tui::app::Origin;
+use crate::tui::app::{App, Origin, Reach};
 
 /// The screen's state: the page while a session gives it a server, else
 /// the reason there is none.
@@ -37,26 +37,36 @@ pub(crate) fn open(gui: &mut Gui) {
         gui.stats.why = Some(t!("gui.stats.no_session").to_string());
         return;
     }
-    let app = &gui.app;
-    let target = match &app.session.peer {
-        Some((parent, _)) => Origin { server: parent.clone(), peer: None },
-        None => app.origin(),
-    };
-    let reach = match app.reach(&target) {
-        Ok(reach) => reach,
+    let client = match session_reach(&gui.app).and_then(|reach| reach_client(&reach)) {
+        Ok(client) => client,
         Err(why) => {
             gui.stats.why = Some(why);
             return;
         }
     };
-    let client = match Client::new_with(&reach.base, reach.self_signed) {
-        Ok(client) => client.with_token(reach.token).with_local_token(reach.local_token),
-        Err(e) => {
-            gui.stats.why = Some(e.to_string());
-            return;
-        }
+    gui.stats.page = Some(page::start(client, gui.app.session.username.clone()).hosted());
+}
+
+/// How the session's server is reached for a page of the hub's: the
+/// session's origin, or a peer session's parent, which keeps the plays
+/// and the admin rooms a peer does not have. `Err` carries the reason in
+/// words (a tunnel that is down, say). The Admin tab reaches its rooms
+/// and its log the same way.
+pub(super) fn session_reach(app: &App) -> Result<Reach, String> {
+    let target = match &app.session.peer {
+        Some((parent, _)) => Origin { server: parent.clone(), peer: None },
+        None => app.origin(),
     };
-    gui.stats.page = Some(page::start(client, app.session.username.clone()).hosted());
+    app.reach(&target)
+}
+
+/// A client for `reach`: its base, its trust, its token and, over a
+/// tunnel, the bridge's loopback token. A `Client` is built per page,
+/// since each page's worker owns its own.
+pub(super) fn reach_client(reach: &Reach) -> Result<Client, String> {
+    Client::new_with(&reach.base, reach.self_signed)
+        .map(|client| client.with_token(reach.token.clone()).with_local_token(reach.local_token.clone()))
+        .map_err(|e| e.to_string())
 }
 
 /// Leaving drops the page — and its worker with it.
@@ -92,6 +102,9 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Library)),
+            // The Admin tab, as from the Library (admin-screen contract,
+            // clause 1).
+            KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
             KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
             KeyCode::Char('V') => return gui.act(Act::VizWindow),
             KeyCode::Char(c @ '1'..='9') => return gui.act(Act::Nav(c as usize - '1' as usize)),
@@ -123,42 +136,16 @@ pub(crate) fn tips(gui: &Gui) -> String {
 }
 
 /// The pointer below the top bar, on the page's own surface — the hub's
-/// loop, step for step (contract clause 5). True when the event was the
-/// screen's to take, whether or not a page was up to take it.
+/// own routine, so the two cannot drift apart (contract clause 5). A GUI
+/// modal or the header's server menu owns the pointer while it is open,
+/// and the page lets go of it. True when the event was the screen's to
+/// take, whether or not a page was up to take it.
 pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
-    if gui.screen != Screen::Stats || mouse.row == 0 || gui.modal_open() {
+    if gui.screen != Screen::Stats || mouse.row == 0 || gui.modal_open() || gui.servers.drop_open {
         return false;
     }
-    let at = Position { x: mouse.column, y: mouse.row };
     let Some(page) = gui.stats.page.as_mut() else { return true };
-    let mut back = false;
-    match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            if !page.ui().begin_press(at) {
-                return true;
-            }
-            if let Some(act) = page.ui().hit(at)
-                && matches!(<Page as Hosted>::act(page, act), Some(Outcome::Quit))
-            {
-                back = true;
-            }
-            page.ui().arm_bars(at);
-        }
-        MouseEventKind::Moved => page.ui().motion(at),
-        MouseEventKind::Drag(_) => {
-            page.ui().motion(at);
-            if let Some(act) = page.ui().drag_action(at) {
-                <Page as Hosted>::act(page, act);
-            }
-        }
-        MouseEventKind::Up(_) => page.ui().release(),
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            page.ui().pointer = Some(at);
-            Hosted::wheel(page, mouse.kind == MouseEventKind::ScrollUp, at);
-        }
-        _ => {}
-    }
-    if back {
+    if matches!(drive_pointer(page, mouse), Some(Outcome::Quit)) {
         gui.act(Act::Screen(Screen::Library));
     }
     true

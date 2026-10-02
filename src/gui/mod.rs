@@ -22,6 +22,7 @@ mod albums;
 mod bar;
 pub(crate) mod control;
 mod actions;
+mod admin;
 mod cover;
 mod dj;
 mod library;
@@ -104,9 +105,12 @@ pub(crate) enum Act {
     Chip(usize),
     /// The query card: start (or resume) editing the search text.
     EditQuery,
-    /// A screen: the Library or Stats from their top-bar tabs, Now Playing
-    /// from `0` — it has no tab.
+    /// A screen: the Library, Stats or Admin from their top-bar tabs, Now
+    /// Playing from `0` — it has no tab.
     Screen(Screen),
+    /// The Admin tab's own pointer ways (see gui::admin): a hallway row,
+    /// a column taking the keys, the log's controls.
+    Adm(admin::AdmAct),
     /// The top bar's Visualizer item: open the window, or bring it to the
     /// front (docs/ux-contracts/visualizer-window.md).
     VizWindow,
@@ -344,6 +348,9 @@ pub(crate) enum Screen {
     NowPlaying,
     /// The stats page, hosted (docs/ux-contracts/stats-screen.md).
     Stats,
+    /// The admin rooms and the server's log, hosted (docs/ux-contracts/
+    /// admin-screen.md).
+    Admin,
 }
 
 /// The sub-view a Settings room shows in place of its rows. At most one is
@@ -536,6 +543,8 @@ pub(crate) struct Gui {
     now: now::NowUi,
     /// The Stats screen's page, while the screen is up.
     stats: stats::StatsUi,
+    /// The Admin screen: its hallway, the room it hosts and the log.
+    admin: admin::AdminUi,
     /// The visualizer window's child process, while one is open.
     vizwin: vizwin::VizWindow,
     /// The Settings sub-view standing in for its rows, when one is open.
@@ -599,6 +608,7 @@ impl Gui {
             screen: Screen::Library,
             now: now::NowUi::new(),
             stats: stats::StatsUi::default(),
+            admin: admin::AdminUi::new(),
             vizwin: vizwin::VizWindow::new(),
             settings_room: None,
             servers: servers::ServersUi::new(),
@@ -778,6 +788,9 @@ impl Gui {
         if torrent::act(self, &act) {
             return false;
         }
+        if admin::act(self, &act) {
+            return false;
+        }
         match act {
             Act::CaptureCancel => {
                 // The banner's [X] is Esc: a sonic pick let go goes home to
@@ -809,6 +822,13 @@ impl Gui {
                 } else if screen != Screen::Stats {
                     stats::close(self);
                 }
+                // The Admin screen's room and log likewise (admin-screen
+                // contract, clause 11).
+                if screen == Screen::Admin && was != Screen::Admin {
+                    admin::open(self);
+                } else if screen != Screen::Admin {
+                    admin::close(self);
+                }
             }
             Act::VizWindow => vizwin::toggle(self),
             Act::Nav(i) => {
@@ -816,6 +836,7 @@ impl Gui {
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
                 stats::close(self);
+                admin::close(self);
                 // The gated room: with the flag gone the row isn't drawn,
                 // and its digit must be as dead as the row (contract §1).
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
@@ -1140,13 +1161,17 @@ fn demo_now() -> Now {
 /// One run of text at a cell, clipped at the frame's edge — written into
 /// the buffer directly: the hub's primitive runs a few hundred times a
 /// frame, and a `Paragraph` per call was a handful of allocations each.
-/// The top bar's tabs at the left — Library, Stats: the kit's tab slab for
-/// the screen that is up, dim text for the other, bright under the
-/// pointer. Now Playing has no tab (it opens on `0`), so while it is up no
-/// tab wears the slab.
+/// The top bar's tabs at the left — Library, Stats, Admin: the kit's tab
+/// slab for the screen that is up, dim text for the others, bright under
+/// the pointer. Now Playing has no tab (it opens on `0`), so while it is
+/// up no tab wears the slab.
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
     let mut x = 1;
-    let tabs = [(Screen::Library, t!("gui.top.library")), (Screen::Stats, t!("sta.title"))];
+    let tabs = [
+        (Screen::Library, t!("gui.top.library")),
+        (Screen::Stats, t!("sta.title")),
+        (Screen::Admin, t!("gui.top.admin")),
+    ];
     for (screen, label) in tabs {
         let text = format!(" {label} ");
         let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
@@ -1300,6 +1325,10 @@ fn clip_lead(text: &str, max: usize) -> String {
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
+    // Where the Admin screen's room and log stood is this frame's to say:
+    // a frame drawn as the mini player leaves no target behind.
+    gui.admin.room_at = Rect::default();
+    gui.admin.log_at = None;
     let area = frame.area();
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
@@ -1370,6 +1399,15 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             }
             stats::draw(frame, gui, view);
         }
+        Screen::Admin => {
+            // The hallway, the hosted room and the log (admin-screen
+            // contract); a pick's banner then takes the room's first row,
+            // which the room leaves blank for it.
+            admin::draw(frame, gui, area);
+            if let Some(text) = &banner {
+                draw_capture_banner(frame, gui, Rect { x: 1, y: 1, width: area.width - 2, height: 1 }, text);
+            }
+        }
     }
 
     if gui.queue_open && gui.screen == Screen::Library {
@@ -1379,7 +1417,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // The note rides the bar's bottom row (gui's own first, else the App's
     // words); the keyboard tips, when shown, take the very last row. The
     // Now Playing screen has no bar and draws its note on its own row.
-    if gui.screen == Screen::Library
+    if matches!(gui.screen, Screen::Library | Screen::Admin)
         && let Some((text, is_err)) = gui.note_words()
     {
         let note = bar::note_rect(area, gui.footer());
@@ -1404,6 +1442,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         t!("gui.tips.now")
     } else if gui.screen == Screen::Stats {
         std::borrow::Cow::from(stats::tips(gui))
+    } else if gui.screen == Screen::Admin {
+        std::borrow::Cow::from(admin::tips(gui))
     } else if gui.in_settings_room(SettingsRoom::Servers) {
         // The bundled server's row has no remove key to name; a peer's row
         // has its own verbs.
@@ -1455,11 +1495,12 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         put(frame, 1, area.height - 1, &tips, dim());
     }
 
-    // The bar, under the Library alone: the Now Playing view carries its
-    // own scrubber and transport. While the pairing QR is up, the card
-    // cover stands down: the graphics encode cache holds ONE image, and two
-    // per frame thrash it.
-    if gui.screen == Screen::Library {
+    // The bar, under the Library and the Admin tab: the Now Playing view
+    // carries its own scrubber and transport, and the Stats page takes the
+    // whole height. While the pairing QR is up, the card cover stands
+    // down: the graphics encode cache holds ONE image, and two per frame
+    // thrash it.
+    if matches!(gui.screen, Screen::Library | Screen::Admin) {
         let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
         let now = gui.bar_now();
         let view = BarView {
@@ -1487,6 +1528,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
+    admin::draw_overlays(frame, gui);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
     dj::draw_modals(frame, gui, area);
@@ -2262,6 +2304,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if gui.screen == Screen::Stats {
         return stats::handle_key(gui, key);
     }
+    // The Admin screen routes its keys by focus: the hallway's, a hosted
+    // room's, or the log's.
+    if gui.screen == Screen::Admin {
+        return admin::handle_key(gui, key);
+    }
     let browse = gui.browse_room()
         && gui.app.connected
         && !actions::modal_open(gui)
@@ -2382,6 +2429,8 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
         // The Stats screen, the third tab (stats-screen contract, entry 2).
         KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
+        // The Admin screen (admin-screen contract, entry 2).
+        KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
         // The visualizer's window (visualizer-window contract, entry 2).
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The tenth room has no digit; `D` is the capital beside `A`'s toggle.
@@ -2472,6 +2521,25 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     false
 }
 
+/// The transport's letters as the Library binds them — Space, `p`, `n`,
+/// `s`, `r`, `A`, `-`, `+` and `=` — for a screen that takes them outside
+/// the Library's own tail (the Admin tab's hallway). `None` when `code` is
+/// none of them; else whether to quit.
+fn transport_key(gui: &mut Gui, code: KeyCode) -> Option<bool> {
+    let act = match code {
+        KeyCode::Char(' ') => Act::PlayPause,
+        KeyCode::Char('p') => Act::Prev,
+        KeyCode::Char('n') => Act::Next,
+        KeyCode::Char('s') => Act::Shuffle,
+        KeyCode::Char('r') => Act::Repeat,
+        KeyCode::Char('A') => Act::AutoDj,
+        KeyCode::Char('-') => Act::VolDown,
+        KeyCode::Char('+') | KeyCode::Char('=') => Act::VolUp,
+        _ => return None,
+    };
+    Some(gui.act(act))
+}
+
 // ── The loop and the room it runs in ────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -2527,6 +2595,7 @@ fn event_loop(
             if connected {
                 gui.reopen_room();
                 stats::reopen(gui);
+                admin::reopen(gui);
             }
         }
         servers::poll(gui);
@@ -2537,11 +2606,13 @@ fn event_loop(
             control::pump(gui, rx);
         }
 
-        // The Stats screen's page pumps its worker and its controls here too.
+        // The Stats screen's page pumps its worker and its controls here too,
+        // and the Admin screen its room and its log.
         let stats_over = stats::frame(gui);
+        let admin_over = admin::frame(gui);
         // The visualizer window's host: the child's exit, the next texture.
         vizwin::tick(gui);
-        let over = gui.ui.hovering_clickable() || stats_over;
+        let over = gui.ui.hovering_clickable() || stats_over || admin_over;
         if over != hand {
             hand = over;
             set_pointer_shape(hand, mouse_on);
@@ -2593,6 +2664,16 @@ fn event_loop(
                     // 5); the GUI's surface still follows the motion, so the
                     // bar's own tabs light and dim as the pointer passes.
                     if stats::pointer(gui, mouse) {
+                        if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
+                            gui.ui.motion(at);
+                        }
+                        continue;
+                    }
+                    // The Admin screen's hosted room takes the pointer inside
+                    // its area, and every event while its modal is up
+                    // (admin-screen contract, clause 18); the hallway, the
+                    // log and the bar answer on the GUI's surface below.
+                    if admin::pointer(gui, mouse) {
                         if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
                             gui.ui.motion(at);
                         }
@@ -2882,6 +2963,14 @@ impl Gui {
         // The header dropdown is on top of everything while it is open.
         if self.servers.drop_open {
             servers::wheel_dropdown(self, delta);
+            return;
+        }
+        // The Admin screen's log scrolls under the wheel; a wheel over the
+        // hosted room reached the room through `admin::pointer`.
+        if self.screen == Screen::Admin {
+            if !self.modal_open() {
+                admin::wheel(self, at, delta);
+            }
             return;
         }
         // A modal owns the pointer whole; the Now Playing screen scrolls
@@ -3485,6 +3574,34 @@ mod tests {
         assert!(all.contains("no session"), "{all}");
         super::handle_key(&mut lone, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(lone.screen, Screen::Library);
+    }
+
+    #[test]
+    fn the_server_dropdown_takes_its_clicks_over_the_stats_page() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+        // Stats-screen clause 5: the header's server menu owns the pointer
+        // while it is open, over the page too — the page used to take the
+        // click from under it.
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert!(gui.stats.page.is_some());
+        gui.servers.drop_open = true;
+        let rows = draw(&mut gui);
+        let y = rows.iter().position(|r| r.contains("+ Add a server")).expect("the menu's add row") as u16;
+        let x = rows[y as usize].char_indices().position(|(i, _)| rows[y as usize][i..].starts_with("+ Add a server")).unwrap() as u16;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x + 2,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!stats::pointer(&mut gui, click), "the page lets go while the menu is open");
+        assert_eq!(gui.ui.hit(Position { x: x + 2, y }), Some(Act::SrvAdd), "and the menu's row answers");
+        gui.servers.drop_open = false;
+        draw(&mut gui);
+        assert!(stats::pointer(&mut gui, click), "with the menu closed the page has it again");
     }
 
     #[test]
