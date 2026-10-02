@@ -579,11 +579,12 @@ to draw in, `body_column`/`draw_foot`/`draw_chip`, `modal_rect` centred in the a
 `Claim` on the keyboard, one shared pointer routine, the `HostedRoom` face the GUI holds), and
 the server's log (`GET /api/v1/admin/logs/recent?since=`, `src/gui/server_log.rs`) on a worker
 thread of its own — docked as a column at 160 columns, as a band under the room at 48 rows,
-otherwise a room of its own on the hallway's Log row; `L` hides or opens it. The host takes only
-Tab, BackTab and `L` from a focused room, never a digit, `q` or Esc; Esc or `q` at a room's base
-hands the focus back to the hallway. Ten locales (35 keys, `gui.tips.base` names `M`), tests for
-the footer's 99 cells and the hallway's label widths in every locale, and an e2e leg with no
-server. Not built: the Overview row, the rooms' one-line summaries, server-side log levels.
+otherwise a room of its own on the hallway's Log row, its lines wrapped whole under their clocks
+(below); `L` hides or opens it. The host takes only Tab, BackTab and `L` from a focused room,
+never a digit, `q` or Esc; Esc or `q` at a room's base hands the focus back to the hallway. Ten
+locales (35 keys, `gui.tips.base` names `M`), tests for the footer's 99 cells and the hallway's
+label widths in every locale, and an e2e leg with no server. Not built: the Overview row, the
+rooms' one-line summaries, server-side log levels.
 Merged after v0.10.0, so the desktop product's window (Phase 14) hosts the tab too: the window
 drives the same two loop halves as the terminal (`gui::frame`, `gui::input`), so the tab's keys,
 pointer, wheel and hand cursor need nothing of their own there. One gap showed only in the
@@ -619,6 +620,17 @@ chord, so Ctrl+Shift+C off a Mac no longer quits. Ten locales (22 log keys, the 
 `copied_clipboard`, the log's footer re-cut to 99 cells). Not built: part-line or keyboard
 highlighting, edge auto-scroll, a drag in Apple Terminal (it reports no held button), choosing
 the save folder.
+
+**Wrapped log lines ✅ 2026-10-02** — a log line was one row, the message's first line clipped
+at the log's edge with ` …` after a stack trace; now the whole message wraps under its clock
+(contract clauses 23, 24, 29). Each of its lines wraps by words in cells at the log's width less
+the clock's ten, keeping a stack trace's indentation; a word wider than a row (a path, CJK with
+no spaces) breaks at the row's last cell; the later rows are set in under the message's first
+cell, every row in the line's colour. The view still scrolls by lines with the bottom line whole
+and the top one showing its tail, but a line taller than the view goes by rows and Home shows
+the oldest line from its clock, so no row is out of reach. Every drawn row maps to its line for
+the drag region, so a press on a later row means that line. ` …` and the first-line text it
+marked are gone; the copy is unchanged.
 
 Build, in order of fit: **logs** ✅ 2026-10-02 (`/api/v1/admin/logs/recent?since=<seq>` is a
 purpose-built tail-poll API with a cursor; the GUI's Admin tab tails it, above), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and

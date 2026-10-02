@@ -233,19 +233,36 @@ not.
     download.
 23. **Lines**: newest at the bottom; each is the local time `HH:MM:SS` in
     dim (UTC on a machine without a zone, `--:--:--` when the server's
-    time does not parse), two spaces, then the message clipped by cells —
-    its first line that is not blank, ` …` after it (` »` on the legacy
-    console) when another non-blank line follows (a stack trace).
-    Info and debug are in the text colour, warn in gold, error in the
-    danger colour; debug is not dimmed. With nothing to show, one
-    sentence: "waiting for the server's log…" (dim) before the first
-    answer; "this server keeps no live log — its logBufferSize is 0" (dim)
-    when the ring is off; "no lines at this level yet" (dim) when no line
-    passes the level; the failure (gold) when the last poll failed.
+    time does not parse), two spaces, then the whole message, wrapped so
+    that none of it is cut: every line of it (a stack trace's too), blank
+    lines at its ends dropped and a blank line between two kept as an
+    empty row, each wrapped by words at the log's width less the clock's
+    ten cells, measured in cells, with a line's own indentation kept on
+    its first row. A word wider than a row (a path, a long token, CJK with
+    no spaces) starts where it stands and breaks at each row's last cell.
+    The rows after a line's first are set in ten cells, under the
+    message's first cell, with no clock. Info and debug are in the text
+    colour, warn in gold, error in the danger colour, on every row of the
+    line; debug is not dimmed. With nothing to show, one sentence:
+    "waiting for the server's log…" (dim) before the first answer; "this
+    server keeps no live log — its logBufferSize is 0" (dim) when the ring
+    is off; "no lines at this level yet" (dim) when no line passes the
+    level; the failure (gold) when the last poll failed.
 24. **Following and paused.** The log follows the newest line until it is
     scrolled up — a key or the wheel — which pauses it and holds the view
     still while new lines arrive under it. End, `f`, a click on the paused
     word, or scrolling back down to the newest line resume following.
+    The view scrolls by lines: its bottom line stands whole at the bottom
+    and the lines above it fill upward, the top one showing its last rows
+    when only they fit. ↑, ↓ and a notch of the wheel move one line; PgUp
+    goes past the lines the view shows whole, so the line cut at the top
+    becomes the bottom, and PgDn past as many lines below as fit a page of
+    rows, never fewer than one. Home goes to the top of the log: the
+    oldest line from its clock, the bottom line cut there if the rows
+    fall that way. A line taller than the view is read a row at a time,
+    a page of rows for PgUp and PgDn, until its first or its last row is
+    in sight, and a step down onto one brings it in from its first row.
+    A new width re-flows the lines under the same bottom line.
 25. **Levels are filtered in the player**, since the route has no level
     parameter: a line shows when its level is at or above the one chosen.
     `http`, `verbose` and `silly` count as debug, an unknown level as
@@ -294,33 +311,34 @@ not.
 
 ### Copying and saving the log
 
-29. **A press-drag across the log's lines highlights them**: whole
-    lines, from the line the press landed on to the line under the
-    pointer, in every placement. A highlighted line is filled across the
-    log's width in the selection colours (the accent behind, the
-    on-accent text), its clock and message in them rather than its
-    level's colour. The highlight is held by the lines' sequence numbers,
-    so arrivals and the ring's drops leave it on the same lines, and it
-    goes once its last line has left the ring. A drag above the first
-    line drawn or below the last stops at that line; the log never
-    scrolls by itself at an edge, but the wheel scrolls during a drag
-    and the highlight's end follows the line under the still pointer.
+29. **A press-drag across the log's lines highlights them**: whole lines,
+    from the line the press landed on to the line under the pointer, in
+    every placement; any row of a wrapped line, the tail of one cut at the
+    top included, means that line. Every row of a highlighted line is
+    filled across the log's width in the selection colours (the accent
+    behind, the on-accent text), its clock and message in them rather than
+    its level's colour. The highlight is held by the lines' sequence
+    numbers, so arrivals and the ring's drops leave it on the same lines,
+    and it goes once its last line has left the ring. A drag above the
+    first row drawn or below the last stops at that row's line; the log
+    never scrolls by itself at an edge, but the wheel scrolls during a
+    drag and the highlight's end follows the line under the still pointer.
     A plain click on the lines (a press released without leaving its
     cell), Esc, a level picked, a restarted server's ring, a new session
-    and the tab opened again clear it; `L`, Tab and `q` keep it.
-    Following carries on under it. The drag region is the line rows and
-    the empty rows under them, never the header or the failure's row.
-    Apple Terminal reports a press as an instant click pair (ui-kit.md,
-    the phantom-release dialect), so there no drag highlights; `y` still
-    copies every line shown. The highlight is a run of text to copy,
-    not the list cursor (ui-kit.md, List cursor): no row verb acts on
-    it and no key moves it.
+    and the tab opened again clear it; `L`, Tab and `q` keep it. Following
+    carries on under it. The drag region is the line rows and the empty
+    rows under them, never the header or the failure's row. Apple Terminal
+    reports a press as an instant click pair (ui-kit.md, the
+    phantom-release dialect), so there no drag highlights; `y` still
+    copies every line shown. The highlight is a run of text to copy, not
+    the list cursor (ui-kit.md, List cursor): no row verb acts on it and
+    no key moves it.
 30. **`y`, or the header's copy, copies** the highlighted lines, or every
     line shown at the chosen level when none is highlighted, oldest
     first. Each line is its local time `HH:MM:SS`, two spaces, `warn` or
     `error` and two spaces for those levels (winston's own words, never
-    translated), then the whole message — every line of it, not only
-    the first the row shows, its control and bidi characters dropped,
+    translated), then the whole message as the rows show it, but
+    unwrapped — every line of it, its control and bidi characters dropped,
     tabs as four spaces, cut at mStream's own 4000 characters — with its
     later lines indented ten spaces, so a stack trace reads under its
     time. Lines are joined by newlines, none after the last. The note
@@ -612,3 +630,27 @@ is the hub's.
     Federation's ticket copies wrote OSC 52 themselves, which a window
     never reads; they now take the same routes as the log's copy, and
     say "ticket copied" when the clipboard took it.
+- **2026-10-02 — Wrapped lines (clauses 23, 24, 29).** A line was one
+  row: the message's first line clipped at the log's edge, with ` …`
+  after it when a stack trace followed, so a long line could not be read
+  on screen at all — only copied. Lines now wrap whole under the clock,
+  and the view still scrolls by lines. Deliberate, each:
+  - **The log wraps its own way**, measured as `kit::wrap_words` is but
+    not through it: a sentence's wrap drops a stack trace's indentation
+    and leaves a word wider than the row whole, to run off the log's
+    edge, where the log keeps the one and breaks the other at the row's
+    last cell. A long word starts where it stands rather than on a row
+    of its own, so a path stays on the row with the `open` before it.
+  - **A line taller than the view goes by rows.** By lines alone, a
+    stack trace taller than the band's seven rows would show only its
+    last rows, and its first, with the clock and the error, never.
+  - **The top of the log may cut the bottom line**, where the rule
+    elsewhere keeps the bottom whole: when a line overshoots the view
+    near the top, a bottom kept whole leaves the lines above it out of
+    reach, and Home is where the oldest line is read from its clock.
+  - **No level word on the rows**: the rows never wrote `warn` or
+    `error` (the colour says it; the copy writes winston's word), and
+    the wrap adds none.
+  - **The ` …` mark is gone** with the clipped row, and so is the
+    first-line text the model kept for it: the model keeps the whole
+    message alone, which the rows wrap and the copy writes.
