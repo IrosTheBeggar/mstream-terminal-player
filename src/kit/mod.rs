@@ -20,6 +20,7 @@
 //! shown at once. Every full-screen page starts with its `init`.
 
 pub mod frames;
+pub mod os;
 pub mod theme;
 
 use std::time::{Duration, Instant};
