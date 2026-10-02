@@ -1114,12 +1114,17 @@ fn draw_path_entry(frame: &mut Frame, room: &mut Room, area: Rect, draft: &PathD
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
     kit::modal_close_plain(frame, &mut room.ui, inner, Act::PathCancel);
+    let shown = kit::field_display(
+        &mut room.ui,
+        inner.x,
+        inner.y + 2,
+        draft.text.value(),
+        draft.text.cursor(),
+        inner.width,
+        None,
+    );
     frame.render_widget(
-        Paragraph::new(Span::raw(kit::input_display(
-            draft.text.value(),
-            draft.text.cursor(),
-            inner.width,
-        ))),
+        Paragraph::new(Span::raw(shown)),
         Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
     );
     let sel_moved = draft.sel != draft.sel_anchor;
@@ -1208,12 +1213,17 @@ fn draw_name(frame: &mut Frame, room: &mut Room, area: Rect, draft: &NameDraft) 
         .border_style(accent());
     let field_inner = card.inner(field);
     frame.render_widget(card, field);
+    let shown = kit::field_display(
+        &mut room.ui,
+        field_inner.x + 1,
+        field_inner.y,
+        draft.name.value(),
+        draft.name.cursor(),
+        field_inner.width.saturating_sub(1),
+        None,
+    );
     frame.render_widget(
-        Paragraph::new(Span::raw(kit::input_display(
-            draft.name.value(),
-            draft.name.cursor(),
-            field_inner.width.saturating_sub(1),
-        ))),
+        Paragraph::new(Span::raw(shown)),
         Rect { x: field_inner.x + 1, y: field_inner.y, width: field_inner.width.saturating_sub(1), height: 1 },
     );
     frame.render_widget(
@@ -1702,5 +1712,33 @@ mod tests {
         assert_eq!(Screen::hint(&room), footer_hint_as(&room, false));
         assert!(Screen::modal_open(&room));
         assert_eq!(Screen::claim(&room), super::super::Claim::All);
+    }
+
+    /// Hosted, the cell a focused field notes is where the GUI's window
+    /// floats the input method's candidates, and what tells it a field has
+    /// the keyboard: it must be the caret's, wherever the field's window
+    /// over a long value stands.
+    #[test]
+    fn the_typed_path_and_the_name_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = seeded();
+        handle_key(&mut room, key(KeyCode::Char('t')));
+        type_text(&mut room, &format!("/srv/{}/tail", "deep".repeat(20)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "deep/tail", "");
+        // Four in from the end, the tail is past the window's edge: a
+        // clip mark stands after the caret.
+        for _ in 0..4 {
+            handle_key(&mut room, key(KeyCode::Left));
+        }
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "deep/", "…");
+        handle_key(&mut room, key(KeyCode::Home));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "", "/srv/deep");
+
+        let name = Input::new(format!("{}-end", "x".repeat(40)));
+        room.modal = Modal::Name(NameDraft { directory: "/srv/music".into(), name, error: None });
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "xxx-end", "");
+        handle_key(&mut room, key(KeyCode::Esc));
+        draw(&mut room);
+        assert_eq!(room.ui.caret_at(), None, "no field, no caret");
     }
 }

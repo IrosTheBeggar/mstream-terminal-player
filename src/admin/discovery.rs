@@ -1757,7 +1757,8 @@ fn draw_invite(frame: &mut Frame, room: &mut Room, pane: Rect, s: &DiscoveryStat
     let inner = card.inner(field);
     frame.render_widget(card, field);
     let shown = if room.ticket_focus {
-        kit::input_display(room.ticket.value(), room.ticket.cursor(), inner.width.saturating_sub(2))
+        let w = inner.width.saturating_sub(2);
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, room.ticket.value(), room.ticket.cursor(), w, None)
     } else {
         room.ticket.value().to_string()
     };
@@ -1871,9 +1872,12 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     // The right side of the section line: the filter (live text while it
     // is on), the hidden-incompatible toggle and the blocked count.
     let mut parts: Vec<Span> = Vec::new();
+    let mut caret = None;
     if room.filter_on {
         let shown = if room.filter_focus {
-            kit::input_display(room.filter.value(), room.filter.cursor(), 30)
+            let (line, at) = kit::field_line(&room.ui, room.filter.value(), room.filter.cursor(), 30, None);
+            caret = Some(at);
+            line
         } else {
             room.filter.value().to_string()
         };
@@ -1900,7 +1904,9 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
         parts.push(Span::styled(" · ", dim()));
         parts.push(Span::styled(t!("p2p.blocked_manage").to_string(), dim()));
     }
-    let right_w: usize = parts.iter().map(|p| p.content.chars().count()).sum();
+    // Measured in cells, as the line is drawn: a composition in the
+    // filter, or a translation, of wide characters takes two each.
+    let right_w: usize = parts.iter().map(|p| kit::width(&p.content)).sum();
     let right = Rect {
         x: table.right().saturating_sub(right_w as u16),
         y,
@@ -1909,6 +1915,10 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     };
     frame.render_widget(Paragraph::new(Line::from(parts)), right);
     room.ui.click(right, Act::FilterOpen);
+    // The filter's caret, now that its line has a place: after `/ `.
+    if let Some(at) = caret {
+        room.ui.note_caret(Position { x: right.x.saturating_add(2 + at), y });
+    }
     y += 1;
 
     // Columns: the fixed ones from the right, SERVER takes the rest —
@@ -2163,7 +2173,8 @@ fn draw_compose(frame: &mut Frame, room: &mut Room, area: Rect, c: &Compose) {
     let field_inner = card.inner(field);
     frame.render_widget(card, field);
     let shown = if focused {
-        kit::input_display(c.message.value(), c.message.cursor(), field_inner.width.saturating_sub(2))
+        let (x, w) = (field_inner.x + 1, field_inner.width.saturating_sub(2));
+        kit::field_display(&mut room.ui, x, field_inner.y, c.message.value(), c.message.cursor(), w, None)
     } else {
         c.message.value().to_string()
     };
@@ -2220,7 +2231,7 @@ fn modal_field<A: Clone>(
     let inner = card.inner(field);
     frame.render_widget(card, field);
     let shown = if focused {
-        kit::input_display(input.value(), input.cursor(), inner.width.saturating_sub(2))
+        kit::field_display(ui, inner.x + 1, inner.y, input.value(), input.cursor(), inner.width.saturating_sub(2), None)
     } else {
         let w = inner.width.saturating_sub(2) as usize;
         let v = input.value();
@@ -3158,5 +3169,36 @@ mod tests {
         assert!(room.modal_open());
         assert_eq!(room.claim(), Claim::All);
         assert_eq!(room.hint(), t!("p2p.hint_leave"));
+    }
+
+    /// The cell a focused field notes is the caret's however the field's
+    /// window over a long value stands (hosted, it is where the GUI's window
+    /// floats the input method's candidates, and what turns its paste on).
+    /// The filter is right-aligned with what follows it, so it notes its
+    /// caret only once its line is measured and placed.
+    #[test]
+    fn the_filter_the_ticket_box_and_the_forms_field_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = on();
+        handle_key(&mut room, key(KeyCode::Char('/')));
+        type_text(&mut room, &format!("{}end", "z".repeat(40)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "zzzend", " · ");
+        handle_key(&mut room, key(KeyCode::Home));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "/ ", "zzz");
+        handle_key(&mut room, key(KeyCode::Enter));
+        draw(&mut room);
+        assert_eq!(room.ui.caret_at(), None, "the filter let go of the keys");
+
+        handle_key(&mut room, key(KeyCode::Char('j')));
+        type_text(&mut room, &format!("node{}end", "a".repeat(120)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "aaaend", "");
+        handle_key(&mut room, key(KeyCode::Esc));
+        draw(&mut room);
+        assert_eq!(room.ui.caret_at(), None, "the box let go of the keys");
+
+        // The name's 64 characters, past its field's 60 cells.
+        handle_key(&mut room, key(KeyCode::Char('e')));
+        type_text(&mut room, &format!(" {}-end", "d".repeat(48)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "ddd-end", "");
     }
 }

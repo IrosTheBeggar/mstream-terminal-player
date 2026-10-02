@@ -282,9 +282,8 @@ impl<A: Clone> Surface<A> {
     /// The cell of the field with the keyboard this frame, if one has it:
     /// a field drawn in the topmost layer. None while a modal with no
     /// field of its own is up over a page's focused field.
-    // The GUI window places its IME box here; the frame tests read it in
-    // every build, the player only in one with the `window` feature.
-    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    // The GUI window places its IME box here, and the GUI's Admin tab
+    // lifts a hosted room's onto its own surface in every build.
     pub fn caret_at(&self) -> Option<Position> {
         self.caret_at
     }
@@ -299,8 +298,9 @@ impl<A: Clone> Surface<A> {
     }
 
     /// The input method's uncommitted text, or none (empty).
-    // Only the GUI window has an input method to report (and the tests).
-    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    // Only the GUI window has an input method to report (and the tests);
+    // the GUI's Admin tab hands the GUI's on to a hosted room in every
+    // build, where it is always empty but in the window.
     pub fn set_composition(&mut self, text: &str) {
         if self.composition != text {
             self.composition.clear();
@@ -1234,6 +1234,47 @@ pub fn input_display_composing(
     (line, u16::try_from(self::width(&before)).unwrap_or(u16::MAX))
 }
 
+/// The focused field of a page that draws on a surface of its own (an
+/// admin room, hosted in the GUI's Admin tab or not): the line
+/// [`input_display_composing`] draws, with the surface's composition and
+/// the caret held steady, and the caret's cell noted on the surface
+/// ([`Surface::note_caret`]), `x` and `y` being the cell the line starts
+/// in. A host lifts the note onto its own surface, which is how the GUI's
+/// window knows the room's field has the keyboard and turns its paste and
+/// its input method on for it, the candidate list at the caret, as it
+/// does for the GUI's own fields (`gui::text_field`). Everywhere else the
+/// note goes unread and the composition stays empty, so the line is the
+/// one [`input_display`] draws. A masked field hands its value in masked
+/// already and its mark as `mask`. The caret does not blink here: a host
+/// times its frames by its own surface's blink clock, not the page's.
+pub fn field_display<A: Clone>(
+    ui: &mut Surface<A>,
+    x: u16,
+    y: u16,
+    value: &str,
+    cursor: usize,
+    width: u16,
+    mask: Option<char>,
+) -> String {
+    let (line, caret) = field_line(ui, value, cursor, width, mask);
+    ui.note_caret(Position { x: x.saturating_add(caret), y });
+    line
+}
+
+/// [`field_display`]'s line and the caret's offset in it, in cells,
+/// noting nothing: for a field whose line is placed only once it has been
+/// measured (a filter right-aligned with what follows it), which notes
+/// its caret itself when it knows where the line starts.
+pub fn field_line<A: Clone>(
+    ui: &Surface<A>,
+    value: &str,
+    cursor: usize,
+    width: u16,
+    mask: Option<char>,
+) -> (String, u16) {
+    input_display_composing(value, cursor, width, true, ui.composition(), mask)
+}
+
 /// Pure core - unit-tested with explicit marks so the assertions hold on
 /// every OS and terminal the tests run under.
 #[cfg(test)]
@@ -1838,6 +1879,38 @@ mod tests {
         assert_eq!(s.composition(), "にほ", "the input method's text outlives frames");
         s.set_composition("");
         assert_eq!(s.composition(), "");
+    }
+
+    /// A hosted page's focused field ([`field_display`]): while nothing is
+    /// composing the line is the one [`input_display`] draws, and the cell
+    /// noted holds the caret wherever the window over a long value stands;
+    /// a composition goes in before the caret, a masked field's as marks.
+    #[test]
+    fn a_hosted_field_notes_the_cell_its_caret_is_drawn_in_however_the_value_is_windowed() {
+        let caret = input_display_blink("", 0, 5, true).chars().next().unwrap();
+        let mut s: Surface<i32> = Surface::new();
+        let value = "0123456789abcdefghij";
+        // The cursor at the end, mid-value and at the start of a value
+        // twice the field's width.
+        for cursor in [20, 10, 0] {
+            let line = field_display(&mut s, 30, 4, value, cursor, 10, None);
+            assert_eq!(line, input_display(value, cursor, 10));
+            let at = s.caret_at().expect("the field noted its caret");
+            assert_eq!(at.y, 4);
+            assert_eq!(line.chars().nth(usize::from(at.x - 30)), Some(caret), "cursor {cursor}: {line:?}");
+        }
+        // Kana are two cells each: the caret's cell counts them so.
+        s.set_composition("にほ");
+        let line = field_display(&mut s, 30, 4, value, 20, 10, None);
+        let before: String = line.chars().take_while(|c| *c != caret).collect();
+        assert!(before.ends_with("にほ"), "the composition before the caret: {line:?}");
+        assert_eq!(s.caret_at(), Some(Position { x: 30 + width(&before) as u16, y: 4 }));
+        let line = field_display(&mut s, 30, 4, "••", 2, 10, Some('•'));
+        assert_eq!(line, format!("••••{caret}"), "a masked field's composition is marks");
+        // The bare line notes nothing, for a field placed once measured.
+        s.begin_frame();
+        assert_eq!(field_line(&s, "ab", 2, 10, None), (format!("abにほ{caret}"), 6));
+        assert_eq!(s.caret_at(), None);
     }
 
     #[test]

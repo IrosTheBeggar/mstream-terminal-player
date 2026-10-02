@@ -1531,10 +1531,11 @@ fn modal_field_labelled(frame: &mut Frame, room: &mut Room, at: Rect, label_w: u
     let card = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(border));
     let inner = card.inner(field);
     frame.render_widget(card, field);
+    let w = inner.width.saturating_sub(2);
     let shown = if focused {
-        kit::input_display(input.value(), input.cursor(), inner.width.saturating_sub(2))
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, input.value(), input.cursor(), w, None)
     } else {
-        clip_tail(input.value(), inner.width.saturating_sub(2))
+        clip_tail(input.value(), w)
     };
     frame.render_widget(
         Paragraph::new(Span::styled(shown, if muted { dim() } else { Style::default() })),
@@ -2641,5 +2642,21 @@ mod tests {
         assert_eq!(room.tips(), t!("bak.hint_add"));
         room.press(key_press(KeyCode::Esc));
         assert_eq!(room.claims(), Claim::Open);
+    }
+
+    /// The cell a focused field notes is the caret's however the field's
+    /// window over a long value stands (hosted, it is where the GUI's window
+    /// floats the input method's candidates).
+    #[test]
+    fn the_forms_field_notes_the_cell_its_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = idle();
+        press(&mut room, KeyCode::Char('a'));
+        let Modal::Form(f) = &mut room.modal else { panic!("the add form") };
+        f.focus = f.fields().iter().position(|field| *field == Field::Dest).expect("a destination field");
+        type_text(&mut room, &format!("/Volumes/{}/tail", "deep".repeat(20)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "deep/tail", "");
+        press(&mut room, KeyCode::Home);
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "", "/Volumes/deep");
     }
 }

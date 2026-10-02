@@ -504,6 +504,21 @@ pub(crate) trait HostedRoom {
 
     /// Whether the room's tooltips name their keys: the host's setting.
     fn set_key_hints(&mut self, on: bool);
+
+    /// The cell where the room's focused field drew its caret in the last
+    /// [`HostedRoom::draw_in`], if a field has the room's keyboard
+    /// ([`Surface::caret_at`], noted by [`crate::kit::field_display`]).
+    /// The host lifts it onto its own surface, so a shell with a paste and
+    /// an input method of its own (the GUI's window) turns them on for the
+    /// room's field. Taken `&mut` because the room's surface is reached
+    /// through [`Screen::ui`].
+    fn caret_at(&mut self) -> Option<Position>;
+
+    /// The host's input method's uncommitted text (empty for none), for
+    /// the room's focused field to draw in place: handed down before every
+    /// [`HostedRoom::draw_in`], so the room's copy follows the host's from
+    /// frame to frame ([`Surface::set_composition`]).
+    fn set_composition(&mut self, text: &str);
 }
 
 impl<S: Screen + 'static> HostedRoom for S {
@@ -553,6 +568,34 @@ impl<S: Screen + 'static> HostedRoom for S {
     fn set_key_hints(&mut self, on: bool) {
         self.ui().key_hints = on;
     }
+
+    fn caret_at(&mut self) -> Option<Position> {
+        self.ui().caret_at()
+    }
+
+    fn set_composition(&mut self, text: &str) {
+        self.ui().set_composition(text);
+    }
+}
+
+/// A room test's check of its focused field, which is the GUI window's
+/// field when the room is hosted (admin-screen contract, clause 28): the
+/// cell the room's surface `ui` noted holds the caret in `frame`, a test's
+/// flattened draw (a character a cell, a line a row), with `before` the
+/// end of what is drawn left of it and `after` the start of what is drawn
+/// right of it, wherever the field's window over a long value stands. The
+/// frame comes first so a test can draw it in the call.
+#[cfg(test)]
+pub(crate) fn assert_caret_between<A: Clone>(frame: &str, ui: &Surface<A>, before: &str, after: &str) {
+    let at = ui.caret_at().expect("a field has the keyboard and noted its caret");
+    let row: Vec<char> = frame.lines().nth(usize::from(at.y)).expect("the caret's row").chars().collect();
+    let line: String = row.iter().collect();
+    let x = usize::from(at.x);
+    assert_eq!(row.get(x), Some(&'▏'), "the noted cell {at:?} holds no caret: {line}");
+    let left: String = row[..x].iter().collect();
+    let right: String = row[x + 1..].iter().collect();
+    assert!(left.ends_with(before), "{before:?} is not left of the caret: {line}");
+    assert!(right.starts_with(after), "{after:?} is not right of the caret: {line}");
 }
 
 // ── Shared chrome ────────────────────────────────────────────────────────────

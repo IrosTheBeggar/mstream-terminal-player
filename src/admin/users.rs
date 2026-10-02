@@ -1185,7 +1185,11 @@ fn field_box(frame: &mut Frame, room: &mut Room, at: Rect, label: &str, input: &
     frame.render_widget(block, field);
     let w = inner.width.saturating_sub(2);
     let value = if masked { "•".repeat(input.value().chars().count()) } else { input.value().to_string() };
-    let shown = if focused { kit::input_display(&value, input.cursor(), w) } else { clip(&value, w) };
+    let shown = if focused {
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, &value, input.cursor(), w, masked.then_some('•'))
+    } else {
+        clip(&value, w)
+    };
     frame.render_widget(Paragraph::new(Span::raw(shown)), Rect { x: inner.x + 1, y: inner.y, width: w, height: 1 });
     room.ui.click(field, act);
 }
@@ -1899,5 +1903,24 @@ mod tests {
         assert!(r.modal_up());
         assert_eq!(r.claims(), Claim::All, "a form holds every key");
         assert_eq!(r.tips(), t!("usr.hint_add"));
+    }
+
+    /// The cell a focused field notes is the caret's, masked or not, however
+    /// the field's window over a long value stands (hosted, it is where the
+    /// GUI's window floats the input method's candidates).
+    #[test]
+    fn the_password_and_the_username_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = loaded();
+        room.act(Act::Password("ben".into()));
+        type_text(&mut room, &"s".repeat(60));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "•••", "");
+        press(&mut room, KeyCode::Home);
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "", "•••");
+        press(&mut room, KeyCode::Esc);
+
+        press(&mut room, KeyCode::Char('a'));
+        type_text(&mut room, &format!("{}-end", "u".repeat(50)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "uuu-end", "");
     }
 }

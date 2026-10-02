@@ -267,16 +267,19 @@ fn render(frame: &mut Frame, page: &mut SignIn) {
     y += 3;
 
     let focus = page.field;
-    let show = |input: &Input, secret: bool, focused: bool| -> String {
+    // A field whose label is on row `top` has its value two rows down, a
+    // cell in from its card's edge (`field_row`).
+    let show = |ui: &mut Surface<Act>, input: &Input, secret: bool, focused: bool, top: u16| -> String {
         let value = if secret { mask(input.value()) } else { input.value().to_string() };
         if focused {
-            kit::input_display(&value, input.cursor(), width.saturating_sub(2))
+            let mark = secret.then_some('•');
+            kit::field_display(ui, x + 1, top + 2, &value, input.cursor(), width.saturating_sub(2), mark)
         } else {
             value
         }
     };
-    let username = show(&page.username, false, focus == Field::Username);
-    let password = show(&page.password, true, focus == Field::Password);
+    let username = show(&mut page.ui, &page.username, false, focus == Field::Username, y);
+    let password = show(&mut page.ui, &page.password, true, focus == Field::Password, y + 4);
     y = field_row(frame, page, x, y, width, &t!("login.field_username"), username, Field::Username);
     y = field_row(frame, page, x, y, width, &t!("login.field_password"), password, Field::Password);
     y += 1;
@@ -482,5 +485,18 @@ mod tests {
         );
         let cfg = config::load().unwrap();
         assert_eq!(cfg.servers[0].username.as_deref(), Some("alice"));
+    }
+
+    /// The cell a focused field notes is the caret's, masked or not, however
+    /// the field's window over a long value stands.
+    #[test]
+    fn the_fields_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut p = page();
+        type_text(&mut p, &format!("{}-end", "u".repeat(60)));
+        super::super::assert_caret_between(&draw(&mut p), &p.ui, "uuu-end", "");
+        p.field = Field::Password;
+        type_text(&mut p, &"s".repeat(60));
+        super::super::assert_caret_between(&draw(&mut p), &p.ui, "•••", "");
     }
 }

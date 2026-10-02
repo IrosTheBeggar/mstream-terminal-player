@@ -2204,7 +2204,8 @@ fn field_box(frame: &mut Frame, room: &mut Room, at: Rect, label: &str, input: &
     let (shown, style) = if value.is_empty() && !focused {
         (placeholder.map(|p| clip(p, w)).unwrap_or_default(), dim())
     } else if focused {
-        (kit::input_display(&value, input.cursor(), w), Style::default())
+        let mask = masked.then_some('•');
+        (kit::field_display(&mut room.ui, inner.x + 1, inner.y, &value, input.cursor(), w, mask), Style::default())
     } else {
         (clip(&value, w), Style::default())
     };
@@ -2421,7 +2422,9 @@ fn draw_torrents(frame: &mut Frame, room: &mut Room, body: Rect) {
     let hover = room.ui.pointer.is_some_and(|p| filter_rect.contains(p));
     let slash_style = if room.filter_focus { Style::default().fg(th().accent).add_modifier(Modifier::BOLD) } else if hover { Style::default().fg(th().bright) } else { dim() };
     let text = if room.filter_focus {
-        Span::raw(kit::input_display(room.filter.value(), room.filter.cursor(), filter_rect.width.saturating_sub(2)))
+        // After the `/ ` mark's two cells.
+        let (x, w) = (filter_rect.x + 2, filter_rect.width.saturating_sub(2));
+        Span::raw(kit::field_display(&mut room.ui, x, filter_rect.y, room.filter.value(), room.filter.cursor(), w, None))
     } else if room.filter.value().is_empty() {
         Span::styled(t!("tor.filter_hint").to_string(), dim())
     } else {
@@ -3793,5 +3796,32 @@ mod tests {
         assert_eq!(room.tips(), t!("tor.hint_seeding"));
         let text = text_of(&hosting::draw_hosted(&mut room, (100, 30), WINDOW));
         assert!(text.contains("[✓] music"), "{text}");
+    }
+
+    /// The cell a focused field notes is the caret's, masked or not, however
+    /// the field's window over a long value stands (hosted, it is where the
+    /// GUI's window floats the input method's candidates).
+    #[test]
+    fn the_filter_and_the_connect_fields_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = connected();
+        press(&mut room, KeyCode::Char('/'));
+        // 77 of the filter's 80 characters, past its 74 cells.
+        type_text(&mut room, &format!("{}end", "z".repeat(74)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "zzzend", "");
+        press(&mut room, KeyCode::Home);
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "/ ", "zzz");
+
+        let mut room = new_room();
+        room.queued = None;
+        room.apply(loaded(params("transmission", false), users(1), false));
+        assert_eq!(room.phase(), Phase::Connect);
+        type_text(&mut room, &format!(".{}end", "h".repeat(80)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "hhhend", "");
+        for _ in 0..3 {
+            press(&mut room, KeyCode::Tab);
+        }
+        type_text(&mut room, &"s".repeat(60));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "•••", "");
     }
 }

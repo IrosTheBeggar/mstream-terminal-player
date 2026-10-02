@@ -440,11 +440,24 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         gui.admin.log.model.mark_seen();
     }
 
+    // The room's field is the window's field (clause 28): the input
+    // method's composition goes down to the room before it draws, and the
+    // caret its focused field noted comes up to the GUI's surface after,
+    // where the window reads that a field has the keyboard (its paste and
+    // its input method on) and floats the candidates by the caret. A GUI
+    // modal drawn over the room later lays itself over the note, as over
+    // a GUI field's; the composition while one is up is its own field's,
+    // so the room's beneath does not draw it too.
+    let composition = if gui.modal_open() { "" } else { gui.ui.composition() };
     let admin = &mut gui.admin;
     let mut drew_room = false;
     if let (Hall::Room(_), Some(room)) = (admin.showing, admin.room.as_mut()) {
         room.set_key_hints(key_hints);
+        room.set_composition(composition);
         room.draw_in(frame, lay.room);
+        if let Some(at) = room.caret_at() {
+            gui.ui.note_caret(at);
+        }
         // The first row is the pick banner's, so its [X] stays the GUI's.
         admin.room_at = Rect { y: lay.room.y + 1, height: lay.room.height.saturating_sub(1), ..lay.room };
         drew_room = true;
@@ -593,10 +606,15 @@ fn draw_log(frame: &mut Frame, gui: &mut Gui, lay: &Layout, key_hints: bool) {
 }
 
 /// The log's level menu, in the overlay pass, so it hangs over the lines
-/// and owns the pointer while it is open.
+/// and owns the pointer while it is open. It owns every key too (clause
+/// 20), so a room's field beneath stops counting as having the keyboard:
+/// a chooser takes its keys as keys, never a paste or a composition.
 pub(super) fn draw_overlays(frame: &mut Frame, gui: &mut Gui) {
     if gui.screen != Screen::Admin || gui.admin.log_at.is_none() {
         return;
+    }
+    if gui.admin.log.menu.is_some() {
+        gui.ui.modal_over();
     }
     server_log::draw_menu(frame, &mut gui.ui, &mut gui.admin.log, wrap_log);
 }
@@ -984,6 +1002,10 @@ mod tests {
         /// Write past the area's bottom and right edges, as a form taller
         /// than the area would.
         spill: bool,
+        /// Where its focused field's caret is, as a room's surface notes it.
+        caret: Option<Position>,
+        /// Each composition the host handed down, in order.
+        compositions: Vec<String>,
     }
 
     /// A room that only writes down what the host asked of it.
@@ -1035,6 +1057,14 @@ mod tests {
 
         fn set_key_hints(&mut self, on: bool) {
             self.0.borrow_mut().hints = Some(on);
+        }
+
+        fn caret_at(&mut self) -> Option<Position> {
+            self.0.borrow().caret
+        }
+
+        fn set_composition(&mut self, text: &str) {
+            self.0.borrow_mut().compositions.push(text.to_string());
         }
     }
 
@@ -2111,5 +2141,115 @@ mod tests {
         assert!(gui.admin.room.is_none() && !gui.admin.log.running(), "leaving drops both");
         reopen(&mut gui);
         assert!(gui.admin.room.is_none(), "a session change off the tab opens nothing");
+    }
+
+    // ── The room's field in the window ──────────────────────────────────────
+
+    #[test]
+    fn a_rooms_focused_field_notes_its_caret_on_the_guis_surface_where_it_draws() {
+        // The window asks the GUI's surface whether a field has the
+        // keyboard, to turn its paste and its input method on, and where
+        // the caret is, to float the candidates there (clause 28): the
+        // typed-path field of the real Libraries room answers through the
+        // host, at the cell its caret is drawn in.
+        let _english = english();
+        let mut gui = admin_gui();
+        render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), None, "the room has no field open");
+        press(&mut gui, KeyCode::Enter);
+        assert_eq!(gui.admin.focus, Focus::Room);
+        press(&mut gui, KeyCode::Char('t'));
+        let buf = render_at(&mut gui, 100, 30);
+        let at = gui.ui.caret_at().expect("the typed-path field has the keyboard");
+        assert_eq!(buf[(at.x, at.y)].symbol(), "▏", "{}", row(&buf, at.y));
+        for c in ['a', 'b', 'c'] {
+            press(&mut gui, KeyCode::Char(c));
+        }
+        let typed = Position { x: at.x + 3, y: at.y };
+        let buf = render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), Some(typed), "after what was typed");
+        assert!(from(&buf, at.x, at.y).starts_with("abc▏"), "{}", row(&buf, at.y));
+
+        // The Log room hides the room, field and all.
+        show(&mut gui, Hall::Log);
+        render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), None, "the Log room shows: no field has the keyboard");
+        show(&mut gui, Hall::Room(RoomId::Libraries));
+        render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), Some(typed), "the room back, and its field with it");
+
+        press(&mut gui, KeyCode::Esc);
+        render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), None, "the field went with its modal");
+    }
+
+    #[test]
+    fn the_input_methods_composition_draws_in_the_rooms_field_before_the_caret() {
+        let _english = english();
+        let mut gui = admin_gui();
+        press(&mut gui, KeyCode::Enter);
+        press(&mut gui, KeyCode::Char('t'));
+        press(&mut gui, KeyCode::Char('a'));
+        press(&mut gui, KeyCode::Char('b'));
+        render_at(&mut gui, 100, 30);
+        let at = gui.ui.caret_at().expect("the typed-path field has the keyboard");
+        // The window sets the composition on the GUI's surface; the host
+        // hands it down before every draw, so it stays in the room's field
+        // from frame to frame until the window lets it go.
+        gui.ui.set_composition("にほ");
+        for frame in 0..2 {
+            let buf = render_at(&mut gui, 100, 30);
+            let cells = [(at.x - 2, "a"), (at.x - 1, "b"), (at.x, "に"), (at.x + 2, "ほ"), (at.x + 4, "▏")];
+            for (x, want) in cells {
+                assert_eq!(buf[(x, at.y)].symbol(), want, "frame {frame}: {}", row(&buf, at.y));
+            }
+            let after = Position { x: at.x + 4, y: at.y };
+            assert_eq!(gui.ui.caret_at(), Some(after), "the caret after the kana's four cells");
+        }
+        gui.ui.set_composition("");
+        let buf = render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), Some(at), "let go, the value is as it was");
+        assert_eq!(buf[(at.x, at.y)].symbol(), "▏");
+    }
+
+    #[test]
+    fn the_host_lifts_a_rooms_caret_only_while_the_room_is_drawn_and_has_the_keys() {
+        let probe = Probe::default();
+        let noted = Position { x: 40, y: 9 };
+        probe.0.borrow_mut().caret = Some(noted);
+        let mut gui = hosting(&probe);
+        gui.ui.set_composition("にほ");
+        render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), Some(noted), "the room's caret, on the GUI's surface");
+        assert_eq!(probe.0.borrow().compositions, ["にほ"], "the composition went down before the draw");
+
+        show(&mut gui, Hall::Log);
+        render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), None, "the Log room draws no room, so no caret comes up");
+        assert_eq!(probe.0.borrow().compositions.len(), 1, "and no composition goes down");
+
+        // The add-server form opens on its chooser, which has no field:
+        // laid over the room's, it takes the keys as keys.
+        show(&mut gui, Hall::Room(RoomId::Libraries));
+        super::super::servers::open_add(&mut gui);
+        render_at(&mut gui, 100, 30);
+        assert_eq!(gui.ui.caret_at(), None, "the GUI's modal laid itself over the note");
+        let handed = probe.0.borrow().compositions.last().cloned();
+        assert_eq!(handed.as_deref(), Some(""), "a composition under a GUI modal is its own field's");
+
+        // The log's level menu takes every key (clause 20), the note too.
+        gui.servers.form = None;
+        render_at(&mut gui, 176, 46);
+        assert_eq!(gui.ui.caret_at(), Some(noted));
+        gui.admin.log.act(LogAct::Menu);
+        render_at(&mut gui, 176, 46);
+        assert_eq!(gui.ui.caret_at(), None, "the level menu is up over the room");
+
+        // No session: no room, no caret.
+        let mut lone = self::gui();
+        press(&mut lone, KeyCode::Char('M'));
+        render_at(&mut lone, 100, 30);
+        assert!(lone.admin.room.is_none());
+        assert_eq!(lone.ui.caret_at(), None);
     }
 }

@@ -2013,10 +2013,11 @@ fn draw_peers(frame: &mut Frame, room: &mut Room, body: Rect) {
     let card = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(border));
     let inner = card.inner(field);
     frame.render_widget(card, field);
+    let w = inner.width.saturating_sub(2);
     let shown = if room.ticket_focus {
-        kit::input_display(room.ticket.value(), room.ticket.cursor(), inner.width.saturating_sub(2))
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, room.ticket.value(), room.ticket.cursor(), w, None)
     } else {
-        clip(room.ticket.value(), inner.width.saturating_sub(2))
+        clip(room.ticket.value(), w)
     };
     frame.render_widget(Paragraph::new(Span::raw(shown)), Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: 1 });
     room.ui.click(field, Act::TicketFocus);
@@ -2117,10 +2118,11 @@ fn modal_field(frame: &mut Frame, room: &mut Room, at: Rect, label: &str, input:
     let card = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(border));
     let inner = card.inner(field);
     frame.render_widget(card, field);
+    let w = inner.width.saturating_sub(2);
     let shown = if focused {
-        kit::input_display(input.value(), input.cursor(), inner.width.saturating_sub(2))
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, input.value(), input.cursor(), w, None)
     } else {
-        clip(input.value(), inner.width.saturating_sub(2))
+        clip(input.value(), w)
     };
     frame.render_widget(Paragraph::new(Span::raw(shown)), Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: 1 });
     room.ui.click(field, act);
@@ -3058,5 +3060,26 @@ mod tests {
         assert!(room.modal_open());
         assert_eq!(room.claim(), Claim::All);
         assert_eq!(room.hint(), t!("fed.hint_turn_off"));
+    }
+
+    /// The cell a focused field notes is the caret's however the field's
+    /// window over a long value stands (hosted, it is where the GUI's window
+    /// floats the input method's candidates, and what turns its paste on).
+    #[test]
+    fn the_ticket_box_and_the_forms_field_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = on();
+        press(&mut room, KeyCode::Char('j'));
+        type_text(&mut room, &format!("mstrfed1:{}end", "q".repeat(120)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "qqqend", "");
+        press(&mut room, KeyCode::Home);
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "", "mstrfed1:");
+        press(&mut room, KeyCode::Esc);
+        draw(&mut room);
+        assert_eq!(room.ui.caret_at(), None, "the box let go of the keys");
+
+        room.act(Act::Mint);
+        type_text(&mut room, &format!("{}-end", "n".repeat(40)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "nnn-end", "");
     }
 }
