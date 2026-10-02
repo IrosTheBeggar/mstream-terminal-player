@@ -19,7 +19,7 @@ mod federation;
 mod libraries;
 mod login;
 pub(crate) mod stats;
-mod tz;
+pub(crate) mod tz;
 mod users;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,7 +28,7 @@ use clap::{Args, Subcommand};
 use ratatui::Frame;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::style::Print;
@@ -41,7 +41,7 @@ use rust_i18n::t;
 use crate::api::{ApiError, Client};
 use crate::kit::theme::th;
 use crate::kit::{
-    GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme,
+    GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme, width,
 };
 
 /// How long to wait for input before redrawing anyway.
@@ -200,8 +200,24 @@ fn saved_username(server: &str) -> Option<String> {
 }
 
 /// How a room's loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Quit,
+}
+
+/// What a hosted room holds of the keyboard right now (admin-screen
+/// contract, clause 13): the host routes a key to the room or keeps it by
+/// asking this first, so a modal or a text field never loses a letter to
+/// the host's own keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Claim {
+    /// The room takes its own keys; the host keeps Tab and its own letters.
+    #[default]
+    Open,
+    /// Tab moves the room's own focus, so the host leaves Tab alone too.
+    OwnTab,
+    /// A modal or a text field is up: every key is the room's.
+    All,
 }
 
 /// What the terminal session asks of a room. A room keeps its own worker
@@ -240,6 +256,30 @@ pub(crate) trait Screen {
 
     /// The wheel over `at`: which list scrolls is the room's to say.
     fn wheel(&mut self, up: bool, at: Position);
+
+    /// Draw inside another shell's `area` (the GUI player's Admin tab):
+    /// no header, since the host's bar names the server, and no tips row,
+    /// since the host's footer carries [`Screen::hint`], on the ground the
+    /// host painted. A page that is never hosted draws nothing here.
+    fn render_hosted(&mut self, _frame: &mut Frame, _area: Rect) {}
+
+    /// The keyboard tips a host's footer shows while this page is hosted,
+    /// in the words the page's own tips row would use.
+    fn hint(&self) -> String {
+        String::new()
+    }
+
+    /// Whether one of the page's own modals is up.
+    fn modal_open(&self) -> bool {
+        false
+    }
+
+    /// How much of the keyboard the page holds right now: every key while
+    /// a modal is up. A page with a text field or a Tab of its own says
+    /// more.
+    fn claim(&self) -> Claim {
+        if self.modal_open() { Claim::All } else { Claim::Open }
+    }
 }
 
 /// The terminal session around a room: ground lease, mouse capture,
@@ -333,39 +373,182 @@ fn event_loop<S: Screen>(
                     }
                 }
                 TermEvent::Mouse(mouse) => {
-                    let at = Position { x: mouse.column, y: mouse.row };
-                    match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            if !screen.ui().begin_press(at) {
-                                continue;
-                            }
-                            let hit = screen.ui().hit(at);
-                            if let Some(act) = hit
-                                && let Some(outcome) = screen.act(act)
-                            {
-                                return Ok(outcome);
-                            }
-                            screen.ui().arm_bars(at);
-                        }
-                        MouseEventKind::Moved => screen.ui().motion(at),
-                        MouseEventKind::Drag(_) => {
-                            screen.ui().motion(at);
-                            let dragged = screen.ui().drag_action(at);
-                            if let Some(act) = dragged {
-                                screen.act(act);
-                            }
-                        }
-                        MouseEventKind::Up(_) => screen.ui().release(),
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            screen.ui().pointer = Some(at);
-                            screen.wheel(mouse.kind == MouseEventKind::ScrollUp, at);
-                        }
-                        _ => {}
+                    if let Some(outcome) = drive_pointer(screen, mouse) {
+                        return Ok(outcome);
                     }
                 }
                 _ => {}
             }
         }
+    }
+}
+
+/// One mouse event, the way the hub's loop takes it. A left press is
+/// first asked whether it is real (Apple Terminal's phantom re-click is
+/// swallowed whole), then dispatched to what it hit, then allowed to arm
+/// a scrollbar; motion moves the hover; a drag moves the hover and the
+/// thumb it holds; a release ends the capture; the wheel sets the pointer
+/// before the page decides which list scrolls. The GUI player's hosted
+/// pages ride the same routine, so there is one copy of it. `Some` when an
+/// action ended the page.
+pub(crate) fn drive_pointer<S: Screen>(screen: &mut S, mouse: MouseEvent) -> Option<Outcome> {
+    let at = Position { x: mouse.column, y: mouse.row };
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if !screen.ui().begin_press(at) {
+                return None;
+            }
+            let hit = screen.ui().hit(at);
+            if let Some(act) = hit
+                && let Some(outcome) = screen.act(act)
+            {
+                return Some(outcome);
+            }
+            screen.ui().arm_bars(at);
+        }
+        MouseEventKind::Moved => screen.ui().motion(at),
+        MouseEventKind::Drag(_) => {
+            screen.ui().motion(at);
+            let dragged = screen.ui().drag_action(at);
+            if let Some(act) = dragged {
+                screen.act(act);
+            }
+        }
+        MouseEventKind::Up(_) => screen.ui().release(),
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            screen.ui().pointer = Some(at);
+            screen.wheel(mouse.kind == MouseEventKind::ScrollUp, at);
+        }
+        _ => {}
+    }
+    None
+}
+
+// ── Hosting a room in another shell ──────────────────────────────────────────
+
+/// The rooms a host can open, in the hallway's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomId {
+    Libraries,
+    Users,
+    Backups,
+    Discovery,
+    Federation,
+    Torrents,
+}
+
+impl RoomId {
+    pub(crate) const ALL: [RoomId; 6] = [
+        RoomId::Libraries,
+        RoomId::Users,
+        RoomId::Backups,
+        RoomId::Discovery,
+        RoomId::Federation,
+        RoomId::Torrents,
+    ];
+}
+
+/// A room, loading, for a host to keep: the start the `admin` subcommand
+/// gives it, behind the face a host can hold without naming the room's
+/// own types. `same_machine` matters only to the rooms that pick server
+/// paths (libraries, backups, torrents).
+pub(crate) fn open_room(id: RoomId, client: Client, same_machine: bool) -> Box<dyn HostedRoom> {
+    match id {
+        RoomId::Libraries => Box::new(libraries::start(client, same_machine)),
+        RoomId::Users => Box::new(users::start(client)),
+        RoomId::Backups => Box::new(backups::start(client, same_machine)),
+        RoomId::Discovery => Box::new(discovery::start(client)),
+        RoomId::Federation => Box::new(federation::start(client)),
+        RoomId::Torrents => Box::new(torrents::start(client, same_machine)),
+    }
+}
+
+/// What a host holds of a room: [`Screen`] made object-safe (there is no
+/// `Act` type to name), with the hub loop's steps folded into the calls a
+/// host's own loop makes. The names differ from [`Screen`]'s, so no call
+/// through either trait is ambiguous.
+pub(crate) trait HostedRoom {
+    /// Draw the room inside `area` ([`Screen::render_hosted`]).
+    fn draw_in(&mut self, frame: &mut Frame, area: Rect);
+
+    /// A key the host routed to the room. It dismisses the tooltip first,
+    /// as a key does in the hub.
+    fn press(&mut self, key: KeyEvent) -> Option<Outcome>;
+
+    /// A mouse event over the room ([`drive_pointer`]).
+    fn mouse(&mut self, mouse: MouseEvent) -> Option<Outcome>;
+
+    /// The pointer left the room (focus moved away, or the room closed),
+    /// so no hover and no tooltip stays behind.
+    fn leave(&mut self);
+
+    /// The host's frame is on screen: fold in what the worker finished and
+    /// hand it the next op, run the room's timers, step a held scrollbar
+    /// arrow, age the tooltip dwell. Pump comes before tick so that an op
+    /// a tick queues is drawn (its busy line) the frame before it is
+    /// pumped, which is the hub's own tick, draw, pump order seen from
+    /// after the host's draw. Returns whether the pointer rests on
+    /// something clickable, for the hand cursor.
+    fn after_frame(&mut self) -> bool;
+
+    /// The keyboard tips for the host's footer ([`Screen::hint`]).
+    fn tips(&self) -> String;
+
+    /// How much of the keyboard the room holds ([`Screen::claim`]).
+    fn claims(&self) -> Claim;
+
+    /// Whether one of the room's modals is up ([`Screen::modal_open`]).
+    fn modal_up(&self) -> bool;
+
+    /// Whether the room's tooltips name their keys: the host's setting.
+    fn set_key_hints(&mut self, on: bool);
+}
+
+impl<S: Screen + 'static> HostedRoom for S {
+    fn draw_in(&mut self, frame: &mut Frame, area: Rect) {
+        <S as Screen>::render_hosted(self, frame, area);
+    }
+
+    fn press(&mut self, key: KeyEvent) -> Option<Outcome> {
+        self.ui().dismiss_tooltip();
+        <S as Screen>::key(self, key)
+    }
+
+    fn mouse(&mut self, mouse: MouseEvent) -> Option<Outcome> {
+        drive_pointer(self, mouse)
+    }
+
+    fn leave(&mut self) {
+        let ui = self.ui();
+        ui.pointer = None;
+        ui.dismiss_tooltip();
+    }
+
+    fn after_frame(&mut self) -> bool {
+        <S as Screen>::pump(self);
+        <S as Screen>::tick(self);
+        let held = self.ui().hold_action();
+        if let Some(act) = held {
+            <S as Screen>::act(self, act);
+        }
+        self.ui().dwell_tick();
+        self.ui().hovering_clickable()
+    }
+
+    fn tips(&self) -> String {
+        <S as Screen>::hint(self)
+    }
+
+    fn claims(&self) -> Claim {
+        <S as Screen>::claim(self)
+    }
+
+    fn modal_up(&self) -> bool {
+        <S as Screen>::modal_open(self)
+    }
+
+    fn set_key_hints(&mut self, on: bool) {
+        self.ui().key_hints = on;
     }
 }
 
@@ -397,9 +580,10 @@ pub(crate) fn draw_header(frame: &mut Frame, area: Rect, title: &str, host: &str
 }
 
 /// [`draw_header`] with the right edge spelled by the caller — the stats
-/// page puts the account there, not a role.
+/// page puts the account there, not a role. The header is the area's
+/// first row, two cells in from either side.
 pub(crate) fn draw_header_as(frame: &mut Frame, area: Rect, title: &str, right: &str) {
-    let head = Rect { x: 2, y: 0, width: area.width.saturating_sub(4), height: 1 };
+    let head = Rect { x: area.x + 2, y: area.y, width: area.width.saturating_sub(4), height: 1 };
     frame.render_widget(Paragraph::new(Span::styled(title.to_string(), bold())), head);
     frame.render_widget(Paragraph::new(Span::styled(right.to_string(), dim())).alignment(Alignment::Right), head);
 }
@@ -414,7 +598,7 @@ pub(crate) fn draw_bottom(
     tips: &str,
 ) {
     let width = area.width.saturating_sub(4);
-    let line = Rect { x: 2, y: area.height.saturating_sub(2), width, height: 1 };
+    let line = Rect { x: area.x + 2, y: area.y + area.height.saturating_sub(2), width, height: 1 };
     if let Some((text, is_err)) = note {
         let style = if *is_err { Style::default().fg(th().gold) } else { dim() };
         frame.render_widget(Paragraph::new(Span::styled(text.clone(), style)), line);
@@ -422,8 +606,66 @@ pub(crate) fn draw_bottom(
     if let Some(busy) = busy {
         frame.render_widget(Paragraph::new(Span::styled(busy.to_string(), accent())), line);
     }
-    let tips_rect = Rect { x: 2, y: area.height.saturating_sub(1), width, height: 1 };
+    let tips_rect = Rect { x: area.x + 2, y: area.y + area.height.saturating_sub(1), width, height: 1 };
     frame.render_widget(Paragraph::new(Span::styled(tips.to_string(), dim())), tips_rect);
+}
+
+/// A room's body column, two cells in from either side. Standalone, it
+/// starts under the header and a blank row and stops above a blank row
+/// and the two bottom lines. Hosted, the host's bar is the header, so it
+/// starts one row into the area and stops above a blank row and the
+/// note, the one bottom line a hosted room keeps.
+pub(crate) fn body_column(area: Rect, hosted: bool) -> Rect {
+    let (top, spent) = if hosted { (1, 3) } else { (2, 5) };
+    Rect {
+        x: area.x + 2,
+        y: area.y + top,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(spent),
+    }
+}
+
+/// A room's bottom edge, standalone or hosted. Standalone it is
+/// [`draw_bottom`]. Hosted, the tips are the host's footer's to show, so
+/// the area's last row carries the status line alone: the busy line in
+/// the accent when there is one, else the note (an error in gold, a note
+/// in dim).
+pub(crate) fn draw_foot(
+    frame: &mut Frame,
+    area: Rect,
+    note: Option<&(String, bool)>,
+    busy: Option<&str>,
+    tips: &str,
+    hosted: bool,
+) {
+    if !hosted {
+        draw_bottom(frame, area, note, busy, tips);
+        return;
+    }
+    let line = Rect {
+        x: area.x + 2,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width.saturating_sub(4),
+        height: 1,
+    };
+    let span = match (busy, note) {
+        (Some(busy), _) => Span::styled(busy.to_string(), accent()),
+        (None, Some((text, is_err))) => {
+            let style = if *is_err { Style::default().fg(th().gold) } else { dim() };
+            Span::styled(text.clone(), style)
+        }
+        (None, None) => return,
+    };
+    frame.render_widget(Paragraph::new(span), line);
+}
+
+/// A hosted room's chip (the beta mark), in gold and flush with the right
+/// edge of the column's first row: the header it sits beside when the
+/// room stands alone is the host's.
+pub(crate) fn draw_chip(frame: &mut Frame, column: Rect, text: &str) {
+    let cells = (width(text) as u16).min(column.width);
+    let rect = Rect { x: column.right() - cells, y: column.y, width: cells, height: 1 };
+    frame.render_widget(Paragraph::new(Span::styled(text.to_string(), Style::default().fg(th().gold))), rect);
 }
 
 /// The server's host, for a header — never the whole URL.
@@ -627,9 +869,407 @@ pub(crate) fn join_home(home: &str, path: &str) -> String {
     }
 }
 
+/// What the room lanes' tests share: the areas the GUI player's Admin tab
+/// hands a room, and a frame drawn around one so a test can see whether
+/// anything landed outside it.
+#[cfg(test)]
+pub(crate) mod hosting {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::{Position, Rect};
+
+    use super::Screen;
+
+    /// The room's area in a 100×30 window with key hints on: right of the
+    /// hallway and its rule, under the top bar, above the footer and the
+    /// player bar.
+    pub(crate) const WINDOW: Rect = Rect { x: 17, y: 1, width: 83, height: 23 };
+    /// The same at the GUI's floor, 100×24: seventeen rows for the room.
+    pub(crate) const FLOOR: Rect = Rect { x: 17, y: 1, width: 83, height: 17 };
+    /// The room beside the docked log column in a 176×46 window.
+    pub(crate) const DOCKED: Rect = Rect { x: 17, y: 1, width: 100, height: 39 };
+
+    /// What every cell holds before the room draws.
+    const UNTOUCHED: &str = "·";
+
+    /// `screen` drawn hosted in `area` on a `size` buffer that was filled
+    /// with `·` in the same draw, so every cell the room wrote shows.
+    pub(crate) fn draw_hosted<S: Screen>(screen: &mut S, size: (u16, u16), area: Rect) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let all = frame.area();
+                for y in all.top()..all.bottom() {
+                    for x in all.left()..all.right() {
+                        frame.buffer_mut()[(x, y)].set_symbol(UNTOUCHED);
+                    }
+                }
+                screen.render_hosted(frame, area);
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The cells left of, above or right of `area` that the room wrote;
+    /// with `below`, the rows under it as well.
+    pub(crate) fn outside(buf: &Buffer, area: Rect, below: bool) -> Vec<(u16, u16)> {
+        let mut hits = Vec::new();
+        for y in buf.area.top()..buf.area.bottom() {
+            if y >= area.bottom() && !below {
+                continue;
+            }
+            for x in buf.area.left()..buf.area.right() {
+                if !area.contains(Position { x, y }) && buf[(x, y)].symbol() != UNTOUCHED {
+                    hits.push((x, y));
+                }
+            }
+        }
+        hits
+    }
+
+    /// Row `y` of the buffer as text.
+    pub(crate) fn row(buf: &Buffer, y: u16) -> String {
+        (buf.area.left()..buf.area.right()).map(|x| buf[(x, y)].symbol()).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::crossterm::event::KeyEventKind;
+
+    use super::hosting::{DOCKED, FLOOR, WINDOW, draw_hosted, outside, row};
+
+    const CLICK: u16 = 50;
+    const QUIT: u16 = 999;
+    const BACK: u16 = 1000;
+    const FWD: u16 = 1001;
+    /// The probe's scrollbar: twenty rows in a six-row view.
+    const BAR: Rect = Rect { x: 10, y: 5, width: 1, height: 6 };
+
+    /// A screen that only writes down what the hub asked of it.
+    #[derive(Default)]
+    struct Probe {
+        ui: Surface<u16>,
+        log: Vec<&'static str>,
+        acts: Vec<u16>,
+        /// Each wheel turn, and where the pointer was when it arrived.
+        wheels: Vec<(bool, Option<Position>)>,
+        /// Each key, and whether a tooltip was ripe when it arrived.
+        keys: Vec<(KeyCode, bool)>,
+        modal: bool,
+        note: Option<(String, bool)>,
+        busy: Option<String>,
+    }
+
+    impl Screen for Probe {
+        type Act = u16;
+
+        fn ui(&mut self) -> &mut Surface<u16> {
+            &mut self.ui
+        }
+
+        fn pump(&mut self) {
+            self.log.push("pump");
+        }
+
+        fn tick(&mut self) {
+            self.log.push("tick");
+        }
+
+        /// A click row, a quit row and a tip on the first, a scrollbar.
+        fn render(&mut self, frame: &mut Frame) {
+            self.ui.begin_frame();
+            self.ui.click(Rect { x: 0, y: 0, width: 5, height: 1 }, CLICK);
+            self.ui.tip(Rect { x: 0, y: 0, width: 5, height: 1 }, "a tip");
+            self.ui.click(Rect { x: 0, y: 1, width: 5, height: 1 }, QUIT);
+            crate::kit::scroll_list(frame, &mut self.ui, BAR, 20, 6, 0, BACK, FWD, |p| p as u16);
+        }
+
+        fn key(&mut self, key: KeyEvent) -> Option<Outcome> {
+            let ripe = self.ui.ripe_tooltip().is_some();
+            self.keys.push((key.code, ripe));
+            None
+        }
+
+        fn act(&mut self, act: u16) -> Option<Outcome> {
+            self.acts.push(act);
+            (act == QUIT).then_some(Outcome::Quit)
+        }
+
+        fn wheel(&mut self, up: bool, _at: Position) {
+            self.wheels.push((up, self.ui.pointer));
+        }
+
+        /// The hosted chrome alone: the beta chip and the foot.
+        fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+            let column = body_column(area, true);
+            draw_chip(frame, column, "beta");
+            draw_foot(frame, area, self.note.as_ref(), self.busy.as_deref(), "x quit", true);
+        }
+
+        fn modal_open(&self) -> bool {
+            self.modal
+        }
+    }
+
+    /// The probe drawn standalone, so its rects and its bar are registered.
+    fn drawn() -> Probe {
+        let mut probe = Probe::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| probe.render(frame)).unwrap();
+        probe
+    }
+
+    fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
+        MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }
+    }
+
+    fn draw_with(size: (u16, u16), paint: impl FnOnce(&mut Frame)) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
+        terminal.draw(paint).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn rows(buf: &Buffer) -> Vec<String> {
+        (buf.area.top()..buf.area.bottom()).map(|y| row(buf, y)).collect()
+    }
+
+    #[test]
+    fn outcome_compares() {
+        assert_eq!(Some(Outcome::Quit), Some(Outcome::Quit));
+        assert_ne!(Some(Outcome::Quit), None);
+    }
+
+    #[test]
+    fn the_body_column_is_todays_standalone_and_one_row_under_the_hosts_bar_hosted() {
+        let window = Rect { x: 0, y: 0, width: 100, height: 30 };
+        assert_eq!(body_column(window, false), Rect { x: 2, y: 2, width: 96, height: 25 }, "the column every room hard-codes");
+        assert_eq!(body_column(WINDOW, true), Rect { x: 19, y: 2, width: 79, height: 20 });
+        let tiny = Rect { x: 5, y: 5, width: 3, height: 2 };
+        assert_eq!(body_column(tiny, false).height, 0, "no room left is an empty column, not a panic");
+        assert_eq!(body_column(tiny, true).width, 0);
+    }
+
+    #[test]
+    fn the_bottom_edge_and_the_header_follow_their_area() {
+        let chrome = |frame: &mut Frame, area: Rect| {
+            draw_header_as(frame, area, "Title", "right");
+            draw_bottom(frame, area, Some(&("a note".to_string(), false)), None, "x quit");
+        };
+        let origin = draw_with((40, 10), |frame| chrome(frame, frame.area()));
+        let rows_at_origin = rows(&origin);
+        assert_eq!(rows_at_origin[0], format!("  Title{}right  ", " ".repeat(26)), "the header where it always was");
+        assert_eq!(rows_at_origin[8], format!("  a note{}", " ".repeat(32)));
+        assert_eq!(rows_at_origin[9], format!("  x quit{}", " ".repeat(32)));
+        assert!(rows_at_origin[1..8].iter().all(|r| r.trim().is_empty()));
+
+        let area = Rect { x: 10, y: 3, width: 40, height: 10 };
+        let offset = draw_with((60, 16), |frame| chrome(frame, area));
+        let shifted = rows(&offset);
+        for (y, line) in rows_at_origin.iter().enumerate() {
+            let got: String = shifted[3 + y].chars().skip(10).take(40).collect();
+            assert_eq!(&got, line, "row {y} of the area");
+        }
+        let blank = |r: &String| r.trim().is_empty();
+        assert!(shifted[..3].iter().all(blank) && shifted[13..].iter().all(blank), "nothing above or below the area");
+        assert!(shifted.iter().all(|r| r.chars().take(10).all(|c| c == ' ') && r.chars().skip(50).all(|c| c == ' ')));
+    }
+
+    #[test]
+    fn hosted_the_foot_is_the_note_alone_on_the_areas_last_row_and_busy_wins() {
+        let mut probe = Probe { note: Some(("Saved.".to_string(), false)), ..Probe::default() };
+        let buf = draw_hosted(&mut probe, (100, 30), WINDOW);
+        assert!(row(&buf, 23).starts_with(&format!("{}Saved.·", "·".repeat(19))), "{}", row(&buf, 23));
+        assert!(!rows(&buf).iter().any(|r| r.contains("x quit")), "the tips are the host's footer's");
+        assert!(outside(&buf, WINDOW, true).is_empty());
+
+        probe.busy = Some("Saving…".to_string());
+        let buf = draw_hosted(&mut probe, (100, 30), WINDOW);
+        assert!(row(&buf, 23).starts_with(&format!("{}Saving…·", "·".repeat(19))), "{}", row(&buf, 23));
+        assert!(!rows(&buf).iter().any(|r| r.contains("Saved")), "busy wins the line outright");
+
+        probe.busy = None;
+        probe.note = None;
+        let buf = draw_hosted(&mut probe, (100, 30), WINDOW);
+        assert_eq!(row(&buf, 23), "·".repeat(100), "nothing to say leaves the row alone");
+
+        let standalone = draw_with((40, 10), |frame| {
+            draw_foot(frame, frame.area(), Some(&("a note".to_string(), true)), Some("busy"), "x quit", false)
+        });
+        let bottom = draw_with((40, 10), |frame| {
+            draw_bottom(frame, frame.area(), Some(&("a note".to_string(), true)), Some("busy"), "x quit")
+        });
+        assert_eq!(standalone, bottom, "standalone, the foot is the bottom edge");
+    }
+
+    #[test]
+    fn the_chip_sits_right_on_the_columns_first_row() {
+        let mut probe = Probe::default();
+        let buf = draw_hosted(&mut probe, (100, 30), WINDOW);
+        // The column runs x 19..98: the chip's last cell is x 97.
+        assert_eq!(row(&buf, 2), format!("{}beta{}", "·".repeat(94), "··"));
+        assert_eq!(buf[(94, 2)].fg, crate::kit::theme::th().gold);
+        assert!(outside(&buf, WINDOW, true).is_empty());
+    }
+
+    #[test]
+    fn drive_pointer_takes_the_hubs_steps() {
+        let mut probe = drawn();
+        assert_eq!(drive_pointer(&mut probe, mouse(MouseEventKind::Down(MouseButton::Left), 2, 0)), None);
+        assert_eq!(probe.acts, vec![CLICK], "a press dispatches what it hit");
+        assert_eq!(probe.ui.pointer, Some(Position { x: 2, y: 0 }));
+
+        drive_pointer(&mut probe, mouse(MouseEventKind::Moved, 3, 3));
+        assert_eq!(probe.ui.pointer, Some(Position { x: 3, y: 3 }), "motion moves the hover");
+
+        // A press on the track jumps and arms a thumb drag; the drag
+        // follows the hand; the release ends it.
+        drive_pointer(&mut probe, mouse(MouseEventKind::Down(MouseButton::Left), 10, 7));
+        let jump = |y| crate::kit::bar_jump(BAR, 14, y) as u16;
+        assert_eq!(probe.acts, vec![CLICK, jump(7)]);
+        drive_pointer(&mut probe, mouse(MouseEventKind::Drag(MouseButton::Left), 10, 9));
+        assert_eq!(probe.acts, vec![CLICK, jump(7), jump(9)], "a drag moves the thumb");
+        drive_pointer(&mut probe, mouse(MouseEventKind::Up(MouseButton::Left), 10, 9));
+        drive_pointer(&mut probe, mouse(MouseEventKind::Drag(MouseButton::Left), 10, 8));
+        assert_eq!(probe.acts.len(), 3, "after the release a drag holds nothing");
+
+        // That release came on the heels of the press: Apple Terminal's
+        // instant click, so its re-click beside the bar is swallowed.
+        assert_eq!(drive_pointer(&mut probe, mouse(MouseEventKind::Down(MouseButton::Left), 9, 8)), None);
+        assert_eq!(probe.acts.len(), 3, "the phantom re-click is swallowed whole");
+
+        drive_pointer(&mut probe, mouse(MouseEventKind::ScrollDown, 30, 9));
+        assert_eq!(probe.wheels, vec![(false, Some(Position { x: 30, y: 9 }))], "the pointer is set before the wheel");
+
+        assert_eq!(
+            drive_pointer(&mut probe, mouse(MouseEventKind::Down(MouseButton::Left), 1, 1)),
+            Some(Outcome::Quit),
+            "an act's outcome comes back"
+        );
+    }
+
+    #[test]
+    fn the_host_face_dismisses_the_tooltip_before_a_key_and_leave_clears_hover() {
+        let ripe = |probe: &mut Probe| {
+            probe.ui.pointer = Some(Position { x: 1, y: 0 });
+            probe.ui.dwell_tick();
+            probe.ui.dwell_backdate(crate::kit::TIP_DELAY);
+            assert!(probe.ui.ripe_tooltip().is_some());
+        };
+        let mut probe = drawn();
+        ripe(&mut probe);
+        let key = KeyEvent::new_with_kind(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press);
+        assert_eq!(HostedRoom::press(&mut probe, key), None);
+        assert_eq!(probe.keys, vec![(KeyCode::Char('x'), false)], "the tooltip was gone before the key arrived");
+
+        ripe(&mut probe);
+        assert_eq!(HostedRoom::mouse(&mut probe, mouse(MouseEventKind::Moved, 2, 0)), None);
+        assert!(probe.ui.hovering_clickable(), "the mouse reaches the room through the host face");
+        HostedRoom::leave(&mut probe);
+        assert_eq!(probe.ui.pointer, None);
+        assert!(probe.ui.ripe_tooltip().is_none());
+        assert!(!probe.ui.hovering_clickable());
+    }
+
+    #[test]
+    fn after_frame_pumps_then_ticks_and_reports_the_hand() {
+        let mut probe = drawn();
+        probe.ui.pointer = Some(Position { x: 2, y: 0 });
+        assert!(probe.after_frame(), "over a click rect the hand shows");
+        assert_eq!(probe.log, vec!["pump", "tick"]);
+        probe.ui.dwell_backdate(crate::kit::TIP_DELAY);
+        assert!(probe.ui.ripe_tooltip().is_some(), "the dwell was aged");
+
+        probe.ui.pointer = Some(Position { x: 30, y: 9 });
+        assert!(!probe.after_frame(), "over nothing it does not");
+
+        // A held endcap steps once its delay is out.
+        drive_pointer(&mut probe, mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        assert_eq!(probe.acts, vec![FWD]);
+        std::thread::sleep(crate::kit::ARROW_DELAY + Duration::from_millis(20));
+        probe.after_frame();
+        assert_eq!(probe.acts, vec![FWD, FWD], "the hold repeats from after_frame");
+    }
+
+    #[test]
+    fn the_claim_defaults_to_all_while_a_modal_is_up() {
+        let mut probe = Probe::default();
+        assert_eq!(probe.claims(), Claim::Open);
+        assert!(!probe.modal_up());
+        assert_eq!(probe.tips(), "", "a page that never said otherwise hints nothing");
+        probe.modal = true;
+        assert_eq!(probe.claims(), Claim::All);
+        assert!(probe.modal_up());
+        assert_eq!(Claim::default(), Claim::Open);
+
+        probe.set_key_hints(false);
+        assert!(!probe.ui.key_hints);
+        probe.set_key_hints(true);
+        assert!(probe.ui.key_hints);
+
+        /// A page whose Tab is its own, the way Torrents' Choose page's is.
+        #[derive(Default)]
+        struct Chooser {
+            ui: Surface<u16>,
+        }
+        impl Screen for Chooser {
+            type Act = u16;
+            fn ui(&mut self) -> &mut Surface<u16> {
+                &mut self.ui
+            }
+            fn pump(&mut self) {}
+            fn render(&mut self, _frame: &mut Frame) {}
+            fn key(&mut self, _key: KeyEvent) -> Option<Outcome> {
+                None
+            }
+            fn act(&mut self, _act: u16) -> Option<Outcome> {
+                None
+            }
+            fn wheel(&mut self, _up: bool, _at: Position) {}
+            fn claim(&self) -> Claim {
+                Claim::OwnTab
+            }
+        }
+        let chooser: Box<dyn HostedRoom> = Box::new(Chooser::default());
+        assert_eq!(chooser.claims(), Claim::OwnTab, "a page's own claim is what the host hears");
+    }
+
+    #[test]
+    fn every_room_opens_through_the_factory() {
+        // Drawn through the host face the way the GUI draws it: nothing
+        // above, left or right of the area at the floor (the host blanks
+        // what spills below), and nothing outside it at all when docked.
+        fn drawn_in(room: &mut dyn HostedRoom, size: (u16, u16), area: Rect) -> Buffer {
+            draw_with(size, |frame| {
+                let all = frame.area();
+                for y in all.top()..all.bottom() {
+                    for x in all.left()..all.right() {
+                        frame.buffer_mut()[(x, y)].set_symbol("·");
+                    }
+                }
+                room.draw_in(frame, area);
+            })
+        }
+        for id in RoomId::ALL {
+            let client = Client::new("http://host.invalid:3000").expect("client");
+            let mut room = open_room(id, client, false);
+            assert!(!room.modal_up(), "{id:?} opens with no modal");
+            assert_eq!(room.claims(), Claim::Open, "{id:?} opens holding no keys of the host's");
+            room.set_key_hints(false);
+            let floor = drawn_in(room.as_mut(), (100, 24), FLOOR);
+            assert_eq!(outside(&floor, FLOOR, false), vec![], "{id:?} at the floor");
+            let docked = drawn_in(room.as_mut(), (176, 46), DOCKED);
+            assert_eq!(outside(&docked, DOCKED, true), vec![], "{id:?} docked");
+            room.leave();
+        }
+        assert_eq!(RoomId::ALL.len(), 6);
+        assert_eq!(RoomId::ALL[0], RoomId::Libraries);
+    }
 
     #[test]
     fn a_home_reference_is_the_tilde_alone_or_before_a_separator() {

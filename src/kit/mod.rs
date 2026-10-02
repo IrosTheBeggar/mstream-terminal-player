@@ -404,6 +404,17 @@ impl<A: Clone> Surface<A> {
         self.dwell = None;
     }
 
+    /// Age the tooltip dwell, so a test can see a ripe tooltip without
+    /// waiting out [`TIP_DELAY`].
+    #[cfg(test)]
+    pub fn dwell_backdate(&mut self, by: Duration) {
+        if let Some((_, _, since)) = &mut self.dwell
+            && let Some(earlier) = since.checked_sub(by)
+        {
+            *since = earlier;
+        }
+    }
+
     fn register_bar(
         &mut self,
         rect: Rect,
@@ -586,13 +597,20 @@ pub fn modal_frame_anchored_on<A: Clone>(
     modal_frame_anchored(frame, area, width, height, max_height, title_color)
 }
 
-/// Where a modal of this size sits: centred, and vertically as if
-/// `max_height` tall, so one that grows keeps its top edge.
+/// Where a modal of this size sits: centred in `area` — wherever the area
+/// starts, so a room hosted under another shell's bar keeps its modals
+/// inside its own rect — and vertically as if `max_height` tall, so one
+/// that grows keeps its top edge.
 pub fn modal_rect(area: Rect, width: u16, height: u16, max_height: u16) -> Rect {
     let width = width.min(area.width.saturating_sub(4));
     let height = height.min(area.height.saturating_sub(2));
     let max_height = max_height.max(height).min(area.height.saturating_sub(2));
-    Rect { x: (area.width - width) / 2, y: (area.height - max_height) / 2, width, height }
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - max_height) / 2,
+        width,
+        height,
+    }
 }
 
 /// Like [`modal_frame`], but vertically positioned as if the modal were
@@ -608,6 +626,21 @@ pub fn modal_frame_anchored(
     title_color: Color,
 ) -> Rect {
     frame_at(frame, modal_rect(area, width, height, max_height), title_color)
+}
+
+/// Wipe `rect` back to bare ground: `Clear`, then the fixed scheme's
+/// ground repainted where the window's ground is owned — the first two
+/// steps of [`frame_at`], without the border. A shell hosting another
+/// page's drawing calls it over whatever that page must not have touched,
+/// so a row the page wrote past its area never reaches the screen.
+pub fn blank(frame: &mut Frame, rect: Rect) {
+    frame.render_widget(Clear, rect);
+    if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(ground).fg(th().text)),
+            rect,
+        );
+    }
 }
 
 /// A frame where the caller puts it — a dropdown under its control, a
@@ -1343,6 +1376,50 @@ mod tests {
         s.release();
         s.motion(Position { x: 9, y: 6 });
         assert_eq!(s.pointer, Some(Position { x: 9, y: 6 }));
+    }
+
+    #[test]
+    fn a_modal_centres_in_its_area_wherever_the_area_starts() {
+        let origin = Rect { x: 0, y: 0, width: 100, height: 30 };
+        assert_eq!(
+            modal_rect(origin, 60, 10, 10),
+            Rect { x: 20, y: 10, width: 60, height: 10 },
+            "an area at the origin puts the modal exactly where it always sat"
+        );
+        assert_eq!(modal_rect(origin, 60, 6, 10), Rect { x: 20, y: 10, width: 60, height: 6 }, "a growing modal keeps its top edge");
+        let hosted = Rect { x: 17, y: 1, width: 83, height: 23 };
+        let r = modal_rect(hosted, 60, 10, 10);
+        assert_eq!(r, Rect { x: 17 + 11, y: 1 + 6, width: 60, height: 10 });
+        assert!(hosted.contains(Position { x: r.x, y: r.y }) && r.right() <= hosted.right() && r.bottom() <= hosted.bottom());
+        let short = Rect { x: 17, y: 1, width: 83, height: 17 };
+        let r = modal_rect(short, 84, 22, 22);
+        assert_eq!(r, Rect { x: 19, y: 2, width: 79, height: 15 }, "a form taller and wider than the area clamps inside it");
+    }
+
+    #[test]
+    fn blank_clears_the_rect_and_nothing_else() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        let rect = Rect { x: 4, y: 2, width: 6, height: 3 };
+        terminal
+            .draw(|frame| {
+                let all = frame.area();
+                for y in all.top()..all.bottom() {
+                    for x in all.left()..all.right() {
+                        frame.buffer_mut()[(x, y)].set_symbol("x");
+                    }
+                }
+                blank(frame, rect);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..8 {
+            for x in 0..20 {
+                let want = if rect.contains(Position { x, y }) { " " } else { "x" };
+                assert_eq!(buffer[(x, y)].symbol(), want, "cell ({x}, {y})");
+            }
+        }
     }
 
     #[test]
