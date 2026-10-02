@@ -352,6 +352,9 @@ impl LogUi {
         self.menu = None;
     }
 
+    /// Whether a poll thread is held: the tests' way to see the tab start
+    /// and stop the log.
+    #[cfg(test)]
     pub(crate) fn running(&self) -> bool {
         self.worker.is_some()
     }

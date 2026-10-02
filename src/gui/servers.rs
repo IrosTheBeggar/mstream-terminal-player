@@ -2552,8 +2552,10 @@ mod tests {
         let _ = &scratch;
         for screen in [Screen::Stats, Screen::Admin] {
             let attic = "http://attic.invalid:3000";
-            let mut config = Config::default();
-            config.servers = vec![entry(attic, Some("paul")), entry("http://office.invalid:3000", None)];
+            let config = Config {
+                servers: vec![entry(attic, Some("paul")), entry("http://office.invalid:3000", None)],
+                ..Config::default()
+            };
             config::save(&config).unwrap();
             let mut gui = Gui::new(config, false, App::new(Some(attic.into()), None, None));
             gui.app.connected = true;
