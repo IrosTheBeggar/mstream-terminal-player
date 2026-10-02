@@ -36,7 +36,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, ServerHome, draw_bottom, draw_header, frame_ground, gate_message, host_of,
+    Outcome, Screen, ServerHome, body_column, draw_foot, draw_header, frame_ground, gate_message,
+    host_of,
 };
 use crate::api::types::DirListing;
 use crate::api::{ApiError, Client};
@@ -624,6 +625,19 @@ impl Screen for Room {
         render(frame, self)
     }
 
+    fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+        self.ui.begin_frame();
+        draw(frame, self, area, true);
+    }
+
+    fn hint(&self) -> String {
+        footer_hint_as(self, true)
+    }
+
+    fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
     fn key(&mut self, key: KeyEvent) -> Option<Outcome> {
         handle_key(self, key)
     }
@@ -809,7 +823,15 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, room: &mut Room) {
     room.ui.begin_frame();
     let Some(area) = frame_ground(frame, 58, 12) else { return };
+    draw(frame, room, area, false);
+}
 
+/// The room inside `area`. Standalone it sits under its own header and
+/// over its tips row. Hosted (the GUI player's Admin tab) the host's bar
+/// is the header and its footer carries the tips, so the area's last row
+/// is the status line alone. Modals and the tooltip centre in `area`
+/// either way.
+fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
     // A modal makes the room beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
     let modal_open = !matches!(room.modal, Modal::None);
@@ -818,20 +840,18 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = None;
     }
 
-    draw_header(frame, area, &t!("admin.title"), &host_of(&room.client));
+    if !hosted {
+        draw_header(frame, area, &t!("admin.title"), &host_of(&room.client));
+    }
 
-    // Full display: two-cell margins, the whole height above the two
-    // bottom lines (a table room, not a form — the kit's 74-cell column
-    // is deliberately not applied).
-    let column = Rect {
-        x: 2,
-        y: 2,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(5),
-    };
+    // Full display: two-cell margins, the whole height above the bottom
+    // lines (a table room, not a form — the kit's 74-cell column is
+    // deliberately not applied).
+    let column = body_column(area, hosted);
     draw_libraries(frame, room, column);
 
-    draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
+    let tips = footer_hint_as(room, hosted);
+    draw_foot(frame, area, room.note.as_ref(), room.busy.as_deref(), &tips, hosted);
 
     if modal_open {
         room.ui.pointer = live_pointer;
@@ -851,16 +871,21 @@ fn render(frame: &mut Frame, room: &mut Room) {
     }
 }
 
-fn footer_hint(room: &Room) -> String {
+/// The room's keyboard tips. Hosted, the base tips end on "Esc back"
+/// rather than "q quit": in the GUI player Esc and `q` hand the keyboard
+/// back to the hallway, and quitting is the hallway's own `q`.
+fn footer_hint_as(room: &Room, hosted: bool) -> String {
     match &room.modal {
         Modal::Browser(_) => t!("hint.browser"),
         Modal::PathEntry(_) => t!("hint.path"),
         Modal::Name(_) => t!("admin.hint_name"),
         Modal::Remove(_) => t!("admin.hint_remove"),
-        Modal::None => match (room.libs.is_empty(), room.sel) {
-            (true, _) => t!("admin.hint_empty"),
-            (false, None) => t!("admin.hint_rows"),
-            (false, Some(_)) => t!("admin.hint_selected"),
+        Modal::None => match (room.libs.is_empty(), room.sel, hosted) {
+            (true, _, false) => t!("admin.hint_empty"),
+            (true, _, true) => t!("admin.hint_empty_hosted"),
+            (false, None, false) => t!("admin.hint_rows"),
+            (false, None, true) => t!("admin.hint_rows_hosted"),
+            (false, Some(_), _) => t!("admin.hint_selected"),
         },
     }
     .to_string()
@@ -1584,5 +1609,98 @@ mod tests {
         assert!(frame.contains("stay on disk"), "{frame}");
         assert!(frame.contains("◂ Keep it") && frame.contains("Remove  "), "{frame}");
         assert!(frame.contains("y remove · Esc keep"), "{frame}");
+    }
+
+    /// The buffer as text, one line per row, for failure messages.
+    fn shown(buf: &ratatui::buffer::Buffer) -> String {
+        (buf.area.top()..buf.area.bottom()).map(|y| buf_row(buf, y) + "\n").collect()
+    }
+
+    /// Row `y` from column `x` on.
+    fn from(buf: &ratatui::buffer::Buffer, x: u16, y: u16) -> String {
+        buf_row(buf, y).chars().skip(x as usize).collect()
+    }
+
+    /// Whether a modal frame's rounded corners sit exactly on `rect`.
+    fn framed_at(buf: &ratatui::buffer::Buffer, rect: Rect) -> bool {
+        buf[(rect.x, rect.y)].symbol() == "╭" && buf[(rect.right() - 1, rect.bottom() - 1)].symbol() == "╯"
+    }
+
+    use super::super::hosting::{DOCKED, FLOOR, WINDOW, draw_hosted, outside, row as buf_row};
+
+    #[test]
+    fn hosted_the_room_draws_inside_its_area_with_no_header_and_its_note_last() {
+        let _en = english();
+        let mut room = seeded();
+        room.queue(Op::Load, t!("admin.busy_loading"));
+        let buf = draw_hosted(&mut room, (100, 30), WINDOW);
+        let text = shown(&buf);
+        assert!(outside(&buf, WINDOW, true).is_empty(), "drawn outside its area:\n{text}");
+        assert!(from(&buf, WINDOW.x, WINDOW.y).chars().all(|c| c == '·'), "the area's first row is the host's:\n{text}");
+        assert!(!text.contains("Libraries") && !text.contains("home.mstream.example"), "no header:\n{text}");
+        assert!(text.contains("Add a music folder") && text.contains("/srv/music"), "{text}");
+        assert!(from(&buf, 19, 23).starts_with("loading libraries…"), "the busy line on the last row:\n{text}");
+        assert!(!text.contains("q quit") && !text.contains("b browse"), "the tips are the host's:\n{text}");
+        // Docked beside the log column, nothing spills either.
+        let buf = draw_hosted(&mut room, (176, 46), DOCKED);
+        assert!(outside(&buf, DOCKED, true).is_empty(), "drawn outside its area:\n{}", shown(&buf));
+        assert!(from(&buf, 19, DOCKED.bottom() - 1).starts_with("loading libraries…"), "{}", shown(&buf));
+    }
+
+    #[test]
+    fn hosted_a_modal_centres_in_the_rooms_area() {
+        let _en = english();
+        let mut room = seeded();
+        handle_key(&mut room, key(KeyCode::Char('t')));
+        assert!(matches!(room.modal, Modal::PathEntry(_)));
+        let buf = draw_hosted(&mut room, (100, 30), WINDOW);
+        let at = kit::modal_rect(WINDOW, 62, 7, 13);
+        assert!(framed_at(&buf, at), "the path modal at {at:?}:\n{}", shown(&buf));
+        assert!(outside(&buf, WINDOW, true).is_empty(), "{}", shown(&buf));
+    }
+
+    #[test]
+    fn hosted_at_the_floor_it_draws_short_and_never_says_resize() {
+        let _en = english();
+        let modals = [
+            Modal::None,
+            Modal::Browser(Browse {
+                path: "/srv".into(),
+                dirs: (0..30).map(|i| format!("folder-{i}")).collect(),
+                sel: 0,
+            }),
+            Modal::PathEntry(PathDraft::default()),
+            Modal::Name(NameDraft { directory: "/srv/music".into(), name: Input::new("music".into()), error: None }),
+            Modal::Remove(1),
+        ];
+        for modal in modals {
+            let mut room = seeded();
+            room.libs.extend((0..20).map(|i| Lib { name: format!("lib-{i}"), root: format!("/srv/{i}"), follow_symlinks: false }));
+            room.note = Some(("a note".into(), false));
+            room.modal = modal;
+            let buf = draw_hosted(&mut room, (100, 24), FLOOR);
+            let text = shown(&buf);
+            assert!(outside(&buf, FLOOR, false).is_empty(), "{:?} drew outside its area:\n{text}", room.modal);
+            assert!(!text.contains(&*t!("resize")), "{text}");
+            // A window's worth of rows holds every modal whole.
+            let buf = draw_hosted(&mut room, (100, 30), WINDOW);
+            assert!(outside(&buf, WINDOW, true).is_empty(), "{:?} spilled:\n{}", room.modal, shown(&buf));
+        }
+    }
+
+    #[test]
+    fn hosted_the_hint_says_esc_back_not_q_quit() {
+        let _en = english();
+        let mut room = seeded();
+        assert_eq!(Screen::hint(&room), "↑ ↓ select · b browse · t type a path · Esc back");
+        assert!(footer_hint_as(&room, false).ends_with("q quit"), "standalone keeps its own words");
+        room.libs.clear();
+        assert_eq!(Screen::hint(&room), "b browse · t type a path · Esc back");
+        assert!(footer_hint_as(&room, false).ends_with("q quit"));
+        // The modals' tips are the same words in either shell.
+        room.modal = Modal::Remove(0);
+        assert_eq!(Screen::hint(&room), footer_hint_as(&room, false));
+        assert!(Screen::modal_open(&room));
+        assert_eq!(Screen::claim(&room), super::super::Claim::All);
     }
 }
