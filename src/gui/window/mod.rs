@@ -83,7 +83,9 @@ use input::{Grid, Raw, Translator};
 use script::{Input, Script, Step};
 use stats::{Counted, Lap, Stats};
 
-use super::{Channels, Ctx, Flow, Gui, Host, finish, frame, input, render};
+use super::{
+    Channels, Ctx, Flow, Gui, Host, finish, frame, input, refresh_book, render, saves_config,
+};
 use crate::instance::Instance;
 use crate::kit::theme::th;
 use crate::runtime::block_on;
@@ -123,6 +125,12 @@ const EARLY_POLL: Duration = Duration::from_millis(4);
 /// still running after this is one the loop must not block on (a slow
 /// driver's shader compiles), and the polls take it from there.
 const OPEN_WAIT: Duration = Duration::from_millis(50);
+/// How long the way out waits for a renderer build still running when
+/// the quit came, so what it built is dropped on the loop's thread rather
+/// than on its own (`teardown`): far past a build's usual 10 ms, and a
+/// slow driver's shader compiles, yet short enough that a hung one does
+/// not hold the quit for long.
+const BUILD_AT_QUIT: Duration = Duration::from_secs(2);
 /// The frame the fidelity dump waits for: the first has the window at its
 /// opening size, the resize to the grid lands a frame or two later.
 const DUMP_AT_FRAME: u32 = 5;
@@ -194,6 +202,7 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     let watching = board.clone();
     gui.ui.watch_overlays(move |rect| watching.overlay(rect));
     let ctx = Ctx::new(&gui.app, channels);
+    send_early(&mut gui, &ctx);
     let mut app = App {
         gui,
         ctx,
@@ -261,6 +270,28 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     }
     exit_report(&laps);
     code
+}
+
+/// The player's first effects — the connect among them — sent to their
+/// workers now, while the window and its renderer are still being built,
+/// rather than by the first frame as the terminal's loop sends them. The
+/// first frame can come seconds after the window opens (a slow GPU's
+/// pipeline build), and the input held until then is replayed right after
+/// it: sent by frame 1, the connect was still on the wire for every held
+/// key, and a key that needs the server (`/` opens the search's field only
+/// once connected) did nothing, so `/ab` typed into a blank window left an
+/// empty field. Sent here, the answer is in by frame 1 whenever the server
+/// answers faster than the window comes up; frame 1 applies it before the
+/// replay. A Save among them reloads the Gui's config copy, as `frame`
+/// does after its own dispatch.
+fn send_early(gui: &mut Gui, ctx: &Ctx) {
+    let saving = saves_config(&gui.pending);
+    let ch = &ctx.channels;
+    crate::tui::dispatch(&gui.app, &mut gui.pending, &ch.audio_tx, &ch.api_tx, &ch.event_tx);
+    if saving && let Ok(fresh) = crate::config::load() {
+        gui.config = fresh;
+        refresh_book(gui);
+    }
 }
 
 /// What winit's X11 keyboard needs and loads only at run time, through
@@ -485,13 +516,34 @@ struct App {
 struct Building {
     /// What the thread built, sent as it ends. A thread that panicked
     /// sends nothing and drops its sender, which the receiver reads as
-    /// disconnected. Dropped while the thread runs (a quit), the thread's
-    /// send fails and what it built is dropped on that thread.
+    /// disconnected. A quit while the thread runs waits for it a while
+    /// ([`BUILD_AT_QUIT`]) rather than drop this: the thread's send would
+    /// fail, and what it built would be dropped on that thread.
     done: Receiver<Result<Parts, String>>,
     /// The type size and the surface the build was begun for: the window
     /// may have been resized while it ran.
     font_px: u32,
     size: PhysicalSize<u32>,
+}
+
+/// What a thread's channel gave in a bounded wait for it.
+#[derive(Debug, PartialEq)]
+enum Drained<T> {
+    /// It sent this.
+    Came(T),
+    /// It ended without sending (it panicked): nothing is left to drop.
+    Ended,
+    /// It was still running when the wait ran out.
+    Running,
+}
+
+/// Whatever `done` sends within `bound`, or why nothing came.
+fn drain<T>(done: &Receiver<T>, bound: Duration) -> Drained<T> {
+    match done.recv_timeout(bound) {
+        Ok(sent) => Drained::Came(sent),
+        Err(RecvTimeoutError::Disconnected) => Drained::Ended,
+        Err(RecvTimeoutError::Timeout) => Drained::Running,
+    }
 }
 
 /// The build's thread: everything after the surface (the vendored
@@ -931,26 +983,35 @@ impl App {
     /// frame has drawn: a click is a cell only on a grid, and lands on what
     /// that frame registered there. A resize or a scale change is the
     /// window's size or scale now, whatever it was then.
+    ///
+    /// One act a frame (held.rs, `next_step`), the next frame asked for at
+    /// once: a key that opens a room acts on what the next frame draws, so
+    /// a frame runs between two keys as it would for hands. Called after
+    /// every frame while the queue drains; the first call says how much
+    /// was held.
     fn replay(&mut self, event_loop: &ActiveEventLoop) {
         if self.held.is_empty() {
             return;
         }
-        let (items, dropped) = self.held.take();
-        let lost = if dropped > 0 { format!(" ({dropped} older dropped)") } else { String::new() };
-        eprintln!(
-            "gui --window: {} inputs came before the first frame; replayed{lost}",
-            items.len()
-        );
-        if let Some(stats) = self.stats.as_mut() {
-            stats.held(items.len() as u64, dropped);
+        if self.frames == 1 {
+            let (count, dropped) = self.held.count();
+            let lost =
+                if dropped > 0 { format!(" ({dropped} older dropped)") } else { String::new() };
+            eprintln!(
+                "gui --window: {count} inputs came before the first frame; replayed one act a \
+                 frame{lost}"
+            );
+            if let Some(stats) = self.stats.as_mut() {
+                stats.held(count as u64, dropped);
+            }
         }
-        for item in items {
+        for item in self.held.next_step() {
             if self.quit_flushed {
                 break;
             }
             let Some(window) = self.window.clone() else { break };
             match item {
-                Held::Raw(raw) => self.feed_raw(event_loop, raw),
+                Held::Raw(raw) => self.feed_now(event_loop, raw),
                 Held::Resized => self.resized(event_loop, window.inner_size()),
                 Held::Scale => {
                     let scale = window.scale_factor();
@@ -1056,10 +1117,9 @@ impl App {
         if !self.shown && cells > 0 {
             self.show(true);
         }
-        // What came before this, the first frame, now that it has drawn.
-        if self.frames == 1 {
-            self.replay(event_loop);
-        }
+        // What came before the first frame, now that it has drawn: one act
+        // after each frame until the queue drains.
+        self.replay(event_loop);
         self.sync_ime();
         self.play(event_loop);
     }
@@ -1187,18 +1247,27 @@ impl App {
         self.ask_redraw();
     }
 
-    /// What the window saw, translated and fed. A composition in progress
-    /// stops here, for the kit to draw; the paste chord reads the
-    /// clipboard while a field has the keyboard and is nothing otherwise
-    /// (off a Mac, Ctrl+V with no field is still the key it was).
-    fn feed_raw(&mut self, event_loop: &ActiveEventLoop, mut raw: Raw) {
+    /// What the window saw: fed now ([`App::feed_now`]), or held behind
+    /// what the replay has still to feed.
+    fn feed_raw(&mut self, event_loop: &ActiveEventLoop, raw: Raw) {
         // Before the first frame there is no grid to read a pointer
         // against and nothing registered to hit: held, and replayed once
-        // the first frame has drawn (`replay`).
-        if self.frames == 0 {
+        // the first frame has drawn (`replay`). While that replay drains,
+        // one act a frame, what comes joins the queue behind it rather
+        // than overtake it.
+        if self.frames == 0 || !self.held.is_empty() {
             self.held.push(Held::Raw(raw));
             return;
         }
+        self.feed_now(event_loop, raw);
+    }
+
+    /// What the window saw, translated and fed: the replay's way in, and a
+    /// live input's when nothing is held. A composition in progress stops
+    /// here, for the kit to draw; the paste chord reads the clipboard while
+    /// a field has the keyboard and is nothing otherwise (off a Mac, Ctrl+V
+    /// with no field is still the key it was).
+    fn feed_now(&mut self, event_loop: &ActiveEventLoop, mut raw: Raw) {
         if let Raw::ImePreedit(text) = &raw {
             let text = text.clone();
             self.set_preedit(&text);
@@ -1533,11 +1602,31 @@ impl App {
         };
         let mut laps = Vec::new();
         lap(&mut laps, "loop");
-        // A build that has finished is dropped here, from its channel, with
-        // the window's other GPU state; one still running is left to end on
-        // its own thread (a hung driver must not hold the way out), and what
-        // it made is dropped there when its send finds no one listening.
-        drop(self.building.take());
+        // A build still running when the quit came is waited for, a while,
+        // and what it made is dropped here, on the loop's thread, before
+        // the window. Left to end on its own, its send would find no one
+        // listening and drop what it built there: the surface, which holds
+        // a clone of the window, and with the window gone from here by
+        // then, the last one — AppKit's window released off the main
+        // thread. Past the bound (a hung driver must not hold the way out
+        // for long) the window is leaked instead: with this clone never
+        // dropped, whatever the thread drops is never the last, and the
+        // process's end reclaims it. That is simpler than handing the
+        // window back across threads, and a quit is the only way here.
+        if let Some(building) = self.building.take() {
+            match drain(&building.done, BUILD_AT_QUIT) {
+                Drained::Came(built) => drop(built),
+                Drained::Ended => {}
+                Drained::Running => {
+                    eprintln!(
+                        "gui --window: the renderer's build was still running {} ms after the \
+                         quit; the window is left to the process's end",
+                        BUILD_AT_QUIT.as_millis()
+                    );
+                    std::mem::forget(self.window.take());
+                }
+            }
+        }
         self.terminal = None;
         lap(&mut laps, "gpu");
         self.window = None;
@@ -1593,8 +1682,14 @@ impl ApplicationHandler for App {
             // window to, which the platform then reports back — moves no
             // cell, and the repaint and the GUI's bookkeeping are skipped:
             // on macOS that repaint was the frame the window came into view
-            // with, a full one, 40 ms in a debug build here.
-            WindowEvent::Resized(size) if self.surface_is(size) => {}
+            // with, a full one, 40 ms in a debug build here. A frame is still
+            // asked for, which costs only the cells that changed: a Windows
+            // restore from minimise lands here too — the minimise's
+            // Resized(0, 0) left the surface at its old size (the backend
+            // keeps it for a zero side), so the restore's size is the one
+            // it has — and without a frame the window came back to nothing
+            // until the next input or tick.
+            WindowEvent::Resized(size) if self.surface_is(size) => self.ask_redraw(),
             WindowEvent::Resized(size) => self.resized(event_loop, size),
             // Before the backend, held: `build` read the scale it builds
             // for, and the replay applies the window's scale if it differs.
@@ -2301,6 +2396,35 @@ fn compare(window: &[&str], test: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The way out's wait on the build's thread: what it sends in time
+    /// comes back to be dropped by the caller, a thread that ended without
+    /// sending is not waited on, and one still running is given up on at
+    /// the bound, not after.
+    #[test]
+    fn the_quit_waits_for_the_build_a_bounded_while() {
+        let (sender, done) = mpsc::channel();
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let _ = sender.send(7);
+        });
+        assert_eq!(drain(&done, Duration::from_secs(5)), Drained::Came(7));
+        late.join().unwrap();
+
+        let (sender, done) = mpsc::channel::<u8>();
+        drop(sender);
+        let started = Instant::now();
+        assert_eq!(drain(&done, Duration::from_secs(5)), Drained::Ended);
+        assert!(started.elapsed() < Duration::from_secs(1), "a dead thread is waited on");
+
+        let (sender, done) = mpsc::channel::<u8>();
+        let started = Instant::now();
+        assert_eq!(drain(&done, Duration::from_millis(50)), Drained::Running);
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(50), "gave up early, {waited:?}");
+        assert!(waited < Duration::from_secs(2), "the bound did not hold, {waited:?}");
+        drop(sender);
+    }
 
     /// Every glyph the GUI can put on screen that Hack cannot draw, other
     /// than the wide CJK the borrowed CJK face is for, must be in

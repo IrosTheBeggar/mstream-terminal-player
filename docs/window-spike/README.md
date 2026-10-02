@@ -36,6 +36,25 @@ The window is in `--features desktop` builds only (`cargo build --features deskt
 - `linux-linkage.txt` — the Linux leg's NEEDED list and guard exit (Docker, aarch64).
 - `checklist.md` — the manual checklist and the criteria scorecard, from the step-4 judge.
 
+## The script lever
+
+`MSTREAM_WINDOW_SCRIPT=<file>` on a `--features desktop` binary plays a script of the raw events
+the winit handlers build, one step per frame (`wait <ms>`, `key`, `text`, `ctrl`, `alt`, `ime`,
+`preedit`, `move`, `click`, `drag`, `wheel`, `resize`, `scale`, `minimise <ms>`, `frame`,
+`dump <path>`, `say`, `quit`; the full list is `src/gui/window/script.rs`'s header).
+`freeze <ms>` holds the frame just drawn on screen that long, no frame after it, for a
+screenshot of a frame the next would replace (a modal's opening frame, say). The script starts
+as the window is made, not at its first frame, so a `wait` counts from the window's creation
+and a slow GPU's blank second can be typed into: until the first frame only the steps that need
+no frame run (`wait`, `say`, `resize`, `quit`, keys, text, and pointer steps in pixels), their
+inputs held and replayed after it one act a frame as a person's are, and the first step that
+needs a frame or the grid (`move`, `click`, `dump`, `frame`, `scale`, `minimise`, `freeze`)
+waits for the first frame. The player's first effects (the connect among them) are sent as the
+window is made too, not by its first frame, so a held key that needs the server (`/` opens the
+search's field only once connected) finds it connected if the server answered before that frame.
+`MSTREAM_WINDOW_STATS=<path>`, `MSTREAM_WINDOW_DUMP=<dir>` and
+`MSTREAM_WINDOW_SIZE=<cols>,<rows>` are the other levers (PLAN.md, Phase 14).
+
 ## The two flavours
 
 One codebase, two products, one CLI: an explicit argv means the same in both, and only an empty

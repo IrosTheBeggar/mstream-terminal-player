@@ -510,7 +510,7 @@ fn the_symbols_draw_from_the_bundled_face_alone() {
 /// Each face used to be fitted by its own line, so Apple SD Gothic Neo's
 /// hangul (a 1200-unit line) drew at 23 px beside Hiragino's kana (a
 /// 1000-unit line) at 27 to 30, in a 32 px cell. The ink heights must be
-/// within 15% of each other, and each glyph inside its box.
+/// within 20% of each other, and each glyph inside its box.
 #[test]
 fn hangul_kana_and_hanzi_draw_at_one_size() {
     let _gpu = one_at_a_time();
@@ -541,9 +541,14 @@ fn hangul_kana_and_hanzi_draw_at_one_size() {
             })
             .collect();
         let (low, high) = (*heights.iter().min().unwrap(), *heights.iter().max().unwrap());
+        // 20%, not tighter: the faces' designs differ though their em is
+        // one. On Windows Malgun Gothic's hangul inks 20 px beside Yu
+        // Gothic's kana at 17 px in 24 px type (CI, run 37028415435); the
+        // per-line fit this guards against was 23 against 30, past it.
         assert!(
-            f64::from(high) <= f64::from(low) * 1.15,
-            "{px} px: {text} ink heights {heights:?} differ by more than 15%"
+            f64::from(high) <= f64::from(low) * 1.20,
+            "{px} px: {text} ink heights {heights:?} differ by more than 20% (one em for \
+             every face holds them within it; past that is the per-line fit come back)"
         );
     }
 }
@@ -578,10 +583,15 @@ fn emoji_faces() -> Option<Vec<Font<'static>>> {
 /// CANCEL TAG.
 const ENGLAND: &str = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
 
+/// The rainbow flag: a white flag with VS16, ZWJ a rainbow.
+const RAINBOW: &str = "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}";
+
 /// Every kind of emoji sequence draws as one picture over the two cells
 /// its width claims, in colour, with nothing in the cell after it: an
 /// emoji with VS16, a flag of regional indicators, a subdivision flag of
-/// tags, a ZWJ family and a skin tone. Before: the VS16 heart and the flag
+/// tags, a ZWJ flag (the rainbow flag), a ZWJ family and a skin tone. The
+/// family is not asked for colour: Noto Color Emoji's Emoji 15.1 redesign
+/// draws it as grey silhouettes. Before: the VS16 heart and the flag
 /// were squeezed into the first of their two cells (their box was measured
 /// by the first character), and a sequence the face could not join drew
 /// its second emoji in the next cell. Each is also a picture of its own,
@@ -591,25 +601,40 @@ const ENGLAND: &str = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{
 /// windows-latest) has no country flags, so 🇺🇸 there is its first
 /// regional indicator alone. A case the face does not join
 /// ([`Font::joins`]) is skipped with a line, keeping only what holds for
-/// any face: ink in its own cells and nothing in the cells after.
+/// any face: ink in its own cells and nothing in the cells after. England's
+/// flag alone may also be joined yet drawn as its base: Segoe UI Emoji has
+/// a glyph for it and no picture in it (CI run 37028415435), and the base 🏴
+/// is the degradation the window specifies — never a box, never empty
+/// cells. Any other joined case drawn as its base is the renderer drawing a
+/// cluster's first character, and fails; and at least one sequence of
+/// several emoji must be drawn joined, so a skip cannot hide that on every
+/// case at once.
 #[test]
 fn emoji_sequences_draw_as_one_picture_in_their_cells() {
     let _gpu = one_at_a_time();
     let Some(faces) = emoji_faces() else { return };
     let emoji = faces.last().unwrap();
+    // The fourth field: whether the picture is in colour in every colour
+    // face (the family is grey in Noto Color Emoji since Emoji 15.1). The
+    // fifth: whether a face may join it and still draw only its base
+    // (England's flag in Segoe UI Emoji).
     let cases = [
-        ("VS16 heart", "\u{2764}\u{FE0F}", "\u{2764}\u{FE0F}"),
-        ("flag", "\u{1F1FA}\u{1F1F8}", "\u{1F1FA}"),
-        ("subdivision flag", ENGLAND, "\u{1F3F4}"),
-        ("ZWJ family", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F468}"),
-        ("skin tone", "\u{1F44D}\u{1F3FD}", "\u{1F44D}"),
+        ("VS16 heart", "\u{2764}\u{FE0F}", "\u{2764}\u{FE0F}", true, false),
+        ("flag", "\u{1F1FA}\u{1F1F8}", "\u{1F1FA}", true, false),
+        ("subdivision flag", ENGLAND, "\u{1F3F4}", true, true),
+        ("ZWJ rainbow flag", RAINBOW, "\u{1F3F3}\u{FE0F}", true, false),
+        ("ZWJ family", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F468}", false, false),
+        ("skin tone", "\u{1F44D}\u{1F3FD}", "\u{1F44D}", true, false),
     ];
     // Every colour face joins some of them (the heart's VS16 at least); none
     // joined would be the shaping or the face lookup broken, not coverage.
-    let joined = cases.iter().filter(|(_, text, _)| emoji.joins(text)).count();
+    let joined = cases.iter().filter(|(_, text, ..)| emoji.joins(text)).count();
     assert!(joined > 0, "the emoji face joined none of the sequences");
+    // The sequences of several emoji drawn as one picture, not as their
+    // base: `joins` is the shaper's word, this is the pixels'.
+    let mut drawn_joined = 0;
     let Some(bar) = row(&faces, 6, "  |") else { return };
-    for (case, text, base) in cases {
+    for (case, text, base, in_colour, may_draw_base) in cases {
         assert_eq!(crate::kit::width(text), 2, "{case}: the GUI's width rule");
         let Some(frame) = row(&faces, 6, format!("{text}|")) else { return };
         let Some(([left, right], [top, bottom])) = ink_extent(&frame, 0, 2) else {
@@ -627,15 +652,33 @@ fn emoji_sequences_draw_as_one_picture_in_their_cells() {
             eprintln!("skipped {case}: the emoji face has no one picture for it");
             continue;
         }
+        // Both cells first: a face that joined the sequence and drew a picture into
+        // one cell only is a defect, whatever the base comparison below says.
         assert!(frame.inked(0, 0) && frame.inked(1, 0), "{case}: not over both of its cells");
-        let pixels = frame.cell(0, 0).into_iter().chain(frame.cell(1, 0));
-        assert!(pixels.filter(|&px| coloured(px)).count() > 0, "{case}: no colour in its cells");
         if base != text {
             let Some(alone) = row(&faces, 6, format!("{base}|")) else { return };
-            let same = (0..2).all(|col| frame.cell(col, 0) == alone.cell(col, 0));
-            assert!(!same, "{case}: drew only its base {base}: the face did not join it");
+            if (0..2).all(|col| frame.cell(col, 0) == alone.cell(col, 0)) {
+                // Joined, yet drawn as its base alone. For England's flag
+                // that is a face whose glyph has no picture (Segoe UI
+                // Emoji), and the base is the specified degradation; the
+                // empty cells it must never be are the panic above.
+                assert!(may_draw_base, "{case}: drew only its base: the face did not join it");
+                eprintln!(
+                    "skipped {case}: the face joined it but has no picture for it (drew the base)"
+                );
+                continue;
+            }
+            drawn_joined += 1;
+        }
+        if in_colour {
+            let pixels = frame.cell(0, 0).into_iter().chain(frame.cell(1, 0));
+            let colour = pixels.filter(|&px| coloured(px)).count();
+            assert!(colour > 0, "{case}: no colour in its cells");
         }
     }
+    // Every colour face CI meets (Apple, Noto, Segoe) has the family and the
+    // skin tones; drawing none of them joined is the renderer, not the face.
+    assert!(drawn_joined > 0, "no sequence of several emoji drew as one picture");
 }
 
 /// A sequence no face joins degrades to its base emoji in its own two

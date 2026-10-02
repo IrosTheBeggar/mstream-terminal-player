@@ -2574,6 +2574,14 @@ enum Flow {
     Quit,
 }
 
+/// Whether any of these effects, once dispatched, writes the config file
+/// behind the Gui's copy of it, which is then reloaded.
+fn saves_config(pending: &[Effect]) -> bool {
+    pending.iter().any(|e| {
+        matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. })
+    })
+}
+
 /// The loop's frame half: effects out, workers' answers in, one frame
 /// drawn, the per-frame pumps run — and the wait until the next frame is
 /// wanted, which the caller sleeps on while it listens for input.
@@ -2589,9 +2597,7 @@ where
     // A SaveSession about to be dispatched writes the config behind
     // this copy's back — a Quick Connect add mints a whole new entry
     // there. Reload after, so the dropdown and the room list it.
-    let saving = gui.pending.iter().any(|e| {
-        matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. })
-    });
+    let saving = saves_config(&gui.pending);
     let ch = &ctx.channels;
     tui::dispatch(&gui.app, &mut gui.pending, &ch.audio_tx, &ch.api_tx, &ch.event_tx);
     ctx.saver.tick(&gui.app);

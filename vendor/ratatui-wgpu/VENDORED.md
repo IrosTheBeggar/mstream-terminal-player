@@ -319,8 +319,9 @@ and the patch entry can go.
     makes the surface on the loop's thread and runs the rest on a thread the loop waits for
     up to 50 ms as the window opens (on macOS the loop's next turn comes only after AppKit
     has shown the window, so a build claimed then drew its first frame 40 ms later than an
-    inline one) and polls after that (`src/gui/window/mod.rs`, `Building`, `OPEN_WAIT`); with 1.5 s planted in the pipelines step its loop
-    went on answering, and a resize and a key made meanwhile took effect.
+    inline one) and polls after that (`src/gui/window/mod.rs`, `Building`, `OPEN_WAIT`);
+    with 1.5 s planted in the pipelines step its loop went on answering, and a resize and a
+    key made meanwhile took effect.
 20. **A present can be owed on purpose** (`backend/wgpu_backend.rs`, `owes_present`,
     `owe_present`). Change 5's `present_owed` was private; the backend now says whether a
     present is owed and lets its caller owe one. The next flush then composites the text

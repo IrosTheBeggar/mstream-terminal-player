@@ -74,8 +74,8 @@
 //! from its own step, as it always was. Before the first frame the steps
 //! that need none run on the loop's own clock — `wait`, `say`, `resize`,
 //! `quit`, and keys, text and pointer steps that name pixels rather than
-//! cells; their inputs are held and replayed after the first frame, as a
-//! person's are (held.rs). The first step that needs a frame or a grid
+//! cells; their inputs are held and replayed after the first frame, one
+//! act a frame, as a person's are (held.rs). The first step that needs a frame or a grid
 //! (`move`, `click`, `dump`, `frame`, `scale`, `minimise`, `freeze`)
 //! waits for the first frame.
 
