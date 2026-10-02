@@ -1075,6 +1075,7 @@ usr:
   public_1: "Il primo utente attiva l'accesso — per la web app, le app e questo lettore."
   public_2: "Rendilo amministratore: un primo utente non amministratore chiude fuori questo pannello."
   public_3: "Questa stanza si collega come l'utente che crea e conserva la sessione, così il pannello resta aperto."
+  public_3_hosted: "Questa stanza si collega come l'utente che crea, ma il lettore mantiene la propria sessione: collegalo anche come quell'utente in Gestisci i server, o le altre stanze verranno rifiutate."
   col_user: "UTENTE"
   col_admin: "ADMIN"
   col_libraries: "LIBRERIE"

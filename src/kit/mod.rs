@@ -962,7 +962,9 @@ fn wrap_at(text: &str, width: usize, hard_break: bool) -> Vec<String> {
             }
             continue;
         }
-        let need = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
+        // Measured in cells, as the budget is: counting characters let a
+        // Japanese line run to twice the width it was given.
+        let need = if line.is_empty() { self::width(word) } else { self::width(&line) + 1 + self::width(word) };
         if need > width && !line.is_empty() {
             lines.push(std::mem::take(&mut line));
         }
@@ -1189,6 +1191,16 @@ mod tests {
         assert!(two.iter().all(|l| l.chars().count() <= TIP_WRAP));
         assert_eq!(two.join(" "), "This folder's name in mStream — click to rename");
         assert!(wrap_tip("   ").is_empty());
+    }
+
+    #[test]
+    fn sentences_wrap_by_cells_so_a_wide_script_keeps_inside_its_budget() {
+        let text = "最初のユーザーがログインを有効にします — ウェブアプリ、アプリ、そしてこのプレイヤーで。";
+        let lines = wrap_words(text, 79);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().all(|l| width(l) <= 79), "{lines:?}");
+        assert_eq!(lines.join(" "), text);
+        assert_eq!(wrap_words("one two three", 7), vec!["one two", "three"], "a Latin line is as it was");
     }
 
     #[test]

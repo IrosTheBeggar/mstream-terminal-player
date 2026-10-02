@@ -1075,6 +1075,7 @@ usr:
   public_1: "El primer usuario activa el inicio de sesión — para la web, las apps y este reproductor."
   public_2: "Hazlo administrador: un primer usuario sin permisos de administrador deja este panel fuera."
   public_3: "Esta sala inicia sesión como el usuario que crea y guarda la sesión, así el panel sigue abierto."
+  public_3_hosted: "Esta sala inicia sesión como el usuario que crea, pero el reproductor conserva su propia sesión: inicia sesión en él con ese usuario en Gestionar servidores, o las demás salas serán rechazadas."
   col_user: "USUARIO"
   col_admin: "ADMIN"
   col_libraries: "BIBLIOTECAS"

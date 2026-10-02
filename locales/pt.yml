@@ -1075,6 +1075,7 @@ usr:
   public_1: "O primeiro usuário liga o login — para a web, os apps e este player."
   public_2: "Faça dele um administrador: um primeiro usuário sem permissão de administrador deixa este painel de fora."
   public_3: "Esta sala entra como o usuário que cria e guarda a sessão, então o painel continua aberto."
+  public_3_hosted: "Esta sala entra como o usuário que cria, mas o player mantém a própria sessão: em Gerenciar servidores, entre com esse usuário no player também, ou as outras salas serão recusadas."
   col_user: "USUÁRIO"
   col_admin: "ADMIN"
   col_libraries: "BIBLIOTECAS"

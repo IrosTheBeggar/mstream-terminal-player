@@ -1075,6 +1075,7 @@ usr:
   public_1: "Pierwszy użytkownik włącza logowanie — w aplikacji webowej, w aplikacjach i w tym odtwarzaczu."
   public_2: "Zrób z niego administratora: pierwszy użytkownik bez uprawnień odcina ten panel."
   public_3: "Ten pokój loguje się jako utworzony użytkownik i zachowuje sesję, więc panel zostaje otwarty."
+  public_3_hosted: "Ten pokój loguje się jako utworzony użytkownik, ale odtwarzacz ma własną sesję: zaloguj go też jako tego użytkownika w Zarządzaj serwerami, inaczej pozostałe pokoje zostaną odrzucone."
   col_user: "UŻYTKOWNIK"
   col_admin: "ADMIN"
   col_libraries: "BIBLIOTEKI"

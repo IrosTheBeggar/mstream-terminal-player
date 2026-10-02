@@ -1075,6 +1075,7 @@ usr:
   public_1: "Le premier utilisateur active la connexion — pour la web, les applis et ce lecteur."
   public_2: "Faites-en un admin : un premier utilisateur non admin ferme ce panneau."
   public_3: "Cette salle se connecte comme l'utilisateur qu'elle crée et garde la session, le panneau reste ouvert."
+  public_3_hosted: "Cette salle se connecte comme l'utilisateur qu'elle crée, mais le lecteur garde sa propre session : connectez-le aussi avec cet utilisateur dans Gérer les serveurs, sinon les autres salles seront refusées."
   col_user: "UTILISATEUR"
   col_admin: "ADMIN"
   col_libraries: "BIBLIOTHÈQUES"

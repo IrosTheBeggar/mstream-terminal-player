@@ -912,7 +912,7 @@ fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
         draw_header(frame, area, &t!("usr.title"), &host_of(&room.client));
     }
     let column = body_column(area, hosted);
-    draw_body(frame, room, column);
+    draw_body(frame, room, column, hosted);
 
     // The cursor row's own line, when nothing louder holds the note line.
     let row_note = match (&room.note, &room.busy, room.selected_name()) {
@@ -968,8 +968,9 @@ fn footer_hint_as(room: &Room, hosted: bool) -> String {
     .to_string()
 }
 
-/// The state line, the add card, the table.
-fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
+/// The state line, the add card, the table. Hosted, public mode's last
+/// sentence says what the player must do as well (its session is its own).
+fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect, hosted: bool) {
     let line = |y: u16| Rect { x: column.x, y, width: column.width, height: 1 };
     let mut y = column.y;
 
@@ -1056,16 +1057,24 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
     if room.users.is_empty() {
         if room.loaded {
             frame.render_widget(Paragraph::new(Span::styled(t!("usr.empty_users").to_string(), dim())), line(y));
-            // The webapp's two warnings, for the one state they apply to.
+            // The webapp's two warnings, for the one state they apply to,
+            // then what the room does about the first user. Hosted, that
+            // sentence says the player must sign in as the user too: the
+            // room keeps the session it makes, the player's stays its own,
+            // and the rest of the Admin tab is refused without it. Each
+            // wraps at the column, 79 cells hosted in a 100-column window.
             let gold = Style::default().fg(th().gold);
-            for (i, key) in ["usr.public_1", "usr.public_2"].iter().enumerate() {
-                let r = y + 3 + i as u16;
-                if r < column.bottom() {
-                    frame.render_widget(Paragraph::new(Span::styled(t!(*key).to_string(), gold)), line(r));
+            let after = if hosted { t!("usr.public_3_hosted") } else { t!("usr.public_3") };
+            let sentences = [(t!("usr.public_1"), gold, 0), (t!("usr.public_2"), gold, 0), (after, dim(), 1)];
+            let mut r = y + 3;
+            for (text, style, gap) in sentences {
+                r += gap;
+                for part in kit::wrap_words(&text, column.width as usize) {
+                    if r < column.bottom() {
+                        frame.render_widget(Paragraph::new(Span::styled(part, style)), line(r));
+                    }
+                    r += 1;
                 }
-            }
-            if y + 6 < column.bottom() {
-                frame.render_widget(Paragraph::new(Span::styled(t!("usr.public_3").to_string(), dim())), line(y + 6));
             }
         }
         return;
@@ -1522,6 +1531,7 @@ mod tests {
         assert!(frame.contains("• public — no users, so no logins"), "{frame}");
         assert!(frame.contains("Add the first user ▸") && frame.contains("(no users yet — a adds the first)"), "{frame}");
         assert!(frame.contains("The first user turns logins on") && frame.contains("Make it an admin"), "{frame}");
+        assert!(frame.contains(&*t!("usr.public_3")), "standalone, the room's own session keeps the panel open:\n{frame}");
         assert!(frame.contains("a add the first user · q quit"), "{frame}");
 
         press(&mut r, KeyCode::Char('a'));
@@ -1801,6 +1811,29 @@ mod tests {
         let buf = draw_hosted(&mut r, (176, 46), DOCKED);
         assert!(outside(&buf, DOCKED, true).is_empty(), "drawn outside its area:\n{}", shown(&buf));
         assert!(from(&buf, 19, DOCKED.bottom() - 1).starts_with("ben sees music"), "{}", shown(&buf));
+    }
+
+    #[test]
+    fn hosted_public_mode_wraps_its_sentences_and_says_the_player_signs_in_too() {
+        let _en = english();
+        let mut r = room();
+        r.queued = None;
+        r.apply(Done::Loaded(Ok((BTreeMap::new(), libs()))));
+        // At 100 columns the column is 79 cells: the last sentence takes two
+        // rows rather than lose its end, and says what the player must do,
+        // since the session this room makes is not the player's.
+        let buf = draw_hosted(&mut r, (100, 30), WINDOW);
+        let text = shown(&buf);
+        assert!(outside(&buf, WINDOW, true).is_empty(), "{text}");
+        let rows: Vec<String> = (13..22).map(|y| from(&buf, 19, y).trim_end_matches('·').trim_end().to_string()).collect();
+        assert_eq!(rows[0], t!("usr.public_1"), "{text}");
+        assert_eq!(rows[1], t!("usr.public_2"), "{text}");
+        assert_eq!(rows[2], "", "{text}");
+        let last: Vec<&str> = rows[3..].iter().map(String::as_str).take_while(|row| !row.is_empty()).collect();
+        assert_eq!(last.len(), 2, "{text}");
+        assert_eq!(last.join(" "), t!("usr.public_3_hosted"), "every word:\n{text}");
+        assert!(rows.iter().all(|row| kit::width(row) <= 79), "{text}");
+        assert!(!text.contains(&*t!("usr.public_3")), "not the hub's promise that the panel stays open:\n{text}");
     }
 
     #[test]

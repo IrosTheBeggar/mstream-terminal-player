@@ -1075,6 +1075,7 @@ usr:
   public_1: "The first user turns logins on — for the webapp, the apps and this player."
   public_2: "Make it an admin: a non-admin first user locks this panel out."
   public_3: "This room signs in as the user it creates and keeps the session, so the panel stays open."
+  public_3_hosted: "This room signs in as the user it creates; the player keeps its own session — sign it in as that user in Manage servers, or the other rooms are refused."
   col_user: "USER"
   col_admin: "ADMIN"
   col_libraries: "LIBRARIES"

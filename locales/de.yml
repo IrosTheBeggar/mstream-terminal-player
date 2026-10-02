@@ -1075,6 +1075,7 @@ usr:
   public_1: "Der erste Nutzer schaltet die Anmeldung ein — für die Web-App, die Apps und diesen Player."
   public_2: "Mach ihn zum Admin: ein erster Nutzer ohne Admin-Rechte sperrt dieses Panel aus."
   public_3: "Dieser Raum meldet sich als der angelegte Nutzer an und behält die Sitzung, damit das Panel offen bleibt."
+  public_3_hosted: "Dieser Raum meldet sich als der angelegte Nutzer an, der Player behält aber seine eigene Sitzung: melde ihn unter „Server verwalten“ ebenfalls als diesen Nutzer an, sonst werden die anderen Räume abgewiesen."
   col_user: "NUTZER"
   col_admin: "ADMIN"
   col_libraries: "BIBLIOTHEKEN"
