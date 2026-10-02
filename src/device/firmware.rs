@@ -24,11 +24,14 @@ use super::DeviceError;
 /// The firmware's repository, and the stem its release files share.
 const REPO: &str = "IrosTheBeggar/mstream-mp3-player";
 const ASSET_STEM: &str = "mstream-player-core2";
-/// The release this player pins — `None` until the first firmware release
-/// exists; `--firmware` and `--release` work regardless.
-pub(crate) const PINNED_TAG: Option<&str> = None;
-/// The sha256 of that release's `*-full.bin`, from its SHA256SUMS.
-pub(crate) const PINNED_FULL_SHA256: Option<&str> = None;
+/// The release this player pins: what `device flash` writes when no
+/// `--firmware` or `--release` says otherwise. Bumped by hand with player
+/// releases, once a firmware release has been tried on a board.
+pub(crate) const PINNED_TAG: Option<&str> = Some("v0.5.0");
+/// The sha256 of that release's `*-full.bin`, from its SHA256SUMS. Release
+/// assets are mutable on GitHub; this is the trust anchor, not the file.
+pub(crate) const PINNED_FULL_SHA256: Option<&str> =
+    Some("231c3772af150d8397be87484e7cb82a725007ef4b43379ac0a6607b7b885203");
 
 /// Where the merged image expects the app: ota_0 in the firmware's
 /// partition table, and where the bootloader at 0x1000 sits inside it.
@@ -466,11 +469,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_pin_is_honest_about_being_empty() {
+    fn the_pin_names_a_release_and_its_checksum_or_says_it_is_empty() {
         rust_i18n::set_locale("en");
-        if PINNED_TAG.is_none() {
-            let err = Source::Pinned.resolve(&mut |_, _| {}).unwrap_err();
-            assert!(err.text().contains("--firmware"), "{}", err.text());
+        match (PINNED_TAG, PINNED_FULL_SHA256) {
+            (Some(tag), Some(sha)) => {
+                assert!(tag.starts_with('v') && tag[1..].split('.').count() == 3, "a release tag: {tag}");
+                assert_eq!(full_asset_name(tag), format!("mstream-player-core2-{tag}-full.bin"));
+                assert!(sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{sha}");
+            }
+            (None, None) => {
+                let err = Source::Pinned.resolve(&mut |_, _| {}).unwrap_err();
+                assert!(err.text().contains("--firmware"), "{}", err.text());
+            }
+            other => panic!("a tag without its checksum, or the other way round: {other:?}"),
         }
         assert_eq!(
             Source::from_args(Some(PathBuf::from("x.bin")), Some("v9".into())),
