@@ -64,8 +64,10 @@ and in once after the first install if it was not.
 On X11 the window needs libxkbcommon-x11 (`libxkbcommon-x11-0` on Debian and Ubuntu); audio needs
 ALSA, as below. There is no desktop build for arm Linux; the terminal player runs there.
 
-The same release carries the bare desktop binaries — `mstream-player-desktop-darwin-arm64`,
-`…-darwin-x64`, `…-linux-x64` and `…-win32-x64.exe` — for scripts and bundles.
+The same release carries the bare desktop binaries, named `-raw` so they are not mistaken
+for the packages — `mstream-player-desktop-darwin-arm64-raw`, `…-darwin-x64-raw`,
+`…-linux-x64-raw` and `…-win32-x64-raw.exe` — for scripts and bundles. A browser download
+leaves them without the execute bit; the packages above are the way in.
 
 Started with no arguments (a double-click, the Dock, the app menu), the desktop player opens the
 GUI in its own window. With no display, or over SSH, it falls back to the terminal UI. Every
