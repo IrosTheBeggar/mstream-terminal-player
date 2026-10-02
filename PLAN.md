@@ -570,8 +570,22 @@ knows the player's reports by the shared `CLIENT_NAME` (they had drifted — `ms
 player"), and totals under a minute read in seconds (`7 s`) where the webapp rounds to `0 minutes`
 — a Top row ranked by seconds of listening read as nothing.
 
-Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
-tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
+**Admin tab in the GUI ✅ 2026-10-02** — the GUI's third tab (`M`), per the "Admin GUI Hybrid"
+canvas and docs/ux-contracts/admin-screen.md: a hallway of the six rooms (SERVER: Libraries,
+Users, Backups; NETWORK: Discovery, Federation, Torrents; WATCH: Log) beside the room, hosted
+whole on the GUI's session through the hub's new hosting seams in `src/admin/mod.rs` (an area
+to draw in, `body_column`/`draw_foot`/`draw_chip`, `modal_rect` centred in the area, the room's
+`Claim` on the keyboard, one shared pointer routine, the `HostedRoom` face the GUI holds), and
+the server's log (`GET /api/v1/admin/logs/recent?since=`, `src/gui/server_log.rs`) on a worker
+thread of its own — docked as a column at 160 columns, as a band under the room at 48 rows,
+otherwise a room of its own on the hallway's Log row; `L` hides or opens it. The host takes only
+Tab, BackTab and `L` from a focused room, never a digit, `q` or Esc; Esc or `q` at a room's base
+hands the focus back to the hallway. Ten locales (35 keys, `gui.tips.base` names `M`), tests for
+the footer's 99 cells and the hallway's label widths in every locale, and an e2e leg with no
+server. Not built: the Overview row, the rooms' one-line summaries, server-side log levels.
+
+Build, in order of fit: **logs** ✅ 2026-10-02 (`/api/v1/admin/logs/recent?since=<seq>` is a
+purpose-built tail-poll API with a cursor; the GUI's Admin tab tails it, above), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
 `/api/v1/scan/status` — no admin rights, no IP gate), **users & access**, **server audio**
 (pairs with `/api/v1/server-playback/*`), **scan params and server config** (uniform scalar
 toggles), then transcode, federation and p2p peer management.
@@ -2192,6 +2206,12 @@ a LATER secondary screen (party view), Columns retired.
   as before, 5–16 ms (their pictures live in the cells, and a clear takes
   them). After a walk through six sizes the screen matched a fresh start
   cell for cell on every protocol.
+- **The Admin tab ✅ 2026-10-02** — the top bar's third tab hosts the
+  admin panel's six rooms (docs/ux-contracts/admin-screen.md, B4 above):
+  a hallway at the left, the room beside it on the App's reach as the
+  Stats tab builds it, and the server's log docked as a column, as a band
+  under the room, or as a room of its own, as the window allows. `M` from
+  the Library, Stats and Now Playing; Esc back.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
@@ -3029,7 +3049,7 @@ dropped as misreadings and six were downgraded. Numbering continues the Phase 1 
 | 60 | `consume()` is a single 332-line match over 21 event variants spanning every domain | when 56-58 land, make it a dispatcher to per-module `consume`s — cheap then, expensive later |
 | 61 | The entry builders (2860-3059 plus the search/discover ones) are pure data→`Vec<Entry>` functions carrying their own history of server quirks, interleaved between the event handler and the keymap | `src/tui/app/entries.rs` |
 | 62 | `app::Queue::next_index`/`prev_index`/`remove` re-implement `engine::pick_next`/`apply_remove` verbatim — same shuffle formula, same loop-one rule, same remove fixups — and the app.rs comment admits they're synced by hand. They never cross-check because the TUI plays via `play_source`, which keeps the engine queue at one entry. Both copies carry parallel test suites, and they have already drifted on remove-current | extract the pure `(len, index, shuffle, loop, manual)` functions into one module both call |
-| 63 | The API worker is strictly serial (`worker.rs:425`): one 20 s timeout head-of-line blocks every pane, and a Quick Connect dial can hold it ~48 s. The code concedes this once already — mDNS discovery got its own thread so a browse "shouldn't hold up a pairing attempt queued behind it". The admin panel's log tailing arrives on this seam next | decide the concurrency story before B4: dispatch onto the shared runtime with a generation token, or formalise the `spawn_discovery` escape hatch |
+| 63 | The API worker is strictly serial (`worker.rs:425`): one 20 s timeout head-of-line blocks every pane, and a Quick Connect dial can hold it ~48 s. The code concedes this once already — mDNS discovery got its own thread so a browse "shouldn't hold up a pairing attempt queued behind it". The admin panel's log tailing arrives on this seam next (2026-10-02: it did not — the GUI's server log polls on a worker thread of its own, `src/gui/server_log.rs`, so the serial worker is still the open question for everything else) | decide the concurrency story before B4: dispatch onto the shared runtime with a generation token, or formalise the `spawn_discovery` escape hatch |
 | 64 | Reply routing is encoded in the variant name — `ApiCmd::SearchDrill` exists only so a Library reply lands in a different pane, duplicating the Library command and event wholesale. Each new operation costs four compiler-checked places plus `note_pending`'s silent `_ => continue` | carry the destination in the command and echo it back on the event; derive the spinner's tab from the same field |
 | 65 | `mstream-player dj` documents itself as "the scriptable view of what the player does" but hand-assembles the request instead of calling the tested `dj::build_random_request`, so it ignores artist cooldown, min rating, genre filters and the sonic pool — and already diverges today for any non-default key matching or rating (`cmd_library.rs:183`) | load the saved prefs and call the builder; collapse `BpmRange`/`BpmWindow` into one struct |
 | 66 | `ui.rs` imports `fmt_duration` from `cmd_library.rs`, so the render layer can't compile without the CLI smoke-test harness. Every other shared formatter lives in `api/types.rs` | move it next to `display_name`/`metadata_display` |

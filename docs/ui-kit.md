@@ -375,6 +375,26 @@ it. A fresh add scrolls its row into view but does not select it.
 add actions; rows with the cursor stowed → how to pick it up, plus
 continue; a row under the cursor → the full set.
 
+### Log tail
+A server's log, read as it grows: one header row, then the lines, the
+newest at the bottom. The header is the follow state as the state
+line's word — `•` and `following` in Green BOLD while the view rides the
+newest line, `• paused` DarkGray once it is scrolled up (the word a
+target that resumes) — then a DarkGray ` · ` and the level filter as a
+Dropdown control (`info ▾`, `v` on the legacy console), with what the
+layout's own key does here dim at the row's right while keyboard hints
+are on. A line is the local time `HH:MM:SS` DarkGray, two cells, then
+the message clipped by cells: its first line only, ` …` when it had
+more. Info and debug read in the text colour (debug is NOT dimmed — it
+is what the reader came for when chosen), warn Yellow, error the danger
+red. Scrolling up pauses and holds the view still while lines arrive
+under it; End, `f`, a click on the paused word or scrolling back to the
+bottom resume. With nothing to show, one DarkGray sentence (waiting,
+the ring off, nothing at this level), or the failure in Yellow. Polling
+is the log's own thread, never two requests at once, slower after a
+failure and stopped on a refusal. First consumer: the GUI's Admin tab
+(docs/ux-contracts/admin-screen.md, `src/gui/server_log.rs`).
+
 ### Modal
 Centered, `Clear` beneath (no scrim — terminals have no alpha; the
 border carries the weight). Border = intent: LightBlue neutral, Yellow
@@ -454,10 +474,10 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
-**The GUI player's top bar**: two tabs at the left — Library, Stats —
-worn as the kit's tab slab for the screen that is up and dim text for
-the other (Now Playing, on `0`, has no tab and lights none while it is
-up), the Visualizer item after them, and the session's server label with
+**The GUI player's top bar**: three tabs at the left — Library, Stats,
+Admin — worn as the kit's tab slab for the screen that is up and dim
+text for the others (Now Playing, on `0`, has no tab and lights none
+while it is up), the Visualizer item after them, and the session's server label with
 `[+]` at the right. The
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
@@ -468,7 +488,37 @@ worth with the footer on. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);
-the queue panel and the bar stand under the Library only.
+the queue panel stands under the Library only, and the bar under the
+Library and Admin.
+
+**The hallway** (the GUI's Admin tab, the "Admin GUI Hybrid" canvas): a
+nav column of rooms that are each a whole page, in the Library column's
+look — DarkGray UPPERCASE groups at x 1 (SERVER, NETWORK, WATCH), the
+rooms at x 3, the open one `▸ label` at x 1 in the accent BOLD, the
+others dim and BRIGHT + BOLD under the pointer — with its rule at x 16,
+DarkGray, turning the accent while the focus is in the room beside it.
+The keyboard cursor wears the slab across the column only while the
+column has the focus: the hallway, the room and a docked log are three
+focus targets on Tab and BackTab, and the footer names the keys of the
+one that holds it. A row may carry a dim count after its label (` · 12
+new`), which yields its cells first.
+
+**Hosted rooms.** A page built as its own command (an admin room, the
+stats page) can be hosted inside another screen's area. The room draws
+its body and its note row and nothing else: no header (the host's bar
+names the server), no tips row (the host's footer carries the room's
+hint, and the room's base hint must say what its keys do THERE — Esc
+back, not q quit), its first row blank for the host, its beta chip at
+the right of the body's first row. It never prints the resize line;
+below its minimum it draws what fits. Its modals centre in its area,
+not the window (`modal_rect` honours the area's origin). The host
+blanks anything the room drew outside its area before drawing its own
+parts — the spill guard — so a tall form cannot land on the bar. What
+the host may take from a focused room is set by the room's claim:
+everything is the room's while a modal or a text field is open; Tab is
+the room's where Tab means something to it; otherwise the host takes
+Tab, BackTab and its one layout key. The host never takes a digit, `q`
+or Esc from a room — those are the room's flags, tabs and way back.
 
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints

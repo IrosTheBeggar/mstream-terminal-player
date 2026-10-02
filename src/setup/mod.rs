@@ -3548,6 +3548,87 @@ pub(crate) mod tests {
         }
     }
 
+    /// The ten locale files, for the tests that measure strings rather
+    /// than mirror keys.
+    const LOCALE_FILES: [(&str, &str); 10] = [
+        ("en", include_str!("../../locales/en.yml")),
+        ("de", include_str!("../../locales/de.yml")),
+        ("es", include_str!("../../locales/es.yml")),
+        ("fr", include_str!("../../locales/fr.yml")),
+        ("it", include_str!("../../locales/it.yml")),
+        ("ja", include_str!("../../locales/ja.yml")),
+        ("pl", include_str!("../../locales/pl.yml")),
+        ("pt", include_str!("../../locales/pt.yml")),
+        ("ru", include_str!("../../locales/ru.yml")),
+        ("zh", include_str!("../../locales/zh.yml")),
+    ];
+
+    /// One dotted key's string in a parsed locale file.
+    fn locale_text(parsed: &serde_yaml::Value, code: &str, key: &str) -> String {
+        let mut node = parsed;
+        for part in key.split('.') {
+            node = node.get(part).unwrap_or_else(|| panic!("{code}: {key} is missing"));
+        }
+        node.as_str().unwrap_or_else(|| panic!("{code}: {key} is not a string")).to_string()
+    }
+
+    #[test]
+    fn the_admin_footer_lines_fit_ninety_nine_cells_in_every_locale() {
+        // The footer is drawn from x 1 and PLAN.md promises hints under a
+        // hundred cells, so every line the Admin tab can put there — and the
+        // Library's base line, which gained `M` with it — must fit 99. The
+        // hallway line with the focus tail stands in for the longest
+        // combination the host appends to a room's own hint.
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            let text = |key: &str| locale_text(&parsed, code, key);
+            let tail = format!(
+                "{} · {} · {}",
+                text("gui.admin.tips_hall"),
+                text("gui.admin.tips_focus"),
+                text("gui.admin.tips_log_key")
+            );
+            let lines = [
+                ("gui.tips.base", text("gui.tips.base")),
+                ("gui.admin.tips_hall", text("gui.admin.tips_hall")),
+                ("gui.admin.tips_log", text("gui.admin.tips_log")),
+                ("gui.admin.tips_log_menu", text("gui.admin.tips_log_menu")),
+                ("gui.admin.tips_hall with the focus tail", tail),
+            ];
+            for (key, line) in lines {
+                let cells = crate::kit::width(&line);
+                assert!(cells <= 99, "{code}: {key} is {cells} cells: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_hallway_labels_fit_their_column_in_every_locale() {
+        // A room label is drawn at x 3 and a group label at x 1, both
+        // stopping before the hallway's rule at x 16.
+        let rooms = [
+            "room_libraries",
+            "room_users",
+            "room_backups",
+            "room_discovery",
+            "room_federation",
+            "room_torrents",
+            "room_log",
+        ];
+        let groups = ["group_server", "group_network", "group_watch"];
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            for (names, room) in [(&rooms[..], true), (&groups[..], false)] {
+                let limit = if room { 13 } else { 15 };
+                for name in names {
+                    let label = locale_text(&parsed, code, &format!("gui.admin.{name}"));
+                    let cells = crate::kit::width(&label);
+                    assert!(cells <= limit, "{code}: gui.admin.{name} is {cells} cells: {label}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_boot_language_prefers_env_then_system_then_english() {
         assert_eq!(detect_lang(None, None), 0);
