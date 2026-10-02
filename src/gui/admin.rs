@@ -1500,6 +1500,54 @@ mod tests {
     }
 
     #[test]
+    fn a_long_log_line_wraps_whole_under_its_clock_in_the_band_and_the_column() {
+        let _en = english();
+        let long = "scan finished: 1204 files in /srv/music/library, 17 new, 3 changed, 0 removed, \
+                    and the album art cache was rebuilt from the embedded pictures";
+        let mut gui = admin_gui();
+        gui.act(Act::Adm(AdmAct::Open(Hall::Room(RoomId::Backups))));
+        gui.admin.log.model.take(lines(1, 10));
+        gui.admin.log.model.take(LogTail { entries: vec![entry(11, "info", long)], last_seq: 11, capacity: 1000 });
+
+        // The band: 105 cells past the clock, so the long line takes the
+        // last two of its seven rows, the line above it the five before.
+        let buf = render_at(&mut gui, 136, 52);
+        for (i, y) in (40..=44).enumerate() {
+            let n = i + 6;
+            assert_eq!(from(&buf, 19, y).trim_end(), format!("09:00:{n:02}  line {n}"), "row {y}");
+        }
+        assert_eq!(
+            from(&buf, 19, 45).trim_end(),
+            "09:00:11  scan finished: 1204 files in /srv/music/library, 17 new, 3 changed, 0 removed, and the album art cache"
+        );
+        assert_eq!(from(&buf, 19, 46).trim_end(), "          was rebuilt from the embedded pictures");
+        // A drag from its later row to its first lights both rows.
+        down(&mut gui, 30, 46);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 30, 45);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 30, 45);
+        assert_eq!(gui.admin.log.model.highlight, Some((11, 11)));
+        let buf = render_at(&mut gui, 136, 52);
+        let band = gui.admin.log_at.expect("the band");
+        assert!(lit(&buf, band, 45) && lit(&buf, band, 46) && !lit(&buf, band, 44));
+        gui.admin.log.model.clear_highlight();
+
+        // The column at 176×46: 44 cells, four rows, nothing past its edge.
+        let buf = render_at(&mut gui, 176, 46);
+        assert_eq!(from(&buf, 120, 13).trim_end(), "09:00:10  line 10");
+        assert_eq!(
+            (14..=17).map(|y| from(&buf, 120, y).trim_end().to_string()).collect::<Vec<_>>(),
+            [
+                "09:00:11  scan finished: 1204 files in",
+                "          /srv/music/library, 17 new, 3 changed, 0",
+                "          removed, and the album art cache was rebuilt",
+                "          from the embedded pictures",
+            ]
+        );
+        assert_eq!(buf[(130, 16)].fg, th().text, "the later rows wear the line's colour");
+        assert_eq!(gui.admin.log_at.map(|log| log.right()), Some(174), "the widest row ends at the log's edge");
+    }
+
+    #[test]
     fn from_160_columns_the_log_docks_beside_a_100_cell_room() {
         let _en = english();
         let mut gui = admin_gui();

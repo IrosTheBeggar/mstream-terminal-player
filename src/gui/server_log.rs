@@ -14,6 +14,13 @@
 //! tab is opened again. The screen pumps it once a frame and the pump only
 //! ever `try_recv`s, so a frame never waits on the network.
 //!
+//! A line is drawn whole: its message wraps by words under the clock, its
+//! later rows set in by the clock's width, so nothing of it is cut at the
+//! log's edge ([`message_rows`]). The view still scrolls by lines, the
+//! newest at the bottom; only a line taller than the view is read a row
+//! at a time, and the top of the log shows the oldest line from its
+//! clock, so every row of every line can be brought into sight.
+//!
 //! Drawing takes any surface and a wrapper for the log's own actions, so
 //! the host decides what a click on the paused word or the level control
 //! becomes in its action type. The level menu is drawn in a second pass,
@@ -45,13 +52,13 @@ use super::log_file::{self, Fallback, SaveError, Saved};
 use super::opener::{self, HandOff};
 use super::{bright_bold, bullet_glyph, put, sel};
 use crate::admin::tz::Zone;
-use crate::admin::{gate_message, iso_unix, printable};
+use crate::admin::{gate_message, iso_unix};
 use crate::api::types::LogTail;
 use crate::api::{ApiError, Client};
 use crate::kit::clipboard::{self, Copied};
 use crate::kit::os::{Os, process_var};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{Grip, Surface, dim, frame_at, width};
+use crate::kit::{Grip, Surface, dim, frame_at, grapheme_cells, width};
 
 /// How many lines the player keeps; older ones fall off the front.
 pub(crate) const RING: usize = 1000;
@@ -60,15 +67,14 @@ pub(crate) const POLL_EVERY: Duration = Duration::from_secs(2);
 /// The pause after a failed request, so a server that is down is not
 /// asked thirty times a minute.
 pub(crate) const POLL_FAILING: Duration = Duration::from_secs(10);
-/// How many characters of a message's first line the row keeps. The
-/// widest log the layouts draw is far narrower; the whole message, which
-/// a copy takes, is kept apart in [`Line::whole`].
-const KEEP_CHARS: usize = 400;
-/// The longest message kept whole, for a copy: what mStream's own logger
-/// cuts a message to, so nothing the server holds is lost.
+/// The longest message kept: what mStream's own logger cuts a message
+/// to, so nothing the server holds is lost. The rows show all of it, and
+/// a copy takes all of it.
 const MESSAGE_CHARS: usize = 4000;
-/// What a copy puts before a message's later lines, so a stack trace
-/// reads under its time stamp: the width of `HH:MM:SS` and its gap.
+/// The width of `HH:MM:SS` and its gap, which sets a line's later rows
+/// under its first: a copy puts it before a message's later lines, so a
+/// stack trace reads under its time stamp, and the view starts every row
+/// of a line after its first one past it.
 const LATER_LINES: &str = "          ";
 
 /// A line's level, most severe first, so a line shows when its level is
@@ -113,37 +119,30 @@ impl Level {
     }
 }
 
-/// One log line as the player keeps it: the message's first line made
-/// printable, whether anything followed it (a stack trace), and the whole
-/// message made printable for a copy.
+/// One log line as the player keeps it: its time, its level, and the
+/// whole message made printable, which the rows wrap and a copy takes.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Line {
     pub seq: u64,
     /// Unix seconds, when the server's time parsed.
     pub at: Option<i64>,
     pub level: Level,
-    pub text: String,
-    pub more: bool,
     /// Every line of the message (see [`whole_message`]).
     pub whole: String,
 }
 
 impl Line {
     fn from_entry(entry: &crate::api::types::ActivityEntry) -> Line {
-        // The first line with something on it: a message that opens on a
-        // newline still says what it is about.
-        let mut parts = entry.message.split('\n').filter(|l| !printable(l, 1).is_empty());
-        let text = parts.next().map(|l| printable(l, KEEP_CHARS)).unwrap_or_default();
-        let more = parts.next().is_some();
         let whole = whole_message(&entry.message);
-        Line { seq: entry.seq, at: iso_unix(&entry.t), level: Level::of(&entry.level), text, more, whole }
+        Line { seq: entry.seq, at: iso_unix(&entry.t), level: Level::of(&entry.level), whole }
     }
 }
 
-/// A message as a copy carries it: every line, each made printable the
-/// way a row is (no character that acts on a terminal or reorders a
-/// reader, a tab as four spaces) and trimmed at its end only, so a stack
-/// trace keeps its indentation. Blank lines at either end go; the whole is
+/// A message as the rows and a copy carry it: every line, each made
+/// printable (no character that acts on a terminal or reorders a reader,
+/// a tab as four spaces) and trimmed at its end only, so a stack trace
+/// keeps its indentation. Blank lines at either end go, so a message that
+/// opens on a newline still starts with what it is about; the whole is
 /// cut at [`MESSAGE_CHARS`].
 fn whole_message(raw: &str) -> String {
     let lines: Vec<String> = raw
@@ -163,6 +162,241 @@ fn whole_message(raw: &str) -> String {
     whole.trim_end().to_string()
 }
 
+/// A message as the rows it takes in `cells` cells, the clock's column
+/// left out: each of its lines wrapped by [`wrap_line`], a blank line
+/// between two kept as an empty row, and an empty message one empty row,
+/// so every line has its clock's row. A log with no cells past the clock
+/// gives each line that one row, since none of a message would show.
+fn message_rows(whole: &str, cells: usize) -> Vec<String> {
+    if cells == 0 {
+        return vec![String::new()];
+    }
+    whole.split('\n').flat_map(|part| wrap_line(part, cells)).collect()
+}
+
+/// One line of a message wrapped at `cells` cells: greedy by words, as
+/// the kit's [`crate::kit::wrap_words`] wraps a sentence, and measured as
+/// it is, in the cells ratatui draws. It does two things a sentence's wrap
+/// does not. The line's own indentation stays on its first row (a stack
+/// trace's `    at`) wherever its first word fits beside it, and the
+/// spaces inside a row stay as written. And a word wider than a whole row
+/// (a path, a token, a run of CJK with no spaces) starts where it stands
+/// and breaks at the last cell of every row, a grapheme at a time, where a
+/// sentence's wrap would leave it whole to run off the log's edge. A blank
+/// line is one empty row.
+fn wrap_line(text: &str, cells: usize) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0;
+    let mut rest = text;
+    let mut first = true;
+    loop {
+        let from = rest.trim_start_matches(' ');
+        let gap = rest.len() - from.len();
+        let (word, after) = from.split_at(from.find(' ').unwrap_or(from.len()));
+        rest = after;
+        if word.is_empty() {
+            break;
+        }
+        let w = width(word);
+        // The spaces before a word stay inside a row, and before the
+        // line's first word as its indentation; a break swallows them.
+        let lead = if first || !row.is_empty() { gap } else { 0 };
+        first = false;
+        if used + lead + w <= cells {
+            row.push_str(&" ".repeat(lead));
+            row.push_str(word);
+            used += lead + w;
+            continue;
+        }
+        if w <= cells {
+            if !row.is_empty() {
+                rows.push(std::mem::take(&mut row));
+            }
+            row.push_str(word);
+            used = w;
+            continue;
+        }
+        // Wider than any row: on from here, cut at every row's last cell.
+        let head = word.graphemes(true).next().map_or(0, grapheme_cells);
+        if used + lead + head <= cells {
+            row.push_str(&" ".repeat(lead));
+            used += lead;
+        } else if !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        for grapheme in word.graphemes(true) {
+            let gw = grapheme_cells(grapheme);
+            if !row.is_empty() && used + gw > cells {
+                rows.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            row.push_str(grapheme);
+            used += gw;
+        }
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// What the view holds, for scrolling: its rows, and the cells a message
+/// row takes (the log's width less the clock's column) — or none before a
+/// frame has drawn the log, when every line counts as one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fit {
+    rows: usize,
+    cells: Option<usize>,
+}
+
+impl Fit {
+    /// The rows `line` takes.
+    fn height(self, line: &Line) -> usize {
+        self.cells.map_or(1, |cells| message_rows(&line.whole, cells).len())
+    }
+
+    /// The view's rows, never fewer than one, so a log with no room for
+    /// a line still scrolls by lines.
+    fn rows(self) -> usize {
+        self.rows.max(1)
+    }
+}
+
+/// A move of the view: a line, or a page of rows, older or newer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Older,
+    Newer,
+    PageOlder,
+    PageNewer,
+}
+
+/// The rows from the oldest shown line's first one down to the view's
+/// bottom row, with line `bottom` at the bottom and `under` of its rows
+/// below the view, counted up to `cap` and no further. The view is full
+/// when they reach its rows, and stands at the top of the log when they
+/// are no more than its rows.
+fn depth(shown: &[&Line], bottom: usize, under: usize, fit: Fit, cap: usize) -> usize {
+    let mut n = fit.height(shown[bottom]).saturating_sub(under);
+    for line in shown[..bottom].iter().rev() {
+        if n >= cap {
+            break;
+        }
+        n += fit.height(line);
+    }
+    n
+}
+
+/// The top of the log, as `(scroll, under)`: the oldest line's first row
+/// at the view's top, and the bottom wherever the rows run out — the one
+/// place the bottom line may be cut short, so the oldest lines are never
+/// out of reach above a line that overshoots the view. Where every line
+/// fits, that is following.
+fn top_of(shown: &[&Line], fit: Fit) -> (usize, usize) {
+    let rows = fit.rows();
+    let mut filled = 0;
+    for (i, line) in shown.iter().enumerate() {
+        filled += fit.height(line);
+        if filled >= rows {
+            return (shown.len() - 1 - i, filled - rows);
+        }
+    }
+    (0, 0)
+}
+
+/// `(scroll, under)` kept where the view is full and its bottom line
+/// whole: the bottom line no older than the oldest, its rows under the
+/// view fewer than it has; the top of the log when the view would not be
+/// full (or following, when every line fits); and a line cut at the
+/// bottom only at the top of the log, or while a line taller than the
+/// view is read — and then never so far that its first row drops below
+/// the view's top. A resize goes through here, so the bottom line stays
+/// the bottom line however the lines re-flow.
+fn settled(shown: &[&Line], scroll: usize, under: usize, fit: Fit) -> (usize, usize) {
+    let Some(newest) = shown.len().checked_sub(1) else { return (0, 0) };
+    let rows = fit.rows();
+    let scroll = scroll.min(newest);
+    let bottom = newest - scroll;
+    let tall = fit.height(shown[bottom]);
+    let under = under.min(tall - 1);
+    let depth = depth(shown, bottom, under, fit, rows + 1);
+    if depth < rows {
+        return top_of(shown, fit);
+    }
+    if depth == rows || under == 0 {
+        return (scroll, under);
+    }
+    (scroll, if tall > rows { under.min(tall - rows) } else { 0 })
+}
+
+/// `(scroll, under)` after `step` (see [`LogModel::go`]).
+fn stepped(shown: &[&Line], scroll: usize, under: usize, step: Step, fit: Fit) -> (usize, usize) {
+    let rows = fit.rows();
+    let Some(bottom) = shown.len().checked_sub(1 + scroll) else { return (scroll, under) };
+    let tall = fit.height(shown[bottom]);
+    // The bottom line's rows from its first down to the view's bottom.
+    let left = tall - under;
+    let page = matches!(step, Step::PageOlder | Step::PageNewer);
+    let by = if page { rows } else { 1 };
+    match step {
+        Step::Older | Step::PageOlder => {
+            if depth(shown, bottom, under, fit, rows + 1) <= rows {
+                return (scroll, under);
+            }
+            if left > rows {
+                return (scroll, (under + by).min(tall - rows));
+            }
+            // Past the lines a page shows whole, from the bottom one up.
+            let mut n = 1;
+            if page {
+                let mut used = left;
+                for line in shown[..bottom].iter().rev() {
+                    used += fit.height(line);
+                    if used > rows {
+                        break;
+                    }
+                    n += 1;
+                }
+            }
+            (scroll + n, 0)
+        }
+        Step::Newer | Step::PageNewer => {
+            if under > 0 && tall > rows {
+                // Lines above it in view: its first row goes to the top.
+                if left < rows {
+                    return (scroll, tall - rows);
+                }
+                return (scroll, under.saturating_sub(by));
+            }
+            if under > 0 && !page {
+                return (scroll, 0);
+            }
+            if scroll == 0 {
+                return (0, 0);
+            }
+            // The lines below that fit a page, at least one.
+            let mut n = 1;
+            if page {
+                let mut used = 0;
+                n = 0;
+                for line in &shown[bottom + 1..] {
+                    used += fit.height(line);
+                    if used > rows {
+                        break;
+                    }
+                    n += 1;
+                }
+                n = n.max(1);
+            }
+            // A line taller than the view comes in from its first row.
+            (scroll - n, fit.height(shown[bottom + n]).saturating_sub(rows))
+        }
+    }
+}
+
 /// The lines held, where the next poll starts, and how the reader is
 /// looking at them.
 pub(crate) struct LogModel {
@@ -173,8 +407,13 @@ pub(crate) struct LogModel {
     /// were already held when the log first answered).
     seen: u64,
     answered: bool,
-    /// How many shown lines the view stands above the newest; 0 follows.
+    /// How many shown lines the view's bottom line stands above the
+    /// newest; 0 follows, with `under` 0.
     pub scroll: usize,
+    /// How many rows of the bottom line are below the view's bottom edge:
+    /// 0 but while a line taller than the view is read, and at the top of
+    /// the log (see [`settled`]).
+    under: usize,
     pub level: Level,
     /// The ring's size on the server, once it has answered; 0 is off.
     pub capacity: Option<u64>,
@@ -203,6 +442,7 @@ impl LogModel {
             seen: 0,
             answered: false,
             scroll: 0,
+            under: 0,
             level: Level::Info,
             capacity: None,
             error: None,
@@ -216,14 +456,15 @@ impl LogModel {
     /// every new one counts as unseen. Otherwise only entries past the
     /// newest line held are appended, so an answer that repeats itself
     /// adds nothing. A paused view grows its offset by the lines that
-    /// arrived under it, so what the reader is looking at stays put. A
-    /// highlight goes with a restarted ring, and once the ring has dropped
-    /// every line of it; the view keeps following under one.
+    /// arrived under it, so what the reader is looking at stays put — a
+    /// tall line read a row at a time included. A highlight goes with a
+    /// restarted ring, and once the ring has dropped every line of it; the
+    /// view keeps following under one.
     pub(crate) fn take(&mut self, tail: LogTail) {
         if self.answered && tail.last_seq < self.cursor {
             self.lines.clear();
             self.seen = 0;
-            self.scroll = 0;
+            self.follow();
             self.highlight = None;
         }
         let newest = self.lines.back().map(|l| l.seq);
@@ -243,7 +484,7 @@ impl LogModel {
         {
             self.highlight = None;
         }
-        if self.scroll > 0 {
+        if !self.following() {
             self.scroll += arrived;
         }
         if !self.answered {
@@ -270,22 +511,43 @@ impl LogModel {
         self.lines.iter().filter(|l| l.level <= self.level).collect()
     }
 
-    /// Whether the view rides the newest line. Derived from the offset,
-    /// so the header's word and the view can never disagree.
+    /// Whether the view rides the newest line, the whole of it in view.
+    /// Derived from the offsets, so the header's word and the view can
+    /// never disagree.
     pub(crate) fn following(&self) -> bool {
-        self.scroll == 0
-    }
-
-    /// Move the view `older` lines back (negative: toward the newest).
-    /// Reaching the newest line follows again.
-    pub(crate) fn scroll_by(&mut self, older: i32) {
-        let most = self.shown().len().saturating_sub(1) as i64;
-        self.scroll = (self.scroll as i64 + older as i64).clamp(0, most.max(0)) as usize;
+        self.scroll == 0 && self.under == 0
     }
 
     /// Ride the newest line again.
     pub(crate) fn follow(&mut self) {
         self.scroll = 0;
+        self.under = 0;
+    }
+
+    /// Move the view. Up and the wheel's notch go a line older: the line
+    /// above the bottom one becomes the bottom, whole. A page goes past
+    /// the lines the view shows whole, so the line cut at its top becomes
+    /// the bottom; down, past as many lines as fit a page; never fewer
+    /// than one. A line taller than the view is the exception: it goes by
+    /// rows (one, or a page) until its first row, or its last, is in
+    /// sight, and a step down onto one brings it in from its first row.
+    /// The top of the log goes no further, and reaching the newest line's
+    /// last row follows again.
+    fn go(&mut self, step: Step, fit: Fit) {
+        self.settle(fit);
+        (self.scroll, self.under) = stepped(&self.shown(), self.scroll, self.under, step, fit);
+        self.settle(fit);
+    }
+
+    /// The top of the log (Home).
+    fn top(&mut self, fit: Fit) {
+        (self.scroll, self.under) = top_of(&self.shown(), fit);
+    }
+
+    /// Keep the view full and its bottom line whole in `fit` (see
+    /// [`settled`]).
+    fn settle(&mut self, fit: Fit) {
+        (self.scroll, self.under) = settled(&self.shown(), self.scroll, self.under, fit);
     }
 
     /// A new filter, and the view follows: the old offset counted lines
@@ -326,11 +588,6 @@ impl LogModel {
     /// The log is on screen: what it holds has been seen.
     pub(crate) fn mark_seen(&mut self) {
         self.seen = self.lines.back().map_or(self.cursor, |l| l.seq.max(self.cursor));
-    }
-
-    /// Keep the offset where `rows` lines still fill the view.
-    fn clamp(&mut self, rows: usize) {
-        self.scroll = self.scroll.min(self.shown().len().saturating_sub(rows));
     }
 }
 
@@ -493,8 +750,11 @@ pub(crate) struct LogUi {
     level_at: Option<Rect>,
     /// The area the log was last drawn in, which the menu stays inside.
     drawn_in: Option<Rect>,
-    /// How many line rows the last frame had, for the wheel's clamp.
+    /// How many line rows the last frame had, and the cells a message row
+    /// took in it (none until a frame has drawn the lines): what the keys
+    /// and the wheel measure a step, a page and the scroll's end in.
     rows: usize,
+    cells: Option<usize>,
     /// The session's client, shared with the poll thread, for a download.
     client: Option<Arc<Client>>,
     /// The server's part of a saved file's name.
@@ -503,7 +763,8 @@ pub(crate) struct LogUi {
     /// the screen.
     hold: Option<Hold>,
     /// The line rows the last frame drew (the rows under the lines too)
-    /// and the sequence number on each drawn row, top first.
+    /// and the sequence number of the line on each drawn row, top first,
+    /// a wrapped line's on every row it took.
     rows_at: Option<(Rect, Vec<u64>)>,
     /// The one-shot threads' channel. It outlives a stop, so a download
     /// still running when the tab is left lands on the next visit.
@@ -529,6 +790,7 @@ impl LogUi {
             level_at: None,
             drawn_in: None,
             rows: 0,
+            cells: None,
             client: None,
             // What a server with no name is called until one is set.
             label: log_file::file_label(""),
@@ -757,8 +1019,9 @@ impl LogUi {
         self.rows_at = None;
     }
 
-    /// The line on screen row `y` of the last frame, clamped to the first
-    /// and the last line drawn, so a drag past either end stops there.
+    /// The line on screen row `y` of the last frame — any of a wrapped
+    /// line's rows means that line — clamped to the first and the last
+    /// row drawn, so a drag past either end stops at their lines.
     fn seq_at(&self, y: u16) -> Option<u64> {
         let (rect, seqs) = self.rows_at.as_ref()?;
         let row = (y.saturating_sub(rect.y) as usize).min(seqs.len().checked_sub(1)?);
@@ -798,19 +1061,30 @@ impl LogUi {
         }
     }
 
-    /// A key while the log has the focus; `rows` is how many lines it
-    /// shows. Every key is the log's except the two that leave it; Esc
-    /// clears a highlight before it leaves.
+    /// The view as the last frame drew it: its rows and its cells. Before
+    /// a frame has drawn the lines, `rows` (what the host gives them) with
+    /// every line one row.
+    fn fit(&self, rows: usize) -> Fit {
+        match self.cells {
+            Some(cells) => Fit { rows: self.rows, cells: Some(cells) },
+            None => Fit { rows, cells: None },
+        }
+    }
+
+    /// A key while the log has the focus; `rows` is how many rows the host
+    /// gives its lines, which counts until a frame has drawn them (see
+    /// [`LogUi::fit`]). Every key is the log's except the two that leave
+    /// it; Esc clears a highlight before it leaves.
     pub(crate) fn key(&mut self, key: KeyEvent, rows: usize) -> LogKey {
-        let page = rows.max(1) as i32;
+        let fit = self.fit(rows);
         match key.code {
             KeyCode::Esc if self.model.highlight.is_some() => self.model.clear_highlight(),
             KeyCode::Esc | KeyCode::Char('q') => return LogKey::Leave,
-            KeyCode::Up => self.model.scroll_by(1),
-            KeyCode::Down => self.model.scroll_by(-1),
-            KeyCode::PageUp => self.model.scroll_by(page),
-            KeyCode::PageDown => self.model.scroll_by(-page),
-            KeyCode::Home => self.model.scroll = usize::MAX,
+            KeyCode::Up => self.model.go(Step::Older, fit),
+            KeyCode::Down => self.model.go(Step::Newer, fit),
+            KeyCode::PageUp => self.model.go(Step::PageOlder, fit),
+            KeyCode::PageDown => self.model.go(Step::PageNewer, fit),
+            KeyCode::Home => self.model.top(fit),
             KeyCode::End | KeyCode::Char('f') => self.model.follow(),
             KeyCode::Enter => self.menu = Some(self.model.level.index()),
             KeyCode::Char('y') => self.copy(),
@@ -818,7 +1092,7 @@ impl LogUi {
             KeyCode::Char('o') => self.show_saved(),
             _ => {}
         }
-        self.model.clamp(rows);
+        self.model.settle(fit);
         LogKey::Taken
     }
 
@@ -834,13 +1108,12 @@ impl LogUi {
         }
     }
 
-    /// One notch of the wheel over the log: up reads older lines, which
-    /// pauses it; down comes back, and following resumes at the bottom.
+    /// One notch of the wheel over the log: a step as ↑ or ↓ takes. Up
+    /// reads older lines, which pauses it; down comes back, and following
+    /// resumes at the bottom. Before a frame has drawn the lines it only
+    /// keeps to them.
     pub(crate) fn wheel(&mut self, up: bool) {
-        self.model.scroll_by(if up { 1 } else { -1 });
-        if self.rows > 0 {
-            self.model.clamp(self.rows);
-        }
+        self.model.go(if up { Step::Older } else { Step::Newer }, self.fit(1));
     }
 
     pub(crate) fn act(&mut self, act: LogAct) {
@@ -910,12 +1183,47 @@ fn span(frame: &mut Frame, x: u16, y: u16, right: u16, text: &str, style: Style)
     width(&shown) as u16
 }
 
+/// One row of the view: the line it belongs to, whether it is that
+/// line's first (the one with the clock), and its part of the message.
+struct Drawn {
+    seq: u64,
+    at: Option<i64>,
+    level: Level,
+    first: bool,
+    text: String,
+}
+
+/// The rows a view of `rows` rows shows, top first: the bottom line
+/// `scroll` lines above the newest, `under` of its rows left below the
+/// view, and the lines above it filling upward, the top one showing its
+/// last rows when only they fit. Only the lines in view are wrapped.
+fn view(shown: &[&Line], scroll: usize, under: usize, rows: usize, cells: usize) -> Vec<Drawn> {
+    let mut drawn = Vec::new();
+    let Some(bottom) = shown.len().checked_sub(1 + scroll) else { return drawn };
+    for (i, line) in shown[..=bottom].iter().rev().enumerate() {
+        let parts = message_rows(&line.whole, cells);
+        let skip = if i == 0 { under } else { 0 };
+        for (n, text) in parts.into_iter().enumerate().rev().skip(skip) {
+            if drawn.len() == rows {
+                break;
+            }
+            drawn.push(Drawn { seq: line.seq, at: line.at, level: line.level, first: n == 0, text });
+        }
+        if drawn.len() == rows {
+            break;
+        }
+    }
+    drawn.reverse();
+    drawn
+}
+
 /// The log in `area`: the header on its first row, then the lines, the
-/// newest at the bottom — or the one sentence when there are none to
-/// show. A failure while lines are held takes the last row, so a log
-/// that stopped never passes for one that is following. The line rows,
-/// and the empty rows under them, are a drag region for the highlight;
-/// highlighted lines wear the selection colours across the log's width.
+/// newest at the bottom, each wrapped whole under its clock — or the one
+/// sentence when there are none to show. A failure while lines are held
+/// takes the last row, so a log that stopped never passes for one that
+/// is following. The line rows, and the empty rows under them, are a
+/// drag region for the highlight; every row of a highlighted line wears
+/// the selection colours across the log's width.
 pub(crate) fn draw<A: Clone + 'static>(
     frame: &mut Frame,
     ui: &mut Surface<A>,
@@ -927,6 +1235,7 @@ pub(crate) fn draw<A: Clone + 'static>(
     log.drawn_in = Some(area);
     log.level_at = None;
     log.rows = 0;
+    log.cells = None;
     log.rows_at = None;
     if area.width == 0 || area.height == 0 {
         return;
@@ -934,16 +1243,20 @@ pub(crate) fn draw<A: Clone + 'static>(
     let right = area.right();
     let y = area.y;
 
-    // The rows the lines get, and the offset clamped to them before the
-    // header says whether the view follows: a paused view whose lines all
-    // fit is following, and says so on this frame, not the next.
+    // The rows the lines get, the cells a message row gets past the
+    // clock's column, and the view settled in them before the header says
+    // whether it follows: a paused view whose lines all fit is following,
+    // and says so on this frame, not the next. A new width re-flows the
+    // lines under the same bottom line.
     let top = y + if look.spaced { 2 } else { 1 };
     let below = area.bottom().saturating_sub(top) as usize;
     let held = log.model.shown().len();
     let error_row = log.model.error.is_some() && held > 0 && below > 0;
     let rows = below - usize::from(error_row);
+    let cells = (area.width as usize).saturating_sub(LATER_LINES.len());
     log.rows = rows;
-    log.model.scroll = log.model.scroll.min(held.saturating_sub(rows));
+    log.cells = Some(cells);
+    log.model.settle(Fit { rows, cells: Some(cells) });
 
     // The header: the follow state, the level control, the hint.
     let mut x = area.x;
@@ -1029,12 +1342,12 @@ pub(crate) fn draw<A: Clone + 'static>(
 
     // The rows the lines stand on this frame, and the drag region over
     // them and the empty rows under them (never the header, nor the
-    // failure's row). A drag in progress re-reads the line under the hand
-    // against these rows, so the wheel, or lines arriving, under a still
-    // pointer move the highlight with the lines.
-    let end = held - log.model.scroll;
-    let first = end.saturating_sub(rows);
-    let seqs: Vec<u64> = log.model.shown()[first..end].iter().map(|l| l.seq).collect();
+    // failure's row), each row mapped to its line. A drag in progress
+    // re-reads the line under the hand against these rows, so the wheel,
+    // or lines arriving, under a still pointer move the highlight with the
+    // lines.
+    let drawn = view(&log.model.shown(), log.model.scroll, log.model.under, rows, cells);
+    let seqs: Vec<u64> = drawn.iter().map(|row| row.seq).collect();
     if !seqs.is_empty() {
         let lines = Rect { x: area.x, y: top, width: area.width, height: rows as u16 };
         log.rows_at = Some((lines, seqs));
@@ -1046,27 +1359,30 @@ pub(crate) fn draw<A: Clone + 'static>(
         ui.drag_region(lines, move |grip, at| wrap(LogAct::Select(grip, at)));
     }
 
-    // The lines, the newest at the bottom of the window onto them; a
-    // highlighted one in the selection colours from edge to edge.
-    let shown = log.model.shown();
-    let more = if legacy_conhost() { " »" } else { " …" };
-    for (row, line) in shown[first..end].iter().enumerate() {
-        let ly = top + row as u16;
-        let lit = log.model.lit(line.seq);
+    // The rows, the newest line's last at the bottom of the window onto
+    // them: a line's first row opens on its clock, its later ones under
+    // the message's first cell, every one in the line's colour; a
+    // highlighted line's rows in the selection colours from edge to edge.
+    for (i, row) in drawn.iter().enumerate() {
+        let ly = top + i as u16;
+        let lit = log.model.lit(row.seq);
         if lit {
             put(frame, area.x, ly, &" ".repeat(area.width as usize), sel());
         }
-        let color = match line.level {
+        let color = match row.level {
             Level::Error => th().danger,
             Level::Warn => th().gold,
             Level::Info | Level::Debug => th().text,
         };
         let (time, words) = if lit { (sel(), sel()) } else { (dim(), Style::default().fg(color)) };
         let mut lx = area.x;
-        lx += span(frame, lx, ly, right, &clock(line.at, log.zone.as_ref()), time);
-        lx += span(frame, lx, ly, right, "  ", if lit { sel() } else { Style::default() });
-        let text = if line.more { format!("{}{more}", line.text) } else { line.text.clone() };
-        span(frame, lx, ly, right, &text, words);
+        if row.first {
+            lx += span(frame, lx, ly, right, &clock(row.at, log.zone.as_ref()), time);
+            lx += span(frame, lx, ly, right, "  ", if lit { sel() } else { Style::default() });
+        } else {
+            lx = lx.saturating_add(LATER_LINES.len() as u16);
+        }
+        span(frame, lx, ly, right, &row.text, words);
     }
 }
 
@@ -1154,7 +1470,7 @@ mod tests {
     }
 
     fn texts(model: &LogModel) -> Vec<String> {
-        model.shown().iter().map(|l| l.text.clone()).collect()
+        model.shown().iter().map(|l| l.whole.clone()).collect()
     }
 
     fn id(act: LogAct) -> LogAct {
@@ -1360,33 +1676,409 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_line_message_shows_its_first_line_and_an_ellipsis_and_no_control_characters() {
-        let mut m = LogModel::new();
-        m.take(tail(
+    fn a_multi_line_message_shows_every_line_keeps_a_blank_one_between_and_no_control_characters() {
+        let mut log = LogUi::new(None).utc();
+        log.model.take(tail(
             vec![
-                entry(1, "error", "Error: ENOENT\r\n    at open (fs.js:1:1)\n    at main"),
+                entry(1, "error", "Error: ENOENT\r\n    at open (fs.js:1:1)\n\n    at main"),
                 entry(2, "info", "tab\there \u{1b}[31mred\u{1b}[0m"),
                 entry(3, "info", "\nopens on a newline"),
                 entry(4, "info", "ends on one\n"),
             ],
             4,
         ));
-        let lines = m.shown();
-        assert_eq!(lines[0].text, "Error: ENOENT");
-        assert!(lines[0].more);
-        assert!(lines[1].text.chars().all(|c| !c.is_control()), "{:?}", lines[1].text);
-        assert!(!lines[1].more);
-        assert_eq!(lines[2].text, "opens on a newline");
-        assert!(!lines[2].more);
-        assert_eq!(lines[3].text, "ends on one");
-        assert!(!lines[3].more, "nothing followed the newline");
-
-        let mut log = LogUi::new(None).utc();
-        log.model = m;
         let mut ui = Surface::new();
-        let buf = render(&mut log, &mut ui, (60, 6), Rect::new(0, 0, 60, 6), &plain());
-        let ellipsis = if legacy_conhost() { " »" } else { " …" };
-        assert!(row(&buf, 1).contains(&format!("Error: ENOENT{ellipsis}")), "{}", row(&buf, 1));
+        let buf = render(&mut log, &mut ui, (60, 10), Rect::new(0, 0, 60, 10), &plain());
+        assert_eq!(
+            rows(&buf, 1..=9),
+            [
+                "09:00:01  Error: ENOENT",
+                "              at open (fs.js:1:1)",
+                "",
+                "              at main",
+                "09:00:02  tab    here [31mred[0m",
+                "09:00:03  opens on a newline",
+                "09:00:04  ends on one",
+                "",
+                "",
+            ],
+            "the trace's own indentation under the message's first cell, nothing after a closing newline"
+        );
+        for y in [1, 2, 4] {
+            assert_eq!(buf[(14, y)].fg, th().danger, "every row of the error: {}", row(&buf, y));
+        }
+        assert_eq!(buf[(0, 1)].fg, th().dim);
+        assert!(
+            (1..8).all(|y| (0..60).all(|x| !buf[(x, y)].symbol().chars().any(char::is_control))),
+            "no control character reaches a cell"
+        );
+    }
+
+    // ── Wrapped lines ───────────────────────────────────────────────────────
+
+    /// A log 30 cells wide: the clock's ten, then twenty for the message.
+    const NARROW: u16 = 30;
+
+    const FOX: &str = "the quick brown fox jumps over the lazy dog again";
+
+    /// Rows `ys` of `buf`, trimmed at their ends.
+    fn rows(buf: &Buffer, ys: std::ops::RangeInclusive<u16>) -> Vec<String> {
+        ys.map(|y| row(buf, y).trim_end().to_string()).collect()
+    }
+
+    /// Twelve lines, the even ones two rows at [`NARROW`] and the odd ones
+    /// one: `line 2 and some more` / `words`, `line 10 and some` / `more
+    /// words`.
+    fn twelve(log: &mut LogUi) {
+        log.model.take(tail(
+            (1..=12)
+                .map(|s| {
+                    let more = if s % 2 == 0 { " and some more words" } else { "" };
+                    entry(s, "info", &format!("line {s}{more}"))
+                })
+                .collect(),
+            12,
+        ));
+    }
+
+    /// Draw a log of twelve lines in seven rows at [`NARROW`].
+    fn seven(log: &mut LogUi, ui: &mut Surface<LogAct>) -> Buffer {
+        render(log, ui, (NARROW, 8), Rect::new(0, 0, NARROW, 8), &plain())
+    }
+
+    #[test]
+    fn a_long_message_wraps_by_words_with_the_clock_on_its_first_row_only() {
+        let mut log = LogUi::new(None).utc();
+        log.model.set_level(Level::Debug);
+        log.model.take(tail(
+            vec![entry(1, "info", FOX), entry(2, "warn", FOX), entry(3, "error", FOX), entry(4, "debug", "short")],
+            4,
+        ));
+        let mut ui = Surface::new();
+        let buf = render(&mut log, &mut ui, (NARROW, 12), Rect::new(0, 0, NARROW, 12), &plain());
+        assert_eq!(
+            rows(&buf, 1..=3),
+            ["09:00:01  the quick brown fox", "          jumps over the lazy", "          dog again"]
+        );
+        assert_eq!(row(&buf, 4).trim_end(), "09:00:02  the quick brown fox");
+        assert_eq!(row(&buf, 10).trim_end(), "09:00:04  short", "the newest at the bottom of the lines");
+        assert_eq!(row(&buf, 11).trim(), "");
+        for (ys, color) in [(1..=3, th().text), (4..=6, th().gold), (7..=9, th().danger)] {
+            for y in ys {
+                assert_eq!(buf[(10, y)].fg, color, "row {y}: {}", row(&buf, y));
+            }
+        }
+        for y in [1, 4, 7] {
+            assert_eq!(buf[(0, y)].fg, th().dim, "the clock is dim");
+        }
+        for y in [2, 3, 5, 6, 8, 9] {
+            assert_eq!(&row(&buf, y)[..10], "          ", "row {y} is set in, with no clock");
+        }
+    }
+
+    #[test]
+    fn a_cjk_message_wraps_by_cells_and_never_splits_a_character() {
+        // Twenty-one cells for the message: ten characters a row, since the
+        // eleventh would end on the twenty-second cell.
+        let message = "日本語のログメッセージは二つのセルで数えます";
+        let mut log = LogUi::new(None).utc();
+        log.model.take(tail(vec![entry(1, "info", message)], 1));
+        let mut ui = Surface::new();
+        let buf = render(&mut log, &mut ui, (31, 6), Rect::new(0, 0, 31, 6), &plain());
+        assert_eq!(find(&buf, 1, "日本語のログメッセー"), Some(10), "{}", row(&buf, 1));
+        assert_eq!(find(&buf, 2, "ジは二つのセルで数え"), Some(10), "{}", row(&buf, 2));
+        assert_eq!(find(&buf, 3, "ます"), Some(10), "{}", row(&buf, 3));
+        assert_eq!(buf[(30, 1)].symbol(), " ", "the odd cell is left empty");
+        assert!(row(&buf, 1).starts_with("09:00:01  ") && row(&buf, 2).starts_with("          "));
+
+        // However many cells, nothing is lost and no row runs over, but
+        // for a row narrower than one character.
+        for cells in [1, 2, 3, 7, 20, 21] {
+            let parts = message_rows(message, cells);
+            assert_eq!(parts.concat(), message, "{cells}");
+            assert!(parts.iter().all(|p| width(p) <= cells.max(2)), "{cells}: {parts:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_wider_than_a_row_breaks_at_the_rows_last_cell() {
+        let message = "ENOENT: open /srv/music/library/albums/2026/a-very-long-folder-name/track.flac";
+        let mut log = LogUi::new(None).utc();
+        log.model.take(tail(vec![entry(1, "error", message)], 1));
+        let mut ui = Surface::new();
+        let buf = render(&mut log, &mut ui, (NARROW, 6), Rect::new(0, 0, NARROW, 6), &plain());
+        assert_eq!(
+            rows(&buf, 1..=4),
+            [
+                "09:00:01  ENOENT: open /srv/mu",
+                "          sic/library/albums/2",
+                "          026/a-very-long-fold",
+                "          er-name/track.flac",
+            ],
+            "the path starts where it stands and fills every row"
+        );
+
+        // A word that fits a row moves to the next one whole; a line's own
+        // indentation stays on its first row; spaces inside a row stay as
+        // written; a blank line is one empty row.
+        assert_eq!(wrap_line("    at open (/srv/x.js:1:1)", 20), ["    at open", "(/srv/x.js:1:1)"]);
+        assert_eq!(wrap_line("a  b", 20), ["a  b"]);
+        assert_eq!(wrap_line("", 20), [""]);
+        assert_eq!(message_rows("", 20), [""], "an empty message still has its clock's row");
+        assert_eq!(message_rows("a\nb", 0), [""], "no cells past the clock: the clock's row alone");
+    }
+
+    #[test]
+    fn the_newest_line_stands_whole_at_the_bottom_and_one_cut_at_the_top_shows_its_tail() {
+        let mut log = LogUi::new(None).utc();
+        log.model.take(tail(vec![entry(1, "info", FOX), entry(2, "info", "short"), entry(3, "info", FOX)], 3));
+        let mut ui = Surface::new();
+        // Five rows: the newest line's three, the short line, and the last
+        // row of the oldest.
+        let buf = render(&mut log, &mut ui, (NARROW, 6), Rect::new(0, 0, NARROW, 6), &plain());
+        assert_eq!(
+            rows(&buf, 1..=5),
+            [
+                "          dog again",
+                "09:00:02  short",
+                "09:00:03  the quick brown fox",
+                "          jumps over the lazy",
+                "          dog again",
+            ]
+        );
+        assert!(log.model.following());
+        assert_eq!(log.rows_at.as_ref().map(|(_, seqs)| seqs.clone()), Some(vec![1, 2, 3, 3, 3]));
+    }
+
+    #[test]
+    fn home_shows_the_oldest_line_from_its_clock_however_the_rows_fall() {
+        // Six one-row lines, a line of three rows, and one more. With the
+        // bottom line always whole the oldest three would be out of reach
+        // above seven rows; the top of the log cuts the bottom instead.
+        let mut log = LogUi::new(None).utc();
+        let mut entries: Vec<ActivityEntry> = (1..=6).map(|s| entry(s, "info", &format!("line {s}"))).collect();
+        entries.push(entry(7, "info", FOX));
+        entries.push(entry(8, "info", "line 8"));
+        log.model.take(tail(entries, 8));
+        let mut ui = Surface::new();
+        let buf = seven(&mut log, &mut ui);
+        assert_eq!(row(&buf, 1).trim_end(), "09:00:04  line 4");
+
+        let top = [
+            "09:00:01  line 1",
+            "09:00:02  line 2",
+            "09:00:03  line 3",
+            "09:00:04  line 4",
+            "09:00:05  line 5",
+            "09:00:06  line 6",
+            "09:00:07  the quick brown fox",
+        ];
+        log.key(key(KeyCode::Home), 7);
+        assert_eq!(rows(&seven(&mut log, &mut ui), 1..=7), top);
+        assert!(!log.model.following());
+        log.key(key(KeyCode::Up), 7);
+        log.wheel(true);
+        log.key(key(KeyCode::PageUp), 7);
+        assert_eq!(rows(&seven(&mut log, &mut ui), 1..=7), top, "nothing is older");
+
+        // Down stands the cut line whole at the bottom, then follows.
+        log.key(key(KeyCode::Down), 7);
+        let buf = seven(&mut log, &mut ui);
+        assert_eq!(row(&buf, 1).trim_end(), "09:00:03  line 3");
+        assert_eq!(row(&buf, 7).trim_end(), "          dog again");
+        log.key(key(KeyCode::Down), 7);
+        assert!(log.model.following());
+    }
+
+    #[test]
+    fn up_and_down_move_a_line_and_pages_move_as_many_lines_as_fit_a_page_of_rows() {
+        let mut log = LogUi::new(None).utc();
+        twelve(&mut log);
+        let mut ui = Surface::new();
+        let buf = seven(&mut log, &mut ui);
+        assert_eq!(
+            rows(&buf, 1..=7),
+            [
+                "          words",
+                "09:00:09  line 9",
+                "09:00:10  line 10 and some",
+                "          more words",
+                "09:00:11  line 11",
+                "09:00:12  line 12 and some",
+                "          more words",
+            ],
+            "line 8 cut at the top shows its last row"
+        );
+        let bottom = |log: &mut LogUi, ui: &mut Surface<LogAct>| row(&seven(log, ui), 7).trim_end().to_string();
+
+        // ↑ makes the line above the bottom the bottom, whole; ↓ comes back.
+        log.key(key(KeyCode::Up), 7);
+        assert_eq!(log.model.scroll, 1);
+        assert_eq!(rows(&seven(&mut log, &mut ui), 1..=1), ["09:00:07  line 7"]);
+        assert_eq!(bottom(&mut log, &mut ui), "09:00:11  line 11");
+        log.key(key(KeyCode::Up), 7);
+        assert_eq!(bottom(&mut log, &mut ui), "          more words");
+        assert_eq!(log.model.scroll, 2);
+        log.key(key(KeyCode::Down), 7);
+        log.key(key(KeyCode::Down), 7);
+        assert!(log.model.following());
+
+        // PgUp goes past the four lines the view shows whole (12, 11, 10
+        // and 9), so line 8, cut at the top, becomes the bottom.
+        log.key(key(KeyCode::PageUp), 7);
+        assert_eq!(log.model.scroll, 4);
+        let buf = seven(&mut log, &mut ui);
+        assert_eq!(row(&buf, 6).trim_end(), "09:00:08  line 8 and some more");
+        assert_eq!(row(&buf, 7).trim_end(), "          words");
+        // Another page would leave the view short: it stops at the top.
+        log.key(key(KeyCode::PageUp), 7);
+        assert_eq!(rows(&seven(&mut log, &mut ui), 1..=1), ["09:00:01  line 1"]);
+        assert_eq!(bottom(&mut log, &mut ui), "09:00:05  line 5");
+        // PgDn brings in the lines below that fit a page: 6 to 9, then the rest.
+        log.key(key(KeyCode::PageDown), 7);
+        assert_eq!(bottom(&mut log, &mut ui), "09:00:09  line 9");
+        log.key(key(KeyCode::PageDown), 7);
+        assert!(log.model.following());
+        assert_eq!(bottom(&mut log, &mut ui), "          more words");
+
+        // The wheel steps as the arrows do.
+        log.wheel(true);
+        assert_eq!(bottom(&mut log, &mut ui), "09:00:11  line 11");
+        log.wheel(true);
+        log.wheel(false);
+        assert_eq!(bottom(&mut log, &mut ui), "09:00:11  line 11");
+        log.wheel(false);
+        assert!(log.model.following());
+    }
+
+    #[test]
+    fn wrapped_lines_that_all_fit_follow_and_one_more_row_lets_the_view_pause() {
+        let mut log = LogUi::new(None).utc();
+        log.model.take(tail(vec![entry(1, "info", FOX), entry(2, "info", FOX)], 2));
+        let mut ui = Surface::new();
+        seven(&mut log, &mut ui);
+        log.key(key(KeyCode::Up), 7);
+        log.wheel(true);
+        assert!(log.model.following(), "six rows in seven: nothing to scroll");
+        log.model.take(tail(vec![entry(3, "info", "line 3 and some more words")], 3));
+        seven(&mut log, &mut ui);
+        log.key(key(KeyCode::Up), 7);
+        assert!(!log.model.following(), "eight rows in seven");
+        log.key(key(KeyCode::Down), 7);
+        assert!(log.model.following());
+    }
+
+    #[test]
+    fn a_line_taller_than_the_view_is_read_a_row_at_a_time() {
+        // A stack trace of nine rows, under a line, in a view of five.
+        let trace = "Error: boom\n    at a\n    at b\n    at c\n    at d\n    at e\n    at f\n    at g\n    at h";
+        let mut log = LogUi::new(None).utc();
+        log.model.take(tail(vec![entry(1, "info", "before"), entry(2, "error", trace)], 2));
+        let mut ui = Surface::new();
+        let five = |log: &mut LogUi, ui: &mut Surface<LogAct>| {
+            rows(&render(log, ui, (NARROW, 6), Rect::new(0, 0, NARROW, 6), &plain()), 1..=5)
+        };
+        let frames = |from: char| -> Vec<String> {
+            (0..5).map(|i| format!("              at {}", (from as u8 + i) as char)).collect()
+        };
+        assert_eq!(five(&mut log, &mut ui), frames('d'), "following: its last rows");
+
+        // ↑ a row at a time to its first row, the clock's.
+        log.key(key(KeyCode::Up), 5);
+        assert!(!log.model.following());
+        assert_eq!(five(&mut log, &mut ui), frames('c'));
+        for _ in 0..3 {
+            log.key(key(KeyCode::Up), 5);
+        }
+        let head = five(&mut log, &mut ui);
+        assert_eq!(head[0], "09:00:02  Error: boom");
+        assert_eq!(head[1..], frames('a')[..4]);
+        // Then the line above it, here the top of the log.
+        log.key(key(KeyCode::Up), 5);
+        let top = five(&mut log, &mut ui);
+        assert_eq!(top[..2], ["09:00:01  before", "09:00:02  Error: boom"]);
+
+        // ↓ brings the trace in from its first row, then a row at a time.
+        log.key(key(KeyCode::Down), 5);
+        assert_eq!(five(&mut log, &mut ui), head);
+        for _ in 0..3 {
+            log.key(key(KeyCode::Down), 5);
+        }
+        assert!(!log.model.following());
+        log.key(key(KeyCode::Down), 5);
+        assert!(log.model.following(), "its last row at the bottom follows");
+
+        // A page goes by a page of rows inside it, no further than its ends.
+        log.key(key(KeyCode::PageUp), 5);
+        assert_eq!(five(&mut log, &mut ui), head);
+        log.key(key(KeyCode::PageDown), 5);
+        assert!(log.model.following());
+
+        // Lines arriving under it hold the rows the reader is on.
+        log.key(key(KeyCode::Up), 5);
+        let held = five(&mut log, &mut ui);
+        log.model.take(tail(vec![entry(3, "info", "after")], 3));
+        assert_eq!(five(&mut log, &mut ui), held);
+        assert!(!log.model.following());
+    }
+
+    #[test]
+    fn a_resize_re_flows_the_lines_under_the_same_bottom_line() {
+        let mut log = LogUi::new(None).utc();
+        twelve(&mut log);
+        let mut ui = Surface::new();
+        seven(&mut log, &mut ui);
+        log.key(key(KeyCode::Up), 7);
+        log.key(key(KeyCode::Up), 7);
+        let wide = render(&mut log, &mut ui, (60, 8), Rect::new(0, 0, 60, 8), &plain());
+        assert_eq!(row(&wide, 7).trim_end(), "09:00:10  line 10 and some more words", "one row each now");
+        assert_eq!(row(&wide, 1).trim_end(), "09:00:04  line 4 and some more words");
+        assert!(!log.model.following());
+        let buf = seven(&mut log, &mut ui);
+        assert_eq!(rows(&buf, 6..=7), ["09:00:10  line 10 and some", "          more words"]);
+    }
+
+    #[test]
+    fn every_row_of_a_highlighted_line_is_lit_and_any_of_its_rows_means_the_line() {
+        let mut log = LogUi::new(None).utc();
+        twelve(&mut log);
+        let mut ui = Surface::new();
+        seven(&mut log, &mut ui);
+        // Rows: 8's last on 1, 9 on 2, 10 on 3-4, 11 on 5, 12 on 6-7.
+        assert_eq!(log.seq_at(1), Some(8), "the tail of a line cut at the top");
+        assert_eq!(log.seq_at(4), Some(10), "a later row");
+        assert_eq!(log.seq_at(7), Some(12));
+        assert_eq!(log.seq_at(40), Some(12), "below the rows, the last line");
+
+        log.model.highlight = Some((10, 10));
+        let buf = seven(&mut log, &mut ui);
+        for y in [3, 4] {
+            for x in 0..NARROW {
+                assert_eq!((buf[(x, y)].bg, buf[(x, y)].fg), (th().accent, th().on_accent), "({x}, {y})");
+            }
+        }
+        for y in [2, 5] {
+            assert_ne!(buf[(20, y)].bg, th().accent, "row {y} is another line");
+        }
+
+        // A drag from a later row to another line's later row.
+        let select = |log: &mut LogUi, grip, y| log.act(LogAct::Select(grip, Position::new(5, y)));
+        select(&mut log, Grip::Press, 4);
+        assert_eq!(log.model.highlight, None, "the press cleared it");
+        select(&mut log, Grip::Drag, 7);
+        select(&mut log, Grip::Release, 7);
+        assert_eq!(log.model.highlight, Some((10, 12)));
+        let buf = seven(&mut log, &mut ui);
+        assert!((3..=7).all(|y| buf[(20, y)].bg == th().accent), "every row of 10, 11 and 12");
+        // From the cut line's tail at the top, a row down.
+        select(&mut log, Grip::Press, 1);
+        select(&mut log, Grip::Drag, 2);
+        select(&mut log, Grip::Release, 2);
+        assert_eq!(log.model.highlight, Some((8, 9)));
+        // A plain click on a later row lights nothing.
+        select(&mut log, Grip::Press, 6);
+        select(&mut log, Grip::Release, 6);
+        assert_eq!(log.model.highlight, None);
     }
 
     #[test]
@@ -1806,13 +2498,9 @@ mod tests {
         let line = Line::from_entry(&entry(1, "error", raw));
         assert_eq!(line.whole, "Error: ENOENT [31mred[0m\n    at open (fs.js:1:1)\n    at main");
         assert!(line.whole.chars().all(|c| c == '\n' || !c.is_control()), "{:?}", line.whole);
-        assert_eq!(line.text, "Error: ENOENT [31mred[0m", "the row's text is as it was");
-        assert!(line.more);
 
         let long = Line::from_entry(&entry(2, "info", &"x".repeat(5000)));
         assert_eq!(long.whole.chars().count(), MESSAGE_CHARS);
-        assert_eq!(long.text.chars().count(), KEEP_CHARS, "the row keeps its own cap");
-        assert!(!long.more);
 
         assert_eq!(Line::from_entry(&entry(3, "info", "\n \n")).whole, "", "nothing on any line");
         assert_eq!(Line::from_entry(&entry(4, "info", "a\n\nb")).whole, "a\n\nb", "a blank line between stays");
