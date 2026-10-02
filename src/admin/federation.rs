@@ -31,15 +31,15 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Claim, Outcome, Screen, age_text, body_column, copy_to_clipboard, draw_foot, draw_header,
-    fmt_bytes, frame_ground, gate_message, host_of, iso_at, iso_unix, printable, short_id,
-    unix_now,
+    Claim, Outcome, Screen, age_text, body_column, draw_foot, draw_header, fmt_bytes,
+    frame_ground, gate_message, host_of, iso_at, iso_unix, printable, short_id, unix_now,
 };
 use crate::api::types::{
     FederationKey, FederationLimits, FederationParams, FederationPeer, FederationRequest,
     MintedKey, PeerTest,
 };
 use crate::api::{ApiError, Client, ExpiryChange};
+use crate::kit::clipboard::Copied;
 use crate::kit::theme::th;
 use crate::kit::{self, Surface, accent, bold, dim};
 use crate::setup::g;
@@ -648,11 +648,7 @@ impl Room {
             }
             Act::CopyTicket(id) => {
                 if let Some(ticket) = self.key_row(id).and_then(|k| k.ticket.clone()) {
-                    let ok = copy_to_clipboard(&ticket);
-                    self.note = Some((
-                        if ok { t!("fed.copied") } else { t!("fed.copy_failed") }.to_string(),
-                        false,
-                    ));
+                    self.note = Some((copied_note(&ticket), false));
                 }
             }
             Act::Limits(id) => {
@@ -752,11 +748,7 @@ impl Room {
             Act::FormSubmit => self.submit_form(),
             Act::MintedCopy => {
                 if let Modal::Minted { ticket: Some(ticket), .. } = &self.modal {
-                    let ok = copy_to_clipboard(ticket);
-                    self.note = Some((
-                        if ok { t!("fed.copied") } else { t!("fed.copy_failed") }.to_string(),
-                        false,
-                    ));
+                    self.note = Some((copied_note(ticket), false));
                 }
             }
             Act::TableScroll(delta) => {
@@ -1081,6 +1073,17 @@ pub(super) fn start(client: Client) -> Room {
 
 /// The request's counterpart, for the screen: their self-asserted name,
 /// gated, or the short endpoint id.
+/// Copy a ticket and say how it left: on the clipboard, handed to the
+/// terminal (which may refuse it without a word), or nowhere.
+fn copied_note(ticket: &str) -> String {
+    match kit::clipboard::copy(ticket) {
+        Copied::Clipboard => t!("fed.copied_clipboard"),
+        Copied::Terminal => t!("fed.copied"),
+        Copied::Failed => t!("fed.copy_failed"),
+    }
+    .to_string()
+}
+
 fn request_name(r: &FederationRequest) -> String {
     let name = printable(r.peer_name.as_deref().unwrap_or(""), NAME_MAX);
     if name.is_empty() { short_id(&r.peer_endpoint_id) } else { name }
@@ -3081,5 +3084,39 @@ mod tests {
         room.act(Act::Mint);
         type_text(&mut room, &format!("{}-end", "n".repeat(40)));
         super::super::assert_caret_between(&draw(&mut room), &room.ui, "nnn-end", "");
+    }
+
+    /// `y` on a ticket row and on a freshly minted ticket both go through
+    /// the kit's clipboard, and the note says which way the ticket went.
+    #[test]
+    fn y_on_a_key_and_on_the_minted_ticket_copy_and_say_how() {
+        use crate::kit::clipboard::{Copied, catch, caught};
+        let _en = english();
+        let answers = [
+            (Copied::Clipboard, t!("fed.copied_clipboard")),
+            (Copied::Terminal, t!("fed.copied")),
+            (Copied::Failed, t!("fed.copy_failed")),
+        ];
+        let mut room = on();
+        room.switch_tab(Tab::Tickets);
+        press(&mut room, KeyCode::Down);
+        let row = room.selected_key().and_then(|k| k.ticket.clone()).expect("a ticket row");
+        for (answer, said) in &answers {
+            catch(*answer);
+            room.note = None;
+            press(&mut room, KeyCode::Char('y'));
+            assert_eq!(room.note, Some((said.to_string(), false)), "the row, {answer:?}");
+        }
+        assert_eq!(caught(), [row.clone(), row.clone(), row]);
+
+        let minted = "mstrfed1:eyJ0IjoibmV3In0".to_string();
+        room.modal = Modal::Minted { name: "Bob's NAS".into(), ticket: Some(minted.clone()), libraries: vec!["music".into()] };
+        for (answer, said) in &answers {
+            catch(*answer);
+            room.note = None;
+            press(&mut room, KeyCode::Char('y'));
+            assert_eq!(room.note, Some((said.to_string(), false)), "the minted ticket, {answer:?}");
+        }
+        assert_eq!(caught(), [minted.clone(), minted.clone(), minted]);
     }
 }

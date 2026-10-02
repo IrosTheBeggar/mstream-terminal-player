@@ -31,7 +31,6 @@ use ratatui::crossterm::event::{
     KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use ratatui::crossterm::style::Print;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::Span;
@@ -843,15 +842,6 @@ pub(crate) fn age_text(secs: i64) -> String {
     } else {
         t!("p2p.age_d", n = mins / (24 * 60)).to_string()
     }
-}
-
-/// OSC 52: hand the text to the terminal's clipboard, where the terminal
-/// allows it (kitty, iTerm2 with the setting on, xterm, foot, Windows
-/// Terminal; Apple Terminal ignores it). Best effort — the note says so.
-pub(crate) fn copy_to_clipboard(text: &str) -> bool {
-    use base64::Engine;
-    let payload = base64::engine::general_purpose::STANDARD.encode(text);
-    execute!(std::io::stdout(), Print(format!("\x1b]52;c;{payload}\x1b\\"))).is_ok()
 }
 
 /// The server user's home — the one the admin file explorer spells `~` and

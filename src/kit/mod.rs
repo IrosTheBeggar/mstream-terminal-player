@@ -18,11 +18,21 @@
 //!
 //! Frames reach the terminal through [`frames`]: whole, in one write, and
 //! shown at once. Every full-screen page starts with its `init`.
+//!
+//! A press-drag that means something other than moving a thumb (marking a
+//! run of log lines) goes through a drag region ([`Surface::drag_region`]):
+//! it is told the press, every move while the button is held and the
+//! release, wherever the pointer lands, and holds the pointer the way a
+//! thumb drag does, so hover never wanders onto what the hand passes over.
+//! Text leaves through [`clipboard`], whose routes follow where the player
+//! runs; [`os`] names that place as data a test can hand in.
 
+pub mod clipboard;
 pub mod frames;
 pub mod os;
 pub mod theme;
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -81,6 +91,26 @@ struct BarReg<A> {
     jump: Box<dyn Fn(usize) -> A>,
 }
 
+/// What a drag region is told: the press that took it, each move while
+/// the button is held (wherever the pointer is by then), and the release
+/// (wherever that lands, inside the region or not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grip {
+    Press,
+    Drag,
+    Release,
+}
+
+/// A registered drag region. `above` is how many clicks were registered
+/// before it, so a press can tell the clicks drawn under it (the focus
+/// click it shares the rows with) from those drawn over it (a menu's
+/// catcher, a modal), which take the press instead.
+struct RegionReg<A> {
+    rect: Rect,
+    above: usize,
+    act: Rc<dyn Fn(Grip, Position) -> A>,
+}
+
 /// The per-screen interaction state. Rebuild the registries every frame
 /// ([`Surface::begin_frame`], then widget calls); the input state
 /// (pointer, dwell, capture) lives across frames.
@@ -101,6 +131,13 @@ pub struct Surface<A> {
     bars: Vec<BarReg<A>>,
     /// An active thumb drag: index into this frame's `bars`.
     drag: Option<usize>,
+    /// This frame's drag regions, rebuilt each frame like `bars`.
+    regions: Vec<RegionReg<A>>,
+    /// The region a press took, held until the release. It keeps its own
+    /// handle on the region's act rather than an index, because the drag
+    /// outlives the frame it began in and the next frame may not draw the
+    /// region at all.
+    gripped: Option<Rc<dyn Fn(Grip, Position) -> A>>,
     /// A held ▲/▼ endcap: (bar index, direction, when the next step fires).
     arrow_hold: Option<(usize, i8, Instant)>,
     /// Where and when the current bar interaction was armed.
@@ -167,6 +204,8 @@ impl<A> Default for Surface<A> {
             dwell: None,
             bars: Vec::new(),
             drag: None,
+            regions: Vec::new(),
+            gripped: None,
             arrow_hold: None,
             armed: None,
             soft_origin: None,
@@ -243,6 +282,7 @@ impl<A: Clone> Surface<A> {
         self.clicks.clear();
         self.tips.clear();
         self.bars.clear();
+        self.regions.clear();
         self.contexts.clear();
         self.caret_drawn = false;
         self.caret_at = None;
@@ -377,8 +417,10 @@ impl<A: Clone> Surface<A> {
     /// must not retarget hover onto whatever sits beside the 1-cell bar.
     /// A SOFT capture (after a phantom release) suppresses hover only
     /// near the press, until the pointer genuinely travels away.
+    /// A drag region's grip captures too: the hand sweeping across the
+    /// page must not light up every control it passes over.
     pub fn motion(&mut self, at: Position) {
-        if self.drag.is_some() || self.arrow_hold.is_some() {
+        if self.drag.is_some() || self.arrow_hold.is_some() || self.gripped.is_some() {
             return;
         }
         if let Some(origin) = self.soft_origin {
@@ -432,7 +474,9 @@ impl<A: Clone> Surface<A> {
     /// within [`PHANTOM_RELEASE`] of arming is Apple Terminal's instant
     /// click — the physical hold is still going, so a SOFT capture keeps
     /// hover pinned near the press (repeat and drag stay off: with holds
-    /// invisible, a repeat could never be stopped).
+    /// invisible, a repeat could never be stopped). A drag region's grip
+    /// ends here too, untold, so a host that only ever calls this never
+    /// leaves one behind; [`Self::release_at`] is the call that tells it.
     pub fn release(&mut self) {
         if let Some((origin, when)) = self.armed.take() {
             if when.elapsed() < PHANTOM_RELEASE {
@@ -441,11 +485,58 @@ impl<A: Clone> Surface<A> {
         }
         self.drag = None;
         self.arrow_hold = None;
+        self.gripped = None;
     }
 
-    /// The action a drag at `at` means (the thumb following the hand),
-    /// if a drag is active.
+    /// Register a drag region: a rect where a press-drag means something
+    /// of the screen's own, told through `act` (see [`Grip`]). Registered
+    /// every frame, like a scrollbar. It is transparent to clicks: [`Self::hit`]
+    /// still returns the click under it, so the rows it covers can keep a
+    /// click of their own (the one that focuses them).
+    pub fn drag_region(&mut self, rect: Rect, act: impl Fn(Grip, Position) -> A + 'static) {
+        self.regions.push(RegionReg { rect, above: self.clicks.len(), act: Rc::new(act) });
+    }
+
+    /// A press on a drag region takes it: the region is told the press and
+    /// holds the pointer until the release. Call after the hit was
+    /// dispatched, like [`Self::arm_bars`]. A click registered after the
+    /// region over the same point wins instead (an open menu's catcher, a
+    /// modal), and the answer is `None`. A region never arms the phantom
+    /// soft capture: its drag is a gesture of the hand, not a hold to
+    /// repeat, so a quick click on it leaves hover free.
+    pub fn arm_region(&mut self, at: Position) -> Option<A> {
+        let region = self.regions.iter().rev().find(|r| r.rect.contains(at))?;
+        let over = self.clicks.get(region.above..).unwrap_or_default();
+        if over.iter().any(|(rect, _)| rect.contains(at)) {
+            return None;
+        }
+        let act = Rc::clone(&region.act);
+        let press = act(Grip::Press, at);
+        self.gripped = Some(act);
+        Some(press)
+    }
+
+    /// Whether a drag region holds the pointer — the host's cue to keep
+    /// every other pointer owner out until the release.
+    pub fn gripping(&self) -> bool {
+        self.gripped.is_some()
+    }
+
+    /// The button lifted at `at`: the gripped region is told the release,
+    /// wherever it landed, and every capture ends as with [`Self::release`].
+    /// `None` when no region was gripped.
+    pub fn release_at(&mut self, at: Position) -> Option<A> {
+        let act = self.gripped.take().map(|f| f(Grip::Release, at));
+        self.release();
+        act
+    }
+
+    /// The action a drag at `at` means: a gripped region told the move, or
+    /// the thumb following the hand, if either is active.
     pub fn drag_action(&mut self, at: Position) -> Option<A> {
+        if let Some(f) = &self.gripped {
+            return Some(f(Grip::Drag, at));
+        }
         let bar = self.bars.get(self.drag?)?;
         Some((bar.jump)(bar_jump(bar.rect, bar.max_scroll, at.y)))
     }
@@ -2015,6 +2106,88 @@ mod tests {
         s.release();
         s.motion(Position { x: 9, y: 6 });
         assert_eq!(s.pointer, Some(Position { x: 9, y: 6 }));
+    }
+
+    /// The acts a test region emits: what it was told, and where.
+    fn told(g: Grip, at: Position) -> (Grip, u16, u16) {
+        (g, at.x, at.y)
+    }
+
+    #[test]
+    fn a_drag_region_arms_on_a_press_follows_the_hand_and_ends_on_the_release_anywhere() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 2, y: 3, width: 20, height: 5 };
+        s.drag_region(rows, told);
+        assert_eq!(s.arm_region(Position { x: 40, y: 3 }), None, "a press beside the region takes nothing");
+        assert!(!s.gripping());
+        assert_eq!(s.arm_region(Position { x: 5, y: 4 }), Some((Grip::Press, 5, 4)));
+        assert!(s.gripping());
+        assert_eq!(s.drag_action(Position { x: 6, y: 6 }), Some((Grip::Drag, 6, 6)));
+        assert_eq!(s.drag_action(Position { x: 70, y: 0 }), Some((Grip::Drag, 70, 0)), "the hand may leave the region");
+        assert_eq!(s.release_at(Position { x: 70, y: 30 }), Some((Grip::Release, 70, 30)), "and let go anywhere");
+        assert!(!s.gripping());
+        assert_eq!(s.drag_action(Position { x: 6, y: 6 }), None, "nothing follows the hand after the release");
+        assert_eq!(s.release_at(Position { x: 6, y: 6 }), None, "a second release tells nobody");
+    }
+
+    #[test]
+    fn a_grip_holds_the_pointer_like_a_thumb_drag() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        s.drag_region(Rect { x: 0, y: 0, width: 10, height: 4 }, told);
+        let press = Position { x: 3, y: 1 };
+        assert!(s.begin_press(press));
+        s.arm_region(press);
+        s.motion(Position { x: 30, y: 9 });
+        assert_eq!(s.pointer, Some(press), "hover stays at the press while gripping");
+        s.release_at(Position { x: 30, y: 9 });
+        s.motion(Position { x: 30, y: 9 });
+        assert_eq!(s.pointer, Some(Position { x: 30, y: 9 }), "free after the release");
+    }
+
+    #[test]
+    fn a_click_registered_over_a_region_after_it_takes_the_press() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 0, y: 0, width: 20, height: 6 };
+        let focus = (Grip::Release, 99, 99);
+        s.click(rows, focus);
+        s.drag_region(rows, told);
+        let catcher = (Grip::Release, 77, 77);
+        s.click(Rect { x: 10, y: 2, width: 10, height: 4 }, catcher);
+        let under_menu = Position { x: 12, y: 3 };
+        assert_eq!(s.hit(under_menu), Some(catcher));
+        assert_eq!(s.arm_region(under_menu), None, "the catcher drawn after the region wins");
+        assert!(!s.gripping());
+        let on_a_line = Position { x: 4, y: 3 };
+        assert_eq!(s.hit(on_a_line), Some(focus), "the region is transparent to the click drawn before it");
+        assert_eq!(s.arm_region(on_a_line), Some((Grip::Press, 4, 3)));
+    }
+
+    #[test]
+    fn regions_clear_with_the_registries_and_a_grip_outlives_its_frame() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 0, y: 0, width: 20, height: 6 };
+        s.begin_frame();
+        s.drag_region(rows, told);
+        s.arm_region(Position { x: 1, y: 1 });
+        s.begin_frame();
+        assert_eq!(s.drag_action(Position { x: 2, y: 2 }), Some((Grip::Drag, 2, 2)), "the grip keeps its own act");
+        assert_eq!(s.arm_region(Position { x: 1, y: 1 }), None, "the next frame drew no region");
+        s.release();
+        assert!(!s.gripping(), "the plain release drops the grip");
+        assert_eq!(s.drag_action(Position { x: 2, y: 2 }), None);
+    }
+
+    #[test]
+    fn a_quick_click_on_a_region_leaves_no_soft_capture() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        s.drag_region(Rect { x: 0, y: 0, width: 20, height: 6 }, told);
+        let press = Position { x: 5, y: 2 };
+        assert!(s.begin_press(press));
+        s.arm_region(press);
+        s.release_at(press);
+        assert!(s.begin_press(Position { x: 6, y: 2 }), "a press one cell away is a press, not a phantom");
+        s.motion(Position { x: 6, y: 3 });
+        assert_eq!(s.pointer, Some(Position { x: 6, y: 3 }), "hover is free at once");
     }
 
     #[test]
