@@ -585,12 +585,15 @@ the footer's 99 cells and the hallway's label widths in every locale, and an e2e
 server. Not built: the Overview row, the rooms' one-line summaries, server-side log levels.
 Merged after v0.10.0, so the desktop product's window (Phase 14) hosts the tab too: the window
 drives the same two loop halves as the terminal (`gui::frame`, `gui::input`), so the tab's keys,
-pointer, wheel and hand cursor need nothing of their own there. One gap shows only in the
-window: the hosted rooms draw their fields on their own surfaces and note no caret on the GUI's,
-so the window counts no field as having the keyboard — Cmd+V pastes nothing into a room's
-field (a Federation or Discovery ticket included; Ctrl+V off a Mac reaches the field as a key
-it ignores), and the input method stays off there. The fix is the rooms noting their caret,
-handed up through `HostedRoom` to the GUI's surface.
+pointer, wheel and hand cursor need nothing of their own there. One gap showed only in the
+window, closed 2026-10-02 (contract clause 28): the hosted rooms drew their fields on their own
+surfaces and noted no caret on the GUI's, so the window counted no field as having the keyboard
+— Cmd+V pasted nothing into a room's field (a Federation or Discovery ticket included; Ctrl+V
+off a Mac reached the field as a key it ignores), and the input method stayed off there. Every
+room's focused field now draws through `kit::field_display`, which notes its caret and draws
+the composition; `HostedRoom` carries the composition down and the caret up to the GUI's
+surface, where the window reads it. The follow-up: a hosted room's caret holds steady rather
+than blink, since the GUI times its frames by its own surface's blink clock.
 
 Build, in order of fit: **logs** ✅ 2026-10-02 (`/api/v1/admin/logs/recent?since=<seq>` is a
 purpose-built tail-poll API with a cursor; the GUI's Admin tab tails it, above), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and

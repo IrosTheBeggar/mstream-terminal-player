@@ -252,6 +252,26 @@ not.
     hint is the room's, written for the hub's full width, and may not: the
     tail goes first, then the window's edge cuts the hint.
 
+### The window
+
+28. **The room's field is the window's field.** In the desktop window
+    (`gui --window`, or a bare `mstream-player` in the desktop flavour) a
+    room's field that has the keyboard is a field as the GUI's own are:
+    the paste chord (Cmd+V on a Mac, Ctrl+V elsewhere) types the
+    clipboard into it, the input method is on while it has the keyboard
+    and off once it lets go, the method's candidate window floats at its
+    caret, and what is being composed is drawn in the field before the
+    caret until it is committed. Only while the room is drawn: not under
+    the Log room, not with no session. A GUI modal laid over the room
+    (the add-server form, which opens on its chooser) and the log's level
+    menu take the keys as keys, never a paste or a composition, and a GUI
+    modal's own field composes in itself, never in the room's beneath;
+    the header's server menu passes every key but Esc on to the field,
+    closing as it goes, as it does over the GUI's own fields. A terminal
+    changes nothing here: it types a paste as keys and composes in its
+    own UI. Hosted, a room's caret holds steady rather than blink with
+    the GUI's own fields' (the deviations log, 2026-10-02).
+
 ## Wording
 
 | Key | English |
@@ -367,3 +387,26 @@ rooms' own strings (`admin.*`, `usr.*`, `bak.*`, `p2p.*`, `fed.*`,
     it stood; the plan routed keys by the focus alone, which let a modal
     that opened by itself own the pointer while the hallway's keys acted
     under it.
+- **2026-10-02 — The room's field in the window (clause 28).** The
+  rooms drew their fields on their own surfaces and noted no caret on
+  the GUI's, so the window counted no field as having the keyboard:
+  Cmd+V into a room's field (a Federation or Discovery ticket included)
+  was dropped on a Mac, Ctrl+V elsewhere reached it as a key it ignores,
+  and the input method stayed off. Each room's focused field now draws
+  through the kit's `field_display`, which notes its caret on the room's
+  surface and draws the surface's composition; `HostedRoom` hands the
+  composition down before the draw and the caret up after it, and the
+  host lifts the caret onto the GUI's surface. Deliberate, each:
+  - **The hosted caret holds steady**, where the GUI's own fields blink:
+    the GUI times its frames by its own surface's blink clock, not a
+    room's, so a blinking room caret is a follow-up of its own.
+  - **The log's level menu lays itself over the note**, as a GUI modal
+    does, since it takes every key (clause 20) and a room's inline field
+    (a filter, a ticket box) can still be focused beneath it.
+  - **No composition reaches the room while a GUI modal is up**: the
+    add-server form's own fields compose in themselves, and the room's
+    field beneath would otherwise draw the same text a second time.
+  - **The Discovery room's section line is measured in cells**, not
+    characters, so a composition (or a translation) of wide characters
+    in it is not cut at its end, and the filter's caret is noted once
+    the line is placed.

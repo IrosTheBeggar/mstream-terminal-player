@@ -518,7 +518,13 @@ the host may take from a focused room is set by the room's claim:
 everything is the room's while a modal or a text field is open; Tab is
 the room's where Tab means something to it; otherwise the host takes
 Tab, BackTab and its one layout key. The host never takes a digit, `q`
-or Esc from a room — those are the room's flags, tabs and way back.
+or Esc from a room — those are the room's flags, tabs and way back. A
+hosted room's focused field draws through `kit::field_display`, which
+notes the caret's cell on the room's surface and draws the surface's
+composition before the caret; the host hands its own composition down
+before the room draws and lifts the room's caret onto its own surface
+after, so to a shell with a paste and an input method of its own (the
+GUI's window) the room's field is its field.
 
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints
