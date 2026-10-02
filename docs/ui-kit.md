@@ -421,7 +421,13 @@ still answers — and a click registered AFTER it over the press's cell (an
 overlay, a modal's catcher) takes the press instead. A region never
 enters the phantom-release soft capture, so in Apple Terminal, whose
 press is an instant click pair, a press is a plain click and no drag
-begins.
+begins. The host keeps a grip honest: after `Surface::release_at` it
+runs `Surface::motion` at the release's cell, so the control under it
+lights at once; a press arriving while a grip stands means the terminal
+lost the release (some drop it when the focus leaves mid-drag), so the
+grip is released at that cell first and the press then goes on as any
+press; and a grip whose region the last frame did not draw (its screen
+left, its pane hidden) is let go before the next event is read.
 
 ### Modal
 Centered, `Clear` beneath (no scrim — terminals have no alpha; the

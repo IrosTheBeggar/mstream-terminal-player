@@ -184,8 +184,13 @@ not.
     them, highlights them (clause 29): the drag keeps the pointer until
     its release, wherever that lands — over the room, the hallway or the
     bar — so nothing else lights, takes the release or keeps a press of
-    its own meanwhile. The hand cursor follows whichever surface reports
-    a clickable under the pointer.
+    its own meanwhile, and what lies under the release lights at once.
+    The drag never outlives the log: leaving the tab, `L`, the Log room
+    folding back or the mini player lets go of it. A press while it
+    holds means the terminal lost the release (some drop it when the
+    focus leaves mid-drag): the drag ends at that press's cell, and the
+    press then acts as any press. The hand cursor follows whichever
+    surface reports a clickable under the pointer.
 20. **A GUI modal, the header's server menu, or the log's level menu owns
     the pointer whole while open**, as elsewhere in the GUI. The level
     menu keeps every key too until it closes, even when a room has come
@@ -355,13 +360,19 @@ not.
     `XDG_DOWNLOAD_DIR` line of `user-dirs.dirs`, then `~/Downloads` —
     or, with none of them there, the player's config folder. A file
     already there is never replaced: the name gains `-2`, `-3`, up to
-    `-99`. The note says where, `~/` for the home folder off Windows,
-    and that `o` shows it. A server that writes no log files (an empty
-    zip: mStream's `writeLogs` is off by default) and one with no
-    download route (404, or an answer that is not a zip) still leave a
-    file: the lines shown, written as the copy writes them, saved as
-    `.txt` under the same name, with a note that says why; with no lines
-    shown either, the note says nothing was saved. A zip cut short (no
+    `-99`; with all of them taken the note names the file and saves
+    nothing. The note says it saved and that `o` shows it, then where,
+    `~/` for the home folder off Windows. The path comes last in every
+    language, and where the note's cells (the window less 70) cannot
+    hold it all, it is clipped at its front to what is left after the
+    words, so the words stay whole and the file's own name stays in
+    sight (ui-kit.md, Table: paths truncate with a leading `…`). A
+    server that writes no log files (an empty zip: mStream's
+    `writeLogs` is off by default) and one with no download route (404,
+    or an answer that is not a zip) still leave a file: the lines
+    shown, written as the copy writes them, saved as `.txt` under the
+    same name, with a note that says why; with no lines shown either,
+    the note says nothing was saved. A zip cut short (no
     end-of-central-directory record) is never saved, and the note says
     `d` tries again. A refusal speaks the hub's gate sentences (401, 403,
     405) and touches no folder; any other failure says "could not
@@ -374,8 +385,9 @@ not.
     (`/select,`), and elsewhere the freedesktop opener opens its folder.
     With nothing saved yet, the note says so and points at `d`. With
     `MSTREAM_NO_OPEN` set, as on a machine with no desktop, nothing is
-    launched and the note gives the file's full path; an opener that
-    fails says so in gold, with the path.
+    launched and the note gives the file's full path, clipped at its
+    front like the download's only where the note cannot hold it; an
+    opener that fails says so in gold, with the path, the same way.
 34. **The window's copy chord is the log's `y`.** In the desktop window,
     Cmd+C on a Mac (not with Shift), and Ctrl+Shift+C or Ctrl+Insert
     elsewhere — never plain Ctrl+C, never with Alt — copies as `y` does
@@ -385,8 +397,10 @@ not.
     or the key at C's place on a layout without Latin letters, as the
     paste chord's V is (clause 28). The window takes the chord whether
     or not the log copies, so off a Mac Ctrl+Shift+C no longer reaches
-    the GUI as Ctrl+C, which quits. A terminal changes nothing here: its
-    own copy chord copies the terminal's text, and `y` copies the log's.
+    the GUI as Ctrl+C, which quits. To the header's open server menu the
+    chord is a key like any other, on every screen: it closes the menu
+    and goes on. A terminal changes nothing here: its own copy chord
+    copies the terminal's text, and `y` copies the log's.
 
 ## Wording
 
@@ -418,13 +432,14 @@ not.
 | `gui.admin.log.copy_failed` | could not reach the clipboard — d saves the log to a file |
 | `gui.admin.log.copy_nothing` | no lines to copy yet |
 | `gui.admin.log.fetching` | downloading the server's logs… |
-| `gui.admin.log.saved` | saved %{path} · o shows it |
-| `gui.admin.log.saved_lines` | saved the lines shown to %{path} — this server offers no log download · o shows it |
-| `gui.admin.log.saved_no_files` | saved the lines shown to %{path} — this server writes no log files · o shows it |
+| `gui.admin.log.saved` | saved · o shows it · %{path} |
+| `gui.admin.log.saved_lines` | saved the lines shown — this server offers no log download · o shows it · %{path} |
+| `gui.admin.log.saved_no_files` | saved the lines shown — this server writes no log files · o shows it · %{path} |
 | `gui.admin.log.zip_cut` | the server's zip arrived cut short — d tries again |
 | `gui.admin.log.save_nothing` | this server sent no log files, and there are no lines here to save |
 | `gui.admin.log.download_failed` | could not download the server's logs |
 | `gui.admin.log.save_failed` | could not save the logs: %{err} |
+| `gui.admin.log.names_taken` | could not save the logs: %{name} and 98 numbered copies are already there |
 | `gui.admin.log.no_folder` | could not find a folder to save the logs in |
 | `gui.admin.log.file_at` | the file is at %{path} |
 | `gui.admin.log.show_failed` | could not show the file — it is at %{path} |
@@ -500,6 +515,11 @@ is the hub's.
   French (sauver) and Italian (salva) rather than "download". The
   header's `copy` and `download` are each locale's own word, measured
   only by the header's whole-or-nothing rule (clause 22).
+- **A note that names a file ends with the path** in every language
+  (`saved`, `saved_lines`, `saved_no_files`, `file_at`, `show_failed`;
+  a setup test pins it), since the path is what gets clipped, at its
+  front, when the note runs out of cells (clause 32). The saved notes
+  were reordered for it: what was saved, then `o`'s hint, then the path.
 
 ## Deviations log
 
