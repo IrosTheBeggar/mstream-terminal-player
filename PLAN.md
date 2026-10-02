@@ -3209,7 +3209,8 @@ visualizer's window on a layout switch, unrun on Windows; Korean on macOS (no so
 enabled); a hidden window
 on Wayland (frames measured on macOS, minimise with playback proven on Windows); Wayland
 paste without XWayland; the cell after a modal opens still paints a cover for one short
-frame (the emoji faces, the Hangul height and the tag characters are lane 14's, below); on
+frame — gone since lane 15 (the emoji faces, the Hangul height and the tag characters
+are lane 14's, below); on
 Windows, 150%, a move between scales and the IMEs, untestable there
 without elevation.
 
@@ -3314,12 +3315,37 @@ the caret stepping per character (tui-input), the renderer's one-cell halfwidth 
 against ratatui's two, a wider symbol face (Miscellaneous Symbols, Dingbats) once a
 subsetter is available, and the emoji faces unrun on Windows and Linux.
 
+**Lane 15, the behaviour conditions (2026-10-02; 4b409ad and 3f1e137).** Input that arrives
+before the first frame is held (a bounded queue of the window's own raw events; a move
+replacing the move before it, only the last resize and scale kept) and replayed one act per
+frame after it, so a `/` typed into a blank window opens the search and the letters after it
+land in the field — which needed the player's first effects, the connect among them, sent
+before the first frame, since `/` opens the query only once connected. A cover is never
+painted under a modal on the modal's first frame: the kit's Surface reports each overlay as
+it is registered, the Board marks the covers placed before it that it touches, and
+CoverPost skips them (order matters: a cover inside its own modal lies under that modal's
+footprint); on the opening frame none of the modal's pixels differ from the settled frame; a
+cover straddling the modal is left out whole for that frame. The renderer is built off the
+loop thread: the vendored builder splits into create_surface on the loop thread and a Send
+build of everything else (change 19), polled with the early threads; with 1.5 s planted in
+the pipelines step the loop kept answering and a scripted resize during the build was kept;
+first present unchanged within noise. Found on the way: the frame that made the player
+visible on macOS was a 40 ms full repaint from a same-size Resized and a same-scale
+ScaleFactorChanged as the window came on screen — both skipped (the resize still asks for a
+redraw), and Occluded(false) presents what the backend holds (change 20), so the player is
+seen ~30 ms sooner. CI's first run of the glyph tests on ubuntu and windows corrected three
+expectations that held only on this Mac's faces (Noto's grey family silhouettes, Segoe's
+pictureless England flag, Malgun Gothic's taller Hangul; the test's tolerance is 20% with
+the reason). Left: a `/` typed after the first frame but before the connection still opens
+an empty search (older than this lane); the lever's own `text` step is not paced; whether
+Segoe's layered glyphs paint at all (the Windows machine); a wheel held before a click
+rides along with it, so the click resolves against the pre-scroll layout.
+
 **From here, in order.** The vendored-crate review with an upstream exit for ratatui-wgpu's changes; the merge with the
 window compiled out of the terminal flavour; the Linux leg on real hardware for the desktop
 linux-x64 build (X11 and Wayland, the .desktop entry's app_id); the macOS and Windows
 checklist rows as the desktop release's gate, including a tray-spawned run and the stub's
-double-click; the open window conditions (the cover flash after a modal, input before the
-backend exists; the glyph ones are done); the rest of the release workflow
+double-click; the open window conditions (all done: lanes 14 and 15); the rest of the release workflow
 (Windows signing once a certificate exists, lifting the hold-back, a notify path that
 fires); a Homebrew cask and a Scoop manifest for the desktop product; the README split into
 two products; the stable player release; on mStream's side (built 2026-10-02 on two
