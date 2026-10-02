@@ -32,7 +32,6 @@ use unicode_bidi::ParagraphBidiInfo;
 use unicode_properties::GeneralCategoryGroup;
 use unicode_properties::UnicodeEmoji;
 use unicode_properties::UnicodeGeneralCategory;
-use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 use web_time::Duration;
 use web_time::Instant;
@@ -69,6 +68,7 @@ use crate::backend::Viewport;
 use crate::backend::WgpuState;
 use crate::colors::ColorTable;
 use crate::colors::Rgb;
+use crate::fonts::FaceScale;
 use crate::fonts::Font;
 use crate::fonts::Fonts;
 use crate::shaders::DefaultPostProcessor;
@@ -91,10 +91,14 @@ pub(super) struct RenderInfo {
     strikeout_pos_min: u16,
     strikeout_pos_max: u16,
 }
-/// Map from (x, y, glyph) -> (cell index, cache entry).
+/// Map from (x, y, glyph, cells wide) -> (cell index, cache entry).
 /// We use an IndexMap because we want a consistent rendering order for
-/// vertices.
-type Rendered = IndexMap<(i32, i32, GlyphId), RenderInfo, RandomState>;
+/// vertices. The width is in the key as it is in [`Sourced`]'s: one glyph
+/// can stand at one place narrow and then wide (an emoji face's ❤ before
+/// and after its VS16 is typed), and keyed without it the new placement and
+/// the old were one entry, which the old one's removal took away — the
+/// grown heart drew nothing and its second cell kept what it held.
+type Rendered = IndexMap<(i32, i32, GlyphId, u32), RenderInfo, RandomState>;
 
 /// Set of (x, y, glyph, char width).
 type Sourced = HashSet<(i32, i32, GlyphId, u32), RandomState>;
@@ -471,6 +475,20 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
         for (x, y, cell) in content {
             let index = y as usize * bounds.width as usize + x as usize;
 
+            // A blank for a cell a wide glyph still covers is ratatui's
+            // clear of a VS16 emoji's second half (its diff sends one when
+            // that cell's symbol changed, for terminals that leave the half
+            // behind), not a cell of its own: the glyph covers it. Written,
+            // it took the continuation's place and shaped as a cell, so
+            // everything after the emoji on the row drew one cell right
+            // (`❤▏` typed into `❤️▏` moved a field's border a cell out). A
+            // continuation is only ever left covered: a narrower cell over
+            // its glyph turns the continuations it uncovers into blanks
+            // first, below.
+            if self.cells[index] == NULL_CELL && cell.symbol() == " " {
+                continue;
+            }
+
             self.fast_blinking
                 .set(index, cell.modifier.contains(Modifier::RAPID_BLINK));
             self.slow_blinking
@@ -635,13 +653,23 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
             // of a cluster and 2) the next cluster in the sequence starts with a non-zero
             // advance.
             let mut next_advance = 0;
+            // Which cells have had a glyph that advances placed in them. A cell is one
+            // grapheme, so it draws as one picture over the cells its width claims: an
+            // emoji sequence the face has a ligature for (a flag, a ZWJ family, a skin
+            // tone) shapes to one glyph, but one it has none for shapes to several that
+            // each advance, and upstream drew the second in the next cell and so on,
+            // over whatever that cell held. Only the first is drawn now: the sequence
+            // degrades to its base emoji (👨 for an unknown family, 👍 for a tone the
+            // face lacks), in its own cells.
+            let mut placed = vec![false; bounds.width as usize];
             let mut shape = |font: &Font,
                              fake_bold,
                              fake_italic,
                              buffer: GlyphBuffer|
              -> UnicodeBuffer {
                 let metrics = font.font();
-                let advance_scale = self.fonts.height_px() as f32 / metrics.height() as f32;
+                let face_scale = self.fonts.face_scale(metrics);
+                let advance_scale = face_scale.scale;
 
                 for (info, position) in buffer
                     .glyph_infos()
@@ -657,6 +685,9 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                         + (position.y_offset as f32 * advance_scale) as i32;
                     let mut advance = (position.x_advance as f32 * advance_scale) as i32;
                     if advance != 0 {
+                        if std::mem::replace(&mut placed[cell_idx], true) {
+                            continue;
+                        }
                         x += next_advance;
                         advance =
                             max_width as i32 * advance.signum() * self.fonts.min_width_px() as i32;
@@ -676,19 +707,28 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                         Modifier::BOLD | Modifier::ITALIC
                     };
 
-                    let key = Key {
-                        style: cell.modifier.intersection(set),
-                        glyph: info.glyph_id,
-                        font: font.id(),
-                    };
-
                     let ch = self.row[info.cluster as usize..].chars().next().unwrap();
                     let width = (metrics
                         .glyph_hor_advance(GlyphId(info.glyph_id as _))
                         .unwrap_or_default() as f32
                         * advance_scale) as u32;
-                    let chars_wide = ch.width().unwrap_or(max_width) as u32;
-                    let chars_wide = if chars_wide == 0 { 1 } else { chars_wide };
+                    // The glyph's box is the cells its cell claims, which ratatui measured
+                    // for the whole grapheme. Upstream measured the cluster's first
+                    // character alone, which is narrower than the grapheme for an emoji
+                    // with VS16 (❤ is one cell, ❤️ two) and a flag (each regional
+                    // indicator is one cell, the pair two): the picture was squeezed into
+                    // one cell of the two. For every other cell the two widths agree.
+                    let chars_wide = (max_width as u32).max(1);
+
+                    // The width is part of the key: one glyph can stand in a narrow cell
+                    // and a wide one (an emoji face's ❤ with and without VS16), and its
+                    // raster is drawn for its box.
+                    let key = Key {
+                        style: cell.modifier.intersection(set),
+                        glyph: info.glyph_id,
+                        font: font.id(),
+                        cells: chars_wide,
+                    };
                     let width = if width == 0 {
                         chars_wide * self.fonts.min_width_px()
                     } else {
@@ -712,7 +752,7 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                     let mut underline_pos_min = 0;
                     let mut underline_pos_max = 0;
                     if key.style.contains(Modifier::UNDERLINED) {
-                        let underline_position = metrics.ascender() as f32
+                        let underline_position = face_scale.ascender
                             - metrics
                                 .underline_metrics()
                                 .map(|m| m.position as f32)
@@ -746,9 +786,9 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                             .map(|m| m.position)
                             .unwrap_or_default();
                         let strikeout_position = if strikeout_position > 0 {
-                            metrics.ascender() as f32 - strikeout_position as f32
+                            face_scale.ascender - strikeout_position as f32
                         } else {
-                            metrics.ascender() as f32 * 0.7f32 // observed average
+                            face_scale.ascender * 0.7f32 // observed average
                         };
                         let strikeout_position = (strikeout_position * advance_scale) as u16;
 
@@ -765,7 +805,7 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                     }
 
                     self.rendered[offset].insert(
-                        (basex, basey, GlyphId(info.glyph_id as _)),
+                        (basex, basey, GlyphId(info.glyph_id as _), chars_wide),
                         RenderInfo {
                             cell: y * bounds.width as usize + cell_idx,
                             cached: *cached,
@@ -787,16 +827,16 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                         let is_emoji = ch.is_emoji_char()
                             && !matches!(ch.general_category_group(), GeneralCategoryGroup::Number);
 
-                        let (rect, image) = rasterize_glyph(
+                        let (rect, image, colour) = rasterize_glyph(
                             cached,
                             metrics,
                             info,
                             fake_italic & !is_emoji,
                             fake_bold & !is_emoji,
-                            advance_scale,
+                            face_scale,
                             width,
                         );
-                        (rect, image, is_emoji)
+                        (rect, image, colour)
                     });
                 }
 
@@ -873,7 +913,7 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                             self.dirty_cells.set(cell + offset_x, true);
                         }
 
-                        self.rendered[cell].shift_remove(&(*x, *y, *glyph));
+                        self.rendered[cell].shift_remove(&(*x, *y, *glyph, *width));
                     }
                     *old = new;
                 }
@@ -951,7 +991,7 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                 let bg_color_u32: u32 = u32::from_be_bytes([r, g, b, 255]);
 
                 for (
-                    (x, y, _),
+                    (x, y, _, _),
                     RenderInfo {
                         cell,
                         cached,
@@ -1113,26 +1153,58 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
     }
 }
 
+/// A glyph's raster for its atlas box, and whether it is in colour: a colour glyph's own pixels
+/// are drawn (the mask's 255), a monochrome one is coverage the cell's foreground colour fills.
+/// Upstream set the mask from the cluster's first character being an emoji, so an emoji drawn
+/// from a text face's outline (a symbol face's ✔) came out white whatever the cell's colour,
+/// and a colour picture of a character that is not an emoji would have been tinted.
 fn rasterize_glyph(
     cached: Entry,
     metrics: &rustybuzz::Face,
     info: &rustybuzz::GlyphInfo,
     fake_italic: bool,
     fake_bold: bool,
-    advance_scale: f32,
+    face: FaceScale,
     actual_width: u32,
-) -> (CacheRect, Vec<u32>) {
-    // `advance_scale` fits the face's line (ascender to descender) to the cell's height. A glyph
-    // whose advance is wider than its box is shrunk to the box and centred in the height it no
-    // longer fills. One narrower than its box is centred in it at that size, never enlarged:
-    // enlarging also grows the line past the cell, and the raster is clipped to the box, so a
-    // face whose wide glyphs advance less than two cells (Apple SD Gothic Neo's hangul, 865 of
-    // 1000 units on a 1200-unit line) lost the top of every syllable and its right-hand
-    // strokes. The offsets are in the 2x raster's pixels, as the transform below is.
+) -> (CacheRect, Vec<u32>, bool) {
+    let advance_scale = face.scale;
+    let glyph = GlyphId(info.glyph_id as _);
+    // `advance_scale` sizes the face (`Fonts::face_scale`). A glyph whose advance is wider than
+    // its box is shrunk to the box and centred in the height it no longer fills. One narrower
+    // than its box is centred in it at that size, never enlarged: enlarging also grows the line
+    // past the cell, and the raster is clipped to the box, so a face whose wide glyphs advance
+    // less than two cells (Apple SD Gothic Neo's hangul, 865 of 1000 units) lost the top of
+    // every syllable and its right-hand strokes. The offsets are in the 2x raster's pixels, as
+    // the transform below is.
     let fit = (cached.width as f32 / actual_width as f32).min(1.0);
-    let computed_offset_x = cached.width as f32 - actual_width as f32 * fit;
-    let computed_offset_y = cached.height as f32 * (1.0 - fit);
-    let scale = fit * advance_scale * 2.0;
+    let mut computed_offset_x = cached.width as f32 - actual_width as f32 * fit;
+    let mut computed_offset_y = cached.height as f32 * (1.0 - fit);
+    let mut scale = fit * advance_scale * 2.0;
+
+    // A fallback face drawn at the last resort's em and on its baseline can reach past the
+    // cell where its own line, fitted to the cell, did not (a face whose ink rides high or
+    // low). Only then is it moved, and only as far as it must be: shifted back inside when
+    // its ink is no taller than the box, shrunk to the box's height when it is.
+    if !face.primary {
+        if let Some(bounds) = metrics.glyph_bounding_box(glyph) {
+            let box_h = cached.height as f32 * 2.0;
+            let baseline = face.ascender * scale + computed_offset_y;
+            let top = baseline - f32::from(bounds.y_max) * scale;
+            let bottom = baseline - f32::from(bounds.y_min) * scale;
+            let ink = bottom - top;
+            if ink > box_h {
+                let shrink = box_h / ink;
+                scale *= shrink;
+                computed_offset_x = cached.width as f32 - actual_width as f32 * fit * shrink;
+                computed_offset_y = (f32::from(bounds.y_max) - face.ascender) * scale;
+            } else if top < 0.0 {
+                computed_offset_y -= top;
+            } else if bottom > box_h {
+                computed_offset_y -= bottom - box_h;
+            }
+        }
+    }
+    let baseline = face.ascender * scale + computed_offset_y;
 
     let skew = if fake_italic {
         Transform::new(
@@ -1154,21 +1226,9 @@ fn rasterize_glyph(
         &mut image[..],
     );
 
-    let mut painter = Painter::new(
-        metrics,
-        &mut target,
-        skew,
-        scale,
-        metrics.ascender() as f32 * scale + computed_offset_y,
-        computed_offset_x,
-    );
+    let mut painter = Painter::new(metrics, &mut target, skew, scale, baseline, computed_offset_x);
     if metrics
-        .paint_color_glyph(
-            GlyphId(info.glyph_id as _),
-            0,
-            RgbaColor::new(255, 255, 255, 255),
-            &mut painter,
-        )
+        .paint_color_glyph(glyph, 0, RgbaColor::new(255, 255, 255, 255), &mut painter)
         .is_some()
     {
         let mut final_image = DrawTarget::new(cached.width as i32, cached.height as i32);
@@ -1195,17 +1255,26 @@ fn rasterize_glyph(
             *argb = u32::from_le_bytes([r, g, b, a]);
         }
 
-        return (*cached, final_image);
+        return (*cached, final_image, true);
     }
 
-    if let Some(raster) = metrics.glyph_raster_image(GlyphId(info.glyph_id as _), u16::MAX) {
-        if let Some(value) = extract_color_image(&mut image, raster, cached, advance_scale) {
-            return value;
-        }
+    // A colour bitmap (sbix, CBDT) from the smallest strike at least twice the box's height, so
+    // the downscale has pixels to average; upstream asked for the largest (Apple Color Emoji's
+    // is 160 px, for a box of 16 to 32). A strike can lack a glyph the face has elsewhere (Apple
+    // Color Emoji's 40, 48 and 52 px strikes have no ZWJ family), so a larger strike, then the
+    // largest, is asked next.
+    let strike = u16::try_from(cached.height * 2).unwrap_or(u16::MAX);
+    let em = advance_scale * metrics.units_per_em() as f32;
+    let colour = [strike, strike.saturating_mul(2), u16::MAX]
+        .into_iter()
+        .filter_map(|ppem| metrics.glyph_raster_image(glyph, ppem))
+        .find_map(|raster| colour_bitmap(raster, cached, em));
+    if let Some(pixels) = colour {
+        return (*cached, pixels, true);
     }
 
     let mut render = Outline::default();
-    if let Some(bounds) = metrics.outline_glyph(GlyphId(info.glyph_id as _), &mut render) {
+    if let Some(bounds) = metrics.outline_glyph(glyph, &mut render) {
         let path = render.finish();
 
         // Some fonts return bounds that are entirely negative. I'm not sure why this
@@ -1217,7 +1286,7 @@ fn rasterize_glyph(
             0.
         };
         let x_off = x_off * scale + computed_offset_x;
-        let y_off = metrics.ascender() as f32 * scale + computed_offset_y;
+        let y_off = baseline;
 
         let mut target = DrawTarget::from_backing(
             cached.width as i32 * 2,
@@ -1266,13 +1335,15 @@ fn rasterize_glyph(
             },
         );
 
-        return (*cached, final_image.into_vec());
+        return (*cached, final_image.into_vec(), false);
     }
 
-    if let Some(raster) = metrics.glyph_raster_image(GlyphId(info.glyph_id as _), u16::MAX) {
+    if let Some(raster) = metrics.glyph_raster_image(glyph, u16::MAX) {
         if raster.width != 0 && raster.height != 0 {
-            if let Some(value) = extract_bw_image(&mut image, raster, cached, advance_scale) {
-                return value;
+            if let Some((rect, pixels)) =
+                extract_bw_image(&mut image, raster, cached, advance_scale)
+            {
+                return (rect, pixels, false);
             }
         }
     }
@@ -1280,111 +1351,126 @@ fn rasterize_glyph(
     (
         *cached,
         vec![0u32; cached.width as usize * cached.height as usize],
+        false,
     )
 }
 
-fn extract_color_image(
-    image: &mut Vec<u32>,
-    raster: RasterGlyphImage,
-    cached: Entry,
-    scale: f32,
-) -> Option<(CacheRect, Vec<u32>)> {
-    // Only the PNG arm re-reads the size, so without the `png` feature (as
-    // this tree builds it) the `mut`s are unused.
-    #[cfg_attr(not(feature = "png"), allow(unused_mut))]
-    let mut src_width = raster.width as i32;
-    #[cfg_attr(not(feature = "png"), allow(unused_mut))]
-    let mut src_height = raster.height as i32;
-
+/// A colour bitmap glyph's pixels as straight (not premultiplied) RGBA, row by row: a PNG
+/// (sbix, CBDT; decoded only with the `png` feature) or premultiplied BGRA (CBDT's format 32).
+/// `None` for a format that is not colour, or a PNG that does not decode.
+fn colour_pixels(raster: &RasterGlyphImage) -> Option<(usize, usize, Vec<[u8; 4]>)> {
     match raster.format {
         RasterImageFormat::PNG => {
             #[cfg(feature = "png")]
             {
                 let mut decoder = png::Decoder::new(std::io::Cursor::new(raster.data));
-                decoder.set_transformations(
-                    png::Transformations::ALPHA | png::Transformations::STRIP_16,
-                );
-                if let Ok(mut reader) = decoder.read_info() {
-                    let (color_type, _) = reader.output_color_type();
-                    let info = reader.info();
-                    src_width = info.width as i32;
-                    src_height = info.height as i32;
-                    let pixel_count = src_width as usize * src_height as usize;
-
-                    match color_type {
-                        png::ColorType::Rgba => {
-                            image.resize(pixel_count, 0);
-                            if reader.next_frame(bytemuck::cast_slice_mut(image)).is_err() {
-                                return None;
-                            }
-                            for rgba in image.iter_mut() {
-                                let [r, g, b, a] = rgba.to_be_bytes();
-                                *rgba = u32::from_be_bytes([a, r, g, b]);
-                            }
-                        }
-                        png::ColorType::GrayscaleAlpha => {
-                            let mut bytes = vec![0u8; pixel_count * 2];
-                            if reader.next_frame(&mut bytes).is_err() {
-                                return None;
-                            }
-                            image.resize(pixel_count, 0);
-                            for (i, ga) in bytes.chunks_exact(2).enumerate() {
-                                image[i] = u32::from_be_bytes([ga[1], ga[0], ga[0], ga[0]]);
-                            }
-                        }
-                        _ => return None,
+                decoder.set_transformations(png::Transformations::normalize_to_color8());
+                let mut reader = decoder.read_info().ok()?;
+                let mut bytes = vec![0; reader.output_buffer_size()?];
+                let frame = reader.next_frame(&mut bytes).ok()?;
+                let (width, height) = (frame.width as usize, frame.height as usize);
+                let bytes = &bytes[..frame.buffer_size()];
+                let pixels: Vec<[u8; 4]> = match frame.color_type {
+                    png::ColorType::Rgba => {
+                        bytes.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect()
                     }
-                } else {
-                    return None;
-                }
+                    png::ColorType::Rgb => {
+                        bytes.chunks_exact(3).map(|p| [p[0], p[1], p[2], 255]).collect()
+                    }
+                    png::ColorType::GrayscaleAlpha => {
+                        bytes.chunks_exact(2).map(|p| [p[0], p[0], p[0], p[1]]).collect()
+                    }
+                    png::ColorType::Grayscale => bytes.iter().map(|&g| [g, g, g, 255]).collect(),
+                    png::ColorType::Indexed => return None,
+                };
+                (pixels.len() == width * height).then_some((width, height, pixels))
             }
             #[cfg(not(feature = "png"))]
-            return None;
+            None
         }
         RasterImageFormat::BitmapPremulBgra32 => {
-            image.resize(raster.width as usize * raster.height as usize, 0);
-            for (y, row) in raster.data.chunks(raster.width as usize * 4).enumerate() {
-                for (x, pixel) in row.chunks(4).enumerate() {
-                    let pixel: &[u8; 4] = pixel.try_into().expect("Invalid chunk size");
-                    let [b, g, r, a] = *pixel;
-                    let pixel = u32::from_be_bytes([
-                        a,
-                        r.saturating_mul(255 / a),
-                        g.saturating_mul(255 / a),
-                        b.saturating_mul(255 / a),
-                    ]);
-                    image[y * raster.width as usize + x] = pixel;
+            let (width, height) = (raster.width as usize, raster.height as usize);
+            let pixels: Vec<[u8; 4]> = raster
+                .data
+                .chunks_exact(4)
+                .map(|p| {
+                    let [b, g, r, a] = [p[0], p[1], p[2], p[3]];
+                    let straight = |c: u8| {
+                        if a == 0 {
+                            0
+                        } else {
+                            (u32::from(c) * 255 / u32::from(a)).min(255) as u8
+                        }
+                    };
+                    [straight(r), straight(g), straight(b), a]
+                })
+                .collect();
+            (pixels.len() == width * height).then_some((width, height, pixels))
+        }
+        _ => None,
+    }
+}
+
+/// A colour bitmap glyph drawn into its box: its strike's em scaled to `em` pixels, the size
+/// the face is drawn at (`Fonts::face_scale`: the last resort's em, as every fallback face's
+/// outlines are), no larger than the box's shorter side, and smaller still if the bitmap
+/// would be wider or taller than the box, centred both ways; each pixel the average of the
+/// bitmap pixels it covers, sampled on a grid as fine as the downscale, in premultiplied
+/// terms so a transparent neighbour does not darken an edge. Upstream stretched the bitmap
+/// over the whole box, offset by the bitmap's bearings read as font units (they are the
+/// strike's pixels), with one bilinear sample per pixel: a 160 px picture squeezed into a 32
+/// px box read one pixel in five, and a straight-alpha PNG was treated as premultiplied.
+/// The result is straight RGBA, as the text pipeline blends (`ALPHA_BLENDING`) and the atlas
+/// holds.
+fn colour_bitmap(
+    raster: RasterGlyphImage,
+    cached: Entry,
+    em: f32,
+) -> Option<Vec<u32>> {
+    let (width, height, pixels) = colour_pixels(&raster)?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (box_w, box_h) = (cached.width as f32, cached.height as f32);
+    let strike_em = f32::from(raster.pixels_per_em.max(1));
+    let scale = (em.min(box_w).min(box_h) / strike_em)
+        .min(box_w / width as f32)
+        .min(box_h / height as f32);
+    let (drawn_w, drawn_h) = (width as f32 * scale, height as f32 * scale);
+    let (left, top) = ((box_w - drawn_w) / 2.0, (box_h - drawn_h) / 2.0);
+    let samples = (1.0 / scale).ceil().clamp(1.0, 8.0) as usize;
+
+    let mut out = vec![0u32; cached.width as usize * cached.height as usize];
+    for y in 0..cached.height as usize {
+        for x in 0..cached.width as usize {
+            let mut sum = [0f32; 4];
+            for sy in 0..samples {
+                for sx in 0..samples {
+                    let px = x as f32 + (sx as f32 + 0.5) / samples as f32;
+                    let py = y as f32 + (sy as f32 + 0.5) / samples as f32;
+                    let (u, v) = ((px - left) / scale, (py - top) / scale);
+                    if u < 0.0 || v < 0.0 || u >= width as f32 || v >= height as f32 {
+                        continue;
+                    }
+                    let [r, g, b, a] = pixels[v as usize * width + u as usize];
+                    let alpha = f32::from(a) / 255.0;
+                    sum[0] += f32::from(r) * alpha;
+                    sum[1] += f32::from(g) * alpha;
+                    sum[2] += f32::from(b) * alpha;
+                    sum[3] += alpha;
                 }
             }
+            if sum[3] == 0.0 {
+                continue;
+            }
+            let count = (samples * samples) as f32;
+            let straight = |c: f32| (c / sum[3]).round().clamp(0.0, 255.0) as u8;
+            let alpha = (sum[3] / count * 255.0).round().clamp(0.0, 255.0) as u8;
+            out[y * cached.width as usize + x] =
+                u32::from_le_bytes([straight(sum[0]), straight(sum[1]), straight(sum[2]), alpha]);
         }
-        _ => return None,
     }
-
-    let mut final_image = DrawTarget::new(cached.width as i32, cached.height as i32);
-    final_image.draw_image_with_size_at(
-        cached.width as f32,
-        cached.height as f32,
-        raster.x as f32 * scale,
-        raster.y as f32 * scale,
-        &raqote::Image {
-            width: src_width,
-            height: src_height,
-            data: &*image,
-        },
-        &DrawOptions {
-            blend_mode: raqote::BlendMode::Src,
-            antialias: raqote::AntialiasMode::None,
-            ..Default::default()
-        },
-    );
-
-    let mut final_image = final_image.into_vec();
-    for argb in final_image.iter_mut() {
-        let [a, r, g, b] = argb.to_be_bytes();
-        *argb = u32::from_le_bytes([r, g, b, a]);
-    }
-
-    Some((*cached, final_image))
+    Some(out)
 }
 
 fn extract_bw_image(

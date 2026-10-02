@@ -20,11 +20,12 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use unicode_width::UnicodeWidthStr;
 
 use super::bar::{Now, TallKind, clip, cover_slot, facts, play_glyphs, seek_line, tall_compact};
 use super::{Act, Gui, draw_card_cover, playing_cover_ready, put};
 use crate::kit::dim;
+// The kit's one width rule, ratatui's: graphemes at the cells they are drawn in.
+use crate::kit::width as cells;
 use crate::kit::theme::th;
 use rust_i18n::t;
 
@@ -109,7 +110,7 @@ pub(super) fn words(now: Option<&Now>) -> Vec<Words> {
 }
 
 fn width_of(line: &Words) -> u16 {
-    line.iter().map(|(text, _)| text.width()).sum::<usize>() as u16
+    line.iter().map(|(text, _)| cells(text)).sum::<usize>() as u16
 }
 
 /// `line` cut to `width` cells, the last run that crosses the edge clipped
@@ -123,8 +124,8 @@ fn fit(line: &Words, width: usize) -> Words {
             break;
         }
         let piece = clip(text, room).into_owned();
-        used += piece.width();
-        let cut = piece.width() < text.width();
+        used += cells(&piece);
+        let cut = cells(&piece) < cells(text);
         out.push((piece, *style));
         if cut {
             break;
@@ -193,7 +194,7 @@ fn arrange(area: Rect, widths: &[u16], seek: bool, text: &str) -> Option<Mini> {
 
     // Beside: the cover on the left, the column to its right as wide as its
     // widest line wants and no narrower than the frames.
-    let natural = widths.iter().copied().chain([text.width() as u16, TRANSPORT_W]).max().unwrap_or(TRANSPORT_W);
+    let natural = widths.iter().copied().chain([cells(text) as u16, TRANSPORT_W]).max().unwrap_or(TRANSPORT_W);
     let widest = inner_h.min(inner_w.saturating_sub(SIDE_GAP + TRANSPORT_W) / 2);
     let side = (MIN_COVER..=widest).rev().find_map(|cover| {
         let width = inner_w.checked_sub(2 * cover + SIDE_GAP)?.min(natural);
@@ -253,7 +254,7 @@ fn centre(lines: Vec<String>, x: u16, width: u16, top: u16) -> Vec<(u16, u16, St
         .into_iter()
         .enumerate()
         .map(|(row, line)| {
-            let left = x + width.saturating_sub(line.width() as u16) / 2;
+            let left = x + width.saturating_sub(cells(&line) as u16) / 2;
             (left, top + row as u16, line)
         })
         .collect()
@@ -268,7 +269,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     for word in text.split_whitespace() {
         let mut word = word;
         loop {
-            let joined = if line.is_empty() { word.width() } else { line.width() + 1 + word.width() };
+            let joined = if line.is_empty() { cells(word) } else { cells(&line) + 1 + cells(word) };
             if joined <= width {
                 if !line.is_empty() {
                     line.push(' ');
@@ -283,13 +284,14 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
             // A word wider than the line: as much of it as fits, and on.
             let mut cut = 0;
             let mut used = 0;
-            for (at, c) in word.char_indices() {
-                let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            let graphemes = unicode_segmentation::UnicodeSegmentation::grapheme_indices(word, true);
+            for (at, grapheme) in graphemes {
+                let w = crate::kit::grapheme_cells(grapheme);
                 if used + w > width && cut > 0 {
                     break;
                 }
                 used += w;
-                cut = at + c.len_utf8();
+                cut = at + grapheme.len();
             }
             lines.push(word[..cut].to_string());
             word = &word[cut..];
@@ -342,7 +344,7 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             let mut x = block.x + block.width.saturating_sub(width_of(&line)) / 2;
             for (text, style) in &line {
                 put(frame, x, block.y + row as u16, text, *style);
-                x += text.width() as u16;
+                x += cells(text) as u16;
             }
         }
     }
@@ -381,7 +383,7 @@ mod tests {
     fn check(mini: &Mini, area: Rect, widths: &[u16]) {
         let transport = mini.transport.map(|(x, y)| Rect { x, y, width: TRANSPORT_W, height: TRANSPORT_H });
         let texts =
-            mini.lines.iter().map(|(x, y, l)| Rect { x: *x, y: *y, width: l.width() as u16, height: 1 });
+            mini.lines.iter().map(|(x, y, l)| Rect { x: *x, y: *y, width: cells(l) as u16, height: 1 });
         let words = mini.words.map(|b| Rect { x: b.x, y: b.y, width: b.width, height: b.count as u16 });
         let seek = mini.progress.map(|(x, y, width)| Rect { x, y, width, height: 1 });
         let parts: Vec<Rect> =
@@ -509,7 +511,7 @@ mod tests {
         check(&mini, window, &SONG);
         assert!(mini.transport.is_some());
         assert!(mini.lines.len() > 1, "wrapped: {:?}", mini.lines);
-        assert!(mini.lines.iter().all(|(_, _, l)| l.width() <= 24));
+        assert!(mini.lines.iter().all(|(_, _, l)| cells(l) <= 24));
 
         // Narrower than the frames: the line is all there is.
         let window = area(18, 10);
@@ -586,7 +588,7 @@ mod tests {
     fn a_line_without_spaces_wraps_by_width() {
         let lines = wrap("ターミナルを広げるとフルプレーヤーになります", 10);
         assert!(lines.len() > 1);
-        assert!(lines.iter().all(|l| l.width() <= 10), "{lines:?}");
+        assert!(lines.iter().all(|l| cells(l) <= 10), "{lines:?}");
         assert_eq!(lines.concat(), "ターミナルを広げるとフルプレーヤーになります");
         assert_eq!(wrap("one two three", 7), ["one two", "three"]);
         assert_eq!(wrap("", 7), [""]);

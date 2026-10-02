@@ -739,15 +739,39 @@ pub fn bar_jump(bar: Rect, max_scroll: usize, y: u16) -> usize {
     (rel * max_scroll + (span - 1) / 2) / (span - 1)
 }
 
-/// Display width in cells — what ratatui spends, so budgets and cut points
-/// agree with the drawing: a CJK character is two cells, not one.
+/// Display width in cells — exactly what ratatui spends drawing `text`, so
+/// budgets and cut points agree with the drawing: a CJK character is two
+/// cells, ❤️ and 1️⃣ are two (their VS16 widens them), and a ZWJ family or
+/// a skin-toned thumb is two, not the six or four its characters add up to.
+///
+/// The rule is ratatui's own (`Buffer::set_stringn`, ratatui-core 0.1):
+/// the text is cut into extended graphemes, each takes its
+/// [`grapheme_cells`], and the sum is the cells the buffer fills. Summing
+/// per character instead counted ❤️ one cell narrower than it is drawn,
+/// so a field or a clipped label ran a cell past its edge, and a family
+/// four cells wider, so it was left out where it fit. One rule for both
+/// flavours: the terminal paints by graphemes as the window does.
 pub fn width(text: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(text)
+    use unicode_segmentation::UnicodeSegmentation;
+    if text.is_ascii() {
+        // Every ASCII character is a grapheme of one cell, but for the
+        // controls ratatui drops ("\r\n" is one grapheme, and dropped too).
+        return text.bytes().filter(|b| !b.is_ascii_control()).count();
+    }
+    text.graphemes(true).map(grapheme_cells).sum()
 }
 
-/// One character's cells (zero for a combining mark).
-pub fn char_width(c: char) -> usize {
-    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+/// One grapheme's cells, as ratatui's `set_stringn` takes them: a grapheme
+/// holding a control character is dropped (no cells), and any other is its
+/// `CellWidth` — `UnicodeWidthStr::width` (unicode-width 0.2) plus a cell
+/// for each halfwidth (han)dakuten. A grapheme of no cells (a stray
+/// combining mark at the start of the text) ratatui drops too.
+pub fn grapheme_cells(grapheme: &str) -> usize {
+    use ratatui::buffer::CellWidth;
+    if grapheme.contains(char::is_control) {
+        return 0;
+    }
+    usize::from(grapheme.cell_width())
 }
 
 /// A list viewport: given the row count, a row to reveal (a moved
@@ -1150,8 +1174,9 @@ pub fn input_display_composing(
         let spliced = format!("{}{composition}{}", &value[..byte], &value[byte..]);
         input_window(&spliced, cursor + composition.chars().count(), width, caret, clip)
     };
-    let cells: usize = line.chars().take(at).map(char_width).sum();
-    (line, u16::try_from(cells).unwrap_or(u16::MAX))
+    // The cells before the caret, by the rule the line is drawn by.
+    let before: String = line.chars().take(at).collect();
+    (line, u16::try_from(self::width(&before)).unwrap_or(u16::MAX))
 }
 
 /// Pure core - unit-tested with explicit marks so the assertions hold on
@@ -1179,6 +1204,19 @@ pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, c
 /// window is what it always was. A wide character that does not fit
 /// beside a clip mark is left out whole, so a line may come up a cell
 /// short of `width`, never over it.
+///
+/// And it walks graphemes, not characters, each at its [`grapheme_cells`]:
+/// the clusters ratatui fills its cells by, so a cluster shows whole or not
+/// at all and the line's cells are the cells drawn. Walking characters, the
+/// characters that extend a grapheme (a flag's tags, a combining mark,
+/// VS16, a ZWJ) took no cells: the walk back took them for free and stopped
+/// on their base when it did not fit, so the line began with the tail of a
+/// cluster whose base was cut (ratatui hangs it on the clip mark's cell,
+/// which the window drew as a box), ❤️ counted a cell short and ran past
+/// the field, and a ZWJ family counted six cells for its two. The caret is
+/// a character of its own in the line it is cut from; a caret inside a
+/// cluster (the cursor counts characters, so Left steps into a flag's tags)
+/// splits it there, and the window keeps the caret's own cluster.
 fn input_window(
     value: &str,
     cursor: usize,
@@ -1186,6 +1224,7 @@ fn input_window(
     caret: char,
     clip: char,
 ) -> (String, usize) {
+    use unicode_segmentation::UnicodeSegmentation;
     let w = width as usize;
     if w < 3 {
         return (clip.to_string(), 0);
@@ -1193,26 +1232,38 @@ fn input_window(
     let mut chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
     chars.insert(cursor, caret);
-    let cells = |range: std::ops::Range<usize>| -> usize {
-        chars[range].iter().map(|&c| char_width(c)).sum()
-    };
-    let n = chars.len();
-    if cells(0..n) <= w {
-        return (chars.into_iter().collect(), cursor);
+    let line: String = chars.iter().collect();
+    // Each cluster's first character, and the cells before it (a prefix
+    // sum, so a run's cells are one subtraction): `starts[i]..starts[i + 1]`
+    // are cluster i's characters, `before[j] - before[i]` the cells of
+    // clusters i..j.
+    let mut starts = vec![0];
+    let mut before = vec![0];
+    for grapheme in line.graphemes(true) {
+        starts.push(starts[starts.len() - 1] + grapheme.chars().count());
+        before.push(before[before.len() - 1] + grapheme_cells(grapheme));
     }
-    // The window is chars[start..end] between the clip marks it needs: one
+    let n = starts.len() - 1;
+    let cells = |from: usize, to: usize| before[to] - before[from];
+    if cells(0, n) <= w {
+        return (line, cursor);
+    }
+    // The caret's cluster: the caret itself, or a cluster it begins (a
+    // combining mark after it hangs on it).
+    let at = starts.iter().rposition(|&s| s <= cursor).unwrap_or(0).min(n - 1);
+    // The window is clusters start..end between the clip marks it needs: one
     // before when it starts past the value's start, one after when it
     // stops short of its end.
     let fits = |start: usize, end: usize| {
-        cells(start..end) + usize::from(start > 0) + usize::from(end < n) <= w
+        cells(start, end) + usize::from(start > 0) + usize::from(end < n) <= w
     };
-    // The caret is the window's last character before the trailing clip —
+    // The caret is the window's last cluster before the trailing clip —
     // unless what follows it would take no more than the clip's own cell,
     // when it shows instead — and the window reaches back from there as
     // far as fits. One that reaches the value's start has room left after
     // the caret, which the text after it takes.
-    let mut end = cursor + 1;
-    if cells(end..n) <= 1 {
+    let mut end = at + 1;
+    if cells(end, n) <= 1 {
         end = n;
     }
     let mut start = end;
@@ -1222,15 +1273,16 @@ fn input_window(
     while start == 0 && end < n && fits(0, end + 1) {
         end += 1;
     }
+    let (from, to) = (starts[start], starts[end]);
     let mut out = String::new();
     if start > 0 {
         out.push(clip);
     }
-    out.extend(&chars[start..end]);
+    out.extend(&chars[from..to]);
     if end < n {
         out.push(clip);
     }
-    (out, cursor - start + usize::from(start > 0))
+    (out, cursor - from + usize::from(start > 0))
 }
 
 // ── The pointer contract (OSC 22) ────────────────────────────────────────────
@@ -1438,7 +1490,7 @@ mod tests {
     /// kana in a ten-cell field drew twenty cells and put the caret at 20.
     #[test]
     fn wide_text_windows_by_cells_and_keeps_the_caret_in_the_field() {
-        let w = |line: &str| line.chars().map(char_width).sum::<usize>();
+        let w = |line: &str| width(line);
         let kana = "あいうえおかきくけこ";
         // At the end: the clip, as many kana as fit, the caret.
         assert_eq!(input_display_with_fancy(kana, 10, 10), "…きくけこ▏");
@@ -1462,6 +1514,167 @@ mod tests {
             assert!(w(&line) <= width as usize, "{line:?} in {width}");
             assert!(at < width, "the caret's cell {at} is past a {width}-cell field: {line:?}");
             assert!(line.ends_with('▏'), "the caret follows the composition: {line:?}");
+        }
+    }
+
+    /// A field never shows part of a cluster at its clipped ends. England's flag is 🏴 and six
+    /// tag characters that take no cells; with the caret at the end of a value that scrolls,
+    /// the line's left clip fell between 🏴 (two cells, which did not fit) and its tags (free),
+    /// so the line began `…` and the tags, which ratatui hangs on the clip's cell and the
+    /// window drew as a box. Every line, at every caret between clusters and every width, is
+    /// whole clusters of the value between its marks.
+    #[test]
+    fn a_clipped_field_shows_a_cluster_whole_or_not_at_all() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let england = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+        // The reported case: the base does not fit beside the clip, the tags would.
+        let value = format!("aaaa{england}bbbbbbbbbb");
+        let end = value.chars().count();
+        assert_eq!(input_display_with_fancy(&value, end, 13), "…bbbbbbbbbb▏");
+        assert_eq!(input_display_with_fancy(&value, end, 14), format!("…{england}bbbbbbbbbb▏"));
+        // And at the other end, the window reaching right from the value's start: a ZWJ
+        // family whose man fits and whose woman does not was cut after the joiner. It is
+        // one cluster of two cells, ratatui's width for it: left out whole where those two
+        // cells and the clip do not fit, shown whole where they do (counted per character,
+        // its six cells kept it out of a line with room for it).
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(input_display_with_fancy(&format!("aa{family}bb"), 0, 5), "▏aa…");
+        let shown = input_display_with_fancy(&format!("aa{family}bb"), 0, 6);
+        assert_eq!(shown, format!("▏aa{family}…"));
+        let w = |line: &str| width(line);
+        let clusters = [
+            england,
+            "e\u{301}",
+            "\u{2764}\u{FE0F}",
+            "\u{1F1FA}\u{1F1F8}",
+            family,
+            "\u{1F44D}\u{1F3FD}",
+        ];
+        for cluster in clusters {
+            let value = format!("ab{cluster}cd{cluster}ef");
+            let mut bounds = vec![0];
+            for grapheme in value.graphemes(true) {
+                bounds.push(bounds[bounds.len() - 1] + grapheme.chars().count());
+            }
+            let chars: Vec<char> = value.chars().collect();
+            for &cursor in &bounds {
+                for width in 3..24u16 {
+                    let shown = input_display_with_fancy(&value, cursor, width);
+                    assert!(w(&shown) <= width as usize, "{shown:?} at {cursor} in {width}");
+                    let text: String = shown.chars().filter(|&c| c != '▏' && c != '…').collect();
+                    let shown_chars = text.chars().count();
+                    let found = (0..=chars.len() - shown_chars).find(|&from| {
+                        chars[from..from + shown_chars].iter().copied().eq(text.chars())
+                            && bounds.contains(&from)
+                            && bounds.contains(&(from + shown_chars))
+                    });
+                    assert!(found.is_some(), "{shown:?} at {cursor} in {width} cuts a cluster");
+                }
+            }
+        }
+    }
+
+    /// The clusters the width rule is held to ratatui on: an emoji with VS16, a keycap, a flag of
+    /// regional indicators, a subdivision flag of tags, a ZWJ family, a skin tone, hangul, kana,
+    /// a hanzi, a decomposed é, a plain word, and a mixed string of them.
+    const PARITY: [&str; 12] = [
+        "\u{2764}\u{FE0F}",
+        "1\u{FE0F}\u{20E3}",
+        "\u{1F1FA}\u{1F1F8}",
+        "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        "\u{1F44D}\u{1F3FD}",
+        "\u{D55C}",
+        "\u{304B}",
+        "\u{65E5}",
+        "e\u{301}",
+        "music",
+        concat!(
+            "a\u{2764}\u{FE0F}b1\u{FE0F}\u{20E3}\u{1F1FA}\u{1F1F8}c",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{1F44D}\u{1F3FD}",
+            "\u{D55C}\u{304B}\u{65E5}e\u{301}",
+        ),
+    ];
+
+    /// The cells ratatui fills setting `text` into a buffer wide enough for it: the cursor's
+    /// advance, which counts each grapheme's cell and the cells its width hides.
+    fn ratatui_cells(text: &str) -> usize {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 200, 1));
+        let (x, _) = buffer.set_stringn(0, 0, text, usize::MAX, Style::default());
+        x as usize
+    }
+
+    /// The row `line` leaves in a 40-cell `TestBackend` filled with `#`, set from column 0
+    /// the way the GUI's `put` sets it: with the buffer's edge as its only budget.
+    fn drawn_over_sentinels(line: &str) -> Vec<String> {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                let buffer = frame.buffer_mut();
+                for x in 0..40 {
+                    buffer[(x, 0)].set_symbol("#");
+                }
+                buffer.set_stringn(0, 0, line, usize::MAX, Style::default());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..40).map(|x| buffer[(x, 0)].symbol().to_string()).collect()
+    }
+
+    /// One width rule, ratatui's: the kit measures every cluster at the cells ratatui fills
+    /// with it. Summing per character, ❤️ and 1️⃣ were a cell short (their VS16 widens them),
+    /// a ZWJ family four cells over and a skin tone two.
+    #[test]
+    fn the_width_rule_is_the_cells_ratatui_draws() {
+        use unicode_width::UnicodeWidthChar;
+        let per_char = |text: &str| text.chars().filter_map(UnicodeWidthChar::width).sum::<usize>();
+        for text in PARITY {
+            assert_eq!(width(text), ratatui_cells(text), "{text:?}: the kit's against ratatui's");
+            let graphemes: usize = unicode_segmentation::UnicodeSegmentation::graphemes(text, true)
+                .map(grapheme_cells)
+                .sum();
+            assert_eq!(graphemes, width(text), "{text:?}: grapheme by grapheme");
+            eprintln!("{text:?}: {} cells, {} summed per character", width(text), per_char(text));
+        }
+        for cluster in &PARITY[..10] {
+            assert!(width(cluster) <= 2, "{cluster:?} is one cluster of at most two cells");
+        }
+        // The controls ratatui drops, and a mark with no base, take no cells.
+        for text in ["a\tb", "a\r\nb", "\u{301}a", "a\u{7}"] {
+            assert_eq!(width(text), ratatui_cells(text), "{text:?}");
+        }
+        // Halfwidth katakana's sound mark: its own cell, as ratatui counts it.
+        assert_eq!(width("\u{FF76}\u{FF9E}"), ratatui_cells("\u{FF76}\u{FF9E}"));
+    }
+
+    /// A field N cells wide never writes past its Nth cell, whatever clusters it holds and
+    /// wherever its caret: the cell after it keeps the `#` it had. And the caret's reported
+    /// cell is where ratatui draws the caret.
+    #[test]
+    fn a_field_of_any_cluster_stays_inside_its_cells() {
+        use unicode_segmentation::UnicodeSegmentation;
+        for cluster in PARITY {
+            let values = [cluster.repeat(9), format!("ab{cluster}cd{cluster}ef{cluster}gh")];
+            for value in values {
+                let mut bounds = vec![0];
+                for grapheme in value.graphemes(true) {
+                    bounds.push(bounds[bounds.len() - 1] + grapheme.chars().count());
+                }
+                for &cursor in &bounds {
+                    for n in 3..30u16 {
+                        let (line, at) = input_display_composing(&value, cursor, n, true, "", None);
+                        let row = drawn_over_sentinels(&line);
+                        assert_eq!(width(&line), ratatui_cells(&line), "{line:?}");
+                        assert!(width(&line) <= n as usize, "{line:?} at {cursor} over {n} cells");
+                        for (x, cell) in row.iter().enumerate().skip(n as usize) {
+                            assert_eq!(cell, "#", "{line:?} at {cursor} in {n} wrote cell {x}");
+                        }
+                        let caret = (0..40).find(|&x| row[x].contains(input_marks().0));
+                        assert_eq!(caret, Some(at as usize), "{line:?}: the caret's cell");
+                    }
+                }
+            }
         }
     }
 

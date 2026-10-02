@@ -408,23 +408,64 @@ pub(super) const PASTE_MAX: usize = 4096;
 /// A tab becomes a space, as a one-line field has no columns to align;
 /// other control characters are dropped, and so are the invisible format
 /// characters that ride along in copied text and are never part of what it
-/// says ([`is_stray_format`]). Spaces of every kind stay. At most
-/// [`PASTE_MAX`] characters are typed.
+/// says ([`is_stray_format`]), except the tag characters that spell a
+/// subdivision flag after its emoji ([`flag_tags`]). Spaces of every kind
+/// stay. At most [`PASTE_MAX`] characters are typed.
 fn paste(text: &str) -> Vec<TermEvent> {
     let line = text.split(['\n', '\r', '\u{2028}', '\u{2029}']).next().unwrap_or("");
-    line.chars()
-        .map(|c| if c == '\t' { ' ' } else { c })
-        .filter(|&c| !c.is_control() && !is_stray_format(c))
+    let chars: Vec<char> = line.chars().map(|c| if c == '\t' { ' ' } else { c }).collect();
+    let spelling = flag_tags(&chars);
+    chars
+        .iter()
+        .zip(spelling)
+        .filter(|&(&c, spelling)| spelling || (!c.is_control() && !is_stray_format(c)))
         .take(PASTE_MAX)
-        .map(|c| TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+        .map(|(&c, _)| TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
         .collect()
+}
+
+/// Which of `chars` are the tags of an emoji tag sequence, and so spelling
+/// rather than stray: a run of tag characters (U+E0020–U+E007E) right after
+/// an emoji, closed by CANCEL TAG (U+E007F). That is how England's,
+/// Scotland's and Wales's flags are written — 🏴 and the tags for "gbeng"
+/// — and dropping the tags pastes a plain black flag. A run with no emoji
+/// before it, or that never closes, is stray and goes with the other format
+/// characters.
+fn flag_tags(chars: &[char]) -> Vec<bool> {
+    let mut spelling = vec![false; chars.len()];
+    let mut at = 0;
+    while at < chars.len() {
+        if !is_tag_base(chars[at]) {
+            at += 1;
+            continue;
+        }
+        let run = chars[at + 1..].iter().take_while(|&&c| ('\u{E0020}'..='\u{E007E}').contains(&c));
+        let end = at + 1 + run.count();
+        if end > at + 1 && chars.get(end) == Some(&'\u{E007F}') {
+            spelling[at + 1..=end].fill(true);
+            at = end + 1;
+        } else {
+            at = end.max(at + 1);
+        }
+    }
+    spelling
+}
+
+/// An emoji a tag sequence can follow: the black flag (🏴, every flag
+/// tag sequence Unicode recommends) or any character of the emoji blocks
+/// (the Miscellaneous Symbols, Dingbats and the supplementary planes'
+/// pictographs), which Unicode's grammar allows as a base. Listed here
+/// rather than pulled from a properties crate for one question.
+fn is_tag_base(c: char) -> bool {
+    matches!(c, '\u{1F3F4}' | '\u{2600}'..='\u{27BF}' | '\u{1F000}'..='\u{1FAFF}')
 }
 
 /// Whether a character is one of Unicode's format characters (Cf) that are
 /// never part of the text they sit in: a byte-order mark, a zero-width
 /// space, a soft hyphen, the bidi marks, embeddings, overrides and isolates,
 /// the invisible maths operators, the interlinear annotation marks and the
-/// tag characters. In a search or an address they sit unseen and make it
+/// tag characters (save a flag's, which [`flag_tags`] keeps). In a search
+/// or an address they sit unseen and make it
 /// miss, or reorder how the field draws. The rest of Cf stays, because it
 /// is spelling: the zero-width non-joiner and joiner (Persian and Indic
 /// words, emoji sequences), the word joiner, the Arabic number signs, the
@@ -1382,6 +1423,45 @@ mod tests {
         // Format characters do not count toward the cap.
         let padded = "\u{200B}".repeat(10) + &"y".repeat(PASTE_MAX);
         assert_eq!(typed(&padded).len(), PASTE_MAX);
+    }
+
+    /// A subdivision flag pastes whole: 🏴 and its tags, closed by CANCEL
+    /// TAG, are spelling, as a ZWJ is. Tags anywhere else are still the
+    /// stray format characters a paste drops: alone, after a letter, in a
+    /// run that never closes, and a second run after a closed one.
+    #[test]
+    fn a_pasted_flag_keeps_its_tags_and_stray_tags_go() {
+        let typed = |text: &str| -> String {
+            one(Raw::Paste(text.into()))
+                .into_iter()
+                .map(|(code, _)| match code {
+                    KeyCode::Char(c) => c,
+                    other => panic!("{other:?} is not typed text"),
+                })
+                .collect()
+        };
+        let england = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+        let scotland = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}";
+        assert_eq!(typed(england), england);
+        assert_eq!(typed(&format!("go {england}{scotland}!")), format!("go {england}{scotland}!"));
+        // Beside the other spelling a paste keeps: a ZWJ family, a flag of
+        // regional indicators, a skin tone, an emoji with VS16.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let others = "\u{1F1FA}\u{1F1F8} \u{1F44D}\u{1F3FD} \u{2764}\u{FE0F}";
+        let mixed = format!("{england} {family} {others}");
+        assert_eq!(typed(&mixed), mixed);
+        // Stray: tags after a letter, tags with no base, an unclosed run,
+        // a lone CANCEL TAG, and tags after a run that already closed.
+        assert_eq!(typed("a\u{E0067}\u{E0062}\u{E007F}b"), "ab");
+        assert_eq!(typed("\u{E0067}\u{E007F}x"), "x");
+        assert_eq!(typed("\u{1F3F4}\u{E0067}\u{E0062} y"), "\u{1F3F4} y");
+        assert_eq!(typed("\u{1F3F4}\u{E007F}"), "\u{1F3F4}");
+        assert_eq!(typed(&format!("{england}\u{E0041}\u{E007F}")), england);
+        // The language tag (U+E0001) is never a flag's.
+        assert_eq!(typed("\u{1F3F4}\u{E0001}\u{E0067}\u{E007F}"), "\u{1F3F4}");
+        // The cap counts a flag's tags as the characters they are.
+        let flags = england.repeat(PASTE_MAX);
+        assert_eq!(typed(&flags).chars().count(), PASTE_MAX);
     }
 
     #[test]

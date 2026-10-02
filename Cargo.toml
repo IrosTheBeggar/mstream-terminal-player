@@ -26,8 +26,12 @@ default-run = "mstream-player"
 # on wasm32, where no gui exists.
 [features]
 default = []
+# The backend's `png` decodes the colour bitmap glyphs of the system's emoji
+# face (Apple Color Emoji's sbix, Noto Color Emoji's CBDT); png 0.18 is in
+# the tree already through image, so it adds no package.
 window = [
     "dep:ratatui-wgpu",
+    "ratatui-wgpu/png",
     "dep:memmap2",
     "dep:arboard",
     "dep:objc2",
@@ -239,11 +243,11 @@ skrifa = { version = "0.44", default-features = false, features = ["std"] }
 # with rustybuzz over faces it is handed, so no system font stack
 # (font-kit, freetype, fontconfig) comes with it. default-features = false
 # leaves out `ahash`, which would bring ahash's compile-time-rng
-# (const-random, tiny-keccak) and flip the ahash egui shares onto it, and
-# `png`, which decodes colour bitmap glyphs from emoji faces the window is
-# never handed. Optional: only the `window` feature builds it.
+# (const-random, tiny-keccak) and flip the ahash egui shares onto it; the
+# `window` feature turns its `png` back on, for the emoji face's bitmaps.
+# Optional: only the `window` feature builds it.
 ratatui-wgpu = { version = "0.6", default-features = false, optional = true }
-# The window's system fallback faces (CJK, symbols) are mapped rather than
+# The window's system fallback faces (CJK, symbols, emoji) are mapped rather than
 # read: the backend wants 'static bytes, and a leaked map gives them without
 # tens of megabytes of collections landing in the heap; only the pages a
 # glyph lookup touches become resident. Already in the tree under
@@ -263,6 +267,13 @@ memmap2 = { version = "0.9", optional = true }
 # which the desktops keep in step with Wayland's; with no XWayland a paste
 # finds nothing and says so on stderr. Optional: the `window` feature.
 arboard = { version = "3", default-features = false, optional = true }
+# The kit's width rule (`kit::width`) and its text fields' window walk
+# graphemes, the segmentation ratatui fills its cells by, so a field's line
+# and a clipped label take the cells they are drawn in and a flag's tags are
+# never shown without their 🏴 (see `kit::input_window`). Both flavours: the
+# terminal paints by graphemes as the window does. Already in the tree under
+# ratatui, so it adds no package.
+unicode-segmentation = "1.13"
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend

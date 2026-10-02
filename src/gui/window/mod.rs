@@ -66,7 +66,6 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::Event as TermEvent;
 use ratatui::style::Color;
 use ratatui_wgpu::{Builder, ColorTable, Dimensions, Font, Fonts, WgpuBackend};
-use unicode_width::UnicodeWidthStr;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, WindowEvent};
@@ -511,13 +510,19 @@ impl Early {
 
 /// The regular faces the window draws with, and what finding them took.
 struct Faces {
-    /// Hack first for everything it has, then a system face for the few
-    /// symbols it lacks, then the borrowed faces for kana, hanzi and
-    /// hangul, whatever the language. `with_regular_fonts` keeps that
-    /// order, where `with_fonts` would sort by width and could put a
-    /// borrowed face's own Latin in front of Hack's. Hack is also the
-    /// builder's last resort, which is what bold and italic cells fall back
-    /// to with faked styles.
+    /// Hack first for everything it has, then the bundled symbol face for
+    /// the few symbols it lacks, then a system face for symbols beyond
+    /// those (a title's ♥ or ♪), then the borrowed faces for kana, hanzi
+    /// and hangul, whatever the language, and last the system's colour
+    /// emoji face. `with_regular_fonts` keeps that order, where
+    /// `with_fonts` would sort by width and could put a borrowed face's
+    /// own Latin in front of Hack's. Hack is also the builder's last
+    /// resort, which is what bold and italic cells fall back to with faked
+    /// styles. The emoji face comes last so a character a text face also
+    /// has (✔, ㊗) keeps its text form, as a terminal draws it; a cluster
+    /// only the emoji face has all of (an emoji with VS16, a flag, a ZWJ
+    /// family) still goes to it whole, since the backend picks the first
+    /// face that has every character of a cell.
     fonts: Vec<Font<'static>>,
     took: Vec<(&'static str, Duration)>,
 }
@@ -533,12 +538,14 @@ fn find_faces(lang: &str) -> Result<Faces, String> {
         took.push((stage, now - clock));
         clock = now;
     };
-    let mut fonts = vec![hack()?];
+    let mut fonts = vec![hack()?, symbols()?];
     lap("faces.hack");
     fonts.extend(symbol_fallback());
     lap("faces.symbols");
     fonts.extend(script_fallbacks(lang));
     lap("faces.scripts");
+    fonts.extend(emoji_fallback());
+    lap("faces.emoji");
     Ok(Faces { fonts, took })
 }
 
@@ -1555,11 +1562,27 @@ fn hack() -> Result<Font<'static>, String> {
 /// stars and the checkbox tick. A terminal borrows these from its own font
 /// fallback without being asked; the window has to be handed a face that
 /// has them, or they draw as boxes. The census test below keeps the list
-/// complete as the GUI grows new glyphs.
+/// complete as the GUI grows new glyphs, and checks that [`SYMBOLS`] has
+/// every one of them.
 const BEYOND_HACK: &str = "★☆✓";
 
-/// Where each platform keeps a face with [`BEYOND_HACK`]'s glyphs, best
-/// first. A monospace face leads where there is one, so the stars keep a
+/// The window's own symbol face (assets/fonts/, made by
+/// scripts/symbol-font.py on Hack's metrics, under the OFL): every glyph of
+/// [`BEYOND_HACK`], drawn the same on every platform, where a borrowed
+/// system face drew Menlo's stars on a Mac, DejaVu's on Linux, Segoe's on
+/// Windows, and boxes on a system with none of them. 1.6 kB, and only in a
+/// binary with the window in it.
+const SYMBOLS: &[u8] = include_bytes!("../../../assets/fonts/mStreamSymbols-Regular.ttf");
+
+/// The bundled symbol face, as the backend reads it.
+fn symbols() -> Result<Font<'static>, String> {
+    Font::new(SYMBOLS).ok_or_else(|| "the bundled symbol face would not load".to_string())
+}
+
+/// Where each platform keeps a face with more symbols than [`SYMBOLS`]
+/// draws, best first: not for the GUI's own glyphs, which the bundled face
+/// has, but for whatever a song's title or an artist's name carries (♥, ♪,
+/// ☯). A monospace face leads where there is one, so those keep a
 /// terminal's shapes: Menlo and DejaVu Sans Mono are Hack's own ancestors.
 /// Every path is read at face 0, which in each of these is the regular one.
 fn symbol_faces() -> Vec<PathBuf> {
@@ -1626,9 +1649,11 @@ fn missing_from(bytes: &[u8], wanted: &str) -> Option<String> {
     Some(wanted.chars().filter(|&ch| charmap.map(ch).is_none()).collect())
 }
 
-/// The system face that fills in [`BEYOND_HACK`], for every language: the
-/// first on the platform's list that has all of it, or failing that the
-/// one that has the most, so as few cells as possible are boxes. The maps
+/// The system face behind [`SYMBOLS`], for every language: the first on
+/// the platform's list that has all of [`BEYOND_HACK`], or failing that the
+/// one that has the most. The list is the measure of a fuller symbol face,
+/// not a need: the bundled face draws those glyphs whichever this finds,
+/// and none at all leaves only a title's rarer symbols as boxes. The maps
 /// of the faces passed over are leaked too; they are a handful of small
 /// files' address space, nothing resident past the character map read.
 fn symbol_fallback() -> Option<Font<'static>> {
@@ -1647,17 +1672,97 @@ fn symbol_fallback() -> Option<Font<'static>> {
             }
         }
     }
-    let Some((path, bytes, missing)) = best else {
-        eprintln!("gui --window: no system face has {BEYOND_HACK}; they will be boxes");
+    let Some((path, bytes, _)) = best else {
+        eprintln!("gui --window: no system symbol face; {BEYOND_HACK} from the bundled one");
         return None;
     };
     let font = Font::new(bytes)?;
-    if missing.is_empty() {
-        eprintln!("gui --window: {BEYOND_HACK} from {}", path.display());
-    } else {
-        eprintln!("gui --window: {BEYOND_HACK} from {}, which has no {missing}", path.display());
-    }
+    eprintln!("gui --window: symbols beyond the bundled face from {}", path.display());
     Some(font)
+}
+
+/// Where each platform keeps its colour emoji face. Apple Color Emoji is
+/// sbix (PNG bitmaps per size), Noto Color Emoji is CBDT (PNG bitmaps) or,
+/// in its newer builds, COLRv1 vector layers, and Segoe UI Emoji is COLR
+/// (v0 layers, v1 on Windows 11): the backend draws all of them, bitmaps
+/// through the `png` decoder its `png` feature brings and layers through
+/// the font reader's painter. Face 0 throughout.
+fn emoji_faces() -> Vec<PathBuf> {
+    let paths: &[&str] = if cfg!(target_os = "macos") {
+        &["/System/Library/Fonts/Apple Color Emoji.ttc"]
+    } else if cfg!(windows) {
+        &["Fonts/seguiemj.ttf"]
+    } else {
+        &[
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/google-noto-color-emoji-fonts/NotoColorEmoji.ttf",
+            "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+            "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+            "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
+            "/usr/share/fonts/truetype/noto-color-emoji/NotoColorEmoji.ttf",
+        ]
+    };
+    paths.iter().map(|path| system_path(path)).collect()
+}
+
+/// Where fontconfig keeps Noto Color Emoji, on a Linux whose packages put
+/// it somewhere none of [`emoji_faces`]'s paths name. Asked only when those
+/// all miss, and only of an `fc-match` that is there; its answer is the
+/// best match, which is some other face when the system has no emoji face
+/// at all, so [`has_colour`] judges it before it is used.
+fn fontconfig_emoji() -> Option<PathBuf> {
+    if cfg!(any(target_os = "macos", windows)) {
+        return None;
+    }
+    let out = std::process::Command::new("fc-match")
+        .args(["--format=%{file}", "Noto Color Emoji:style=Regular"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let path = String::from_utf8(out.stdout).ok()?;
+    (out.status.success() && !path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Whether a face draws in colour: it has bitmaps (sbix, CBDT) or layers
+/// (COLR). A face with none of them is a text face, which fontconfig may
+/// offer in an emoji face's place.
+fn has_colour(bytes: &[u8]) -> bool {
+    let Ok(face) = skrifa::FontRef::from_index(bytes, 0) else { return false };
+    [b"sbix", b"CBDT", b"COLR"]
+        .into_iter()
+        .any(|tag| face.table_data(skrifa::Tag::new(tag)).is_some())
+}
+
+/// The colour emoji face, for every language, mapped as the CJK faces are
+/// (a 190 MB collection on a Mac, of which only the glyphs drawn become
+/// resident), with where it came from; `None` on a system without one,
+/// where an emoji draws as Hack's box as it did before.
+fn emoji_face() -> Option<(PathBuf, &'static [u8])> {
+    emoji_faces()
+        .into_iter()
+        .chain(std::iter::from_fn({
+            let mut asked = false;
+            move || (!std::mem::replace(&mut asked, true)).then(fontconfig_emoji).flatten()
+        }))
+        .find_map(|path| {
+            let bytes = map_font(&path)?;
+            has_colour(bytes).then_some((path, bytes))
+        })
+}
+
+/// [`emoji_face`] as the backend reads it, said on stderr like the others.
+fn emoji_fallback() -> Option<Font<'static>> {
+    let Some((path, bytes)) = emoji_face() else {
+        eprintln!("gui --window: no colour emoji face; emoji will be boxes");
+        return None;
+    };
+    let font = Font::new(bytes);
+    match &font {
+        Some(_) => eprintln!("gui --window: emoji from {}", path.display()),
+        None => eprintln!("gui --window: {} is not a face the backend can read", path.display()),
+    }
+    font
 }
 
 /// The scripts Hack has nothing for, each with the system faces that draw
@@ -1862,7 +1967,7 @@ fn shown_rows(buffer: &Buffer) -> Vec<String> {
                 }
                 let symbol = buffer[(x, y)].symbol();
                 row.push_str(symbol);
-                covered = symbol.width().saturating_sub(1);
+                covered = crate::kit::grapheme_cells(symbol).saturating_sub(1);
             }
             row
         })
@@ -1941,6 +2046,54 @@ mod tests {
             needless.is_empty(),
             "{needless} is in BEYOND_HACK but Hack has it, or the GUI no longer draws it"
         );
+        // And the window's own face has every one of them, so none of it
+        // waits on what the system has.
+        let unbundled = missing_from(SYMBOLS, BEYOND_HACK).expect("the bundled face reads");
+        assert!(
+            unbundled.is_empty(),
+            "the bundled symbol face has no {unbundled}: add it to scripts/symbol-font.py"
+        );
+    }
+
+    /// The bundled symbol face is a face both readers take — the backend's
+    /// (rustybuzz, through `Font::new`) and skrifa — on Hack's metrics, so
+    /// it sits on Hack's grid at Hack's size (the backend scales a face on
+    /// Hack's em, line and ascender exactly as it scales Hack), and it is
+    /// a text face, not a colour one.
+    #[test]
+    fn the_bundled_symbol_face_is_on_hacks_metrics() {
+        use skrifa::MetadataProvider;
+        use skrifa::instance::{LocationRef, Size};
+        let metrics = |bytes| {
+            let face = skrifa::FontRef::new(bytes).unwrap();
+            let m = face.metrics(Size::unscaled(), LocationRef::default());
+            (m.units_per_em, m.ascent, m.descent)
+        };
+        assert_eq!(metrics(SYMBOLS), metrics(epaint_default_fonts::HACK_REGULAR));
+        assert!(symbols().is_ok());
+        assert!(!has_colour(SYMBOLS) && !has_colour(epaint_default_fonts::HACK_REGULAR));
+        // Every glyph advances one of Hack's cells.
+        let face = skrifa::FontRef::new(SYMBOLS).unwrap();
+        let hack = skrifa::FontRef::new(epaint_default_fonts::HACK_REGULAR).unwrap();
+        let advance = |face: &skrifa::FontRef, c| {
+            let glyph = face.charmap().map(c).unwrap_or_default();
+            face.glyph_metrics(Size::unscaled(), LocationRef::default()).advance_width(glyph)
+        };
+        for c in BEYOND_HACK.chars() {
+            assert_eq!(advance(&face, c), advance(&hack, 'm'), "{c}");
+        }
+    }
+
+    /// On a Mac the emoji face is Apple Color Emoji, found and judged a
+    /// colour face; a text face found in its place would not be.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_finds_its_colour_emoji_face() {
+        let (path, bytes) = emoji_face().expect("every Mac has Apple Color Emoji");
+        assert!(path.ends_with("Apple Color Emoji.ttc"), "{}", path.display());
+        assert!(has_colour(bytes));
+        let menlo = map_font(Path::new("/System/Library/Fonts/Menlo.ttc")).unwrap();
+        assert!(!has_colour(menlo));
     }
 
     /// The probe finds what the loader can open and not what it cannot:

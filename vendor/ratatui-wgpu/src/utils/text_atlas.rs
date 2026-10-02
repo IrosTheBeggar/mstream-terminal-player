@@ -11,6 +11,8 @@ pub(crate) struct Key {
     pub(crate) style: Modifier,
     pub(crate) glyph: u32,
     pub(crate) font: u64,
+    /// The cells the glyph's box spans.
+    pub(crate) cells: u32,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

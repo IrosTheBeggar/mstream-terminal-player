@@ -11,6 +11,10 @@ use rustybuzz::Face;
 pub struct Font<'a> {
     font: Face<'a>,
     advance: f32,
+    /// The face has an `m`, the glyph its width is read from. One without
+    /// (a symbol or emoji face) only has `.notdef`'s advance to offer, which
+    /// says nothing about a cell, so it does not narrow the grid.
+    sets_width: bool,
     id: u64,
 }
 
@@ -42,12 +46,14 @@ impl<'a> Font<'a> {
         hasher.write_u32(index);
 
         Face::from_slice(data, index).map(|font| {
+            let m = font.glyph_index('m');
             let advance = font
-                .glyph_hor_advance(font.glyph_index('m').unwrap_or_default())
+                .glyph_hor_advance(m.unwrap_or_default())
                 .unwrap_or_default() as f32;
             Self {
                 font,
                 advance,
+                sets_width: m.is_some(),
                 id: hasher.finish(),
             }
         })
@@ -63,6 +69,30 @@ impl Font<'_> {
         &self.font
     }
 
+    /// Whether this face has one picture for `text`: it shapes to a single glyph that advances,
+    /// and that glyph is not `.notdef`. A grapheme the face has no ligature for shapes to several
+    /// and the renderer draws only the first (VENDORED.md, change 16), so a caller that expects
+    /// a joined picture asks this first: faces differ in which sequences they join (Segoe UI
+    /// Emoji has no country flags at all), and that is the face's coverage, not a fault.
+    pub fn joins(
+        &self,
+        text: &str,
+    ) -> bool {
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let shaped = rustybuzz::shape(&self.font, &[], buffer);
+        let mut advancing = shaped
+            .glyph_infos()
+            .iter()
+            .zip(shaped.glyph_positions())
+            .filter(|(_, position)| position.x_advance != 0);
+        matches!(
+            (advancing.next(), advancing.next()),
+            (Some((info, _)), None) if info.glyph_id != 0
+        )
+    }
+
     pub(crate) fn char_width(
         &self,
         height_px: u32,
@@ -70,6 +100,32 @@ impl Font<'_> {
         let scale = height_px as f32 / self.font.height() as f32;
         (self.advance * scale) as u32
     }
+
+    /// [`Font::char_width`] for a fallback face: none (`u32::MAX`, which no
+    /// `min` picks) for a face without an `m`. The last resort always
+    /// counts, with or without one.
+    fn fallback_width(
+        &self,
+        height_px: u32,
+    ) -> u32 {
+        if self.sets_width {
+            self.char_width(height_px)
+        } else {
+            u32::MAX
+        }
+    }
+}
+
+/// How one face is drawn into a cell: font units to pixels, and the baseline
+/// in the face's own units (its distance below the cell's top is
+/// `ascender * scale`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FaceScale {
+    pub(crate) scale: f32,
+    pub(crate) ascender: f32,
+    /// The face is drawn as the last resort is: the same em, line and
+    /// ascender, so its own line fits the cell exactly as before.
+    pub(crate) primary: bool,
 }
 
 /// A collection of fonts to use for rendering. Supports font fallback.
@@ -126,12 +182,15 @@ impl<'a> Fonts<'a> {
     ) {
         self.char_height = height_px;
 
-        self.char_width = std::iter::once(&self.last_resort)
-            .chain(self.regular.iter())
+        let fallbacks = self
+            .regular
+            .iter()
             .chain(self.bold.iter())
             .chain(self.italic.iter())
             .chain(self.bold_italic.iter())
-            .map(|font| font.char_width(height_px))
+            .map(|font| font.fallback_width(height_px));
+        self.char_width = std::iter::once(self.last_resort.char_width(height_px))
+            .chain(fallbacks)
             .min()
             .unwrap_or_default();
     }
@@ -155,7 +214,7 @@ impl<'a> Fonts<'a> {
                 warn!("Non monospace font used in add_fonts, this may cause unexpected rendering.");
             }
 
-            self.char_width = self.char_width.min(font.char_width(self.char_height));
+            self.char_width = self.char_width.min(font.fallback_width(self.char_height));
             if font.font().is_italic() && font.font().is_bold() {
                 self.bold_italic.push(font);
             } else if font.font().is_italic() {
@@ -245,6 +304,42 @@ impl<'a> Fonts<'a> {
         self.char_width
     }
 
+    /// How a face is scaled into the cell. The last resort's line (ascender
+    /// to descender) is the cell's height, as upstream sized every face.
+    /// Every other face is drawn at the last resort's pixels per em, with its
+    /// baseline on the last resort's: upstream fitted each face's own line
+    /// to the cell, so a face with a tall line drew small and one with a
+    /// short line large (Apple SD Gothic Neo's hangul, on a 1200-unit line,
+    /// at 23 px beside Hiragino's kana, on a 1000-unit line, at 27 to 30,
+    /// in a 32 px cell), and a hangul syllable, a kana and a hanzi did not
+    /// sit at one size. A face with the last resort's em, line and
+    /// ascender (another copy of it, or one drawn on its metrics) is
+    /// scaled exactly as before.
+    pub(crate) fn face_scale(
+        &self,
+        face: &Face,
+    ) -> FaceScale {
+        let primary = self.last_resort.font();
+        let height = self.char_height as f32;
+        if face.units_per_em() == primary.units_per_em()
+            && face.height() == primary.height()
+            && face.ascender() == primary.ascender()
+        {
+            return FaceScale {
+                scale: height / face.height() as f32,
+                ascender: face.ascender() as f32,
+                primary: true,
+            };
+        }
+        let primary_scale = height / primary.height() as f32;
+        let scale = primary_scale * primary.units_per_em() as f32 / face.units_per_em() as f32;
+        FaceScale {
+            scale,
+            ascender: primary.ascender() as f32 * primary_scale / scale,
+            primary: false,
+        }
+    }
+
     pub(crate) fn count(&self) -> usize {
         1 + self.bold.len() + self.italic.len() + self.bold_italic.len() + self.regular.len()
     }
@@ -302,8 +397,15 @@ impl<'a> Fonts<'a> {
         last_resort_fake_bold: bool,
         last_resort_fake_italic: bool,
     ) -> (&'fonts Font<'a>, bool, bool) {
-        let mut max = 0;
+        // A face with the cluster's first character, its base, beats any face without it,
+        // and then the face with the most of the cluster wins, as upstream chose. Upstream
+        // counted characters alone, so a base followed by characters that only an emoji face
+        // has (a stray run of tags, the tail of a flag whose 🏴 a text field clipped) was
+        // given to the emoji face, which has no glyph for the base and drew `.notdef`, a box,
+        // over it. With the base's face, the shaper hides the default-ignorable rest.
+        let mut max = (false, 0);
         let mut font = None;
+        let base = cluster.chars().next();
         for (candidate, fake_bold, fake_italic) in fonts.into_iter().chain(std::iter::once((
             &self.last_resort,
             last_resort_fake_bold,
@@ -317,8 +419,9 @@ impl<'a> Fonts<'a> {
                         count += usize::from(candidate.font().glyph_index(ch).is_some());
                         (count, idx)
                     });
-            if count > max {
-                max = count;
+            let has_base = base.is_some_and(|ch| candidate.font().glyph_index(ch).is_some());
+            if (has_base, count) > max {
+                max = (has_base, count);
                 font = Some((candidate, fake_bold, fake_italic));
             }
 
@@ -344,7 +447,7 @@ impl<'a> Fonts<'a> {
 
         target[len..]
             .iter()
-            .map(|font| font.char_width(char_height))
+            .map(|font| font.fallback_width(char_height))
             .min()
             .unwrap_or(u32::MAX)
     }

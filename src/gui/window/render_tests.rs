@@ -17,7 +17,7 @@ use ratatui_wgpu::shaders::DefaultPostProcessor;
 use ratatui_wgpu::wgpu::TextureFormat;
 use ratatui_wgpu::{Builder, Dimensions, Font};
 
-use super::{hack, script_fallbacks, symbol_fallback};
+use super::{emoji_face, hack, script_fallbacks, symbol_fallback, symbols};
 use crate::runtime::block_on;
 use crate::viz_window::overlay::cjk_faces;
 
@@ -424,4 +424,346 @@ fn a_wide_glyph_narrowed_leaves_no_residue() {
     for col in 2..20 {
         assert!(!frame.inked(col, 0), "residue of 本 in cell {col}");
     }
+}
+
+/// An emoji that grows wide in place draws as a fresh one does, and keeps the rest of its row in
+/// place. Typing ❤ then its VS16 into a field turns `❤▏` into `❤️▏`: the heart's cell becomes
+/// two wide, and ratatui's diff sends the cell it now covers as a blank (its clear for terminals
+/// that leave a VS16 emoji's second half behind). The backend wrote that blank over the
+/// continuation, which then shaped as a cell of its own, so everything after the heart on the
+/// row drew one cell right: the live window's search box put its right border a cell past the
+/// box's corner. And the heart itself drew nothing, its second cell keeping the caret: the wide
+/// heart and the narrow one were one entry in the backend's placements, which the narrow one's
+/// removal took away (VENDORED.md, change 18). Also a VS16 emoji over two narrow cells, a
+/// keycap grown in place, and a heart narrowed back (its VS16 deleted).
+#[test]
+fn an_emoji_widened_in_place_keeps_its_row_in_place() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let cases = [
+        ("\u{2764}\u{258F}|", "\u{2764}\u{FE0F}\u{258F}|"),
+        ("\u{2764}x|", "\u{2764}\u{FE0F}|"),
+        ("ab|", "\u{2764}\u{FE0F}|"),
+        ("1x2|", "1\u{FE0F}\u{20E3}2|"),
+        ("\u{2764}\u{FE0F}\u{258F}|", "\u{2764}\u{258F}|"),
+    ];
+    for (before, after) in cases {
+        let frames = vec![vec![Line::from(before)], vec![Line::from(after)]];
+        let Some(frame) = frame_or_skip(render(faces.clone(), 8, frames, TextureFormat::Rgba8Unorm))
+        else {
+            return;
+        };
+        let Some(fresh) = row(&faces, 8, after) else { return };
+        for col in 0..8 {
+            assert!(
+                frame.cell(col, 0) == fresh.cell(col, 0),
+                "{before:?} then {after:?}: cell {col} is not what a fresh {after:?} draws there"
+            );
+        }
+    }
+}
+
+/// Whether a pixel is coloured rather than grey: its channels apart by more
+/// than a grey's (white, the ground, and everything blended between them,
+/// are within a few levels of each other).
+fn coloured(px: [u8; 3]) -> bool {
+    px.iter().max().unwrap() - px.iter().min().unwrap() > 40
+}
+
+/// One row of `line` drawn `cols` wide in `faces` at the tests' size, or a
+/// skip ([`frame_or_skip`]).
+fn row(faces: &[Font<'_>], cols: u32, line: impl Into<Line<'static>>) -> Option<Frame> {
+    let frames = vec![vec![line.into()]];
+    frame_or_skip(render(faces.to_vec(), cols, frames, TextureFormat::Rgba8Unorm))
+}
+
+/// The GUI's own symbols draw from the bundled face with no system face at
+/// all, each inside its one cell, and not as Hack's box for a glyph it
+/// lacks. The window used to borrow them from the system (Menlo here,
+/// DejaVu on Linux, nothing on a bare Windows), so this is what every
+/// platform now draws.
+#[test]
+fn the_symbols_draw_from_the_bundled_face_alone() {
+    let _gpu = one_at_a_time();
+    let text = super::BEYOND_HACK;
+    let Some(alone) = row(&[hack().unwrap()], 8, text) else { return };
+    let Some(frame) = row(&[hack().unwrap(), symbols().unwrap()], 8, text) else { return };
+    assert_eq!(frame.cell_w, alone.cell_w, "the bundled face changed the cell");
+    for (col, ch) in text.chars().enumerate() {
+        let col = col as u32;
+        let Some(([left, right], [top, bottom])) = ink_extent(&frame, col, 1) else {
+            panic!("{ch} left its cell empty");
+        };
+        let (w, h) = (frame.cell_w, frame.cell_h);
+        eprintln!("{ch}: inked x {left}..={right}, y {top}..={bottom} of {w}x{h}");
+        assert!(frame.cell(col, 0) != alone.cell(col, 0), "{ch} draws as Hack's box");
+        assert!(top > 0 && bottom < h - 1, "{ch} touches the cell's top or bottom");
+    }
+    for col in text.chars().count() as u32..8 {
+        assert!(!frame.inked(col, 0), "ink in cell {col}, after the symbols");
+    }
+}
+
+/// A hangul syllable, a kana and a hanzi side by side are one size: every
+/// borrowed face is drawn at Hack's pixels per em (VENDORED.md, change 15).
+/// Each face used to be fitted by its own line, so Apple SD Gothic Neo's
+/// hangul (a 1200-unit line) drew at 23 px beside Hiragino's kana (a
+/// 1000-unit line) at 27 to 30, in a 32 px cell. The ink heights must be
+/// within 15% of each other, and each glyph inside its box.
+#[test]
+fn hangul_kana_and_hanzi_draw_at_one_size() {
+    let _gpu = one_at_a_time();
+    let text = "한か日";
+    if script_fallbacks("en").len() < 3 {
+        eprintln!("skipped: this system lacks a face for kana, hanzi or hangul");
+        return;
+    }
+    for px in [PX, 32] {
+        let mut faces = vec![hack().unwrap()];
+        faces.extend(script_fallbacks("en"));
+        let lines = vec![vec![Line::from(text)]];
+        let drawn = render_at(px, faces, 8, lines, TextureFormat::Rgba8Unorm);
+        let Some(frame) = frame_or_skip(drawn) else { return };
+        let heights: Vec<u32> = text
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| {
+                let Some(([left, right], [top, bottom])) = ink_extent(&frame, i as u32 * 2, 2)
+                else {
+                    panic!("{px} px: {ch} left its cells empty");
+                };
+                let tall = bottom - top + 1;
+                eprintln!("{px} px: {ch} inked x {left}..={right}, y {top}..={bottom}: {tall}");
+                let inside = top > 0 && bottom < frame.cell_h - 1;
+                assert!(inside, "{px} px: {ch} touches its box's edge");
+                tall
+            })
+            .collect();
+        let (low, high) = (*heights.iter().min().unwrap(), *heights.iter().max().unwrap());
+        assert!(
+            f64::from(high) <= f64::from(low) * 1.15,
+            "{px} px: {text} ink heights {heights:?} differ by more than 15%"
+        );
+    }
+}
+
+/// The faces an emoji test draws with: Hack, the bundled symbols, and the
+/// system's colour emoji face; `None`, with a line saying so, on a system
+/// without one (CI's ubuntu has none). `MSTREAM_TEST_EMOJI_FACE=<file>`
+/// draws them with that face instead, so a Mac can check a Noto Color
+/// Emoji (CBDT) or a Segoe UI Emoji (COLR) copied from elsewhere.
+fn emoji_faces() -> Option<Vec<Font<'static>>> {
+    let chosen = std::env::var_os("MSTREAM_TEST_EMOJI_FACE").map(std::path::PathBuf::from);
+    let found = match chosen {
+        Some(path) => {
+            let bytes = std::fs::read(&path).expect("MSTREAM_TEST_EMOJI_FACE is not a file");
+            Some((path, &*Box::leak(bytes.into_boxed_slice())))
+        }
+        None => emoji_face(),
+    };
+    let Some((path, bytes)) = found else {
+        eprintln!("skipped: no colour emoji face on this system");
+        return None;
+    };
+    eprintln!("emoji face: {}", path.display());
+    let Some(emoji) = Font::new(bytes) else {
+        eprintln!("skipped: emoji face failed to parse: {}", path.display());
+        return None;
+    };
+    Some(vec![hack().unwrap(), symbols().unwrap(), emoji])
+}
+
+/// England's flag: the black flag and the tags for "gbeng", closed by
+/// CANCEL TAG.
+const ENGLAND: &str = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+
+/// Every kind of emoji sequence draws as one picture over the two cells
+/// its width claims, in colour, with nothing in the cell after it: an
+/// emoji with VS16, a flag of regional indicators, a subdivision flag of
+/// tags, a ZWJ family and a skin tone. Before: the VS16 heart and the flag
+/// were squeezed into the first of their two cells (their box was measured
+/// by the first character), and a sequence the face could not join drew
+/// its second emoji in the next cell. Each is also a picture of its own,
+/// not its base emoji's: the face joined the sequence.
+///
+/// Faces differ in which sequences they join: Segoe UI Emoji (CI's
+/// windows-latest) has no country flags, so 🇺🇸 there is its first
+/// regional indicator alone. A case the face does not join
+/// ([`Font::joins`]) is skipped with a line, keeping only what holds for
+/// any face: ink in its own cells and nothing in the cells after.
+#[test]
+fn emoji_sequences_draw_as_one_picture_in_their_cells() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let emoji = faces.last().unwrap();
+    let cases = [
+        ("VS16 heart", "\u{2764}\u{FE0F}", "\u{2764}\u{FE0F}"),
+        ("flag", "\u{1F1FA}\u{1F1F8}", "\u{1F1FA}"),
+        ("subdivision flag", ENGLAND, "\u{1F3F4}"),
+        ("ZWJ family", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F468}"),
+        ("skin tone", "\u{1F44D}\u{1F3FD}", "\u{1F44D}"),
+    ];
+    // Every colour face joins some of them (the heart's VS16 at least); none
+    // joined would be the shaping or the face lookup broken, not coverage.
+    let joined = cases.iter().filter(|(_, text, _)| emoji.joins(text)).count();
+    assert!(joined > 0, "the emoji face joined none of the sequences");
+    let Some(bar) = row(&faces, 6, "  |") else { return };
+    for (case, text, base) in cases {
+        assert_eq!(crate::kit::width(text), 2, "{case}: the GUI's width rule");
+        let Some(frame) = row(&faces, 6, format!("{text}|")) else { return };
+        let Some(([left, right], [top, bottom])) = ink_extent(&frame, 0, 2) else {
+            panic!("{case}: its two cells are empty");
+        };
+        let (w, h) = (2 * frame.cell_w, frame.cell_h);
+        eprintln!("{case}: inked x {left}..={right}, y {top}..={bottom} of {w}x{h}");
+        // The `|` after it is in cell 2, where a fresh `|` draws it, and
+        // nothing is past it: true of a sequence degraded to its base too.
+        assert!(frame.cell(2, 0) == bar.cell(2, 0), "{case}: cell 2 is not the `|` alone");
+        for col in 3..6 {
+            assert!(!frame.inked(col, 0), "{case}: ink in cell {col}");
+        }
+        if !emoji.joins(text) {
+            eprintln!("skipped {case}: the emoji face has no one picture for it");
+            continue;
+        }
+        assert!(frame.inked(0, 0) && frame.inked(1, 0), "{case}: not over both of its cells");
+        let pixels = frame.cell(0, 0).into_iter().chain(frame.cell(1, 0));
+        assert!(pixels.filter(|&px| coloured(px)).count() > 0, "{case}: no colour in its cells");
+        if base != text {
+            let Some(alone) = row(&faces, 6, format!("{base}|")) else { return };
+            let same = (0..2).all(|col| frame.cell(col, 0) == alone.cell(col, 0));
+            assert!(!same, "{case}: drew only its base {base}: the face did not join it");
+        }
+    }
+}
+
+/// A sequence no face joins degrades to its base emoji in its own two
+/// cells: a man ZWJ a dinosaur is one grapheme two cells wide, which no
+/// emoji face has a picture for, so it shapes to two emoji, and only the
+/// first is drawn. Before, the dinosaur drew in the next two cells, over
+/// what was there.
+///
+/// Also a pair of regional indicators that is no country (A A): Apple
+/// Color Emoji draws it as Segoe UI Emoji draws every flag, having none (its
+/// first letter alone), so this is that path on a Mac; Noto Color Emoji has
+/// one picture for any unknown pair. Either way: ink in its own two cells,
+/// none after.
+#[test]
+fn an_unjoined_sequence_draws_its_base_and_nothing_after() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let emoji = faces.last().unwrap();
+    let no_country = "\u{1F1E6}\u{1F1E6}";
+    assert_eq!(crate::kit::width(no_country), 2);
+    if emoji.joins(no_country) {
+        eprintln!("the emoji face has one picture for an unknown flag");
+    } else {
+        eprintln!("the emoji face has no picture for an unknown flag: its first letter alone");
+    }
+    let Some(frame) = row(&faces, 6, format!("{no_country}|")) else { return };
+    let Some(bar) = row(&faces, 6, "  |") else { return };
+    assert!(ink_extent(&frame, 0, 2).is_some(), "the unknown flag's cells are empty");
+    assert!(frame.cell(2, 0) == bar.cell(2, 0), "the unknown flag drew into cell 2");
+    for col in 3..6 {
+        assert!(!frame.inked(col, 0), "the unknown flag drew into cell {col}");
+    }
+    let text = "\u{1F468}\u{200D}\u{1F996}";
+    assert_eq!(crate::kit::width(text), 2);
+    assert!(!emoji.joins(text), "the emoji face has a picture for a man ZWJ a dinosaur");
+    let Some(frame) = row(&faces, 6, text) else { return };
+    let Some(alone) = row(&faces, 6, "\u{1F468}") else { return };
+    for col in 0..6 {
+        assert!(frame.cell(col, 0) == alone.cell(col, 0), "cell {col} is not the man alone");
+    }
+    for col in 2..6 {
+        assert!(!frame.inked(col, 0), "ink in cell {col}: the dinosaur overdrew the next cells");
+    }
+}
+
+/// A symbol an emoji face also has keeps its text form from the bundled
+/// face, in the cell's colour: the heavy tick (U+2714) is an emoji
+/// character, but with no VS16 it is the bundled face's monochrome tick,
+/// drawn gold in a gold cell, not a colour picture and not white.
+#[test]
+fn a_text_symbol_takes_the_cells_colour_not_the_emoji_faces() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let gold = Style::new().fg(Color::Rgb(GOLD[0], GOLD[1], GOLD[2]));
+    let Some(frame) = row(&faces, 4, Span::styled("\u{2714}", gold)) else { return };
+    let ink: Vec<[u8; 3]> = frame
+        .cell(0, 0)
+        .into_iter()
+        .filter(|px| px.iter().zip(GROUND).any(|(&got, ground)| got.abs_diff(ground) > 40))
+        .collect();
+    assert!(!ink.is_empty(), "the heavy tick left its cell empty");
+    let fullest = ink.iter().map(|px| px[0]).max().unwrap();
+    let gold_red = GOLD[0];
+    assert!(fullest.abs_diff(gold_red) <= 2, "the tick's ink is {fullest:02x}, not {gold_red:02x}");
+    assert!(ink.iter().all(|px| px[2] < 0xd0), "the tick has white ink: drawn as colour");
+}
+
+/// A pasted England flag shows in a field as one picture: the kit's field
+/// line (the caret after the value, as the search box draws it) keeps 🏴
+/// and its tags together, measures them as the two cells ratatui gives the
+/// grapheme, and the window draws one flag over those cells with the caret
+/// in the cell after them. The kit counts a tag as no cells (unicode-width
+/// gives each zero), so its caret offset agrees with the drawing.
+#[test]
+fn a_pasted_subdivision_flag_shows_in_a_field_as_one_picture() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let value = format!("ab{ENGLAND}");
+    let cursor = value.chars().count();
+    let (line, caret) = crate::kit::input_display_composing(&value, cursor, 20, true, "", None);
+    assert!(line.contains(ENGLAND), "the field's line split the flag: {line:?}");
+    assert_eq!(caret, 4, "the caret is not in the cell after the flag's two");
+    let Some(frame) = row(&faces, 8, line) else { return };
+    let Some(flag) = row(&faces, 8, value) else { return };
+    for col in 0..4 {
+        assert!(frame.cell(col, 0) == flag.cell(col, 0), "cell {col} is not the flag drawn alone");
+    }
+    // Only a face with the flag's picture is sure to cover both cells; one
+    // without (Segoe UI Emoji has no subdivision flags) draws the black
+    // flag alone, whose ink is the face's to place.
+    if faces.last().unwrap().joins(ENGLAND) {
+        assert!(frame.inked(2, 0) && frame.inked(3, 0), "the flag is not over both its cells");
+    } else {
+        eprintln!("the emoji face has no England flag: drawn as its black flag");
+        assert!(frame.inked(2, 0) || frame.inked(3, 0), "the flag's cells are empty");
+    }
+    assert!(frame.inked(4, 0), "no caret in the cell after the flag");
+    for col in 5..8 {
+        assert!(!frame.inked(col, 0), "ink in cell {col}, past the caret");
+    }
+}
+
+/// Tags with no 🏴 before them draw nothing of their own: the cell is its first character
+/// alone. A field that scrolled used to clip a pasted England flag between its 🏴 and its tags,
+/// which hung on the clip mark's cell, and a caret moved in between the 🏴 and its tags has
+/// them hang on the caret's: the renderer gave such a cell to the emoji face, the only face
+/// with the tags, which has no `…`, `▏` or `b` and drew a box over the cell. The base's face
+/// now draws it (VENDORED.md, change 17), and the field no longer cuts the flag at its clip
+/// (`kit::input_window`), so its line begins with the clip and the text.
+#[test]
+fn a_stray_tag_run_draws_as_its_base_alone() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let tags = &ENGLAND['\u{1F3F4}'.len_utf8()..];
+    for base in ["\u{2026}", "\u{258F}", "b"] {
+        let Some(frame) = row(&faces, 4, format!("{base}{tags}b")) else { return };
+        let Some(alone) = row(&faces, 4, format!("{base}b")) else { return };
+        assert!(frame.inked(0, 0), "{base} with tags left its cell empty");
+        for col in 0..4 {
+            assert!(frame.cell(col, 0) == alone.cell(col, 0), "{base} with tags: cell {col}");
+        }
+    }
+    // The reported field: 🏴 does not fit beside the clip, and the tags are not shown either.
+    let value = format!("aaaa{ENGLAND}bbbbbbbbbb");
+    let cursor = value.chars().count();
+    let (line, _) = crate::kit::input_display_composing(&value, cursor, 13, true, "", None);
+    assert!(!line.contains(tags) && !line.contains('\u{E007F}'), "the field split the flag");
+    let clip = line.chars().next().unwrap();
+    let Some(frame) = row(&faces, 14, line) else { return };
+    let Some(alone) = row(&faces, 14, clip.to_string()) else { return };
+    assert!(frame.cell(0, 0) == alone.cell(0, 0), "the clip's cell is not the clip alone");
 }

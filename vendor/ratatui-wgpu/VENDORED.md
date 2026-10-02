@@ -13,7 +13,9 @@ The GUI's own window (`src/gui/window/`) draws through this backend, and it need
 collection, a font id that does not read the whole font, failed presents (and how loudly they
 are logged), fallback glyphs that fit their cells, a wide glyph narrowed without shifting the
 row, a public offscreen path for tests, the build's stage timings, a device made before
-the window and the adapter in use, and a wgpu that keeps to the player's feature set. They
+the window and the adapter in use, a wgpu that keeps to the player's feature set, fallback
+faces drawn at the main face's size, colour emoji drawn whole in their cells, and a cell's
+face chosen by its first character. They
 land here, one change at a time, each recorded below, until an upstream release carries them
 and the patch entry can go.
 
@@ -78,7 +80,9 @@ and the patch entry can go.
    PNG arm re-reads `src_width`/`src_height`, and this tree builds without the `png` feature;
    the two `let mut`s carry `#[cfg_attr(not(feature = "png"), allow(unused_mut))]`. Path
    dependencies are not lint-capped the way registry crates are, so these showed in every
-   build.
+   build. (Superseded by change 16, which replaced `extract_color_image` with
+   `colour_pixels` and `colour_bitmap`; the window builds now turn `png` on, and the new code
+   has no binding that only one arm uses.)
 7. **A font's id hashes a bounded prefix, not every byte** (`fonts.rs`, `Font::new_at`).
    Upstream fed the whole of the font's data to the id's hasher. The player hands the
    backend system collections it memory-maps (`src/gui/window/mod.rs`, `map_font`: Hiragino
@@ -177,6 +181,121 @@ and the patch entry can go.
     backends (Metal, DX12, Vulkan, GLES) come from the player's line, as before. Why: the
     desktop build's wgpu is then the terminal build's, feature for feature (`cargo tree -e
     features -i wgpu`), and no browser backend is compiled into a native binary.
+
+15. **Fallback faces are drawn at the main face's em** (`fonts.rs`, `Fonts::face_scale`;
+    `backend/wgpu_backend.rs`, `flush` and `rasterize_glyph`). Upstream fitted every face's own
+    line (ascender to descender) to the cell's height, so a face's glyphs came out as large as
+    its line was short: in the player's 32 px cell Apple SD Gothic Neo's hangul (a 1200-unit
+    line on a 1000-unit em) drew about 23 px tall beside Hiragino Sans' kana (a 1000-unit
+    line) at 27 to 30, and at 24 px 한, か and 日 inked 17, 20 and 21 px. Now the last resort
+    (the builder's font, Hack in the player) is sized as before, and every other face at the
+    last resort's pixels per em, with its baseline on the last resort's baseline; a face with
+    the last resort's em, line and ascender (another copy of Hack, the player's bundled
+    symbol face, Menlo) takes the old arithmetic unchanged, so its pixels are the same. Since a
+    face drawn that way can reach past the cell where its own line did not, a glyph whose ink
+    (its bounding box) would leave the box is moved back inside, shrunk to the box's height
+    only when its ink is taller than the box. None of the kana, hanzi or hangul the render
+    tests draw on this Mac needed either (Apple Color Emoji's glyph boxes do, but its bitmaps
+    are placed by `colour_bitmap`, change 16, which ignores the outline's offsets).
+    Underlines and strike-outs take the shared baseline too. Measured
+    (`src/gui/window/render_tests.rs`, `hangul_kana_and_hanzi_draw_at_one_size`): 한, か and 日
+    ink 18, 18 and 18 px at 24 px, and 24, 23 and 23 px at 32 px, where the test allows 15%
+    between them. The kana and hanzi are smaller than before (Hiragino's em drew at the cell's
+    height, 32 px; it now draws at Hack's, 27.5 px), the hangul a little larger. Noto Sans
+    CJK (Linux) draws at the same em now rather than at its line's 1448 units: arithmetic, not
+    measured, as Linux was not run.
+16. **Colour emoji, drawn whole in their cells** (`backend/wgpu_backend.rs`, `flush`,
+    `rasterize_glyph`, `colour_pixels`, `colour_bitmap`; `utils/text_atlas.rs`, `Key`;
+    `fonts.rs`, `Font::fallback_width`). The player hands the window the system's colour emoji
+    face (Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji) and builds this crate with its
+    `png` feature. Six things upstream did wrong with one:
+    - A glyph's box was as many cells as the cluster's *first character* is wide, which is
+      narrower than ratatui's cell for an emoji with VS16 (❤ is one cell, ❤️ two) and a flag
+      (each regional indicator is one cell, the pair two), so those pictures were squeezed into
+      the first of their two cells. The box is now the cell's own width, which ratatui measured
+      for the whole grapheme; for every other cell the two agree. The atlas key carries the
+      width (`Key::cells`), since one glyph can stand in a narrow cell and a wide one.
+    - A grapheme the face has no ligature for (a ZWJ sequence it does not know, a skin tone it
+      lacks) shapes to several glyphs that each advance, and each was drawn a cell further on,
+      over whatever the next cells held. Only a cell's first advancing glyph is drawn now: the
+      sequence degrades to its base emoji in its own cells (never to boxes). Combining marks,
+      which do not advance, are drawn as before. The latent limit: a grapheme that shapes to
+      several *advancing* glyphs that are not emoji (Thai or Devanagari in a face that splits
+      a base and its mark into glyphs that each advance) would lose all but the first, the
+      mark among them; no face the window loads today shapes any script that way.
+    - The colour mask (the atlas's "draw these pixels as they are", against "fill this coverage
+      with the cell's colour") was set when the cluster's first character is an emoji, so an
+      emoji character drawn from a text face's outline (the player's ✔) came out white
+      whatever the cell's colour. It is now set when the raster is in colour: a COLR glyph
+      painted, or a colour bitmap decoded. A COLR face whose layers the font reader cannot
+      paint falls back to its glyph's outline in the cell's colour (Segoe UI Emoji has
+      monochrome outlines beside its layers); a bitmap face whose bitmap cannot be decoded
+      draws nothing, as before.
+    - The bitmap came from the largest strike (Apple Color Emoji's 160 px) and was stretched
+      over the whole box with one bilinear sample per pixel, offset by its bearings read as
+      font units (they are the strike's pixels), and a straight-alpha PNG was handed to
+      raqote, which takes premultiplied pixels. `colour_bitmap` now takes the smallest strike
+      at least twice the box's height (then a larger one: Apple Color Emoji's 40, 48 and 52 px
+      strikes have no ZWJ family glyphs), scales the strike's em to the size the face is drawn
+      at (change 15's em, at most the box's shorter side), centres it, and averages the bitmap
+      pixels each box pixel covers, in premultiplied terms, into straight RGBA, which is what
+      the text pipeline's `ALPHA_BLENDING` expects. CBDT's premultiplied BGRA bitmaps are
+      un-premultiplied the same way. PNG decoding uses `png`'s `normalize_to_color8` and takes
+      RGBA, RGB, grey and grey-alpha, where upstream took RGBA and grey-alpha only.
+    - `Font::joins` (public, new) says whether a face shapes a string to one advancing glyph
+      that is not `.notdef`: the player's render tests ask it before demanding a joined
+      picture, since faces differ in which sequences they join (Segoe UI Emoji has no country
+      flags, so 🇺🇸 there is its first regional indicator alone, by the rule above).
+    - A face without an `m` (a symbol or emoji face: its width is read from `m`'s advance,
+      and without one it is `.notdef`'s) narrowed the grid when that advance was small;
+      `Fonts` now leaves such a face out of the cell's width (the last resort always counts).
+    Checked offscreen (`render_tests.rs`): ❤️, 🇺🇸, 🏴󠁧󠁢󠁥󠁮󠁧󠁿, 👨‍👩‍👧 and 👍🏽 each ink both of their
+    cells, in colour, as a picture that differs from their base emoji's (each case a face
+    does not join is skipped with a line, keeping only the cell-after checks), with the cell
+    after them untouched, through Apple Color Emoji (sbix) and through Noto Color Emoji (CBDT);
+    👨‍🦖, which no face joins, draws exactly as 👨 alone; ✔ from a text face is drawn in the
+    cell's gold. COLR (Segoe UI Emoji) goes through upstream's `paint_color_glyph`, with change
+    15's scale and baseline, and was not run here (no COLR face on this Mac).
+17. **A cell's face is one that has its first character** (`fonts.rs`, `Fonts::select_font`).
+    Upstream gave a cell to the face with the most of its characters, whichever they were. A
+    cell whose base is followed by characters only an emoji face has went to the emoji face,
+    which has no glyph for the base, and its `.notdef` (a box) was drawn in the base's place.
+    The player met it in a text field: a pasted England flag (🏴 and six tag characters, which
+    take no cells) scrolled until the field's left clip fell between the 🏴 and its tags, and
+    ratatui hung the tags on the clip mark's cell, `…` with six tags, which Apple Color Emoji
+    won six to Hack's one. A caret moved into the flag, between the 🏴 and its tags, does the
+    same to the caret's `▏`. A face with the base now beats any face without it, and among those
+    the most characters wins as before, so a sequence an emoji face has whole (❤️, a keycap, a
+    flag) still goes to it. With the base's face, rustybuzz hides the default-ignorable rest
+    (Hack shapes each tag to a blank glyph that does not advance). The field no longer makes
+    that cell (the player cuts its line at grapheme boundaries), but text from anywhere else,
+    a title with a stray tag run, takes this path. Checked offscreen (`render_tests.rs`,
+    `a_stray_tag_run_draws_as_its_base_alone`): `…`, `▏` and `b` with England's tags after them
+    draw exactly as they do alone, where upstream's rule drew a box over the first; and live,
+    in the search box on this Mac, `…` with the tags drew as `…` where it was a box.
+18. **An emoji grown wide in place** (`backend/wgpu_backend.rs`, `draw`; the `Rendered` key).
+    Typing ❤ and then its VS16 into a field turns the cell `❤` (one wide) into `❤️` (two
+    wide) where it stands, and two things went wrong, both met live in the search box:
+    - ratatui's diff sends the cell a VS16 emoji newly covers as a blank when that cell's
+      symbol changed (its clear for terminals that leave such an emoji's second half
+      behind). `draw` wrote the blank over the continuation it had just made, and the blank
+      shaped as a cell of its own, so everything after the emoji on the row drew one cell
+      right (the box's right border a cell past its corner). A blank sent for a cell that is
+      still a continuation is now ignored: the glyph covers that cell, and a continuation is
+      only ever left in place while its glyph covers it (change 10 turns the ones a narrower
+      cell uncovers into blanks first).
+    - `Rendered` was keyed by place and glyph, and `Sourced` (by change 16) by place, glyph
+      and width: the narrow heart and the wide one, the same glyph at the same place, were one
+      entry, which the removal of the narrow one's `Sourced` took away. The wide heart drew
+      nothing and its second cell kept the caret drawn there before. `Rendered` now carries
+      the width in its key too.
+    Checked offscreen (`render_tests.rs`, `an_emoji_widened_in_place_keeps_its_row_in_place`):
+    `❤▏|` then `❤️▏|`, `❤x|` then `❤️|`, `ab|` then `❤️|`, `1x2|` then `1️⃣2|` and `❤️▏|`
+    then `❤▏|` each draw cell for cell as the second line does fresh. Before, the first four
+    drew their rows from the emoji's second cell on one cell right, and with the blank
+    ignored but the key unchanged the two hearts grown in place still differed in both their
+    cells (no white of their own, the old `▏` or `x` in the second). Upstream had neither:
+    its widths were the cluster's first character's, which a VS16 does not change.
 
 ### Tests
 
