@@ -154,7 +154,7 @@ jobs:
   # whatever the branch is called. No file name carries the version, and a
   # dry run publishes nothing, so it collides with no release.
   package-desktop:
-    name: ${{ matrix.package }}
+    name: Package ${{ matrix.package }}
     needs: build-desktop
     if: needs.build-desktop.result == 'success'
     runs-on: ${{ matrix.runner }}
