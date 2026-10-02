@@ -774,26 +774,34 @@ pub(super) fn act(gui: &mut Gui, act: &Act) -> bool {
 
 /// The pointer below the top bar (contract clauses 18 and 20). The room
 /// takes what lands inside its area less its first row, every event while
-/// its modal is up, and the drag and release of a press that began in it;
-/// a press there hands it the keys. Anything else lets go of the room's
-/// hover and answers on the GUI's surface — the hallway, the log, the
-/// bar. A GUI modal, the server menu or the log's level menu owns the
-/// pointer while open, and a frame that drew no room (the Log room, the
-/// mini player) takes nothing. True when the room took the event.
+/// its modal is up, and the drag and release of a press that began in it,
+/// even on the top bar's row, where a thumb dragged to the top overshoots:
+/// a release the room never saw would leave its held arrow stepping and
+/// its thumb following later drags. A press in the room hands it the keys.
+/// Anything else lets go of the room's hover and answers on the GUI's
+/// surface — the hallway, the log, the bar. A GUI modal, the server menu
+/// or the log's level menu owns the pointer while open, and a frame that
+/// drew no room (the Log room, the mini player) takes nothing. True when
+/// the room took the event.
 pub(super) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
-    if gui.screen != Screen::Admin
-        || mouse.row == 0
+    if gui.screen != Screen::Admin {
+        return false;
+    }
+    let held = gui.admin.pressed && matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
+    if (mouse.row == 0 && !held)
         || gui.modal_open()
         || gui.servers.drop_open
         || gui.admin.log.menu.is_some()
     {
+        if let Some(room) = gui.admin.room.as_mut() {
+            room.leave();
+        }
         return false;
     }
     let admin = &mut gui.admin;
     let drawn = !admin.room_at.is_empty() && matches!(admin.showing, Hall::Room(_));
     let Some(room) = admin.room.as_mut().filter(|_| drawn) else { return false };
     let at = Position { x: mouse.column, y: mouse.row };
-    let held = admin.pressed && matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
     if !(admin.room_at.contains(at) || room.modal_up() || held) {
         room.leave();
         if matches!(mouse.kind, MouseEventKind::Up(_)) {
@@ -1642,6 +1650,42 @@ mod tests {
         // The hand follows the room's clickables while it is drawn.
         assert!(frame(&mut gui));
         assert!(probe.0.borrow().frames > 0);
+    }
+
+    #[test]
+    fn a_press_in_the_room_released_on_the_top_bar_is_still_the_rooms() {
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        render_at(&mut gui, 100, 30);
+        let mice = |probe: &Probe| probe.0.borrow().mice.clone();
+
+        // A thumb dragged to the top overshoots onto the bar's row: the
+        // drag and the release there are the room's, so its held arrow or
+        // thumb lets go with the button.
+        down(&mut gui, 30, 5);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 30, 0);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 30, 0);
+        let all = mice(&probe);
+        assert_eq!(
+            &all[all.len() - 2..],
+            [(MouseEventKind::Drag(MouseButton::Left), 30, 0), (MouseEventKind::Up(MouseButton::Left), 30, 0)]
+        );
+
+        // Released: a press and a drag on the hallway's empty cells are not
+        // the room's.
+        down(&mut gui, 5, 16);
+        assert_eq!(gui.admin.focus, Focus::Hall);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 5, 10);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 5, 10);
+        assert_eq!(mice(&probe).len(), all.len(), "a hallway drag after the release is not the room's");
+
+        // With no button held, the bar's row is the GUI's, and the room
+        // lets go of its hover there.
+        mouse(&mut gui, MouseEventKind::Moved, 30, 5);
+        let left = probe.0.borrow().left;
+        mouse(&mut gui, MouseEventKind::Moved, 30, 0);
+        assert_eq!(mice(&probe).len(), all.len() + 1, "only the move inside the room reached it");
+        assert_eq!(probe.0.borrow().left, left + 1, "the room was told the pointer left");
     }
 
     #[test]

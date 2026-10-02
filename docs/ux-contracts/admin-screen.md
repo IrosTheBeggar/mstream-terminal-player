@@ -155,8 +155,9 @@ not.
     takes every event under the top bar — its own catchers decide, and a
     click elsewhere is swallowed, so a half-filled form is never lost to
     a hallway click. A press that started in the room keeps the pointer
-    until it is released. When the pointer leaves the room, the room's
-    hover and tooltip are cleared.
+    until it is released, even on the top bar's row, where a thumb dragged
+    to the top lands. When the pointer leaves the room, the room's hover
+    and tooltip are cleared.
 19. **The hallway and the log answer on the GUI's surface.** A click on
     the hallway column gives it the focus; a click on a row opens it. A
     click in the log gives it the focus; its level control opens the menu
