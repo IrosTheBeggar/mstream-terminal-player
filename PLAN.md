@@ -3274,7 +3274,20 @@ flash where it can be avoided. Three lanes put it in, the same shape as the cond
   run the same code here and in CI; the .app assembled from the debug binary opened from
   Finder with its id, name and logo. Only the rc-tag run proves the signing and the plumbing.
 
-**From here, in order.** An rc tag at this head to prove both families and the gate (the
+**The rc run (v0.10.0-rc.1, run 36948308093, 2026-10-02).** The tag at b760349. Proven:
+the reusable build workflow is called for both families; all three terminal Linux legs and
+the desktop linux-x64 leg built inside the cross container and passed the linkage guard
+(the window build keeps NEEDED clean); both Windows legs built, the desktop one compiling
+the Windows-only code (FreeConsole, the launcher stub, the FileDescription) for the first
+time and staging the stub beside the player in its artifact; the gate held: with the
+macOS legs failed, package-desktop, release and channels were skipped, no release object
+exists and latest still names v0.9.0. Not proven: all four macOS legs signed and then
+notarization answered HTTP 403, "A required agreement is missing or has expired" —
+Apple's Developer Program agreement awaiting the account holder's acceptance (v0.9.0 had
+notarized 25 hours earlier), so the bundle's notarization, stapling and the package
+plumbing wait for a rerun of the failed jobs once the agreement is accepted.
+
+**From here, in order.** The rerun of the rc's failed jobs after the agreement (the
 release must come out marked pre-release, channels skipped, latest still v0.9.0); the
 vendored-crate review with an upstream exit for ratatui-wgpu's changes; the merge with the
 window compiled out of the terminal flavour; the Linux leg on real hardware for the desktop
