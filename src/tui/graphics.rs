@@ -32,6 +32,53 @@ pub use native::PictureHost;
 #[cfg(target_arch = "wasm32")]
 pub use stub::Graphics;
 
+/// How the band's waveform looks this frame, for a host that paints it
+/// with pixels rather than eighth blocks (the GUI window; see
+/// [`Graphics::draw_wave`]). The same three channels the glyph band
+/// draws: what is behind the playhead, what is ahead of it, and where a
+/// click would land.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaveLook {
+    /// How far through the track, 0..=1.
+    pub progress: f32,
+    /// The bar's column under the pointer, when a click there would seek.
+    pub hover: Option<u16>,
+    pub played: ratatui::style::Color,
+    /// Ahead of the playhead; the caller brightens it under the pointer,
+    /// as the glyph band does.
+    pub unplayed: ratatui::style::Color,
+    /// The mark where a click would land.
+    pub marker: ratatui::style::Color,
+}
+
+/// A track's shape for a band of a given width (`tui::ui::wave_shape`):
+/// the server's bars scaled so the loudest is 255, and the stretch the
+/// terminal draws that width by, as fractions of the loudest bar — a
+/// column's root mean square `e` stands `(e - floor) / span` of the half.
+// Read only by the window's host (gui/window/covers.rs); the terminal
+// flavour builds it for a host it never has.
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub struct WaveShape {
+    pub peaks: std::sync::Arc<[u8]>,
+    pub floor: f32,
+    pub span: f32,
+}
+
+/// The band's waveform, handed to a host: the track it belongs to, its
+/// shape, and how it looks this frame.
+// Read only by the window's host (gui/window/covers.rs); the terminal
+// flavour builds it for a host it never has.
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub struct WaveSpec {
+    /// The track's identity, hashed from its path: a host keeps a texture
+    /// per track by it.
+    pub key: u64,
+    pub shape: WaveShape,
+    pub look: WaveLook,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use ratatui::Frame;
@@ -52,6 +99,12 @@ mod native {
     pub trait PictureHost: Send + Sync {
         /// `art` belongs in `area` this frame, on a grid of `grid`'s size.
         fn place(&self, area: Rect, grid: Rect, art: &Art);
+
+        /// The band's waveform belongs in `area` this frame. A host that
+        /// paints only pictures ignores it, and the cells it was handed
+        /// stay blank: the caller asks [`Graphics::draw_wave`] only where
+        /// the window is the screen.
+        fn place_wave(&self, _area: Rect, _grid: Rect, _wave: &super::WaveSpec) {}
     }
 
     pub struct Graphics {
@@ -91,6 +144,11 @@ mod native {
         /// hundreds of syscalls a second for an answer that changes on
         /// the scale of someone adjusting their font.
         font_checked: std::time::Instant,
+        /// The playing track's shape as [`draw_wave`](Graphics::draw_wave)
+        /// last worked it out, by the track's key and the band's width:
+        /// the gain reads all 800 bars and the stretch sorts the columns,
+        /// which is once a track (and a resize), not once a frame.
+        wave: Option<(u64, u16, super::WaveShape)>,
         /// How many render-time decodes have run, for the tests that pin
         /// the caching above — a cache that silently stopped caching would
         /// otherwise still pass every drawing assertion.
@@ -316,6 +374,7 @@ mod native {
                 adaptive: false,
                 images_outlive_resize: false,
                 font_checked: std::time::Instant::now(),
+                wave: None,
                 #[cfg(test)]
                 decodes: std::cell::Cell::new(0),
                 #[cfg(test)]
@@ -590,6 +649,13 @@ mod native {
         if area.is_empty() {
             return false;
         }
+        blank_to_ground(frame, area);
+        host.place(area, grid, art);
+        true
+    }
+
+    /// Every cell of `area` emptied, keeping its own background.
+    fn blank_to_ground(frame: &mut Frame, area: Rect) {
         let buffer = frame.buffer_mut();
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
@@ -599,8 +665,50 @@ mod native {
                 cell.set_bg(ground);
             }
         }
-        host.place(area, grid, art);
-        true
+    }
+
+    impl Graphics {
+        /// The band's waveform as pixels, where a host paints them: the
+        /// glyphs already drawn in `area` (the bar's own columns, both
+        /// rows) are blanked to their ground and the shape handed to the
+        /// host to paint over them. False, and nothing touched, everywhere
+        /// a terminal is the screen — the glyphs stand. `shape` is asked
+        /// only when `track` or the width is not the one worked out last.
+        pub fn draw_wave(
+            &mut self,
+            frame: &mut Frame,
+            area: Rect,
+            track: &str,
+            shape: impl FnOnce() -> super::WaveShape,
+            look: super::WaveLook,
+        ) -> bool {
+            let Some(host) = self.host.clone() else { return false };
+            let grid = frame.area();
+            let area = area.intersection(grid);
+            if area.is_empty() {
+                return false;
+            }
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                track.hash(&mut hasher);
+                hasher.finish()
+            };
+            let shape = match &self.wave {
+                Some((held, width, shape)) if *held == key && *width == area.width => shape.clone(),
+                _ => {
+                    let shape = shape();
+                    self.wave = Some((key, area.width, shape.clone()));
+                    shape
+                }
+            };
+            if shape.peaks.is_empty() {
+                return false;
+            }
+            blank_to_ground(frame, area);
+            host.place_wave(area, grid, &super::WaveSpec { key, shape, look });
+            true
+        }
     }
 
     impl Graphics {
@@ -1284,6 +1392,17 @@ mod stub {
         }
 
         pub fn draw(&mut self, _frame: &mut Frame, _area: Rect, _art: &Art) -> bool {
+            false
+        }
+
+        pub fn draw_wave(
+            &mut self,
+            _frame: &mut Frame,
+            _area: Rect,
+            _track: &str,
+            _shape: impl FnOnce() -> super::WaveShape,
+            _look: super::WaveLook,
+        ) -> bool {
             false
         }
     }

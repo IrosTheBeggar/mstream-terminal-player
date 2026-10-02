@@ -19,8 +19,9 @@
 //! opens the window at another grid than 100×30 — 70,20 shows the mini
 //! player. `MSTREAM_WINDOW_DUMP=<dir>` writes what the window holds as text,
 //! and the same Gui drawn into a `TestBackend` of the same size, a few
-//! frames in, and says on stderr whether they match. That is how the spike
-//! checks fidelity without reading pixels. `MSTREAM_WINDOW_SCRIPT=<file>`
+//! frames in (`MSTREAM_WINDOW_DUMP_AT=<frame>` for a later one), and says
+//! on stderr whether they match. That is how the spike checks fidelity
+//! without reading pixels. `MSTREAM_WINDOW_SCRIPT=<file>`
 //! plays keys, text and pointer gestures into the window and dumps what it
 //! shows, one step a frame (script.rs has the commands): the spike's way to
 //! prove input on a machine that may not send a window synthetic events.
@@ -56,6 +57,7 @@ mod input;
 mod render_tests;
 mod script;
 mod stats;
+mod waves;
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -195,7 +197,7 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     let dump = std::env::var_os("MSTREAM_WINDOW_DUMP").map(PathBuf::from);
     // Covers are the window's to draw: every Graphics the GUI forks for a
     // slot is forked from this one, so they all record onto the board.
-    let board = Arc::new(Board::default());
+    let board = Arc::new(Board::with_palette(named_colours(th())));
     gui.app.graphics = crate::tui::graphics::Graphics::hosted(board.clone());
     // And the board hears of every overlay as it is drawn, so a cover a
     // modal opens over is not painted over the modal on the frame it opens.
@@ -214,6 +216,10 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
         asked: None,
         frames: 0,
         dump,
+        dump_at: std::env::var("MSTREAM_WINDOW_DUMP_AT")
+            .ok()
+            .and_then(|at| at.trim().parse().ok())
+            .unwrap_or(DUMP_AT_FRAME),
         exit_code: 0,
         done: false,
         translator: Translator::new(),
@@ -435,6 +441,10 @@ struct App {
     asked: Option<Instant>,
     frames: u32,
     dump: Option<PathBuf>,
+    /// The frame the fidelity dump is taken at: [`DUMP_AT_FRAME`], or
+    /// `MSTREAM_WINDOW_DUMP_AT` for a screen a script reaches later (Now
+    /// Playing with a track's waveform in, say).
+    dump_at: u32,
     exit_code: i32,
     /// The teardown has run.
     done: bool,
@@ -1105,7 +1115,7 @@ impl App {
             }
         }
         self.frames += 1;
-        if self.frames == DUMP_AT_FRAME
+        if self.frames == self.dump_at
             && let Some(dir) = &self.dump
             && let Err(e) = dump(dir, terminal, &mut self.gui)
         {
@@ -1544,6 +1554,11 @@ impl App {
             format!("{} at {}", placed.len(), rects.join(" "))
         };
         let covers = format!("{covers}, {under} under an overlay");
+        // And the band's waveform, painted or standing under an overlay.
+        let (waves, waves_under) = self.board.placed_waves();
+        let waves: Vec<String> =
+            waves.iter().map(|r| format!("{},{} {}×{}", r.x, r.y, r.width, r.height)).collect();
+        let covers = format!("{covers}; waves [{}], {waves_under} under", waves.join(" "));
         let minimised = match self.window.as_ref().and_then(|window| window.is_minimized()) {
             Some(true) => "yes",
             Some(false) => "no",

@@ -3254,6 +3254,33 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    /// The Auto-DJ sources picker in a terminal: its footprint is the
+    /// window's business (the pictures it paints beside the cells), so a
+    /// terminal's GUI registers none. With one, a kitty or sixel cover
+    /// beside the picker turned to the mosaic and the picker's open and
+    /// close each spent a hot frame, for a picker the terminal's cells
+    /// already drew over the picture's cells where they met.
+    #[test]
+    fn a_terminal_registers_no_footprint_for_the_dj_sources_picker() {
+        let mut gui = test_gui();
+        gui.app.connected = true;
+        gui.app.now_playing = Some(track("music/a.mp3", "Night Drive", 252.0));
+        gui.act(Act::Screen(Screen::NowPlaying));
+        draw(&mut gui);
+        draw(&mut gui);
+        let libraries = (0..40).map(|i| format!("Library {i}")).collect();
+        gui.app.dj_panel.sources = Some(crate::tui::app::GenrePicker { all: libraries, ..Default::default() });
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("Library 0"), "the picker is drawn:\n{all}");
+        assert!(!gui.ui.overlays_moved(), "the frame it opens asks for no hot frame");
+        draw(&mut gui);
+        let screen = Rect::new(0, 0, 100, 30);
+        assert!(!gui.ui.covered_last_frame(screen), "nothing stands the cover or the band down");
+        gui.app.dj_panel.sources = None;
+        draw(&mut gui);
+        assert!(!gui.ui.overlays_moved(), "nor the frame it closes");
+    }
+
     /// A connected App with a listed Files pane, no server involved.
     fn browsing_gui() -> Gui {
         let mut gui = test_gui();

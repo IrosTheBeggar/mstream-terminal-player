@@ -60,7 +60,10 @@ pub(crate) fn view_rect(area: Rect, banner: bool, footer: bool) -> Rect {
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     let regions = now_regions(view);
     let mosaic = gui.now.cover.is_some_and(|cover| gui.ui.covered_last_frame(cover));
-    let extras = NowExtras { reserve: TRANSPORT_ROWS, mosaic, no_hints: true };
+    // The band's waveform by the same rule: painted by the window only
+    // where nothing stood over the band last frame.
+    let wave_text = gui.ui.covered_last_frame(gui.now.band);
+    let extras = NowExtras { reserve: TRANSPORT_ROWS, mosaic, no_hints: true, wave_text };
     let layout = render_now_view(frame, &regions, &mut gui.app, &extras);
     gui.now.band = layout.band;
     gui.now.cover = layout.cover;
@@ -100,9 +103,20 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
 
     // The Auto-DJ tab's sources picker is the TUI's own overlay: the GUI
     // draws its genre picker and chooser as kit modals; this one it lends
-    // from the view it reuses.
+    // from the view it reuses. In the window it is registered as an
+    // overlay as theirs are, so the pictures the window paints beside the
+    // cells (the cover beside it, the band's waveform under a long list)
+    // stand down rather than paint over it. Only there: in a terminal the
+    // picture goes out with the cells (kitty's placeholders are cells the
+    // picker's draw replaces where they meet), and the TUI it is lent from
+    // never stood its cover down for it either. A footprint there only
+    // traded the picture for the mosaic and spent a hot frame on the
+    // picker's open and close.
     if gui.app.dj_panel.sources.is_some() {
-        crate::tui::ui::render_dj_picker(frame, view, &gui.app);
+        let picker = crate::tui::ui::render_dj_picker(frame, view, &gui.app);
+        if gui.app.graphics.is_hosted() && !picker.is_empty() {
+            gui.ui.overlay(picker);
+        }
     }
 
     // The screen's note, where the TUI's key hints would be (clause 9): the

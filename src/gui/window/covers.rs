@@ -45,15 +45,17 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ratatui::layout::Rect;
-use ratatui_wgpu::PostProcessor;
+use ratatui::style::Color;
+use ratatui_wgpu::{ColorTable, PostProcessor};
 use ratatui_wgpu::shaders::DefaultPostProcessor;
 use wgpu::{
     CommandEncoder, Device, Queue, RenderPipeline, SurfaceConfiguration, TextureFormat,
     TextureView,
 };
 
+use super::waves::{PlacedWave, WavePass};
 use crate::tui::art::Art;
-use crate::tui::graphics::PictureHost;
+use crate::tui::graphics::{PictureHost, WaveSpec};
 
 /// How many cover textures stay on the GPU. The wall's page and the queue
 /// panel together are under twenty; this keeps a page turn back and forth
@@ -114,6 +116,10 @@ struct Pixels {
 #[derive(Default)]
 pub(super) struct Board {
     inner: Mutex<Inner>,
+    /// What a named colour draws as in this window (`named_colours`), so
+    /// a wave's colours are the cells' own: the TUI's theme defaults are
+    /// palette names, which only the window's table turns into bytes.
+    palette: ColorTable,
 }
 
 #[derive(Default)]
@@ -127,6 +133,9 @@ struct Inner {
     arrivals: Vec<Pixels>,
     /// The worker's resamples, likewise.
     decoded: Vec<Pixels>,
+    /// This frame's waveforms (waves.rs): the Now Playing band's, one a
+    /// rect.
+    waves: Vec<PlacedWave>,
 }
 
 impl Board {
@@ -139,7 +148,56 @@ impl Board {
     /// A frame is about to draw: last frame's covers are forgotten, so a
     /// cover that is no longer drawn is no longer painted.
     pub(super) fn begin_frame(&self) {
-        self.lock().placed.clear();
+        let mut inner = self.lock();
+        inner.placed.clear();
+        inner.waves.clear();
+    }
+
+    /// A board whose waves take named colours from `palette`.
+    pub(super) fn with_palette(palette: ColorTable) -> Board {
+        Board { palette, ..Board::default() }
+    }
+
+    /// A theme colour as the window draws it: what the backend's own
+    /// table answers for the cells (ratatui-wgpu's `ColorTable::c2c`,
+    /// which is the crate's own), with the xterm cube for an index.
+    fn rgb(&self, colour: Color) -> [u8; 3] {
+        let p = &self.palette;
+        match colour {
+            Color::Rgb(r, g, b) => [r, g, b],
+            Color::Reset | Color::White => p.WHITE,
+            Color::Black => p.BLACK,
+            Color::Red => p.RED,
+            Color::Green => p.GREEN,
+            Color::Yellow => p.YELLOW,
+            Color::Blue => p.BLUE,
+            Color::Magenta => p.MAGENTA,
+            Color::Cyan => p.CYAN,
+            Color::Gray => p.GRAY,
+            Color::DarkGray => p.DARKGRAY,
+            Color::LightRed => p.LIGHTRED,
+            Color::LightGreen => p.LIGHTGREEN,
+            Color::LightYellow => p.LIGHTYELLOW,
+            Color::LightBlue => p.LIGHTBLUE,
+            Color::LightMagenta => p.LIGHTMAGENTA,
+            Color::LightCyan => p.LIGHTCYAN,
+            Color::Indexed(index) => xterm(index, p),
+        }
+    }
+
+    /// This frame's waves as placed, for the render tests.
+    #[cfg(test)]
+    pub(super) fn waves_for_tests(&self) -> Vec<PlacedWave> {
+        self.lock().waves.clone()
+    }
+
+    /// Where this frame's waves are painted, and how many stand under an
+    /// overlay: for the script's dump, beside the covers.
+    pub(super) fn placed_waves(&self) -> (Vec<Rect>, usize) {
+        let inner = self.lock();
+        let painted = inner.waves.iter().filter(|wave| !wave.under).map(|wave| wave.rect);
+        let under = inner.waves.iter().filter(|wave| wave.under).count();
+        (painted.collect(), under)
     }
 
     /// Something was drawn over the base layer this frame — told by the
@@ -152,9 +210,15 @@ impl Board {
     /// the next frame the draw site draws the mosaic there itself, as it
     /// always has.
     pub(super) fn overlay(&self, rect: Rect) {
-        for placed in &mut self.lock().placed {
+        let mut inner = self.lock();
+        for placed in &mut inner.placed {
             if placed.rect.intersects(rect) {
                 placed.under = true;
+            }
+        }
+        for wave in &mut inner.waves {
+            if wave.rect.intersects(rect) {
+                wave.under = true;
             }
         }
     }
@@ -178,6 +242,49 @@ impl PictureHost for Board {
         }
         let grid = (grid.width, grid.height);
         inner.placed.push(Placed { art: art.id(), rect: area, grid, under: false });
+    }
+
+    fn place_wave(&self, area: Rect, grid: Rect, wave: &WaveSpec) {
+        let look = wave.look;
+        let colours = [self.rgb(look.played), self.rgb(look.unplayed), self.rgb(look.marker)];
+        let placed = PlacedWave {
+            key: wave.key,
+            peaks: wave.shape.peaks.clone(),
+            floor: wave.shape.floor,
+            span: wave.shape.span,
+            rect: area,
+            grid: (grid.width, grid.height),
+            progress: look.progress,
+            hover: look.hover,
+            colours,
+            under: false,
+        };
+        // One wave a rect: the dump's second render of the same frame
+        // places it again, and it is the same wave.
+        let mut inner = self.lock();
+        inner.waves.retain(|other| other.rect != area);
+        inner.waves.push(placed);
+    }
+}
+
+/// An xterm 256-colour index as bytes: the sixteen named ones from the
+/// palette, the 6×6×6 cube, then the grey ramp.
+fn xterm(index: u8, p: &ColorTable) -> [u8; 3] {
+    let named = [
+        p.BLACK, p.RED, p.GREEN, p.YELLOW, p.BLUE, p.MAGENTA, p.CYAN, p.GRAY, p.DARKGRAY,
+        p.LIGHTRED, p.LIGHTGREEN, p.LIGHTYELLOW, p.LIGHTBLUE, p.LIGHTMAGENTA, p.LIGHTCYAN, p.WHITE,
+    ];
+    match index {
+        0..=15 => named[usize::from(index)],
+        16..=231 => {
+            let i = index - 16;
+            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            [level(i / 36), level(i / 6 % 6), level(i % 6)]
+        }
+        _ => {
+            let grey = 8 + (index - 232) * 10;
+            [grey; 3]
+        }
     }
 }
 
@@ -266,6 +373,8 @@ pub(super) struct CoverPost {
     uploads: u64,
     decodes: u64,
     worker: Option<Sender<Request>>,
+    /// The band's waveform, painted after the covers.
+    waves: WavePass,
 }
 
 /// Four floats a vertex: NDC position, then texture coordinate.
@@ -283,6 +392,7 @@ impl CoverPost {
             "texture_bytes": textures().map(Texture::bytes).sum::<u64>(),
             "uploads": self.uploads,
             "resamples_asked": self.decodes,
+            "waves": self.waves.report(),
         })
     }
 
@@ -641,6 +751,7 @@ impl PostProcessor for CoverPost {
             uploads: 0,
             decodes: 0,
             worker: None,
+            waves: WavePass::compile(device, surface_config),
         }
     }
 
@@ -666,11 +777,11 @@ impl PostProcessor for CoverPost {
         self.text.process(encoder, queue, text_view, surface_config, surface_view);
         self.processed += 1;
 
-        let (placed, arrivals, decoded) = {
+        let (placed, arrivals, decoded, waves) = {
             let mut inner = self.board.lock();
             let arrivals = std::mem::take(&mut inner.arrivals);
             let decoded = std::mem::take(&mut inner.decoded);
-            (inner.placed.clone(), arrivals, decoded)
+            (inner.placed.clone(), arrivals, decoded, inner.waves.clone())
         };
         for mut pixels in arrivals {
             let cover = Cover {
@@ -779,6 +890,10 @@ impl PostProcessor for CoverPost {
         }
         self.drawn = placed;
         self.evict();
+        // The band's waveform over the text and any cover: it shares no
+        // cells with a cover, so the order is only for what an overlay's
+        // own picture would stand over.
+        self.waves.process(&self.device, encoder, queue, surface_config, surface_view, &waves);
     }
 
     /// The backend composites and presents only when a cell changed; a
@@ -786,7 +901,7 @@ impl PostProcessor for CoverPost {
     /// changing, or a sharper texture landing must present too.
     fn needs_update(&self) -> bool {
         let inner = self.board.lock();
-        inner.placed != self.drawn || !inner.decoded.is_empty()
+        inner.placed != self.drawn || !inner.decoded.is_empty() || self.waves.changed(&inner.waves)
     }
 }
 

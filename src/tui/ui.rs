@@ -393,6 +393,10 @@ pub(crate) struct NowExtras {
     /// Leave the key hints off the last row; the modes readout draws
     /// either way.
     pub no_hints: bool,
+    /// Draw the band's waveform as glyphs even where the window could
+    /// paint it: an overlay stood over the band last frame (the cover's
+    /// rule, `mosaic`, for the band).
+    pub wave_text: bool,
 }
 
 /// Where the shared view put the parts a pointer surface wires up.
@@ -1397,6 +1401,9 @@ pub(crate) fn render_now_view(
         Paragraph::new(progress_line(app, gauge_area.width as usize, hovering(app, gauge_area), glyphs().mirrored)),
         bar_area,
     );
+    if !extras.wave_text {
+        hosted_wave(frame, app, Rect { height: wave_area.height + bar_area.height, ..gauge_area });
+    }
 
     // The keys that work here, and the modes -- there is no footer down here
     // to carry either, and going full screen should not quietly hide whether
@@ -2067,7 +2074,14 @@ fn resample_bars(bars: &[u8], columns: usize) -> Vec<u8> {
     if columns == 0 || bars.is_empty() {
         return Vec::new();
     }
-    let energy: Vec<f64> = (0..columns)
+    let energy = column_energy(bars, columns);
+    let Some((floor, span)) = stretch(&energy) else { return vec![0; columns] };
+    energy.iter().map(|e| (((e - floor) / span * 255.0).round().clamp(0.0, 255.0)) as u8).collect()
+}
+
+/// Each column's root-mean-square over the bars that share it.
+fn column_energy(bars: &[u8], columns: usize) -> Vec<f64> {
+    (0..columns)
         .map(|column| {
             let start = column * bars.len() / columns;
             let end = ((column + 1) * bars.len() / columns).max(start + 1).min(bars.len());
@@ -2075,7 +2089,12 @@ fn resample_bars(bars: &[u8], columns: usize) -> Vec<u8> {
             let sum: f64 = window.iter().map(|b| f64::from(*b).powi(2)).sum();
             (sum / window.len() as f64).sqrt()
         })
-        .collect();
+        .collect()
+}
+
+/// What [`resample_bars`] maps onto the full height, as (floor, span) in
+/// the energies' own units; `None` for a silent track.
+fn stretch(energy: &[f64]) -> Option<(f64, f64)> {
 
     // Stretched onto the band this track actually uses, rather than onto
     // 0..255. Measured against demo.mstream.io: after RMS, a densely
@@ -2092,19 +2111,86 @@ fn resample_bars(bars: &[u8], columns: usize) -> Vec<u8> {
     // almost nothing.
     let loudest = energy.iter().copied().fold(0.0_f64, f64::max);
     if loudest <= 0.0 {
-        return vec![0; columns];
+        return None;
     }
-    let mut sorted: Vec<f64> = energy.clone();
+    let mut sorted: Vec<f64> = energy.to_vec();
     sorted.sort_by(f64::total_cmp);
     let quiet = sorted[sorted.len() / 10];
     // A track with no variation to stretch — a test tone, or a bar one
     // column wide — has `quiet == loudest`, and stretching it would map its
     // only height to nothing. Show it at its own level instead.
-    let (floor, span) = match loudest - quiet > f64::EPSILON {
+    Some(match loudest - quiet > f64::EPSILON {
         true => (quiet, loudest - quiet),
         false => (0.0, loudest),
+    })
+}
+
+/// The band's shape for a pixel surface, `columns` wide: every one of the
+/// server's bars, and the terminal's own stretch to draw them by.
+///
+/// The bars are only scaled, the loudest to 255 — normalised once a track.
+/// [`resample_bars`]' stretch (the tenth percentile of the columns'
+/// energies onto the bottom, the loudest onto the top) cannot be applied to
+/// the bars themselves: it has an offset and a clamp, which the root mean
+/// square a column takes does not commute with, and stretching the 800
+/// bars and then squashing them drew the demo's 6AM up to two eighths off
+/// the terminal's shape in 38 of its 84 columns. A gain does commute, so
+/// the window takes the column's root mean square of these bars and THEN
+/// stretches by `floor` and `span` (fractions of the loudest bar), which is
+/// the terminal's arithmetic in the terminal's order: over a window one
+/// column wide it is the terminal's column.
+pub(crate) fn wave_shape(bars: &[u8], columns: usize) -> crate::tui::graphics::WaveShape {
+    let loudest = bars.iter().copied().max().unwrap_or(0);
+    let gain = if loudest == 0 { 0.0 } else { 255.0 / f64::from(loudest) };
+    let peaks: Vec<u8> = bars.iter().map(|b| (f64::from(*b) * gain).round() as u8).collect();
+    let loudest = f64::from(loudest);
+    let (floor, span) = stretch(&column_energy(bars, columns.max(1)))
+        .map_or((0.0, 1.0), |(floor, span)| (floor / loudest, span / loudest));
+    crate::tui::graphics::WaveShape { peaks: peaks.into(), floor: floor as f32, span: span as f32 }
+}
+
+/// The band's waveform as pixels, where the window paints them: over the
+/// bar's own columns in both rows (`band`), the time beside it left as
+/// text. Only with the mirrored glyphs (the band's two halves are the one
+/// shape) and only for a track with a shape; a terminal's `Graphics` has
+/// no host and leaves the glyphs just drawn standing.
+fn hosted_wave(frame: &mut Frame, app: &mut App, band: Rect) {
+    if !glyphs().mirrored || band.height < 2 {
+        return;
+    }
+    let (_, _, Some(bar_width)) = progress_parts(app, band.width as usize) else { return };
+    let hover = hovering(app, band)
+        .filter(|_| app.status.duration > 0.0)
+        .filter(|at| usize::from(*at) < bar_width);
+    let look = crate::tui::graphics::WaveLook {
+        progress: label_progress(app) as f32,
+        hover,
+        played: accent(),
+        unplayed: if hover.is_some() { folder() } else { dim() },
+        marker: Color::White,
     };
-    energy.iter().map(|e| (((e - floor) / span * 255.0).round().clamp(0.0, 255.0)) as u8).collect()
+    let Some(track) = app.now_playing.as_ref() else { return };
+    let Some(Some(bars)) = app.waveforms.get(&track.filepath) else { return };
+    let area = Rect { width: bar_width as u16, ..band };
+    app.graphics.draw_wave(frame, area, &track.filepath, || wave_shape(bars, bar_width), look);
+}
+
+/// The playhead the window paints, on the time label's cadence: the
+/// position rounded to the whole second the label shows (`fmt_duration`).
+///
+/// The wave's playhead is pixels, and at a hundred columns a playing track
+/// moves it a pixel about eight times a second; each one is a present the
+/// cells never asked for, five times the glyph band's. Stepped with the
+/// label, it moves on the frame the label's own cells change, which
+/// presents anyway, so a playing track costs what it did as glyphs. A
+/// smooth playhead is a pacing decision (hot frames while it shows), not
+/// this one's to make.
+fn label_progress(app: &App) -> f64 {
+    let status = &app.status;
+    if status.duration <= 0.0 || !status.duration.is_finite() || !status.position.is_finite() {
+        return 0.0;
+    }
+    (status.position.max(0.0).round() / status.duration).clamp(0.0, 1.0)
 }
 
 /// A column's amplitude as eighths of one cell.
@@ -2938,7 +3024,9 @@ fn render_dj_overlays(frame: &mut Frame, area: Rect, app: &App) {
 /// Whether a picker row is switched on, however the picker decides that.
 type Chosen<'a> = Box<dyn Fn(&str) -> bool + 'a>;
 
-pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
+/// Returns the box it drew, empty when no picker is open: a pixel surface
+/// registers it as an overlay (gui/now.rs), as the kit's modals do.
+pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) -> Rect {
     let sources_off = app.dj_sources_off();
     let (picker, title, empty, chosen): (&crate::tui::app::GenrePicker, String, &str, Chosen<'_>) =
         if let Some(picker) = app.dj_panel.sources.as_ref() {
@@ -2956,7 +3044,7 @@ pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
         let genres = library.genres;
         (picker, title, "  no genres tagged", Box::new(move |name: &str| genres.iter().any(|g| g == name)))
     } else {
-        return;
+        return Rect::default();
     };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -3003,6 +3091,7 @@ pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
     frame.render_widget(Paragraph::new(lines), inner);
+    box_area
 }
 
 /// "Start Auto DJ with what?" — the two answers and the remember box.
@@ -5123,6 +5212,71 @@ mod tests {
                 "the rows all go somewhere at {height}"
             );
         }
+    }
+
+    /// The window's band (gui/window/waves.rs) takes a column's root mean
+    /// square of `wave_shape`'s bars and then stretches it by the shape's
+    /// floor and span. Done here on the CPU, column by column, that is the
+    /// terminal's `resample_bars` to within rounding; and the bars, only
+    /// scaled, squash to the terminal's columns as the server's do.
+    #[test]
+    fn the_windows_waveform_is_the_terminals_at_every_column() {
+        // A loud body with a quiet break and a fade, jittered bar to bar.
+        let mut seed = 7u32;
+        let bars: Vec<u8> = (0..800)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let jitter = f64::from((seed >> 16) % 60);
+                let level = match i {
+                    0..=40 => f64::from(i) * 4.0,
+                    400..=470 => 50.0,
+                    760.. => f64::from(800 - i) * 4.0,
+                    _ => 170.0,
+                };
+                (level + jitter).min(230.0) as u8
+            })
+            .collect();
+        for columns in [30, 84, 124, 200] {
+            let shape = wave_shape(&bars, columns);
+            assert_eq!(shape.peaks.iter().copied().max(), Some(255), "scaled to the loudest");
+            let terminal = resample_bars(&bars, columns);
+            let scaled: Vec<u8> = shape.peaks.to_vec();
+            for (column, &want) in terminal.iter().enumerate() {
+                let start = column * 800 / columns;
+                let end = ((column + 1) * 800 / columns).max(start + 1);
+                let window = &scaled[start..end];
+                let squares: f64 = window.iter().map(|b| (f64::from(*b) / 255.0).powi(2)).sum();
+                let mean = squares / window.len() as f64;
+                let level = (mean.sqrt() - f64::from(shape.floor)) / f64::from(shape.span);
+                let got = (level.clamp(0.0, 1.0) * 255.0).round() as i32;
+                assert!(
+                    (got - i32::from(want)).abs() <= 2,
+                    "{columns} columns, column {column}: the window's {got}, the terminal's {want}"
+                );
+            }
+            let resquashed = resample_bars(&scaled, columns);
+            let off = resquashed.iter().zip(&terminal).map(|(a, b)| a.abs_diff(*b)).max();
+            assert!(off <= Some(2), "{columns} columns: re-squashed {off:?} off the terminal's");
+        }
+    }
+
+    /// The window's playhead rounds to the second the time label shows, so
+    /// the two move on the same frame; a length nobody knows is the start.
+    #[test]
+    fn the_windows_playhead_steps_with_the_time_label() {
+        let mut app = App::new(None, None, None);
+        app.status.duration = 100.0;
+        for (position, want) in [(30.0, 0.30), (30.4, 0.30), (30.5, 0.31), (30.9, 0.31), (99.7, 1.0)] {
+            app.status.position = position;
+            assert!((label_progress(&app) - want).abs() < 1e-9, "{position}: {}", label_progress(&app));
+            assert_eq!(
+                fmt_duration(app.status.position),
+                fmt_duration(label_progress(&app) * app.status.duration),
+                "the playhead and the label agree at {position}"
+            );
+        }
+        app.status.duration = 0.0;
+        assert_eq!(label_progress(&app), 0.0);
     }
 
     #[test]

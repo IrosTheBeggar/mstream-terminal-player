@@ -894,3 +894,533 @@ fn a_cover_under_a_modal_that_opens_this_frame_is_not_painted_over_it() {
     let Some((control, under, _)) = frame_or_skip(covers_and_a_modal(false)) else { return };
     assert!(magenta(&control, under) > 0, "without the watch the flash does not show");
 }
+
+/// One frame's drawing, handed the frame and a hosted `Graphics`.
+type Draw = Box<dyn FnMut(&mut ratatui::Frame, &mut crate::tui::graphics::Graphics)>;
+
+/// The band's waveform as the window paints it (waves.rs): a headless
+/// backend with the window's post processor, a grid of `cols`×`rows` at
+/// [`PX`], and `draw` given the frame and a hosted `Graphics` on the board.
+fn waved(
+    cols: u32,
+    rows: u32,
+    format: TextureFormat,
+    mut draws: Vec<Draw>,
+) -> Result<(Frame, Vec<bool>), String> {
+    use std::sync::Arc;
+
+    use ratatui_wgpu::PostProcessor;
+
+    use super::covers::{Board, CoverPost};
+    use crate::tui::graphics::Graphics;
+
+    let board = Arc::new(Board::default());
+    let wide = 4096;
+    let builder = Builder::<CoverPost>::from_font_and_user_data(hack()?, board.clone())
+        .with_font_size_px(PX)
+        .with_width_and_height(Dimensions {
+            width: NonZeroU32::new(wide).unwrap(),
+            height: NonZeroU32::new(rows * PX).unwrap(),
+        })
+        .with_bg_color(Color::Rgb(GROUND[0], GROUND[1], GROUND[2]))
+        .with_fg_color(Color::White);
+    let mut backend = block_on(builder.build_headless_with_format(format))?
+        .map_err(|e| format!("no headless wgpu backend: {e}"))?;
+    let reported = backend.window_size().map_err(|e| e.to_string())?;
+    let cell_w = wide / u32::from(reported.columns_rows.width);
+    backend.resize(cols * cell_w, rows * PX);
+    let mut graphics = Graphics::hosted(board.clone());
+    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+    // After each frame: would the next, placing the same, present?
+    let mut wants = Vec::new();
+    for draw in &mut draws {
+        board.begin_frame();
+        terminal.draw(|frame| draw(frame, &mut graphics)).map_err(|e| e.to_string())?;
+        wants.push(terminal.backend().post_processor().needs_update());
+    }
+    let pixels = terminal.backend().read_pixels().ok_or("the frame could not be read back")?;
+    Ok((Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX }, wants))
+}
+
+/// Peaks in blocks of a hundred bars, loud then quiet: the first eighth of
+/// the track loud, the second quiet, and so on.
+fn blocky_peaks() -> Vec<u8> {
+    (0..800).map(|bar| if (bar / 100) % 2 == 0 { 255 } else { 32 }).collect()
+}
+
+/// The blocky peaks as the band's shape for a 30-column bar.
+fn blocky_shape() -> crate::tui::graphics::WaveShape {
+    crate::tui::ui::wave_shape(&blocky_peaks(), 30)
+}
+
+/// The pixel test: the shape follows the peaks, the playhead splits the
+/// colours, and nothing leaves the bar's rect — the cell after it keeps its
+/// own colour and the rows above and below keep the ground. Glyphs drawn in
+/// the rect first are blanked, as the band's are.
+fn a_wave_paints_its_peaks_in_its_rect_on(format: TextureFormat) {
+    use crate::tui::graphics::WaveLook;
+
+    let _gpu = one_at_a_time();
+    const PLAYED: [u8; 3] = [230, 40, 40];
+    const UNPLAYED: [u8; 3] = [40, 80, 230];
+    const MARK: [u8; 3] = [40, 220, 60];
+    const AFTER: [u8; 3] = [200, 200, 0];
+    let rect = Rect::new(4, 4, 30, 2);
+    let after = Rect::new(34, 4, 1, 2);
+    fn rgb([r, g, b]: [u8; 3]) -> Color {
+        Color::Rgb(r, g, b)
+    }
+    let look = move |hover| WaveLook {
+        progress: 0.5,
+        hover,
+        played: rgb(PLAYED),
+        unplayed: rgb(UNPLAYED),
+        marker: rgb(MARK),
+    };
+    let frame_with = move |hover: Option<u16>| -> Draw {
+        Box::new(move |frame: &mut ratatui::Frame, graphics: &mut crate::tui::graphics::Graphics| {
+            let glyphs = Paragraph::new(vec![Line::raw("X".repeat(30)), Line::raw("X".repeat(30))]);
+            frame.render_widget(glyphs, rect);
+            frame.render_widget(
+                Paragraph::new(vec![Line::raw(" "), Line::raw(" ")])
+                    .style(Style::new().bg(rgb(AFTER))),
+                after,
+            );
+            assert!(graphics.draw_wave(frame, rect, "t", blocky_shape, look(hover)));
+        })
+    };
+    let draws = vec![frame_with(None), frame_with(None), frame_with(Some(20))];
+    let Some((frame, wants)) = frame_or_skip(waved(40, 12, format, draws)) else { return };
+    // Each frame presented what it placed: nothing more is owed after it.
+    assert_eq!(wants, [false, false, false], "after each present nothing more is owed");
+
+    let near = |px: [u8; 3], want: [u8; 3]| px.iter().zip(want).all(|(&a, b)| a.abs_diff(b) <= 3);
+    let (x0, y0) = (u32::from(rect.x) * frame.cell_w, u32::from(rect.y) * frame.cell_h);
+    let width = u32::from(rect.width) * frame.cell_w;
+    let height = u32::from(rect.height) * frame.cell_h;
+    // The ink in one pixel column of the rect, top to bottom.
+    let column = |u: f32| -> Vec<[u8; 3]> {
+        let x = x0 + (u * width as f32) as u32;
+        (y0..y0 + height).map(|y| frame.pixel(x, y)).collect()
+    };
+    let inked = |u: f32| column(u).iter().filter(|px| !near(**px, GROUND)).count();
+    let (loud, quiet) = (inked(0.06), inked(0.19));
+    let tall = height as usize * 9 / 10;
+    assert!(loud >= tall, "a loud bar reaches the band's edges: {loud} of {height}");
+    assert!(quiet > 0 && quiet * 3 < loud, "a quiet bar is a thin line: {quiet} against {loud}");
+    // The centre row of each: played left of the playhead, unplayed right.
+    let centre = (height / 2) as usize;
+    assert!(near(column(0.06)[centre], PLAYED), "{:?}", column(0.06)[centre]);
+    assert!(near(column(0.56)[centre], UNPLAYED), "{:?}", column(0.56)[centre]);
+    // The glyphs under it were blanked: the quiet bar's top is ground.
+    assert!(near(column(0.19)[2], GROUND), "the X under the wave shows: {:?}", column(0.19)[2]);
+    // The hover's marker at column 20's left edge, the whole band tall.
+    let marker = column(20.0 / 30.0 + 0.5 / width as f32);
+    assert!(marker.iter().all(|px| near(*px, MARK)), "the marker: {:?}", &marker[..4]);
+    // Nothing outside the rect: the cell after it is its own colour, and
+    // the rows above and below are ground.
+    let after_px = [4, 5].into_iter().flat_map(|row| frame.cell(u32::from(after.x), row));
+    assert!(after_px.into_iter().all(|px| px == AFTER), "the cell after the rect was touched");
+    for row in [3, 6] {
+        for col in 0..40 {
+            assert!(frame.cell(col, row).iter().all(|px| near(*px, GROUND)), "ink at {col},{row}");
+        }
+    }
+}
+
+#[test]
+fn a_wave_paints_its_peaks_in_its_rect() {
+    a_wave_paints_its_peaks_in_its_rect_on(TextureFormat::Rgba8Unorm);
+}
+
+/// The same on a surface that stores sRGB (VENDORED.md change 3's branch):
+/// the colours decoded for the store to encode, so they land as the theme's
+/// own bytes.
+#[test]
+fn a_wave_keeps_its_colours_on_an_srgb_surface() {
+    a_wave_paints_its_peaks_in_its_rect_on(TextureFormat::Rgba8UnormSrgb);
+}
+
+/// A hover move or a seek with no cell changing owes a present; the same
+/// wave placed again does not; a playhead that moved less than a pixel
+/// does not either. (The bar's cells are blank whatever the wave looks
+/// like, so the backend's dirty cells cannot say.)
+#[test]
+fn a_wave_that_changed_owes_a_present_and_one_that_did_not_does_not() {
+    use std::sync::Arc;
+
+    use ratatui_wgpu::PostProcessor;
+
+    use super::covers::{Board, CoverPost};
+    use crate::tui::graphics::{Graphics, PictureHost, WaveLook, WaveSpec};
+
+    let _gpu = one_at_a_time();
+    let board = Arc::new(Board::default());
+    let builder = Builder::<CoverPost>::from_font_and_user_data(hack().unwrap(), board.clone())
+        .with_font_size_px(PX)
+        .with_width_and_height(Dimensions {
+            width: NonZeroU32::new(640).unwrap(),
+            height: NonZeroU32::new(10 * PX).unwrap(),
+        });
+    let built = block_on(builder.build_headless())
+        .and_then(|built| built.map_err(|e| format!("no headless wgpu backend: {e}")));
+    let Some(backend) = frame_or_skip(built) else { return };
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut graphics = Graphics::hosted(board.clone());
+    let rect = Rect::new(2, 4, 30, 2);
+    let look = |progress: f32, hover| WaveLook {
+        progress,
+        hover,
+        played: Color::Cyan,
+        unplayed: Color::DarkGray,
+        marker: Color::White,
+    };
+    let mut key = 0;
+    let mut grid = Rect::default();
+    board.begin_frame();
+    terminal
+        .draw(|frame| {
+            grid = frame.area();
+            assert!(graphics.draw_wave(frame, rect, "t", blocky_shape, look(0.25, None)));
+        })
+        .unwrap();
+    if let Some(wave) = board_waves(&board).first() {
+        key = wave.key;
+    }
+    let wants = |terminal: &Terminal<_>| -> bool {
+        let terminal: &Terminal<ratatui_wgpu::WgpuBackend<'_, '_, CoverPost, _>> = terminal;
+        terminal.backend().post_processor().needs_update()
+    };
+    // What the next frame's drawing path would hand the board, without
+    // drawing it: the backend asks needs_update before it flushes.
+    let place = |look: WaveLook| {
+        board.begin_frame();
+        board.place_wave(rect, grid, &WaveSpec { key, shape: blocky_shape(), look });
+    };
+    assert!(!wants(&terminal), "presented: nothing owed");
+    place(look(0.25, None));
+    assert!(!wants(&terminal), "the same wave again owes nothing");
+    place(look(0.2501, None));
+    assert!(!wants(&terminal), "a playhead short of a pixel owes nothing");
+    place(look(0.25, Some(7)));
+    assert!(wants(&terminal), "a hover owes a present");
+    place(look(0.75, None));
+    assert!(wants(&terminal), "a seek owes a present");
+    board.begin_frame();
+    assert!(wants(&terminal), "a wave gone owes a present");
+}
+
+/// This frame's waves on the board, painted or not.
+fn board_waves(board: &super::covers::Board) -> Vec<super::waves::PlacedWave> {
+    board.waves_for_tests()
+}
+
+/// The window's own type size at a display scale of 2.
+const SHOT_PX: u32 = 32;
+
+/// The window's backend, drawing offscreen.
+type WindowBackend = ratatui_wgpu::WgpuBackend<
+    'static,
+    'static,
+    super::covers::CoverPost,
+    ratatui_wgpu::HeadlessSurface,
+>;
+
+/// A headless window renderer, `cols`×`rows` cells at [`SHOT_PX`], built
+/// the way the window builds its own (the theme's ground, text and named
+/// colours, the post processor on `board`); `None` with no GPU here.
+fn window_terminal(
+    board: &std::sync::Arc<super::covers::Board>,
+    cols: u32,
+    rows: u32,
+) -> Option<Terminal<WindowBackend>> {
+    use super::covers::CoverPost;
+    use crate::kit::theme::th;
+
+    let theme = th();
+    let mut faces = vec![hack().unwrap(), symbols().unwrap()];
+    faces.extend(symbol_fallback());
+    let wide = 8192;
+    let builder = Builder::<CoverPost>::from_font_and_user_data(hack().unwrap(), board.clone())
+        .with_regular_fonts(faces)
+        .with_font_size_px(SHOT_PX)
+        .with_width_and_height(Dimensions {
+            width: NonZeroU32::new(wide).unwrap(),
+            height: NonZeroU32::new(rows * SHOT_PX).unwrap(),
+        })
+        .with_bg_color(theme.ground.unwrap_or(Color::Black))
+        .with_fg_color(theme.text)
+        .with_color_table(super::named_colours(theme));
+    let built = block_on(builder.build_headless())
+        .and_then(|built| built.map_err(|e| format!("no headless wgpu backend: {e}")));
+    let mut backend = frame_or_skip(built)?;
+    let reported = backend.window_size().unwrap();
+    let cell_w = wide / u32::from(reported.columns_rows.width);
+    backend.resize(cols * cell_w, rows * SHOT_PX);
+    Some(Terminal::new(backend).unwrap())
+}
+
+/// A Gui on Now Playing with the demo's 6AM playing `progress` of the way
+/// through, its server shape `bars`; its covers and waves go to `board`
+/// when `hosted`, as the window's do.
+fn now_playing_gui(
+    board: &std::sync::Arc<super::covers::Board>,
+    hosted: bool,
+    bars: &[u8],
+    progress: f64,
+) -> crate::gui::Gui {
+    use crate::api::types::{Track, TrackMetadata};
+    use crate::gui::{Act, Gui, Screen};
+    use crate::tui::app::App;
+    use crate::tui::graphics::Graphics;
+
+    let mut gui = Gui::new(crate::config::Config::default(), false, App::new(None, None, None));
+    if hosted {
+        gui.app.graphics = Graphics::hosted(board.clone());
+        let watching = board.clone();
+        gui.ui.watch_overlays(move |rect| watching.overlay(rect));
+    }
+    gui.app.connected = true;
+    let duration = 123.0;
+    gui.app.now_playing = Some(Track {
+        filepath: "library/Boukmanflow/6AM.mp3".into(),
+        metadata: TrackMetadata {
+            title: Some("6AM".into()),
+            artist: Some("Boukmanflow".into()),
+            duration: Some(duration),
+            ..TrackMetadata::default()
+        },
+    });
+    gui.app.status = crate::player::PlayerStatus {
+        playing: true,
+        position: progress * duration,
+        duration,
+        source: "x".into(),
+        ..Default::default()
+    };
+    gui.app.waveforms.insert("library/Boukmanflow/6AM.mp3".into(), Some(bars.to_vec()));
+    gui.act(Act::Screen(Screen::NowPlaying));
+    gui
+}
+
+/// The Auto-DJ tab's sources picker is the TUI's overlay, lent to the
+/// GUI's Now Playing screen; it registered no footprint, so a picture under
+/// it was painted over it. A long list of libraries reaches the band's top
+/// row: on the frame it opens the wave stands down (the board heard the
+/// overlay), and from the next the band draws as glyphs.
+#[test]
+fn the_dj_sources_picker_stands_the_band_down() {
+    use std::sync::Arc;
+
+    use super::covers::Board;
+    use crate::gui::render;
+
+    let _gpu = one_at_a_time();
+    let board = Arc::new(Board::default());
+    let Some(mut terminal) = window_terminal(&board, 100, 30) else { return };
+    let mut gui = now_playing_gui(&board, true, &blocky_peaks(), 0.35);
+    let mut frame = |gui: &mut crate::gui::Gui| {
+        board.begin_frame();
+        terminal.draw(|frame| render(frame, gui)).unwrap();
+        board.placed_waves()
+    };
+    frame(&mut gui);
+    let (painted, under) = frame(&mut gui);
+    assert_eq!((painted.len(), under), (1, 0), "the band's wave is painted at rest");
+    let libraries = (0..40).map(|i| format!("Library {i}")).collect();
+    let picker = crate::tui::app::GenrePicker { all: libraries, ..Default::default() };
+    gui.app.dj_panel.sources = Some(picker);
+    let (painted, under) = frame(&mut gui);
+    assert_eq!((painted.len(), under), (0, 1), "the frame the picker opens: the wave under it");
+    let (painted, under) = frame(&mut gui);
+    assert_eq!((painted.len(), under), (0, 0), "the next: the band is glyphs");
+    gui.app.dj_panel.sources = None;
+    frame(&mut gui);
+    let (painted, _) = frame(&mut gui);
+    assert_eq!(painted.len(), 1, "the picker gone, the wave is back");
+}
+
+/// A playing track with no input, the window's most common idle state:
+/// the wave's playhead steps with the time label (`ui::label_progress`),
+/// on frames whose cells changed anyway, so the painted band presents no
+/// more often than the glyph band did. Before, its pixel playhead moved
+/// about eight times a second at a hundred columns and every move was a
+/// present of its own — five times the glyphs'.
+#[test]
+fn a_playing_wave_presents_no_more_often_than_the_glyphs() {
+    use std::sync::Arc;
+
+    use super::covers::Board;
+    use crate::gui::render;
+    use crate::kit::theme::th;
+
+    let _gpu = one_at_a_time();
+    let mut presents = Vec::new();
+    for hosted in [false, true] {
+        let board = Arc::new(Board::with_palette(super::named_colours(th())));
+        let Some(mut terminal) = window_terminal(&board, 100, 30) else { return };
+        let mut gui = now_playing_gui(&board, hosted, &blocky_peaks(), 0.35);
+        for _ in 0..3 {
+            board.begin_frame();
+            terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        }
+        let before = processed(&terminal);
+        // Six seconds of the GUI's idle pace, the clock 100 ms a frame.
+        for _ in 0..60 {
+            gui.app.status.position += 0.1;
+            board.begin_frame();
+            terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+            if hosted {
+                let (painted, _) = board.placed_waves();
+                assert_eq!(painted.len(), 1, "the wave is painted while it plays");
+            }
+        }
+        presents.push(processed(&terminal) - before);
+    }
+    let (glyphs, wave) = (presents[0], presents[1]);
+    assert!(glyphs > 0, "the time label ticked over six seconds");
+    assert!(wave <= glyphs, "the wave presented {wave} times, the glyphs {glyphs}");
+}
+
+/// The waveform spike's pictures: the Now Playing screen as the window
+/// draws it, offscreen, with the band painted (`hosted`) and as glyphs
+/// (what the window drew before the spike: the glyph path is untouched),
+/// at a few widths, playheads and hovers. Writes `<name>.png` (the frame)
+/// and `<name>-band.png` (the band's rows at twice the size) under
+/// `MSTREAM_WAVE_SHOTS`; `MSTREAM_WAVE_BARS` is a file of the server's 800
+/// bytes for the track, the blocky test peaks without it.
+#[test]
+#[ignore = "pictures for the waveform spike: MSTREAM_WAVE_SHOTS=<dir>"]
+fn wave_shots() {
+    use std::sync::Arc;
+
+    use super::covers::Board;
+    use crate::gui::render;
+    use crate::kit::theme::th;
+
+    let Some(dir) = std::env::var_os("MSTREAM_WAVE_SHOTS").map(std::path::PathBuf::from) else {
+        return;
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    let bars = std::env::var_os("MSTREAM_WAVE_BARS")
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_else(blocky_peaks);
+    let _gpu = one_at_a_time();
+    let rows = 30u32;
+    let shots: &[(&str, u32, bool, f64, Option<u16>)] = &[
+        ("glyphs-100", 100, false, 0.35, None),
+        ("wave-100", 100, true, 0.35, None),
+        ("glyphs-100-hover", 100, false, 0.35, Some(60)),
+        ("wave-100-hover", 100, true, 0.35, Some(60)),
+        ("wave-100-seek25", 100, true, 0.25, None),
+        ("wave-100-seek75", 100, true, 0.75, None),
+        ("glyphs-140", 140, false, 0.35, None),
+        ("wave-140", 140, true, 0.35, None),
+    ];
+    for &(name, cols, hosted, progress, hover) in shots {
+        let board = Arc::new(Board::with_palette(super::named_colours(th())));
+        let Some(mut terminal) = window_terminal(&board, cols, rows) else { return };
+        let mut gui = now_playing_gui(&board, hosted, &bars, progress);
+        // Two frames: the second is the screen at rest, laid out by the
+        // first (the band's rect, the hover's column on it).
+        for _ in 0..2 {
+            board.begin_frame();
+            terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+            if let Some(column) = hover {
+                let band = gui.now.band;
+                let at = ratatui::layout::Position { x: band.x + column, y: band.y + 1 };
+                gui.app.pointer = Some(at);
+            }
+        }
+        let pixels = terminal.backend().read_pixels().unwrap();
+        let width = (pixels.len() / 4) as u32 / (rows * SHOT_PX);
+        let image = image::RgbaImage::from_raw(width, rows * SHOT_PX, pixels).unwrap();
+        image.save(dir.join(format!("{name}.png"))).unwrap();
+        let band = gui.now.band;
+        let y = u32::from(band.y) * SHOT_PX;
+        let height = u32::from(band.height) * SHOT_PX;
+        let crop = image::imageops::crop_imm(&image, 0, y, width, height).to_image();
+        image::imageops::resize(&crop, width * 2, height * 2, image::imageops::FilterType::Nearest)
+            .save(dir.join(format!("{name}-band.png")))
+            .unwrap();
+        let (waves, under) = board.placed_waves();
+        eprintln!("{name}: band {band:?}, waves {waves:?} ({under} under), {width} px wide");
+    }
+}
+
+/// The waveform spike's cost, offscreen: the Now Playing screen drawn 200
+/// frames at a time through the window's renderer, the band as glyphs and
+/// as the painted wave, at rest, with the pointer moving along the band a
+/// column a frame, and with the track playing (the clock 100 ms a frame,
+/// the GUI's idle pace). Prints each case's draw time (the GUI's frame,
+/// the diff, the backend's flush with its post processor, the submit) and
+/// how many frames the post processor ran, which is how many the window
+/// would present. `sync` also reads every frame back, so the GPU's work is
+/// inside the time. `MSTREAM_WAVE_BENCH=1`.
+#[test]
+#[ignore = "the waveform spike's offscreen bench: MSTREAM_WAVE_BENCH=1"]
+fn wave_bench() {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use super::covers::Board;
+    use crate::gui::render;
+    use crate::kit::theme::th;
+
+    if std::env::var_os("MSTREAM_WAVE_BENCH").is_none() {
+        return;
+    }
+    let bars = std::env::var_os("MSTREAM_WAVE_BARS")
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_else(blocky_peaks);
+    let _gpu = one_at_a_time();
+    for sync in [false, true] {
+        let cases = [("rest", false, false), ("hover", true, false), ("playing", false, true)];
+        for (case, moving, playing) in cases {
+            for hosted in [false, true] {
+                let board = Arc::new(Board::with_palette(super::named_colours(th())));
+                let Some(mut terminal) = window_terminal(&board, 100, 30) else { return };
+                let mut gui = now_playing_gui(&board, hosted, &bars, 0.35);
+                for _ in 0..5 {
+                    board.begin_frame();
+                    terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+                }
+                let before = processed(&terminal);
+                let mut took = Vec::new();
+                for i in 0..200u16 {
+                    let band = gui.now.band;
+                    if moving {
+                        let x = band.x + i % 84;
+                        gui.app.pointer = Some(ratatui::layout::Position { x, y: band.y + 1 });
+                    }
+                    if playing {
+                        gui.app.status.position += 0.1;
+                    }
+                    let started = Instant::now();
+                    board.begin_frame();
+                    terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+                    if sync {
+                        let _ = terminal.backend().read_pixels();
+                    }
+                    took.push(started.elapsed().as_secs_f64() * 1000.0);
+                }
+                let presents = processed(&terminal) - before;
+                took.sort_by(f64::total_cmp);
+                let at = |q: f64| took[((took.len() - 1) as f64 * q) as usize];
+                let band = if hosted { "wave" } else { "glyphs" };
+                let (p50, p95) = (at(0.5), at(0.95));
+                eprintln!(
+                    "bench sync={sync} {case:8} {band:6}: draw p50 {p50:.3} ms p95 {p95:.3} ms, \
+                     {presents} presents of 200"
+                );
+            }
+        }
+    }
+}
+
+/// How many times the window's post processor has run: its presents.
+fn processed<S: ratatui_wgpu::RenderSurface<'static>>(
+    terminal: &Terminal<ratatui_wgpu::WgpuBackend<'static, 'static, super::covers::CoverPost, S>>,
+) -> u64 {
+    terminal.backend().post_processor().report()["processed"].as_u64().unwrap_or(0)
+}
