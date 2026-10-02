@@ -3277,7 +3277,10 @@ without elevation.
 
 **Two products from one crate (2026-10-01).** The owner's decision: the codebase is dual
 purpose, a terminal player and a desktop player. The DESKTOP releases, a new asset family
-`mstream-player-desktop-*` (win32-x64, darwin-x64, darwin-arm64, linux-x64) with per-OS app
+`mstream-player-desktop-*` (win32-x64, darwin-x64, darwin-arm64, linux-x64; the bare files
+carry a `-raw` suffix since 2026-10-02, after a download of one by hand; proven by
+v0.10.1-rc.1, run 37056273001: the renamed binaries beside the packages, the stub inside
+the Windows zip and absent from the release, latest and the channels untouched) with per-OS app
 packages to follow, open the GUI in its own window; the TERMINAL releases (the unsuffixed
 binaries, deb and rpm, the Homebrew formula, Scoop, the one-line installers, `cargo install`)
 are the terminal player with the window compiled out. mStream's binary bundles ship the

@@ -9,8 +9,9 @@
 # family: the unsuffixed binaries, the deb/rpm, and what Homebrew, Scoop,
 # install.sh/ps1 and cargo install fetch. The desktop flavour
 # (`--features desktop`, the GUI in its own window when started with no
-# arguments) ships as `mstream-player-desktop-*`: the bare binaries, for
-# mStream's bundles, and per-OS packages of them (package-desktop below).
+# arguments) ships as `mstream-player-desktop-*`: the bare binaries, named
+# `-raw` so nobody downloads one by hand (they are for mStream's bundles and
+# for scripts), and per-OS packages of them (package-desktop below).
 #
 # A tag with a hyphen (v0.10.0-rc.1) is a pre-release: the Release is
 # marked so (notify-mstream.yml skips those), never becomes "latest" (what
@@ -105,22 +106,22 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
-            binary_name: mstream-player-desktop-win32-x64.exe
+            binary_name: mstream-player-desktop-win32-x64-raw.exe
             use_cross: false
 
           - target: x86_64-apple-darwin
             runner: macos-latest
-            binary_name: mstream-player-desktop-darwin-x64
+            binary_name: mstream-player-desktop-darwin-x64-raw
             use_cross: false
 
           - target: aarch64-apple-darwin
             runner: macos-latest
-            binary_name: mstream-player-desktop-darwin-arm64
+            binary_name: mstream-player-desktop-darwin-arm64-raw
             use_cross: false
 
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
-            binary_name: mstream-player-desktop-linux-x64
+            binary_name: mstream-player-desktop-linux-x64-raw
             use_cross: true
     uses: ./.github/workflows/build-binary.yml
     with:
@@ -164,24 +165,24 @@ jobs:
         include:
           - package: mstream-player-desktop-darwin-arm64.app.zip
             kind: macos
-            binary: mstream-player-desktop-darwin-arm64
+            binary: mstream-player-desktop-darwin-arm64-raw
             runner: macos-latest
 
           - package: mstream-player-desktop-darwin-x64.app.zip
             kind: macos
-            binary: mstream-player-desktop-darwin-x64
+            binary: mstream-player-desktop-darwin-x64-raw
             runner: macos-latest
 
           # A zip needs no Windows runner; the build-desktop leg's artifact
           # carries the stub beside the player (build-binary.yml).
           - package: mstream-player-desktop-win32-x64.zip
             kind: windows
-            binary: mstream-player-desktop-win32-x64.exe
+            binary: mstream-player-desktop-win32-x64-raw.exe
             runner: ubuntu-latest
 
           - package: mstream-player-desktop-linux-x64.tar.gz
             kind: linux
-            binary: mstream-player-desktop-linux-x64
+            binary: mstream-player-desktop-linux-x64-raw
             runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -313,7 +314,7 @@ jobs:
         run: |
           python3 scripts/package-windows.py \
             "in/${{ matrix.binary }}" \
-            "in/mstream-player-desktop-launch-win32-x64.exe" \
+            "in/mstream-player-desktop-launch-win32-x64-raw.exe" \
             assets/mstream-logo.ico "out/${{ matrix.package }}"
           echo "- \`${{ matrix.package }}\`: **unsigned** (no Windows code-signing certificate yet)" >> "$GITHUB_STEP_SUMMARY"
 
@@ -440,7 +441,7 @@ jobs:
           cd dist
           # The Windows launcher stub rides the desktop artifact only to reach
           # the zip; alone it is nothing to publish or to pin.
-          rm -f mstream-player-desktop-launch-win32-x64.exe
+          rm -f mstream-player-desktop-launch-win32-x64-raw.exe
           chmod +x mstream-player-linux-* mstream-player-darwin-* mstream-player-win32-*
           # The desktop family may be held back (build-desktop skipped), and an
           # unmatched glob would hand chmod its literal pattern; hence the test.
