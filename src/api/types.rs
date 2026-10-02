@@ -785,6 +785,20 @@ pub struct DiscoveryActivity {
     pub last_seq: u64,
 }
 
+/// `GET api/v1/admin/logs/recent?since=<seq>` — the tail of the server's main
+/// log ring (mStream's `logger.js` `LogRing.read`), delta-polled by sequence
+/// number like [`DiscoveryActivity`]. Entries come oldest first and only past
+/// `since`; a `since` the server never reached (it restarted) answers the
+/// whole ring with `last_seq` below the cursor. A `capacity` of 0 means the
+/// ring is off and nothing will ever arrive.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LogTail {
+    pub entries: Vec<ActivityEntry>,
+    pub last_seq: u64,
+    pub capacity: u64,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ActivityEntry {
@@ -1709,6 +1723,31 @@ mod tests {
         let caps = Capabilities::from(&serde_json::from_str::<Ping>(r#"{"vpaths":[]}"#).unwrap());
         assert_eq!(caps, Capabilities::default());
         assert!(caps.enabled_names().is_empty());
+    }
+
+    #[test]
+    fn the_log_tail_parses_the_routes_json() {
+        // The shape of `LogRing.read`: raw winston levels, ISO times, and a
+        // stack trace riding inside the message after a newline. Fields the
+        // player does not name are ignored rather than refused.
+        let json = r#"{"entries":[
+            {"seq":41,"t":"2026-10-02T09:15:04.120Z","level":"info","message":"scan finished"},
+            {"seq":42,"t":"2026-10-02T09:15:05.000Z","level":"error",
+             "message":"Error: ENOENT\n    at open (fs.js:1:1)","meta":{"x":1}}],
+            "lastSeq":42,"capacity":1000,"extra":true}"#;
+        let tail: LogTail = serde_json::from_str(json).unwrap();
+        assert_eq!(tail.last_seq, 42);
+        assert_eq!(tail.capacity, 1000);
+        assert_eq!(tail.entries.len(), 2);
+        assert_eq!(tail.entries[0].seq, 41);
+        assert_eq!(tail.entries[0].t, "2026-10-02T09:15:04.120Z");
+        assert_eq!(tail.entries[1].level, "error");
+        assert_eq!(tail.entries[1].message, "Error: ENOENT\n    at open (fs.js:1:1)");
+
+        // An older or trimmed answer without the ring's size reads as off.
+        let bare: LogTail = serde_json::from_str(r#"{"entries":[],"lastSeq":7}"#).unwrap();
+        assert_eq!(bare.capacity, 0);
+        assert_eq!(bare.last_seq, 7);
     }
 }
 

@@ -30,6 +30,7 @@ mod now;
 mod playlists;
 mod queue;
 mod servers;
+mod server_log;
 mod sonic;
 mod stats;
 mod torrent;
