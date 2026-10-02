@@ -1284,8 +1284,9 @@ impl App {
             self.set_preedit("");
         }
         // The copy chord is always the window's: the Admin log's copy when
-        // that log can take it, else nothing. Off a Mac, Ctrl+Shift+C would
-        // otherwise reach the GUI as Ctrl+C and quit.
+        // that log can take it, else nothing but what any key does to the
+        // header's open server menu, which closes. Off a Mac, Ctrl+Shift+C
+        // would otherwise reach the GUI as Ctrl+C and quit.
         if input::is_copy(&raw) {
             if super::admin::copy_chord(&mut self.gui) {
                 self.ask_redraw();

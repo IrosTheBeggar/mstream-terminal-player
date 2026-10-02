@@ -1367,15 +1367,27 @@ fn content_rect(width: u16, height: u16, queue_open: bool, footer: bool) -> Rect
 }
 
 /// A path clipped LEADING, so the leaf stays visible (the kit's path law:
-/// ten identical prefixes say nothing).
+/// ten identical prefixes say nothing). Measured in cells and cut between
+/// whole graphemes, as [`bar::clip`] cuts a label's end: a CJK folder name
+/// is two cells a glyph.
 fn clip_lead(text: &str, max: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max {
+    use unicode_segmentation::UnicodeSegmentation;
+    if crate::kit::width(text) <= max {
         return text.to_string();
     }
-    let tail: String = chars[chars.len() - max.saturating_sub(1)..].iter().collect();
+    let room = max.saturating_sub(1);
+    let mut kept = 0;
+    let mut cut = text.len();
+    for (i, grapheme) in text.grapheme_indices(true).rev() {
+        let w = crate::kit::grapheme_cells(grapheme);
+        if kept + w > room {
+            break;
+        }
+        kept += w;
+        cut = i;
+    }
     let mark = if legacy_conhost() { '»' } else { '…' };
-    format!("{mark}{tail}")
+    format!("{mark}{}", &text[cut..])
 }
 
 /// One frame. Public to the crate so render tests can drive it.
@@ -2780,6 +2792,20 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             // The App keeps the pointer too: the Now Playing band
             // lights under it, the TUI's way.
             gui.app.note_pointer(at);
+            // A grip whose log is gone lets go before anything reads it,
+            // and a press while one stands means its release was lost (a
+            // terminal that drops the Up when the focus leaves mid-drag):
+            // the grip ends at the press's cell, and the press goes on as
+            // any press.
+            admin::let_go_unseen(gui);
+            if matches!(mouse.kind, MouseEventKind::Down(_))
+                && gui.ui.gripping()
+                && let Some(act) = gui.ui.release_at(at)
+                && gui.act(act)
+            {
+                ctx.saver.flush(&gui.app);
+                return Flow::Quit;
+            }
             // A press-drag on a drag region (the Admin log's lines)
             // holds the pointer until its release, like a thumb drag:
             // no page owner takes an event while it does, so the hand
@@ -2873,6 +2899,9 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                     if let Some(act) = gui.ui.release_at(at) {
                         gui.act(act);
                     }
+                    // The capture is over: the control under the release
+                    // lights now, not on the hand's next move.
+                    gui.ui.motion(at);
                     actions::drop(gui);
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -3395,6 +3424,19 @@ mod tests {
             Entry::Track { label: "Aurora".into(), track: Box::new(track("music/b.mp3", "Aurora", 228.0)) },
         ]);
         gui
+    }
+
+    #[test]
+    fn a_path_clipped_at_its_front_counts_cells_and_keeps_whole_graphemes() {
+        crate::kit::theme::pin_modern_terminal();
+        assert_eq!(clip_lead("/srv/drop/log.zip", 40), "/srv/drop/log.zip");
+        assert_eq!(clip_lead("/srv/drop/log.zip", 8), "…log.zip");
+        // Two cells a glyph: the budget is cells, and a glyph that would
+        // straddle the edge is left out whole.
+        let wide = "~/ダウンロード/ログ.zip";
+        assert_eq!(clip_lead(wide, 9), "…ログ.zip");
+        assert_eq!(clip_lead(wide, 8), "…グ.zip");
+        assert_eq!(crate::kit::width(&clip_lead(wide, 8)), 7);
     }
 
     #[test]

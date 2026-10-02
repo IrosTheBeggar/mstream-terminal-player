@@ -849,9 +849,11 @@ pub(super) fn act(gui: &mut Gui, act: &Act) -> bool {
 }
 
 /// The log's last note (a copy, a download, a file shown), lifted into
-/// the GUI's note above the bar.
+/// the GUI's note on the bar's bottom row, a path in it fitted to that
+/// note's width in this window.
 fn take_log_note(gui: &mut Gui) {
-    if let Some(note) = gui.admin.log.take_note() {
+    let cells = super::bar::note_width(gui.last_width) as usize;
+    if let Some(note) = gui.admin.log.take_note(cells) {
         gui.note = Some(note);
     }
 }
@@ -859,18 +861,21 @@ fn take_log_note(gui: &mut Gui) {
 /// The window's copy chord (Cmd+C on a Mac, Ctrl+Shift+C or Ctrl+Insert
 /// elsewhere) is the log's `y` while the log on screen has the keys or a
 /// highlight stands, and nothing laid over the screen holds them: no GUI
-/// modal, no level menu, no room's modal. True when it copied.
+/// modal, no level menu, no room's modal. To the header's server menu it
+/// is a key like any other, which closes the menu and goes on (servers.rs),
+/// on every screen. True when it changed anything (a copy, the menu
+/// closed), so the window draws again.
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 pub(super) fn copy_chord(gui: &mut Gui) -> bool {
-    if gui.screen != Screen::Admin || gui.admin.log_at.is_none() || gui.modal_open() || gui.admin.log.menu.is_some() {
-        return false;
-    }
+    let closed = std::mem::take(&mut gui.servers.drop_open);
     let admin = &gui.admin;
-    if room_up(admin) && admin.room.as_ref().is_some_and(|room| room.modal_up()) {
-        return false;
-    }
-    if admin.focus != Focus::Log && admin.log.model.highlight.is_none() {
-        return false;
+    let held = gui.screen != Screen::Admin
+        || admin.log_at.is_none()
+        || gui.modal_open()
+        || admin.log.menu.is_some()
+        || (room_up(admin) && admin.room.as_ref().is_some_and(|room| room.modal_up()));
+    if held || (admin.focus != Focus::Log && admin.log.model.highlight.is_none()) {
+        return closed;
     }
     gui.admin.log.copy();
     take_log_note(gui);
@@ -878,6 +883,18 @@ pub(super) fn copy_chord(gui: &mut Gui) -> bool {
 }
 
 // ── Pointer, wheel, frame, footer ───────────────────────────────────────────
+
+/// A grip on the log's lines stands only while the log does: off the
+/// screen, or with the log left undrawn by the last frame (`L`, the Log
+/// room folded back, the mini player), it lets go untold, and the log's
+/// hold with it. Else a release the terminal never sent would hold the
+/// pointer for good: hover frozen, every page owner shut out.
+pub(super) fn let_go_unseen(gui: &mut Gui) {
+    if gui.ui.gripping() && (gui.screen != Screen::Admin || gui.admin.log_at.is_none()) {
+        gui.ui.release();
+        gui.admin.log.let_go();
+    }
+}
 
 /// The pointer below the top bar (contract clauses 18 and 20). The room
 /// takes what lands inside its area less its first row, every event while
@@ -2371,6 +2388,77 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_released_over_a_hallway_row_lights_it_at_once() {
+        let _en = english();
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 20));
+        let buf = render_at(&mut gui, 176, 46);
+        let log = gui.admin.log_at.unwrap();
+        let top = first_line_row(&buf, log);
+        down(&mut gui, log.x + 3, top + 1);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 5, 4);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 5, 4);
+        assert_eq!(gui.ui.pointer, Some(Position::new(5, 4)), "hover at the release, with no move after");
+        let buf = render_at(&mut gui, 176, 46);
+        assert_eq!(buf[(3, 4)].fg, th().bright, "the Users row lights: {}", row(&buf, 4));
+    }
+
+    #[test]
+    fn a_press_after_a_lost_release_ends_the_grip_and_acts_as_any_press() {
+        let _en = english();
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 60));
+        let buf = render_at(&mut gui, 176, 46);
+        let log = gui.admin.log_at.unwrap();
+        let top = first_line_row(&buf, log);
+        down(&mut gui, log.x + 3, top + 1);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), log.x + 3, top + 3);
+        assert!(gui.ui.gripping());
+
+        // The terminal never sent the Up (the focus left mid-drag). The
+        // next press, on the hallway's Users row, ends the grip there and
+        // opens the room, as it would have with the release seen.
+        down(&mut gui, 5, 4);
+        assert!(!gui.ui.gripping(), "the press ended the grip");
+        assert_eq!(gui.admin.room_id, Some(RoomId::Users), "and was a press like any other");
+        assert_eq!(gui.admin.focus, Focus::Room);
+        let highlight = gui.admin.log.model.highlight;
+        assert!(highlight.is_some(), "the dragged run stays highlighted");
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 5, 4);
+
+        // Free again: a bare move over the lines goes where the hand goes
+        // and extends nothing.
+        render_at(&mut gui, 176, 46);
+        mouse(&mut gui, MouseEventKind::Moved, log.x + 3, top + 9);
+        assert_eq!(gui.ui.pointer, Some(Position::new(log.x + 3, top + 9)));
+        assert_eq!(gui.admin.log.model.highlight, highlight);
+    }
+
+    #[test]
+    fn leaving_the_screen_mid_drag_lets_go_of_the_grip() {
+        let _en = english();
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 60));
+        let buf = render_at(&mut gui, 176, 46);
+        let log = gui.admin.log_at.unwrap();
+        let top = first_line_row(&buf, log);
+        down(&mut gui, log.x + 3, top + 1);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), log.x + 3, top + 3);
+        let held = gui.admin.log.model.highlight;
+        assert!(gui.ui.gripping());
+
+        // The Library comes up with the Up never sent: the first event
+        // after finds no log to hold the pointer for.
+        gui.act(Act::Screen(Screen::Library));
+        render_at(&mut gui, 176, 46);
+        mouse(&mut gui, MouseEventKind::Moved, 40, 10);
+        assert!(!gui.ui.gripping(), "the grip went with the screen");
+        assert_eq!(gui.ui.pointer, Some(Position::new(40, 10)), "hover follows the hand again");
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 40, 12);
+        assert_eq!(gui.admin.log.model.highlight, held, "and a drag there moves nothing of the log's");
+    }
+
+    #[test]
     fn a_plain_click_on_the_lines_clears_the_highlight_and_gives_the_log_the_keys() {
         let mut gui = admin_gui();
         gui.admin.log.model.take(lines(1, 20));
@@ -2428,9 +2516,8 @@ mod tests {
         assert_eq!(gui.admin.log_at, None, "L hid it mid-drag");
         mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), log.x + 3, top + 9);
         assert_eq!(gui.admin.log.model.highlight, held, "a later drag moves nothing");
-        assert!(gui.ui.gripping(), "the hand is still held");
+        assert!(!gui.ui.gripping(), "the grip went with the log");
         mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), log.x + 3, top + 9);
-        assert!(!gui.ui.gripping(), "until the release");
         assert_eq!(gui.admin.log.model.highlight, held, "L keeps the highlight");
         assert_eq!(gui.admin.focus, Focus::Room, "L handed the log's keys to the room, and the release took nothing back");
     }
@@ -2543,6 +2630,41 @@ mod tests {
         assert!(chord(&mut gui));
         gui.act(Act::Screen(Screen::Library));
         assert!(!chord(&mut gui), "another screen");
+    }
+
+    #[test]
+    fn the_copy_chord_closes_the_server_menu_as_any_key_does() {
+        let _en = english();
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 3));
+        render_at(&mut gui, 176, 46);
+
+        // Nothing to copy (the hallway's keys, no highlight): the menu
+        // closes all the same, and the window is told to draw it gone.
+        gui.servers.drop_open = true;
+        assert!(copy_chord(&mut gui));
+        assert!(!gui.servers.drop_open);
+        assert!(crate::kit::clipboard::caught().is_empty());
+
+        // With the log's keys it closes and copies, as `y` does through
+        // the open menu.
+        gui.admin.focus = Focus::Log;
+        gui.servers.drop_open = true;
+        assert!(copy_chord(&mut gui));
+        assert!(!gui.servers.drop_open);
+        assert_eq!(crate::kit::clipboard::caught().len(), 1);
+        gui.servers.drop_open = true;
+        press(&mut gui, KeyCode::Char('y'));
+        assert!(!gui.servers.drop_open);
+        assert_eq!(crate::kit::clipboard::caught().len(), 1, "the key does the same");
+
+        // On every screen, and nothing changes with no menu open.
+        gui.act(Act::Screen(Screen::Library));
+        gui.servers.drop_open = true;
+        assert!(copy_chord(&mut gui));
+        assert!(!gui.servers.drop_open);
+        assert!(!copy_chord(&mut gui));
+        assert!(crate::kit::clipboard::caught().is_empty());
     }
 
     #[test]

@@ -94,7 +94,14 @@ pub(super) fn cover_rect(area: Rect, footer: bool) -> Rect {
 /// Where the screen's note (or an armed pick's banner) goes: the bottom
 /// row, between the volume group and the card.
 pub(super) fn note_rect(area: Rect, footer: bool) -> Rect {
-    Rect { x: NOTE_X, y: top(area, footer) + 4, width: card_x(area).saturating_sub(NOTE_X + 2), height: 1 }
+    Rect { x: NOTE_X, y: top(area, footer) + 4, width: note_width(area.width), height: 1 }
+}
+
+/// The note's cells in a window `width` wide, for words fitted before
+/// they are drawn (a path clipped at its front). Saturating, since a
+/// window under the minimum draws the mini player and no note at all.
+pub(super) fn note_width(width: u16) -> u16 {
+    width.saturating_sub(CARD_W).saturating_sub(NOTE_X + 2)
 }
 
 // ── Pure geometry ───────────────────────────────────────────────────────────

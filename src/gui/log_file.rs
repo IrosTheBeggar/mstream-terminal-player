@@ -87,18 +87,24 @@ pub(super) fn user_dirs_download(text: &str, home: &Path) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// The first candidate that is a folder, else `fallback`.
-pub(super) fn downloads_dir(os: Os, vars: Vars, fallback: Option<PathBuf>) -> Option<PathBuf> {
-    candidates(os, vars).into_iter().find(|dir| dir.is_dir()).or(fallback)
+/// The first candidate that is a folder, else what `fallback` gives,
+/// asked only then: giving it may make a folder.
+pub(super) fn downloads_dir(
+    os: Os,
+    vars: Vars,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    candidates(os, vars).into_iter().find(|dir| dir.is_dir()).or_else(fallback)
 }
 
 /// This machine's Downloads folder, or the player's own config folder
 /// when it has none: a container or a bare account still gets the file
-/// somewhere the user can find it.
+/// somewhere the user can find it. The config folder is made only on
+/// that last resort, never on a download that lands in Downloads.
 pub(super) fn downloads_here() -> Option<PathBuf> {
-    let fallback =
-        crate::config::config_dir().ok().filter(|dir| std::fs::create_dir_all(dir).is_ok());
-    downloads_dir(Os::HERE, &process_var, fallback)
+    downloads_dir(Os::HERE, &process_var, || {
+        crate::config::config_dir().ok().filter(|dir| std::fs::create_dir_all(dir).is_ok())
+    })
 }
 
 /// The server's part of a file name. A tunnel's identity is a public key,
@@ -193,9 +199,12 @@ pub(super) fn zip_shape(bytes: &[u8]) -> ZipShape {
 /// Write `bytes` to `dir/stem.ext`, or the first of `stem-2.ext` …
 /// `stem-99.ext` that is free: a download never replaces a file already
 /// there. A file the write fails partway through is removed, so nothing
-/// half-written is left to be mistaken for the log.
-pub(super) fn write_new(dir: &Path, stem: &str, ext: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
+/// half-written is left to be mistaken for the log. With every name
+/// taken, the answer is [`SaveError::Taken`], which the note words itself;
+/// the disk's own refusals keep the system's words.
+pub(super) fn write_new(dir: &Path, stem: &str, ext: &str, bytes: &[u8]) -> Result<PathBuf, SaveError> {
+    let io = |e: std::io::Error| SaveError::Io(e.to_string());
+    std::fs::create_dir_all(dir).map_err(io)?;
     for n in 1..=99 {
         let name = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
         let path = dir.join(name);
@@ -204,18 +213,15 @@ pub(super) fn write_new(dir: &Path, stem: &str, ext: &str, bytes: &[u8]) -> std:
                 if let Err(e) = file.write_all(bytes).and_then(|()| file.flush()) {
                     drop(file);
                     let _ = std::fs::remove_file(&path);
-                    return Err(e);
+                    return Err(io(e));
                 }
                 return Ok(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
+            Err(e) => return Err(io(e)),
         }
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        format!("{stem}.{ext} and 98 numbered copies are already there"),
-    ))
+    Err(SaveError::Taken(format!("{stem}.{ext}")))
 }
 
 /// Why the lines shown were saved instead of the server's files.
@@ -245,6 +251,8 @@ pub(super) enum SaveError {
     Nothing,
     /// No folder to save into.
     NoFolder,
+    /// The file's name, and every numbered copy of it, already there.
+    Taken(String),
     /// The disk said no.
     Io(String),
 }
@@ -258,10 +266,9 @@ pub(super) fn save_download(
     stem: &str,
     lines: &str,
 ) -> Result<Saved, SaveError> {
-    let io = |e: std::io::Error| SaveError::Io(e.to_string());
     let why = match answer {
         Ok(bytes) => match zip_shape(&bytes) {
-            ZipShape::Files => return write_new(dir, stem, "zip", &bytes).map(Saved::Zip).map_err(io),
+            ZipShape::Files => return write_new(dir, stem, "zip", &bytes).map(Saved::Zip),
             ZipShape::Cut => return Err(SaveError::Cut),
             ZipShape::Empty => Fallback::NoFiles,
             ZipShape::NotZip => Fallback::NoRoute,
@@ -272,7 +279,7 @@ pub(super) fn save_download(
     if lines.is_empty() {
         return Err(SaveError::Nothing);
     }
-    let path = write_new(dir, stem, "txt", format!("{lines}\n").as_bytes()).map_err(io)?;
+    let path = write_new(dir, stem, "txt", format!("{lines}\n").as_bytes())?;
     Ok(Saved::Text { path, why })
 }
 
@@ -333,12 +340,20 @@ mod tests {
         let downloads = dir(home.join("Downloads"));
         let vars = env(&[("HOME", &home)]);
         let get = |k: &str| vars.get(k).cloned();
-        assert_eq!(downloads_dir(Os::Mac, &get, fallback.clone()), Some(downloads.clone()));
+        assert_eq!(downloads_dir(Os::Mac, &get, || fallback.clone()), Some(downloads.clone()));
+        // The fallback is only asked once no candidate is a folder: it
+        // may make one.
+        let asked = std::cell::Cell::new(false);
+        let found = downloads_dir(Os::Mac, &get, || {
+            asked.set(true);
+            None
+        });
+        assert_eq!((found, asked.get()), (Some(downloads.clone()), false));
         let profile = dir(scratch.0.join("profile"));
         let profile_downloads = dir(profile.join("Downloads"));
         let vars = env(&[("USERPROFILE", &profile)]);
         let get = |k: &str| vars.get(k).cloned();
-        assert_eq!(downloads_dir(Os::Windows, &get, fallback.clone()), Some(profile_downloads));
+        assert_eq!(downloads_dir(Os::Windows, &get, || fallback.clone()), Some(profile_downloads));
 
         // The freedesktop order: the variable when absolute, then the
         // user-dirs file, then ~/Downloads.
@@ -348,10 +363,11 @@ mod tests {
         std::fs::write(home.join(".config/user-dirs.dirs"), "XDG_DOWNLOAD_DIR=\"$HOME/Téléchargements\"\n").unwrap();
         let vars = env(&[("HOME", &home), ("XDG_DOWNLOAD_DIR", &exported)]);
         let get = |k: &str| vars.get(k).cloned();
-        assert_eq!(downloads_dir(Os::Unix, &get, fallback.clone()), Some(exported));
+        assert_eq!(downloads_dir(Os::Unix, &get, || fallback.clone()), Some(exported));
         let vars = env(&[("HOME", &home), ("XDG_DOWNLOAD_DIR", Path::new("relative/dl"))]);
         let get = |k: &str| vars.get(k).cloned();
-        assert_eq!(downloads_dir(Os::Unix, &get, fallback.clone()), Some(named.clone()), "a relative variable is ignored");
+        let found = downloads_dir(Os::Unix, &get, || fallback.clone());
+        assert_eq!(found, Some(named.clone()), "a relative variable is ignored");
         assert_eq!(candidates(Os::Unix, &get), [named.clone(), downloads.clone()]);
 
         // XDG_CONFIG_HOME moves the file.
@@ -360,20 +376,20 @@ mod tests {
         std::fs::write(config.join("user-dirs.dirs"), format!("XDG_DOWNLOAD_DIR=\"{}\"\n", elsewhere.display())).unwrap();
         let vars = env(&[("HOME", &home), ("XDG_CONFIG_HOME", &config)]);
         let get = |k: &str| vars.get(k).cloned();
-        assert_eq!(downloads_dir(Os::Unix, &get, fallback.clone()), Some(elsewhere));
+        assert_eq!(downloads_dir(Os::Unix, &get, || fallback.clone()), Some(elsewhere));
 
         // A file naming a folder that is not there falls through to ~/Downloads.
         std::fs::remove_dir_all(&named).unwrap();
         let vars = env(&[("HOME", &home)]);
         let get = |k: &str| vars.get(k).cloned();
-        assert_eq!(downloads_dir(Os::Unix, &get, fallback.clone()), Some(downloads.clone()));
+        assert_eq!(downloads_dir(Os::Unix, &get, || fallback.clone()), Some(downloads.clone()));
 
         // No candidate is a folder: the fallback.
         std::fs::remove_dir_all(&downloads).unwrap();
-        assert_eq!(downloads_dir(Os::Unix, &get, fallback.clone()), fallback);
-        assert_eq!(downloads_dir(Os::Mac, &get, fallback.clone()), fallback);
+        assert_eq!(downloads_dir(Os::Unix, &get, || fallback.clone()), fallback);
+        assert_eq!(downloads_dir(Os::Mac, &get, || fallback.clone()), fallback);
         let nothing = |_: &str| None;
-        assert_eq!(downloads_dir(Os::Windows, &nothing, None), None);
+        assert_eq!(downloads_dir(Os::Windows, &nothing, || None), None);
     }
 
     #[test]
@@ -467,6 +483,18 @@ mod tests {
         assert_eq!(second, into.join("mstream-logs-x-2.zip"));
         assert_eq!(std::fs::read(&first).unwrap(), b"first");
         assert_eq!(std::fs::read(&second).unwrap(), b"second");
+
+        // With every numbered name taken, the answer names the file, for
+        // the note to word; nothing already there is touched.
+        for n in 3..=99 {
+            std::fs::write(into.join(format!("mstream-logs-x-{n}.zip")), b"older").unwrap();
+        }
+        match write_new(&into, "mstream-logs-x", "zip", b"third") {
+            Err(SaveError::Taken(name)) => assert_eq!(name, "mstream-logs-x.zip"),
+            other => panic!("every name taken: {other:?}"),
+        }
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(std::fs::read_dir(&into).unwrap().count(), 99);
     }
 
     #[test]

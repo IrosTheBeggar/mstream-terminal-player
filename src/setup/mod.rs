@@ -3631,6 +3631,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_admin_logs_notes_naming_a_file_end_with_the_path_in_every_locale() {
+        // The GUI's note clips the path at its front to the cells left
+        // after the words (src/gui/server_log.rs), which only keeps the
+        // words whole and the file's name in sight while the path comes
+        // last.
+        let keys = ["saved", "saved_lines", "saved_no_files", "file_at", "show_failed"];
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            for key in keys {
+                let text = locale_text(&parsed, code, &format!("gui.admin.log.{key}"));
+                assert!(text.ends_with("%{path}"), "{code}: gui.admin.log.{key} ends elsewhere: {text}");
+            }
+        }
+    }
+
+    #[test]
     fn the_boot_language_prefers_env_then_system_then_english() {
         assert_eq!(detect_lang(None, None), 0);
         assert_eq!(detect_lang(None, Some("de-DE".into())), 1);

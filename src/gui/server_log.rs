@@ -448,6 +448,39 @@ enum Side {
     Shown(PathBuf, Result<HandOff, String>),
 }
 
+/// A note the log leaves for the screen.
+enum Note {
+    /// Words alone, and whether they tell of a failure.
+    Words(String, bool),
+    /// Words that name a file: the key, whose `%{path}` comes last in every
+    /// locale, the path as the note writes it, and whether it tells of a
+    /// failure. The path is fitted to the note's cells when the screen
+    /// takes it ([`file_note`]).
+    File(&'static str, String, bool),
+}
+
+impl Note {
+    /// Words that tell how something went.
+    fn said(text: impl ToString) -> Note {
+        Note::Words(text.to_string(), false)
+    }
+
+    /// Words that tell of a failure, which the note shows in gold.
+    fn failed(text: impl ToString) -> Note {
+        Note::Words(text.to_string(), true)
+    }
+}
+
+/// A note naming a file, in `cells`: the words whole, then the path
+/// clipped LEADING to the cells left after them, so the file's own name
+/// stays in sight however narrow the window (the kit's path law). The
+/// whole path is what `o` shows.
+fn file_note(key: &str, path: &str, cells: usize) -> String {
+    let room = cells.saturating_sub(width(&t!(key, path = "")));
+    let path = if room == 0 { String::new() } else { super::clip_lead(path, room) };
+    t!(key, path = path).to_string()
+}
+
 /// The log as a screen holds it: the model, the level menu's cursor
 /// while it is open, the poll thread, where the last frame put it, and
 /// what the copy and the download need and say.
@@ -478,9 +511,9 @@ pub(crate) struct LogUi {
     downloading: bool,
     /// The file the last download saved, for `o`.
     saved: Option<PathBuf>,
-    /// What the last copy, download or show said, and whether it is a
-    /// failure, until the screen takes it.
-    note: Option<(String, bool)>,
+    /// What the last copy, download or show said, until the screen takes
+    /// it.
+    note: Option<Note>,
     /// Where a download saves instead of the Downloads folder: a test's
     /// own temporary folder.
     save_dir: Option<PathBuf>,
@@ -596,7 +629,9 @@ impl LogUi {
     }
 
     /// A one-shot thread's answer, as the note it leaves. A download's
-    /// answer ends the download either way.
+    /// answer ends the download either way. A saved file is named from the
+    /// home folder (`~/`); a file shown, or not, by its whole path, which
+    /// is all a machine with no desktop gets.
     fn land(&mut self, answer: Side) {
         let full = |path: &PathBuf| path.display().to_string();
         let note = match answer {
@@ -606,32 +641,34 @@ impl LogUi {
                 let shown = |path: &PathBuf| log_file::shown_path(path, home.as_deref(), Os::HERE);
                 match saved {
                     Ok(Saved::Zip(path)) => {
-                        let note = t!("gui.admin.log.saved", path = shown(&path)).to_string();
+                        let note = Note::File("gui.admin.log.saved", shown(&path), false);
                         self.saved = Some(path);
-                        (note, false)
+                        note
                     }
                     Ok(Saved::Text { path, why }) => {
-                        let note = match why {
-                            Fallback::NoRoute => t!("gui.admin.log.saved_lines", path = shown(&path)),
-                            Fallback::NoFiles => t!("gui.admin.log.saved_no_files", path = shown(&path)),
+                        let key = match why {
+                            Fallback::NoRoute => "gui.admin.log.saved_lines",
+                            Fallback::NoFiles => "gui.admin.log.saved_no_files",
                         };
+                        let note = Note::File(key, shown(&path), false);
                         self.saved = Some(path);
-                        (note.to_string(), false)
+                        note
                     }
-                    Err(SaveError::Api(e)) => (gate_message(&e, &t!("gui.admin.log.download_failed")), true),
-                    Err(SaveError::Cut) => (t!("gui.admin.log.zip_cut").to_string(), true),
-                    Err(SaveError::Nothing) => (t!("gui.admin.log.save_nothing").to_string(), true),
-                    Err(SaveError::NoFolder) => (t!("gui.admin.log.no_folder").to_string(), true),
-                    Err(SaveError::Io(err)) => (t!("gui.admin.log.save_failed", err = err).to_string(), true),
+                    Err(SaveError::Api(e)) => {
+                        Note::failed(gate_message(&e, &t!("gui.admin.log.download_failed")))
+                    }
+                    Err(SaveError::Cut) => Note::failed(t!("gui.admin.log.zip_cut")),
+                    Err(SaveError::Nothing) => Note::failed(t!("gui.admin.log.save_nothing")),
+                    Err(SaveError::NoFolder) => Note::failed(t!("gui.admin.log.no_folder")),
+                    Err(SaveError::Taken(name)) => Note::failed(t!("gui.admin.log.names_taken", name = name)),
+                    Err(SaveError::Io(err)) => Note::failed(t!("gui.admin.log.save_failed", err = err)),
                 }
             }
             // The file manager came up: it says enough.
             Side::Shown(_, Ok(HandOff::Launched)) => return,
-            Side::Shown(path, Ok(HandOff::Headless(_))) => {
-                (t!("gui.admin.log.file_at", path = full(&path)).to_string(), false)
-            }
+            Side::Shown(path, Ok(HandOff::Headless(_))) => Note::File("gui.admin.log.file_at", full(&path), false),
             Side::Shown(path, Ok(HandOff::Nothing) | Err(_)) => {
-                (t!("gui.admin.log.show_failed", path = full(&path)).to_string(), true)
+                Note::File("gui.admin.log.show_failed", full(&path), true)
             }
         };
         self.note = Some(note);
@@ -643,15 +680,15 @@ impl LogUi {
         let lit = !self.model.highlighted().is_empty();
         let lines = self.model.to_copy();
         if lines.is_empty() {
-            self.note = Some((t!("gui.admin.log.copy_nothing").to_string(), false));
+            self.note = Some(Note::said(t!("gui.admin.log.copy_nothing")));
             return;
         }
         let text = as_text(&lines, self.zone.as_ref());
         self.note = Some(match clipboard::copy(&text) {
-            Copied::Clipboard if lit => (t!("gui.admin.log.copied_highlight").to_string(), false),
-            Copied::Clipboard => (t!("gui.admin.log.copied_all").to_string(), false),
-            Copied::Terminal => (t!("gui.admin.log.copied_terminal").to_string(), false),
-            Copied::Failed => (t!("gui.admin.log.copy_failed").to_string(), true),
+            Copied::Clipboard if lit => Note::said(t!("gui.admin.log.copied_highlight")),
+            Copied::Clipboard => Note::said(t!("gui.admin.log.copied_all")),
+            Copied::Terminal => Note::said(t!("gui.admin.log.copied_terminal")),
+            Copied::Failed => Note::failed(t!("gui.admin.log.copy_failed")),
         });
     }
 
@@ -675,9 +712,9 @@ impl LogUi {
         self.note = Some(match spawned {
             Ok(_) => {
                 self.downloading = true;
-                (t!("gui.admin.log.fetching").to_string(), false)
+                Note::said(t!("gui.admin.log.fetching"))
             }
-            Err(e) => (t!("gui.admin.log.save_failed", err = e.to_string()).to_string(), true),
+            Err(e) => Note::failed(t!("gui.admin.log.save_failed", err = e.to_string())),
         });
     }
 
@@ -685,7 +722,7 @@ impl LogUi {
     /// a thread, since the opener is watched for a moment.
     pub(crate) fn show_saved(&mut self) {
         let Some(path) = self.saved.clone() else {
-            self.note = Some((t!("gui.admin.log.nothing_saved").to_string(), false));
+            self.note = Some(Note::said(t!("gui.admin.log.nothing_saved")));
             return;
         };
         let side = self.side.0.clone();
@@ -695,7 +732,7 @@ impl LogUi {
             let _ = side.send(Side::Shown(shown, answer));
         });
         if spawned.is_err() {
-            self.note = Some((t!("gui.admin.log.show_failed", path = path.display().to_string()).to_string(), true));
+            self.note = Some(Note::File("gui.admin.log.show_failed", path.display().to_string(), true));
         }
     }
 
@@ -704,9 +741,13 @@ impl LogUi {
         self.downloading
     }
 
-    /// The note the last copy, download or show left, once.
-    pub(crate) fn take_note(&mut self) -> Option<(String, bool)> {
-        self.note.take()
+    /// The note the last copy, download or show left, once, as words and
+    /// whether they tell of a failure, for a note `cells` wide.
+    pub(crate) fn take_note(&mut self, cells: usize) -> Option<(String, bool)> {
+        Some(match self.note.take()? {
+            Note::Words(text, failed) => (text, failed),
+            Note::File(key, path, failed) => (file_note(key, &path, cells), failed),
+        })
     }
 
     /// The log is not on screen: a press held on it lets go, and the rows
@@ -1740,7 +1781,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             log.pump(Instant::now());
-            if let Some(note) = log.take_note().filter(|(text, _)| *text != fetching) {
+            if let Some(note) = log.take_note(usize::MAX).filter(|(text, _)| *text != fetching) {
                 return note;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1958,7 +1999,7 @@ mod tests {
     fn y_copies_the_highlight_or_every_shown_line_and_says_how() {
         let _en = english();
         let mut log = LogUi::new(None).utc();
-        let note = |log: &mut LogUi| log.take_note().expect("a note");
+        let note = |log: &mut LogUi| log.take_note(usize::MAX).expect("a note");
 
         clipboard::catch(Copied::Clipboard);
         assert_eq!(log.key(key(KeyCode::Char('y')), 5), LogKey::Taken);
@@ -2085,11 +2126,11 @@ mod tests {
         let mut log = downloading_log(&server, &dir);
 
         log.key(key(KeyCode::Char('o')), 5);
-        assert_eq!(log.take_note(), Some((t!("gui.admin.log.nothing_saved").to_string(), false)));
+        assert_eq!(log.take_note(usize::MAX), Some((t!("gui.admin.log.nothing_saved").to_string(), false)));
 
         assert_eq!(log.key(key(KeyCode::Char('d')), 5), LogKey::Taken);
         assert!(log.downloading());
-        assert_eq!(log.take_note(), Some((t!("gui.admin.log.fetching").to_string(), false)));
+        assert_eq!(log.take_note(usize::MAX), Some((t!("gui.admin.log.fetching").to_string(), false)));
         let (note, failed) = landed(&mut log);
         assert!(!log.downloading());
         let files = dir.files();
@@ -2111,6 +2152,51 @@ mod tests {
         log.key(key(KeyCode::Char('o')), 5);
         assert_eq!(landed(&mut log), (t!("gui.admin.log.file_at", path = path.display().to_string()).to_string(), false));
         log.stop();
+    }
+
+    #[test]
+    fn a_note_naming_a_file_keeps_its_words_whole_and_clips_the_path_at_its_front() {
+        // Every locale ends these sentences with the path (the setup
+        // tests pin it), so a clip at its front loses folders, never words.
+        let _en = english();
+        let path = "~/Downloads/mstream-logs-quickconnect-abcdefghijkl-20261002-090000.zip";
+        let keys = [
+            "gui.admin.log.saved",
+            "gui.admin.log.saved_lines",
+            "gui.admin.log.saved_no_files",
+            "gui.admin.log.file_at",
+            "gui.admin.log.show_failed",
+        ];
+        for key in keys {
+            let words = t!(key, path = "").to_string();
+            // The note at 100, 136 and 176 columns, and with room to spare.
+            for cells in [30, 66, 106, 400] {
+                let note = file_note(key, path, cells);
+                let room = cells.saturating_sub(width(&words));
+                if room >= width(path) {
+                    assert_eq!(note, format!("{words}{path}"), "{key} at {cells}");
+                } else if room > 0 {
+                    let tail = &path[path.len() - (room - 1)..];
+                    assert_eq!(note, format!("{words}…{tail}"), "{key} at {cells}");
+                    assert_eq!(width(&note), cells, "{key} at {cells}");
+                } else {
+                    assert_eq!(note, words, "{key} at {cells}: the words, and no stray mark");
+                }
+            }
+        }
+
+        // The download's note, at a 176-column window: the words, then
+        // the path, whole.
+        let mut log = LogUi::new(None);
+        let saved = PathBuf::from("/srv/drop/mstream-logs-127.0.0.1-20261002-090000.zip");
+        log.land(Side::Saved(Ok(Saved::Zip(saved.clone()))));
+        let (note, failed) = log.take_note(106).expect("a note");
+        let whole = "saved · o shows it · /srv/drop/mstream-logs-127.0.0.1-20261002-090000.zip";
+        assert_eq!((note.as_str(), failed), (whole, false));
+        // And at 100 columns, the file's own name in what is left.
+        log.land(Side::Shown(saved, Ok(HandOff::Headless("MSTREAM_NO_OPEN".into()))));
+        let (note, _) = log.take_note(30).expect("a note");
+        assert_eq!(note, "the file is at …002-090000.zip");
     }
 
     #[test]
@@ -2193,7 +2279,7 @@ mod tests {
         let mut lone = LogUi::new(None);
         lone.download();
         assert!(!lone.downloading());
-        assert_eq!(lone.take_note(), None);
+        assert_eq!(lone.take_note(usize::MAX), None);
         log.stop();
     }
 }
