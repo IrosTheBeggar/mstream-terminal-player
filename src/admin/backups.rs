@@ -28,8 +28,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, ServerHome, age_text, draw_bottom, draw_header, fmt_bytes, fmt_count,
-    frame_ground, gate_message, host_of, iso_unix, printable, unix_now,
+    Outcome, Screen, ServerHome, age_text, body_column, draw_chip, draw_foot, draw_header,
+    fmt_bytes, fmt_count, frame_ground, gate_message, host_of, iso_unix, printable, unix_now,
 };
 use crate::api::types::{ActiveBackup, BackupDestination, BackupRun, BackupStatus, DirListing, PathCheck, RunAnswer};
 use crate::api::{ApiError, BackupPatch, Client, NewBackupDestination};
@@ -962,6 +962,21 @@ impl Screen for Room {
         render(frame, self)
     }
 
+    fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+        self.ui.begin_frame();
+        draw(frame, self, area, true);
+    }
+
+    /// The room's own tips already end on "Esc back", so hosted they are
+    /// the same words.
+    fn hint(&self) -> String {
+        footer_hint(self)
+    }
+
+    fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
     fn key(&mut self, key: KeyEvent) -> Option<Outcome> {
         handle_key(self, key)
     }
@@ -1137,7 +1152,16 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, room: &mut Room) {
     room.ui.begin_frame();
     let Some(area) = frame_ground(frame, MIN_W, MIN_H) else { return };
+    draw(frame, room, area, false);
+}
 
+/// The room inside `area`. Standalone it sits under its own header, the
+/// BETA chip beside the title, and over its tips row. Hosted (the GUI
+/// player's Admin tab) the host's bar is the header, so the chip moves to
+/// the right of the body's first row, beside the state line, and the
+/// host's footer carries the tips, leaving the area's last row to the
+/// status line alone. Modals and the tooltip centre in `area` either way.
+fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
     // A modal makes the room beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
     let modal_open = !matches!(room.modal, Modal::None);
@@ -1146,19 +1170,29 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = None;
     }
 
-    let title = t!("bak.title").to_string();
-    draw_header(frame, area, &title, &host_of(&room.client));
-    // The page's BETA banner, as a chip beside the title.
-    frame.render_widget(
-        Paragraph::new(Span::styled(t!("bak.beta").to_string(), Style::default().fg(th().gold))),
-        Rect { x: 2 + title.chars().count() as u16 + 1, y: 0, width: 8, height: 1 },
-    );
-    let column = Rect { x: 2, y: 2, width: area.width.saturating_sub(4), height: area.height.saturating_sub(5) };
+    let beta = t!("bak.beta").to_string();
+    if !hosted {
+        let title = t!("bak.title").to_string();
+        draw_header(frame, area, &title, &host_of(&room.client));
+        // The page's BETA banner, as a chip beside the title.
+        frame.render_widget(
+            Paragraph::new(Span::styled(beta.clone(), Style::default().fg(th().gold))),
+            Rect { x: area.x + 2 + title.chars().count() as u16 + 1, y: area.y, width: 8, height: 1 },
+        );
+    }
+    let column = body_column(area, hosted);
+    // Hosted, the chip takes the right of the state line's row, so the
+    // cadence keeps clear of it by the chip and a two-cell gap.
+    let reserve = if hosted { kit::width(&beta) as u16 + 2 } else { 0 };
     if room.loaded {
-        draw_state(frame, room, column);
+        draw_state(frame, room, column, reserve);
         draw_table(frame, room, column);
     }
-    draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
+    if hosted {
+        draw_chip(frame, column, &beta);
+    }
+    let tips = footer_hint(room);
+    draw_foot(frame, area, room.note.as_ref(), room.busy.as_deref(), &tips, hosted);
 
     if modal_open {
         room.ui.pointer = live_pointer;
@@ -1207,8 +1241,9 @@ fn footer_hint(room: &Room) -> String {
 }
 
 /// The state line: the run in flight with the kit's scan bar, the queue,
-/// or idle.
-fn draw_state(frame: &mut Frame, room: &mut Room, column: Rect) {
+/// or idle. The cadence on its right stops `reserve` cells short of the
+/// column's edge, where a hosted room's chip sits.
+fn draw_state(frame: &mut Frame, room: &mut Room, column: Rect, reserve: u16) {
     let line = |y: u16| Rect { x: column.x, y, width: column.width, height: 1 };
     let now = unix_now();
     let (spans, polls) = match &room.status.active {
@@ -1256,8 +1291,10 @@ fn draw_state(frame: &mut Frame, room: &mut Room, column: Rect) {
     let state_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     frame.render_widget(Paragraph::new(Line::from(spans)), line(column.y));
     let polls = polls.to_string();
-    if state_w + 2 + polls.chars().count() <= column.width as usize {
-        frame.render_widget(Paragraph::new(Span::styled(polls, dim())).alignment(Alignment::Right), line(column.y));
+    let room_for = column.width.saturating_sub(reserve);
+    if state_w + 2 + polls.chars().count() <= room_for as usize {
+        let at = Rect { width: room_for, ..line(column.y) };
+        frame.render_widget(Paragraph::new(Span::styled(polls, dim())).alignment(Alignment::Right), at);
     }
     if let Some(a) = &room.status.active {
         frame.render_widget(Paragraph::new(progress_line(a, column.width as usize)), line(column.y + 1));
@@ -1568,6 +1605,12 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
     let line = |y: u16| Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 1 };
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
+    // A short window (the GUI's floor, or a terminal under the form's
+    // height) clamps the frame, so a block draws only when its last row
+    // clears the button row. At full height every block does, and the
+    // error line shares the button row, left of the buttons.
+    let by = inner.bottom().saturating_sub(1);
+    let clear = |last: u16| last < by;
     let title = if editing {
         t!("bak.edit_title", library = f.library_name, path = f.original.as_ref().map(|d| d.dest_path.clone()).unwrap_or_default())
     } else {
@@ -1581,8 +1624,13 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
     let mut y = inner.y + 2;
 
     // LIBRARY
-    frame.render_widget(Paragraph::new(Span::styled(t!("bak.field_library").to_string(), dim())), Rect { x, y, width: 10, height: 1 });
-    if editing {
+    let lib_shown = clear(y + lib_rows - 1);
+    if lib_shown {
+        frame.render_widget(Paragraph::new(Span::styled(t!("bak.field_library").to_string(), dim())), Rect { x, y, width: 10, height: 1 });
+    }
+    if !lib_shown {
+        y += lib_rows + 1;
+    } else if editing {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(f.library_name.clone(), bold()), Span::styled(t!("bak.library_fixed").to_string(), dim())])),
             Rect { x: x + 10, y, width: w.saturating_sub(10), height: 1 },
@@ -1605,8 +1653,13 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
     }
 
     // TRIGGER: the kit's radio group, one row per option with its words.
-    frame.render_widget(Paragraph::new(Span::styled(t!("bak.field_trigger").to_string(), dim())), Rect { x, y, width: 10, height: 1 });
+    if clear(y) {
+        frame.render_widget(Paragraph::new(Span::styled(t!("bak.field_trigger").to_string(), dim())), Rect { x, y, width: 10, height: 1 });
+    }
     for (i, trigger) in Trigger::ALL.iter().enumerate() {
+        if !clear(y + i as u16) {
+            break;
+        }
         let rect = Rect { x: x + 10, y: y + i as u16, width: w.saturating_sub(10), height: 1 };
         let on = *trigger == f.trigger;
         let hovered = room.ui.pointer.is_some_and(|p| rect.contains(p));
@@ -1631,19 +1684,21 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
     y += 4;
 
     // DESTINATION: the path, ^B to browse, the server's verdict beneath.
-    modal_field(
-        frame,
-        room,
-        Rect { x, y, width: w, height: 4 },
-        &t!("bak.field_dest"),
-        &f.dest,
-        focused == Field::Dest,
-        false,
-        Act::FormFocus(index_of(Field::Dest)),
-    );
-    let browse = t!("bak.browse_button").to_string();
-    let browse_w = browse.chars().count() as u16 + 4;
-    kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(browse_w + 1), y, width: browse_w, height: 1 }, &browse, false, Act::FormBrowse);
+    if clear(y + 3) {
+        modal_field(
+            frame,
+            room,
+            Rect { x, y, width: w, height: 4 },
+            &t!("bak.field_dest"),
+            &f.dest,
+            focused == Field::Dest,
+            false,
+            Act::FormFocus(index_of(Field::Dest)),
+        );
+        let browse = t!("bak.browse_button").to_string();
+        let browse_w = browse.chars().count() as u16 + 4;
+        kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(browse_w + 1), y, width: browse_w, height: 1 }, &browse, false, Act::FormBrowse);
+    }
     y += 4;
     let dest_text = f.dest.value().trim();
     let verdict: Option<(String, Style)> = if dest_text.is_empty() {
@@ -1663,10 +1718,12 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
         None
     };
     // The server's sentence may run long: two rows, wrapped at words.
-    if let Some((text, style)) = verdict {
+    if let Some((text, style)) = verdict
+        && clear(y)
+    {
         frame.render_widget(
             Paragraph::new(Span::styled(printable(&text, 2 * w as usize), style)).wrap(Wrap { trim: true }),
-            Rect { x, y, width: w, height: 2 },
+            Rect { x, y, width: w, height: 2.min(by - y) },
         );
     }
     y += 2;
@@ -1678,6 +1735,9 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
         (Field::Hour, t!("bak.field_hour").to_string(), t!("bak.hint_hour").to_string(), &f.hour, f.trigger != Trigger::Daily),
     ];
     for (i, (field, label, hint, input, muted)) in numbers.iter().enumerate() {
+        if !clear(y + 3) {
+            break;
+        }
         let fx = x + i as u16 * 21;
         let room_w = w.saturating_sub(i as u16 * 21);
         modal_field_labelled(
@@ -1691,26 +1751,31 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
             *muted,
             Act::FormFocus(index_of(*field)),
         );
-        frame.render_widget(Paragraph::new(Span::styled(hint.clone(), dim())), Rect { x: fx, y: y + 4, width: 20.min(room_w), height: 1 });
+        if clear(y + 4) {
+            frame.render_widget(Paragraph::new(Span::styled(hint.clone(), dim())), Rect { x: fx, y: y + 4, width: 20.min(room_w), height: 1 });
+        }
     }
     y += 5;
 
     // EXCLUDE PATTERNS
-    modal_field(
-        frame,
-        room,
-        Rect { x, y, width: w, height: 4 },
-        &t!("bak.field_excludes"),
-        &f.excludes,
-        focused == Field::Excludes,
-        false,
-        Act::FormFocus(index_of(Field::Excludes)),
-    );
+    if clear(y + 3) {
+        modal_field(
+            frame,
+            room,
+            Rect { x, y, width: w, height: 4 },
+            &t!("bak.field_excludes"),
+            &f.excludes,
+            focused == Field::Excludes,
+            false,
+            Act::FormFocus(index_of(Field::Excludes)),
+        );
+    }
     y += 4;
-    if let Some(err) = &f.error {
+    if let Some(err) = &f.error
+        && y <= by
+    {
         frame.render_widget(Paragraph::new(Span::styled(clip(err, w), Style::default().fg(th().gold))), line(y));
     }
-    let by = inner.bottom().saturating_sub(1);
     if editing {
         kit::button(frame, &mut room.ui, Rect { x, y: by, width: w, height: 1 }, &t!("bak.reset_patterns"), false, Act::FormResetExcludes);
     }
@@ -2458,5 +2523,123 @@ mod tests {
         assert_eq!(f.numbers().unwrap_err(), "the hour is 0 to 23");
         f.hour = Input::new("3".into());
         assert_eq!(f.numbers().unwrap(), (30, 200, Some(3)));
+    }
+
+    /// The buffer as text, one line per row, for failure messages.
+    fn shown(buf: &ratatui::buffer::Buffer) -> String {
+        (buf.area.top()..buf.area.bottom()).map(|y| buf_row(buf, y) + "\n").collect()
+    }
+
+    /// Row `y` from column `x` on.
+    fn from(buf: &ratatui::buffer::Buffer, x: u16, y: u16) -> String {
+        buf_row(buf, y).chars().skip(x as usize).collect()
+    }
+
+    /// Whether a modal frame's rounded corners sit exactly on `rect`.
+    fn framed_at(buf: &ratatui::buffer::Buffer, rect: Rect) -> bool {
+        buf[(rect.x, rect.y)].symbol() == "╭" && buf[(rect.right() - 1, rect.bottom() - 1)].symbol() == "╯"
+    }
+
+    use super::super::hosting::{DOCKED, FLOOR, WINDOW, draw_hosted, outside, row as buf_row};
+    use super::super::{Claim, HostedRoom, body_column};
+
+    #[test]
+    fn hosted_the_room_draws_inside_its_area_with_no_header_and_its_note_last() {
+        let _en = english();
+        let mut room = idle();
+        room.note = Some(("music: backup started".into(), false));
+        let buf = draw_hosted(&mut room, (100, 30), WINDOW);
+        let text = shown(&buf);
+        assert!(outside(&buf, WINDOW, true).is_empty(), "drawn outside its area:\n{text}");
+        assert!(from(&buf, WINDOW.x, WINDOW.y).chars().all(|c| c == '·'), "the area's first row is the host's:\n{text}");
+        assert!(!text.contains("Backups") && !text.contains("home.mstream.example"), "no header:\n{text}");
+        assert!(text.contains("Add a backup destination") && text.contains("…/Backup/music"), "{text}");
+        assert!(from(&buf, 19, 23).starts_with("music: backup started"), "the note on the last row:\n{text}");
+        assert!(!text.contains("a add a destination · Esc back"), "the tips are the host's:\n{text}");
+        let buf = draw_hosted(&mut room, (176, 46), DOCKED);
+        assert!(outside(&buf, DOCKED, true).is_empty(), "drawn outside its area:\n{}", shown(&buf));
+        assert!(from(&buf, 19, DOCKED.bottom() - 1).starts_with("music: backup started"), "{}", shown(&buf));
+    }
+
+    #[test]
+    fn hosted_the_beta_chip_rides_the_bodys_first_row_not_row_zero() {
+        let _en = english();
+        let mut room = idle();
+        let buf = draw_hosted(&mut room, (100, 30), WINDOW);
+        let text = shown(&buf);
+        let column = body_column(WINDOW, true);
+        assert_eq!(from(&buf, column.right() - 4, column.y), "beta··", "flush with the column's right edge:\n{text}");
+        assert!(buf_row(&buf, 0).chars().all(|c| c == '·'), "row zero is the host's bar:\n{text}");
+        assert!(from(&buf, 19, 2).starts_with("• idle — nothing running"), "{text}");
+        // Where the cadence fits beside the state, it keeps clear of the chip.
+        let buf = draw_hosted(&mut room, (176, 46), DOCKED);
+        assert!(buf_row(&buf, 2).contains("polls every 5 s··beta··"), "{}", shown(&buf));
+        // The chip is there while the room is still loading, too.
+        let mut loading = new_room();
+        let buf = draw_hosted(&mut loading, (100, 30), WINDOW);
+        assert_eq!(from(&buf, column.right() - 4, column.y), "beta··", "{}", shown(&buf));
+        // Standalone it still sits beside the title.
+        assert!(draw(&mut room).lines().next().is_some_and(|l| l.starts_with("  Backups beta")));
+    }
+
+    #[test]
+    fn hosted_a_modal_centres_in_the_rooms_area() {
+        let _en = english();
+        let mut room = idle();
+        press(&mut room, KeyCode::Down);
+        press(&mut room, KeyCode::Char('r'));
+        assert!(matches!(room.modal, Modal::Remove(1)));
+        let buf = draw_hosted(&mut room, (100, 30), WINDOW);
+        let at = kit::modal_rect(WINDOW, 68, 10, 10);
+        assert!(framed_at(&buf, at), "the remove gate at {at:?}:\n{}", shown(&buf));
+        assert!(outside(&buf, WINDOW, true).is_empty(), "{}", shown(&buf));
+    }
+
+    #[test]
+    fn hosted_at_the_floor_it_never_says_resize() {
+        let _en = english();
+        let form = || Box::new(Form::add(&[("music".into(), 10)], &defaults()));
+        let modals = [
+            Modal::None,
+            Modal::Form(form()),
+            Modal::Browser {
+                browse: Browse { path: "/Volumes".into(), dirs: (0..30).map(|i| format!("disk-{i}")).collect(), sel: 0 },
+                form: form(),
+            },
+            Modal::History {
+                dest: Box::new(dests().remove(0)),
+                runs: (0..20).map(|i| run("success", 3600 * (i + 1), 1, 2, 0, 1024, None)).collect(),
+                loaded: true,
+                sel: 0,
+            },
+            Modal::Remove(1),
+        ];
+        for modal in modals {
+            let mut room = idle();
+            room.note = Some(("a note".into(), false));
+            room.modal = modal;
+            let buf = draw_hosted(&mut room, (100, 24), FLOOR);
+            let text = shown(&buf);
+            assert!(outside(&buf, FLOOR, false).is_empty(), "{:?} drew outside its area:\n{text}", room.modal);
+            assert!(!text.contains(&*t!("resize")), "{text}");
+            // A window's worth of rows holds every modal whole.
+            let buf = draw_hosted(&mut room, (100, 30), WINDOW);
+            assert!(outside(&buf, WINDOW, true).is_empty(), "{:?} spilled:\n{}", room.modal, shown(&buf));
+        }
+    }
+
+    #[test]
+    fn hosted_claims_every_key_while_a_modal_is_up() {
+        let _en = english();
+        let mut room = idle();
+        assert_eq!(room.claims(), Claim::Open);
+        assert!(!room.modal_up());
+        assert_eq!(room.tips(), "↑↓ select · a add a destination · Esc back", "the room's own words");
+        room.press(key_press(KeyCode::Char('a')));
+        assert!(room.modal_up());
+        assert_eq!(room.claims(), Claim::All, "the form takes every letter");
+        assert_eq!(room.tips(), t!("bak.hint_add"));
+        room.press(key_press(KeyCode::Esc));
+        assert_eq!(room.claims(), Claim::Open);
     }
 }
