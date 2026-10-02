@@ -57,3 +57,23 @@ terminal route"; 1 stays every other failure. On Windows a double-clicked deskto
 frees the console Explorer gave it (one still flashes as it starts), and the
 `mstream-player-launch` stub, packaged as "mStream Player.exe", is a GUI-subsystem program
 that starts `mstream-player.exe gui --window` beside it with no console at all.
+
+## The desktop packages
+
+Beside the bare `mstream-player-desktop-*` binaries, release.yml's `package-desktop` job wraps
+each one the way its OS installs an app, with the layouts in `scripts/package-macos.sh`,
+`scripts/package-windows.py` and `scripts/package-linux.sh` (the same scripts run on a dev Mac).
+`mstream-player-desktop-darwin-{arm64,x64}.app.zip` holds `mStream Player.app`: bundle id
+`io.mstream.player`, the executable `Contents/MacOS/mstream-player`, the icns, and an
+Info.plist asking for the local network (`_mstream._tcp`, for discovery); when the signing
+secrets exist the bundle is signed with the Developer ID, notarized and stapled, else it ships
+unsigned and the run's summary says so. `mstream-player-desktop-win32-x64.zip` is portable:
+`mStream Player.exe` (the launcher stub, to double-click), `mstream-player.exe` (the player,
+also usable from a terminal), `mstream-player.ico` and a README.txt; it is **not code-signed**
+for now (no Windows certificate yet), so SmartScreen warns on first run, which the README says.
+`mstream-player-desktop-linux-x64.tar.gz` holds one directory, `mstream-player-desktop/`, with
+the binary, `io.mstream.player.desktop`, the hicolor icons (16 to 512 px) under `icons/`, and a
+README.txt with the per-user install into `~/.local`. The zip and the tarball are reproducible
+(fixed order, the commit's time, owner 0). A pre-release's version, which Info.plist's
+CFBundleShortVersionString cannot hold, keeps its numeric core there and the full string in
+the bundle's `MStreamPlayerVersion` key.

@@ -108,11 +108,24 @@ jobs:
       # arrangement for CLI tools. Runs before staging so the manifest
       # hashes cover the signed bytes. Both flavours sign with the same
       # identifier: they are one program, built two ways.
+      #
+      # The certificate import is .github/actions/macos-signing, shared with
+      # release.yml's .app bundles; it leaves the identity empty when the
+      # secrets are absent.
+      - name: Import signing certificate (macOS)
+        id: signing
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/macos-signing
+        with:
+          cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+
       - name: Sign and notarize (macOS)
         if: runner.os == 'macOS'
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          IDENTITY: ${{ steps.signing.outputs.identity }}
+          KEYCHAIN: ${{ steps.signing.outputs.keychain }}
           ASC_API_KEY: ${{ secrets.ASC_API_KEY }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -126,22 +139,9 @@ jobs:
             exit 0
           fi
           bin="target/${{ inputs.target }}/release/mstream-player"
+          keychain="$KEYCHAIN"
+          identity="$IDENTITY"
 
-          keychain="$RUNNER_TEMP/signing.keychain-db"
-          keychain_password="$(uuidgen)"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 900 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
-            -P "$CERT_PASSWORD" -T /usr/bin/codesign
-          rm "$RUNNER_TEMP/cert.p12"
-          security set-key-partition-list -S "apple-tool:,apple:" \
-            -s -k "$keychain_password" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" login.keychain
-
-          identity=$(security find-identity -v -p codesigning "$keychain" \
-            | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)
           codesign --force --timestamp --options runtime \
             --identifier io.mstream.player --sign "$identity" "$bin"
           codesign --verify --strict --verbose=2 "$bin"
@@ -166,7 +166,7 @@ jobs:
           fi
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
             --key "$RUNNER_TEMP/asc.p8" --key-id "$ASC_KEY_ID" \
-            "${issuer[@]}" --wait --timeout 15m
+            ${issuer[@]+"${issuer[@]}"} --wait --timeout 15m
           rm "$RUNNER_TEMP/asc.p8"
 
       # If the sign step failed between creating the keychain and its own
@@ -192,12 +192,25 @@ jobs:
           fi
           mkdir -p staging
           cp "$src" "staging/${{ inputs.binary_name }}"
+          # The desktop Windows leg has a second bin, the launcher stub
+          # (src/bin/launch.rs), which the same `cargo build` made: with no
+          # --bin, cargo builds every bin whose required-features are on.
+          # It rides in this leg's artifact under the family's naming, for
+          # release.yml's package-desktop to put in the zip as
+          # "mStream Player.exe" (and the release lists it as an asset too).
+          if [[ "${{ inputs.features }}" == desktop && "${{ inputs.binary_name }}" == *.exe ]]; then
+            name="${{ inputs.binary_name }}"
+            cp "target/${{ inputs.target }}/release/mstream-player-launch.exe" \
+              "staging/${name/#mstream-player-desktop-/mstream-player-desktop-launch-}"
+          fi
 
       # Artifact names are unique per run, which the two families' distinct
-      # asset names guarantee.
+      # asset names guarantee. The whole staging directory, which holds the
+      # one binary (and on the desktop Windows leg the stub); its files land
+      # at the artifact's root either way.
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.binary_name }}
-          path: staging/${{ inputs.binary_name }}
+          path: staging/
           retention-days: 1
