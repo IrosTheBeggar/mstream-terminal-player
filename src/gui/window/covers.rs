@@ -77,12 +77,16 @@ const SHARPER: f32 = 1.05;
 /// down to the box: past 2:1 a sample without mipmaps skips texels.
 const SMALLER: f32 = 2.0;
 
-/// One cover this frame: which art, in which cells, on which grid.
+/// One cover this frame: which art, in which cells, on which grid, and
+/// whether something drawn after it this frame stands over it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Placed {
     art: u64,
     rect: Rect,
     grid: (u16, u16),
+    /// An overlay registered after the cover was placed (a modal, the
+    /// dropdown, a tooltip) touches its rect: not painted this frame.
+    under: bool,
 }
 
 /// Pixels on their way to a texture: RGBA rows, whether they are as
@@ -138,10 +142,31 @@ impl Board {
         self.lock().placed.clear();
     }
 
-    /// Where this frame's covers are painted, in cells: what the script's
-    /// dump says, so a run can tell a picture from the text under a modal.
-    pub(super) fn placed_rects(&self) -> Vec<Rect> {
-        self.lock().placed.iter().map(|placed| placed.rect).collect()
+    /// Something was drawn over the base layer this frame — told by the
+    /// kit's surface as the overlay registers (`Surface::watch_overlays`).
+    /// Every cover placed so far that it touches stands down for this
+    /// frame: the draw site chose a picture by LAST frame's overlays, so
+    /// on the frame a modal opens it placed one under it, and the cover
+    /// would be painted over the modal for that frame. A cover placed after
+    /// this (one inside the modal) is the modal's own and is painted. From
+    /// the next frame the draw site draws the mosaic there itself, as it
+    /// always has.
+    pub(super) fn overlay(&self, rect: Rect) {
+        for placed in &mut self.lock().placed {
+            if placed.rect.intersects(rect) {
+                placed.under = true;
+            }
+        }
+    }
+
+    /// Where this frame's covers are painted, in cells, and how many more
+    /// were placed but stand under an overlay: what the script's dump says,
+    /// so a run can tell a picture from the text under a modal.
+    pub(super) fn placed_rects(&self) -> (Vec<Rect>, usize) {
+        let inner = self.lock();
+        let painted = inner.placed.iter().filter(|placed| !placed.under);
+        let under = inner.placed.iter().filter(|placed| placed.under).count();
+        (painted.map(|placed| placed.rect).collect(), under)
     }
 }
 
@@ -151,7 +176,8 @@ impl PictureHost for Board {
         if inner.known.insert(art.id()) {
             inner.arrivals.push(thumbnail(art));
         }
-        inner.placed.push(Placed { art: art.id(), rect: area, grid: (grid.width, grid.height) });
+        let grid = (grid.width, grid.height);
+        inner.placed.push(Placed { art: art.id(), rect: area, grid, under: false });
     }
 }
 
@@ -675,7 +701,11 @@ impl PostProcessor for CoverPost {
         let mut floats: Vec<f32> = Vec::with_capacity(placed.len() * 24);
         let mut draws: Vec<wgpu::BindGroup> = Vec::with_capacity(placed.len());
         let mut asks = Vec::new();
-        for placed_cover in &placed {
+        // A cover under an overlay drawn after it is left out: its cells are
+        // the overlay's this frame (Board::overlay). Its texture keeps its
+        // age, so a cover a modal hides for a while may be evicted, and is
+        // uploaded again from its first sighting when the modal goes.
+        for placed_cover in placed.iter().filter(|placed| !placed.under) {
             let Some(cover) = self.covers.get_mut(&placed_cover.art) else { continue };
             // The box itself, before the picture is fitted in it, picks the
             // texture: the fit depends on the picture's shape, which every
@@ -787,7 +817,7 @@ mod tests {
     use super::*;
 
     fn placed(x: u16, y: u16, width: u16, height: u16) -> Placed {
-        Placed { art: 1, rect: Rect { x, y, width, height }, grid: (100, 30) }
+        Placed { art: 1, rect: Rect { x, y, width, height }, grid: (100, 30), under: false }
     }
 
     #[test]
@@ -880,5 +910,34 @@ mod tests {
         }
         board.begin_frame();
         assert!(board.lock().placed.is_empty(), "a frame starts with no covers");
+    }
+
+    /// A modal registered after covers were placed stands down the ones it
+    /// touches — wholly under it or straddling its edge — and not the one
+    /// beside it; a cover placed after it (inside the modal) is its own.
+    #[test]
+    fn an_overlay_stands_down_the_covers_placed_before_it_that_it_touches() {
+        let board = Board::default();
+        let art = Art::from_rgb(1, 1, vec![255, 0, 255]).unwrap();
+        let grid = Rect::new(0, 0, 100, 30);
+        let modal = Rect::new(30, 8, 40, 14);
+        let under = Rect::new(40, 10, 6, 3);
+        let beside = Rect::new(2, 10, 6, 3);
+        let straddling = Rect::new(66, 20, 6, 3);
+        let below = Rect::new(30, 22, 6, 3);
+        for rect in [under, beside, straddling, below] {
+            board.place(rect, grid, &art);
+        }
+        board.overlay(modal);
+        let inside = Rect::new(32, 9, 6, 3);
+        board.place(inside, grid, &art);
+        let (painted, hidden) = board.placed_rects();
+        assert_eq!(painted, [beside, below, inside], "the bottom edge is not a touch");
+        assert_eq!(hidden, 2);
+        // A second overlay over the modal's own cover stands it down too.
+        board.overlay(Rect::new(33, 10, 10, 1));
+        assert_eq!(board.placed_rects(), (vec![beside, below], 3));
+        board.begin_frame();
+        assert_eq!(board.placed_rects(), (Vec::new(), 0));
     }
 }

@@ -37,8 +37,10 @@
 //! input method is on only while a field has the keyboard, so a Japanese
 //! keyboard's digits still switch rooms; Cmd+V (Ctrl+V elsewhere) types the
 //! clipboard into the field; a button let go outside the window lets go;
-//! a move to a screen of another scale re-sizes the type; and a drag on the
-//! window's edge steps by whole cells, where the platform allows it.
+//! a move to a screen of another scale re-sizes the type; a drag on the
+//! window's edge steps by whole cells, where the platform allows it; and
+//! what is typed or clicked while the window stands blank, its renderer
+//! still being built, takes effect once the first frame has drawn (held.rs).
 //!
 //! What the terminal's main does on the way out, the window does itself:
 //! the launcher's instance lock is dropped after the App, or in `exiting`
@@ -47,6 +49,7 @@
 //! where the log is.
 
 mod covers;
+mod held;
 mod icon;
 mod input;
 #[cfg(test)]
@@ -56,7 +59,8 @@ mod stats;
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -65,7 +69,7 @@ use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::Event as TermEvent;
 use ratatui::style::Color;
-use ratatui_wgpu::{Builder, ColorTable, Dimensions, Font, Fonts, WgpuBackend};
+use ratatui_wgpu::{Builder, Built, ColorTable, Dimensions, Font, Fonts, WgpuBackend};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, WindowEvent};
@@ -74,6 +78,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use covers::{Board, CoverPost};
+use held::{Held, HeldInput};
 use input::{Grid, Raw, Translator};
 use script::{Input, Script, Step};
 use stats::{Counted, Lap, Stats};
@@ -109,11 +114,25 @@ const SHOW_BY: Duration = Duration::from_secs(4);
 /// on them: a wake every few milliseconds for the moments they take, so the
 /// backend follows them by no more than that.
 const EARLY_POLL: Duration = Duration::from_millis(4);
+/// How long `open` waits for the backend's build before it leaves it to the
+/// loop's polls. On macOS the loop's next turn after the window is made
+/// comes only once AppKit has put the window on screen, 40–50 ms later
+/// here, so a build done in its usual 10 ms would sit unclaimed for that
+/// long and the first frame would follow the window's show instead of
+/// overlapping it: 40 ms later than when the build ran inline. A build
+/// still running after this is one the loop must not block on (a slow
+/// driver's shader compiles), and the polls take it from there.
+const OPEN_WAIT: Duration = Duration::from_millis(50);
 /// The frame the fidelity dump waits for: the first has the window at its
 /// opening size, the resize to the grid lands a frame or two later.
 const DUMP_AT_FRAME: u32 = 5;
 
 type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static, CoverPost>>>;
+/// What the backend's thread hands back: the backend but for its glyph
+/// caches, which are not `Send` (the vendored builder's `Built`).
+type Parts = Built<'static, 'static, CoverPost>;
+/// The builder and the surface made for it, on their way to that thread.
+type BuildJob = (Builder<'static, CoverPost>, wgpu::Surface<'static>);
 
 /// The exit code of a window that could not be opened at all: no display
 /// (winit's event loop would not start), libxkbcommon-x11 missing on an
@@ -170,6 +189,10 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     // slot is forked from this one, so they all record onto the board.
     let board = Arc::new(Board::default());
     gui.app.graphics = crate::tui::graphics::Graphics::hosted(board.clone());
+    // And the board hears of every overlay as it is drawn, so a cover a
+    // modal opens over is not painted over the modal on the frame it opens.
+    let watching = board.clone();
+    gui.ui.watch_overlays(move |rect| watching.overlay(rect));
     let ctx = Ctx::new(&gui.app, channels);
     let mut app = App {
         gui,
@@ -206,6 +229,10 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
         quit_at: None,
         exit_laps: Vec::new(),
         exit_clock: None,
+        held: HeldInput::default(),
+        opened_logical: None,
+        building: None,
+        frozen_until: None,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("gui --window: {e}");
@@ -434,6 +461,47 @@ struct App {
     quit_at: Option<Instant>,
     exit_laps: Vec<(&'static str, Duration)>,
     exit_clock: Option<Instant>,
+    /// What the window was given before its first frame drew, to replay
+    /// after it (held.rs).
+    held: HeldInput,
+    /// The window's size in points as it was made: one that differs when
+    /// the backend lands was resized meanwhile, and keeps that size.
+    opened_logical: Option<LogicalSize<f64>>,
+    /// The backend's build, while its thread runs.
+    building: Option<Building>,
+    /// The script's `freeze`: no frame until then.
+    frozen_until: Option<Instant>,
+}
+
+/// The backend being built on a thread of its own, once the loop has made
+/// the surface (which only the window's thread may): the device checked
+/// against the surface, the surface configured, the atlas and the
+/// pipelines. That is about 10 ms on this Mac, but it is GPU driver work
+/// — shader compiles, a swapchain on DX12 — and a loop that waited on it
+/// would answer nothing meanwhile, the blank Not Responding window lane 6
+/// took the early threads off the loop for. `open` waits for it a moment
+/// ([`OPEN_WAIT`]); after that the loop polls it as it polls those
+/// (`about_to_wait`).
+struct Building {
+    /// What the thread built, sent as it ends. A thread that panicked
+    /// sends nothing and drops its sender, which the receiver reads as
+    /// disconnected. Dropped while the thread runs (a quit), the thread's
+    /// send fails and what it built is dropped on that thread.
+    done: Receiver<Result<Parts, String>>,
+    /// The type size and the surface the build was begun for: the window
+    /// may have been resized while it ran.
+    font_px: u32,
+    size: PhysicalSize<u32>,
+}
+
+/// The build's thread: everything after the surface (the vendored
+/// builder's `build_parts_with_surface`), blocking on its futures. The job
+/// is taken from its slot (`App::build`), where only one hand takes it.
+fn build_parts(slot: &Mutex<Option<BuildJob>>) -> Result<Parts, String> {
+    let job = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    let (builder, surface) = job.ok_or("the renderer's build was taken twice")?;
+    block_on(builder.build_parts_with_surface(surface))?
+        .map_err(|e| format!("the window has nothing to draw with: {e}"))
 }
 
 /// The way out's steps and what each took, on stderr, just before the
@@ -453,14 +521,15 @@ fn exit_report(laps: &[(&'static str, Duration)]) {
 /// The startup's work that needs no window, begun on threads of its own
 /// before the event loop runs: the faces, and the GPU's instance, adapter
 /// and device. It overlaps the event loop's start and the window's
-/// creation instead of following them. The backend is built from it once
-/// both threads are done: at once in `open` when they already are (on this
-/// Mac, warm or cold, they are), else from the loop, which polls them
-/// (`about_to_wait`) rather than block on a join. A blocked loop answered
-/// nothing — on Windows, the white window the Windows report saw for two to
-/// three seconds, which DWM marks Not Responding under load — and could not
-/// show a hidden window by its deadline either: a loaded run there showed
-/// it 17 s after it was made, blank.
+/// creation instead of following them. The backend's build begins from it
+/// once both threads are done: at once in `open` when they already are (on
+/// this Mac, warm or cold, they are), else from the loop, which polls them
+/// (`about_to_wait`) rather than block on a join; the build itself runs on
+/// a thread of its own too, polled the same way ([`Building`]). A blocked
+/// loop answered nothing — on Windows, the white window the Windows report
+/// saw for two to three seconds, which DWM marks Not Responding under load
+/// — and could not show a hidden window by its deadline either: a loaded
+/// run there showed it 17 s after it was made, blank.
 struct Early {
     faces: Option<JoinHandle<Result<Faces, String>>>,
     gpu: Option<JoinHandle<Gpu>>,
@@ -601,8 +670,9 @@ impl Host for WindowHost<'_> {
 }
 
 impl App {
-    /// The window, and the backend that draws cells onto it: the backend at
-    /// once if the early threads are done, else as soon as they are, from
+    /// The window, and the backend that draws cells onto it: the backend's
+    /// build begun at once if the early threads are done, and installed if
+    /// it is done within [`OPEN_WAIT`]; else each as soon as it can be, from
     /// the loop (`about_to_wait`), which goes on answering the window
     /// meanwhile.
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
@@ -634,7 +704,8 @@ impl App {
         // On Windows the window is made hidden and `show` puts it on screen
         // once a frame has been presented to it; the other platforms show
         // it now, as before (macOS presents into it within a frame, and
-        // winit's `Occluded(false)` there repaints it as it comes into view).
+        // winit's `Occluded(false)` there presents it again as it comes into
+        // view).
         let attributes = if cfg!(windows) { attributes.with_visible(false) } else { attributes };
         let window = Arc::new(
             event_loop
@@ -643,21 +714,23 @@ impl App {
         );
         self.lap.mark(&mut self.stats, "window");
         self.opened_at = Some(Instant::now());
+        self.opened_logical = Some(window.inner_size().to_logical(window.scale_factor()));
         self.shown = !cfg!(windows);
         self.window = Some(window);
-        if self.early.ready() { self.build() } else { Ok(()) }
+        self.poll_build(OPEN_WAIT)
     }
 
-    /// The backend onto the window `open` made, from what the early threads
-    /// found, then the window sized to the grid and the first frame asked
-    /// for. Called once both threads are done, so the joins do not wait.
+    /// The backend's build begun, onto the window `open` made, from what
+    /// the early threads found: the surface here, on the window's thread
+    /// (the one part that must be), the rest on a thread of its own that
+    /// the loop polls ([`Building`]); `install` takes it from there. Called
+    /// once both early threads are done, so the joins do not wait.
     fn build(&mut self) -> Result<(), String> {
         let Some(window) = self.window.clone() else { return Ok(()) };
         // The loop's wait for the early threads, when it had to wait: none
         // when `open` builds at once. The joins after it then wait for
         // nothing, and their stages say so.
         self.lap.mark(&mut self.stats, "threads.wait");
-        let (cols, rows) = self.grid;
         // Read now rather than at the window's creation: the loop may have
         // run in between, and a scale change then found no backend to tell.
         self.scale = window.scale_factor();
@@ -704,8 +777,60 @@ impl App {
         if let Some((adapter, device, queue)) = gpu.device {
             builder = builder.with_device(adapter, device, queue);
         }
-        let backend = block_on(builder.build_with_target(window.clone()))?
+        let surface = builder
+            .create_surface(window.clone())
             .map_err(|e| format!("the window has nothing to draw with: {e}"))?;
+        self.lap.mark(&mut self.stats, "surface");
+        // Handed over through a slot rather than moved into the closure,
+        // so a thread that cannot start leaves the job here to be done on
+        // the loop's thread instead, as the early threads' work is.
+        let job: Arc<Mutex<Option<BuildJob>>> = Arc::new(Mutex::new(Some((builder, surface))));
+        let theirs = job.clone();
+        let (sender, done) = mpsc::channel();
+        let spawned = std::thread::Builder::new().name("window-backend".into()).spawn(move || {
+            let _ = sender.send(build_parts(&theirs));
+        });
+        match spawned {
+            Ok(_) => {
+                self.building = Some(Building { done, font_px, size });
+                Ok(())
+            }
+            Err(_) => self.install(build_parts(&job), font_px, size),
+        }
+    }
+
+    /// The build begun once the early threads are done, and the backend
+    /// installed once its thread is, waiting for that up to `wait`: `open`
+    /// waits a moment ([`OPEN_WAIT`]), the loop's polls not at all.
+    fn poll_build(&mut self, wait: Duration) -> Result<(), String> {
+        if self.building.is_none() && self.early.ready() {
+            self.build()?;
+        }
+        let Some(building) = &self.building else { return Ok(()) };
+        let built = match building.done.recv_timeout(wait) {
+            Ok(built) => built,
+            Err(RecvTimeoutError::Timeout) => return Ok(()),
+            Err(RecvTimeoutError::Disconnected) => Err("the renderer's build panicked".into()),
+        };
+        let Some(Building { font_px, size, .. }) = self.building.take() else { return Ok(()) };
+        self.install(built, font_px, size)
+    }
+
+    /// The backend the build made, onto the window: then the window sized
+    /// to the grid and the first frame asked for. `font_px` and `size` are
+    /// what the build was begun with.
+    fn install(
+        &mut self,
+        built: Result<Parts, String>,
+        font_px: u32,
+        size: PhysicalSize<u32>,
+    ) -> Result<(), String> {
+        let Some(window) = self.window.clone() else { return Ok(()) };
+        // The glyph caches, made here: the one part that could not cross
+        // from the build's thread.
+        let backend = built?.finish();
+        // From the surface to here: the build's thread and the poll that
+        // found it done.
         self.lap.mark(&mut self.stats, "backend");
         // Which adapter, through which backend: the one line a report needs
         // (otherwise it is only in wgpu's own log, at debug level). Asked of
@@ -722,6 +847,12 @@ impl App {
         let timed = self.stats.is_some();
         let mut terminal =
             Terminal::new(Counted::new(backend, timed)).map_err(|e| e.to_string())?;
+        // A window resized while the build ran: the surface to its size
+        // now, before anything is measured on it.
+        let now = window.inner_size();
+        if now != size {
+            terminal.backend_mut().resize(now.width.max(1), now.height.max(1));
+        }
 
         // The cell's width comes back from the backend, not from
         // arithmetic here: it is the narrowest of the faces it was given,
@@ -734,24 +865,46 @@ impl App {
         // grown when the opening guess fell short, trimmed when it
         // overshot — so the window and the render tests draw the same
         // number of cells.
+        let (cols, rows) = self.grid;
         let reported = terminal.backend_mut().window_size().map_err(|e| e.to_string())?;
         let (got_cols, got_rows) =
             (reported.columns_rows.width.max(1), reported.columns_rows.height.max(1));
         let cell = (u32::from(reported.pixels.width) / u32::from(got_cols), font_px);
         let want = fit(cell, (cols, rows));
-        eprintln!(
-            "gui --window: {font_px} px type at scale {}, cell {}×{} px, opened at \
-             {got_cols}×{got_rows} cells; sizing to {cols}×{rows}, {}×{} px",
-            window.scale_factor(),
-            cell.0,
-            cell.1,
-            want.width,
-            want.height,
-        );
-        if want != size
-            && let Some(now) = window.request_inner_size(want)
-        {
-            terminal.backend_mut().resize(now.width, now.height);
+        // Unless the window was resized while the backend was built — by
+        // hand, by a tiling window manager, by the script's `resize` — when
+        // the size it was given is kept, as a terminal keeps the size it is
+        // dragged to, and the grid is what fits it. A change of scale alone
+        // keeps the size in points, so it is not one.
+        let points = now.to_logical::<f64>(window.scale_factor());
+        let resized = self.opened_logical.is_some_and(|opened| {
+            (points.width - opened.width).abs() > 0.5 || (points.height - opened.height).abs() > 0.5
+        });
+        if resized {
+            eprintln!(
+                "gui --window: {font_px} px type at scale {}, cell {}×{} px; resized to {}×{} px \
+                 while the renderer was built, {got_cols}×{got_rows} cells, kept",
+                window.scale_factor(),
+                cell.0,
+                cell.1,
+                now.width,
+                now.height,
+            );
+        } else {
+            eprintln!(
+                "gui --window: {font_px} px type at scale {}, cell {}×{} px, opened at \
+                 {got_cols}×{got_rows} cells; sizing to {cols}×{rows}, {}×{} px",
+                window.scale_factor(),
+                cell.0,
+                cell.1,
+                want.width,
+                want.height,
+            );
+            if want != now
+                && let Some(now) = window.request_inner_size(want)
+            {
+                terminal.backend_mut().resize(now.width, now.height);
+            }
         }
 
         // A terminal is never less than a cell, and ratatui-wgpu counts on
@@ -772,11 +925,61 @@ impl App {
         Ok(())
     }
 
+    /// What came while there was no frame to read it against — the
+    /// renderer being built, and the first frame not drawn — through the
+    /// handler it would have gone through, in order, now that the first
+    /// frame has drawn: a click is a cell only on a grid, and lands on what
+    /// that frame registered there. A resize or a scale change is the
+    /// window's size or scale now, whatever it was then.
+    fn replay(&mut self, event_loop: &ActiveEventLoop) {
+        if self.held.is_empty() {
+            return;
+        }
+        let (items, dropped) = self.held.take();
+        let lost = if dropped > 0 { format!(" ({dropped} older dropped)") } else { String::new() };
+        eprintln!(
+            "gui --window: {} inputs came before the first frame; replayed{lost}",
+            items.len()
+        );
+        if let Some(stats) = self.stats.as_mut() {
+            stats.held(items.len() as u64, dropped);
+        }
+        for item in items {
+            if self.quit_flushed {
+                break;
+            }
+            let Some(window) = self.window.clone() else { break };
+            match item {
+                Held::Raw(raw) => self.feed_raw(event_loop, raw),
+                Held::Resized => self.resized(event_loop, window.inner_size()),
+                Held::Scale => {
+                    let scale = window.scale_factor();
+                    if (scale - self.scale).abs() > f64::EPSILON
+                        && let Some(want) = self.rescale(event_loop, scale)
+                        && let Some(now) = window.request_inner_size(want)
+                    {
+                        self.resized(event_loop, now);
+                    }
+                }
+            }
+        }
+        self.ask_redraw();
+    }
+
     /// Every cell to the GPU on the next frame: ratatui's clear forgets
     /// the last frame, so the next draw is a whole one.
     fn repaint_all(&mut self) {
         if let Some(terminal) = self.terminal.as_mut() {
             let _ = terminal.clear();
+        }
+        self.ask_redraw();
+    }
+
+    /// The screen the backend holds presented again on the next frame,
+    /// though nothing changed: the frame is asked for now.
+    fn present_again(&mut self) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.backend_mut().owe_present();
         }
         self.ask_redraw();
     }
@@ -791,9 +994,10 @@ impl App {
     /// The loop's frame half, and the time the next one is wanted by. The
     /// clock is read only for the stats lever.
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        if self.terminal.is_none() {
+        if self.terminal.is_none() || self.frozen() {
             // A redraw before the backend exists (the window was asked to
-            // repaint as it came into view) draws nothing and is not timed.
+            // repaint as it came into view) draws nothing and is not timed;
+            // nor does one while the script holds the frame on screen.
             self.asked = None;
             return;
         }
@@ -814,10 +1018,14 @@ impl App {
             self.lap.mark(&mut self.stats, "to_first_frame");
         }
         self.board.begin_frame();
+        // An owed present this frame's flush makes is a present though no
+        // cell changed: the stats lever counts it as one.
+        let owed = terminal.backend().owes_present();
         let framed = frame(terminal, &mut self.gui, &mut self.ctx, &mut WindowHost(window));
         let (cells, flush) = terminal.backend_mut().take_cells();
+        let repaid = owed && !terminal.backend().owes_present();
         if let (Some(stats), Some(started)) = (self.stats.as_mut(), started) {
-            stats.frame(cells, flush, started.elapsed());
+            stats.frame(cells, repaid, flush, started.elapsed());
         }
         match framed {
             Ok(wait) => {
@@ -848,8 +1056,17 @@ impl App {
         if !self.shown && cells > 0 {
             self.show(true);
         }
+        // What came before this, the first frame, now that it has drawn.
+        if self.frames == 1 {
+            self.replay(event_loop);
+        }
         self.sync_ime();
         self.play(event_loop);
+    }
+
+    /// The script's `freeze` holds the frame on screen.
+    fn frozen(&self) -> bool {
+        self.frozen_until.is_some_and(|until| Instant::now() < until)
     }
 
     /// The window onto the screen — on Windows, where `open` made it hidden
@@ -975,6 +1192,13 @@ impl App {
     /// clipboard while a field has the keyboard and is nothing otherwise
     /// (off a Mac, Ctrl+V with no field is still the key it was).
     fn feed_raw(&mut self, event_loop: &ActiveEventLoop, mut raw: Raw) {
+        // Before the first frame there is no grid to read a pointer
+        // against and nothing registered to hit: held, and replayed once
+        // the first frame has drawn (`replay`).
+        if self.frames == 0 {
+            self.held.push(Held::Raw(raw));
+            return;
+        }
         if let Raw::ImePreedit(text) = &raw {
             let text = text.clone();
             self.set_preedit(&text);
@@ -1045,7 +1269,18 @@ impl App {
             }
             self.script_until = None;
         }
+        // Before the first frame — the renderer still being built — only
+        // the steps that need no frame run: their inputs are held and
+        // replayed after it, as a person's are. The first that needs one
+        // waits for it.
+        let early = self.frames == 0;
         while let Some(step) = self.script.as_mut().and_then(Script::next) {
+            if early && !step.needs_no_frame() {
+                if let Some(script) = self.script.as_mut() {
+                    script.push_front(step);
+                }
+                break;
+            }
             match step {
                 Step::Wait(time) => {
                     let until = Instant::now() + time;
@@ -1054,14 +1289,17 @@ impl App {
                     break;
                 }
                 Step::Inputs(inputs) => {
-                    let Some(grid) = self.grid() else { break };
+                    // A cell needs the grid; a step that names one runs
+                    // only once there is one (`needs_no_frame`).
+                    let grid = self.grid();
                     for step_input in inputs {
-                        let raw = match step_input {
-                            Input::Raw(raw) => raw,
-                            Input::MoveTo(col, row) => {
+                        let raw = match (step_input, grid) {
+                            (Input::Raw(raw), _) => raw,
+                            (Input::MoveTo(col, row), Some(grid)) => {
                                 let (x, y) = grid.centre(col, row);
                                 Raw::Move { x, y }
                             }
+                            (Input::MoveTo(..), None) => continue,
                         };
                         self.feed_raw(event_loop, raw);
                     }
@@ -1116,6 +1354,14 @@ impl App {
                 // The next step after the next frame, which comes when the
                 // last one's wait runs out: nothing is asked for here.
                 Step::Frame => break,
+                // No frame for that long: the one just drawn stays on
+                // screen, for a screenshot of it. The next step runs on the
+                // frame after.
+                Step::Freeze(time) => {
+                    eprintln!("gui --window: script freezes the frame for {} ms", time.as_millis());
+                    self.frozen_until = Some(Instant::now() + time);
+                    break;
+                }
                 Step::Quit => {
                     self.quit_at = self.stats.is_some().then(Instant::now);
                     event_loop.exit();
@@ -1132,7 +1378,13 @@ impl App {
     /// A new surface size: to the backend, then a whole repaint, then the
     /// GUI's own resize bookkeeping through the input half.
     fn resized(&mut self, event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
-        let Some(terminal) = self.terminal.as_mut() else { return };
+        // Before the backend there is no surface to size: the fact is
+        // held, and the window's size then applied by the replay — kept,
+        // since `install` keeps a size the window was given meanwhile.
+        let Some(terminal) = self.terminal.as_mut() else {
+            self.held.push(Held::Resized);
+            return;
+        };
         // A zero side (a window minimised on Windows) goes through as it
         // is: the backend keeps its last surface for it. Anything else
         // smaller than a cell becomes one cell, drawn scaled into the
@@ -1144,6 +1396,17 @@ impl App {
         let _ = terminal.clear();
         let Ok(grid) = terminal.backend_mut().size() else { return };
         self.feed(event_loop, TermEvent::Resize(grid.width, grid.height));
+    }
+
+    /// The surface is this size already. Not asked of a resize that comes
+    /// with new type (`rescale`): the cells change there though the pixels
+    /// may not.
+    fn surface_is(&mut self, size: PhysicalSize<u32>) -> bool {
+        let Some(terminal) = self.terminal.as_mut() else { return false };
+        terminal.backend_mut().window_size().is_ok_and(|now| {
+            (u32::from(now.pixels.width), u32::from(now.pixels.height))
+                == (size.width, size.height)
+        })
     }
 
     /// The display's scale changed (the window moved to another screen):
@@ -1199,8 +1462,9 @@ impl App {
         let mut text = terminal.backend().get_text();
         let pointer = grid.map_or((0, 0), |grid| self.translator.pointer(grid));
         let surface = grid.map_or((0, 0), |grid| (grid.width, grid.height));
-        // The covers this frame painted as pictures, as x,y w×h in cells.
-        let placed = self.board.placed_rects();
+        // The covers this frame painted as pictures, as x,y w×h in cells,
+        // and how many more it placed under something drawn over them.
+        let (placed, under) = self.board.placed_rects();
         let covers = if placed.is_empty() {
             "none".to_string()
         } else {
@@ -1210,6 +1474,7 @@ impl App {
                 .collect();
             format!("{} at {}", placed.len(), rects.join(" "))
         };
+        let covers = format!("{covers}, {under} under an overlay");
         let minimised = match self.window.as_ref().and_then(|window| window.is_minimized()) {
             Some(true) => "yes",
             Some(false) => "no",
@@ -1268,6 +1533,11 @@ impl App {
         };
         let mut laps = Vec::new();
         lap(&mut laps, "loop");
+        // A build that has finished is dropped here, from its channel, with
+        // the window's other GPU state; one still running is left to end on
+        // its own thread (a hung driver must not hold the way out), and what
+        // it made is dropped there when its send finds no one listening.
+        drop(self.building.take());
         self.terminal = None;
         lap(&mut laps, "gpu");
         self.window = None;
@@ -1319,7 +1589,31 @@ impl ApplicationHandler for App {
             // against a surface mid-resize can, so the next frame draws
             // every cell. The GUI's own resize bookkeeping runs through the
             // input half with the grid the surface now holds.
+            // A size the surface has already — the one `install` sized the
+            // window to, which the platform then reports back — moves no
+            // cell, and the repaint and the GUI's bookkeeping are skipped:
+            // on macOS that repaint was the frame the window came into view
+            // with, a full one, 40 ms in a debug build here.
+            WindowEvent::Resized(size) if self.surface_is(size) => {}
             WindowEvent::Resized(size) => self.resized(event_loop, size),
+            // Before the backend, held: `build` read the scale it builds
+            // for, and the replay applies the window's scale if it differs.
+            WindowEvent::ScaleFactorChanged { .. } if self.terminal.is_none() => {
+                self.held.push(Held::Scale)
+            }
+            // The scale the type is sized for already: macOS reports the
+            // window's scale as it comes on screen though `build` read the
+            // same one. The type, the surface and the grid all stand, and
+            // the window keeps its size rather than take winit's suggestion;
+            // rebuilding the type for it repainted every cell, a full frame
+            // that was the one the window first showed the player with.
+            WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer }
+                if (scale_factor - self.scale).abs() <= f64::EPSILON =>
+            {
+                if let Some(window) = &self.window {
+                    let _ = inner_size_writer.request_inner_size(window.inner_size());
+                }
+            }
             // winit's suggested size keeps the window's logical size, which
             // is the grid only to within a pixel or so of rounding; the
             // grid's own size goes back instead, and the `Resized` that
@@ -1373,14 +1667,17 @@ impl ApplicationHandler for App {
             // its next flush presents whatever changed. That flush is the
             // next frame, though, which a still screen may not ask for for
             // a whole poll, so the window coming into view asks for one now
-            // — and repaints every cell with it, which costs one full frame
-            // and spares a compositor that dropped the hidden window's
-            // contents a screen of stale rows.
+            // — and owes the present whether or not the last one failed,
+            // since one that went to a window the compositor never showed
+            // failed nowhere (VENDORED.md, change 20). That puts the whole
+            // screen up again from what the backend holds, a few
+            // milliseconds, where repainting every cell cost a full frame
+            // (about 40 ms in a debug build here) before the player was seen.
             WindowEvent::Occluded(false) => {
                 if let Some(stats) = self.stats.as_mut() {
                     stats.visible();
                 }
-                self.repaint_all();
+                self.present_again();
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
@@ -1396,23 +1693,27 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             return;
         }
-        // Until the backend exists the loop polls the early threads, and
-        // builds it on the turn they are done; meanwhile it answers the
-        // window, and a hidden one is shown by its deadline, blank, rather
-        // than kept off screen for as long as the GPU takes.
+        // Until the backend exists the loop polls the early threads, begins
+        // its build on the turn they are done, and installs it on the turn
+        // the build's thread is; meanwhile it answers the window, and a
+        // hidden one is shown by its deadline, blank, rather than kept off
+        // screen for as long as the GPU takes.
         if self.terminal.is_none() {
-            if !self.early.ready() {
+            // Before the first frame: the window never showed the player.
+            if let Err(e) = self.poll_build(Duration::ZERO) {
+                eprintln!("gui --window: {e}");
+                self.exit_code = NO_WINDOW;
+                event_loop.exit();
+                return;
+            }
+            if self.terminal.is_none() {
+                // The script goes on meanwhile, as far as it can without a
+                // frame; what it types is held like a person's.
+                self.play(event_loop);
                 if !self.shown && self.show_due() {
                     self.show(false);
                 }
                 event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + EARLY_POLL));
-                return;
-            }
-            // Before the first frame: the window never showed the player.
-            if let Err(e) = self.build() {
-                eprintln!("gui --window: {e}");
-                self.exit_code = NO_WINDOW;
-                event_loop.exit();
                 return;
             }
         }
@@ -1433,6 +1734,15 @@ impl ApplicationHandler for App {
             }
         }
         let now = Instant::now();
+        // The script's `freeze`: the loop sleeps until it ends, asking for
+        // nothing, and draws again after.
+        if let Some(until) = self.frozen_until {
+            if now < until {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+                return;
+            }
+            self.frozen_until = None;
+        }
         if let Some(at) = self.restore_at.filter(|&at| now >= at) {
             self.restore_at = None;
             if let Some(window) = &self.window {

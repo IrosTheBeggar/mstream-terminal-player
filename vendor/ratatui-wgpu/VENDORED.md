@@ -297,6 +297,40 @@ and the patch entry can go.
     cells (no white of their own, the old `▏` or `x` in the second). Upstream had neither:
     its widths were the cluster's first character's, which a VS16 does not change.
 
+19. **The build in two halves, the second off the window's thread** (`backend/builder.rs`,
+    `lib.rs`). `build_with_target` was the surface's creation and the rest of the build in
+    one call, on the caller's thread. `Builder::create_surface(target)` is now the first half
+    on its own — the one part that must run on the thread that owns the window, since on
+    macOS a surface is the view's `CAMetalLayer` — and `Builder::build_parts_with_surface`
+    the second, which may run on any thread: the adapter's check against the surface, a
+    device when none was given, the surface's capabilities and configuration, the atlas,
+    the shaders and the pipelines all work from wgpu's handles, which are `Send` and `Sync`.
+    The finished backend is not `Send` — the shaping plans' and the glyph atlas's LRU caches
+    (`evictor`, over `tether_map`) link their entries by raw pointer — so the second half
+    returns `Built`, every field but those two caches, which is `Send` whenever the post
+    processor is (checked at compile time for the default one), and `Built::finish` on the
+    window's thread makes the caches, empty and cheap, and hands back the backend. The struct
+    literal that ended `build_with_render_surface` moved into `finish` unchanged, but for the
+    blink clocks, which now start when the backend is finished; `build_with_target`,
+    `build_with_surface` and the headless builds are the two halves called in a row and
+    behave as before. Why: the configuration and the pipelines are driver work (shader
+    compiles; a swapchain on DX12) that took 10 ms here but is the kind of stage that took
+    seconds on the Windows machine, and a loop blocked on it answers nothing. The player
+    makes the surface on the loop's thread and runs the rest on a thread the loop waits for
+    up to 50 ms as the window opens (on macOS the loop's next turn comes only after AppKit
+    has shown the window, so a build claimed then drew its first frame 40 ms later than an
+    inline one) and polls after that (`src/gui/window/mod.rs`, `Building`, `OPEN_WAIT`); with 1.5 s planted in the pipelines step its loop
+    went on answering, and a resize and a key made meanwhile took effect.
+20. **A present can be owed on purpose** (`backend/wgpu_backend.rs`, `owes_present`,
+    `owe_present`). Change 5's `present_owed` was private; the backend now says whether a
+    present is owed and lets its caller owe one. The next flush then composites the text
+    pass's target — which holds every cell as last drawn — onto a fresh surface texture and
+    presents it, though no cell changed. Why: on macOS the first present goes to a window
+    not yet on screen, and the player's answer to the window coming into view was a repaint
+    of every cell, a full frame of about 40 ms in a debug build here; owing the present
+    puts the same screen up for the post processor's pass alone, and the player's stats can
+    tell that present from a frame that changed nothing.
+
 ### Tests
 
 The `#[cfg(test)] mod tests` of `backend/wgpu_backend.rs` (golden-image tests) and of

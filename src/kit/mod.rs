@@ -117,6 +117,15 @@ pub struct Surface<A> {
     /// resets what it covers. Covers an overlay never touches stay pixels.
     overlays: Vec<Rect>,
     covered: Vec<Rect>,
+    /// Told of each overlay the moment it registers, while the frame is
+    /// still drawing: the GUI window's cover board, which paints its
+    /// pictures after the cells and so can stand one down on the very frame
+    /// a modal opens over it, where the rule above leaves it painted over
+    /// the modal for that frame. The order is the point: a cover placed
+    /// before an overlay is under it, one placed after (the actions sheet's
+    /// own header) is in it. `None` everywhere else, the terminal included,
+    /// where nothing changes.
+    overlay_watch: Option<Box<dyn Fn(Rect)>>,
     /// What a right click means where — a row's context verb (the
     /// track-actions contract's sheet). Rebuilt each frame like `clicks`.
     contexts: Vec<(Rect, A)>,
@@ -162,6 +171,7 @@ impl<A> Default for Surface<A> {
             soft_origin: None,
             overlays: Vec::new(),
             covered: Vec::new(),
+            overlay_watch: None,
             contexts: Vec::new(),
             key_hints: true,
             caret_since: None,
@@ -189,6 +199,16 @@ impl<A: Clone> Surface<A> {
     /// overlay registers after the base layer's controls are dropped.
     pub fn overlay(&mut self, rect: Rect) {
         self.overlays.push(rect);
+        if let Some(watch) = &self.overlay_watch {
+            watch(rect);
+        }
+    }
+
+    /// Have `watch` told of every overlay as it registers (see
+    /// `overlay_watch`). Only the GUI's window watches.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn watch_overlays(&mut self, watch: impl Fn(Rect) + 'static) {
+        self.overlay_watch = Some(Box::new(watch));
     }
 
     /// Whether an overlay stood over any part of `rect` LAST frame — the
@@ -1374,6 +1394,31 @@ mod tests {
         assert!(s.overlays_moved(), "the frame it closes on");
         s.begin_frame();
         assert!(!s.overlays_moved());
+    }
+
+    /// A watcher hears every overlay as it registers, in order, the modal
+    /// frame's among them, and changes nothing the surface itself answers.
+    #[test]
+    fn an_overlay_watcher_is_told_each_footprint_as_it_registers() {
+        use std::sync::{Arc, Mutex};
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mut s: Surface<u8> = Surface::new();
+        let ear = heard.clone();
+        s.watch_overlays(move |rect| ear.lock().unwrap().push(rect));
+        let tip = Rect { x: 1, y: 1, width: 4, height: 1 };
+        s.begin_frame();
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                modal_frame_on(frame, &mut s, frame.area(), 20, 6, Color::White);
+            })
+            .unwrap();
+        s.overlay(tip);
+        let modal = modal_rect(Rect::new(0, 0, 40, 12), 20, 6, 6);
+        assert_eq!(*heard.lock().unwrap(), [modal, tip]);
+        s.begin_frame();
+        assert!(s.covered_last_frame(modal) && s.covered_last_frame(tip));
     }
 
     #[test]

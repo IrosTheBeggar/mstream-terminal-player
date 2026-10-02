@@ -153,6 +153,9 @@ pub(super) struct Stats {
     /// The startup's stages in the order they ran, each with what it took:
     /// what a window blank for seconds on one machine spent them on.
     stages: Vec<(String, f64)>,
+    /// Inputs that came before the first frame and were replayed after
+    /// it, and how many were dropped for want of room (held.rs).
+    held: (u64, u64),
 }
 
 impl Stats {
@@ -179,6 +182,7 @@ impl Stats {
             frame_ms: Vec::new(),
             redraw_ms: Vec::new(),
             stages: Vec::new(),
+            held: (0, 0),
         }
     }
 
@@ -207,13 +211,15 @@ impl Stats {
         }
     }
 
-    /// One frame: the cells it drew, its flush, the frame half's time.
-    pub(super) fn frame(&mut self, cells: u64, flush: Duration, frame: Duration) {
+    /// One frame: the cells it drew, whether its flush made a present that
+    /// was owed (one that changed no cell, but put the screen up again),
+    /// its flush, the frame half's time.
+    pub(super) fn frame(&mut self, cells: u64, repaid: bool, flush: Duration, frame: Duration) {
         self.frames += 1;
         self.cells += cells;
         self.flush_ms.push(ms(flush));
         self.frame_ms.push(ms(frame));
-        if cells == 0 {
+        if cells == 0 && !repaid {
             self.unchanged += 1;
             return;
         }
@@ -235,6 +241,11 @@ impl Stats {
             self.visible_pending = false;
             self.first_visible = Some(since);
         }
+    }
+
+    /// Inputs held before the first frame, replayed after it, and dropped.
+    pub(super) fn held(&mut self, replayed: u64, dropped: u64) {
+        self.held = (replayed, dropped);
     }
 
     /// The whole redraw the frame was part of.
@@ -265,6 +276,7 @@ impl Stats {
             "flush_ms": spread(&self.flush_ms),
             "present_flush_ms": spread(&self.present_flush_ms),
             "redraw_ms": spread(&self.redraw_ms),
+            "held_input": { "replayed": self.held.0, "dropped": self.held.1 },
             "covers": covers,
         });
         let text = serde_json::to_string_pretty(&report).unwrap_or_default() + "\n";
@@ -357,13 +369,13 @@ mod tests {
     #[test]
     fn a_window_shown_by_its_present_is_seen_at_that_present() {
         let mut stats = Stats::new(PathBuf::new());
-        stats.frame(0, Duration::ZERO, Duration::ZERO);
+        stats.frame(0, false, Duration::ZERO, Duration::ZERO);
         assert_eq!(stats.first_present, None);
-        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        stats.frame(3000, false, Duration::ZERO, Duration::ZERO);
         stats.seen_as_presented();
         assert!(stats.first_visible.is_some());
         assert_eq!(stats.first_visible, stats.first_present);
-        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        stats.frame(3000, false, Duration::ZERO, Duration::ZERO);
         assert_eq!(stats.first_visible, stats.first_present);
     }
 
@@ -373,16 +385,35 @@ mod tests {
     #[test]
     fn a_window_coming_into_view_is_seen_at_the_next_present() {
         let mut stats = Stats::new(PathBuf::new());
-        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        stats.frame(3000, false, Duration::ZERO, Duration::ZERO);
         stats.visible();
-        stats.frame(0, Duration::ZERO, Duration::ZERO);
+        stats.frame(0, false, Duration::ZERO, Duration::ZERO);
         assert_eq!(stats.first_visible, None);
-        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        stats.frame(3000, false, Duration::ZERO, Duration::ZERO);
         assert!(stats.first_visible.is_some_and(|seen| Some(seen) >= stats.first_present));
         // Shown with nothing presented yet: the first present is the one.
         let mut stats = Stats::new(PathBuf::new());
         stats.seen_as_presented();
-        stats.frame(3000, Duration::ZERO, Duration::ZERO);
+        stats.frame(3000, false, Duration::ZERO, Duration::ZERO);
         assert_eq!(stats.first_visible, stats.first_present);
+    }
+
+    /// The window coming into view owes a present rather than repaint
+    /// every cell (macOS's `Occluded(false)`): the frame that makes it
+    /// changes no cell, and is still the one the player is first seen at.
+    /// A frame that changed nothing and owed nothing is not.
+    #[test]
+    fn an_owed_present_is_a_present() {
+        let mut stats = Stats::new(PathBuf::new());
+        stats.frame(3000, false, Duration::ZERO, Duration::ZERO);
+        let first = stats.first_present;
+        stats.visible();
+        stats.frame(0, false, Duration::ZERO, Duration::ZERO);
+        assert_eq!(stats.first_visible, None);
+        assert_eq!(stats.unchanged, 1);
+        stats.frame(0, true, Duration::ZERO, Duration::ZERO);
+        assert!(stats.first_visible.is_some_and(|seen| Some(seen) >= first));
+        assert_eq!((stats.unchanged, stats.present_flush_ms.len()), (1, 2));
+        assert_eq!(stats.first_present, first);
     }
 }

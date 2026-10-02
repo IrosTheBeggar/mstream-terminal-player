@@ -10,6 +10,7 @@ use std::num::NonZeroU32;
 
 use ratatui::Terminal;
 use ratatui::backend::Backend;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -120,7 +121,7 @@ fn render_at(
 /// headless surface, and a runner without one (CI's ubuntu and windows
 /// boxes) must not go red for a renderer it cannot run — the repo's GPU
 /// tests have always stood aside there. Any other failure is a failure.
-fn frame_or_skip(rendered: Result<Frame, String>) -> Option<Frame> {
+fn frame_or_skip<T>(rendered: Result<T, String>) -> Option<T> {
     match rendered {
         Ok(frame) => Some(frame),
         Err(e) if e.starts_with("no headless wgpu backend") => {
@@ -766,4 +767,87 @@ fn a_stray_tag_run_draws_as_its_base_alone() {
     let Some(frame) = row(&faces, 14, line) else { return };
     let Some(alone) = row(&faces, 14, clip.to_string()) else { return };
     assert!(frame.cell(0, 0) == alone.cell(0, 0), "the clip's cell is not the clip alone");
+}
+
+/// One frame through the window's own post processor (covers.rs): two
+/// solid magenta covers, `under` and `beside`, placed through the hosted
+/// `Graphics` as the GUI's draw sites place theirs, and then — later in the
+/// same frame, as the GUI draws its overlays last — a 20×8 modal opened
+/// through the kit on a surface the board watches (`watched`) or not.
+/// Returns the frame and the two covers' cell rects.
+fn covers_and_a_modal(watched: bool) -> Result<(Frame, Rect, Rect), String> {
+    use std::sync::Arc;
+
+    use super::covers::{Board, CoverPost};
+    use crate::kit::Surface;
+    use crate::tui::art::Art;
+    use crate::tui::graphics::Graphics;
+
+    let (cols, rows) = (40u32, 12u32);
+    let board = Arc::new(Board::default());
+    let mut surface: Surface<()> = Surface::new();
+    if watched {
+        let watching = board.clone();
+        surface.watch_overlays(move |rect| watching.overlay(rect));
+    }
+    let wide = 4096;
+    let builder = Builder::<CoverPost>::from_font_and_user_data(hack()?, board.clone())
+        .with_font_size_px(PX)
+        .with_width_and_height(Dimensions {
+            width: NonZeroU32::new(wide).unwrap(),
+            height: NonZeroU32::new(rows * PX).unwrap(),
+        })
+        .with_bg_color(Color::Rgb(GROUND[0], GROUND[1], GROUND[2]))
+        .with_fg_color(Color::White);
+    let mut backend = block_on(builder.build_headless())?
+        .map_err(|e| format!("no headless wgpu backend: {e}"))?;
+    let reported = backend.window_size().map_err(|e| e.to_string())?;
+    let cell_w = wide / u32::from(reported.columns_rows.width);
+    backend.resize(cols * cell_w, rows * PX);
+
+    let grid = Rect::new(0, 0, cols as u16, rows as u16);
+    let modal = crate::kit::modal_rect(grid, 20, 8, 8);
+    let under = Rect { x: modal.x + 2, y: modal.y + 2, width: 6, height: 3 };
+    let beside = Rect { x: 1, y: modal.y + 2, width: 6, height: 3 };
+    assert!(!beside.intersects(modal) && modal.contains(under.as_position()));
+    let art = Art::from_rgb(4, 4, [255, 0, 255].repeat(16)).ok_or("no art")?;
+    let mut graphics = Graphics::hosted(board.clone());
+
+    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+    board.begin_frame();
+    surface.begin_frame();
+    terminal
+        .draw(|frame| {
+            graphics.draw(frame, under, &art);
+            graphics.draw(frame, beside, &art);
+            crate::kit::modal_frame_on(frame, &mut surface, grid, 20, 8, Color::White);
+        })
+        .map_err(|e| e.to_string())?;
+    let pixels = terminal.backend().read_pixels().ok_or("the frame could not be read back")?;
+    Ok((Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX }, under, beside))
+}
+
+/// The cover flash. A draw site asks whether an overlay stood over its
+/// cover LAST frame, so on the frame a modal opens it still places the
+/// picture, and the post processor painted it over the modal for that
+/// frame (10 ms, until the hot frame drew the mosaic). The board now hears
+/// the modal register and leaves out the covers placed before it that it
+/// touches: no cover pixel under the modal, the one beside it painted. The
+/// unwatched surface is the control: the same frame without the fix
+/// paints the cover over the modal.
+#[test]
+fn a_cover_under_a_modal_that_opens_this_frame_is_not_painted_over_it() {
+    let _gpu = one_at_a_time();
+    let magenta = |frame: &Frame, rect: Rect| {
+        let cells = rect.positions().flat_map(|at| frame.cell(at.x.into(), at.y.into()));
+        cells.filter(|px| *px == [255, 0, 255]).count()
+    };
+    let Some((frame, under, beside)) = frame_or_skip(covers_and_a_modal(true)) else { return };
+    assert_eq!(magenta(&frame, under), 0, "the cover was painted over the modal");
+    // The cover beside is a square fitted in its box: most of the box.
+    let (w, h) = (u32::from(beside.width) * frame.cell_w, u32::from(beside.height) * frame.cell_h);
+    let side = w.min(h) as usize;
+    assert!(magenta(&frame, beside) >= side * side * 9 / 10, "the cover beside was not painted");
+    let Some((control, under, _)) = frame_or_skip(covers_and_a_modal(false)) else { return };
+    assert!(magenta(&control, under) > 0, "without the watch the flash does not show");
 }

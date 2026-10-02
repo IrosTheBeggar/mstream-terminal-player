@@ -53,6 +53,9 @@
 //! - `frame`: nothing until the next frame, which comes when the loop's own
 //!   wait says (a `wait` would bring it forward): how a run reads the
 //!   cadence, from the dumps on either side
+//! - `freeze <ms>`: no frame for that long, so the one just drawn stays on
+//!   screen for a screenshot — the frame a modal opens on, say, which the
+//!   next (10 ms later) would otherwise replace
 //! - `dump <path>`: the window's text, then the pointer's state, the
 //!   covers painted as pictures and the last press: its cell, the action
 //!   the GUI's hit found there (or none) and whether a drag began
@@ -63,6 +66,18 @@
 //! one lands — the hover a click needs, the room a key opened — as it
 //! would be for hands that are never faster than a frame. A line that
 //! does not parse is reported on stderr and skipped.
+//!
+//! The script starts as the window is made, not at its first frame: on
+//! this Mac the two are a few tens of milliseconds apart, but on a slow
+//! GPU the window stands blank for a second or more while its renderer is
+//! built, and a script is how a run types into it then. A `wait` is time
+//! from its own step, as it always was. Before the first frame the steps
+//! that need none run on the loop's own clock — `wait`, `say`, `resize`,
+//! `quit`, and keys, text and pointer steps that name pixels rather than
+//! cells; their inputs are held and replayed after the first frame, as a
+//! person's are (held.rs). The first step that needs a frame or a grid
+//! (`move`, `click`, `dump`, `frame`, `scale`, `minimise`, `freeze`)
+//! waits for the first frame.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -86,7 +101,24 @@ pub(super) enum Step {
     Minimise(Duration),
     /// The next frame, at the loop's pace.
     Frame,
+    /// No frame for this long.
+    Freeze(Duration),
     Quit,
+}
+
+impl Step {
+    /// Whether the step can run before the window's first frame, while
+    /// its renderer is being built: it needs no grid (a cell is a place
+    /// only on one) and nothing drawn.
+    pub(super) fn needs_no_frame(&self) -> bool {
+        match self {
+            Step::Wait(_) | Step::Say(_) | Step::Resize(..) | Step::Quit => true,
+            Step::Inputs(inputs) => inputs.iter().all(|input| matches!(input, Input::Raw(_))),
+            Step::Dump(_) | Step::Scale(_) | Step::Minimise(_) | Step::Frame | Step::Freeze(_) => {
+                false
+            }
+        }
+    }
 }
 
 /// A [`Raw`] waiting for the grid.
@@ -123,6 +155,11 @@ impl Script {
 
     pub(super) fn next(&mut self) -> Option<Step> {
         self.steps.pop_front()
+    }
+
+    /// A step taken that could not run yet, back at the front.
+    pub(super) fn push_front(&mut self, step: Step) {
+        self.steps.push_front(step);
     }
 
     pub(super) fn is_done(&self) -> bool {
@@ -379,6 +416,10 @@ fn parse_line(line: &str) -> Result<Vec<Step>, String> {
             Ok(vec![Step::Minimise(Duration::from_millis(ms))])
         }
         "frame" => Ok(vec![Step::Frame]),
+        "freeze" => {
+            let ms: u64 = arg.trim().parse().map_err(|_| "freeze wants milliseconds")?;
+            Ok(vec![Step::Freeze(Duration::from_millis(ms))])
+        }
         "quit" => Ok(vec![Step::Quit]),
         _ => Err("no such command".into()),
     }
@@ -529,6 +570,39 @@ quit
                 Step::Inputs(vec![Input::MoveTo(3, 4)]),
                 button(true),
                 button(false),
+            ]
+        );
+    }
+
+    /// What may run before the first frame: what names no cell and needs
+    /// nothing drawn.
+    #[test]
+    fn a_freeze_parses_and_only_frameless_steps_run_before_the_first_frame() {
+        let (steps, errors) = parse(
+            "freeze 3000\nfreeze\nwait 300\ntext /\nclickpx 5,5\nclick 3,4\ndump d\n\
+             resize 800,600\nscale 2\nframe\nsay hi\nquit\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(steps[0], Step::Freeze(Duration::from_secs(3)));
+        let early: Vec<bool> = steps.iter().map(Step::needs_no_frame).collect();
+        assert_eq!(
+            early,
+            [
+                false, // freeze
+                true,  // wait
+                true,  // text /
+                true,  // clickpx: the move,
+                true,  // the press
+                true,  // and the release, in pixels
+                false, // click: a cell,
+                true,  // then its press
+                true,  // and release
+                false, // dump
+                true,  // resize
+                false, // scale
+                false, // frame
+                true,  // say
+                true,  // quit
             ]
         );
     }

@@ -381,10 +381,34 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
 impl<'a, P: PostProcessor> Builder<'a, P> {
     /// Build a new backend with the provided surface target - e.g. a winit
     /// `Window`.
+    ///
+    /// This is [`Builder::create_surface`] then [`Builder::build_with_surface`]
+    /// on one thread. A caller that wants the rest of the build off the
+    /// window's thread calls the two itself: see [`Builder::create_surface`].
     pub async fn build_with_target<'s>(
         mut self,
         target: impl Into<SurfaceTarget<'s>>,
     ) -> Result<WgpuBackend<'a, 's, P>> {
+        let surface = self.create_surface(target)?;
+        self.build_with_surface(surface).await
+    }
+
+    /// The part of a build that has to run on the thread that owns the
+    /// window: the surface, made from the window with this builder's
+    /// instance (or a default one, kept for the build). On macOS a
+    /// surface is the window's view's `CAMetalLayer`, which AppKit lets
+    /// only the main thread touch; elsewhere it is cheap. Everything after
+    /// it — the adapter's check against the surface, a device when none
+    /// was given, the surface's capabilities and configuration, the atlas,
+    /// the shaders and the pipelines — works from wgpu's handles, which are
+    /// `Send` and `Sync`, so [`Builder::build_parts_with_surface`] may run
+    /// on any thread, and what it makes be moved back to the window's
+    /// thread (it is `Send` whenever the post processor is), where
+    /// [`Built::finish`] turns it into the backend that draws.
+    pub fn create_surface<'s>(
+        &mut self,
+        target: impl Into<SurfaceTarget<'s>>,
+    ) -> Result<Surface<'s>> {
         let instance = self.instance.get_or_insert_with(|| {
             wgpu::Instance::new(InstanceDescriptor {
                 backends: Backends::default(),
@@ -392,11 +416,9 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
                 ..InstanceDescriptor::new_without_display_handle()
             })
         });
-        let surface = instance
+        instance
             .create_surface(target)
-            .map_err(Error::SurfaceCreationFailed)?;
-
-        self.build_with_surface(surface).await
+            .map_err(Error::SurfaceCreationFailed)
     }
 
     /// Build a new backend from this builder with the supplied surface. You
@@ -432,9 +454,28 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
     }
 
     async fn build_with_render_surface<'s, S: RenderSurface<'s> + 's>(
+        self,
+        surface: S,
+    ) -> Result<WgpuBackend<'a, 's, P, S>> {
+        self.build_parts(surface).await.map(Built::finish)
+    }
+
+    /// [`Builder::build_with_surface`] up to the last step: everything but
+    /// the glyph caches, which [`Built::finish`] makes. What a caller that
+    /// built the surface on the window's thread ([`Builder::create_surface`])
+    /// runs on another: the result is `Send` whenever the post processor
+    /// is, where the finished backend is not (see [`Built`]).
+    pub async fn build_parts_with_surface<'s>(
+        self,
+        surface: Surface<'s>,
+    ) -> Result<Built<'a, 's, P>> {
+        self.build_parts(surface).await
+    }
+
+    async fn build_parts<'s, S: RenderSurface<'s> + 's>(
         mut self,
         mut surface: S,
-    ) -> Result<WgpuBackend<'a, 's, P, S>> {
+    ) -> Result<Built<'a, 's, P, S>> {
         let instance = self.instance.get_or_insert_with(|| {
             wgpu::Instance::new(InstanceDescriptor {
                 backends: Backends::default(),
@@ -630,35 +671,18 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
         );
         lap("pipelines");
 
-        Ok(WgpuBackend {
+        Ok(Built {
             post_process,
             build_timings: timings,
             adapter_info: adapter.get_info(),
-            cells: vec![],
-            dirty_rows: vec![],
-            dirty_cells: BitVec::new(),
-            rendered: vec![],
-            sourced: vec![],
-            fast_blinking: BitVec::new(),
-            slow_blinking: BitVec::new(),
-            cursor: (0, 0),
             surface,
             _surface: PhantomData,
             surface_config,
-            present_owed: false,
             device,
             queue,
-            plan_cache: PlanCache::new(self.fonts.count().max(2)),
-            buffer: UnicodeBuffer::new(),
-            row: String::new(),
-            rowmap: vec![],
             viewport: self.viewport,
-            cached: Atlas::new(&self.fonts, CACHE_WIDTH, CACHE_HEIGHT),
             text_cache,
             text_mask,
-            bg_vertices: vec![],
-            text_indices: vec![],
-            text_vertices: vec![],
             text_screen_size_buffer,
             text_bg_compositor,
             text_fg_compositor,
@@ -668,12 +692,95 @@ impl<'a, P: PostProcessor> Builder<'a, P> {
             reset_fg,
             reset_bg,
             fast_duration: self.fast_blink,
+            slow_duration: self.slow_blink,
+        })
+    }
+}
+
+/// A backend built all but for its last step: the device, the surface
+/// configured, the textures and the pipelines, everything that costs
+/// anything. What is missing are the shaping plans' and the glyph atlas's
+/// caches, two LRU maps whose links are raw pointers and so are not
+/// `Send`; they start empty and cost nothing to make. So a build can run
+/// on one thread ([`Builder::build_parts_with_surface`]) and this be moved
+/// to the window's thread, where [`Built::finish`] makes the caches and
+/// hands back the backend that draws.
+pub struct Built<
+    'f,
+    's,
+    P: PostProcessor = DefaultPostProcessor,
+    S: RenderSurface<'s> = Surface<'s>,
+> {
+    post_process: P,
+    build_timings: Vec<(&'static str, Duration)>,
+    adapter_info: wgpu::AdapterInfo,
+    surface: S,
+    _surface: PhantomData<&'s S>,
+    surface_config: wgpu::SurfaceConfiguration,
+    device: Device,
+    queue: wgpu::Queue,
+    viewport: Viewport,
+    text_cache: wgpu::Texture,
+    text_mask: wgpu::Texture,
+    text_screen_size_buffer: Buffer,
+    text_bg_compositor: TextCacheBgPipeline,
+    text_fg_compositor: TextCacheFgPipeline,
+    wgpu_state: crate::backend::WgpuState,
+    fonts: Fonts<'f>,
+    colors: ColorTable,
+    reset_fg: crate::colors::Rgb,
+    reset_bg: crate::colors::Rgb,
+    fast_duration: Duration,
+    slow_duration: Duration,
+}
+
+impl<'f, 's, P: PostProcessor, S: RenderSurface<'s>> Built<'f, 's, P, S> {
+    /// The backend, with its caches made and its blink clocks started now.
+    pub fn finish(self) -> WgpuBackend<'f, 's, P, S> {
+        WgpuBackend {
+            post_process: self.post_process,
+            build_timings: self.build_timings,
+            adapter_info: self.adapter_info,
+            cells: vec![],
+            dirty_rows: vec![],
+            dirty_cells: BitVec::new(),
+            rendered: vec![],
+            sourced: vec![],
+            fast_blinking: BitVec::new(),
+            slow_blinking: BitVec::new(),
+            cursor: (0, 0),
+            surface: self.surface,
+            _surface: PhantomData,
+            surface_config: self.surface_config,
+            present_owed: false,
+            device: self.device,
+            queue: self.queue,
+            plan_cache: PlanCache::new(self.fonts.count().max(2)),
+            buffer: UnicodeBuffer::new(),
+            row: String::new(),
+            rowmap: vec![],
+            viewport: self.viewport,
+            cached: Atlas::new(&self.fonts, CACHE_WIDTH, CACHE_HEIGHT),
+            text_cache: self.text_cache,
+            text_mask: self.text_mask,
+            bg_vertices: vec![],
+            text_indices: vec![],
+            text_vertices: vec![],
+            text_screen_size_buffer: self.text_screen_size_buffer,
+            text_bg_compositor: self.text_bg_compositor,
+            text_fg_compositor: self.text_fg_compositor,
+            wgpu_state: self.wgpu_state,
+            fonts: self.fonts,
+            colors: self.colors,
+            reset_fg: self.reset_fg,
+            reset_bg: self.reset_bg,
+            fast_duration: self.fast_duration,
             last_fast_toggle: Instant::now(),
             show_fast: true,
-            slow_duration: self.slow_blink,
+            slow_duration: self.slow_duration,
             last_slow_toggle: Instant::now(),
             show_slow: true,
-        })
+        }
     }
 }
 
@@ -1067,3 +1174,15 @@ fn min_limits(
             .min(available.max_ray_recursion_depth),
     }
 }
+
+// What `Builder::create_surface` promises: a builder and its surface may be
+// moved to another thread, built there, and what the build made moved back.
+// Checked at compile time, for the default post processor; a caller's own
+// is checked where it moves one (the `Send` bounds of a thread's closure
+// and of its result).
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Builder<'static, DefaultPostProcessor>>();
+    send::<Surface<'static>>();
+    send::<Built<'static, 'static, DefaultPostProcessor>>();
+};

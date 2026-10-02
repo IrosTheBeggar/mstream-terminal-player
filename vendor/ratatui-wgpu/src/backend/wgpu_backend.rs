@@ -309,6 +309,24 @@ impl<'f, 's, P: PostProcessor, S: RenderSurface<'s>> WgpuBackend<'f, 's, P, S> {
         &self.adapter_info
     }
 
+    /// A present is owed: the surface gave no texture the last time one was
+    /// asked for (an occluded window), or [`WgpuBackend::owe_present`] was
+    /// called, and the next flush presents whether anything changed or not.
+    pub fn owes_present(&self) -> bool {
+        self.present_owed
+    }
+
+    /// Owe a present: the next flush composites what the backend already
+    /// holds onto a fresh surface texture and presents it, though no cell
+    /// changed. For a window coming into view, whose last present may have
+    /// gone to a surface the compositor never showed: the text pass's
+    /// target holds every cell as last drawn, so this puts the whole screen
+    /// up again for the cost of the post processor's pass, where a repaint
+    /// of every cell would redraw them all first.
+    pub fn owe_present(&mut self) {
+        self.present_owed = true;
+    }
+
     /// Update the fonts used for rendering. This will cause a full repaint of
     /// the screen the next time [`WgpuBackend::flush`] is called.
     pub fn update_fonts(
