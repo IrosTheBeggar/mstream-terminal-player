@@ -3281,15 +3281,22 @@ the desktop linux-x64 leg built inside the cross container and passed the linkag
 the Windows-only code (FreeConsole, the launcher stub, the FileDescription) for the first
 time and staging the stub beside the player in its artifact; the gate held: with the
 macOS legs failed, package-desktop, release and channels were skipped, no release object
-exists and latest still names v0.9.0. Not proven: all four macOS legs signed and then
-notarization answered HTTP 403, "A required agreement is missing or has expired" —
-Apple's Developer Program agreement awaiting the account holder's acceptance (v0.9.0 had
-notarized 25 hours earlier), so the bundle's notarization, stapling and the package
-plumbing wait for a rerun of the failed jobs once the agreement is accepted.
+exists and latest still names v0.9.0. The four macOS legs signed and then notarization
+answered HTTP 403, "A required agreement is missing or has expired" — Apple's Developer
+Program agreement awaiting the account holder's acceptance (v0.9.0 had notarized 25 hours
+earlier). Once accepted, a rerun of the failed jobs went green end to end: the four macOS
+legs notarized, the four package legs ran (the arm64 and x64 bundles "Accepted", stapled,
+"The validate action worked", spctl "accepted, source=Notarized Developer ID"), the
+release was published as a pre-release with 21 assets (both families, the three packages
+and the two app zips, the stub dropped from dist), latest still v0.9.0, and channels
+skipped — the Homebrew and Scoop repos untouched. On this Mac the downloaded arm64 app zip
+verifies (codesign --deep --strict, stapler validate, spctl Notarized Developer ID, bundle
+id io.mstream.player, version 0.10.0), opens from Finder's `open` with its window and the
+default lock, and quits clean; the Windows zip holds "mStream Player.exe", the player, the
+icon and the README; the tarball its layout. The rc's binaries print 0.9.0 because
+Cargo.toml was not bumped; a stable tag bumps it first.
 
-**From here, in order.** The rerun of the rc's failed jobs after the agreement (the
-release must come out marked pre-release, channels skipped, latest still v0.9.0); the
-vendored-crate review with an upstream exit for ratatui-wgpu's changes; the merge with the
+**From here, in order.** The vendored-crate review with an upstream exit for ratatui-wgpu's changes; the merge with the
 window compiled out of the terminal flavour; the Linux leg on real hardware for the desktop
 linux-x64 build (X11 and Wayland, the .desktop entry's app_id); the macOS and Windows
 checklist rows as the desktop release's gate, including a tray-spawned run and the stub's
