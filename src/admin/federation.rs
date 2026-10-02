@@ -31,8 +31,9 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, age_text, copy_to_clipboard, draw_bottom, draw_header, fmt_bytes,
-    frame_ground, gate_message, host_of, iso_at, iso_unix, printable, short_id, unix_now,
+    Claim, Outcome, Screen, age_text, body_column, copy_to_clipboard, draw_foot, draw_header,
+    fmt_bytes, frame_ground, gate_message, host_of, iso_at, iso_unix, printable, short_id,
+    unix_now,
 };
 use crate::api::types::{
     FederationKey, FederationLimits, FederationParams, FederationPeer, FederationRequest,
@@ -1048,6 +1049,25 @@ impl Screen for Room {
             self.tscroll = if up { self.tscroll.saturating_sub(1) } else { self.tscroll.saturating_add(1) };
         }
     }
+
+    fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+        self.ui.begin_frame();
+        draw(frame, self, area, true);
+    }
+
+    fn hint(&self) -> String {
+        footer_hint(self)
+    }
+
+    fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
+    /// Every key while a modal is up, and while the Peers tab's paste box
+    /// has the caret: a ticket is letters, and none of them is the host's.
+    fn claim(&self) -> Claim {
+        if self.modal_open() || self.ticket_focus { Claim::All } else { Claim::Open }
+    }
 }
 
 /// The room, loading: what `mstream-player admin federation` opens.
@@ -1426,7 +1446,15 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, room: &mut Room) {
     room.ui.begin_frame();
     let Some(area) = frame_ground(frame, MIN_W, MIN_H) else { return };
+    draw(frame, room, area, false);
+}
 
+/// The room inside `area`. Standalone it owns the window, header and tips
+/// row included. Hosted, the host's bar names the server and its footer
+/// carries the tips, so the room draws neither and keeps only its note on
+/// the area's last row; below its minimum it draws what fits and never
+/// asks for a larger window.
+fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
     // A modal makes the room beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
     let modal_open = !matches!(room.modal, Modal::None);
@@ -1435,19 +1463,16 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = None;
     }
 
-    draw_header(frame, area, &t!("fed.title"), &host_of(&room.client));
-    let column = Rect {
-        x: 2,
-        y: 2,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(5),
-    };
+    if !hosted {
+        draw_header(frame, area, &t!("fed.title"), &host_of(&room.client));
+    }
+    let column = body_column(area, hosted);
     match room.params.clone() {
         None => {}
         Some(p) if !p.enabled => draw_off(frame, room, column, &p),
         Some(p) => draw_on(frame, room, column, &p),
     }
-    draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
+    draw_foot(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room), hosted);
 
     if modal_open {
         room.ui.pointer = live_pointer;
@@ -2952,5 +2977,86 @@ mod tests {
         );
         assert!(decode_ticket(&ticket_for(serde_json::json!({ "k": "key" }))).is_none(), "t is required");
         assert!(iso_unix("2026-09-06 09:41:52").is_some(), "SQLite's form parses too");
+    }
+
+    // ── Hosted in the GUI player's Admin tab ─────────────────────────────
+
+    use crate::admin::hosting::{self, DOCKED, FLOOR, WINDOW};
+    use ratatui::buffer::Buffer;
+
+    /// The cells `from..to` of row `y`, as text.
+    fn cells(buf: &Buffer, y: u16, from: u16, to: u16) -> String {
+        (from..to).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// The whole buffer as text, a row a line.
+    fn text_of(buf: &Buffer) -> String {
+        (buf.area.top()..buf.area.bottom()).map(|y| hosting::row(buf, y)).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn hosted_the_room_draws_inside_its_area_with_no_header_and_its_note_last() {
+        let _en = english();
+        for (size, area) in [((100, 30), WINDOW), ((176, 46), DOCKED)] {
+            let mut room = on();
+            room.note = Some(("the relay answered".into(), true));
+            let buf = hosting::draw_hosted(&mut room, size, area);
+            let text = text_of(&buf);
+            assert_eq!(hosting::outside(&buf, area, true), Vec::<(u16, u16)>::new(), "{size:?}\n{text}");
+            assert!(!text.contains("home.mstream.example"), "no header\n{text}");
+            assert!(!text.contains(&*t!("fed.hint_requests")), "the tips are the host's\n{text}");
+            assert_eq!(cells(&buf, area.y, area.x, area.right()), "·".repeat(area.width as usize), "the first row is the host's");
+            assert!(cells(&buf, area.y + 1, area.x + 2, area.right()).starts_with("• on — connected to relay"), "{text}");
+            assert!(text.contains(" Requests · 1 ") && text.contains(" Peers "), "{text}");
+            assert!(cells(&buf, area.bottom() - 1, area.x + 2, area.right()).starts_with("the relay answered"), "{text}");
+        }
+    }
+
+    #[test]
+    fn hosted_a_modal_centres_in_the_rooms_area() {
+        let _en = english();
+        let mut room = on();
+        room.modal = Modal::TurnOff;
+        let buf = hosting::draw_hosted(&mut room, (100, 30), WINDOW);
+        // The turn-off gate is 68 by 9: a title, a blank, two lines, a
+        // blank, the buttons.
+        let at = kit::modal_rect(WINDOW, 68, 9, 9);
+        assert_eq!((at.x, at.y), (24, 8));
+        assert_eq!(buf[(at.x, at.y)].symbol(), "╭");
+        assert_eq!(buf[(at.right() - 1, at.bottom() - 1)].symbol(), "╯");
+        assert_eq!(hosting::outside(&buf, WINDOW, true), Vec::<(u16, u16)>::new());
+    }
+
+    #[test]
+    fn hosted_at_the_floor_it_never_says_resize() {
+        let _en = english();
+        for params in [params_on(), params_off()] {
+            let mut room = new_room();
+            room.apply(loaded(params));
+            room.note = Some(("a note".into(), false));
+            let buf = hosting::draw_hosted(&mut room, (100, 24), FLOOR);
+            let text = text_of(&buf);
+            assert_eq!(hosting::outside(&buf, FLOOR, false), Vec::<(u16, u16)>::new(), "{text}");
+            assert!(!text.contains(&*t!("resize")), "{text}");
+            assert!(cells(&buf, FLOOR.bottom() - 1, FLOOR.x + 2, FLOOR.right()).starts_with("a note"), "{text}");
+        }
+    }
+
+    #[test]
+    fn it_claims_every_key_while_the_paste_box_has_the_caret() {
+        let _en = english();
+        let mut room = on();
+        assert_eq!(room.claim(), Claim::Open);
+        press(&mut room, KeyCode::Char('j'));
+        assert!(room.ticket_focus);
+        assert_eq!(room.claim(), Claim::All);
+        press(&mut room, KeyCode::Char('L'));
+        assert_eq!(room.ticket.value(), "L", "a capital L is a letter of the ticket");
+        press(&mut room, KeyCode::Esc);
+        assert_eq!(room.claim(), Claim::Open);
+        room.modal = Modal::TurnOff;
+        assert!(room.modal_open());
+        assert_eq!(room.claim(), Claim::All);
+        assert_eq!(room.hint(), t!("fed.hint_turn_off"));
     }
 }
