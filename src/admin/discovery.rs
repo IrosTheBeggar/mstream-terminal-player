@@ -30,9 +30,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Claim, Outcome, Screen, age_text, body_column, copy_to_clipboard, draw_foot, draw_header,
-    fmt_bytes, fmt_count, frame_ground, gate_message, host_of, iso_unix, printable, short_id,
-    unix_now,
+    Claim, Outcome, Screen, age_text, body_column, draw_foot, draw_header, fmt_bytes, fmt_count,
+    frame_ground, gate_message, host_of, iso_unix, printable, short_id, unix_now,
 };
 #[cfg(test)]
 use super::iso_at;
@@ -41,6 +40,7 @@ use crate::api::types::{
     FederationParams, FederationRequest,
 };
 use crate::api::{ApiError, Client, DiscoverySetting, PeerAction};
+use crate::kit::clipboard::Copied;
 use crate::kit::theme::th;
 use crate::kit::{self, Surface, accent, bold, dim};
 use crate::setup::g;
@@ -643,11 +643,12 @@ impl Room {
             }
             Act::CopyTicket => {
                 if let Some(ticket) = self.status.as_ref().and_then(|s| s.ticket.clone()) {
-                    let ok = copy_to_clipboard(&ticket);
-                    self.note = Some((
-                        if ok { t!("p2p.copied") } else { t!("p2p.copy_failed") }.to_string(),
-                        false,
-                    ));
+                    let said = match kit::clipboard::copy(&ticket) {
+                        Copied::Clipboard => t!("p2p.copied_clipboard"),
+                        Copied::Terminal => t!("p2p.copied"),
+                        Copied::Failed => t!("p2p.copy_failed"),
+                    };
+                    self.note = Some((said.to_string(), false));
                 }
             }
             Act::ToggleIncompatible => {
@@ -3200,5 +3201,28 @@ mod tests {
         handle_key(&mut room, key(KeyCode::Char('e')));
         type_text(&mut room, &format!(" {}-end", "d".repeat(48)));
         super::super::assert_caret_between(&draw(&mut room), &room.ui, "ddd-end", "");
+    }
+
+    /// `y` hands the invite's ticket to the kit's clipboard and the note
+    /// says which way it went: on the clipboard, handed to the terminal
+    /// (which may refuse it), or nowhere.
+    #[test]
+    fn y_on_the_invite_copies_the_ticket_and_says_how() {
+        use crate::kit::clipboard::{Copied, catch, caught};
+        let _en = english();
+        let mut room = on();
+        room.switch_tab(Tab::Invite);
+        let ticket = room.status.as_ref().and_then(|s| s.ticket.clone()).expect("a ticket");
+        for (answer, said) in [
+            (Copied::Clipboard, t!("p2p.copied_clipboard")),
+            (Copied::Terminal, t!("p2p.copied")),
+            (Copied::Failed, t!("p2p.copy_failed")),
+        ] {
+            catch(answer);
+            room.note = None;
+            handle_key(&mut room, key(KeyCode::Char('y')));
+            assert_eq!(room.note, Some((said.to_string(), false)), "{answer:?}");
+        }
+        assert_eq!(caught(), [ticket.clone(), ticket.clone(), ticket]);
     }
 }
