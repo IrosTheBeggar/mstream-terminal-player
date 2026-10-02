@@ -3208,10 +3208,9 @@ reasoned through and compiled by CI's Windows leg, not run.
 visualizer's window on a layout switch, unrun on Windows; Korean on macOS (no source
 enabled); a hidden window
 on Wayland (frames measured on macOS, minimise with playback proven on Windows); Wayland
-paste without XWayland; the emoji faces (a flag candidate draws as boxes); Hangul drawn at
-its own face's line height, smaller than the kana beside it; the cell after a modal opens
-still paints a cover for one short frame; the tag characters in emoji flag sequences, which
-paste still drops; on Windows, 150%, a move between scales and the IMEs, untestable there
+paste without XWayland; the cell after a modal opens still paints a cover for one short
+frame (the emoji faces, the Hangul height and the tag characters are lane 14's, below); on
+Windows, 150%, a move between scales and the IMEs, untestable there
 without elevation.
 
 **Two products from one crate (2026-10-01).** The owner's decision: the codebase is dual
@@ -3296,12 +3295,31 @@ default lock, and quits clean; the Windows zip holds "mStream Player.exe", the p
 icon and the README; the tarball its layout. The rc's binaries print 0.9.0 because
 Cargo.toml was not bumped; a stable tag bumps it first.
 
+**Lane 14, the text and glyph conditions (2026-10-02).** A bundled six-glyph symbol face of
+our own (★ ☆ ✓ ✔ ✗ ✘, 1.6 KB, drawn by scripts/symbol-font.py under the OFL, since no
+subsetter or fitting OFL face was on this Mac) draws the GUI's own symbols ahead of any
+system face; the platform's colour emoji face is mapped like the CJK faces with the
+renderer's png feature on for window builds, and a VS16 heart, a regional-indicator flag, a
+tag-sequence flag, a ZWJ family and a skin tone each draw as one coloured picture over the
+two cells they claim (verified on Apple Color Emoji and Noto Color Emoji's bitmaps; Segoe's
+COLR layers unrun); fallback faces draw at the primary face's pixels-per-em, so 한 か 日
+ink at one height; a pasted subdivision flag keeps its tag characters and a clipped field
+shows a cluster whole or not at all; a face that has the cell's first character wins it, so
+a stray tag run is never a box (vendored changes 15–18). The lane found that the kit and
+the GUI chrome measured text per character while ratatui paints per grapheme (❤️ and a
+keycap spilled a cell past a field, a ZWJ family wasted four): kit::width now applies
+ratatui-core's own rule in both flavours, with parity tests against a ratatui Buffer. Left:
+src/tui/ui.rs's own per-character fit and tail, the admin rooms' clips by character count,
+the caret stepping per character (tui-input), the renderer's one-cell halfwidth dakuten
+against ratatui's two, a wider symbol face (Miscellaneous Symbols, Dingbats) once a
+subsetter is available, and the emoji faces unrun on Windows and Linux.
+
 **From here, in order.** The vendored-crate review with an upstream exit for ratatui-wgpu's changes; the merge with the
 window compiled out of the terminal flavour; the Linux leg on real hardware for the desktop
 linux-x64 build (X11 and Wayland, the .desktop entry's app_id); the macOS and Windows
 checklist rows as the desktop release's gate, including a tray-spawned run and the stub's
-double-click; the open window conditions (symbol and emoji faces, Hangul line height, the
-cover flash after a modal, input before the backend exists); the rest of the release workflow
+double-click; the open window conditions (the cover flash after a modal, input before the
+backend exists; the glyph ones are done); the rest of the release workflow
 (Windows signing once a certificate exists, lifting the hold-back, a notify path that
 fires); a Homebrew cask and a Scoop manifest for the desktop product; the README split into
 two products; the stable player release; on mStream's side (built 2026-10-02 on two
