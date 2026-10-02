@@ -27,8 +27,7 @@ settings — is the same in both, and both keep their files in the same places.
 ### Install the desktop player
 
 Download the package for your machine from
-[Releases](https://github.com/IrosTheBeggar/mstream-terminal-player/releases). Until the next
-stable release, the desktop packages are on the pre-release v0.10.0-rc.1.
+[Releases](https://github.com/IrosTheBeggar/mstream-terminal-player/releases).
 
 | Platform | Package |
 |---|---|
