@@ -2910,7 +2910,7 @@ admin rooms.
 > 20 recorded changes, vendor/winit with two backports) ship as they are, by the owner's
 > decision of 2026-10-02: their VENDORED.md files are the record, and filing the changes
 > upstream is a separate task, not a gate. What remains before the stable tag is under
-> **Shipping**, near the end of this phase. Five
+> **Shipping — shipped as v0.10.0 on 2026-10-02 (release run 37048300547: both families, the three packages, the app notarized and stapled, Homebrew and Scoop bumped, 21 assets; the published app prints 0.10.0 with `features: window`).**, near the end of this phase. Five
 > commits on `claude/desktop-app-packaging-8ee4ff` (4e10926 render, 4685214 loop, de04c35
 > input, 4d6b4df stats, c59cbdb art) plus the keyboard check's fix, on top of v0.8.0, pushed
 > as PR #41; the condition lanes and the Windows machine's two fixes followed
