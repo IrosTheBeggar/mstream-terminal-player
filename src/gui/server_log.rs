@@ -1561,6 +1561,9 @@ mod tests {
 
     #[test]
     fn the_level_menu_hangs_from_the_control_stays_inside_and_picks_with_keys_and_clicks() {
+        // The menu's rows are read back as translated words, so the locale
+        // must hold still while another test switches it.
+        let _guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut log = LogUi::new(None).utc();
         log.model.take(infos(1, 10));
         let mut ui = Surface::new();
