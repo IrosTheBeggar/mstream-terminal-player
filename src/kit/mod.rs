@@ -117,6 +117,15 @@ pub struct Surface<A> {
     /// resets what it covers. Covers an overlay never touches stay pixels.
     overlays: Vec<Rect>,
     covered: Vec<Rect>,
+    /// Told of each overlay the moment it registers, while the frame is
+    /// still drawing: the GUI window's cover board, which paints its
+    /// pictures after the cells and so can stand one down on the very frame
+    /// a modal opens over it, where the rule above leaves it painted over
+    /// the modal for that frame. The order is the point: a cover placed
+    /// before an overlay is under it, one placed after (the actions sheet's
+    /// own header) is in it. `None` everywhere else, the terminal included,
+    /// where nothing changes.
+    overlay_watch: Option<Box<dyn Fn(Rect)>>,
     /// What a right click means where — a row's context verb (the
     /// track-actions contract's sheet). Rebuilt each frame like `clicks`.
     contexts: Vec<(Rect, A)>,
@@ -132,6 +141,20 @@ pub struct Surface<A> {
     /// that may or may not blink is worse than one that always does.
     caret_since: Option<Instant>,
     caret_drawn: bool,
+    /// The cell the focused field drew its caret in this frame (blinked
+    /// off or not), cleared with the registries like the frame's mark and
+    /// again by every modal laid over the page (see [`Self::modal_over`]):
+    /// it marks the field that has the keyboard, so a shell turns its
+    /// input method and its paste on for it and floats the method's
+    /// candidate list here. A field under a modal may still draw its caret
+    /// (and keep the blink's clock), but the modal owns the keys.
+    caret_at: Option<Position>,
+    /// What an input method is composing for the focused field and has
+    /// not committed. Only a shell that receives composition outside the
+    /// key stream sets it — the GUI's own window; a terminal composes in
+    /// its own UI and sends the commit as keys — so it stays empty, and
+    /// changes nothing, everywhere else (see [`input_display_composing`]).
+    composition: String,
 }
 
 impl<A> Default for Surface<A> {
@@ -148,10 +171,13 @@ impl<A> Default for Surface<A> {
             soft_origin: None,
             overlays: Vec::new(),
             covered: Vec::new(),
+            overlay_watch: None,
             contexts: Vec::new(),
             key_hints: true,
             caret_since: None,
             caret_drawn: false,
+            caret_at: None,
+            composition: String::new(),
         }
     }
 }
@@ -173,12 +199,32 @@ impl<A: Clone> Surface<A> {
     /// overlay registers after the base layer's controls are dropped.
     pub fn overlay(&mut self, rect: Rect) {
         self.overlays.push(rect);
+        if let Some(watch) = &self.overlay_watch {
+            watch(rect);
+        }
+    }
+
+    /// Have `watch` told of every overlay as it registers (see
+    /// `overlay_watch`). Only the GUI's window watches.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn watch_overlays(&mut self, watch: impl Fn(Rect) + 'static) {
+        self.overlay_watch = Some(Box::new(watch));
     }
 
     /// Whether an overlay stood over any part of `rect` LAST frame — the
     /// question a pixel surface asks before drawing pixels there.
     pub fn covered_last_frame(&self, rect: Rect) -> bool {
         self.covered.iter().any(|over| over.intersects(rect))
+    }
+
+    /// Whether this frame's overlays stand anywhere other than last
+    /// frame's did: one opened, closed or moved. A pixel surface drew this
+    /// frame by last frame's footprints, so a cover under a modal that just
+    /// opened is still a picture painted over it, until the next frame
+    /// draws it as text; a shell that sees this asks for that frame soon
+    /// rather than at its idle poll.
+    pub fn overlays_moved(&self) -> bool {
+        self.overlays != self.covered
     }
 
     /// Whether an overlay OTHER than `own` stood over any part of `rect`
@@ -198,6 +244,7 @@ impl<A: Clone> Surface<A> {
         self.bars.clear();
         self.contexts.clear();
         self.caret_drawn = false;
+        self.caret_at = None;
     }
 
     /// A field took a key or a click: the caret shows solid from now.
@@ -223,6 +270,46 @@ impl<A: Clone> Surface<A> {
         let elapsed = self.caret_since.map_or(0, |since| since.elapsed().as_millis());
         let into = elapsed % CARET_BLINK.as_millis();
         Some(Duration::from_millis((CARET_BLINK.as_millis() - into) as u64))
+    }
+
+    /// The focused field says where it drew its caret this frame — or
+    /// where it would, for a field that shows a placeholder until the
+    /// first key yet takes the keys all the same.
+    pub fn note_caret(&mut self, at: Position) {
+        self.caret_at = Some(at);
+    }
+
+    /// The cell of the field with the keyboard this frame, if one has it:
+    /// a field drawn in the topmost layer. None while a modal with no
+    /// field of its own is up over a page's focused field.
+    // The GUI window places its IME box here; the frame tests read it in
+    // every build, the player only in one with the `window` feature.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn caret_at(&self) -> Option<Position> {
+        self.caret_at
+    }
+
+    /// A modal is laid over what drew so far: the keys are the modal's
+    /// from here, so a field beneath stops counting as having them; one
+    /// drawn inside the modal (after its frame) notes its caret again.
+    /// The blink's flag stays, so a caret still showing beside the modal
+    /// keeps its rhythm.
+    pub fn modal_over(&mut self) {
+        self.caret_at = None;
+    }
+
+    /// The input method's uncommitted text, or none (empty).
+    // Only the GUI window has an input method to report (and the tests).
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn set_composition(&mut self, text: &str) {
+        if self.composition != text {
+            self.composition.clear();
+            self.composition.push_str(text);
+        }
+    }
+
+    pub fn composition(&self) -> &str {
+        &self.composition
     }
 
     /// Age the blink clock, so a test can see the other phase.
@@ -583,6 +670,7 @@ pub fn modal_frame_anchored_on<A: Clone>(
     title_color: Color,
 ) -> Rect {
     s.overlay(modal_rect(area, width, height, max_height));
+    s.modal_over();
     modal_frame_anchored(frame, area, width, height, max_height, title_color)
 }
 
@@ -671,15 +759,39 @@ pub fn bar_jump(bar: Rect, max_scroll: usize, y: u16) -> usize {
     (rel * max_scroll + (span - 1) / 2) / (span - 1)
 }
 
-/// Display width in cells — what ratatui spends, so budgets and cut points
-/// agree with the drawing: a CJK character is two cells, not one.
+/// Display width in cells — exactly what ratatui spends drawing `text`, so
+/// budgets and cut points agree with the drawing: a CJK character is two
+/// cells, ❤️ and 1️⃣ are two (their VS16 widens them), and a ZWJ family or
+/// a skin-toned thumb is two, not the six or four its characters add up to.
+///
+/// The rule is ratatui's own (`Buffer::set_stringn`, ratatui-core 0.1):
+/// the text is cut into extended graphemes, each takes its
+/// [`grapheme_cells`], and the sum is the cells the buffer fills. Summing
+/// per character instead counted ❤️ one cell narrower than it is drawn,
+/// so a field or a clipped label ran a cell past its edge, and a family
+/// four cells wider, so it was left out where it fit. One rule for both
+/// flavours: the terminal paints by graphemes as the window does.
 pub fn width(text: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(text)
+    use unicode_segmentation::UnicodeSegmentation;
+    if text.is_ascii() {
+        // Every ASCII character is a grapheme of one cell, but for the
+        // controls ratatui drops ("\r\n" is one grapheme, and dropped too).
+        return text.bytes().filter(|b| !b.is_ascii_control()).count();
+    }
+    text.graphemes(true).map(grapheme_cells).sum()
 }
 
-/// One character's cells (zero for a combining mark).
-pub fn char_width(c: char) -> usize {
-    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+/// One grapheme's cells, as ratatui's `set_stringn` takes them: a grapheme
+/// holding a control character is dropped (no cells), and any other is its
+/// `CellWidth` — `UnicodeWidthStr::width` (unicode-width 0.2) plus a cell
+/// for each halfwidth (han)dakuten. A grapheme of no cells (a stray
+/// combining mark at the start of the text) ratatui drops too.
+pub fn grapheme_cells(grapheme: &str) -> usize {
+    use ratatui::buffer::CellWidth;
+    if grapheme.contains(char::is_control) {
+        return 0;
+    }
+    usize::from(grapheme.cell_width())
 }
 
 /// A list viewport: given the row count, a row to reveal (a moved
@@ -1035,12 +1147,56 @@ pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
 /// reserved either way, so the line never shifts as it blinks. A shell
 /// asks [`Surface::caret`] for the phase.
 pub fn input_display_blink(value: &str, cursor: usize, width: u16, on: bool) -> String {
-    let (caret, clip) = if crate::kit::theme::legacy_conhost() {
+    let (caret, clip) = input_marks();
+    input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
+}
+
+/// The caret and clip marks this terminal can draw (see [`input_display`]).
+fn input_marks() -> (char, char) {
+    if crate::kit::theme::legacy_conhost() {
         ('│', '»')
     } else {
         ('▏', '…')
+    }
+}
+
+/// [`input_display_blink`] for the focused field, with an input method's
+/// uncommitted text spliced in at the cursor and the caret after it — the
+/// way every editor shows a composition in place, so にほん sits in the
+/// field while it is typed and becomes the value only on commit. While
+/// composing the caret holds solid: the keys are landing, as after any
+/// key. Also the caret's offset from the line's start, in cells, for a
+/// shell that places a candidate list by it. With no composition the
+/// line is exactly [`input_display_blink`]'s.
+///
+/// A masked field (a password) hands its value in masked already, and
+/// its mark as `mask`: the composition is drawn as that mark, one per
+/// character, like the value around it — never in clear beside a row of
+/// bullets.
+pub fn input_display_composing(
+    value: &str,
+    cursor: usize,
+    width: u16,
+    on: bool,
+    composition: &str,
+    mask: Option<char>,
+) -> (String, u16) {
+    let (caret, clip) = input_marks();
+    let (line, at) = if composition.is_empty() {
+        input_window(value, cursor, width, if on { caret } else { ' ' }, clip)
+    } else {
+        let cursor = cursor.min(value.chars().count());
+        let byte = value.char_indices().nth(cursor).map_or(value.len(), |(i, _)| i);
+        let composition: String = match mask {
+            Some(mark) => composition.chars().map(|_| mark).collect(),
+            None => composition.to_string(),
+        };
+        let spliced = format!("{}{composition}{}", &value[..byte], &value[byte..]);
+        input_window(&spliced, cursor + composition.chars().count(), width, caret, clip)
     };
-    input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
+    // The cells before the caret, by the rule the line is drawn by.
+    let before: String = line.chars().take(at).collect();
+    (line, u16::try_from(self::width(&before)).unwrap_or(u16::MAX))
 }
 
 /// Pure core - unit-tested with explicit marks so the assertions hold on
@@ -1051,26 +1207,102 @@ fn input_display_with_fancy(value: &str, cursor: usize, width: u16) -> String {
 }
 
 pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, clip: char) -> String {
+    input_window(value, cursor, width, caret, clip).0
+}
+
+/// The windowed line, and the caret's index in it, in characters. The
+/// clip marks never land on the caret: a window that starts past the
+/// value's start keeps the caret at least one in, and one that stops short
+/// of its end keeps it at least one short.
+///
+/// The window is measured in cells, not characters: `width` is the cells
+/// the field has, and a wide character (kana, hanzi, hangul) takes two of
+/// them. Counting characters let a line of CJK run to twice the field's
+/// width, past its border, and put the caret's cell outside the field.
+/// That was wrong in a terminal as much as in the GUI's window, so this is
+/// a correctness fix both share; for text of narrow characters only, the
+/// window is what it always was. A wide character that does not fit
+/// beside a clip mark is left out whole, so a line may come up a cell
+/// short of `width`, never over it.
+///
+/// And it walks graphemes, not characters, each at its [`grapheme_cells`]:
+/// the clusters ratatui fills its cells by, so a cluster shows whole or not
+/// at all and the line's cells are the cells drawn. Walking characters, the
+/// characters that extend a grapheme (a flag's tags, a combining mark,
+/// VS16, a ZWJ) took no cells: the walk back took them for free and stopped
+/// on their base when it did not fit, so the line began with the tail of a
+/// cluster whose base was cut (ratatui hangs it on the clip mark's cell,
+/// which the window drew as a box), ❤️ counted a cell short and ran past
+/// the field, and a ZWJ family counted six cells for its two. The caret is
+/// a character of its own in the line it is cut from; a caret inside a
+/// cluster (the cursor counts characters, so Left steps into a flag's tags)
+/// splits it there, and the window keeps the caret's own cluster.
+fn input_window(
+    value: &str,
+    cursor: usize,
+    width: u16,
+    caret: char,
+    clip: char,
+) -> (String, usize) {
+    use unicode_segmentation::UnicodeSegmentation;
     let w = width as usize;
     if w < 3 {
-        return clip.to_string();
+        return (clip.to_string(), 0);
     }
     let mut chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
     chars.insert(cursor, caret);
-    let total = chars.len();
-    if total <= w {
-        return chars.into_iter().collect();
+    let line: String = chars.iter().collect();
+    // Each cluster's first character, and the cells before it (a prefix
+    // sum, so a run's cells are one subtraction): `starts[i]..starts[i + 1]`
+    // are cluster i's characters, `before[j] - before[i]` the cells of
+    // clusters i..j.
+    let mut starts = vec![0];
+    let mut before = vec![0];
+    for grapheme in line.graphemes(true) {
+        starts.push(starts[starts.len() - 1] + grapheme.chars().count());
+        before.push(before[before.len() - 1] + grapheme_cells(grapheme));
     }
-    let start = cursor.saturating_sub(w.saturating_sub(2)).min(total - w);
-    let mut out: Vec<char> = chars[start..start + w].to_vec();
+    let n = starts.len() - 1;
+    let cells = |from: usize, to: usize| before[to] - before[from];
+    if cells(0, n) <= w {
+        return (line, cursor);
+    }
+    // The caret's cluster: the caret itself, or a cluster it begins (a
+    // combining mark after it hangs on it).
+    let at = starts.iter().rposition(|&s| s <= cursor).unwrap_or(0).min(n - 1);
+    // The window is clusters start..end between the clip marks it needs: one
+    // before when it starts past the value's start, one after when it
+    // stops short of its end.
+    let fits = |start: usize, end: usize| {
+        cells(start, end) + usize::from(start > 0) + usize::from(end < n) <= w
+    };
+    // The caret is the window's last cluster before the trailing clip —
+    // unless what follows it would take no more than the clip's own cell,
+    // when it shows instead — and the window reaches back from there as
+    // far as fits. One that reaches the value's start has room left after
+    // the caret, which the text after it takes.
+    let mut end = at + 1;
+    if cells(end, n) <= 1 {
+        end = n;
+    }
+    let mut start = end;
+    while start > 0 && fits(start - 1, end) {
+        start -= 1;
+    }
+    while start == 0 && end < n && fits(0, end + 1) {
+        end += 1;
+    }
+    let (from, to) = (starts[start], starts[end]);
+    let mut out = String::new();
     if start > 0 {
-        out[0] = clip;
+        out.push(clip);
     }
-    if start + w < total {
-        out[w - 1] = clip;
+    out.extend(&chars[from..to]);
+    if end < n {
+        out.push(clip);
     }
-    out.into_iter().collect()
+    (out, cursor - from + usize::from(start > 0))
 }
 
 // ── The pointer contract (OSC 22) ────────────────────────────────────────────
@@ -1139,6 +1371,54 @@ mod tests {
         assert!(s.covered_last_frame(inside), "the modal-inertness clear keeps the footprints");
         s.begin_frame();
         assert!(!s.covered_last_frame(inside), "and the frame after it leaves is clear");
+    }
+
+    /// The footprints moving is what a shell watches to bring the next
+    /// frame forward: the frame an overlay opens on, the frame it closes on
+    /// and the frame it moves on, never a frame that repeats the last.
+    #[test]
+    fn the_overlays_moving_is_told_on_the_frame_they_move() {
+        let mut s: Surface<u8> = Surface::new();
+        let modal = Rect { x: 0, y: 0, width: 10, height: 10 };
+        s.begin_frame();
+        assert!(!s.overlays_moved(), "nothing then nothing");
+        s.overlay(modal);
+        assert!(s.overlays_moved(), "the frame a modal opens on");
+        s.begin_frame();
+        s.overlay(modal);
+        assert!(!s.overlays_moved(), "the same modal again is still");
+        s.begin_frame();
+        s.overlay(Rect { x: 1, ..modal });
+        assert!(s.overlays_moved(), "a moved one");
+        s.begin_frame();
+        assert!(s.overlays_moved(), "the frame it closes on");
+        s.begin_frame();
+        assert!(!s.overlays_moved());
+    }
+
+    /// A watcher hears every overlay as it registers, in order, the modal
+    /// frame's among them, and changes nothing the surface itself answers.
+    #[test]
+    fn an_overlay_watcher_is_told_each_footprint_as_it_registers() {
+        use std::sync::{Arc, Mutex};
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mut s: Surface<u8> = Surface::new();
+        let ear = heard.clone();
+        s.watch_overlays(move |rect| ear.lock().unwrap().push(rect));
+        let tip = Rect { x: 1, y: 1, width: 4, height: 1 };
+        s.begin_frame();
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                modal_frame_on(frame, &mut s, frame.area(), 20, 6, Color::White);
+            })
+            .unwrap();
+        s.overlay(tip);
+        let modal = modal_rect(Rect::new(0, 0, 40, 12), 20, 6, 6);
+        assert_eq!(*heard.lock().unwrap(), [modal, tip]);
+        s.begin_frame();
+        assert!(s.covered_last_frame(modal) && s.covered_last_frame(tip));
     }
 
     #[test]
@@ -1249,6 +1529,200 @@ mod tests {
         assert_eq!(input_display_with_fancy("123456789", 4, 10), "1234▏56789");
     }
 
+    /// The window counts cells: wide text fits the field it is drawn in,
+    /// in a terminal and in the window alike, and the caret's cell the
+    /// composing line reports stays inside it. Counting characters, ten
+    /// kana in a ten-cell field drew twenty cells and put the caret at 20.
+    #[test]
+    fn wide_text_windows_by_cells_and_keeps_the_caret_in_the_field() {
+        let w = |line: &str| width(line);
+        let kana = "あいうえおかきくけこ";
+        // At the end: the clip, as many kana as fit, the caret.
+        assert_eq!(input_display_with_fancy(kana, 10, 10), "…きくけこ▏");
+        // At the start: the caret, the kana that fit, the clip.
+        assert_eq!(input_display_with_fancy(kana, 0, 10), "▏あいうえ…");
+        // Mid-value: the caret one short of the trailing clip. A fourth
+        // kana before it would make eleven cells, so the line is nine.
+        assert_eq!(input_display_with_fancy(kana, 6, 10), "…えおか▏…");
+        // Narrow and wide together, cursor anywhere: never past the field.
+        let mixed = "ab日本cd語ef한국gh";
+        for width in 3..20u16 {
+            for cursor in 0..=mixed.chars().count() {
+                let shown = input_display_with_fancy(mixed, cursor, width);
+                assert!(w(&shown) <= width as usize, "{shown:?} at {cursor} in {width}");
+                assert!(shown.contains('▏'), "the caret always shows: {shown:?}");
+            }
+        }
+        // A composition of kana: the caret's reported cell is in the field.
+        for width in [6u16, 10, 15] {
+            let (line, at) = input_display_composing("東京", 2, width, true, "にほんご", None);
+            assert!(w(&line) <= width as usize, "{line:?} in {width}");
+            assert!(at < width, "the caret's cell {at} is past a {width}-cell field: {line:?}");
+            assert!(line.ends_with('▏'), "the caret follows the composition: {line:?}");
+        }
+    }
+
+    /// A field never shows part of a cluster at its clipped ends. England's flag is 🏴 and six
+    /// tag characters that take no cells; with the caret at the end of a value that scrolls,
+    /// the line's left clip fell between 🏴 (two cells, which did not fit) and its tags (free),
+    /// so the line began `…` and the tags, which ratatui hangs on the clip's cell and the
+    /// window drew as a box. Every line, at every caret between clusters and every width, is
+    /// whole clusters of the value between its marks.
+    #[test]
+    fn a_clipped_field_shows_a_cluster_whole_or_not_at_all() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let england = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+        // The reported case: the base does not fit beside the clip, the tags would.
+        let value = format!("aaaa{england}bbbbbbbbbb");
+        let end = value.chars().count();
+        assert_eq!(input_display_with_fancy(&value, end, 13), "…bbbbbbbbbb▏");
+        assert_eq!(input_display_with_fancy(&value, end, 14), format!("…{england}bbbbbbbbbb▏"));
+        // And at the other end, the window reaching right from the value's start: a ZWJ
+        // family whose man fits and whose woman does not was cut after the joiner. It is
+        // one cluster of two cells, ratatui's width for it: left out whole where those two
+        // cells and the clip do not fit, shown whole where they do (counted per character,
+        // its six cells kept it out of a line with room for it).
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(input_display_with_fancy(&format!("aa{family}bb"), 0, 5), "▏aa…");
+        let shown = input_display_with_fancy(&format!("aa{family}bb"), 0, 6);
+        assert_eq!(shown, format!("▏aa{family}…"));
+        let w = |line: &str| width(line);
+        let clusters = [
+            england,
+            "e\u{301}",
+            "\u{2764}\u{FE0F}",
+            "\u{1F1FA}\u{1F1F8}",
+            family,
+            "\u{1F44D}\u{1F3FD}",
+        ];
+        for cluster in clusters {
+            let value = format!("ab{cluster}cd{cluster}ef");
+            let mut bounds = vec![0];
+            for grapheme in value.graphemes(true) {
+                bounds.push(bounds[bounds.len() - 1] + grapheme.chars().count());
+            }
+            let chars: Vec<char> = value.chars().collect();
+            for &cursor in &bounds {
+                for width in 3..24u16 {
+                    let shown = input_display_with_fancy(&value, cursor, width);
+                    assert!(w(&shown) <= width as usize, "{shown:?} at {cursor} in {width}");
+                    let text: String = shown.chars().filter(|&c| c != '▏' && c != '…').collect();
+                    let shown_chars = text.chars().count();
+                    let found = (0..=chars.len() - shown_chars).find(|&from| {
+                        chars[from..from + shown_chars].iter().copied().eq(text.chars())
+                            && bounds.contains(&from)
+                            && bounds.contains(&(from + shown_chars))
+                    });
+                    assert!(found.is_some(), "{shown:?} at {cursor} in {width} cuts a cluster");
+                }
+            }
+        }
+    }
+
+    /// The clusters the width rule is held to ratatui on: an emoji with VS16, a keycap, a flag of
+    /// regional indicators, a subdivision flag of tags, a ZWJ family, a skin tone, hangul, kana,
+    /// a hanzi, a decomposed é, a plain word, and a mixed string of them.
+    const PARITY: [&str; 12] = [
+        "\u{2764}\u{FE0F}",
+        "1\u{FE0F}\u{20E3}",
+        "\u{1F1FA}\u{1F1F8}",
+        "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        "\u{1F44D}\u{1F3FD}",
+        "\u{D55C}",
+        "\u{304B}",
+        "\u{65E5}",
+        "e\u{301}",
+        "music",
+        concat!(
+            "a\u{2764}\u{FE0F}b1\u{FE0F}\u{20E3}\u{1F1FA}\u{1F1F8}c",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{1F44D}\u{1F3FD}",
+            "\u{D55C}\u{304B}\u{65E5}e\u{301}",
+        ),
+    ];
+
+    /// The cells ratatui fills setting `text` into a buffer wide enough for it: the cursor's
+    /// advance, which counts each grapheme's cell and the cells its width hides.
+    fn ratatui_cells(text: &str) -> usize {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 200, 1));
+        let (x, _) = buffer.set_stringn(0, 0, text, usize::MAX, Style::default());
+        x as usize
+    }
+
+    /// The row `line` leaves in a 40-cell `TestBackend` filled with `#`, set from column 0
+    /// the way the GUI's `put` sets it: with the buffer's edge as its only budget.
+    fn drawn_over_sentinels(line: &str) -> Vec<String> {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                let buffer = frame.buffer_mut();
+                for x in 0..40 {
+                    buffer[(x, 0)].set_symbol("#");
+                }
+                buffer.set_stringn(0, 0, line, usize::MAX, Style::default());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..40).map(|x| buffer[(x, 0)].symbol().to_string()).collect()
+    }
+
+    /// One width rule, ratatui's: the kit measures every cluster at the cells ratatui fills
+    /// with it. Summing per character, ❤️ and 1️⃣ were a cell short (their VS16 widens them),
+    /// a ZWJ family four cells over and a skin tone two.
+    #[test]
+    fn the_width_rule_is_the_cells_ratatui_draws() {
+        use unicode_width::UnicodeWidthChar;
+        let per_char = |text: &str| text.chars().filter_map(UnicodeWidthChar::width).sum::<usize>();
+        for text in PARITY {
+            assert_eq!(width(text), ratatui_cells(text), "{text:?}: the kit's against ratatui's");
+            let graphemes: usize = unicode_segmentation::UnicodeSegmentation::graphemes(text, true)
+                .map(grapheme_cells)
+                .sum();
+            assert_eq!(graphemes, width(text), "{text:?}: grapheme by grapheme");
+            eprintln!("{text:?}: {} cells, {} summed per character", width(text), per_char(text));
+        }
+        for cluster in &PARITY[..10] {
+            assert!(width(cluster) <= 2, "{cluster:?} is one cluster of at most two cells");
+        }
+        // The controls ratatui drops, and a mark with no base, take no cells.
+        for text in ["a\tb", "a\r\nb", "\u{301}a", "a\u{7}"] {
+            assert_eq!(width(text), ratatui_cells(text), "{text:?}");
+        }
+        // Halfwidth katakana's sound mark: its own cell, as ratatui counts it.
+        assert_eq!(width("\u{FF76}\u{FF9E}"), ratatui_cells("\u{FF76}\u{FF9E}"));
+    }
+
+    /// A field N cells wide never writes past its Nth cell, whatever clusters it holds and
+    /// wherever its caret: the cell after it keeps the `#` it had. And the caret's reported
+    /// cell is where ratatui draws the caret.
+    #[test]
+    fn a_field_of_any_cluster_stays_inside_its_cells() {
+        use unicode_segmentation::UnicodeSegmentation;
+        for cluster in PARITY {
+            let values = [cluster.repeat(9), format!("ab{cluster}cd{cluster}ef{cluster}gh")];
+            for value in values {
+                let mut bounds = vec![0];
+                for grapheme in value.graphemes(true) {
+                    bounds.push(bounds[bounds.len() - 1] + grapheme.chars().count());
+                }
+                for &cursor in &bounds {
+                    for n in 3..30u16 {
+                        let (line, at) = input_display_composing(&value, cursor, n, true, "", None);
+                        let row = drawn_over_sentinels(&line);
+                        assert_eq!(width(&line), ratatui_cells(&line), "{line:?}");
+                        assert!(width(&line) <= n as usize, "{line:?} at {cursor} over {n} cells");
+                        for (x, cell) in row.iter().enumerate().skip(n as usize) {
+                            assert_eq!(cell, "#", "{line:?} at {cursor} in {n} wrote cell {x}");
+                        }
+                        let caret = (0..40).find(|&x| row[x].contains(input_marks().0));
+                        assert_eq!(caret, Some(at as usize), "{line:?}: the caret's cell");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_caret_withheld_leaves_its_cell_so_the_line_never_shifts() {
         assert_eq!(input_display_blink("1234", 2, 10, false), "12 34");
@@ -1261,6 +1735,85 @@ mod tests {
             on.chars().zip(off.chars()).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
         assert_eq!(differ.len(), 1, "one cell blinks, the rest stand: {on} / {off}");
         assert_eq!(off.chars().nth(differ[0]), Some(' '));
+    }
+
+    #[test]
+    fn a_composition_splices_in_at_the_cursor_with_the_caret_after_it() {
+        // No composition: the very line the blinking caret draws, either
+        // phase, and the caret's cell after the text before it.
+        for on in [true, false] {
+            let (line, at) = input_display_composing("abcd", 2, 20, on, "", None);
+            assert_eq!(line, input_display_blink("abcd", 2, 20, on));
+            assert_eq!(at, 2);
+        }
+        // Composing at the end, mid-value and at the start: the text goes
+        // in at the cursor and the caret follows it, solid even in the
+        // blink's off phase. Kana are two cells each.
+        let caret = input_display_blink("", 0, 5, true);
+        let shown = input_display_composing("", 0, 20, false, "にほん", None);
+        assert_eq!(shown, (format!("にほん{caret}"), 6));
+        let shown = input_display_composing("ab", 1, 20, true, "x", None);
+        assert_eq!(shown, (format!("ax{caret}b"), 2));
+        let shown = input_display_composing("ab", 0, 20, false, "日", None);
+        assert_eq!(shown, (format!("日{caret}ab"), 2));
+        // The value itself is not touched; a cursor past the end is the
+        // end; a long composition windows around the caret like any text.
+        assert_eq!(input_display_composing("ab", 9, 20, true, "c", None).0, format!("abc{caret}"));
+        let (line, at) = input_display_composing("0123456789", 10, 8, true, "abcdef", None);
+        assert_eq!(line.chars().count(), 8);
+        assert!(line.ends_with(&format!("cdef{caret}")), "{line}");
+        assert_eq!(at, 7);
+    }
+
+    /// A masked field's composition is drawn as its mark, one per
+    /// character: nothing an input method composes for a password shows in
+    /// clear. The value comes in masked already, as the field draws it.
+    #[test]
+    fn a_masked_fields_composition_is_drawn_masked() {
+        let caret = input_display_blink("", 0, 5, true);
+        let (line, at) = input_display_composing("••", 2, 20, true, "にほ", Some('•'));
+        assert_eq!((line.as_str(), at), (format!("••••{caret}").as_str(), 4));
+        assert!(!line.contains('に') && !line.contains('ほ'), "{line}");
+        // Mid-value too, and an unmasked field is untouched.
+        let (line, _) = input_display_composing("•••", 1, 20, false, "pw", Some('•'));
+        assert_eq!(line, format!("•••{caret}••"));
+        let plain = input_display_composing("ab", 2, 20, true, "pw", None).0;
+        assert_eq!(plain, format!("abpw{caret}"));
+    }
+
+    #[test]
+    fn the_surface_keeps_the_caret_cell_for_a_frame_and_the_composition_until_told() {
+        let mut s: Surface<i32> = Surface::new();
+        assert_eq!((s.caret_at(), s.composition()), (None, ""));
+        s.note_caret(Position { x: 7, y: 3 });
+        s.set_composition("にほ");
+        assert_eq!(s.caret_at(), Some(Position { x: 7, y: 3 }));
+        s.begin_frame();
+        assert_eq!(s.caret_at(), None, "a frame that draws no field has no caret");
+        assert_eq!(s.composition(), "にほ", "the input method's text outlives frames");
+        s.set_composition("");
+        assert_eq!(s.composition(), "");
+    }
+
+    #[test]
+    fn a_modal_takes_the_keyboard_from_the_field_beneath_it() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut s: Surface<i32> = Surface::new();
+        terminal
+            .draw(|frame| {
+                // The page's field, then a modal with none: the field's
+                // caret still blinks beside it, but it has no keyboard.
+                s.caret();
+                s.note_caret(Position { x: 3, y: 1 });
+                modal_frame_on(frame, &mut s, frame.area(), 20, 5, Color::Reset);
+                assert_eq!(s.caret_at(), None);
+                assert!(s.caret_next_flip().is_some(), "the blink keeps its clock");
+                // A field drawn inside the modal has it again.
+                s.note_caret(Position { x: 12, y: 5 });
+            })
+            .unwrap();
+        assert_eq!(s.caret_at(), Some(Position { x: 12, y: 5 }));
     }
 
     #[test]

@@ -5,11 +5,54 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Terminal player and headless server-audio engine for mStream"
 repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
+# Two binaries in the desktop flavour (the stub below), so `cargo run`
+# needs to be told which one is the player.
+default-run = "mstream-player"
 
 # Two targets, one crate. The wasm32 build is the browser demo (see src/web):
 # the same App and drawing code rendered by ratzilla, with the OS-bound layers
 # — audio device, threads, sockets, filesystem — either stubbed or compiled
 # out. Everything in plain [dependencies] must build for both.
+
+# One codebase, two products. The terminal releases (the plain binaries,
+# deb/rpm, Homebrew, Scoop, the install scripts, `cargo install`) build
+# with no features: the terminal player, its visualizer window included,
+# with the GUI's own window compiled out, so `gui --window` does not exist
+# there. The desktop releases build with `--features desktop`, which opens
+# the GUI in a window of its own. `window` is that window alone, for a
+# source build that wants `gui --window` without the desktop defaults that
+# `desktop` carries (an empty argv opens the window, under a default
+# instance lock; the Windows launcher stub; src/desktop.rs); both are inert
+# on wasm32, where no gui exists.
+[features]
+default = []
+# The backend's `png` decodes the colour bitmap glyphs of the system's emoji
+# face (Apple Color Emoji's sbix, Noto Color Emoji's CBDT); png 0.18 is in
+# the tree already through image, so it adds no package.
+window = [
+    "dep:ratatui-wgpu",
+    "ratatui-wgpu/png",
+    "dep:memmap2",
+    "dep:arboard",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+]
+# windows-sys is the desktop flavour's on Windows alone (the console it
+# leaves on a double-click, the stub's one message box); a feature may name
+# a target-specific dependency, which other targets simply never build.
+desktop = ["window", "dep:windows-sys"]
+
+# The desktop flavour's Windows launcher: a GUI-subsystem stub that starts
+# `mstream-player.exe gui --window` beside it with no console at all, so a
+# double-click never flashes one (src/bin/launch.rs). The packaged zip
+# renames it "mStream Player.exe"; a bin name cannot carry the space. On
+# every other OS it builds to a note and exit 1, so a desktop check of any
+# target still compiles it.
+[[bin]]
+name = "mstream-player-launch"
+path = "src/bin/launch.rs"
+required-features = ["desktop"]
 
 [dependencies]
 # i18n: compile-time-embedded YAML locales (locales/*.yml), t!() with
@@ -192,6 +235,45 @@ epaint_default_fonts = "0.36"
 # a borrowed system face is checked the way egui will read it, because
 # egui panics on a face it cannot parse. Versioned with egui's (epaint).
 skrifa = { version = "0.44", default-features = false, features = ["std"] }
+# The GUI's own window (src/gui/window/; the window-mode spike): a
+# ratatui backend that draws the cell buffer onto a wgpu surface, so the
+# same `render` that fills a terminal fills a native window. It is on the
+# wgpu and ratatui-core lines above and draws onto any surface target, the
+# winit window included, without depending on winit itself; it shapes text
+# with rustybuzz over faces it is handed, so no system font stack
+# (font-kit, freetype, fontconfig) comes with it. default-features = false
+# leaves out `ahash`, which would bring ahash's compile-time-rng
+# (const-random, tiny-keccak) and flip the ahash egui shares onto it; the
+# `window` feature turns its `png` back on, for the emoji face's bitmaps.
+# Optional: only the `window` feature builds it.
+ratatui-wgpu = { version = "0.6", default-features = false, optional = true }
+# The window's system fallback faces (CJK, symbols, emoji) are mapped rather than
+# read: the backend wants 'static bytes, and a leaked map gives them without
+# tens of megabytes of collections landing in the heap; only the pages a
+# glyph lookup touches become resident. Already in the tree under
+# smithay-client-toolkit; named here for the window's direct use, and
+# optional with it (the `window` feature).
+memmap2 = { version = "0.9", optional = true }
+# The window's paste (Cmd+V on a Mac, Ctrl+V elsewhere, into a text field):
+# the window gets no bracketed paste from a terminal, so it reads the
+# system clipboard itself. default-features = false leaves out
+# `image-data` (the image crate, for clipboard images the player never
+# reads) and keeps out `wayland-data-control`, whose wayland-client would
+# link libwayland-client into NEEDED. What is left links only system
+# frameworks: NSPasteboard through the objc2 crates already in the tree on
+# macOS, the Win32 clipboard through clipboard-win on Windows, and on Linux
+# x11rb's pure-Rust X11 connection (no libX11, nothing in NEEDED). The
+# Linux gap: a Wayland session pastes only through XWayland's clipboard,
+# which the desktops keep in step with Wayland's; with no XWayland a paste
+# finds nothing and says so on stderr. Optional: the `window` feature.
+arboard = { version = "3", default-features = false, optional = true }
+# The kit's width rule (`kit::width`) and its text fields' window walk
+# graphemes, the segmentation ratatui fills its cells by, so a field's line
+# and a clipped label take the cells they are drawn in and a flag's tags are
+# never shown without their 🏴 (see `kit::input_window`). Both flavours: the
+# terminal paints by graphemes as the window does. Already in the tree under
+# ratatui, so it adds no package.
+unicode-segmentation = "1.13"
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend
@@ -212,6 +294,45 @@ skrifa = { version = "0.44", default-features = false, features = ["std"] }
 # which runs the chooser in its own app context.
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.15", default-features = false }
+# The desktop flavour's two Win32 calls into the console (FreeConsole, and
+# GetConsoleProcessList to know the console is its own) and the launcher
+# stub's MessageBoxW (whose HWND is Foundation's). The 0.61 line is already
+# in the tree (winit, mio and others bring it), so this adds features, not
+# a crate. Optional: only the `desktop` feature builds it.
+#
+# Win32_UI_Shell is SetCurrentProcessExplicitAppUserModelID alone (the
+# player's window and the stub name one taskbar identity, src/identity.rs);
+# WindowsAndMessaging also brings what a refused second launch needs to
+# bring the holder's window forward (desktop.rs).
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# The desktop window's AppKit calls, which winit has no API for: the Dock
+# icon of a bare (unbundled) binary, set from the embedded PNG, and a
+# refused second launch activating the player that holds the lock
+# (NSRunningApplication). The exact versions arboard already brings on
+# macOS (its NSPasteboard), so these add features, not crates: the
+# AppKit classes named below, and `libc` for the pid lookup's pid_t.
+# objc2-foundation is in the tree with its default features already.
+# Optional: the `window` feature.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.4", optional = true }
+objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "libc",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+    "NSRunningApplication",
+] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "NSData",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
@@ -262,6 +383,13 @@ codegen-units = 1
 # (--no-build --no-strip --target <triple>); nothing here compiles anything.
 # The dependency alternative below is the noble rename of libasound2 — the
 # whole point of shipping a .deb is that ALSA arrives with it.
+# libxkbcommon-x11-0 is what a winit window loads at run time on an X11
+# session (winit's keyboard, through xkbcommon-dl): the visualizer's in
+# every build, the GUI's in the desktop one, which says what to install
+# and exits 3 (no window) without it. Recommended, not required: the
+# headless jukebox and the terminal faces open no window, and a server
+# install should not pull X11 libraries for one. apt installs recommends by
+# default, so a desktop gets it.
 [package.metadata.deb]
 maintainer = "Paul Sori <paul@mstream.io>"
 copyright = "Paul Sori"
@@ -271,6 +399,7 @@ run the same binary headless as mStream's server-audio jukebox engine."""
 section = "sound"
 priority = "optional"
 depends = "libasound2t64 | libasound2"
+recommends = "libxkbcommon-x11-0"
 assets = [
     ["target/release/mstream-player", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/mstream-player/README.md", "644"],
@@ -287,6 +416,12 @@ auto-req = "no"
 
 [package.metadata.generate-rpm.requires]
 alsa-lib = "*"
+
+# The window's X11 keyboard library, as a weak dependency for the deb's
+# reason above (dnf installs weak dependencies by default; a minimal server
+# install leaves them out). Fedora spells it libxkbcommon-x11.
+[package.metadata.generate-rpm.recommends]
+libxkbcommon-x11 = "*"
 
 # The tests' fake mStream endpoint — the server half of the tunnel protocol,
 # relay-free — speaks iroh directly; the player itself no longer does.
@@ -307,3 +442,33 @@ naga = { version = "30", features = ["glsl-in", "wgsl-in", "msl-out", "hlsl-out"
 [build-dependencies]
 # Windows icon + VersionInfo embedding (build.rs; no-op for other targets).
 winresource = "0.1"
+
+# Two crates built from copies in vendor/ rather than from crates.io, each
+# for a defect upstream has not shipped a fix for (vendor/*/VENDORED.md says
+# exactly what differs). A patch, not a path dependency, so the version
+# lines above stay the contract and everything else in the tree that wants
+# the same crate — egui-winit wants winit — gets the patched copy too: one
+# winit, one ratatui-wgpu. The copies ship in releases (the owner's decision,
+# 2026-10-02), with vendor/*/VENDORED.md as the record; filing the changes
+# upstream is a separate task. Drop an entry once an upstream release
+# carries its fixes.
+# The table holds for both flavours (a patch cannot follow a feature): the
+# terminal build never builds ratatui-wgpu, and its winit, through the
+# visualizer window, is the vendored one as well.
+[patch.crates-io]
+# The GUI window's renderer, and the place its fixes land: twenty
+# recorded changes (surface format, face index, wide-glyph shaping, failed
+# presents, a device made before the window, its wgpu kept to the feature
+# set above, colour emoji, the build off the window's thread, and more);
+# VENDORED.md lists each.
+ratatui-wgpu = { path = "vendor/ratatui-wgpu" }
+# macOS IME: 0.30.13 drops an ASCII key typed right after an input
+# method's commit (Korean `한` then `;` or a digit loses that key) and
+# doubles a Space typed with no composition. The fix is rust-windowing/
+# winit PR #4478, backported to the 0.30 layout; VENDORED.md has the
+# hunks. Japanese and Chinese are untouched by it: their confirm keys
+# never leave the input method (the Kotoeri candidate list takes an Enter
+# of its own, which is native, not a defect). Windows: a freeze on every
+# keyboard-layout switch (a reused HKL served a stale cached layout), fixed
+# by winit PR #4582 through Warp's 0.30-line backport.
+winit = { path = "vendor/winit" }

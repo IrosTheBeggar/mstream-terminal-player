@@ -29,6 +29,10 @@ use crate::tui::app::Effect;
 
 use super::{Act, Gui, SettingsRoom, accent, bright_bold, put, sel};
 
+/// The mark a password field draws for each character of its value, and of
+/// an input method's composition in it.
+const MASK: char = '•';
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 /// What a background probe has said about one saved server so far.
@@ -2072,11 +2076,18 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let body = block.inner(rect);
         frame.render_widget(block, rect);
         let shown: String =
-            if mask { value.chars().map(|_| '•').collect() } else { value.to_string() };
+            if mask { value.chars().map(|_| MASK).collect() } else { value.to_string() };
         let text_style = if enabled { Style::default() } else { dim() };
         if focused && enabled {
             let cursor = shown.chars().count();
-            super::text_field(frame, &mut gui.ui, body.x + 1, body.y, &shown, cursor, body.width.saturating_sub(2), text_style);
+            let (x, w) = (body.x + 1, body.width.saturating_sub(2));
+            if mask {
+                // A composition (the window's input method) is masked too.
+                let ui = &mut gui.ui;
+                super::masked_field(frame, ui, x, body.y, &shown, cursor, w, text_style, MASK);
+            } else {
+                super::text_field(frame, &mut gui.ui, x, body.y, &shown, cursor, w, text_style);
+            }
         } else {
             put(
                 frame,

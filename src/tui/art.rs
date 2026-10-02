@@ -45,6 +45,13 @@ pub struct Art {
     /// goes to the cache and the clone the drawing path holds are the same
     /// picture, and this is the larger half of it.
     source: Arc<[u8]>,
+    /// Hard-edged: drawn scaled, its pixels should stay squares rather than
+    /// be blended (a QR code's modules), where a photograph wants
+    /// smoothing. Only a renderer that scales the picture itself reads it
+    /// (the GUI's window); a terminal's protocols scale as they do.
+    // Set in every build (setup's QR code), read only by the window.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    crisp: bool,
 }
 
 /// Dimensions only. The derived form prints every pixel byte, which turns
@@ -83,11 +90,26 @@ impl Art {
         if width == 0 || height == 0 || rgb.len() != (width * height * 3) as usize {
             return None;
         }
-        Some(Art { id: NEXT.fetch_add(1, Ordering::Relaxed), width, height, rgb, source })
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        Some(Art { id, width, height, rgb, source, crisp: false })
     }
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The same picture, marked hard-edged (see [`Art::is_crisp`]).
+    pub fn into_crisp(self) -> Art {
+        Art { crisp: true, ..self }
+    }
+
+    /// Whether the picture's pixels should stay squares when it is drawn
+    /// scaled — nearest-neighbour, not blended.
+    // Read only by the window's sampler; the terminal flavour sets the flag
+    // (setup's QR code) and never asks.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn is_crisp(&self) -> bool {
+        self.crisp
     }
 
     /// The bytes this cover arrived as, or empty for one built from pixels.

@@ -10,11 +10,84 @@ Terminal player and headless audio engine for [mStream](https://github.com/IrosT
 in half-blocks at thirty frames a second. Captured with the built-in replay harness
 (`mstream-player replay "…,html" --live`).*
 
-**Status: Phase 4** — the interactive player works: browse your libraries, queue tracks, and
-play them with seeking, all from the terminal. See [PLAN.md](PLAN.md) for the roadmap and the
-control-API contract.
+One codebase, two products: the **terminal player**, which runs in the terminal you already
+have, and the **desktop player**, the same program with the GUI drawn in a window of its own. See
+[PLAN.md](PLAN.md) for the roadmap and the control-API contract.
 
 ## Install
+
+### Two flavours
+
+The terminal player and the desktop player are one program built two ways, and they differ in two
+places only. Started with no arguments, the desktop player opens the GUI in its own window, where
+the terminal player opens the classic player in your terminal; and only the desktop player has
+the window at all (`mstream-player gui --window`). Everything else — commands, keys, servers,
+settings — is the same in both, and both keep their files in the same places.
+
+### Install the desktop player
+
+Download the package for your machine from
+[Releases](https://github.com/IrosTheBeggar/mstream-terminal-player/releases). Until the next
+stable release, the desktop packages are on the pre-release v0.10.0-rc.1.
+
+| Platform | Package |
+|---|---|
+| macOS Intel / Apple Silicon | `mstream-player-desktop-darwin-x64.app.zip` / `…-arm64.app.zip` |
+| Windows x64 | `mstream-player-desktop-win32-x64.zip` |
+| Linux x64 | `mstream-player-desktop-linux-x64.tar.gz` |
+
+**macOS.** Unzip and drag **mStream Player.app** to Applications. The app is signed, notarized
+and stapled, so Gatekeeper accepts it.
+
+**Windows.** Unzip it anywhere; nothing is installed. Double-click **mStream Player.exe**, or pin
+it to the taskbar: it is a small launcher that starts the player beside it with no console
+window. `mstream-player.exe` beside it is the player itself, for use from a terminal; the zip
+also holds the icon and a `README.txt`. The build is not code-signed yet, so SmartScreen may warn
+on first run: choose **More info**, then **Run anyway**.
+
+**Linux** (x64). The tarball unpacks to `mstream-player-desktop/`: the binary, the desktop entry
+`io.mstream.player.desktop`, the icons under `icons/hicolor/` and a `README.txt`. Run it in
+place with `./mstream-player`, or install it for your user so it shows in the app menu:
+
+```bash
+cd mstream-player-desktop
+mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons
+cp mstream-player ~/.local/bin/
+cp io.mstream.player.desktop ~/.local/share/applications/
+cp -r icons/hicolor ~/.local/share/icons/
+update-desktop-database ~/.local/share/applications
+gtk-update-icon-cache ~/.local/share/icons/hicolor   # if your desktop uses it
+```
+
+The menu entry runs `mstream-player`, so `~/.local/bin` must be on your PATH; log out
+and in once after the first install if it was not.
+
+On X11 the window needs libxkbcommon-x11 (`libxkbcommon-x11-0` on Debian and Ubuntu); audio needs
+ALSA, as below. There is no desktop build for arm Linux; the terminal player runs there.
+
+The same release carries the bare desktop binaries — `mstream-player-desktop-darwin-arm64`,
+`…-darwin-x64`, `…-linux-x64` and `…-win32-x64.exe` — for scripts and bundles.
+
+Started with no arguments (a double-click, the Dock, the app menu), the desktop player opens the
+GUI in its own window. With no display, or over SSH, it falls back to the terminal UI. Every
+command works as it does in the terminal player, `mstream-player gui --window` opens the window
+explicitly, and exit code 3 means no window could open. `mstream-player --version` prints a second
+line, `features: window`, so a script can tell the two apart. It keeps its config, credentials and
+cache in the same places as the terminal player — see
+[Where it keeps things](#where-it-keeps-things).
+
+To build it from source (or use `--features window` for `gui --window` without the window on an
+empty command line):
+
+```bash
+cargo install --git https://github.com/IrosTheBeggar/mstream-terminal-player --features desktop
+```
+
+### Install the terminal player
+
+This is what Homebrew, Scoop, the one-line installers, the `.deb` and `.rpm`, the unsuffixed
+release binaries and `cargo install` deliver. It has no window of its own: `gui --window` is a
+usage error there.
 
 Homebrew (macOS, or Homebrew on Linux):
 
@@ -64,7 +137,8 @@ glibc 2.31 or newer — Debian 11, Ubuntu 20.04, and the Pi and NAS images of th
 ALSA at runtime (`sudo apt install libasound2`). macOS quarantines binaries downloaded in a
 browser; the one-liner doesn't trip that, and the macOS binaries are signed and notarized. To
 build from source instead:
-`cargo install --git https://github.com/IrosTheBeggar/mstream-terminal-player`.
+`cargo install --git https://github.com/IrosTheBeggar/mstream-terminal-player`. Add
+`--features desktop` to build the window into it — the desktop player above.
 
 ## The player
 
@@ -372,9 +446,11 @@ Servers running in public mode (no users configured) need no login — just pass
 
 `mstream-player gui` opens the mouse-first surface the installers launch —
 the same player, drawn for the pointer: everything is clickable and every
-action keeps a key. It wants a terminal at least 100×24 cells; smaller, it
-becomes a mini player — the cover, what is playing, a seek line, and prev ·
-play · next — until there is room again.
+action keeps a key. In the terminal player it runs in your terminal and wants
+at least 100×24 cells; smaller, it becomes a mini player — the cover, what
+is playing, a seek line, and prev · play · next — until there is room again.
+In the desktop player, started with no arguments or as `gui --window`, it
+opens in its own window instead (see [Two flavours](#two-flavours)).
 
 - **Three screens**: **Library** (the nav column and its rooms) and **Stats**
   (`T`) are the top bar's tabs; **Now Playing** (`0`, no tab of its own) is

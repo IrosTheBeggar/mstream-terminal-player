@@ -1,11 +1,25 @@
-# Tag-driven releases: push a `v*` tag to build all six native targets plus
-# the browser bundle, and publish a GitHub Release with the binaries, the web
-# tarball, and a sha256 manifest.json that mStream vendors for its
-# pinned-version download.
+# Tag-driven releases: push a `v*` tag to build all six native targets of
+# the terminal player, the desktop family beside them, and the browser
+# bundle, and publish a GitHub Release with the binaries, the web tarball,
+# and a sha256 manifest.json that mStream vendors for its pinned-version
+# download.
+#
+# Two products from one tree (Cargo.toml's [features]). The terminal
+# flavour (no features) is every asset that existed before the desktop
+# family: the unsuffixed binaries, the deb/rpm, and what Homebrew, Scoop,
+# install.sh/ps1 and cargo install fetch. The desktop flavour
+# (`--features desktop`, the GUI in its own window when started with no
+# arguments) ships as `mstream-player-desktop-*`: the bare binaries, for
+# mStream's bundles, and per-OS packages of them (package-desktop below).
+#
+# A tag with a hyphen (v0.10.0-rc.1) is a pre-release: the Release is
+# marked so (notify-mstream.yml skips those), never becomes "latest" (what
+# install.sh and install.ps1 fetch by default), and the package channels
+# are not bumped.
 #
 # Adapted from mStream's build-rust-server-audio.yml — same target matrix and
 # cross setup, but artifacts go to a Release instead of being committed back
-# into the repo.
+# into the repo. The steps of one leg live in build-binary.yml.
 #
 # Every Linux build goes through cross, x64 included: the containers bring
 # their own target-arch ALSA headers (Cross.toml), and the container's glibc
@@ -23,9 +37,10 @@ permissions:
   contents: write
 
 jobs:
+  # The terminal flavour: these six names are what install.sh, install.ps1,
+  # the channel bump scripts and mStream's updater ask for by exact name.
   build:
-    name: Build ${{ matrix.binary_name }}
-    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.binary_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -59,149 +74,261 @@ jobs:
             runner: ubuntu-latest
             binary_name: mstream-player-linux-arm
             use_cross: true
+    uses: ./.github/workflows/build-binary.yml
+    with:
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      binary_name: ${{ matrix.binary_name }}
+      use_cross: ${{ matrix.use_cross }}
+    secrets: inherit
 
+  # The desktop flavour, for the machines that have a desktop: no arm64 or
+  # armv7 Linux, whose installs are the headless NAS and Pi boxes.
+  #
+  # The hold-back: a pre-release tag always builds it, so a release
+  # candidate is where the desktop assets get tried; a stable tag builds it
+  # only once the repository variable DESKTOP_RELEASES is 'true', so the
+  # first stable tag after this lands does not ship untested desktop assets.
+  # The owner sets the variable (Settings > Secrets and variables > Actions >
+  # Variables) once the desktop gates in PLAN.md (Phase 14) pass. A
+  # workflow_dispatch from a branch is not a tag and publishes nothing, so
+  # it builds both families as a dry run.
+  build-desktop:
+    name: ${{ matrix.binary_name }}
+    if: >-
+      ${{ !startsWith(github.ref, 'refs/tags/v')
+          || contains(github.ref_name, '-')
+          || vars.DESKTOP_RELEASES == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            binary_name: mstream-player-desktop-win32-x64.exe
+            use_cross: false
+
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            binary_name: mstream-player-desktop-darwin-x64
+            use_cross: false
+
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            binary_name: mstream-player-desktop-darwin-arm64
+            use_cross: false
+
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary_name: mstream-player-desktop-linux-x64
+            use_cross: true
+    uses: ./.github/workflows/build-binary.yml
+    with:
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      binary_name: ${{ matrix.binary_name }}
+      use_cross: ${{ matrix.use_cross }}
+      features: desktop
+    secrets: inherit
+
+  # The desktop packages: each desktop binary wrapped the way its OS
+  # installs an app, beside the bare binaries (which mStream's bundles
+  # fetch, and which stay as they are):
+  # - mstream-player-desktop-darwin-{arm64,x64}.app.zip: "mStream Player.app",
+  #   bundle id io.mstream.player, signed, notarized and stapled when the
+  #   signing secrets exist (a dmg may come later);
+  # - mstream-player-desktop-win32-x64.zip: portable, the launcher stub as
+  #   "mStream Player.exe" beside the player; unsigned (no certificate yet,
+  #   which its README.txt says);
+  # - mstream-player-desktop-linux-x64.tar.gz: the binary, the desktop entry
+  #   and the hicolor icons, with a per-user install in its README.txt.
+  # The layouts are scripts/package-{macos.sh,windows.py,linux.sh}, so the
+  # same code runs on a dev Mac and here; this job only fetches, signs and
+  # uploads. Held back with build-desktop: a skipped build skips this.
+  #
+  # The version is the tag's, less the v. A workflow_dispatch from a branch
+  # has no tag (GITHUB_REF_NAME is the branch, slashes and all), and is the
+  # dry run of this very job, so it takes Cargo.toml's version instead of
+  # failing: the number the binary inside reports with --version, so the
+  # bundle and its executable agree, and a valid CFBundleShortVersionString
+  # whatever the branch is called. No file name carries the version, and a
+  # dry run publishes nothing, so it collides with no release.
+  package-desktop:
+    name: Package ${{ matrix.package }}
+    needs: build-desktop
+    if: needs.build-desktop.result == 'success'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: mstream-player-desktop-darwin-arm64.app.zip
+            kind: macos
+            binary: mstream-player-desktop-darwin-arm64
+            runner: macos-latest
+
+          - package: mstream-player-desktop-darwin-x64.app.zip
+            kind: macos
+            binary: mstream-player-desktop-darwin-x64
+            runner: macos-latest
+
+          # A zip needs no Windows runner; the build-desktop leg's artifact
+          # carries the stub beside the player (build-binary.yml).
+          - package: mstream-player-desktop-win32-x64.zip
+            kind: windows
+            binary: mstream-player-desktop-win32-x64.exe
+            runner: ubuntu-latest
+
+          - package: mstream-player-desktop-linux-x64.tar.gz
+            kind: linux
+            binary: mstream-player-desktop-linux-x64
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download the desktop binary
+        uses: actions/download-artifact@v8
         with:
-          targets: ${{ matrix.target }}
+          name: ${{ matrix.binary }}
+          path: in
 
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Install cross
-        if: matrix.use_cross
-        run: |
-          curl -fsSL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-gnu.tar.gz \
-            | tar xz -C "$HOME/.cargo/bin"
-
-      - name: Build
+      # SOURCE_DATE_EPOCH (the commit's time) is the zip's and the
+      # tarball's one timestamp, so a rerun of the same commit packs the
+      # same bytes.
+      - name: Version
+        id: version
         shell: bash
-        # 64 MiB stacks for rustc's threads (the default is 8 MiB). The
-        # v0.6.0 tag build died on darwin-x64 with `rustc interrupted by
-        # SIGBUS` — a stack overflow inside an LLVM machine pass
-        # (MachineLateInstrsCleanup recursing over one very large function
-        # of this crate) while cross-compiling x86_64-apple-darwin on the
-        # arm64 runner with rustc 1.98.1; the other five targets built. The
-        # compiler's own advice for this crash class is a larger
-        # RUST_MIN_STACK, and the legs that never needed it take no harm.
-        # (`cross` runs cargo in a container and does not pass this
-        # through — those legs were never the problem.)
-        env:
-          RUST_MIN_STACK: 67108864
         run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+          set -eo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
           else
-            cargo build --release --target ${{ matrix.target }}
+            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           fi
+          if [ -z "$version" ]; then
+            echo "::error::no version from ${GITHUB_REF} or Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "packaging ${{ matrix.package }} as version $version"
 
-      # CI runs the same guard on its native build; this is the one that
-      # sees the binaries that ship, arm64 and armv7 included.
-      - name: Linkage guard (Linux)
-        if: runner.os == 'Linux'
-        run: sh test/linkage.sh target/${{ matrix.target }}/release/mstream-player
-
-      # Developer ID signing + notarization, only where the secrets exist:
-      # a fork or a dry run still builds, just unsigned. Bare Mach-O
-      # binaries cannot be stapled, so the notarization ticket lives on
-      # Apple's servers and Gatekeeper checks it online — the normal
-      # arrangement for CLI tools. Runs before staging so the manifest
-      # hashes cover the signed bytes.
-      - name: Sign and notarize (macOS)
-        if: runner.os == 'macOS'
+      - name: Assemble the .app (macOS)
+        if: matrix.kind == 'macos'
+        shell: bash
         env:
-          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bash scripts/package-macos.sh "in/${{ matrix.binary }}" \
+            assets/icons/io.mstream.player.icns "$VERSION" work
+
+      - name: Import signing certificate (macOS)
+        id: signing
+        if: matrix.kind == 'macos'
+        uses: ./.github/actions/macos-signing
+        with:
+          cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+
+      # Inside-out, though there is little inside: the bundle's one piece of
+      # code is its executable, which build-binary.yml already signed with
+      # this identity and the identifier io.mstream.player. Signing the
+      # bundle re-signs that executable as the bundle's main code, so its
+      # signature now seals Info.plist and the resources too, under the same
+      # identifier (CFBundleIdentifier). No --deep: it would re-sign nested
+      # code with the outer options, which Apple advises against, and
+      # nothing is nested here.
+      #
+      # A bare Mach-O cannot hold a stapled ticket; a bundle can, so the
+      # .app is notarized as a zip, stapled, and zipped again: Gatekeeper
+      # then accepts it offline on first launch.
+      - name: Sign, notarize, staple and zip (macOS)
+        if: matrix.kind == 'macos'
+        shell: bash
+        env:
+          IDENTITY: ${{ steps.signing.outputs.identity }}
+          KEYCHAIN: ${{ steps.signing.outputs.keychain }}
           ASC_API_KEY: ${{ secrets.ASC_API_KEY }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          PACKAGE: ${{ matrix.package }}
         run: |
           set -euo pipefail
-          # The secrets context is not allowed in a step-level `if`, so the
-          # gate lives here: absent secrets mean an unsigned build, not a
-          # failed one.
-          if [ -z "${CERT_P12}" ]; then
-            echo "signing secrets absent — shipping unsigned"
+          app="work/mStream Player.app"
+          mkdir -p out
+          if [ -z "${IDENTITY}" ]; then
+            ditto -c -k --keepParent "$app" "out/$PACKAGE"
+            echo "- \`$PACKAGE\`: **unsigned** (signing secrets absent)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          bin="target/${{ matrix.target }}/release/mstream-player"
 
-          keychain="$RUNNER_TEMP/signing.keychain-db"
-          keychain_password="$(uuidgen)"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 900 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
-            -P "$CERT_PASSWORD" -T /usr/bin/codesign
-          rm "$RUNNER_TEMP/cert.p12"
-          security set-key-partition-list -S "apple-tool:,apple:" \
-            -s -k "$keychain_password" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" login.keychain
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=2 "$app" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Runtime)'
 
-          identity=$(security find-identity -v -p codesigning "$keychain" \
-            | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)
-          codesign --force --timestamp --options runtime \
-            --identifier io.mstream.player --sign "$identity" "$bin"
-          codesign --verify --strict --verbose=2 "$bin"
-
-          # The signing key's job is done: notarytool below submits the
-          # already-signed binary with API-key auth and needs no keychain.
-          # Take it out of the search list and delete it now rather than
-          # leaving an unlocked, codesign-authorized Developer ID keychain on
-          # the runner for the rest of the job (the `if: always()` step below
-          # covers a failure that exits this script before this line).
+          # The key's job is done; drop the keychain now, as build-binary.yml
+          # does (the always() step below covers an earlier failure).
           security list-keychains -d user -s login.keychain
-          security delete-keychain "$keychain"
+          security delete-keychain "$KEYCHAIN"
           echo "signing keychain removed"
 
+          # Signed but not yet notarized, Gatekeeper rejects it
+          # ("source=Unnotarized Developer ID"): printed for the log only.
+          spctl -a -t exec -vv "$app" || true
+
           echo "$ASC_API_KEY" > "$RUNNER_TEMP/asc.p8"
-          ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
-          # Team keys carry an issuer UUID; individual keys must not pass
-          # --issuer at all, says notarytool itself.
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"
           issuer=()
           if [ -n "${ASC_ISSUER_ID}" ]; then
             issuer=(--issuer "$ASC_ISSUER_ID")
           fi
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
             --key "$RUNNER_TEMP/asc.p8" --key-id "$ASC_KEY_ID" \
-            "${issuer[@]}" --wait --timeout 15m
+            ${issuer[@]+"${issuer[@]}"} --wait --timeout 15m
           rm "$RUNNER_TEMP/asc.p8"
 
-      # If the sign step failed between creating the keychain and its own
-      # removal (a codesign or verify failure), the keychain must still not
-      # outlive the step. Idempotent: an already-deleted keychain is simply
-      # not there; an unsigned build never created one.
+          # stapler fails when Apple issued no ticket, which also catches a
+          # submission that came back Invalid with notarytool exiting 0.
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl -a -t exec -vv "$app"
+
+          ditto -c -k --keepParent "$app" "out/$PACKAGE"
+          echo "- \`$PACKAGE\`: signed, notarized and stapled" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Remove signing keychain (always)
-        if: always() && runner.os == 'macOS'
+        if: always() && matrix.kind == 'macos'
+        shell: bash
         run: |
           security list-keychains -d user -s login.keychain 2>/dev/null || true
           if [ -f "$RUNNER_TEMP/signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/signing.keychain-db" && echo "signing keychain removed (cleanup step)"
           else
-            echo "no signing keychain present (already removed, or this build shipped unsigned)"
+            echo "no signing keychain present (already removed, or this package shipped unsigned)"
           fi
 
-      - name: Stage binary
+      - name: Zip (Windows)
+        if: matrix.kind == 'windows'
         shell: bash
         run: |
-          src="target/${{ matrix.target }}/release/mstream-player"
-          if [[ "${{ matrix.binary_name }}" == *.exe ]]; then
-            src="${src}.exe"
-          fi
-          mkdir -p staging
-          cp "$src" "staging/${{ matrix.binary_name }}"
+          python3 scripts/package-windows.py \
+            "in/${{ matrix.binary }}" \
+            "in/mstream-player-desktop-launch-win32-x64.exe" \
+            assets/mstream-logo.ico "out/${{ matrix.package }}"
+          echo "- \`${{ matrix.package }}\`: **unsigned** (no Windows code-signing certificate yet)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload binary
+      - name: Tar (Linux)
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          bash scripts/package-linux.sh "in/${{ matrix.binary }}" assets "out/${{ matrix.package }}"
+
+      - name: Upload package
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.binary_name }}
-          path: staging/${{ matrix.binary_name }}
+          name: ${{ matrix.package }}
+          path: out/${{ matrix.package }}
+          if-no-files-found: error
           retention-days: 1
 
   # The seventh artifact: the same player built for a tab (see src/web),
@@ -245,9 +372,24 @@ jobs:
           path: mstream-player-web.tar.gz
           retention-days: 1
 
+  # A skipped need would skip this job too, the hold-back's skipped
+  # build-desktop included, unless the `if` says otherwise; so it does:
+  # every terminal leg and the web bundle must have succeeded, and the
+  # desktop family either went through whole (binaries and packages) or
+  # was held back whole (both skipped). A failed desktop leg or package
+  # stops the release, as any failed leg always has; so does the pair
+  # disagreeing, which only a failure can cause.
   release:
     name: Publish release
-    needs: [build, web]
+    needs: [build, build-desktop, package-desktop, web]
+    if: >-
+      ${{ !cancelled()
+          && needs.build.result == 'success'
+          && needs.web.result == 'success'
+          && ((needs.build-desktop.result == 'success'
+               && needs.package-desktop.result == 'success')
+              || (needs.build-desktop.result == 'skipped'
+                  && needs.package-desktop.result == 'skipped')) }}
     runs-on: ubuntu-latest
     steps:
       # The packaging tools read Cargo.toml and ship the README, so this
@@ -268,7 +410,9 @@ jobs:
       # Native packages wrap the binaries that were just downloaded — no
       # compilation. Their real value over the bare binary is the dependency
       # line: apt and dnf bring ALSA along instead of the README explaining
-      # it. armv7 gets a deb only; Fedora retired 32-bit arm.
+      # it. armv7 gets a deb only; Fedora retired 32-bit arm. They wrap the
+      # terminal flavour only, named below by its exact asset names; the
+      # desktop binaries sit beside them in dist/ untouched.
       - name: Package deb and rpm
         shell: bash
         run: |
@@ -294,7 +438,23 @@ jobs:
         shell: bash
         run: |
           cd dist
+          # The Windows launcher stub rides the desktop artifact only to reach
+          # the zip; alone it is nothing to publish or to pin.
+          rm -f mstream-player-desktop-launch-win32-x64.exe
           chmod +x mstream-player-linux-* mstream-player-darwin-* mstream-player-win32-*
+          # The desktop family may be held back (build-desktop skipped), and an
+          # unmatched glob would hand chmod its literal pattern; hence the test.
+          # Its packages share the prefix and are not programs: they keep
+          # their modes (the executables inside carry their own).
+          for f in mstream-player-desktop-*; do
+            case "$f" in *.zip|*.tar.gz) continue ;; esac
+            if [ -e "$f" ]; then chmod +x "$f"; fi
+          done
+          # Only the leading v goes: a pre-release tag yields "0.10.0-rc.1",
+          # which is what its GitHub Release is called anyway. Consumers go by
+          # exact file names, not by this list's shape (install.sh's grep for
+          # its one asset, the Homebrew and Scoop bump.sh scripts, mStream's
+          # updater), so the desktop entries are additive and apiVersion stays 1.
           version="${GITHUB_REF_NAME#v}"
           {
             echo '{'
@@ -315,18 +475,35 @@ jobs:
           } > manifest.json
           cat manifest.json
 
+      # A hyphen in the tag (v0.10.0-rc.1) marks a pre-release, which GitHub
+      # never serves as releases/latest; make_latest says the same thing for
+      # stable tags outright rather than leaving it to the API's default.
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
 
   # In this same workflow rather than reacting to `release: published`,
   # because that event never fires here: the release is created with the
   # workflow's own GITHUB_TOKEN, and GITHUB_TOKEN events do not trigger
   # workflows. update-tap.yml remains as the hand-cranked fallback.
+  #
+  # Stable tags only: a pre-release must not become what `brew upgrade` and
+  # `scoop update` install. The status checks are spelled out because a
+  # skip carries down the whole dependency chain, not only to the jobs that
+  # name the skipped one (GitHub's `needs` docs; actions/runner#491): left
+  # to the implicit success(), this would be skipped whenever the hold-back
+  # skipped build-desktop, even with `release` green.
   channels:
     name: Update package channels
     needs: release
+    if: >-
+      ${{ !cancelled()
+          && needs.release.result == 'success'
+          && startsWith(github.ref, 'refs/tags/v')
+          && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
