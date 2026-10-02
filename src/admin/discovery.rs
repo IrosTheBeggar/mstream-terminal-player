@@ -30,8 +30,9 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, age_text, copy_to_clipboard, draw_bottom, draw_header, fmt_bytes, fmt_count,
-    frame_ground, gate_message, host_of, iso_unix, printable, short_id, unix_now,
+    Claim, Outcome, Screen, age_text, body_column, copy_to_clipboard, draw_foot, draw_header,
+    fmt_bytes, fmt_count, frame_ground, gate_message, host_of, iso_unix, printable, short_id,
+    unix_now,
 };
 #[cfg(test)]
 use super::iso_at;
@@ -335,6 +336,9 @@ pub(crate) struct Room {
     activity_seq: u64,
     /// The Activity pane's wheel offset from the newest line.
     ascroll: usize,
+    /// Where the last frame drew the tabs' pane, if it drew one: the wheel
+    /// walks the log only over it, wherever a host put the room.
+    pane_at: Option<Rect>,
     pub tab: Tab,
     /// The KEYBOARD cursor over the VISIBLE rows — `None` until ↑/↓.
     pub sel: Option<usize>,
@@ -379,6 +383,7 @@ impl Room {
             activity: Vec::new(),
             activity_seq: 0,
             ascroll: 0,
+            pane_at: None,
             tab: Tab::Stats,
             sel: None,
             filter: Input::default(),
@@ -1059,12 +1064,34 @@ impl Screen for Room {
             return;
         }
         // Over the Activity pane the wheel walks the log; anywhere else it
-        // is the table's.
-        if self.tab == Tab::Activity && (6..6 + PANE_ROWS).contains(&at.y) {
+        // is the table's. Only the rows are asked: the pane spans the
+        // column, and the column is all the room has across.
+        let over_pane = self.pane_at.is_some_and(|p| (p.y..p.bottom()).contains(&at.y));
+        if self.tab == Tab::Activity && over_pane {
             self.ascroll = if up { self.ascroll.saturating_add(1) } else { self.ascroll.saturating_sub(1) };
         } else {
             self.tscroll = if up { self.tscroll.saturating_sub(1) } else { self.tscroll.saturating_add(1) };
         }
+    }
+
+    fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+        self.ui.begin_frame();
+        draw(frame, self, area, true);
+    }
+
+    fn hint(&self) -> String {
+        footer_hint(self)
+    }
+
+    fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
+    /// Every key while a modal is up, and while the filter or the befriend
+    /// box has the caret: a typed `L` is a letter of the ticket, not the
+    /// host's.
+    fn claim(&self) -> Claim {
+        if self.modal_open() || self.filter_focus || self.ticket_focus { Claim::All } else { Claim::Open }
     }
 }
 
@@ -1346,6 +1373,16 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, room: &mut Room) {
     room.ui.begin_frame();
     let Some(area) = frame_ground(frame, MIN_W, MIN_H) else { return };
+    draw(frame, room, area, false);
+}
+
+/// The room inside `area`. Standalone it owns the window, header and tips
+/// row included. Hosted, the host's bar names the server and its footer
+/// carries the tips, so the room draws neither and keeps only its note on
+/// the area's last row; below its minimum it draws what fits, and the
+/// table is what gets shorter.
+fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
+    room.pane_at = None;
 
     // A modal makes the room beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
@@ -1355,14 +1392,16 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = None;
     }
 
-    draw_header(frame, area, &t!("p2p.title"), &host_of(&room.client));
-    let column = Rect { x: 2, y: 2, width: area.width.saturating_sub(4), height: area.height.saturating_sub(5) };
+    if !hosted {
+        draw_header(frame, area, &t!("p2p.title"), &host_of(&room.client));
+    }
+    let column = body_column(area, hosted);
     match room.status.clone() {
         None => {}
         Some(s) if !s.enabled => draw_off(frame, room, column, &s),
         Some(s) => draw_on(frame, room, column, &s),
     }
-    draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
+    draw_foot(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room), hosted);
 
     if modal_open {
         room.ui.pointer = live_pointer;
@@ -1574,6 +1613,7 @@ fn draw_on(frame: &mut Frame, room: &mut Room, column: Rect, s: &DiscoveryStatus
     }
 
     let pane = Rect { x: column.x, y: tabs_y + 2, width: column.width, height: PANE_ROWS };
+    room.pane_at = Some(pane);
     match room.tab {
         Tab::Stats => draw_stats(frame, room, pane, s),
         Tab::Activity => draw_activity(frame, room, pane),
@@ -2981,5 +3021,142 @@ mod tests {
         assert_eq!(fmt_bytes(1_536), "2 KB");
         assert_eq!(short_id(&hex("8f31c0e2a7")), "8f31c0e2a78f…");
         assert_eq!(printable("bad\u{1b}[31mname\u{202E}", 10), "bad[31mnam");
+    }
+
+    // ── Hosted in the GUI player's Admin tab ─────────────────────────────
+
+    use crate::admin::drive_pointer;
+    use crate::admin::hosting::{self, DOCKED, FLOOR, WINDOW};
+    use ratatui::buffer::Buffer;
+    use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+
+    /// The cells `from..to` of row `y`, as text.
+    fn cells(buf: &Buffer, y: u16, from: u16, to: u16) -> String {
+        (from..to).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// The whole buffer as text, a row a line.
+    fn text_of(buf: &Buffer) -> String {
+        (buf.area.top()..buf.area.bottom()).map(|y| hosting::row(buf, y)).collect::<Vec<_>>().join("\n")
+    }
+
+    /// A wheel turn at (x, y), through the hub's own pointer routine.
+    fn wheel_at(room: &mut Room, up: bool, x: u16, y: u16) {
+        let kind = if up { MouseEventKind::ScrollUp } else { MouseEventKind::ScrollDown };
+        drive_pointer(room, MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+
+    #[test]
+    fn hosted_the_room_draws_inside_its_area_with_no_header_and_its_note_last() {
+        let _en = english();
+        for (size, area) in [((100, 30), WINDOW), ((176, 46), DOCKED)] {
+            let mut room = on();
+            room.note = Some(("the mesh answered".into(), false));
+            let buf = hosting::draw_hosted(&mut room, size, area);
+            let text = text_of(&buf);
+            assert_eq!(hosting::outside(&buf, area, true), Vec::<(u16, u16)>::new(), "{size:?}\n{text}");
+            assert!(!text.contains(&*t!("p2p.title")) && !text.contains("home.mstream.example"), "no header\n{text}");
+            assert!(!text.contains(&*t!("p2p.hint_rows")), "the tips are the host's\n{text}");
+            assert_eq!(cells(&buf, area.y, area.x, area.right()), "·".repeat(area.width as usize), "the first row is the host's");
+            assert!(cells(&buf, area.y + 1, area.x + 2, area.right()).starts_with(&*t!("p2p.state_connected")), "{text}");
+            assert!(cells(&buf, area.bottom() - 1, area.x + 2, area.right()).starts_with("the mesh answered"), "{text}");
+            assert!(text.contains("snapshots held") && text.contains("Basement Archive"), "{text}");
+        }
+    }
+
+    #[test]
+    fn hosted_a_modal_centres_in_the_rooms_area() {
+        let _en = english();
+        let mut room = on();
+        room.modal = Modal::Leave;
+        let buf = hosting::draw_hosted(&mut room, (100, 30), WINDOW);
+        // The leave gate is 68 by 8: a title, a blank, two lines, the buttons.
+        let at = kit::modal_rect(WINDOW, 68, 8, 8);
+        assert_eq!((at.x, at.y), (24, 8));
+        assert_eq!(buf[(at.x, at.y)].symbol(), "╭");
+        assert_eq!(buf[(at.right() - 1, at.bottom() - 1)].symbol(), "╯");
+        assert_eq!(hosting::outside(&buf, WINDOW, true), Vec::<(u16, u16)>::new());
+    }
+
+    #[test]
+    fn hosted_at_the_floor_it_keeps_its_pane_and_shortens_the_table() {
+        let _en = english();
+        let mut room = on();
+        let text = text_of(&hosting::draw_hosted(&mut room, (100, 30), WINDOW));
+        assert!(text.contains("Basement Archive"), "the table has rows in the window\n{text}");
+
+        let mut room = on();
+        let buf = hosting::draw_hosted(&mut room, (100, 24), FLOOR);
+        let text = text_of(&buf);
+        assert_eq!(hosting::outside(&buf, FLOOR, false), Vec::<(u16, u16)>::new(), "{text}");
+        assert_eq!(room.pane_at, Some(Rect { x: 19, y: 6, width: 79, height: PANE_ROWS }));
+        assert!(text.contains("snapshots held") && text.contains("servers known"), "the pane keeps its rows\n{text}");
+        assert!(!text.contains("Basement Archive"), "the table gives way first\n{text}");
+        assert!(!text.contains(&*t!("resize")), "{text}");
+    }
+
+    #[test]
+    fn the_activity_wheel_follows_the_drawn_pane_wherever_the_room_sits() {
+        let _en = english();
+        let lower = Rect { y: 9, ..WINDOW };
+        for (size, area) in [((100, 30), WINDOW), ((100, 40), lower)] {
+            let mut room = on();
+            room.tab = Tab::Activity;
+            hosting::draw_hosted(&mut room, size, area);
+            let pane = room.pane_at.expect("the pane was drawn");
+            assert_eq!(pane.y, area.y + 5, "state row, bar, tabs, gap: {area:?}");
+            wheel_at(&mut room, true, 40, pane.y);
+            wheel_at(&mut room, true, 40, pane.bottom() - 1);
+            assert_eq!((room.ascroll, room.tscroll), (2, 0), "{area:?}");
+            wheel_at(&mut room, false, 40, pane.bottom());
+            wheel_at(&mut room, false, 40, pane.y - 1);
+            assert_eq!((room.ascroll, room.tscroll), (2, 2), "{area:?}");
+        }
+        // Sitting lower, the rows a standalone pane would hold are above
+        // this one: the wheel there is the table's.
+        let mut room = on();
+        room.tab = Tab::Activity;
+        hosting::draw_hosted(&mut room, (100, 40), lower);
+        wheel_at(&mut room, false, 40, 6);
+        assert_eq!((room.ascroll, room.tscroll), (0, 1));
+    }
+
+    #[test]
+    fn the_wheel_over_the_activity_pane_still_walks_the_log_standalone() {
+        let _en = english();
+        let mut room = on();
+        room.tab = Tab::Activity;
+        draw(&mut room);
+        assert_eq!(room.pane_at, Some(Rect { x: 2, y: 6, width: 96, height: PANE_ROWS }));
+        wheel_at(&mut room, true, 40, 6);
+        wheel_at(&mut room, true, 40, 6 + PANE_ROWS - 1);
+        assert_eq!((room.ascroll, room.tscroll), (2, 0));
+        wheel_at(&mut room, false, 40, 6 + PANE_ROWS);
+        assert_eq!((room.ascroll, room.tscroll), (2, 1));
+        room.tab = Tab::Stats;
+        wheel_at(&mut room, false, 40, 7);
+        assert_eq!((room.ascroll, room.tscroll), (2, 2), "only the Activity pane walks the log");
+    }
+
+    #[test]
+    fn it_claims_every_key_while_filtering_or_befriending() {
+        let _en = english();
+        let mut room = on();
+        assert_eq!(room.claim(), Claim::Open);
+        handle_key(&mut room, key(KeyCode::Char('/')));
+        assert_eq!(room.claim(), Claim::All, "the filter has the caret");
+        handle_key(&mut room, key(KeyCode::Enter));
+        assert_eq!(room.claim(), Claim::Open);
+        handle_key(&mut room, key(KeyCode::Char('j')));
+        assert!(room.ticket_focus);
+        assert_eq!(room.claim(), Claim::All, "the befriend box has the caret");
+        handle_key(&mut room, key(KeyCode::Char('L')));
+        assert_eq!(room.ticket.value(), "L", "a capital L is a letter of the ticket");
+        handle_key(&mut room, key(KeyCode::Esc));
+        assert_eq!(room.claim(), Claim::Open);
+        room.modal = Modal::Leave;
+        assert!(room.modal_open());
+        assert_eq!(room.claim(), Claim::All);
+        assert_eq!(room.hint(), t!("p2p.hint_leave"));
     }
 }
