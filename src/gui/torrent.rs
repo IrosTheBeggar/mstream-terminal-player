@@ -47,6 +47,7 @@ use crate::kit::{
 };
 use crate::tui::worker::Event;
 
+use super::opener::{HandOff, open_target};
 use super::torrent_meta::{self as meta, Confidence, TorrentMeta};
 use super::{Act, Gui, SettingsRoom, accent, bright_bold, put, sel, text_button};
 
@@ -189,16 +190,6 @@ pub(crate) struct Matches {
 enum Loaded {
     Dir,
     File(Vec<u8>),
-}
-
-/// How a hand-off went.
-enum HandOff {
-    /// The opener ran (or is still running — a client took the file).
-    Launched,
-    /// The opener said nothing will take it.
-    Nothing,
-    /// `MSTREAM_NO_OPEN`: the staged file's path, for the note.
-    Headless(String),
 }
 
 /// What the threads send home.
@@ -469,52 +460,6 @@ fn load_path(path: &str) -> Result<Loaded, String> {
     std::io::Read::read_to_end(&mut std::io::Read::take(file, TORRENT_MAX_BYTES + 1), &mut bytes)
         .map_err(|e| e.to_string())?;
     Ok(Loaded::File(bytes))
-}
-
-/// Hand a file or a magnet link to the OS's opener and see whether
-/// anything took it. `MSTREAM_NO_OPEN` is the test seam — headless
-/// callers put the staged path in the note instead.
-fn open_target(target: &str) -> Result<HandOff, String> {
-    if std::env::var("MSTREAM_NO_OPEN").is_ok_and(|v| !v.is_empty() && v != "0") {
-        return Ok(HandOff::Headless(target.to_string()));
-    }
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut c = std::process::Command::new("open");
-        c.arg(target);
-        c
-    };
-    // Not `cmd /c start`: cmd.exe reads `&`, `|`, `^` and `%VAR%` in the
-    // target as its own syntax, so a magnet's `&dn=…` became a command.
-    // Explorer hands the file or URL to its registered handler untouched.
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut c = std::process::Command::new("explorer.exe");
-        c.arg(target);
-        c
-    };
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let mut command = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(target);
-        c
-    };
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    // The openers answer fast when nothing can take the file (macOS's
-    // `open` exits 1, xdg-open 3); one that is still running after a
-    // moment has handed it to a client that is now starting up.
-    for _ in 0..20 {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            return Ok(if status.success() { HandOff::Launched } else { HandOff::Nothing });
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    Ok(HandOff::Launched)
 }
 
 /// A one-shot client for the live session, the servers room's way.
