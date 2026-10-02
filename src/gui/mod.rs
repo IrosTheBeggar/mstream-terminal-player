@@ -2780,11 +2780,17 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             // The App keeps the pointer too: the Now Playing band
             // lights under it, the TUI's way.
             gui.app.note_pointer(at);
+            // A press-drag on a drag region (the Admin log's lines)
+            // holds the pointer until its release, like a thumb drag:
+            // no page owner takes an event while it does, so the hand
+            // passing over a page lights nothing there, and the release
+            // comes back here to end the grip wherever it lands.
+            let gripping = gui.ui.gripping();
             // The Stats screen's page owns the pointer below the top
             // bar, on its own surface (stats-screen contract, clause
             // 5); the GUI's surface still follows the motion, so the
             // bar's own tabs light and dim as the pointer passes.
-            if stats::pointer(gui, mouse) {
+            if !gripping && stats::pointer(gui, mouse) {
                 if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
                     gui.ui.motion(at);
                 }
@@ -2794,7 +2800,7 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             // its area, and every event while its modal is up
             // (admin-screen contract, clause 18); the hallway, the
             // log and the bar answer on the GUI's surface below.
-            if admin::pointer(gui, mouse) {
+            if !gripping && admin::pointer(gui, mouse) {
                 if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
                     gui.ui.motion(at);
                 }
@@ -2823,6 +2829,16 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                         return Flow::Quit;
                     }
                     gui.ui.arm_bars(at);
+                    // A press on a drag region takes it, unless a click
+                    // drawn over the region (a menu's catcher) or a
+                    // modal took the press.
+                    if !gui.modal_open()
+                        && let Some(act) = gui.ui.arm_region(at)
+                        && gui.act(act)
+                    {
+                        ctx.saver.flush(&gui.app);
+                        return Flow::Quit;
+                    }
                 }
                 // A right click on a row is its sheet (entry point 1) —
                 // never through a modal, which owns the pointer whole.
@@ -2835,7 +2851,16 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                         return Flow::Quit;
                     }
                 }
-                MouseEventKind::Moved => gui.ui.motion(at),
+                // Some terminals report the held button's moves as
+                // plain moves: a grip follows those too.
+                MouseEventKind::Moved => {
+                    gui.ui.motion(at);
+                    if gui.ui.gripping()
+                        && let Some(act) = gui.ui.drag_action(at)
+                    {
+                        gui.act(act);
+                    }
+                }
                 MouseEventKind::Drag(_) => {
                     gui.ui.motion(at);
                     if gui.actions.drag.is_some() {
@@ -2845,7 +2870,9 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                     }
                 }
                 MouseEventKind::Up(_) => {
-                    gui.ui.release();
+                    if let Some(act) = gui.ui.release_at(at) {
+                        gui.act(act);
+                    }
                     actions::drop(gui);
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -3656,8 +3683,9 @@ mod tests {
     }
 
     /// The loop's own Ctx, on channels nothing answers: what the frame
-    /// half dispatches goes nowhere, which a test of its wait wants.
-    fn quiet_ctx(gui: &Gui) -> Ctx {
+    /// half dispatches goes nowhere, which a test of its wait wants, and
+    /// the input half needs nothing more (the Admin tests drive it).
+    pub(super) fn quiet_ctx(gui: &Gui) -> Ctx {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (audio_tx, _) = std::sync::mpsc::channel();
         let (api_tx, _) = std::sync::mpsc::channel();

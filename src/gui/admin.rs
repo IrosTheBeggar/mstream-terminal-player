@@ -30,8 +30,8 @@ use super::server_log::{self, LogAct, LogKey, LogUi, Look};
 use super::stats::{reach_client, session_reach};
 use super::{Act, DJ_NAV, Gui, Screen, accent, bar, bright_bold, forward_glyph, put, sel};
 use crate::admin::{Claim, HostedRoom, Outcome, RoomId, open_room};
-use crate::kit::{blank, dim, width, wrap_words};
-use crate::tui::app::Reach;
+use crate::kit::{Grip, blank, dim, width, wrap_words};
+use crate::tui::app::{App, Reach};
 
 /// The hallway's rule, and the first column of the room's area after it.
 const RULE_X: u16 = 16;
@@ -153,7 +153,8 @@ pub(crate) enum AdmAct {
     Open(Hall),
     /// A column taking the keys: the hallway's empty cells, the log.
     Focus(Focus),
-    /// The log's own controls: the level, its menu, the paused word.
+    /// The log's own controls: the level, its menu, the paused word, the
+    /// copy and the download, and a press-drag on its lines.
     Log(LogAct),
 }
 
@@ -258,10 +259,22 @@ pub(super) fn open(gui: &mut Gui) {
     // server however it is reached.
     gui.admin.same_machine = same_machine(&reach) && gui.app.session.peer.is_none();
     gui.admin.log.start(client);
+    gui.admin.log.set_label(&log_server(&gui.app));
     gui.admin.reach = Some(reach);
     let showing = gui.admin.showing;
     show(gui, showing);
     gui.admin.cursor = row_of(showing);
+}
+
+/// The server a saved log file is named after: the one the screen's
+/// rooms and log reach (a peer session's parent, else the session's own
+/// origin, a tunnel by its identity), never the loopback bridge a tunnel
+/// is reached through.
+fn log_server(app: &App) -> String {
+    match &app.session.peer {
+        Some((parent, _)) => parent.clone(),
+        None => app.origin().server,
+    }
 }
 
 /// Leaving drops the room and stops the log's poll. What was shown, the
@@ -406,8 +419,12 @@ fn settle(gui: &mut Gui, width: u16, height: u16) -> Layout {
     };
     let rows = hall_rows(lay.log_row && session).len();
     admin.cursor = admin.cursor.min(rows - 1);
+    // A log off the screen (hidden by `L`, or the Log room folded back)
+    // lets go of a press held on it, so a drag that outlives it moves
+    // nothing.
     if !log {
         admin.log.menu = None;
+        admin.log.let_go();
     }
     lay
 }
@@ -699,6 +716,7 @@ pub(super) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
                 gui.admin.focus = Focus::Hall;
                 gui.admin.cursor = row_of(gui.admin.showing);
             }
+            take_log_note(gui);
         }
         Route::Cycle { back } => {
             let admin = &mut gui.admin;
@@ -816,13 +834,46 @@ pub(super) fn act(gui: &mut Gui, act: &Act) -> bool {
             }
         }
         AdmAct::Log(log_act) => {
-            // A click on the log's own controls is a click in the log.
-            if *log_act != LogAct::MenuClose {
+            // A click on the log's own controls is a click in the log, and
+            // so is a press on its lines; the moves and the release of that
+            // press, wherever the hand has gone, hand nothing on.
+            let elsewhere = matches!(log_act, LogAct::MenuClose | LogAct::Select(Grip::Drag | Grip::Release, _));
+            if !elsewhere {
                 gui.admin.focus = Focus::Log;
             }
             gui.admin.log.act(*log_act);
+            take_log_note(gui);
         }
     }
+    true
+}
+
+/// The log's last note (a copy, a download, a file shown), lifted into
+/// the GUI's note above the bar.
+fn take_log_note(gui: &mut Gui) {
+    if let Some(note) = gui.admin.log.take_note() {
+        gui.note = Some(note);
+    }
+}
+
+/// The window's copy chord (Cmd+C on a Mac, Ctrl+Shift+C or Ctrl+Insert
+/// elsewhere) is the log's `y` while the log on screen has the keys or a
+/// highlight stands, and nothing laid over the screen holds them: no GUI
+/// modal, no level menu, no room's modal. True when it copied.
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
+pub(super) fn copy_chord(gui: &mut Gui) -> bool {
+    if gui.screen != Screen::Admin || gui.admin.log_at.is_none() || gui.modal_open() || gui.admin.log.menu.is_some() {
+        return false;
+    }
+    let admin = &gui.admin;
+    if room_up(admin) && admin.room.as_ref().is_some_and(|room| room.modal_up()) {
+        return false;
+    }
+    if admin.focus != Focus::Log && admin.log.model.highlight.is_none() {
+        return false;
+    }
+    gui.admin.log.copy();
+    take_log_note(gui);
     true
 }
 
@@ -889,16 +940,18 @@ pub(super) fn wheel(gui: &mut Gui, at: Position, delta: i32) {
     }
 }
 
-/// The screen's duties after the draw: the log's answers and its next
-/// poll, the room's worker, timers, held control and tooltip dwell (the
-/// room is pumped while the Log room hides it). Returns whether the
-/// pointer rests on one of the shown room's clickables, for the hand.
+/// The screen's duties after the draw: the log's answers, its next poll
+/// and the note a download or a shown file left, the room's worker,
+/// timers, held control and tooltip dwell (the room is pumped while the
+/// Log room hides it). Returns whether the pointer rests on one of the
+/// shown room's clickables, for the hand.
 pub(super) fn frame(gui: &mut Gui) -> bool {
     if gui.screen != Screen::Admin {
         return false;
     }
+    gui.admin.log.pump(Instant::now());
+    take_log_note(gui);
     let admin = &mut gui.admin;
-    admin.log.pump(Instant::now());
     let drawn = !admin.room_at.is_empty() && matches!(admin.showing, Hall::Room(_));
     admin.room.as_mut().is_some_and(|room| room.after_frame()) && drawn
 }
@@ -1105,31 +1158,13 @@ mod tests {
         press_with(gui, code, KeyModifiers::NONE)
     }
 
-    /// A mouse event the way the GUI's loop routes it: the Stats page and
-    /// the Admin room first, then the GUI's own surface.
+    /// A mouse event through the GUI's own loop, so the routing a test
+    /// drives can never drift from the one the player runs: the grip, the
+    /// Stats page and the Admin room first, then the GUI's own surface.
     fn mouse(gui: &mut Gui, kind: MouseEventKind, x: u16, y: u16) {
-        let at = Position { x, y };
         let event = MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
-        if super::super::stats::pointer(gui, event) || pointer(gui, event) {
-            if matches!(kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
-                gui.ui.motion(at);
-            }
-            return;
-        }
-        match kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                if gui.ui.begin_press(at)
-                    && let Some(act) = gui.ui.hit(at)
-                {
-                    gui.act(act);
-                }
-            }
-            MouseEventKind::Moved | MouseEventKind::Drag(_) => gui.ui.motion(at),
-            MouseEventKind::Up(_) => gui.ui.release(),
-            MouseEventKind::ScrollUp => gui.wheel(at, -1),
-            MouseEventKind::ScrollDown => gui.wheel(at, 1),
-            _ => {}
-        }
+        let mut ctx = super::super::tests::quiet_ctx(gui);
+        super::super::input(gui, &mut ctx, ratatui::crossterm::event::Event::Mouse(event));
     }
 
     fn down(gui: &mut Gui, x: u16, y: u16) {
@@ -2251,5 +2286,292 @@ mod tests {
         render_at(&mut lone, 100, 30);
         assert!(lone.admin.room.is_none());
         assert_eq!(lone.ui.caret_at(), None);
+    }
+
+    // ── Copying and saving the log ──────────────────────────────────────────
+
+    /// The first row of the log's lines this frame, read off the buffer.
+    fn first_line_row(buf: &Buffer, log: Rect) -> u16 {
+        (log.y..log.bottom()).find(|&y| from(buf, log.x, y).starts_with("09:")).expect("a line on screen")
+    }
+
+    /// Whether row `y` of the log wears the selection colours.
+    fn lit(buf: &Buffer, log: Rect, y: u16) -> bool {
+        let cell = &buf[(log.x + 20, y)];
+        cell.bg == th().accent && cell.fg == th().on_accent
+    }
+
+    #[test]
+    fn a_drag_over_the_logs_lines_highlights_them_in_every_placement() {
+        let _en = english();
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 60));
+        for (w, h, log_room) in [(176, 46, false), (136, 52, false), (100, 30, true)] {
+            gui.admin.log.model.clear_highlight();
+            gui.admin.focus = Focus::Hall;
+            if log_room {
+                render_at(&mut gui, w, h);
+                press(&mut gui, KeyCode::Char('L'));
+                assert_eq!(gui.admin.showing, Hall::Log);
+                gui.admin.focus = Focus::Hall;
+            }
+            let buf = render_at(&mut gui, w, h);
+            let log = gui.admin.log_at.expect("the log is on screen");
+            let top = first_line_row(&buf, log);
+            down(&mut gui, log.x + 3, top + 1);
+            assert!(gui.ui.gripping(), "{w}×{h}: the press took the lines");
+            mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), log.x + 9, top + 2);
+            mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), log.x + 9, top + 3);
+            mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), log.x + 9, top + 3);
+            assert!(!gui.ui.gripping());
+            assert_eq!(gui.admin.focus, Focus::Log, "{w}×{h}: the log has the keys");
+            assert_eq!(gui.admin.log.model.highlighted().len(), 3, "{w}×{h}");
+            let buf = render_at(&mut gui, w, h);
+            for y in top + 1..=top + 3 {
+                assert!(lit(&buf, log, y), "{w}×{h}: row {y}: {}", row(&buf, y));
+            }
+            for y in [top, top + 4] {
+                assert!(!lit(&buf, log, y), "{w}×{h}: row {y} beside the run");
+            }
+        }
+    }
+
+    #[test]
+    fn a_drag_from_the_log_lights_nothing_else_and_a_release_over_the_room_ends_it() {
+        let _en = english();
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, 5));
+        let buf = render_at(&mut gui, 176, 46);
+        let log = gui.admin.log_at.unwrap();
+        let top = first_line_row(&buf, log);
+        let press = Position::new(log.x + 3, top + 1);
+        down(&mut gui, press.x, press.y);
+        assert!(gui.ui.gripping());
+
+        // Across the hallway's Users row: nothing there lights.
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 5, 4);
+        assert_eq!(gui.ui.pointer, Some(press), "the hand is held at the press");
+        let buf = render_at(&mut gui, 176, 46);
+        assert_ne!(buf[(3, 4)].fg, th().bright, "the Users row stays as it was");
+
+        // Over the room, and let go there: the room is told nothing, and
+        // the grip ends.
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 30, 20);
+        mouse(&mut gui, MouseEventKind::Moved, 31, 20);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 31, 20);
+        assert!(probe.0.borrow().mice.is_empty(), "{:?}", probe.0.borrow().mice);
+        assert!(!gui.ui.gripping(), "the release over the room ended the grip");
+        assert_eq!(gui.admin.log.model.highlight, Some((2, 5)), "clamped to the last line drawn");
+        assert_eq!(gui.admin.focus, Focus::Log, "the release handed the room nothing");
+
+        // Free again, the room has the pointer inside it.
+        mouse(&mut gui, MouseEventKind::Moved, 32, 20);
+        assert_eq!(probe.0.borrow().mice, [(MouseEventKind::Moved, 32, 20)]);
+    }
+
+    #[test]
+    fn a_plain_click_on_the_lines_clears_the_highlight_and_gives_the_log_the_keys() {
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 20));
+        let buf = render_at(&mut gui, 176, 46);
+        let log = gui.admin.log_at.unwrap();
+        let top = first_line_row(&buf, log);
+        gui.admin.log.model.highlight = Some((5, 8));
+        assert_eq!(gui.admin.focus, Focus::Hall);
+
+        // A click elsewhere in the log (its header) keeps it.
+        down(&mut gui, log.x + 40, log.y);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), log.x + 40, log.y);
+        assert_eq!(gui.admin.log.model.highlight, Some((5, 8)));
+        gui.admin.focus = Focus::Hall;
+
+        down(&mut gui, log.x + 3, top + 2);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), log.x + 3, top + 2);
+        assert_eq!(gui.admin.log.model.highlight, None);
+        assert_eq!(gui.admin.focus, Focus::Log);
+        assert!(!gui.ui.gripping());
+    }
+
+    #[test]
+    fn a_room_modal_keeps_a_press_on_the_log_the_rooms() {
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, 20));
+        let buf = render_at(&mut gui, 176, 46);
+        let log = gui.admin.log_at.unwrap();
+        let top = first_line_row(&buf, log);
+        probe.0.borrow_mut().modal = true;
+        render_at(&mut gui, 176, 46);
+        down(&mut gui, log.x + 3, top + 1);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), log.x + 3, top + 4);
+        assert_eq!(probe.0.borrow().mice.first(), Some(&(MouseEventKind::Down(MouseButton::Left), log.x + 3, top + 1)));
+        assert!(!gui.ui.gripping(), "nothing grips under the room's modal");
+        assert_eq!(gui.admin.log.model.highlight, None);
+        assert_eq!(gui.admin.focus, Focus::Room);
+    }
+
+    #[test]
+    fn hiding_the_log_mid_drag_lets_go_of_the_hold() {
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 60));
+        let buf = render_at(&mut gui, 176, 46);
+        let log = gui.admin.log_at.unwrap();
+        let top = first_line_row(&buf, log);
+        down(&mut gui, log.x + 3, top + 1);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), log.x + 3, top + 3);
+        let held = gui.admin.log.model.highlight;
+        assert!(held.is_some());
+
+        press(&mut gui, KeyCode::Char('L'));
+        render_at(&mut gui, 176, 46);
+        assert_eq!(gui.admin.log_at, None, "L hid it mid-drag");
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), log.x + 3, top + 9);
+        assert_eq!(gui.admin.log.model.highlight, held, "a later drag moves nothing");
+        assert!(gui.ui.gripping(), "the hand is still held");
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), log.x + 3, top + 9);
+        assert!(!gui.ui.gripping(), "until the release");
+        assert_eq!(gui.admin.log.model.highlight, held, "L keeps the highlight");
+        assert_eq!(gui.admin.focus, Focus::Room, "L handed the log's keys to the room, and the release took nothing back");
+    }
+
+    #[test]
+    fn y_in_the_log_copies_and_the_note_says_how() {
+        let _en = english();
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 3));
+        render_at(&mut gui, 176, 46);
+        gui.admin.focus = Focus::Log;
+        crate::kit::clipboard::catch(crate::kit::clipboard::Copied::Clipboard);
+        assert!(!press(&mut gui, KeyCode::Char('y')));
+        assert_eq!(crate::kit::clipboard::caught(), ["09:00:01  line 1\n09:00:02  line 2\n09:00:03  line 3"]);
+        assert_eq!(gui.note, Some((t!("gui.admin.log.copied_all").to_string(), false)));
+        let buf = render_at(&mut gui, 176, 46);
+        assert!((0..46).any(|y| row(&buf, y).contains(&*t!("gui.admin.log.copied_all"))), "the note is on screen");
+
+        crate::kit::clipboard::catch(crate::kit::clipboard::Copied::Failed);
+        gui.admin.log.model.highlight = Some((2, 2));
+        press(&mut gui, KeyCode::Char('y'));
+        assert_eq!(crate::kit::clipboard::caught(), ["09:00:02  line 2"]);
+        assert_eq!(gui.note, Some((t!("gui.admin.log.copy_failed").to_string(), true)));
+
+        // The header's control, by the pointer.
+        crate::kit::clipboard::catch(crate::kit::clipboard::Copied::Terminal);
+        let buf = render_at(&mut gui, 176, 46);
+        let log = gui.admin.log_at.unwrap();
+        let copy = col(&from(&buf, log.x, log.y), "copy").expect("the copy control") + log.x;
+        down(&mut gui, copy, log.y);
+        assert_eq!(gui.note, Some((t!("gui.admin.log.copied_terminal").to_string(), false)));
+        assert_eq!(crate::kit::clipboard::caught().len(), 1);
+        crate::kit::clipboard::catch(crate::kit::clipboard::Copied::Clipboard);
+    }
+
+    #[test]
+    fn d_in_the_log_says_downloading_then_the_failure() {
+        let _en = english();
+        let dir = std::env::temp_dir().join(format!("mstream-admin-log-d-{}", std::process::id()));
+        let mut gui = session_gui();
+        press(&mut gui, KeyCode::Char('M'));
+        let log = std::mem::replace(&mut gui.admin.log, LogUi::new(None));
+        gui.admin.log = log.utc().saving_into(dir.clone());
+        render_at(&mut gui, 176, 46);
+        gui.admin.focus = Focus::Log;
+        press(&mut gui, KeyCode::Char('d'));
+        assert_eq!(gui.note, Some((t!("gui.admin.log.fetching").to_string(), false)));
+        let buf = render_at(&mut gui, 176, 46);
+        let header = from(&buf, 120, 2);
+        let busy = col(&header, "downloading…").expect(&header) + 120;
+        assert_eq!(buf[(busy, 2)].fg, th().accent);
+
+        let failed = t!("gui.admin.log.download_failed").to_string();
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while !gui.note.as_ref().is_some_and(|(text, _)| text.starts_with(&failed)) && Instant::now() < deadline {
+            frame(&mut gui);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let (text, is_err) = gui.note.clone().expect("a note");
+        assert!(text.starts_with(&failed), "{text}");
+        assert!(is_err, "a failure");
+        let buf = render_at(&mut gui, 176, 46);
+        let y = (0..46).find(|&y| row(&buf, y).contains(&failed)).expect("the note on screen");
+        let x = col(&row(&buf, y), &failed).unwrap();
+        assert_eq!(buf[(x, y)].fg, th().gold, "in gold");
+        assert!(row(&buf, 2).contains("· download"), "the control is back: {}", row(&buf, 2));
+        assert!(!dir.exists(), "a failed download writes nothing");
+    }
+
+    #[test]
+    fn the_copy_chord_acts_only_with_a_highlight_or_the_logs_focus() {
+        let _en = english();
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, 3));
+        render_at(&mut gui, 176, 46);
+        let chord = |gui: &mut Gui| {
+            let acted = copy_chord(gui);
+            assert_eq!(crate::kit::clipboard::caught().len(), usize::from(acted), "a copy exactly when it acted");
+            acted
+        };
+
+        assert!(!chord(&mut gui), "the hallway's keys and no highlight");
+        gui.admin.focus = Focus::Log;
+        assert!(chord(&mut gui), "the log has the keys");
+        assert_eq!(gui.note, Some((t!("gui.admin.log.copied_all").to_string(), false)));
+        gui.admin.focus = Focus::Hall;
+        gui.admin.log.model.highlight = Some((1, 2));
+        assert!(chord(&mut gui), "a highlight stands");
+        assert_eq!(gui.note, Some((t!("gui.admin.log.copied_highlight").to_string(), false)));
+
+        // Something over the screen holds the keys.
+        super::super::servers::open_add(&mut gui);
+        assert!(!chord(&mut gui), "a GUI modal");
+        gui.servers.form = None;
+        gui.admin.log.act(LogAct::Menu);
+        assert!(!chord(&mut gui), "the level menu");
+        gui.admin.log.act(LogAct::MenuClose);
+        probe.0.borrow_mut().modal = true;
+        assert!(!chord(&mut gui), "the room's modal");
+        probe.0.borrow_mut().modal = false;
+        assert!(chord(&mut gui));
+
+        // The log not on screen, or another screen.
+        press(&mut gui, KeyCode::Char('L'));
+        render_at(&mut gui, 176, 46);
+        assert!(!chord(&mut gui), "L hid the log");
+        press(&mut gui, KeyCode::Char('L'));
+        render_at(&mut gui, 176, 46);
+        assert!(chord(&mut gui));
+        gui.act(Act::Screen(Screen::Library));
+        assert!(!chord(&mut gui), "another screen");
+    }
+
+    #[test]
+    fn the_log_label_is_the_sessions_server_not_the_tunnels_loopback() {
+        let mut gui = session_gui();
+        press(&mut gui, KeyCode::Char('M'));
+        assert_eq!(gui.admin.log.label(), "host.invalid", "a URL's host");
+
+        // A tunnel session is reached through a loopback bridge; its file
+        // is named after the tunnel.
+        let id = "mstream+iroh://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst";
+        let mut tunnel = gui_with_session("http://127.0.0.1:51234", id);
+        press(&mut tunnel, KeyCode::Char('M'));
+        assert!(tunnel.admin.log.running(), "the tab opened on the session");
+        assert_eq!(tunnel.admin.log.label(), "quickconnect-abcdefghijkl");
+
+        // A peer session's pages reach its parent.
+        let mut peer = gui_with_session("http://127.0.0.1:51234", id);
+        peer.app.session.peer = Some(("https://parent.example.com:8443".into(), 7));
+        assert_eq!(log_server(&peer.app), "https://parent.example.com:8443");
+        assert_eq!(super::super::log_file::file_label(&log_server(&peer.app)), "parent.example.com");
+    }
+
+    /// A session on `server`, known by `id`.
+    fn gui_with_session(server: &str, id: &str) -> Gui {
+        let mut gui = gui();
+        gui.app.connected = true;
+        gui.app.session.server = server.into();
+        gui.app.session.server_id = id.into();
+        gui
     }
 }

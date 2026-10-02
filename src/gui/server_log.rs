@@ -19,24 +19,39 @@
 //! becomes in its action type. The level menu is drawn in a second pass,
 //! [`draw_menu`], after everything else, because it hangs over the lines
 //! as a real overlay.
+//!
+//! The lines can leave the player two ways (clauses 29-33). A press-drag
+//! across them highlights a run of whole lines, anchored by sequence
+//! number so it stays on the same lines as new ones arrive, and `y` copies
+//! the highlight, or every line shown, through the kit's clipboard. `d`
+//! downloads the server's own log files on a one-shot thread of its own,
+//! never the poll's, so a zip that takes a minute never holds up the tail,
+//! and `o` shows the file it saved. Their answers come back as a note the
+//! screen lifts into the GUI's.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
+use super::log_file::{self, Fallback, SaveError, Saved};
+use super::opener::{self, HandOff};
 use super::{bright_bold, bullet_glyph, put, sel};
 use crate::admin::tz::Zone;
 use crate::admin::{gate_message, iso_unix, printable};
 use crate::api::types::LogTail;
 use crate::api::{ApiError, Client};
+use crate::kit::clipboard::{self, Copied};
+use crate::kit::os::{Os, process_var};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{Surface, dim, frame_at, width};
+use crate::kit::{Grip, Surface, dim, frame_at, width};
 
 /// How many lines the player keeps; older ones fall off the front.
 pub(crate) const RING: usize = 1000;
@@ -45,10 +60,16 @@ pub(crate) const POLL_EVERY: Duration = Duration::from_secs(2);
 /// The pause after a failed request, so a server that is down is not
 /// asked thirty times a minute.
 pub(crate) const POLL_FAILING: Duration = Duration::from_secs(10);
-/// How many characters of a message's first line are kept. The widest
-/// log the layouts draw is far narrower; the cap only bounds the memory
-/// a thousand 4000-character messages would take.
+/// How many characters of a message's first line the row keeps. The
+/// widest log the layouts draw is far narrower; the whole message, which
+/// a copy takes, is kept apart in [`Line::whole`].
 const KEEP_CHARS: usize = 400;
+/// The longest message kept whole, for a copy: what mStream's own logger
+/// cuts a message to, so nothing the server holds is lost.
+const MESSAGE_CHARS: usize = 4000;
+/// What a copy puts before a message's later lines, so a stack trace
+/// reads under its time stamp: the width of `HH:MM:SS` and its gap.
+const LATER_LINES: &str = "          ";
 
 /// A line's level, most severe first, so a line shows when its level is
 /// at or above the filter's (`line.level <= filter`).
@@ -93,7 +114,8 @@ impl Level {
 }
 
 /// One log line as the player keeps it: the message's first line made
-/// printable, and whether anything followed it (a stack trace).
+/// printable, whether anything followed it (a stack trace), and the whole
+/// message made printable for a copy.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Line {
     pub seq: u64,
@@ -102,6 +124,8 @@ pub(crate) struct Line {
     pub level: Level,
     pub text: String,
     pub more: bool,
+    /// Every line of the message (see [`whole_message`]).
+    pub whole: String,
 }
 
 impl Line {
@@ -111,8 +135,32 @@ impl Line {
         let mut parts = entry.message.split('\n').filter(|l| !printable(l, 1).is_empty());
         let text = parts.next().map(|l| printable(l, KEEP_CHARS)).unwrap_or_default();
         let more = parts.next().is_some();
-        Line { seq: entry.seq, at: iso_unix(&entry.t), level: Level::of(&entry.level), text, more }
+        let whole = whole_message(&entry.message);
+        Line { seq: entry.seq, at: iso_unix(&entry.t), level: Level::of(&entry.level), text, more, whole }
     }
+}
+
+/// A message as a copy carries it: every line, each made printable the
+/// way a row is (no character that acts on a terminal or reorders a
+/// reader, a tab as four spaces) and trimmed at its end only, so a stack
+/// trace keeps its indentation. Blank lines at either end go; the whole is
+/// cut at [`MESSAGE_CHARS`].
+fn whole_message(raw: &str) -> String {
+    let lines: Vec<String> = raw
+        .split('\n')
+        .map(|line| {
+            line.replace('\t', "    ")
+                .chars()
+                .filter(|c| !(c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')))
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    let Some(first) = lines.iter().position(|l| !l.is_empty()) else { return String::new() };
+    let last = lines.iter().rposition(|l| !l.is_empty()).unwrap_or(first);
+    let whole: String = lines[first..=last].join("\n").chars().take(MESSAGE_CHARS).collect();
+    whole.trim_end().to_string()
 }
 
 /// The lines held, where the next poll starts, and how the reader is
@@ -134,6 +182,11 @@ pub(crate) struct LogModel {
     pub error: Option<String>,
     /// The server refused the log (401, 403 or 405): polling stops.
     pub gated: bool,
+    /// The highlighted run: the sequence numbers of the line a drag began
+    /// on and the one it reached, in either order. Anchored by line rather
+    /// than by row, so arrivals and the ring's drops leave it where it was;
+    /// it goes when its last line leaves the ring.
+    pub highlight: Option<(u64, u64)>,
 }
 
 impl Default for LogModel {
@@ -154,6 +207,7 @@ impl LogModel {
             capacity: None,
             error: None,
             gated: false,
+            highlight: None,
         }
     }
 
@@ -162,12 +216,15 @@ impl LogModel {
     /// every new one counts as unseen. Otherwise only entries past the
     /// newest line held are appended, so an answer that repeats itself
     /// adds nothing. A paused view grows its offset by the lines that
-    /// arrived under it, so what the reader is looking at stays put.
+    /// arrived under it, so what the reader is looking at stays put. A
+    /// highlight goes with a restarted ring, and once the ring has dropped
+    /// every line of it; the view keeps following under one.
     pub(crate) fn take(&mut self, tail: LogTail) {
         if self.answered && tail.last_seq < self.cursor {
             self.lines.clear();
             self.seen = 0;
             self.scroll = 0;
+            self.highlight = None;
         }
         let newest = self.lines.back().map(|l| l.seq);
         let mut arrived = 0;
@@ -180,6 +237,11 @@ impl LogModel {
         }
         while self.lines.len() > RING {
             self.lines.pop_front();
+        }
+        if let Some((anchor, head)) = self.highlight
+            && self.lines.front().is_none_or(|front| anchor.max(head) < front.seq)
+        {
+            self.highlight = None;
         }
         if self.scroll > 0 {
             self.scroll += arrived;
@@ -227,10 +289,33 @@ impl LogModel {
     }
 
     /// A new filter, and the view follows: the old offset counted lines
-    /// of a different list.
+    /// of a different list, and the highlight lines the reader no longer
+    /// sees.
     pub(crate) fn set_level(&mut self, level: Level) {
         self.level = level;
+        self.highlight = None;
         self.follow();
+    }
+
+    /// Whether the line numbered `seq` is in the highlight.
+    fn lit(&self, seq: u64) -> bool {
+        self.highlight.is_some_and(|(a, h)| (a.min(h)..=a.max(h)).contains(&seq))
+    }
+
+    /// The shown lines in the highlight, oldest first.
+    pub(crate) fn highlighted(&self) -> Vec<&Line> {
+        self.lines.iter().filter(|l| l.level <= self.level && self.lit(l.seq)).collect()
+    }
+
+    /// What `y` copies: the highlight, or every line shown when nothing is
+    /// highlighted.
+    pub(crate) fn to_copy(&self) -> Vec<&Line> {
+        let lit = self.highlighted();
+        if lit.is_empty() { self.shown() } else { lit }
+    }
+
+    pub(crate) fn clear_highlight(&mut self) {
+        self.highlight = None;
     }
 
     /// Shown lines that arrived since the log was last on screen.
@@ -269,6 +354,40 @@ pub(crate) fn clock(at: Option<i64>, zone: Option<&Zone>) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
 }
 
+/// One line as a copy writes it: the clock, two spaces, the level for a
+/// warning or an error in winston's own word (what the server wrote, so
+/// it is never translated), and the whole message, its later lines set
+/// under the message's first by [`LATER_LINES`]. A blank later line stays
+/// blank rather than carry the indent as trailing spaces.
+pub(crate) fn copy_line(line: &Line, zone: Option<&Zone>) -> String {
+    let mut out = clock(line.at, zone);
+    out.push_str("  ");
+    match line.level {
+        Level::Error => out.push_str("error  "),
+        Level::Warn => out.push_str("warn  "),
+        Level::Info | Level::Debug => {}
+    }
+    let mut parts = line.whole.split('\n');
+    out.push_str(parts.next().unwrap_or_default());
+    for part in parts {
+        out.push('\n');
+        if !part.is_empty() {
+            out.push_str(LATER_LINES);
+            out.push_str(part);
+        }
+    }
+    if line.whole.is_empty() {
+        out.truncate(out.trim_end().len());
+    }
+    out
+}
+
+/// Lines as a copy carries them: one [`copy_line`] each, oldest first,
+/// joined by newlines with none after the last.
+pub(crate) fn as_text(lines: &[&Line], zone: Option<&Zone>) -> String {
+    lines.iter().map(|line| copy_line(line, zone)).collect::<Vec<_>>().join("\n")
+}
+
 /// What a click in the log means. The host wraps these in its own action.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum LogAct {
@@ -279,6 +398,13 @@ pub(crate) enum LogAct {
     Pick(Level),
     /// The paused word.
     Follow,
+    /// The lines' drag region: a press, a move of the held button, or its
+    /// release, wherever the pointer is.
+    Select(Grip, Position),
+    /// The header's copy control.
+    CopyLines,
+    /// The header's download control.
+    Download,
 }
 
 /// What became of a key the focused log was handed.
@@ -304,8 +430,27 @@ struct Worker {
     last: Option<Instant>,
 }
 
+/// A press on the lines, held: the line it began on, where the pointer
+/// is now and where it pressed, and whether it has moved off that cell,
+/// which is what tells a drag from a plain click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hold {
+    anchor: u64,
+    at: Position,
+    press: Position,
+    moved: bool,
+}
+
+/// What the log's one-shot threads send back: a download saved (or why
+/// not), and a saved file shown (or why not).
+enum Side {
+    Saved(Result<Saved, SaveError>),
+    Shown(PathBuf, Result<HandOff, String>),
+}
+
 /// The log as a screen holds it: the model, the level menu's cursor
-/// while it is open, the poll thread, and where the last frame put it.
+/// while it is open, the poll thread, where the last frame put it, and
+/// what the copy and the download need and say.
 pub(crate) struct LogUi {
     pub model: LogModel,
     pub menu: Option<usize>,
@@ -317,25 +462,68 @@ pub(crate) struct LogUi {
     drawn_in: Option<Rect>,
     /// How many line rows the last frame had, for the wheel's clamp.
     rows: usize,
+    /// The session's client, shared with the poll thread, for a download.
+    client: Option<Arc<Client>>,
+    /// The server's part of a saved file's name.
+    label: String,
+    /// A press on the lines, until its release or until the log leaves
+    /// the screen.
+    hold: Option<Hold>,
+    /// The line rows the last frame drew (the rows under the lines too)
+    /// and the sequence number on each drawn row, top first.
+    rows_at: Option<(Rect, Vec<u64>)>,
+    /// The one-shot threads' channel. It outlives a stop, so a download
+    /// still running when the tab is left lands on the next visit.
+    side: (Sender<Side>, Receiver<Side>),
+    downloading: bool,
+    /// The file the last download saved, for `o`.
+    saved: Option<PathBuf>,
+    /// What the last copy, download or show said, and whether it is a
+    /// failure, until the screen takes it.
+    note: Option<(String, bool)>,
+    /// Where a download saves instead of the Downloads folder: a test's
+    /// own temporary folder.
+    save_dir: Option<PathBuf>,
 }
 
 impl LogUi {
     pub(crate) fn new(zone: Option<Zone>) -> Self {
-        LogUi { model: LogModel::new(), menu: None, zone, worker: None, level_at: None, drawn_in: None, rows: 0 }
+        LogUi {
+            model: LogModel::new(),
+            menu: None,
+            zone,
+            worker: None,
+            level_at: None,
+            drawn_in: None,
+            rows: 0,
+            client: None,
+            // What a server with no name is called until one is set.
+            label: log_file::file_label(""),
+            hold: None,
+            rows_at: None,
+            side: channel(),
+            downloading: false,
+            saved: None,
+            note: None,
+            save_dir: None,
+        }
     }
 
     /// Start reading `client`'s log from the beginning of its ring, on a
     /// thread of its own: it takes a `since`, makes the one blocking call,
-    /// and sends the answer back, until the screen lets go of it.
+    /// and sends the answer back, until the screen lets go of it. The
+    /// client is kept too, for a download.
     pub(crate) fn start(&mut self, client: Client) {
         self.stop();
         self.model = LogModel::new();
         self.menu = None;
+        let client = Arc::new(client);
+        let polling = Arc::clone(&client);
         let (jobs, job_rx) = channel::<u64>();
         let (done_tx, done) = channel::<Result<LogTail, ApiError>>();
         let spawned = std::thread::Builder::new().name("server log".into()).spawn(move || {
             while let Ok(since) = job_rx.recv() {
-                if done_tx.send(client.admin_logs_recent(since)).is_err() {
+                if done_tx.send(polling.admin_logs_recent(since)).is_err() {
                     break;
                 }
             }
@@ -343,13 +531,24 @@ impl LogUi {
         if spawned.is_ok() {
             self.worker = Some(Worker { jobs, done, in_flight: false, last: None });
         }
+        self.client = Some(client);
     }
 
     /// Let go of the poll thread. It finishes the call it is in, finds
-    /// nobody to answer, and ends.
+    /// nobody to answer, and ends. A download in flight keeps its thread
+    /// and its way back.
     pub(crate) fn stop(&mut self) {
         self.worker = None;
         self.menu = None;
+        self.client = None;
+        self.hold = None;
+        self.rows_at = None;
+    }
+
+    /// Name the server a saved file is named after (see
+    /// [`log_file::file_label`]).
+    pub(crate) fn set_label(&mut self, server: &str) {
+        self.label = log_file::file_label(server);
     }
 
     /// Whether a poll thread is held: the tests' way to see the tab start
@@ -359,9 +558,12 @@ impl LogUi {
         self.worker.is_some()
     }
 
-    /// Take whatever answers have arrived, then send the next request
-    /// when one is due. Never blocks.
+    /// Take whatever answers have arrived, the one-shot threads' first,
+    /// then send the next request when one is due. Never blocks.
     pub(crate) fn pump(&mut self, now: Instant) {
+        while let Ok(answer) = self.side.1.try_recv() {
+            self.land(answer);
+        }
         let Some(worker) = self.worker.as_mut() else { return };
         let mut lost = false;
         loop {
@@ -393,11 +595,175 @@ impl LogUi {
         }
     }
 
+    /// A one-shot thread's answer, as the note it leaves. A download's
+    /// answer ends the download either way.
+    fn land(&mut self, answer: Side) {
+        let full = |path: &PathBuf| path.display().to_string();
+        let note = match answer {
+            Side::Saved(saved) => {
+                self.downloading = false;
+                let home = process_var("HOME").map(PathBuf::from);
+                let shown = |path: &PathBuf| log_file::shown_path(path, home.as_deref(), Os::HERE);
+                match saved {
+                    Ok(Saved::Zip(path)) => {
+                        let note = t!("gui.admin.log.saved", path = shown(&path)).to_string();
+                        self.saved = Some(path);
+                        (note, false)
+                    }
+                    Ok(Saved::Text { path, why }) => {
+                        let note = match why {
+                            Fallback::NoRoute => t!("gui.admin.log.saved_lines", path = shown(&path)),
+                            Fallback::NoFiles => t!("gui.admin.log.saved_no_files", path = shown(&path)),
+                        };
+                        self.saved = Some(path);
+                        (note.to_string(), false)
+                    }
+                    Err(SaveError::Api(e)) => (gate_message(&e, &t!("gui.admin.log.download_failed")), true),
+                    Err(SaveError::Cut) => (t!("gui.admin.log.zip_cut").to_string(), true),
+                    Err(SaveError::Nothing) => (t!("gui.admin.log.save_nothing").to_string(), true),
+                    Err(SaveError::NoFolder) => (t!("gui.admin.log.no_folder").to_string(), true),
+                    Err(SaveError::Io(err)) => (t!("gui.admin.log.save_failed", err = err).to_string(), true),
+                }
+            }
+            // The file manager came up: it says enough.
+            Side::Shown(_, Ok(HandOff::Launched)) => return,
+            Side::Shown(path, Ok(HandOff::Headless(_))) => {
+                (t!("gui.admin.log.file_at", path = full(&path)).to_string(), false)
+            }
+            Side::Shown(path, Ok(HandOff::Nothing) | Err(_)) => {
+                (t!("gui.admin.log.show_failed", path = full(&path)).to_string(), true)
+            }
+        };
+        self.note = Some(note);
+    }
+
+    /// `y`: the highlight, or every line shown, onto the clipboard by the
+    /// kit's route, and a note saying which and how.
+    pub(crate) fn copy(&mut self) {
+        let lit = !self.model.highlighted().is_empty();
+        let lines = self.model.to_copy();
+        if lines.is_empty() {
+            self.note = Some((t!("gui.admin.log.copy_nothing").to_string(), false));
+            return;
+        }
+        let text = as_text(&lines, self.zone.as_ref());
+        self.note = Some(match clipboard::copy(&text) {
+            Copied::Clipboard if lit => (t!("gui.admin.log.copied_highlight").to_string(), false),
+            Copied::Clipboard => (t!("gui.admin.log.copied_all").to_string(), false),
+            Copied::Terminal => (t!("gui.admin.log.copied_terminal").to_string(), false),
+            Copied::Failed => (t!("gui.admin.log.copy_failed").to_string(), true),
+        });
+    }
+
+    /// `d`: the server's log files, fetched and saved on a thread of their
+    /// own. What it saves instead when the server has none (the lines
+    /// shown) is taken now, as the reader sees them. One at a time, and
+    /// only with a session to ask.
+    pub(crate) fn download(&mut self) {
+        if self.downloading {
+            return;
+        }
+        let Some(client) = self.client.clone() else { return };
+        let lines = as_text(&self.model.shown(), self.zone.as_ref());
+        let stem = log_file::file_stem(&self.label, crate::admin::unix_now(), self.zone.as_ref());
+        let dir = self.save_dir.clone();
+        let side = self.side.0.clone();
+        let spawned = std::thread::Builder::new().name("server log download".into()).spawn(move || {
+            let saved = save(client.admin_logs_download(), dir, &stem, &lines);
+            let _ = side.send(Side::Saved(saved));
+        });
+        self.note = Some(match spawned {
+            Ok(_) => {
+                self.downloading = true;
+                (t!("gui.admin.log.fetching").to_string(), false)
+            }
+            Err(e) => (t!("gui.admin.log.save_failed", err = e.to_string()).to_string(), true),
+        });
+    }
+
+    /// `o`: the file the last download saved, shown in the file manager on
+    /// a thread, since the opener is watched for a moment.
+    pub(crate) fn show_saved(&mut self) {
+        let Some(path) = self.saved.clone() else {
+            self.note = Some((t!("gui.admin.log.nothing_saved").to_string(), false));
+            return;
+        };
+        let side = self.side.0.clone();
+        let shown = path.clone();
+        let spawned = std::thread::Builder::new().name("server log show".into()).spawn(move || {
+            let answer = opener::reveal(&shown);
+            let _ = side.send(Side::Shown(shown, answer));
+        });
+        if spawned.is_err() {
+            self.note = Some((t!("gui.admin.log.show_failed", path = path.display().to_string()).to_string(), true));
+        }
+    }
+
+    /// Whether a download is in flight: the header's busy word.
+    pub(crate) fn downloading(&self) -> bool {
+        self.downloading
+    }
+
+    /// The note the last copy, download or show left, once.
+    pub(crate) fn take_note(&mut self) -> Option<(String, bool)> {
+        self.note.take()
+    }
+
+    /// The log is not on screen: a press held on it lets go, and the rows
+    /// it was drawn on no longer stand anywhere. The highlight stays.
+    pub(crate) fn let_go(&mut self) {
+        self.hold = None;
+        self.rows_at = None;
+    }
+
+    /// The line on screen row `y` of the last frame, clamped to the first
+    /// and the last line drawn, so a drag past either end stops there.
+    fn seq_at(&self, y: u16) -> Option<u64> {
+        let (rect, seqs) = self.rows_at.as_ref()?;
+        let row = (y.saturating_sub(rect.y) as usize).min(seqs.len().checked_sub(1)?);
+        seqs.get(row).copied()
+    }
+
+    /// The press-drag on the lines (clause 29). A press anchors on its line
+    /// and clears the highlight; once the pointer has moved off the pressed
+    /// cell, the highlight runs from the anchor to the line under it, the
+    /// release's included (a terminal that reports no moves between still
+    /// highlights the run). A release that never moved was a plain click,
+    /// which leaves nothing highlighted. A move with no press held, or none
+    /// of the log on screen, is nobody's.
+    fn select(&mut self, grip: Grip, at: Position) {
+        match grip {
+            Grip::Press => {
+                self.model.clear_highlight();
+                self.hold = self.seq_at(at.y).map(|anchor| Hold { anchor, at, press: at, moved: false });
+            }
+            Grip::Drag => {
+                let (Some(head), Some(hold)) = (self.seq_at(at.y), self.hold.as_mut()) else { return };
+                hold.moved |= at != hold.press;
+                hold.at = at;
+                if hold.moved {
+                    self.model.highlight = Some((hold.anchor, head));
+                }
+            }
+            Grip::Release => {
+                let Some(mut hold) = self.hold.take() else { return };
+                hold.moved |= at != hold.press;
+                match self.seq_at(at.y) {
+                    Some(head) if hold.moved => self.model.highlight = Some((hold.anchor, head)),
+                    _ if !hold.moved => self.model.clear_highlight(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// A key while the log has the focus; `rows` is how many lines it
-    /// shows. Every key is the log's except the two that leave it.
+    /// shows. Every key is the log's except the two that leave it; Esc
+    /// clears a highlight before it leaves.
     pub(crate) fn key(&mut self, key: KeyEvent, rows: usize) -> LogKey {
         let page = rows.max(1) as i32;
         match key.code {
+            KeyCode::Esc if self.model.highlight.is_some() => self.model.clear_highlight(),
             KeyCode::Esc | KeyCode::Char('q') => return LogKey::Leave,
             KeyCode::Up => self.model.scroll_by(1),
             KeyCode::Down => self.model.scroll_by(-1),
@@ -406,6 +772,9 @@ impl LogUi {
             KeyCode::Home => self.model.scroll = usize::MAX,
             KeyCode::End | KeyCode::Char('f') => self.model.follow(),
             KeyCode::Enter => self.menu = Some(self.model.level.index()),
+            KeyCode::Char('y') => self.copy(),
+            KeyCode::Char('d') => self.download(),
+            KeyCode::Char('o') => self.show_saved(),
             _ => {}
         }
         self.model.clamp(rows);
@@ -444,6 +813,9 @@ impl LogUi {
                 self.menu = None;
             }
             LogAct::Follow => self.model.follow(),
+            LogAct::Select(grip, at) => self.select(grip, at),
+            LogAct::CopyLines => self.copy(),
+            LogAct::Download => self.download(),
         }
     }
 
@@ -452,6 +824,36 @@ impl LogUi {
     pub(crate) fn utc(mut self) -> Self {
         self.zone = None;
         self
+    }
+
+    /// The same log saving its downloads into `dir`, a test's own folder,
+    /// never the Downloads folder.
+    #[cfg(test)]
+    pub(crate) fn saving_into(mut self, dir: PathBuf) -> Self {
+        self.save_dir = Some(dir);
+        self
+    }
+
+    /// The server's part of a saved file's name, as a test reads it.
+    #[cfg(test)]
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+/// The download's answer, saved where it belongs (see
+/// [`log_file::save_download`]). A refusal, or a server that cannot be
+/// reached, leaves the disk alone: the folder is looked for, and the
+/// config folder made as the last resort, only once there is something to
+/// put in it.
+fn save(answer: Result<Vec<u8>, ApiError>, dir: Option<PathBuf>, stem: &str, lines: &str) -> Result<Saved, SaveError> {
+    let answer = match answer {
+        Err(e) if !matches!(e, ApiError::NotFound(_)) => return Err(SaveError::Api(e)),
+        answer => answer,
+    };
+    match dir.or_else(log_file::downloads_here) {
+        Some(dir) => log_file::save_download(answer, &dir, stem, lines),
+        None => Err(SaveError::NoFolder),
     }
 }
 
@@ -470,8 +872,10 @@ fn span(frame: &mut Frame, x: u16, y: u16, right: u16, text: &str, style: Style)
 /// The log in `area`: the header on its first row, then the lines, the
 /// newest at the bottom — or the one sentence when there are none to
 /// show. A failure while lines are held takes the last row, so a log
-/// that stopped never passes for one that is following.
-pub(crate) fn draw<A: Clone>(
+/// that stopped never passes for one that is following. The line rows,
+/// and the empty rows under them, are a drag region for the highlight;
+/// highlighted lines wear the selection colours across the log's width.
+pub(crate) fn draw<A: Clone + 'static>(
     frame: &mut Frame,
     ui: &mut Surface<A>,
     log: &mut LogUi,
@@ -482,6 +886,7 @@ pub(crate) fn draw<A: Clone>(
     log.drawn_in = Some(area);
     log.level_at = None;
     log.rows = 0;
+    log.rows_at = None;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -523,6 +928,38 @@ pub(crate) fn draw<A: Clone>(
         ui.click(rect, wrap(LogAct::Menu));
         log.level_at = Some(rect);
     }
+    // The copy and the download, for the pointer: the GUI's footer of
+    // keys is off by default. Each is drawn whole or not at all, and one
+    // that does not fit ends the row; the hint gives way before them.
+    let controls = [
+        (t!("gui.admin.log.copy"), Some((LogAct::CopyLines, t!("gui.admin.log.tip_copy")))),
+        if log.downloading() {
+            (t!("gui.admin.log.downloading"), None)
+        } else {
+            (t!("gui.admin.log.download"), Some((LogAct::Download, t!("gui.admin.log.tip_download"))))
+        },
+    ];
+    for (word, act) in controls {
+        let w = width(&word) as u16;
+        if x + width(" · ") as u16 + w > right {
+            break;
+        }
+        x += span(frame, x, y, right, " · ", dim());
+        let rect = Rect { x, y, width: w, height: 1 };
+        match act {
+            Some((act, tip)) => {
+                let style = if ui.hovers(rect) { bright_bold() } else { dim() };
+                span(frame, x, y, right, &word, style);
+                ui.click(rect, wrap(act));
+                ui.tip_keyed(rect, tip);
+            }
+            // The kit's busy word: the accent, and nothing to press.
+            None => {
+                span(frame, x, y, right, &word, Style::default().fg(th().accent));
+            }
+        }
+        x += w;
+    }
     if let Some(hint) = &look.hint {
         let w = width(hint) as u16;
         if x + 2 + w <= right {
@@ -549,23 +986,46 @@ pub(crate) fn draw<A: Clone>(
         span(frame, area.x, top, right, &words, dim());
     }
 
-    // The lines, the newest at the bottom of the window onto them.
-    let shown = log.model.shown();
+    // The rows the lines stand on this frame, and the drag region over
+    // them and the empty rows under them (never the header, nor the
+    // failure's row). A drag in progress re-reads the line under the hand
+    // against these rows, so the wheel, or lines arriving, under a still
+    // pointer move the highlight with the lines.
     let end = held - log.model.scroll;
     let first = end.saturating_sub(rows);
+    let seqs: Vec<u64> = log.model.shown()[first..end].iter().map(|l| l.seq).collect();
+    if !seqs.is_empty() {
+        let lines = Rect { x: area.x, y: top, width: area.width, height: rows as u16 };
+        log.rows_at = Some((lines, seqs));
+        if let Some(hold) = log.hold.filter(|h| h.moved)
+            && let Some(head) = log.seq_at(hold.at.y)
+        {
+            log.model.highlight = Some((hold.anchor, head));
+        }
+        ui.drag_region(lines, move |grip, at| wrap(LogAct::Select(grip, at)));
+    }
+
+    // The lines, the newest at the bottom of the window onto them; a
+    // highlighted one in the selection colours from edge to edge.
+    let shown = log.model.shown();
     let more = if legacy_conhost() { " »" } else { " …" };
     for (row, line) in shown[first..end].iter().enumerate() {
         let ly = top + row as u16;
-        let mut lx = area.x;
-        lx += span(frame, lx, ly, right, &clock(line.at, log.zone.as_ref()), dim());
-        lx += span(frame, lx, ly, right, "  ", Style::default());
+        let lit = log.model.lit(line.seq);
+        if lit {
+            put(frame, area.x, ly, &" ".repeat(area.width as usize), sel());
+        }
         let color = match line.level {
             Level::Error => th().danger,
             Level::Warn => th().gold,
             Level::Info | Level::Debug => th().text,
         };
+        let (time, words) = if lit { (sel(), sel()) } else { (dim(), Style::default().fg(color)) };
+        let mut lx = area.x;
+        lx += span(frame, lx, ly, right, &clock(line.at, log.zone.as_ref()), time);
+        lx += span(frame, lx, ly, right, "  ", if lit { sel() } else { Style::default() });
         let text = if line.more { format!("{}{more}", line.text) } else { line.text.clone() };
-        span(frame, lx, ly, right, &text, Style::default().fg(color));
+        span(frame, lx, ly, right, &text, words);
     }
 }
 
@@ -1180,5 +1640,560 @@ mod tests {
         let mut ui = Surface::new();
         let buf = render(&mut log, &mut ui, (100, 4), Rect::new(0, 0, 100, 4), &plain());
         assert_eq!(row(&buf, 1).trim_end(), t!("admin.gate_unauthorized"));
+    }
+
+    // ── Copy, download and the highlight ────────────────────────────────────
+
+    /// The locale pinned to English while a test reads the log's words.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        crate::kit::theme::pin_modern_terminal();
+        guard
+    }
+
+    fn seqs(lines: &[&Line]) -> Vec<u64> {
+        lines.iter().map(|l| l.seq).collect()
+    }
+
+    /// A folder of the test's own under the system's temporary folder,
+    /// gone when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!("mstream-log-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn files(&self) -> Vec<PathBuf> {
+            let mut files: Vec<PathBuf> = std::fs::read_dir(&self.0).unwrap().map(|e| e.unwrap().path()).collect();
+            files.sort();
+            files
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A server answering the log's two routes: a tail that adds nothing
+    /// to the poll, and `status` with `body` to the download. Each request
+    /// line comes back on the receiver.
+    fn canned(status: u16, body: Vec<u8>) -> (String, Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen) = channel::<String>();
+        std::thread::spawn(move || {
+            for sock in listener.incoming() {
+                let Ok(mut sock) = sock else { continue };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 512];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&byte[..n]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&head).lines().next().unwrap_or_default().to_string();
+                let (code, kind, bytes) = if line.contains("/logs/download") {
+                    let kind = if body.starts_with(b"PK") { "application/zip" } else { "application/json" };
+                    (status, kind, body.clone())
+                } else {
+                    (200, "application/json", br#"{"entries":[],"lastSeq":999999,"capacity":1000}"#.to_vec())
+                };
+                let _ = seen_tx.send(line);
+                let reply = format!(
+                    "HTTP/1.1 {code} Canned\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                let _ = sock.write_all(reply.as_bytes()).and_then(|()| sock.write_all(&bytes));
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    /// A zip by the signatures the player checks: a local file header at
+    /// the start, the end-of-central-directory record at the very end.
+    fn zip_bytes() -> Vec<u8> {
+        let mut bytes = b"PK\x03\x04".to_vec();
+        bytes.extend_from_slice(b"\x14\x00\x00\x00\x00\x00 a log file's bytes \xff\xfe");
+        bytes.extend_from_slice(&empty_zip());
+        bytes
+    }
+
+    /// The zip of no files: the end record alone.
+    fn empty_zip() -> Vec<u8> {
+        let mut bytes = b"PK\x05\x06".to_vec();
+        bytes.extend_from_slice(&[0; 18]);
+        bytes
+    }
+
+    /// Pump until a note other than the fetching one comes up.
+    fn landed(log: &mut LogUi) -> (String, bool) {
+        let fetching = t!("gui.admin.log.fetching").to_string();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            log.pump(Instant::now());
+            if let Some(note) = log.take_note().filter(|(text, _)| *text != fetching) {
+                return note;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no note within ten seconds");
+    }
+
+    /// A log reading `server`, saving into `dir`, on UTC.
+    fn downloading_log(server: &str, dir: &Scratch) -> LogUi {
+        let mut log = LogUi::new(None).utc().saving_into(dir.0.clone());
+        log.start(Client::new(server).expect("client"));
+        log.set_label(server);
+        log
+    }
+
+    #[test]
+    fn whole_messages_are_printable_kept_whole_and_capped() {
+        let raw = "\n  \nError: ENOENT \u{1b}[31mred\u{1b}[0m\r\n\tat open (fs.js:1:1)\n    at \u{202E}main\u{2066}  \n\n";
+        let line = Line::from_entry(&entry(1, "error", raw));
+        assert_eq!(line.whole, "Error: ENOENT [31mred[0m\n    at open (fs.js:1:1)\n    at main");
+        assert!(line.whole.chars().all(|c| c == '\n' || !c.is_control()), "{:?}", line.whole);
+        assert_eq!(line.text, "Error: ENOENT [31mred[0m", "the row's text is as it was");
+        assert!(line.more);
+
+        let long = Line::from_entry(&entry(2, "info", &"x".repeat(5000)));
+        assert_eq!(long.whole.chars().count(), MESSAGE_CHARS);
+        assert_eq!(long.text.chars().count(), KEEP_CHARS, "the row keeps its own cap");
+        assert!(!long.more);
+
+        assert_eq!(Line::from_entry(&entry(3, "info", "\n \n")).whole, "", "nothing on any line");
+        assert_eq!(Line::from_entry(&entry(4, "info", "a\n\nb")).whole, "a\n\nb", "a blank line between stays");
+    }
+
+    #[test]
+    fn a_highlight_is_anchored_by_seq_and_survives_the_ring_dropping_old_lines() {
+        let mut m = LogModel::new();
+        m.take(infos(1, 1000));
+        m.highlight = Some((510, 500));
+        m.take(infos(1001, 300));
+        assert_eq!(m.shown()[0].seq, 301, "the ring dropped the oldest three hundred");
+        assert_eq!(seqs(&m.highlighted()), (500..=510).collect::<Vec<_>>());
+        m.take(infos(1301, 209));
+        assert_eq!(seqs(&m.highlighted()), [510], "its last line still held");
+        m.take(infos(1510, 1));
+        assert_eq!(m.highlight, None, "gone with its last line");
+    }
+
+    #[test]
+    fn a_highlight_clears_on_a_new_level_a_restart_and_a_new_server() {
+        let mut m = LogModel::new();
+        m.take(infos(1, 10));
+        m.highlight = Some((3, 5));
+        m.set_level(Level::Warn);
+        assert_eq!(m.highlight, None, "a new level");
+
+        m.set_level(Level::Info);
+        m.highlight = Some((3, 5));
+        m.take(infos(11, 2));
+        assert_eq!(m.highlight, Some((3, 5)), "arrivals keep it");
+        m.take(infos(1, 2));
+        assert_eq!(m.highlight, None, "a restarted ring");
+
+        let mut log = LogUi::new(None);
+        log.model.take(infos(1, 10));
+        log.model.highlight = Some((3, 5));
+        log.start(Client::new("http://127.0.0.1:9").unwrap());
+        assert_eq!(log.model.highlight, None, "a new server");
+        log.stop();
+    }
+
+    #[test]
+    fn following_keeps_going_under_a_highlight() {
+        let mut log = LogUi::new(None).utc();
+        log.model.take(infos(1, 10));
+        log.model.highlight = Some((3, 5));
+        log.model.take(infos(11, 5));
+        assert!(log.model.following(), "new lines still pull the view along");
+        assert_eq!(log.model.scroll, 0);
+        assert_eq!(seqs(&log.model.highlighted()), [3, 4, 5]);
+    }
+
+    #[test]
+    fn esc_clears_a_highlight_before_it_leaves_the_log() {
+        let mut log = LogUi::new(None);
+        log.model.take(infos(1, 10));
+        log.model.highlight = Some((3, 5));
+        assert_eq!(log.key(key(KeyCode::Esc), 5), LogKey::Taken);
+        assert_eq!(log.model.highlight, None);
+        assert_eq!(log.key(key(KeyCode::Esc), 5), LogKey::Leave);
+
+        log.model.highlight = Some((3, 5));
+        assert_eq!(log.key(key(KeyCode::Char('q')), 5), LogKey::Leave);
+        assert_eq!(log.model.highlight, Some((3, 5)), "q leaves and keeps it");
+    }
+
+    #[test]
+    fn a_press_drag_and_release_highlight_and_a_plain_click_clears() {
+        // Thirty lines in eight rows: the header, then 24..=30 on rows 1-7.
+        let mut log = LogUi::new(None).utc();
+        log.model.take(infos(1, 30));
+        let mut ui = Surface::new();
+        let size = (60, 8);
+        let area = Rect::new(0, 0, 60, 8);
+        render(&mut log, &mut ui, size, area, &plain());
+        let at = |x, y| Position::new(x, y);
+        let select = |log: &mut LogUi, grip, x, y| log.act(LogAct::Select(grip, at(x, y)));
+
+        // Down and up on one row, from row 2 to row 4.
+        select(&mut log, Grip::Press, 5, 2);
+        select(&mut log, Grip::Drag, 5, 3);
+        select(&mut log, Grip::Drag, 7, 4);
+        select(&mut log, Grip::Release, 7, 4);
+        assert_eq!(log.model.highlight, Some((25, 27)));
+
+        // A plain click on the lines clears it, and lights nothing itself.
+        select(&mut log, Grip::Press, 5, 6);
+        select(&mut log, Grip::Drag, 5, 6);
+        assert_eq!(log.model.highlight, None);
+        select(&mut log, Grip::Release, 5, 6);
+        assert_eq!(log.model.highlight, None);
+
+        // A sideways drag on one row highlights that row.
+        select(&mut log, Grip::Press, 5, 6);
+        select(&mut log, Grip::Drag, 30, 6);
+        select(&mut log, Grip::Release, 30, 6);
+        assert_eq!(log.model.highlight, Some((29, 29)));
+
+        // Past the first and the last drawn line, the drag stops at them.
+        select(&mut log, Grip::Press, 5, 3);
+        select(&mut log, Grip::Drag, 5, 0);
+        assert_eq!(log.model.highlight, Some((26, 24)), "the header's row reads as the first line");
+        select(&mut log, Grip::Drag, 5, 40);
+        assert_eq!(log.model.highlight, Some((26, 30)), "below the rows, the last");
+        select(&mut log, Grip::Release, 90, 40);
+        assert_eq!(log.model.highlight, Some((26, 30)), "released anywhere");
+
+        // A press and a release on different rows with no move between.
+        select(&mut log, Grip::Press, 5, 1);
+        select(&mut log, Grip::Release, 5, 3);
+        assert_eq!(log.model.highlight, Some((24, 26)));
+
+        // A move with no press held, or once the log let go, is nobody's.
+        select(&mut log, Grip::Drag, 5, 7);
+        assert_eq!(log.model.highlight, Some((24, 26)));
+        select(&mut log, Grip::Press, 5, 1);
+        select(&mut log, Grip::Drag, 5, 2);
+        log.let_go();
+        select(&mut log, Grip::Drag, 5, 7);
+        select(&mut log, Grip::Release, 5, 7);
+        assert_eq!(log.model.highlight, Some((24, 25)));
+    }
+
+    #[test]
+    fn the_wheel_during_a_drag_moves_the_head_with_the_lines() {
+        let mut log = LogUi::new(None).utc();
+        log.model.take(infos(1, 30));
+        let mut ui = Surface::new();
+        let area = Rect::new(0, 0, 60, 8);
+        render(&mut log, &mut ui, (60, 8), area, &plain());
+        log.act(LogAct::Select(Grip::Press, Position::new(5, 2)));
+        log.act(LogAct::Select(Grip::Drag, Position::new(5, 5)));
+        assert_eq!(log.model.highlight, Some((25, 28)));
+        // The pointer stays on row 5 while the wheel brings older lines.
+        log.wheel(true);
+        let buf = render(&mut log, &mut ui, (60, 8), area, &plain());
+        assert_eq!(log.model.highlight, Some((25, 27)), "the head is the line now under the hand");
+        assert!(row(&buf, 5).contains("line 27"), "{}", row(&buf, 5));
+        assert_eq!(buf[(40, 5)].bg, th().accent);
+        // Lines arriving under a following view move it the other way.
+        log.wheel(false);
+        log.model.take(infos(31, 2));
+        render(&mut log, &mut ui, (60, 8), area, &plain());
+        assert_eq!(log.model.highlight, Some((25, 30)));
+        // Released, it stays where it was let go.
+        log.act(LogAct::Select(Grip::Release, Position::new(5, 5)));
+        log.model.take(infos(33, 2));
+        render(&mut log, &mut ui, (60, 8), area, &plain());
+        assert_eq!(log.model.highlight, Some((25, 30)));
+    }
+
+    #[test]
+    fn the_copy_text_is_the_clock_a_level_word_and_the_whole_message() {
+        let mut m = LogModel::new();
+        m.set_level(Level::Debug);
+        let mut unparsed = entry(5, "debug", "no time");
+        unparsed.t = "yesterday".into();
+        m.take(tail(
+            vec![
+                entry(1, "info", "server started"),
+                entry(2, "warn", "slow scan"),
+                entry(3, "error", "Error: ENOENT\n    at open (fs.js:1:1)\n\n  at main"),
+                entry(4, "error", ""),
+                unparsed,
+            ],
+            5,
+        ));
+        let text = as_text(&m.shown(), None);
+        assert_eq!(
+            text,
+            "09:00:01  server started\n\
+             09:00:02  warn  slow scan\n\
+             09:00:03  error  Error: ENOENT\n              at open (fs.js:1:1)\n\n            at main\n\
+             09:00:04  error\n\
+             --:--:--  no time"
+        );
+        assert!(!text.ends_with('\n'));
+        // The clock is the machine's, as the rows show it.
+        if let Some(zone) = crate::admin::tz::local() {
+            let line = &m.shown()[0];
+            assert!(copy_line(line, Some(&zone)).starts_with(&clock(line.at, Some(&zone))));
+        }
+    }
+
+    #[test]
+    fn y_copies_the_highlight_or_every_shown_line_and_says_how() {
+        let _en = english();
+        let mut log = LogUi::new(None).utc();
+        let note = |log: &mut LogUi| log.take_note().expect("a note");
+
+        clipboard::catch(Copied::Clipboard);
+        assert_eq!(log.key(key(KeyCode::Char('y')), 5), LogKey::Taken);
+        assert_eq!(note(&mut log), (t!("gui.admin.log.copy_nothing").to_string(), false));
+        assert!(clipboard::caught().is_empty(), "nothing went to the clipboard");
+
+        log.model.take(tail(
+            vec![entry(1, "info", "one"), entry(2, "debug", "chatter"), entry(3, "warn", "three"), entry(4, "info", "four")],
+            4,
+        ));
+        log.key(key(KeyCode::Char('y')), 5);
+        assert_eq!(clipboard::caught(), ["09:00:01  one\n09:00:03  warn  three\n09:00:04  four"], "only lines passing the level");
+        assert_eq!(note(&mut log), (t!("gui.admin.log.copied_all").to_string(), false));
+
+        log.model.highlight = Some((3, 1));
+        log.act(LogAct::CopyLines);
+        assert_eq!(clipboard::caught(), ["09:00:01  one\n09:00:03  warn  three"], "the highlight, the debug line inside it skipped");
+        assert_eq!(note(&mut log), (t!("gui.admin.log.copied_highlight").to_string(), false));
+
+        clipboard::catch(Copied::Terminal);
+        log.copy();
+        assert_eq!(note(&mut log), (t!("gui.admin.log.copied_terminal").to_string(), false));
+        clipboard::catch(Copied::Failed);
+        log.copy();
+        assert_eq!(note(&mut log), (t!("gui.admin.log.copy_failed").to_string(), true));
+        assert_eq!(clipboard::caught().len(), 2);
+        clipboard::catch(Copied::Clipboard);
+    }
+
+    #[test]
+    fn highlighted_rows_wear_the_selection_colours_and_the_region_covers_the_line_rows() {
+        let mut log = LogUi::new(None).utc();
+        log.model.take(infos(1, 5));
+        log.model.highlight = Some((2, 3));
+        let mut ui = Surface::new();
+        // Spaced, in a 40-cell area from column 4: the header on row 1, a
+        // blank row, the five lines on rows 3-7, empty rows 8-9, and the
+        // failure on row 10.
+        let area = Rect::new(4, 1, 40, 10);
+        let look = Look { spaced: true, hint: None };
+        log.model.fail(&ApiError::Network("down".into()));
+        let buf = render(&mut log, &mut ui, (50, 12), area, &look);
+        assert!(row(&buf, 4).contains("line 2") && row(&buf, 5).contains("line 3"), "{}", row(&buf, 4));
+        for y in [4, 5] {
+            for x in area.x..area.right() {
+                assert_eq!((buf[(x, y)].bg, buf[(x, y)].fg), (th().accent, th().on_accent), "({x}, {y})");
+            }
+            assert_ne!(buf[(area.x - 1, y)].bg, th().accent, "the fill keeps to the log");
+        }
+        for y in [3, 6] {
+            assert_ne!(buf[(area.x + 12, y)].bg, th().accent, "row {y} is not highlighted");
+            assert_eq!(buf[(area.x, y)].fg, th().dim, "its time stays dim");
+        }
+        assert_eq!(buf[(area.x, 10)].fg, th().gold, "the failure's row: {}", row(&buf, 10));
+
+        for y in [1, 2, 10] {
+            assert_eq!(ui.arm_region(Position::new(10, y)), None, "row {y} is no line row");
+        }
+        for y in [3, 7, 9] {
+            assert_eq!(ui.arm_region(Position::new(10, y)), Some(LogAct::Select(Grip::Press, Position::new(10, y))), "row {y}");
+            ui.release();
+        }
+        assert_eq!(ui.arm_region(Position::new(area.right(), 5)), None, "not past the log's edge");
+
+        // No lines, no region.
+        let mut empty = LogUi::new(None);
+        let mut ui = Surface::new();
+        render(&mut empty, &mut ui, (50, 12), area, &look);
+        assert_eq!(ui.arm_region(Position::new(10, 3)), None);
+    }
+
+    #[test]
+    fn the_header_offers_copy_and_download_whole_or_not_at_all() {
+        let _en = english();
+        let mut log = LogUi::new(None).utc();
+        log.model.take(infos(1, 3));
+        let mut ui = Surface::new();
+        let buf = render(&mut log, &mut ui, (70, 5), Rect::new(0, 0, 70, 5), &plain());
+        assert_eq!(row(&buf, 0).trim_end(), "• following · info ▾ · copy · download");
+        let copy = find(&buf, 0, "copy").expect("copy");
+        let download = find(&buf, 0, "download").expect("download");
+        assert_eq!(ui.hit(Position::new(copy, 0)), Some(LogAct::CopyLines));
+        assert_eq!(ui.hit(Position::new(download + 7, 0)), Some(LogAct::Download));
+        assert_eq!(ui.hit(Position::new(copy - 2, 0)), None, "the dot between is no control");
+        assert_eq!(buf[(copy, 0)].fg, th().dim);
+        ui.pointer = Some(Position::new(copy + 1, 0));
+        let buf = render(&mut log, &mut ui, (70, 5), Rect::new(0, 0, 70, 5), &plain());
+        assert_eq!(buf[(copy, 0)].fg, th().bright);
+        assert!(buf[(copy, 0)].modifier.contains(Modifier::BOLD));
+        ui.pointer = None;
+
+        // The docked column at 160 columns is 38 cells: at the debug level
+        // the download no longer fits, and is left out rather than cut.
+        log.model.set_level(Level::Debug);
+        let narrow = Rect::new(0, 0, 38, 5);
+        let buf = render(&mut log, &mut ui, (38, 5), narrow, &plain());
+        assert_eq!(row(&buf, 0).trim_end(), "• following · debug ▾ · copy");
+        assert!(!ui.clicks.iter().any(|(_, act)| *act == LogAct::Download));
+        log.model.set_level(Level::Info);
+        let buf = render(&mut log, &mut ui, (38, 5), narrow, &plain());
+        assert_eq!(row(&buf, 0), "• following · info ▾ · copy · download", "at info it fits exactly");
+
+        // While a download runs, the busy word in the accent, nothing to press.
+        log.downloading = true;
+        let buf = render(&mut log, &mut ui, (70, 5), Rect::new(0, 0, 70, 5), &plain());
+        let busy = find(&buf, 0, "downloading…").expect("the busy word");
+        assert_eq!(buf[(busy, 0)].fg, th().accent);
+        assert_eq!(ui.hit(Position::new(busy + 2, 0)), None);
+        log.downloading = false;
+
+        // The hint gives way before the controls do.
+        let look = Look { spaced: false, hint: Some(t!("gui.admin.log.hint_undock").to_string()) };
+        let buf = render(&mut log, &mut ui, (49, 5), Rect::new(0, 0, 49, 5), &look);
+        assert!(row(&buf, 0).ends_with("· download  L undocks"), "{}", row(&buf, 0));
+        let buf = render(&mut log, &mut ui, (48, 5), Rect::new(0, 0, 48, 5), &look);
+        assert_eq!(row(&buf, 0).trim_end(), "• following · info ▾ · copy · download");
+    }
+
+    #[test]
+    fn d_saves_a_canned_servers_zip_and_o_shows_it() {
+        let _en = english();
+        let dir = Scratch::new("zip");
+        let (server, seen) = canned(200, zip_bytes());
+        let mut log = downloading_log(&server, &dir);
+
+        log.key(key(KeyCode::Char('o')), 5);
+        assert_eq!(log.take_note(), Some((t!("gui.admin.log.nothing_saved").to_string(), false)));
+
+        assert_eq!(log.key(key(KeyCode::Char('d')), 5), LogKey::Taken);
+        assert!(log.downloading());
+        assert_eq!(log.take_note(), Some((t!("gui.admin.log.fetching").to_string(), false)));
+        let (note, failed) = landed(&mut log);
+        assert!(!log.downloading());
+        let files = dir.files();
+        assert_eq!(files.len(), 1, "{files:?}");
+        let path = &files[0];
+        assert_eq!(std::fs::read(path).unwrap(), zip_bytes(), "the server's bytes, untouched");
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let stamp = name.strip_prefix("mstream-logs-127.0.0.1-").and_then(|n| n.strip_suffix(".zip")).expect(&name);
+        let (date, time) = stamp.split_once('-').expect(&name);
+        assert!(date.len() == 8 && time.len() == 6 && stamp.chars().all(|c| c.is_ascii_digit() || c == '-'), "{name}");
+        let home = process_var("HOME").map(PathBuf::from);
+        let shown = log_file::shown_path(path, home.as_deref(), Os::HERE);
+        assert_eq!((note, failed), (t!("gui.admin.log.saved", path = shown).to_string(), false));
+        let requests: Vec<String> = seen.try_iter().collect();
+        assert!(requests.iter().any(|r| r.starts_with("GET /api/v1/admin/logs/download ")), "{requests:?}");
+
+        // o shows it: under test nothing launches, and the note names the
+        // whole path instead.
+        log.key(key(KeyCode::Char('o')), 5);
+        assert_eq!(landed(&mut log), (t!("gui.admin.log.file_at", path = path.display().to_string()).to_string(), false));
+        log.stop();
+    }
+
+    #[test]
+    fn d_on_a_server_without_the_route_saves_the_shown_lines() {
+        let _en = english();
+        for (status, body, word) in [
+            (404, br#"{"error":"Not Found"}"#.to_vec(), "gui.admin.log.saved_lines"),
+            (200, empty_zip(), "gui.admin.log.saved_no_files"),
+        ] {
+            let dir = Scratch::new(&format!("lines-{status}"));
+            let (server, _) = canned(status, body);
+            let mut log = downloading_log(&server, &dir);
+            log.model.take(tail(vec![entry(1, "info", "one"), entry(2, "debug", "chatter"), entry(3, "error", "three")], 3));
+            log.model.highlight = Some((3, 3));
+            log.download();
+            let (note, failed) = landed(&mut log);
+            let files = dir.files();
+            assert_eq!(files.len(), 1, "{status}: {files:?}");
+            assert_eq!(files[0].extension().unwrap(), "txt");
+            let text = std::fs::read_to_string(&files[0]).unwrap();
+            assert_eq!(text, "09:00:01  one\n09:00:03  error  three\n", "{status}: every line shown, whatever the highlight");
+            let home = process_var("HOME").map(PathBuf::from);
+            let shown = log_file::shown_path(&files[0], home.as_deref(), Os::HERE);
+            let want = match word {
+                "gui.admin.log.saved_lines" => t!("gui.admin.log.saved_lines", path = shown),
+                _ => t!("gui.admin.log.saved_no_files", path = shown),
+            };
+            assert_eq!((note, failed), (want.to_string(), false), "{status}");
+            log.stop();
+        }
+
+        // No route and no lines: nothing to save, and nothing saved.
+        let dir = Scratch::new("lines-none");
+        let (server, _) = canned(404, b"{}".to_vec());
+        let mut log = downloading_log(&server, &dir);
+        log.download();
+        assert_eq!(landed(&mut log), (t!("gui.admin.log.save_nothing").to_string(), true));
+        assert!(dir.files().is_empty());
+        log.stop();
+    }
+
+    #[test]
+    fn a_refused_download_says_the_hubs_sentence() {
+        let _en = english();
+        let dir = Scratch::new("refused");
+        let (server, _) = canned(403, br#"{"error":"Admin access required"}"#.to_vec());
+        let mut log = downloading_log(&server, &dir);
+        log.model.take(infos(1, 3));
+        log.download();
+        let forbidden = ApiError::Forbidden("Admin access required".into());
+        assert_eq!(landed(&mut log), (gate_message(&forbidden, &t!("gui.admin.log.download_failed")), true));
+        assert!(dir.files().is_empty(), "nothing saved, not even the lines");
+        assert!(!log.downloading(), "and the next d may go");
+
+        // A zip cut short is said so, and never saved.
+        let (server, _) = canned(200, zip_bytes()[..30].to_vec());
+        let mut log = downloading_log(&server, &dir);
+        log.model.take(infos(1, 3));
+        log.download();
+        assert_eq!(landed(&mut log), (t!("gui.admin.log.zip_cut").to_string(), true));
+        assert!(dir.files().is_empty());
+        log.stop();
+    }
+
+    #[test]
+    fn one_download_at_a_time() {
+        let _en = english();
+        let dir = Scratch::new("once");
+        let (server, seen) = canned(200, zip_bytes());
+        let mut log = downloading_log(&server, &dir);
+        log.key(key(KeyCode::Char('d')), 5);
+        log.key(key(KeyCode::Char('d')), 5);
+        log.act(LogAct::Download);
+        landed(&mut log);
+        let downloads = seen.try_iter().filter(|r| r.contains("/logs/download")).count();
+        assert_eq!(downloads, 1);
+        assert_eq!(dir.files().len(), 1);
+
+        // Without a session there is nothing to ask.
+        let mut lone = LogUi::new(None);
+        lone.download();
+        assert!(!lone.downloading());
+        assert_eq!(lone.take_note(), None);
+        log.stop();
     }
 }
