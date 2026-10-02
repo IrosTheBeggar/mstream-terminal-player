@@ -1,6 +1,9 @@
 #!/usr/bin/expect -f
 # Phase 1: folders + extras committed, then QUIT before creating the
 # admin (Ctrl+C). The open-admin window must survive for phase 2.
+# Every gate's braces span lines: expect reads a one-line braced list as a
+# single pattern that never matches, so such a gate waits out its timeout
+# and lets the leg run on past a screen that never painted.
 set timeout 20
 set env(TERM) xterm-256color
 set env(MSTREAM_SETUP_LANG) en
@@ -10,16 +13,25 @@ set env(HOME) $::env(WIZHOME)
 proc drain {secs} { expect -timeout $secs timeout {} }
 spawn {*}$argv
 exec stty rows 40 columns 100 < $spawn_out(slave,name)
-expect { "Add a music folder" {} timeout { exit 2 } }
+expect {
+    "Add a music folder" {}
+    timeout { exit 2 }
+}
 send "t"
 drain 1
 send "$::env(WIZMUSIC)\r"
 drain 1
 send "c"
-expect { "All optional" {} timeout { exit 4 } }
+expect {
+    "All optional" {}
+    timeout { exit 4 }
+}
 drain 1
 send "c"
-expect { "Admin User" {} timeout { exit 5 } }
+expect {
+    "Admin User" {}
+    timeout { exit 5 }
+}
 drain 1
 send "\x03"
 expect eof

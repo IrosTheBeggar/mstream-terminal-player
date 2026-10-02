@@ -4,7 +4,15 @@
 # there picks one of its tabs rather than a nav room (the review's
 # key-routing bug, which needed no server to show), Esc comes back to the
 # Library screen, q quits clean. Gates on first-paint words only: the
-# strip's `1:Queue` and the visualizer tab's own line.
+# strip's `1:Queue` and its selected `[3:Visualizer]` marker, which the
+# restyling repaints whole and the gate matches exactly (in a glob the
+# brackets would be a character class, and a lone letter would pass). A
+# sentence painted over an earlier frame can reach the pty in pieces, since
+# the diff renderer skips every cell that did not change, even a letter
+# inside a word: the visualizer's sentence does, so its gate is the marker.
+# Every gate's braces span lines: expect reads a one-line braced list as a
+# single pattern that never matches, so such a gate waits out its timeout
+# and lets the leg run on past a screen that never painted.
 set timeout 20
 set env(TERM) xterm-256color
 set env(MSTREAM_SETUP_LANG) en
@@ -21,18 +29,33 @@ expect {
     eof { puts "DIED-EARLY"; exit 6 }
     timeout { puts "NO-LIBRARY-SCREEN"; exec kill -9 [exp_pid]; expect eof; exit 2 }
 }
-expect { "Cassini IV" {} timeout { puts "NO-DEMO-SEAT"; exec kill -9 [exp_pid]; expect eof; exit 3 } }
+expect {
+    "Cassini IV" {}
+    timeout { puts "NO-DEMO-SEAT"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
 drain 1
 send "0"
-expect { "1:Queue" {} timeout { puts "NO-NOW-PLAYING"; exec kill -9 [exp_pid]; expect eof; exit 4 } }
+expect {
+    "1:Queue" {}
+    timeout { puts "NO-NOW-PLAYING"; exec kill -9 [exp_pid]; expect eof; exit 4 }
+}
 drain 1
 send "3"
-expect { "visualiser goes here" {} timeout { puts "DIGIT-LEFT-THE-SCREEN"; exec kill -9 [exp_pid]; expect eof; exit 5 } }
+expect {
+    -ex {[3:Visualizer]} {}
+    timeout { puts "DIGIT-LEFT-THE-SCREEN"; exec kill -9 [exp_pid]; expect eof; exit 5 }
+}
 drain 1
 send "\x1b"
-expect { "Add a server" {} timeout { puts "NO-WAY-BACK"; exec kill -9 [exp_pid]; expect eof; exit 7 } }
+expect {
+    "Add a server" {}
+    timeout { puts "NO-WAY-BACK"; exec kill -9 [exp_pid]; expect eof; exit 7 }
+}
 drain 1
 send "q"
-expect { eof {} timeout { exec kill -9 [exp_pid]; expect eof; exit 8 } }
+expect {
+    eof {}
+    timeout { exec kill -9 [exp_pid]; expect eof; exit 8 }
+}
 catch wait result
 exit [lindex $result 3]
