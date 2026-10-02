@@ -35,7 +35,9 @@ federated peer's parent serves it as it serves the queue.
   the period control, the log, the forget gate. A server older than 6.27
   says "no Stats API" the page's way.
 - **The session changes** while the screen is up (a switch, a pasted
-  code's dial): the page is rebuilt on the new session's server.
+  code's dial): the page is rebuilt on the new session's server. A switch
+  drops the page the moment it goes out, and the screen says there is no
+  session until the new server answers.
 - **Leaving** drops the page; coming back builds it again and reloads.
 
 ## Behavior contract

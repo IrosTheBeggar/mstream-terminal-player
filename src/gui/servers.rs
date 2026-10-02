@@ -614,6 +614,12 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
         entry.last_path.clone(),
     );
     gui.pend(effects);
+    // The Stats page and the Admin rooms were the old server's: they stand
+    // down now, not when the new one answers, so a switch that never lands
+    // leaves nothing that reads or changes the old server under the new
+    // one's name. Its Connected opens them again on the new server.
+    super::stats::reopen(gui);
+    super::admin::reopen(gui);
     gui.servers.switching = Some(entry.url.clone());
     let shown = config::display_name(&entry);
     gui.note = Some((t!("gui.srv.reaching", server = shown).to_string(), false));
@@ -2531,6 +2537,57 @@ mod tests {
         switch_to(&mut gui, 0);
         assert!(gui.pending.is_empty());
         assert!(gui.servers.switching.is_none());
+    }
+
+    #[test]
+    fn a_switch_stands_the_stats_page_and_the_admin_rooms_down_until_the_new_server_answers() {
+        use super::super::{Screen, admin, stats};
+        // A switch that never lands has no Connected to rebuild them by, so
+        // the page and the rooms go at the switch: nothing goes on reading,
+        // or changing, the server being left while the header names the
+        // new one. Unresolvable hosts, so nothing a test opens reaches out.
+        let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        let scratch = Scratch::new("gui-switch-screens");
+        let _ = &scratch;
+        for screen in [Screen::Stats, Screen::Admin] {
+            let attic = "http://attic.invalid:3000";
+            let mut config = Config::default();
+            config.servers = vec![entry(attic, Some("paul")), entry("http://office.invalid:3000", None)];
+            config::save(&config).unwrap();
+            let mut gui = Gui::new(config, false, App::new(Some(attic.into()), None, None));
+            gui.app.connected = true;
+            gui.act(Act::Screen(screen));
+            let up = |gui: &Gui| match screen {
+                Screen::Stats => gui.stats.page.is_some(),
+                _ => gui.admin.room.is_some() && gui.admin.log.running(),
+            };
+            assert!(up(&gui), "{screen:?} opens on the first server");
+
+            switch_to(&mut gui, 1);
+            assert!(!up(&gui), "{screen:?} stands down at the switch");
+            let why = match screen {
+                Screen::Stats => t!("gui.stats.no_session"),
+                _ => t!("gui.admin.no_session"),
+            };
+            let all = draw(&mut gui).join("\n");
+            assert!(all.contains(&*why), "{screen:?} says why:\n{all}");
+
+            // The new server answers, and the loop opens it there.
+            let connected = Event::Connected {
+                server: "http://office.invalid:3000".into(),
+                id: "http://office.invalid:3000".into(),
+                username: None,
+                token: None,
+                ping: Box::default(),
+            };
+            observe(&mut gui, &connected);
+            let effects = gui.app.apply_event(connected);
+            gui.pend(effects);
+            stats::reopen(&mut gui);
+            admin::reopen(&mut gui);
+            assert!(up(&gui), "{screen:?} opens again on the new server");
+        }
     }
 
     #[test]

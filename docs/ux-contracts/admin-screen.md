@@ -39,7 +39,10 @@ not.
   polling until the tab is opened again.
 - **The session changes** while the tab is up (a switch, a pasted code's
   dial): the room and the log are rebuilt on the new session's server; the
-  room shown and the log's placement are kept.
+  room shown and the log's placement are kept. A switch drops both the
+  moment it goes out, and the tab says there is no session until the new
+  server answers, so a switch that never lands leaves nothing reading or
+  changing the old server under the new one's name.
 - **Leaving** the tab drops the room and stops the log; coming back builds
   both again and reloads.
 
