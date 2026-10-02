@@ -36,7 +36,9 @@
 //! the keyboard, and its candidate list floats by that field's caret; the
 //! input method is on only while a field has the keyboard, so a Japanese
 //! keyboard's digits still switch rooms; Cmd+V (Ctrl+V elsewhere) types the
-//! clipboard into the field; a button let go outside the window lets go;
+//! clipboard into the field; Cmd+C (Ctrl+Shift+C or Ctrl+Insert elsewhere)
+//! is the Admin log's `y`, to the clipboard and never as OSC 52; a button
+//! let go outside the window lets go;
 //! a move to a screen of another scale re-sizes the type; a drag on the
 //! window's edge steps by whole cells, where the platform allows it; and
 //! what is typed or clicked while the window stands blank, its renderer
@@ -185,6 +187,11 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
             return NO_WINDOW;
         }
     };
+    // From here the player draws into a window of its own, so a copy goes
+    // to the pasteboard or a tool, never as OSC 52 into the shell that may
+    // have launched it. The fallback above runs in the terminal and keeps
+    // the terminal's route.
+    crate::kit::clipboard::set_windowed();
     lap.mark(&mut stats, "event_loop");
     let early = Early {
         faces,
@@ -1275,6 +1282,15 @@ impl App {
         }
         if let Raw::ImeCommit(_) = raw {
             self.set_preedit("");
+        }
+        // The copy chord is always the window's: the Admin log's copy when
+        // that log can take it, else nothing. Off a Mac, Ctrl+Shift+C would
+        // otherwise reach the GUI as Ctrl+C and quit.
+        if input::is_copy(&raw) {
+            if super::admin::copy_chord(&mut self.gui) {
+                self.ask_redraw();
+            }
+            return;
         }
         if input::is_paste(&raw) {
             if self.editing() {
