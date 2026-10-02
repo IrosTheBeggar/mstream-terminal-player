@@ -11,10 +11,12 @@
 //! Three things can hold the keyboard here: the hallway, the room and the
 //! log. A focused room keeps every key but the two the screen needs to
 //! move between them, Tab and `L`, and those only while the room holds
-//! nothing that wants them; the pointer is the room's inside its area and
-//! the GUI's everywhere else. The geometry, the key routing and the focus
-//! cycle are pure functions of their inputs, so the tests pin them by
-//! window size and by key before any frame is drawn.
+//! nothing that wants them; a room that holds every key has the focus,
+//! wherever it stood. The pointer is the room's inside its area, and under
+//! the top bar while its modal is up, and the GUI's everywhere else. The
+//! geometry, the key routing and the focus cycle are pure functions of
+//! their inputs, so the tests pin them by window size and by key before
+//! any frame is drawn.
 
 use std::time::Instant;
 
@@ -28,7 +30,7 @@ use super::server_log::{self, LogAct, LogKey, LogUi, Look};
 use super::stats::{reach_client, session_reach};
 use super::{Act, DJ_NAV, Gui, Screen, accent, bar, bright_bold, forward_glyph, put, sel};
 use crate::admin::{Claim, HostedRoom, Outcome, RoomId, open_room};
-use crate::kit::{blank, dim, width};
+use crate::kit::{blank, dim, width, wrap_words};
 use crate::tui::app::Reach;
 
 /// The hallway's rule, and the first column of the room's area after it.
@@ -358,23 +360,39 @@ fn room_up(admin: &AdminUi) -> bool {
     admin.room.is_some() && matches!(admin.showing, Hall::Room(_))
 }
 
+/// What the drawn room holds of the keyboard, whatever has the focus;
+/// Open while no room is drawn.
+fn room_claim(admin: &AdminUi) -> Claim {
+    match admin.room.as_ref() {
+        Some(room) if room_up(admin) => room.claims(),
+        _ => Claim::Open,
+    }
+}
+
 /// The layout for this window, with what is shown and what has the focus
 /// made to agree with it: a window that grew past the Room placement, or
 /// an `L` that docked the log again, hands the Log room back to the last
-/// room (the log keeps the focus, now beside it); a focus on something
-/// not on screen falls back to the room, or the hallway.
+/// room (the log keeps the focus, now beside it, and the hallway's cursor
+/// moves to the room's row); a room that holds every key — a modal that
+/// opened while the hallway or the log had the keys, a text field —
+/// takes the focus; a focus on something not on screen falls back to the
+/// room, or the hallway.
 fn settle(gui: &mut Gui, width: u16, height: u16) -> Layout {
     let footer = gui.footer();
     let mut lay = layout(width, height, footer, gui.admin.log_hidden, gui.admin.showing);
     if gui.admin.showing == Hall::Log && lay.placement != Placement::Room {
         let last = gui.admin.last_room;
         show(gui, Hall::Room(last));
+        gui.admin.cursor = row_of(Hall::Room(last));
         lay = layout(width, height, footer, gui.admin.log_hidden, gui.admin.showing);
     }
     let admin = &mut gui.admin;
     let session = admin.reach.is_some();
     let room = room_up(admin);
     let log = session && lay.log.is_some();
+    if room_claim(admin) == Claim::All {
+        admin.focus = Focus::Room;
+    }
     admin.focus = match admin.focus {
         Focus::Room if !room => Focus::Hall,
         Focus::Log if !log => {
@@ -406,6 +424,14 @@ fn wrap_log(act: LogAct) -> Act {
 /// banner, the note, the bar and the footer are the GUI's, drawn after.
 pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let lay = settle(gui, area.width, area.height);
+    // A room's modal owns the pointer under the top bar (clause 18), and
+    // swallows the clicks there: the GUI's surface lets go of it, so the
+    // hallway, the log and the bar neither light nor show the hand under
+    // a pointer they cannot have. The top bar's row stays the GUI's.
+    let modal = room_up(&gui.admin) && gui.admin.room.as_ref().is_some_and(|room| room.modal_up());
+    if modal && gui.ui.pointer.is_some_and(|at| at.y > 0) {
+        gui.ui.pointer = None;
+    }
     let key_hints = gui.config.gui.key_hints;
     let session = gui.admin.reach.is_some();
     let log_on = session && lay.log.is_some();
@@ -423,8 +449,19 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         admin.room_at = Rect { y: lay.room.y + 1, height: lay.room.height.saturating_sub(1), ..lay.room };
         drew_room = true;
     } else if !session {
+        // The sentence where the room would be, on a second row where the
+        // window is too narrow for it (most translations, at the floor);
+        // what two rows cannot hold is cut at the second's end.
         let why = admin.why.clone().unwrap_or_default();
-        put(frame, 19, 2, &bar::clip(&why, area.width.saturating_sub(21) as usize), dim());
+        let cells = area.width.saturating_sub(21) as usize;
+        let mut lines = wrap_words(&why, cells).into_iter();
+        if let Some(first) = lines.next() {
+            put(frame, 19, 2, &bar::clip(&first, cells), dim());
+        }
+        let rest = lines.collect::<Vec<_>>().join(" ");
+        if !rest.is_empty() {
+            put(frame, 19, 3, &bar::clip(&rest, cells), dim());
+        }
     }
 
     // The spill guard: whatever the room wrote below its area (a form
@@ -473,7 +510,8 @@ fn draw_hallway(frame: &mut Frame, gui: &mut Gui, lay: &Layout, session: bool) {
             break;
         }
         let rect = Rect { x: 1, y, width: RULE_X - 1, height: 1 };
-        let open = hall == gui.admin.showing;
+        // With no session nothing is open, whatever was shown last.
+        let open = session && hall == gui.admin.showing;
         let cursor = hall_keys && i == gui.admin.cursor;
         let style = if cursor {
             sel().add_modifier(Modifier::BOLD)
@@ -579,14 +617,18 @@ pub(super) enum Route {
     ToggleLog,
 }
 
-/// Which of the screen's three holders a key is for (contract clause 13).
-/// The host keeps only Tab and BackTab, while the focused room's claim is
-/// Open, and `L`, while the room holds no modal or text field; every
-/// other key a focused room gets, digits, `q`, Esc and the GUI's capitals
-/// included.
+/// Which of the screen's three holders a key is for (contract clause 13),
+/// by the focus and the drawn room's `claim`. A room that holds every key
+/// (a modal or a text field up) gets every key, wherever the focus stood.
+/// Otherwise the host keeps only Tab and BackTab, while the focused room's
+/// claim is Open, and `L`; every other key a focused room gets, digits,
+/// `q`, Esc and the GUI's capitals included.
 pub(super) fn route(focus: Focus, claim: Claim, menu_open: bool, key: KeyEvent) -> Route {
     if menu_open {
         return Route::Menu;
+    }
+    if claim == Claim::All {
+        return Route::Room;
     }
     let tab = matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
         && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
@@ -594,7 +636,6 @@ pub(super) fn route(focus: Focus, claim: Claim, menu_open: bool, key: KeyEvent) 
     let cycle = Route::Cycle { back: key.code == KeyCode::BackTab };
     match focus {
         Focus::Room => match claim {
-            Claim::All => Route::Room,
             Claim::Open if tab => cycle,
             _ if log => Route::ToggleLog,
             _ => Route::Room,
@@ -629,10 +670,7 @@ pub(super) fn next_focus(focus: Focus, log_beside: bool, log_room: bool, has_roo
 /// every screen. Returns true to quit.
 pub(super) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     let lay = settle(gui, gui.last_width, gui.last_height);
-    let claim = match (&gui.admin.room, gui.admin.focus) {
-        (Some(room), Focus::Room) => room.claims(),
-        _ => Claim::Open,
-    };
+    let claim = room_claim(&gui.admin);
     let menu_open = gui.admin.log.menu.is_some();
     match route(gui.admin.focus, claim, menu_open, key) {
         Route::Menu => gui.admin.log.menu_key(key),
@@ -788,6 +826,10 @@ pub(super) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
         return false;
     }
     let held = gui.admin.pressed && matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
+    // A release ends the press wherever it lands, whoever takes it.
+    if matches!(mouse.kind, MouseEventKind::Up(_)) {
+        gui.admin.pressed = false;
+    }
     if (mouse.row == 0 && !held)
         || gui.modal_open()
         || gui.servers.drop_open
@@ -804,18 +846,11 @@ pub(super) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
     let at = Position { x: mouse.column, y: mouse.row };
     if !(admin.room_at.contains(at) || room.modal_up() || held) {
         room.leave();
-        if matches!(mouse.kind, MouseEventKind::Up(_)) {
-            admin.pressed = false;
-        }
         return false;
     }
-    match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            admin.focus = Focus::Room;
-            admin.pressed = true;
-        }
-        MouseEventKind::Up(_) => admin.pressed = false,
-        _ => {}
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+        admin.focus = Focus::Room;
+        admin.pressed = true;
     }
     if matches!(room.mouse(mouse), Some(Outcome::Quit)) {
         admin.focus = Focus::Hall;
@@ -1186,9 +1221,16 @@ mod tests {
     #[test]
     fn route_hands_every_key_to_a_room_that_claims_them_all() {
         let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
-        for event in [key(KeyCode::Tab), back, key(KeyCode::Char('L')), key(KeyCode::Char('q')), key(KeyCode::Esc)] {
-            assert_eq!(route(Focus::Room, Claim::All, false, event), Route::Room, "{event:?}");
+        let keys = [key(KeyCode::Tab), back, key(KeyCode::Char('L')), key(KeyCode::Char('q')), key(KeyCode::Esc), key(KeyCode::Down)];
+        // Wherever the focus stood: a modal that opened while the hallway or
+        // the log had the keys is the room's to answer.
+        for focus in [Focus::Room, Focus::Hall, Focus::Log] {
+            for event in keys {
+                assert_eq!(route(focus, Claim::All, false, event), Route::Room, "{focus:?} {event:?}");
+            }
         }
+        // The log's open level menu still takes every key until it closes.
+        assert_eq!(route(Focus::Hall, Claim::All, true, key(KeyCode::Esc)), Route::Menu);
     }
 
     #[test]
@@ -1608,6 +1650,53 @@ mod tests {
         assert!(gui.admin.log_at.is_some());
     }
 
+    #[test]
+    fn the_log_room_folding_back_puts_the_hallway_cursor_on_the_room_it_shows() {
+        let mut gui = admin_gui();
+        gui.act(Act::Adm(AdmAct::Open(Hall::Room(RoomId::Federation))));
+        render_at(&mut gui, 136, 40);
+        press(&mut gui, KeyCode::Char('L'));
+        assert_eq!((gui.admin.showing, gui.admin.cursor), (Hall::Log, 6));
+        // Wide enough to dock: the Log room folds back into Federation.
+        render_at(&mut gui, 176, 46);
+        assert_eq!(gui.admin.showing, Hall::Room(RoomId::Federation));
+        assert_eq!(gui.admin.cursor, 4, "Federation's row, not where the Log's index falls");
+        press(&mut gui, KeyCode::Tab);
+        assert_eq!(gui.admin.focus, Focus::Hall);
+        press(&mut gui, KeyCode::Enter);
+        assert_eq!((gui.admin.showing, gui.admin.focus), (Hall::Room(RoomId::Federation), Focus::Room), "Enter opens the room shown");
+    }
+
+    #[test]
+    fn a_room_that_claims_every_key_takes_the_focus_from_the_hallway_and_the_log() {
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        render_at(&mut gui, 176, 46);
+        assert_eq!(gui.admin.focus, Focus::Hall);
+
+        // A modal opens on its own while the hallway has the keys — a folder
+        // listing answering after the keys moved on.
+        probe.0.borrow_mut().modal = true;
+        render_at(&mut gui, 176, 46);
+        assert_eq!(gui.admin.focus, Focus::Room, "the modal takes the focus");
+        for code in [KeyCode::Down, KeyCode::Enter, KeyCode::Char('2'), KeyCode::Char('M'), KeyCode::Tab, KeyCode::Char('L')] {
+            assert!(!press(&mut gui, code));
+        }
+        let keys = probe.0.borrow().keys.clone();
+        assert_eq!(keys.len(), 6, "every key reached the room: {keys:?}");
+        assert_eq!((gui.screen, gui.admin.cursor, gui.admin.log_hidden), (Screen::Admin, 0, false), "and none moved the host");
+
+        // The same from the log, and for a text field (no modal) as well.
+        probe.0.borrow_mut().modal = false;
+        press(&mut gui, KeyCode::Tab);
+        assert_eq!(gui.admin.focus, Focus::Log);
+        probe.0.borrow_mut().claim = Claim::All;
+        assert!(!press(&mut gui, KeyCode::Down));
+        assert_eq!(gui.admin.focus, Focus::Room);
+        assert_eq!(probe.0.borrow().keys.last(), Some(&KeyCode::Down), "the log's ↓ was the room's");
+        assert!(gui.admin.log.model.following(), "and the log did not scroll");
+    }
+
     // ── The pointer ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1707,6 +1796,36 @@ mod tests {
         down(&mut gui, lx + 1, 0);
         assert_eq!(probe.0.borrow().mice.len(), 2);
         assert_eq!(gui.screen, Screen::Library);
+    }
+
+    #[test]
+    fn under_a_room_modal_nothing_of_the_guis_lights_or_shows_the_hand() {
+        let _en = english();
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        let buf = render_at(&mut gui, 100, 30);
+        let lx = col(&row(&buf, 0), " Library ").unwrap();
+        let bar = gui.ui.clicks.iter().find(|(rect, _)| rect.y >= 25).map(|(rect, _)| Position::new(rect.x, rect.y)).expect("a bar control");
+
+        // Without a modal the hallway's row and the bar's control light.
+        mouse(&mut gui, MouseEventKind::Moved, 5, 4);
+        let buf = render_at(&mut gui, 100, 30);
+        assert_eq!(buf[(3, 4)].fg, th().bright, "the Users row under the pointer");
+        assert!(gui.ui.hovering_clickable());
+
+        // The modal opens by a key with the pointer resting there.
+        probe.0.borrow_mut().modal = true;
+        let buf = render_at(&mut gui, 100, 30);
+        assert_eq!(buf[(3, 4)].fg, dim().fg.unwrap(), "the row stays dim under the modal");
+        assert!(!gui.ui.hovering_clickable(), "and shows no hand");
+        mouse(&mut gui, MouseEventKind::Moved, bar.x, bar.y);
+        render_at(&mut gui, 100, 30);
+        assert!(!gui.ui.hovering_clickable(), "nor does the bar's control the modal swallows");
+
+        // The top bar's row stays the GUI's.
+        mouse(&mut gui, MouseEventKind::Moved, lx + 1, 0);
+        render_at(&mut gui, 100, 30);
+        assert!(gui.ui.hovering_clickable(), "the Library tab answers");
     }
 
     #[test]
@@ -1881,6 +2000,8 @@ mod tests {
         assert!(!(0..30).any(|y| row(&buf, y).contains("WATCH")), "no log without a session");
         assert_eq!(from(&buf, 1, 29).trim_end(), t!("gui.tips.stats_back"));
         assert_eq!(from(&buf, 19, 3).trim(), "", "one sentence");
+        let hallway = (2..25).map(|y| (0..16).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(!hallway.contains(forward_glyph()), "no room is open:\n{hallway}");
 
         // Nothing to move the keys to, nothing for L to show.
         press(&mut gui, KeyCode::Tab);
@@ -1890,6 +2011,29 @@ mod tests {
         assert!(gui.admin.room.is_none());
         press(&mut gui, KeyCode::Esc);
         assert_eq!(gui.screen, Screen::Library);
+    }
+
+    #[test]
+    fn the_no_session_sentence_wraps_onto_a_second_row_rather_than_be_cut() {
+        let _en = english();
+        // Six translations outrun the floor's 79 cells; the sentence is set
+        // in each one's words without moving the process's locale.
+        let mut gui = gui();
+        press(&mut gui, KeyCode::Char('M'));
+        for locale in ["de", "es", "fr", "it", "pl", "pt"] {
+            let sentence = t!("gui.admin.no_session", locale = locale).to_string();
+            gui.admin.why = Some(sentence.clone());
+            let buf = render_at(&mut gui, 100, 30);
+            let (first, second) = (from(&buf, 19, 2).trim_end().to_string(), from(&buf, 19, 3).trim_end().to_string());
+            assert!(!second.is_empty(), "{locale}: two rows");
+            assert_eq!(format!("{first} {second}"), sentence, "{locale}: every word, none cut");
+            assert!(width(&first) <= 79 && width(&second) <= 79, "{locale}: {first} / {second}");
+        }
+        // What two rows cannot hold is cut at the second's end.
+        gui.admin.why = Some("word ".repeat(40).trim_end().to_string());
+        let buf = render_at(&mut gui, 100, 30);
+        assert!(from(&buf, 19, 3).trim_end().ends_with('…'));
+        assert_eq!(from(&buf, 19, 4).trim(), "");
     }
 
     #[test]

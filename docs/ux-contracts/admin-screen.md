@@ -27,8 +27,10 @@ not.
 ## States & flows
 
 - **No session**: the tab opens on one dim sentence where the room would
-  be — "no session — connect to a server and its admin rooms open here";
-  Esc, `M` or the Library tab leave.
+  be — "no session — connect to a server and its admin rooms open here",
+  on a second row where the window is too narrow for it (most
+  translations, at the floor) — and the hallway marks no room open; Esc,
+  `M` or the Library tab leave.
 - **A server that cannot be reached right now** (a tunnel down): the
   reach's own reason on that line, as on the Stats tab.
 - **A room**: loading on entry — every read of the room's, exactly as
@@ -66,11 +68,12 @@ not.
    13. A dim `│` at x 16 runs from row 2 to the row above the bar and
    turns the accent while the room (or the Log room) has the focus. Room
    labels are clipped to 13 cells and group labels to 15. The open row is
-   `▸ label` at x 1 in the accent, BOLD; the others are dim at x 3, BRIGHT
-   + BOLD under the pointer. While the hallway has the focus, its cursor
-   row wears the slab across x 1–15. WATCH and Log show only while a
-   session exists and the log is not on screen beside the room — in the
-   Room placement, or when `L` has hidden it.
+   `▸ label` at x 1 in the accent, BOLD — none while there is no session;
+   the others are dim at x 3, BRIGHT + BOLD under the pointer. While the
+   hallway has the focus, its cursor row wears the slab across x 1–15.
+   WATCH and Log show only while a session exists and the log is not on
+   screen beside the room — in the Room placement, or when `L` has hidden
+   it.
 4. **The Log row counts what you have not seen**: a dim ` · 12 new` after
    the label while lines at or above the chosen level have arrived since
    the log was last on screen. Lines the server already held when the tab
@@ -79,7 +82,9 @@ not.
    when the row is short of cells.
 5. **The tab lands on Libraries** with the focus in the hallway. The room
    last shown is remembered for as long as the player runs, and the tab
-   opens on it next time.
+   opens on it next time. When the Log room gives way to a docked log
+   (the window grew, or `L`), the hallway's cursor moves to the room
+   shown.
 
 ### The room
 
@@ -121,13 +126,17 @@ not.
     The log is in the cycle only while it stands beside the room (Column
     or Band); while the Log room shows, the cycle is hallway ⇄ log; with
     no room (no session) the focus stays in the hallway. Torrents' Choose
-    page keeps Tab for itself, as it does in the hub.
+    page keeps Tab for itself, as it does in the hub. A drawn room that
+    holds every key — a modal or a text field up, Torrents' Connect page —
+    has the focus wherever it stood: a modal that opens while the hallway
+    or the log has the keys (a folder listing answering after they moved
+    on) takes them, and the focus stays with the room until it lets go.
 13. **A focused room keeps every key.** The host takes only Ctrl-C (as on
     every GUI screen), Tab and BackTab while the room holds nothing that
     wants them, and `L` unless the room has a modal or a text field open
-    — then every key is the room's. The host never takes a digit, `q`,
-    Esc, `M`, `T`, `V` or `D` from a focused room: they are the room's
-    flags, tabs and verbs.
+    — then every key is the room's, whichever of the three had the focus
+    (clause 12). The host never takes a digit, `q`, Esc, `M`, `T`, `V` or
+    `D` from a focused room: they are the room's flags, tabs and verbs.
 14. **Esc at a room's base, or `q`, moves the focus to the hallway** and
     closes nothing, with the hallway's cursor on the room's row. `q` in
     the hallway quits the player, as on every GUI screen.
@@ -157,17 +166,22 @@ not.
     wheel on its own controls, the hub's way. While its modal is up it
     takes every event under the top bar — its own catchers decide, and a
     click elsewhere is swallowed, so a half-filled form is never lost to
-    a hallway click. A press that started in the room keeps the pointer
-    until it is released, even on the top bar's row, where a thumb dragged
-    to the top lands. When the pointer leaves the room, the room's hover
-    and tooltip are cleared.
+    a hallway click — and nothing of the GUI's under the top bar (the
+    hallway, the log, the bar) lights or shows the hand meanwhile. A press
+    that started in the room keeps the pointer until it is released, even
+    on the top bar's row, where a thumb dragged to the top lands. When the
+    pointer leaves the room, or the room is hidden (the Log room), the
+    room's hover and tooltip are cleared and any press it held is let go,
+    so a held arrow never steps on unseen.
 19. **The hallway and the log answer on the GUI's surface.** A click on
     the hallway column gives it the focus; a click on a row opens it. A
     click in the log gives it the focus; its level control opens the menu
     and the paused word resumes following. The hand cursor follows
     whichever surface reports a clickable under the pointer.
 20. **A GUI modal, the header's server menu, or the log's level menu owns
-    the pointer whole while open**, as elsewhere in the GUI.
+    the pointer whole while open**, as elsewhere in the GUI. The level
+    menu keeps every key too until it closes, even when a room has come
+    to hold every key under it.
 
 ### The log
 
@@ -201,7 +215,8 @@ not.
 23. **Lines**: newest at the bottom; each is the local time `HH:MM:SS` in
     dim (UTC on a machine without a zone, `--:--:--` when the server's
     time does not parse), two spaces, then the message clipped by cells —
-    its first line only, ` …` after it when it had more (a stack trace).
+    its first line that is not blank, ` …` after it (` »` on the legacy
+    console) when another non-blank line follows (a stack trace).
     Info and debug are in the text colour, warn in gold, error in the
     danger colour; debug is not dimmed. With nothing to show, one
     sentence: "waiting for the server's log…" (dim) before the first
@@ -232,8 +247,10 @@ not.
     ` · Tab focus · L log` — only `L log` while the room keeps Tab, and
     nothing while it holds a modal or a text field — the tail only when
     the whole line fits the window, otherwise the room's hint alone; in
-    the log, its keys, or the menu's while the menu is open. Every
-    footer line fits 99 cells in every locale.
+    the log, its keys, or the menu's while the menu is open. Every line
+    of the tab's own fits 99 cells in every locale. A focused room's own
+    hint is the room's, written for the hub's full width, and may not: the
+    tail goes first, then the window's edge cuts the hint.
 
 ## Wording
 
@@ -260,6 +277,7 @@ not.
 | `admin.hint_rows_hosted` | ↑ ↓ select · b browse · t type a path · Esc back |
 | `usr.hint_empty_hosted` | a add the first user · Esc back |
 | `usr.hint_rows_hosted` | ↑ ↓ select · a add a user · Esc back |
+| `usr.public_3_hosted` | This room signs in as the user it creates; the player keeps its own session — sign it in as that user in Manage servers, or the other rooms are refused. |
 
 Changed: `gui.tips.base` names `M` ("· M admin" before "· q quit"). The
 rooms' own strings (`admin.*`, `usr.*`, `bak.*`, `p2p.*`, `fed.*`,
@@ -283,7 +301,8 @@ rooms' own strings (`admin.*`, `usr.*`, `bak.*`, `p2p.*`, `fed.*`,
 - **The Users room's first-user session**: in the hub, the first user
   added to a public server becomes the hub's session; the GUI does not
   adopt it, so the room reloads as the hub would and the GUI keeps its own
-  session.
+  session. Hosted, the room's public-mode note says so: sign the player in
+  as that user in Manage servers, or the other rooms are refused.
 
 ## Translation notes
 
@@ -334,3 +353,17 @@ rooms' own strings (`admin.*`, `usr.*`, `bak.*`, `p2p.*`, `fed.*`,
   - **Hosted Libraries and Users say "Esc back"** where the hub says
     "q quit", because in the tab `q` and Esc hand the focus to the
     hallway and quit nothing.
+  - **Hosted Users' public-mode note** (`usr.public_3_hosted`) says the
+    player must sign in as the first user too, where the hub's says the
+    panel stays open: the session the room makes is not the player's, so
+    after the first user the rest of the tab is refused (Out of scope).
+    Its sentences wrap at the column rather than lose their ends.
+  - **The footer follows the focus** (clause 27) where the canvas's Main
+    board writes one line for all three holders — `Tab hallway / room /
+    log · ↑↓ rooms · ←→ the room's tabs · t undock the log · Esc back`:
+    one line cannot carry a room's own keys, and the canvas's `t` is `L`
+    here.
+  - **A room that holds every key has the focus** (clause 12), wherever
+    it stood; the plan routed keys by the focus alone, which let a modal
+    that opened by itself own the pointer while the hallway's keys acted
+    under it.

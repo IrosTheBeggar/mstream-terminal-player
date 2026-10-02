@@ -8,7 +8,7 @@
 //! GUI's footer.
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use rust_i18n::t;
 
@@ -25,6 +25,8 @@ use crate::tui::app::{App, Origin, Reach};
 pub(crate) struct StatsUi {
     pub page: Option<Page>,
     why: Option<String>,
+    /// A press began on the page: its drag and release are the page's.
+    pressed: bool,
 }
 
 /// Open the screen: the page on the session's server — a peer session's
@@ -33,6 +35,7 @@ pub(crate) struct StatsUi {
 pub(crate) fn open(gui: &mut Gui) {
     gui.stats.page = None;
     gui.stats.why = None;
+    gui.stats.pressed = false;
     if !gui.app.connected {
         gui.stats.why = Some(t!("gui.stats.no_session").to_string());
         return;
@@ -73,6 +76,7 @@ pub(super) fn reach_client(reach: &Reach) -> Result<Client, String> {
 pub(crate) fn close(gui: &mut Gui) {
     gui.stats.page = None;
     gui.stats.why = None;
+    gui.stats.pressed = false;
 }
 
 /// The session changed under the screen: the page is the new server's.
@@ -136,13 +140,27 @@ pub(crate) fn tips(gui: &Gui) -> String {
 }
 
 /// The pointer below the top bar, on the page's own surface — the hub's
-/// own routine, so the two cannot drift apart (contract clause 5). A GUI
-/// modal or the header's server menu owns the pointer while it is open,
-/// and the page lets go of it. True when the event was the screen's to
-/// take, whether or not a page was up to take it.
+/// own routine, so the two cannot drift apart (contract clause 5) — and
+/// the drag and release of a press that began on the page, even on the top
+/// bar's row, where a thumb dragged to the top overshoots: a release the
+/// page never saw would leave its held arrow stepping and its thumb
+/// following later drags. A GUI modal or the header's server menu owns the
+/// pointer while it is open, and the page lets go of it. True when the
+/// event was the screen's to take, whether or not a page was up to take it.
 pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
-    if gui.screen != Screen::Stats || mouse.row == 0 || gui.modal_open() || gui.servers.drop_open {
+    if gui.screen != Screen::Stats {
         return false;
+    }
+    let held = gui.stats.pressed && matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
+    // A release ends the press wherever it lands, whoever takes it.
+    if matches!(mouse.kind, MouseEventKind::Up(_)) {
+        gui.stats.pressed = false;
+    }
+    if (mouse.row == 0 && !held) || gui.modal_open() || gui.servers.drop_open {
+        return false;
+    }
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+        gui.stats.pressed = true;
     }
     let Some(page) = gui.stats.page.as_mut() else { return true };
     if matches!(drive_pointer(page, mouse), Some(Outcome::Quit)) {

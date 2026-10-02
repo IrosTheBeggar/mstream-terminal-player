@@ -67,8 +67,11 @@ federated peer's parent serves it as it serves the queue.
    keeps every key.
 5. **The pointer** below the top bar is the page's: hover, click, hold,
    drag and the wheel on its own controls, the hub's way. The top bar's
-   row is the GUI's. A GUI modal (the add-server form, the server menu, a
-   torrent dialog) owns the pointer whole while open, as elsewhere.
+   row is the GUI's, but for the drag and the release of a press that
+   began on the page, which stay the page's there (a thumb dragged to the
+   top overshoots onto it). A GUI modal (the add-server form, the server
+   menu, a torrent dialog) owns the pointer whole while open, as
+   elsewhere.
 6. **The footer** shows the page's hint line — the keys that work now, in
    the page's order — with "Esc library" after it while nothing on the
    page is selected or open.
@@ -207,3 +210,8 @@ the no-session sentence; `gui.tips.base` names `T` (and `M`, since
   The page now steps aside while the menu is open, as clause 5 always
   said. Found while the Admin tab was built on the same seam; `M`, the
   Admin tab's key, joined the page's way out the same day.
+- **2026-10-02 — A release on the top bar (clause 5).** A press that began
+  on the page and was let go on the top bar's row never reached it, so a
+  held arrow went on stepping and a thumb kept following until the next
+  click. The drag and the release of such a press are the page's now, as
+  the Admin tab's rooms' are.

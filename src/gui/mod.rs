@@ -1166,15 +1166,14 @@ fn demo_now() -> Now {
 /// the pointer. Now Playing has no tab (it opens on `0`), so while it is
 /// up no tab wears the slab.
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
-    let mut x = 1;
     let tabs = [
         (Screen::Library, t!("gui.top.library")),
         (Screen::Stats, t!("sta.title")),
         (Screen::Admin, t!("gui.top.admin")),
     ];
-    for (screen, label) in tabs {
-        let text = format!(" {label} ");
-        let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
+    let viz = t!("gui.top.viz");
+    let rects = top_rects([&tabs[0].1, &tabs[1].1, &tabs[2].1, &viz]);
+    for ((screen, label), rect) in tabs.into_iter().zip(rects) {
         let style = if gui.screen == screen {
             sel().add_modifier(Modifier::BOLD)
         } else if gui.ui.hovers(rect) {
@@ -1182,14 +1181,12 @@ fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
         } else {
             dim()
         };
-        put(frame, x, 0, &text, style);
+        put(frame, rect.x, 0, &format!(" {label} "), style);
         gui.ui.click(rect, Act::Screen(screen));
-        x += rect.width + 1;
     }
     // The Visualizer item: not a screen but a window (visualizer-window
     // contract, entry 1) — lit while one is open, bright under the pointer.
-    let text = format!(" {} ", t!("gui.top.viz"));
-    let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
+    let rect = rects[3];
     let style = if vizwin::is_open(gui) {
         Style::default().fg(th().accent).add_modifier(Modifier::BOLD)
     } else if gui.ui.hovers(rect) {
@@ -1197,9 +1194,23 @@ fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
     } else {
         dim()
     };
-    put(frame, x, 0, &text, style);
+    put(frame, rect.x, 0, &format!(" {viz} "), style);
     gui.ui.click(rect, Act::VizWindow);
     gui.ui.tip_keyed(rect, t!("gui.top.viz_tip").to_string());
+}
+
+/// Where the top bar's items stand, left to right from x 1 with a cell
+/// between them: each its label's cells and a space either side. Cells,
+/// not characters: a Japanese or Chinese label is two cells a character,
+/// and counting characters left the Admin tab's right half dead under the
+/// Visualizer item's rect.
+fn top_rects<const N: usize>(labels: [&str; N]) -> [Rect; N] {
+    let mut x = 1;
+    labels.map(|label| {
+        let rect = Rect { x, y: 0, width: crate::kit::width(label) as u16 + 2, height: 1 };
+        x += rect.width + 1;
+        rect
+    })
 }
 
 fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
@@ -3525,6 +3536,38 @@ mod tests {
     }
 
     #[test]
+    fn the_top_bar_items_stand_on_their_labels_cells_in_every_script() {
+        // A rect is the label's cells: Japanese and Chinese draw two a
+        // character, and rects counted in characters left the Admin tab's
+        // right half under the Visualizer item.
+        for locale in ["en", "ja", "zh"] {
+            let labels = ["gui.top.library", "sta.title", "gui.top.admin", "gui.top.viz"].map(|key| t!(key, locale = locale).to_string());
+            let rects = top_rects([&labels[0], &labels[1], &labels[2], &labels[3]]);
+            assert_eq!(rects[0].x, 1);
+            for (label, rect) in labels.iter().zip(rects) {
+                assert_eq!(rect.width as usize, crate::kit::width(label) + 2, "{locale}: {label}");
+            }
+            for pair in rects.windows(2) {
+                assert_eq!(pair[1].x, pair[0].right() + 1, "{locale}: one cell between {pair:?}");
+            }
+        }
+        let ja = top_rects(["ライブラリ", "統計", "管理", "ビジュアライザー"]);
+        assert_eq!(ja[2], Rect { x: 21, y: 0, width: 6, height: 1 }, "管理 is four cells and its two spaces");
+        assert_eq!(ja[3].x, 28, "the Visualizer item a cell after it");
+
+        // Drawn, every cell of an item answers for it (here in English).
+        let mut gui = browsing_gui();
+        draw(&mut gui);
+        let acts = [Act::Screen(Screen::Library), Act::Screen(Screen::Stats), Act::Screen(Screen::Admin), Act::VizWindow];
+        let en = ["Library", "Stats", "Admin", "Visualizer"];
+        for (rect, act) in top_rects(en).into_iter().zip(acts) {
+            for x in rect.left()..rect.right() {
+                assert_eq!(gui.ui.hit(Position { x, y: 0 }), Some(act.clone()), "cell {x}");
+            }
+        }
+    }
+
+    #[test]
     fn the_stats_tab_hosts_the_stats_page_under_the_top_bar() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         // The stats-screen contract: the page whole under the bar, the
@@ -3602,6 +3645,36 @@ mod tests {
         gui.servers.drop_open = false;
         draw(&mut gui);
         assert!(stats::pointer(&mut gui, click), "with the menu closed the page has it again");
+    }
+
+    #[test]
+    fn a_press_on_the_stats_page_released_on_the_top_bar_is_still_the_pages() {
+        use crate::admin::Screen as _;
+        use ratatui::crossterm::event::MouseEvent;
+        // A thumb dragged to the top overshoots onto the bar's row: the drag
+        // and the release there are the page's, so its held arrow or thumb
+        // lets go with the button (the Admin tab's clause 18, the same way).
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert!(gui.stats.page.is_some());
+        draw(&mut gui);
+        let at = |kind, x, y| MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
+        let left = MouseButton::Left;
+
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Moved, 30, 0)), "with no button held the bar's row is the GUI's");
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Down(left), 30, 5)));
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Drag(left), 30, 0)), "the drag onto the bar's row is the page's");
+        assert_eq!(gui.stats.page.as_mut().unwrap().ui().pointer, Some(Position { x: 30, y: 0 }));
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 0)), "and so is the release");
+
+        // Released: the bar's row is the GUI's again.
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Drag(left), 30, 0)));
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 0)));
+        // A press on the bar's row was never the page's, and nor is its release.
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Down(left), 30, 0)));
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 0)));
     }
 
     #[test]
