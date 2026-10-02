@@ -682,15 +682,17 @@ mod tests {
         Look { spaced: false, hint: None }
     }
 
-    /// The x of the first cell of `needle` on row `y`, counted in cells.
+    /// The x of the first cell of `needle` on row `y`, counted in cells:
+    /// the needle walked by graphemes, each at the cells ratatui fills.
     fn find(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
-        let first = needle.chars().next()?.to_string();
+        use unicode_segmentation::UnicodeSegmentation;
+        let first = needle.graphemes(true).next()?;
         (0..buf.area.width).find(|&x| {
             buf[(x, y)].symbol() == first && {
                 let mut cx = x;
-                needle.chars().all(|c| {
-                    let ok = cx < buf.area.width && buf[(cx, y)].symbol() == c.to_string();
-                    cx += crate::kit::char_width(c).max(1) as u16;
+                needle.graphemes(true).all(|g| {
+                    let ok = cx < buf.area.width && buf[(cx, y)].symbol() == g;
+                    cx += crate::kit::grapheme_cells(g).max(1) as u16;
                     ok
                 })
             }

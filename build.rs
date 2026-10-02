@@ -3,7 +3,12 @@
 // own icon group, and without one every surface shows the generic binary
 // glyph. winresource also stamps default VersionInfo from the Cargo metadata
 // while it's in there (consumers that re-stamp VersionInfo, like mStream's
-// bundler, simply replace it).
+// bundler, simply replace it). Every bin of the package gets the same
+// resource: on msvc winresource links the compiled .res with
+// `cargo:rustc-link-arg`, which cargo passes to every binary's link (the
+// desktop flavour's launcher stub, src/bin/launch.rs, included), and on gnu
+// with a whole-archive `rustc-link-lib`, which with no library target
+// reaches each bin as well.
 //
 // Resource compilation needs a Windows resource compiler (rc.exe). The
 // release CI builds win32 on a windows runner where that always holds; a
@@ -22,6 +27,12 @@ fn main() {
     }
     let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/mstream-logo.ico");
+    // The desktop flavour is an app: Task Manager, the taskbar's jump list
+    // and "Open with" name a program by its FileDescription, which defaults
+    // to the package name. The terminal flavour keeps that default.
+    if std::env::var_os("CARGO_FEATURE_DESKTOP").is_some() {
+        res.set("FileDescription", "mStream Player");
+    }
     match res.compile() {
         Ok(()) => {}
         Err(e) if !cfg!(windows) => {

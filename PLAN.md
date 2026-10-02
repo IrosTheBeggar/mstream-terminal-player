@@ -583,6 +583,14 @@ Tab, BackTab and `L` from a focused room, never a digit, `q` or Esc; Esc or `q` 
 hands the focus back to the hallway. Ten locales (35 keys, `gui.tips.base` names `M`), tests for
 the footer's 99 cells and the hallway's label widths in every locale, and an e2e leg with no
 server. Not built: the Overview row, the rooms' one-line summaries, server-side log levels.
+Merged after v0.10.0, so the desktop product's window (Phase 14) hosts the tab too: the window
+drives the same two loop halves as the terminal (`gui::frame`, `gui::input`), so the tab's keys,
+pointer, wheel and hand cursor need nothing of their own there. One gap shows only in the
+window: the hosted rooms draw their fields on their own surfaces and note no caret on the GUI's,
+so the window counts no field as having the keyboard — Cmd+V pastes nothing into a room's
+field (a Federation or Discovery ticket included; Ctrl+V off a Mac reaches the field as a key
+it ignores), and the input method stays off there. The fix is the rooms noting their caret,
+handed up through `HostedRoom` to the GUI's surface.
 
 Build, in order of fit: **logs** ✅ 2026-10-02 (`/api/v1/admin/logs/recent?since=<seq>` is a
 purpose-built tail-poll API with a cursor; the GUI's Admin tab tails it, above), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
@@ -2920,6 +2928,563 @@ admin rooms.
 - **Left:** the pin (after firmware v0.5.0); the launcher's item (mStream: `PlayerPage::Device`,
   a version gate, the web installer as the fallback); Wi-Fi and pairing over the same port
   (the hidden `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
+
+### Phase 14 — The window spike: the GUI in a window of its own (2026-09-29/30)
+
+> **Status (2026-10-02): spike done, decision GO WITH CONDITIONS, the conditions and the
+> Windows run worked (below); the window is the desktop product's default and compiled out of
+> the terminal product (lanes 7–9), the desktop packages went through the v0.10.0-rc.1
+> pre-release, and PR #41 is for merge.** The vendored crates (vendor/ratatui-wgpu with its
+> 20 recorded changes, vendor/winit with two backports) ship as they are, by the owner's
+> decision of 2026-10-02: their VENDORED.md files are the record, and filing the changes
+> upstream is a separate task, not a gate. What remains before the stable tag is under
+> **Shipping — shipped as v0.10.0 on 2026-10-02 (release run 37048300547: both families, the three packages, the app notarized and stapled, Homebrew and Scoop bumped, 21 assets; the published app prints 0.10.0 with `features: window`).**, near the end of this phase. Five
+> commits on `claude/desktop-app-packaging-8ee4ff` (4e10926 render, 4685214 loop, de04c35
+> input, 4d6b4df stats, c59cbdb art) plus the keyboard check's fix, on top of v0.8.0, pushed
+> as PR #41; the condition lanes and the Windows machine's two fixes followed
+> on the same branch. Steps 1–3 and 5 were each
+> built by one implementer and judged by three adversarial reviewers with lenses that varied
+> by step (fidelity, liveness, behaviour or visual; terminal parity or footprint; code), with
+> fix rounds only for blocking findings; step 4 was two measurement legs (this Mac, and Linux
+> in Docker), two skeptics who re-measured, and a criteria judge. Five blocking findings were
+> raised, four distinct issues (the en stars as tofu, the pointer grid, Ctrl on non-Latin
+> layouts, a crash on absurd script numbers), all in steps 1 and 3 and each fixed at the root;
+> the implementer found and fixed a fifth crash on its own (a resize below one cell aborting
+> inside the crate). The evidence is in `docs/window-spike/` (screenshots, stats, CPU
+> samples, the Linux linkage list, the full manual checklist). The spike's sections are a
+> record of what happened; the Shipping paragraph is the plan to ship.
+
+**The question.** The desktop-app packaging research (2026-09-28) found that a "desktop
+app" of this player is a terminal emulator plus the player, which is why the mStream bundle
+carries Ghostty on macOS, launches through Windows Terminal on Windows and uses the user's
+own terminal on Linux. The alternative is to draw the same cell buffer ourselves: ratatui
+hands a `Backend` the cells that changed, and `ratatui-wgpu` is a backend whose surface is a
+wgpu texture in a window we own — the same winit and wgpu the visualizer window already
+links. The spike asked three things: does the GUI render faithfully that way, does input hold
+up, and how much of the GUI has to change.
+
+**What it is.** `mstream-player gui --window` (a hidden flag) runs the real player — the
+same `App`, the same audio and api workers, the same `render` — in a winit window through
+ratatui-wgpu 0.6 (`src/gui/window/`: `mod.rs` the window and its loop, `input.rs` the
+translator, `script.rs` a scripted-input lever, `stats.rs` a timing lever, `covers.rs` the
+art). The GUI loop in `src/gui/mod.rs` is split into two shared halves — `frame` (dispatch,
+tick, draw, the worker drain, the polls, the pointer through a one-method `Host` trait, the
+wait) and `input` (one crossterm-shaped event → Continue or Quit) — which the terminal loop
+calls in the old order and the window calls from its event loop at the terminal's own
+cadence (10 ms hot, 33 ms while the visualizer draws, the caret's flip, else 100 ms).
+Startup and teardown that need no terminal moved verbatim into `start` and `finish`. That
+split restructures the loop the terminal GUI ships on; the parity reviewers read it
+statement by statement and ran the GUI tests and the expect leg, and found no behaviour
+change, but it is the one part of the spike that touches the shipping path.
+
+**Steps and evidence.**
+- *1 — Render (4e10926).* Hack is the face, plus a system symbol face for the three glyphs
+  Hack lacks (★ ☆ ✓; a census test over the GUI's literals and the locales guards the list;
+  Menlo on macOS, DejaVu Sans Mono on Linux, the Windows candidates never run — on a box with
+  none of them the stars are boxes again, which a bundled face would end) and the visualizer
+  overlay's CJK face for ja and zh. The backend's `get_text()` against the same Gui drawn into
+  a `TestBackend` reads `100×30 EQUAL` in en, ja and zh: a text-level check that proves every
+  cell reached the backend, not what the pixels look like — that rests on the macOS
+  screenshots, which show rounded frames, the seek thumb, the transport glyphs, kana and
+  kanji from Hiragino, no tofu.
+- *2 — The shell (4685214).* Against demo.mstream.io the Files room lists the server's
+  library; at 70×20 the mini player shows; Cmd-Q reaches the same teardown and writes the
+  config; a resize feeds the GUI's own Resize bookkeeping after a full repaint;
+  `MSTREAM_WINDOW_SIZE=<cols>,<rows>` sets the opening grid.
+- *3 — Input (de04c35).* winit keys, text, IME commits, pointer, buttons and wheel become
+  crossterm events: named keys by name; characters from the text the OS composed; Ctrl from
+  the layout's Latin letter, else a control character, else the bare Latin key, else the
+  key's place (so a non-Latin layout still quits on Ctrl+c); Shift+Tab as BackTab; pixels to
+  cells against the backend's stretched grid; wheel turns accumulated to whole lines; held
+  buttons for drags. Accessibility is not granted on the dev Mac, so the proof is
+  `MSTREAM_WINDOW_SCRIPT=<file>` (wait/key/text/ctrl/ime/move/click/rclick/drag/wheel/
+  resize/dump/quit), which injects the raw events the winit handlers would build — one step
+  below winit, so the OS-to-winit-to-raw conversion itself is proven only by reading winit's
+  source. Through it: rooms by digit, drill, a typed query character by character, Tab and
+  Shift+Tab, an IME commit landing as text (a synthetic preedit is tracked and logged, and
+  types nothing), clicks acting on the row they land on down to the bottom row, hover verbs
+  and the hand cursor following the pointer, the wheel both ways, a right-click sheet, a
+  queue-row drag, Ctrl+c and `q` quitting through the same teardown with the config written.
+  Home/End, PageUp/Down, Left/Right and the F-keys are unit-tested only, and the winit-to-raw
+  half has no unit tests at all. 18 translator tests.
+- *4 — The numbers (4d6b4df).* `MSTREAM_WINDOW_STATS=<path>` counts, through a pass-through
+  backend, which cells ratatui handed on and times `frame`, the flush and the whole redraw.
+- *5 — Art (c59cbdb).* `Graphics::hosted`: instead of encoding a picture for a terminal
+  protocol, `draw` blanks the cover's cells and records the cell rect and the art on a
+  per-frame board; a post-processor runs ratatui-wgpu's own text blit unchanged and then
+  draws one textured quad per cover (the cell rect as a fraction of the grid, the picture
+  fitted whole and centred, `Rgba8UnormSrgb` on the sRGB surface, the 128 px thumbnail first
+  and a worker's full decode scaled to the box when it lands, at most 48 textures held).
+  The Albums wall, the bar's card, the queue rows and Now Playing show pictures; a page turn
+  and a resize keep them aligned; a queue row's sheet over the wall reads over mosaics — the
+  terminal's overlay rule, lagging one frame, so a texture paints over a freshly opened modal
+  for up to 100 ms. Slot::draw_paced in `src/gui/cover.rs`, the shared slot every room draws
+  covers through, gained the one hosted branch. Art ran on macOS Metal only.
+
+**The numbers** (release profile at step 4, before the art; this Mac; against
+demo.mstream.io; ~25 s a run; CPU as cputime over wall time from t ≥ 10 s, the steady state;
+the terminal GUI on a pty with the mosaic persona as the baseline; "first frame" counted from
+`window::run` entry, not from spawn):
+
+| Scenario | Window CPU | Terminal CPU | `frame` p50 / p95 ms | First frame ms |
+|---|---|---|---|---|
+| Idle, Library | 1.2% | 1.3% | 0.42 / 0.46 | 142 warm, 415 cold |
+| Albums wall | 1.5% | 1.4% | 0.76 / 0.86 | 175 |
+| Playback, Library | 2.9% | 2.3% | 0.54 / 2.2 | 190 |
+| Now Playing + waveform | 3.2% | 2.6% | 0.55 / 2.6 | 181 |
+| Now Playing, Visualizer tab (33 ms) | 14.8–16.7% | 5.4–5.7% | 3.1 / 4.7 | 170 |
+
+Whole-run CPU (start-up included) is higher for the window: idle 2.0% against 1.5%, the wall
+2.5 against 1.7, playback 4.2 against 3.2, Now Playing 4.6 against 3.8, the visualizer tab
+10.6 against 4.6. A frame that changes nothing costs about 3 µs to flush (the backend skips
+encode and present); a presenting flush is 1.2–2.8 ms p50, under 5 ms p95; single-frame
+maxima reached 16–18 ms, over the 16 ms the criterion named. The first cold launch after a
+build listed its window 1.0 s after spawn; there is no single spawn-to-pixel timer. RSS
+111–116 MB against the terminal's 33–38 MB — the wgpu device, the atlas and the fonts. The
+macOS binary 36,132,480 → 37,261,296 bytes at step 4 (+1.1 MB, +3.1%; the baseline is the
+fd0f13b release of 2026-09-27, one small change before v0.8.0; step 5's art was not
+re-measured in release) with no new framework or dylib (Metal, QuartzCore and AppKit were
+already linked for the visualizer). Art is measured in the DEBUG build only: 20 s on a still
+wall, `frame` p50 3.3 ms and p95 4.3 ms, but the seven frames that presented flushed at p50
+15.9 ms and p95 34 ms (uploads and shaping included), and the visual reviewer's run with four
+page turns had `frame` p95 7.6 ms and max 57 ms. Note that playback does NOT put the loop
+on 33 ms — `drawing_audio()` is the visualizer tab only — so four of the five rows run at the
+100 ms poll. A release build takes 14–17 min here, and the test profile recompiles the wgpu
+and naga stack.
+
+**The Linux leg** (Docker, `rust:1-slim-bookworm`, aarch64, the step-3 tree de04c35): the
+release build in 17.5 min cold; `test/linkage.sh` passes with NEEDED unchanged (libasound,
+libgcc_s, libm, libc — every crate ratatui-wgpu brings is pure Rust); the binary is
+45,066,952 bytes with no pre-spike baseline to set against; under Xvfb the window opens and
+quits clean in ~7 s on lavapipe (Vulkan, Mesa 22.3.6, a CPU device) and again with
+`WGPU_BACKEND=gl` on llvmpipe, the text dumps identical and `100×30 EQUAL` — text dumps
+only, en only, no screenshot, and neither the art path nor the stats lever ran there. One
+fact for a Linux desktop build: without `libxkbcommon-x11.so` the window panics before it
+opens (winit's X11 path through xkbcommon-dl, exit 101 — needs a clean error or a fall back
+to the terminal GUI, and the dependency listed). From reading the crate, not observed:
+`Font::new` reads only face 0 of a collection, so Noto CJK SC at index 2 would be skipped
+for Chinese on Linux.
+
+**The scorecard** (the criteria set before the spike started; the judge's verdicts, with the
+reviewers' caveats restored):
+
+| Criterion | Verdict | Why |
+|---|---|---|
+| Rendering fidelity | partial | Every cell reaches the backend (EQUAL on both platforms); pixels judged on macOS screenshots only, no tofu in en/ja/zh. Gaps: an en locale loads no CJK face, so CJK titles draw as boxes and Korean is tofu everywhere; after a wide glyph the rest of the row shifts left (the crate shapes a row as one string and the cell after a wide glyph is empty — a cover-box corner landed two cells left in the IME scenario), a crate defect needing a patch or a workaround; the darks come out darker (below). |
+| Plain input | pass, with caveats | Driven end to end at 2× scale through the lever: Enter, Esc, Backspace, Down, Tab and Shift+Tab, digits and letters as text, Ctrl, clicks to the bottom row, wheel, drag; then at a real keyboard (the operator) and as real OS key events: every standard key, key repeat, Option chords, Cmd chords, Ctrl on a Russian layout. Unit-tested only: Home/End, Page keys, Left/Right, F-keys; 1× scale untested. |
+| Dead keys and AltGr | partial | Dead keys pass on macOS at a real keyboard; the German layout's Option chords pass as real key events. Windows AltGr untested, and confirmed from the code: a left Ctrl+Alt standing in for AltGr there falls through to the bare Latin key (German `@` becomes Ctrl+q). The Dvorak Ctrl+punctuation remap was found at the keyboard and fixed. |
+| IME | partial | Real sessions at last: Pinyin composes and Space commits `中国` (attachment flaky in two of five runs); Japanese composes, one Enter commits without Space, and after Space the candidate list takes an Enter of its own — native Kotoeri, matched by an AppKit control. Synthetic commits land as text; preedit is not drawn; the candidate window sits at the origin; unverified that IME is enabled only while a text field has focus and that Enter during a composition is not delivered twice. |
+| Integration cost | partial | About 186 lines across 6 files at step 4 (all seams: the flag, the loop halves, `start`/`finish`, the palette pin, two visibilities), within the ~200 the criterion named; step 5 added graphics.rs (+61) and cover.rs (+10, the shared slot's hosted branch), about 257 lines across 8 files, over it. The raw stat reads +409/−213 because the loop body moved into `frame`/`input`. No room or widget file touched. |
+| Performance | pass, with caveats | Steady idle CPU equal to the terminal's; p95 under 5 ms; a warm first frame under 200 ms. Caveats: maxima 16–18 ms; a cold launch about 1 s; the visualizer tab costs 2.7–2.9× the terminal; art unmeasured in release. |
+| Footprint | pass | +1.1 MB, no new frameworks (before the art); Linux NEEDED unchanged, plus the libxkbcommon-x11 runtime load; the build and test times above are the larger cost. |
+| Platform | partial | macOS Metal proven end to end; Linux X11 under Xvfb on a CPU rasteriser, text only, on the pre-art tree (no Wayland, no real driver, no x86_64); Windows untouched at the spike's end (the Windows 10 run and retest below came with the conditions). |
+
+**What the crates taught.** ratatui-wgpu 0.6: `RenderSurface` is sealed (its `Sealed` bound
+in `src/backend/mod.rs`; the headless surface is test-only), so a real window is required;
+rows are marked clean after a failed present (the first present on macOS is occluded — a
+full repaint on `Occluded(false)` is the workaround, and any other failed present, a Timeout
+or an Outdated surface during a live resize, would still leave stale pixels until a cell
+changes); the default post-processor stretches the cell grid across the whole surface, so
+pixel→cell must use the drawn grid; a 0×0 grid panics inside the crate, so the surface is
+held to one cell; `default-features = false` drops ahash and png (otherwise ahash's
+compile-time-rng leaks into egui's tree). wgpu-core 30 sorts sRGB surface formats first, so
+the surface is `Bgra8UnormSrgb`, and the crate's blit decodes with pow 2.2 while the sRGB
+store re-encodes with the exact curve: the darks come out darker (ground #12131c → #0a0b16,
+gold and text within one level), while the cover textures go through the exact curve, so
+the ground beside a cover may differ by a level. The fix is not in our tree: a one-line
+`remove_srgb_suffix()` patch carried on the crate, a colour pre-conversion in our own backend
+wrapper, or a custom blit. The visualizer tab's named ANSI colours map through the crate's
+SVG table (Blue = #0000ff) — `Builder::with_color_table` fixes that on our side. winit 0.30:
+Cmd-Q exits inside AppKit, so main's exit code and the instance-lock sidecar cleanup are
+skipped; `set_min_inner_size` is ignored by a scripted `setContentSize`; Super chords are
+dropped today, so there is no Cmd+V paste (a terminal types pasted text as keys); a platform
+that holds back redraws for a hidden window (a hidden Wayland window, for one) would stop
+`frame`, and with it the worker drain and track advance — occlusion and minimise were never
+exercised, even on macOS.
+
+**Conditions before this could replace a terminal host** (the judge's list, plus the
+reviewers' minors worth carrying): the gamma fix and the colour table; an always-on CJK
+fallback with collection indices, and the wide-glyph row shift patched or worked around; the
+libxkbcommon-x11 panic turned into a clean error and the dependency documented; a panic hook
+of the window's own and Cmd-Q routed through `finish`; paste; the IME candidate window at the
+caret, preedit drawn, IME gated to focused text fields (winit is now vendored with the #4478 Korean backport,
+untested here for want of a Korean source); held buttons cleared on `CursorLeft`
+and focus loss; `ScaleFactorChanged`; a periodic or resize-triggered full repaint for failed
+presents; playback and queue advance proven while hidden or minimised; the overlay rule's
+one-frame lag; nearest-neighbour sampling for the QR code; mipmaps or a sharper resample for
+shrunk covers; resize increments so glyphs do not stretch between whole-cell sizes; a
+byte-bounded texture cache; a bundled symbol face; the timing probe gated off without its
+lever; and the manual checklist passed. The judge's gate: keep the flag hidden until the
+gamma, CJK, libxkbcommon and panic-hook conditions and the Windows run are done.
+
+**The conditions, worked (2026-09-30 to 10-01).** Five lanes on the same branch, each one
+implementer and three adversarial reviewers as the spike was, each committed on its own:
+- *Lane 1 (e8fe96e)* — ratatui-wgpu and winit vendored under `[patch.crates-io]`
+  (`vendor/`, each with a VENDORED.md naming every change); winit carries Warp's 0.30
+  backport of rust-windowing/winit#4478 (Korean: a key dropped after a commit, a doubled
+  Space), untested here for want of a Korean source. The lane also showed the Japanese
+  "swallowed Enter" was native Kotoeri (above).
+- *Lane 2 (b5384fc)* — the renderer: headless rendering made public with a pixel readback and
+  offscreen tests of our own; the surface takes the non-sRGB twin of the format wgpu offered,
+  so bytes pass through exactly (ground #12131c and gold #e5c07b measure exact), with the
+  exact sRGB curve where only sRGB exists; faces open by collection index; a failed present
+  is owed, not lost; a font's id hashes a bounded prefix; a glyph narrower than its box is
+  centred rather than enlarged, which was clipping Hangul; the wide-glyph "shift" was the
+  text dump's spelling, shown by a test that draws AB日本CD. The window: a colour table for
+  the named ANSI colours; CJK and Hangul faces for every locale through memory-mapped files
+  at unchanged RSS; the QR code sampled nearest; covers resampled when a box shrinks; a byte
+  bound on the texture cache; the timing probe idle without its lever.
+- *Lane 3 (689df49)* — a composition drawn inline at the caret (the kit splices it, inert
+  without one); IME allowed only while a field has the keyboard, placed at the caret's cell,
+  with a modal taking the keyboard from the field beneath it; paste (Cmd+V, Ctrl+V,
+  Ctrl+Shift+V) into a field only, the clipboard's first line typed as keys; the pointer
+  leaving or focus lost releases held buttons; a scale-factor change rebuilds the fonts and
+  re-grids; `scale`, `leave`, `alt`, `ctrlalt`, `minimise`, `frame`, `press`, `release`
+  joined the lever.
+- *Lane 4 (dc0ad19)* — a clean line and exit 1 when libxkbcommon-x11 is missing on an X11
+  session, the package recommended by the deb and rpm; a panic hook of the window's own; the
+  instance lock dropped by the window on Cmd-Q; the kit reports moved overlays and the next
+  frame runs hot, so a cover paints over a fresh modal for ~20 ms, not ~100; a minimised
+  window on macOS keeps its frames, clock and queue (measured over 20 s, so no hidden-window
+  timer); resize increments; the field's window counts cells, so wide text fits (a shared
+  correctness fix); a masked composition; paste capped at 4096 and stripped of stray format
+  characters; a narrower cell replacing a wide one clears the continuation cell (a residue
+  the window had shown).
+- *Lane 5 (dde0aa4)* — from the Windows report: the glyph tier pinned modern under the
+  window; Warp's backport of rust-windowing/winit#4582 against the layout-switch freeze; an
+  Alt chord delivers only what the OS composed (AltGr's @ and €; Ctrl+Alt+q nothing, where
+  it had quit the player); startup stages timed and the face discovery and the wgpu adapter
+  and device moved to threads started before the window exists (warm first frame here
+  ~180 → ~150 ms); every quit path exits within 50 ms here, with a "way out" timing line
+  for Windows' 11 s Ctrl+Q; the dump names the last press and what it hit, for the queue
+  drag that never starts there.
+
+**The Windows run (2026-10-01, Windows 10 22H2, one display at 200%, NVIDIA via Vulkan,
+rustc 1.98.1).** Build and tests green; the automated pass green (keys, mouse to the bottom
+row, resize to a cell without a crash, covers as pictures, 1× through a DPI-unaware launch);
+real input green for the key walk, clicks, the transport, close by X and Alt+F4 with the
+sidecar removed, minimise with playback continuing; CPU idle 0.5% and the visualizer tab
+15.9% in release. Defects: the conhost glyph set from a plain console (fixed, lane 5); a hang
+on every keyboard-layout switch (the winit freeze, backported, untested until the retest);
+the queue drag never starting (not reproducible here; evidence added for the retest);
+Ctrl+V typing a `v` (paste, lane 3); Ctrl+Alt+q quitting (lane 5); the first frame 2–3 s
+after the window appeared (stages instrumented; the retest names the slow one); Ctrl+Q
+11 s to exit (timings added). Untestable there: AltGr, dead keys and IMEs (no second layout
+without elevation, and the hang), 150%, a scale move.
+
+**The Windows retest and the hand-off (2026-10-01, the same machine, c2c81bb then de9084a).**
+The retest passed the glyph tier, Ctrl+V, Ctrl+Alt+q, the quit paths, minimise, AltGr and
+the dead keys (later also the dead-key Space fix: `'` `e` → `é`, `'` Space → `'`, `^` Space
+→ `^`); startup there was 1.4–1.7 s warm, the Vulkan instance alone 0.5 s; the posted
+layout change still froze inside `DefWindowProcW`, an opengl32 hook sitting in the
+window-procedure chain; and the queue drag read as a one-column miss. Three items went back
+to the Windows agent with ownership of the files involved, and all three came back:
+- *C, not a bug.* The grip is at window width − 7 (column 93 at 100 columns), `[⋯]` at
+  95–97, and the earlier presses were at 94, a cell only the row covers. A press on the grip
+  through the lever reads `QueueGrip`, the drag begins, and the release reorders the queue.
+- *B, fixed by the backend mask (d50bd5d).* The repro on `WGPU_BACKEND=dx12` alone and on
+  `vulkan` alone did not freeze, so it was the GL backend's presence, not winit, and the
+  vendored winit is untouched. On Windows the window now builds a DX12-only instance first
+  and a Vulkan-only one only when DX12 finds no adapter, never GL; `WGPU_BACKEND` still
+  overrides. Three posted layout changes with the window focused: no hang, dumps continuing,
+  AltGr+Q on the switched layout typing `@`. First present 1.0–1.2 s warm against
+  1.6–1.8 s: the instance 22–39 ms where Vulkan's was 575–893, and DX12's adapter request,
+  ~0.5 s for two GPUs, the long pole now.
+- *F, the window hidden until its first present (ec1ab37).* Windows only: created with
+  `with_visible(false)` and shown the moment a frame hands the backend cells, or at a 4 s
+  deadline regardless. A hidden window gets no `WM_PAINT`, so until it is shown the frames
+  run from `about_to_wait`. The window appears already drawn about 1 s after spawn warm,
+  where it had stood blank from ~300 ms for 1.3–2.4 s; `first_visible_present_ms` fills on
+  Windows. Under a compile-like load the baseline went "Not Responding" with a DWM ghost in
+  its place from ~8 s until its first present at ~20 s; after, no ghost at all, since DWM
+  does not ghost a hidden window. But the deadline is checked only once `open()` has
+  returned from joining the GPU thread, so under that load it fired 17 s in, and the main
+  thread sat hung through the join — the follow-up lane below.
+- *Found there, outside its files:* the six offscreen render tests lock up when the harness
+  runs them concurrently on NVIDIA — one test's Vulkan device going down inside nvoglv64.dll
+  while another's all-backend instance brings a WGL context up in the same DLL, neither
+  returning. Fixed here by taking the GPU one at a time (7b4399c). CI's Windows runner has
+  no NVIDIA driver, which is why its leg stayed green.
+
+**Lane 6 (f57faec), the review of the Windows commits, worked.** A reviewer read d50bd5d
+and ec1ab37 against wgpu-hal 30.0.1 and found six minors, none blocking, and this lane did
+them with the same shape (one implementer, a code lens and a macOS lens, no fix round
+needed):
+- One module, `src/gpu_pick.rs`, now chooses the instance and adapter for the GUI window,
+  the visualizer's own process and the headless `viz-probe`: on Windows a DX12-only instance
+  first, Vulkan alone only when DX12 has no hardware adapter, never GL, so no process of ours
+  brings up the backend that froze the window unless `WGPU_BACKEND` asks. DX12 answers even
+  without D3D12 hardware, with WARP, Microsoft's software rasteriser, which had made the
+  Vulkan fallback all but dead and would have drawn such a machine's frames on the CPU: a
+  software adapter is now held while Vulkan is tried and taken only as the last resort (the
+  rule is a pure function over lazy tries, with tests that the walk stops at hardware).
+- `open()` no longer joins the early threads. When they are not done, the loop polls them
+  every 4 ms, builds the backend on the turn they finish and answers window events meanwhile;
+  a hidden window shown at the deadline draws one frame first, so a late window is not blank
+  (the Windows run under load had the main thread hung through the join and the deadline
+  firing 17 s in). On this Mac the threads finish before the window exists, so nothing
+  changes: first present 165 vs 167 ms warm medians, A/B; a 1.5 s delay planted on the GPU
+  thread put the first present at 1.65 s with the window answering throughout.
+- The "drawing with … through …" line is printed once, after the backend is built, naming
+  the adapter the backend holds (the vendored builder now reports it, change 13), with ", in
+  software" for a CPU adapter; the main-thread fallback hands its adapter and device to the
+  builder instead of dropping them; on Windows `first_visible_present_ms` records the frame
+  that showed the window, not the repaint after it; a `threads.wait` stage joins the stats.
+Left as minors: the offscreen render tests still build the crate's default instance (GL in a
+test process on Windows; the mutex covers the hang); the visualizer child prints no adapter
+line; input that arrives before the backend exists is dropped, not held (a quit key in that
+gap does nothing, the close button still works); and the backend build itself (surface,
+configure, pipelines) still runs on the loop thread. The Windows paths of this lane are
+reasoned through and compiled by CI's Windows leg, not run.
+
+**Still open after the Windows run.** The WARP rule, the polled startup under load and the
+visualizer's window on a layout switch, unrun on Windows; Korean on macOS (no source
+enabled); a hidden window
+on Wayland (frames measured on macOS, minimise with playback proven on Windows); Wayland
+paste without XWayland; the cell after a modal opens still paints a cover for one short
+frame — gone since lane 15 (the emoji faces, the Hangul height and the tag characters
+are lane 14's, below); on
+Windows, 150%, a move between scales and the IMEs, untestable there
+without elevation.
+
+**Two products from one crate (2026-10-01).** The owner's decision: the codebase is dual
+purpose, a terminal player and a desktop player. The DESKTOP releases, a new asset family
+`mstream-player-desktop-*` (win32-x64, darwin-x64, darwin-arm64, linux-x64) with per-OS app
+packages to follow, open the GUI in its own window; the TERMINAL releases (the unsuffixed
+binaries, deb and rpm, the Homebrew formula, Scoop, the one-line installers, `cargo install`)
+are the terminal player with the window compiled out. mStream's binary bundles ship the
+desktop binary; every other mStream install gets the terminal one. On Windows no console
+flash where it can be avoided. Three lanes put it in, the same shape as the condition lanes:
+- *Lane 7 (4e172c3)* — Cargo features: `window` pulls ratatui-wgpu, memmap2 and arboard,
+  the only crates the window alone uses; `desktop` enables it and carries the desktop
+  defaults; `default = []`, so a plain build, `cargo install` and today's release legs are
+  the terminal player, whose `gui --window` is clap's usage error as on v0.9.0 (a test in
+  both flavours). The patch section cannot follow a feature, so the vendored winit reaches
+  both flavours through the visualizer; the vendored ratatui-wgpu reaches the desktop only,
+  and it had pulled wgpu's default features (webgpu, naga's wgsl-out) back in — change 14
+  trims it to std and wgsl, and the terminal flavour's wgpu and naga feature sets equal
+  main's on all three targets. CI tests both flavours on ubuntu and windows, adds a macOS
+  leg for the desktop flavour, lavapipe for the render tests on ubuntu, the linkage guard on
+  both flavours' Linux release builds, a guard that the terminal flavour pulls none of the
+  window's crates, and the wasm check with the feature on.
+- *Lane 8 (2424a3d)* — the desktop flavour's contract. The rule: an explicit argv means the
+  same in both flavours; only an empty argv differs, the window in the desktop flavour and
+  the TUI in the terminal one, with the TUI as the fallback where no window can be
+  expected (no DISPLAY, WAYLAND_DISPLAY or WAYLAND_SOCKET on a Unix other than macOS; SSH
+  with a tty) and Finder's `-psn_*` arguments counted as none. A first run with no saved
+  server shows the Library screen's "no server saved" line and the Add a server button.
+  The empty-argv launch takes `<config dir>/desktop-player.lock` with the launcher's
+  sidecar (sharing the tray's path is open); the sidecar's host reads "window"; `--version`
+  adds a `features: window` line under the unchanged first one; exit 3 wherever no window
+  can open at all, for a launcher to fall back on; on Windows FreeConsole when the console
+  is ours alone, and a GUI-subsystem stub bin, mstream-player-launch (packaged as "mStream
+  Player.exe"), that starts the player with CREATE_NO_WINDOW so a shortcut opens the window
+  and nothing else. Terminal flavour unchanged (1056 tests, the expect leg, a bare launch
+  shows the wizard); desktop 1120 tests, the window on an empty argv in ~210 ms warm.
+- *Lane 9 (a4328e9)* — release.yml: the leg steps once in build-binary.yml (workflow_call);
+  `build` is the six terminal legs unchanged in effect; `build-desktop` the four desktop
+  legs with `--features desktop`, signed and notarized alike, held back from stable tags
+  until the repository variable DESKTOP_RELEASES is 'true'; a tag with a '-' is a
+  pre-release, never latest, and `channels` runs only for a stable tag (before this, an rc
+  tag would have bumped the formula and Scoop and been served by the installers' latest);
+  the desktop binaries join manifest.json through the existing loop, apiVersion unchanged.
+  Only an rc-tag run proves the reusable call, the secrets reaching the sign step, the
+  cross container and the Windows desktop leg.
+- *Lane 10 (3504cf9)* — identity: `scripts/icons.py` makes the hicolor PNG set and the
+  macOS .icns from the Windows .ico (256 and 512 px upscaled from 128), with a Linux
+  desktop entry under assets/linux (not packaged yet); `src/identity.rs` holds APP_ID
+  "io.mstream.player" (app_id and WM_CLASS, the entry's name, the codesign identifier) and
+  the AUMID "mStream.Player" shared with the stub; the window carries the logo as its icon,
+  names itself on X11 and Wayland, and on macOS sets the Dock image, so the bare binary
+  shows the logo (first present unchanged); a refused second launch raises the holder's
+  window on macOS and Windows (never a call that waits on it), the line still printed.
+- *Lane 11* — the packages: a package-desktop job (skipped with build-desktop) assembles
+  "mStream Player.app" from the signed binary (bundle id io.mstream.player, the Bonjour
+  and local-network keys, the minimum OS from the binary's own load command), signs it
+  inside-out, notarizes, staples and ships it as a .app.zip; a Windows zip with the player,
+  the launcher stub as "mStream Player.exe", the icon and an unsigned-build note; a
+  deterministic Linux tarball with the desktop entry and icons. Scripts under scripts/
+  run the same code here and in CI; the .app assembled from the debug binary opened from
+  Finder with its id, name and logo. Only the rc-tag run proves the signing and the plumbing.
+
+**The rc run (v0.10.0-rc.1, run 36948308093, 2026-10-02).** The tag at b760349. Proven:
+the reusable build workflow is called for both families; all three terminal Linux legs and
+the desktop linux-x64 leg built inside the cross container and passed the linkage guard
+(the window build keeps NEEDED clean); both Windows legs built, the desktop one compiling
+the Windows-only code (FreeConsole, the launcher stub, the FileDescription) for the first
+time and staging the stub beside the player in its artifact; the gate held: with the
+macOS legs failed, package-desktop, release and channels were skipped, no release object
+exists and latest still names v0.9.0. The four macOS legs signed and then notarization
+answered HTTP 403, "A required agreement is missing or has expired" — Apple's Developer
+Program agreement awaiting the account holder's acceptance (v0.9.0 had notarized 25 hours
+earlier). Once accepted, a rerun of the failed jobs went green end to end: the four macOS
+legs notarized, the four package legs ran (the arm64 and x64 bundles "Accepted", stapled,
+"The validate action worked", spctl "accepted, source=Notarized Developer ID"), the
+release was published as a pre-release with 21 assets (both families, the three packages
+and the two app zips, the stub dropped from dist), latest still v0.9.0, and channels
+skipped — the Homebrew and Scoop repos untouched. On this Mac the downloaded arm64 app zip
+verifies (codesign --deep --strict, stapler validate, spctl Notarized Developer ID, bundle
+id io.mstream.player, version 0.10.0), opens from Finder's `open` with its window and the
+default lock, and quits clean; the Windows zip holds "mStream Player.exe", the player, the
+icon and the README; the tarball its layout. The rc's binaries print 0.9.0 because
+Cargo.toml was not bumped; a stable tag bumps it first.
+
+**Lane 14, the text and glyph conditions (2026-10-02).** A bundled six-glyph symbol face of
+our own (★ ☆ ✓ ✔ ✗ ✘, 1.6 KB, drawn by scripts/symbol-font.py under the OFL, since no
+subsetter or fitting OFL face was on this Mac) draws the GUI's own symbols ahead of any
+system face; the platform's colour emoji face is mapped like the CJK faces with the
+renderer's png feature on for window builds, and a VS16 heart, a regional-indicator flag, a
+tag-sequence flag, a ZWJ family and a skin tone each draw as one coloured picture over the
+two cells they claim (verified on Apple Color Emoji and Noto Color Emoji's bitmaps; Segoe's
+COLR layers unrun); fallback faces draw at the primary face's pixels-per-em, so 한 か 日
+ink at one height; a pasted subdivision flag keeps its tag characters and a clipped field
+shows a cluster whole or not at all; a face that has the cell's first character wins it, so
+a stray tag run is never a box (vendored changes 15–18). The lane found that the kit and
+the GUI chrome measured text per character while ratatui paints per grapheme (❤️ and a
+keycap spilled a cell past a field, a ZWJ family wasted four): kit::width now applies
+ratatui-core's own rule in both flavours, with parity tests against a ratatui Buffer. Left:
+src/tui/ui.rs's own per-character fit and tail, the admin rooms' clips by character count,
+the caret stepping per character (tui-input), the renderer's one-cell halfwidth dakuten
+against ratatui's two, a wider symbol face (Miscellaneous Symbols, Dingbats) once a
+subsetter is available, and the emoji faces unrun on Windows and Linux.
+
+**Lane 15, the behaviour conditions (2026-10-02; 4b409ad and 3f1e137).** Input that arrives
+before the first frame is held (a bounded queue of the window's own raw events; a move
+replacing the move before it, only the last resize and scale kept) and replayed one act per
+frame after it, so a `/` typed into a blank window opens the search and the letters after it
+land in the field — which needed the player's first effects, the connect among them, sent
+before the first frame, since `/` opens the query only once connected. A cover is never
+painted under a modal on the modal's first frame: the kit's Surface reports each overlay as
+it is registered, the Board marks the covers placed before it that it touches, and
+CoverPost skips them (order matters: a cover inside its own modal lies under that modal's
+footprint); on the opening frame none of the modal's pixels differ from the settled frame; a
+cover straddling the modal is left out whole for that frame. The renderer is built off the
+loop thread: the vendored builder splits into create_surface on the loop thread and a Send
+build of everything else (change 19), polled with the early threads; with 1.5 s planted in
+the pipelines step the loop kept answering and a scripted resize during the build was kept;
+first present unchanged within noise. Found on the way: the frame that made the player
+visible on macOS was a 40 ms full repaint from a same-size Resized and a same-scale
+ScaleFactorChanged as the window came on screen — both skipped (the resize still asks for a
+redraw), and Occluded(false) presents what the backend holds (change 20), so the player is
+seen ~30 ms sooner. CI's first run of the glyph tests on ubuntu and windows corrected three
+expectations that held only on this Mac's faces (Noto's grey family silhouettes, Segoe's
+pictureless England flag, Malgun Gothic's taller Hangul; the test's tolerance is 20% with
+the reason). Left: a `/` typed after the first frame but before the connection still opens
+an empty search (older than this lane); the lever's own `text` step is not paced; whether
+Segoe's layered glyphs paint at all (the Windows machine); a wheel held before a click
+rides along with it, so the click resolves against the pre-scroll layout.
+
+**Shipping (the owner's decisions, 2026-10-02).** PR #41 is for merge. The vendored crates
+ship as they are, under `[patch.crates-io]` (winit in both products, ratatui-wgpu in the
+desktop one); vendor/ratatui-wgpu/VENDORED.md and vendor/winit/VENDORED.md are the record of
+every change, and filing those changes upstream is a separate task that gates nothing. The
+steps to the stable release, in order: merge PR #41; bump the crate version to 0.10.0 (the
+rc's binaries print 0.9.0); set the repository variable DESKTOP_RELEASES to 'true' (until
+then a stable tag builds only the terminal family); tag v0.10.0. Owed before that tag, as
+proof rather than code: the Windows run of the published zip (the stub, the console, taskbar
+grouping, the emoji and Hangul faces, at 100% and 150%); Linux on real hardware (the
+tarball, X11 and Wayland, the desktop entry's app_id); the few macOS checklist rows still
+unrun; Korean. After the first desktop release: a Windows code-signing certificate, a
+Homebrew cask and a Scoop manifest for the desktop zip, an updater for the hand-downloaded
+packages, and the wider symbol face (Miscellaneous Symbols, Dingbats) once a subsetter is
+available. The mStream integration is parked behind other work.
+
+**From here, in order.** Done since the list was first written: the vendored-crate review
+(they ship, above), the window compiled out of the terminal flavour, the open window
+conditions (lanes 14 and 15), the hold-back (lane 9) and its rc run, and the README split into
+two products (2026-10-02). The release gate and what follows it are under Shipping. Parked
+behind other work (2026-10-02): on mStream's side (built 2026-10-02 on two branches of the
+mStream repo, `claude/desktop-player-pin` and `claude/launcher-window`, reviewed and green,
+awaiting their PRs), the manifest updater taking the desktop names and refusing pre-release
+tags, the bundler staging the desktop entry under the terminal file name while the runtime
+fetch keeps the terminal one, the launcher probing `features: window`, starting the window
+directly and falling back to the terminal route on exit 3; then a notify path that fires,
+the three-way coexistence check, and the mStream release. Still open for the owner: a
+shared lock with the tray, close as quit or keep playing, Ghostty's role for the setup and
+admin faces (the research of 2026-10-02 found all three faces can open in a window behind a
+Face trait, about four lanes; parked with the mStream work). Settled on 2026-10-02: vendored
+winit in terminal releases (it ships, above), the Windows certificate (after the first
+desktop release), the .app bundle id (io.mstream.player, the codesign identifier already in
+use, shipped by the rc) and the packaging tool (our own scripts under scripts/, no
+cargo-packager or Velopack; an updater comes after the first release).
+
+**The manual checklist** (`docs/window-spike/checklist.md` has every item with its expected
+result; the shape): macOS — launch from Terminal and iTerm; the key walk (digits, arrows,
+Home/End, PageUp/Down, Tab and Shift+Tab, Enter, Esc, Backspace, Space, T); key repeat on
+Down and Backspace; Cmd+V, Cmd+Q, Cmd+W; dead keys on ABC Extended (Option+e e → é, ` a →
+à); Japanese Romaji and Pinyin in the search box; CJK titles in an en library; hover, click,
+right-click, queue drag, wheel and trackpad fling; a drag released outside the window; a
+slow corner resize and a move between Retina and non-Retina displays; the ground colour
+beside Terminal.app with Digital Color Meter; CPU in the visualizer tab; playback continuing
+while the window is covered, minimised and behind a Space switch. Windows (11, 100% and
+150%) — launch from PowerShell and Windows Terminal; the key walk plus Ctrl+C; AltGr+Q/E on
+German and AltGr+A on Polish; US International dead keys; Microsoft Japanese and Pinyin
+IMEs; Ctrl+V; clicks on the first and last rows and the transport at 150%; close with X and
+Alt+F4, then relaunch; a move between 100% and 150% monitors; CPU and memory idle and in the
+visualizer tab.
+
+**The keyboard check (2026-09-30).** The operator ran the macOS half at a real keyboard:
+dead keys (Option+e e → é and the rest) and every standard key passed. Accessibility was then
+granted to the Claude app, and the rest ran as real OS key events posted through a CGEvent
+helper (`keys.swift` in the session scratchpad: key down and up with the autorepeat flag,
+modifier flags, layouts switched through the Text Input Sources API), which also proved the
+OS-to-winit-to-raw path the script lever had skipped: `/` opened the search card and `cass`
+arrived through it; key repeat works (Down held into a list, Backspace held for one press and
+five repeats took six characters); on the German layout Option+l, Option+e and the y key typed
+`@€z`; Cmd+V pasted nothing and typed nothing (the known gap, safely), Cmd+W did nothing,
+Cmd+Q quit and wrote the config; on the Russian layout Ctrl+c quit. One bug: on Dvorak,
+Ctrl+' reached the GUI as `q` — the key's place stood in for every key the layout named
+with something other than a Latin letter, and the GUI quits on `q` whatever the modifier —
+so the player closed. Fixed the same day (the place stands in only for a letter of another
+script; a unit test pins it; re-run at the keyboard: Ctrl+' does nothing, Ctrl+c on Russian
+still quits). Also learned: the GUI's `q` quit ignores modifiers in both the terminal and the
+window, so Ctrl+q quits too — pre-existing, and the same on both paths. Still untested: the
+IMEs. This Mac has Japanese Romaji installed but no second input source added under Keyboard
+settings, so the menu bar offers no switch, and the Text Input Sources API refuses to select
+an input method programmatically (paramErr −50, even from a process with a key window),
+while it switches keyboard layouts freely. Once the operator added Japanese and Pinyin under Keyboard settings, the API selected them (the
+earlier refusal was a source outside the enabled set), and the IME rows ran the same way, judged
+from screen dumps every two seconds and the window's preedit log. **Pinyin passes**: typing
+`zhongguo` composes (`zhong guo` in the log, nothing typed into the box), Space commits `中国`
+into the search box, twice out of two runs — though in two earlier runs the input method never
+attached and the letters arrived as Latin text, so attachment is flaky. **Japanese behaves as the system does, which the first reading
+got wrong**: `nihon` composes (`にほん`), and then what Enter does depends on whether Space was
+pressed. Without Space, one Enter commits and the next submits the search. After Space, which
+opens Kotoeri's candidate list, the first Enter only closes the list and the second commits —
+and a plain AppKit text view, built as a control and fed the same posted keys, does exactly the
+same, as does stock winit against the backported one. The first write-up called this a winit
+0.30.13 defect of the rust-windowing/winit#4478 class; it is not, and #4478 touches only the
+Korean paths. That backport is carried anyway (lane 1 of the conditions vendored winit for it):
+it fixes documented Korean losses — an ASCII key typed right after a commit, a doubled Space —
+that this Mac cannot test because no Korean source is enabled. Esc discards a composition on
+its second press, also native. Also observed: with the Japanese IME
+on and no text field focused, the digit `2` went into a full-width composition (`２`) instead
+of switching rooms — a terminal composes the same way, but it is the case for gating IME to
+focused text fields. Windows remained unrun at the time; the Windows run and retest
+above came with the conditions.
+
+**Driving it.** The levers above plus `MSTREAM_WINDOW_DUMP=<dir>` (the backend's text against
+a `TestBackend` render of the same Gui — reliable only with no server, since a live listing
+can land between the two draws). Screenshots of a background window: a swiftc
+`CGWindowListCopyWindowInfo` lister for the id, then `screencapture -l <id> -x -o`; quit
+through `NSRunningApplication.terminate` for the Cmd-Q path. Every cargo call on this Mac is
+`cargo +1.98.1` (stable is 1.94.1; egui 0.36 wants 1.95). The scratch drivers do not survive
+a session; the levers and `docs/window-spike/` do. Only a `--features desktop` build has the
+window (`cargo +1.98.1 build --features desktop`); a plain build has no `gui --window`.
+
+**Recommendation** (the judge's verdict; the framing that follows it is the author's). Go,
+with the conditions above and the flag hidden until the gate clears. The budget of going:
+about 2.7–2.9× the terminal's CPU in the visualizer tab and about 78 MB more resident
+memory, in exchange for one executable per platform with no bundled terminal and pixel art
+wherever a GPU rasterises — a claim proven on macOS, run once on Linux under a CPU
+rasteriser, and (at the time of the verdict) not yet run on Windows; the Windows 10 run and
+retest above came later and passed. The terminal-host route (Ghostty on macOS, Windows
+Terminal on Windows, the user's terminal on Linux) ships today and does not depend on this,
+so the author's proposal is a phase of its own rather than a rider on the packaging work,
+starting with the manual checklist on macOS and Windows; if dead keys or IME fail there, the
+author's fallback to try first is egui text fields over the surface (egui and its IME
+plumbing are already linked for the visualizer's controls) — a proposal, not something the
+spike tested.
 
 ## Smoke testing
 

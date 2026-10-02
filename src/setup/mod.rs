@@ -1617,7 +1617,8 @@ pub(crate) fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
     image::DynamicImage::ImageLuma8(img)
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .ok()?;
-    crate::tui::art::decode(&png)
+    // Hard-edged: a renderer that scales it itself keeps the modules square.
+    crate::tui::art::decode(&png).map(crate::tui::art::Art::into_crisp)
 }
 
 /// The pairing ticket as unicode half-blocks, light-on-dark so it scans off

@@ -66,6 +66,16 @@ impl Slot {
     /// The cover, pixels where the terminal draws them and the budget
     /// allows, the ▀-mosaic otherwise.
     pub(super) fn draw_paced(&mut self, frame: &mut Frame, rect: Rect, art: &Art, pace: &Pace) {
+        // The GUI's window draws covers itself (`Graphics::hosted`): a draw
+        // there only records the cover, microseconds, so there is no warm
+        // cache to keep and no encode for the budget to ration — and a
+        // slot the budget turned away would show the mosaic for nothing.
+        if self.graphics.is_hosted() {
+            if !self.graphics.draw(frame, rect, art) {
+                self.draw_mosaic(frame, rect, art);
+            }
+            return;
+        }
         let want = (art.id(), rect.width, rect.height);
         if self.key == Some(want) {
             // Warm: drawing is the cached protocol entry, microseconds.

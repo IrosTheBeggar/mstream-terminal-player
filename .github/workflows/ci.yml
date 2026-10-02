@@ -6,13 +6,20 @@ on:
   pull_request:
 
 jobs:
+  # Both products from one tree (Cargo.toml's [features]): the terminal
+  # flavour (no features; every release but the desktop one) and the
+  # desktop flavour (`--features desktop`, the GUI's own window). Linux and
+  # Windows test both, one after the other in one job, so the dependencies
+  # the two share (all but three crates) build once and one cache holds
+  # both; macOS tests the desktop flavour, whose offscreen render tests get
+  # Metal there.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
 
@@ -24,16 +31,59 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test
+      # The terminal flavour ships no GUI window: the window's crates must
+      # not be in its tree at all, on any target.
+      - name: Flavour guard (terminal)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          # On its own line, so a cargo failure fails the step rather than
+          # reading as an empty, passing list.
+          tree=$(cargo tree --locked --target all -e normal --prefix none -f '{p}')
+          # grep's 1 is "no match", the pass case; any other failure in the
+          # pipeline must fail the step rather than pass it with an empty list.
+          found=$(echo "$tree" | { grep -E '^(ratatui-wgpu|arboard) ' || [ $? -eq 1 ]; } | sort -u)
+          if [ -n "$found" ]; then
+            echo "::error::the terminal flavour pulls in the GUI window's crates:"
+            echo "$found"
+            exit 1
+          fi
+
+      - name: Test (terminal)
+        if: runner.os != 'macOS'
         run: cargo test
 
-      - name: Build
+      # After the terminal tests, so they run as they always have: lavapipe
+      # gives the desktop flavour's offscreen render tests a Vulkan adapter
+      # (without one they skip, through frame_or_skip; with it they must
+      # pass).
+      - name: Install a software Vulkan driver (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y mesa-vulkan-drivers
+
+      - name: Test (desktop)
+        run: cargo test --features desktop
+
+      # The visualizer brought a GPU stack, and the desktop flavour adds the
+      # GUI's window on the same one; both must open their drivers at run
+      # time, never link them, or the binary stops starting on headless
+      # boxes. See the script. Each flavour is checked on Linux, since each
+      # ships there; Windows keeps its one release build, of the terminal
+      # flavour, as before (the desktop one's test build above compiles the
+      # same code).
+      - name: Build (terminal)
+        if: runner.os != 'macOS'
         run: cargo build --release
 
-      # The visualizer brought a GPU stack; it must open its drivers at run
-      # time, never link them, or the binary stops starting on headless
-      # boxes. See the script.
-      - name: Linkage guard (Linux)
+      - name: Linkage guard (Linux, terminal)
+        if: runner.os == 'Linux'
+        run: sh test/linkage.sh target/release/mstream-player
+
+      - name: Build (desktop)
+        if: runner.os == 'Linux'
+        run: cargo build --release --features desktop
+
+      - name: Linkage guard (Linux, desktop)
         if: runner.os == 'Linux'
         run: sh test/linkage.sh target/release/mstream-player
 
@@ -57,6 +107,11 @@ jobs:
 
       - name: Check
         run: cargo check --target wasm32-unknown-unknown
+
+      # The browser build has no gui, so the desktop feature must change
+      # nothing here (gui is cfg(not(wasm32)) in main.rs).
+      - name: Check (desktop feature)
+        run: cargo check --target wasm32-unknown-unknown --features desktop
 
   e2e:
     name: E2E (${{ matrix.os }})
