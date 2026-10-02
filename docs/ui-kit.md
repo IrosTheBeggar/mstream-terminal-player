@@ -392,8 +392,36 @@ under it; End, `f`, a click on the paused word or scrolling back to the
 bottom resume. With nothing to show, one DarkGray sentence (waiting,
 the ring off, nothing at this level), or the failure in Yellow. Polling
 is the log's own thread, never two requests at once, slower after a
-failure and stopped on a refusal. First consumer: the GUI's Admin tab
-(docs/ux-contracts/admin-screen.md, `src/gui/server_log.rs`).
+failure and stopped on a refusal. **The highlight**: a press-drag across
+the lines (a drag region, below) highlights whole lines from the press's
+line to the pointer's, each filled across the log's width in the
+selection colours (bg ACCENT fg ON-ACCENT, its level colour set aside),
+held by the lines' sequence numbers so arrivals never move it; a drag
+past either end stops at the last line drawn, and a plain click, Esc or
+a new level clear it. It is text to copy, NOT the list cursor below: no
+row verb reads it and no key moves it, so the list-cursor law ("the
+pointer never highlights a row") stands. `y` copies the highlight, or
+every line shown, through the kit's clipboard (the behavioral rule
+below). **The header's controls**: after the level, ` · copy` and
+` · download` as text buttons, each drawn whole or not at all, the first
+that does not fit ending the row, and the dim key hint at the right gives
+way before them; while a download runs its word is the busy word
+(`downloading…` fg LightBlue, no click). First consumer: the GUI's Admin
+tab (docs/ux-contracts/admin-screen.md, `src/gui/server_log.rs`).
+
+### Drag region
+A press-drag that means something other than moving a thumb — marking a
+run of log lines — registers a drag region over its rows each frame
+(`Surface::drag_region`), told the press, every move while the button is
+held and the release, wherever each lands. It CAPTURES the pointer as a
+thumb drag does: hover stays put and nothing else takes the release, so
+a host that routes events to a hosted room skips it while
+`Surface::gripping` holds. It is transparent to clicks — a click under it
+still answers — and a click registered AFTER it over the press's cell (an
+overlay, a modal's catcher) takes the press instead. A region never
+enters the phantom-release soft capture, so in Apple Terminal, whose
+press is an instant click pair, a press is a plain click and no drag
+begins.
 
 ### Modal
 Centered, `Clear` beneath (no scrim — terminals have no alpha; the
@@ -652,3 +680,21 @@ owned `String`s so they translate like everything else.
   NSOpenPanel never fronts from a terminal process), rfd on Windows,
   ashpd (default-features off) on Linux, with the in-TUI LOCAL browser
   as the universal fallback (same filesystem as the picker).
+- **The clipboard is the kit's.** Every copy goes through
+  `kit::clipboard::copy`, never an escape written by hand, and the route
+  follows where the player runs. In the desktop window: the system
+  pasteboard (arboard), then the platform's tool — never OSC 52, which a
+  window launched from a shell would write into that shell. In a
+  terminal over SSH (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set):
+  OSC 52 alone, because the far machine's clipboard is not the user's.
+  In a local terminal: the pasteboard where the build links one (the
+  desktop flavour), then the tool, then OSC 52. The tools are `pbcopy`
+  (given a UTF-8 locale), `clip.exe` (fed UTF-16), and `wl-copy` under
+  Wayland or `xclip` then `xsel` under X11; a tool that exits non-zero or
+  takes more than a second is passed over, and text over 1 MiB never goes
+  as OSC 52. The answer is one of three, and the caller's note says
+  which: **Clipboard** (it is there), **Terminal** (handed over as OSC 52,
+  which Apple Terminal ignores and iTerm2 gates behind a setting, so the
+  note says "if it allows it"), **Failed** (nothing took it; the note
+  offers another way out). Tests never reach the system clipboard: under
+  test `copy` answers from a per-thread catcher.

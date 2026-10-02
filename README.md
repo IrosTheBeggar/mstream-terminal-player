@@ -515,7 +515,9 @@ cannot rename one, so it is asked for once. `r` removes behind a warning; the fi
 
 The GUI player hosts the same six rooms in its **Admin** tab (`M`), on the session it already
 holds, beside a live tail of the server's log — a column in a wide window, a band under the
-room in a tall one, otherwise a room of its own (`L` moves it).
+room in a tall one, otherwise a room of its own (`L` moves it). Drag across the log's lines to
+highlight them; `y` copies them (or every line shown), `d` saves the server's log files to
+your Downloads folder.
 
 ```
 mstream-player admin discovery               # the discovery network (P2P)

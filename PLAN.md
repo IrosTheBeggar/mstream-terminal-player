@@ -472,7 +472,8 @@ compose (message + offered vpaths), block and leave as gold gates, `h` incompati
 blocked, `/` filter, a quiet ten-second poll. Off the network: the pitch, one join card that
 posts `enabled` at once (no gate, by the user's call) and the federation-requests opt-in on by
 default; the identity modal opens after the join, as the webapp does. `y` copies the ticket
-over OSC 52 (best effort; Apple Terminal ignores it). Kit additions documented: tabs (active
+through the kit's clipboard (since 2026-10-02: the pasteboard or the platform's tool, OSC 52 as
+the terminal's last resort and alone over SSH, never in the window). Kit additions documented: tabs (active
 = 1-row filled slab), the state line, an inline non-modal input.
 
 **Federation room ✅ 2026-09-07** — `mstream-player admin federation` (`src/admin/federation.rs`),
@@ -594,6 +595,30 @@ room's focused field now draws through `kit::field_display`, which notes its car
 the composition; `HostedRoom` carries the composition down and the caret up to the GUI's
 surface, where the window reads it. The follow-up: a hosted room's caret holds steady rather
 than blink, since the GUI times its frames by its own surface's blink clock.
+
+**Log copy, download and highlight ✅ 2026-10-02** — the Admin tab's server log gains its ways
+out (contract clauses 29-34). A press-drag across its lines highlights whole lines, held by
+sequence number so arrivals and the ring's drops never move it, through a new kit element, the
+drag region (`Surface::drag_region`: the press, every move and the release wherever it lands,
+with the scrollbar's hard capture, so `gui::input` skips the hosted room and the Stats page
+while a grip stands). `y` copies the highlight or every line shown — the clock, winston's
+`warn`/`error`, the whole message with its later lines indented — through the new
+`kit::clipboard`, whose route follows where the player runs: the pasteboard (arboard, the
+desktop flavour only) and the platform's tool in the window, never OSC 52 there; OSC 52 alone
+over SSH; pasteboard, tool, then OSC 52 in a local terminal. Discovery's and Federation's `y`
+moved onto it, so a ticket copies in the window too. `d` fetches `GET
+/api/v1/admin/logs/download` on a one-shot thread with the log's client (never the poll's,
+Known risk 63), checks the zip by its end record, and saves `mstream-logs-<server>-<time>.zip` in
+the Downloads folder without ever replacing a file; a server with no log files or no route
+leaves the lines shown as `.txt`, and a zip cut short is never saved. `o` shows the file in
+Finder or Explorer (the folder elsewhere) rather than opening it, through `src/gui/opener.rs`,
+which the torrent room's opener moved into. The header carries `copy` and `download` for the
+pointer, whole or not at all, with `downloading…` while one runs. In the window Cmd+C
+(Ctrl+Shift+C or Ctrl+Insert elsewhere) is the log's `y`, and the window always takes the
+chord, so Ctrl+Shift+C off a Mac no longer quits. Ten locales (22 log keys, the two rooms'
+`copied_clipboard`, the log's footer re-cut to 99 cells). Not built: part-line or keyboard
+highlighting, edge auto-scroll, a drag in Apple Terminal (it reports no held button), choosing
+the save folder.
 
 Build, in order of fit: **logs** ✅ 2026-10-02 (`/api/v1/admin/logs/recent?since=<seq>` is a
 purpose-built tail-poll API with a cursor; the GUI's Admin tab tails it, above), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
