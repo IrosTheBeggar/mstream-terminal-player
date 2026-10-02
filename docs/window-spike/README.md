@@ -1,5 +1,8 @@
 # The window spike — evidence
 
+> **Status (2026-10-02):** the spike became the desktop product; its record is PLAN.md's Phase 14,
+> where the Shipping paragraph says what remains. The evidence below stays as the spike left it.
+
 What PLAN.md's Phase 14 cites, kept beside it because the session scratchpad that produced it
 does not persist. Screenshots are the real window on the dev Mac (Retina, scale 2), downscaled
 to 1000 px wide; the text under each name says which step and scenario produced it.

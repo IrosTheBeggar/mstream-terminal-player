@@ -448,15 +448,19 @@ winresource = "0.1"
 # exactly what differs). A patch, not a path dependency, so the version
 # lines above stay the contract and everything else in the tree that wants
 # the same crate — egui-winit wants winit — gets the patched copy too: one
-# winit, one ratatui-wgpu. Drop an entry once a release carries its fix.
+# winit, one ratatui-wgpu. The copies ship in releases (the owner's decision,
+# 2026-10-02), with vendor/*/VENDORED.md as the record; filing the changes
+# upstream is a separate task. Drop an entry once an upstream release
+# carries its fixes.
 # The table holds for both flavours (a patch cannot follow a feature): the
 # terminal build never builds ratatui-wgpu, and its winit, through the
 # visualizer window, is the vendored one as well.
 [patch.crates-io]
-# The GUI window's renderer, and the place its fixes land: fourteen
-# recorded changes so far (surface format, face index, wide-glyph shaping,
-# failed presents, a device made before the window, its wgpu kept to the
-# feature set above, and more); VENDORED.md lists each.
+# The GUI window's renderer, and the place its fixes land: twenty
+# recorded changes (surface format, face index, wide-glyph shaping, failed
+# presents, a device made before the window, its wgpu kept to the feature
+# set above, colour emoji, the build off the window's thread, and more);
+# VENDORED.md lists each.
 ratatui-wgpu = { path = "vendor/ratatui-wgpu" }
 # macOS IME: 0.30.13 drops an ASCII key typed right after an input
 # method's commit (Korean `한` then `;` or a digit loses that key) and
@@ -464,5 +468,7 @@ ratatui-wgpu = { path = "vendor/ratatui-wgpu" }
 # winit PR #4478, backported to the 0.30 layout; VENDORED.md has the
 # hunks. Japanese and Chinese are untouched by it: their confirm keys
 # never leave the input method (the Kotoeri candidate list takes an Enter
-# of its own, which is native, not a defect).
+# of its own, which is native, not a defect). Windows: a freeze on every
+# keyboard-layout switch (a reused HKL served a stale cached layout), fixed
+# by winit PR #4582 through Warp's 0.30-line backport.
 winit = { path = "vendor/winit" }

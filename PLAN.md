@@ -2903,12 +2903,17 @@ admin rooms.
 
 ### Phase 14 — The window spike: the GUI in a window of its own (2026-09-29/30)
 
-> **Status: spike done, decision GO WITH CONDITIONS — nothing ships from it yet; the
-> conditions and the Windows run are worked (below), and the window is now the desktop
-> flavour's default, compiled out of the terminal flavour (lanes 7–9).** Five
+> **Status (2026-10-02): spike done, decision GO WITH CONDITIONS, the conditions and the
+> Windows run worked (below); the window is the desktop product's default and compiled out of
+> the terminal product (lanes 7–9), the desktop packages went through the v0.10.0-rc.1
+> pre-release, and PR #41 is for merge.** The vendored crates (vendor/ratatui-wgpu with its
+> 20 recorded changes, vendor/winit with two backports) ship as they are, by the owner's
+> decision of 2026-10-02: their VENDORED.md files are the record, and filing the changes
+> upstream is a separate task, not a gate. What remains before the stable tag is under
+> **Shipping**, near the end of this phase. Five
 > commits on `claude/desktop-app-packaging-8ee4ff` (4e10926 render, 4685214 loop, de04c35
 > input, 4d6b4df stats, c59cbdb art) plus the keyboard check's fix, on top of v0.8.0, pushed
-> as PR #41 (not for merge); the condition lanes and the Windows machine's two fixes followed
+> as PR #41; the condition lanes and the Windows machine's two fixes followed
 > on the same branch. Steps 1–3 and 5 were each
 > built by one implementer and judged by three adversarial reviewers with lenses that varied
 > by step (fidelity, liveness, behaviour or visual; terminal parity or footprint; code), with
@@ -2918,8 +2923,8 @@ admin rooms.
 > layouts, a crash on absurd script numbers), all in steps 1 and 3 and each fixed at the root;
 > the implementer found and fixed a fifth crash on its own (a resize below one cell aborting
 > inside the crate). The evidence is in `docs/window-spike/` (screenshots, stats, CPU
-> samples, the Linux linkage list, the full manual checklist). This is a record of what
-> happened, not a plan to ship.
+> samples, the Linux linkage list, the full manual checklist). The spike's sections are a
+> record of what happened; the Shipping paragraph is the plan to ship.
 
 **The question.** The desktop-app packaging research (2026-09-28) found that a "desktop
 app" of this player is a terminal emulator plus the player, which is why the mStream bundle
@@ -3341,24 +3346,39 @@ an empty search (older than this lane); the lever's own `text` step is not paced
 Segoe's layered glyphs paint at all (the Windows machine); a wheel held before a click
 rides along with it, so the click resolves against the pre-scroll layout.
 
-**From here, in order.** The vendored-crate review with an upstream exit for ratatui-wgpu's changes; the merge with the
-window compiled out of the terminal flavour; the Linux leg on real hardware for the desktop
-linux-x64 build (X11 and Wayland, the .desktop entry's app_id); the macOS and Windows
-checklist rows as the desktop release's gate, including a tray-spawned run and the stub's
-double-click; the open window conditions (all done: lanes 14 and 15); the rest of the release workflow
-(Windows signing once a certificate exists, lifting the hold-back, a notify path that
-fires); a Homebrew cask and a Scoop manifest for the desktop product; the README split into
-two products; the stable player release; on mStream's side (built 2026-10-02 on two
-branches of the mStream repo, `claude/desktop-player-pin` and `claude/launcher-window`,
-reviewed and green, awaiting their PRs), the manifest updater taking the desktop names and
-refusing pre-release tags, the bundler staging the desktop entry under the terminal file
-name while the runtime fetch keeps the terminal one, the launcher probing
-`features: window`, starting the window directly and falling back to the terminal route on
-exit 3; then the three-way coexistence check, and the mStream release. An
-updater for hand-downloaded zips comes after the first desktop release. Still open for the
-owner: the .app bundle id, a shared lock with the tray, close as quit or keep playing,
-vendored winit in terminal releases without an upstream exit, the packaging tool, Ghostty's
-role for the setup and admin faces, the Windows certificate.
+**Shipping (the owner's decisions, 2026-10-02).** PR #41 is for merge. The vendored crates
+ship as they are, under `[patch.crates-io]` (winit in both products, ratatui-wgpu in the
+desktop one); vendor/ratatui-wgpu/VENDORED.md and vendor/winit/VENDORED.md are the record of
+every change, and filing those changes upstream is a separate task that gates nothing. The
+steps to the stable release, in order: merge PR #41; bump the crate version to 0.10.0 (the
+rc's binaries print 0.9.0); set the repository variable DESKTOP_RELEASES to 'true' (until
+then a stable tag builds only the terminal family); tag v0.10.0. Owed before that tag, as
+proof rather than code: the Windows run of the published zip (the stub, the console, taskbar
+grouping, the emoji and Hangul faces, at 100% and 150%); Linux on real hardware (the
+tarball, X11 and Wayland, the desktop entry's app_id); the few macOS checklist rows still
+unrun; Korean. After the first desktop release: a Windows code-signing certificate, a
+Homebrew cask and a Scoop manifest for the desktop zip, an updater for the hand-downloaded
+packages, and the wider symbol face (Miscellaneous Symbols, Dingbats) once a subsetter is
+available. The mStream integration is parked behind other work.
+
+**From here, in order.** Done since the list was first written: the vendored-crate review
+(they ship, above), the window compiled out of the terminal flavour, the open window
+conditions (lanes 14 and 15), the hold-back (lane 9) and its rc run, and the README split into
+two products (2026-10-02). The release gate and what follows it are under Shipping. Parked
+behind other work (2026-10-02): on mStream's side (built 2026-10-02 on two branches of the
+mStream repo, `claude/desktop-player-pin` and `claude/launcher-window`, reviewed and green,
+awaiting their PRs), the manifest updater taking the desktop names and refusing pre-release
+tags, the bundler staging the desktop entry under the terminal file name while the runtime
+fetch keeps the terminal one, the launcher probing `features: window`, starting the window
+directly and falling back to the terminal route on exit 3; then a notify path that fires,
+the three-way coexistence check, and the mStream release. Still open for the owner: a
+shared lock with the tray, close as quit or keep playing, Ghostty's role for the setup and
+admin faces (the research of 2026-10-02 found all three faces can open in a window behind a
+Face trait, about four lanes; parked with the mStream work). Settled on 2026-10-02: vendored
+winit in terminal releases (it ships, above), the Windows certificate (after the first
+desktop release), the .app bundle id (io.mstream.player, the codesign identifier already in
+use, shipped by the rc) and the packaging tool (our own scripts under scripts/, no
+cargo-packager or Velopack; an updater comes after the first release).
 
 **The manual checklist** (`docs/window-spike/checklist.md` has every item with its expected
 result; the shape): macOS — launch from Terminal and iTerm; the key walk (digits, arrows,

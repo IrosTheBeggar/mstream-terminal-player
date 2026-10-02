@@ -1,5 +1,8 @@
 # ratatui-wgpu, vendored
 
+> This copy ships in the desktop product's releases, by the owner's decision of 2026-10-02; this
+> file is the record of what differs. Filing the changes upstream is a separate task.
+
 Upstream: [ratatui-wgpu 0.6.0](https://crates.io/crates/ratatui-wgpu/0.6.0) from crates.io
 (repository <https://github.com/Jesterhearts/ratatui-wgpu>, commit
 `254e49c4f60e8841258fb2e5c8a89a1d51afe830` per the crate's `.cargo_vcs_info.json`). The root

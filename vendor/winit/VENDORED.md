@@ -1,5 +1,8 @@
 # winit, vendored
 
+> This copy ships in releases of both products, by the owner's decision of 2026-10-02; this
+> file is the record of what differs. Filing the changes upstream is a separate task.
+
 Upstream: [winit 0.30.13](https://crates.io/crates/winit/0.30.13) from crates.io
 (<https://github.com/rust-windowing/winit>). The root `Cargo.toml` swaps it in with
 `[patch.crates-io]`, so the dependency line there still reads `winit = "0.30"`, and
