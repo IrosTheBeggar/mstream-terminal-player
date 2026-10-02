@@ -735,7 +735,7 @@ pub(crate) fn gate_message(e: &ApiError, what: &str) -> String {
     }
 }
 
-// ── Text, time and clipboard helpers shared by the rooms ──────────────────
+// ── Text and time helpers shared by the rooms ────────────────────────────────
 
 /// The first twelve hex digits and an ellipsis — the webapp's fingerprint.
 pub(crate) fn short_id(id: &str) -> String {

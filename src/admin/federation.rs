@@ -1071,8 +1071,6 @@ pub(super) fn start(client: Client) -> Room {
 
 // ── Row facts ────────────────────────────────────────────────────────────────
 
-/// The request's counterpart, for the screen: their self-asserted name,
-/// gated, or the short endpoint id.
 /// Copy a ticket and say how it left: on the clipboard, handed to the
 /// terminal (which may refuse it without a word), or nowhere.
 fn copied_note(ticket: &str) -> String {
@@ -1084,6 +1082,8 @@ fn copied_note(ticket: &str) -> String {
     .to_string()
 }
 
+/// The request's counterpart, for the screen: their self-asserted name,
+/// gated, or the short endpoint id.
 fn request_name(r: &FederationRequest) -> String {
     let name = printable(r.peer_name.as_deref().unwrap_or(""), NAME_MAX);
     if name.is_empty() { short_id(&r.peer_endpoint_id) } else { name }
