@@ -3297,10 +3297,13 @@ double-click; the open window conditions (symbol and emoji faces, Hangul line he
 cover flash after a modal, input before the backend exists); the rest of the release workflow
 (Windows signing once a certificate exists, lifting the hold-back, a notify path that
 fires); a Homebrew cask and a Scoop manifest for the desktop product; the README split into
-two products; the stable player release; on mStream's side, the manifest updater taking the
-desktop names and refusing pre-release tags, the bundler preferring the desktop entry while
-the runtime fetch keeps the terminal one, the launcher probing `features: window` and
-starting the window directly, the three-way coexistence check, and the mStream release. An
+two products; the stable player release; on mStream's side (built 2026-10-02 on two
+branches of the mStream repo, `claude/desktop-player-pin` and `claude/launcher-window`,
+reviewed and green, awaiting their PRs), the manifest updater taking the desktop names and
+refusing pre-release tags, the bundler staging the desktop entry under the terminal file
+name while the runtime fetch keeps the terminal one, the launcher probing
+`features: window`, starting the window directly and falling back to the terminal route on
+exit 3; then the three-way coexistence check, and the mStream release. An
 updater for hand-downloaded zips comes after the first desktop release. Still open for the
 owner: the .app bundle id, a shared lock with the tray, close as quit or keep playing,
 vendored winit in terminal releases without an upstream exit, the packaging tool, Ghostty's
