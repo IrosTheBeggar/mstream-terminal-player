@@ -58,6 +58,26 @@ search's field only once connected) finds it connected if the server answered be
 `MSTREAM_WINDOW_STATS=<path>`, `MSTREAM_WINDOW_DUMP=<dir>` and
 `MSTREAM_WINDOW_SIZE=<cols>,<rows>` are the other levers (PLAN.md, Phase 14).
 
+## Faces
+
+The window host (`src/gui/window/mod.rs`) shows a face: a `Box<dyn Face>` behind the small
+object-safe trait in `src/gui/window/face.rs`, so a program other than the GUI can stand in a
+window of its own without a second host (PLAN.md, Phase 15). The GUI is the first face
+(`GuiFace` in `src/gui/mod.rs`), each method the call the host made into the Gui by name
+before. What every face answers: its `title`, the `frame` half (one frame drawn into the
+window's terminal and the wait until the next, with the window's cursor as its `Host`), the
+`input` half (one translated event, `Flow::Quit` to leave), the caret of the field with the
+keyboard (`caret_at`, which turns the input method and the paste chord on) and the input
+method's composition (`set_composition`), `host_pictures` (the Board that draws pictures as
+textures, and the overlay watch), `finish` (the way out, alone on the no-display path), and
+`render_test`, what the fidelity dump draws into a `TestBackend`. The rest is optional and
+defaulted to nothing: `grid` (100×30), `send_early` (work before the first frame), `copy` (the
+copy chord, swallowed by default), `flush` (what a quit would have saved, for the close
+button), `exit_code` (0 for a clean close; a failed frame and no window keep 1 and 3), and the
+script lever's probes `hit_debug` and `drag_began`. Everything else (the renderer's build, the
+held input and its replay, the input method's placement, the levers, the stats, the instance
+lock) is the host's and no face's business.
+
 ## The two flavours
 
 One codebase, two products, one CLI: an explicit argv means the same in both, and only an empty

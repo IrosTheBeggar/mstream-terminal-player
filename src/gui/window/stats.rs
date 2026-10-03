@@ -30,8 +30,10 @@ use ratatui::layout::{Position, Size};
 /// A backend that says how many cells each draw handed it and, when it is
 /// timing, how long its last flush took; everything else goes straight
 /// through. Deref reaches the wrapped backend's own methods (`get_text`,
-/// `resize`).
-pub(super) struct Counted<B> {
+/// `resize`). Named by the crate, though its module is the window's,
+/// because a face's frame half takes the window's terminal
+/// (`WindowTerminal`) and so names it.
+pub(crate) struct Counted<B> {
     inner: B,
     /// Cells handed to `draw` since [`Counted::take_cells`] last asked.
     cells: u64,
