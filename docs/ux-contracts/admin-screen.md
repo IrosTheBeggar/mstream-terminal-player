@@ -259,9 +259,12 @@ not.
     becomes the bottom, and PgDn past as many lines below as fit a page of
     rows, never fewer than one. Home goes to the top of the log: the
     oldest line from its clock, the bottom line cut there if the rows
-    fall that way. A line taller than the view is read a row at a time,
-    a page of rows for PgUp and PgDn, until its first or its last row is
-    in sight, and a step down onto one brings it in from its first row.
+    fall that way; PgDn from there counts that line's hidden rows in its
+    page, so paging down never skips a row, and shows the line whole
+    first when those rows leave no room for the line below. A line
+    taller than the view is read a row at a time, a page of rows for
+    PgUp and PgDn, until its first or its last row is in sight, and a
+    step down onto one brings it in from its first row.
     A new width re-flows the lines under the same bottom line.
 25. **Levels are filtered in the player**, since the route has no level
     parameter: a line shows when its level is at or above the one chosen.
@@ -647,7 +650,9 @@ is the hub's.
   - **The top of the log may cut the bottom line**, where the rule
     elsewhere keeps the bottom whole: when a line overshoots the view
     near the top, a bottom kept whole leaves the lines above it out of
-    reach, and Home is where the oldest line is read from its clock.
+    reach, and Home is where the oldest line is read from its clock. A
+    page down from there brings the cut line's hidden rows in with the
+    lines below them, so none is skipped on the way to the newest.
   - **No level word on the rows**: the rows never wrote `warn` or
     `error` (the colour says it; the copy writes winston's word), and
     the wrap adds none.

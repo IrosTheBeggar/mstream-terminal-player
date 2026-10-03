@@ -377,10 +377,14 @@ fn stepped(shown: &[&Line], scroll: usize, under: usize, step: Step, fit: Fit) -
             if scroll == 0 {
                 return (0, 0);
             }
-            // The lines below that fit a page, at least one.
+            // The lines below that fit a page, at least one. The rows of
+            // the bottom line still under the view (at the top of the
+            // log) count in that page, so none of them is skipped; when
+            // they leave room for no line below, the page shows that line
+            // whole first.
             let mut n = 1;
             if page {
-                let mut used = 0;
+                let mut used = under;
                 n = 0;
                 for line in &shown[bottom + 1..] {
                     used += fit.height(line);
@@ -388,6 +392,9 @@ fn stepped(shown: &[&Line], scroll: usize, under: usize, step: Step, fit: Fit) -
                         break;
                     }
                     n += 1;
+                }
+                if n == 0 && under > 0 {
+                    return (scroll, 0);
                 }
                 n = n.max(1);
             }
@@ -527,8 +534,10 @@ impl LogModel {
     /// Move the view. Up and the wheel's notch go a line older: the line
     /// above the bottom one becomes the bottom, whole. A page goes past
     /// the lines the view shows whole, so the line cut at its top becomes
-    /// the bottom; down, past as many lines as fit a page; never fewer
-    /// than one. A line taller than the view is the exception: it goes by
+    /// the bottom; down, past as many lines as fit a page below the rows
+    /// a line cut at the bottom still hides, never fewer than one, unless
+    /// those rows leave no room, when the page shows that line whole. A
+    /// line taller than the view is the exception: it goes by
     /// rows (one, or a page) until its first row, or its last, is in
     /// sight, and a step down onto one brings it in from its first row.
     /// The top of the log goes no further, and reaching the newest line's
@@ -1949,6 +1958,99 @@ mod tests {
         assert_eq!(bottom(&mut log, &mut ui), "09:00:11  line 11");
         log.wheel(false);
         assert!(log.model.following());
+    }
+
+    #[test]
+    fn a_page_down_from_the_top_shows_the_rows_of_the_line_cut_at_the_bottom_first() {
+        // A line of four rows, one of five, then ten of one: the top of the
+        // log in seven rows cuts the second line after its third row.
+        let lines = |third: &str| {
+            let mut entries = vec![
+                entry(1, "info", "one\none b\none c\none d"),
+                entry(2, "info", "two\ntwo b\ntwo c\ntwo d\ntwo e"),
+                entry(3, "info", third),
+            ];
+            entries.extend((4..=12).map(|s| entry(s, "info", &format!("line {s}"))));
+            tail(entries, 12)
+        };
+        let mut log = LogUi::new(None).utc();
+        log.model.take(lines("line 3"));
+        let mut ui = Surface::new();
+        seven(&mut log, &mut ui);
+        log.key(key(KeyCode::Home), 7);
+        assert_eq!(
+            rows(&seven(&mut log, &mut ui), 5..=7),
+            ["09:00:02  two", "          two b", "          two c"]
+        );
+        // The page counts the two rows still under the view: they come
+        // in, and five lines below them.
+        log.key(key(KeyCode::PageDown), 7);
+        assert_eq!(
+            rows(&seven(&mut log, &mut ui), 1..=7),
+            [
+                "          two d",
+                "          two e",
+                "09:00:03  line 3",
+                "09:00:04  line 4",
+                "09:00:05  line 5",
+                "09:00:06  line 6",
+                "09:00:07  line 7",
+            ]
+        );
+
+        // When the line below would not fit beside those rows, the page
+        // stands the cut line whole at the bottom first.
+        let mut log = LogUi::new(None).utc();
+        log.model.take(lines("three\nthree b\nthree c\nthree d\nthree e\nthree f"));
+        seven(&mut log, &mut ui);
+        log.key(key(KeyCode::Home), 7);
+        log.key(key(KeyCode::PageDown), 7);
+        assert_eq!(
+            rows(&seven(&mut log, &mut ui), 1..=7),
+            [
+                "          one c",
+                "          one d",
+                "09:00:02  two",
+                "          two b",
+                "          two c",
+                "          two d",
+                "          two e",
+            ]
+        );
+        log.key(key(KeyCode::PageDown), 7);
+        assert_eq!(
+            rows(&seven(&mut log, &mut ui), 1..=7),
+            [
+                "09:00:03  three",
+                "          three b",
+                "          three c",
+                "          three d",
+                "          three e",
+                "          three f",
+                "09:00:04  line 4",
+            ]
+        );
+
+        // Paging down from the top to the newest passes every row.
+        let mut seen = std::collections::HashSet::new();
+        log.key(key(KeyCode::Home), 7);
+        for _ in 0..20 {
+            seen.extend(rows(&seven(&mut log, &mut ui), 1..=7));
+            if log.model.following() {
+                break;
+            }
+            log.key(key(KeyCode::PageDown), 7);
+        }
+        assert!(log.model.following());
+        let mut every: Vec<String> = ["one", "one b", "one c", "one d", "two", "two b", "two c", "two d", "two e"]
+            .into_iter()
+            .chain(["three", "three b", "three c", "three d", "three e", "three f"])
+            .map(String::from)
+            .collect();
+        every.extend((4..=12).map(|s| format!("line {s}")));
+        for text in every {
+            assert!(seen.iter().any(|row| row.ends_with(&format!("  {text}"))), "{text} never shown: {seen:?}");
+        }
     }
 
     #[test]
