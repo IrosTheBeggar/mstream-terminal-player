@@ -3593,13 +3593,16 @@ pub(crate) mod tests {
                 ("gui.tips.base", text("gui.tips.base")),
                 ("gui.admin.tips_hall", text("gui.admin.tips_hall")),
                 ("gui.admin.tips_log", text("gui.admin.tips_log")),
-                ("gui.admin.tips_log_menu", text("gui.admin.tips_log_menu")),
                 ("gui.admin.tips_hall with the focus tail", tail),
             ];
             for (key, line) in lines {
                 let cells = crate::kit::width(&line);
                 assert!(cells <= 99, "{code}: {key} is {cells} cells: {line}");
             }
+            // The log has no level to choose since 2026-10-02, so its
+            // line names no Enter, in any locale's word for the key.
+            let log = text("gui.admin.tips_log");
+            assert!(!["Enter", "Entrée", "Invio"].iter().any(|key| log.contains(key)), "{code}: {log}");
         }
     }
 

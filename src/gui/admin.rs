@@ -2070,6 +2070,7 @@ mod tests {
         assert_eq!(gui.admin.focus, Focus::Log);
         let buf = render_at(&mut gui, 176, 46);
         assert_eq!(from(&buf, 1, 45).trim_end(), t!("gui.admin.tips_log"));
+        assert!(!t!("gui.admin.tips_log").contains("Enter"));
         press(&mut gui, KeyCode::Enter);
         assert_eq!(render_at(&mut gui, 176, 46), buf, "Enter opens nothing");
         assert_eq!(gui.admin.focus, Focus::Log);
