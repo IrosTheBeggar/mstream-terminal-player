@@ -205,16 +205,16 @@ not.
     - **Band**, narrower but 48 rows and taller: the room keeps the
       window's width and stops nine rows short; a `─` row from x 19 to the
       third column from the right edge, then the log's header and seven
-      lines.
+      rows of lines, which wrapping may fill with fewer lines than seven.
     - **Room**, anything smaller: the log is a room of its own on the
       hallway's Log row, drawn at x 19 from row 2 with a blank row under
       its header.
 
     The rules beside and above the log turn the accent while it has the
     focus. At 136×52 with the footer off the band's rows are the room's
-    note on 37, the rule on 38, the header on 39 and lines on 40–46; at
-    176×46 with the footer on, the room's note is on row 39, the rule at
-    x 118, the header at (120, 2) and lines from row 4.
+    note on 37, the rule on 38, the header on 39 and the lines' rows on
+    40–46; at 176×46 with the footer on, the room's note is on row 39, the
+    rule at x 118, the header at (120, 2) and the lines' rows from row 4.
 22. **The header**: `•` in the ok colour and `following` in the ok colour,
     BOLD — or `• paused` dim, the word a target that resumes following —
     then a dim ` · ` and the level with a dim `▾` (`v` on the legacy
@@ -259,7 +259,8 @@ not.
     becomes the bottom, and PgDn past as many lines below as fit a page of
     rows, never fewer than one. Home goes to the top of the log: the
     oldest line from its clock, the bottom line cut there if the rows
-    fall that way; PgDn from there counts that line's hidden rows in its
+    fall that way; a ↓ or a notch down from there first shows that cut
+    line whole, without moving by a line; PgDn from there counts that line's hidden rows in its
     page, so paging down never skips a row, and shows the line whole
     first when those rows leave no room for the line below. A line
     taller than the view is read a row at a time, a page of rows for
