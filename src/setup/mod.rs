@@ -1800,8 +1800,11 @@ fn run_tui(mut wizard: Wizard) -> i32 {
     }
 }
 
-/// The terminal's loop: a frame, then input until the frame's wait runs
-/// out — everything queued is drained before the next draw.
+/// The terminal's loop: a frame, then the first input to arrive within the
+/// frame's wait, with everything queued behind it drained before the next
+/// draw. A zero wait is a progress poll that is due: the loop redraws at
+/// once and reads no input first, as it always did, so the poll's op is
+/// dispatched before any pending key can queue one of its own.
 fn event_loop(
     terminal: &mut crate::kit::frames::PageTerminal,
     wizard: &mut Wizard,
@@ -1817,7 +1820,7 @@ fn event_loop(
             to_worker,
             from_worker,
         )?;
-        if !event::poll(wait)? {
+        if wait.is_zero() || !event::poll(wait)? {
             continue;
         }
         // Drain everything queued before the next draw: mouse capture arms
