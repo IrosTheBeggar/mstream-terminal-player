@@ -190,9 +190,10 @@ not.
     ends at that press's cell, and the press then acts as any press. A
     press on the scroll bar holds the pointer the same way while its arrow
     repeats or its thumb is dragged: the room hears nothing of the hand
-    until the release, which ends the hold wherever it lands, and a press
-    while it holds lets it go and then acts as any press. The hand cursor
-    follows whichever surface reports a clickable under the pointer.
+    until the release, which ends the hold wherever it lands, a press
+    while it holds lets it go and then acts as any press, and the hold
+    never outlives the log either. The hand cursor follows whichever
+    surface reports a clickable under the pointer.
 20. **A GUI modal or the header's server menu owns the pointer whole while
     open**, as elsewhere in the GUI.
 
@@ -303,11 +304,10 @@ not.
     ` · Tab focus · L log` — only `L log` while the room keeps Tab, and
     nothing while it holds a modal or a text field — the tail only when
     the whole line fits the window, otherwise the room's hint alone; in
-    the log, its keys — `y` copy and `d` download among them — or the
-    menu's while the menu is open. Every line of the tab's own fits 99
-    cells in every locale. A focused room's own hint is the room's,
-    written for the hub's full width, and may not: the tail goes first,
-    then the window's edge cuts the hint.
+    the log, its keys (`y` copy and `d` download among them). Every line
+    of the tab's own fits 99 cells in every locale. A focused room's own
+    hint is the room's, written for the hub's full width, and may not: the
+    tail goes first, then the window's edge cuts the hint.
 
 ### The window
 
@@ -718,9 +718,11 @@ from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
     lines does, so a hand that wanders into the room while an arrow
     repeats or the thumb is dragged tells the room nothing, and the
     release there ends the hold; a press while one is held means its
-    release was lost, and lets it go before acting. The kit gained
-    `Surface::holding_bar` for it, and `scroll_items`, its scroll bar
-    with the thumb sized by items rather than by the bar's rows.
+    release was lost, and lets it go before acting. The hold lets go with
+    the log, as the drag does, and a press the server menu takes arms no
+    hold beneath it. The kit gained `Surface::holding_bar` for it, and
+    `scroll_items`, its scroll bar with the thumb sized by items rather
+    than by the bar's rows.
   - **The level filter and its menu are gone** (clause 25): the header's
     `info ▾`, the Dropdown, Enter's way into it and its footer line. The
     log shows every line the ring holds — http, verbose, debug and silly
