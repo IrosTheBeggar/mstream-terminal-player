@@ -598,6 +598,8 @@ the composition; `HostedRoom` carries the composition down and the caret up to t
 surface, where the window reads it. The follow-up: a hosted room's caret holds steady rather
 than blink, since the GUI times its frames by its own surface's blink clock.
 
+> **Shipped as v0.11.0 on 2026-10-03 (release run 37092102068: both families, the three packages, the app notarized and stapled, Homebrew and Scoop bumped, 21 assets), with the log's wrapped lines, scroll bar, highlight, copy and download, and the hosted rooms' fields taking paste and the input method in the window.**
+
 **Log copy, download and highlight ✅ 2026-10-02** — the Admin tab's server log gains its ways
 out (contract clauses 29-34). A press-drag across its lines highlights whole lines, held by
 sequence number so arrivals and the ring's drops never move it, through a new kit element, the
