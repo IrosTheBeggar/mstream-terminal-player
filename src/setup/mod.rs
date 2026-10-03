@@ -1868,30 +1868,9 @@ fn event_loop(
                     let at = Position { x: mouse.column, y: mouse.row };
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            if !wizard.ui.begin_press(at) {
-                                continue;
+                            if let Some(outcome) = press(wizard, at) {
+                                return Ok(outcome);
                             }
-                            // Blur commits an in-progress rename: a click
-                            // anywhere outside the active chip ends the
-                            // edit (Enter's semantics), then the click
-                            // proceeds as normal.
-                            if let Some((row, _)) = &wizard.editing {
-                                let row = *row;
-                                let on_chip = wizard.ui.clicks.iter().any(|(rect, act)| {
-                                    *act == Act::RenameFolder(row) && rect.contains(at)
-                                });
-                                if !on_chip {
-                                    wizard.finish_rename();
-                                }
-                            }
-                            if let Some(act) = wizard.ui.hit(at) {
-                                if let Some(outcome) = wizard.act(act) {
-                                    return Ok(outcome);
-                                }
-                            }
-                            // A press on a scrollbar arms its interaction
-                            // (endcaps hold-repeat, the track a thumb drag).
-                            wizard.ui.arm_bars(at);
                         }
                         // A scrollbar interaction CAPTURES the mouse:
                         // while an arrow is held or the thumb dragged,
@@ -1938,6 +1917,34 @@ fn event_loop(
             }
         }
     }
+}
+
+/// A left press, the way the wizard's loop takes it. Apple Terminal's
+/// phantom re-click is swallowed whole; a press outside the chip being
+/// renamed commits the rename first (blur is Enter's semantics), then the
+/// press goes on as normal: what it hit is dispatched, and a scrollbar
+/// under it arms its interaction (endcaps hold-repeat, the track a thumb
+/// drag) unless a click drawn over the bar took the press (the kit's
+/// rule). `Some` when an action ended the wizard.
+fn press(wizard: &mut Wizard, at: Position) -> Option<Outcome> {
+    if !wizard.ui.begin_press(at) {
+        return None;
+    }
+    if let Some((row, _)) = &wizard.editing {
+        let row = *row;
+        let on_chip =
+            wizard.ui.clicks.iter().any(|(rect, act)| *act == Act::RenameFolder(row) && rect.contains(at));
+        if !on_chip {
+            wizard.finish_rename();
+        }
+    }
+    if let Some(act) = wizard.ui.hit(at)
+        && let Some(outcome) = wizard.act(act)
+    {
+        return Some(outcome);
+    }
+    wizard.ui.arm_bars(at);
+    None
 }
 
 /// Tab (or Right from the end of the line): accept the picked suggestion,
@@ -4214,4 +4221,71 @@ pub(crate) mod tests {
         assert!(matches!(wizard.queued, Some(Op::CreateAdmin)));
     }
 
+    /// The folders table under the path modal: a press where its bar
+    /// stands neither steps nor holds an arrow nor drags the thumb (the
+    /// screen beneath a modal is inert, its bar dropped with every rect it
+    /// registered before the modal draws), and the modal, which no press
+    /// outside it closes, stays up. With the modal gone the bar answers
+    /// again.
+    #[test]
+    fn a_press_on_the_folders_bar_under_the_path_modal_arms_nothing() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        for i in 0..40 {
+            wizard.folders.push(folder(&format!("/srv/music/{i:02}")));
+        }
+        sync_names(&mut wizard.folders);
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut draw = |wizard: &mut Wizard| {
+            terminal.draw(|frame| render(frame, wizard)).unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let buf = draw(&mut wizard);
+        let (x, up) = (0..buf.area.width)
+            .flat_map(|x| (0..buf.area.height - 1).map(move |y| (x, y)))
+            .find(|&(x, y)| buf[(x, y)].symbol() == "▲" && matches!(buf[(x, y + 1)].symbol(), "█" | "│"))
+            .expect("the table's bar");
+        let down = (up + 1..buf.area.height).find(|&y| buf[(x, y)].symbol() == "▼").expect("its ▼");
+        let track = (up + down) / 2;
+        wizard.tscroll = 10;
+        let wait = || std::thread::sleep(kit::ARROW_DELAY + Duration::from_millis(30));
+
+        // ▲ under the path modal: nothing beneath takes the press.
+        wizard.modal = Modal::PathEntry(PathDraft::default());
+        draw(&mut wizard);
+        assert!(press(&mut wizard, Position::new(x, up)).is_none());
+        assert!(matches!(wizard.modal, Modal::PathEntry(_)), "the modal stays up");
+        assert!(!wizard.ui.holding_bar(), "and the arrow beneath held nothing");
+        wait();
+        assert!(wizard.ui.hold_action().is_none(), "so nothing repeats");
+        wizard.ui.release();
+
+        // The track under the modal: no jump, no thumb.
+        press(&mut wizard, Position::new(x, track));
+        assert!(wizard.ui.drag_action(Position::new(x, down - 1)).is_none(), "no thumb follows the hand");
+        wizard.ui.release();
+        assert_eq!(wizard.tscroll, 10, "the table never moved");
+
+        // The modal gone, ▲ steps and repeats, and the track jumps and
+        // drags the thumb.
+        wizard.act(Act::PathCancel);
+        draw(&mut wizard);
+        press(&mut wizard, Position::new(x, up));
+        assert_eq!(wizard.tscroll, 9);
+        assert!(wizard.ui.holding_bar());
+        wait();
+        let repeat = wizard.ui.hold_action().expect("the repeat");
+        wizard.act(repeat);
+        assert_eq!(wizard.tscroll, 8);
+        wizard.ui.release();
+        draw(&mut wizard);
+        press(&mut wizard, Position::new(x, up + 1));
+        assert_eq!(wizard.tscroll, 0, "the track's first cell is the top");
+        let thumb = wizard.ui.drag_action(Position::new(x, down - 1)).expect("the thumb follows the hand");
+        wizard.act(thumb);
+        assert!(wizard.tscroll > 10, "down the table");
+        wizard.ui.release();
+    }
 }
