@@ -2859,21 +2859,18 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                         gui.app.focus = crate::tui::app::Focus::Browser;
                         gui.queue_view.stow();
                     }
-                    // Whether the header's server menu was open, asked
-                    // before the hit closes it: its rows, and its catcher
-                    // over the whole frame, take every press, so a scroll
-                    // bar beneath arms no held arrow and no thumb's drag
-                    // for one (admin-screen contract, clause 20).
-                    let menu = gui.servers.drop_open;
                     if let Some(act) = gui.ui.hit(at)
                         && gui.act(act)
                     {
                         ctx.saver.flush(&gui.app);
                         return Flow::Quit;
                     }
-                    if !menu {
-                        gui.ui.arm_bars(at);
-                    }
+                    // A scroll bar arms only where no click drawn over it
+                    // took the press: the header's server menu's catcher,
+                    // a modal's guard (the kit's rule), so the press that
+                    // closes either never starts the list beneath it
+                    // scrolling (admin-screen contract, clause 20).
+                    gui.ui.arm_bars(at);
                     // A bar it armed on the Admin log lets go with the log.
                     admin::note_bar(gui, at);
                     // A press on a drag region takes it, unless a click
@@ -3846,6 +3843,164 @@ mod tests {
         gui.act(Act::SheetClose);
         assert_eq!(wait(&mut gui), HOT, "the frame the modal closes on");
         assert!(wait(&mut gui) > HOT);
+    }
+
+    /// A mouse event through the loop's input half, as the player takes it.
+    fn pointer_at(gui: &mut Gui, kind: MouseEventKind, x: u16, y: u16) {
+        let event = ratatui::crossterm::event::MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
+        let mut ctx = quiet_ctx(gui);
+        input(gui, &mut ctx, TermEvent::Mouse(event));
+    }
+
+    fn press_at(gui: &mut Gui, x: u16, y: u16) {
+        pointer_at(gui, MouseEventKind::Down(MouseButton::Left), x, y);
+    }
+
+    fn release_at(gui: &mut Gui, x: u16, y: u16) {
+        pointer_at(gui, MouseEventKind::Up(MouseButton::Left), x, y);
+    }
+
+    /// The rows of the ▲ and the ▼ of the bar standing in column `x`.
+    fn bar_ends(buf: &ratatui::buffer::Buffer, x: u16) -> (u16, u16) {
+        let rows = buf.area.top()..buf.area.bottom();
+        let up = rows.clone().find(|&y| buf[(x, y)].symbol() == "▲").expect("the bar's ▲");
+        let down = rows.filter(|&y| y > up).find(|&y| buf[(x, y)].symbol() == "▼").expect("the bar's ▼");
+        (up, down)
+    }
+
+    /// Past the pause before a held arrow's first repeat.
+    fn past_the_hold_delay() {
+        std::thread::sleep(crate::kit::ARROW_DELAY + Duration::from_millis(30));
+    }
+
+    /// The Files room on a session, sixty tracks long, with the queue
+    /// panel closed: its list's bar stands alone, at the content's right.
+    fn long_files_gui() -> Gui {
+        let mut gui = Gui::new(Config::default(), false, App::new(Some("http://host:3000".into()), None, None));
+        gui.app.connected = true;
+        gui.app.session.server = "http://host:3000".into();
+        gui.app.session.server_id = "http://host:3000".into();
+        gui.queue_open = false;
+        gui.act(Act::Nav(FILES_NAV));
+        let tracks = (0..60).map(|i| Entry::Track {
+            label: format!("Track {i:02}"),
+            track: Box::new(track(&format!("music/{i:02}.flac"), &format!("Track {i:02}"), 200.0)),
+        });
+        gui.app.files.set(tracks.collect());
+        gui.pending.clear();
+        gui
+    }
+
+    /// The track-actions sheet's backdrop is a click registered over the
+    /// whole frame after the list's bar: the press there closes the sheet
+    /// and nothing else (the kit's rule) — no step, no held arrow, no
+    /// jump, no thumb — and with the sheet gone the bar answers again.
+    #[test]
+    fn a_press_on_a_lists_bar_under_the_track_actions_sheet_only_closes_the_sheet() {
+        let mut gui = long_files_gui();
+        let buf = draw_buffer(&mut gui);
+        let x = (0..buf.area.width)
+            .find(|&x| {
+                (0..buf.area.height - 1)
+                    .any(|y| buf[(x, y)].symbol() == "▲" && matches!(buf[(x, y + 1)].symbol(), "█" | "│"))
+            })
+            .expect("the list's bar");
+        let (up, down) = bar_ends(&buf, x);
+        let track = (up + down) / 2;
+        gui.files_view.scroll = 10;
+
+        // ▲ under the sheet: the backdrop closes it, and the arrow beneath
+        // neither steps nor holds.
+        gui.act(Act::More(Tab::Files, 0));
+        draw_buffer(&mut gui);
+        assert_eq!(gui.ui.hit(Position::new(x, up)), Some(Act::SheetClose), "the bar stands under the backdrop");
+        press_at(&mut gui, x, up);
+        assert!(!actions::modal_open(&gui), "the press closed the sheet");
+        assert!(!gui.ui.holding_bar(), "and held no arrow");
+        past_the_hold_delay();
+        assert!(gui.ui.hold_action().is_none(), "so nothing repeats");
+        release_at(&mut gui, x, up);
+        assert_eq!(gui.files_view.scroll, 10, "nothing stepped");
+
+        // The track under the sheet: no jump, and no thumb follows the hand.
+        gui.act(Act::More(Tab::Files, 0));
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, track);
+        assert!(!actions::modal_open(&gui));
+        pointer_at(&mut gui, MouseEventKind::Drag(MouseButton::Left), x, down - 1);
+        release_at(&mut gui, x, down - 1);
+        assert_eq!(gui.files_view.scroll, 10, "the view never moved");
+
+        // The sheet gone, ▲ steps and repeats, and the track jumps and
+        // drags the thumb.
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, up);
+        assert_eq!(gui.files_view.scroll, 9);
+        assert!(gui.ui.holding_bar());
+        past_the_hold_delay();
+        let repeat = gui.ui.hold_action().expect("the repeat");
+        gui.act(repeat);
+        assert_eq!(gui.files_view.scroll, 8);
+        release_at(&mut gui, x, up);
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, up + 1);
+        assert_eq!(gui.files_view.scroll, 0, "the track's first cell is the top");
+        pointer_at(&mut gui, MouseEventKind::Drag(MouseButton::Left), x, down - 1);
+        assert!(gui.files_view.scroll > 10, "the thumb rode the hand down");
+        release_at(&mut gui, x, down - 1);
+    }
+
+    /// The add-server form's guard covers the whole frame, the queue
+    /// panel's bar among it: the guard swallows the press (the form stays
+    /// up) and the bar beneath arms nothing; with the form gone it does.
+    #[test]
+    fn a_press_on_the_queues_bar_under_the_add_server_form_arms_nothing_beneath_it() {
+        use crate::tui::app::{Origin, Queued};
+        let mut gui = long_files_gui();
+        gui.app.files.set(Vec::new());
+        gui.queue_open = true;
+        gui.app.queue.items = (0..20)
+            .map(|i| Queued {
+                origin: Origin { server: "http://host:3000".into(), peer: None },
+                dj: None,
+                track: track(&format!("q/{i:02}.flac"), &format!("Queued {i:02}"), 200.0),
+            })
+            .collect();
+        let buf = draw_buffer(&mut gui);
+        let x = buf.area.width - 1;
+        let (up, down) = bar_ends(&buf, x);
+        let track = (up + down) / 2;
+        gui.queue_view.scroll = 5;
+
+        // ▲ under the form: its guard has the press, nothing beneath holds.
+        servers::open_add(&mut gui);
+        draw_buffer(&mut gui);
+        assert_eq!(gui.ui.hit(Position::new(x, up)), Some(Act::Guard), "the bar stands under the form's guard");
+        press_at(&mut gui, x, up);
+        assert!(gui.servers.modal_open(), "the guard swallowed the press");
+        assert!(!gui.ui.holding_bar(), "and the arrow beneath held nothing");
+        past_the_hold_delay();
+        assert!(gui.ui.hold_action().is_none());
+        release_at(&mut gui, x, up);
+
+        // The track under the form: no jump, no thumb.
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, track);
+        pointer_at(&mut gui, MouseEventKind::Drag(MouseButton::Left), x, down - 1);
+        release_at(&mut gui, x, down - 1);
+        assert_eq!(gui.queue_view.scroll, 5, "the queue never moved");
+
+        // The form gone, ▼ steps and repeats.
+        gui.act(Act::FormCancel);
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, down);
+        assert_eq!(gui.queue_view.scroll, 6);
+        assert!(gui.ui.holding_bar());
+        past_the_hold_delay();
+        let repeat = gui.ui.hold_action().expect("the repeat");
+        gui.act(repeat);
+        assert_eq!(gui.queue_view.scroll, 7);
+        release_at(&mut gui, x, down);
     }
 
     #[test]
