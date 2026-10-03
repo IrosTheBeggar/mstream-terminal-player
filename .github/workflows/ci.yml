@@ -91,6 +91,15 @@ jobs:
           echo "qr --window: exit $code"
           test "$code" -eq 2
 
+      # The terminal flavour's --version is one line: no features line at all,
+      # so a launcher reading line 2 sees nothing and keeps its terminal route.
+      - name: One version line (Linux, terminal)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          target/release/mstream-player --version
+          test "$(target/release/mstream-player --version | wc -l)" -eq 1
+
       - name: Build (desktop)
         if: runner.os == 'Linux'
         run: cargo build --release --features desktop
@@ -115,6 +124,18 @@ jobs:
             echo "$page --window: exit $code"
             test "$code" -eq 3
           done
+
+      # The desktop flavour's second line, exactly: mStream's launcher gates
+      # its routes on these words (`window` for the player's window,
+      # `window-pages` for the wizard and Quick Connect in theirs), and
+      # release.yml never reads --version, so this and the main.rs unit test
+      # are the only gates on the line.
+      - name: The features line (Linux, desktop)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          target/release/mstream-player --version
+          test "$(target/release/mstream-player --version | sed -n 2p)" = 'features: window window-pages'
 
   # The browser build has no test runner, but it has a type system: a plain
   # check catches the native-only import or the unhandled worker command that

@@ -224,7 +224,13 @@ use clap::{Args, Parser, Subcommand};
 /// (`-V` is clap's short form): both flags answer the same.
 #[cfg(not(target_arch = "wasm32"))]
 const VERSION: &str = if cfg!(feature = "window") {
-    concat!(env!("CARGO_PKG_VERSION"), "\nfeatures: window")
+    // One second line, space-separated words, never a third: mStream's
+    // launcher reads only line 2, strips `features:` and splits on commas or
+    // whitespace, so `window` still names the desktop build to every launcher
+    // that ever read it, and `window-pages` tells one that knows the word that
+    // `setup --window` and `qr --window` open the wizard and the Quick
+    // Connect page in windows of their own (exit 3 when none can open).
+    concat!(env!("CARGO_PKG_VERSION"), "\nfeatures: window window-pages")
 } else {
     env!("CARGO_PKG_VERSION")
 };
@@ -798,7 +804,14 @@ mod tests {
             let mut lines = text.lines();
             assert_eq!(lines.next(), Some(first.as_str()), "{flag}: {text:?}");
             #[cfg(feature = "window")]
-            assert_eq!(lines.next(), Some("features: window"), "{flag}: {text:?}");
+            {
+                let second = lines.next().expect("the window adds a second line");
+                assert_eq!(second, "features: window window-pages", "{flag}: {text:?}");
+                // The prefix and the first word are what every launcher that
+                // ever read this line keys on; the pages' word rides behind.
+                assert!(second.starts_with("features: window"), "{flag}: {text:?}");
+                assert!(second.split_whitespace().any(|w| w == "window"), "{flag}: {text:?}");
+            }
             assert_eq!(lines.next(), None, "{flag}: {text:?}");
         }
         let rendered = Cli::command().render_version();

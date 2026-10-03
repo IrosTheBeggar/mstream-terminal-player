@@ -103,7 +103,9 @@ player's config directory, so a second one prints the launcher's "already open" 
 it) and leaves; whether to share the tray's lock instead is open. The sidecar's `host` reads
 `window` for a player in its own window (`gui --window` or the desktop empty argv) and the
 terminal's name otherwise. `mstream-player --version` (and `-V`) keeps its first line
-`mstream-player X.Y.Z`; a build with the window adds `features: window` on a second. When the
+`mstream-player X.Y.Z`; a build with the window adds `features: window window-pages` on a second
+(one line of space-separated words: `window` for the player's own window, `window-pages` for the
+setup wizard's and Quick Connect's; a launcher splits the line and looks for the word it needs). When the
 window cannot open at all (no display, libxkbcommon-x11 missing, no GPU adapter or backend,
 an event loop that will not start) the player exits 3, which a launcher takes as "use the
 terminal route", and so do `setup --window` and `qr --window` (ci.yml checks both with no
