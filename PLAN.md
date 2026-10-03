@@ -1631,7 +1631,8 @@ RELEASE exists — so it's merge, then tag, then integrate.
    one language switch — the released-bytes sanity pass.
 4. Publish (non-draft, non-prerelease) — that's the trigger
    `notify-mstream.yml` requires to signal the mStream repo, and
-   `update-tap.yml` refreshes the Homebrew tap.
+   `update-tap.yml` refreshes the Homebrew tap. (The notify-mstream.yml
+   trigger never fired — see Phase 14, 2026-10-03.)
 
 **9c — Integrate into the mStream binaries** (mStream repo).
 1. ✅ Manifest bump (mStream PR #907, 2026-08-25): pinned `v0.4.0`, all
@@ -3450,19 +3451,22 @@ tarball, X11 and Wayland, the desktop entry's app_id); the few macOS checklist r
 unrun; Korean. After the first desktop release: a Windows code-signing certificate, a
 Homebrew cask and a Scoop manifest for the desktop zip, an updater for the hand-downloaded
 packages, and the wider symbol face (Miscellaneous Symbols, Dingbats) once a subsetter is
-available. The mStream integration is parked behind other work.
+available. The mStream integration, parked behind other work at the time, landed on
+2026-10-03 (under From here).
 
 **From here, in order.** Done since the list was first written: the vendored-crate review
 (they ship, above), the window compiled out of the terminal flavour, the open window
 conditions (lanes 14 and 15), the hold-back (lane 9) and its rc run, and the README split into
-two products (2026-10-02). The release gate and what follows it are under Shipping. Parked
-behind other work (2026-10-02): on mStream's side (built 2026-10-02 on two branches of the
-mStream repo, `claude/desktop-player-pin` and `claude/launcher-window`, reviewed and green,
-awaiting their PRs), the manifest updater taking the desktop names and refusing pre-release
-tags, the bundler staging the desktop entry under the terminal file name while the runtime
-fetch keeps the terminal one, the launcher probing `features: window`, starting the window
-directly and falling back to the terminal route on exit 3; then a notify path that fires,
-the three-way coexistence check, and the mStream release. Still open for the owner: a
+two products (2026-10-02). The release gate and what follows it are under Shipping. On
+mStream's side, merged 2026-10-03 after being parked a day behind other work: the manifest
+updater taking the desktop names and refusing pre-release tags, and the bundler staging the
+desktop entry under the terminal file name while the runtime fetch keeps the terminal one
+(mStream PR #1049); the launcher probing `features: window`, starting the window directly
+and falling back to the terminal route on exit 3 (mStream PR #1050); and the pins bumped to
+v0.11.0, the first stable tag with the `-raw` names (mStream PR #1052, whose bundle legs
+staged the desktop binary on macOS arm64 and x64, Windows x64 and Linux x64, and the
+terminal one on Linux arm64). The notify path that fires is the mStream notice below. Left
+on that side: the three-way coexistence check and the mStream release. Still open for the owner: a
 shared lock with the tray, close as quit or keep playing, Ghostty's role for the setup and
 admin faces (the research of 2026-10-02 found all three faces can open in a window behind a
 Face trait, about four lanes; parked with the mStream work). Settled on 2026-10-02: vendored
@@ -3470,6 +3474,19 @@ winit in terminal releases (it ships, above), the Windows certificate (after the
 desktop release), the .app bundle id (io.mstream.player, the codesign identifier already in
 use, shipped by the rc) and the packaging tool (our own scripts under scripts/, no
 cargo-packager or Velopack; an updater comes after the first release).
+
+**The mStream notice (2026-10-03).** The "notify path that fires" above: notify-mstream.yml
+never fired. It listened for `release: published`, and the Release is created inside
+release.yml with the workflow's own GITHUB_TOKEN, whose events, a workflow_dispatch or
+repository_dispatch aside, start no workflows — zero runs since 2026-08-20, and every pin bump
+to date was done by hand on the mStream side (the updater script run locally through v0.5.0, a
+workflow_dispatch of update-mstream-player-manifest from v0.6.0 on). The dispatch now runs as
+release.yml's `notify` job, beside `channels` and gated the same way, on stable tags only (a
+pre-release is not an adoption candidate, and mStream's updater refuses it anyway);
+notify-mstream.yml is the hand crank, and both run scripts/notify-mstream.sh, which validates
+the tag the way mStream does and fails loud with GitHub's answer when the token is refused.
+The proof: hand-crank the tag mStream currently pins (an older one would open a downgrade PR
+there), and its workflow answers "pins already current — nothing to do".
 
 **The manual checklist** (`docs/window-spike/checklist.md` has every item with its expected
 result; the shape): macOS — launch from Terminal and iTerm; the key walk (digits, arrows,
