@@ -186,6 +186,10 @@ pub(crate) struct AdminUi {
     pub(super) log_at: Option<Rect>,
     /// A press began in the room: its drag and release are the room's.
     pressed: bool,
+    /// The scroll bar the last press armed is the log's: its held arrow or
+    /// dragged thumb lets go with the log, as a grip on the lines does. A
+    /// bar of another list's holds on wherever that list stands.
+    bar_held: bool,
 }
 
 impl AdminUi {
@@ -205,6 +209,7 @@ impl AdminUi {
             room_at: Rect::default(),
             log_at: None,
             pressed: false,
+            bar_held: false,
         }
     }
 }
@@ -420,10 +425,11 @@ fn settle(gui: &mut Gui, width: u16, height: u16) -> Layout {
     let rows = hall_rows(lay.log_row && session).len();
     admin.cursor = admin.cursor.min(rows - 1);
     // A log off the screen (hidden by `L`, or the Log room folded back)
-    // lets go of a press held on it, so a drag that outlives it moves
-    // nothing.
+    // lets go of a press held on it, on its lines or its bar, so a drag
+    // that outlives it moves nothing, a held arrow steps nothing, and the
+    // room has the pointer again.
     if !log {
-        admin.log.let_go();
+        let_go(gui);
     }
     lay
 }
@@ -620,7 +626,6 @@ fn draw_log(frame: &mut Frame, gui: &mut Gui, lay: &Layout, key_hints: bool) {
     gui.admin.log_at = Some(rect);
     gui.admin.log.model.mark_seen();
 }
-
 
 // ── Keys ────────────────────────────────────────────────────────────────────
 
@@ -840,10 +845,10 @@ fn take_log_note(gui: &mut Gui) {
 /// The window's copy chord (Cmd+C on a Mac, Ctrl+Shift+C or Ctrl+Insert
 /// elsewhere) is the log's `y` while the log on screen has the keys or a
 /// highlight stands, and nothing laid over the screen holds them: no GUI
-/// modal, no room's modal. To the header's server menu it
-/// is a key like any other, which closes the menu and goes on (servers.rs),
-/// on every screen. True when it changed anything (a copy, the menu
-/// closed), so the window draws again.
+/// modal, no room's modal. To the header's server menu it is a key like
+/// any other, which closes the menu and goes on (servers.rs), on every
+/// screen. True when it changed anything (a copy, the menu closed), so the
+/// window draws again.
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 pub(super) fn copy_chord(gui: &mut Gui) -> bool {
     let closed = std::mem::take(&mut gui.servers.drop_open);
@@ -862,16 +867,41 @@ pub(super) fn copy_chord(gui: &mut Gui) -> bool {
 
 // ── Pointer, wheel, frame, footer ───────────────────────────────────────────
 
-/// A grip on the log's lines stands only while the log does: off the
+/// A press held on the log stands only while the log does: off the
 /// screen, or with the log left undrawn by the last frame (`L`, the Log
-/// room folded back, the mini player), it lets go untold, and the log's
-/// hold with it. Else a release the terminal never sent would hold the
-/// pointer for good: hover frozen, every page owner shut out.
+/// room folded back, the mini player), a grip on its lines, or a held
+/// arrow or dragged thumb of its bar, lets go untold, and the log's hold
+/// with it. Else a release the terminal never sent, or one the hand has
+/// yet to give, would hold the pointer for good (hover frozen, every page
+/// owner shut out), and a held arrow would step whatever list stands
+/// where its bar was. Asked before every pointer event, and by the loop's
+/// frame before a held arrow steps.
 pub(super) fn let_go_unseen(gui: &mut Gui) {
-    if gui.ui.gripping() && (gui.screen != Screen::Admin || gui.admin.log_at.is_none()) {
-        gui.ui.release();
-        gui.admin.log.let_go();
+    let held = gui.ui.gripping() || (gui.admin.bar_held && gui.ui.holding_bar());
+    if held && (gui.screen != Screen::Admin || gui.admin.log_at.is_none()) {
+        let_go(gui);
     }
+}
+
+/// Every press held on the log lets go, untold: the GUI surface's grip on
+/// its lines or its bar's held arrow or dragged thumb, and the log's own
+/// hold on a line. A bar of another list's holds on.
+fn let_go(gui: &mut Gui) {
+    if gui.ui.gripping() || (gui.admin.bar_held && gui.ui.holding_bar()) {
+        gui.ui.release();
+    }
+    gui.admin.bar_held = false;
+    gui.admin.log.let_go();
+}
+
+/// A left press on the GUI's surface notes whether the scroll bar it
+/// armed is the log's, so that bar's hold lets go with the log
+/// ([`let_go_unseen`]) and no other list's does. Called after the press
+/// armed whatever it did.
+pub(super) fn note_bar(gui: &mut Gui, at: Position) {
+    gui.admin.bar_held = gui.ui.holding_bar()
+        && gui.screen == Screen::Admin
+        && gui.admin.log_at.is_some_and(|log| log.contains(at));
 }
 
 /// The pointer below the top bar (contract clauses 18 and 20). The room
@@ -990,7 +1020,7 @@ mod tests {
     use crate::api::types::{ActivityEntry, LogTail};
     use crate::config::Config;
     use crate::kit::theme::th;
-    use crate::tui::app::App;
+    use crate::tui::app::{App, Entry};
 
     fn english() -> std::sync::MutexGuard<'static, ()> {
         let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2436,6 +2466,129 @@ mod tests {
         assert!(gui.admin.log.model.following());
         let buf = render_at(&mut gui, 136, 52);
         assert_eq!((37..=46).filter(|&y| buf[(133, y)].symbol() == "█").collect::<Vec<_>>(), thumb);
+    }
+
+    #[test]
+    fn a_press_on_the_logs_bar_under_the_server_menu_only_closes_the_menu() {
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, 60));
+        // The band at 136×52: the bar on x 133, ▲ on 37, the track under.
+        let buf = render_at(&mut gui, 136, 52);
+        assert_eq!(buf[(133, 37)].symbol(), "▲");
+        let focus = gui.admin.focus;
+
+        // ▲: the menu's catcher takes the press and closes the menu, and
+        // the arrow beneath neither steps nor holds.
+        gui.servers.drop_open = true;
+        render_at(&mut gui, 136, 52);
+        down(&mut gui, 133, 37);
+        assert!(!gui.servers.drop_open, "the press closed the menu");
+        assert!(!gui.ui.holding_bar(), "and held no arrow");
+        std::thread::sleep(crate::kit::ARROW_DELAY + std::time::Duration::from_millis(30));
+        assert!(gui.ui.hold_action().is_none(), "so nothing repeats");
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 133, 37);
+        assert_eq!(gui.admin.log.model.scroll, 0, "nothing stepped");
+
+        // The track: no thumb follows the hand after the press.
+        gui.servers.drop_open = true;
+        render_at(&mut gui, 136, 52);
+        down(&mut gui, 133, 40);
+        assert!(!gui.servers.drop_open);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 133, 38);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 133, 38);
+        assert!(gui.admin.log.model.following(), "the view never moved");
+
+        // Nor does a press on the lines grip them.
+        gui.servers.drop_open = true;
+        render_at(&mut gui, 136, 52);
+        down(&mut gui, 30, 44);
+        assert!(!gui.servers.drop_open);
+        assert!(!gui.ui.gripping());
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 30, 40);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 30, 40);
+        assert_eq!(gui.admin.log.model.highlight, None);
+
+        assert_eq!(gui.admin.focus, focus, "the log never took the keys");
+        assert!(probe.0.borrow().mice.is_empty(), "nor the room a press: {:?}", probe.0.borrow().mice);
+    }
+
+    #[test]
+    fn a_held_arrow_lets_go_with_the_log_and_the_room_has_the_pointer_again() {
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, 60));
+        render_at(&mut gui, 136, 52);
+        down(&mut gui, 133, 37);
+        assert!(gui.ui.holding_bar());
+        assert_eq!(gui.admin.log.model.scroll, 1);
+
+        // `L` with the button still down: the frame that hides the band
+        // lets go of the arrow.
+        press(&mut gui, KeyCode::Char('L'));
+        render_at(&mut gui, 136, 52);
+        assert_eq!(gui.admin.log_at, None, "L hid the band");
+        assert!(!gui.ui.holding_bar(), "the hold went with the log");
+
+        // The next pointer event reaches the room, and the log stepped no
+        // further.
+        mouse(&mut gui, MouseEventKind::Moved, 30, 10);
+        assert_eq!(probe.0.borrow().mice, [(MouseEventKind::Moved, 30, 10)]);
+        assert_eq!(gui.admin.log.model.scroll, 1);
+    }
+
+    #[test]
+    fn a_held_arrow_lets_go_when_the_tab_is_left_under_it() {
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 60));
+        render_at(&mut gui, 136, 52);
+        down(&mut gui, 133, 37);
+        assert!(gui.ui.holding_bar());
+        assert_eq!(gui.admin.focus, Focus::Log);
+
+        // Esc twice with the button still down and the pointer at rest: the
+        // log hands the keys to the hallway, the hallway goes to the
+        // Library. The loop's frame there finds no log before the arrow's
+        // repeat would step a list of the Library's. What the Library asked
+        // of a server nobody answers is dropped, so the frame sends nothing.
+        press(&mut gui, KeyCode::Esc);
+        press(&mut gui, KeyCode::Esc);
+        assert_eq!(gui.screen, Screen::Library);
+        gui.pending.clear();
+        std::thread::sleep(crate::kit::ARROW_DELAY + std::time::Duration::from_millis(30));
+        super::super::tests::loop_frame(&mut gui, 136, 52);
+        assert!(!gui.ui.holding_bar(), "the hold went with the tab");
+        mouse(&mut gui, MouseEventKind::Moved, 40, 10);
+        assert_eq!(gui.ui.pointer, Some(Position::new(40, 10)), "hover follows the hand again");
+    }
+
+    #[test]
+    fn a_held_bar_of_another_screens_list_holds_on() {
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 60));
+        render_at(&mut gui, 136, 52);
+        // The last bar held, and let go, is the log's.
+        down(&mut gui, 133, 37);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 133, 37);
+
+        // The Files room with more rows than fit, on the Library: its bar,
+        // held, is none of the log's, and the pointer events while it holds
+        // let go of nothing, though no log stands.
+        gui.act(Act::Screen(Screen::Library));
+        gui.active = super::super::FILES_NAV;
+        let dirs = (0..120).map(|i| Entry::Dir { label: format!("dir {i}"), path: format!("music/{i}") });
+        gui.app.files.set(dirs.collect());
+        let buf = render_at(&mut gui, 136, 52);
+        let (x, y) = (0..136)
+            .flat_map(|x| (0..51).map(move |y| (x, y)))
+            .find(|&(x, y)| buf[(x, y)].symbol() == "▲" && matches!(buf[(x, y + 1)].symbol(), "█" | "│"))
+            .expect("the list's bar");
+        down(&mut gui, x, y);
+        assert!(gui.ui.holding_bar());
+        mouse(&mut gui, MouseEventKind::Moved, x + 1, y);
+        assert!(gui.ui.holding_bar(), "the move let go of nothing");
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), x + 1, y);
+        assert!(!gui.ui.holding_bar(), "the release did");
     }
 
     #[test]

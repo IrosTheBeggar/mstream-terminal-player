@@ -2753,6 +2753,10 @@ where
         ctx.hand = over;
         host.pointer(ctx.hand);
     }
+    // A held arrow of the Admin log's bar whose log this frame left
+    // undrawn lets go before it steps whatever list now stands where the
+    // bar was: the pointer may rest while the keys change the screen.
+    admin::let_go_unseen(gui);
     if let Some(act) = gui.ui.hold_action() {
         gui.act(act);
     }
@@ -2791,12 +2795,14 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             // The App keeps the pointer too: the Now Playing band
             // lights under it, the TUI's way.
             gui.app.note_pointer(at);
-            // A grip whose log is gone lets go before anything reads it,
-            // and a press while one stands means its release was lost (a
-            // terminal that drops the Up when the focus leaves mid-drag):
-            // the grip ends at the press's cell, and the press goes on as
-            // any press. A held arrow or a dragged thumb lost the same way
-            // lets go too, untold, as a release would have.
+            // A grip on the Admin log's lines, or a held arrow or dragged
+            // thumb of its bar, lets go before anything reads it once the
+            // log is gone, and a press while a grip stands means its
+            // release was lost (a terminal that drops the Up when the
+            // focus leaves mid-drag): the grip ends at the press's cell,
+            // and the press goes on as any press. A held arrow or a
+            // dragged thumb lost the same way lets go too, untold, as a
+            // release would have.
             admin::let_go_unseen(gui);
             if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 if gui.ui.gripping()
@@ -2853,13 +2859,23 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                         gui.app.focus = crate::tui::app::Focus::Browser;
                         gui.queue_view.stow();
                     }
+                    // Whether the header's server menu was open, asked
+                    // before the hit closes it: its rows, and its catcher
+                    // over the whole frame, take every press, so a scroll
+                    // bar beneath arms no held arrow and no thumb's drag
+                    // for one (admin-screen contract, clause 20).
+                    let menu = gui.servers.drop_open;
                     if let Some(act) = gui.ui.hit(at)
                         && gui.act(act)
                     {
                         ctx.saver.flush(&gui.app);
                         return Flow::Quit;
                     }
-                    gui.ui.arm_bars(at);
+                    if !menu {
+                        gui.ui.arm_bars(at);
+                    }
+                    // A bar it armed on the Admin log lets go with the log.
+                    admin::note_bar(gui, at);
                     // A press on a drag region takes it, unless a click
                     // drawn over the region (a menu's catcher) or a
                     // modal took the press.
@@ -3785,6 +3801,15 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             self.0.flush().map_err(|never| match never {})
         }
+    }
+
+    /// One pass of the loop's frame half on a `w`×`h` test terminal: the
+    /// draw, then the duties after it, a held arrow's next step among them.
+    /// What it dispatches reaches channels nobody answers.
+    pub(super) fn loop_frame(gui: &mut Gui, w: u16, h: u16) -> Duration {
+        let mut ctx = quiet_ctx(gui);
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(w, h))).unwrap();
+        frame(&mut terminal, gui, &mut ctx, &mut NoHost).unwrap()
     }
 
     /// A modal opened over a cover: the cover drew that frame by last

@@ -1087,7 +1087,6 @@ impl LogUi {
         LogKey::Taken
     }
 
-
     /// One notch of the wheel over the log: a step as ↑ or ↓ takes. Up
     /// reads older lines, which pauses it; down comes back, and following
     /// resumes at the bottom. Before a frame has drawn the lines it only
