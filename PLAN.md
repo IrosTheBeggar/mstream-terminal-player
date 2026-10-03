@@ -584,7 +584,8 @@ otherwise a room of its own on the hallway's Log row, its lines wrapped whole un
 never a digit, `q` or Esc; Esc or `q` at a room's base hands the focus back to the hallway. Ten
 locales (35 keys, `gui.tips.base` names `M`), tests for the footer's 99 cells and the hallway's
 label widths in every locale, and an e2e leg with no server. Not built: the Overview row, the
-rooms' one-line summaries, server-side log levels.
+rooms' one-line summaries, server-side log levels (the player's own level menu went on
+2026-10-02, below: the log shows every line the ring holds).
 Merged after v0.10.0, so the desktop product's window (Phase 14) hosts the tab too: the window
 drives the same two loop halves as the terminal (`gui::frame`, `gui::input`), so the tab's keys,
 pointer, wheel and hand cursor need nothing of their own there. One gap showed only in the
@@ -631,6 +632,23 @@ and the top one showing its tail, but a line taller than the view goes by rows a
 the oldest line from its clock, so no row is out of reach. Every drawn row maps to its line for
 the drag region, so a press on a later row means that line. ` …` and the first-line text it
 marked are gone; the copy is unchanged.
+
+**A taller band, a scroll bar, every level ✅ 2026-10-02** — three changes asked for together
+(contract clauses 21-25 and the deviations log). The band under the room is twelve rows, ten
+of them lines where seven were, the room three rows shorter and the 48-row threshold as it was.
+The log has the kit's scroll bar on its last column while its lines do not all fit whole (the
+lines a cell narrower beside it, none and the whole width when they fit), counted in lines
+rather than rows so no frame wraps the whole ring: the thumb is where the oldest line shown
+from its clock stands among them all, its length the share shown whole; the endcaps are ↑ and
+↓ with the kit's hold-repeat, a track press moves the bottom line there (top of the log at one
+end, following at the other) and arms the thumb's drag. The kit gained `scroll_items` (the bar
+sized by items) and `Surface::holding_bar`, which `gui::input` now honours as it does a drag
+region's grip, so a held arrow or thumb keeps the pointer from the hosted room until its
+release. The drag region for the highlight leaves the bar's column out. The level filter and
+its menu are gone: every line shows (http, verbose, debug and silly too) in the colours it had,
+the Log row counts every line, Enter does nothing in the log, and the four level labels and the
+menu's footer went from all ten locales, `tips_log` lost `Enter level`, and `empty` now says
+the server's log has no lines yet.
 
 Build, in order of fit: **logs** ✅ 2026-10-02 (`/api/v1/admin/logs/recent?since=<seq>` is a
 purpose-built tail-poll API with a cursor; the GUI's Admin tab tails it, above), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and

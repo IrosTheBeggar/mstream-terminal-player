@@ -75,11 +75,11 @@ not.
    screen beside the room — in the Room placement, or when `L` has hidden
    it.
 4. **The Log row counts what you have not seen**: a dim ` · 12 new` after
-   the label while lines at or above the chosen level have arrived since
-   the log was last on screen. Lines the server already held when the tab
-   opened, and anything before the log's first answer, do not count;
-   after a server restart, the new ring's lines do. The count goes first
-   when the row is short of cells.
+   the label while lines, of any level, have arrived since the log was
+   last on screen. Lines the server already held when the tab opened, and
+   anything before the log's first answer, do not count; after a server
+   restart, the new ring's lines do. The count goes first when the row is
+   short of cells.
 5. **The tab lands on Libraries** with the focus in the hallway. The room
    last shown is remembered for as long as the player runs, and the tab
    opens on it next time. When the Log room gives way to a docked log
@@ -147,13 +147,11 @@ not.
     The transport keys work as on the Library: Space, `p`, `n`, `s`, `r`,
     `A`, `-`, `+` and `=`.
 16. **The log's keys**: `↑` `↓` a line, PgUp and PgDn a page, Home the
-    oldest line, End or `f` back to following, Enter opens the level
-    menu, `y` copies (clause 30), `d` downloads the server's log files
-    (clause 32), `o` shows the file the last download saved (clause 33).
-    Esc clears a highlight that stands (clause 29); otherwise Esc or `q`
-    hand the focus back to the hallway. In the level menu: `↑` `↓` move
-    its cursor, Enter picks, Esc closes and keeps the level; every other
-    key is swallowed while it is open.
+    oldest line, End or `f` back to following, `y` copies (clause 30), `d`
+    downloads the server's log files (clause 32), `o` shows the file the
+    last download saved (clause 33). Esc clears a highlight that stands
+    (clause 29); otherwise Esc or `q` hand the focus back to the hallway.
+    Every other key, Enter among them, does nothing there.
 17. **`L` moves the log.** In a window wide or tall enough for the log
     beside the room (clause 21), `L` hides it — the room takes its rows or
     columns and WATCH · Log comes back to the hallway — and shows it
@@ -178,23 +176,25 @@ not.
     so a held arrow never steps on unseen.
 19. **The hallway and the log answer on the GUI's surface.** A click on
     the hallway column gives it the focus; a click on a row opens it. A
-    click in the log gives it the focus; its level control opens the menu,
-    the paused word resumes following, and the header's copy and download
-    do what `y` and `d` do. A press on the log's lines, dragged across
-    them, highlights them (clause 29): the drag keeps the pointer until
-    its release, wherever that lands — over the room, the hallway or the
-    bar — so nothing else lights, takes the release or keeps a press of
-    its own meanwhile, and what lies under the release lights at once.
-    The drag never outlives the log: leaving the tab, `L`, the Log room
-    folding back or the mini player lets go of it. A press while it
-    holds means the terminal lost the release (some drop it when the
-    focus leaves mid-drag): the drag ends at that press's cell, and the
-    press then acts as any press. The hand cursor follows whichever
-    surface reports a clickable under the pointer.
-20. **A GUI modal, the header's server menu, or the log's level menu owns
-    the pointer whole while open**, as elsewhere in the GUI. The level
-    menu keeps every key too until it closes, even when a room has come
-    to hold every key under it.
+    click in the log gives it the focus; the paused word resumes
+    following, the header's copy and download do what `y` and `d` do, and
+    a press on its scroll bar steps, jumps or drags the view (clause 24).
+    A press on the log's lines, dragged across them, highlights them
+    (clause 29): the drag keeps the pointer until its release, wherever
+    that lands — over the room, the hallway or the bar — so nothing else
+    lights, takes the release or keeps a press of its own meanwhile, and
+    what lies under the release lights at once. The drag never outlives
+    the log: leaving the tab, `L`, the Log room folding back or the mini
+    player lets go of it. A press while it holds means the terminal lost
+    the release (some drop it when the focus leaves mid-drag): the drag
+    ends at that press's cell, and the press then acts as any press. A
+    press on the scroll bar holds the pointer the same way while its arrow
+    repeats or its thumb is dragged: the room hears nothing of the hand
+    until the release, which ends the hold wherever it lands, and a press
+    while it holds lets it go and then acts as any press. The hand cursor
+    follows whichever surface reports a clickable under the pointer.
+20. **A GUI modal or the header's server menu owns the pointer whole while
+    open**, as elsewhere in the GUI.
 
 ### The log
 
@@ -203,51 +203,50 @@ not.
       x 118 runs from row 2 to the row above the bar; the log stands at
       x 120 from row 2 — its header, a blank row, then its lines.
     - **Band**, narrower but 48 rows and taller: the room keeps the
-      window's width and stops nine rows short; a `─` row from x 19 to the
-      third column from the right edge, then the log's header and seven
-      rows of lines, which wrapping may fill with fewer lines than seven.
+      window's width and stops twelve rows short; a `─` row from x 19 to
+      the third column from the right edge, then the log's header and ten
+      rows of lines, which wrapping may fill with fewer lines than ten.
     - **Room**, anything smaller: the log is a room of its own on the
       hallway's Log row, drawn at x 19 from row 2 with a blank row under
       its header.
 
     The rules beside and above the log turn the accent while it has the
     focus. At 136×52 with the footer off the band's rows are the room's
-    note on 37, the rule on 38, the header on 39 and the lines' rows on
-    40–46; at 176×46 with the footer on, the room's note is on row 39, the
+    note on 34, the rule on 35, the header on 36 and the lines' rows on
+    37–46; at 176×46 with the footer on, the room's note is on row 39, the
     rule at x 118, the header at (120, 2) and the lines' rows from row 4.
+    At the band's threshold, 48 rows with the footer on, the room keeps 29
+    rows.
 22. **The header**: `•` in the ok colour and `following` in the ok colour,
     BOLD — or `• paused` dim, the word a target that resumes following —
-    then a dim ` · ` and the level with a dim `▾` (`v` on the legacy
-    console), BRIGHT + BOLD under the pointer, a target that opens the
-    level menu. The menu is the kit's Dropdown, hanging from the level's
-    first cell and kept inside the log: error · warn · info · debug, the
-    current one wearing `•`, the cursor the slab. After the level, a dim
-    ` · ` and `copy`, then a dim ` · ` and `download`, each dim and
-    BRIGHT + BOLD under the pointer with a tooltip, and each drawn whole
-    or not at all: the first that does not fit ends the row. While a
+    then a dim ` · ` and `copy`, then a dim ` · ` and `download`, each dim
+    and BRIGHT + BOLD under the pointer with a tooltip, and each drawn
+    whole or not at all: the first that does not fit ends the row. While a
     download runs, `download` reads `downloading…` in the accent (the
     kit's busy word) and is no target. At the header's right, dim and only
-    while keyboard hints are on, what `L` does here: "L undocks"
-    (Column), "L hides the band" (Band), "L back to the room" (the Log
-    room); it is the first thing to give way, before the copy and the
-    download.
+    while keyboard hints are on, what `L` does here: "L undocks" (Column),
+    "L hides the band" (Band), "L back to the room" (the Log room); it is
+    the first thing to give way, before the copy and the download.
 23. **Lines**: newest at the bottom; each is the local time `HH:MM:SS` in
     dim (UTC on a machine without a zone, `--:--:--` when the server's
     time does not parse), two spaces, then the whole message, wrapped so
     that none of it is cut: every line of it (a stack trace's too), blank
     lines at its ends dropped and a blank line between two kept as an
     empty row, each wrapped by words at the log's width less the clock's
-    ten cells, measured in cells, with a line's own indentation kept on
-    its first row. A word wider than a row (a path, a long token, CJK with
-    no spaces) starts where it stands and breaks at each row's last cell.
-    The rows after a line's first are set in ten cells, under the
-    message's first cell, with no clock. Info and debug are in the text
-    colour, warn in gold, error in the danger colour, on every row of the
-    line; debug is not dimmed. With nothing to show, one sentence:
-    "waiting for the server's log…" (dim) before the first answer; "this
-    server keeps no live log — its logBufferSize is 0" (dim) when the ring
-    is off; "no lines at this level yet" (dim) when no line passes the
-    level; the failure (gold) when the last poll failed.
+    ten cells (and the scroll bar's cell while it stands, clause 24),
+    measured in cells, with a line's own indentation kept on its first
+    row. A word wider than a row (a path, a long token, CJK with no
+    spaces) starts where it stands and breaks at each row's last cell. The
+    rows after a line's first are set in ten cells, under the message's
+    first cell, with no clock. Every line the server's ring holds is
+    shown, whatever its level: error in the danger colour, warn in gold,
+    and the rest — info, http, verbose, debug, silly and a level the
+    player does not know — in the text colour, on every row of the line;
+    nothing is dimmed. With nothing to show, one sentence: "waiting for
+    the server's log…" (dim) before the first answer; "this server keeps
+    no live log — its logBufferSize is 0" (dim) when the ring is off; "the
+    server's log has no lines yet" (dim) when the ring holds none; the
+    failure (gold) when the last poll failed.
 24. **Following and paused.** The log follows the newest line until it is
     scrolled up — a key or the wheel — which pauses it and holds the view
     still while new lines arrive under it. End, `f`, a click on the paused
@@ -267,10 +266,27 @@ not.
     PgUp and PgDn, until its first or its last row is in sight, and a
     step down onto one brings it in from its first row.
     A new width re-flows the lines under the same bottom line.
-25. **Levels are filtered in the player**, since the route has no level
-    parameter: a line shows when its level is at or above the one chosen.
-    `http`, `verbose` and `silly` count as debug, an unknown level as
-    info; the default is info.
+
+    **The scroll bar**: while the lines do not all fit whole in the view,
+    the kit's scroll bar (ui-kit.md, Table) stands on the log's last
+    column beside the lines' rows, from the first of them to the last —
+    the track `│` dim, the thumb `█` in the accent, `▲` and `▼` dim, all
+    BRIGHT under the pointer — and the lines wrap a cell narrower beside
+    it. When every line fits whole at the log's width there is none, and
+    the lines keep that cell; nor is there one for a single line, or with
+    fewer than three rows of lines. The bar counts lines, not rows: its
+    thumb stands where the oldest line shown from its clock stands among
+    all the lines, and is as long as the share of them the view shows
+    whole, so it is at the bottom while following and at the top at the
+    top of the log, even where the bottom line is cut there. `▲` and `▼`
+    move one line as ↑ and ↓ do, and repeat while held; a press on the
+    track moves the bottom line to that place — the track's first cell is
+    the top of the log, its last follows — and the thumb then follows the
+    hand until the release. Reaching the newest line follows again, as a
+    key does. The wheel is unchanged, and every move the bar makes has its
+    key.
+25. *Removed 2026-10-02.* The level filter and its menu are gone: the
+    log shows every line the ring holds (clause 23).
 26. **Polling**: every 2 s while the tab is up, in every placement — the
     Log row's count needs it — on a worker thread of the log's own, so a
     slow answer never holds a room's requests behind it, and never two
@@ -298,20 +314,20 @@ not.
 28. **The room's field is the window's field.** In the desktop window
     (`gui --window`, or a bare `mstream-player` in the desktop flavour) a
     room's field that has the keyboard is a field as the GUI's own are:
-    the paste chord (Cmd+V on a Mac, Ctrl+V elsewhere) types the
-    clipboard into it, the input method is on while it has the keyboard
-    and off once it lets go, the method's candidate window floats at its
-    caret, and what is being composed is drawn in the field before the
-    caret until it is committed. Only while the room is drawn: not under
-    the Log room, not with no session. A GUI modal laid over the room
-    (the add-server form, which opens on its chooser) and the log's level
-    menu take the keys as keys, never a paste or a composition, and a GUI
-    modal's own field composes in itself, never in the room's beneath;
-    the header's server menu passes every key but Esc on to the field,
-    closing as it goes, as it does over the GUI's own fields. A terminal
-    changes nothing here: it types a paste as keys and composes in its
-    own UI. Hosted, a room's caret holds steady rather than blink with
-    the GUI's own fields' (the deviations log, 2026-10-02).
+    the paste chord (Cmd+V on a Mac, Ctrl+V elsewhere) types the clipboard
+    into it, the input method is on while it has the keyboard and off once
+    it lets go, the method's candidate window floats at its caret, and
+    what is being composed is drawn in the field before the caret until it
+    is committed. Only while the room is drawn: not under the Log room,
+    not with no session. A GUI modal laid over the room (the add-server
+    form, which opens on its chooser) takes the keys as keys, never a
+    paste or a composition, and a GUI modal's own field composes in
+    itself, never in the room's beneath; the header's server menu passes
+    every key but Esc on to the field, closing as it goes, as it does over
+    the GUI's own fields. A terminal changes nothing here: it types a
+    paste as keys and composes in its own UI. Hosted, a room's caret holds
+    steady rather than blink with the GUI's own fields' (the deviations
+    log, 2026-10-02).
 
 ### Copying and saving the log
 
@@ -319,7 +335,7 @@ not.
     from the line the press landed on to the line under the pointer, in
     every placement; any row of a wrapped line, the tail of one cut at the
     top included, means that line. Every row of a highlighted line is
-    filled across the log's width in the selection colours (the accent
+    filled across the lines' width in the selection colours (the accent
     behind, the on-accent text), its clock and message in them rather than
     its level's colour. The highlight is held by the lines' sequence
     numbers, so arrivals and the ring's drops leave it on the same lines,
@@ -328,29 +344,29 @@ not.
     never scrolls by itself at an edge, but the wheel scrolls during a
     drag and the highlight's end follows the line under the still pointer.
     A plain click on the lines (a press released without leaving its
-    cell), Esc, a level picked, a restarted server's ring, a new session
-    and the tab opened again clear it; `L`, Tab and `q` keep it. Following
-    carries on under it. The drag region is the line rows and the empty
-    rows under them, never the header or the failure's row. Apple Terminal
-    reports a press as an instant click pair (ui-kit.md, the
-    phantom-release dialect), so there no drag highlights; `y` still
-    copies every line shown. The highlight is a run of text to copy, not
-    the list cursor (ui-kit.md, List cursor): no row verb acts on it and
-    no key moves it.
+    cell), Esc, a restarted server's ring, a new session and the tab
+    opened again clear it; `L`, Tab and `q` keep it. Following carries on
+    under it. The drag region is the line rows and the empty rows under
+    them, never the header, the failure's row or the scroll bar's column:
+    a press on the bar is the bar's, and a drag begun on the lines moves
+    the highlight over the bar, never its thumb. Apple Terminal reports a
+    press as an instant click pair (ui-kit.md, the phantom-release
+    dialect), so there no drag highlights; `y` still copies every line
+    shown. The highlight is a run of text to copy, not the list cursor
+    (ui-kit.md, List cursor): no row verb acts on it and no key moves it.
 30. **`y`, or the header's copy, copies** the highlighted lines, or every
-    line shown at the chosen level when none is highlighted, oldest
-    first. Each line is its local time `HH:MM:SS`, two spaces, `warn` or
-    `error` and two spaces for those levels (winston's own words, never
-    translated), then the whole message as the rows show it, but
-    unwrapped — every line of it, its control and bidi characters dropped,
-    tabs as four spaces, cut at mStream's own 4000 characters — with its
-    later lines indented ten spaces, so a stack trace reads under its
-    time. Lines are joined by newlines, none after the last. The note
-    says which went — "the highlighted lines are on the clipboard" or
-    "every line shown is on the clipboard" — and carries no count; a
-    copy handed to the terminal says it may not have arrived, a copy no
-    route took says so in gold, both pointing at `d`; with nothing shown,
-    "no lines to copy yet".
+    line shown when none is highlighted, oldest first. Each line is its
+    local time `HH:MM:SS`, two spaces, `warn` or `error` and two spaces
+    for those levels (winston's own words, never translated), then the
+    whole message as the rows show it, but unwrapped — every line of it,
+    its control and bidi characters dropped, tabs as four spaces, cut at
+    mStream's own 4000 characters — with its later lines indented ten
+    spaces, so a stack trace reads under its time. Lines are joined by
+    newlines, none after the last. The note says which went — "the
+    highlighted lines are on the clipboard" or "every line shown is on the
+    clipboard" — and carries no count; a copy handed to the terminal says
+    it may not have arrived, a copy no route took says so in gold, both
+    pointing at `d`; with nothing shown, "no lines to copy yet".
 31. **Where a copy goes is the kit's** (ui-kit.md, "The clipboard is the
     kit's"), by where the player runs: in the desktop window, the
     system pasteboard, then the platform's tool, and never OSC 52, which
@@ -415,14 +431,14 @@ not.
     elsewhere — never plain Ctrl+C, never with Alt — copies as `y` does
     while the log is on screen and either has the focus or holds a
     highlight, and nothing laid over the screen holds the keys: no GUI
-    modal, no level menu, no room's modal. The C is the layout's letter,
-    or the key at C's place on a layout without Latin letters, as the
-    paste chord's V is (clause 28). The window takes the chord whether
-    or not the log copies, so off a Mac Ctrl+Shift+C no longer reaches
-    the GUI as Ctrl+C, which quits. To the header's open server menu the
-    chord is a key like any other, on every screen: it closes the menu
-    and goes on. A terminal changes nothing here: its own copy chord
-    copies the terminal's text, and `y` copies the log's.
+    modal, no room's modal. The C is the layout's letter, or the key at
+    C's place on a layout without Latin letters, as the paste chord's V is
+    (clause 28). The window takes the chord whether or not the log copies,
+    so off a Mac Ctrl+Shift+C no longer reaches the GUI as Ctrl+C, which
+    quits. To the header's open server menu the chord is a key like any
+    other, on every screen: it closes the menu and goes on. A terminal
+    changes nothing here: its own copy chord copies the terminal's text,
+    and `y` copies the log's.
 
 ## Wording
 
@@ -436,12 +452,10 @@ not.
 | `gui.admin.log_new` | · %{n} new |
 | `gui.admin.tips_hall` | ↑ ↓ rooms · Enter open · Tab focus · L log · Esc library · q quit |
 | `gui.admin.tips_focus` / `tips_log_key` | Tab focus / L log |
-| `gui.admin.tips_log` | ↑ ↓ scroll · End follow · Enter level · y copy · d download · Tab focus · L log · Esc hallway |
-| `gui.admin.tips_log_menu` | ↑ ↓ level · Enter choose · Esc close |
+| `gui.admin.tips_log` | ↑ ↓ scroll · End follow · y copy · d download · Tab focus · L log · Esc hallway |
 | `gui.admin.log.following` / `paused` | following / paused |
-| `gui.admin.log.level_error` / `level_warn` / `level_info` / `level_debug` | error / warn / info / debug |
 | `gui.admin.log.waiting` | waiting for the server's log… |
-| `gui.admin.log.empty` | no lines at this level yet |
+| `gui.admin.log.empty` | the server's log has no lines yet |
 | `gui.admin.log.off` | this server keeps no live log — its logBufferSize is 0 |
 | `gui.admin.log.failed` | could not read the server's log |
 | `gui.admin.log.hint_undock` / `hint_hide` / `hint_room` | L undocks / L hides the band / L back to the room |
@@ -474,10 +488,13 @@ not.
 | `usr.public_3_hosted` | This room signs in as the user it creates; the player keeps its own session — sign it in as that user in Manage servers, or the other rooms are refused. |
 
 Changed: `gui.tips.base` names `M` ("· M admin" before "· q quit"), and
-`gui.admin.tips_log` names `y` and `d` (2026-10-02). The rooms' own
-strings (`admin.*`, `usr.*`, `bak.*`, `p2p.*`, `fed.*`, `tor.*`) are
-unchanged but for the two `copied_clipboard` keys; the hub's 401 sentence
-is the hub's.
+`gui.admin.tips_log` names `y` and `d` (2026-10-02). With the level menu
+gone (2026-10-02), `gui.admin.tips_log` names no `Enter level`,
+`gui.admin.log.empty` says the ring holds no lines rather than none at the
+level, and the four level labels and `gui.admin.tips_log_menu` are removed
+from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
+`p2p.*`, `fed.*`, `tor.*`) are unchanged but for the two
+`copied_clipboard` keys; the hub's 401 sentence is the hub's.
 
 ## Out of scope here
 
@@ -489,8 +506,11 @@ is the hub's.
 - **A sign-in page.** A 401 says the hub's sentence; signing in is the
   Servers form's or `mstream-player login`'s.
 - **The folded hallway and the compact bar** the canvas offers as options.
-- **Server-side levels and limits** for the log: the route has neither, so
-  the player filters and caps.
+- **Levels and limits** for the log: the route has neither, and the
+  player shows every line the ring holds and keeps the newest 1000. The
+  player's own level filter was removed on 2026-10-02 (clause 25).
+- **A scroll bar counted in rows**: the bar counts lines, since counting
+  every line's rows would wrap the whole ring on every frame (clause 24).
 - **Highlighting part of a line, and highlighting from the keyboard**:
   the highlight is whole lines, made with the pointer; `y` with nothing
   highlighted copies every line shown.
@@ -542,6 +562,12 @@ is the hub's.
   a setup test pins it), since the path is what gets clipped, at its
   front, when the note runs out of cells (clause 32). The saved notes
   were reordered for it: what was saved, then `o`'s hint, then the path.
+- **The log's footer without `Enter level`** (2026-10-02). With the level
+  menu gone, each locale's `tips_log` lost its Enter segment (Entrée in
+  French, Invio in Italian) and nothing else: the cuts made for 99 cells
+  stay, and the setup test that measures the line also checks that it
+  names no Enter. `empty` was reworded in every locale to say the
+  server's log has no lines yet, since there is no level for it to name.
 
 ## Deviations log
 
@@ -646,7 +672,7 @@ is the hub's.
     last cell. A long word starts where it stands rather than on a row
     of its own, so a path stays on the row with the `open` before it.
   - **A line taller than the view goes by rows.** By lines alone, a
-    stack trace taller than the band's seven rows would show only its
+    stack trace taller than the band's rows of lines would show only its
     last rows, and its first, with the clock and the error, never.
   - **The top of the log may cut the bottom line**, where the rule
     elsewhere keeps the bottom whole: when a line overshoots the view
@@ -660,3 +686,46 @@ is the hub's.
   - **The ` …` mark is gone** with the clipped row, and so is the
     first-line text the model kept for it: the model keeps the whole
     message alone, which the rows wrap and the copy writes.
+- **2026-10-02 — A taller band, a scroll bar, every level (clauses 4,
+  16, 19-25, 27-30, 34).** Three changes the user asked for: the band a
+  few rows taller, a scroll bar on the log, and no level selection.
+  Deliberate, each:
+  - **The band is twelve rows**, ten of them lines where seven were; the
+    room above gives up the three, and the 48-row threshold stays, so at
+    the threshold with the footer on the room keeps 29 rows.
+  - **The bar counts lines, not rows.** A thumb measured in rows would
+    need every line's rows, which means wrapping all thousand lines of
+    up to four thousand characters on every frame; the view already
+    wraps only the lines in sight. Its place is the oldest line shown
+    from its clock among all the lines and its length the share the view
+    shows whole, so it sits at the bottom while following, and at the top
+    at the top of the log even where the bottom line is cut there. Where
+    lines wrap, the thumb's length changes as the view moves.
+  - **The track lands by lines**: a press between its ends puts the
+    bottom line where the proportion falls, so the oldest line shown is
+    near the press rather than exactly on it when lines wrap; the
+    track's first cell is exactly the top of the log (Home) and its last
+    exactly following (End).
+  - **The bar is decided at the log's whole width**: it stands when the
+    lines do not all fit whole there, so it never comes and goes with
+    the cell it takes from them. There is none for a single line (a
+    line taller than the view is read by rows, which a bar of lines
+    cannot show) and none with fewer than three rows of lines, which
+    would leave no track between its arrows.
+  - **The endcaps are ↑ and ↓**: one line, or a row inside a line taller
+    than the view, as the keys and the wheel go.
+  - **A held bar keeps the pointer from the room**, as a drag on the
+    lines does, so a hand that wanders into the room while an arrow
+    repeats or the thumb is dragged tells the room nothing, and the
+    release there ends the hold; a press while one is held means its
+    release was lost, and lets it go before acting. The kit gained
+    `Surface::holding_bar` for it, and `scroll_items`, its scroll bar
+    with the thumb sized by items rather than by the bar's rows.
+  - **The level filter and its menu are gone** (clause 25): the header's
+    `info ▾`, the Dropdown, Enter's way into it and its footer line. The
+    log shows every line the ring holds — http, verbose, debug and silly
+    too — keeps their colours (warn gold, error the danger colour, the
+    rest the text colour), counts every one on the Log row, and copies
+    every one shown. The rules that went with the menu went with it: a
+    level picked no longer clears the highlight or follows, and the copy
+    chord no longer waits on a menu.

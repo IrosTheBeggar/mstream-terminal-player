@@ -11,7 +11,7 @@ hold-repeat, generic over each screen's action enum), the widgets as
 free functions (`tall_button` and `tall_secondary` over one
 `tall_frame`, `tall_frame_bordered` for the thick border, `button`,
 `cursor_ring`, `modal_frame(_anchored)`,
-`modal_close`, `scroll_list`, `letter_strip`, `draw_tooltip`,
+`modal_close`, `scroll_list` and `scroll_items`, `letter_strip`, `draw_tooltip`,
 `input_display`), the pure geometry (`table_view` and the `ListView`
 that carries a list's offset, its reveal flag and whether the keyboard
 holds its cursor across frames, `letter_index`,
@@ -348,7 +348,13 @@ like every clickable. **A bar interaction CAPTURES the pointer**:
 while an arrow is held or the thumb dragged, sub-cell hand tremor must
 not retarget hover onto whatever sits beside the 1-cell bar — and
 terminals differ on whether mid-press motion arrives as Drag or plain
-Moved, so BOTH honor the capture. Hover resumes on release.
+Moved, so BOTH honor the capture. Hover resumes on release. A host that
+hands the pointer to a hosted page keeps it from that page while
+`Surface::holding_bar`, as while a drag region grips (below), so the
+release comes back to the bar wherever the hand lets go.
+`scroll_list` sizes the thumb by the bar's rows, one per list row;
+`scroll_items` sizes it by items, for a list whose items take more than
+one row each (the Log tail's wrapped lines).
 **The phantom-release dialect** (Apple Terminal, probed 470.2): a press
 reports as an INSTANT click pair, motion-while-held arrives as plain
 Moved, and the physical release emits a SECOND click pair at wherever
@@ -380,41 +386,53 @@ A server's log, read as it grows: one header row, then the lines, the
 newest at the bottom. The header is the follow state as the state line's
 word — `•` and `following` in Green BOLD while the view rides the newest
 line, `• paused` DarkGray once it is scrolled up (the word a target that
-resumes) — then a DarkGray ` · ` and the level filter as a Dropdown
-control (`info ▾`, `v` on the legacy console), with what the layout's
-own key does here dim at the row's right while keyboard hints are on. A
-line is the local time `HH:MM:SS` DarkGray, two cells, then the whole
+resumes) — then its controls (below), with what the layout's own key
+does here dim at the row's right while keyboard hints are on. It shows
+EVERY line the server holds, whatever its level — http, verbose, debug
+and silly beside info, warn and error — and has no level filter. A line
+is the local time `HH:MM:SS` DarkGray, two cells, then the whole
 message, never cut: each of its lines wrapped by words in cells at the
 log's width less the clock's ten (a line's indentation kept on its first
 row, a word wider than a row broken at the row's last cell, a blank line
 between two kept), the rows after the first set in ten cells with no
-clock. Info and debug read in the text colour on every row of the line
-(debug is NOT dimmed — it is what the reader came for when chosen), warn
-Yellow, error the danger red. The view scrolls by lines, the bottom line
-whole and the top one showing its last rows; a line taller than the view
-goes by rows, and the top of the log shows the oldest line from its
-clock. Scrolling up pauses and holds the view still while lines arrive
-under it; End, `f`, a click on the paused word or scrolling back to the
-bottom resume. With nothing to show, one DarkGray sentence (waiting, the
-ring off, nothing at this level), or the failure in Yellow. Polling is
-the log's own thread, never two requests at once, slower after a failure
-and stopped on a refusal. **The highlight**: a press-drag across the
-lines (a drag region, below) highlights whole lines from the press's
+clock. Every level but two reads in the text colour on every row of the
+line (nothing is dimmed), warn Yellow, error the danger red. The view
+scrolls by lines, the bottom line whole and the top one showing its last
+rows; a line taller than the view goes by rows, and the top of the log
+shows the oldest line from its clock. Scrolling up pauses and holds the
+view still while lines arrive under it; End, `f`, a click on the paused
+word or scrolling back to the bottom resume. **The scroll bar**: the
+Table's bar (above) on the log's last column beside the lines' rows,
+only while the lines do not all fit whole at the log's width — two lines
+or more, and three rows or more for its arrows and a track — and the
+lines wrap a cell narrower beside it. It counts LINES, not rows
+(`scroll_items`): counting rows would wrap the whole ring every frame,
+so the thumb stands where the oldest line shown from its clock stands
+among all the lines, its length the share the view shows whole — at the
+bottom while following, at the top at the top of the log. Its endcaps
+are ↑ and ↓ (hold-repeat as ever), a track press moves the bottom line
+to its place (the first track cell the top of the log, the last
+following) and arms the thumb's drag, and the wheel is the wheel. With
+nothing to show, one DarkGray sentence (waiting, the ring off, no lines
+yet), or the failure in Yellow. Polling is the log's own thread, never
+two requests at once, slower after a failure and stopped on a refusal.
+**The highlight**: a press-drag across the lines (a drag region, below,
+never over the bar's column) highlights whole lines from the press's
 line to the pointer's (any row of a wrapped line is that line), every
-row of each filled across the log's width in the selection colours (bg
+row of each filled across the lines' width in the selection colours (bg
 ACCENT fg ON-ACCENT, its level colour set aside), held by the lines'
 sequence numbers so arrivals never move it; a drag past either end stops
-at the last line drawn, and a plain click, Esc or a new level clear it.
-It is text to copy, NOT the list cursor below: no row verb reads it and
-no key moves it, so the list-cursor law ("the pointer never highlights a
-row") stands. `y` copies the highlight, or every line shown, through the
-kit's clipboard (the behavioral rule below). **The header's controls**:
-after the level, ` · copy` and ` · download` as text buttons, each drawn
-whole or not at all, the first that does not fit ending the row, and the
-dim key hint at the right gives way before them; while a download runs
-its word is the busy word (`downloading…` fg LightBlue, no click). First
-consumer: the GUI's Admin tab (docs/ux-contracts/admin-screen.md,
-`src/gui/server_log.rs`).
+at the last line drawn, and a plain click or Esc clears it. It is text
+to copy, NOT the list cursor below: no row verb reads it and no key
+moves it, so the list-cursor law ("the pointer never highlights a row")
+stands. `y` copies the highlight, or every line shown, through the kit's
+clipboard (the behavioral rule below). **The header's controls**: after
+the follow state, ` · copy` and ` · download` as text buttons, each
+drawn whole or not at all, the first that does not fit ending the row,
+and the dim key hint at the right gives way before them; while a
+download runs its word is the busy word (`downloading…` fg LightBlue, no
+click). First consumer: the GUI's Admin tab
+(docs/ux-contracts/admin-screen.md, `src/gui/server_log.rs`).
 
 ### Drag region
 A press-drag that means something other than moving a thumb — marking a
