@@ -1,0 +1,48 @@
+#!/usr/bin/expect -f
+# The GUI player's Admin tab under a pty with no server saved at all: `M`
+# opens the tab on its one sentence (no session, so no room and no log),
+# Esc in the hallway comes back to the Library screen, q quits clean.
+# Gates on first-paint words only: the Library's way in with no server,
+# and the tab's sentence, matched by its last words since the cells
+# before them may already stand. Each gate's braces span lines: expect
+# reads a braced list on one line as a single pattern, which never
+# matches and lets the leg run on past a screen that never painted.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(MSTREAM_GUI_DEMO) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+spawn {*}$argv
+exec stty rows 34 columns 120 < $spawn_out(slave,name)
+expect {
+    "Add a server" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-LIBRARY-SCREEN" 2 }
+}
+drain 1
+send "M"
+expect {
+    "admin rooms open here" {}
+    eof { puts "DIED-ON-M"; exit 7 }
+    timeout { fail "NO-ADMIN-SCREEN" 3 }
+}
+drain 1
+send "\x1b"
+expect {
+    "Add a server" {}
+    eof { puts "DIED-ON-ESC"; exit 8 }
+    timeout { fail "NO-WAY-BACK" 4 }
+}
+drain 1
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 5 }
+}
+catch wait result
+exit [lindex $result 3]

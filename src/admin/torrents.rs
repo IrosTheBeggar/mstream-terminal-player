@@ -33,8 +33,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, age_text, draw_bottom, draw_header, fmt_bytes, frame_ground, gate_message,
-    host_of, iso_unix, printable, short_id, unix_now,
+    Claim, Outcome, Screen, age_text, body_column, draw_chip, draw_foot, draw_header, fmt_bytes,
+    frame_ground, gate_message, host_of, iso_unix, printable, short_id, unix_now,
 };
 use crate::api::types::{
     AccessRow, AdminUser, PathTemplates, ProbeAnswer, RemoveAnswer, SeedOutcome, TemplateSaved,
@@ -1232,6 +1232,34 @@ impl Screen for Room {
             self.tscroll = if up { self.tscroll.saturating_sub(1) } else { self.tscroll.saturating_add(1) };
         }
     }
+
+    fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+        self.ui.begin_frame();
+        draw(frame, self, area, true);
+    }
+
+    fn hint(&self) -> String {
+        footer_hint(self)
+    }
+
+    fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
+    /// Every key while a modal is up, on the connect form (its fields take
+    /// any letter), and while the filter has the caret. On the client page
+    /// Tab walks the two radio groups, so the room keeps Tab as well.
+    fn claim(&self) -> Claim {
+        if self.modal_open() {
+            return Claim::All;
+        }
+        match self.phase() {
+            Phase::Connect => Claim::All,
+            Phase::Tabs if self.filter_focus => Claim::All,
+            Phase::Choose => Claim::OwnTab,
+            Phase::Loading | Phase::Tabs => Claim::Open,
+        }
+    }
 }
 
 /// The room, loading: what `mstream-player admin torrents` opens.
@@ -1801,7 +1829,16 @@ fn tab_letter(room: &mut Room, ch: char) -> Option<Outcome> {
 fn render(frame: &mut Frame, room: &mut Room) {
     room.ui.begin_frame();
     let Some(area) = frame_ground(frame, MIN_W, MIN_H) else { return };
+    draw(frame, room, area, false);
+}
 
+/// The room inside `area`. Standalone it owns the window: the header with
+/// the beta chip beside the title, and the tips row. Hosted, the host's bar
+/// names the server and its footer carries the tips, so the chip moves to
+/// the right of the body's first row (the state line stops short of it)
+/// and the room keeps only its note on the area's last row. Below its
+/// minimum it draws what fits and never asks for a larger window.
+fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
     // A modal makes the room beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
     let modal_open = !matches!(room.modal, Modal::None);
@@ -1810,19 +1847,32 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = None;
     }
 
-    let title = t!("tor.title").to_string();
-    draw_header(frame, area, &title, &host_of(&room.client));
-    let chip_x = area.x + 2 + title.chars().count() as u16 + 1;
-    frame.render_widget(
-        Paragraph::new(Span::styled(t!("tor.beta").to_string(), Style::default().fg(th().gold))),
-        Rect { x: chip_x, y: area.y, width: area.width.saturating_sub(chip_x + 30), height: 1 },
-    );
-    let column = Rect {
-        x: 2,
-        y: 2,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(5),
+    let beta = t!("tor.beta").to_string();
+    if !hosted {
+        let title = t!("tor.title").to_string();
+        draw_header(frame, area, &title, &host_of(&room.client));
+        let chip_x = area.x + 2 + title.chars().count() as u16 + 1;
+        frame.render_widget(
+            Paragraph::new(Span::styled(beta.clone(), Style::default().fg(th().gold))),
+            Rect { x: chip_x, y: area.y, width: area.width.saturating_sub(chip_x + 30), height: 1 },
+        );
+    }
+    let column = body_column(area, hosted);
+    // The state line heads every page that draws (not the loading one,
+    // nor a connect page with no form yet). Hosted, it leaves the chip its
+    // cells and a gap of two.
+    let paged = match room.phase() {
+        Phase::Loading => false,
+        Phase::Connect => room.connect.is_some(),
+        Phase::Choose | Phase::Tabs => true,
     };
+    if paged {
+        let reserve = if hosted { kit::width(&beta) as u16 + 2 } else { 0 };
+        draw_state(frame, room, Rect { width: column.width.saturating_sub(reserve), ..column });
+    }
+    if hosted {
+        draw_chip(frame, column, &beta);
+    }
     match room.phase() {
         Phase::Loading => {}
         Phase::Choose => draw_choose(frame, room, column),
@@ -1833,7 +1883,7 @@ fn render(frame: &mut Frame, room: &mut Room) {
         }
         Phase::Tabs => draw_tabs(frame, room, column),
     }
-    draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
+    draw_foot(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room), hosted);
 
     if modal_open {
         room.ui.pointer = live_pointer;
@@ -2030,6 +2080,9 @@ fn state_spans(room: &Room) -> (Vec<Span<'static>>, Option<String>) {
     }
 }
 
+/// The state line on `column`'s first row, its poll note right-aligned
+/// when both fit. [`draw`] calls it for every page, so a hosted room can
+/// hand it a column that stops short of the chip.
 fn draw_state(frame: &mut Frame, room: &Room, column: Rect) {
     let (spans, polls) = state_spans(room);
     let state_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
@@ -2090,7 +2143,6 @@ fn card(frame: &mut Frame, room: &mut Room, at: Rect, label: &str, color: ratatu
 /// The client page: the pitch, the client radio group, the card, the policy.
 fn draw_choose(frame: &mut Frame, room: &mut Room, column: Rect) {
     let line = |y: u16| Rect { x: column.x, y, width: column.width, height: 1 };
-    draw_state(frame, room, column);
     frame.render_widget(Paragraph::new(t!("tor.pitch_1").to_string()), line(column.y + 2));
     frame.render_widget(Paragraph::new(t!("tor.pitch_2").to_string()), line(column.y + 3));
     frame.render_widget(
@@ -2152,7 +2204,8 @@ fn field_box(frame: &mut Frame, room: &mut Room, at: Rect, label: &str, input: &
     let (shown, style) = if value.is_empty() && !focused {
         (placeholder.map(|p| clip(p, w)).unwrap_or_default(), dim())
     } else if focused {
-        (kit::input_display(&value, input.cursor(), w), Style::default())
+        let mask = masked.then_some('•');
+        (kit::field_display(&mut room.ui, inner.x + 1, inner.y, &value, input.cursor(), w, mask), Style::default())
     } else {
         (clip(&value, w), Style::default())
     };
@@ -2163,7 +2216,6 @@ fn field_box(frame: &mut Frame, room: &mut Room, at: Rect, label: &str, input: &
 /// The connect page: the form, the probe's answer, the two buttons.
 fn draw_connect(frame: &mut Frame, room: &mut Room, column: Rect, c: &Connect) {
     let line = |y: u16| Rect { x: column.x, y, width: column.width, height: 1 };
-    draw_state(frame, room, column);
     let fields = c.fields();
     let index_of = |f: CField| fields.iter().position(|x| *x == f).unwrap_or(0);
     let focused = c.focused();
@@ -2246,10 +2298,9 @@ fn draw_connect(frame: &mut Frame, room: &mut Room, column: Rect, c: &Connect) {
     let _ = line;
 }
 
-/// Connected: the state line, the tabs, the active tab's body.
+/// Connected: under the state line, the tabs and the active tab's body.
 fn draw_tabs(frame: &mut Frame, room: &mut Room, column: Rect) {
     let line = |y: u16| Rect { x: column.x, y, width: column.width, height: 1 };
-    draw_state(frame, room, column);
     let tabs_y = column.y + 2;
     let mut x = column.x;
     for tab in room.tabs() {
@@ -2371,7 +2422,9 @@ fn draw_torrents(frame: &mut Frame, room: &mut Room, body: Rect) {
     let hover = room.ui.pointer.is_some_and(|p| filter_rect.contains(p));
     let slash_style = if room.filter_focus { Style::default().fg(th().accent).add_modifier(Modifier::BOLD) } else if hover { Style::default().fg(th().bright) } else { dim() };
     let text = if room.filter_focus {
-        Span::raw(kit::input_display(room.filter.value(), room.filter.cursor(), filter_rect.width.saturating_sub(2)))
+        // After the `/ ` mark's two cells.
+        let (x, w) = (filter_rect.x + 2, filter_rect.width.saturating_sub(2));
+        Span::raw(kit::field_display(&mut room.ui, x, filter_rect.y, room.filter.value(), room.filter.cursor(), w, None))
     } else if room.filter.value().is_empty() {
         Span::styled(t!("tor.filter_hint").to_string(), dim())
     } else {
@@ -3626,5 +3679,149 @@ mod tests {
             assert_eq!(expand_home("~/x.torrent"), format!("{home}/x.torrent"));
         }
         assert_eq!(expand_home("/abs"), "/abs");
+    }
+
+    // ── Hosted in the GUI player's Admin tab ─────────────────────────────
+
+    use crate::admin::HostedRoom;
+    use crate::admin::hosting::{self, DOCKED, FLOOR, WINDOW};
+    use ratatui::buffer::Buffer;
+
+    /// The cells `from..to` of row `y`, as text.
+    fn cells(buf: &Buffer, y: u16, from: u16, to: u16) -> String {
+        (from..to).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// The whole buffer as text, a row a line.
+    fn text_of(buf: &Buffer) -> String {
+        (buf.area.top()..buf.area.bottom()).map(|y| hosting::row(buf, y)).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn hosted_the_room_draws_inside_its_area_with_no_header_and_its_note_last() {
+        let _en = english();
+        for (size, area) in [((100, 30), WINDOW), ((176, 46), DOCKED)] {
+            let mut room = connected();
+            room.note = Some(("the daemon answered".into(), false));
+            let buf = hosting::draw_hosted(&mut room, size, area);
+            let text = text_of(&buf);
+            assert_eq!(hosting::outside(&buf, area, true), Vec::<(u16, u16)>::new(), "{size:?}\n{text}");
+            assert!(!text.contains("Torrents beta") && !text.contains("home.mstream.example · admin"), "no header\n{text}");
+            assert!(!text.contains(&*t!("tor.hint_torrents")), "the tips are the host's\n{text}");
+            assert_eq!(cells(&buf, area.y, area.x, area.right()), "·".repeat(area.width as usize), "the first row is the host's");
+            assert!(cells(&buf, area.bottom() - 1, area.x + 2, area.right()).starts_with("the daemon answered"), "{text}");
+            assert!(text.contains(" Torrents · 4 ") && text.contains("Boards of C"), "{text}");
+        }
+    }
+
+    #[test]
+    fn hosted_the_beta_chip_rides_the_bodys_first_row() {
+        let _en = english();
+        let mut room = connected();
+        let buf = hosting::draw_hosted(&mut room, (100, 30), WINDOW);
+        let text = text_of(&buf);
+        // The column runs x 19..98; the chip ends flush with it, and the
+        // state line stops two cells short of the chip.
+        assert_eq!(cells(&buf, 2, 94, 98), "beta", "{text}");
+        assert_eq!(cells(&buf, 2, 92, 94), "··", "{text}");
+        assert!(cells(&buf, 2, 19, 98).starts_with(&*t!("tor.state_connected")), "{text}");
+        // Wide enough for the poll note, it sits right-aligned beside the
+        // chip with the same gap.
+        let wide = Rect { x: 17, y: 1, width: 143, height: 23 };
+        let buf = hosting::draw_hosted(&mut room, (160, 30), wide);
+        let text = text_of(&buf);
+        assert_eq!(cells(&buf, 2, 154, 158), "beta", "{text}");
+        let polls = t!("tor.polls").to_string();
+        let start = 152 - kit::width(&polls) as u16;
+        assert_eq!(cells(&buf, 2, start, 154), format!("{polls}··"), "{text}");
+        // Standalone, the chip still sits beside the title.
+        assert!(draw(&mut room).lines().next().unwrap().starts_with("  Torrents beta"));
+    }
+
+    #[test]
+    fn hosted_at_the_floor_the_choose_and_connect_pages_draw_without_panicking() {
+        let _en = english();
+        for (client, users_n, phase) in [("disabled", 4, Phase::Choose), ("transmission", 1, Phase::Connect)] {
+            let mut room = new_room();
+            room.queued = None;
+            room.apply(loaded(params(client, false), users(users_n), false));
+            assert_eq!(room.phase(), phase);
+            let buf = hosting::draw_hosted(&mut room, (100, 24), FLOOR);
+            let text = text_of(&buf);
+            assert_eq!(hosting::outside(&buf, FLOOR, false), Vec::<(u16, u16)>::new(), "{phase:?}\n{text}");
+            assert!(!text.contains(&*t!("resize")), "{phase:?}\n{text}");
+            assert_eq!(cells(&buf, 2, 94, 98), "beta", "{phase:?}\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_claim_follows_the_phase() {
+        let _en = english();
+        let mut room = new_room();
+        assert_eq!(room.phase(), Phase::Loading);
+        assert_eq!(room.claim(), Claim::Open);
+        room.queued = None;
+        room.apply(loaded(params("disabled", false), users(4), false));
+        assert_eq!(room.phase(), Phase::Choose);
+        assert_eq!(room.claim(), Claim::OwnTab, "Tab walks the radio groups");
+        let mut room = new_room();
+        room.queued = None;
+        room.apply(loaded(params("transmission", false), users(1), false));
+        assert_eq!(room.phase(), Phase::Connect);
+        assert_eq!(room.claim(), Claim::All, "the form's fields take every letter");
+        let mut room = connected();
+        assert_eq!(room.phase(), Phase::Tabs);
+        assert_eq!(room.claim(), Claim::Open);
+        press(&mut room, KeyCode::Char('/'));
+        assert!(room.filter_focus);
+        assert_eq!(room.claim(), Claim::All, "the filter has the caret");
+        press(&mut room, KeyCode::Enter);
+        assert_eq!(room.claim(), Claim::Open);
+        room.modal = Modal::Disconnect;
+        assert!(room.modal_open());
+        assert_eq!(room.claim(), Claim::All);
+        assert_eq!(room.hint(), t!("tor.hint_disconnect"));
+    }
+
+    #[test]
+    fn hosted_seeding_digits_still_reach_the_room() {
+        let _en = english();
+        let mut room = connected();
+        press(&mut room, KeyCode::Right);
+        press(&mut room, KeyCode::Right);
+        assert_eq!(room.tab, Tab::Seeding);
+        assert_eq!(room.claims(), Claim::Open, "the host keeps its hands off a digit");
+        assert!(HostedRoom::press(&mut room, KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).is_none());
+        assert_eq!(room.ticked_vpaths(), vec!["music".to_string()]);
+        assert_eq!(room.tips(), t!("tor.hint_seeding"));
+        let text = text_of(&hosting::draw_hosted(&mut room, (100, 30), WINDOW));
+        assert!(text.contains("[✓] music"), "{text}");
+    }
+
+    /// The cell a focused field notes is the caret's, masked or not, however
+    /// the field's window over a long value stands (hosted, it is where the
+    /// GUI's window floats the input method's candidates).
+    #[test]
+    fn the_filter_and_the_connect_fields_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = connected();
+        press(&mut room, KeyCode::Char('/'));
+        // 77 of the filter's 80 characters, past its 74 cells.
+        type_text(&mut room, &format!("{}end", "z".repeat(74)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "zzzend", "");
+        press(&mut room, KeyCode::Home);
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "/ ", "zzz");
+
+        let mut room = new_room();
+        room.queued = None;
+        room.apply(loaded(params("transmission", false), users(1), false));
+        assert_eq!(room.phase(), Phase::Connect);
+        type_text(&mut room, &format!(".{}end", "h".repeat(80)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "hhhend", "");
+        for _ in 0..3 {
+            press(&mut room, KeyCode::Tab);
+        }
+        type_text(&mut room, &"s".repeat(60));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "•••", "");
     }
 }

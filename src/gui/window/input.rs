@@ -505,6 +505,30 @@ pub(super) fn is_paste(raw: &Raw) -> bool {
     chord && !mods.alt && ctrl_letter(text.as_deref(), *bare, *physical) == Some('v')
 }
 
+/// Whether a key is the platform's copy chord: Cmd+C on a Mac; elsewhere
+/// Ctrl+Shift+C, which terminals use because Ctrl+C is the interrupt, and
+/// Ctrl+Insert, the older copy key. Plain Ctrl+C is never the chord: in
+/// the player it quits, as it does in a terminal. Cmd+Shift+C is a Mac's
+/// own other shortcut, so Shift held there is not the chord either. The C
+/// is read as [`is_paste`] reads its V. Option/Alt held is some other
+/// chord.
+pub(super) fn is_copy(raw: &Raw) -> bool {
+    let Raw::Key { named, text, bare, physical, mods, pressed: true, .. } = raw else {
+        return false;
+    };
+    if mods.alt {
+        return false;
+    }
+    let letter_c = || named.is_none() && ctrl_letter(text.as_deref(), *bare, *physical) == Some('c');
+    if cfg!(target_os = "macos") {
+        mods.logo && !mods.ctrl && !mods.shift && letter_c()
+    } else {
+        mods.ctrl
+            && !mods.logo
+            && ((mods.shift && letter_c()) || (*named == Some(Named::Insert) && !mods.shift))
+    }
+}
+
 /// A key press, as crossterm reports it: a named key as its code, text as
 /// one character each — so the layout, Shift and a dead key's accent are
 /// the operating system's answer, not a guess here.
@@ -1498,6 +1522,57 @@ mod tests {
         assert!(!is_paste(&press("c", 'c', 'c', chord)));
         assert!(!is_paste(&press("v", 'v', 'v', Mods { alt: true, ..chord })));
         assert!(!is_paste(&key("v", 'v', Some('v'), chord, false)));
+    }
+
+    #[test]
+    fn the_copy_chord_is_the_platforms() {
+        let key = |text: &str, bare: char, place: Option<char>, mods, pressed| Raw::Key {
+            named: None,
+            text: Some(text.into()),
+            bare: Some(bare),
+            physical: place,
+            mods,
+            pressed,
+            repeat: false,
+        };
+        let press =
+            |text: &str, bare: char, place: char, mods| key(text, bare, Some(place), mods, true);
+        let insert = |mods, pressed| Raw::Key {
+            named: Some(Named::Insert),
+            text: None,
+            bare: None,
+            physical: None,
+            mods,
+            pressed,
+            repeat: false,
+        };
+        let logo = Mods { logo: true, ..Mods::default() };
+        let logo_shift = Mods { logo: true, shift: true, ..Mods::default() };
+        let ctrl = Mods { ctrl: true, ..Mods::default() };
+        let ctrl_shift = Mods { ctrl: true, shift: true, ..Mods::default() };
+        let mac = cfg!(target_os = "macos");
+        assert_eq!(is_copy(&press("c", 'c', 'c', logo)), mac);
+        assert!(!is_copy(&press("C", 'c', 'c', logo_shift)));
+        // Plain Ctrl+C is the player's quit, on every platform.
+        assert!(!is_copy(&press("c", 'c', 'c', ctrl)));
+        assert_eq!(is_copy(&press("C", 'c', 'c', ctrl_shift)), !mac);
+        assert_eq!(is_copy(&insert(ctrl, true)), !mac);
+        assert!(!is_copy(&insert(ctrl_shift, true)));
+        assert!(!is_copy(&insert(Mods::default(), true)));
+        let chord = if mac { logo } else { ctrl_shift };
+        // Russian: the key at C's place types с; it is still the chord.
+        assert!(is_copy(&press("С", 'с', 'c', chord)));
+        // Dvorak: the key at QWERTY's C types j, and c is on the key at
+        // QWERTY's I — the layout's letter is the chord.
+        assert!(!is_copy(&press("J", 'j', 'c', chord)));
+        assert!(is_copy(&press("C", 'c', 'i', chord)));
+        // Not the chord: Alt held, a release, another letter, the paste.
+        assert!(!is_copy(&press("c", 'c', 'c', Mods { alt: true, ..chord })));
+        assert!(!is_copy(&key("c", 'c', Some('c'), chord, false)));
+        assert!(!is_copy(&insert(Mods { alt: true, ..ctrl }, true)));
+        assert!(!is_copy(&insert(ctrl, false)));
+        assert!(!is_copy(&press("x", 'x', 'x', chord)));
+        assert!(!is_copy(&press("V", 'v', 'v', ctrl_shift)));
     }
 
     #[test]

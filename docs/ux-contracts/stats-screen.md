@@ -19,7 +19,8 @@ federated peer's parent serves it as it serves the queue.
 1. The top bar's **Stats** tab, second after Library (the Now Playing tab
    was hidden 2026-09-27; `0` opens that screen); the **Library** tab
    beside it is the way back.
-2. **`T`** from any screen; **`T`** or **Esc** back to the Library.
+2. **`T`** from any screen; **`T`** or **Esc** back to the Library; **`M`**
+   on to the Admin tab (the admin-screen contract).
 3. A nav digit or `D` leaves for that room; `0` for Now Playing.
 
 ## States & flows
@@ -34,7 +35,9 @@ federated peer's parent serves it as it serves the queue.
   the period control, the log, the forget gate. A server older than 6.27
   says "no Stats API" the page's way.
 - **The session changes** while the screen is up (a switch, a pasted
-  code's dial): the page is rebuilt on the new session's server.
+  code's dial): the page is rebuilt on the new session's server. A switch
+  drops the page the moment it goes out, and the screen says there is no
+  session until the new server answers.
 - **Leaving** drops the page; coming back builds it again and reloads.
 
 ## Behavior contract
@@ -58,13 +61,17 @@ federated peer's parent serves it as it serves the queue.
    rows, `[` `]` periods, `p`, `t`, `m`, `o`, `x`, and inside its modals).
    `q` quits the player, as on every GUI screen. Esc goes to the page
    first — it closes the page's modal or lets go of its row — and with
-   nothing left to close, back to the Library. `T` goes back. `0`, the
-   digits and `D` reach the other screen and the rooms as from anywhere,
-   unless a modal of the page's is open, which keeps every key.
+   nothing left to close, back to the Library. `T` goes back, `M` to the
+   Admin tab. `0`, the digits and `D` reach the other screen and the
+   rooms as from anywhere, unless a modal of the page's is open, which
+   keeps every key.
 5. **The pointer** below the top bar is the page's: hover, click, hold,
    drag and the wheel on its own controls, the hub's way. The top bar's
-   row is the GUI's. A GUI modal (the add-server form, the server menu, a
-   torrent dialog) owns the pointer whole while open, as elsewhere.
+   row is the GUI's, but for the drag and the release of a press that
+   began on the page, which stay the page's there (a thumb dragged to the
+   top overshoots onto it). A GUI modal (the add-server form, the server
+   menu, a torrent dialog) owns the pointer whole while open, as
+   elsewhere.
 6. **The footer** shows the page's hint line — the keys that work now, in
    the page's order — with "Esc library" after it while nothing on the
    page is selected or open.
@@ -147,7 +154,8 @@ The page's two column charts — plays per day (or week, or month) and the
 
 The page's own strings (`sta.*`). New: the tab is the page's title
 (`sta.title`); `gui.tips.stats_back` "Esc library"; `gui.stats.no_session`
-the no-session sentence; `gui.tips.base` names `T`.
+the no-session sentence; `gui.tips.base` names `T` (and `M`, since
+2026-10-02).
 
 ## Deviations log
 
@@ -195,3 +203,15 @@ the no-session sentence; `gui.tips.base` names `T`.
   a word. The blink was the page emptying itself on a change so the state
   line could not name one period over another's totals; with the line
   gone the page keeps its numbers and tracks which period they belong to.
+- **2026-10-02 — The server menu over the page (clause 5).** The header's
+  server menu could not be clicked while the page was up: the page took
+  every press below the top bar unless a GUI modal was open, and the menu
+  is not one of the GUI's modals, so its rows fell through to the page.
+  The page now steps aside while the menu is open, as clause 5 always
+  said. Found while the Admin tab was built on the same seam; `M`, the
+  Admin tab's key, joined the page's way out the same day.
+- **2026-10-02 — A release on the top bar (clause 5).** A press that began
+  on the page and was let go on the top bar's row never reached it, so a
+  held arrow went on stepping and a thumb kept following until the next
+  click. The drag and the release of such a press are the page's now, as
+  the Admin tab's rooms' are.

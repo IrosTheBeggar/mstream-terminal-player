@@ -453,12 +453,14 @@ is playing, a seek line, and prev · play · next — until there is room again.
 In the desktop player, started with no arguments or as `gui --window`, it
 opens in its own window instead (see [Two flavours](#two-flavours)).
 
-- **Three screens**: **Library** (the nav column and its rooms) and **Stats**
-  (`T`) are the top bar's tabs; **Now Playing** (`0`, no tab of its own) is
-  the classic player's full-screen view — the facts, the cover, the tabbed
-  panel and the waveform band — with prev · play · next under the cover;
-  Stats is the listening log of `mstream-player stats` on the session's
-  server, whole: the same tabs, periods and keys, Esc back to the Library.
+- **Four screens**: **Library** (the nav column and its rooms), **Stats**
+  (`T`) and **Admin** (`M`) are the top bar's tabs; **Now Playing** (`0`, no
+  tab of its own) is the classic player's full-screen view — the facts, the
+  cover, the tabbed panel and the waveform band — with prev · play · next
+  under the cover; Stats is the listening log of `mstream-player stats` on
+  the session's server, whole: the same tabs, periods and keys, Esc back to
+  the Library. Admin is the admin panel below, its six rooms in a hallway
+  at the left, with the server's own log beside them.
   Beside them, the
   **Visualizer** item (`V`) opens the mobile app's shader presets in a
   window of their own, moving to what is playing. Move the pointer over it
@@ -512,6 +514,12 @@ completion from the server; `~` is the server user's home, as it is for `b`. Eve
 adding ends at the naming step, because the name is
 the library's vpath — its address in every link, playlist and user grant — and the server
 cannot rename one, so it is asked for once. `r` removes behind a warning; the files never move.
+
+The GUI player hosts the same six rooms in its **Admin** tab (`M`), on the session it already
+holds, beside a live tail of the server's log — a column in a wide window, a band under the
+room in a tall one, otherwise a room of its own (`L` moves it). Drag across the log's lines to
+highlight them; `y` copies them (or every line shown), `d` saves the server's log files to
+your Downloads folder.
 
 ```
 mstream-player admin discovery               # the discovery network (P2P)

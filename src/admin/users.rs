@@ -22,8 +22,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, draw_bottom, draw_header, frame_ground, gate_message, host_of, login,
-    printable,
+    Outcome, Screen, body_column, draw_foot, draw_header, frame_ground, gate_message, host_of,
+    login, printable,
 };
 use crate::api::types::{AdminUser, LoginResponse};
 use crate::api::{ApiError, Client, NewUser, UserAccess};
@@ -741,6 +741,19 @@ impl Screen for Room {
         render(frame, self)
     }
 
+    fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+        self.ui.begin_frame();
+        draw(frame, self, area, true);
+    }
+
+    fn hint(&self) -> String {
+        footer_hint_as(self, true)
+    }
+
+    fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
     fn key(&mut self, key: KeyEvent) -> Option<Outcome> {
         handle_key(self, key)
     }
@@ -878,7 +891,15 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, room: &mut Room) {
     room.ui.begin_frame();
     let Some(area) = frame_ground(frame, MIN_W, MIN_H) else { return };
+    draw(frame, room, area, false);
+}
 
+/// The room inside `area`. Standalone it sits under its own header and
+/// over its tips row. Hosted (the GUI player's Admin tab) the host's bar
+/// is the header and its footer carries the tips, so the area's last row
+/// is the status line alone, the cursor row's own line included. Modals
+/// and the tooltip centre in `area` either way.
+fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
     // A modal makes the room beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
     let modal_open = !matches!(room.modal, Modal::None);
@@ -887,9 +908,11 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = None;
     }
 
-    draw_header(frame, area, &t!("usr.title"), &host_of(&room.client));
-    let column = Rect { x: 2, y: 2, width: area.width.saturating_sub(4), height: area.height.saturating_sub(5) };
-    draw_body(frame, room, column);
+    if !hosted {
+        draw_header(frame, area, &t!("usr.title"), &host_of(&room.client));
+    }
+    let column = body_column(area, hosted);
+    draw_body(frame, room, column, hosted);
 
     // The cursor row's own line, when nothing louder holds the note line.
     let row_note = match (&room.note, &room.busy, room.selected_name()) {
@@ -905,7 +928,8 @@ fn render(frame: &mut Frame, room: &mut Room) {
         _ => None,
     };
     let note = room.note.clone().or(row_note);
-    draw_bottom(frame, area, note.as_ref(), room.busy.as_deref(), &footer_hint(room));
+    let tips = footer_hint_as(room, hosted);
+    draw_foot(frame, area, note.as_ref(), room.busy.as_deref(), &tips, hosted);
 
     if modal_open {
         room.ui.pointer = live_pointer;
@@ -924,23 +948,29 @@ fn render(frame: &mut Frame, room: &mut Room) {
     }
 }
 
-fn footer_hint(room: &Room) -> String {
+/// The room's keyboard tips. Hosted, the base tips end on "Esc back"
+/// rather than "q quit": in the GUI player Esc and `q` hand the keyboard
+/// back to the hallway, and quitting is the hallway's own `q`.
+fn footer_hint_as(room: &Room, hosted: bool) -> String {
     match &room.modal {
         Modal::Add(_) => t!("usr.hint_add"),
         Modal::Libraries(_) => t!("usr.hint_libraries"),
         Modal::Password(_) => t!("usr.hint_password"),
         Modal::Remove(_) => t!("usr.hint_remove"),
-        Modal::None => match (room.users.is_empty(), room.sel) {
-            (true, _) => t!("usr.hint_empty"),
-            (false, None) => t!("usr.hint_rows"),
-            (false, Some(_)) => t!("usr.hint_selected"),
+        Modal::None => match (room.users.is_empty(), room.sel, hosted) {
+            (true, _, false) => t!("usr.hint_empty"),
+            (true, _, true) => t!("usr.hint_empty_hosted"),
+            (false, None, false) => t!("usr.hint_rows"),
+            (false, None, true) => t!("usr.hint_rows_hosted"),
+            (false, Some(_), _) => t!("usr.hint_selected"),
         },
     }
     .to_string()
 }
 
-/// The state line, the add card, the table.
-fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
+/// The state line, the add card, the table. Hosted, public mode's last
+/// sentence says what the player must do as well (its session is its own).
+fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect, hosted: bool) {
     let line = |y: u16| Rect { x: column.x, y, width: column.width, height: 1 };
     let mut y = column.y;
 
@@ -1027,16 +1057,24 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
     if room.users.is_empty() {
         if room.loaded {
             frame.render_widget(Paragraph::new(Span::styled(t!("usr.empty_users").to_string(), dim())), line(y));
-            // The webapp's two warnings, for the one state they apply to.
+            // The webapp's two warnings, for the one state they apply to,
+            // then what the room does about the first user. Hosted, that
+            // sentence says the player must sign in as the user too: the
+            // room keeps the session it makes, the player's stays its own,
+            // and the rest of the Admin tab is refused without it. Each
+            // wraps at the column, 79 cells hosted in a 100-column window.
             let gold = Style::default().fg(th().gold);
-            for (i, key) in ["usr.public_1", "usr.public_2"].iter().enumerate() {
-                let r = y + 3 + i as u16;
-                if r < column.bottom() {
-                    frame.render_widget(Paragraph::new(Span::styled(t!(*key).to_string(), gold)), line(r));
+            let after = if hosted { t!("usr.public_3_hosted") } else { t!("usr.public_3") };
+            let sentences = [(t!("usr.public_1"), gold, 0), (t!("usr.public_2"), gold, 0), (after, dim(), 1)];
+            let mut r = y + 3;
+            for (text, style, gap) in sentences {
+                r += gap;
+                for part in kit::wrap_words(&text, column.width as usize) {
+                    if r < column.bottom() {
+                        frame.render_widget(Paragraph::new(Span::styled(part, style)), line(r));
+                    }
+                    r += 1;
                 }
-            }
-            if y + 6 < column.bottom() {
-                frame.render_widget(Paragraph::new(Span::styled(t!("usr.public_3").to_string(), dim())), line(y + 6));
             }
         }
         return;
@@ -1147,7 +1185,11 @@ fn field_box(frame: &mut Frame, room: &mut Room, at: Rect, label: &str, input: &
     frame.render_widget(block, field);
     let w = inner.width.saturating_sub(2);
     let value = if masked { "•".repeat(input.value().chars().count()) } else { input.value().to_string() };
-    let shown = if focused { kit::input_display(&value, input.cursor(), w) } else { clip(&value, w) };
+    let shown = if focused {
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, &value, input.cursor(), w, masked.then_some('•'))
+    } else {
+        clip(&value, w)
+    };
     frame.render_widget(Paragraph::new(Span::raw(shown)), Rect { x: inner.x + 1, y: inner.y, width: w, height: 1 });
     room.ui.click(field, act);
 }
@@ -1493,6 +1535,7 @@ mod tests {
         assert!(frame.contains("• public — no users, so no logins"), "{frame}");
         assert!(frame.contains("Add the first user ▸") && frame.contains("(no users yet — a adds the first)"), "{frame}");
         assert!(frame.contains("The first user turns logins on") && frame.contains("Make it an admin"), "{frame}");
+        assert!(frame.contains(&*t!("usr.public_3")), "standalone, the room's own session keeps the panel open:\n{frame}");
         assert!(frame.contains("a add the first user · q quit"), "{frame}");
 
         press(&mut r, KeyCode::Char('a'));
@@ -1731,5 +1774,153 @@ mod tests {
         r.last_load = Some(Instant::now() - POLL);
         r.tick();
         assert!(r.queued.is_none(), "never under a modal");
+    }
+
+    /// The buffer as text, one line per row, for failure messages.
+    fn shown(buf: &ratatui::buffer::Buffer) -> String {
+        (buf.area.top()..buf.area.bottom()).map(|y| buf_row(buf, y) + "\n").collect()
+    }
+
+    /// Row `y` from column `x` on.
+    fn from(buf: &ratatui::buffer::Buffer, x: u16, y: u16) -> String {
+        buf_row(buf, y).chars().skip(x as usize).collect()
+    }
+
+    /// Whether a modal frame's rounded corners sit exactly on `rect`.
+    fn framed_at(buf: &ratatui::buffer::Buffer, rect: Rect) -> bool {
+        buf[(rect.x, rect.y)].symbol() == "╭" && buf[(rect.right() - 1, rect.bottom() - 1)].symbol() == "╯"
+    }
+
+    use super::super::hosting::{DOCKED, FLOOR, WINDOW, draw_hosted, outside, row as buf_row};
+    use super::super::{Claim, HostedRoom};
+
+    #[test]
+    fn hosted_the_room_draws_inside_its_area_and_its_row_note_takes_the_last_row() {
+        let _en = english();
+        let mut r = loaded();
+        r.note = None;
+        press(&mut r, KeyCode::Down);
+        press(&mut r, KeyCode::Down);
+        let buf = draw_hosted(&mut r, (100, 30), WINDOW);
+        let text = shown(&buf);
+        assert!(outside(&buf, WINDOW, true).is_empty(), "drawn outside its area:\n{text}");
+        assert!(from(&buf, WINDOW.x, WINDOW.y).chars().all(|c| c == '·'), "the area's first row is the host's:\n{text}");
+        assert!(!text.contains("home.mstream.example"), "no header:\n{text}");
+        assert!(from(&buf, 19, 2).starts_with("• 3 users — 1 admin · logins on"), "the state line opens the body:\n{text}");
+        assert!(
+            from(&buf, 19, 23).starts_with("ben sees music · field-recordings · 1–5 flip a flag, saved at once"),
+            "the cursor row's note on the last row:\n{text}"
+        );
+        assert!(!text.contains("Esc deselect"), "the tips are the host's:\n{text}");
+        let buf = draw_hosted(&mut r, (176, 46), DOCKED);
+        assert!(outside(&buf, DOCKED, true).is_empty(), "drawn outside its area:\n{}", shown(&buf));
+        assert!(from(&buf, 19, DOCKED.bottom() - 1).starts_with("ben sees music"), "{}", shown(&buf));
+    }
+
+    #[test]
+    fn hosted_public_mode_wraps_its_sentences_and_says_the_player_signs_in_too() {
+        let _en = english();
+        let mut r = room();
+        r.queued = None;
+        r.apply(Done::Loaded(Ok((BTreeMap::new(), libs()))));
+        // At 100 columns the column is 79 cells: the last sentence takes two
+        // rows rather than lose its end, and says what the player must do,
+        // since the session this room makes is not the player's.
+        let buf = draw_hosted(&mut r, (100, 30), WINDOW);
+        let text = shown(&buf);
+        assert!(outside(&buf, WINDOW, true).is_empty(), "{text}");
+        let rows: Vec<String> = (13..22).map(|y| from(&buf, 19, y).trim_end_matches('·').trim_end().to_string()).collect();
+        assert_eq!(rows[0], t!("usr.public_1"), "{text}");
+        assert_eq!(rows[1], t!("usr.public_2"), "{text}");
+        assert_eq!(rows[2], "", "{text}");
+        let last: Vec<&str> = rows[3..].iter().map(String::as_str).take_while(|row| !row.is_empty()).collect();
+        assert_eq!(last.len(), 2, "{text}");
+        assert_eq!(last.join(" "), t!("usr.public_3_hosted"), "every word:\n{text}");
+        assert!(rows.iter().all(|row| kit::width(row) <= 79), "{text}");
+        assert!(!text.contains(&*t!("usr.public_3")), "not the hub's promise that the panel stays open:\n{text}");
+    }
+
+    #[test]
+    fn hosted_the_add_form_centres_in_the_area_and_clamps_at_the_floor() {
+        let _en = english();
+        let mut r = loaded();
+        press(&mut r, KeyCode::Char('a'));
+        let buf = draw_hosted(&mut r, (100, 30), WINDOW);
+        let at = kit::modal_rect(WINDOW, 84, 22, 22);
+        assert!(framed_at(&buf, at), "the add form at {at:?}:\n{}", shown(&buf));
+        assert!(outside(&buf, WINDOW, true).is_empty(), "{}", shown(&buf));
+        // Seventeen rows: the form shrinks to the area and its rows that no
+        // longer fit are left out, not drawn past its frame.
+        let buf = draw_hosted(&mut r, (100, 24), FLOOR);
+        let at = kit::modal_rect(FLOOR, 84, 22, 22);
+        assert_eq!(at.height, FLOOR.height - 2);
+        assert!(framed_at(&buf, at), "the add form at {at:?}:\n{}", shown(&buf));
+        assert!(outside(&buf, FLOOR, true).is_empty(), "{}", shown(&buf));
+        assert!(!shown(&buf).contains(&*t!("resize")));
+        // The room's other modals stay inside the area at both sizes too.
+        for act in [Act::Libraries("ben".into()), Act::Password("ben".into()), Act::Remove("ben".into())] {
+            let mut r = loaded();
+            r.libraries.extend((0..20).map(|i| format!("lib-{i}")));
+            r.act(act);
+            for (size, area) in [((100, 30), WINDOW), ((100, 24), FLOOR)] {
+                let buf = draw_hosted(&mut r, size, area);
+                assert!(outside(&buf, area, area == WINDOW).is_empty(), "{:?} spilled:\n{}", r.modal, shown(&buf));
+            }
+        }
+    }
+
+    #[test]
+    fn hosted_digits_still_flip_flags() {
+        let _en = english();
+        let mut r = loaded();
+        r.note = None;
+        assert_eq!(r.claims(), Claim::Open, "the host routes the room's keys to it");
+        r.press(key(KeyCode::Down));
+        r.press(key(KeyCode::Down)); // ben
+        assert!(r.press(key(KeyCode::Char('1'))).is_none());
+        assert_eq!(
+            r.queued,
+            Some(Op::Access {
+                username: "ben".into(),
+                access: UserAccess { admin: true, allow_mkdir: true, allow_upload: false, allow_file_modify: true, allow_server_audio: false },
+            })
+        );
+        // Esc stows the cursor, then hands the keyboard back.
+        assert!(r.press(key(KeyCode::Esc)).is_none());
+        assert_eq!(r.press(key(KeyCode::Esc)), Some(Outcome::Quit));
+    }
+
+    #[test]
+    fn hosted_the_hint_says_esc_back_not_q_quit() {
+        let _en = english();
+        let mut r = loaded();
+        assert_eq!(r.tips(), "↑ ↓ select · a add a user · Esc back");
+        assert!(footer_hint_as(&r, false).ends_with("q quit"), "standalone keeps its own words");
+        r.users.clear();
+        assert_eq!(r.tips(), "a add the first user · Esc back");
+        assert!(footer_hint_as(&r, false).ends_with("q quit"));
+        press(&mut r, KeyCode::Char('a'));
+        assert!(r.modal_up());
+        assert_eq!(r.claims(), Claim::All, "a form holds every key");
+        assert_eq!(r.tips(), t!("usr.hint_add"));
+    }
+
+    /// The cell a focused field notes is the caret's, masked or not, however
+    /// the field's window over a long value stands (hosted, it is where the
+    /// GUI's window floats the input method's candidates).
+    #[test]
+    fn the_password_and_the_username_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = loaded();
+        room.act(Act::Password("ben".into()));
+        type_text(&mut room, &"s".repeat(60));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "•••", "");
+        press(&mut room, KeyCode::Home);
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "", "•••");
+        press(&mut room, KeyCode::Esc);
+
+        press(&mut room, KeyCode::Char('a'));
+        type_text(&mut room, &format!("{}-end", "u".repeat(50)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "uuu-end", "");
     }
 }

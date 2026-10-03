@@ -22,14 +22,18 @@ mod albums;
 mod bar;
 pub(crate) mod control;
 mod actions;
+mod admin;
 mod cover;
 mod dj;
 mod library;
+mod log_file;
 mod mini;
 mod now;
+mod opener;
 mod playlists;
 mod queue;
 mod servers;
+mod server_log;
 mod sonic;
 mod stats;
 mod torrent;
@@ -111,9 +115,12 @@ pub(crate) enum Act {
     Chip(usize),
     /// The query card: start (or resume) editing the search text.
     EditQuery,
-    /// A screen: the Library or Stats from their top-bar tabs, Now Playing
-    /// from `0` — it has no tab.
+    /// A screen: the Library, Stats or Admin from their top-bar tabs, Now
+    /// Playing from `0` — it has no tab.
     Screen(Screen),
+    /// The Admin tab's own pointer ways (see gui::admin): a hallway row,
+    /// a column taking the keys, the log's controls.
+    Adm(admin::AdmAct),
     /// The top bar's Visualizer item: open the window, or bring it to the
     /// front (docs/ux-contracts/visualizer-window.md).
     VizWindow,
@@ -351,6 +358,9 @@ pub(crate) enum Screen {
     NowPlaying,
     /// The stats page, hosted (docs/ux-contracts/stats-screen.md).
     Stats,
+    /// The admin rooms and the server's log, hosted (docs/ux-contracts/
+    /// admin-screen.md).
+    Admin,
 }
 
 /// The sub-view a Settings room shows in place of its rows. At most one is
@@ -543,6 +553,8 @@ pub(crate) struct Gui {
     now: now::NowUi,
     /// The Stats screen's page, while the screen is up.
     stats: stats::StatsUi,
+    /// The Admin screen: its hallway, the room it hosts and the log.
+    admin: admin::AdminUi,
     /// The visualizer window's child process, while one is open.
     vizwin: vizwin::VizWindow,
     /// The Settings sub-view standing in for its rows, when one is open.
@@ -606,6 +618,7 @@ impl Gui {
             screen: Screen::Library,
             now: now::NowUi::new(),
             stats: stats::StatsUi::default(),
+            admin: admin::AdminUi::new(),
             vizwin: vizwin::VizWindow::new(),
             settings_room: None,
             servers: servers::ServersUi::new(),
@@ -785,6 +798,9 @@ impl Gui {
         if torrent::act(self, &act) {
             return false;
         }
+        if admin::act(self, &act) {
+            return false;
+        }
         match act {
             Act::CaptureCancel => {
                 // The banner's [X] is Esc: a sonic pick let go goes home to
@@ -816,6 +832,13 @@ impl Gui {
                 } else if screen != Screen::Stats {
                     stats::close(self);
                 }
+                // The Admin screen's room and log likewise (admin-screen
+                // contract, clause 11).
+                if screen == Screen::Admin && was != Screen::Admin {
+                    admin::open(self);
+                } else if screen != Screen::Admin {
+                    admin::close(self);
+                }
             }
             Act::VizWindow => vizwin::toggle(self),
             Act::Nav(i) => {
@@ -823,6 +846,7 @@ impl Gui {
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
                 stats::close(self);
+                admin::close(self);
                 // The gated room: with the flag gone the row isn't drawn,
                 // and its digit must be as dead as the row (contract §1).
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
@@ -1147,16 +1171,19 @@ fn demo_now() -> Now {
 /// One run of text at a cell, clipped at the frame's edge — written into
 /// the buffer directly: the hub's primitive runs a few hundred times a
 /// frame, and a `Paragraph` per call was a handful of allocations each.
-/// The top bar's tabs at the left — Library, Stats: the kit's tab slab for
-/// the screen that is up, dim text for the other, bright under the
-/// pointer. Now Playing has no tab (it opens on `0`), so while it is up no
-/// tab wears the slab.
+/// The top bar's tabs at the left — Library, Stats, Admin: the kit's tab
+/// slab for the screen that is up, dim text for the others, bright under
+/// the pointer. Now Playing has no tab (it opens on `0`), so while it is
+/// up no tab wears the slab.
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
-    let mut x = 1;
-    let tabs = [(Screen::Library, t!("gui.top.library")), (Screen::Stats, t!("sta.title"))];
-    for (screen, label) in tabs {
-        let text = format!(" {label} ");
-        let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
+    let tabs = [
+        (Screen::Library, t!("gui.top.library")),
+        (Screen::Stats, t!("sta.title")),
+        (Screen::Admin, t!("gui.top.admin")),
+    ];
+    let viz = t!("gui.top.viz");
+    let rects = top_rects([&tabs[0].1, &tabs[1].1, &tabs[2].1, &viz]);
+    for ((screen, label), rect) in tabs.into_iter().zip(rects) {
         let style = if gui.screen == screen {
             sel().add_modifier(Modifier::BOLD)
         } else if gui.ui.hovers(rect) {
@@ -1164,14 +1191,12 @@ fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
         } else {
             dim()
         };
-        put(frame, x, 0, &text, style);
+        put(frame, rect.x, 0, &format!(" {label} "), style);
         gui.ui.click(rect, Act::Screen(screen));
-        x += rect.width + 1;
     }
     // The Visualizer item: not a screen but a window (visualizer-window
     // contract, entry 1) — lit while one is open, bright under the pointer.
-    let text = format!(" {} ", t!("gui.top.viz"));
-    let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
+    let rect = rects[3];
     let style = if vizwin::is_open(gui) {
         Style::default().fg(th().accent).add_modifier(Modifier::BOLD)
     } else if gui.ui.hovers(rect) {
@@ -1179,9 +1204,23 @@ fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
     } else {
         dim()
     };
-    put(frame, x, 0, &text, style);
+    put(frame, rect.x, 0, &format!(" {viz} "), style);
     gui.ui.click(rect, Act::VizWindow);
     gui.ui.tip_keyed(rect, t!("gui.top.viz_tip").to_string());
+}
+
+/// Where the top bar's items stand, left to right from x 1 with a cell
+/// between them: each its label's cells and a space either side. Cells,
+/// not characters: a Japanese or Chinese label is two cells a character,
+/// and counting characters left the Admin tab's right half dead under the
+/// Visualizer item's rect.
+fn top_rects<const N: usize>(labels: [&str; N]) -> [Rect; N] {
+    let mut x = 1;
+    labels.map(|label| {
+        let rect = Rect { x, y: 0, width: crate::kit::width(label) as u16 + 2, height: 1 };
+        x += rect.width + 1;
+        rect
+    })
 }
 
 fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
@@ -1328,21 +1367,37 @@ fn content_rect(width: u16, height: u16, queue_open: bool, footer: bool) -> Rect
 }
 
 /// A path clipped LEADING, so the leaf stays visible (the kit's path law:
-/// ten identical prefixes say nothing).
+/// ten identical prefixes say nothing). Measured in cells and cut between
+/// whole graphemes, as [`bar::clip`] cuts a label's end: a CJK folder name
+/// is two cells a glyph.
 fn clip_lead(text: &str, max: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max {
+    use unicode_segmentation::UnicodeSegmentation;
+    if crate::kit::width(text) <= max {
         return text.to_string();
     }
-    let tail: String = chars[chars.len() - max.saturating_sub(1)..].iter().collect();
+    let room = max.saturating_sub(1);
+    let mut kept = 0;
+    let mut cut = text.len();
+    for (i, grapheme) in text.grapheme_indices(true).rev() {
+        let w = crate::kit::grapheme_cells(grapheme);
+        if kept + w > room {
+            break;
+        }
+        kept += w;
+        cut = i;
+    }
     let mark = if legacy_conhost() { '»' } else { '…' };
-    format!("{mark}{tail}")
+    format!("{mark}{}", &text[cut..])
 }
 
 /// One frame. Public to the crate so render tests can drive it.
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
+    // Where the Admin screen's room and log stood is this frame's to say:
+    // a frame drawn as the mini player leaves no target behind.
+    gui.admin.room_at = Rect::default();
+    gui.admin.log_at = None;
     let area = frame.area();
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
@@ -1413,6 +1468,15 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             }
             stats::draw(frame, gui, view);
         }
+        Screen::Admin => {
+            // The hallway, the hosted room and the log (admin-screen
+            // contract); a pick's banner then takes the room's first row,
+            // which the room leaves blank for it.
+            admin::draw(frame, gui, area);
+            if let Some(text) = &banner {
+                draw_capture_banner(frame, gui, Rect { x: 1, y: 1, width: area.width - 2, height: 1 }, text);
+            }
+        }
     }
 
     if gui.queue_open && gui.screen == Screen::Library {
@@ -1422,7 +1486,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // The note rides the bar's bottom row (gui's own first, else the App's
     // words); the keyboard tips, when shown, take the very last row. The
     // Now Playing screen has no bar and draws its note on its own row.
-    if gui.screen == Screen::Library
+    if matches!(gui.screen, Screen::Library | Screen::Admin)
         && let Some((text, is_err)) = gui.note_words()
     {
         let note = bar::note_rect(area, gui.footer());
@@ -1447,6 +1511,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         t!("gui.tips.now")
     } else if gui.screen == Screen::Stats {
         std::borrow::Cow::from(stats::tips(gui))
+    } else if gui.screen == Screen::Admin {
+        std::borrow::Cow::from(admin::tips(gui))
     } else if gui.in_settings_room(SettingsRoom::Servers) {
         // The bundled server's row has no remove key to name; a peer's row
         // has its own verbs.
@@ -1498,11 +1564,12 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         put(frame, 1, area.height - 1, &tips, dim());
     }
 
-    // The bar, under the Library alone: the Now Playing view carries its
-    // own scrubber and transport. While the pairing QR is up, the card
-    // cover stands down: the graphics encode cache holds ONE image, and two
-    // per frame thrash it.
-    if gui.screen == Screen::Library {
+    // The bar, under the Library and the Admin tab: the Now Playing view
+    // carries its own scrubber and transport, and the Stats page takes the
+    // whole height. While the pairing QR is up, the card cover stands
+    // down: the graphics encode cache holds ONE image, and two per frame
+    // thrash it.
+    if matches!(gui.screen, Screen::Library | Screen::Admin) {
         let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
         let now = gui.bar_now();
         let view = BarView {
@@ -2305,6 +2372,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if gui.screen == Screen::Stats {
         return stats::handle_key(gui, key);
     }
+    // The Admin screen routes its keys by focus: the hallway's, a hosted
+    // room's, or the log's.
+    if gui.screen == Screen::Admin {
+        return admin::handle_key(gui, key);
+    }
     let browse = gui.browse_room()
         && gui.app.connected
         && !actions::modal_open(gui)
@@ -2425,6 +2497,8 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
         // The Stats screen, the third tab (stats-screen contract, entry 2).
         KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
+        // The Admin screen (admin-screen contract, entry 2).
+        KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
         // The visualizer's window (visualizer-window contract, entry 2).
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The tenth room has no digit; `D` is the capital beside `A`'s toggle.
@@ -2513,6 +2587,25 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         _ => {}
     }
     false
+}
+
+/// The transport's letters as the Library binds them — Space, `p`, `n`,
+/// `s`, `r`, `A`, `-`, `+` and `=` — for a screen that takes them outside
+/// the Library's own tail (the Admin tab's hallway). `None` when `code` is
+/// none of them; else whether to quit.
+fn transport_key(gui: &mut Gui, code: KeyCode) -> Option<bool> {
+    let act = match code {
+        KeyCode::Char(' ') => Act::PlayPause,
+        KeyCode::Char('p') => Act::Prev,
+        KeyCode::Char('n') => Act::Next,
+        KeyCode::Char('s') => Act::Shuffle,
+        KeyCode::Char('r') => Act::Repeat,
+        KeyCode::Char('A') => Act::AutoDj,
+        KeyCode::Char('-') => Act::VolDown,
+        KeyCode::Char('+') | KeyCode::Char('=') => Act::VolUp,
+        _ => return None,
+    };
+    Some(gui.act(act))
 }
 
 // ── The loop and the room it runs in ────────────────────────────────────────
@@ -2638,6 +2731,7 @@ where
         if connected {
             gui.reopen_room();
             stats::reopen(gui);
+            admin::reopen(gui);
         }
     }
     servers::poll(gui);
@@ -2648,15 +2742,21 @@ where
         control::pump(gui, rx);
     }
 
-    // The Stats screen's page pumps its worker and its controls here too.
+    // The Stats screen's page pumps its worker and its controls here too,
+    // and the Admin screen its room and its log.
     let stats_over = stats::frame(gui);
+    let admin_over = admin::frame(gui);
     // The visualizer window's host: the child's exit, the next texture.
     vizwin::tick(gui);
-    let over = gui.ui.hovering_clickable() || stats_over;
+    let over = gui.ui.hovering_clickable() || stats_over || admin_over;
     if over != ctx.hand {
         ctx.hand = over;
         host.pointer(ctx.hand);
     }
+    // A held arrow of the Admin log's bar whose log this frame left
+    // undrawn lets go before it steps whatever list now stands where the
+    // bar was: the pointer may rest while the keys change the screen.
+    admin::let_go_unseen(gui);
     if let Some(act) = gui.ui.hold_action() {
         gui.act(act);
     }
@@ -2695,11 +2795,49 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             // The App keeps the pointer too: the Now Playing band
             // lights under it, the TUI's way.
             gui.app.note_pointer(at);
+            // A grip on the Admin log's lines, or a held arrow or dragged
+            // thumb of its bar, lets go before anything reads it once the
+            // log is gone, and a press while a grip stands means its
+            // release was lost (a terminal that drops the Up when the
+            // focus leaves mid-drag): the grip ends at the press's cell,
+            // and the press goes on as any press. A held arrow or a
+            // dragged thumb lost the same way lets go too, untold, as a
+            // release would have.
+            admin::let_go_unseen(gui);
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                if gui.ui.gripping()
+                    && let Some(act) = gui.ui.release_at(at)
+                    && gui.act(act)
+                {
+                    ctx.saver.flush(&gui.app);
+                    return Flow::Quit;
+                }
+                if gui.ui.holding_bar() {
+                    gui.ui.release();
+                }
+            }
+            // A press-drag on a drag region (the Admin log's lines), and
+            // a press on one of the GUI's own scroll bars (the Admin
+            // log's), hold the pointer until the release: no page owner
+            // takes an event meanwhile, so the hand passing over a page
+            // lights nothing there, and the release comes back here to end
+            // the grip, the repeat or the thumb's drag wherever it lands.
+            let gripping = gui.ui.gripping() || gui.ui.holding_bar();
             // The Stats screen's page owns the pointer below the top
             // bar, on its own surface (stats-screen contract, clause
             // 5); the GUI's surface still follows the motion, so the
             // bar's own tabs light and dim as the pointer passes.
-            if stats::pointer(gui, mouse) {
+            if !gripping && stats::pointer(gui, mouse) {
+                if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
+                    gui.ui.motion(at);
+                }
+                return Flow::Continue;
+            }
+            // The Admin screen's hosted room takes the pointer inside
+            // its area, and every event while its modal is up
+            // (admin-screen contract, clause 18); the hallway, the
+            // log and the bar answer on the GUI's surface below.
+            if !gripping && admin::pointer(gui, mouse) {
                 if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
                     gui.ui.motion(at);
                 }
@@ -2727,7 +2865,24 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                         ctx.saver.flush(&gui.app);
                         return Flow::Quit;
                     }
+                    // A scroll bar arms only where no click drawn over it
+                    // took the press: the header's server menu's catcher,
+                    // a modal's guard (the kit's rule), so the press that
+                    // closes either never starts the list beneath it
+                    // scrolling (admin-screen contract, clause 20).
                     gui.ui.arm_bars(at);
+                    // A bar it armed on the Admin log lets go with the log.
+                    admin::note_bar(gui, at);
+                    // A press on a drag region takes it, unless a click
+                    // drawn over the region (a menu's catcher) or a
+                    // modal took the press.
+                    if !gui.modal_open()
+                        && let Some(act) = gui.ui.arm_region(at)
+                        && gui.act(act)
+                    {
+                        ctx.saver.flush(&gui.app);
+                        return Flow::Quit;
+                    }
                 }
                 // A right click on a row is its sheet (entry point 1) —
                 // never through a modal, which owns the pointer whole.
@@ -2740,7 +2895,16 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                         return Flow::Quit;
                     }
                 }
-                MouseEventKind::Moved => gui.ui.motion(at),
+                // Some terminals report the held button's moves as
+                // plain moves: a grip follows those too.
+                MouseEventKind::Moved => {
+                    gui.ui.motion(at);
+                    if gui.ui.gripping()
+                        && let Some(act) = gui.ui.drag_action(at)
+                    {
+                        gui.act(act);
+                    }
+                }
                 MouseEventKind::Drag(_) => {
                     gui.ui.motion(at);
                     if gui.actions.drag.is_some() {
@@ -2750,7 +2914,12 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                     }
                 }
                 MouseEventKind::Up(_) => {
-                    gui.ui.release();
+                    if let Some(act) = gui.ui.release_at(at) {
+                        gui.act(act);
+                    }
+                    // The capture is over: the control under the release
+                    // lights now, not on the hand's next move.
+                    gui.ui.motion(at);
                     actions::drop(gui);
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -3015,6 +3184,14 @@ impl Gui {
             servers::wheel_dropdown(self, delta);
             return;
         }
+        // The Admin screen's log scrolls under the wheel; a wheel over the
+        // hosted room reached the room through `admin::pointer`.
+        if self.screen == Screen::Admin {
+            if !self.modal_open() {
+                admin::wheel(self, at, delta);
+            }
+            return;
+        }
         // A modal owns the pointer whole; the Now Playing screen scrolls
         // nothing yet (its queue panel is not on screen).
         if self.modal_open() || matches!(self.screen, Screen::NowPlaying | Screen::Stats) {
@@ -3265,6 +3442,19 @@ mod tests {
             Entry::Track { label: "Aurora".into(), track: Box::new(track("music/b.mp3", "Aurora", 228.0)) },
         ]);
         gui
+    }
+
+    #[test]
+    fn a_path_clipped_at_its_front_counts_cells_and_keeps_whole_graphemes() {
+        crate::kit::theme::pin_modern_terminal();
+        assert_eq!(clip_lead("/srv/drop/log.zip", 40), "/srv/drop/log.zip");
+        assert_eq!(clip_lead("/srv/drop/log.zip", 8), "…log.zip");
+        // Two cells a glyph: the budget is cells, and a glyph that would
+        // straddle the edge is left out whole.
+        let wide = "~/ダウンロード/ログ.zip";
+        assert_eq!(clip_lead(wide, 9), "…ログ.zip");
+        assert_eq!(clip_lead(wide, 8), "…グ.zip");
+        assert_eq!(crate::kit::width(&clip_lead(wide, 8)), 7);
     }
 
     #[test]
@@ -3553,8 +3743,9 @@ mod tests {
     }
 
     /// The loop's own Ctx, on channels nothing answers: what the frame
-    /// half dispatches goes nowhere, which a test of its wait wants.
-    fn quiet_ctx(gui: &Gui) -> Ctx {
+    /// half dispatches goes nowhere, which a test of its wait wants, and
+    /// the input half needs nothing more (the Admin tests drive it).
+    pub(super) fn quiet_ctx(gui: &Gui) -> Ctx {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (audio_tx, _) = std::sync::mpsc::channel();
         let (api_tx, _) = std::sync::mpsc::channel();
@@ -3609,6 +3800,15 @@ mod tests {
         }
     }
 
+    /// One pass of the loop's frame half on a `w`×`h` test terminal: the
+    /// draw, then the duties after it, a held arrow's next step among them.
+    /// What it dispatches reaches channels nobody answers.
+    pub(super) fn loop_frame(gui: &mut Gui, w: u16, h: u16) -> Duration {
+        let mut ctx = quiet_ctx(gui);
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(w, h))).unwrap();
+        frame(&mut terminal, gui, &mut ctx, &mut NoHost).unwrap()
+    }
+
     /// A modal opened over a cover: the cover drew that frame by last
     /// frame's footprints — a picture, over the modal, in a window or a
     /// pixel terminal — so the frame half asks for the next one at the hot
@@ -3643,6 +3843,164 @@ mod tests {
         gui.act(Act::SheetClose);
         assert_eq!(wait(&mut gui), HOT, "the frame the modal closes on");
         assert!(wait(&mut gui) > HOT);
+    }
+
+    /// A mouse event through the loop's input half, as the player takes it.
+    fn pointer_at(gui: &mut Gui, kind: MouseEventKind, x: u16, y: u16) {
+        let event = ratatui::crossterm::event::MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
+        let mut ctx = quiet_ctx(gui);
+        input(gui, &mut ctx, TermEvent::Mouse(event));
+    }
+
+    fn press_at(gui: &mut Gui, x: u16, y: u16) {
+        pointer_at(gui, MouseEventKind::Down(MouseButton::Left), x, y);
+    }
+
+    fn release_at(gui: &mut Gui, x: u16, y: u16) {
+        pointer_at(gui, MouseEventKind::Up(MouseButton::Left), x, y);
+    }
+
+    /// The rows of the ▲ and the ▼ of the bar standing in column `x`.
+    fn bar_ends(buf: &ratatui::buffer::Buffer, x: u16) -> (u16, u16) {
+        let rows = buf.area.top()..buf.area.bottom();
+        let up = rows.clone().find(|&y| buf[(x, y)].symbol() == "▲").expect("the bar's ▲");
+        let down = rows.filter(|&y| y > up).find(|&y| buf[(x, y)].symbol() == "▼").expect("the bar's ▼");
+        (up, down)
+    }
+
+    /// Past the pause before a held arrow's first repeat.
+    fn past_the_hold_delay() {
+        std::thread::sleep(crate::kit::ARROW_DELAY + Duration::from_millis(30));
+    }
+
+    /// The Files room on a session, sixty tracks long, with the queue
+    /// panel closed: its list's bar stands alone, at the content's right.
+    fn long_files_gui() -> Gui {
+        let mut gui = Gui::new(Config::default(), false, App::new(Some("http://host:3000".into()), None, None));
+        gui.app.connected = true;
+        gui.app.session.server = "http://host:3000".into();
+        gui.app.session.server_id = "http://host:3000".into();
+        gui.queue_open = false;
+        gui.act(Act::Nav(FILES_NAV));
+        let tracks = (0..60).map(|i| Entry::Track {
+            label: format!("Track {i:02}"),
+            track: Box::new(track(&format!("music/{i:02}.flac"), &format!("Track {i:02}"), 200.0)),
+        });
+        gui.app.files.set(tracks.collect());
+        gui.pending.clear();
+        gui
+    }
+
+    /// The track-actions sheet's backdrop is a click registered over the
+    /// whole frame after the list's bar: the press there closes the sheet
+    /// and nothing else (the kit's rule) — no step, no held arrow, no
+    /// jump, no thumb — and with the sheet gone the bar answers again.
+    #[test]
+    fn a_press_on_a_lists_bar_under_the_track_actions_sheet_only_closes_the_sheet() {
+        let mut gui = long_files_gui();
+        let buf = draw_buffer(&mut gui);
+        let x = (0..buf.area.width)
+            .find(|&x| {
+                (0..buf.area.height - 1)
+                    .any(|y| buf[(x, y)].symbol() == "▲" && matches!(buf[(x, y + 1)].symbol(), "█" | "│"))
+            })
+            .expect("the list's bar");
+        let (up, down) = bar_ends(&buf, x);
+        let track = (up + down) / 2;
+        gui.files_view.scroll = 10;
+
+        // ▲ under the sheet: the backdrop closes it, and the arrow beneath
+        // neither steps nor holds.
+        gui.act(Act::More(Tab::Files, 0));
+        draw_buffer(&mut gui);
+        assert_eq!(gui.ui.hit(Position::new(x, up)), Some(Act::SheetClose), "the bar stands under the backdrop");
+        press_at(&mut gui, x, up);
+        assert!(!actions::modal_open(&gui), "the press closed the sheet");
+        assert!(!gui.ui.holding_bar(), "and held no arrow");
+        past_the_hold_delay();
+        assert!(gui.ui.hold_action().is_none(), "so nothing repeats");
+        release_at(&mut gui, x, up);
+        assert_eq!(gui.files_view.scroll, 10, "nothing stepped");
+
+        // The track under the sheet: no jump, and no thumb follows the hand.
+        gui.act(Act::More(Tab::Files, 0));
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, track);
+        assert!(!actions::modal_open(&gui));
+        pointer_at(&mut gui, MouseEventKind::Drag(MouseButton::Left), x, down - 1);
+        release_at(&mut gui, x, down - 1);
+        assert_eq!(gui.files_view.scroll, 10, "the view never moved");
+
+        // The sheet gone, ▲ steps and repeats, and the track jumps and
+        // drags the thumb.
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, up);
+        assert_eq!(gui.files_view.scroll, 9);
+        assert!(gui.ui.holding_bar());
+        past_the_hold_delay();
+        let repeat = gui.ui.hold_action().expect("the repeat");
+        gui.act(repeat);
+        assert_eq!(gui.files_view.scroll, 8);
+        release_at(&mut gui, x, up);
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, up + 1);
+        assert_eq!(gui.files_view.scroll, 0, "the track's first cell is the top");
+        pointer_at(&mut gui, MouseEventKind::Drag(MouseButton::Left), x, down - 1);
+        assert!(gui.files_view.scroll > 10, "the thumb rode the hand down");
+        release_at(&mut gui, x, down - 1);
+    }
+
+    /// The add-server form's guard covers the whole frame, the queue
+    /// panel's bar among it: the guard swallows the press (the form stays
+    /// up) and the bar beneath arms nothing; with the form gone it does.
+    #[test]
+    fn a_press_on_the_queues_bar_under_the_add_server_form_arms_nothing_beneath_it() {
+        use crate::tui::app::{Origin, Queued};
+        let mut gui = long_files_gui();
+        gui.app.files.set(Vec::new());
+        gui.queue_open = true;
+        gui.app.queue.items = (0..20)
+            .map(|i| Queued {
+                origin: Origin { server: "http://host:3000".into(), peer: None },
+                dj: None,
+                track: track(&format!("q/{i:02}.flac"), &format!("Queued {i:02}"), 200.0),
+            })
+            .collect();
+        let buf = draw_buffer(&mut gui);
+        let x = buf.area.width - 1;
+        let (up, down) = bar_ends(&buf, x);
+        let track = (up + down) / 2;
+        gui.queue_view.scroll = 5;
+
+        // ▲ under the form: its guard has the press, nothing beneath holds.
+        servers::open_add(&mut gui);
+        draw_buffer(&mut gui);
+        assert_eq!(gui.ui.hit(Position::new(x, up)), Some(Act::Guard), "the bar stands under the form's guard");
+        press_at(&mut gui, x, up);
+        assert!(gui.servers.modal_open(), "the guard swallowed the press");
+        assert!(!gui.ui.holding_bar(), "and the arrow beneath held nothing");
+        past_the_hold_delay();
+        assert!(gui.ui.hold_action().is_none());
+        release_at(&mut gui, x, up);
+
+        // The track under the form: no jump, no thumb.
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, track);
+        pointer_at(&mut gui, MouseEventKind::Drag(MouseButton::Left), x, down - 1);
+        release_at(&mut gui, x, down - 1);
+        assert_eq!(gui.queue_view.scroll, 5, "the queue never moved");
+
+        // The form gone, ▼ steps and repeats.
+        gui.act(Act::FormCancel);
+        draw_buffer(&mut gui);
+        press_at(&mut gui, x, down);
+        assert_eq!(gui.queue_view.scroll, 6);
+        assert!(gui.ui.holding_bar());
+        past_the_hold_delay();
+        let repeat = gui.ui.hold_action().expect("the repeat");
+        gui.act(repeat);
+        assert_eq!(gui.queue_view.scroll, 7);
+        release_at(&mut gui, x, down);
     }
 
     #[test]
@@ -3703,6 +4061,38 @@ mod tests {
     }
 
     #[test]
+    fn the_top_bar_items_stand_on_their_labels_cells_in_every_script() {
+        // A rect is the label's cells: Japanese and Chinese draw two a
+        // character, and rects counted in characters left the Admin tab's
+        // right half under the Visualizer item.
+        for locale in ["en", "ja", "zh"] {
+            let labels = ["gui.top.library", "sta.title", "gui.top.admin", "gui.top.viz"].map(|key| t!(key, locale = locale).to_string());
+            let rects = top_rects([&labels[0], &labels[1], &labels[2], &labels[3]]);
+            assert_eq!(rects[0].x, 1);
+            for (label, rect) in labels.iter().zip(rects) {
+                assert_eq!(rect.width as usize, crate::kit::width(label) + 2, "{locale}: {label}");
+            }
+            for pair in rects.windows(2) {
+                assert_eq!(pair[1].x, pair[0].right() + 1, "{locale}: one cell between {pair:?}");
+            }
+        }
+        let ja = top_rects(["ライブラリ", "統計", "管理", "ビジュアライザー"]);
+        assert_eq!(ja[2], Rect { x: 21, y: 0, width: 6, height: 1 }, "管理 is four cells and its two spaces");
+        assert_eq!(ja[3].x, 28, "the Visualizer item a cell after it");
+
+        // Drawn, every cell of an item answers for it (here in English).
+        let mut gui = browsing_gui();
+        draw(&mut gui);
+        let acts = [Act::Screen(Screen::Library), Act::Screen(Screen::Stats), Act::Screen(Screen::Admin), Act::VizWindow];
+        let en = ["Library", "Stats", "Admin", "Visualizer"];
+        for (rect, act) in top_rects(en).into_iter().zip(acts) {
+            for x in rect.left()..rect.right() {
+                assert_eq!(gui.ui.hit(Position { x, y: 0 }), Some(act.clone()), "cell {x}");
+            }
+        }
+    }
+
+    #[test]
     fn the_stats_tab_hosts_the_stats_page_under_the_top_bar() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         // The stats-screen contract: the page whole under the bar, the
@@ -3752,6 +4142,64 @@ mod tests {
         assert!(all.contains("no session"), "{all}");
         super::handle_key(&mut lone, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(lone.screen, Screen::Library);
+    }
+
+    #[test]
+    fn the_server_dropdown_takes_its_clicks_over_the_stats_page() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+        // Stats-screen clause 5: the header's server menu owns the pointer
+        // while it is open, over the page too — the page used to take the
+        // click from under it.
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert!(gui.stats.page.is_some());
+        gui.servers.drop_open = true;
+        let rows = draw(&mut gui);
+        let y = rows.iter().position(|r| r.contains("+ Add a server")).expect("the menu's add row") as u16;
+        let x = rows[y as usize].char_indices().position(|(i, _)| rows[y as usize][i..].starts_with("+ Add a server")).unwrap() as u16;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x + 2,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!stats::pointer(&mut gui, click), "the page lets go while the menu is open");
+        assert_eq!(gui.ui.hit(Position { x: x + 2, y }), Some(Act::SrvAdd), "and the menu's row answers");
+        gui.servers.drop_open = false;
+        draw(&mut gui);
+        assert!(stats::pointer(&mut gui, click), "with the menu closed the page has it again");
+    }
+
+    #[test]
+    fn a_press_on_the_stats_page_released_on_the_top_bar_is_still_the_pages() {
+        use crate::admin::Screen as _;
+        use ratatui::crossterm::event::MouseEvent;
+        // A thumb dragged to the top overshoots onto the bar's row: the drag
+        // and the release there are the page's, so its held arrow or thumb
+        // lets go with the button (the Admin tab's clause 18, the same way).
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert!(gui.stats.page.is_some());
+        draw(&mut gui);
+        let at = |kind, x, y| MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
+        let left = MouseButton::Left;
+
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Moved, 30, 0)), "with no button held the bar's row is the GUI's");
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Down(left), 30, 5)));
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Drag(left), 30, 0)), "the drag onto the bar's row is the page's");
+        assert_eq!(gui.stats.page.as_mut().unwrap().ui().pointer, Some(Position { x: 30, y: 0 }));
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 0)), "and so is the release");
+
+        // Released: the bar's row is the GUI's again.
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Drag(left), 30, 0)));
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 0)));
+        // A press on the bar's row was never the page's, and nor is its release.
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Down(left), 30, 0)));
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 0)));
     }
 
     #[test]

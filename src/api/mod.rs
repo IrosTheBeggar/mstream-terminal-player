@@ -55,9 +55,22 @@ fn daemon_ceiling() -> Option<std::time::Duration> {
 }
 /// A discovery snapshot download: the server answers once the transfer is
 /// verified, and a cross-network pull can take minutes (its own ceiling
-/// is ten).
+/// is ten). The server's logs download shares it: the zip is built while
+/// it streams, and a server that writes large log files sends minutes of
+/// it over a slow link.
 #[cfg(not(target_arch = "wasm32"))]
 const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The logs download's ceiling, [`FETCH_TIMEOUT`]; the browser build has
+/// no per-request timeout to set.
+#[cfg(not(target_arch = "wasm32"))]
+fn download_ceiling() -> Option<std::time::Duration> {
+    Some(FETCH_TIMEOUT)
+}
+#[cfg(target_arch = "wasm32")]
+fn download_ceiling() -> Option<std::time::Duration> {
+    None
+}
 
 /// The torrent routes' ceiling: a seed check hashes the torrent's files
 /// on the server's disk and auto-detect may reach for tags, both slower
@@ -598,6 +611,41 @@ impl Client {
             );
         }
         self.finish(req, path).await
+    }
+
+    /// A GET whose body stays bytes: [`Client::send_within`]'s URL, header
+    /// and ceiling, and [`Client::finish`]'s status mapping, read from the
+    /// body as lossy text only when it is a refusal. The browser build
+    /// ignores `longest`, as `send_within` does.
+    async fn get_bytes(
+        &self,
+        path: &str,
+        longest: Option<std::time::Duration>,
+    ) -> Result<Vec<u8>, ApiError> {
+        let url = self.endpoint(path)?;
+        #[allow(unused_mut)]
+        let mut req = self.http.get(url);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(longest) = longest {
+            req = req.timeout(longest);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = longest;
+        if let Some(token) = &self.token {
+            req = req.header("x-access-token", token);
+        }
+
+        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let refusal = || extract_error(&String::from_utf8_lossy(&bytes));
+        match status {
+            StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
+            StatusCode::FORBIDDEN => Err(ApiError::Forbidden(refusal())),
+            StatusCode::NOT_FOUND => Err(ApiError::NotFound(path.to_string())),
+            s if !s.is_success() => Err(ApiError::Server { status: s.as_u16(), message: refusal() }),
+            _ => Ok(bytes.to_vec()),
+        }
     }
 
     /// Send a built request and map the answer: only 401 is a session
@@ -1330,7 +1378,8 @@ impl Client {
     /// The cover image a track's `album-art` metadata names — raw bytes,
     /// whatever format the server holds it in.
     ///
-    /// This is the one non-JSON GET in the client, so it does its own small
+    /// This is one of the client's two non-JSON GETs (the logs download is
+    /// the other), so it does its own small
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
     pub async fn album_art_async(&self, file: &str) -> Result<Vec<u8>, ApiError> {
@@ -1645,6 +1694,31 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn admin_discovery_activity(&self, since: u64) -> Result<DiscoveryActivity, ApiError> {
         wait(self.admin_discovery_activity_async(since))
+    }
+
+    /// The server's main log ring past `since` (0 = everything it holds).
+    /// The route has no level or limit parameter, so the player filters.
+    pub async fn admin_logs_recent_async(&self, since: u64) -> Result<LogTail, ApiError> {
+        self.get(&format!("api/v1/admin/logs/recent?since={since}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_logs_recent(&self, since: u64) -> Result<LogTail, ApiError> {
+        wait(self.admin_logs_recent_async(since))
+    }
+
+    /// The server's log files as one zip, the bytes exactly as they came.
+    /// mStream streams the archive after its headers are out, so a 200
+    /// can still end short: the caller checks the zip's shape before it
+    /// trusts it. A server that writes no log files answers an empty zip,
+    /// and one older than the route answers 404.
+    pub async fn admin_logs_download_async(&self) -> Result<Vec<u8>, ApiError> {
+        self.get_bytes("api/v1/admin/logs/download", download_ceiling()).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_logs_download(&self) -> Result<Vec<u8>, ApiError> {
+        wait(self.admin_logs_download_async())
     }
 
     /// Join the discovery network, optionally opening the federation
@@ -2866,5 +2940,88 @@ mod tests {
             extract_error(r#"{"ok":false,"error":"no_source","message":"Provide a .torrent file"}"#),
             "Provide a .torrent file"
         );
+    }
+
+    /// A server on a loopback port that answers each of `replies` to one
+    /// connection in turn, and hands back every request's head.
+    fn canned_server(replies: Vec<Vec<u8>>) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 512];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&byte[..n]),
+                    }
+                }
+                let _ = seen_tx.send(String::from_utf8_lossy(&head).to_string());
+                let _ = sock.write_all(&reply);
+            }
+        });
+        (port, seen_rx)
+    }
+
+    fn reply(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn the_logs_download_keeps_the_body_as_bytes_and_maps_refusals() {
+        // Not UTF-8 anywhere: read as text, it would come back changed.
+        let zip: Vec<u8> = vec![b'P', b'K', 3, 4, 0xff, 0xfe, 0x00, 0x80, 0xc3];
+        let (port, seen) = canned_server(vec![
+            reply("200 OK", "application/zip", &zip),
+            reply("404 Not Found", "text/html", b"<pre>Cannot GET</pre>"),
+            reply("403 Forbidden", "application/json", br#"{"error":"Admin access required"}"#),
+            reply("405 Method Not Allowed", "application/json", br#"{"error":"not here"}"#),
+        ]);
+        let client =
+            Client::new(&format!("http://127.0.0.1:{port}")).unwrap().with_token(Some("tok".into()));
+
+        assert_eq!(client.admin_logs_download().expect("the zip"), zip);
+        let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(head.starts_with("GET /api/v1/admin/logs/download HTTP/1.1\r\n"), "{head}");
+        assert!(head.to_ascii_lowercase().contains("x-access-token: tok\r\n"), "{head}");
+
+        match client.admin_logs_download() {
+            Err(ApiError::NotFound(path)) => assert_eq!(path, "api/v1/admin/logs/download"),
+            other => panic!("a server without the route: {other:?}"),
+        }
+        match client.admin_logs_download() {
+            Err(ApiError::Forbidden(words)) => assert_eq!(words, "Admin access required"),
+            other => panic!("a refused download: {other:?}"),
+        }
+        match client.admin_logs_download() {
+            Err(ApiError::Server { status, message }) => {
+                assert_eq!(status, 405);
+                assert_eq!(message, "not here");
+            }
+            other => panic!("any other refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tunnel_client_carries_its_loopback_token_on_the_download() {
+        let (port, seen) = canned_server(vec![reply("200 OK", "application/zip", b"PK\x05\x06")]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}"))
+            .unwrap()
+            .with_local_token(Some("bridge".into()));
+        assert_eq!(client.admin_logs_download().expect("the zip"), b"PK\x05\x06");
+        let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        let request = head.lines().next().unwrap_or_default();
+        assert!(request.starts_with("GET /api/v1/admin/logs/download?__lt=bridge "), "{request}");
     }
 }

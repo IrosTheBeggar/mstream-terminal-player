@@ -155,6 +155,10 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
   top bar and hosts the stats page the same way this screen hosts the
   TUI's view (the stats-screen contract); `T` opens it from anywhere as
   `0` opens this one, and from here too.
+- **2026-10-02 — The Admin tab.** Admin stands third on the top bar and
+  hosts the admin rooms (the admin-screen contract); `M` opens it from
+  here, beside `T`, after the keyword field and the sources picker have
+  had their keys, as `T` does.
 - **2026-09-26 — The follow-ups.** The note on the keys row stops short
   of the modes readout wherever the view put it (clause 9), instead of
   forty fixed cells. An e2e leg (`test/e2e/legs/gui-now.exp`) drives the

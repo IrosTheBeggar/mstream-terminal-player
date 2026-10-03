@@ -1868,30 +1868,9 @@ fn event_loop(
                     let at = Position { x: mouse.column, y: mouse.row };
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            if !wizard.ui.begin_press(at) {
-                                continue;
+                            if let Some(outcome) = press(wizard, at) {
+                                return Ok(outcome);
                             }
-                            // Blur commits an in-progress rename: a click
-                            // anywhere outside the active chip ends the
-                            // edit (Enter's semantics), then the click
-                            // proceeds as normal.
-                            if let Some((row, _)) = &wizard.editing {
-                                let row = *row;
-                                let on_chip = wizard.ui.clicks.iter().any(|(rect, act)| {
-                                    *act == Act::RenameFolder(row) && rect.contains(at)
-                                });
-                                if !on_chip {
-                                    wizard.finish_rename();
-                                }
-                            }
-                            if let Some(act) = wizard.ui.hit(at) {
-                                if let Some(outcome) = wizard.act(act) {
-                                    return Ok(outcome);
-                                }
-                            }
-                            // A press on a scrollbar arms its interaction
-                            // (endcaps hold-repeat, the track a thumb drag).
-                            wizard.ui.arm_bars(at);
                         }
                         // A scrollbar interaction CAPTURES the mouse:
                         // while an arrow is held or the thumb dragged,
@@ -1938,6 +1917,34 @@ fn event_loop(
             }
         }
     }
+}
+
+/// A left press, the way the wizard's loop takes it. Apple Terminal's
+/// phantom re-click is swallowed whole; a press outside the chip being
+/// renamed commits the rename first (blur is Enter's semantics), then the
+/// press goes on as normal: what it hit is dispatched, and a scrollbar
+/// under it arms its interaction (endcaps hold-repeat, the track a thumb
+/// drag) unless a click drawn over the bar took the press (the kit's
+/// rule). `Some` when an action ended the wizard.
+fn press(wizard: &mut Wizard, at: Position) -> Option<Outcome> {
+    if !wizard.ui.begin_press(at) {
+        return None;
+    }
+    if let Some((row, _)) = &wizard.editing {
+        let row = *row;
+        let on_chip =
+            wizard.ui.clicks.iter().any(|(rect, act)| *act == Act::RenameFolder(row) && rect.contains(at));
+        if !on_chip {
+            wizard.finish_rename();
+        }
+    }
+    if let Some(act) = wizard.ui.hit(at)
+        && let Some(outcome) = wizard.act(act)
+    {
+        return Some(outcome);
+    }
+    wizard.ui.arm_bars(at);
+    None
 }
 
 /// Tab (or Right from the end of the line): accept the picked suggestion,
@@ -3549,6 +3556,106 @@ pub(crate) mod tests {
         }
     }
 
+    /// The ten locale files, for the tests that measure strings rather
+    /// than mirror keys.
+    const LOCALE_FILES: [(&str, &str); 10] = [
+        ("en", include_str!("../../locales/en.yml")),
+        ("de", include_str!("../../locales/de.yml")),
+        ("es", include_str!("../../locales/es.yml")),
+        ("fr", include_str!("../../locales/fr.yml")),
+        ("it", include_str!("../../locales/it.yml")),
+        ("ja", include_str!("../../locales/ja.yml")),
+        ("pl", include_str!("../../locales/pl.yml")),
+        ("pt", include_str!("../../locales/pt.yml")),
+        ("ru", include_str!("../../locales/ru.yml")),
+        ("zh", include_str!("../../locales/zh.yml")),
+    ];
+
+    /// One dotted key's string in a parsed locale file.
+    fn locale_text(parsed: &serde_yaml::Value, code: &str, key: &str) -> String {
+        let mut node = parsed;
+        for part in key.split('.') {
+            node = node.get(part).unwrap_or_else(|| panic!("{code}: {key} is missing"));
+        }
+        node.as_str().unwrap_or_else(|| panic!("{code}: {key} is not a string")).to_string()
+    }
+
+    #[test]
+    fn the_admin_footer_lines_fit_ninety_nine_cells_in_every_locale() {
+        // The footer is drawn from x 1 and PLAN.md promises hints under a
+        // hundred cells, so every line the Admin tab can put there — and the
+        // Library's base line, which gained `M` with it — must fit 99. The
+        // hallway line with the focus tail stands in for the longest
+        // combination the host appends to a room's own hint.
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            let text = |key: &str| locale_text(&parsed, code, key);
+            let tail = format!(
+                "{} · {} · {}",
+                text("gui.admin.tips_hall"),
+                text("gui.admin.tips_focus"),
+                text("gui.admin.tips_log_key")
+            );
+            let lines = [
+                ("gui.tips.base", text("gui.tips.base")),
+                ("gui.admin.tips_hall", text("gui.admin.tips_hall")),
+                ("gui.admin.tips_log", text("gui.admin.tips_log")),
+                ("gui.admin.tips_hall with the focus tail", tail),
+            ];
+            for (key, line) in lines {
+                let cells = crate::kit::width(&line);
+                assert!(cells <= 99, "{code}: {key} is {cells} cells: {line}");
+            }
+            // The log has no level to choose since 2026-10-02, so its
+            // line names no Enter, in any locale's word for the key.
+            let log = text("gui.admin.tips_log");
+            assert!(!["Enter", "Entrée", "Invio"].iter().any(|key| log.contains(key)), "{code}: {log}");
+        }
+    }
+
+    #[test]
+    fn the_hallway_labels_fit_their_column_in_every_locale() {
+        // A room label is drawn at x 3 and a group label at x 1, both
+        // stopping before the hallway's rule at x 16.
+        let rooms = [
+            "room_libraries",
+            "room_users",
+            "room_backups",
+            "room_discovery",
+            "room_federation",
+            "room_torrents",
+            "room_log",
+        ];
+        let groups = ["group_server", "group_network", "group_watch"];
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            for (names, room) in [(&rooms[..], true), (&groups[..], false)] {
+                let limit = if room { 13 } else { 15 };
+                for name in names {
+                    let label = locale_text(&parsed, code, &format!("gui.admin.{name}"));
+                    let cells = crate::kit::width(&label);
+                    assert!(cells <= limit, "{code}: gui.admin.{name} is {cells} cells: {label}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_admin_logs_notes_naming_a_file_end_with_the_path_in_every_locale() {
+        // The GUI's note clips the path at its front to the cells left
+        // after the words (src/gui/server_log.rs), which only keeps the
+        // words whole and the file's name in sight while the path comes
+        // last.
+        let keys = ["saved", "saved_lines", "saved_no_files", "file_at", "show_failed"];
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            for key in keys {
+                let text = locale_text(&parsed, code, &format!("gui.admin.log.{key}"));
+                assert!(text.ends_with("%{path}"), "{code}: gui.admin.log.{key} ends elsewhere: {text}");
+            }
+        }
+    }
+
     #[test]
     fn the_boot_language_prefers_env_then_system_then_english() {
         assert_eq!(detect_lang(None, None), 0);
@@ -4114,4 +4221,71 @@ pub(crate) mod tests {
         assert!(matches!(wizard.queued, Some(Op::CreateAdmin)));
     }
 
+    /// The folders table under the path modal: a press where its bar
+    /// stands neither steps nor holds an arrow nor drags the thumb (the
+    /// screen beneath a modal is inert, its bar dropped with every rect it
+    /// registered before the modal draws), and the modal, which no press
+    /// outside it closes, stays up. With the modal gone the bar answers
+    /// again.
+    #[test]
+    fn a_press_on_the_folders_bar_under_the_path_modal_arms_nothing() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        for i in 0..40 {
+            wizard.folders.push(folder(&format!("/srv/music/{i:02}")));
+        }
+        sync_names(&mut wizard.folders);
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut draw = |wizard: &mut Wizard| {
+            terminal.draw(|frame| render(frame, wizard)).unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let buf = draw(&mut wizard);
+        let (x, up) = (0..buf.area.width)
+            .flat_map(|x| (0..buf.area.height - 1).map(move |y| (x, y)))
+            .find(|&(x, y)| buf[(x, y)].symbol() == "▲" && matches!(buf[(x, y + 1)].symbol(), "█" | "│"))
+            .expect("the table's bar");
+        let down = (up + 1..buf.area.height).find(|&y| buf[(x, y)].symbol() == "▼").expect("its ▼");
+        let track = (up + down) / 2;
+        wizard.tscroll = 10;
+        let wait = || std::thread::sleep(kit::ARROW_DELAY + Duration::from_millis(30));
+
+        // ▲ under the path modal: nothing beneath takes the press.
+        wizard.modal = Modal::PathEntry(PathDraft::default());
+        draw(&mut wizard);
+        assert!(press(&mut wizard, Position::new(x, up)).is_none());
+        assert!(matches!(wizard.modal, Modal::PathEntry(_)), "the modal stays up");
+        assert!(!wizard.ui.holding_bar(), "and the arrow beneath held nothing");
+        wait();
+        assert!(wizard.ui.hold_action().is_none(), "so nothing repeats");
+        wizard.ui.release();
+
+        // The track under the modal: no jump, no thumb.
+        press(&mut wizard, Position::new(x, track));
+        assert!(wizard.ui.drag_action(Position::new(x, down - 1)).is_none(), "no thumb follows the hand");
+        wizard.ui.release();
+        assert_eq!(wizard.tscroll, 10, "the table never moved");
+
+        // The modal gone, ▲ steps and repeats, and the track jumps and
+        // drags the thumb.
+        wizard.act(Act::PathCancel);
+        draw(&mut wizard);
+        press(&mut wizard, Position::new(x, up));
+        assert_eq!(wizard.tscroll, 9);
+        assert!(wizard.ui.holding_bar());
+        wait();
+        let repeat = wizard.ui.hold_action().expect("the repeat");
+        wizard.act(repeat);
+        assert_eq!(wizard.tscroll, 8);
+        wizard.ui.release();
+        draw(&mut wizard);
+        press(&mut wizard, Position::new(x, up + 1));
+        assert_eq!(wizard.tscroll, 0, "the track's first cell is the top");
+        let thumb = wizard.ui.drag_action(Position::new(x, down - 1)).expect("the thumb follows the hand");
+        wizard.act(thumb);
+        assert!(wizard.tscroll > 10, "down the table");
+        wizard.ui.release();
+    }
 }

@@ -31,7 +31,7 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, age_text, copy_to_clipboard, draw_bottom, draw_header, fmt_bytes,
+    Claim, Outcome, Screen, age_text, body_column, draw_foot, draw_header, fmt_bytes,
     frame_ground, gate_message, host_of, iso_at, iso_unix, printable, short_id, unix_now,
 };
 use crate::api::types::{
@@ -39,6 +39,7 @@ use crate::api::types::{
     MintedKey, PeerTest,
 };
 use crate::api::{ApiError, Client, ExpiryChange};
+use crate::kit::clipboard::Copied;
 use crate::kit::theme::th;
 use crate::kit::{self, Surface, accent, bold, dim};
 use crate::setup::g;
@@ -647,11 +648,7 @@ impl Room {
             }
             Act::CopyTicket(id) => {
                 if let Some(ticket) = self.key_row(id).and_then(|k| k.ticket.clone()) {
-                    let ok = copy_to_clipboard(&ticket);
-                    self.note = Some((
-                        if ok { t!("fed.copied") } else { t!("fed.copy_failed") }.to_string(),
-                        false,
-                    ));
+                    self.note = Some((copied_note(&ticket), false));
                 }
             }
             Act::Limits(id) => {
@@ -751,11 +748,7 @@ impl Room {
             Act::FormSubmit => self.submit_form(),
             Act::MintedCopy => {
                 if let Modal::Minted { ticket: Some(ticket), .. } = &self.modal {
-                    let ok = copy_to_clipboard(ticket);
-                    self.note = Some((
-                        if ok { t!("fed.copied") } else { t!("fed.copy_failed") }.to_string(),
-                        false,
-                    ));
+                    self.note = Some((copied_note(ticket), false));
                 }
             }
             Act::TableScroll(delta) => {
@@ -1048,6 +1041,25 @@ impl Screen for Room {
             self.tscroll = if up { self.tscroll.saturating_sub(1) } else { self.tscroll.saturating_add(1) };
         }
     }
+
+    fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+        self.ui.begin_frame();
+        draw(frame, self, area, true);
+    }
+
+    fn hint(&self) -> String {
+        footer_hint(self)
+    }
+
+    fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
+    /// Every key while a modal is up, and while the Peers tab's paste box
+    /// has the caret: a ticket is letters, and none of them is the host's.
+    fn claim(&self) -> Claim {
+        if self.modal_open() || self.ticket_focus { Claim::All } else { Claim::Open }
+    }
 }
 
 /// The room, loading: what `mstream-player admin federation` opens.
@@ -1058,6 +1070,17 @@ pub(super) fn start(client: Client) -> Room {
 }
 
 // ── Row facts ────────────────────────────────────────────────────────────────
+
+/// Copy a ticket and say how it left: on the clipboard, handed to the
+/// terminal (which may refuse it without a word), or nowhere.
+fn copied_note(ticket: &str) -> String {
+    match kit::clipboard::copy(ticket) {
+        Copied::Clipboard => t!("fed.copied_clipboard"),
+        Copied::Terminal => t!("fed.copied"),
+        Copied::Failed => t!("fed.copy_failed"),
+    }
+    .to_string()
+}
 
 /// The request's counterpart, for the screen: their self-asserted name,
 /// gated, or the short endpoint id.
@@ -1426,7 +1449,15 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, room: &mut Room) {
     room.ui.begin_frame();
     let Some(area) = frame_ground(frame, MIN_W, MIN_H) else { return };
+    draw(frame, room, area, false);
+}
 
+/// The room inside `area`. Standalone it owns the window, header and tips
+/// row included. Hosted, the host's bar names the server and its footer
+/// carries the tips, so the room draws neither and keeps only its note on
+/// the area's last row; below its minimum it draws what fits and never
+/// asks for a larger window.
+fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
     // A modal makes the room beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
     let modal_open = !matches!(room.modal, Modal::None);
@@ -1435,19 +1466,16 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = None;
     }
 
-    draw_header(frame, area, &t!("fed.title"), &host_of(&room.client));
-    let column = Rect {
-        x: 2,
-        y: 2,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(5),
-    };
+    if !hosted {
+        draw_header(frame, area, &t!("fed.title"), &host_of(&room.client));
+    }
+    let column = body_column(area, hosted);
     match room.params.clone() {
         None => {}
         Some(p) if !p.enabled => draw_off(frame, room, column, &p),
         Some(p) => draw_on(frame, room, column, &p),
     }
-    draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
+    draw_foot(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room), hosted);
 
     if modal_open {
         room.ui.pointer = live_pointer;
@@ -1988,10 +2016,11 @@ fn draw_peers(frame: &mut Frame, room: &mut Room, body: Rect) {
     let card = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(border));
     let inner = card.inner(field);
     frame.render_widget(card, field);
+    let w = inner.width.saturating_sub(2);
     let shown = if room.ticket_focus {
-        kit::input_display(room.ticket.value(), room.ticket.cursor(), inner.width.saturating_sub(2))
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, room.ticket.value(), room.ticket.cursor(), w, None)
     } else {
-        clip(room.ticket.value(), inner.width.saturating_sub(2))
+        clip(room.ticket.value(), w)
     };
     frame.render_widget(Paragraph::new(Span::raw(shown)), Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: 1 });
     room.ui.click(field, Act::TicketFocus);
@@ -2092,10 +2121,11 @@ fn modal_field(frame: &mut Frame, room: &mut Room, at: Rect, label: &str, input:
     let card = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(border));
     let inner = card.inner(field);
     frame.render_widget(card, field);
+    let w = inner.width.saturating_sub(2);
     let shown = if focused {
-        kit::input_display(input.value(), input.cursor(), inner.width.saturating_sub(2))
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, input.value(), input.cursor(), w, None)
     } else {
-        clip(input.value(), inner.width.saturating_sub(2))
+        clip(input.value(), w)
     };
     frame.render_widget(Paragraph::new(Span::raw(shown)), Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: 1 });
     room.ui.click(field, act);
@@ -2952,5 +2982,141 @@ mod tests {
         );
         assert!(decode_ticket(&ticket_for(serde_json::json!({ "k": "key" }))).is_none(), "t is required");
         assert!(iso_unix("2026-09-06 09:41:52").is_some(), "SQLite's form parses too");
+    }
+
+    // ── Hosted in the GUI player's Admin tab ─────────────────────────────
+
+    use crate::admin::hosting::{self, DOCKED, FLOOR, WINDOW};
+    use ratatui::buffer::Buffer;
+
+    /// The cells `from..to` of row `y`, as text.
+    fn cells(buf: &Buffer, y: u16, from: u16, to: u16) -> String {
+        (from..to).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// The whole buffer as text, a row a line.
+    fn text_of(buf: &Buffer) -> String {
+        (buf.area.top()..buf.area.bottom()).map(|y| hosting::row(buf, y)).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn hosted_the_room_draws_inside_its_area_with_no_header_and_its_note_last() {
+        let _en = english();
+        for (size, area) in [((100, 30), WINDOW), ((176, 46), DOCKED)] {
+            let mut room = on();
+            room.note = Some(("the relay answered".into(), true));
+            let buf = hosting::draw_hosted(&mut room, size, area);
+            let text = text_of(&buf);
+            assert_eq!(hosting::outside(&buf, area, true), Vec::<(u16, u16)>::new(), "{size:?}\n{text}");
+            assert!(!text.contains("home.mstream.example"), "no header\n{text}");
+            assert!(!text.contains(&*t!("fed.hint_requests")), "the tips are the host's\n{text}");
+            assert_eq!(cells(&buf, area.y, area.x, area.right()), "·".repeat(area.width as usize), "the first row is the host's");
+            assert!(cells(&buf, area.y + 1, area.x + 2, area.right()).starts_with("• on — connected to relay"), "{text}");
+            assert!(text.contains(" Requests · 1 ") && text.contains(" Peers "), "{text}");
+            assert!(cells(&buf, area.bottom() - 1, area.x + 2, area.right()).starts_with("the relay answered"), "{text}");
+        }
+    }
+
+    #[test]
+    fn hosted_a_modal_centres_in_the_rooms_area() {
+        let _en = english();
+        let mut room = on();
+        room.modal = Modal::TurnOff;
+        let buf = hosting::draw_hosted(&mut room, (100, 30), WINDOW);
+        // The turn-off gate is 68 by 9: a title, a blank, two lines, a
+        // blank, the buttons.
+        let at = kit::modal_rect(WINDOW, 68, 9, 9);
+        assert_eq!((at.x, at.y), (24, 8));
+        assert_eq!(buf[(at.x, at.y)].symbol(), "╭");
+        assert_eq!(buf[(at.right() - 1, at.bottom() - 1)].symbol(), "╯");
+        assert_eq!(hosting::outside(&buf, WINDOW, true), Vec::<(u16, u16)>::new());
+    }
+
+    #[test]
+    fn hosted_at_the_floor_it_never_says_resize() {
+        let _en = english();
+        for params in [params_on(), params_off()] {
+            let mut room = new_room();
+            room.apply(loaded(params));
+            room.note = Some(("a note".into(), false));
+            let buf = hosting::draw_hosted(&mut room, (100, 24), FLOOR);
+            let text = text_of(&buf);
+            assert_eq!(hosting::outside(&buf, FLOOR, false), Vec::<(u16, u16)>::new(), "{text}");
+            assert!(!text.contains(&*t!("resize")), "{text}");
+            assert!(cells(&buf, FLOOR.bottom() - 1, FLOOR.x + 2, FLOOR.right()).starts_with("a note"), "{text}");
+        }
+    }
+
+    #[test]
+    fn it_claims_every_key_while_the_paste_box_has_the_caret() {
+        let _en = english();
+        let mut room = on();
+        assert_eq!(room.claim(), Claim::Open);
+        press(&mut room, KeyCode::Char('j'));
+        assert!(room.ticket_focus);
+        assert_eq!(room.claim(), Claim::All);
+        press(&mut room, KeyCode::Char('L'));
+        assert_eq!(room.ticket.value(), "L", "a capital L is a letter of the ticket");
+        press(&mut room, KeyCode::Esc);
+        assert_eq!(room.claim(), Claim::Open);
+        room.modal = Modal::TurnOff;
+        assert!(room.modal_open());
+        assert_eq!(room.claim(), Claim::All);
+        assert_eq!(room.hint(), t!("fed.hint_turn_off"));
+    }
+
+    /// The cell a focused field notes is the caret's however the field's
+    /// window over a long value stands (hosted, it is where the GUI's window
+    /// floats the input method's candidates, and what turns its paste on).
+    #[test]
+    fn the_ticket_box_and_the_forms_field_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = on();
+        press(&mut room, KeyCode::Char('j'));
+        type_text(&mut room, &format!("mstrfed1:{}end", "q".repeat(120)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "qqqend", "");
+        press(&mut room, KeyCode::Home);
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "", "mstrfed1:");
+        press(&mut room, KeyCode::Esc);
+        draw(&mut room);
+        assert_eq!(room.ui.caret_at(), None, "the box let go of the keys");
+
+        room.act(Act::Mint);
+        type_text(&mut room, &format!("{}-end", "n".repeat(40)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "nnn-end", "");
+    }
+
+    /// `y` on a ticket row and on a freshly minted ticket both go through
+    /// the kit's clipboard, and the note says which way the ticket went.
+    #[test]
+    fn y_on_a_key_and_on_the_minted_ticket_copy_and_say_how() {
+        use crate::kit::clipboard::{Copied, catch, caught};
+        let _en = english();
+        let answers = [
+            (Copied::Clipboard, t!("fed.copied_clipboard")),
+            (Copied::Terminal, t!("fed.copied")),
+            (Copied::Failed, t!("fed.copy_failed")),
+        ];
+        let mut room = on();
+        room.switch_tab(Tab::Tickets);
+        press(&mut room, KeyCode::Down);
+        let row = room.selected_key().and_then(|k| k.ticket.clone()).expect("a ticket row");
+        for (answer, said) in &answers {
+            catch(*answer);
+            room.note = None;
+            press(&mut room, KeyCode::Char('y'));
+            assert_eq!(room.note, Some((said.to_string(), false)), "the row, {answer:?}");
+        }
+        assert_eq!(caught(), [row.clone(), row.clone(), row]);
+
+        let minted = "mstrfed1:eyJ0IjoibmV3In0".to_string();
+        room.modal = Modal::Minted { name: "Bob's NAS".into(), ticket: Some(minted.clone()), libraries: vec!["music".into()] };
+        for (answer, said) in &answers {
+            catch(*answer);
+            room.note = None;
+            press(&mut room, KeyCode::Char('y'));
+            assert_eq!(room.note, Some((said.to_string(), false)), "the minted ticket, {answer:?}");
+        }
+        assert_eq!(caught(), [minted.clone(), minted.clone(), minted]);
     }
 }

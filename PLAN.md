@@ -472,7 +472,8 @@ compose (message + offered vpaths), block and leave as gold gates, `h` incompati
 blocked, `/` filter, a quiet ten-second poll. Off the network: the pitch, one join card that
 posts `enabled` at once (no gate, by the user's call) and the federation-requests opt-in on by
 default; the identity modal opens after the join, as the webapp does. `y` copies the ticket
-over OSC 52 (best effort; Apple Terminal ignores it). Kit additions documented: tabs (active
+through the kit's clipboard (since 2026-10-02: the pasteboard or the platform's tool, OSC 52 as
+the terminal's last resort and alone over SSH, never in the window). Kit additions documented: tabs (active
 = 1-row filled slab), the state line, an inline non-modal input.
 
 **Federation room ✅ 2026-09-07** — `mstream-player admin federation` (`src/admin/federation.rs`),
@@ -570,8 +571,87 @@ knows the player's reports by the shared `CLIENT_NAME` (they had drifted — `ms
 player"), and totals under a minute read in seconds (`7 s`) where the webapp rounds to `0 minutes`
 — a Top row ranked by seconds of listening read as nothing.
 
-Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
-tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
+**Admin tab in the GUI ✅ 2026-10-02** — the GUI's third tab (`M`), per the "Admin GUI Hybrid"
+canvas and docs/ux-contracts/admin-screen.md: a hallway of the six rooms (SERVER: Libraries,
+Users, Backups; NETWORK: Discovery, Federation, Torrents; WATCH: Log) beside the room, hosted
+whole on the GUI's session through the hub's new hosting seams in `src/admin/mod.rs` (an area
+to draw in, `body_column`/`draw_foot`/`draw_chip`, `modal_rect` centred in the area, the room's
+`Claim` on the keyboard, one shared pointer routine, the `HostedRoom` face the GUI holds), and
+the server's log (`GET /api/v1/admin/logs/recent?since=`, `src/gui/server_log.rs`) on a worker
+thread of its own — docked as a column at 160 columns, as a band under the room at 48 rows,
+otherwise a room of its own on the hallway's Log row, its lines wrapped whole under their clocks
+(below); `L` hides or opens it. The host takes only Tab, BackTab and `L` from a focused room,
+never a digit, `q` or Esc; Esc or `q` at a room's base hands the focus back to the hallway. Ten
+locales (35 keys, `gui.tips.base` names `M`), tests for the footer's 99 cells and the hallway's
+label widths in every locale, and an e2e leg with no server. Not built: the Overview row, the
+rooms' one-line summaries, server-side log levels (the player's own level menu went on
+2026-10-02, below: the log shows every line the ring holds).
+Merged after v0.10.0, so the desktop product's window (Phase 14) hosts the tab too: the window
+drives the same two loop halves as the terminal (`gui::frame`, `gui::input`), so the tab's keys,
+pointer, wheel and hand cursor need nothing of their own there. One gap showed only in the
+window, closed 2026-10-02 (contract clause 28): the hosted rooms drew their fields on their own
+surfaces and noted no caret on the GUI's, so the window counted no field as having the keyboard
+— Cmd+V pasted nothing into a room's field (a Federation or Discovery ticket included; Ctrl+V
+off a Mac reached the field as a key it ignores), and the input method stayed off there. Every
+room's focused field now draws through `kit::field_display`, which notes its caret and draws
+the composition; `HostedRoom` carries the composition down and the caret up to the GUI's
+surface, where the window reads it. The follow-up: a hosted room's caret holds steady rather
+than blink, since the GUI times its frames by its own surface's blink clock.
+
+**Log copy, download and highlight ✅ 2026-10-02** — the Admin tab's server log gains its ways
+out (contract clauses 29-34). A press-drag across its lines highlights whole lines, held by
+sequence number so arrivals and the ring's drops never move it, through a new kit element, the
+drag region (`Surface::drag_region`: the press, every move and the release wherever it lands,
+with the scrollbar's hard capture, so `gui::input` skips the hosted room and the Stats page
+while a grip stands). `y` copies the highlight or every line shown — the clock, winston's
+`warn`/`error`, the whole message with its later lines indented — through the new
+`kit::clipboard`, whose route follows where the player runs: the pasteboard (arboard, the
+desktop flavour only) and the platform's tool in the window, never OSC 52 there; OSC 52 alone
+over SSH; pasteboard, tool, then OSC 52 in a local terminal. Discovery's and Federation's `y`
+moved onto it, so a ticket copies in the window too. `d` fetches `GET
+/api/v1/admin/logs/download` on a one-shot thread with the log's client (never the poll's,
+Known risk 63), checks the zip by its end record, and saves `mstream-logs-<server>-<time>.zip` in
+the Downloads folder without ever replacing a file; a server with no log files or no route
+leaves the lines shown as `.txt`, and a zip cut short is never saved. `o` shows the file in
+Finder or Explorer (the folder elsewhere) rather than opening it, through `src/gui/opener.rs`,
+which the torrent room's opener moved into. The header carries `copy` and `download` for the
+pointer, whole or not at all, with `downloading…` while one runs. In the window Cmd+C
+(Ctrl+Shift+C or Ctrl+Insert elsewhere) is the log's `y`, and the window always takes the
+chord, so Ctrl+Shift+C off a Mac no longer quits. Ten locales (22 log keys, the two rooms'
+`copied_clipboard`, the log's footer re-cut to 99 cells). Not built: part-line or keyboard
+highlighting, edge auto-scroll, a drag in Apple Terminal (it reports no held button), choosing
+the save folder.
+
+**Wrapped log lines ✅ 2026-10-02** — a log line was one row, the message's first line clipped
+at the log's edge with ` …` after a stack trace; now the whole message wraps under its clock
+(contract clauses 23, 24, 29). Each of its lines wraps by words in cells at the log's width less
+the clock's ten, keeping a stack trace's indentation; a word wider than a row (a path, CJK with
+no spaces) breaks at the row's last cell; the later rows are set in under the message's first
+cell, every row in the line's colour. The view still scrolls by lines with the bottom line whole
+and the top one showing its tail, but a line taller than the view goes by rows and Home shows
+the oldest line from its clock, so no row is out of reach. Every drawn row maps to its line for
+the drag region, so a press on a later row means that line. ` …` and the first-line text it
+marked are gone; the copy is unchanged.
+
+**A taller band, a scroll bar, every level ✅ 2026-10-02** — three changes asked for together
+(contract clauses 21-25 and the deviations log). The band under the room is twelve rows, ten
+of them lines where seven were, the room three rows shorter and the 48-row threshold as it was.
+The log has the kit's scroll bar on its last column while its lines do not all fit whole (the
+lines a cell narrower beside it, none and the whole width when they fit), counted in lines
+rather than rows so no frame wraps the whole ring: the thumb is where the oldest line shown
+from its clock stands among them all, its length the share shown whole; the endcaps are ↑ and
+↓ with the kit's hold-repeat, a track press moves the bottom line there (top of the log at one
+end, following at the other) and arms the thumb's drag. The kit gained `scroll_items` (the bar
+sized by items) and `Surface::holding_bar`, which `gui::input` now honours as it does a drag
+region's grip, so a held arrow or thumb keeps the pointer from the hosted room until its
+release. The drag region for the highlight leaves the bar's column out. The level filter and
+its menu are gone: every line shows (http, verbose, debug and silly too) in the colours it had,
+the Log row counts every line, Enter does nothing in the log, and the four level labels and the
+menu's footer went from all ten locales, `tips_log` lost `Enter level`, and `empty` now says
+the server's log has no lines yet.
+
+Build, in order of fit: **logs** ✅ 2026-10-02 (`/api/v1/admin/logs/recent?since=<seq>` is a
+purpose-built tail-poll API with a cursor; the GUI's Admin tab tails it, above), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
 `/api/v1/scan/status` — no admin rights, no IP gate), **users & access**, **server audio**
 (pairs with `/api/v1/server-playback/*`), **scan params and server config** (uniform scalar
 toggles), then transcode, federation and p2p peer management.
@@ -2192,6 +2272,12 @@ a LATER secondary screen (party view), Columns retired.
   as before, 5–16 ms (their pictures live in the cells, and a clear takes
   them). After a walk through six sizes the screen matched a fresh start
   cell for cell on every protocol.
+- **The Admin tab ✅ 2026-10-02** — the top bar's third tab hosts the
+  admin panel's six rooms (docs/ux-contracts/admin-screen.md, B4 above):
+  a hallway at the left, the room beside it on the App's reach as the
+  Stats tab builds it, and the server's log docked as a column, as a band
+  under the room, or as a room of its own, as the window allows. `M` from
+  the Library, Stats and Now Playing; Esc back.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
@@ -3589,7 +3675,7 @@ dropped as misreadings and six were downgraded. Numbering continues the Phase 1 
 | 60 | `consume()` is a single 332-line match over 21 event variants spanning every domain | when 56-58 land, make it a dispatcher to per-module `consume`s — cheap then, expensive later |
 | 61 | The entry builders (2860-3059 plus the search/discover ones) are pure data→`Vec<Entry>` functions carrying their own history of server quirks, interleaved between the event handler and the keymap | `src/tui/app/entries.rs` |
 | 62 | `app::Queue::next_index`/`prev_index`/`remove` re-implement `engine::pick_next`/`apply_remove` verbatim — same shuffle formula, same loop-one rule, same remove fixups — and the app.rs comment admits they're synced by hand. They never cross-check because the TUI plays via `play_source`, which keeps the engine queue at one entry. Both copies carry parallel test suites, and they have already drifted on remove-current | extract the pure `(len, index, shuffle, loop, manual)` functions into one module both call |
-| 63 | The API worker is strictly serial (`worker.rs:425`): one 20 s timeout head-of-line blocks every pane, and a Quick Connect dial can hold it ~48 s. The code concedes this once already — mDNS discovery got its own thread so a browse "shouldn't hold up a pairing attempt queued behind it". The admin panel's log tailing arrives on this seam next | decide the concurrency story before B4: dispatch onto the shared runtime with a generation token, or formalise the `spawn_discovery` escape hatch |
+| 63 | The API worker is strictly serial (`worker.rs:425`): one 20 s timeout head-of-line blocks every pane, and a Quick Connect dial can hold it ~48 s. The code concedes this once already — mDNS discovery got its own thread so a browse "shouldn't hold up a pairing attempt queued behind it". The admin panel's log tailing arrives on this seam next (2026-10-02: it did not — the GUI's server log polls on a worker thread of its own, `src/gui/server_log.rs`, so the serial worker is still the open question for everything else) | decide the concurrency story before B4: dispatch onto the shared runtime with a generation token, or formalise the `spawn_discovery` escape hatch |
 | 64 | Reply routing is encoded in the variant name — `ApiCmd::SearchDrill` exists only so a Library reply lands in a different pane, duplicating the Library command and event wholesale. Each new operation costs four compiler-checked places plus `note_pending`'s silent `_ => continue` | carry the destination in the command and echo it back on the event; derive the spinner's tab from the same field |
 | 65 | `mstream-player dj` documents itself as "the scriptable view of what the player does" but hand-assembles the request instead of calling the tested `dj::build_random_request`, so it ignores artist cooldown, min rating, genre filters and the sonic pool — and already diverges today for any non-default key matching or rating (`cmd_library.rs:183`) | load the saved prefs and call the builder; collapse `BpmRange`/`BpmWindow` into one struct |
 | 66 | `ui.rs` imports `fmt_duration` from `cmd_library.rs`, so the render layer can't compile without the CLI smoke-test harness. Every other shared formatter lives in `api/types.rs` | move it next to `display_name`/`metadata_display` |

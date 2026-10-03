@@ -11,7 +11,7 @@ hold-repeat, generic over each screen's action enum), the widgets as
 free functions (`tall_button` and `tall_secondary` over one
 `tall_frame`, `tall_frame_bordered` for the thick border, `button`,
 `cursor_ring`, `modal_frame(_anchored)`,
-`modal_close`, `scroll_list`, `letter_strip`, `draw_tooltip`,
+`modal_close`, `scroll_list` and `scroll_items`, `letter_strip`, `draw_tooltip`,
 `input_display`), the pure geometry (`table_view` and the `ListView`
 that carries a list's offset, its reveal flag and whether the keyboard
 holds its cursor across frames, `letter_index`,
@@ -344,11 +344,21 @@ bar is live**: endcaps step one row and HOLD-REPEAT while pressed
 proportionally to the clicked position, a track press arms a THUMB
 DRAG (ridden on mouse-drag, released on mouse-up), the wheel scrolls,
 and the bar brightens under the pointer (thumb and endcaps → Cyan)
-like every clickable. **A bar interaction CAPTURES the pointer**:
+like every clickable. **A click registered over the bar after it takes
+the press**, as over a drag region (below), so a modal's guard or an
+open menu's catcher never arms the bar beneath it: the press that
+closes a modal holds no arrow and drags no thumb under it.
+**A bar interaction CAPTURES the pointer**:
 while an arrow is held or the thumb dragged, sub-cell hand tremor must
 not retarget hover onto whatever sits beside the 1-cell bar — and
 terminals differ on whether mid-press motion arrives as Drag or plain
-Moved, so BOTH honor the capture. Hover resumes on release.
+Moved, so BOTH honor the capture. Hover resumes on release. A host that
+hands the pointer to a hosted page keeps it from that page while
+`Surface::holding_bar`, as while a drag region grips (below), so the
+release comes back to the bar wherever the hand lets go.
+`scroll_list` sizes the thumb by the bar's rows, one per list row;
+`scroll_items` sizes it by items, for a list whose items take more than
+one row each (the Log tail's wrapped lines).
 **The phantom-release dialect** (Apple Terminal, probed 470.2): a press
 reports as an INSTANT click pair, motion-while-held arrives as plain
 Moved, and the physical release emits a SECOND click pair at wherever
@@ -374,6 +384,79 @@ it. A fresh add scrolls its row into view but does not select it.
 **The tips line names only what works right now**: no rows → just the
 add actions; rows with the cursor stowed → how to pick it up, plus
 continue; a row under the cursor → the full set.
+
+### Log tail
+A server's log, read as it grows: one header row, then the lines, the
+newest at the bottom. The header is the follow state as the state line's
+word — `•` and `following` in Green BOLD while the view rides the newest
+line, `• paused` DarkGray once it is scrolled up (the word a target that
+resumes) — then its controls (below), with what the layout's own key
+does here dim at the row's right while keyboard hints are on. It shows
+EVERY line the server holds, whatever its level — http, verbose, debug
+and silly beside info, warn and error — and has no level filter. A line
+is the local time `HH:MM:SS` DarkGray, two cells, then the whole
+message, never cut: each of its lines wrapped by words in cells at the
+log's width less the clock's ten (a line's indentation kept on its first
+row, a word wider than a row broken at the row's last cell, a blank line
+between two kept), the rows after the first set in ten cells with no
+clock. Every level but two reads in the text colour on every row of the
+line (nothing is dimmed), warn Yellow, error the danger red. The view
+scrolls by lines, the bottom line whole and the top one showing its last
+rows; a line taller than the view goes by rows, and the top of the log
+shows the oldest line from its clock. Scrolling up pauses and holds the
+view still while lines arrive under it; End, `f`, a click on the paused
+word or scrolling back to the bottom resume. **The scroll bar**: the
+Table's bar (above) on the log's last column beside the lines' rows,
+only while the lines do not all fit whole at the log's width — two lines
+or more, and three rows or more for its arrows and a track — and the
+lines wrap a cell narrower beside it. It counts LINES, not rows
+(`scroll_items`): counting rows would wrap the whole ring every frame,
+so the thumb stands where the oldest line shown from its clock stands
+among all the lines, its length the share the view shows whole — at the
+bottom while following, at the top at the top of the log. Its endcaps
+are ↑ and ↓ (hold-repeat as ever), a track press moves the bottom line
+to its place (the first track cell the top of the log, the last
+following) and arms the thumb's drag, and the wheel is the wheel. With
+nothing to show, one DarkGray sentence (waiting, the ring off, no lines
+yet), or the failure in Yellow. Polling is the log's own thread, never
+two requests at once, slower after a failure and stopped on a refusal.
+**The highlight**: a press-drag across the lines (a drag region, below,
+never over the bar's column) highlights whole lines from the press's
+line to the pointer's (any row of a wrapped line is that line), every
+row of each filled across the lines' width in the selection colours (bg
+ACCENT fg ON-ACCENT, its level colour set aside), held by the lines'
+sequence numbers so arrivals never move it; a drag past either end stops
+at the last line drawn, and a plain click or Esc clears it. It is text
+to copy, NOT the list cursor below: no row verb reads it and no key
+moves it, so the list-cursor law ("the pointer never highlights a row")
+stands. `y` copies the highlight, or every line shown, through the kit's
+clipboard (the behavioral rule below). **The header's controls**: after
+the follow state, ` · copy` and ` · download` as text buttons, each
+drawn whole or not at all, the first that does not fit ending the row,
+and the dim key hint at the right gives way before them; while a
+download runs its word is the busy word (`downloading…` fg LightBlue, no
+click). First consumer: the GUI's Admin tab
+(docs/ux-contracts/admin-screen.md, `src/gui/server_log.rs`).
+
+### Drag region
+A press-drag that means something other than moving a thumb — marking a
+run of log lines — registers a drag region over its rows each frame
+(`Surface::drag_region`), told the press, every move while the button is
+held and the release, wherever each lands. It CAPTURES the pointer as a
+thumb drag does: hover stays put and nothing else takes the release, so
+a host that routes events to a hosted room skips it while
+`Surface::gripping` holds. It is transparent to clicks — a click under it
+still answers — and a click registered AFTER it over the press's cell (an
+overlay, a modal's catcher) takes the press instead. A region never
+enters the phantom-release soft capture, so in Apple Terminal, whose
+press is an instant click pair, a press is a plain click and no drag
+begins. The host keeps a grip honest: after `Surface::release_at` it
+runs `Surface::motion` at the release's cell, so the control under it
+lights at once; a press arriving while a grip stands means the terminal
+lost the release (some drop it when the focus leaves mid-drag), so the
+grip is released at that cell first and the press then goes on as any
+press; and a grip whose region the last frame did not draw (its screen
+left, its pane hidden) is let go before the next event is read.
 
 ### Modal
 Centered, `Clear` beneath (no scrim — terminals have no alpha; the
@@ -454,10 +537,10 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
-**The GUI player's top bar**: two tabs at the left — Library, Stats —
-worn as the kit's tab slab for the screen that is up and dim text for
-the other (Now Playing, on `0`, has no tab and lights none while it is
-up), the Visualizer item after them, and the session's server label with
+**The GUI player's top bar**: three tabs at the left — Library, Stats,
+Admin — worn as the kit's tab slab for the screen that is up and dim
+text for the others (Now Playing, on `0`, has no tab and lights none
+while it is up), the Visualizer item after them, and the session's server label with
 `[+]` at the right. The
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
@@ -468,7 +551,43 @@ worth with the footer on. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);
-the queue panel and the bar stand under the Library only.
+the queue panel stands under the Library only, and the bar under the
+Library and Admin.
+
+**The hallway** (the GUI's Admin tab, the "Admin GUI Hybrid" canvas): a
+nav column of rooms that are each a whole page, in the Library column's
+look — DarkGray UPPERCASE groups at x 1 (SERVER, NETWORK, WATCH), the
+rooms at x 3, the open one `▸ label` at x 1 in the accent BOLD, the
+others dim and BRIGHT + BOLD under the pointer — with its rule at x 16,
+DarkGray, turning the accent while the focus is in the room beside it.
+The keyboard cursor wears the slab across the column only while the
+column has the focus: the hallway, the room and a docked log are three
+focus targets on Tab and BackTab, and the footer names the keys of the
+one that holds it. A row may carry a dim count after its label (` · 12
+new`), which yields its cells first.
+
+**Hosted rooms.** A page built as its own command (an admin room, the
+stats page) can be hosted inside another screen's area. The room draws
+its body and its note row and nothing else: no header (the host's bar
+names the server), no tips row (the host's footer carries the room's
+hint, and the room's base hint must say what its keys do THERE — Esc
+back, not q quit), its first row blank for the host, its beta chip at
+the right of the body's first row. It never prints the resize line;
+below its minimum it draws what fits. Its modals centre in its area,
+not the window (`modal_rect` honours the area's origin). The host
+blanks anything the room drew outside its area before drawing its own
+parts — the spill guard — so a tall form cannot land on the bar. What
+the host may take from a focused room is set by the room's claim:
+everything is the room's while a modal or a text field is open; Tab is
+the room's where Tab means something to it; otherwise the host takes
+Tab, BackTab and its one layout key. The host never takes a digit, `q`
+or Esc from a room — those are the room's flags, tabs and way back. A
+hosted room's focused field draws through `kit::field_display`, which
+notes the caret's cell on the room's surface and draws the surface's
+composition before the caret; the host hands its own composition down
+before the room draws and lifts the room's caret onto its own surface
+after, so to a shell with a paste and an input method of its own (the
+GUI's window) the room's field is its field.
 
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints
@@ -596,3 +715,21 @@ owned `String`s so they translate like everything else.
   NSOpenPanel never fronts from a terminal process), rfd on Windows,
   ashpd (default-features off) on Linux, with the in-TUI LOCAL browser
   as the universal fallback (same filesystem as the picker).
+- **The clipboard is the kit's.** Every copy goes through
+  `kit::clipboard::copy`, never an escape written by hand, and the route
+  follows where the player runs. In the desktop window: the system
+  pasteboard (arboard), then the platform's tool — never OSC 52, which a
+  window launched from a shell would write into that shell. In a
+  terminal over SSH (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set):
+  OSC 52 alone, because the far machine's clipboard is not the user's.
+  In a local terminal: the pasteboard where the build links one (the
+  desktop flavour), then the tool, then OSC 52. The tools are `pbcopy`
+  (given a UTF-8 locale), `clip.exe` (fed UTF-16), and `wl-copy` under
+  Wayland or `xclip` then `xsel` under X11; a tool that exits non-zero or
+  takes more than a second is passed over, and text over 1 MiB never goes
+  as OSC 52. The answer is one of three, and the caller's note says
+  which: **Clipboard** (it is there), **Terminal** (handed over as OSC 52,
+  which Apple Terminal ignores and iTerm2 gates behind a setting, so the
+  note says "if it allows it"), **Failed** (nothing took it; the note
+  offers another way out). Tests never reach the system clipboard: under
+  test `copy` answers from a per-thread catcher.

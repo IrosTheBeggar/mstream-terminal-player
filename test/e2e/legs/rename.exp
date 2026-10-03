@@ -1,4 +1,7 @@
 #!/usr/bin/expect -f
+# Every gate's braces span lines: expect reads a one-line braced list as a
+# single pattern that never matches, so such a gate waits out its timeout
+# and lets the leg run on past a screen that never painted.
 set timeout 20
 set env(TERM) xterm-256color
 set env(MSTREAM_SETUP_LANG) en
@@ -7,7 +10,10 @@ set env(HOME) $::env(WIZHOME)
 proc drain {secs} { expect -timeout $secs timeout {} }
 spawn {*}$argv
 exec stty rows 40 columns 100 < $spawn_out(slave,name)
-expect { "Add a music folder" {} timeout { puts "SYNC-FAIL"; exit 2 } }
+expect {
+    "Add a music folder" {}
+    timeout { puts "SYNC-FAIL"; exit 2 }
+}
 send "t"
 drain 1
 send "$::env(WIZMUSIC)\r"

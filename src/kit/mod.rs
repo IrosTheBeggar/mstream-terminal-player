@@ -18,10 +18,21 @@
 //!
 //! Frames reach the terminal through [`frames`]: whole, in one write, and
 //! shown at once. Every full-screen page starts with its `init`.
+//!
+//! A press-drag that means something other than moving a thumb (marking a
+//! run of log lines) goes through a drag region ([`Surface::drag_region`]):
+//! it is told the press, every move while the button is held and the
+//! release, wherever the pointer lands, and holds the pointer the way a
+//! thumb drag does, so hover never wanders onto what the hand passes over.
+//! Text leaves through [`clipboard`], whose routes follow where the player
+//! runs; [`os`] names that place as data a test can hand in.
 
+pub mod clipboard;
 pub mod frames;
+pub mod os;
 pub mod theme;
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -72,12 +83,37 @@ pub fn bold() -> Style {
 // ── The interaction surface ──────────────────────────────────────────────────
 
 /// A registered scrollbar: geometry plus the actions its parts emit.
+/// `above` is how many clicks were registered before it, its own cells
+/// among them, so a press can tell a click drawn over it (a menu's
+/// catcher, a modal's guard), which takes the press instead, as a drag
+/// region's mark does.
 struct BarReg<A> {
     rect: Rect,
+    above: usize,
     max_scroll: usize,
     step_back: A,
     step_fwd: A,
     jump: Box<dyn Fn(usize) -> A>,
+}
+
+/// What a drag region is told: the press that took it, each move while
+/// the button is held (wherever the pointer is by then), and the release
+/// (wherever that lands, inside the region or not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grip {
+    Press,
+    Drag,
+    Release,
+}
+
+/// A registered drag region. `above` is how many clicks were registered
+/// before it, so a press can tell the clicks drawn under it (the focus
+/// click it shares the rows with) from those drawn over it (a menu's
+/// catcher, a modal), which take the press instead.
+struct RegionReg<A> {
+    rect: Rect,
+    above: usize,
+    act: Rc<dyn Fn(Grip, Position) -> A>,
 }
 
 /// The per-screen interaction state. Rebuild the registries every frame
@@ -100,6 +136,13 @@ pub struct Surface<A> {
     bars: Vec<BarReg<A>>,
     /// An active thumb drag: index into this frame's `bars`.
     drag: Option<usize>,
+    /// This frame's drag regions, rebuilt each frame like `bars`.
+    regions: Vec<RegionReg<A>>,
+    /// The region a press took, held until the release. It keeps its own
+    /// handle on the region's act rather than an index, because the drag
+    /// outlives the frame it began in and the next frame may not draw the
+    /// region at all.
+    gripped: Option<Rc<dyn Fn(Grip, Position) -> A>>,
     /// A held ▲/▼ endcap: (bar index, direction, when the next step fires).
     arrow_hold: Option<(usize, i8, Instant)>,
     /// Where and when the current bar interaction was armed.
@@ -166,6 +209,8 @@ impl<A> Default for Surface<A> {
             dwell: None,
             bars: Vec::new(),
             drag: None,
+            regions: Vec::new(),
+            gripped: None,
             arrow_hold: None,
             armed: None,
             soft_origin: None,
@@ -242,6 +287,7 @@ impl<A: Clone> Surface<A> {
         self.clicks.clear();
         self.tips.clear();
         self.bars.clear();
+        self.regions.clear();
         self.contexts.clear();
         self.caret_drawn = false;
         self.caret_at = None;
@@ -282,9 +328,8 @@ impl<A: Clone> Surface<A> {
     /// The cell of the field with the keyboard this frame, if one has it:
     /// a field drawn in the topmost layer. None while a modal with no
     /// field of its own is up over a page's focused field.
-    // The GUI window places its IME box here; the frame tests read it in
-    // every build, the player only in one with the `window` feature.
-    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    // The GUI window places its IME box here, and the GUI's Admin tab
+    // lifts a hosted room's onto its own surface in every build.
     pub fn caret_at(&self) -> Option<Position> {
         self.caret_at
     }
@@ -299,8 +344,9 @@ impl<A: Clone> Surface<A> {
     }
 
     /// The input method's uncommitted text, or none (empty).
-    // Only the GUI window has an input method to report (and the tests).
-    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    // Only the GUI window has an input method to report (and the tests);
+    // the GUI's Admin tab hands the GUI's on to a hosted room in every
+    // build, where it is always empty but in the window.
     pub fn set_composition(&mut self, text: &str) {
         if self.composition != text {
             self.composition.clear();
@@ -376,8 +422,10 @@ impl<A: Clone> Surface<A> {
     /// must not retarget hover onto whatever sits beside the 1-cell bar.
     /// A SOFT capture (after a phantom release) suppresses hover only
     /// near the press, until the pointer genuinely travels away.
+    /// A drag region's grip captures too: the hand sweeping across the
+    /// page must not light up every control it passes over.
     pub fn motion(&mut self, at: Position) {
-        if self.drag.is_some() || self.arrow_hold.is_some() {
+        if self.drag.is_some() || self.arrow_hold.is_some() || self.gripped.is_some() {
             return;
         }
         if let Some(origin) = self.soft_origin {
@@ -413,9 +461,18 @@ impl<A: Clone> Surface<A> {
     /// A press on a scrollbar arms its interaction: endcap rows arm
     /// hold-to-repeat (the press itself already stepped via the cell's
     /// registered act), track rows arm a thumb drag. Call after the hit
-    /// was dispatched.
+    /// was dispatched. The bar is the last drawn under the press, as the
+    /// hit is the last drawn click; a click registered after it over the
+    /// same point took the press instead (an open menu's catcher, a
+    /// modal's guard), and nothing arms: a press that closes a modal, or
+    /// that a modal swallows, never starts the list beneath it scrolling,
+    /// for every screen at once.
     pub fn arm_bars(&mut self, at: Position) {
-        let Some(i) = self.bars.iter().position(|b| b.rect.contains(at)) else { return };
+        let Some(i) = self.bars.iter().rposition(|b| b.rect.contains(at)) else { return };
+        let over = self.clicks.get(self.bars[i].above..).unwrap_or_default();
+        if over.iter().any(|(rect, _)| rect.contains(at)) {
+            return;
+        }
         self.armed = Some((at, Instant::now()));
         let rect = self.bars[i].rect;
         if at.y == rect.y {
@@ -431,7 +488,9 @@ impl<A: Clone> Surface<A> {
     /// within [`PHANTOM_RELEASE`] of arming is Apple Terminal's instant
     /// click — the physical hold is still going, so a SOFT capture keeps
     /// hover pinned near the press (repeat and drag stay off: with holds
-    /// invisible, a repeat could never be stopped).
+    /// invisible, a repeat could never be stopped). A drag region's grip
+    /// ends here too, untold, so a host that only ever calls this never
+    /// leaves one behind; [`Self::release_at`] is the call that tells it.
     pub fn release(&mut self) {
         if let Some((origin, when)) = self.armed.take() {
             if when.elapsed() < PHANTOM_RELEASE {
@@ -440,11 +499,67 @@ impl<A: Clone> Surface<A> {
         }
         self.drag = None;
         self.arrow_hold = None;
+        self.gripped = None;
     }
 
-    /// The action a drag at `at` means (the thumb following the hand),
-    /// if a drag is active.
+    /// Register a drag region: a rect where a press-drag means something
+    /// of the screen's own, told through `act` (see [`Grip`]). Registered
+    /// every frame, like a scrollbar. It is transparent to clicks: [`Self::hit`]
+    /// still returns the click under it, so the rows it covers can keep a
+    /// click of their own (the one that focuses them).
+    pub fn drag_region(&mut self, rect: Rect, act: impl Fn(Grip, Position) -> A + 'static) {
+        self.regions.push(RegionReg { rect, above: self.clicks.len(), act: Rc::new(act) });
+    }
+
+    /// A press on a drag region takes it: the region is told the press and
+    /// holds the pointer until the release. Call after the hit was
+    /// dispatched, like [`Self::arm_bars`]. A click registered after the
+    /// region over the same point wins instead (an open menu's catcher, a
+    /// modal), and the answer is `None`. A region never arms the phantom
+    /// soft capture: its drag is a gesture of the hand, not a hold to
+    /// repeat, so a quick click on it leaves hover free.
+    pub fn arm_region(&mut self, at: Position) -> Option<A> {
+        let region = self.regions.iter().rev().find(|r| r.rect.contains(at))?;
+        let over = self.clicks.get(region.above..).unwrap_or_default();
+        if over.iter().any(|(rect, _)| rect.contains(at)) {
+            return None;
+        }
+        let act = Rc::clone(&region.act);
+        let press = act(Grip::Press, at);
+        self.gripped = Some(act);
+        Some(press)
+    }
+
+    /// Whether a drag region holds the pointer — the host's cue to keep
+    /// every other pointer owner out until the release.
+    pub fn gripping(&self) -> bool {
+        self.gripped.is_some()
+    }
+
+    /// Whether a scrollbar interaction holds the pointer: an endcap held
+    /// for its repeat, or the thumb dragged. A host that hands the pointer
+    /// to a page of its own (the GUI's Admin room) keeps it from that page
+    /// meanwhile, as it does while [`Self::gripping`], so the release comes
+    /// back to the surface that armed the bar wherever the hand lets go.
+    pub fn holding_bar(&self) -> bool {
+        self.drag.is_some() || self.arrow_hold.is_some()
+    }
+
+    /// The button lifted at `at`: the gripped region is told the release,
+    /// wherever it landed, and every capture ends as with [`Self::release`].
+    /// `None` when no region was gripped.
+    pub fn release_at(&mut self, at: Position) -> Option<A> {
+        let act = self.gripped.take().map(|f| f(Grip::Release, at));
+        self.release();
+        act
+    }
+
+    /// The action a drag at `at` means: a gripped region told the move, or
+    /// the thumb following the hand, if either is active.
     pub fn drag_action(&mut self, at: Position) -> Option<A> {
+        if let Some(f) = &self.gripped {
+            return Some(f(Grip::Drag, at));
+        }
         let bar = self.bars.get(self.drag?)?;
         Some((bar.jump)(bar_jump(bar.rect, bar.max_scroll, at.y)))
     }
@@ -491,6 +606,17 @@ impl<A: Clone> Surface<A> {
         self.dwell = None;
     }
 
+    /// Age the tooltip dwell, so a test can see a ripe tooltip without
+    /// waiting out [`TIP_DELAY`].
+    #[cfg(test)]
+    pub fn dwell_backdate(&mut self, by: Duration) {
+        if let Some((_, _, since)) = &mut self.dwell
+            && let Some(earlier) = since.checked_sub(by)
+        {
+            *since = earlier;
+        }
+    }
+
     fn register_bar(
         &mut self,
         rect: Rect,
@@ -499,7 +625,7 @@ impl<A: Clone> Surface<A> {
         step_fwd: A,
         jump: Box<dyn Fn(usize) -> A>,
     ) {
-        self.bars.push(BarReg { rect, max_scroll, step_back, step_fwd, jump });
+        self.bars.push(BarReg { rect, above: self.clicks.len(), max_scroll, step_back, step_fwd, jump });
     }
 }
 
@@ -674,13 +800,20 @@ pub fn modal_frame_anchored_on<A: Clone>(
     modal_frame_anchored(frame, area, width, height, max_height, title_color)
 }
 
-/// Where a modal of this size sits: centred, and vertically as if
-/// `max_height` tall, so one that grows keeps its top edge.
+/// Where a modal of this size sits: centred in `area` — wherever the area
+/// starts, so a room hosted under another shell's bar keeps its modals
+/// inside its own rect — and vertically as if `max_height` tall, so one
+/// that grows keeps its top edge.
 pub fn modal_rect(area: Rect, width: u16, height: u16, max_height: u16) -> Rect {
     let width = width.min(area.width.saturating_sub(4));
     let height = height.min(area.height.saturating_sub(2));
     let max_height = max_height.max(height).min(area.height.saturating_sub(2));
-    Rect { x: (area.width - width) / 2, y: (area.height - max_height) / 2, width, height }
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - max_height) / 2,
+        width,
+        height,
+    }
 }
 
 /// Like [`modal_frame`], but vertically positioned as if the modal were
@@ -696,6 +829,21 @@ pub fn modal_frame_anchored(
     title_color: Color,
 ) -> Rect {
     frame_at(frame, modal_rect(area, width, height, max_height), title_color)
+}
+
+/// Wipe `rect` back to bare ground: `Clear`, then the fixed scheme's
+/// ground repainted where the window's ground is owned — the first two
+/// steps of [`frame_at`], without the border. A shell hosting another
+/// page's drawing calls it over whatever that page must not have touched,
+/// so a row the page wrote past its area never reaches the screen.
+pub fn blank(frame: &mut Frame, rect: Rect) {
+    frame.render_widget(Clear, rect);
+    if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(ground).fg(th().text)),
+            rect,
+        );
+    }
 }
 
 /// A frame where the caller puts it — a dropdown under its control, a
@@ -867,7 +1015,8 @@ impl ListView {
 /// The kit scrollbar, fully live: endcaps step (and hold-repeat), track
 /// cells jump proportionally, a track press arms a thumb drag, and the
 /// bar brightens under the pointer. Draws only on overflow; registers
-/// every cell and the bar geometry with the surface.
+/// every cell and the bar geometry with the surface. The thumb is sized
+/// by the bar's own rows, each of which is one of the list's.
 #[allow(clippy::too_many_arguments)]
 pub fn scroll_list<A: Clone>(
     frame: &mut Frame,
@@ -880,11 +1029,50 @@ pub fn scroll_list<A: Clone>(
     step_fwd: A,
     jump: impl Fn(usize) -> A + 'static,
 ) {
+    scroll_bar(frame, s, bar, len, visible, first, bar.height as usize, step_back, step_fwd, jump);
+}
+
+/// The kit scrollbar over items that may take more than one row each
+/// (the Admin log's wrapped lines): [`scroll_list`] in every way, but the
+/// thumb is sized by `visible` items of `len`, where a list's is sized by
+/// the bar's rows. Its positions are items too, so a host that cannot
+/// afford to count every item's rows keeps its bar in items.
+#[allow(clippy::too_many_arguments)]
+pub fn scroll_items<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    bar: Rect,
+    len: usize,
+    visible: usize,
+    first: usize,
+    step_back: A,
+    step_fwd: A,
+    jump: impl Fn(usize) -> A + 'static,
+) {
+    scroll_bar(frame, s, bar, len, visible, first, visible, step_back, step_fwd, jump);
+}
+
+/// The scrollbar both faces draw: `viewport` is what ratatui sizes the
+/// thumb by, against the `len - visible` positions past the first.
+#[allow(clippy::too_many_arguments)]
+fn scroll_bar<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    bar: Rect,
+    len: usize,
+    visible: usize,
+    first: usize,
+    viewport: usize,
+    step_back: A,
+    step_fwd: A,
+    jump: impl Fn(usize) -> A + 'static,
+) {
     if len <= visible || visible == 0 {
         return;
     }
     let max_scroll = len - visible;
-    let mut state = ScrollbarState::new(max_scroll + 1).position(first);
+    let mut state =
+        ScrollbarState::new(max_scroll + 1).position(first).viewport_content_length(viewport);
     let bar_hover = s.hovers(bar);
     let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
     let thumb = if bar_hover {
@@ -1041,7 +1229,9 @@ fn wrap_at(text: &str, width: usize, hard_break: bool) -> Vec<String> {
             }
             continue;
         }
-        let need = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
+        // Measured in cells, as the budget is: counting characters let a
+        // Japanese line run to twice the width it was given.
+        let need = if line.is_empty() { self::width(word) } else { self::width(&line) + 1 + self::width(word) };
         if need > width && !line.is_empty() {
             lines.push(std::mem::take(&mut line));
         }
@@ -1197,6 +1387,47 @@ pub fn input_display_composing(
     // The cells before the caret, by the rule the line is drawn by.
     let before: String = line.chars().take(at).collect();
     (line, u16::try_from(self::width(&before)).unwrap_or(u16::MAX))
+}
+
+/// The focused field of a page that draws on a surface of its own (an
+/// admin room, hosted in the GUI's Admin tab or not): the line
+/// [`input_display_composing`] draws, with the surface's composition and
+/// the caret held steady, and the caret's cell noted on the surface
+/// ([`Surface::note_caret`]), `x` and `y` being the cell the line starts
+/// in. A host lifts the note onto its own surface, which is how the GUI's
+/// window knows the room's field has the keyboard and turns its paste and
+/// its input method on for it, the candidate list at the caret, as it
+/// does for the GUI's own fields (`gui::text_field`). Everywhere else the
+/// note goes unread and the composition stays empty, so the line is the
+/// one [`input_display`] draws. A masked field hands its value in masked
+/// already and its mark as `mask`. The caret does not blink here: a host
+/// times its frames by its own surface's blink clock, not the page's.
+pub fn field_display<A: Clone>(
+    ui: &mut Surface<A>,
+    x: u16,
+    y: u16,
+    value: &str,
+    cursor: usize,
+    width: u16,
+    mask: Option<char>,
+) -> String {
+    let (line, caret) = field_line(ui, value, cursor, width, mask);
+    ui.note_caret(Position { x: x.saturating_add(caret), y });
+    line
+}
+
+/// [`field_display`]'s line and the caret's offset in it, in cells,
+/// noting nothing: for a field whose line is placed only once it has been
+/// measured (a filter right-aligned with what follows it), which notes
+/// its caret itself when it knows where the line starts.
+pub fn field_line<A: Clone>(
+    ui: &Surface<A>,
+    value: &str,
+    cursor: usize,
+    width: u16,
+    mask: Option<char>,
+) -> (String, u16) {
+    input_display_composing(value, cursor, width, true, ui.composition(), mask)
 }
 
 /// Pure core - unit-tested with explicit marks so the assertions hold on
@@ -1436,6 +1667,16 @@ mod tests {
         assert!(two.iter().all(|l| l.chars().count() <= TIP_WRAP));
         assert_eq!(two.join(" "), "This folder's name in mStream — click to rename");
         assert!(wrap_tip("   ").is_empty());
+    }
+
+    #[test]
+    fn sentences_wrap_by_cells_so_a_wide_script_keeps_inside_its_budget() {
+        let text = "最初のユーザーがログインを有効にします — ウェブアプリ、アプリ、そしてこのプレイヤーで。";
+        let lines = wrap_words(text, 79);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().all(|l| width(l) <= 79), "{lines:?}");
+        assert_eq!(lines.join(" "), text);
+        assert_eq!(wrap_words("one two three", 7), vec!["one two", "three"], "a Latin line is as it was");
     }
 
     #[test]
@@ -1795,6 +2036,38 @@ mod tests {
         assert_eq!(s.composition(), "");
     }
 
+    /// A hosted page's focused field ([`field_display`]): while nothing is
+    /// composing the line is the one [`input_display`] draws, and the cell
+    /// noted holds the caret wherever the window over a long value stands;
+    /// a composition goes in before the caret, a masked field's as marks.
+    #[test]
+    fn a_hosted_field_notes_the_cell_its_caret_is_drawn_in_however_the_value_is_windowed() {
+        let caret = input_display_blink("", 0, 5, true).chars().next().unwrap();
+        let mut s: Surface<i32> = Surface::new();
+        let value = "0123456789abcdefghij";
+        // The cursor at the end, mid-value and at the start of a value
+        // twice the field's width.
+        for cursor in [20, 10, 0] {
+            let line = field_display(&mut s, 30, 4, value, cursor, 10, None);
+            assert_eq!(line, input_display(value, cursor, 10));
+            let at = s.caret_at().expect("the field noted its caret");
+            assert_eq!(at.y, 4);
+            assert_eq!(line.chars().nth(usize::from(at.x - 30)), Some(caret), "cursor {cursor}: {line:?}");
+        }
+        // Kana are two cells each: the caret's cell counts them so.
+        s.set_composition("にほ");
+        let line = field_display(&mut s, 30, 4, value, 20, 10, None);
+        let before: String = line.chars().take_while(|c| *c != caret).collect();
+        assert!(before.ends_with("にほ"), "the composition before the caret: {line:?}");
+        assert_eq!(s.caret_at(), Some(Position { x: 30 + width(&before) as u16, y: 4 }));
+        let line = field_display(&mut s, 30, 4, "••", 2, 10, Some('•'));
+        assert_eq!(line, format!("••••{caret}"), "a masked field's composition is marks");
+        // The bare line notes nothing, for a field placed once measured.
+        s.begin_frame();
+        assert_eq!(field_line(&s, "ab", 2, 10, None), (format!("abにほ{caret}"), 6));
+        assert_eq!(s.caret_at(), None);
+    }
+
     #[test]
     fn a_modal_takes_the_keyboard_from_the_field_beneath_it() {
         use ratatui::{Terminal, backend::TestBackend};
@@ -1896,6 +2169,191 @@ mod tests {
         s.release();
         s.motion(Position { x: 9, y: 6 });
         assert_eq!(s.pointer, Some(Position { x: 9, y: 6 }));
+    }
+
+    /// A modal's guard drawn after a list's bar takes every press over it:
+    /// no held arrow, no thumb's drag and no soft capture arm beneath it,
+    /// while the bar's cells beside the guard, and a bar drawn inside the
+    /// modal over the list's, arm as ever.
+    #[test]
+    fn a_click_registered_over_a_bar_after_it_takes_the_press() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut s: Surface<i32> = Surface::new();
+        // The list's bar: ▲ on 2, the track on 3-6, ▼ on 7. The modal's
+        // guard covers rows 5-10, registered after the bar the way an
+        // overlay draws after the screen beneath; the modal's own list
+        // draws its bar inside, on 6-9, over the list's.
+        let list = Rect { x: 10, y: 2, width: 1, height: 6 };
+        let guard = Rect { x: 4, y: 5, width: 12, height: 6 };
+        let inside = Rect { x: 10, y: 6, width: 1, height: 4 };
+        let mut terminal = Terminal::new(TestBackend::new(20, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                s.begin_frame();
+                scroll_list(frame, &mut s, list, 20, 6, 0, -1, 1, |p| p as i32 + 100);
+                s.click(guard, 77);
+                scroll_list(frame, &mut s, inside, 20, 4, 0, -2, 2, |p| p as i32 + 200);
+            })
+            .unwrap();
+
+        // The list's track under the guard: the guard has the press.
+        let covered = Position { x: 10, y: 5 };
+        assert!(s.begin_press(covered));
+        assert_eq!(s.hit(covered), Some(77));
+        s.arm_bars(covered);
+        assert!(!s.holding_bar(), "the guard drawn after the bar wins");
+        assert_eq!(s.drag_action(Position { x: 10, y: 3 }), None, "no thumb follows the hand");
+        assert_eq!(s.hold_action(), None);
+        s.release();
+        s.motion(Position { x: 9, y: 5 });
+        assert_eq!(s.pointer, Some(Position { x: 9, y: 5 }), "and the instant release left no soft capture");
+
+        // Where the modal's own bar stands over the list's, the press is
+        // the modal's bar's: its track jumps and its thumb follows.
+        let modal_track = Position { x: 10, y: 7 };
+        assert_eq!(s.hit(modal_track), Some(200 + bar_jump(inside, 16, 7) as i32));
+        s.arm_bars(modal_track);
+        assert!(s.holding_bar());
+        assert_eq!(s.drag_action(Position { x: 10, y: 8 }), Some(200 + bar_jump(inside, 16, 8) as i32));
+        s.release();
+
+        // Beside the guard the list's bar is its own: ▲ holds, the track
+        // drags.
+        let up = Position { x: 10, y: 2 };
+        assert_eq!(s.hit(up), Some(-1));
+        s.arm_bars(up);
+        assert!(s.holding_bar(), "the endcap the guard leaves bare arms");
+        s.release();
+        s.arm_bars(Position { x: 10, y: 3 });
+        assert_eq!(s.drag_action(Position { x: 10, y: 4 }), Some(100 + bar_jump(list, 14, 4) as i32));
+        s.release();
+    }
+
+    /// The acts a test region emits: what it was told, and where.
+    fn told(g: Grip, at: Position) -> (Grip, u16, u16) {
+        (g, at.x, at.y)
+    }
+
+    #[test]
+    fn a_drag_region_arms_on_a_press_follows_the_hand_and_ends_on_the_release_anywhere() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 2, y: 3, width: 20, height: 5 };
+        s.drag_region(rows, told);
+        assert_eq!(s.arm_region(Position { x: 40, y: 3 }), None, "a press beside the region takes nothing");
+        assert!(!s.gripping());
+        assert_eq!(s.arm_region(Position { x: 5, y: 4 }), Some((Grip::Press, 5, 4)));
+        assert!(s.gripping());
+        assert_eq!(s.drag_action(Position { x: 6, y: 6 }), Some((Grip::Drag, 6, 6)));
+        assert_eq!(s.drag_action(Position { x: 70, y: 0 }), Some((Grip::Drag, 70, 0)), "the hand may leave the region");
+        assert_eq!(s.release_at(Position { x: 70, y: 30 }), Some((Grip::Release, 70, 30)), "and let go anywhere");
+        assert!(!s.gripping());
+        assert_eq!(s.drag_action(Position { x: 6, y: 6 }), None, "nothing follows the hand after the release");
+        assert_eq!(s.release_at(Position { x: 6, y: 6 }), None, "a second release tells nobody");
+    }
+
+    #[test]
+    fn a_grip_holds_the_pointer_like_a_thumb_drag() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        s.drag_region(Rect { x: 0, y: 0, width: 10, height: 4 }, told);
+        let press = Position { x: 3, y: 1 };
+        assert!(s.begin_press(press));
+        s.arm_region(press);
+        s.motion(Position { x: 30, y: 9 });
+        assert_eq!(s.pointer, Some(press), "hover stays at the press while gripping");
+        s.release_at(Position { x: 30, y: 9 });
+        s.motion(Position { x: 30, y: 9 });
+        assert_eq!(s.pointer, Some(Position { x: 30, y: 9 }), "free after the release");
+    }
+
+    #[test]
+    fn a_click_registered_over_a_region_after_it_takes_the_press() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 0, y: 0, width: 20, height: 6 };
+        let focus = (Grip::Release, 99, 99);
+        s.click(rows, focus);
+        s.drag_region(rows, told);
+        let catcher = (Grip::Release, 77, 77);
+        s.click(Rect { x: 10, y: 2, width: 10, height: 4 }, catcher);
+        let under_menu = Position { x: 12, y: 3 };
+        assert_eq!(s.hit(under_menu), Some(catcher));
+        assert_eq!(s.arm_region(under_menu), None, "the catcher drawn after the region wins");
+        assert!(!s.gripping());
+        let on_a_line = Position { x: 4, y: 3 };
+        assert_eq!(s.hit(on_a_line), Some(focus), "the region is transparent to the click drawn before it");
+        assert_eq!(s.arm_region(on_a_line), Some((Grip::Press, 4, 3)));
+    }
+
+    #[test]
+    fn regions_clear_with_the_registries_and_a_grip_outlives_its_frame() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 0, y: 0, width: 20, height: 6 };
+        s.begin_frame();
+        s.drag_region(rows, told);
+        s.arm_region(Position { x: 1, y: 1 });
+        s.begin_frame();
+        assert_eq!(s.drag_action(Position { x: 2, y: 2 }), Some((Grip::Drag, 2, 2)), "the grip keeps its own act");
+        assert_eq!(s.arm_region(Position { x: 1, y: 1 }), None, "the next frame drew no region");
+        s.release();
+        assert!(!s.gripping(), "the plain release drops the grip");
+        assert_eq!(s.drag_action(Position { x: 2, y: 2 }), None);
+    }
+
+    #[test]
+    fn a_quick_click_on_a_region_leaves_no_soft_capture() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        s.drag_region(Rect { x: 0, y: 0, width: 20, height: 6 }, told);
+        let press = Position { x: 5, y: 2 };
+        assert!(s.begin_press(press));
+        s.arm_region(press);
+        s.release_at(press);
+        assert!(s.begin_press(Position { x: 6, y: 2 }), "a press one cell away is a press, not a phantom");
+        s.motion(Position { x: 6, y: 3 });
+        assert_eq!(s.pointer, Some(Position { x: 6, y: 3 }), "hover is free at once");
+    }
+
+    #[test]
+    fn a_modal_centres_in_its_area_wherever_the_area_starts() {
+        let origin = Rect { x: 0, y: 0, width: 100, height: 30 };
+        assert_eq!(
+            modal_rect(origin, 60, 10, 10),
+            Rect { x: 20, y: 10, width: 60, height: 10 },
+            "an area at the origin puts the modal exactly where it always sat"
+        );
+        assert_eq!(modal_rect(origin, 60, 6, 10), Rect { x: 20, y: 10, width: 60, height: 6 }, "a growing modal keeps its top edge");
+        let hosted = Rect { x: 17, y: 1, width: 83, height: 23 };
+        let r = modal_rect(hosted, 60, 10, 10);
+        assert_eq!(r, Rect { x: 17 + 11, y: 1 + 6, width: 60, height: 10 });
+        assert!(hosted.contains(Position { x: r.x, y: r.y }) && r.right() <= hosted.right() && r.bottom() <= hosted.bottom());
+        let short = Rect { x: 17, y: 1, width: 83, height: 17 };
+        let r = modal_rect(short, 84, 22, 22);
+        assert_eq!(r, Rect { x: 19, y: 2, width: 79, height: 15 }, "a form taller and wider than the area clamps inside it");
+    }
+
+    #[test]
+    fn blank_clears_the_rect_and_nothing_else() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        let rect = Rect { x: 4, y: 2, width: 6, height: 3 };
+        terminal
+            .draw(|frame| {
+                let all = frame.area();
+                for y in all.top()..all.bottom() {
+                    for x in all.left()..all.right() {
+                        frame.buffer_mut()[(x, y)].set_symbol("x");
+                    }
+                }
+                blank(frame, rect);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..8 {
+            for x in 0..20 {
+                let want = if rect.contains(Position { x, y }) { " " } else { "x" };
+                assert_eq!(buffer[(x, y)].symbol(), want, "cell ({x}, {y})");
+            }
+        }
     }
 
     #[test]
