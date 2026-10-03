@@ -344,7 +344,11 @@ bar is live**: endcaps step one row and HOLD-REPEAT while pressed
 proportionally to the clicked position, a track press arms a THUMB
 DRAG (ridden on mouse-drag, released on mouse-up), the wheel scrolls,
 and the bar brightens under the pointer (thumb and endcaps → Cyan)
-like every clickable. **A bar interaction CAPTURES the pointer**:
+like every clickable. **A click registered over the bar after it takes
+the press**, as over a drag region (below), so a modal's guard or an
+open menu's catcher never arms the bar beneath it: the press that
+closes a modal holds no arrow and drags no thumb under it.
+**A bar interaction CAPTURES the pointer**:
 while an arrow is held or the thumb dragged, sub-cell hand tremor must
 not retarget hover onto whatever sits beside the 1-cell bar — and
 terminals differ on whether mid-press motion arrives as Drag or plain

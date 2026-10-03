@@ -720,7 +720,10 @@ from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
     release there ends the hold; a press while one is held means its
     release was lost, and lets it go before acting. The hold lets go with
     the log, as the drag does, and a press the server menu takes arms no
-    hold beneath it. The kit gained `Surface::holding_bar` for it, and
+    hold beneath it, by the kit's rule rather than a case of the GUI's
+    own: a click registered over a bar after it takes the press
+    (docs/ui-kit.md, Table), the menu's catcher as much as a modal's
+    guard. The kit gained `Surface::holding_bar` for it, and
     `scroll_items`, its scroll bar with the thumb sized by items rather
     than by the bar's rows.
   - **The level filter and its menu are gone** (clause 25): the header's
