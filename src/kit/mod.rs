@@ -83,8 +83,13 @@ pub fn bold() -> Style {
 // ── The interaction surface ──────────────────────────────────────────────────
 
 /// A registered scrollbar: geometry plus the actions its parts emit.
+/// `above` is how many clicks were registered before it, its own cells
+/// among them, so a press can tell a click drawn over it (a menu's
+/// catcher, a modal's guard), which takes the press instead, as a drag
+/// region's mark does.
 struct BarReg<A> {
     rect: Rect,
+    above: usize,
     max_scroll: usize,
     step_back: A,
     step_fwd: A,
@@ -456,9 +461,18 @@ impl<A: Clone> Surface<A> {
     /// A press on a scrollbar arms its interaction: endcap rows arm
     /// hold-to-repeat (the press itself already stepped via the cell's
     /// registered act), track rows arm a thumb drag. Call after the hit
-    /// was dispatched.
+    /// was dispatched. The bar is the last drawn under the press, as the
+    /// hit is the last drawn click; a click registered after it over the
+    /// same point took the press instead (an open menu's catcher, a
+    /// modal's guard), and nothing arms: a press that closes a modal, or
+    /// that a modal swallows, never starts the list beneath it scrolling,
+    /// for every screen at once.
     pub fn arm_bars(&mut self, at: Position) {
-        let Some(i) = self.bars.iter().position(|b| b.rect.contains(at)) else { return };
+        let Some(i) = self.bars.iter().rposition(|b| b.rect.contains(at)) else { return };
+        let over = self.clicks.get(self.bars[i].above..).unwrap_or_default();
+        if over.iter().any(|(rect, _)| rect.contains(at)) {
+            return;
+        }
         self.armed = Some((at, Instant::now()));
         let rect = self.bars[i].rect;
         if at.y == rect.y {
@@ -611,7 +625,7 @@ impl<A: Clone> Surface<A> {
         step_fwd: A,
         jump: Box<dyn Fn(usize) -> A>,
     ) {
-        self.bars.push(BarReg { rect, max_scroll, step_back, step_fwd, jump });
+        self.bars.push(BarReg { rect, above: self.clicks.len(), max_scroll, step_back, step_fwd, jump });
     }
 }
 
@@ -2155,6 +2169,65 @@ mod tests {
         s.release();
         s.motion(Position { x: 9, y: 6 });
         assert_eq!(s.pointer, Some(Position { x: 9, y: 6 }));
+    }
+
+    /// A modal's guard drawn after a list's bar takes every press over it:
+    /// no held arrow, no thumb's drag and no soft capture arm beneath it,
+    /// while the bar's cells beside the guard, and a bar drawn inside the
+    /// modal over the list's, arm as ever.
+    #[test]
+    fn a_click_registered_over_a_bar_after_it_takes_the_press() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut s: Surface<i32> = Surface::new();
+        // The list's bar: ▲ on 2, the track on 3-6, ▼ on 7. The modal's
+        // guard covers rows 5-10, registered after the bar the way an
+        // overlay draws after the screen beneath; the modal's own list
+        // draws its bar inside, on 6-9, over the list's.
+        let list = Rect { x: 10, y: 2, width: 1, height: 6 };
+        let guard = Rect { x: 4, y: 5, width: 12, height: 6 };
+        let inside = Rect { x: 10, y: 6, width: 1, height: 4 };
+        let mut terminal = Terminal::new(TestBackend::new(20, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                s.begin_frame();
+                scroll_list(frame, &mut s, list, 20, 6, 0, -1, 1, |p| p as i32 + 100);
+                s.click(guard, 77);
+                scroll_list(frame, &mut s, inside, 20, 4, 0, -2, 2, |p| p as i32 + 200);
+            })
+            .unwrap();
+
+        // The list's track under the guard: the guard has the press.
+        let covered = Position { x: 10, y: 5 };
+        assert!(s.begin_press(covered));
+        assert_eq!(s.hit(covered), Some(77));
+        s.arm_bars(covered);
+        assert!(!s.holding_bar(), "the guard drawn after the bar wins");
+        assert_eq!(s.drag_action(Position { x: 10, y: 3 }), None, "no thumb follows the hand");
+        assert_eq!(s.hold_action(), None);
+        s.release();
+        s.motion(Position { x: 9, y: 5 });
+        assert_eq!(s.pointer, Some(Position { x: 9, y: 5 }), "and the instant release left no soft capture");
+
+        // Where the modal's own bar stands over the list's, the press is
+        // the modal's bar's: its track jumps and its thumb follows.
+        let modal_track = Position { x: 10, y: 7 };
+        assert_eq!(s.hit(modal_track), Some(200 + bar_jump(inside, 16, 7) as i32));
+        s.arm_bars(modal_track);
+        assert!(s.holding_bar());
+        assert_eq!(s.drag_action(Position { x: 10, y: 8 }), Some(200 + bar_jump(inside, 16, 8) as i32));
+        s.release();
+
+        // Beside the guard the list's bar is its own: ▲ holds, the track
+        // drags.
+        let up = Position { x: 10, y: 2 };
+        assert_eq!(s.hit(up), Some(-1));
+        s.arm_bars(up);
+        assert!(s.holding_bar(), "the endcap the guard leaves bare arms");
+        s.release();
+        s.arm_bars(Position { x: 10, y: 3 });
+        assert_eq!(s.drag_action(Position { x: 10, y: 4 }), Some(100 + bar_jump(list, 14, 4) as i32));
+        s.release();
     }
 
     /// The acts a test region emits: what it was told, and where.
