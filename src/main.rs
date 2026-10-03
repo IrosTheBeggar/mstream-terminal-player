@@ -606,6 +606,11 @@ fn main() {
             std::process::exit(code);
         }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
+        // The wizard and the Quick Connect page, in this terminal or, with
+        // `--window` where the window exists, in a window of their own.
+        // Either way a page is not the player: it takes no instance lock
+        // and writes no sidecar (the lock's match above gives it none), so
+        // it opens beside an open player, as `qr` always has.
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
         (Some(Command::Admin(args)), _) => std::process::exit(admin::run(args)),
         (Some(Command::Stats(args)), _) => std::process::exit(admin::run_stats(args)),
@@ -725,7 +730,9 @@ mod tests {
 
     /// The two flavours' CLIs (Cargo.toml's [features]): the terminal
     /// releases have no `gui --window`, so asking for one is clap's usage
-    /// error, as on v0.9.0; a build with the window parses it.
+    /// error, as on v0.9.0; a build with the window parses it. The pages'
+    /// windows (`setup --window`, `qr --window`) follow the GUI's, and each
+    /// command alone is the terminal's in both flavours.
     #[test]
     fn gui_window_exists_only_where_the_window_does() {
         use clap::CommandFactory;
@@ -750,6 +757,28 @@ mod tests {
                 panic!("`gui` is the gui command");
             };
             assert!(!args.window, "the terminal is still the default face");
+        }
+
+        for page in ["setup", "qr"] {
+            let parsed = Cli::try_parse_from(["mstream-player", page, "--window"]);
+            let bare = Cli::try_parse_from(["mstream-player", page]).unwrap().command;
+            assert!(matches!(bare, Some(Command::Setup(_) | Command::Qr(_))), "{page}");
+            #[cfg(not(feature = "window"))]
+            {
+                let err = parsed.err().expect("the terminal flavour has no --window");
+                assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{page}");
+                assert_eq!(err.exit_code(), 2, "{page}");
+            }
+            #[cfg(feature = "window")]
+            {
+                let windowed = |command: Option<Command>| match command {
+                    Some(Command::Setup(args)) => args.window,
+                    Some(Command::Qr(args)) => args.window,
+                    _ => panic!("`{page}` is its own command"),
+                };
+                assert!(windowed(parsed.expect("the window flavour parses it").command), "{page}");
+                assert!(!windowed(bare), "`{page}` alone is still the terminal's");
+            }
         }
     }
 

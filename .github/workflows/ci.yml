@@ -79,6 +79,18 @@ jobs:
         if: runner.os == 'Linux'
         run: sh test/linkage.sh target/release/mstream-player
 
+      # The terminal releases have no page windows: `qr --window` is clap's
+      # usage error there (2), as `gui --window` is. Checked on this build,
+      # before the desktop build below replaces the binary.
+      - name: No page windows (Linux, terminal)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          code=0
+          target/release/mstream-player qr --window --server http://127.0.0.1:9 || code=$?
+          echo "qr --window: exit $code"
+          test "$code" -eq 2
+
       - name: Build (desktop)
         if: runner.os == 'Linux'
         run: cargo build --release --features desktop
@@ -86,6 +98,23 @@ jobs:
       - name: Linkage guard (Linux, desktop)
         if: runner.os == 'Linux'
         run: sh test/linkage.sh target/release/mstream-player
+
+      # The pages' windows with no display to open one on: `setup --window`
+      # and `qr --window` exit 3 (window/mod.rs's NO_WINDOW) before any
+      # network, GPU or terminal work, which is the code mStream's launcher
+      # falls back to another route on.
+      - name: Page windows with no display (Linux, desktop)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for page in setup qr; do
+            code=0
+            env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+              target/release/mstream-player "$page" --window --server http://127.0.0.1:9 \
+              || code=$?
+            echo "$page --window: exit $code"
+            test "$code" -eq 3
+          done
 
   # The browser build has no test runner, but it has a type system: a plain
   # check catches the native-only import or the unhandled worker command that

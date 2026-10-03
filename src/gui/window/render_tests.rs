@@ -894,3 +894,169 @@ fn a_cover_under_a_modal_that_opens_this_frame_is_not_painted_over_it() {
     let Some((control, under, _)) = frame_or_skip(covers_and_a_modal(false)) else { return };
     assert!(magenta(&control, under) > 0, "without the watch the flash does not show");
 }
+
+/// One frame of a `WizardFace` in the window: what the board paints, how
+/// many pictures it was handed that stand under an overlay, the grid's
+/// text and the pixels.
+struct WizardFrame {
+    frame: Frame,
+    placed: Vec<Rect>,
+    under: usize,
+    text: String,
+}
+
+/// A `WizardFace` (`setup --window`, or `qr --window` when `standalone`)
+/// handed the window's Board as `run` hands it, drawn at the window's
+/// 100×30 by its `render_test` (the wizard's `render`) through the
+/// backend's post processor: one frame for each step, which is first given
+/// the face to change.
+fn wizard_in_the_window(
+    standalone: bool,
+    steps: &[fn(&mut crate::setup::face::WizardFace)],
+) -> Result<Vec<WizardFrame>, String> {
+    use std::sync::Arc;
+
+    use super::covers::{Board, CoverPost};
+    use super::face::Face;
+    use crate::setup::face::WizardFace;
+
+    let (cols, rows) = (100u32, 30u32);
+    let board = Arc::new(Board::default());
+    let (mut face, _jobs, _answers) = WizardFace::opened(standalone);
+    let watching = board.clone();
+    face.host_pictures_as_the_window(board.clone(), Box::new(move |rect| watching.overlay(rect)));
+
+    let wide = 4096;
+    let builder = Builder::<CoverPost>::from_font_and_user_data(hack()?, board.clone())
+        .with_font_size_px(PX)
+        .with_width_and_height(Dimensions {
+            width: NonZeroU32::new(wide).unwrap(),
+            height: NonZeroU32::new(rows * PX).unwrap(),
+        })
+        .with_bg_color(Color::Rgb(GROUND[0], GROUND[1], GROUND[2]))
+        .with_fg_color(Color::White);
+    let mut backend = block_on(builder.build_headless())?
+        .map_err(|e| format!("no headless wgpu backend: {e}"))?;
+    let reported = backend.window_size().map_err(|e| e.to_string())?;
+    let cell_w = wide / u32::from(reported.columns_rows.width);
+    backend.resize(cols * cell_w, rows * PX);
+
+    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+    let mut frames = Vec::new();
+    for step in steps {
+        step(&mut face);
+        board.begin_frame();
+        terminal.draw(|frame| face.render_test(frame)).map_err(|e| e.to_string())?;
+        let (placed, under) = board.placed_rects();
+        let text = terminal.backend().get_text();
+        let pixels = terminal.backend().read_pixels().ok_or("the frame could not be read back")?;
+        let frame = Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX };
+        frames.push(WizardFrame { frame, placed, under, text });
+    }
+    Ok(frames)
+}
+
+/// The wordmark's light ink somewhere in `rect`.
+fn wordmark_ink(frame: &Frame, rect: Rect) -> bool {
+    let (x0, y0) = (u32::from(rect.x) * frame.cell_w, u32::from(rect.y) * frame.cell_h);
+    let (w, h) = (u32::from(rect.width) * frame.cell_w, u32::from(rect.height) * frame.cell_h);
+    let band = (y0..y0 + h).flat_map(|y| (x0..x0 + w).map(move |x| (x, y)));
+    band.into_iter().any(|(x, y)| frame.pixel(x, y)[2] > 0xa0)
+}
+
+/// The raster code where a terminal's half-block one cannot go: at the
+/// window's grid the page is two columns, the board paints the wordmark
+/// and then the code in the left one (no overlay over either), the grid
+/// carries the right column's buttons and not the stacked page's
+/// `done.too_short`, and the pixels are a QR code's. The code is a square
+/// fitted whole in its band and centred, as the post processor fits every
+/// picture: its corner is the quiet zone's white, a module inside it is
+/// dark, and the band's slack beside it is the ground. The wordmark's band
+/// carries the wordmark's light ink.
+#[test]
+fn the_quick_connect_page_draws_its_code_in_the_window() {
+    let _gpu = one_at_a_time();
+    let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let answered: fn(&mut crate::setup::face::WizardFace) =
+        |face| face.answer_ticket("iroh-ticket-abc123");
+    let Some(mut frames) = frame_or_skip(wizard_in_the_window(true, &[answered])) else { return };
+    let WizardFrame { frame, placed, under, text } = frames.remove(0);
+    assert_eq!((placed.len(), under), (2, 0), "the wordmark and the code, painted: {placed:?}");
+    // The Done page's column starts two cells in; its left column is 30
+    // wide at this grid (`setup::draw_done`).
+    let (wordmark, code) = (placed[0], placed[1]);
+    for rect in [wordmark, code] {
+        assert!(rect.x >= 2 && rect.right() <= 32, "{rect:?} is not in the left column");
+    }
+    assert!(code.y > wordmark.bottom(), "the code under the wordmark");
+
+    let too_short = rust_i18n::t!("done.too_short");
+    assert!(!text.contains(&*too_short), "the stacked page's apology:\n{text}");
+    for key in ["done.btn_android", "done.btn_ios", "done.btn_admin"] {
+        let label = rust_i18n::t!(key);
+        assert!(text.contains(&*label), "no {label} button:\n{text}");
+    }
+
+    let px = |rect: Rect| {
+        let (x0, y0) = (u32::from(rect.x) * frame.cell_w, u32::from(rect.y) * frame.cell_h);
+        let (w, h) = (u32::from(rect.width) * frame.cell_w, u32::from(rect.height) * frame.cell_h);
+        (x0, y0, w, h)
+    };
+    let (x0, y0, w, h) = px(code);
+    let side = w.min(h);
+    let (left, top) = (x0 + (w - side) / 2, y0 + (h - side) / 2);
+    let white = |p: [u8; 3]| p.iter().all(|&c| c >= 0xf0);
+    let dark = |p: [u8; 3]| p.iter().all(|&c| c <= 0x30);
+    let corner = frame.pixel(left + 2, top + 2);
+    assert!(white(corner), "the code's corner is {corner:?}");
+    let far = frame.pixel(left + side - 3, top + side - 3);
+    assert!(white(far), "the code's far corner is {far:?}");
+    let modules = (top..top + side).flat_map(|y| (left..left + side).map(move |x| (x, y)));
+    assert!(modules.into_iter().any(|(x, y)| dark(frame.pixel(x, y))), "no dark module");
+    if w > side + 4 {
+        let slack = frame.pixel(x0 + 1, top + side / 2);
+        let ground = slack.iter().zip(GROUND).all(|(&got, ground)| got.abs_diff(ground) <= 8);
+        assert!(ground, "the slack beside the code is {slack:?}");
+    }
+
+    assert!(wordmark_ink(&frame, wordmark), "no wordmark in its band");
+}
+
+/// The directory browser over the folders screen in the window, where its
+/// top border crosses the wordmark's band. Before it opens the board
+/// paints the wordmark. On the frame it opens the wordmark is placed and
+/// stands under the browser, so the band's rows above the browser are the
+/// ground and nothing else; on the next the wizard places no picture and
+/// the grid carries the figlet there instead.
+#[test]
+fn the_wordmark_is_not_painted_over_a_wizard_modal() {
+    use crate::setup::face::WizardFace;
+
+    let _gpu = one_at_a_time();
+    let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let steps: [fn(&mut WizardFace); 3] = [|_| {}, WizardFace::open_the_browser, |_| {}];
+    let Some(frames) = frame_or_skip(wizard_in_the_window(false, &steps)) else { return };
+    let [before, opened, after] = &frames[..] else { panic!("three frames") };
+
+    assert_eq!(before.under, 0);
+    let [band] = before.placed[..] else { panic!("the wordmark alone: {:?}", before.placed) };
+    assert!(wordmark_ink(&before.frame, band), "no wordmark in its band");
+
+    let opened_placed = (opened.placed.len(), opened.under);
+    assert_eq!(opened_placed, (0, 1), "the wordmark stands under the browser");
+    // The browser's top border is the band's last row at this grid.
+    let lines: Vec<&str> = opened.text.lines().collect();
+    let last = usize::from(band.bottom() - 1);
+    let top = lines[last].contains('╭') && !lines[last - 1].contains('╭');
+    assert!(top, "the browser's top:\n{}", opened.text);
+    let above = Rect { height: band.height - 1, ..band };
+    let ground = |p: [u8; 3]| p.iter().zip(GROUND).all(|(&got, ground)| got.abs_diff(ground) <= 8);
+    for at in above.positions() {
+        let cell = opened.frame.cell(at.x.into(), at.y.into());
+        assert!(cell.iter().all(|&p| ground(p)), "{at:?} above the browser is not the ground");
+    }
+
+    assert_eq!((after.placed.len(), after.under), (0, 0), "no picture under the browser");
+    let figlet = r" _ __ ___ / ___|| |_ _ __ ___  __ _ _ __ ___";
+    assert!(after.text.contains(figlet), "no figlet in the band:\n{}", after.text);
+}

@@ -15,6 +15,8 @@
 //! reads input, and runs one queued server call per pass (queued so the
 //! "working…" frame is on screen while the call blocks).
 
+#[cfg(feature = "window")]
+pub(crate) mod face;
 pub mod picker;
 
 use std::sync::Arc;
@@ -99,6 +101,14 @@ pub struct SetupArgs {
     /// Token for a server that already has accounts (testing)
     #[arg(long, hide = true)]
     token: Option<String>,
+
+    /// The wizard in the player's own window (setup/face.rs) instead of
+    /// this terminal, as `gui --window` is the GUI's. Only in a build with
+    /// the `window` feature; the terminal releases' CLI has no such flag,
+    /// so asking for one is clap's usage error there.
+    #[cfg(feature = "window")]
+    #[arg(long, hide = true)]
+    pub(crate) window: bool,
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -1704,6 +1714,13 @@ pub fn run(args: SetupArgs) -> i32 {
     let mut wizard = Wizard::new(client);
     wizard.lang = boot_language();
     wizard.queue(Op::Ping, t!("busy.reaching"));
+    // The window forks here, with the first op queued for the face to send
+    // while the window is built, and the language set, which the window
+    // reads once as it starts to load faces for it.
+    #[cfg(feature = "window")]
+    if args.window {
+        return run_window(wizard);
+    }
     run_tui(wizard)
 }
 
@@ -1716,6 +1733,12 @@ pub struct QrArgs {
     /// Auth token override (default: the saved session's token)
     #[arg(long, hide = true)]
     token: Option<String>,
+
+    /// The page in the player's own window, as `setup --window` is the
+    /// wizard's. Only in a build with the `window` feature.
+    #[cfg(feature = "window")]
+    #[arg(long, hide = true)]
+    pub(crate) window: bool,
 }
 
 /// The Done screen alone, as its own command: the Quick Connect QR for
@@ -1733,6 +1756,11 @@ pub fn run_qr(args: QrArgs) -> i32 {
     wizard.standalone = true;
     wizard.screen = Screen::Done;
     wizard.queue(Op::LoadDone, t!("busy.fetching_qc"));
+    // The window forks where the wizard's does, for the same reasons.
+    #[cfg(feature = "window")]
+    if args.window {
+        return run_window(wizard);
+    }
     run_tui(wizard)
 }
 
@@ -1741,6 +1769,35 @@ pub fn run_qr(args: QrArgs) -> i32 {
 /// window titles.
 pub(crate) fn session_title(standalone: bool) -> &'static str {
     if standalone { "mStream Quick Connect" } else { "mStream Setup" }
+}
+
+/// Both entries in the player's own window (`setup --window`, `qr
+/// --window`): `gui::run`'s window arm with the wizard as the face. The
+/// terminal is never touched on the way: the title stack, the ground lease,
+/// the pixel probe, the frames and the mouse capture are [`run_tui`]'s, and
+/// the window has its own of each. No instance lock is taken, so a page
+/// opens beside an open player as the terminal's `qr` always has, and the
+/// exit code is the window's: 0 every way out of the wizard and for the
+/// close button, [`NO_WINDOW`](crate::gui::window::NO_WINDOW) when no
+/// window opens, 1 when a frame fails.
+#[cfg(feature = "window")]
+fn run_window(wizard: Wizard) -> i32 {
+    // A window that cannot open on this desktop says so and leaves, with
+    // the no-window code a launcher falls back on (window/mod.rs has the
+    // one case).
+    #[cfg(target_os = "linux")]
+    if let Some(line) = crate::gui::window::x11_keyboard_missing() {
+        eprintln!("{line}");
+        return crate::gui::window::NO_WINDOW;
+    }
+    // The window is not the terminal that launched it, so the palette and
+    // the glyphs are pinned to the window's before anything draws; nothing
+    // above asked for either (`Wizard::new` reads no colour), so the pins
+    // land.
+    theme::pin_truecolor();
+    theme::pin_modern_glyphs();
+    let (to_worker, from_worker) = spawn_worker();
+    crate::gui::window::run(Box::new(face::WizardFace::new(wizard, to_worker, from_worker)), None)
 }
 
 /// The shared terminal session around both entries: ground lease, pixel
@@ -1899,6 +1956,15 @@ where
         && wizard.last_poll.elapsed() >= PROGRESS_EVERY
     {
         wizard.queued = Some(Op::PollProgress);
+        return Ok(Duration::ZERO);
+    }
+
+    // A modal opened, closed or moved in a window: this frame drew the
+    // wordmark by last frame's footprints, so it is bare under a modal
+    // that just opened and still the figlet where one just closed. The
+    // frame that draws it by these comes now rather than a poll later, as
+    // the GUI's hot frame does. A terminal draws no differently by them.
+    if wizard.graphics.is_hosted() && wizard.ui.overlays_moved() {
         return Ok(Duration::ZERO);
     }
     Ok(POLL)
@@ -2446,6 +2512,10 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
         wizard.ui.pointer = live_pointer;
         wizard.ui.clear_registries();
     }
+    // Each modal registers its footprint as it draws (`kit::modal_frame_on`),
+    // and a window that hears it stands down any picture placed beneath:
+    // the directory browser's top border crosses the folders wordmark's
+    // band at the window's grid, and any modal does in a short window.
     match wizard.modal.clone() {
         Modal::None => {}
         Modal::SkipWarning => draw_skip_warning(frame, wizard, area),
@@ -2455,6 +2525,12 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
 
     // The tooltip draws last — over everything, once the dwell matures.
+    // It registers no overlay, unlike the GUI's. The language chip's tip
+    // touches the wordmark's band, which is the column's whole width, and a
+    // window stands a picture down by the band it was placed in, so every
+    // hover of the chip would swap the wordmark for the figlet. At the
+    // window's grid the picture sits centred in its band, clear of the tip;
+    // only a window narrowed below about 74 columns brings the two together.
     if let Some((target, text)) = wizard.ui.ripe_tooltip() {
         kit::draw_tooltip(frame, area, target, text);
     }
@@ -2535,7 +2611,7 @@ fn footer_hint(wizard: &Wizard) -> String {
 /// conventions.
 fn draw_language(frame: &mut Frame, wizard: &mut Wizard, area: Rect, sel: usize) {
     let inner =
-        kit::modal_frame(frame, area, 30, LANGS.len() as u16 + 4, th().accent);
+        kit::modal_frame_on(frame, &mut wizard.ui, area, 30, LANGS.len() as u16 + 4, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled(t!("lang.modal_title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
@@ -2626,9 +2702,16 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     // unowned background the figlet is the honest rendering). Both paths
     // occupy the same band, so the screen never reflows on capability.
     // A window's ground is always ours: it paints the theme's ground
-    // behind every cell, the color the picture was flattened onto.
+    // behind every cell, the color the picture was flattened onto. In a
+    // window the figlet also stands in wherever a modal stood over the band
+    // last frame, the rule the GUI's covers follow: the window does not
+    // paint a picture placed before a modal that touches it (the modal
+    // registers as it draws), so the band would otherwise be bare while
+    // the modal is up. A terminal's picture draws as it always has.
     let band = Rect { x: column.x, y, width: column.width, height: LOGO.len() as u16 };
+    let under_a_modal = wizard.graphics.is_hosted() && wizard.ui.covered_last_frame(band);
     let drew = (theme::ground_owned() || wizard.graphics.is_hosted())
+        && !under_a_modal
         && match &wizard.logo_art {
             Some(art) => wizard.logo_gfx.draw(frame, band, art),
             None => false,
@@ -3162,7 +3245,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 }
 
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
-    let inner = kit::modal_frame(frame, area, 62, 15, th().gold);
+    let inner = kit::modal_frame_on(frame, &mut wizard.ui, area, 62, 15, th().gold);
     kit::modal_close(frame, &mut wizard.ui, inner, Act::SkipCancel);
     let lines = vec![
         Line::from(Span::styled(t!("skip_modal.title").to_string(), Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
@@ -3207,7 +3290,7 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
 }
 
 fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Browse) {
-    let inner = kit::modal_frame(frame, area, 66, 18, th().accent);
+    let inner = kit::modal_frame_on(frame, &mut wizard.ui, area, 66, 18, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled(t!("browse.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
@@ -3261,7 +3344,8 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     let shown = suggestions.len().min(6) as u16;
     // Anchored as if always full: the title and input hold one spot and
     // the suggestion list grows DOWNWARD beneath them.
-    let inner = kit::modal_frame_anchored(frame, area, 62, 7 + shown, 13, th().accent);
+    let inner =
+        kit::modal_frame_anchored_on(frame, &mut wizard.ui, area, 62, 7 + shown, 13, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled(t!("path_modal.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
@@ -4404,7 +4488,7 @@ pub(crate) mod tests {
     /// A TestBackend with the loop's error type, as the GUI's tests have
     /// one: the frame half is generic over backends that fail as io does
     /// (the terminal's and the window's), and a TestBackend never fails.
-    struct IoTest(ratatui::backend::TestBackend);
+    pub(super) struct IoTest(pub(super) ratatui::backend::TestBackend);
 
     impl ratatui::backend::Backend for IoTest {
         type Error = std::io::Error;
@@ -4477,13 +4561,13 @@ pub(crate) mod tests {
     }
 
     /// Where the click for `act` was registered in the frame just drawn.
-    fn click_rect(wizard: &Wizard, act: Act) -> Rect {
+    pub(super) fn click_rect(wizard: &Wizard, act: Act) -> Rect {
         wizard.ui.clicks.iter().find(|(_, a)| *a == act).map(|(rect, _)| *rect).expect("the control")
     }
 
     /// The text of one row of a drawn buffer, a wide character's hidden
     /// cell left out.
-    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+    pub(super) fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
         let mut text = String::new();
         let mut x = 0;
         while x < buf.area.width {
