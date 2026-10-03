@@ -1597,7 +1597,6 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
-    admin::draw_overlays(frame, gui);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
     dj::draw_modals(frame, gui, area);
@@ -2796,22 +2795,28 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             // and a press while one stands means its release was lost (a
             // terminal that drops the Up when the focus leaves mid-drag):
             // the grip ends at the press's cell, and the press goes on as
-            // any press.
+            // any press. A held arrow or a dragged thumb lost the same way
+            // lets go too, untold, as a release would have.
             admin::let_go_unseen(gui);
-            if matches!(mouse.kind, MouseEventKind::Down(_))
-                && gui.ui.gripping()
-                && let Some(act) = gui.ui.release_at(at)
-                && gui.act(act)
-            {
-                ctx.saver.flush(&gui.app);
-                return Flow::Quit;
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                if gui.ui.gripping()
+                    && let Some(act) = gui.ui.release_at(at)
+                    && gui.act(act)
+                {
+                    ctx.saver.flush(&gui.app);
+                    return Flow::Quit;
+                }
+                if gui.ui.holding_bar() {
+                    gui.ui.release();
+                }
             }
-            // A press-drag on a drag region (the Admin log's lines)
-            // holds the pointer until its release, like a thumb drag:
-            // no page owner takes an event while it does, so the hand
-            // passing over a page lights nothing there, and the release
-            // comes back here to end the grip wherever it lands.
-            let gripping = gui.ui.gripping();
+            // A press-drag on a drag region (the Admin log's lines), and
+            // a press on one of the GUI's own scroll bars (the Admin
+            // log's), hold the pointer until the release: no page owner
+            // takes an event meanwhile, so the hand passing over a page
+            // lights nothing there, and the release comes back here to end
+            // the grip, the repeat or the thumb's drag wherever it lands.
+            let gripping = gui.ui.gripping() || gui.ui.holding_bar();
             // The Stats screen's page owns the pointer below the top
             // bar, on its own surface (stats-screen contract, clause
             // 5); the GUI's surface still follows the motion, so the

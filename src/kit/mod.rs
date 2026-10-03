@@ -522,6 +522,15 @@ impl<A: Clone> Surface<A> {
         self.gripped.is_some()
     }
 
+    /// Whether a scrollbar interaction holds the pointer: an endcap held
+    /// for its repeat, or the thumb dragged. A host that hands the pointer
+    /// to a page of its own (the GUI's Admin room) keeps it from that page
+    /// meanwhile, as it does while [`Self::gripping`], so the release comes
+    /// back to the surface that armed the bar wherever the hand lets go.
+    pub fn holding_bar(&self) -> bool {
+        self.drag.is_some() || self.arrow_hold.is_some()
+    }
+
     /// The button lifted at `at`: the gripped region is told the release,
     /// wherever it landed, and every capture ends as with [`Self::release`].
     /// `None` when no region was gripped.
@@ -992,7 +1001,8 @@ impl ListView {
 /// The kit scrollbar, fully live: endcaps step (and hold-repeat), track
 /// cells jump proportionally, a track press arms a thumb drag, and the
 /// bar brightens under the pointer. Draws only on overflow; registers
-/// every cell and the bar geometry with the surface.
+/// every cell and the bar geometry with the surface. The thumb is sized
+/// by the bar's own rows, each of which is one of the list's.
 #[allow(clippy::too_many_arguments)]
 pub fn scroll_list<A: Clone>(
     frame: &mut Frame,
@@ -1005,11 +1015,50 @@ pub fn scroll_list<A: Clone>(
     step_fwd: A,
     jump: impl Fn(usize) -> A + 'static,
 ) {
+    scroll_bar(frame, s, bar, len, visible, first, bar.height as usize, step_back, step_fwd, jump);
+}
+
+/// The kit scrollbar over items that may take more than one row each
+/// (the Admin log's wrapped lines): [`scroll_list`] in every way, but the
+/// thumb is sized by `visible` items of `len`, where a list's is sized by
+/// the bar's rows. Its positions are items too, so a host that cannot
+/// afford to count every item's rows keeps its bar in items.
+#[allow(clippy::too_many_arguments)]
+pub fn scroll_items<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    bar: Rect,
+    len: usize,
+    visible: usize,
+    first: usize,
+    step_back: A,
+    step_fwd: A,
+    jump: impl Fn(usize) -> A + 'static,
+) {
+    scroll_bar(frame, s, bar, len, visible, first, visible, step_back, step_fwd, jump);
+}
+
+/// The scrollbar both faces draw: `viewport` is what ratatui sizes the
+/// thumb by, against the `len - visible` positions past the first.
+#[allow(clippy::too_many_arguments)]
+fn scroll_bar<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    bar: Rect,
+    len: usize,
+    visible: usize,
+    first: usize,
+    viewport: usize,
+    step_back: A,
+    step_fwd: A,
+    jump: impl Fn(usize) -> A + 'static,
+) {
     if len <= visible || visible == 0 {
         return;
     }
     let max_scroll = len - visible;
-    let mut state = ScrollbarState::new(max_scroll + 1).position(first);
+    let mut state =
+        ScrollbarState::new(max_scroll + 1).position(first).viewport_content_length(viewport);
     let bar_hover = s.hovers(bar);
     let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
     let thumb = if bar_hover {

@@ -43,8 +43,8 @@ const DOCKED_W: u16 = 100;
 /// its own on the hallway's Log row.
 const COLUMN_FROM: u16 = 160;
 const BAND_FROM: u16 = 48;
-/// The band's rows: its rule, the log's header and seven lines.
-const BAND_ROWS: u16 = 9;
+/// The band's rows: its rule, the log's header and ten rows of lines.
+const BAND_ROWS: u16 = 12;
 /// The cells a hallway label may take before the rule: a room's from x 3,
 /// a group's from x 1.
 const ROOM_LABEL: usize = 13;
@@ -153,8 +153,8 @@ pub(crate) enum AdmAct {
     Open(Hall),
     /// A column taking the keys: the hallway's empty cells, the log.
     Focus(Focus),
-    /// The log's own controls: the level, its menu, the paused word, the
-    /// copy and the download, and a press-drag on its lines.
+    /// The log's own controls: the paused word, the copy and the
+    /// download, its scroll bar, and a press-drag on its lines.
     Log(LogAct),
 }
 
@@ -423,7 +423,6 @@ fn settle(gui: &mut Gui, width: u16, height: u16) -> Layout {
     // lets go of a press held on it, so a drag that outlives it moves
     // nothing.
     if !log {
-        admin.log.menu = None;
         admin.log.let_go();
     }
     lay
@@ -622,27 +621,12 @@ fn draw_log(frame: &mut Frame, gui: &mut Gui, lay: &Layout, key_hints: bool) {
     gui.admin.log.model.mark_seen();
 }
 
-/// The log's level menu, in the overlay pass, so it hangs over the lines
-/// and owns the pointer while it is open. It owns every key too (clause
-/// 20), so a room's field beneath stops counting as having the keyboard:
-/// a chooser takes its keys as keys, never a paste or a composition.
-pub(super) fn draw_overlays(frame: &mut Frame, gui: &mut Gui) {
-    if gui.screen != Screen::Admin || gui.admin.log_at.is_none() {
-        return;
-    }
-    if gui.admin.log.menu.is_some() {
-        gui.ui.modal_over();
-    }
-    server_log::draw_menu(frame, &mut gui.ui, &mut gui.admin.log, wrap_log);
-}
 
 // ── Keys ────────────────────────────────────────────────────────────────────
 
 /// Where a key goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Route {
-    /// The log's level menu, while it is open: every key.
-    Menu,
     Room,
     Log,
     Hall,
@@ -658,10 +642,7 @@ pub(super) enum Route {
 /// Otherwise the host keeps only Tab and BackTab, while the focused room's
 /// claim is Open, and `L`; every other key a focused room gets, digits,
 /// `q`, Esc and the GUI's capitals included.
-pub(super) fn route(focus: Focus, claim: Claim, menu_open: bool, key: KeyEvent) -> Route {
-    if menu_open {
-        return Route::Menu;
-    }
+pub(super) fn route(focus: Focus, claim: Claim, key: KeyEvent) -> Route {
     if claim == Claim::All {
         return Route::Room;
     }
@@ -706,9 +687,7 @@ pub(super) fn next_focus(focus: Focus, log_beside: bool, log_room: bool, has_roo
 pub(super) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     let lay = settle(gui, gui.last_width, gui.last_height);
     let claim = room_claim(&gui.admin);
-    let menu_open = gui.admin.log.menu.is_some();
-    match route(gui.admin.focus, claim, menu_open, key) {
-        Route::Menu => gui.admin.log.menu_key(key),
+    match route(gui.admin.focus, claim, key) {
         Route::Room => room_key(gui, key),
         Route::Log => {
             let rows = lay.log.map_or(0, |r| r.height.saturating_sub(if lay.spaced { 2 } else { 1 })) as usize;
@@ -751,7 +730,6 @@ fn room_key(gui: &mut Gui, key: KeyEvent) {
 /// Log room with the keys on the log, and from there goes back to the
 /// last room with the keys on the room.
 fn toggle_log(gui: &mut Gui, lay: &Layout) {
-    gui.admin.log.menu = None;
     if lay.natural != Placement::Room {
         let admin = &mut gui.admin;
         admin.log_hidden = !admin.log_hidden;
@@ -835,9 +813,10 @@ pub(super) fn act(gui: &mut Gui, act: &Act) -> bool {
         }
         AdmAct::Log(log_act) => {
             // A click on the log's own controls is a click in the log, and
-            // so is a press on its lines; the moves and the release of that
-            // press, wherever the hand has gone, hand nothing on.
-            let elsewhere = matches!(log_act, LogAct::MenuClose | LogAct::Select(Grip::Drag | Grip::Release, _));
+            // so is a press on its lines or its bar; the moves and the
+            // release of a press on the lines, wherever the hand has gone,
+            // hand nothing on.
+            let elsewhere = matches!(log_act, LogAct::Select(Grip::Drag | Grip::Release, _));
             if !elsewhere {
                 gui.admin.focus = Focus::Log;
             }
@@ -861,7 +840,7 @@ fn take_log_note(gui: &mut Gui) {
 /// The window's copy chord (Cmd+C on a Mac, Ctrl+Shift+C or Ctrl+Insert
 /// elsewhere) is the log's `y` while the log on screen has the keys or a
 /// highlight stands, and nothing laid over the screen holds them: no GUI
-/// modal, no level menu, no room's modal. To the header's server menu it
+/// modal, no room's modal. To the header's server menu it
 /// is a key like any other, which closes the menu and goes on (servers.rs),
 /// on every screen. True when it changed anything (a copy, the menu
 /// closed), so the window draws again.
@@ -872,7 +851,6 @@ pub(super) fn copy_chord(gui: &mut Gui) -> bool {
     let held = gui.screen != Screen::Admin
         || admin.log_at.is_none()
         || gui.modal_open()
-        || admin.log.menu.is_some()
         || (room_up(admin) && admin.room.as_ref().is_some_and(|room| room.modal_up()));
     if held || (admin.focus != Focus::Log && admin.log.model.highlight.is_none()) {
         return closed;
@@ -903,10 +881,11 @@ pub(super) fn let_go_unseen(gui: &mut Gui) {
 /// a release the room never saw would leave its held arrow stepping and
 /// its thumb following later drags. A press in the room hands it the keys.
 /// Anything else lets go of the room's hover and answers on the GUI's
-/// surface — the hallway, the log, the bar. A GUI modal, the server menu
-/// or the log's level menu owns the pointer while open, and a frame that
-/// drew no room (the Log room, the mini player) takes nothing. True when
-/// the room took the event.
+/// surface — the hallway, the log, the bar. A GUI modal or the server
+/// menu owns the pointer while open, and a frame that drew no room (the
+/// Log room, the mini player) takes nothing. True when the room took the
+/// event. A press held on the log's lines or its scroll bar keeps the
+/// pointer from the room until its release (`gui::input` asks first).
 pub(super) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
     if gui.screen != Screen::Admin {
         return false;
@@ -916,11 +895,7 @@ pub(super) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
     if matches!(mouse.kind, MouseEventKind::Up(_)) {
         gui.admin.pressed = false;
     }
-    if (mouse.row == 0 && !held)
-        || gui.modal_open()
-        || gui.servers.drop_open
-        || gui.admin.log.menu.is_some()
-    {
+    if (mouse.row == 0 && !held) || gui.modal_open() || gui.servers.drop_open {
         if let Some(room) = gui.admin.room.as_mut() {
             room.leave();
         }
@@ -949,9 +924,6 @@ pub(super) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
 /// older lines. A wheel over the room reached the room through
 /// [`pointer`].
 pub(super) fn wheel(gui: &mut Gui, at: Position, delta: i32) {
-    if gui.admin.log.menu.is_some() {
-        return;
-    }
     if gui.admin.log_at.is_some_and(|rect| rect.contains(at)) {
         gui.admin.log.wheel(delta < 0);
     }
@@ -974,8 +946,8 @@ pub(super) fn frame(gui: &mut Gui) -> bool {
 }
 
 /// The footer's line by focus (contract clause 27): with no session the
-/// way back; in the hallway its keys; in the log its keys, or the menu's;
-/// in the room the room's own hint, then the host's keys it leaves free
+/// way back; in the hallway its keys; in the log its keys; in the room
+/// the room's own hint, then the host's keys it leaves free
 /// (Tab and `L` while its claim is Open, `L` alone while it keeps Tab,
 /// nothing while it holds every key), the tail only when the whole line
 /// fits the footer.
@@ -983,9 +955,6 @@ pub(super) fn tips(gui: &Gui) -> String {
     let admin = &gui.admin;
     if admin.reach.is_none() {
         return t!("gui.tips.stats_back").to_string();
-    }
-    if admin.log.menu.is_some() {
-        return t!("gui.admin.tips_log_menu").to_string();
     }
     match admin.focus {
         Focus::Hall => t!("gui.admin.tips_hall").to_string(),
@@ -1234,11 +1203,13 @@ mod tests {
 
         let band = at(136, 52, false, false, libraries);
         assert_eq!(band.placement, Placement::Band);
-        assert_eq!(band.room, Rect::new(17, 1, 119, 37), "the room's note on row 37");
-        assert_eq!(band.rule, Some(Rect::new(19, 38, 115, 1)));
+        assert_eq!(band.room, Rect::new(17, 1, 119, 34), "the room's note on row 34");
+        assert_eq!(band.rule, Some(Rect::new(19, 35, 115, 1)));
         assert_eq!(band.rule.unwrap().right() - 1, 133, "the rule ends at the third column from the edge");
-        assert_eq!(band.log, Some(Rect::new(19, 39, 115, 8)), "a header and seven lines");
+        assert_eq!(band.log, Some(Rect::new(19, 36, 115, 11)), "a header and ten rows of lines, 37-46");
         assert!(!band.spaced && !band.log_row);
+        // At the threshold with the footer on, the room keeps 29 rows.
+        assert_eq!(at(136, 48, true, false, libraries).room, Rect::new(17, 1, 119, 29));
 
         let main = at(176, 46, true, false, libraries);
         assert_eq!(main.placement, Placement::Column);
@@ -1273,31 +1244,27 @@ mod tests {
             KeyCode::Char('l'),
             KeyCode::Char(' '),
         ] {
-            assert_eq!(route(Focus::Room, Claim::Open, false, key(code)), Route::Room, "{code:?}");
+            assert_eq!(route(Focus::Room, Claim::Open, key(code)), Route::Room, "{code:?}");
         }
-        assert_eq!(route(Focus::Room, Claim::Open, false, key(KeyCode::Tab)), Route::Cycle { back: false });
+        assert_eq!(route(Focus::Room, Claim::Open, key(KeyCode::Tab)), Route::Cycle { back: false });
         let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(route(Focus::Room, Claim::Open, false, back), Route::Cycle { back: true });
-        assert_eq!(route(Focus::Room, Claim::Open, false, key(KeyCode::Char('L'))), Route::ToggleLog);
+        assert_eq!(route(Focus::Room, Claim::Open, back), Route::Cycle { back: true });
+        assert_eq!(route(Focus::Room, Claim::Open, key(KeyCode::Char('L'))), Route::ToggleLog);
         let shifted = KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT);
-        assert_eq!(route(Focus::Room, Claim::Open, false, shifted), Route::ToggleLog);
+        assert_eq!(route(Focus::Room, Claim::Open, shifted), Route::ToggleLog);
         let ctrl_l = KeyEvent::new(KeyCode::Char('L'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
-        assert_eq!(route(Focus::Room, Claim::Open, false, ctrl_l), Route::Room, "a chord is the room's");
+        assert_eq!(route(Focus::Room, Claim::Open, ctrl_l), Route::Room, "a chord is the room's");
         let ctrl_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL);
-        assert_eq!(route(Focus::Room, Claim::Open, false, ctrl_tab), Route::Room);
+        assert_eq!(route(Focus::Room, Claim::Open, ctrl_tab), Route::Room);
 
         // The hallway and the log keep their own keys and share the two.
-        assert_eq!(route(Focus::Hall, Claim::Open, false, key(KeyCode::Char('1'))), Route::Hall);
-        assert_eq!(route(Focus::Hall, Claim::Open, false, key(KeyCode::Tab)), Route::Cycle { back: false });
-        assert_eq!(route(Focus::Hall, Claim::Open, false, key(KeyCode::Char('L'))), Route::ToggleLog);
-        assert_eq!(route(Focus::Log, Claim::Open, false, key(KeyCode::Char('q'))), Route::Log);
-        assert_eq!(route(Focus::Log, Claim::Open, false, key(KeyCode::Tab)), Route::Cycle { back: false });
-        assert_eq!(route(Focus::Log, Claim::Open, false, key(KeyCode::Char('L'))), Route::ToggleLog);
-        // The open level menu takes every key, whoever had the focus.
-        for focus in [Focus::Hall, Focus::Room, Focus::Log] {
-            assert_eq!(route(focus, Claim::Open, true, key(KeyCode::Tab)), Route::Menu);
-            assert_eq!(route(focus, Claim::Open, true, key(KeyCode::Char('L'))), Route::Menu);
-        }
+        assert_eq!(route(Focus::Hall, Claim::Open, key(KeyCode::Char('1'))), Route::Hall);
+        assert_eq!(route(Focus::Hall, Claim::Open, key(KeyCode::Tab)), Route::Cycle { back: false });
+        assert_eq!(route(Focus::Hall, Claim::Open, key(KeyCode::Char('L'))), Route::ToggleLog);
+        assert_eq!(route(Focus::Log, Claim::Open, key(KeyCode::Char('q'))), Route::Log);
+        assert_eq!(route(Focus::Log, Claim::Open, key(KeyCode::Tab)), Route::Cycle { back: false });
+        assert_eq!(route(Focus::Log, Claim::Open, key(KeyCode::Char('L'))), Route::ToggleLog);
+        assert_eq!(route(Focus::Log, Claim::Open, key(KeyCode::Enter)), Route::Log, "Enter is the log's, and does nothing there");
     }
 
     #[test]
@@ -1308,20 +1275,18 @@ mod tests {
         // the log had the keys is the room's to answer.
         for focus in [Focus::Room, Focus::Hall, Focus::Log] {
             for event in keys {
-                assert_eq!(route(focus, Claim::All, false, event), Route::Room, "{focus:?} {event:?}");
+                assert_eq!(route(focus, Claim::All, event), Route::Room, "{focus:?} {event:?}");
             }
         }
-        // The log's open level menu still takes every key until it closes.
-        assert_eq!(route(Focus::Hall, Claim::All, true, key(KeyCode::Esc)), Route::Menu);
     }
 
     #[test]
     fn route_keeps_tab_for_a_room_that_owns_it() {
         let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(route(Focus::Room, Claim::OwnTab, false, key(KeyCode::Tab)), Route::Room);
-        assert_eq!(route(Focus::Room, Claim::OwnTab, false, back), Route::Room);
-        assert_eq!(route(Focus::Room, Claim::OwnTab, false, key(KeyCode::Char('L'))), Route::ToggleLog);
-        assert_eq!(route(Focus::Room, Claim::OwnTab, false, key(KeyCode::Char('1'))), Route::Room);
+        assert_eq!(route(Focus::Room, Claim::OwnTab, key(KeyCode::Tab)), Route::Room);
+        assert_eq!(route(Focus::Room, Claim::OwnTab, back), Route::Room);
+        assert_eq!(route(Focus::Room, Claim::OwnTab, key(KeyCode::Char('L'))), Route::ToggleLog);
+        assert_eq!(route(Focus::Room, Claim::OwnTab, key(KeyCode::Char('1'))), Route::Room);
     }
 
     #[test]
@@ -1468,7 +1433,7 @@ mod tests {
         press(&mut gui, KeyCode::Char('L'));
         assert_eq!((gui.admin.showing, gui.admin.focus), (Hall::Log, Focus::Log));
         let buf = render_at(&mut gui, 136, 40);
-        assert!(from(&buf, 19, 2).starts_with("• following · info ▾"), "{}", row(&buf, 2));
+        assert!(from(&buf, 19, 2).starts_with("• following · copy · download"), "{}", row(&buf, 2));
         assert_eq!(from(&buf, 19, 3).trim(), "", "a blank row under the header");
         assert!(from(&buf, 19, 4).starts_with("09:00:01  line 1"), "{}", row(&buf, 4));
         assert!(from(&buf, 19, 8).starts_with("09:00:05  line 5"));
@@ -1479,21 +1444,24 @@ mod tests {
     }
 
     #[test]
-    fn at_136x52_the_log_is_a_nine_row_band_under_the_room() {
+    fn at_136x52_the_log_is_a_twelve_row_band_under_the_room() {
         let _en = english();
         let mut gui = admin_gui();
         gui.act(Act::Adm(AdmAct::Open(Hall::Room(RoomId::Backups))));
         gui.admin.log.model.take(lines(1, 10));
         let buf = render_at(&mut gui, 136, 52);
-        assert!(from(&buf, 19, 37).starts_with("loading backups…"), "the room's note: {}", row(&buf, 37));
-        assert_eq!(buf[(19, 38)].symbol(), "─");
-        assert_eq!(buf[(133, 38)].symbol(), "─");
-        assert_eq!(buf[(134, 38)].symbol(), " ", "the rule stops at the third column from the edge");
-        assert!(from(&buf, 19, 39).starts_with("• following · info ▾"), "{}", row(&buf, 39));
-        for (i, y) in (40..=46).enumerate() {
-            let n = i + 4;
-            assert!(from(&buf, 19, y).starts_with(&format!("09:00:{n:02}  line {n}")), "row {y}: {}", row(&buf, y));
+        assert_eq!(gui.admin.room_at, Rect::new(17, 2, 119, 33), "the room stops twelve rows short");
+        assert!(from(&buf, 19, 34).starts_with("loading backups…"), "the room's note: {}", row(&buf, 34));
+        assert_eq!(buf[(19, 35)].symbol(), "─");
+        assert_eq!(buf[(133, 35)].symbol(), "─");
+        assert_eq!(buf[(134, 35)].symbol(), " ", "the rule stops at the third column from the edge");
+        assert_eq!(from(&buf, 19, 36).trim_end(), "• following · copy · download", "no level control");
+        // Ten lines in ten rows: every one fits, so no bar.
+        for (i, y) in (37..=46).enumerate() {
+            let n = i + 1;
+            assert_eq!(from(&buf, 19, y).trim_end(), format!("09:00:{n:02}  line {n}"), "row {y}");
         }
+        assert_eq!(gui.admin.log_at.map(|log| log.bottom()), Some(47), "the band ends above the bar");
         assert!(!(0..52).any(|y| row(&buf, y).contains("WATCH")), "no Log row while the band shows it");
         assert_eq!(from(&buf, 130, 2), "beta  ", "the beta chip at the right of the body's first row");
         assert_eq!(buf[(130, 2)].fg, th().gold);
@@ -1509,26 +1477,29 @@ mod tests {
         gui.admin.log.model.take(lines(1, 10));
         gui.admin.log.model.take(LogTail { entries: vec![entry(11, "info", long)], last_seq: 11, capacity: 1000 });
 
-        // The band: 105 cells past the clock, so the long line takes the
-        // last two of its seven rows, the line above it the five before.
+        // The band: twelve rows for ten, so the bar, and 104 cells past the
+        // clock beside it; the long line takes the last two of its ten
+        // rows, the lines above it the eight before.
         let buf = render_at(&mut gui, 136, 52);
-        for (i, y) in (40..=44).enumerate() {
-            let n = i + 6;
-            assert_eq!(from(&buf, 19, y).trim_end(), format!("09:00:{n:02}  line {n}"), "row {y}");
+        let band = gui.admin.log_at.expect("the band");
+        for (i, y) in (37..=44).enumerate() {
+            let n = i + 3;
+            assert_eq!(lines_text(&buf, band, y), format!("09:00:{n:02}  line {n}"), "row {y}");
         }
         assert_eq!(
-            from(&buf, 19, 45).trim_end(),
+            lines_text(&buf, band, 45),
             "09:00:11  scan finished: 1204 files in /srv/music/library, 17 new, 3 changed, 0 removed, and the album art cache"
         );
-        assert_eq!(from(&buf, 19, 46).trim_end(), "          was rebuilt from the embedded pictures");
+        assert_eq!(lines_text(&buf, band, 46), "          was rebuilt from the embedded pictures");
+        assert_eq!((buf[(133, 37)].symbol(), buf[(133, 46)].symbol()), ("▲", "▼"), "the bar on the band's last column");
         // A drag from its later row to its first lights both rows.
         down(&mut gui, 30, 46);
         mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 30, 45);
         mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 30, 45);
         assert_eq!(gui.admin.log.model.highlight, Some((11, 11)));
         let buf = render_at(&mut gui, 136, 52);
-        let band = gui.admin.log_at.expect("the band");
         assert!(lit(&buf, band, 45) && lit(&buf, band, 46) && !lit(&buf, band, 44));
+        assert_ne!(buf[(133, 45)].bg, th().accent, "the fill stops at the bar");
         gui.admin.log.model.clear_highlight();
 
         // The column at 176×46: 44 cells, four rows, nothing past its edge.
@@ -1559,7 +1530,7 @@ mod tests {
             assert_eq!(buf[(118, y)].symbol(), "│", "the log's rule on row {y}");
         }
         assert_ne!(buf[(118, 40)].symbol(), "│");
-        assert!(from(&buf, 120, 2).starts_with("• following · info ▾"), "{}", row(&buf, 2));
+        assert!(from(&buf, 120, 2).starts_with("• following · copy · download"), "{}", row(&buf, 2));
         let hint = t!("gui.admin.log.hint_undock").to_string();
         assert_eq!(col(&row(&buf, 2), &hint).map(|x| x + width(&hint) as u16), Some(174), "the hint ends where the log does");
         assert_eq!(from(&buf, 120, 3).trim(), "");
@@ -1752,8 +1723,8 @@ mod tests {
 
         // Band: L hides the band and the room takes its rows.
         render_at(&mut gui, 136, 52);
-        assert_eq!(gui.admin.log_at, Some(Rect::new(19, 39, 115, 8)));
-        assert_eq!(gui.admin.room_at.height, 36);
+        assert_eq!(gui.admin.log_at, Some(Rect::new(19, 36, 115, 11)));
+        assert_eq!(gui.admin.room_at.height, 33);
         press(&mut gui, KeyCode::Char('L'));
         render_at(&mut gui, 136, 52);
         assert_eq!(gui.admin.log_at, None);
@@ -1959,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn the_server_menu_and_the_log_menu_own_the_pointer_over_the_room() {
+    fn the_server_menu_owns_the_pointer_over_the_room() {
         let probe = Probe::default();
         let mut gui = hosting(&probe);
         gui.servers.drop_open = true;
@@ -1967,14 +1938,6 @@ mod tests {
         down(&mut gui, 30, 5);
         assert!(probe.0.borrow().mice.is_empty(), "the server menu's catcher took it");
         assert!(!gui.servers.drop_open, "and closed the menu");
-
-        render_at(&mut gui, 176, 46);
-        gui.admin.log.act(LogAct::Menu);
-        render_at(&mut gui, 176, 46);
-        mouse(&mut gui, MouseEventKind::Moved, 30, 6);
-        down(&mut gui, 30, 5);
-        assert!(probe.0.borrow().mice.is_empty(), "the level menu's catcher took it");
-        assert_eq!(gui.admin.log.menu, None, "and closed the menu");
         assert_eq!(gui.screen, Screen::Admin);
     }
 
@@ -2013,7 +1976,7 @@ mod tests {
         gui.admin.log.model.take(lines(6, 3));
         assert_eq!(count(&mut gui), "Log · 3 new");
         gui.admin.log.model.take(LogTail { entries: vec![entry(9, "debug", "quiet")], last_seq: 9, capacity: 1000 });
-        assert_eq!(count(&mut gui), "Log · 3 new", "a line below the level does not count");
+        assert_eq!(count(&mut gui), "Log · 4 new", "a debug line counts as every line does");
 
         // On screen in the Log room, they are seen.
         press(&mut gui, KeyCode::Char('L'));
@@ -2062,7 +2025,7 @@ mod tests {
 
         let buf = render_at(&mut gui, 136, 52);
         assert_eq!(gui.admin.focus, Focus::Log);
-        assert_eq!(buf[(19, 38)].fg, th().accent, "the band's rule");
+        assert_eq!(buf[(19, 35)].fg, th().accent, "the band's rule");
 
         // The Log room lights the hallway's rule.
         render_at(&mut gui, 136, 40);
@@ -2100,7 +2063,7 @@ mod tests {
         probe.0.borrow_mut().tips = "y".repeat(99 - width(tail));
         assert_eq!(footer(&mut gui), "y".repeat(99 - width(tail)), "one cell over: the room's hint alone");
 
-        // The log's keys, and its menu's.
+        // The log's keys, which name no level; Enter there changes nothing.
         let buf = render_at(&mut gui, 176, 46);
         assert!(from(&buf, 1, 45).trim_end().ends_with(tail), "a wider window has room for the tail");
         press(&mut gui, KeyCode::Tab);
@@ -2108,12 +2071,7 @@ mod tests {
         let buf = render_at(&mut gui, 176, 46);
         assert_eq!(from(&buf, 1, 45).trim_end(), t!("gui.admin.tips_log"));
         press(&mut gui, KeyCode::Enter);
-        assert!(gui.admin.log.menu.is_some(), "Enter opens the level menu");
-        let buf = render_at(&mut gui, 176, 46);
-        assert_eq!(from(&buf, 1, 45).trim_end(), t!("gui.admin.tips_log_menu"));
-        press(&mut gui, KeyCode::Down);
-        press(&mut gui, KeyCode::Enter);
-        assert_eq!(gui.admin.log.model.level, server_log::Level::Debug, "the menu took the keys");
+        assert_eq!(render_at(&mut gui, 176, 46), buf, "Enter opens nothing");
         assert_eq!(gui.admin.focus, Focus::Log);
     }
 
@@ -2180,9 +2138,9 @@ mod tests {
         let buf = render_at(&mut gui, 176, 46);
         assert_eq!(probe.0.borrow().hints, Some(true));
         assert!(row(&buf, 2).contains(&hint));
-        // With the footer on, the band's header is on row 38.
+        // With the footer on, the band's header is on row 35.
         let buf = render_at(&mut gui, 136, 52);
-        assert!(row(&buf, 38).contains(&*t!("gui.admin.log.hint_hide")), "{}", row(&buf, 38));
+        assert!(row(&buf, 35).contains(&*t!("gui.admin.log.hint_hide")), "{}", row(&buf, 35));
         press(&mut gui, KeyCode::Char('L'));
         let buf = render_at(&mut gui, 136, 52);
         assert!(!(0..52).any(|y| row(&buf, y).contains(&*t!("gui.admin.log.hint_hide"))), "the band is hidden");
@@ -2337,13 +2295,17 @@ mod tests {
         let handed = probe.0.borrow().compositions.last().cloned();
         assert_eq!(handed.as_deref(), Some(""), "a composition under a GUI modal is its own field's");
 
-        // The log's level menu takes every key (clause 20), the note too.
+        // Enter in the log lays nothing over the room: its field keeps the
+        // keyboard, and nothing covers the frame.
         gui.servers.form = None;
         render_at(&mut gui, 176, 46);
         assert_eq!(gui.ui.caret_at(), Some(noted));
-        gui.admin.log.act(LogAct::Menu);
+        gui.admin.focus = Focus::Log;
+        press(&mut gui, KeyCode::Enter);
         render_at(&mut gui, 176, 46);
-        assert_eq!(gui.ui.caret_at(), None, "the level menu is up over the room");
+        render_at(&mut gui, 176, 46);
+        assert_eq!(gui.ui.caret_at(), Some(noted), "no menu is up over the room");
+        assert!(!gui.ui.covered_last_frame(Rect::new(0, 0, 176, 46)), "no overlay anywhere");
 
         // No session: no room, no caret.
         let mut lone = self::gui();
@@ -2358,6 +2320,12 @@ mod tests {
     /// The first row of the log's lines this frame, read off the buffer.
     fn first_line_row(buf: &Buffer, log: Rect) -> u16 {
         (log.y..log.bottom()).find(|&y| from(buf, log.x, y).starts_with("09:")).expect("a line on screen")
+    }
+
+    /// Row `y` of the log's lines, trimmed at its end: the log's cells
+    /// but its last, where the scroll bar stands while the lines overflow.
+    fn lines_text(buf: &Buffer, log: Rect, y: u16) -> String {
+        (log.x..log.right() - 1).map(|x| buf[(x, y)].symbol()).collect::<String>().trim_end().to_string()
     }
 
     /// Whether row `y` of the log wears the selection colours.
@@ -2399,6 +2367,74 @@ mod tests {
                 assert!(!lit(&buf, log, y), "{w}×{h}: row {y} beside the run");
             }
         }
+    }
+
+    #[test]
+    fn the_logs_bar_steps_jumps_and_drags_through_the_guis_loop_and_holds_the_pointer() {
+        let _en = english();
+        let probe = Probe::default();
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, 60));
+        // The band at 136×52: ten rows of lines on 37-46, the bar on x 133
+        // — ▲ on 37, the track on 38-45, ▼ on 46.
+        let buf = render_at(&mut gui, 136, 52);
+        let band = gui.admin.log_at.expect("the band");
+        assert_eq!((buf[(133, 37)].symbol(), buf[(133, 46)].symbol()), ("▲", "▼"));
+        assert_eq!(lines_text(&buf, band, 46), "09:00:00  line 60");
+
+        // ▲: a line older at once, the keys on the log, no highlight begun.
+        down(&mut gui, 133, 37);
+        assert_eq!(gui.admin.log.model.scroll, 1);
+        assert_eq!(gui.admin.focus, Focus::Log, "a press in the log hands it the keys");
+        assert!(gui.ui.holding_bar() && !gui.ui.gripping(), "the bar's, never the lines' drag");
+        // Held, it repeats as the loop's frame half asks.
+        std::thread::sleep(crate::kit::ARROW_DELAY + std::time::Duration::from_millis(30));
+        let repeat = gui.ui.hold_action().expect("the repeat");
+        gui.act(repeat);
+        assert_eq!(gui.admin.log.model.scroll, 2);
+        // The hand wanders into the room and lets go there: the room is
+        // told nothing, and the hold ends.
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 30, 10);
+        mouse(&mut gui, MouseEventKind::Moved, 31, 10);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 31, 10);
+        assert!(probe.0.borrow().mice.is_empty(), "{:?}", probe.0.borrow().mice);
+        assert!(!gui.ui.holding_bar());
+        assert_eq!(gui.admin.log.model.highlight, None);
+        assert_eq!(gui.admin.focus, Focus::Log);
+
+        // The track's first cell is the top of the log; a drag down past
+        // the bar's end follows again.
+        render_at(&mut gui, 136, 52);
+        down(&mut gui, 133, 38);
+        let buf = render_at(&mut gui, 136, 52);
+        assert_eq!(lines_text(&buf, band, 37), "09:00:01  line 1", "the top of the log");
+        assert!(from(&buf, 19, 36).starts_with("• paused"), "{}", row(&buf, 36));
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 133, 51);
+        assert!(gui.admin.log.model.following(), "the thumb rode the hand to the bottom");
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 133, 51);
+        assert!(!gui.ui.holding_bar());
+
+        // A press that lost its release is let go by the next press, which
+        // then reaches the room as any press does.
+        render_at(&mut gui, 136, 52);
+        down(&mut gui, 133, 46);
+        assert!(gui.ui.holding_bar());
+        down(&mut gui, 30, 10);
+        assert!(!gui.ui.holding_bar());
+        assert_eq!(probe.0.borrow().mice, [(MouseEventKind::Down(MouseButton::Left), 30, 10)]);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 30, 10);
+
+        // A drag from the lines across the bar moves the highlight, never
+        // the view or the thumb.
+        let buf = render_at(&mut gui, 136, 52);
+        let thumb: Vec<u16> = (37..=46).filter(|&y| buf[(133, y)].symbol() == "█").collect();
+        down(&mut gui, 30, 44);
+        mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), 133, 39);
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), 133, 39);
+        assert_eq!(gui.admin.log.model.highlight, Some((58, 53)));
+        assert!(gui.admin.log.model.following());
+        let buf = render_at(&mut gui, 136, 52);
+        assert_eq!((37..=46).filter(|&y| buf[(133, y)].symbol() == "█").collect::<Vec<_>>(), thumb);
     }
 
     #[test]
@@ -2661,9 +2697,6 @@ mod tests {
         super::super::servers::open_add(&mut gui);
         assert!(!chord(&mut gui), "a GUI modal");
         gui.servers.form = None;
-        gui.admin.log.act(LogAct::Menu);
-        assert!(!chord(&mut gui), "the level menu");
-        gui.admin.log.act(LogAct::MenuClose);
         probe.0.borrow_mut().modal = true;
         assert!(!chord(&mut gui), "the room's modal");
         probe.0.borrow_mut().modal = false;
