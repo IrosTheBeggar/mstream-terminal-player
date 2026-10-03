@@ -1,37 +1,37 @@
-# Tell mStream a release is out so its pin-bump PR opens itself: this
-# fires a repository_dispatch that mStream's update-mstream-player-manifest
-# workflow consumes (it re-downloads and sha256-verifies every binary
-# against this release's manifest.json before pinning anything, then opens
-# a review PR — a human merges it there).
+# The hand-cranked mStream notice: fire the player-release dispatch for a
+# given tag. The automatic path is the `notify` job inside release.yml — it
+# cannot live here behind GitHub's published-release event, because our
+# releases are created with the workflow's own GITHUB_TOKEN, and GITHUB_TOKEN
+# events (other than workflow_dispatch and repository_dispatch) never trigger
+# workflows; this file listened for that event from 2026-08-20 and ran zero
+# times. This stays for re-runs and repairs, and for proving the token: the
+# tag mStream currently pins makes its workflow answer "pins already
+# current — nothing to do", which is the harmless end-to-end proof (an
+# older tag would open a downgrade PR there).
 #
-# MSTREAM_REPO_TOKEN: fine-grained PAT — Repository access:
+# Needs MSTREAM_REPO_TOKEN: a fine-grained PAT — Repository access:
 # IrosTheBeggar/mStream only; Permissions: Contents: Read and write.
-# Failure mode when it expires: no pin-bump PR appears after a release;
-# mStream's workflow_dispatch (tag input) is the manual fallback.
-#
-# `release: published` on purpose: draft releases have no public asset
-# URLs, and mStream's update script needs them.
-name: Notify mStream
+name: Notify mStream (manual)
+
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to tell mStream about, e.g. v0.11.0"
+        required: true
+
+# The dispatch goes out with the PAT; GITHUB_TOKEN only reads the script.
+permissions:
+  contents: read
+
 jobs:
   notify:
-    if: ${{ !github.event.release.draft && !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+
       - name: Fire player-release dispatch
         env:
           TOKEN: ${{ secrets.MSTREAM_REPO_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::warning::MSTREAM_REPO_TOKEN is not set — mStream was not notified; run its update-mstream-player-manifest workflow by hand for $TAG"
-            exit 0
-          fi
-          curl -sf -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/IrosTheBeggar/mStream/dispatches \
-            -d "{\"event_type\":\"player-release\",\"client_payload\":{\"tag\":\"$TAG\"}}"
-          echo "notified mStream: $TAG"
+          TAG: ${{ inputs.tag }}
+        run: sh scripts/notify-mstream.sh

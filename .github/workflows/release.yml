@@ -14,9 +14,9 @@
 # for scripts), and per-OS packages of them (package-desktop below).
 #
 # A tag with a hyphen (v0.10.0-rc.1) is a pre-release: the Release is
-# marked so (notify-mstream.yml skips those), never becomes "latest" (what
-# install.sh and install.ps1 fetch by default), and the package channels
-# are not bumped.
+# marked so, never becomes "latest" (what install.sh and install.ps1 fetch
+# by default), and neither the package channels nor mStream are told
+# (channels and notify below skip it).
 #
 # Adapted from mStream's build-rust-server-audio.yml — same target matrix and
 # cross setup, but artifacts go to a Release instead of being committed back
@@ -535,3 +535,37 @@ jobs:
           fi
           git commit -m "mstream-player $GITHUB_REF_NAME"
           git push
+
+  # Beside channels, and here for the same reason: mStream's repository_dispatch
+  # cannot hang off `release: published`, because the Release above is created
+  # with the workflow's own GITHUB_TOKEN and that event never fires here
+  # (notify-mstream.yml listened for it from 2026-08-20 and ran zero times;
+  # every pin bump so far was done by hand on the mStream side — the updater
+  # script run locally through v0.5.0, a workflow_dispatch of
+  # update-mstream-player-manifest from v0.6.0 on).
+  # notify-mstream.yml remains as the hand-cranked fallback.
+  #
+  # Stable tags only: a pre-release is not an adoption candidate, and mStream's
+  # manifest updater refuses pre-release tags on its own. The status is spelled
+  # out as in channels (actions/runner#491). An expired MSTREAM_REPO_TOKEN shows
+  # as a red job on a published release rather than as silence.
+  notify:
+    name: Notify mStream
+    needs: release
+    if: >-
+      ${{ !cancelled()
+          && needs.release.result == 'success'
+          && startsWith(github.ref, 'refs/tags/v')
+          && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    # The dispatch goes out with the PAT; GITHUB_TOKEN only reads the script.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Fire player-release dispatch
+        env:
+          TOKEN: ${{ secrets.MSTREAM_REPO_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: sh scripts/notify-mstream.sh
