@@ -72,10 +72,12 @@ leaves them without the execute bit; the packages above are the way in.
 Started with no arguments (a double-click, the Dock, the app menu), the desktop player opens the
 GUI in its own window. With no display, or over SSH, it falls back to the terminal UI. Every
 command works as it does in the terminal player, `mstream-player gui --window` opens the window
-explicitly, and exit code 3 means no window could open. `mstream-player --version` prints a second
-line, `features: window`, so a script can tell the two apart. It keeps its config, credentials and
-cache in the same places as the terminal player — see
-[Where it keeps things](#where-it-keeps-things).
+explicitly, `setup --window` and `qr --window` open the setup wizard and the Quick Connect page in
+windows of their own (beside an open player, and 0 every way they close), and exit code 3 means no
+window could open. `mstream-player --version` prints a second line, `features: window window-pages`
+(`window` says the player opens a window; `window-pages` that the setup wizard and Quick Connect do
+too), so a script can tell the two flavours apart. It keeps its config, credentials and cache in the same places as the
+terminal player — see [Where it keeps things](#where-it-keeps-things).
 
 To build it from source (or use `--features window` for `gui --window` without the window on an
 empty command line):
@@ -87,8 +89,8 @@ cargo install --git https://github.com/IrosTheBeggar/mstream-terminal-player --f
 ### Install the terminal player
 
 This is what Homebrew, Scoop, the one-line installers, the `.deb` and `.rpm`, the unsuffixed
-release binaries and `cargo install` deliver. It has no window of its own: `gui --window` is a
-usage error there.
+release binaries and `cargo install` deliver. It has no window of its own: `gui --window`,
+`setup --window` and `qr --window` are usage errors there.
 
 Homebrew (macOS, or Homebrew on Linux):
 

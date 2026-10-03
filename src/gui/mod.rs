@@ -42,7 +42,7 @@ mod vizwin;
 // The GUI's own window: the desktop flavour's (`--features desktop`, or
 // `window` alone); the terminal releases are built without it.
 #[cfg(feature = "window")]
-mod window;
+pub(crate) mod window;
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -2644,7 +2644,7 @@ impl Ctx {
 /// Whatever shows the GUI, for the one thing the loop asks of it beyond
 /// drawing: the pointer's shape over something clickable. The terminal
 /// writes the OSC 22 shape; a native window sets its own cursor.
-trait Host {
+pub(crate) trait Host {
     fn pointer(&mut self, hand: bool);
 }
 
@@ -2662,7 +2662,7 @@ impl Host for TermHost {
 
 /// What one input left the loop to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Flow {
+pub(crate) enum Flow {
     Continue,
     Quit,
 }
@@ -2682,7 +2682,7 @@ fn frame<B>(
     terminal: &mut ratatui::Terminal<B>,
     gui: &mut Gui,
     ctx: &mut Ctx,
-    host: &mut impl Host,
+    host: &mut dyn Host,
 ) -> std::io::Result<Duration>
 where
     B: ratatui::backend::Backend<Error = std::io::Error>,
@@ -3286,7 +3286,7 @@ pub fn run(
         // console behind it must not select the CP437 stand-ins.
         theme::pin_modern_glyphs();
         let (gui, channels) = start(server, token, torrent, bundled, control);
-        return window::run(gui, channels, instance.take());
+        return window::run(Box::new(GuiFace::new(gui, channels)), instance.take());
     }
     let (mut gui, channels) = start(server, token, torrent, bundled, control);
 
@@ -3382,6 +3382,112 @@ fn finish(gui: &mut Gui, ctx: &Ctx) {
     // way; the GUI's bar choice rides its own section afterwards.
     tui::remember(&gui.app);
     gui.save_now();
+}
+
+/// The GUI as the window's face (gui/window/face.rs): the Gui and the
+/// loop's Ctx, with each of the host's asks answered by the call the host
+/// made into the Gui by name before there was a trait.
+#[cfg(feature = "window")]
+pub(crate) struct GuiFace {
+    gui: Gui,
+    ctx: Ctx,
+}
+
+#[cfg(feature = "window")]
+impl GuiFace {
+    /// The Ctx is made before the window's event loop exists rather than
+    /// just after it: nothing between the two touches the queue or the
+    /// plays, so the saver's first signatures are the App as `start` left
+    /// it either way, and its clocks start only the event loop's few
+    /// milliseconds sooner.
+    fn new(gui: Gui, channels: Channels) -> Self {
+        let ctx = Ctx::new(&gui.app, channels);
+        GuiFace { gui, ctx }
+    }
+}
+
+#[cfg(feature = "window")]
+impl window::face::Face for GuiFace {
+    fn title(&self) -> &'static str {
+        "mStream Player"
+    }
+
+    fn frame(
+        &mut self,
+        terminal: &mut window::WindowTerminal,
+        host: &mut dyn Host,
+    ) -> std::io::Result<Duration> {
+        frame(terminal, &mut self.gui, &mut self.ctx, host)
+    }
+
+    fn input(&mut self, event: TermEvent) -> Flow {
+        input(&mut self.gui, &mut self.ctx, event)
+    }
+
+    fn caret_at(&self) -> Option<Position> {
+        self.gui.ui.caret_at()
+    }
+
+    fn set_composition(&mut self, text: &str) {
+        self.gui.ui.set_composition(text);
+    }
+
+    fn host_pictures(
+        &mut self,
+        host: std::sync::Arc<dyn crate::tui::graphics::PictureHost>,
+        overlays: Box<dyn Fn(Rect) + 'static>,
+    ) {
+        self.gui.app.graphics = crate::tui::graphics::Graphics::hosted(host);
+        self.gui.ui.watch_overlays(overlays);
+    }
+
+    /// The player's first effects — the connect among them — sent to their
+    /// workers now, while the window and its renderer are still being
+    /// built, rather than by the first frame as the terminal's loop sends
+    /// them. The first frame can come seconds after the window opens (a
+    /// slow GPU's pipeline build), and the input held until then is
+    /// replayed right after it: sent by frame 1, the connect was still on
+    /// the wire for every held key, and a key that needs the server (`/`
+    /// opens the search's field only once connected) did nothing, so `/ab`
+    /// typed into a blank window left an empty field. Sent here, the answer
+    /// is in by frame 1 whenever the server answers faster than the window
+    /// comes up; frame 1 applies it before the replay. A Save among them
+    /// reloads the Gui's config copy, as `frame` does after its own
+    /// dispatch.
+    fn send_early(&mut self) {
+        let gui = &mut self.gui;
+        let saving = saves_config(&gui.pending);
+        let ch = &self.ctx.channels;
+        tui::dispatch(&gui.app, &mut gui.pending, &ch.audio_tx, &ch.api_tx, &ch.event_tx);
+        if saving && let Ok(fresh) = config::load() {
+            gui.config = fresh;
+            refresh_book(gui);
+        }
+    }
+
+    fn copy(&mut self) -> bool {
+        admin::copy_chord(&mut self.gui)
+    }
+
+    fn flush(&mut self) {
+        self.ctx.saver.flush(&self.gui.app);
+    }
+
+    fn finish(&mut self) {
+        finish(&mut self.gui, &self.ctx);
+    }
+
+    fn hit_debug(&self, at: Position) -> Option<String> {
+        self.gui.ui.hit(at).map(|act| format!("{act:?}"))
+    }
+
+    fn drag_began(&self) -> bool {
+        self.gui.actions.drag.is_some()
+    }
+
+    fn render_test(&mut self, frame: &mut Frame<'_>) {
+        render(frame, &mut self.gui);
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -3807,6 +3913,32 @@ mod tests {
         let mut ctx = quiet_ctx(gui);
         let mut terminal = Terminal::new(IoTest(TestBackend::new(w, h))).unwrap();
         frame(&mut terminal, gui, &mut ctx, &mut NoHost).unwrap()
+    }
+
+    /// The GUI as the window's face answers the host's reads from the Gui
+    /// itself: the title the window had before there was a face, the caret
+    /// the last frame noted, the composition its field draws, and for the
+    /// fidelity dump the Gui's own render, cell for cell.
+    #[cfg(feature = "window")]
+    #[test]
+    fn gui_face_mirrors_the_guis_caret_and_title() {
+        use crate::gui::window::face::Face;
+        let gui = test_gui();
+        let ctx = quiet_ctx(&gui);
+        let mut face = GuiFace { gui, ctx };
+        assert_eq!(face.title(), "mStream Player");
+        assert_eq!(face.caret_at(), None);
+        face.gui.ui.note_caret(Position { x: 12, y: 3 });
+        assert_eq!(face.caret_at(), Some(Position { x: 12, y: 3 }));
+        face.set_composition("か");
+        assert_eq!(face.gui.ui.composition(), "か");
+        assert!(!face.drag_began());
+
+        let mut by_face = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        by_face.draw(|frame| face.render_test(frame)).unwrap();
+        let mut by_gui = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        by_gui.draw(|frame| render(frame, &mut test_gui())).unwrap();
+        assert_eq!(rows(&by_face), rows(&by_gui));
     }
 
     /// A modal opened over a cover: the cover drew that frame by last

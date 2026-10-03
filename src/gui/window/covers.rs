@@ -110,9 +110,10 @@ struct Pixels {
 
 /// What the drawing path and the post-processor share. Both run on the
 /// window's thread, one after the other within a frame; the decode worker
-/// is the only other hand on it.
+/// is the only other hand on it. Named by the crate as [`CoverPost`] is,
+/// whose user data it is.
 #[derive(Default)]
-pub(super) struct Board {
+pub(crate) struct Board {
     inner: Mutex<Inner>,
 }
 
@@ -238,8 +239,10 @@ struct Request {
     crisp: bool,
 }
 
-/// ratatui-wgpu's text blit, then the covers over it.
-pub(super) struct CoverPost {
+/// ratatui-wgpu's text blit, then the covers over it. Named by the crate,
+/// though its module is the window's, because a face's frame half takes
+/// the window's terminal (`WindowTerminal`) and so names it.
+pub(crate) struct CoverPost {
     text: DefaultPostProcessor,
     board: Arc<Board>,
     /// `process` is handed a queue but no device, and textures and a

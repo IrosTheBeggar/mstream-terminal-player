@@ -58,6 +58,37 @@ search's field only once connected) finds it connected if the server answered be
 `MSTREAM_WINDOW_STATS=<path>`, `MSTREAM_WINDOW_DUMP=<dir>` and
 `MSTREAM_WINDOW_SIZE=<cols>,<rows>` are the other levers (PLAN.md, Phase 14).
 
+## Faces
+
+The window host (`src/gui/window/mod.rs`) shows a face: a `Box<dyn Face>` behind the small
+object-safe trait in `src/gui/window/face.rs`, so a program other than the GUI can stand in a
+window of its own without a second host (PLAN.md, Phase 15). The GUI is the first face
+(`GuiFace` in `src/gui/mod.rs`), each method the call the host made into the Gui by name
+before. What every face answers: its `title`, the `frame` half (one frame drawn into the
+window's terminal and the wait until the next, with the window's cursor as its `Host`), the
+`input` half (one translated event, `Flow::Quit` to leave), the caret of the field with the
+keyboard (`caret_at`, which turns the input method and the paste chord on) and the input
+method's composition (`set_composition`), `host_pictures` (the Board that draws pictures as
+textures, and the overlay watch), `finish` (the way out, alone on the no-display path), and
+`render_test`, what the fidelity dump draws into a `TestBackend`. The rest is optional and
+defaulted to nothing: `grid` (100×30), `send_early` (work before the first frame), `copy` (the
+copy chord, swallowed by default), `flush` (what a quit would have saved, for the close
+button), `exit_code` (0 for a clean close; a failed frame and no window keep 1 and 3), and the
+script lever's probes `hit_debug` and `drag_began`. Everything else (the renderer's build, the
+held input and its replay, the input method's placement, the levers, the stats, the instance
+lock) is the host's and no face's business.
+
+The setup wizard is the second face (`WizardFace` in `src/setup/face.rs`), opened by the hidden
+`setup --window` and `qr --window` of a build with the window (the terminal flavour has neither,
+as it has no `gui --window`). It is the wizard's own two halves (`setup::frame` and
+`setup::input`, which the terminal's loop runs too) with the op each entry queued sent while the
+window is built, and its two pictures, the wordmark and the Quick Connect code, drawn as the
+Board's textures, so the Done page is two columns from its first frame at 100×30, where the
+terminal's half-block code would not fit. The window's input needs no arm for it: pastes and
+input-method commits arrive as one key a character, Ctrl+C quits, the copy chord has nothing to
+copy, and a resize is read off the frame. A page takes no instance lock and writes no sidecar,
+so it opens beside an open player; it exits 0 every way it closes, and the host's 3 and 1 stand.
+
 ## The two flavours
 
 One codebase, two products, one CLI: an explicit argv means the same in both, and only an empty
@@ -72,10 +103,14 @@ player's config directory, so a second one prints the launcher's "already open" 
 it) and leaves; whether to share the tray's lock instead is open. The sidecar's `host` reads
 `window` for a player in its own window (`gui --window` or the desktop empty argv) and the
 terminal's name otherwise. `mstream-player --version` (and `-V`) keeps its first line
-`mstream-player X.Y.Z`; a build with the window adds `features: window` on a second. When the
+`mstream-player X.Y.Z`; a build with the window adds `features: window window-pages` on a second
+(one line of space-separated words: `window` for the player's own window, `window-pages` for the
+setup wizard's and Quick Connect's; a launcher splits the line and looks for the word it needs). When the
 window cannot open at all (no display, libxkbcommon-x11 missing, no GPU adapter or backend,
 an event loop that will not start) the player exits 3, which a launcher takes as "use the
-terminal route"; 1 stays every other failure. On Windows a double-clicked desktop binary
+terminal route", and so do `setup --window` and `qr --window` (ci.yml checks both with no
+display on Linux, and the terminal build's `qr --window` exiting 2); 1 stays every other
+failure. On Windows a double-clicked desktop binary
 frees the console Explorer gave it (one still flashes as it starts), and the
 `mstream-player-launch` stub, packaged as "mStream Player.exe", is a GUI-subsystem program
 that starts `mstream-player.exe gui --window` beside it with no console at all.

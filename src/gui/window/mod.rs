@@ -13,7 +13,10 @@
 //! Step 3 is input: the keyboard, an input method and the pointer, turned
 //! into the crossterm events a terminal would have sent (input.rs) and fed
 //! through the same input half. The terminal path does not come through
-//! this module at all.
+//! this module at all. The host asks those two halves, and the few reads
+//! and hand-offs around them, of a face (face.rs) rather than of the Gui by
+//! name, so another program can be shown in a window of its own; the GUI
+//! is the first face (`gui::GuiFace`).
 //!
 //! Three levers ride along, all hidden. `MSTREAM_WINDOW_SIZE=<cols>,<rows>`
 //! opens the window at another grid than 100×30 — 70,20 shows the mini
@@ -51,6 +54,7 @@
 //! where the log is.
 
 mod covers;
+pub(crate) mod face;
 mod held;
 mod icon;
 mod input;
@@ -80,26 +84,24 @@ use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use covers::{Board, CoverPost};
+use face::Face;
 use held::{Held, HeldInput};
 use input::{Grid, Raw, Translator};
 use script::{Input, Script, Step};
 use stats::{Counted, Lap, Stats};
 
-use super::{
-    Channels, Ctx, Flow, Gui, Host, finish, frame, input, refresh_book, render, saves_config,
-};
+use super::{Flow, Host};
 use crate::instance::Instance;
 use crate::kit::theme::th;
 use crate::runtime::block_on;
 
-const TITLE: &str = "mStream Player";
 /// The text size in points; the backend is handed pixels, so this is
 /// multiplied by the display's scale factor, or a Retina screen would get
 /// type half the size a terminal shows.
 const FONT_PT: f64 = 16.0;
-/// The grid the window opens at unless `MSTREAM_WINDOW_SIZE` says
-/// otherwise: the installer's own terminal window, and the size the render
-/// tests draw at.
+/// The grid the window opens at unless `MSTREAM_WINDOW_SIZE` or the face
+/// says otherwise: the installer's own terminal window, and the size the
+/// render tests draw at.
 const GRID: (u16, u16) = (100, 30);
 /// Hack at 16 points is eight points wide: the guess the window opens on,
 /// before the backend exists to say what a cell really is.
@@ -137,7 +139,7 @@ const BUILD_AT_QUIT: Duration = Duration::from_secs(2);
 /// opening size, the resize to the grid lands a frame or two later.
 const DUMP_AT_FRAME: u32 = 5;
 
-type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static, CoverPost>>>;
+pub(crate) type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static, CoverPost>>>;
 /// What the backend's thread hands back: the backend but for its glyph
 /// caches, which are not `Send` (the vendored builder's `Built`).
 type Parts = Built<'static, 'static, CoverPost>;
@@ -155,13 +157,14 @@ type BuildJob = (Builder<'static, CoverPost>, wgpu::Surface<'static>);
 /// usage error.
 pub(crate) const NO_WINDOW: i32 = 3;
 
-/// The player in a window, from a Gui and workers that `gui::start` has
-/// already brought up; the exit code is the terminal's (0, or 1 when a
-/// frame failed), or [`NO_WINDOW`] when there is no window to open. `instance` is the
-/// launcher's instance lock, if this run holds one: dropped last, after the
-/// App, so its sidecar goes on every way out — the Cmd-Q that ends the
-/// process inside AppKit included, where `exiting` drops it.
-pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) -> i32 {
+/// A face in a window, already brought up by its caller (the GUI's by
+/// `gui::start`); the exit code is the face's for a clean close (0 for the
+/// GUI), 1 when a frame failed, or [`NO_WINDOW`] when there is no window to
+/// open. `instance` is the launcher's instance lock, if this run holds one:
+/// dropped last, after the App, so its sidecar goes on every way out — the
+/// Cmd-Q that ends the process inside AppKit included, where `exiting`
+/// drops it.
+pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
     // First, so the stats' clock (when the lever is set) starts at entry.
     let mut stats = Stats::from_env();
     let mut lap = Lap::start(&stats);
@@ -177,13 +180,12 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     // The faces first, on their own thread, so the search overlaps all of
     // the event loop's start and the window's creation.
     let faces = Early::faces(rust_i18n::locale().to_string());
-    let grid = opening_grid();
+    let grid = opening_grid(face.grid());
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
         Err(e) => {
             eprintln!("gui --window: no display to open a window on ({e})");
-            let ctx = Ctx::new(&gui.app, channels);
-            finish(&mut gui, &ctx);
+            face.finish();
             return NO_WINDOW;
         }
     };
@@ -201,19 +203,18 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     };
     let dump = std::env::var_os("MSTREAM_WINDOW_DUMP").map(PathBuf::from);
     // Covers are the window's to draw: every Graphics the GUI forks for a
-    // slot is forked from this one, so they all record onto the board.
+    // slot is forked from the one the face is handed, so they all record
+    // onto the board. And the board hears of every overlay as it is drawn,
+    // so a cover a modal opens over is not painted over the modal on the
+    // frame it opens.
     let board = Arc::new(Board::default());
-    gui.app.graphics = crate::tui::graphics::Graphics::hosted(board.clone());
-    // And the board hears of every overlay as it is drawn, so a cover a
-    // modal opens over is not painted over the modal on the frame it opens.
     let watching = board.clone();
-    gui.ui.watch_overlays(move |rect| watching.overlay(rect));
-    let ctx = Ctx::new(&gui.app, channels);
-    send_early(&mut gui, &ctx);
+    face.host_pictures(board.clone(), Box::new(move |rect| watching.overlay(rect)));
+    face.send_early();
     let mut app = App {
-        gui,
-        ctx,
+        face,
         grid,
+        hand: false,
         board,
         window: None,
         terminal: None,
@@ -265,7 +266,9 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     // second player the launcher starts once the sidecar is gone finds
     // this one's queue saved and its port free.
     let instance = app.instance.take();
-    let code = app.exit_code;
+    // A clean close is the face's to code; a frame that failed or a window
+    // that never opened keeps the host's.
+    let code = if app.exit_code == 0 { app.face.exit_code() } else { app.exit_code };
     let mut laps = std::mem::take(&mut app.exit_laps);
     let clock = app.exit_clock.take();
     drop(app);
@@ -277,28 +280,6 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     }
     exit_report(&laps);
     code
-}
-
-/// The player's first effects — the connect among them — sent to their
-/// workers now, while the window and its renderer are still being built,
-/// rather than by the first frame as the terminal's loop sends them. The
-/// first frame can come seconds after the window opens (a slow GPU's
-/// pipeline build), and the input held until then is replayed right after
-/// it: sent by frame 1, the connect was still on the wire for every held
-/// key, and a key that needs the server (`/` opens the search's field only
-/// once connected) did nothing, so `/ab` typed into a blank window left an
-/// empty field. Sent here, the answer is in by frame 1 whenever the server
-/// answers faster than the window comes up; frame 1 applies it before the
-/// replay. A Save among them reloads the Gui's config copy, as `frame`
-/// does after its own dispatch.
-fn send_early(gui: &mut Gui, ctx: &Ctx) {
-    let saving = saves_config(&gui.pending);
-    let ch = &ctx.channels;
-    crate::tui::dispatch(&gui.app, &mut gui.pending, &ch.audio_tx, &ch.api_tx, &ch.event_tx);
-    if saving && let Ok(fresh) = crate::config::load() {
-        gui.config = fresh;
-        refresh_book(gui);
-    }
 }
 
 /// What winit's X11 keyboard needs and loads only at run time, through
@@ -321,7 +302,7 @@ const XKB_X11: [&std::ffi::CStr; 2] = [c"libxkbcommon-x11.so.0", c"libxkbcommon-
 /// `gui::run` asks before the player starts, so a window that cannot open
 /// leaves before any worker, audio device or connection is up.
 #[cfg(target_os = "linux")]
-pub(super) fn x11_keyboard_missing() -> Option<String> {
+pub(crate) fn x11_keyboard_missing() -> Option<String> {
     let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
     x11_keyboard_missing_with(set, loads)
 }
@@ -408,11 +389,11 @@ fn panic_log_note(log: Option<&Path>) -> Option<String> {
     Some(format!("mstream-player: the log is at {}", log.display()))
 }
 
-/// The grid to open at: `MSTREAM_WINDOW_SIZE=<cols>,<rows>`, or [`GRID`].
-/// A value that does not read as two sizes of at least one cell is said
-/// so and ignored.
-fn opening_grid() -> (u16, u16) {
-    let Some(raw) = std::env::var_os("MSTREAM_WINDOW_SIZE") else { return GRID };
+/// The grid to open at: `MSTREAM_WINDOW_SIZE=<cols>,<rows>`, or the face's
+/// own (`grid`, [`GRID`] unless the face says otherwise). A value that does
+/// not read as two sizes of at least one cell is said so and ignored.
+fn opening_grid(grid: (u16, u16)) -> (u16, u16) {
+    let Some(raw) = std::env::var_os("MSTREAM_WINDOW_SIZE") else { return grid };
     let raw = raw.to_string_lossy();
     let parsed = raw.split_once(',').and_then(|(cols, rows)| {
         let cols: u16 = cols.trim().parse().ok()?;
@@ -421,16 +402,20 @@ fn opening_grid() -> (u16, u16) {
     });
     parsed.unwrap_or_else(|| {
         eprintln!(
-            "gui --window: MSTREAM_WINDOW_SIZE={raw} is not <cols>,<rows>; opening at 100,30"
+            "gui --window: MSTREAM_WINDOW_SIZE={raw} is not <cols>,<rows>; opening at {},{}",
+            grid.0, grid.1
         );
-        GRID
+        grid
     })
 }
 
 struct App {
-    gui: Gui,
-    ctx: Ctx,
+    /// What the window shows (face.rs).
+    face: Box<dyn Face>,
     grid: (u16, u16),
+    /// The pointer is the platform's hand: what the face last asked of the
+    /// window's cursor, for the script's dumps.
+    hand: bool,
     /// This frame's covers, between the drawing path and the backend's
     /// post-processor.
     board: Arc<Board>,
@@ -720,11 +705,17 @@ impl Gpu {
 
 /// The window as the loop's [`Host`]: the pointer over something
 /// clickable is the platform's hand, as the terminal's OSC 22 shape is.
-struct WindowHost<'a>(&'a Window);
+/// The shape set is kept in the App's `hand`, which the script's dumps
+/// report.
+struct WindowHost<'a> {
+    window: &'a Window,
+    hand: &'a mut bool,
+}
 
 impl Host for WindowHost<'_> {
     fn pointer(&mut self, hand: bool) {
-        self.0.set_cursor(if hand { CursorIcon::Pointer } else { CursorIcon::Default });
+        *self.hand = hand;
+        self.window.set_cursor(if hand { CursorIcon::Pointer } else { CursorIcon::Default });
     }
 }
 
@@ -737,7 +728,8 @@ impl App {
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         let (cols, rows) = self.grid;
         let opening = LogicalSize::new(f64::from(cols) * CELL_GUESS_PT, f64::from(rows) * FONT_PT);
-        let attributes = Window::default_attributes().with_title(TITLE).with_inner_size(opening);
+        let attributes =
+            Window::default_attributes().with_title(self.face.title()).with_inner_size(opening);
         // The app id, as both halves of X11's WM_CLASS and as Wayland's
         // app_id: what a desktop shell matches to the desktop entry of the
         // same name, for its icon and its dock grouping (identity.rs). One
@@ -1089,7 +1081,8 @@ impl App {
         // An owed present this frame's flush makes is a present though no
         // cell changed: the stats lever counts it as one.
         let owed = terminal.backend().owes_present();
-        let framed = frame(terminal, &mut self.gui, &mut self.ctx, &mut WindowHost(window));
+        let framed =
+            self.face.frame(terminal, &mut WindowHost { window, hand: &mut self.hand });
         let (cells, flush) = terminal.backend_mut().take_cells();
         let repaid = owed && !terminal.backend().owes_present();
         if let (Some(stats), Some(started)) = (self.stats.as_mut(), started) {
@@ -1114,7 +1107,7 @@ impl App {
         self.frames += 1;
         if self.frames == DUMP_AT_FRAME
             && let Some(dir) = &self.dump
-            && let Err(e) = dump(dir, terminal, &mut self.gui)
+            && let Err(e) = dump(dir, terminal, &mut *self.face)
         {
             eprintln!("gui --window: the dump failed: {e}");
         }
@@ -1177,7 +1170,7 @@ impl App {
             return false;
         }
         let fed = self.stats.is_some().then(Instant::now);
-        if input(&mut self.gui, &mut self.ctx, event) == Flow::Quit {
+        if self.face.input(event) == Flow::Quit {
             self.quit_flushed = true;
             self.quit_at = fed;
             event_loop.exit();
@@ -1197,7 +1190,7 @@ impl App {
     /// modal still draws one. Nor would `App::input_mode`'s Editing, which
     /// is also what a player with no server reports, field or none.
     fn editing(&self) -> bool {
-        self.gui.ui.caret_at().is_some()
+        self.face.caret_at().is_some()
     }
 
     /// The input method on while a field has the keyboard and off while
@@ -1208,7 +1201,7 @@ impl App {
     /// method a person turns off for a TUI's keys by hand.
     fn sync_ime(&mut self) {
         let editing = self.editing();
-        let place = self.gui.ui.caret_at();
+        let place = self.face.caret_at();
         let grid = self.grid();
         let Some(window) = self.window.clone() else { return };
         if editing != self.ime_allowed {
@@ -1250,7 +1243,7 @@ impl App {
         eprintln!("gui --window: preedit {text:?}");
         self.preedit.clear();
         self.preedit.push_str(text);
-        self.gui.ui.set_composition(text);
+        self.face.set_composition(text);
         self.ask_redraw();
     }
 
@@ -1283,12 +1276,13 @@ impl App {
         if let Raw::ImeCommit(_) = raw {
             self.set_preedit("");
         }
-        // The copy chord is always the window's: the Admin log's copy when
-        // that log can take it, else nothing but what any key does to the
-        // header's open server menu, which closes. Off a Mac, Ctrl+Shift+C
-        // would otherwise reach the GUI as Ctrl+C and quit.
+        // The copy chord is always the window's, handed to the face and never
+        // to its input half: the GUI's is the Admin log's copy when that log
+        // can take it, else nothing but what any key does to the header's
+        // open server menu, which closes. Off a Mac, Ctrl+Shift+C would
+        // otherwise reach the GUI as Ctrl+C and quit.
         if input::is_copy(&raw) {
-            if super::admin::copy_chord(&mut self.gui) {
+            if self.face.copy() {
                 self.ask_redraw();
             }
             return;
@@ -1308,8 +1302,8 @@ impl App {
         let press = match raw {
             Raw::Button { button, down: true } if self.script.is_some() => {
                 let (x, y) = self.translator.pointer(grid);
-                let hit = self.gui.ui.hit(ratatui::layout::Position { x, y });
-                let hit = hit.map_or_else(|| "none".to_string(), |act| format!("{act:?}"));
+                let hit = self.face.hit_debug(ratatui::layout::Position { x, y });
+                let hit = hit.unwrap_or_else(|| "none".to_string());
                 Some(format!("{button:?} at {x},{y}, hit {hit}"))
             }
             _ => None,
@@ -1323,7 +1317,7 @@ impl App {
             }
         }
         if let Some(press) = press {
-            let drag = if self.gui.actions.drag.is_some() { "drag began" } else { "no drag" };
+            let drag = if self.face.drag_began() { "drag began" } else { "no drag" };
             self.last_press = Some(format!("{press}, {drag}"));
         }
         if fed {
@@ -1575,7 +1569,7 @@ impl App {
             self.translator.pixel().1,
             surface.0,
             surface.1,
-            if self.ctx.hand { "hand" } else { "default" },
+            if self.hand { "hand" } else { "default" },
             self.preedit,
             self.translator.held(),
             match (self.ime_allowed, self.ime_area) {
@@ -1649,9 +1643,9 @@ impl App {
         self.window = None;
         lap(&mut laps, "window");
         if !self.quit_flushed {
-            self.ctx.saver.flush(&self.gui.app);
+            self.face.flush();
         }
-        finish(&mut self.gui, &self.ctx);
+        self.face.finish();
         lap(&mut laps, "finish");
         self.exit_laps = laps;
         self.exit_clock = clock;
@@ -2347,19 +2341,16 @@ fn script_fallbacks(lang: &str) -> Vec<Font<'static>> {
     fonts
 }
 
-/// The fidelity check: what the window holds, as text, beside the same Gui
+/// The fidelity check: what the window holds, as text, beside the same face
 /// drawn into a `TestBackend` of the same size, both written to `dir` and
 /// compared row by row with trailing blanks trimmed.
-fn dump(dir: &Path, terminal: &WindowTerminal, gui: &mut Gui) -> Result<(), String> {
+fn dump(dir: &Path, terminal: &WindowTerminal, face: &mut dyn Face) -> Result<(), String> {
     let lang = rust_i18n::locale().to_string();
     let window_text = terminal.backend().get_text();
     let window_rows: Vec<&str> = window_text.lines().collect();
 
     let size = terminal.backend().size().map_err(|e| e.to_string())?;
-    let mut test =
-        Terminal::new(TestBackend::new(size.width, size.height)).map_err(|e| e.to_string())?;
-    test.draw(|frame| render(frame, gui)).map_err(|e| e.to_string())?;
-    let test_rows = shown_rows(test.backend().buffer());
+    let test_rows = face_rows(face, size.width, size.height)?;
 
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(format!("window-text-{lang}.txt")), &window_text)
@@ -2371,6 +2362,14 @@ fn dump(dir: &Path, terminal: &WindowTerminal, gui: &mut Gui) -> Result<(), Stri
     eprintln!("gui --window: {}×{} cells, {lang}: {verdict}", size.width, size.height);
     let line = format!("{}×{} {verdict}\n", size.width, size.height);
     std::fs::write(dir.join(format!("compare-{lang}.txt")), line).map_err(|e| e.to_string())
+}
+
+/// A face drawn into a `TestBackend` of `width`×`height` cells, as the
+/// rows a screen shows: the dump's side that no window draws.
+fn face_rows(face: &mut dyn Face, width: u16, height: u16) -> Result<Vec<String>, String> {
+    let mut test = Terminal::new(TestBackend::new(width, height)).map_err(|e| e.to_string())?;
+    test.draw(|frame| face.render_test(frame)).map_err(|e| e.to_string())?;
+    Ok(shown_rows(test.backend().buffer()))
 }
 
 /// A buffer's rows as a screen shows them: the cell after a wide glyph is

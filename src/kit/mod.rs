@@ -1329,6 +1329,10 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) -> 
 /// fonts and draw as '?' - CP437's own `│` and `»` stand in, same single
 /// cell, so the windowing math is identical (found live: the rename and
 /// directory-modal carets rendered as question marks).
+// No field draws through this since the wizard's moved to `field_display`
+// beside the admin rooms' and the GUI's; it stays as the line those draw
+// while nothing is composing, which the tests hold them to.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
     input_display_blink(value, cursor, width, true)
 }
@@ -1336,6 +1340,7 @@ pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
 /// [`input_display`] with the caret drawn or withheld — its cell stays
 /// reserved either way, so the line never shifts as it blinks. A shell
 /// asks [`Surface::caret`] for the phase.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn input_display_blink(value: &str, cursor: usize, width: u16, on: bool) -> String {
     let (caret, clip) = input_marks();
     input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
@@ -1437,6 +1442,7 @@ fn input_display_with_fancy(value: &str, cursor: usize, width: u16) -> String {
     input_display_with(value, cursor, width, '▏', '…')
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, clip: char) -> String {
     input_window(value, cursor, width, caret, clip).0
 }

@@ -15,6 +15,8 @@
 //! reads input, and runs one queued server call per pass (queued so the
 //! "working…" frame is on screen while the call blocks).
 
+#[cfg(feature = "window")]
+pub(crate) mod face;
 pub mod picker;
 
 use std::sync::Arc;
@@ -99,6 +101,14 @@ pub struct SetupArgs {
     /// Token for a server that already has accounts (testing)
     #[arg(long, hide = true)]
     token: Option<String>,
+
+    /// The wizard in the player's own window (setup/face.rs) instead of
+    /// this terminal, as `gui --window` is the GUI's. Only in a build with
+    /// the `window` feature; the terminal releases' CLI has no such flag,
+    /// so asking for one is clap's usage error there.
+    #[cfg(feature = "window")]
+    #[arg(long, hide = true)]
+    pub(crate) window: bool,
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -346,7 +356,7 @@ fn server_port(server: &str) -> Option<u16> {
 /// A server call queued from input handling and run right after the next
 /// draw, so its "working…" note is actually visible while it blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Op {
+pub(crate) enum Op {
     Ping,
     PickNative,
     OpenBrowser(String),
@@ -363,7 +373,7 @@ enum Op {
 }
 
 /// What the worker sends back for each [`Op`].
-enum Done {
+pub(crate) enum Done {
     /// Reachability, plus the folders the server ALREADY has (vpath name,
     /// server path) so a reopened wizard shows reality instead of
     /// re-deriving names that collide server-side. The list is
@@ -398,7 +408,7 @@ struct ScanWidget {
 /// it runs, then whichever enrichment pass (waveforms, album art, …) is
 /// working, then done.
 #[derive(Debug, Clone)]
-enum ProgressReport {
+pub(crate) enum ProgressReport {
     Files(Vec<crate::api::types::ScanProgressRow>),
     Enrichment { pass: String, attempted: u64, total: Option<u64>, more: bool },
     Idle,
@@ -406,7 +416,7 @@ enum ProgressReport {
 
 /// Everything an op needs to run away from the UI state. Snapshotted at
 /// dispatch time — the worker never sees the Wizard.
-enum Job {
+pub(crate) enum Job {
     Plain(Op),
     Folders(Vec<(usize, String, String)>),
     Admin { username: String, password: String, vpaths: Vec<String> },
@@ -415,7 +425,7 @@ enum Job {
 
 /// The worker thread: one op at a time, results back over the channel. The
 /// picker runs here too, so the UI stays live while a dialog is open.
-fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
+pub(crate) fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<(Arc<Client>, Job)>();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<Done>();
     std::thread::spawn(move || {
@@ -518,7 +528,7 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
 }
 
 /// How the loop ended.
-enum Outcome {
+pub(crate) enum Outcome {
     Quit,
 }
 
@@ -604,6 +614,9 @@ pub(crate) struct Wizard {
     /// The kit's interaction surface: click/tip/bar registries, pointer,
     /// tooltip dwell, scrollbar capture and hold-repeat.
     ui: Surface<Act>,
+    /// Whether the hand was the pointer's shape last asked for: a shape
+    /// is asked for only when it changes.
+    hand: bool,
 }
 
 impl Wizard {
@@ -644,6 +657,7 @@ impl Wizard {
             tscroll: 0,
             sel_anchor: None,
             ui: Surface::new(),
+            hand: false,
         }
     }
 
@@ -895,9 +909,24 @@ impl Wizard {
     /// the stacked layout — it cannot fit a half column. No
     /// ground-ownership gate: unlike the logo, the code's picture
     /// carries its own white quiet zone and is correct on any
-    /// background.
+    /// background. A window's host draws pixels too, though it answers
+    /// no protocol: its pictures are textures over the grid, not escapes
+    /// in it (the GUI's covers decide the same way, `gui::cover`).
     fn done_two_column(&self) -> bool {
-        self.graphics.protocol().is_some()
+        self.graphics.protocol().is_some() || self.graphics.is_hosted()
+    }
+
+    /// Take the surface the pictures draw on: the terminal's probed
+    /// answer, or a window's host. One that can draw them gets the
+    /// wordmark too, flattened onto the theme's ground (the window paints
+    /// that same ground behind every cell), and a fork of its own for it,
+    /// which keeps the host.
+    pub(crate) fn adopt_graphics(&mut self, graphics: crate::tui::graphics::Graphics) {
+        self.graphics = graphics;
+        if self.graphics.protocol().is_some() || self.graphics.is_hosted() {
+            self.logo_art = theme::th().ground_rgb.and_then(logo_art);
+            self.logo_gfx = self.graphics.fork();
+        }
     }
 
     /// Switch the wizard's language. Everything re-renders through t!()
@@ -1023,7 +1052,7 @@ impl Wizard {
     /// Hand the queued op to the worker. Ops are single-flight: while one is
     /// in flight the UI shows its busy note and further queues are ignored
     /// (completion listings replace instead — typing outruns the network).
-    fn dispatch_queued(&mut self, to_worker: &Sender<(Arc<Client>, Job)>) {
+    pub(crate) fn dispatch_queued(&mut self, to_worker: &Sender<(Arc<Client>, Job)>) {
         for path in self.pending_validate.drain(..) {
             let _ = to_worker.send((self.client.clone(), Job::Plain(Op::Validate(path))));
         }
@@ -1685,6 +1714,13 @@ pub fn run(args: SetupArgs) -> i32 {
     let mut wizard = Wizard::new(client);
     wizard.lang = boot_language();
     wizard.queue(Op::Ping, t!("busy.reaching"));
+    // The window forks here, with the first op queued for the face to send
+    // while the window is built, and the language set, which the window
+    // reads once as it starts to load faces for it.
+    #[cfg(feature = "window")]
+    if args.window {
+        return run_window(wizard);
+    }
     run_tui(wizard)
 }
 
@@ -1697,6 +1733,12 @@ pub struct QrArgs {
     /// Auth token override (default: the saved session's token)
     #[arg(long, hide = true)]
     token: Option<String>,
+
+    /// The page in the player's own window, as `setup --window` is the
+    /// wizard's. Only in a build with the `window` feature.
+    #[cfg(feature = "window")]
+    #[arg(long, hide = true)]
+    pub(crate) window: bool,
 }
 
 /// The Done screen alone, as its own command: the Quick Connect QR for
@@ -1714,14 +1756,48 @@ pub fn run_qr(args: QrArgs) -> i32 {
     wizard.standalone = true;
     wizard.screen = Screen::Done;
     wizard.queue(Op::LoadDone, t!("busy.fetching_qc"));
+    // The window forks where the wizard's does, for the same reasons.
+    #[cfg(feature = "window")]
+    if args.window {
+        return run_window(wizard);
+    }
     run_tui(wizard)
 }
 
 /// The window title for each wizard-family surface. English on purpose —
 /// window chrome, not wizard copy, and stable for anyone scripting against
 /// window titles.
-fn session_title(standalone: bool) -> &'static str {
+pub(crate) fn session_title(standalone: bool) -> &'static str {
     if standalone { "mStream Quick Connect" } else { "mStream Setup" }
+}
+
+/// Both entries in the player's own window (`setup --window`, `qr
+/// --window`): `gui::run`'s window arm with the wizard as the face. The
+/// terminal is never touched on the way: the title stack, the ground lease,
+/// the pixel probe, the frames and the mouse capture are [`run_tui`]'s, and
+/// the window has its own of each. No instance lock is taken, so a page
+/// opens beside an open player as the terminal's `qr` always has, and the
+/// exit code is the window's: 0 every way out of the wizard and for the
+/// close button, [`NO_WINDOW`](crate::gui::window::NO_WINDOW) when no
+/// window opens, 1 when a frame fails.
+#[cfg(feature = "window")]
+fn run_window(wizard: Wizard) -> i32 {
+    // A window that cannot open on this desktop says so and leaves, with
+    // the no-window code a launcher falls back on (window/mod.rs has the
+    // one case).
+    #[cfg(target_os = "linux")]
+    if let Some(line) = crate::gui::window::x11_keyboard_missing() {
+        eprintln!("{line}");
+        return crate::gui::window::NO_WINDOW;
+    }
+    // The window is not the terminal that launched it, so the palette and
+    // the glyphs are pinned to the window's before anything draws; nothing
+    // above asked for either (`Wizard::new` reads no colour), so the pins
+    // land.
+    theme::pin_truecolor();
+    theme::pin_modern_glyphs();
+    let (to_worker, from_worker) = spawn_worker();
+    crate::gui::window::run(Box::new(face::WizardFace::new(wizard, to_worker, from_worker)), None)
 }
 
 /// The shared terminal session around both entries: ground lease, pixel
@@ -1747,11 +1823,7 @@ fn run_tui(mut wizard: Wizard) -> i32 {
     // Ask about pixels while nothing else is talking on stdio — the probe
     // runs its own bounded raw-mode transaction, and ratatui::init below
     // re-asserts terminal state behind it (the player's own ordering).
-    wizard.graphics = crate::tui::graphics::Graphics::probe();
-    if wizard.graphics.protocol().is_some() {
-        wizard.logo_art = theme::th().ground_rgb.and_then(logo_art);
-        wizard.logo_gfx = wizard.graphics.fork();
-    }
+    wizard.adopt_graphics(crate::tui::graphics::Graphics::probe());
 
     // The wizard's palette is its interface: not subject to NO_COLOR.
     crate::console::keep_colors();
@@ -1785,6 +1857,11 @@ fn run_tui(mut wizard: Wizard) -> i32 {
     }
 }
 
+/// The terminal's loop: a frame, then the first input to arrive within the
+/// frame's wait, with everything queued behind it drained before the next
+/// draw. A zero wait is a progress poll that is due: the loop redraws at
+/// once and reads no input first, as it always did, so the poll's op is
+/// dispatched before any pending key can queue one of its own.
 fn event_loop(
     terminal: &mut crate::kit::frames::PageTerminal,
     wizard: &mut Wizard,
@@ -1792,53 +1869,15 @@ fn event_loop(
     to_worker: &Sender<(Arc<Client>, Job)>,
     from_worker: &Receiver<Done>,
 ) -> std::io::Result<Outcome> {
-    let mut hand = false;
     loop {
-        terminal.draw(|frame| render(frame, wizard))?;
-
-        // Fold in whatever the worker finished, then hand it the next op.
-        loop {
-            match from_worker.try_recv() {
-                Ok(done) => wizard.apply(done),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    wizard.note =
-                        Some((t!("note.worker_gone").to_string(), true));
-                    break;
-                }
-            }
-        }
-        wizard.dispatch_queued(to_worker);
-
-        // The hand cursor follows whether the pointer is over anything
-        // clickable in the frame just drawn.
-        let over = wizard.ui.hovering_clickable();
-        if over != hand {
-            hand = over;
-            set_pointer_shape(hand, mouse_on);
-        }
-
-        // A held scrollbar arrow keeps stepping until the button lifts.
-        if let Some(act) = wizard.ui.hold_action() {
-            wizard.act(act);
-        }
-
-        // Tooltip dwell. Tips can't leak through modals — render drops
-        // the base registries while one is up, so whatever is registered
-        // belongs to the layer on top.
-        wizard.ui.dwell_tick();
-
-        if wizard.screen != Screen::Folders
-            && !wizard.standalone
-            && wizard.queued.is_none()
-            && !wizard.in_flight
-            && wizard.last_poll.elapsed() >= PROGRESS_EVERY
-        {
-            wizard.queued = Some(Op::PollProgress);
-            continue;
-        }
-
-        if !event::poll(POLL)? {
+        let wait = frame(
+            terminal,
+            wizard,
+            &mut |hand| set_pointer_shape(hand, mouse_on),
+            to_worker,
+            from_worker,
+        )?;
+        if wait.is_zero() || !event::poll(wait)? {
             continue;
         }
         // Drain everything queued before the next draw: mouse capture arms
@@ -1849,73 +1888,155 @@ fn event_loop(
         while event::poll(Duration::ZERO)? {
             inputs.push(event::read()?);
         }
-        for input in inputs {
-            match input {
-                TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    // Typing dismisses a tooltip (the dwell re-arms if the
-                    // pointer just sits there, like native tooltips).
-                    wizard.ui.dismiss_tooltip();
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.code == KeyCode::Char('c')
-                    {
-                        return Ok(Outcome::Quit);
-                    }
-                    if let Some(outcome) = handle_key(wizard, key) {
-                        return Ok(outcome);
+        for one in inputs {
+            if let Some(outcome) = input(wizard, one) {
+                return Ok(outcome);
+            }
+        }
+    }
+}
+
+/// The loop's frame half: one frame drawn, the worker's answers folded
+/// in and the next op handed to it, the per-frame pumps run, and the wait
+/// until the next frame is wanted, which the caller sleeps on while it
+/// listens for input. Generic over the backend, as the GUI's frame half
+/// is, so a window's terminal draws the wizard as the terminal's does;
+/// `pointer` is told each time the hand should show or stop showing,
+/// which a terminal writes as OSC 22 and a window sets as its cursor.
+pub(crate) fn frame<B>(
+    terminal: &mut ratatui::Terminal<B>,
+    wizard: &mut Wizard,
+    pointer: &mut dyn FnMut(bool),
+    to_worker: &Sender<(Arc<Client>, Job)>,
+    from_worker: &Receiver<Done>,
+) -> std::io::Result<Duration>
+where
+    B: ratatui::backend::Backend<Error = std::io::Error>,
+{
+    terminal.draw(|frame| render(frame, wizard))?;
+
+    // Fold in whatever the worker finished, then hand it the next op.
+    loop {
+        match from_worker.try_recv() {
+            Ok(done) => wizard.apply(done),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                wizard.note =
+                    Some((t!("note.worker_gone").to_string(), true));
+                break;
+            }
+        }
+    }
+    wizard.dispatch_queued(to_worker);
+
+    // The hand cursor follows whether the pointer is over anything
+    // clickable in the frame just drawn.
+    let over = wizard.ui.hovering_clickable();
+    if over != wizard.hand {
+        wizard.hand = over;
+        pointer(over);
+    }
+
+    // A held scrollbar arrow keeps stepping until the button lifts.
+    if let Some(act) = wizard.ui.hold_action() {
+        wizard.act(act);
+    }
+
+    // Tooltip dwell. Tips can't leak through modals — render drops
+    // the base registries while one is up, so whatever is registered
+    // belongs to the layer on top.
+    wizard.ui.dwell_tick();
+
+    // The scan's progress is due: the poll is queued, and the frame that
+    // sends it is wanted now, not after a wait for input.
+    if wizard.screen != Screen::Folders
+        && !wizard.standalone
+        && wizard.queued.is_none()
+        && !wizard.in_flight
+        && wizard.last_poll.elapsed() >= PROGRESS_EVERY
+    {
+        wizard.queued = Some(Op::PollProgress);
+        return Ok(Duration::ZERO);
+    }
+
+    // A modal opened, closed or moved in a window: this frame drew the
+    // wordmark by last frame's footprints, so it is bare under a modal
+    // that just opened and still the figlet where one just closed. The
+    // frame that draws it by these comes now rather than a poll later, as
+    // the GUI's hot frame does. A terminal draws no differently by them.
+    if wizard.graphics.is_hosted() && wizard.ui.overlays_moved() {
+        return Ok(Duration::ZERO);
+    }
+    Ok(POLL)
+}
+
+/// The loop's input half, for one event: a key, a press, the pointer's
+/// motion, the wheel. `Some` when the event ended the wizard. A resize
+/// asks nothing of it (render reads the frame's area on every draw), and
+/// neither does a paste: the terminal's bracketed paste is never turned
+/// on, and a window types its pastes as keys.
+pub(crate) fn input(wizard: &mut Wizard, event: TermEvent) -> Option<Outcome> {
+    match event {
+        TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+            // Typing dismisses a tooltip (the dwell re-arms if the
+            // pointer just sits there, like native tooltips).
+            wizard.ui.dismiss_tooltip();
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('c')
+            {
+                return Some(Outcome::Quit);
+            }
+            handle_key(wizard, key)
+        }
+        TermEvent::Mouse(mouse) => {
+            let at = Position { x: mouse.column, y: mouse.row };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    return press(wizard, at);
+                }
+                // A scrollbar interaction CAPTURES the mouse:
+                // while an arrow is held or the thumb dragged,
+                // sub-cell hand tremor must not retarget hover
+                // onto whatever sits beside the 1-cell bar —
+                // and terminals differ on whether mid-press
+                // motion arrives as Drag or plain Moved, so
+                // BOTH honor the capture.
+                MouseEventKind::Moved => {
+                    wizard.ui.motion(at);
+                }
+                MouseEventKind::Drag(_) => {
+                    wizard.ui.motion(at);
+                    if let Some(act) = wizard.ui.drag_action(at) {
+                        wizard.act(act);
                     }
                 }
-                TermEvent::Mouse(mouse) => {
-                    let at = Position { x: mouse.column, y: mouse.row };
-                    match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            if let Some(outcome) = press(wizard, at) {
-                                return Ok(outcome);
-                            }
-                        }
-                        // A scrollbar interaction CAPTURES the mouse:
-                        // while an arrow is held or the thumb dragged,
-                        // sub-cell hand tremor must not retarget hover
-                        // onto whatever sits beside the 1-cell bar —
-                        // and terminals differ on whether mid-press
-                        // motion arrives as Drag or plain Moved, so
-                        // BOTH honor the capture.
-                        MouseEventKind::Moved => {
-                            wizard.ui.motion(at);
-                        }
-                        MouseEventKind::Drag(_) => {
-                            wizard.ui.motion(at);
-                            if let Some(act) = wizard.ui.drag_action(at) {
-                                wizard.act(act);
-                            }
-                        }
-                        MouseEventKind::Up(_) => {
-                            wizard.ui.release();
-                        }
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            wizard.ui.pointer = Some(at);
-                            let up = mouse.kind == MouseEventKind::ScrollUp;
-                            if let Modal::PathEntry(draft) = &mut wizard.modal {
-                                draft.scroll = if up {
-                                    draft.scroll.saturating_sub(1)
-                                } else {
-                                    draft.scroll.saturating_add(1)
-                                };
-                            } else if wizard.screen == Screen::Folders
-                                && matches!(wizard.modal, Modal::None)
-                            {
-                                wizard.tscroll = if up {
-                                    wizard.tscroll.saturating_sub(1)
-                                } else {
-                                    wizard.tscroll.saturating_add(1)
-                                };
-                            }
-                        }
-                        _ => {}
+                MouseEventKind::Up(_) => {
+                    wizard.ui.release();
+                }
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    wizard.ui.pointer = Some(at);
+                    let up = mouse.kind == MouseEventKind::ScrollUp;
+                    if let Modal::PathEntry(draft) = &mut wizard.modal {
+                        draft.scroll = if up {
+                            draft.scroll.saturating_sub(1)
+                        } else {
+                            draft.scroll.saturating_add(1)
+                        };
+                    } else if wizard.screen == Screen::Folders
+                        && matches!(wizard.modal, Modal::None)
+                    {
+                        wizard.tscroll = if up {
+                            wizard.tscroll.saturating_sub(1)
+                        } else {
+                            wizard.tscroll.saturating_add(1)
+                        };
                     }
                 }
                 _ => {}
             }
+            None
         }
+        _ => None,
     }
 }
 
@@ -2204,7 +2325,7 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
-fn render(frame: &mut Frame, wizard: &mut Wizard) {
+pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
     wizard.ui.begin_frame();
     let area = frame.area();
     // The fixed scheme paints its own ground — but only when the terminal
@@ -2391,6 +2512,10 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         wizard.ui.pointer = live_pointer;
         wizard.ui.clear_registries();
     }
+    // Each modal registers its footprint as it draws (`kit::modal_frame_on`),
+    // and a window that hears it stands down any picture placed beneath:
+    // the directory browser's top border crosses the folders wordmark's
+    // band at the window's grid, and any modal does in a short window.
     match wizard.modal.clone() {
         Modal::None => {}
         Modal::SkipWarning => draw_skip_warning(frame, wizard, area),
@@ -2400,6 +2525,12 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
 
     // The tooltip draws last — over everything, once the dwell matures.
+    // It registers no overlay, unlike the GUI's. The language chip's tip
+    // touches the wordmark's band, which is the column's whole width, and a
+    // window stands a picture down by the band it was placed in, so every
+    // hover of the chip would swap the wordmark for the figlet. At the
+    // window's grid the picture sits centred in its band, clear of the tip;
+    // only a window narrowed below about 74 columns brings the two together.
     if let Some((target, text)) = wizard.ui.ripe_tooltip() {
         kit::draw_tooltip(frame, area, target, text);
     }
@@ -2480,7 +2611,7 @@ fn footer_hint(wizard: &Wizard) -> String {
 /// conventions.
 fn draw_language(frame: &mut Frame, wizard: &mut Wizard, area: Rect, sel: usize) {
     let inner =
-        kit::modal_frame(frame, area, 30, LANGS.len() as u16 + 4, th().accent);
+        kit::modal_frame_on(frame, &mut wizard.ui, area, 30, LANGS.len() as u16 + 4, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled(t!("lang.modal_title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
@@ -2570,8 +2701,17 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     // ground is ours (the picture is flattened onto that ground, so on an
     // unowned background the figlet is the honest rendering). Both paths
     // occupy the same band, so the screen never reflows on capability.
+    // A window's ground is always ours: it paints the theme's ground
+    // behind every cell, the color the picture was flattened onto. In a
+    // window the figlet also stands in wherever a modal stood over the band
+    // last frame, the rule the GUI's covers follow: the window does not
+    // paint a picture placed before a modal that touches it (the modal
+    // registers as it draws), so the band would otherwise be bare while
+    // the modal is up. A terminal's picture draws as it always has.
     let band = Rect { x: column.x, y, width: column.width, height: LOGO.len() as u16 };
-    let drew = theme::ground_owned()
+    let under_a_modal = wizard.graphics.is_hosted() && wizard.ui.covered_last_frame(band);
+    let drew = (theme::ground_owned() || wizard.graphics.is_hosted())
+        && !under_a_modal
         && match &wizard.logo_art {
             Some(art) => wizard.logo_gfx.draw(frame, band, art),
             None => false,
@@ -2660,11 +2800,21 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
         let folder = &wizard.folders[i];
         let editing = wizard.editing.as_ref().is_some_and(|(row, _)| *row == i);
+        // The chip's caret, in cells from the line's start inside its
+        // bracket, noted once the chip's cell is known.
+        let mut chip_caret = None;
         let name = match (&wizard.editing, editing) {
-            (Some((_, draft)), true) => format!(
-                "[{}]",
-                kit::input_display(draft.value(), draft.cursor(), NAME_W.saturating_sub(2))
-            ),
+            (Some((_, draft)), true) => {
+                let (line, caret) = kit::field_line(
+                    &wizard.ui,
+                    draft.value(),
+                    draft.cursor(),
+                    NAME_W.saturating_sub(2),
+                    None,
+                );
+                chip_caret = Some(caret);
+                format!("[{line}]")
+            }
             _ => folder.name.clone(),
         };
         let row_bg = if selected && !editing {
@@ -2693,6 +2843,9 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             rect,
         );
         frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
+        if let Some(caret) = chip_caret {
+            wizard.ui.note_caret(Position { x: name_rect.x + 1 + caret, y });
+        }
         wizard.ui.click(name_rect, Act::RenameFolder(i));
         if !editing {
             // The tip tells the truth per row: a committed name cannot
@@ -2775,6 +2928,9 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
 }
 
+/// One login field under its label. `caret` is the focused field's
+/// caret, in cells from the start of `value` (the caller draws the line
+/// with it), and None for the others.
 fn field_row(
     frame: &mut Frame,
     wizard: &mut Wizard,
@@ -2784,7 +2940,7 @@ fn field_row(
     label: &str,
     value: String,
     field: LoginField,
-    focused: bool,
+    caret: Option<u16>,
 ) -> u16 {
     frame.render_widget(
         Paragraph::new(Span::styled(label, dim())),
@@ -2792,9 +2948,13 @@ fn field_row(
     );
     let rect = Rect { x, y: y + 1, width, height: 3 };
     let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
-    let inner = card(frame, rect, focused, hovered);
-    let _ = focused; // the caller renders the caret via input_display
+    let inner = card(frame, rect, caret.is_some(), hovered);
     frame.render_widget(Paragraph::new(Span::raw(value)), inner);
+    // The focused field notes its caret's cell, which is how a window
+    // knows a field has the keyboard (see `kit::field_display`).
+    if let Some(off) = caret {
+        wizard.ui.note_caret(Position { x: inner.x + off, y: inner.y });
+    }
     wizard.ui.click(rect, Act::Focus(field));
     y + 4
 }
@@ -2818,13 +2978,18 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let width = column.width.min(44);
     let x = column.x + (column.width - width) / 2;
     let focus = wizard.field;
-    let show = |input: &Input, secret: bool, focused: bool| -> String {
+    // A secret is handed in masked, with its mark, so an input method's
+    // composition draws as marks too and never in clear.
+    let show = |input: &Input, secret: bool, focused: bool| -> (String, Option<u16>) {
         let value =
             if secret { mask(input.value()) } else { input.value().to_string() };
         if focused {
-            kit::input_display(&value, input.cursor(), width.saturating_sub(2))
+            let mark = secret.then_some(MASK);
+            let (line, caret) =
+                kit::field_line(&wizard.ui, &value, input.cursor(), width.saturating_sub(2), mark);
+            (line, Some(caret))
         } else {
-            value
+            (value, None)
         }
     };
     let (username, password, confirm) = (
@@ -2832,9 +2997,9 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         show(&wizard.password, true, focus == LoginField::Password),
         show(&wizard.confirm, true, focus == LoginField::Confirm),
     );
-    y = field_row(frame, wizard, x, y, width, &t!("login.field_username"), username, LoginField::Username, focus == LoginField::Username);
-    y = field_row(frame, wizard, x, y, width, &t!("login.field_password"), password, LoginField::Password, focus == LoginField::Password);
-    y = field_row(frame, wizard, x, y, width, &t!("login.field_confirm"), confirm, LoginField::Confirm, focus == LoginField::Confirm);
+    y = field_row(frame, wizard, x, y, width, &t!("login.field_username"), username.0, LoginField::Username, username.1);
+    y = field_row(frame, wizard, x, y, width, &t!("login.field_password"), password.0, LoginField::Password, password.1);
+    y = field_row(frame, wizard, x, y, width, &t!("login.field_confirm"), confirm.0, LoginField::Confirm, confirm.1);
     y += 1;
 
     let skip = kit::button(
@@ -2848,8 +3013,11 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     wizard.ui.tip(skip, t!("login.tip_skip"));
 }
 
+/// The mark a secret is drawn in, one per character.
+const MASK: char = '•';
+
 fn mask(secret: &str) -> String {
-    "•".repeat(secret.chars().count())
+    MASK.to_string().repeat(secret.chars().count())
 }
 
 fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
@@ -3077,7 +3245,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 }
 
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
-    let inner = kit::modal_frame(frame, area, 62, 15, th().gold);
+    let inner = kit::modal_frame_on(frame, &mut wizard.ui, area, 62, 15, th().gold);
     kit::modal_close(frame, &mut wizard.ui, inner, Act::SkipCancel);
     let lines = vec![
         Line::from(Span::styled(t!("skip_modal.title").to_string(), Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
@@ -3122,7 +3290,7 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
 }
 
 fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Browse) {
-    let inner = kit::modal_frame(frame, area, 66, 18, th().accent);
+    let inner = kit::modal_frame_on(frame, &mut wizard.ui, area, 66, 18, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled(t!("browse.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
@@ -3176,18 +3344,26 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     let shown = suggestions.len().min(6) as u16;
     // Anchored as if always full: the title and input hold one spot and
     // the suggestion list grows DOWNWARD beneath them.
-    let inner = kit::modal_frame_anchored(frame, area, 62, 7 + shown, 13, th().accent);
+    let inner =
+        kit::modal_frame_anchored_on(frame, &mut wizard.ui, area, 62, 7 + shown, 13, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled(t!("path_modal.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
     kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel);
+    // Drawn after render cleared the page's registries for the modal, so
+    // its caret is the frame's: the modal's field has the keyboard.
+    let line = kit::field_display(
+        &mut wizard.ui,
+        inner.x,
+        inner.y + 2,
+        draft.text.value(),
+        draft.text.cursor(),
+        inner.width,
+        None,
+    );
     frame.render_widget(
-        Paragraph::new(Span::raw(kit::input_display(
-            draft.text.value(),
-            draft.text.cursor(),
-            inner.width,
-        ))),
+        Paragraph::new(Span::raw(line)),
         Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
     );
     let sel_moved = draft.sel != draft.sel_anchor;
@@ -3679,6 +3855,26 @@ pub(crate) mod tests {
             crate::tui::graphics::Graphics::forced(ratatui_image::picker::ProtocolType::Kitty);
         assert!(wizard.qr.is_none() && wizard.qr_art.is_none());
         assert!(wizard.done_two_column());
+        // A terminal's protocol is one arm of the gate by itself, with no
+        // host behind it (a window's host is the other, proven where the
+        // window's own Graphics exists), and adopting it gives the
+        // wordmark a fork on the same answer.
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        let kitty = ratatui_image::picker::ProtocolType::Kitty;
+        wizard.adopt_graphics(crate::tui::graphics::Graphics::forced(kitty));
+        assert!(!wizard.graphics.is_hosted());
+        assert!(wizard.done_two_column());
+        assert_eq!(wizard.logo_gfx.protocol(), Some("kitty"), "the wordmark's fork answers alike");
+        assert_eq!(
+            wizard.logo_art.is_some(),
+            th().ground_rgb.is_some(),
+            "a wordmark wherever there is a ground to flatten it onto"
+        );
+        // Nothing that draws pixels: one column, and no wordmark built.
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        wizard.adopt_graphics(crate::tui::graphics::Graphics::disabled());
+        assert!(!wizard.done_two_column());
+        assert!(wizard.logo_art.is_none() && wizard.logo_gfx.protocol().is_none());
     }
 
     #[test]
@@ -4287,5 +4483,281 @@ pub(crate) mod tests {
         wizard.act(thumb);
         assert!(wizard.tscroll > 10, "down the table");
         wizard.ui.release();
+    }
+
+    /// A TestBackend with the loop's error type, as the GUI's tests have
+    /// one: the frame half is generic over backends that fail as io does
+    /// (the terminal's and the window's), and a TestBackend never fails.
+    pub(super) struct IoTest(pub(super) ratatui::backend::TestBackend);
+
+    impl ratatui::backend::Backend for IoTest {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+        {
+            self.0.draw(content).map_err(|never| match never {})
+        }
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            self.0.hide_cursor().map_err(|never| match never {})
+        }
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            self.0.show_cursor().map_err(|never| match never {})
+        }
+        fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+            self.0.get_cursor_position().map_err(|never| match never {})
+        }
+        fn set_cursor_position<P: Into<Position>>(&mut self, at: P) -> std::io::Result<()> {
+            self.0.set_cursor_position(at).map_err(|never| match never {})
+        }
+        fn clear(&mut self) -> std::io::Result<()> {
+            self.0.clear().map_err(|never| match never {})
+        }
+        fn clear_region(&mut self, kind: ratatui::backend::ClearType) -> std::io::Result<()> {
+            self.0.clear_region(kind).map_err(|never| match never {})
+        }
+        fn size(&self) -> std::io::Result<ratatui::layout::Size> {
+            self.0.size().map_err(|never| match never {})
+        }
+        fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> {
+            self.0.window_size().map_err(|never| match never {})
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush().map_err(|never| match never {})
+        }
+    }
+
+    /// The loop's two ends as a test holds them: the worker's inbox, kept
+    /// so a dispatch lands somewhere, and its outbox, kept so the frame
+    /// half never sees the worker gone.
+    struct Wires {
+        to_worker: Sender<(Arc<Client>, Job)>,
+        jobs: Receiver<(Arc<Client>, Job)>,
+        done: Sender<Done>,
+        from_worker: Receiver<Done>,
+    }
+
+    fn wires() -> Wires {
+        let (to_worker, jobs) = std::sync::mpsc::channel();
+        let (done, from_worker) = std::sync::mpsc::channel();
+        Wires { to_worker, jobs, done, from_worker }
+    }
+
+    /// One frame half on a 100×30 test terminal, its pointer asks
+    /// recorded; the wait it answered.
+    fn frame_once(wizard: &mut Wizard, wires: &Wires, asked: &mut Vec<bool>) -> Duration {
+        let mut terminal =
+            ratatui::Terminal::new(IoTest(ratatui::backend::TestBackend::new(100, 30))).unwrap();
+        frame(&mut terminal, wizard, &mut |hand| asked.push(hand), &wires.to_worker, &wires.from_worker)
+            .unwrap()
+    }
+
+    /// Draw the wizard into a 100×30 test terminal; the cells it drew.
+    fn draw_100x30(wizard: &mut Wizard) -> ratatui::buffer::Buffer {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, wizard)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Where the click for `act` was registered in the frame just drawn.
+    pub(super) fn click_rect(wizard: &Wizard, act: Act) -> Rect {
+        wizard.ui.clicks.iter().find(|(_, a)| *a == act).map(|(rect, _)| *rect).expect("the control")
+    }
+
+    /// The text of one row of a drawn buffer, a wide character's hidden
+    /// cell left out.
+    pub(super) fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut text = String::new();
+        let mut x = 0;
+        while x < buf.area.width {
+            let symbol = buf[(x, y)].symbol();
+            text.push_str(symbol);
+            x += (kit::width(symbol) as u16).max(1);
+        }
+        text
+    }
+
+    /// The wizard's three fields note their caret's cell, the way the
+    /// admin rooms' and the GUI's do, which is what a window reads to give
+    /// a field its paste and its input method: the login field with the
+    /// keyboard, the rename chip inside its bracket, and the path modal's
+    /// line, drawn after the page beneath was made inert. A modal with no
+    /// field of its own takes the keys, and the note with them. The lines
+    /// are the ones the terminal always drew while nothing composes; a
+    /// composition draws in the focused field, as marks in a secret one.
+    #[test]
+    fn the_focused_field_notes_its_caret_and_a_modal_clears_it() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let caret_marks = ["▏", "│"];
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        wizard.screen = Screen::Login;
+        wizard.field = LoginField::Password;
+        wizard.password = "hunter2".into();
+        let buf = draw_100x30(&mut wizard);
+        let card = click_rect(&wizard, Act::Focus(LoginField::Password));
+        let field = Position { x: card.x + 1, y: card.y + 1 };
+        let caret = Position { x: field.x + 7, y: field.y };
+        assert_eq!(wizard.ui.caret_at(), Some(caret), "the field's cell plus the cursor");
+        assert!(caret_marks.contains(&buf[caret].symbol()), "the caret is drawn where it is noted");
+        assert_eq!(buf[(field.x, field.y)].symbol(), "•", "the line starts at the field's cell");
+        // Mid-line, the note follows the cursor.
+        handle_key(&mut wizard, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_key(&mut wizard, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        draw_100x30(&mut wizard);
+        assert_eq!(wizard.ui.caret_at(), Some(Position { x: field.x + 5, y: field.y }));
+
+        // The skip warning has no field: the keys are the modal's.
+        wizard.modal = Modal::SkipWarning;
+        draw_100x30(&mut wizard);
+        assert_eq!(wizard.ui.caret_at(), None);
+
+        // The path modal's own field has them, drawn after the page beneath
+        // was made inert.
+        let draft = PathDraft { text: Input::new("abc".into()), ..PathDraft::default() };
+        wizard.modal = Modal::PathEntry(draft);
+        let buf = draw_100x30(&mut wizard);
+        let at = wizard.ui.caret_at().expect("the modal's field notes its caret");
+        assert_eq!(
+            [(at.x - 3, at.y), (at.x - 2, at.y), (at.x - 1, at.y)].map(|cell| buf[cell].symbol()),
+            ["a", "b", "c"],
+            "three in from where the line starts"
+        );
+        assert!(caret_marks.contains(&buf[at].symbol()));
+        wizard.modal = Modal::None;
+
+        // The rename chip notes inside its bracket.
+        wizard.screen = Screen::Folders;
+        wizard.add_folder("/tmp/music".to_string());
+        wizard.act(Act::RenameFolder(0));
+        let buf = draw_100x30(&mut wizard);
+        let chip = click_rect(&wizard, Act::RenameFolder(0));
+        assert_eq!(buf[(chip.x, chip.y)].symbol(), "[");
+        let at = Position { x: chip.x + 1 + "media".len() as u16, y: chip.y };
+        assert_eq!(wizard.ui.caret_at(), Some(at));
+        assert!(caret_marks.contains(&buf[at].symbol()));
+        wizard.finish_rename();
+        draw_100x30(&mut wizard);
+        assert_eq!(wizard.ui.caret_at(), None, "no field, no note");
+
+        // An input method's composition draws in the focused field, the
+        // caret after it, and as marks in a secret one: never in clear.
+        wizard.screen = Screen::Login;
+        wizard.field = LoginField::Username;
+        wizard.username = "ab".into();
+        wizard.ui.set_composition("日本");
+        let buf = draw_100x30(&mut wizard);
+        let card = click_rect(&wizard, Act::Focus(LoginField::Username));
+        let row = row_text(&buf, card.y + 1);
+        assert!(row.contains("ab日本"), "{row}");
+        let at = Position { x: card.x + 1 + 2 + 4, y: card.y + 1 };
+        assert_eq!(wizard.ui.caret_at(), Some(at), "after the composition's four cells");
+        wizard.field = LoginField::Password;
+        let buf = draw_100x30(&mut wizard);
+        let card = click_rect(&wizard, Act::Focus(LoginField::Password));
+        let row = row_text(&buf, card.y + 1);
+        // The cursor sat two from the end: the composition's two marks
+        // went in there, and the caret after them.
+        assert_eq!(row.matches('•').count(), 7 + 2, "the value's marks and the composition's: {row}");
+        assert_eq!(wizard.ui.caret_at(), Some(Position { x: card.x + 1 + 5 + 2, y: card.y + 1 }));
+        assert!((0..buf.area.height).all(|y| !row_text(&buf, y).contains('日')), "never in clear");
+    }
+
+    /// The loop's input half is the terminal loop's match, one event at a
+    /// time: Ctrl+C and the Done page's Esc end the wizard, a resize and a
+    /// paste ask nothing of it, and a press on a control drawn last frame
+    /// does what the control does. The frame half tells its pointer of
+    /// the hand only when it changes, over what the frame just drew.
+    #[test]
+    fn the_loop_halves_compose() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = |code, modifiers| TermEvent::Key(KeyEvent::new(code, modifiers));
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        assert!(matches!(
+            input(&mut wizard, key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Outcome::Quit)
+        ));
+        wizard.screen = Screen::Done;
+        assert!(matches!(input(&mut wizard, key(KeyCode::Esc, KeyModifiers::NONE)), Some(Outcome::Quit)));
+
+        wizard.screen = Screen::Login;
+        wizard.username = "anna".into();
+        assert!(input(&mut wizard, TermEvent::Resize(80, 24)).is_none());
+        assert!(input(&mut wizard, TermEvent::Paste("hunter2".into())).is_none());
+        assert_eq!(
+            (wizard.screen, &wizard.modal, wizard.username.value(), wizard.password.value()),
+            (Screen::Login, &Modal::None, "anna", ""),
+            "neither changed anything"
+        );
+
+        draw_100x30(&mut wizard);
+        let skip = click_rect(&wizard, Act::SkipLogin);
+        let at = Position { x: skip.x, y: skip.y };
+        assert_eq!(wizard.ui.hit(at), Some(Act::SkipLogin));
+        let press = TermEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(input(&mut wizard, press).is_none());
+        assert_eq!(wizard.modal, Modal::SkipWarning, "the press did what Skip does");
+
+        // The hand: asked for once when the pointer comes to rest over a
+        // control, not again while it stays, and let go once it leaves.
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        let wires = wires();
+        let mut asked = Vec::new();
+        assert_eq!(frame_once(&mut wizard, &wires, &mut asked), POLL);
+        assert!(asked.is_empty(), "the arrow is where the loop starts");
+        let add = click_rect(&wizard, Act::BrowseNative);
+        wizard.ui.pointer = Some(Position { x: add.x + 1, y: add.y + 1 });
+        frame_once(&mut wizard, &wires, &mut asked);
+        frame_once(&mut wizard, &wires, &mut asked);
+        assert_eq!(asked, [true]);
+        wizard.ui.pointer = Some(Position { x: 0, y: 29 });
+        frame_once(&mut wizard, &wires, &mut asked);
+        assert_eq!(asked, [true, false]);
+    }
+
+    /// The scan's progress is re-asked every PROGRESS_EVERY on the
+    /// wizard's own pages after the folders, and the frame half that queues
+    /// the ask wants the next frame now, the terminal loop's `continue`
+    /// before there were halves; the frame after sends it. The standalone
+    /// Quick Connect page never asks, and anything else waits POLL. A
+    /// worker's answer is folded in by the next frame.
+    #[test]
+    fn the_frame_half_asks_for_an_immediate_redraw_when_progress_is_due() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let overdue = || Instant::now() - PROGRESS_EVERY - Duration::from_millis(1);
+        let wires = wires();
+        let mut asked = Vec::new();
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        wizard.screen = Screen::Extras;
+        assert_eq!(frame_once(&mut wizard, &wires, &mut asked), POLL, "not due yet");
+        wizard.last_poll = overdue();
+        assert_eq!(frame_once(&mut wizard, &wires, &mut asked), Duration::ZERO);
+        assert_eq!(wizard.queued, Some(Op::PollProgress));
+        assert_eq!(frame_once(&mut wizard, &wires, &mut asked), POLL, "in flight: no second ask");
+        let (_, job) = wires.jobs.try_recv().expect("the frame after sent it");
+        assert!(matches!(job, Job::Plain(Op::PollProgress)));
+
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        wizard.standalone = true;
+        wizard.screen = Screen::Done;
+        wizard.last_poll = overdue();
+        assert_eq!(frame_once(&mut wizard, &wires, &mut asked), POLL);
+        assert_eq!(wizard.queued, None, "the standalone page never polls");
+
+        let status = crate::api::types::IrohStatus {
+            enabled: true,
+            qr: Some("ticket".to_string()),
+            ..Default::default()
+        };
+        wires.done.send(Done::Iroh(Ok(status))).unwrap();
+        assert!(wizard.qr.is_none());
+        frame_once(&mut wizard, &wires, &mut asked);
+        assert!(wizard.qr.is_some(), "the next frame applied the answer");
+        assert!(wizard.note.is_none(), "and never found the worker gone");
     }
 }

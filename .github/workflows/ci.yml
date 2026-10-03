@@ -79,6 +79,27 @@ jobs:
         if: runner.os == 'Linux'
         run: sh test/linkage.sh target/release/mstream-player
 
+      # The terminal releases have no page windows: `qr --window` is clap's
+      # usage error there (2), as `gui --window` is. Checked on this build,
+      # before the desktop build below replaces the binary.
+      - name: No page windows (Linux, terminal)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          code=0
+          target/release/mstream-player qr --window --server http://127.0.0.1:9 || code=$?
+          echo "qr --window: exit $code"
+          test "$code" -eq 2
+
+      # The terminal flavour's --version is one line: no features line at all,
+      # so a launcher reading line 2 sees nothing and keeps its terminal route.
+      - name: One version line (Linux, terminal)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          target/release/mstream-player --version
+          test "$(target/release/mstream-player --version | wc -l)" -eq 1
+
       - name: Build (desktop)
         if: runner.os == 'Linux'
         run: cargo build --release --features desktop
@@ -86,6 +107,35 @@ jobs:
       - name: Linkage guard (Linux, desktop)
         if: runner.os == 'Linux'
         run: sh test/linkage.sh target/release/mstream-player
+
+      # The pages' windows with no display to open one on: `setup --window`
+      # and `qr --window` exit 3 (window/mod.rs's NO_WINDOW) before any
+      # network, GPU or terminal work, which is the code mStream's launcher
+      # falls back to another route on.
+      - name: Page windows with no display (Linux, desktop)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for page in setup qr; do
+            code=0
+            env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+              target/release/mstream-player "$page" --window --server http://127.0.0.1:9 \
+              || code=$?
+            echo "$page --window: exit $code"
+            test "$code" -eq 3
+          done
+
+      # The desktop flavour's second line, exactly: mStream's launcher gates
+      # its routes on these words (`window` for the player's window,
+      # `window-pages` for the wizard and Quick Connect in theirs), and
+      # release.yml never reads --version, so this and the main.rs unit test
+      # are the only gates on the line.
+      - name: The features line (Linux, desktop)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          target/release/mstream-player --version
+          test "$(target/release/mstream-player --version | sed -n 2p)" = 'features: window window-pages'
 
   # The browser build has no test runner, but it has a type system: a plain
   # check catches the native-only import or the unhandled worker command that
