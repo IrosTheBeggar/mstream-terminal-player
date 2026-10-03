@@ -1741,4 +1741,70 @@ mod tests {
         draw(&mut room);
         assert_eq!(room.ui.caret_at(), None, "no field, no caret");
     }
+
+    /// The table under the Name modal, hosted as the GUI's Admin tab
+    /// hosts it and driven through the hub's own pointer routine: a press
+    /// where the table's bar stands neither steps nor holds an arrow nor
+    /// drags the thumb (the room beneath a modal is inert, its bar dropped
+    /// with every rect it registered before the modal draws), and the
+    /// modal stays up. With the modal gone the bar answers again.
+    #[test]
+    fn a_press_on_the_tables_bar_under_the_name_modal_arms_nothing() {
+        use crate::admin::drive_pointer;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let _en = english();
+        let mut room = room(false);
+        room.libs = (0..40)
+            .map(|i| Lib { name: format!("lib{i:02}"), root: format!("/srv/{i:02}"), follow_symlinks: false })
+            .collect();
+        let pointer = |room: &mut Room, kind: MouseEventKind, x: u16, y: u16| {
+            drive_pointer(room, MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+        };
+        let down_at = MouseEventKind::Down(MouseButton::Left);
+        let up_at = MouseEventKind::Up(MouseButton::Left);
+        let wait = || std::thread::sleep(kit::ARROW_DELAY + std::time::Duration::from_millis(30));
+        let buf = draw_hosted(&mut room, (100, 30), WINDOW);
+        let (x, up) = (WINDOW.left()..WINDOW.right())
+            .flat_map(|x| (WINDOW.top()..WINDOW.bottom() - 1).map(move |y| (x, y)))
+            .find(|&(x, y)| buf[(x, y)].symbol() == "▲" && matches!(buf[(x, y + 1)].symbol(), "█" | "│"))
+            .expect("the table's bar");
+        let down = (up + 1..WINDOW.bottom()).find(|&y| buf[(x, y)].symbol() == "▼").expect("its ▼");
+        let track = (up + down) / 2;
+        room.tscroll = 10;
+
+        // ▲ under the modal: nothing beneath takes the press.
+        room.open_name("/srv/new".into());
+        draw_hosted(&mut room, (100, 30), WINDOW);
+        pointer(&mut room, down_at, x, up);
+        assert!(matches!(room.modal, Modal::Name(_)), "the modal stays up");
+        assert!(!room.ui.holding_bar(), "and the arrow beneath held nothing");
+        wait();
+        assert!(room.ui.hold_action().is_none(), "so nothing repeats");
+        pointer(&mut room, up_at, x, up);
+
+        // The track under the modal: no jump, no thumb.
+        pointer(&mut room, down_at, x, track);
+        pointer(&mut room, MouseEventKind::Drag(MouseButton::Left), x, down - 1);
+        pointer(&mut room, up_at, x, down - 1);
+        assert_eq!(room.tscroll, 10, "the table never moved");
+
+        // The modal gone, ▲ steps and repeats, and the track jumps and
+        // drags the thumb.
+        room.act(Act::NameCancel);
+        draw_hosted(&mut room, (100, 30), WINDOW);
+        pointer(&mut room, down_at, x, up);
+        assert_eq!(room.tscroll, 9);
+        assert!(room.ui.holding_bar());
+        wait();
+        let repeat = room.ui.hold_action().expect("the repeat");
+        room.act(repeat);
+        assert_eq!(room.tscroll, 8);
+        pointer(&mut room, up_at, x, up);
+        draw_hosted(&mut room, (100, 30), WINDOW);
+        pointer(&mut room, down_at, x, up + 1);
+        assert_eq!(room.tscroll, 0, "the track's first cell is the top");
+        pointer(&mut room, MouseEventKind::Drag(MouseButton::Left), x, down - 1);
+        assert!(room.tscroll > 10, "the thumb rode the hand down");
+        pointer(&mut room, up_at, x, down - 1);
+    }
 }
