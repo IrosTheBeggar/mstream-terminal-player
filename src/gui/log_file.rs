@@ -67,7 +67,10 @@ pub(super) fn candidates(os: Os, vars: Vars) -> Vec<PathBuf> {
 /// `"$HOME/…"` and an absolute path. `"$HOME"` alone is how it says the
 /// folder is turned off, and a relative path means nothing outside the
 /// shell that sources it, so both read as no answer. The last assignment
-/// wins, as it would in the shell.
+/// wins, as it would in the shell. Absolute means the file's own idea of
+/// it, a leading slash: the file is written on Unix, and the host's rule
+/// would call `/srv/drop` relative on Windows, where this parser only
+/// ever runs under test.
 pub(super) fn user_dirs_download(text: &str, home: &Path) -> Option<PathBuf> {
     let value = text
         .lines()
@@ -83,8 +86,7 @@ pub(super) fn user_dirs_download(text: &str, home: &Path) -> Option<PathBuf> {
         let rest = rest.trim_matches('/');
         return (!rest.is_empty()).then(|| home.join(rest));
     }
-    let path = PathBuf::from(value);
-    path.is_absolute().then_some(path)
+    value.starts_with('/').then(|| PathBuf::from(value))
 }
 
 /// The first candidate that is a folder, else what `fallback` gives,
