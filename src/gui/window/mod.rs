@@ -169,6 +169,17 @@ pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
     let mut stats = Stats::from_env();
     let mut lap = Lap::start(&stats);
     install_panic_hook();
+    // A crash in the graphics driver, which no hook here sees, ends the
+    // process with its code rather than hanging it behind WER's dialog, so a
+    // launcher waiting on it hears that it died (desktop.rs).
+    #[cfg(all(windows, feature = "desktop"))]
+    crate::desktop::quiet_native_crashes();
+    // And the one such crash known to be ours to avoid is named before the
+    // GPU thread can meet it.
+    #[cfg(windows)]
+    if let Some(line) = std::env::current_exe().ok().and_then(|exe| long_path_warning(&exe)) {
+        eprintln!("{line}");
+    }
     // The taskbar identity the launcher stub also names (identity.rs), set
     // before any window exists: the taskbar reads it when one first shows.
     #[cfg(all(windows, feature = "desktop"))]
@@ -387,6 +398,33 @@ fn install_panic_hook() {
 fn panic_log_note(log: Option<&Path>) -> Option<String> {
     let log = log.filter(|path| path.is_file())?;
     Some(format!("mstream-player: the log is at {}", log.display()))
+}
+
+/// The length of the executable's path, in UTF-16 units as Windows counts
+/// it, from which the window host warns: a little short of where it was
+/// seen to matter, so a path a few characters off the edge is named too.
+const LONG_EXE_PATH: usize = 250;
+
+/// On Windows, the line to print before the GPU thread starts when the
+/// executable's path is [`LONG_EXE_PATH`] or longer; `None` for any shorter.
+/// NVIDIA's driver (31.0.15.3640 on a GTX 1060, DX12 and Vulkan alike) was
+/// measured to fast-fail inside itself while the device is made once the
+/// path reaches 253 units, 252 being fine: the window never appears, and
+/// the process ends (`desktop::quiet_native_crashes`) with nothing of ours
+/// to say why. A warning alone, for whoever reads the log: the run goes on
+/// as before, since most drivers do not care. Counted through a lossy
+/// string, which keeps the count exact: an unpaired surrogate, one unit, is
+/// replaced by U+FFFD, one unit too.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn long_path_warning(exe: &Path) -> Option<String> {
+    let units = exe.as_os_str().to_string_lossy().encode_utf16().count();
+    (units >= LONG_EXE_PATH).then(|| {
+        format!(
+            "gui --window: this player's path is {units} characters long; some graphics drivers \
+             (NVIDIA, measured at 253 and up) crash on paths that long, so if no window appears, \
+             move the player to a shorter folder"
+        )
+    })
 }
 
 /// The grid to open at: `MSTREAM_WINDOW_SIZE=<cols>,<rows>`, or the face's
@@ -2569,6 +2607,38 @@ mod tests {
         assert!(note.ends_with(&log.display().to_string()), "{note}");
         assert_eq!(panic_log_note(Some(&dir)), None, "a directory is not a log");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The long-path warning starts at 250 UTF-16 units, as Windows counts
+    /// a path: a character beyond the Basic Multilingual Plane is two, an
+    /// accented letter one, and a lone surrogate one as well.
+    #[test]
+    fn a_path_of_250_units_or_more_is_warned_about() {
+        // `C:\` and `\mstream-player.exe` are 22 units around the folder.
+        let exe = |folder: &str| PathBuf::from(format!("C:\\{folder}\\mstream-player.exe"));
+        let ascii = |units: usize| exe(&"d".repeat(units - 22));
+        assert_eq!(long_path_warning(Path::new("C:\\mStream\\mstream-player.exe")), None);
+        assert_eq!(long_path_warning(&ascii(249)), None);
+        let line = long_path_warning(&ascii(250)).expect("250 units is warned about");
+        assert!(line.starts_with("gui --window: this player's path is 250 characters"), "{line}");
+        assert!(line.contains("shorter folder"), "{line}");
+        assert!(long_path_warning(&ascii(253)).unwrap().contains(" 253 characters"));
+
+        // 226 letters and a clef (two units) are 250; with an é instead of
+        // the clef, 249.
+        let folder = "d".repeat(226);
+        assert!(long_path_warning(&exe(&format!("{folder}\u{1D11E}"))).is_some());
+        assert_eq!(long_path_warning(&exe(&format!("{folder}é"))), None);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let path = ascii(249);
+            let mut wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().collect();
+            wide.insert(3, 0xD800);
+            let lone = PathBuf::from(std::ffi::OsString::from_wide(&wide));
+            assert!(long_path_warning(&lone).unwrap().contains(" 250 characters"));
+        }
     }
 
     /// `cargo test the_window_panic_hook -- --ignored` — swaps the

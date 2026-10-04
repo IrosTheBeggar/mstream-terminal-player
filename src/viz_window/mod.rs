@@ -59,6 +59,12 @@ pub struct WindowArgs {
 }
 
 pub fn run(args: WindowArgs) -> i32 {
+    // A crash in the graphics driver ends this process with its code, not
+    // behind WER's dialog, so the player hears the window is gone. A desktop
+    // player's children inherit the mode, but an older player may be the one
+    // that started this, so it is set here too (desktop.rs).
+    #[cfg(all(windows, feature = "desktop"))]
+    crate::desktop::quiet_native_crashes();
     // The controls speak the player's language: the same detection, so the
     // same answer.
     crate::setup::boot_language();

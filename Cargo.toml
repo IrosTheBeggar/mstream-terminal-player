@@ -303,10 +303,13 @@ rfd = { version = "0.15", default-features = false }
 # Win32_UI_Shell is SetCurrentProcessExplicitAppUserModelID alone (the
 # player's window and the stub name one taskbar identity, src/identity.rs);
 # WindowsAndMessaging also brings what a refused second launch needs to
-# bring the holder's window forward (desktop.rs).
+# bring the holder's window forward (desktop.rs). Diagnostics_Debug is
+# GetErrorMode and SetErrorMode alone: a crash in a graphics driver ends the
+# process instead of hanging it behind WER's dialog (desktop.rs).
 windows-sys = { version = "0.61", optional = true, features = [
     "Win32_Foundation",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

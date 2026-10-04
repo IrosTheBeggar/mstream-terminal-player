@@ -56,7 +56,8 @@ mod setup;
 #[cfg(not(target_arch = "wasm32"))]
 mod admin;
 /// The desktop flavour's launch contract: what an empty argv opens, its
-/// default instance lock, and the console a double-click leaves behind.
+/// default instance lock, the console a double-click leaves behind, and a
+/// driver crash that exits instead of hanging behind WER's dialog.
 #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
 mod desktop;
 /// The desktop app's identity: its app id and Windows AppUserModelID,
