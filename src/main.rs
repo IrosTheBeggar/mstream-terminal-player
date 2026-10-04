@@ -38,7 +38,8 @@ mod serve;
 #[cfg(not(target_arch = "wasm32"))]
 mod shader;
 /// The wgpu instance and adapter every window and probe draws with: on
-/// Windows, DX12 or Vulkan alone, never GL.
+/// Windows, DX12 or Vulkan alone, never GL, and a driver crash that ends the
+/// process instead of hanging it behind WER's dialog.
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu_pick;
 /// The visualizer's window: a child process of the player (PLAN.md, Phase
@@ -56,8 +57,7 @@ mod setup;
 #[cfg(not(target_arch = "wasm32"))]
 mod admin;
 /// The desktop flavour's launch contract: what an empty argv opens, its
-/// default instance lock, the console a double-click leaves behind, and a
-/// driver crash that exits instead of hanging behind WER's dialog.
+/// default instance lock, and the console a double-click leaves behind.
 #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
 mod desktop;
 /// The desktop app's identity: its app id and Windows AppUserModelID,

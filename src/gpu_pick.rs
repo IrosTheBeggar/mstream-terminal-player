@@ -130,6 +130,44 @@ fn settle<C>(tries: impl Iterator<Item = C>, hardware: impl Fn(&C) -> Option<boo
     software.or(last)
 }
 
+/// A native crash ends the process at once, with its exception code, rather
+/// than leaving it suspended behind a Windows Error Reporting dialog. Called
+/// first thing by each of our ways into a GPU device, in both flavours: the
+/// window host (the GUI, the wizard and Quick Connect), the visualizer's own
+/// process and the visualizer probe. The terminal flavour has the last two
+/// as well (its GUI starts the same `viz-window` child), so this lives here,
+/// beside the choice they all draw with, rather than in the desktop half.
+///
+/// A crash inside a graphics driver is a fast fail (a /GS stack-cookie
+/// check, 0xC0000409) that no handler of ours ever sees. By default WER then
+/// suspends the process and shows "has stopped working" until someone closes
+/// it, while the window, hidden until its first present, never shows: a
+/// launcher that started the player sees it still running, takes the page
+/// for up and never falls back, and a GUI that started the visualizer's
+/// window takes it for open and sends its V to a suspended process. Measured
+/// with the NVIDIA driver that crashes on a long executable path (Windows 10
+/// 22H2, GTX 1060, a debug build): without this the process sat behind the
+/// dialog until killed; with SEM_NOGPFAULTERRORBOX it was gone 0.0–0.3 s
+/// after WerFault started, with 0xC0000409 and no dialog (WER still runs,
+/// without any UI, and may queue a report). WerSetFlags
+/// (WER_FAULT_REPORTING_NO_UI) was measured too: no dialog either, but the
+/// process stayed suspended another 2.3–2.9 s while WER took its dump, and
+/// on top of the error mode it changed nothing.
+///
+/// SEM_FAILCRITICALERRORS is the companion Microsoft recommends for every
+/// application: a drive with no disk is an error to the caller, not a system
+/// message box. Both bits are inherited by the processes this one starts,
+/// which is right for them too; the visualizer still sets them itself, as an
+/// older player may be the one that starts it.
+#[cfg(windows)]
+pub fn quiet_native_crashes() {
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        GetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SetErrorMode,
+    };
+    // SAFETY: no pointers; the calls read and set this process's error mode.
+    unsafe { SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

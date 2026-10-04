@@ -171,14 +171,18 @@ pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
     install_panic_hook();
     // A crash in the graphics driver, which no hook here sees, ends the
     // process with its code rather than hanging it behind WER's dialog, so a
-    // launcher waiting on it hears that it died (desktop.rs).
-    #[cfg(all(windows, feature = "desktop"))]
-    crate::desktop::quiet_native_crashes();
+    // launcher waiting on it hears that it died (gpu_pick.rs).
+    #[cfg(windows)]
+    crate::gpu_pick::quiet_native_crashes();
     // And the one such crash known to be ours to avoid is named before the
-    // GPU thread can meet it.
+    // GPU thread can meet it: on stderr, for a parent that keeps it (the
+    // mStream launcher's page log), and in the debug log, for a double-click,
+    // whose stderr goes nowhere. The log's file is written unbuffered, so the
+    // line is on disk before the driver can take the process down.
     #[cfg(windows)]
     if let Some(line) = std::env::current_exe().ok().and_then(|exe| long_path_warning(&exe)) {
         eprintln!("{line}");
+        tracing::warn!("{line}");
     }
     // The taskbar identity the launcher stub also names (identity.rs), set
     // before any window exists: the taskbar reads it when one first shows.
@@ -410,11 +414,14 @@ const LONG_EXE_PATH: usize = 250;
 /// NVIDIA's driver (31.0.15.3640 on a GTX 1060, DX12 and Vulkan alike) was
 /// measured to fast-fail inside itself while the device is made once the
 /// path reaches 253 units, 252 being fine: the window never appears, and
-/// the process ends (`desktop::quiet_native_crashes`) with nothing of ours
-/// to say why. A warning alone, for whoever reads the log: the run goes on
-/// as before, since most drivers do not care. Counted through a lossy
-/// string, which keeps the count exact: an unpaired surrogate, one unit, is
-/// replaced by U+FFFD, one unit too.
+/// the process ends (`gpu_pick::quiet_native_crashes`) with nothing of ours
+/// to say why. A warning alone: the run goes on as before, since most
+/// drivers do not care. It reaches only who keeps it, though: a parent that
+/// captures stderr (the mStream launcher's page log) or a debug log the run
+/// writes (`MSTREAM_LOG`, or the config's `[log]`); a double-click with
+/// neither leaves no trace of it, and no dialog either. Counted through a
+/// lossy string, which keeps the count exact: an unpaired surrogate, one
+/// unit, is replaced by U+FFFD, one unit too.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn long_path_warning(exe: &Path) -> Option<String> {
     let units = exe.as_os_str().to_string_lossy().encode_utf16().count();

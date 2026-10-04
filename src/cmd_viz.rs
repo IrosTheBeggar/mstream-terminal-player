@@ -55,9 +55,9 @@ pub fn run(args: VizProbeArgs) -> i32 {
     println!("viz-probe: the visualizer presets, on this machine's GPU\n");
     // A driver that crashes while the device is made ends the probe with its
     // code, which is the answer, rather than hanging it behind WER's dialog
-    // (desktop.rs).
-    #[cfg(all(windows, feature = "desktop"))]
-    crate::desktop::quiet_native_crashes();
+    // (gpu_pick.rs).
+    #[cfg(windows)]
+    crate::gpu_pick::quiet_native_crashes();
     // The instance the visualizer's window would draw with (`gpu_pick`: on
     // Windows DX12 or Vulkan alone, never GL, unless `WGPU_BACKEND` says),
     // so the probe asks the driver the window would get. The last failure

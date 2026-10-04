@@ -38,10 +38,7 @@ window = [
     "dep:objc2-app-kit",
     "dep:objc2-foundation",
 ]
-# windows-sys is the desktop flavour's on Windows alone (the console it
-# leaves on a double-click, the stub's one message box); a feature may name
-# a target-specific dependency, which other targets simply never build.
-desktop = ["window", "dep:windows-sys"]
+desktop = ["window"]
 
 # The desktop flavour's Windows launcher: a GUI-subsystem stub that starts
 # `mstream-player.exe gui --window` beside it with no console at all, so a
@@ -298,15 +295,19 @@ rfd = { version = "0.15", default-features = false }
 # GetConsoleProcessList to know the console is its own) and the launcher
 # stub's MessageBoxW (whose HWND is Foundation's). The 0.61 line is already
 # in the tree (winit, mio and others bring it), so this adds features, not
-# a crate. Optional: only the `desktop` feature builds it.
+# a crate.
 #
 # Win32_UI_Shell is SetCurrentProcessExplicitAppUserModelID alone (the
 # player's window and the stub name one taskbar identity, src/identity.rs);
 # WindowsAndMessaging also brings what a refused second launch needs to
 # bring the holder's window forward (desktop.rs). Diagnostics_Debug is
 # GetErrorMode and SetErrorMode alone: a crash in a graphics driver ends the
-# process instead of hanging it behind WER's dialog (desktop.rs).
-windows-sys = { version = "0.61", optional = true, features = [
+# process instead of hanging it behind WER's dialog (gpu_pick.rs). That one
+# is both flavours': the terminal flavour has the visualizer's window and
+# probe too, so the crate is not optional, and the desktop flavour's calls
+# are gated on its feature where they are made. windows-sys is bindings
+# alone, so the terminal binary links nothing it does not call.
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
