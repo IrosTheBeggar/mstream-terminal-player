@@ -1721,11 +1721,17 @@ impl App {
     /// The window or its backend failed before any frame: said, and the
     /// loop asked to end with [`NO_WINDOW`]. Said once because the exit
     /// asked for here is what [`turn`] reads first: nothing is tried again
-    /// on the turns winit still runs on its way out.
+    /// on the turns winit still runs on its way out. And polled from here,
+    /// whichever callback failed: winit on Windows waits as the control flow
+    /// says before it looks at the exit, and a failure in `resumed`, or in
+    /// the `about_to_wait` that follows it at once, finds the flow still at
+    /// its first `Wait`, which would hold the loop's end until some message
+    /// came to a window that never opened and need never get one.
     fn give_up(&mut self, event_loop: &ActiveEventLoop, e: &str) {
         eprintln!("gui --window: {e}");
         self.exit_code = NO_WINDOW;
         event_loop.exit();
+        event_loop.set_control_flow(ControlFlow::Poll);
     }
 }
 
@@ -1905,10 +1911,9 @@ impl ApplicationHandler for App {
         match turn {
             Turn::Open => return,
             // winit on Windows waits as the control flow says before it
-            // looks at the exit, and an exit asked for in `resumed` leaves
-            // the flow at `Wait`: polled, the loop ends now rather than on
+            // looks at the exit: polled, the loop ends now rather than on
             // the next message, which a window that never opened may never
-            // get.
+            // get. `give_up` polls already; this holds for every other exit.
             Turn::Leaving => {
                 event_loop.set_control_flow(ControlFlow::Poll);
                 return;
@@ -2836,13 +2841,15 @@ mod tests {
         assert!(![0, 1, 2, 101].contains(&NO_WINDOW));
     }
 
-    /// A turn after an exit was asked for begins nothing, whatever the
-    /// window holds: an opening that failed with the window made and no
-    /// backend in is not built again on the turns winit runs on its way
-    /// out. Before an exit, the window comes first, then its backend, then
-    /// the frames.
+    /// The decision `resumed` and `about_to_wait` read first ([`turn`]): an
+    /// exit asked for outranks whatever the window holds, so an opening that
+    /// failed with the window made and no backend in is a leaving turn, not
+    /// a build. Before an exit, the window comes first, then its backend,
+    /// then the frames. The table alone: that the two callbacks read it
+    /// before they open or build anything is theirs to keep, and the Windows
+    /// run with no adapter (one set of lines, not three) is what shows it.
     #[test]
-    fn a_failed_opening_is_not_tried_again_on_the_way_out() {
+    fn an_exit_asked_for_comes_before_every_other_turn() {
         for window in [false, true] {
             for backend in [false, true] {
                 assert_eq!(turn(true, window, backend), Turn::Leaving);
