@@ -1699,9 +1699,57 @@ impl App {
     /// came to a window that never opened and need never get one.
     fn give_up(&mut self, event_loop: &ActiveEventLoop, e: &str) {
         eprintln!("gui --window: {e}");
-        self.exit_code = NO_WINDOW;
-        event_loop.exit();
-        event_loop.set_control_flow(ControlFlow::Poll);
+        self.exit_code = end_unopened(event_loop);
+    }
+}
+
+/// The few calls on winit's loop that ending a failed opening takes, as a
+/// trait so that ending can be tested without a loop: winit's
+/// `ActiveEventLoop` exists only inside its own `run_app`, and the failure
+/// it guards (every line said three times, or a loop left waiting for a
+/// message) showed only on a Windows machine with no adapter.
+trait Ending {
+    fn exit(&self);
+    fn exiting(&self) -> bool;
+    fn set_control_flow(&self, flow: ControlFlow);
+}
+
+impl Ending for ActiveEventLoop {
+    fn exit(&self) {
+        ActiveEventLoop::exit(self)
+    }
+    fn exiting(&self) -> bool {
+        ActiveEventLoop::exiting(self)
+    }
+    fn set_control_flow(&self, flow: ControlFlow) {
+        ActiveEventLoop::set_control_flow(self, flow)
+    }
+}
+
+/// What [`App::give_up`] does to the loop, whichever callback failed: the
+/// exit asked for, which every later [`turn`] reads first, and the flow
+/// polled, so winit on Windows does not wait at its first `Wait` before it
+/// looks at the exit. Answers the exit code, [`NO_WINDOW`].
+fn end_unopened(event_loop: &impl Ending) -> i32 {
+    event_loop.exit();
+    event_loop.set_control_flow(ControlFlow::Poll);
+    NO_WINDOW
+}
+
+/// Whether `about_to_wait` goes on past its first look at the turn: not
+/// with no window yet (`resumed` makes it), and not once an exit is asked
+/// for, which is polled so the loop ends now rather than on the next
+/// message, one a window that never opened may never get. Only the build's
+/// turns and the frames' go on, so an exit asked for by a failed opening
+/// begins no build again.
+fn goes_on(event_loop: &impl Ending, turn: Turn) -> bool {
+    match turn {
+        Turn::Open => false,
+        Turn::Leaving => {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            false
+        }
+        Turn::Build | Turn::Frames => true,
     }
 }
 
@@ -1878,17 +1926,13 @@ impl ApplicationHandler for App {
     /// than a poll, when the loop sleeps between checks rather than spin.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let turn = self.turn(event_loop);
-        match turn {
-            Turn::Open => return,
-            // winit on Windows waits as the control flow says before it
-            // looks at the exit: polled, the loop ends now rather than on
-            // the next message, which a window that never opened may never
-            // get. `give_up` polls already; this holds for every other exit.
-            Turn::Leaving => {
-                event_loop.set_control_flow(ControlFlow::Poll);
-                return;
-            }
-            Turn::Build | Turn::Frames => {}
+        // winit on Windows waits as the control flow says before it looks
+        // at the exit: a turn that is leaving is polled ([`goes_on`]), so
+        // the loop ends now rather than on the next message, which a window
+        // that never opened may never get. `give_up` polls already; this
+        // holds for every other exit.
+        if !goes_on(event_loop, turn) {
+            return;
         }
         // Until the backend exists the loop polls the early threads, begins
         // its build on the turn they are done, and installs it on the turn
@@ -2783,9 +2827,9 @@ mod tests {
     /// exit asked for outranks whatever the window holds, so an opening that
     /// failed with the window made and no backend in is a leaving turn, not
     /// a build. Before an exit, the window comes first, then its backend,
-    /// then the frames. The table alone: that the two callbacks read it
-    /// before they open or build anything is theirs to keep, and the Windows
-    /// run with no adapter (one set of lines, not three) is what shows it.
+    /// then the frames. The table alone: what the callbacks do with it is
+    /// the next test's, and the Windows run with no adapter (one set of
+    /// lines, not three, and a prompt exit) is the checklist's.
     #[test]
     fn an_exit_asked_for_comes_before_every_other_turn() {
         for window in [false, true] {
@@ -2796,6 +2840,65 @@ mod tests {
         assert_eq!(turn(false, false, false), Turn::Open);
         assert_eq!(turn(false, true, false), Turn::Build);
         assert_eq!(turn(false, true, true), Turn::Frames);
+    }
+
+    /// A stand-in for winit's loop, which cannot be made outside its own
+    /// `run_app`: the exit asked for, and the control flow last set, which
+    /// starts at winit's own first `Wait`.
+    #[derive(Default)]
+    struct FakeLoop {
+        exiting: std::cell::Cell<bool>,
+        flow: std::cell::Cell<ControlFlow>,
+    }
+
+    impl Ending for FakeLoop {
+        fn exit(&self) {
+            self.exiting.set(true);
+        }
+        fn exiting(&self) -> bool {
+            self.exiting.get()
+        }
+        fn set_control_flow(&self, flow: ControlFlow) {
+            self.flow.set(flow);
+        }
+    }
+
+    /// A failed opening, in `resumed` (no window made) or in the build that
+    /// `about_to_wait` carries on (the window made, no backend), ends the
+    /// loop with [`NO_WINDOW`], polled rather than at winit's first `Wait`;
+    /// and every turn winit still runs after it is a leaving one that
+    /// `about_to_wait` goes no further with, polled too, so the build is
+    /// never begun again and its failure is said once. A turn with no
+    /// window yet goes no further either, and leaves the flow as it was.
+    #[test]
+    fn a_failed_opening_ends_polled_and_no_later_turn_builds_again() {
+        for (window, backend) in [(false, false), (true, false)] {
+            let event_loop = FakeLoop::default();
+            assert_eq!(event_loop.flow.get(), ControlFlow::Wait, "winit's first flow");
+            let before = turn(event_loop.exiting(), window, backend);
+            assert_ne!(before, Turn::Leaving, "window {window}: not leaving yet");
+
+            assert_eq!(end_unopened(&event_loop), NO_WINDOW, "window {window}: its exit code");
+            assert!(event_loop.exiting.get(), "window {window}: the exit is asked for");
+            assert_eq!(event_loop.flow.get(), ControlFlow::Poll, "window {window}: polled");
+
+            // winit runs about_to_wait twice more on its way out; neither
+            // builds, and each polls whatever the flow was left at.
+            for _ in 0..2 {
+                event_loop.flow.set(ControlFlow::Wait);
+                let later = turn(event_loop.exiting(), window, backend);
+                assert_eq!(later, Turn::Leaving, "window {window}: a later turn is leaving");
+                assert!(!goes_on(&event_loop, later), "window {window}: no build begun again");
+                assert_eq!(event_loop.flow.get(), ControlFlow::Poll, "window {window}: polled");
+            }
+        }
+
+        let event_loop = FakeLoop::default();
+        assert!(!goes_on(&event_loop, Turn::Open), "no window yet: resumed makes it");
+        assert_eq!(event_loop.flow.get(), ControlFlow::Wait, "and the flow is left alone");
+        assert!(goes_on(&event_loop, Turn::Build), "the build's turn goes on");
+        assert!(goes_on(&event_loop, Turn::Frames), "the frames' turn goes on");
+        assert!(!event_loop.exiting.get(), "and neither asks for an exit");
     }
 
     /// The X11 keyboard probe: a line only on an X11 session whose loader
