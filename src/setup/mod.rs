@@ -2462,65 +2462,29 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
         } else {
             t!("folders.continue_disabled").to_string()
         };
-        // Right-anchored by the frame's own width in cells, so the frame
-        // ends at the bar's edge in every language (a character count put
-        // a Japanese button short of it, and the kit then cut the label).
-        let x = bar.right().saturating_sub(kit::tall_width(&label));
-        let rect = kit::tall_button(
-            frame,
-            &mut wizard.ui,
-            Rect { x, y: bar.y, width: bar.width, height: 3 },
-            &label,
-            enabled,
-            Act::ContinueFolders,
-        );
+        let at = (label.as_str(), enabled, Act::ContinueFolders);
+        let (rect, _) = bar_buttons(frame, &mut wizard.ui, bar, at, None);
         if !enabled {
             wizard.ui.tip(rect, t!("folders.tip_continue_disabled"));
         }
     }
     if wizard.screen == Screen::Extras {
-        let label = t!("extras.continue").to_string();
-        let x = bar.right().saturating_sub(kit::tall_width(&label));
-        let rect = kit::tall_button(
-            frame,
-            &mut wizard.ui,
-            Rect { x, y: bar.y, width: bar.width, height: 3 },
-            &label,
-            true,
-            Act::ContinueExtras,
-        );
-        let back_label = t!("extras.back").to_string();
-        let back_x = rect.x.saturating_sub(kit::tall_width(&back_label) + 2);
-        let back = kit::tall_secondary(
-            frame,
-            &mut wizard.ui,
-            Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
-            &back_label,
-            Act::BackToFolders,
-        );
-        wizard.ui.tip(back, t!("extras.tip_back"));
+        let (label, back_label) = (t!("extras.continue"), t!("extras.back"));
+        let at = (&*label, true, Act::ContinueExtras);
+        let back = Some((&*back_label, Act::BackToFolders));
+        let (_, back) = bar_buttons(frame, &mut wizard.ui, bar, at, back);
+        if let Some(back) = back {
+            wizard.ui.tip(back, t!("extras.tip_back"));
+        }
     }
     if wizard.screen == Screen::Login {
-        let label = t!("login.create").to_string();
-        let x = bar.right().saturating_sub(kit::tall_width(&label));
-        let rect = kit::tall_button(
-            frame,
-            &mut wizard.ui,
-            Rect { x, y: bar.y, width: bar.width, height: 3 },
-            &label,
-            true,
-            Act::CreateAdmin,
-        );
-        let back_label = t!("login.back").to_string();
-        let back_x = rect.x.saturating_sub(kit::tall_width(&back_label) + 2);
-        let back = kit::tall_secondary(
-            frame,
-            &mut wizard.ui,
-            Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
-            &back_label,
-            Act::BackToExtras,
-        );
-        wizard.ui.tip(back, t!("login.tip_back"));
+        let (label, back_label) = (t!("login.create"), t!("login.back"));
+        let at = (&*label, true, Act::CreateAdmin);
+        let back = Some((&*back_label, Act::BackToExtras));
+        let (_, back) = bar_buttons(frame, &mut wizard.ui, bar, at, back);
+        if let Some(back) = back {
+            wizard.ui.tip(back, t!("login.tip_back"));
+        }
     }
 
     if modal_open {
@@ -3171,13 +3135,19 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         // page, from its first frame on (so nothing moves when the first
         // poll lands), never the standalone Quick Connect page, which has no
         // scan and would have cut its message and its cards for blank rows.
+        // The tall cards may end one row past the column, on the blank row
+        // above the note, as they always did: counting only the column's
+        // rows gave every 24-row window the one-row list, at the most common
+        // terminal size. The one-row list, and the message's cut, keep to
+        // the column.
         let need = u16::try_from(message.line_count(right.width)).unwrap_or(u16::MAX).max(4);
         let rest = right.bottom().saturating_sub(ry);
         let scan_rows = done_scan_rows(wizard);
         let (tall, short) = (3 * DONE_ACTIONS as u16, DONE_ACTIONS as u16);
-        let cards = need + 1 + scan_rows + tall <= rest;
+        let cards = need + 1 + scan_rows + tall <= rest + DONE_CARDS_SPARE_ROW;
+        let room = if cards { rest + DONE_CARDS_SPARE_ROW } else { rest };
         let list = if cards { tall } else { short };
-        let message_h = need.min(rest.saturating_sub(1 + scan_rows + list));
+        let message_h = need.min(room.saturating_sub(1 + scan_rows + list));
         frame.render_widget(
             message,
             Rect { x: right.x, y: ry, width: right.width, height: message_h },
@@ -3315,6 +3285,39 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let width = done_list_width().min(column.width);
     done_list(frame, wizard, column.x + (column.width - width) / 2, y, width);
 }
+
+/// The bottom bar's buttons: the screen's forward action as the kit's tall
+/// primary block, right-anchored so its frame ends on the bar's edge, and,
+/// where the screen has one, the way back as a tall secondary two cells to
+/// its left. Both are placed by their frames' widths in cells
+/// (`kit::tall_width`), as the kit draws them: a character count put a
+/// Japanese button short of the bar's edge, and the kit then cut its label
+/// ("続け" of "続ける ▸"). One function for the three screens' bars, so the
+/// test that draws it with the Japanese and Chinese labels checks the very
+/// arithmetic each bar uses, without switching the process-wide locale.
+fn bar_buttons(
+    frame: &mut Frame,
+    ui: &mut Surface<Act>,
+    bar: Rect,
+    (label, enabled, act): (&str, bool, Act),
+    back: Option<(&str, Act)>,
+) -> (Rect, Option<Rect>) {
+    let x = bar.right().saturating_sub(kit::tall_width(label));
+    let at = Rect { x, y: bar.y, width: bar.width, height: 3 };
+    let rect = kit::tall_button(frame, ui, at, label, enabled, act);
+    let back = back.map(|(label, act)| {
+        let x = rect.x.saturating_sub(kit::tall_width(label) + 2);
+        let at = Rect { x, y: bar.y, width: bar.width, height: 3 };
+        kit::tall_secondary(frame, ui, at, label, act)
+    });
+    (rect, back)
+}
+
+/// The rows the two-column Done page's tall cards may run past the column:
+/// the blank one between the column's bottom and the note (`render` puts
+/// the column at the page's height less six from row two, so it ends at the
+/// height less four, and the note at the height less three).
+const DONE_CARDS_SPARE_ROW: u16 = 1;
 
 /// The rows the Done page keeps for the scan's status: its three lines
 /// and a blank under them.
@@ -4001,21 +4004,32 @@ pub(crate) mod tests {
         text
     }
 
-    /// The language chip and the bar's Continue measure their labels in
+    /// The language chip and the bars' buttons measure their labels in
     /// cells: in Japanese and Chinese at 100×30 the chip shows the whole
-    /// name of the language (it showed "▾ 日"), and the button frames the
-    /// whole label (it framed "続け" of "続ける ▸") with its right edge on
-    /// the bar's, where a character count left it short.
+    /// name of the language (it showed "▾ 日"), and each screen's bar frames
+    /// the whole label of its forward action (it framed "続け" of "続ける ▸")
+    /// with its right edge on the bar's, where a character count left it
+    /// short, and the whole way back two cells to its left.
     ///
     /// Nothing here switches the process-global locale, which tests that
     /// assert English without the lock would read mid-draw: the chip's
     /// label is the language's own name from `LANGS`, drawn whatever the
-    /// locale once the index is set, and the button is the bar's call (its
-    /// x from `kit::tall_width`, as the bar computes it) with the label
-    /// translated at the call. The English wizard checks the bar's own path.
+    /// locale once the index is set, and the buttons are drawn by
+    /// `bar_buttons`, the one function the Folders, Extras and Login bars
+    /// all call, with the labels translated at the call. The English wizard
+    /// checks the bar's own path through `render`. The glyph tier is pinned
+    /// first: the chip's arrow is read once by the draw and once for the
+    /// label expected, and on a bare Windows console another test's pin
+    /// landing between the two reads would make them differ.
     #[test]
-    fn the_chip_and_continue_show_their_whole_cjk_labels_at_100x30() {
+    fn the_chip_and_the_bar_buttons_show_their_whole_cjk_labels_at_100x30() {
+        crate::kit::theme::pin_modern_terminal();
         let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bars = [
+            ("folders.continue_enabled", Act::ContinueFolders, None),
+            ("extras.continue", Act::ContinueExtras, Some(("extras.back", Act::BackToFolders))),
+            ("login.create", Act::CreateAdmin, Some(("login.back", Act::BackToExtras))),
+        ];
         for code in ["ja", "zh"] {
             let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
             wizard.lang = LANGS.iter().position(|(c, _)| *c == code).expect(code);
@@ -4027,23 +4041,33 @@ pub(crate) mod tests {
             assert_eq!(usize::from(chip.width), kit::width(&chip_label), "{code}: its width");
             assert_eq!(cells_text(&buf, 0, chip.x, chip.right()), chip_label, "{code}: the chip");
 
-            let label = t!("folders.continue_enabled", locale = code).to_string();
-            let backend = ratatui::backend::TestBackend::new(100, 3);
-            let mut terminal = ratatui::Terminal::new(backend).unwrap();
-            let mut ui = kit::Surface::<Act>::new();
-            let bar = Rect { x: 2, y: 0, width: 96, height: 3 };
-            let mut button = Rect::default();
-            terminal
-                .draw(|frame| {
-                    let x = bar.right().saturating_sub(kit::tall_width(&label));
-                    let at = Rect { x, y: bar.y, width: bar.width, height: 3 };
-                    button = kit::tall_button(frame, &mut ui, at, &label, true, Act::ContinueFolders);
-                })
-                .unwrap();
-            let buf = terminal.backend().buffer();
-            assert_eq!(button.right(), 98, "{code}: the frame ends on the bar's right edge");
-            let inside = cells_text(buf, button.y + 1, button.x + 1, button.right() - 1);
-            assert_eq!(inside, format!("  {label}  "), "{code}: the label inside its frame");
+            for (key, act, back) in bars.clone() {
+                let label = t!(key, locale = code).to_string();
+                let back_label = back.map(|(key, act)| (t!(key, locale = code).to_string(), act));
+                let backend = ratatui::backend::TestBackend::new(100, 3);
+                let mut terminal = ratatui::Terminal::new(backend).unwrap();
+                let mut ui = kit::Surface::<Act>::new();
+                let bar = Rect { x: 2, y: 0, width: 96, height: 3 };
+                let mut drawn = (Rect::default(), None);
+                let back = back_label.as_ref().map(|(label, act)| (label.as_str(), act.clone()));
+                terminal
+                    .draw(|frame| {
+                        drawn = bar_buttons(frame, &mut ui, bar, (&label, true, act), back);
+                    })
+                    .unwrap();
+                let buf = terminal.backend().buffer();
+                let (button, back_rect) = drawn;
+                assert_eq!(button.right(), 98, "{code} {key}: on the bar's right edge");
+                let inside = cells_text(buf, button.y + 1, button.x + 1, button.right() - 1);
+                assert_eq!(inside, format!("  {label}  "), "{code} {key}: its whole label");
+                if let Some((back_label, _)) = &back_label {
+                    let back = back_rect.expect("the way back is drawn");
+                    assert_eq!(back.right() + 2, button.x, "{code} {key}: two cells left of it");
+                    assert_eq!(back.width, kit::tall_width(back_label), "{code} {key}: its width");
+                    let inside = cells_text(buf, back.y + 1, back.x + 1, back.right() - 1);
+                    assert_eq!(inside, format!("  {back_label}  "), "{code} {key}: the way back");
+                }
+            }
         }
         let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
         wizard.add_folder("/srv/music".to_string());
@@ -4148,6 +4172,30 @@ pub(crate) mod tests {
         let message = format!("{} {}", t!("done.running_port", port = 3000), t!("done.scan_left"));
         let text = done_text(&buf, true);
         assert!(text.join(" ").contains(&message), "the standalone page at the floor: {text:#?}");
+    }
+
+    /// At 80×24, the most common terminal size, the two-column wizard Done
+    /// page keeps its tall cards under its whole four-row English message
+    /// and the scan's rows: the last card ends on the blank row above the
+    /// note, one past the column, as it always did, and the note's row stays
+    /// its own. A bound of the column alone gave every 24-row window the
+    /// one-row list.
+    #[test]
+    fn the_two_column_done_page_keeps_its_tall_cards_at_80x24() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut wizard = done_page(true);
+        wizard.note = Some(("A note".to_string(), false));
+        let buf = draw_at(&mut wizard, 80, 24);
+        let message = format!("{} {}", t!("done.running_port", port = 3000), t!("done.scan_left"));
+        let text = done_text(&buf, true);
+        assert!(text.join(" ").contains(&message), "the message whole: {text:#?}");
+        let last = text.iter().rposition(|row| row.ends_with("automatically.")).expect("end");
+        let first = click_rect(&wizard, done_action(0));
+        assert_eq!(first.height, 3, "the tall cards");
+        assert!(first.y > last as u16 + DONE_SCAN_ROWS, "the cards under the message and the scan");
+        let end = click_rect(&wizard, done_action(DONE_ACTIONS - 1)).bottom();
+        assert_eq!(end, 24 - 3, "the last card ends on the row above the note");
+        assert_eq!(row_text(&buf, 24 - 3).trim(), "A note", "the note's row is its own");
     }
 
     /// The stacked Done page lets the half-block code in before the scan's
