@@ -1690,11 +1690,58 @@ impl App {
         // The instance lock is not dropped here: `run` drops it after the
         // App, or `exiting` does when the platform ends the process.
     }
+
+    /// What this turn of the loop is for ([`turn`]).
+    fn turn(&self, event_loop: &ActiveEventLoop) -> Turn {
+        turn(event_loop.exiting(), self.window.is_some(), self.terminal.is_some())
+    }
+
+    /// The window or its backend failed before any frame: said, and the
+    /// loop asked to end with [`NO_WINDOW`]. Said once because the exit
+    /// asked for here is what [`turn`] reads first: nothing is tried again
+    /// on the turns winit still runs on its way out.
+    fn give_up(&mut self, event_loop: &ActiveEventLoop, e: &str) {
+        eprintln!("gui --window: {e}");
+        self.exit_code = NO_WINDOW;
+        event_loop.exit();
+    }
+}
+
+/// What a turn of the loop is for, from where the window's opening stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Turn {
+    /// No window yet: `resumed` makes it.
+    Open,
+    /// The window is made and its backend is not in yet: the turn carries
+    /// the build on.
+    Build,
+    /// The backend is in: the turn is the frames'.
+    Frames,
+    /// An exit was asked for: nothing is begun, and the loop waits for
+    /// nothing on its way out.
+    Leaving,
+}
+
+/// What a turn is for: `exiting` an exit was asked for, `window` the window
+/// is made, `backend` its backend is in. The exit comes first. winit on
+/// Windows runs `about_to_wait` twice after a `resumed` that asks for one
+/// (once before it waits, once as the loop ends), and a failed opening
+/// leaves the window made but the early threads' work spent, which
+/// `Early::ready` reads as done: each of those turns began the build again,
+/// finding the faces and being refused the surface once more, so a
+/// machine with nothing to draw with printed every line three times.
+fn turn(exiting: bool, window: bool, backend: bool) -> Turn {
+    match (exiting, window, backend) {
+        (true, ..) => Turn::Leaving,
+        (false, false, _) => Turn::Open,
+        (false, true, false) => Turn::Build,
+        (false, true, true) => Turn::Frames,
+    }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.turn(event_loop) != Turn::Open {
             return;
         }
         self.lap.mark(&mut self.stats, "to_resumed");
@@ -1706,9 +1753,7 @@ impl ApplicationHandler for App {
             self.lap.mark(&mut self.stats, "dock_icon");
         }
         if let Err(e) = self.open(event_loop) {
-            eprintln!("gui --window: {e}");
-            self.exit_code = NO_WINDOW;
-            event_loop.exit();
+            self.give_up(event_loop, &e);
         }
     }
 
@@ -1834,20 +1879,29 @@ impl ApplicationHandler for App {
     /// the loop wakes — unless the platform has held it back for longer
     /// than a poll, when the loop sleeps between checks rather than spin.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
-            return;
+        let turn = self.turn(event_loop);
+        match turn {
+            Turn::Open => return,
+            // winit on Windows waits as the control flow says before it
+            // looks at the exit, and an exit asked for in `resumed` leaves
+            // the flow at `Wait`: polled, the loop ends now rather than on
+            // the next message, which a window that never opened may never
+            // get.
+            Turn::Leaving => {
+                event_loop.set_control_flow(ControlFlow::Poll);
+                return;
+            }
+            Turn::Build | Turn::Frames => {}
         }
         // Until the backend exists the loop polls the early threads, begins
         // its build on the turn they are done, and installs it on the turn
         // the build's thread is; meanwhile it answers the window, and a
         // hidden one is shown by its deadline, blank, rather than kept off
         // screen for as long as the GPU takes.
-        if self.terminal.is_none() {
+        if turn == Turn::Build {
             // Before the first frame: the window never showed the player.
             if let Err(e) = self.poll_build(Duration::ZERO) {
-                eprintln!("gui --window: {e}");
-                self.exit_code = NO_WINDOW;
-                event_loop.exit();
+                self.give_up(event_loop, &e);
                 return;
             }
             if self.terminal.is_none() {
@@ -2747,6 +2801,23 @@ mod tests {
     fn a_window_that_cannot_open_has_its_own_exit_code() {
         assert_eq!(NO_WINDOW, 3);
         assert!(![0, 1, 2, 101].contains(&NO_WINDOW));
+    }
+
+    /// A turn after an exit was asked for begins nothing, whatever the
+    /// window holds: an opening that failed with the window made and no
+    /// backend in is not built again on the turns winit runs on its way
+    /// out. Before an exit, the window comes first, then its backend, then
+    /// the frames.
+    #[test]
+    fn a_failed_opening_is_not_tried_again_on_the_way_out() {
+        for window in [false, true] {
+            for backend in [false, true] {
+                assert_eq!(turn(true, window, backend), Turn::Leaving);
+            }
+        }
+        assert_eq!(turn(false, false, false), Turn::Open);
+        assert_eq!(turn(false, true, false), Turn::Build);
+        assert_eq!(turn(false, true, true), Turn::Frames);
     }
 
     /// The X11 keyboard probe: a line only on an X11 session whose loader
