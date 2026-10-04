@@ -685,6 +685,11 @@ pins (its tag and checksum sit in `src/device/firmware.rs`, bumped with player r
 every time; `MSTREAM_FIRMWARE_BASE` points them at a mirror. `--erase` and `--no-erase` decide
 the erase instead of the board; `--yes` prints each step and writes without a screen.
 
+The pinned release is v0.6.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
+ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
+`-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install, download
+that file from the release and write it with `--firmware`. It keeps the settings like any update.
+
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported
 as such. `MSTREAM_DEVICE_FAKE=<word>` runs everything against a scripted board, for tests:

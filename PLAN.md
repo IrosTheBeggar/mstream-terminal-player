@@ -2957,13 +2957,13 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 
 ### Phase 13 — The MP3 player's flasher (`mstream-player device flash`)
 
-> **Status 2026-10-01: built, unreleased** — the page, the `--yes` line mode, `device list`,
-> the fake board and its e2e leg; then the page's UX from the design cards (mStream
-> `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time left,
-> what to do next, the port watch, and the log behind `l`. The firmware's first release,
-> v0.5.0 (1 Oct 2026), is the pin in `src/device/firmware.rs` — `device flash` with no flags
-> writes it; `--firmware` / `--release` still override. The mStream launcher's menu item is
-> the next slice there.
+> **Status 2026-10-04: shipped in v0.10.0** (built 2026-10-01) — the page, the `--yes` line
+> mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
+> (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
+> left, what to do next, the port watch, and the log behind `l`. The pin in
+> `src/device/firmware.rs` is firmware v0.6.0 (2 Oct 2026; the first release, v0.5.0, until
+> 4 Oct) — `device flash` with no flags writes it; `--firmware` / `--release` still override.
+> The mStream launcher's menu item is dropped (Paul, 4 Oct 2026).
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
@@ -2986,9 +2986,9 @@ admin rooms.
   write, so one reset serves both, and restarts it on every way out before the write; the page
   cannot leave a write. The baud ladder (921600 → 460800 → 115200) covers bridges and cables
   that cannot hold the fast rate, on connect and again on a write that dies.
-- **Left:** the pin (after firmware v0.5.0); the launcher's item (mStream: `PlayerPage::Device`,
-  a version gate, the web installer as the fallback); Wi-Fi and pairing over the same port
-  (the hidden `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
+- **Left:** a way to v0.6.0's `-dio-full.bin` from the page (today `--firmware`, for a Core2
+  that keeps restarting on the QIO image); Wi-Fi and pairing over the same port (the hidden
+  `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
 
 ### Phase 14 — The window spike: the GUI in a window of its own (2026-09-29/30)
 
