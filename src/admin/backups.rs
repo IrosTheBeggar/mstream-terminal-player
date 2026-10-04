@@ -1551,7 +1551,13 @@ fn modal_field_labelled(frame: &mut Frame, room: &mut Room, at: Rect, label_w: u
 /// form's `lib_rows` counts the rows this wraps to: a library named in
 /// Japanese, counted by characters, got a rect short by half its name, so
 /// the name was cut there, its click covered only what was left, and the
-/// row wrapped later than it should have.
+/// row wrapped later than it should have. An option wider than the room
+/// left in its row (one that starts the row and still does not fit) is
+/// clamped to the row, so its name is cut inside it and its click stays on
+/// what is drawn, as setup's browser row and skip buttons are: measured in
+/// cells, a name of thirty Japanese characters outgrows the 60-cell row,
+/// and unclamped it painted over the modal's right border and past it.
+/// `lib_rows` counts such an option as the one row it takes.
 fn radio_row(frame: &mut Frame, room: &mut Room, at: Rect, options: &[String], chosen: usize, focused: bool, field_index: usize) -> u16 {
     let mut x = at.x;
     let mut y = at.y;
@@ -1561,7 +1567,7 @@ fn radio_row(frame: &mut Frame, room: &mut Room, at: Rect, options: &[String], c
             x = at.x;
             y += 1;
         }
-        let rect = Rect { x, y, width: w, height: 1 };
+        let rect = Rect { x, y, width: w.min(at.right().saturating_sub(x)), height: 1 };
         let on = i == chosen;
         let hovered = room.ui.pointer.is_some_and(|p| rect.contains(p));
         let glyph_style = if on && focused {
@@ -1577,7 +1583,7 @@ fn radio_row(frame: &mut Frame, room: &mut Room, at: Rect, options: &[String], c
             rect,
         );
         room.ui.click(rect, Act::FormPick(field_index, i));
-        x += w + 3;
+        x += rect.width + 3;
     }
     y + 1 - at.y
 }
@@ -2214,6 +2220,54 @@ mod tests {
         }
         // lib_rows counted the same two rows: TRIGGER starts a blank row on.
         let trigger_y = rects[2].y + 2;
+        let label: String = (0..buffer.area.width).map(|x| buffer[(x, trigger_y)].symbol()).collect();
+        assert!(label.contains(&*t!("bak.field_trigger")), "the trigger under the wrapped row: {label:?}");
+    }
+
+    /// An option wider than the whole row is clamped to it: a library named
+    /// by thirty Japanese characters (60 cells) wants 64 of the add form's
+    /// 60-cell row at 100×30, which runs from x 25 to 85, the modal's border
+    /// at 86. The option starts the row and ends at its end, the padding
+    /// cell and the border past it survive, its click rect is the drawn
+    /// rect, and its name is cut cleanly; the next library wraps under it,
+    /// and the trigger label sits where lib_rows put it. Unclamped, the
+    /// option painted over the border and its click reached past the modal.
+    #[test]
+    fn the_add_forms_library_radio_clamps_an_option_wider_than_the_row() {
+        let _en = english();
+        let long = "日本の音楽アーカイブ".repeat(3);
+        assert_eq!(kit::width(&long), 60);
+        let mut room = new_room();
+        room.apply(Done::Platform(Ok(defaults())));
+        room.queued = None;
+        room.busy = None;
+        let libraries = vec![(long.clone(), 10), ("music".to_string(), 20)];
+        room.apply(Done::Loaded(Ok(Box::new(Loaded { dests: Vec::new(), status: BackupStatus::default(), libraries: Some(libraries) }))));
+        press(&mut room, KeyCode::Char('a'));
+        let Modal::Form(f) = &room.modal else { panic!("the add form") };
+        let library = f.fields().iter().position(|x| *x == Field::Library).expect("the library field");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let option = |i: usize| {
+            let act = Act::FormPick(library, i);
+            room.ui.clicks.iter().find(|(_, a)| *a == act).map(|(rect, _)| *rect).unwrap_or_else(|| panic!("option {i}"))
+        };
+        let first = option(0);
+        assert_eq!((first.x, first.right()), (25, 85), "clamped to the row: {first:?}");
+        assert_eq!(buffer[(85, first.y)].symbol(), " ", "the padding cell survives");
+        assert_eq!(buffer[(86, first.y)].symbol(), "│", "the border survives");
+        let mut text = String::new();
+        let mut x = first.x;
+        while x < first.right() {
+            let symbol = buffer[(x, first.y)].symbol();
+            text.push_str(symbol);
+            x += (kit::width(symbol) as u16).max(1);
+        }
+        assert!(text.len() > "(•) ".len() && format!("(•) {long}").starts_with(text.trim_end()), "cut, not garbled: {text:?}");
+        let second = option(1);
+        assert_eq!((second.x, second.y, second.width), (25, first.y + 1, 9), "the next wraps under it, whole");
+        let trigger_y = second.y + 2;
         let label: String = (0..buffer.area.width).map(|x| buffer[(x, trigger_y)].symbol()).collect();
         assert!(label.contains(&*t!("bak.field_trigger")), "the trigger under the wrapped row: {label:?}");
     }

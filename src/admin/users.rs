@@ -1254,16 +1254,22 @@ fn draw_add(frame: &mut Frame, room: &mut Room, area: Rect, f: &AddForm) {
             // Japanese got a rect short by half its name, so the name was
             // cut there and its click covered only what was left, and the
             // row took a tick it had no room for instead of leaving it off.
+            // The first tick is drawn however wide, clamped to the row so
+            // its label is cut inside it, as kit::button cuts its own: in
+            // cells a name of forty Japanese characters (well under
+            // NAME_MAX) outgrows the 80-cell row by itself, and breaking on
+            // it left the line blank, every later library hidden with it,
+            // while Tab still walked onto ticks nobody could see.
             let mut lx = x;
             for (i, (name, on)) in f.libraries.iter().enumerate() {
                 let label = printable(name, NAME_MAX);
                 let cw = kit::width(&label) as u16 + 4;
-                if lx + cw > x + w {
+                if lx + cw > x + w && lx > x {
                     break;
                 }
-                let rect = Rect { x: lx, y, width: cw, height: 1 };
+                let rect = Rect { x: lx, y, width: cw.min((x + w).saturating_sub(lx)), height: 1 };
                 check_row(frame, room, rect, *on, focused == AField::Lib(i), &label, "", Act::FormToggle(index_of(AField::Lib(i))));
-                lx += cw + 3;
+                lx += rect.width + 3;
             }
         }
     }
@@ -1531,6 +1537,49 @@ mod tests {
             }
             assert_eq!(text, format!("[✓] {}", names[i]), "tick {i}: its whole name");
         }
+    }
+
+    /// A first library whose name alone outgrows the row is still drawn:
+    /// forty Japanese characters are 80 cells, so its tick wants 84 of the
+    /// row's 80 at 100×30. The tick starts the row, is clamped to its end
+    /// (the border cell past it survives), shows the start of its name cut
+    /// cleanly, and its click rect is the drawn rect; the second library,
+    /// with no room left, is left off. Breaking on the first tick, as the
+    /// row once did, left the whole line blank.
+    #[test]
+    fn the_add_forms_first_library_tick_is_drawn_clamped_when_its_name_outgrows_the_row() {
+        let _en = english();
+        let long = "日本の音楽アーカイブ".repeat(4);
+        assert_eq!(kit::width(&long), 80);
+        let mut r = room();
+        r.queued = None;
+        r.apply(Done::Loaded(Ok((BTreeMap::new(), vec![long.clone(), "music".to_string()]))));
+        press(&mut r, KeyCode::Char('a'));
+        let Modal::Add(f) = &r.modal else { panic!("the add form") };
+        let fields = f.fields();
+        let index_of = |field: AField| fields.iter().position(|x| *x == field).expect("a field");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut r)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let tick = |i: usize| {
+            let act = Act::FormToggle(index_of(AField::Lib(i)));
+            r.ui.clicks.iter().find(|(_, a)| *a == act).map(|(rect, _)| *rect)
+        };
+        let first = tick(0).expect("the first tick is drawn");
+        assert_eq!(tick(1), None, "no room is left for the second");
+        // The modal is 84 wide at x 8, so the row runs from 10 to 90 and the
+        // border sits at 91.
+        assert_eq!((first.x, first.right()), (10, 90), "clamped to the row: {first:?}");
+        assert_eq!(buffer[(first.right() + 1, first.y)].symbol(), "│", "the border survives");
+        let mut text = String::new();
+        let mut x = first.x;
+        while x < first.right() {
+            let symbol = buffer[(x, first.y)].symbol();
+            text.push_str(symbol);
+            x += (kit::width(symbol) as u16).max(1);
+        }
+        let whole = format!("[✓] {long}");
+        assert!(text.len() > "[✓] ".len() && whole.starts_with(text.trim_end()), "cut, not garbled: {text:?}");
     }
 
     #[test]
