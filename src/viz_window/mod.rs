@@ -65,6 +65,15 @@ pub fn run(args: WindowArgs) -> i32 {
     // be the one that started this, so it is set here too (gpu_pick.rs).
     #[cfg(windows)]
     crate::gpu_pick::quiet_native_crashes();
+    // And the crash known to come from a long executable path is named
+    // before the device is made: on stderr, which the player keeps in its
+    // log as `[viz-window] …` and, as this process's last line when the
+    // driver ends it, in its "visualizer failed" note. The terminal flavour
+    // has no window host to have said it already.
+    #[cfg(windows)]
+    if let Some(line) = crate::gpu_pick::this_long_path_warning("viz-window") {
+        eprintln!("{line}");
+    }
     // The controls speak the player's language: the same detection, so the
     // same answer.
     crate::setup::boot_language();

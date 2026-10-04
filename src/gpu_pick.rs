@@ -168,6 +168,52 @@ pub fn quiet_native_crashes() {
     unsafe { SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
 }
 
+/// The length of the executable's path, in UTF-16 units as Windows counts
+/// it, from which [`long_path_warning`] warns: a little short of where it
+/// was seen to matter, so a path a few characters off the edge is named too.
+const LONG_EXE_PATH: usize = 250;
+
+/// On Windows, the line each of our ways into a GPU device prints before it
+/// makes one, when the executable's path is [`LONG_EXE_PATH`] or longer;
+/// `None` for any shorter. `who` starts the line (`gui --window`,
+/// `viz-window`, `viz-probe`), as the rest of that command's lines start.
+///
+/// NVIDIA's driver (31.0.15.3640 on a GTX 1060, DX12 and Vulkan alike) was
+/// measured to fast-fail inside itself while the device is made once the
+/// path reaches 253 units, 252 being fine: the window never appears, and
+/// the process ends ([`quiet_native_crashes`]) with nothing of ours to say
+/// why. It lives here, beside the crash quieting, for the same reason that
+/// does: all three ways in make their device from the same executable, and
+/// the terminal flavour, which has no window host, still starts the
+/// visualizer's window and runs the probe. A warning alone: the run goes on
+/// as before, since most drivers do not care. It reaches only who keeps it,
+/// though: a parent that captures stderr (the mStream launcher's page log;
+/// the player's own log for its visualizer child, as `[viz-window] …`, and
+/// the "visualizer failed" note when it is the child's last line), the
+/// probe's own report, or a debug log the run writes (`MSTREAM_LOG`, or the
+/// config's `[log]`); a double-click with neither leaves no trace of it, and
+/// no dialog either. Counted through a lossy string, which keeps the count
+/// exact: an unpaired surrogate, one unit, is replaced by U+FFFD, one unit
+/// too.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn long_path_warning(who: &str, exe: &std::path::Path) -> Option<String> {
+    let units = exe.as_os_str().to_string_lossy().encode_utf16().count();
+    (units >= LONG_EXE_PATH).then(|| {
+        format!(
+            "{who}: this player's path is {units} characters long; some graphics drivers \
+             (NVIDIA, measured at 253 and up) crash on paths that long, so if no picture \
+             appears, move the player to a shorter folder"
+        )
+    })
+}
+
+/// [`long_path_warning`] for this process's own executable: `None` too when
+/// the path cannot be read, since then there is nothing to measure.
+#[cfg(windows)]
+pub fn this_long_path_warning(who: &str) -> Option<String> {
+    std::env::current_exe().ok().and_then(|exe| long_path_warning(who, &exe))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +267,52 @@ mod tests {
     #[cfg(not(windows))]
     fn one_instance_off_windows() {
         assert_eq!(windows_masks(), None);
+    }
+
+    /// The long-path warning starts at 250 UTF-16 units, as Windows counts
+    /// a path: a character beyond the Basic Multilingual Plane is two, an
+    /// accented letter one, and a lone surrogate one as well. The line
+    /// starts with the command that says it.
+    #[test]
+    fn a_path_of_250_units_or_more_is_warned_about() {
+        use std::path::{Path, PathBuf};
+        // `C:\` and `\mstream-player.exe` are 22 units around the folder.
+        let exe = |folder: &str| PathBuf::from(format!("C:\\{folder}\\mstream-player.exe"));
+        let ascii = |units: usize| exe(&"d".repeat(units - 22));
+        let warn = |path: &Path| long_path_warning("gui --window", path);
+        assert_eq!(warn(Path::new("C:\\mStream\\mstream-player.exe")), None);
+        assert_eq!(warn(&ascii(249)), None);
+        let line = warn(&ascii(250)).expect("250 units is warned about");
+        assert!(line.starts_with("gui --window: this player's path is 250 characters"), "{line}");
+        assert!(line.contains("shorter folder"), "{line}");
+        assert!(warn(&ascii(253)).unwrap().contains(" 253 characters"));
+
+        // 226 letters and a clef (two units) are 250; with an é instead of
+        // the clef, 249.
+        let folder = "d".repeat(226);
+        assert!(warn(&exe(&format!("{folder}\u{1D11E}"))).is_some());
+        assert_eq!(warn(&exe(&format!("{folder}é"))), None);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let path = ascii(249);
+            let mut wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().collect();
+            wide.insert(3, 0xD800);
+            let lone = PathBuf::from(std::ffi::OsString::from_wide(&wide));
+            assert!(warn(&lone).unwrap().contains(" 250 characters"));
+        }
+    }
+
+    /// The visualizer's process and the probe say the same line under their
+    /// own names: the terminal flavour, which has no window host, meets the
+    /// same driver through them.
+    #[test]
+    fn the_visualizer_and_the_probe_warn_under_their_own_names() {
+        let exe = std::path::PathBuf::from(format!("C:\\{}\\mstream-player.exe", "d".repeat(240)));
+        for who in ["viz-window", "viz-probe"] {
+            let line = long_path_warning(who, &exe).expect("262 units is warned about");
+            assert!(line.starts_with(&format!("{who}: this player's path is 262 ")), "{line}");
+        }
     }
 }
