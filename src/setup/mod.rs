@@ -3167,12 +3167,17 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         // short for the tall cards lists the actions as the stacked page's
         // one-row buttons instead, and only then does the message give up
         // its tail, to keep the list inside the column and off the tips.
+        // The scan's rows are kept only where a scan can be: the wizard's
+        // page, from its first frame on (so nothing moves when the first
+        // poll lands), never the standalone Quick Connect page, which has no
+        // scan and would have cut its message and its cards for blank rows.
         let need = u16::try_from(message.line_count(right.width)).unwrap_or(u16::MAX).max(4);
         let rest = right.bottom().saturating_sub(ry);
+        let scan_rows = done_scan_rows(wizard);
         let (tall, short) = (3 * DONE_ACTIONS as u16, DONE_ACTIONS as u16);
-        let cards = need + 1 + DONE_SCAN_ROWS + tall <= rest;
+        let cards = need + 1 + scan_rows + tall <= rest;
         let list = if cards { tall } else { short };
-        let message_h = need.min(rest.saturating_sub(1 + DONE_SCAN_ROWS + list));
+        let message_h = need.min(rest.saturating_sub(1 + scan_rows + list));
         frame.render_widget(
             message,
             Rect { x: right.x, y: ry, width: right.width, height: message_h },
@@ -3184,7 +3189,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
                 Rect { x: right.x, y: ry, width: right.width, height: 3 },
             );
         }
-        ry += DONE_SCAN_ROWS;
+        ry += scan_rows;
         if !cards {
             let width = done_list_width().min(right.width);
             done_list(frame, wizard, right.x, ry, width);
@@ -3235,22 +3240,31 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         .wrap(Wrap { trim: true });
     // As in the two columns: the rows the wrapped message needs, never
     // fewer than the two this page was drawn around. What goes under it
-    // (a blank, the scan's rows while one runs, the button list) is
-    // counted before the code is let in, so the list never runs past the
-    // column onto the note and the tips.
+    // (a blank, the scan's rows, the button list) is counted before the
+    // code is let in, so the list never runs past the column onto the note
+    // and the tips. The scan's rows are the wizard's from its first frame
+    // (not from the first poll, which would swap a code drawn a moment ago
+    // for the apology line) and never the standalone page's.
     let need = u16::try_from(message.line_count(column.width)).unwrap_or(u16::MAX).max(2);
-    let scan_h = if wizard.scan.is_some() { DONE_SCAN_ROWS } else { 0 };
-    let below = 1 + scan_h + DONE_ACTIONS as u16;
+    let mut scan_h = done_scan_rows(wizard);
 
     if let Some(qr) = wizard.qr.clone() {
         let rows = qr.len() as u16;
-        // The code gets whatever height the message and everything under
-        // it do not need, less the blank under the code itself.
-        let avail = column.bottom().saturating_sub(y).saturating_sub(need + below + 1);
+        // The code gets whatever height the message, the blank under it and
+        // the list do not need, less the blank under the code itself.
+        let fixed = need + 1 + DONE_ACTIONS as u16 + 1;
+        let avail = column.bottom().saturating_sub(y).saturating_sub(fixed);
+        // The code is what the page is for, so the scan's status gives way
+        // to it first: its three lines, else its step on one, else nothing,
+        // whichever lets the whole code in.
+        let fits = [scan_h, scan_h.min(DONE_SCAN_SHORT_ROWS), 0]
+            .into_iter()
+            .find(|&scan| rows + scan <= avail);
         // The half-block code is fixed-size — drawn only when it fits
         // WHOLE (a cropped QR scans as nothing), and otherwise replaced
         // by the one honest line.
-        if rows <= avail {
+        if let Some(scan) = fits {
+            scan_h = scan;
             let qr_width = qr.first().map(|l| kit::width(l)).unwrap_or(0) as u16;
             let x = column.x + (column.width.saturating_sub(qr_width)) / 2;
             for line in &qr {
@@ -3275,18 +3289,27 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     }
     // Only at the floor, with the apology line above it, does the message
     // give up its tail, and then only to keep the list inside the column.
+    let below = 1 + scan_h + DONE_ACTIONS as u16;
     let message_h = need.min(column.bottom().saturating_sub(y + below));
     frame.render_widget(message, Rect { x: column.x, y, width: column.width, height: message_h });
     y += message_h + 1;
 
-    // With no bottom bar on this page, the scan status lives here.
+    // With no bottom bar on this page, the scan status lives here: whole,
+    // or its step alone where the code needed the other rows.
     if let Some(scan) = &wizard.scan {
+        let lines = if scan_h >= DONE_SCAN_ROWS {
+            scan_lines(scan)
+        } else {
+            let mut step = vec![Span::raw(scan.step.clone())];
+            step.extend(scan.pct.map(|pct| Span::styled(format!(" {pct}%"), dim())));
+            vec![Line::from(step)]
+        };
         frame.render_widget(
-            Paragraph::new(scan_lines(scan)).alignment(Alignment::Center),
-            Rect { x: column.x, y, width: column.width, height: 3 },
+            Paragraph::new(lines).alignment(Alignment::Center),
+            Rect { x: column.x, y, width: column.width, height: scan_h.saturating_sub(1) },
         );
-        y += scan_h;
     }
+    y += scan_h;
 
     // The same button list, one row each, centered.
     let width = done_list_width().min(column.width);
@@ -3296,6 +3319,18 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 /// The rows the Done page keeps for the scan's status: its three lines
 /// and a blank under them.
 const DONE_SCAN_ROWS: u16 = 4;
+
+/// The rows the stacked Done page keeps for the scan's step alone, and a
+/// blank under it, when its three lines would keep the code off the page.
+const DONE_SCAN_SHORT_ROWS: u16 = 2;
+
+/// The rows the Done page keeps for the scan's status: the wizard's from
+/// its first frame, before any poll has answered, so the page does not move
+/// (or, stacked, lose its code) when the first answer lands; none on the
+/// standalone Quick Connect page, which never scans.
+fn done_scan_rows(wizard: &Wizard) -> u16 {
+    if wizard.standalone { 0 } else { DONE_SCAN_ROWS }
+}
 
 /// The cells the widest Done action takes as a one-row button, its two
 /// cells of padding a side counted; measured as `kit::button` measures, so
@@ -3398,17 +3433,15 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
     }
 
     let y = inner.bottom().saturating_sub(1);
-    let up = kit::button(frame, &mut wizard.ui, Rect { x: inner.x, y, width: inner.width, height: 1 }, &t!("browse.up"), false, Act::BrowseUp);
-    let open = kit::button(frame, &mut wizard.ui, Rect { x: up.right() + 1, y, width: inner.width, height: 1 }, &t!("browse.open"), false, Act::BrowseEnter);
-    let add = kit::button(
-        frame,
-        &mut wizard.ui,
-        Rect { x: open.right() + 1, y, width: inner.width, height: 1 },
-        &t!("browse.add"),
-        true,
-        Act::BrowseAdd,
-    );
-    kit::button(frame, &mut wizard.ui, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, &t!("browse.close"), false, Act::BrowseCancel);
+    // Each button gets the room left before the modal's right edge, so the
+    // kit cuts the last label inside the frame: the Japanese row is 57 cells,
+    // and a narrow window's modal is not, which drew 閉じる (and its click
+    // rect) over the border and past it.
+    let row = |x: u16| Rect { x, y, width: inner.right().saturating_sub(x), height: 1 };
+    let up = kit::button(frame, &mut wizard.ui, row(inner.x), &t!("browse.up"), false, Act::BrowseUp);
+    let open = kit::button(frame, &mut wizard.ui, row(up.right() + 1), &t!("browse.open"), false, Act::BrowseEnter);
+    let add = kit::button(frame, &mut wizard.ui, row(open.right() + 1), &t!("browse.add"), true, Act::BrowseAdd);
+    kit::button(frame, &mut wizard.ui, row(add.right() + 1), &t!("browse.close"), false, Act::BrowseCancel);
 }
 
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
@@ -3956,17 +3989,6 @@ pub(crate) mod tests {
         assert!(wizard.logo_art.is_none() && wizard.logo_gfx.protocol().is_none());
     }
 
-    /// Puts the process locale back to English when a test that switched
-    /// it ends, passing or failing, so no test after it reads another
-    /// language.
-    struct BackToEnglish;
-
-    impl Drop for BackToEnglish {
-        fn drop(&mut self) {
-            rust_i18n::set_locale("en");
-        }
-    }
-
     /// The text of the cells from `x` up to `end` on row `y`, a wide
     /// character's hidden cell left out.
     fn cells_text(buf: &ratatui::buffer::Buffer, y: u16, x: u16, end: u16) -> String {
@@ -3984,13 +4006,19 @@ pub(crate) mod tests {
     /// name of the language (it showed "▾ 日"), and the button frames the
     /// whole label (it framed "続け" of "続ける ▸") with its right edge on
     /// the bar's, where a character count left it short.
+    ///
+    /// Nothing here switches the process-global locale, which tests that
+    /// assert English without the lock would read mid-draw: the chip's
+    /// label is the language's own name from `LANGS`, drawn whatever the
+    /// locale once the index is set, and the button is the bar's call (its
+    /// x from `kit::tall_width`, as the bar computes it) with the label
+    /// translated at the call. The English wizard checks the bar's own path.
     #[test]
     fn the_chip_and_continue_show_their_whole_cjk_labels_at_100x30() {
         let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _english = BackToEnglish;
         for code in ["ja", "zh"] {
             let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
-            wizard.set_language(LANGS.iter().position(|(c, _)| *c == code).expect(code));
+            wizard.lang = LANGS.iter().position(|(c, _)| *c == code).expect(code);
             wizard.add_folder("/srv/music".to_string());
             let buf = draw_100x30(&mut wizard);
 
@@ -3999,12 +4027,30 @@ pub(crate) mod tests {
             assert_eq!(usize::from(chip.width), kit::width(&chip_label), "{code}: its width");
             assert_eq!(cells_text(&buf, 0, chip.x, chip.right()), chip_label, "{code}: the chip");
 
-            let label = t!("folders.continue_enabled").to_string();
-            let button = click_rect(&wizard, Act::ContinueFolders);
+            let label = t!("folders.continue_enabled", locale = code).to_string();
+            let backend = ratatui::backend::TestBackend::new(100, 3);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            let mut ui = kit::Surface::<Act>::new();
+            let bar = Rect { x: 2, y: 0, width: 96, height: 3 };
+            let mut button = Rect::default();
+            terminal
+                .draw(|frame| {
+                    let x = bar.right().saturating_sub(kit::tall_width(&label));
+                    let at = Rect { x, y: bar.y, width: bar.width, height: 3 };
+                    button = kit::tall_button(frame, &mut ui, at, &label, true, Act::ContinueFolders);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
             assert_eq!(button.right(), 98, "{code}: the frame ends on the bar's right edge");
-            let inside = cells_text(&buf, button.y + 1, button.x + 1, button.right() - 1);
+            let inside = cells_text(buf, button.y + 1, button.x + 1, button.right() - 1);
             assert_eq!(inside, format!("  {label}  "), "{code}: the label inside its frame");
         }
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        wizard.add_folder("/srv/music".to_string());
+        draw_100x30(&mut wizard);
+        let button = click_rect(&wizard, Act::ContinueFolders);
+        assert_eq!(button.right(), 98, "the bar's own frame ends on its right edge");
+        assert_eq!(button.width, kit::tall_width(&t!("folders.continue_enabled")));
     }
 
     /// A Done page on a server at port 3000 with a Quick Connect code, in
@@ -4093,6 +4139,72 @@ pub(crate) mod tests {
         let mut wizard = done_page(true);
         draw_100x30(&mut wizard);
         assert_eq!(click_rect(&wizard, done_action(0)).height, 3, "the tall cards at 100×30");
+        // The standalone Quick Connect page has no scan, so it keeps no
+        // rows for one: at the floor its message shows whole, where four
+        // blank rows kept for a scan cut its last three.
+        let mut wizard = done_page(true);
+        wizard.standalone = true;
+        let buf = draw_at(&mut wizard, 58, 20);
+        let message = format!("{} {}", t!("done.running_port", port = 3000), t!("done.scan_left"));
+        let text = done_text(&buf, true);
+        assert!(text.join(" ").contains(&message), "the standalone page at the floor: {text:#?}");
+    }
+
+    /// The stacked Done page lets the half-block code in before the scan's
+    /// status: at a height where the code fits only without the scan's
+    /// three lines it is drawn, with the scan's step on one row or none,
+    /// and the list stays inside the column. Whether the code shows never
+    /// depends on whether a poll has answered yet, so the first answer
+    /// cannot swap a code just drawn for the apology line.
+    #[test]
+    fn the_stacked_done_page_keeps_its_code_before_the_scan_status() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let rows: u16 = 29;
+        let code_row = "▀".repeat(29);
+        let shows_code = |buf: &ratatui::buffer::Buffer| {
+            (0..buf.area.height).filter(|&y| row_text(buf, y).contains(&code_row)).count()
+        };
+        // The code comes in as soon as it fits with the message (two rows
+        // here), the list and the blanks between: no rows are held back for
+        // the scan's three lines (y 4 for the heading, the column's bottom
+        // at the height less four).
+        let threshold = 4 + rows + 2 + 1 + DONE_ACTIONS as u16 + 1 + 4;
+        let mut drawn_at = None;
+        for height in 40..=60 {
+            let mut shown = Vec::new();
+            for scan in [None, Some(40)] {
+                let mut wizard = done_page(false);
+                wizard.qr = Some(vec![code_row.clone(); usize::from(rows)]);
+                wizard.scan = scan.map(|pct| ScanWidget {
+                    step: "Scanning media".to_string(),
+                    pct: Some(pct),
+                    detail: "1204 tracks so far".to_string(),
+                });
+                let buf = draw_at(&mut wizard, 100, height);
+                let code = shows_code(&buf);
+                assert!(code == 0 || code == usize::from(rows), "{height} rows: the code whole or not at all");
+                let list_end = click_rect(&wizard, done_action(DONE_ACTIONS - 1)).bottom();
+                assert!(list_end <= height - 4, "{height} rows: the list ends at {list_end}");
+                // The scan's step from two rows past the threshold, and its
+                // whole three lines from four past it (and wherever the
+                // code is not drawn at all).
+                let text = done_text(&buf, false).join("\n");
+                if scan.is_some() && (code == 0 || height >= threshold + DONE_SCAN_SHORT_ROWS) {
+                    assert!(text.contains("Scanning media"), "{height} rows: {text}");
+                }
+                if scan.is_some() && (code == 0 || height >= threshold + DONE_SCAN_ROWS) {
+                    assert!(text.contains("1204 tracks so far"), "{height} rows: {text}");
+                } else if scan.is_some() {
+                    assert!(!text.contains("1204 tracks so far"), "{height} rows: {text}");
+                }
+                shown.push(code > 0);
+            }
+            assert_eq!(shown[0], shown[1], "{height} rows: the code alike before and after a poll");
+            if shown[0] && drawn_at.is_none() {
+                drawn_at = Some(height);
+            }
+        }
+        assert_eq!(drawn_at, Some(threshold));
     }
 
     #[test]
