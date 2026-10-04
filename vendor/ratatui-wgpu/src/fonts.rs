@@ -103,6 +103,34 @@ impl Font<'_> {
         )
     }
 
+    /// Whether this face composes `text` from several pictures that its positioning places,
+    /// rather than joining it into one: the renderer then draws every picture of it into the
+    /// cell's box (VENDORED.md, change 22). Windows 10's Segoe UI Emoji composes a family so,
+    /// and [`Font::joins`] says no of it. Public so the player's tests know which to expect.
+    pub fn composes(
+        &self,
+        text: &str,
+    ) -> bool {
+        if self.font.tables().colr.is_none() {
+            return false;
+        }
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let shaped = rustybuzz::shape(&self.font, &[], buffer);
+        let mut cell = Cell::EMPTY;
+        cell.set_symbol(text);
+        let rowmap = vec![0; text.len()];
+        let runs = crate::backend::wgpu_backend::composed_runs(
+            &self.font,
+            shaped.glyph_infos(),
+            shaped.glyph_positions(),
+            &rowmap,
+            std::slice::from_ref(&cell),
+        );
+        runs.into_iter().next().flatten().is_some()
+    }
+
     /// Whether this face's glyph for `ch` is one the backend draws in colour: COLR layers, or a
     /// colour bitmap (sbix or CBDT, a PNG or premultiplied BGRA). A face's monochrome bitmaps
     /// (EBDT, an old CJK face's hinted strikes) and a text face's outlines are not. Asked only

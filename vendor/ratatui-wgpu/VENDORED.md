@@ -364,28 +364,33 @@ and the patch entry can go.
       face has still goes to the first face with the most of it. No face is named. No glyph
       the GUI draws of its own has emoji presentation (its census keeps them to symbols one
       cell wide, and no such character has it).
-    - Segoe UI Emoji has no country flags: a regional-indicator pair shapes to two monochrome
-      letters (Windows 10's are narrow and half an em tall), and only the first was drawn,
-      centred in the flag's two cells. A pair that shapes to two advancing glyphs is now
-      drawn a letter to a cell, `J` then `P`, each in a box one cell wide, as Windows
+    - No face the window has on Windows 10 has country flags. Neither Segoe UI Emoji's
+      regional indicators nor Segoe UI Symbol's are in colour, so the preference above passes
+      them by, and Segoe UI Symbol, the earlier face with both, draws the pair: two monochrome
+      letters (narrow, half an em tall), of which only the first was drawn, centred in the
+      flag's two cells. A pair that shapes to two advancing glyphs, `.notdef` not counted, is
+      now drawn a letter to a cell, `J` then `P`, each in a box one cell wide, as Windows
       Terminal draws it. The second letter's entry stands in the wide cell's continuation, so
       the composite takes that entry's background from the flag's cell, not from the
       continuation's default one, which would have been a gap in a highlighted row. A face
       with the flag (Apple Color Emoji, Noto Color Emoji) shapes the pair to one glyph and
-      draws as before. A subdivision flag needs nothing: a face without its picture hides or
-      joins the tags and draws its 🏴 (Windows 10's Segoe UI Emoji joins them into its 🏴
-      glyph, a dark flag whose pole alone stands out from a dark ground), which is change
-      16's degradation.
+      draws as before, and a face with neither letter (the last resort, on a system with no
+      emoji face) keeps change 16's one box over both cells rather than a box to a cell. A
+      subdivision flag needs nothing: no face on Windows 10 maps its tags, the shaper hides
+      them, and the face with its 🏴 draws that, which is change 16's degradation.
+    - A consequence on Windows 10, accepted: 🏴 has emoji presentation, so a subdivision flag
+      (England, Scotland, Wales) and a plain 🏴 now draw from Segoe UI Emoji's colour black
+      flag, as Windows Terminal draws them, where Segoe UI Symbol's light outline drew before.
+      On the player's dark ground the black flag's pole alone stands out. Keeping the outline
+      would take a rule for this one character against the presentation Unicode gives it.
     - What follows a glyph left out is left out too. Windows 10's Segoe UI Emoji has no
       family picture: it composes 👨‍👩‍👧 from family-member glyphs, the man and the woman
       advancing and the girl not, placed back over the woman by its positioning. Change 16
       dropped the woman but drew the girl, which does not advance, at the man's place, and
       she reached into the cell before the family's. A glyph that does not advance is now
       drawn only while its cell has drawn no more than its advancing glyphs; combining marks
-      before a dropped glyph are drawn as before. The family now draws as its man alone, in
-      colour, with the dark stroke Segoe's family-member glyph has at its left; the whole
-      composition, as Windows Terminal draws it, would need several glyphs fitted into one
-      box, which nothing here does.
+      before a dropped glyph are drawn as before. Change 22 then draws such a composition
+      whole.
     - Latent: a blinking cell's toggle redraws its own index alone, so an unjoined flag's
       second letter would not blink with the first; the player blinks no cell.
     Checked offscreen on Windows 10 (GTX 1060, DX12) with Segoe UI Emoji (COLR) and Segoe UI
@@ -399,8 +404,12 @@ and the patch entry can go.
     Symbol in the cell's gold and ♥️ from the emoji face;
     `an_unjoined_sequence_draws_its_base_and_nothing_after` draws 🇦🇦 and 🇯🇵 as each letter
     exactly as it draws alone, in cells 0 and 1, with nothing after (it fails with the split
-    turned off), and `|👨‍👩‍👧|` with both bars as `|  |` draws them (it failed at cell 0 before
-    the corollary). Where the symbol face lacks 🎵 (macOS's do) the first default
+    turned off), both with the test faces and in the window's order with Segoe UI Symbol
+    ahead of the emoji face, which is where the window's letters come from;
+    `emoji_sequences_draw_as_one_picture_in_their_cells` holds 🇺🇸's two cells to each letter
+    drawn alone; `a_flag_no_face_has_draws_as_one_box_like_any_missing_emoji` draws 🇯🇵 with
+    Hack alone exactly as 🎵, one box over two cells (it failed with `.notdef` counted). Where
+    the symbol face lacks 🎵 (macOS's do) the first default
     picture a text face has stands in, and a host with none skips with a line; a face with
     the flag or the family skips those checks with a line, as before. Two tests met Windows
     10's face and were made to tell a picture from its base:
@@ -410,6 +419,46 @@ and the patch entry can go.
     exactly as 🏴 is a face without the picture, whatever `Font::joins` says). Live, in the
     player's window on the same machine: an album of emoji titles drew 🎵 and the family's
     man in colour, ❤️ as before, the bundled stars and tick unchanged, and 🇯🇵 as `J` `P`.
+22. **A composed emoji drawn whole; a removal takes only its own cell's entry**
+    (`backend/wgpu_backend.rs`, `flush`, `composed_runs`, `rasterize_glyph`;
+    `utils/text_atlas.rs`, `Key::run`). Two things change 21 left, found in its review:
+    - Windows 10's Segoe UI Emoji has no picture for a family or a couple. It composes them
+      from member glyphs by its positioning: 👨‍👩‍👧 shapes to a man (advance 1696 units, offset
+      256) and a woman (1552) and a girl who does not advance, placed 1552 units back, in
+      front of them; 👩‍❤️‍👨 to a woman, a heart placed over her and a man; 👨‍👦 to a man and a
+      boy placed in front of him. Windows Terminal draws the whole composition in the cell,
+      and change 21 drew the first person alone. A cell is now composed when the face is a
+      COLR face, the cluster has emoji presentation, every glyph of it with ink is a COLR
+      picture, and a picture after the first does not advance, which is what tells a
+      composition from separate emoji the face cannot join: 👨‍🦖, a man and a dinosaur that
+      both advance, still draws as its man by change 16. The cell is drawn once, as its first
+      glyph's entry, into one box its cells wide: each picture is painted at its pen position
+      plus its offsets, and the run is fitted to its total advance (3248 units for the
+      family) as one glyph is to its own, with the ink's height taken over every picture for
+      change 15's fit. The atlas key carries a hash of the pictures and their places
+      (`Key::run`, 0 for one glyph), as one first glyph can begin different runs. sbix and
+      CBDT faces (Apple, Noto) join what they know into one glyph and never take this path.
+      `Font::composes` (public, new) says whether a face composes a string, by the same rule,
+      as `Font::joins` says whether it joins one: the player's tests ask it.
+    - `Rendered` and `Sourced` are keyed by place, glyph and width, and a removal took the
+      key out of `Rendered` whichever cell had put it there. Change 21 made one place
+      routinely change hands: an unjoined flag's second letter stands in the continuation and
+      belongs to its flag's cell, so `x🇵🇪` redrawn as `🇯🇵` puts the same P at the same place,
+      cell 1's on the first frame and cell 0's on the second, and cell 1's removal took the
+      entry cell 0 had just put there (and the reverse with the frames swapped). The letter was
+      left on screen as the frame before drew it, in that frame's colours, and no entry drew
+      it again until its row changed. A removal now takes an entry only when the entry's
+      `RenderInfo::cell` is the cell whose `Sourced` is being diffed.
+    Checked offscreen on Windows 10 (GTX 1060, DX12) with Segoe UI Emoji
+    (`src/gui/window/render_tests.rs`): `a_family_the_face_composes_draws_whole_in_its_cells`
+    draws `|👨‍👩‍👧|` with both bars as `|  |` draws them and the family's ink 18 px wide and 16
+    tall at 24 px, where the man alone was 11 wide and 20 tall (the test failed so), and
+    `an_unjoined_sequence_draws_its_base_and_nothing_after` holds that 👨‍🦖 is not composed;
+    `a_flag_letter_that_changes_cells_in_place_is_drawn_by_its_new_cell` draws `x🇵🇪|` (gold)
+    then `🇯🇵|`, the reverse, and the same with 🇦🇦, each cell for cell as the second line draws
+    fresh, and failed at cell 1 before the removal took the owner into account. A row of 👨‍👩‍👧,
+    👩‍❤️‍👨, 👨‍👦 and 👨‍👩‍👧‍👦 drawn at 48 px in the window's faces, looked at, showed each group
+    whole in its two cells, with 👨‍🦖 still its man.
 
 ### Tests
 

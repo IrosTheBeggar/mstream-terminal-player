@@ -604,12 +604,12 @@ const RAINBOW: &str = "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}";
 /// any face: ink in its own cells and nothing in the cells after. England's
 /// flag alone may also be joined yet drawn as its base: Segoe UI Emoji has
 /// a glyph for it and no picture in it (CI run 37028415435; on Windows 10
-/// the tags join into its 🏴 glyph, whose pole alone is ink), and the base 🏴
-/// is the degradation the window specifies — never a box, never empty
-/// cells. Any other joined case drawn as its base is the renderer drawing a
-/// cluster's first character, and fails; and at least one sequence of
-/// several emoji must be drawn joined, so a skip cannot hide that on every
-/// case at once.
+/// it maps no tags, the shaper hides them, and its 🏴 alone is drawn, a
+/// dark flag whose pole alone is ink), and the base 🏴 is the degradation
+/// the window specifies — never a box, never empty cells. Any other joined
+/// case drawn as its base is the renderer drawing a cluster's first
+/// character, and fails; and at least one sequence of several emoji must be
+/// drawn joined, so a skip cannot hide that on every case at once.
 #[test]
 fn emoji_sequences_draw_as_one_picture_in_their_cells() {
     let _gpu = one_at_a_time();
@@ -651,9 +651,14 @@ fn emoji_sequences_draw_as_one_picture_in_their_cells() {
         }
         if !emoji.joins(text) {
             // A country flag the face has no picture for is its two letters, one to a
-            // cell (VENDORED.md, change 21), not the first letter alone in both.
+            // cell (VENDORED.md, change 21), each exactly as it draws alone: the first
+            // letter alone, centred in both cells, inks both as well.
             if case == "flag" {
-                assert!(frame.inked(0, 0) && frame.inked(1, 0), "flag: not a letter to a cell");
+                for (col, letter) in [(0, "\u{1F1FA}"), (1, "\u{1F1F8}")] {
+                    let Some(alone) = row(&faces, 6, format!("{letter}|")) else { return };
+                    let same = frame.cell(col, 0) == alone.cell(0, 0);
+                    assert!(same, "flag: cell {col} is not {letter}");
+                }
             }
             eprintln!("skipped {case}: the emoji face has no one picture for it");
             continue;
@@ -698,12 +703,19 @@ fn emoji_sequences_draw_as_one_picture_in_their_cells() {
 /// Flags are the exception: a pair of regional indicators a face has no
 /// picture for is its two letters, each in a cell of its own, as Windows
 /// Terminal draws it (VENDORED.md, change 21). Its first letter alone, a
-/// narrow letter in two cells, was a sliver: Segoe UI Emoji has no country
-/// flags, and 🇯🇵 was a sliver of a `J` on Windows. A pair that is no
-/// country (A A) takes that path in Apple Color Emoji too, and Japan's
-/// does in Segoe UI Emoji; Noto Color Emoji has one picture for any pair.
-/// Either way: ink in its own two cells, none after, and a pair the face
-/// does not join is each letter exactly as it draws alone.
+/// narrow letter in two cells, was a sliver: no face the window has on
+/// Windows 10 has country flags, and 🇯🇵 was a sliver of a `J` there. A pair
+/// that is no country (A A) takes that path in Apple Color Emoji too, and
+/// Japan's does in Segoe UI Emoji; Noto Color Emoji has one picture for any
+/// pair. Either way: ink in its own two cells, none after, and a pair the
+/// face does not join is each letter exactly as it draws alone.
+///
+/// The test faces have no symbol face, but the window has one before the
+/// emoji face, and on Windows it is Segoe UI Symbol that draws the letters:
+/// neither face's regional indicators are in colour, so the colour
+/// preference passes them by, and the earlier face with both wins. So the
+/// flag is drawn in the window's order too, where the system's symbol face
+/// has the letters.
 #[test]
 fn an_unjoined_sequence_draws_its_base_and_nothing_after() {
     let _gpu = one_at_a_time();
@@ -732,9 +744,34 @@ fn an_unjoined_sequence_draws_its_base_and_nothing_after() {
             assert!(frame.cell(col, 0) == alone.cell(0, 0), "{pair}: cell {col} is not {letter}");
         }
     }
+    // In the window's order: Hack, the bundled symbols, the system's symbol face, the emoji
+    // face. Where the symbol face has the letters, they are its, each as it draws alone.
+    let (j, p) = ("\u{1F1EF}", "\u{1F1F5}");
+    match symbol_fallback().filter(|symbol| symbol.joins(j) && symbol.joins(p)) {
+        None => eprintln!("no system symbol face with the regional indicators"),
+        Some(symbol) => {
+            let window = [hack().unwrap(), symbols().unwrap(), symbol, emoji.clone()];
+            let pair = format!("{j}{p}");
+            let Some(frame) = row(&window, 6, format!("{pair}|")) else { return };
+            let Some(bar) = row(&window, 6, "  |") else { return };
+            assert!(frame.cell(2, 0) == bar.cell(2, 0), "window order: the flag drew into cell 2");
+            if window[2..].iter().any(|face| face.joins(&pair)) {
+                eprintln!("window order: a face has one picture for {pair}");
+            } else {
+                for (col, letter) in [(0, j), (1, p)] {
+                    let Some(alone) = row(&window, 6, format!("{letter}|")) else { return };
+                    assert!(alone.inked(0, 0), "window order: {letter} alone left its cell empty");
+                    let same = frame.cell(col, 0) == alone.cell(0, 0);
+                    assert!(same, "window order: cell {col} is not {letter}");
+                }
+            }
+        }
+    }
     let text = "\u{1F468}\u{200D}\u{1F996}";
     assert_eq!(crate::kit::width(text), 2);
     assert!(!emoji.joins(text), "the emoji face has a picture for a man ZWJ a dinosaur");
+    // Two emoji that both advance are not a composition (change 22): nothing placed them.
+    assert!(!emoji.composes(text), "the emoji face composes a man ZWJ a dinosaur");
     let Some(frame) = row(&faces, 6, text) else { return };
     let Some(alone) = row(&faces, 6, "\u{1F468}") else { return };
     for col in 0..6 {
@@ -743,24 +780,93 @@ fn an_unjoined_sequence_draws_its_base_and_nothing_after() {
     for col in 2..6 {
         assert!(!frame.inked(col, 0), "ink in cell {col}: the dinosaur overdrew the next cells");
     }
-    // A family the face composes from its people rather than joining: Windows 10's Segoe UI
-    // Emoji shapes 👨‍👩‍👧 to the man and the woman, who advance, and the girl, who does not and
-    // is placed back over the woman. The woman is not drawn, and neither is what hangs on her:
-    // the girl drawn at the man's place reached into the cell before the family's. The face
-    // also had the family whole before change 21 (the test faces have no symbol face), so this
-    // is change 16's rule (VENDORED.md), checked where a face composes rather than joins.
+}
+
+/// A family a colour face composes from its people, rather than joining it into one glyph,
+/// draws whole in its two cells, as Windows Terminal draws it: Windows 10's Segoe UI Emoji
+/// shapes 👨‍👩‍👧 to a man and a woman, who advance, and a girl, who does not and is placed back
+/// in front of them, and the three are drawn into one box, fitted to the run's advance
+/// (VENDORED.md, change 22). Before, the man alone was drawn: three people side by side are
+/// wider than they are tall, and one alone is taller than wide, so the family's ink must be
+/// wider than tall. Nothing reaches the cells around it either: the girl drawn at the man's
+/// place once reached into the cell before the family's. A face that joins the family (Apple,
+/// Noto), or neither joins nor composes it, skips with a line.
+#[test]
+fn a_family_the_face_composes_draws_whole_in_its_cells() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
-    if emoji.joins(family) {
-        eprintln!("the emoji face has one picture for the family");
+    let emoji = faces.last().unwrap();
+    if emoji.joins(family) || !emoji.composes(family) {
+        eprintln!("skipped: the emoji face does not compose the family from its people");
         return;
     }
-    // Its man is a family member's glyph, not the man's own, so only the cells around it are
-    // compared, with `|` and a blank two cells wide.
     let Some(frame) = row(&faces, 6, format!("|{family}|")) else { return };
     let Some(bars) = row(&faces, 6, "|  |") else { return };
-    assert!(frame.inked(1, 0) || frame.inked(2, 0), "|family|: the family's cells are empty");
     for col in [0, 3, 4, 5] {
         assert!(frame.cell(col, 0) == bars.cell(col, 0), "|family|: cell {col} is not |  |'s");
+    }
+    let Some(([left, right], [top, bottom])) = ink_extent(&frame, 1, 2) else {
+        panic!("|family|: the family's cells are empty");
+    };
+    let (wide, tall) = (right - left + 1, bottom - top + 1);
+    eprintln!("family: inked x {left}..={right}, y {top}..={bottom}: {wide} wide, {tall} tall");
+    assert!(wide > tall, "the family is drawn as one person ({wide} wide, {tall} tall)");
+    let pixels = frame.cell(1, 0).into_iter().chain(frame.cell(2, 0));
+    assert!(pixels.filter(|&px| coloured(px)).count() > 0, "the family has no colour");
+}
+
+/// A flag no face has letters for draws as one box over its two cells, as any emoji the faces
+/// lack does, not a box to a cell: the split into letters (VENDORED.md, change 21) counts only
+/// glyphs that are not `.notdef`. With Hack alone, the last resort on a system with no emoji
+/// face, 🇯🇵 must draw exactly as 🎵 does, one `.notdef` in a box two cells wide.
+#[test]
+fn a_flag_no_face_has_draws_as_one_box_like_any_missing_emoji() {
+    let _gpu = one_at_a_time();
+    let faces = [hack().unwrap()];
+    assert!(!faces[0].joins("\u{1F1EF}") && !faces[0].joins("\u{1F3B5}"), "Hack has them");
+    let Some(flag) = row(&faces, 6, "\u{1F1EF}\u{1F1F5}|") else { return };
+    let Some(note) = row(&faces, 6, "\u{1F3B5}|") else { return };
+    for col in 0..6 {
+        assert!(flag.cell(col, 0) == note.cell(col, 0), "cell {col} is not what 🎵 draws there");
+    }
+}
+
+/// A glyph that stays where it was while its cell changes owner is drawn as its new owner
+/// draws it: an unjoined flag's second letter stands in its flag's continuation and is the
+/// flag's cell's, so the same letter at the same place can be one cell's on one frame and the
+/// next cell's on the next (`x🇵🇪` then `🇯🇵`: the P in cell 1 is cell 1's, then cell 0's). The
+/// glyphs a frame draws are keyed by place, glyph and width alone, and the old owner's removal
+/// took away the entry the new owner had just put there (VENDORED.md, change 22): the letter
+/// was left on screen as the frame before had drawn it, in that frame's colours, and nothing
+/// drew it again until its row changed. So the first frame is gold and the second white, and
+/// each second frame must draw cell for cell as it does fresh. Japan and Peru shape to their
+/// letters in Segoe UI Emoji, the A pair in Apple Color Emoji too; a face with every pair's
+/// picture (Noto Color Emoji) draws pictures and holds the same.
+#[test]
+fn a_flag_letter_that_changes_cells_in_place_is_drawn_by_its_new_cell() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let (aa, jp, pe) = ("\u{1F1E6}\u{1F1E6}", "\u{1F1EF}\u{1F1F5}", "\u{1F1F5}\u{1F1EA}");
+    let cases = [
+        (format!("x{pe}|"), format!("{jp}|")),
+        (format!("{jp}|"), format!("x{pe}|")),
+        (format!("x{aa}|"), format!("{aa}|")),
+        (format!("{aa}|"), format!("x{aa}|")),
+    ];
+    let gold = Style::new().fg(Color::Rgb(GOLD[0], GOLD[1], GOLD[2]));
+    for (before, after) in cases {
+        let first = Line::from(Span::styled(before.clone(), gold));
+        let frames = vec![vec![first], vec![Line::from(after.clone())]];
+        let drawn = render(faces.clone(), 6, frames, TextureFormat::Rgba8Unorm);
+        let Some(frame) = frame_or_skip(drawn) else { return };
+        let Some(fresh) = row(&faces, 6, after.clone()) else { return };
+        for col in 0..6 {
+            assert!(
+                frame.cell(col, 0) == fresh.cell(col, 0),
+                "{before:?} then {after:?}: cell {col} is not what a fresh {after:?} draws there"
+            );
+        }
     }
 }
 
@@ -935,8 +1041,9 @@ fn a_pasted_subdivision_flag_shows_in_a_field_as_one_picture() {
     }
     // Only a face with the flag's picture is sure to cover both cells; one
     // without (Segoe UI Emoji has no subdivision flags) draws the black
-    // flag alone, whose ink is the face's to place. Windows 10's joins the
-    // tags into its 🏴 glyph, so `joins` alone does not tell them apart:
+    // flag alone, whose ink is the face's to place. Windows 10's maps no
+    // tags, which the shaper hides, so its 🏴 is the one advancing glyph and
+    // `joins` says yes; `joins` alone does not tell the two apart:
     // the flag drawn exactly as 🏴 is drawn is a face without the picture.
     let Some(black) = row(&faces, 8, "ab\u{1F3F4}") else { return };
     let as_black = (2..4).all(|col| flag.cell(col, 0) == black.cell(col, 0));

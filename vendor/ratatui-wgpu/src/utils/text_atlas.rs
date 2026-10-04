@@ -13,6 +13,11 @@ pub(crate) struct Key {
     pub(crate) font: u64,
     /// The cells the glyph's box spans.
     pub(crate) cells: u32,
+    /// 0 for one glyph; for a cell a colour face composes from several pictures (an emoji
+    /// family its positioning builds from its people), a hash of the pictures and their places,
+    /// which are drawn into this one box (`flush`, `composed_runs`). `glyph` is then the first
+    /// picture's.
+    pub(crate) run: u64,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
