@@ -11,13 +11,18 @@
 //! over D-Bus, nothing linked — while macOS and Windows use rfd's native
 //! NSOpenPanel / IFileOpenDialog, which link only system frameworks.
 //!
-//! The dialog is modal from the wizard's point of view: the call blocks the
-//! event loop until the user answers. That is the behavior a picker should
-//! have, and on a headless box the Linux portal call fails in about a
-//! millisecond (no session bus), which is what routes the wizard to its
-//! server-side browser instead.
+//! The call blocks its caller until the user answers, so every caller runs
+//! it on a worker thread and the UI stays live while a dialog is open. On a
+//! headless box the Linux portal call fails in about a millisecond (no
+//! session bus), which is what routes the wizard to its server-side browser
+//! instead. On Windows, when the player runs in a window of its own, the
+//! dialogs belong to that window ([`set_owner`]).
 
+#[cfg(windows)]
+use std::num::NonZeroIsize;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 /// What came back from asking for a folder — or, through
 /// [`pick_torrent`], a file.
@@ -110,9 +115,88 @@ fn osascript_path(script: &str) -> Result<Option<PathBuf>, String> {
     }
 }
 
+// ── The dialogs' owner (Windows) ────────────────────────────────────────────
+
+/// The HWND of the window the Windows dialogs belong to, 0 for none: the
+/// player's own window while one is open. Unowned, IFileOpenDialog opened
+/// wherever it last stood (the screen's top-left corner the first time),
+/// left the window clickable behind it, and on closing handed the focus to
+/// whatever window was next in z-order (in the v0.12.0 Windows smoke, an
+/// unrelated topmost one). Owned, it is centred over the window, modal to
+/// it (Show disables it until the answer) and gives it the focus back as it
+/// closes. A number rather than the window itself: winit gives out a
+/// window's handle on its loop's thread alone, and every dialog runs on a
+/// worker thread. A terminal run never sets one, and its dialogs stay
+/// unowned as before.
+#[cfg(windows)]
+static OWNER: AtomicIsize = AtomicIsize::new(0);
+
+/// Name the window the dialogs open over, or with `None` withdraw it: the
+/// window host (`gui::window`) sets its window's HWND as it opens it and
+/// withdraws it at its teardown, before the window is destroyed. A quit
+/// with a dialog up ends the run as it did unowned: the process's end takes
+/// the dialog with it.
+///
+/// The owner lives on the loop's thread and the dialog on a worker's.
+/// Windows allows that (Show disables and later re-enables the owner with
+/// cross-thread messages, and joins the two threads' input while the dialog
+/// is up), and neither thread waits on the other: the loop keeps drawing,
+/// and the worker pumps the dialog's own modal loop.
+#[cfg(windows)]
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
+pub fn set_owner(hwnd: Option<NonZeroIsize>) {
+    OWNER.store(hwnd.map_or(0, NonZeroIsize::get), Ordering::Release);
+}
+
+/// The published owner, if a window has named one.
+#[cfg(windows)]
+fn owner() -> Option<Owner> {
+    NonZeroIsize::new(OWNER.load(Ordering::Acquire)).map(Owner)
+}
+
+/// An HWND in the shape rfd's `set_parent` takes. rfd reads the handle once,
+/// as the dialog is built, and hands it to IFileDialog::Show as the owner.
+#[cfg(windows)]
+struct Owner(NonZeroIsize);
+
+#[cfg(windows)]
+impl winit::raw_window_handle::HasWindowHandle for Owner {
+    fn window_handle(
+        &self,
+    ) -> Result<winit::raw_window_handle::WindowHandle<'_>, winit::raw_window_handle::HandleError>
+    {
+        use winit::raw_window_handle::{RawWindowHandle, Win32WindowHandle, WindowHandle};
+        let raw = RawWindowHandle::Win32(Win32WindowHandle::new(self.0));
+        // SAFETY: the handle is only ever passed to Show as its owner, and an
+        // HWND is a handle the window manager validates, not a pointer: the
+        // teardown withdraws it before the window goes, and even a stale one
+        // is a number for Show to look up, never freed memory to read.
+        Ok(unsafe { WindowHandle::borrow_raw(raw) })
+    }
+}
+
+#[cfg(windows)]
+impl winit::raw_window_handle::HasDisplayHandle for Owner {
+    fn display_handle(
+        &self,
+    ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError>
+    {
+        Ok(winit::raw_window_handle::DisplayHandle::windows())
+    }
+}
+
+/// The dialog, owned by the player's window when one is open.
+#[cfg(windows)]
+fn owned(dialog: rfd::FileDialog) -> rfd::FileDialog {
+    match owner() {
+        Some(owner) => dialog.set_parent(&owner),
+        None => dialog,
+    }
+}
+
 #[cfg(windows)]
 pub fn pick_folder() -> Pick {
-    match rfd::FileDialog::new().set_title(DIALOG_TITLE).pick_folder() {
+    match owned(rfd::FileDialog::new().set_title(DIALOG_TITLE)).pick_folder() {
         Some(path) => Pick::Folder(path),
         None => Pick::Cancelled,
     }
@@ -127,7 +211,7 @@ pub fn pick_torrent(title: &str, start: Option<&Path>) -> Pick {
     if let Some(start) = start {
         dialog = dialog.set_directory(start);
     }
-    match dialog.pick_file() {
+    match owned(dialog).pick_file() {
         Some(path) => Pick::File(path),
         None => Pick::Cancelled,
     }
@@ -209,5 +293,23 @@ mod tests {
         // The admin room's localized title lands in the same quoted string.
         let titled = torrent_script("Add a \"seed\"", None);
         assert!(titled.contains("with prompt \"Add a \\\"seed\\\"\""), "{titled}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_published_window_owns_the_dialogs_until_it_is_withdrawn() {
+        use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+        use winit::raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+        // No test opens a window, so nothing else publishes one meanwhile.
+        assert!(owner().is_none(), "a terminal run's dialogs are unowned");
+        set_owner(NonZeroIsize::new(0x1234));
+        let published = owner().expect("the published window owns the dialogs");
+        let raw = published.window_handle().expect("an HWND is always at hand").as_raw();
+        assert!(matches!(raw, RawWindowHandle::Win32(h) if h.hwnd.get() == 0x1234), "{raw:?}");
+        // rfd reads the display handle too; on Windows there is only the one.
+        let display = published.display_handle().expect("Windows has its display").as_raw();
+        assert!(matches!(display, RawDisplayHandle::Windows(_)), "{display:?}");
+        set_owner(None);
+        assert!(owner().is_none(), "a closed window's dialogs are unowned again");
     }
 }

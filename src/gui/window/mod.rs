@@ -805,6 +805,12 @@ impl App {
         self.opened_at = Some(Instant::now());
         self.opened_logical = Some(window.inner_size().to_logical(window.scale_factor()));
         self.shown = !cfg!(windows);
+        // The native dialogs (the wizard's Browse, the Add-torrent rooms)
+        // belong to this window from now until the teardown (picker.rs): its
+        // handle is read here because winit gives it out on this thread
+        // alone, and the dialogs open on worker threads.
+        #[cfg(windows)]
+        crate::setup::picker::set_owner(hwnd(&window));
         self.window = Some(window);
         self.poll_build(OPEN_WAIT)
     }
@@ -1635,6 +1641,11 @@ impl App {
             return;
         }
         self.done = true;
+        // The dialogs stop naming the window before it is destroyed below
+        // (or leaked, past a hung build), so no later one is handed a stale
+        // handle for its owner.
+        #[cfg(windows)]
+        crate::setup::picker::set_owner(None);
         if let Some(stats) = &self.stats {
             let covers = self.terminal.as_ref().map(|t| t.backend().post_processor().report());
             stats.write(covers);
@@ -2016,6 +2027,17 @@ fn named_colours(theme: &crate::kit::theme::Theme) -> ColorTable {
         LIGHTMAGENTA: [0xd6, 0x70, 0xd6],
         LIGHTCYAN: [0x29, 0xb8, 0xdb],
         WHITE: [0xe5, 0xe5, 0xe5],
+    }
+}
+
+/// The window's HWND, for the native dialogs to take as their owner. Asked
+/// on the loop's thread: winit refuses the handle on any other.
+#[cfg(windows)]
+fn hwnd(window: &Window) -> Option<std::num::NonZeroIsize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd),
+        _ => None,
     }
 }
 
