@@ -217,10 +217,10 @@ pub(crate) fn feed(exe: &Path, tool: &Tool, text: &str, wait: Duration) -> bool 
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW: the window build has no console, and clip.exe
-        // would otherwise flash one of its own.
-        command.creation_flags(0x0800_0000);
+        // would otherwise flash one of its own. With the default error mode
+        // too, not the window host's crash quieting, which is not clip's.
+        crate::gpu_pick::default_error_mode(&mut command, 0x0800_0000);
     }
     let Ok(mut child) = command.spawn() else { return false };
     if let Some(mut stdin) = child.stdin.take() {

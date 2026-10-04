@@ -1689,9 +1689,15 @@ fn open_url(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let launched = std::process::Command::new("open").arg(url).spawn().is_ok();
     // Explorer, not `cmd /c start`: cmd.exe reads `&` and `%VAR%` in the
-    // URL as its own syntax.
+    // URL as its own syntax. With the default error mode: the wizard's
+    // window host quiets its own crash dialogs, and Explorer is not ours.
     #[cfg(target_os = "windows")]
-    let launched = std::process::Command::new("explorer.exe").arg(url).spawn().is_ok();
+    let launched = {
+        let mut command = std::process::Command::new("explorer.exe");
+        command.arg(url);
+        crate::gpu_pick::default_error_mode(&mut command, 0);
+        command.spawn().is_ok()
+    };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let launched = std::process::Command::new("xdg-open").arg(url).spawn().is_ok();
     launched

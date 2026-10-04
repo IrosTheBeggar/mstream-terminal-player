@@ -110,6 +110,10 @@ fn launch(opener: Opener, seam: &str) -> Result<HandOff, String> {
         #[cfg(not(windows))]
         command.arg(raw);
     }
+    // Explorer and the other openers are not ours: they keep their own
+    // crash dialogs, not the window host's quieting.
+    #[cfg(windows)]
+    crate::gpu_pick::default_error_mode(&mut command, 0);
     let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

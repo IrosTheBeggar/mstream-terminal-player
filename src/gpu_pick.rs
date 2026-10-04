@@ -156,9 +156,18 @@ fn settle<C>(tries: impl Iterator<Item = C>, hardware: impl Fn(&C) -> Option<boo
 ///
 /// SEM_FAILCRITICALERRORS is the companion Microsoft recommends for every
 /// application: a drive with no disk is an error to the caller, not a system
-/// message box. Both bits are inherited by the processes this one starts,
-/// which is right for them too; the visualizer still sets them itself, as an
-/// older player may be the one that starts it.
+/// message box.
+///
+/// Windows hands a process's error mode to every child it creates without
+/// CREATE_DEFAULT_ERROR_MODE, so both bits would reach the helper programs
+/// the player starts as well: Explorer for a reveal or a URL, the openers,
+/// clip.exe. Those are not ours to quiet; a crash of theirs has nothing to
+/// do with a graphics driver, and its owner's own dialog is what Windows
+/// would show had anyone else started it. So each of those spawns asks for
+/// the default mode ([`default_error_mode`]). The visualizer's window, the
+/// one child of ours that does make a GPU device, keeps inheriting: it is
+/// the same executable, with the same reason to be quiet, and it sets both
+/// bits itself anyway, as an older player may be the one that starts it.
 #[cfg(windows)]
 pub fn quiet_native_crashes() {
     use windows_sys::Win32::System::Diagnostics::Debug::{
@@ -166,6 +175,31 @@ pub fn quiet_native_crashes() {
     };
     // SAFETY: no pointers; the calls read and set this process's error mode.
     unsafe { SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+}
+
+/// The process creation flag that gives a child the system's default error
+/// mode instead of its parent's (winbase.h; std has no name for it).
+const CREATE_DEFAULT_ERROR_MODE: u32 = 0x0400_0000;
+
+/// The creation flags for a helper program the player starts on Windows:
+/// `flags`, whatever the caller already needs (CREATE_NO_WINDOW for
+/// clip.exe), with CREATE_DEFAULT_ERROR_MODE added, so the helper does not
+/// inherit the crash quieting of [`quiet_native_crashes`]. A function of
+/// the flags rather than a call on the command because `creation_flags`
+/// replaces what was set before: the caller passes every flag it wants in
+/// one value, and the test checks the composition on any OS.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn helper_creation_flags(flags: u32) -> u32 {
+    flags | CREATE_DEFAULT_ERROR_MODE
+}
+
+/// Start `command` with the system's default error mode, and `flags`
+/// besides ([`helper_creation_flags`]): for every helper program the
+/// player hands a file, a URL or the clipboard to.
+#[cfg(windows)]
+pub fn default_error_mode(command: &mut std::process::Command, flags: u32) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(helper_creation_flags(flags));
 }
 
 /// The length of the executable's path, in UTF-16 units as Windows counts
@@ -267,6 +301,17 @@ mod tests {
     #[cfg(not(windows))]
     fn one_instance_off_windows() {
         assert_eq!(windows_masks(), None);
+    }
+
+    /// A helper program's creation flags keep whatever its caller asked for
+    /// and add CREATE_DEFAULT_ERROR_MODE: clip.exe stays windowless, and a
+    /// flag already given is not doubled into another.
+    #[test]
+    fn a_helper_gets_the_default_error_mode_beside_its_own_flags() {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        assert_eq!(helper_creation_flags(0), 0x0400_0000, "Explorer and the openers");
+        assert_eq!(helper_creation_flags(CREATE_NO_WINDOW), 0x0C00_0000, "clip.exe");
+        assert_eq!(helper_creation_flags(0x0400_0000), 0x0400_0000, "idempotent");
     }
 
     /// The long-path warning starts at 250 UTF-16 units, as Windows counts
