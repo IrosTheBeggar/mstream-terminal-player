@@ -2285,7 +2285,7 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
         FormKind::Limits => t!("fed.limits_submit"),
     }
     .to_string();
-    let bx = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let bx = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x: bx, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &label, f.can_submit(), Act::FormSubmit);
 }
 
@@ -2324,11 +2324,11 @@ fn draw_minted(frame: &mut Frame, room: &mut Room, area: Rect, name: &str, ticke
     );
     let y = inner.bottom().saturating_sub(1);
     let done = t!("fed.minted_done").to_string();
-    let done_w = done.chars().count() as u16 + 4;
+    let done_w = kit::width(&done) as u16 + 4;
     let done_rect = kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(done_w), y, width: done_w, height: 1 }, &done, true, Act::MintedDone);
     if ticket.is_some() {
         let copy = t!("fed.minted_copy").to_string();
-        let copy_w = copy.chars().count() as u16 + 4;
+        let copy_w = kit::width(&copy) as u16 + 4;
         kit::button(frame, &mut room.ui, Rect { x: done_rect.x.saturating_sub(copy_w + 2), y, width: copy_w, height: 1 }, &copy, false, Act::MintedCopy);
     }
 }
@@ -2345,7 +2345,7 @@ fn draw_peer_name(frame: &mut Frame, room: &mut Room, area: Rect, name: &Input, 
     frame.render_widget(Paragraph::new(Span::styled(preview_words(preview), Style::default().fg(th().ok))), line(inner.y + 2));
     modal_field(frame, room, Rect { x: inner.x + 1, y: inner.y + 4, width: 40.min(inner.width.saturating_sub(2)), height: 4 }, &t!("fed.peer_name_label"), name, true, Act::PeerNameAdd);
     let label = t!("fed.peer_name_add").to_string();
-    let x = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &label, true, Act::PeerNameAdd);
 }
 
@@ -2361,8 +2361,8 @@ fn draw_gate(frame: &mut Frame, room: &mut Room, area: Rect, title: String, body
         Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(2) },
     );
     let y = inner.bottom().saturating_sub(1);
-    let go_w = go.0.chars().count() as u16 + 4;
-    let safe_w = safe.0.chars().count() as u16 + 4;
+    let go_w = kit::width(&go.0) as u16 + 4;
+    let safe_w = kit::width(&safe.0) as u16 + 4;
     let safe_x = inner.right().saturating_sub(go_w + 2 + safe_w);
     let safe_rect = kit::button(frame, &mut room.ui, Rect { x: safe_x, y, width: inner.width, height: 1 }, &safe.0, true, safe.1);
     kit::button(frame, &mut room.ui, Rect { x: safe_rect.right() + 2, y, width: inner.width, height: 1 }, &go.0, false, go.1);

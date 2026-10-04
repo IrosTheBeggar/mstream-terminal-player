@@ -1520,7 +1520,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                     _ if ready => format!("{} {forward}", t!("gui.tor.submit")),
                     _ => format!("{}  ", t!("gui.tor.submit")),
                 };
-                let width = label.chars().count() as u16 + 6;
+                let width = crate::kit::tall_width(&label);
                 let at = Rect {
                     x: content.right().saturating_sub(width),
                     y: content.bottom().saturating_sub(3).max(y),

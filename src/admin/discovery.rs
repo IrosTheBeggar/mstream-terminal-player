@@ -1728,7 +1728,7 @@ fn draw_invite(frame: &mut Frame, room: &mut Room, pane: Rect, s: &DiscoveryStat
     );
     if let Some(ticket) = &s.ticket {
         let copy = t!("p2p.invite_copy").to_string();
-        let w = copy.chars().count() as u16 + 4;
+        let w = kit::width(&copy) as u16 + 4;
         kit::button(
             frame,
             &mut room.ui,
@@ -1782,7 +1782,7 @@ fn draw_config(frame: &mut Frame, room: &mut Room, pane: Rect, s: &DiscoveryStat
         spans.push(Span::raw(format!(" — {}", printable(&s.server_description, DESCRIPTION_MAX))));
     }
     let edit = t!("p2p.config_edit").to_string();
-    let edit_w = edit.chars().count() as u16 + 4;
+    let edit_w = kit::width(&edit) as u16 + 4;
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
         Rect { x: pane.x, y: pane.y, width: pane.width.saturating_sub(edit_w + 1), height: 1 },
@@ -2210,7 +2210,7 @@ fn draw_compose(frame: &mut Frame, room: &mut Room, area: Rect, c: &Compose) {
         );
     }
     let label = t!("p2p.compose_send").to_string();
-    let x = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &label, c.loaded, Act::ComposeSend);
 }
 
@@ -2277,7 +2277,7 @@ fn draw_identity(frame: &mut Frame, room: &mut Room, area: Rect, d: &IdentityDra
         frame.render_widget(Paragraph::new(Span::styled(err.clone(), Style::default().fg(th().gold))), line(inner.y + 14));
     }
     let label = t!("p2p.identity_save").to_string();
-    let x = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &label, true, Act::IdentitySave);
 }
 
@@ -2314,7 +2314,7 @@ fn draw_setting(frame: &mut Frame, room: &mut Room, area: Rect, d: &SettingDraft
         frame.render_widget(Paragraph::new(Span::styled(err.clone(), Style::default().fg(th().gold))), line(inner.y + 12));
     }
     let save = t!("p2p.setting_save").to_string();
-    let x = inner.right().saturating_sub(save.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&save) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &save, true, Act::SettingSave);
 }
 
@@ -2330,8 +2330,8 @@ fn draw_gate(frame: &mut Frame, room: &mut Room, area: Rect, title: String, body
         Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(2) },
     );
     let y = inner.bottom().saturating_sub(1);
-    let go_w = go.0.chars().count() as u16 + 4;
-    let safe_w = safe.0.chars().count() as u16 + 4;
+    let go_w = kit::width(&go.0) as u16 + 4;
+    let safe_w = kit::width(&safe.0) as u16 + 4;
     let safe_x = inner.right().saturating_sub(go_w + 2 + safe_w);
     let safe_rect = kit::button(frame, &mut room.ui, Rect { x: safe_x, y, width: inner.width, height: 1 }, &safe.0, true, safe.1);
     kit::button(frame, &mut room.ui, Rect { x: safe_rect.right() + 2, y, width: inner.width, height: 1 }, &go.0, false, go.1);

@@ -90,7 +90,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     let spare = layout.spare;
     if spare.height >= air + 3 {
         let (prev, play, next) = play_glyphs(gui.bar_paused());
-        let group_w: u16 = [prev, play, next].iter().map(|l| l.chars().count() as u16 + 4).sum::<u16>() + 2;
+        let group_w: u16 = [prev, play, next].iter().map(|l| crate::kit::width(l) as u16 + 4).sum::<u16>() + 2;
         let y = spare.y + air;
         let mut x = spare.x + spare.width.saturating_sub(group_w) / 2;
         x += tall_compact(frame, &mut gui.ui, x, y, prev, TallKind::Strong, Act::Prev) + 1;

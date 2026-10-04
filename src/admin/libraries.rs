@@ -1250,7 +1250,7 @@ fn draw_name(frame: &mut Frame, room: &mut Room, area: Rect, draft: &NameDraft) 
     }
 
     let label = t!("admin.name_add").to_string();
-    let x = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(
         frame,
         &mut room.ui,
@@ -1292,8 +1292,8 @@ fn draw_remove(frame: &mut Frame, room: &mut Room, area: Rect, i: usize) {
     let y = inner.bottom().saturating_sub(1);
     let keep = t!("admin.remove_keep").to_string();
     let remove = t!("admin.remove_confirm").to_string();
-    let remove_w = remove.chars().count() as u16 + 4;
-    let keep_w = keep.chars().count() as u16 + 4;
+    let remove_w = kit::width(&remove) as u16 + 4;
+    let keep_w = kit::width(&keep) as u16 + 4;
     let keep_x = inner.right().saturating_sub(remove_w + 2 + keep_w);
     let keep_rect = kit::button(
         frame,

@@ -89,13 +89,17 @@ url = "2"
 # explicitly here — the default set only implies it through crossterm, and
 # without it ratatui-core goes no-std and expects the app to provide a
 # critical-section implementation, which surfaces as unresolvable `env`
-# imports in the .wasm.
+# imports in the .wasm. "unstable-rendered-line-info" is Paragraph::line_count:
+# the rows a wrapped paragraph takes, counted by the wrapper that draws it, so
+# the setup wizard's Done page gives a translated sentence the rows it needs
+# instead of a guess. It only makes the method public; it adds no package.
 ratatui = { version = "0.30.2", default-features = false, features = [
     "std",
     "all-widgets",
     "layout-cache",
     "macros",
     "underline-color",
+    "unstable-rendered-line-info",
 ] }
 # Decodes cover art, nothing else. jpeg and png are what mStream's art cache
 # actually holds; the default features would compile every codec the crate

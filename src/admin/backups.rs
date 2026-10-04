@@ -1697,7 +1697,7 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
             Act::FormFocus(index_of(Field::Dest)),
         );
         let browse = t!("bak.browse_button").to_string();
-        let browse_w = browse.chars().count() as u16 + 4;
+        let browse_w = kit::width(&browse) as u16 + 4;
         kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(browse_w + 1), y, width: browse_w, height: 1 }, &browse, false, Act::FormBrowse);
     }
     y += 4;
@@ -1781,7 +1781,7 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
         kit::button(frame, &mut room.ui, Rect { x, y: by, width: w, height: 1 }, &t!("bak.reset_patterns"), false, Act::FormResetExcludes);
     }
     let label = if editing { t!("bak.save") } else { t!("bak.add_submit") }.to_string();
-    let bx = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let bx = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x: bx, y: by, width: inner.width, height: 1 }, &label, true, Act::FormSubmit);
 }
 
@@ -1936,8 +1936,8 @@ fn draw_gate(frame: &mut Frame, room: &mut Room, area: Rect, title: String, body
         Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(2) },
     );
     let y = inner.bottom().saturating_sub(1);
-    let go_w = go.0.chars().count() as u16 + 4;
-    let safe_w = safe.0.chars().count() as u16 + 4;
+    let go_w = kit::width(&go.0) as u16 + 4;
+    let safe_w = kit::width(&safe.0) as u16 + 4;
     let safe_x = inner.right().saturating_sub(go_w + 2 + safe_w);
     let safe_rect = kit::button(frame, &mut room.ui, Rect { x: safe_x, y, width: inner.width, height: 1 }, &safe.0, true, safe.1);
     kit::button(frame, &mut room.ui, Rect { x: safe_rect.right() + 2, y, width: inner.width, height: 1 }, &go.0, false, go.1);

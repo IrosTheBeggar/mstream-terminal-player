@@ -1423,16 +1423,27 @@ pub(crate) fn sanitize_name(raw: &str) -> String {
     out
 }
 
-/// A path fitted into `width` cells with its TAIL kept — `…` plus the
-/// last `width − 1` characters when it overflows. Returns whether it
-/// clipped, so the caller can hang the full path on a tooltip.
+/// A path fitted into `width` cells with its TAIL kept — `…` plus as
+/// many whole graphemes from the end as fill `width − 1` cells when it
+/// overflows. Returns whether it clipped, so the caller can hang the full
+/// path on a tooltip. Cells, not characters: a folder named in Japanese
+/// takes two a character, and counting characters ran the tail past its
+/// cell, where the leaf the ellipsis exists to keep was the part cut.
 pub(crate) fn ellipsize_path_start(path: &str, width: usize) -> (String, bool) {
-    let count = path.chars().count();
-    if count <= width || width == 0 {
+    use unicode_segmentation::UnicodeSegmentation;
+    if kit::width(path) <= width || width == 0 {
         return (path.to_string(), false);
     }
-    let tail: String = path.chars().skip(count - width.saturating_sub(1)).collect();
-    (format!("{}{tail}", g("…", "»")), true)
+    let budget = width.saturating_sub(1);
+    let (mut used, mut start) = (0, path.len());
+    for (at, grapheme) in path.grapheme_indices(true).rev() {
+        used += kit::grapheme_cells(grapheme);
+        if used > budget {
+            break;
+        }
+        start = at;
+    }
+    (format!("{}{}", g("…", "»"), &path[start..]), true)
 }
 
 /// The default name for a folder: its basename, sanitized.
@@ -2377,10 +2388,11 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
 
     // The language selector, top-left on the folders screen — the mirror
     // of the step counter. Everything else re-renders through t!() the
-    // moment it changes.
+    // moment it changes. The chip is as wide as its label's cells: counted
+    // in characters, "日本語" kept one of its three.
     if wizard.screen == Screen::Folders {
         let label = format!("{} {}", g("▾", "▼"), LANGS[wizard.lang].1);
-        let chip = Rect { x: 2, y: 0, width: label.chars().count() as u16, height: 1 };
+        let chip = Rect { x: 2, y: 0, width: kit::width(&label) as u16, height: 1 };
         let hovered = wizard.ui.pointer.is_some_and(|p| chip.contains(p));
         let style = if hovered { Style::default().fg(th().bright) } else { dim() };
         frame.render_widget(Paragraph::new(Span::styled(label, style)), chip);
@@ -2450,7 +2462,10 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
         } else {
             t!("folders.continue_disabled").to_string()
         };
-        let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
+        // Right-anchored by the frame's own width in cells, so the frame
+        // ends at the bar's edge in every language (a character count put
+        // a Japanese button short of it, and the kit then cut the label).
+        let x = bar.right().saturating_sub(kit::tall_width(&label));
         let rect = kit::tall_button(
             frame,
             &mut wizard.ui,
@@ -2465,7 +2480,7 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
     if wizard.screen == Screen::Extras {
         let label = t!("extras.continue").to_string();
-        let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
+        let x = bar.right().saturating_sub(kit::tall_width(&label));
         let rect = kit::tall_button(
             frame,
             &mut wizard.ui,
@@ -2475,7 +2490,7 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
             Act::ContinueExtras,
         );
         let back_label = t!("extras.back").to_string();
-        let back_x = rect.x.saturating_sub(back_label.chars().count() as u16 + 6 + 2);
+        let back_x = rect.x.saturating_sub(kit::tall_width(&back_label) + 2);
         let back = kit::tall_secondary(
             frame,
             &mut wizard.ui,
@@ -2487,7 +2502,7 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
     if wizard.screen == Screen::Login {
         let label = t!("login.create").to_string();
-        let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
+        let x = bar.right().saturating_sub(kit::tall_width(&label));
         let rect = kit::tall_button(
             frame,
             &mut wizard.ui,
@@ -2497,7 +2512,7 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
             Act::CreateAdmin,
         );
         let back_label = t!("login.back").to_string();
-        let back_x = rect.x.saturating_sub(back_label.chars().count() as u16 + 6 + 2);
+        let back_x = rect.x.saturating_sub(kit::tall_width(&back_label) + 2);
         let back = kit::tall_secondary(
             frame,
             &mut wizard.ui,
@@ -2757,9 +2772,14 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     const REMOVE_W: u16 = 4; // ' [X]'
     let sel_width = column.width.saturating_sub(REMOVE_W);
     let header = Rect { x: column.x, y, width: sel_width, height: 1 };
+    // The name heading is padded to NAME_W in cells, where the rows start
+    // their paths: `{:<16}` pads characters, which set the folder heading
+    // two cells right of its column under a Japanese "名前".
+    let name_col = t!("folders.col_name").to_string();
+    let name_pad = " ".repeat(usize::from(NAME_W).saturating_sub(kit::width(&name_col)));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!("{:<width$}", t!("folders.col_name"), width = NAME_W as usize), dim()),
+            Span::styled(format!("{name_col}{name_pad}"), dim()),
             Span::styled(t!("folders.col_folder").to_string(), dim()),
         ])),
         header,
@@ -3138,26 +3158,53 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         } else {
             wizard.qr_note.clone()
         };
+        let message = Paragraph::new(format!("{opening} {scan_line}")).wrap(Wrap { trim: true });
+        // The message takes the rows its wrapped text needs, never fewer
+        // than the four the page was drawn around (so the cards hold still
+        // across languages at the default size), and the cards move down
+        // under a longer one: a fixed four cut "automatically." off the
+        // English in a window narrowed to seventy columns. A column too
+        // short for the tall cards lists the actions as the stacked page's
+        // one-row buttons instead, and only then does the message give up
+        // its tail, to keep the list inside the column and off the tips.
+        let need = u16::try_from(message.line_count(right.width)).unwrap_or(u16::MAX).max(4);
+        let rest = right.bottom().saturating_sub(ry);
+        let (tall, short) = (3 * DONE_ACTIONS as u16, DONE_ACTIONS as u16);
+        let cards = need + 1 + DONE_SCAN_ROWS + tall <= rest;
+        let list = if cards { tall } else { short };
+        let message_h = need.min(rest.saturating_sub(1 + DONE_SCAN_ROWS + list));
         frame.render_widget(
-            Paragraph::new(format!("{opening} {scan_line}")).wrap(Wrap { trim: true }),
-            Rect { x: right.x, y: ry, width: right.width, height: 4 },
+            message,
+            Rect { x: right.x, y: ry, width: right.width, height: message_h },
         );
-        ry += 5;
+        ry += message_h + 1;
         if let Some(scan) = &wizard.scan {
             frame.render_widget(
                 Paragraph::new(scan_lines(scan)),
                 Rect { x: right.x, y: ry, width: right.width, height: 3 },
             );
         }
-        ry += 4;
+        ry += DONE_SCAN_ROWS;
+        if !cards {
+            let width = done_list_width().min(right.width);
+            done_list(frame, wizard, right.x, ry, width);
+            return;
+        }
         for (i, (label, tip)) in done_buttons().into_iter().enumerate() {
             let rect = Rect { x: right.x, y: ry, width: right.width.min(44), height: 3 };
             let selected = wizard.done_sel == Some(i);
             let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
             let inner = card(frame, rect, selected, hovered);
+            // One cell in from the card's left border, and so one short of
+            // the inner width, or a long label paints over the right one.
             frame.render_widget(
                 Paragraph::new(Span::styled(label, bold())),
-                Rect { x: inner.x + 1, y: inner.y, width: inner.width, height: 1 },
+                Rect {
+                    x: inner.x + 1,
+                    y: inner.y,
+                    width: inner.width.saturating_sub(1),
+                    height: 1,
+                },
             );
             wizard.ui.click(rect, done_action(i));
             wizard.ui.tip(rect, tip);
@@ -3178,16 +3225,33 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
     y += 2;
 
+    let scan_line = if wizard.qr.is_some() {
+        t!("done.scan_above").to_string()
+    } else {
+        wizard.qr_note.clone()
+    };
+    let message = Paragraph::new(format!("{opening} {scan_line}"))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    // As in the two columns: the rows the wrapped message needs, never
+    // fewer than the two this page was drawn around. What goes under it
+    // (a blank, the scan's rows while one runs, the button list) is
+    // counted before the code is let in, so the list never runs past the
+    // column onto the note and the tips.
+    let need = u16::try_from(message.line_count(column.width)).unwrap_or(u16::MAX).max(2);
+    let scan_h = if wizard.scan.is_some() { DONE_SCAN_ROWS } else { 0 };
+    let below = 1 + scan_h + DONE_ACTIONS as u16;
+
     if let Some(qr) = wizard.qr.clone() {
         let rows = qr.len() as u16;
-        // The code gets whatever height the chrome below it does not
-        // need: the message (2), a blank, and the button list (4).
-        let avail = column.height.saturating_sub(y - column.y).saturating_sub(8);
+        // The code gets whatever height the message and everything under
+        // it do not need, less the blank under the code itself.
+        let avail = column.bottom().saturating_sub(y).saturating_sub(need + below + 1);
         // The half-block code is fixed-size — drawn only when it fits
         // WHOLE (a cropped QR scans as nothing), and otherwise replaced
         // by the one honest line.
         if rows <= avail {
-            let qr_width = qr.first().map(|l| l.chars().count()).unwrap_or(0) as u16;
+            let qr_width = qr.first().map(|l| kit::width(l)).unwrap_or(0) as u16;
             let x = column.x + (column.width.saturating_sub(qr_width)) / 2;
             for line in &qr {
                 frame.render_widget(
@@ -3209,18 +3273,11 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             y += 2;
         }
     }
-    let scan_line = if wizard.qr.is_some() {
-        t!("done.scan_above").to_string()
-    } else {
-        wizard.qr_note.clone()
-    };
-    frame.render_widget(
-        Paragraph::new(format!("{opening} {scan_line}"))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        Rect { x: column.x, y, width: column.width, height: 2 },
-    );
-    y += 3;
+    // Only at the floor, with the apology line above it, does the message
+    // give up its tail, and then only to keep the list inside the column.
+    let message_h = need.min(column.bottom().saturating_sub(y + below));
+    frame.render_widget(message, Rect { x: column.x, y, width: column.width, height: message_h });
+    y += message_h + 1;
 
     // With no bottom bar on this page, the scan status lives here.
     if let Some(scan) = &wizard.scan {
@@ -3228,19 +3285,34 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             Paragraph::new(scan_lines(scan)).alignment(Alignment::Center),
             Rect { x: column.x, y, width: column.width, height: 3 },
         );
-        y += 4;
+        y += scan_h;
     }
 
     // The same button list, one row each, centered.
-    let buttons = done_buttons();
-    let widest = buttons.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0) as u16;
-    let bx = column.x + column.width.saturating_sub(widest + 4) / 2;
-    for (i, (label, tip)) in buttons.into_iter().enumerate() {
-        let rect = Rect { x: bx, y, width: widest + 4, height: 1 };
+    let width = done_list_width().min(column.width);
+    done_list(frame, wizard, column.x + (column.width - width) / 2, y, width);
+}
+
+/// The rows the Done page keeps for the scan's status: its three lines
+/// and a blank under them.
+const DONE_SCAN_ROWS: u16 = 4;
+
+/// The cells the widest Done action takes as a one-row button, its two
+/// cells of padding a side counted; measured as `kit::button` measures, so
+/// the centred list's x agrees with what is drawn.
+fn done_list_width() -> u16 {
+    done_buttons().iter().map(|(label, _)| kit::width(label)).max().unwrap_or(0) as u16 + 4
+}
+
+/// The Done actions as one-row buttons, one under another from (x, y), in
+/// slots `width` cells wide: the stacked page's list, and the two columns'
+/// when the column is too short for the tall cards.
+fn done_list(frame: &mut Frame, wizard: &mut Wizard, x: u16, y: u16, width: u16) {
+    for (i, (label, tip)) in done_buttons().into_iter().enumerate() {
+        let rect = Rect { x, y: y + i as u16, width, height: 1 };
         let selected = wizard.done_sel == Some(i);
         kit::button(frame, &mut wizard.ui, rect, &label, selected, done_action(i));
         wizard.ui.tip(rect, tip);
-        y += 1;
     }
 }
 
@@ -3610,6 +3682,13 @@ pub(crate) mod tests {
         assert!(shown.ends_with("c/Favorites"), "{shown}");
         // Degenerate width never panics.
         assert_eq!(ellipsize_path_start("/x", 0).0, "/x");
+        // Cells, not characters: a Japanese leaf is two a character, and
+        // the tail stops at a whole grapheme within the cell.
+        let (shown, clipped) = ellipsize_path_start("/home/anna/音楽/お気に入り", 12);
+        assert!(clipped);
+        assert!(crate::kit::width(&shown) <= 12, "{shown}");
+        assert!(shown.ends_with("/お気に入り"), "the leaf survives: {shown}");
+        assert_eq!(ellipsize_path_start("/音楽", 5), ("/音楽".to_string(), false));
         // The tooltip pairing: a spaceless path hard-wraps at the tip
         // width instead of clipping, and the THREE-line cap holds however
         // long the path gets. The cap is the path tip's policy alone —
@@ -3875,6 +3954,145 @@ pub(crate) mod tests {
         wizard.adopt_graphics(crate::tui::graphics::Graphics::disabled());
         assert!(!wizard.done_two_column());
         assert!(wizard.logo_art.is_none() && wizard.logo_gfx.protocol().is_none());
+    }
+
+    /// Puts the process locale back to English when a test that switched
+    /// it ends, passing or failing, so no test after it reads another
+    /// language.
+    struct BackToEnglish;
+
+    impl Drop for BackToEnglish {
+        fn drop(&mut self) {
+            rust_i18n::set_locale("en");
+        }
+    }
+
+    /// The text of the cells from `x` up to `end` on row `y`, a wide
+    /// character's hidden cell left out.
+    fn cells_text(buf: &ratatui::buffer::Buffer, y: u16, x: u16, end: u16) -> String {
+        let (mut text, mut x) = (String::new(), x);
+        while x < end {
+            let symbol = buf[(x, y)].symbol();
+            text.push_str(symbol);
+            x += (kit::width(symbol) as u16).max(1);
+        }
+        text
+    }
+
+    /// The language chip and the bar's Continue measure their labels in
+    /// cells: in Japanese and Chinese at 100×30 the chip shows the whole
+    /// name of the language (it showed "▾ 日"), and the button frames the
+    /// whole label (it framed "続け" of "続ける ▸") with its right edge on
+    /// the bar's, where a character count left it short.
+    #[test]
+    fn the_chip_and_continue_show_their_whole_cjk_labels_at_100x30() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _english = BackToEnglish;
+        for code in ["ja", "zh"] {
+            let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+            wizard.set_language(LANGS.iter().position(|(c, _)| *c == code).expect(code));
+            wizard.add_folder("/srv/music".to_string());
+            let buf = draw_100x30(&mut wizard);
+
+            let chip_label = format!("{} {}", g("▾", "▼"), LANGS[wizard.lang].1);
+            let chip = click_rect(&wizard, Act::OpenLanguage);
+            assert_eq!(usize::from(chip.width), kit::width(&chip_label), "{code}: its width");
+            assert_eq!(cells_text(&buf, 0, chip.x, chip.right()), chip_label, "{code}: the chip");
+
+            let label = t!("folders.continue_enabled").to_string();
+            let button = click_rect(&wizard, Act::ContinueFolders);
+            assert_eq!(button.right(), 98, "{code}: the frame ends on the bar's right edge");
+            let inside = cells_text(&buf, button.y + 1, button.x + 1, button.right() - 1);
+            assert_eq!(inside, format!("  {label}  "), "{code}: the label inside its frame");
+        }
+    }
+
+    /// A Done page on a server at port 3000 with a Quick Connect code, in
+    /// two columns (pictures) or stacked (none).
+    fn done_page(two_column: bool) -> Wizard {
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:3000").expect("client"));
+        wizard.screen = Screen::Done;
+        wizard.qr = Some(vec!["▀▀▀▀".to_string()]);
+        if two_column {
+            wizard.graphics =
+                crate::tui::graphics::Graphics::forced(ratatui_image::picker::ProtocolType::Kitty);
+        }
+        assert_eq!(wizard.done_two_column(), two_column);
+        wizard
+    }
+
+    fn draw_at(wizard: &mut Wizard, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, wizard)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// The Done page's rows of text, each trimmed, with the two columns'
+    /// right half only (what follows the vertical gold rule) — the
+    /// message reads back whole by joining them.
+    fn done_text(buf: &ratatui::buffer::Buffer, two_column: bool) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| row_text(buf, y))
+            .map(|row| match row.split_once('│') {
+                Some((_, right)) if two_column => right.trim().to_string(),
+                _ => row.trim().to_string(),
+            })
+            .collect()
+    }
+
+    /// The Done message takes the rows its wrapped text needs. At 70
+    /// columns the English wraps to five rows in the two columns' right
+    /// half, where a fixed four lost "automatically.", and to three on the
+    /// stacked page, where it had two; either way it shows whole, the
+    /// buttons start under it, and the list ends inside the column.
+    #[test]
+    fn the_done_message_shows_whole_at_seventy_columns_in_english() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (two_column, scan) in [(true, t!("done.scan_left")), (false, t!("done.scan_above"))] {
+            let mut wizard = done_page(two_column);
+            let buf = draw_at(&mut wizard, 70, 30);
+            let message = format!("{} {scan}", t!("done.running_port", port = 3000));
+            let text = done_text(&buf, two_column);
+            assert!(text.join(" ").contains(&message), "two_column {two_column}: {text:#?}");
+            let last = text.iter().rposition(|row| row.ends_with("automatically.")).expect("end");
+            let first = click_rect(&wizard, done_action(0));
+            assert!(first.y > last as u16, "two_column {two_column}: the list under the message");
+            let list_end = click_rect(&wizard, done_action(DONE_ACTIONS - 1)).bottom();
+            assert!(list_end <= 2 + 30 - 6, "two_column {two_column}: inside the column");
+        }
+    }
+
+    /// At the wizard's floor, 58×20, with a scan running and a code to
+    /// scan, the Done page keeps its button list inside the column, clear
+    /// of the note and the tips under it, in both layouts: the two columns
+    /// trade the tall cards for one-row buttons when the cards do not fit,
+    /// and the message gives up its tail before the list moves past it.
+    #[test]
+    fn the_done_list_stays_inside_the_column_at_the_floor() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for two_column in [true, false] {
+            let mut wizard = done_page(two_column);
+            wizard.scan = Some(ScanWidget {
+                step: "Scanning".to_string(),
+                pct: Some(40),
+                detail: "1,234 files".to_string(),
+            });
+            let buf = draw_at(&mut wizard, 58, 20);
+            let text = done_text(&buf, two_column);
+            assert!(text.iter().any(|row| row.starts_with("Your mStream")), "{text:#?}");
+            let mut bottom = 0;
+            for i in 0..DONE_ACTIONS {
+                let rect = click_rect(&wizard, done_action(i));
+                assert!(rect.y >= bottom, "two_column {two_column}: {i} under the one before");
+                bottom = rect.bottom();
+            }
+            assert!(bottom <= 2 + 20 - 6, "two_column {two_column}: the list ends at {bottom}");
+        }
+        // With the room for them, the two columns keep the tall cards.
+        let mut wizard = done_page(true);
+        draw_100x30(&mut wizard);
+        assert_eq!(click_rect(&wizard, done_action(0)).height, 3, "the tall cards at 100×30");
     }
 
     #[test]
