@@ -3378,7 +3378,9 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
     // The body clips ABOVE the button row: wrapped lines must never
     // share cells with the buttons (a longer translation once pushed
     // "…later from the admin panel." under them, and the 2-cell button
-    // gap exposed the "ro" of "from" as a phantom typo).
+    // gap exposed the "ro" of "from" as a phantom typo). It stops two rows
+    // short, so the row above the buttons is free for a confirmation too
+    // long to sit beside the way back (skip_buttons).
     let body = Rect {
         x: inner.x,
         y: inner.y,
@@ -3389,19 +3391,24 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
     skip_buttons(frame, &mut wizard.ui, inner, &t!("skip_modal.back"), &t!("skip_modal.confirm"));
 }
 
-/// The skip warning's two buttons on the modal's last row: the way back,
-/// then the confirmation two cells to its right. Each gets the room left
-/// before the modal's right edge, as the directory browser's row does, so
-/// the kit cuts the second label inside the frame: given the inner width
-/// whatever its x, the confirmation (and its click rect) ran over the
-/// border and past it wherever the two buttons outgrew the row: French at
-/// any width (63 cells with the gap, in a 60-cell row), and German,
-/// Spanish, Italian, Portuguese and Russian at the wizard's 58-column
-/// floor, where the row is 52. The Japanese and Chinese pairs, measured in
-/// cells, fit at both. A cut label is the kit's way everywhere a row runs
-/// short, and the click stays on what is drawn. Apart from the modal's
-/// body, with its labels passed in, so the test draws it in each language
-/// without switching the process-wide locale. Returns both buttons' rects.
+/// The skip warning's two buttons: the way back on the modal's last row,
+/// then the confirmation two cells to its right where the whole label fits
+/// there, or else on the row above, from the left edge. Given the inner
+/// width whatever its x, the confirmation (and its click rect) once ran
+/// over the border and past it wherever the two buttons outgrew the row:
+/// French at any width (63 cells with the gap, in a 60-cell row), and
+/// German, Spanish, Italian, Portuguese and Russian at the wizard's
+/// 58-column floor, where the row is 52. Clamping it to the row kept it
+/// inside but cut the destructive action's label mid-word ("Passer en
+/// public quand mêm", Russian down to "Всё равно пу"), the phantom-typo
+/// fault the body's clip above exists to prevent; so it moves up instead.
+/// That row is free: the body stops two rows short of the bottom. Each
+/// button is still clamped to the room left before the right edge, as the
+/// directory browser's row is, so a label wider than the modal on a row of
+/// its own (none of the shipped ones) is cut inside the frame and the
+/// click stays on what is drawn. Apart from the modal's body, with its
+/// labels passed in, so the test draws it in each language without
+/// switching the process-wide locale. Returns both buttons' rects.
 fn skip_buttons(
     frame: &mut Frame,
     ui: &mut Surface<Act>,
@@ -3410,9 +3417,14 @@ fn skip_buttons(
     confirm: &str,
 ) -> (Rect, Rect) {
     let y = inner.bottom().saturating_sub(1);
-    let row = |x: u16| Rect { x, y, width: inner.right().saturating_sub(x), height: 1 };
-    let back = kit::button(frame, ui, row(inner.x), back, true, Act::SkipCancel);
-    let confirm = kit::button(frame, ui, row(back.right() + 2), confirm, false, Act::SkipConfirm);
+    let row = |x: u16, y: u16| Rect { x, y, width: inner.right().saturating_sub(x), height: 1 };
+    let back = kit::button(frame, ui, row(inner.x, y), back, true, Act::SkipCancel);
+    let beside = back.right() + 2;
+    let fits = beside as usize + kit::width(&format!("  {confirm}  ")) <= inner.right() as usize;
+    // A modal too short for a second row keeps the confirmation beside,
+    // clamped, rather than drawing it on the frame's top edge.
+    let at = if fits || y <= inner.y { row(beside, y) } else { row(inner.x, y - 1) };
+    let confirm = kit::button(frame, ui, at, confirm, false, Act::SkipConfirm);
     (back, confirm)
 }
 
@@ -4795,56 +4807,96 @@ pub(crate) mod tests {
         assert!(wizard.public);
     }
 
-    /// The skip warning's buttons stay inside the modal in every language,
-    /// at the wizard's floor (58 columns, where the modal is 54 wide) and at
-    /// 100 (its full 62): the confirmation ends at the modal's inner right
-    /// edge at the latest, the border's cell on its row is still the border,
-    /// its click rect is what it drew, and a label is cut only where the two
-    /// buttons outgrow the row, never the way back. Drawn through
-    /// `skip_buttons` with each language's labels, so no test switches the
-    /// process-wide locale. The Japanese and Chinese pairs fit at both
-    /// widths (51 and 35 cells); the overflow was the longer European ones.
+    /// Draws the skip modal's frame and buttons at `width`×30 with the given
+    /// labels; returns the modal's inner rect, both buttons' rects, the
+    /// buffer, and the confirmation's click rect.
+    fn draw_skip_buttons(
+        width: u16,
+        back_label: &str,
+        confirm_label: &str,
+    ) -> (Rect, Rect, Rect, ratatui::buffer::Buffer, Option<Rect>) {
+        let backend = ratatui::backend::TestBackend::new(width, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut ui = kit::Surface::<Act>::new();
+        let (mut inner, mut drawn) = (Rect::default(), (Rect::default(), Rect::default()));
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                inner = kit::modal_frame_on(frame, &mut ui, area, 62, 15, th().gold);
+                drawn = skip_buttons(frame, &mut ui, inner, back_label, confirm_label);
+            })
+            .unwrap();
+        let clicked = ui.clicks.iter().find(|(_, a)| *a == Act::SkipConfirm).map(|(r, _)| *r);
+        (inner, drawn.0, drawn.1, terminal.backend().buffer().clone(), clicked)
+    }
+
+    /// The skip warning's buttons stay inside the modal and whole in every
+    /// language, at the wizard's floor (58 columns, where the modal is 54
+    /// wide) and at 100 (its full 62): the way back on the last row, the
+    /// confirmation beside it or, where the pair outgrows the row, on the
+    /// row above from the left edge; each ends at the inner right edge at
+    /// the latest, the border's cell on its row is still the border, and
+    /// the confirmation's click rect is what it drew. Which languages stack
+    /// is left to their translations' lengths, so shortening one never
+    /// fails this; the two placements themselves are pinned by the
+    /// synthetic test below. Drawn through `skip_buttons` with each
+    /// language's labels, so no test switches the process-wide locale.
     #[test]
-    fn the_skip_modal_buttons_stay_inside_its_border_in_every_language() {
-        let mut overflowed = Vec::new();
+    fn the_skip_modal_buttons_stay_whole_inside_its_border_in_every_language() {
         for (code, _) in LANGS {
             let back_label = t!("skip_modal.back", locale = code).to_string();
             let confirm_label = t!("skip_modal.confirm", locale = code).to_string();
             for width in [58, 100] {
-                let backend = ratatui::backend::TestBackend::new(width, 30);
-                let mut terminal = ratatui::Terminal::new(backend).unwrap();
-                let mut ui = kit::Surface::<Act>::new();
-                let (mut inner, mut drawn) = (Rect::default(), (Rect::default(), Rect::default()));
-                terminal
-                    .draw(|frame| {
-                        let area = frame.area();
-                        inner = kit::modal_frame_on(frame, &mut ui, area, 62, 15, th().gold);
-                        drawn = skip_buttons(frame, &mut ui, inner, &back_label, &confirm_label);
-                    })
-                    .unwrap();
-                let buf = terminal.backend().buffer();
-                let (back, confirm) = drawn;
+                let (inner, back, confirm, buf, clicked) = draw_skip_buttons(width, &back_label, &confirm_label);
                 let at = format!("{code} at {width} columns");
-                assert!(confirm.right() <= inner.right(), "{at}: {confirm:?} past {inner:?}");
-                assert_eq!(buf[(inner.right(), confirm.y)].symbol(), "│", "{at}: the border");
-                let row = |rect: Rect| cells_text(buf, rect.y, rect.x, rect.right());
+                let row = |rect: Rect| cells_text(&buf, rect.y, rect.x, rect.right());
+                assert_eq!(back.y, inner.bottom() - 1, "{at}: the way back on the last row");
                 assert_eq!(row(back), format!("  {back_label}  "), "{at}: the way back, whole");
-                let clicked = |act: Act| ui.clicks.iter().find(|(_, a)| *a == act).map(|(r, _)| *r);
-                assert_eq!(clicked(Act::SkipConfirm), Some(confirm), "{at}: its click is its rect");
-                let whole = format!("  {confirm_label}  ");
-                let fits = back.right() + 2 + kit::width(&whole) as u16 <= inner.right();
-                if fits {
-                    assert_eq!(row(confirm), whole, "{at}: the confirmation, whole");
-                } else {
-                    assert!(whole.starts_with(&row(confirm)), "{at}: cut, not garbled");
-                    overflowed.push(at);
+                assert_eq!(row(confirm), format!("  {confirm_label}  "), "{at}: the confirmation, whole");
+                assert_eq!(clicked, Some(confirm), "{at}: its click is its rect");
+                for rect in [back, confirm] {
+                    assert!(rect.right() <= inner.right(), "{at}: {rect:?} past {inner:?}");
+                    assert_eq!(buf[(inner.right(), rect.y)].symbol(), "│", "{at}: the border");
                 }
+                let beside = (confirm.x, confirm.y) == (back.right() + 2, back.y);
+                let above = (confirm.x, confirm.y) == (inner.x, back.y - 1);
+                assert!(beside || above, "{at}: beside the way back or above it: {back:?} {confirm:?}");
             }
         }
-        // The sizes where the confirmation ran past the border before the
-        // clamp: French at either width, German at the floor.
-        for at in ["fr at 100 columns", "fr at 58 columns", "de at 58 columns"] {
-            assert!(overflowed.iter().any(|o| o == at), "{at} is measured: {overflowed:?}");
+    }
+
+    /// The two placements, with labels whose widths are fixed here rather
+    /// than by a translation: a 40-cell confirmation beside an 8-cell way
+    /// back takes 54 cells with the gap, so it sits beside at 100 columns
+    /// (a 60-cell row) and moves up whole at 58 (a 52-cell row); a 64-cell
+    /// CJK one is wider than the modal on a row of its own, so it moves up
+    /// and is clamped there, cut cleanly at the inner right edge with the
+    /// border intact and its click on what it drew.
+    #[test]
+    fn the_skip_modal_confirmation_moves_above_the_way_back_when_the_pair_outgrows_the_row() {
+        let ascii = "x".repeat(40);
+        for (width, stacked) in [(100, false), (58, true)] {
+            let (inner, back, confirm, buf, clicked) = draw_skip_buttons(width, "Back", &ascii);
+            let at = format!("{width} columns");
+            if stacked {
+                assert_eq!((confirm.x, confirm.y), (inner.x, back.y - 1), "{at}: above the way back");
+            } else {
+                assert_eq!((confirm.x, confirm.y), (back.right() + 2, back.y), "{at}: beside the way back");
+            }
+            assert_eq!(cells_text(&buf, confirm.y, confirm.x, confirm.right()), format!("  {ascii}  "), "{at}: whole");
+            assert_eq!(clicked, Some(confirm), "{at}: its click is its rect");
+        }
+        let cjk = "公開".repeat(15);
+        assert_eq!(kit::width(&cjk), 60);
+        for width in [58, 100] {
+            let (inner, back, confirm, buf, clicked) = draw_skip_buttons(width, "Back", &cjk);
+            let at = format!("{width} columns, CJK");
+            assert_eq!((confirm.x, confirm.y), (inner.x, back.y - 1), "{at}: above the way back");
+            assert_eq!(confirm.right(), inner.right(), "{at}: clamped to the edge");
+            assert_eq!(buf[(inner.right(), confirm.y)].symbol(), "│", "{at}: the border");
+            let text = cells_text(&buf, confirm.y, confirm.x, confirm.right());
+            assert!(format!("  {cjk}  ").starts_with(text.trim_end()) && text.len() > 2, "{at}: cut, not garbled: {text:?}");
+            assert_eq!(clicked, Some(confirm), "{at}: its click is its rect");
         }
     }
 
