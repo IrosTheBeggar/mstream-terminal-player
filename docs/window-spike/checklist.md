@@ -51,6 +51,8 @@ recorded, not a surprise. Expected numbers are from a release build on an M-seri
 
 23. Windows, CPU and memory: idle on Library for 60 s, then 60 s in the Visualizer tab, watched in Task Manager. Expected: idle stays comparable to the terminal GUI (about 1–2%), and the Visualizer tab stays about 15% or less of one core, at roughly 110–130 MB.
 
+24. Windows, native dialogs (added after the v0.12.0 smoke): in `setup --window` press b (Browse), and in the GUI's window open the Add-torrent room's file dialog. Expected: each dialog opens centred over the player's window, not at its last spot or the screen's corner; the player's window takes no clicks while it is up (GetWindow(dialog, GW_OWNER) is the player's window); and on closing, the focus goes back to the player's window. The unit test reads the owner rfd is handed; only this run shows Windows honouring it.
+
 ## Criteria the judge scored
 
 - **1. Rendering fidelity: the window matches the terminal cell for cell, CJK included, no tofu; the colour-gamma finding** — partial. The cell-text comparison cannot see tofu, and the tofu gap is real. cjk_fallback (src/gui/window/mod.rs:746) loads a CJK face only when the UI locale is ja or zh. So CJK track titles in an en or other locale, and Korean anywhere, draw as boxes. On Linux, faces at a collection index above 0 are skipped (Noto CJK zh). The Visualizer tab's named ANSI colours go through ratatui-wgpu's SVG-keyword table, so Color::Blue draws as #0000ff, not a terminal palette. Gamma is unfixed. The options are to patch ratatui-wgpu's surface format, pre-convert colours in the Counted backend, or write a custom PostProcessor.

@@ -194,9 +194,26 @@ fn owned(dialog: rfd::FileDialog) -> rfd::FileDialog {
     }
 }
 
+/// The folder dialog `pick_folder` opens, built apart so a test can read
+/// its owner (rfd's dialog prints its parent in its `Debug`).
+#[cfg(windows)]
+fn folder_dialog() -> rfd::FileDialog {
+    owned(rfd::FileDialog::new().set_title(DIALOG_TITLE))
+}
+
+/// The torrent dialog `pick_torrent` opens, built apart as the folder one is.
+#[cfg(windows)]
+fn torrent_dialog(title: &str, start: Option<&Path>) -> rfd::FileDialog {
+    let mut dialog = rfd::FileDialog::new().set_title(title).add_filter("Torrent", &["torrent"]);
+    if let Some(start) = start {
+        dialog = dialog.set_directory(start);
+    }
+    owned(dialog)
+}
+
 #[cfg(windows)]
 pub fn pick_folder() -> Pick {
-    match owned(rfd::FileDialog::new().set_title(DIALOG_TITLE)).pick_folder() {
+    match folder_dialog().pick_folder() {
         Some(path) => Pick::Folder(path),
         None => Pick::Cancelled,
     }
@@ -207,11 +224,7 @@ pub fn pick_torrent(title: &str, start: Option<&Path>) -> Pick {
     if torrent_dialogs_disabled() {
         return Pick::Unavailable("dialogs are switched off".to_string());
     }
-    let mut dialog = rfd::FileDialog::new().set_title(title).add_filter("Torrent", &["torrent"]);
-    if let Some(start) = start {
-        dialog = dialog.set_directory(start);
-    }
-    match owned(dialog).pick_file() {
+    match torrent_dialog(title, start).pick_file() {
         Some(path) => Pick::File(path),
         None => Pick::Cancelled,
     }
@@ -295,6 +308,12 @@ mod tests {
         assert!(titled.contains("with prompt \"Add a \\\"seed\\\"\""), "{titled}");
     }
 
+    /// A published HWND is handed out as the Win32 window handle rfd's
+    /// `set_parent` reads, and the dialogs the two pickers open carry it as
+    /// their parent, until it is withdrawn. rfd keeps the parent to itself
+    /// but prints it in the dialog's `Debug`, which is what is read here; that
+    /// Show then centres and disables the window is the OS's, and the window
+    /// checklist (docs/window-spike/checklist.md) has it checked live.
     #[cfg(windows)]
     #[test]
     fn a_published_window_owns_the_dialogs_until_it_is_withdrawn() {
@@ -309,7 +328,19 @@ mod tests {
         // rfd reads the display handle too; on Windows there is only the one.
         let display = published.display_handle().expect("Windows has its display").as_raw();
         assert!(matches!(display, RawDisplayHandle::Windows(_)), "{display:?}");
+        // The dialogs the pickers open, as rfd prints them (0x1234 is 4660).
+        let dialogs = || {
+            let torrent = torrent_dialog(TORRENT_TITLE, Some(Path::new("C:\\Users")));
+            [("folder", format!("{:?}", folder_dialog())), ("torrent", format!("{torrent:?}"))]
+        };
+        for (picker, dialog) in dialogs() {
+            assert!(dialog.contains("parent: Some(Win32("), "{picker}: unowned: {dialog}");
+            assert!(dialog.contains("hwnd: 4660"), "{picker}: not the published window: {dialog}");
+        }
         set_owner(None);
         assert!(owner().is_none(), "a closed window's dialogs are unowned again");
+        for (picker, dialog) in dialogs() {
+            assert!(dialog.contains("parent: None"), "{picker}: owned after the window: {dialog}");
+        }
     }
 }
