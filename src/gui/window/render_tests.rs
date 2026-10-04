@@ -1092,6 +1092,54 @@ fn a_default_presentation_emoji_draws_from_the_colour_face_past_a_text_face() {
     eprintln!("{text}: from the colour face past a text face, {tinted} coloured pixels");
 }
 
+/// A keycap draws as the colour face's picture, though its base is a digit every face has in
+/// monochrome, the emoji face included (VENDORED.md, change 24): `1️⃣` and `#️⃣` drawn with the
+/// faces in the window's order (Hack, the bundled symbols, the system's symbol face and script
+/// faces, then the emoji face) are cell for cell what they are with the emoji face right after
+/// Hack, and have colour in them. Judged by the base alone, a text face ahead of the emoji face
+/// with all of the keycap's characters drew it as a plain digit. On Windows 10 no face ahead of
+/// Segoe UI Emoji maps U+FE0F (none in its Fonts folder does), so there the emoji face won on
+/// the count and this holds with or without the change; it is the guard for a system whose
+/// text faces map the variation selectors. The digit and `#` without VS16 and U+20E3 stay text:
+/// drawn exactly as without the emoji face at all. A colour face with no picture for a keycap
+/// skips with a line.
+#[test]
+fn a_keycap_draws_from_the_colour_face_and_a_plain_digit_stays_text() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let emoji = faces.last().unwrap().clone();
+    let keycaps = ["1\u{FE0F}\u{20E3}", "#\u{FE0F}\u{20E3}"];
+    if let Some(missing) = keycaps.iter().find(|k| !emoji.colour_cluster(k)) {
+        eprintln!("skipped: the emoji face has no colour picture for the keycap {missing:?}");
+        return;
+    }
+    let (hack, symbols) = (hack().unwrap(), symbols().unwrap());
+    let text_faces: Vec<Font<'static>> =
+        symbol_fallback().into_iter().chain(script_fallbacks("en")).collect();
+    let mut window = vec![hack.clone(), symbols.clone()];
+    window.extend(text_faces.iter().cloned());
+    let without_emoji = window.clone();
+    window.push(emoji.clone());
+    let mut colour_first = vec![hack, emoji, symbols];
+    colour_first.extend(text_faces);
+    for keycap in keycaps {
+        let line = format!("{keycap}|");
+        let Some(frame) = row(&window, 4, line.clone()) else { return };
+        let Some(colour) = row(&colour_first, 4, line) else { return };
+        for col in 0..4 {
+            assert!(frame.cell(col, 0) == colour.cell(col, 0), "{keycap:?}: cell {col}");
+        }
+        let tinted = (0..2).flat_map(|col| frame.cell(col, 0)).filter(|&px| coloured(px)).count();
+        eprintln!("{keycap:?}: {tinted} coloured pixels");
+        assert!(tinted > 0, "{keycap:?} drew without colour: a plain digit, not the keycap");
+    }
+    let Some(frame) = row(&window, 4, "1#|") else { return };
+    let Some(text) = row(&without_emoji, 4, "1#|") else { return };
+    for col in 0..4 {
+        assert!(frame.cell(col, 0) == text.cell(col, 0), "the plain digit and #: cell {col}");
+    }
+}
+
 /// A character whose default is text keeps its text face, in the cell's colour, though the
 /// colour face has it too: ♥ (U+2665) without VS16 draws from the text face before the emoji
 /// face, gold in a gold cell and not the colour face's red heart, and with VS16 it is the

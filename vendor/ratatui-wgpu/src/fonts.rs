@@ -145,6 +145,42 @@ impl Font<'_> {
         let Some(glyph) = self.font.glyph_index(ch) else {
             return false;
         };
+        self.colour_glyph_id(glyph)
+    }
+
+    /// Whether this face draws all of `cluster` as one picture in colour: it shapes to a single
+    /// advancing glyph ([`Font::joins`]) that is in colour as [`Font::colour_glyph`] judges a
+    /// glyph. For a keycap (`1️⃣`, `#️⃣`), whose base, a digit or `#`, is a monochrome glyph
+    /// even in the emoji face, the picture being the face's ligature for the whole sequence
+    /// (VENDORED.md, change 24). Public so the player's tests know which to expect.
+    pub fn colour_cluster(
+        &self,
+        cluster: &str,
+    ) -> bool {
+        if !self.colour {
+            return false;
+        }
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(cluster);
+        buffer.guess_segment_properties();
+        let shaped = rustybuzz::shape(&self.font, &[], buffer);
+        let mut advancing = shaped
+            .glyph_infos()
+            .iter()
+            .zip(shaped.glyph_positions())
+            .filter(|(_, position)| position.x_advance != 0);
+        match (advancing.next(), advancing.next()) {
+            (Some((info, _)), None) if info.glyph_id != 0 => u16::try_from(info.glyph_id)
+                .is_ok_and(|id| self.colour_glyph_id(rustybuzz::ttf_parser::GlyphId(id))),
+            _ => false,
+        }
+    }
+
+    /// Whether `glyph` is one the backend draws in colour (see [`Font::colour_glyph`]).
+    fn colour_glyph_id(
+        &self,
+        glyph: rustybuzz::ttf_parser::GlyphId,
+    ) -> bool {
         self.font.is_color_glyph(glyph)
             || self.font.glyph_raster_image(glyph, u16::MAX).is_some_and(|raster| {
                 matches!(
@@ -473,7 +509,17 @@ impl<'a> Fonts<'a> {
         // a terminal draws both from Segoe UI Emoji. A cluster with text presentation (♥, ✔,
         // ★ without VS16, a digit) is chosen as before, and with no colour face for an emoji
         // the first face with the most of it still draws it.
+        //
+        // A keycap (a digit, `#` or `*`, VS16, then U+20E3) is the one emoji whose base is
+        // text in every face: the emoji face's `1` is a monochrome digit like any other, and
+        // its picture is the ligature it shapes the whole sequence to. Judged by its base it
+        // was never in colour, so the emoji face drew it only by having the most of it, and a
+        // text face ahead of it with all three characters (one that maps U+FE0F) drew it as a
+        // plain digit beside an enclosing mark. For a keycap the face's shaping of the whole
+        // cluster is asked as well ([`Font::colour_cluster`]): a face that joins it into one
+        // colour picture is in colour. A digit or `#` alone is text and never asks.
         let emoji = emoji_presentation(cluster);
+        let keycap = emoji && is_keycap(cluster);
         let mut max = (false, false, 0);
         let mut font = None;
         let base = cluster.chars().next();
@@ -491,7 +537,10 @@ impl<'a> Fonts<'a> {
                         (count, idx)
                     });
             let has_base = base.is_some_and(|ch| candidate.font().glyph_index(ch).is_some());
-            let colour = emoji && has_base && base.is_some_and(|ch| candidate.colour_glyph(ch));
+            let colour = emoji
+                && has_base
+                && (base.is_some_and(|ch| candidate.colour_glyph(ch))
+                    || (keycap && candidate.colour_cluster(cluster)));
             if (has_base, colour, count) > max {
                 max = (has_base, colour, count);
                 font = Some((candidate, fake_bold, fake_italic));
@@ -558,6 +607,16 @@ pub fn emoji_presentation(cluster: &str) -> bool {
             })
         }
     }
+}
+
+/// Whether a cluster is a keycap: a digit, `#` or `*`, VS16 (or, unqualified, nothing), then
+/// U+20E3, and nothing more (UTS #51's `emoji_keycap_sequence`). Its base is text in every
+/// face, so [`Fonts::select_font`] judges a face's colour by the whole sequence instead.
+fn is_keycap(cluster: &str) -> bool {
+    let mut chars = cluster.chars();
+    let base = chars.next().is_some_and(|ch| ch.is_ascii_digit() || ch == '#' || ch == '*');
+    let rest: Vec<char> = chars.collect();
+    base && matches!(rest.as_slice(), ['\u{FE0F}', '\u{20E3}'] | ['\u{20E3}'])
 }
 
 /// `Emoji_Presentation=Yes`: the character is a picture unless asked otherwise. It is the

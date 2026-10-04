@@ -21,9 +21,9 @@ faces drawn at the main face's size, colour emoji drawn whole in their cells, a 
 chosen by its first character, an emoji grown wide in place, the build split so its second half
 runs off the window's thread, a present owed on purpose, an emoji drawn from a colour face ahead
 of the monochrome symbol faces, an unjoined flag drawn as its two letters, a composed emoji (a
-family) drawn whole, and a wide cell that erases every glyph it lands on. They land here, one
-change at a time, each recorded below, until an upstream release carries them and the patch
-entry can go.
+family) drawn whole, a wide cell that erases every glyph it lands on, and a keycap drawn from
+the colour face. They land here, one change at a time, each recorded below, until an upstream
+release carries them and the patch entry can go.
 
 ## What differs from 0.6.0
 
@@ -489,6 +489,29 @@ entry can go.
     `the_bar_in_the_window_keeps_the_space_after_an_emoji_as_the_title_changes`, the GUI's own
     bar drawn through ratatui's diff). Before, each drew its row a cell short (`日x|` for
     `日 x|`).
+24. **A keycap draws from the colour face** (`fonts.rs`, `Fonts::select_font`,
+    `Font::colour_cluster`, which is public, `is_keycap`). Change 21's preference judged a
+    face's colour by its glyph for the cluster's base, and a keycap (a digit, `#` or `*`, VS16,
+    then U+20E3: `1️⃣`, `#️⃣`) is the one emoji whose base is text in every face: Segoe UI
+    Emoji's `1` is a monochrome digit like Hack's, and its picture is the ligature its GSUB
+    makes of the whole sequence. So no face was in colour for a keycap, and the face with the
+    most of it drew it, the earlier on a tie: a text face ahead of the emoji face that maps all
+    three characters drew a plain digit with an enclosing mark beside it. For a keycap with
+    emoji presentation a face is now also in colour when it shapes the whole cluster to one
+    advancing glyph, not `.notdef`, that is in colour as `Font::colour_glyph` judges a glyph
+    (`Font::colour_cluster`; asked only of faces with colour tables, and only for a keycap,
+    so no other cluster is shaped during the choice). A digit or `#` alone has text
+    presentation and is chosen as before; so is an unqualified keycap (`1⃣`, no VS16) where
+    no face pictures it, Segoe UI Emoji ligating only the qualified form. Latent on Windows
+    10: no face ahead of Segoe UI Emoji maps U+FE0F (it is the only face in the Fonts folder
+    that maps all of `1`, `#`, U+FE0F and U+20E3), so the emoji face won the count there and
+    drew the keycap right; a system whose text faces map the variation selectors met the
+    fault. Checked offscreen on Windows 10 (`render_tests.rs`,
+    `a_keycap_draws_from_the_colour_face_and_a_plain_digit_stays_text`): `1️⃣` and `#️⃣` in the
+    window's face order draw cell for cell as with the emoji face right after Hack, with
+    colour in them (316 and 313 coloured pixels), and `1#` draws exactly as without the emoji
+    face; a colour face with no picture for a keycap skips with a line. For the reason above
+    it holds on that machine with or without the change.
 
 ### Tests
 
