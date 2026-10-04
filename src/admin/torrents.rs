@@ -1851,7 +1851,8 @@ fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
     if !hosted {
         let title = t!("tor.title").to_string();
         draw_header(frame, area, &title, &host_of(&room.client));
-        let chip_x = area.x + 2 + title.chars().count() as u16 + 1;
+        // In cells, so a Japanese title is not drawn over.
+        let chip_x = area.x + 2 + kit::width(&title) as u16 + 1;
         frame.render_widget(
             Paragraph::new(Span::styled(beta.clone(), Style::default().fg(th().gold))),
             Rect { x: chip_x, y: area.y, width: area.width.saturating_sub(chip_x + 30), height: 1 },
@@ -2313,7 +2314,11 @@ fn draw_tabs(frame: &mut Frame, room: &mut Room, column: Rect) {
             Tab::Client => t!("tor.tab_client").to_string(),
         };
         let label = format!(" {name} ");
-        let rect = Rect { x, y: tabs_y, width: label.chars().count() as u16, height: 1 };
+        // In cells, as the kit draws the label, and clamped to the column:
+        // counted by characters a Japanese tab got a rect half its width,
+        // so the label was cut there, its click covered only what was left,
+        // and the next tab started inside it.
+        let rect = Rect { x, y: tabs_y, width: (kit::width(&label) as u16).min(column.right().saturating_sub(x)), height: 1 };
         let hover = room.ui.pointer.is_some_and(|pt| rect.contains(pt));
         let style = if tab == room.tab {
             Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD)
@@ -2673,25 +2678,33 @@ fn draw_seeding(frame: &mut Frame, room: &mut Room, body: Rect) {
     let ticks_y = body.y + 7;
     let mut x = body.x;
     let label = format!("{}  ", t!("tor.seed_search"));
-    frame.render_widget(Paragraph::new(Span::styled(label.clone(), dim())), Rect { x, y: ticks_y, width: label.chars().count() as u16, height: 1 });
-    x += label.chars().count() as u16;
+    // The label and each tick in cells, as drawn, the users room's add-form
+    // rule: counted by characters a library named in Japanese got a rect
+    // half its width, so it was cut there and its click covered only what
+    // was left. The first tick is drawn however wide, clamped to the row,
+    // rather than leaving the row empty; a later one that does not fit is
+    // left off.
+    let label_w = kit::width(&label) as u16;
+    frame.render_widget(Paragraph::new(Span::styled(label.clone(), dim())), Rect { x, y: ticks_y, width: label_w.min(body.width), height: 1 });
+    x += label_w;
+    let first_x = x;
     let ticks = room.seed_ticks.clone();
     for (i, (name, on)) in ticks.iter().enumerate() {
         let text = format!("{} {}", if *on { g("[✓]", "[x]") } else { "[ ]" }, printable(name, NAME_MAX));
-        let w = text.chars().count() as u16;
-        if x + w > body.right() {
+        let w = kit::width(&text) as u16;
+        if x + w > body.right() && x > first_x {
             break;
         }
-        let rect = Rect { x, y: ticks_y, width: w, height: 1 };
+        let rect = Rect { x, y: ticks_y, width: w.min(body.right().saturating_sub(x)), height: 1 };
         let hover = room.ui.pointer.is_some_and(|p| rect.contains(p));
         let style = if hover { Style::default().fg(th().bright) } else if *on { Style::default().fg(th().ok) } else { dim() };
         frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
         room.ui.click(rect, Act::SeedTick(i));
-        x += w + 3;
+        x += rect.width + 3;
     }
     if ticks.iter().all(|(_, on)| !*on) {
         let hint = t!("tor.seed_all").to_string();
-        if x + 2 + hint.chars().count() as u16 <= body.right() {
+        if x + 2 + kit::width(&hint) as u16 <= body.right() {
             frame.render_widget(Paragraph::new(Span::styled(hint, dim())).alignment(Alignment::Right), line(ticks_y));
         }
     }
@@ -3276,6 +3289,45 @@ mod tests {
         assert_eq!(room.connect.as_ref().unwrap().fields(), vec![CField::Host, CField::Port, CField::Password, CField::Https]);
     }
 
+    /// Every tab label draws whole in Japanese at 100×30, its click rect
+    /// as wide as it in cells, and each tab starts past the one before.
+    /// Counted by characters ' 概要 ' got a 4-cell rect for 6 cells of text,
+    /// so it drew as ' 概 ', the next tab started two cells into it, and
+    /// each click covered only what was left. Drawn under the process-wide
+    /// locale (the room reads its labels through `t!`), held for the test.
+    #[test]
+    fn every_tab_label_draws_whole_in_japanese() {
+        let _ja = crate::setup::tests::in_locale("ja");
+        let mut room = connected();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        assert!(!room.torrents.is_empty(), "the Torrents tab carries its count");
+        let tabs: Vec<(Tab, String)> = room
+            .tabs()
+            .into_iter()
+            .map(|tab| {
+                let name = match tab {
+                    Tab::Torrents => t!("tor.tab_torrents_n", n = room.torrents.len()).to_string(),
+                    Tab::Libraries => t!("tor.tab_libraries").to_string(),
+                    Tab::Seeding => t!("tor.tab_seeding").to_string(),
+                    Tab::Access => t!("tor.tab_access").to_string(),
+                    Tab::Client => t!("tor.tab_client").to_string(),
+                };
+                (tab, format!(" {name} "))
+            })
+            .collect();
+        assert_eq!(tabs.len(), 5, "every tab, Access included");
+        let buffer = terminal.backend().buffer().clone();
+        let mut end = 0;
+        for (tab, label) in tabs {
+            let rect = room.ui.clicks.iter().find(|(_, a)| *a == Act::Tab(tab)).map(|(r, _)| *r).unwrap_or_else(|| panic!("{label:?}"));
+            assert_eq!(crate::setup::tests::cells_text(&buffer, rect.y, rect.x, rect.right()), label, "drawn whole");
+            assert_eq!(usize::from(rect.width), kit::width(&label), "{label:?}: its click covers it");
+            assert!(rect.x >= end, "{label:?} starts past the tab before it");
+            end = rect.right();
+        }
+    }
+
     #[test]
     fn connected_the_torrents_tab_lists_filters_and_gates_the_remove() {
         let _en = english();
@@ -3454,6 +3506,44 @@ mod tests {
         assert!(room.note.as_ref().is_some_and(|(n, _)| n == "music: template cleared"));
         room.note = None;
         assert!(row(&draw(&mut room), "music").contains("(none — typed by hand)"));
+    }
+
+    /// The SEARCH IN ticks measure their names in cells, as the users
+    /// room's add form does: two libraries named by ten Japanese
+    /// characters draw whole, 24 cells each and three apart, each click on
+    /// its tick; and a first name wider than the row by itself (fifty
+    /// characters, 100 cells) is still drawn, clamped to the body's right
+    /// edge and cut cleanly, with the next left off, rather than leaving
+    /// the row empty. The body's edges are read off the add card's click,
+    /// which spans it.
+    #[test]
+    fn the_seeding_ticks_measure_japanese_names_in_cells_and_clamp_the_first() {
+        let _en = english();
+        let mut room = connected();
+        room.tab = Tab::Seeding;
+        let tick_text = |room: &Room, buffer: &ratatui::buffer::Buffer, i: usize| {
+            let rect = room.ui.clicks.iter().find(|(_, a)| *a == Act::SeedTick(i)).map(|(r, _)| *r);
+            rect.map(|r| (r, crate::setup::tests::cells_text(buffer, r.y, r.x, r.right())))
+        };
+        let short = ["日本の音楽アーカイブ", "クラシック全集の録音"];
+        room.seed_ticks = short.iter().map(|n| (n.to_string(), false)).collect();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let (a, a_text) = tick_text(&room, &buffer, 0).expect("tick 0");
+        let (b, b_text) = tick_text(&room, &buffer, 1).expect("tick 1");
+        assert_eq!((a.width, b.width, b.x), (24, 24, a.right() + 3), "in cells, three apart");
+        assert_eq!((a_text, b_text), (format!("[ ] {}", short[0]), format!("[ ] {}", short[1])), "whole");
+
+        let long = "日本の音楽アーカイブ".repeat(5);
+        room.seed_ticks = vec![(long.clone(), false), ("music".to_string(), false)];
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let body = room.ui.clicks.iter().find(|(_, a)| *a == Act::SeedAdd).map(|(r, _)| *r).expect("the add card");
+        let (first, text) = tick_text(&room, &buffer, 0).expect("the first tick is drawn");
+        assert_eq!(first.right(), body.right(), "clamped to the body: {first:?} in {body:?}");
+        assert!(text.len() > "[ ] ".len() && format!("[ ] {long}").starts_with(text.trim_end()), "cut, not garbled: {text:?}");
+        assert_eq!(tick_text(&room, &buffer, 1), None, "no room is left for the next");
     }
 
     #[test]

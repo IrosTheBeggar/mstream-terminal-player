@@ -3803,6 +3803,29 @@ pub(crate) mod tests {
     /// env-race lesson, applied before it flakes.
     pub(crate) static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// LOCALE_LOCK held with the process-wide locale switched to another
+    /// language, for a test that draws a whole room in it (the rooms read
+    /// their labels through `t!` with no locale passed). Dropping it puts
+    /// English back before the lock is let go, a failed assertion's unwind
+    /// included, so the language never leaks into the next test to take
+    /// the lock; the rooms' `english()` guards set English anyway.
+    pub(crate) struct LocaleGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for LocaleGuard {
+        fn drop(&mut self) {
+            rust_i18n::set_locale("en");
+        }
+    }
+
+    pub(crate) fn in_locale(code: &str) -> LocaleGuard {
+        let lock = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale(code);
+        crate::kit::theme::pin_modern_terminal();
+        LocaleGuard { _lock: lock }
+    }
+
     #[test]
     fn every_locale_mirrors_the_english_keys_and_placeholders() {
         let files: [(&str, &str); 10] = [
@@ -4023,7 +4046,7 @@ pub(crate) mod tests {
 
     /// The text of the cells from `x` up to `end` on row `y`, a wide
     /// character's hidden cell left out.
-    fn cells_text(buf: &ratatui::buffer::Buffer, y: u16, x: u16, end: u16) -> String {
+    pub(crate) fn cells_text(buf: &ratatui::buffer::Buffer, y: u16, x: u16, end: u16) -> String {
         let (mut text, mut x) = (String::new(), x);
         while x < end {
             let symbol = buf[(x, y)].symbol();

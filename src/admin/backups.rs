@@ -1177,7 +1177,8 @@ fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
         // The page's BETA banner, as a chip beside the title.
         frame.render_widget(
             Paragraph::new(Span::styled(beta.clone(), Style::default().fg(th().gold))),
-            Rect { x: area.x + 2 + title.chars().count() as u16 + 1, y: area.y, width: 8, height: 1 },
+            // In cells, so a Japanese title is not drawn over.
+            Rect { x: area.x + 2 + kit::width(&title) as u16 + 1, y: area.y, width: 8, height: 1 },
         );
     }
     let column = body_column(area, hosted);

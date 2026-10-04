@@ -1009,7 +1009,11 @@ fn draw_body(frame: &mut Frame, page: &mut Page, column: Rect) {
     let mut x = column.x;
     for tab in Tab::ALL {
         let label = format!(" {} ", tab.name());
-        let rect = Rect { x, y: tabs_y, width: label.chars().count() as u16, height: 1 };
+        // In cells, as the kit draws the label, and clamped to the column:
+        // counted by characters a Japanese tab got a rect half its width,
+        // so the label was cut there, its click covered only what was left,
+        // and the next tab started inside it.
+        let rect = Rect { x, y: tabs_y, width: (kit::width(&label) as u16).min(column.right().saturating_sub(x)), height: 1 };
         let hover = page.ui.pointer.is_some_and(|pt| rect.contains(pt));
         let style = if tab == page.tab {
             Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD)
@@ -1053,14 +1057,17 @@ fn draw_tab_note(frame: &mut Frame, page: &mut Page, at: Rect) {
     if page.tab == Tab::Recent && page.zone.is_none() {
         parts.push(t!("sta.zone_utc").to_string());
     }
-    while !parts.is_empty() && parts.join(" · ").chars().count() > at.width as usize {
+    // In cells, as period_control draws the name that leads it: counted by
+    // characters a Japanese note was right-anchored too far right, and the
+    // control, wider than counted, pushed the rest past the row's end.
+    while !parts.is_empty() && kit::width(&parts.join(" · ")) > at.width as usize {
         parts.pop();
     }
     if parts.is_empty() {
         return;
     }
     let text = parts.join(" · ");
-    let mut x = at.right().saturating_sub(text.chars().count() as u16);
+    let mut x = at.right().saturating_sub(kit::width(&text) as u16);
     if name.is_some() {
         x = period_control(frame, page, x, at.y);
         parts.remove(0);
@@ -1267,7 +1274,7 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     };
     frame.render_widget(Paragraph::new(Span::styled(title.clone(), dim())), line(y));
     let days_note = days_note(&data.summary);
-    if title.chars().count() + 2 + days_note.chars().count() <= width {
+    if kit::width(&title) + 2 + kit::width(&days_note) <= width {
         frame.render_widget(Paragraph::new(Span::styled(days_note, dim())).alignment(Alignment::Right), line(y));
     }
     let cell_w = ((width.saturating_sub(gutter_w) / values.len().max(1)) as u16).clamp(1, 3);
@@ -1290,20 +1297,23 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     // the row has room for the split's words on a bar of at least
     // SHARE_MIN cells.
     let o = &data.summary.origins;
-    let name_w = [t!("sta.origin_local_row"), t!("sta.origin_peers_row")].iter().map(|s| s.chars().count()).max().unwrap_or(0) + 1;
+    let name_w = [t!("sta.origin_local_row"), t!("sta.origin_peers_row")].iter().map(|s| kit::width(s)).max().unwrap_or(0) + 1;
     let words = |plays: u64, ms: u64| t!("sta.plays_time", plays = plays_words(plays), time = fmt_duration(ms)).to_string();
     let (local_words, peer_words) = (words(o.local.plays, o.local.listened_ms), words(o.peers.plays, o.peers.listened_ms));
-    let widest = local_words.chars().count().max(peer_words.chars().count());
+    let widest = kit::width(&local_words).max(kit::width(&peer_words));
     let right_w = body.width.saturating_sub(hours_w + 3);
     let left_w = if page.peer_plays() && right_w as usize >= name_w + SHARE_MIN + 2 + widest { hours_w } else { body.width };
     let title = t!("sta.chart_hours").to_string();
     frame.render_widget(Paragraph::new(Span::styled(title.clone(), dim())), line(y));
     if let Some(note) = hours_note(&data.summary)
-        && title.chars().count() + 2 + note.chars().count() <= left_w as usize
+        && kit::width(&title) + 2 + kit::width(&note) <= left_w as usize
     {
+        // In cells, as drawn: a Japanese title counted by characters put
+        // the note over its second half.
+        let title_w = kit::width(&title) as u16;
         frame.render_widget(
             Paragraph::new(Span::styled(note, dim())),
-            Rect { x: body.x + title.chars().count() as u16 + 2, y, width: left_w - title.chars().count() as u16 - 2, height: 1 },
+            Rect { x: body.x + title_w + 2, y, width: left_w - title_w - 2, height: 1 },
         );
     }
     let hour_labels: Vec<(usize, String)> = [0, 6, 12, 18, 23].iter().map(|h| (*h, h.to_string())).collect();
@@ -1319,8 +1329,11 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
         let total = (o.local.plays + o.peers.plays).max(1);
         let local_share = ((o.local.plays * bar_w as u64 + total / 2) / total) as usize;
         let split = |frame: &mut Frame, at: Rect, name: String, filled: usize, words: &str| {
+            // Padded to name_w in cells: format!'s width counts characters,
+            // so the two Japanese names' bars started at different columns.
+            let pad = " ".repeat(name_w.saturating_sub(kit::width(&name)));
             let spans = vec![
-                Span::raw(format!("{name:<name_w$}")),
+                Span::raw(format!("{name}{pad}")),
                 Span::styled(g("▰", "■").repeat(filled), Style::default().fg(th().accent)),
                 Span::styled(g("▱", "·").repeat(bar_w - filled), dim()),
                 Span::raw(format!("  {words}")),
@@ -1433,7 +1446,9 @@ fn chart(frame: &mut Frame, at: Rect, values: &[u64], cell_w: u16, labels: &[(us
             continue;
         }
         let x = plot_x + *i as u16 * cell_w;
-        let w = text.chars().count() as u16;
+        // In cells, as drawn: a Japanese month ("1月") counted by characters
+        // was a cell short, so its rect cut it and the next label crowded it.
+        let w = kit::width(text) as u16;
         if x < end || x + w > at.right() {
             continue;
         }
@@ -1447,7 +1462,7 @@ fn chart(frame: &mut Frame, at: Rect, values: &[u64], cell_w: u16, labels: &[(us
     }
     frame.render_widget(Paragraph::new(Span::styled(base, dim())), Rect { x: at.x, y: base_y, width: at.width, height: 1 });
     for (x, text) in placed {
-        frame.render_widget(Paragraph::new(Span::styled(text.to_string(), dim())), Rect { x, y: base_y + 1, width: text.chars().count() as u16, height: 1 });
+        frame.render_widget(Paragraph::new(Span::styled(text.to_string(), dim())), Rect { x, y: base_y + 1, width: kit::width(text) as u16, height: 1 });
     }
 }
 
@@ -1732,10 +1747,12 @@ fn draw_period_list(frame: &mut Frame, page: &mut Page, area: Rect, cursor: usiz
     page.ui.click(area, Act::PeriodClose);
 
     let anchor = page.period_at.unwrap_or(Rect { x: area.x + 2, y: area.y + if page.hosted { 1 } else { 2 }, width: 0, height: 1 });
+    // In cells, as period_control above it now measures the name: counted
+    // by characters a Japanese period's list was too narrow for its rows.
     let widest = options
         .iter()
-        .map(|o| o.name.chars().count() + o.detail.as_ref().map_or(0, |d| d.chars().count() + 2))
-        .chain(foot.iter().map(|f| f.chars().count()))
+        .map(|o| kit::width(&o.name) + o.detail.as_ref().map_or(0, |d| kit::width(d) + 2))
+        .chain(foot.iter().map(|f| kit::width(f)))
         .max()
         .unwrap_or(10);
     // The frame, the marker's cell and a cell of padding each side.
@@ -2657,6 +2674,30 @@ mod tests {
 
     fn row(frame: &str, needle: &str) -> String {
         frame.lines().find(|l| l.contains(needle)).map(|l| l.to_string()).unwrap_or_else(|| panic!("no row with {needle:?}:\n{frame}"))
+    }
+
+    /// Every tab label draws whole in Japanese at 100×30, its click rect
+    /// as wide as it in cells, and each tab starts past the one before.
+    /// Counted by characters ' 概要 ' got a 4-cell rect for 6 cells of text,
+    /// so it drew as ' 概 ', the next tab started two cells into it, and
+    /// each click covered only what was left. Drawn under the process-wide
+    /// locale (the room reads its labels through `t!`), held for the test.
+    #[test]
+    fn every_tab_label_draws_whole_in_japanese() {
+        let _ja = crate::setup::tests::in_locale("ja");
+        let mut p = ready();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut p)).unwrap();
+        let tabs: Vec<(Tab, String)> = Tab::ALL.iter().map(|t| (*t, format!(" {} ", t.name()))).collect();
+        let buffer = terminal.backend().buffer().clone();
+        let mut end = 0;
+        for (tab, label) in tabs {
+            let rect = p.ui.clicks.iter().find(|(_, a)| *a == Act::Tab(tab)).map(|(r, _)| *r).unwrap_or_else(|| panic!("{label:?}"));
+            assert_eq!(crate::setup::tests::cells_text(&buffer, rect.y, rect.x, rect.right()), label, "drawn whole");
+            assert_eq!(usize::from(rect.width), kit::width(&label), "{label:?}: its click covers it");
+            assert!(rect.x >= end, "{label:?} starts past the tab before it");
+            end = rect.right();
+        }
     }
 
     /// The radio rows (ORIGIN, SHOW, RANK BY) measure their options in

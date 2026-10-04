@@ -1028,13 +1028,16 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect, hosted: bool) {
     let x_col = sel_end + 1;
     let user_x = column.x;
     let admin_x = user_x + USER_W + 2;
-    let admin_w = (Flag::Admin.header().chars().count() as u16).max(3);
+    // The flag columns are as wide as their headers in cells, as drawn: a
+    // Japanese header counted by characters got half its width, so it was
+    // cut and the glyphs centred under it sat off its middle.
+    let admin_w = (kit::width(&Flag::Admin.header()) as u16).max(3);
     let libs_x = admin_x + admin_w + 2;
     // The four flag columns hang off the selection's right edge.
     let mut flag_cols: Vec<(Flag, u16, u16)> = Vec::new(); // (flag, x, w)
     let mut right = sel_end;
     for flag in [Flag::Modify, Flag::Audio, Flag::Upload, Flag::Mkdir] {
-        let w = (flag.header().chars().count() as u16).max(3);
+        let w = (kit::width(&flag.header()) as u16).max(3);
         right = right.saturating_sub(w);
         flag_cols.push((flag, right, w));
         right = right.saturating_sub(2);
