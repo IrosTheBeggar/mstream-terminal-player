@@ -443,6 +443,12 @@ release carries them and the patch entry can go.
       CBDT faces (Apple, Noto) join what they know into one glyph and never take this path.
       `Font::composes` (public, new) says whether a face composes a string, by the same rule,
       as `Font::joins` says whether it joins one: the player's tests ask it.
+      `Font::composition` (public, new, with `Composition` and `Placed`) says how: every
+      shaped glyph with its advance, offsets and place, whether it is a COLRv0 or COLRv1
+      picture, and its ink box at that place, taken by a painter that paints nothing and keeps
+      the box of every outline a layer fills, through the pushed transforms and cut to the clip
+      box (`InkBounds`), as a COLRv1 picture's own `glyf` entry may be empty. The family test
+      compares the drawn shape with it and prints it.
     - `Rendered` and `Sourced` are keyed by place, glyph and width, and a removal took the
       key out of `Rendered` whichever cell had put it there. Change 21 made one place
       routinely change hands: an unjoined flag's second letter stands in the continuation and
@@ -455,8 +461,16 @@ release carries them and the patch entry can go.
     Checked offscreen on Windows 10 (GTX 1060, DX12) with Segoe UI Emoji
     (`src/gui/window/render_tests.rs`): `a_family_the_face_composes_draws_whole_in_its_cells`
     draws `|👨‍👩‍👧|` with both bars as `|  |` draws them and the family's ink 18 px wide and 16
-    tall at 24 px, where the man alone was 11 wide and 20 tall (the test failed so), and
-    `an_unjoined_sequence_draws_its_base_and_nothing_after` holds that 👨‍🦖 is not composed;
+    tall at 24 px (1.13), the shape of its three pictures together (2734 by 2300 units, 1.19),
+    where its first picture alone was drawn 11 wide and 20 tall (0.55; the test fails so, and
+    did again with `flush`'s composing switched off). That the family is wider than tall is
+    Windows 10's design, not a rule, and the test first asked only that: GitHub's
+    windows-2025 image, whose Segoe UI Emoji is Windows 11's, drew it 19 wide and 20 tall, the
+    height of an emoji not shrunk, so (by inference; that font was not to hand) its run is no
+    wider than one emoji and its people are composed inside one emoji's square. The test now
+    holds the drawn shape to the face's own (`Font::composition`) within a quarter, and nearer
+    it than to the first picture's where those differ by a fifth or more, and prints both.
+    Also `an_unjoined_sequence_draws_its_base_and_nothing_after` holds that 👨‍🦖 is not composed;
     `a_flag_letter_that_changes_cells_in_place_is_drawn_by_its_new_cell` draws `x🇵🇪|` (gold)
     then `🇯🇵|`, the reverse, and the same with 🇦🇦, each cell for cell as the second line draws
     fresh, and failed at cell 1 before the removal took the owner into account. A row of 👨‍👩‍👧,

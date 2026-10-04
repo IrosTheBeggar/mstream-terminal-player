@@ -904,32 +904,99 @@ fn an_unjoined_sequence_draws_its_base_and_nothing_after() {
 /// draws whole in its two cells, as Windows Terminal draws it: Windows 10's Segoe UI Emoji
 /// shapes 👨‍👩‍👧 to a man and a woman, who advance, and a girl, who does not and is placed back
 /// in front of them, and the three are drawn into one box, fitted to the run's advance
-/// (VENDORED.md, change 22). Before, the man alone was drawn: three people side by side are
-/// wider than they are tall, and one alone is taller than wide, so the family's ink must be
-/// wider than tall. Nothing reaches the cells around it either: the girl drawn at the man's
-/// place once reached into the cell before the family's. A face that joins the family (Apple,
-/// Noto), or neither joins nor composes it, skips with a line.
+/// (VENDORED.md, change 22). Before, the first picture alone was drawn.
+///
+/// What "whole" looks like is the face's to say, so the test asks it: the shape of the drawn
+/// ink, its width over its height, must be the shape of every picture's ink at the place the
+/// face put it (`Font::composition`), within a quarter; and where the first picture alone is
+/// a different shape, the drawing must be nearer the whole than the first picture. Shapes,
+/// not sizes, as the run is shrunk to fit its box by however much its advance exceeds it. On
+/// Windows 10 (Segoe UI Emoji 1.29, COLRv0) the people stand side by side: the whole is 2734
+/// units wide and 2300 tall (1.19), the man who comes first 1366 by 2300 (0.59), and the
+/// family draws 18 px wide and 16 tall (1.13) at 24 px, its first picture alone (as before
+/// change 22) 11 by 20 (0.55). The test once asked only that the family be wider than tall, which is
+/// Windows 10's design and not a rule: GitHub's windows-2025 image (its Segoe UI Emoji is
+/// Windows 11's) drew it 19 wide and 20 tall, the height of an emoji not shrunk, so its run is
+/// no wider than one emoji and its people, it seems, composed inside one emoji's square. Nor
+/// would 👨 drawn alone by the same face be a measure: as an emoji of his own he is square too
+/// (18 by 19 here), not the narrow member the family begins with. The shaping, the boxes and
+/// the drawn extents are printed first, so a failure on a face not met here says which it is.
+///
+/// Nothing reaches the cells around it either: the girl drawn at the man's place once reached
+/// into the cell before the family's. A face that joins the family (Apple, Noto), or neither
+/// joins nor composes it, skips with a line.
 #[test]
 fn a_family_the_face_composes_draws_whole_in_its_cells() {
     let _gpu = one_at_a_time();
     let Some(faces) = emoji_faces() else { return };
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
     let emoji = faces.last().unwrap();
-    if emoji.joins(family) || !emoji.composes(family) {
+    let shaped = emoji.composition(family);
+    eprintln!(
+        "family: {} glyphs, run advance {} of {} units/em, joins {}, composes {}",
+        shaped.glyphs.len(),
+        shaped.advance,
+        shaped.units_per_em,
+        emoji.joins(family),
+        shaped.composes,
+    );
+    for glyph in &shaped.glyphs {
+        let kind = match (glyph.colour, glyph.v1) {
+            (false, _) => "not a COLR picture",
+            (true, false) => "COLRv0",
+            (true, true) => "COLRv1",
+        };
+        eprintln!(
+            "  glyph {}: advance {}, offset ({}, {}), painted at x {}, {kind}, ink {:?}",
+            glyph.glyph, glyph.x_advance, glyph.x_offset, glyph.y_offset, glyph.x, glyph.ink,
+        );
+    }
+    if emoji.joins(family) || !shaped.composes {
         eprintln!("skipped: the emoji face does not compose the family from its people");
         return;
     }
     let Some(frame) = row(&faces, 6, format!("|{family}|")) else { return };
     let Some(bars) = row(&faces, 6, "|  |") else { return };
-    for col in [0, 3, 4, 5] {
-        assert!(frame.cell(col, 0) == bars.cell(col, 0), "|family|: cell {col} is not |  |'s");
+    let Some(man) = row(&faces, 6, "\u{1F468}") else { return };
+    if let Some(([left, right], [top, bottom])) = ink_extent(&man, 0, 2) {
+        let (wide, tall) = (right - left + 1, bottom - top + 1);
+        eprintln!("the man alone: inked x {left}..={right}, y {top}..={bottom}: {wide} by {tall}");
     }
     let Some(([left, right], [top, bottom])) = ink_extent(&frame, 1, 2) else {
         panic!("|family|: the family's cells are empty");
     };
     let (wide, tall) = (right - left + 1, bottom - top + 1);
-    eprintln!("family: inked x {left}..={right}, y {top}..={bottom}: {wide} wide, {tall} tall");
-    assert!(wide > tall, "the family is drawn as one person ({wide} wide, {tall} tall)");
+    let drawn = wide as f32 / tall as f32;
+    let extent = format!("x {left}..={right}, y {top}..={bottom}: {wide} by {tall}");
+    eprintln!("family: inked {extent} ({drawn:.2})");
+    let (Some(whole), Some(first)) = (shaped.ink(), shaped.first_ink()) else {
+        panic!("the face composes the family but none of its pictures has ink");
+    };
+    let shape = |[x0, y0, x1, y1]: [f32; 4]| (x1 - x0, y1 - y0, (x1 - x0) / (y1 - y0));
+    let (whole_w, whole_h, whole) = shape(whole);
+    let (first_w, first_h, first) = shape(first);
+    // The size each would be drawn at the scale the drawn height says was used.
+    let px = tall as f32 / whole_h;
+    eprintln!(
+        "every picture: {whole_w} by {whole_h} units ({whole:.2}), {:.1} by {tall} px at the \
+         drawn scale; the first alone: {first_w} by {first_h} units ({first:.2}), {:.1} px wide",
+        whole_w * px,
+        first_w * px,
+    );
+    for col in [0, 3, 4, 5] {
+        assert!(frame.cell(col, 0) == bars.cell(col, 0), "|family|: cell {col} is not |  |'s");
+    }
+    assert!(
+        (drawn - whole).abs() <= whole / 4.0,
+        "the family is drawn {wide} by {tall} ({drawn:.2}): its pictures together are {whole:.2}",
+    );
+    if (whole - first).abs() >= whole / 5.0 {
+        assert!(
+            (drawn - whole).abs() < (drawn - first).abs(),
+            "the family is drawn {wide} by {tall} ({drawn:.2}), nearer its first picture alone \
+             ({first:.2}) than every picture together ({whole:.2})",
+        );
+    }
     let pixels = frame.cell(1, 0).into_iter().chain(frame.cell(2, 0));
     assert!(pixels.filter(|&px| coloured(px)).count() > 0, "the family has no colour");
 }

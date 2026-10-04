@@ -131,6 +131,55 @@ impl Font<'_> {
         runs.into_iter().next().flatten().is_some()
     }
 
+    /// How this face shapes `text` and where each glyph's ink lies, so a test can say what a
+    /// composed cell must look like on whatever face it meets, and print what it met. Every
+    /// shaped glyph is listed at its place, the pen plus its offset as `composed_runs` puts it,
+    /// with the ink box of a COLR picture taken from the outlines painting it fills
+    /// (`InkBounds`): a COLRv1 picture's own `glyf` entry may be empty, so its bounding box
+    /// says nothing, while the layers it paints are outlines with boxes. Public so the player's
+    /// tests can ask it (VENDORED.md, change 22).
+    pub fn composition(
+        &self,
+        text: &str,
+    ) -> Composition {
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let shaped = rustybuzz::shape(&self.font, &[], buffer);
+        let mut pen = 0;
+        let mut glyphs = vec![];
+        for (info, position) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
+            let id = rustybuzz::ttf_parser::GlyphId(info.glyph_id as u16);
+            let (x, y) = (pen + position.x_offset, position.y_offset);
+            let colour = self.font.is_color_glyph(id);
+            let mut bounds = InkBounds::new(&self.font);
+            if colour {
+                let white = rustybuzz::ttf_parser::RgbaColor::new(255, 255, 255, 255);
+                self.font.paint_color_glyph(id, 0, white, &mut bounds);
+            }
+            let ink = bounds.ink().map(|[x0, y0, x1, y1]| {
+                [x0 + x as f32, y0 + y as f32, x1 + x as f32, y1 + y as f32]
+            });
+            glyphs.push(Placed {
+                glyph: id.0,
+                x_advance: position.x_advance,
+                x_offset: position.x_offset,
+                y_offset: position.y_offset,
+                x,
+                colour,
+                v1: bounds.v1,
+                ink,
+            });
+            pen += position.x_advance;
+        }
+        Composition {
+            glyphs,
+            advance: pen,
+            units_per_em: self.font.units_per_em(),
+            composes: self.composes(text),
+        }
+    }
+
     /// Whether this face's glyph for `ch` is one the backend draws in colour: COLR layers, or a
     /// colour bitmap (sbix or CBDT, a PNG or premultiplied BGRA). A face's monochrome bitmaps
     /// (EBDT, an old CJK face's hinted strikes) and a text face's outlines are not. Asked only
@@ -209,6 +258,173 @@ impl Font<'_> {
             self.char_width(height_px)
         } else {
             u32::MAX
+        }
+    }
+}
+
+/// A string as one face shapes it, from [`Font::composition`]: its glyphs in order and the
+/// run's whole advance, in the face's units.
+#[derive(Clone, Debug)]
+pub struct Composition {
+    pub glyphs: Vec<Placed>,
+    /// The sum of the glyphs' advances: what change 22 fits into the cell's box.
+    pub advance: i32,
+    pub units_per_em: i32,
+    /// [`Font::composes`] of the same string.
+    pub composes: bool,
+}
+
+impl Composition {
+    /// The ink of every COLR picture at its place, together: what a composed cell draws, as
+    /// `[x_min, y_min, x_max, y_max]` in font units, y up. `None` if none has ink.
+    pub fn ink(&self) -> Option<[f32; 4]> {
+        self.glyphs
+            .iter()
+            .filter(|glyph| glyph.colour)
+            .filter_map(|glyph| glyph.ink)
+            .reduce(|[a0, b0, a1, b1], [x0, y0, x1, y1]| {
+                [a0.min(x0), b0.min(y0), a1.max(x1), b1.max(y1)]
+            })
+    }
+
+    /// The first COLR picture's ink at its place: what was drawn of a composition before
+    /// change 22, its first picture alone.
+    pub fn first_ink(&self) -> Option<[f32; 4]> {
+        self.glyphs.iter().find(|glyph| glyph.colour).and_then(|glyph| glyph.ink)
+    }
+}
+
+/// One shaped glyph of a [`Composition`].
+#[derive(Clone, Debug)]
+pub struct Placed {
+    pub glyph: u16,
+    pub x_advance: i32,
+    pub x_offset: i32,
+    pub y_offset: i32,
+    /// Where it is painted: the pen before it plus its `x_offset`.
+    pub x: i32,
+    /// A COLR picture (`Face::is_color_glyph`), as `composed_runs` counts one.
+    pub colour: bool,
+    /// Painted through a COLRv1 paint graph (a clip, a layer or a transform was pushed), not
+    /// COLRv0's flat layers.
+    pub v1: bool,
+    /// The picture's ink at its place, `[x_min, y_min, x_max, y_max]` in font units, y up;
+    /// `None` for a glyph that is not a picture or paints nothing.
+    pub ink: Option<[f32; 4]>,
+}
+
+/// A COLR painter that paints nothing and keeps the box of what would be: the bounding box of
+/// every outline a layer fills, through the transforms pushed around it, cut to the glyph's
+/// clip box when the face gives one. A box, not the ink itself: an outline's box can hold
+/// space its fill leaves clear, so it is an upper bound, tight for the faces' people.
+struct InkBounds<'f, 'a> {
+    face: &'f rustybuzz::Face<'a>,
+    /// The transform in force and the ones it replaced, innermost last.
+    transform: rustybuzz::ttf_parser::Transform,
+    stack: Vec<rustybuzz::ttf_parser::Transform>,
+    ink: Option<[f32; 4]>,
+    /// The base glyph's clip box: the first pushed before any outline.
+    clip: Option<[f32; 4]>,
+    v1: bool,
+}
+
+impl<'f, 'a> InkBounds<'f, 'a> {
+    fn new(face: &'f rustybuzz::Face<'a>) -> Self {
+        Self {
+            face,
+            transform: Default::default(),
+            stack: vec![],
+            ink: None,
+            clip: None,
+            v1: false,
+        }
+    }
+
+    /// `[x0, y0, x1, y1]` through the transform in force: the box of its four corners.
+    fn transformed(
+        &self,
+        [x0, y0, x1, y1]: [f32; 4],
+    ) -> [f32; 4] {
+        let t = self.transform;
+        let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+            .map(|(x, y)| (t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f));
+        corners.iter().fold(
+            [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+            |[a0, b0, a1, b1], &(x, y)| [a0.min(x), b0.min(y), a1.max(x), b1.max(y)],
+        )
+    }
+
+    fn ink(&self) -> Option<[f32; 4]> {
+        let [x0, y0, x1, y1] = self.ink?;
+        let Some([c0, d0, c1, d1]) = self.clip else {
+            return Some([x0, y0, x1, y1]);
+        };
+        let cut = [x0.max(c0), y0.max(d0), x1.min(c1), y1.min(d1)];
+        (cut[0] < cut[2] && cut[1] < cut[3]).then_some(cut)
+    }
+}
+
+impl<'a> rustybuzz::ttf_parser::colr::Painter<'a> for InkBounds<'_, 'a> {
+    fn outline_glyph(
+        &mut self,
+        glyph_id: rustybuzz::ttf_parser::GlyphId,
+    ) {
+        let Some(rect) = self.face.glyph_bounding_box(glyph_id) else {
+            return;
+        };
+        let rect = [rect.x_min, rect.y_min, rect.x_max, rect.y_max].map(f32::from);
+        let [x0, y0, x1, y1] = self.transformed(rect);
+        self.ink = Some(match self.ink {
+            None => [x0, y0, x1, y1],
+            Some([a0, b0, a1, b1]) => [a0.min(x0), b0.min(y0), a1.max(x1), b1.max(y1)],
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: rustybuzz::ttf_parser::colr::Paint<'a>,
+    ) {
+    }
+
+    fn push_clip(&mut self) {
+        self.v1 = true;
+    }
+
+    fn push_clip_box(
+        &mut self,
+        clipbox: rustybuzz::ttf_parser::colr::ClipBox,
+    ) {
+        self.v1 = true;
+        if self.clip.is_none() && self.ink.is_none() {
+            let rect = [clipbox.x_min, clipbox.y_min, clipbox.x_max, clipbox.y_max];
+            self.clip = Some(self.transformed(rect));
+        }
+    }
+
+    fn pop_clip(&mut self) {}
+
+    fn push_layer(
+        &mut self,
+        _: rustybuzz::ttf_parser::colr::CompositeMode,
+    ) {
+        self.v1 = true;
+    }
+
+    fn pop_layer(&mut self) {}
+
+    fn push_transform(
+        &mut self,
+        transform: rustybuzz::ttf_parser::Transform,
+    ) {
+        self.v1 = true;
+        self.stack.push(self.transform);
+        // The outer transform applies last, as the renderer's `Painter` composes them.
+        self.transform = rustybuzz::ttf_parser::Transform::combine(self.transform, transform);
+    }
+
+    fn pop_transform(&mut self) {
+        if let Some(outer) = self.stack.pop() {
+            self.transform = outer;
         }
     }
 }
