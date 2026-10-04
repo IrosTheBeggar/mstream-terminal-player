@@ -541,9 +541,11 @@ forward action as a tall primary on the right.
 Admin, MP3 Player — worn as the kit's tab slab for the screen that is up
 and dim text for the others (Now Playing, on `0`, has no tab and lights
 none while it is up), the Visualizer item after them, and the session's
-server label with `[+]` at the right; at the 100-column floor the strip
-must end a blank cell short of a local server's label in every locale,
-since nothing else keeps the two apart. While the MP3 Player tab's page
+server label with `[+]` at the right. The label never covers the strip —
+drawn over a tab it would take its clicks — so it starts at least a blank
+cell past the Visualizer item, cut short with the kit's mark (its menu
+mark kept) where it would not; at the 100-column floor a local server's
+label stands whole in every locale. While the MP3 Player tab's page
 writes, the strip is inert: no tab lights or answers a click. The
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,

@@ -2285,14 +2285,21 @@ a LATER secondary screen (party view), Columns retired.
   the firmware page of `mstream-player device flash` with no flags
   (docs/ux-contracts/mp3-player-screen.md; Phase 13), in place of the
   tray launcher's dropped menu item: the page grew a hosted mode (no
-  header, no tips row, nothing drawn past its area), the tab builds it on
-  entry and drops it on leaving — its worker restarting a held board as
-  the channel closes — except while it writes, when every key but Ctrl+C
-  is the page's, the top bar is inert and no screen change is honoured; a
-  quit with the board held before the write waits up to two seconds for
-  its restart. `F` from the Library, Now Playing, Stats and the Admin
-  hallway, `F` or Esc back. The strip's fit beside the server label is
-  now tested at 100 columns in every locale.
+  header, no tips row, nothing drawn past its area, Done's extra words
+  giving way before its Close at the floor), the tab builds it on entry
+  and lets it go on leaving — its worker told to let the board go, the
+  page kept aside until it has, a quick return waiting for it — except
+  while it writes, when every key but Ctrl+C is the page's, the top bar
+  is inert and no screen change is honoured; a quit with the board held,
+  or being reached, waits up to eight seconds for its restart. The worker
+  hears Quit early (before a port, between baud rungs, once the board
+  answers) and lets a board go with no boot-line listen, which the
+  command's Esc gains too. The footer is the page's whatever the key
+  hints say; the mini player hides the page's keys and says when it
+  writes. `K` from the Library, Now Playing, Stats and the Admin hallway,
+  `K` or Esc back (`F` was first; Caps Lock on the filter key's `f` reset
+  a plugged-in Core2). The server label is cut to keep off the strip,
+  tested at 100 columns in every locale.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
@@ -2977,7 +2984,7 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > 4 Oct) — `device flash` with no flags writes it; `--firmware` / `--release` still override.
 > The mStream launcher's menu item is dropped (Paul, 4 Oct 2026): **the GUI's MP3 Player tab
 > replaces it** (built 2026-10-04, docs/ux-contracts/mp3-player-screen.md) — the same page with
-> no flags, hosted under the GUI's top bar, `F` from the Library, Now Playing, Stats and the
+> no flags, hosted under the GUI's top bar, `K` from the Library, Now Playing, Stats and the
 > Admin hallway.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
