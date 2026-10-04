@@ -5,7 +5,9 @@
 //! the tests, for all four targets wgpu translates to, without a GPU:
 //! naga's frontend and validator, then the Metal, HLSL, SPIR-V and GLSL
 //! writers, each behind `catch_unwind` because a writer can panic where it
-//! should have returned an error — one does, below.
+//! should have returned an error — one does, below. On Windows the HLSL
+//! then goes through FXC, the compiler after naga on the DX12 path, which
+//! has refused a pass that every writer accepted (09's image pass did).
 //!
 //! The canaries at the bottom pin the naga behaviours the translation in
 //! `glsl.rs` exists to work around. When a naga upgrade fixes one, its
@@ -51,10 +53,16 @@ fn back(module: &naga::Module, info: &ModuleInfo, backend: Backend) -> Result<()
             let mut out = String::new();
             let options = naga::back::hlsl::Options::default();
             let pipeline = naga::back::hlsl::PipelineOptions::default();
-            naga::back::hlsl::Writer::new(&mut out, &options, &pipeline)
+            let written = naga::back::hlsl::Writer::new(&mut out, &options, &pipeline)
                 .write(module, info, None)
-                .map(drop)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            #[cfg(windows)]
+            for entry in written.entry_point_names {
+                fxc::compile(&out, &entry.map_err(|e| e.to_string())?)?;
+            }
+            #[cfg(not(windows))]
+            drop(written);
+            Ok(())
         }
         Backend::Spirv => naga::back::spv::write_vec(module, info, &Default::default(), None)
             .map(drop)
@@ -211,4 +219,104 @@ fn naga_still_builds_an_invalid_mat2_from_one_vec4() {
     // in the mobile app's copy regardless; this says when naga needs it.
     let source = format!("{HEADER}void main() {{ mat2 r = mat2(vec4(1.0, 0.0, 0.0, 1.0)); color = vec4(r[0], r[1]); }}\n");
     assert!(front(&source).is_err(), "naga builds mat2(vec4) now: 06's edit is no longer needed here");
+}
+
+// ── FXC ─────────────────────────────────────────────────────────────────────
+
+/// FXC, which wgpu's DX12 backend compiles naga's HLSL with unless it finds
+/// a DXC (`dxcompiler.dll`, which we do not ship) on the DLL search path,
+/// and DX12 is what Windows draws with first (`gpu_pick`). It has rules
+/// naga's writer does not know: a texture sampled with an implicit LOD
+/// inside a loop it cannot unroll is refused, which is why
+/// 09-mountainbytes.glsl carries a local edit. It is part of Windows itself
+/// (`d3dcompiler_47.dll`, in System32 since 8.1), so the test needs nothing
+/// installed.
+#[cfg(windows)]
+mod fxc {
+    use std::ffi::{CString, c_char, c_void};
+
+    #[link(name = "d3dcompiler_47", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn D3DCompile(
+            source: *const c_void,
+            source_len: usize,
+            source_name: *const c_char,
+            defines: *const c_void,
+            include: *mut c_void,
+            entry_point: *const c_char,
+            target: *const c_char,
+            flags1: u32,
+            flags2: u32,
+            code: *mut *mut c_void,
+            errors: *mut *mut c_void,
+        ) -> i32;
+    }
+
+    /// The flag wgpu compiles with, when its debug layer is off.
+    const D3DCOMPILE_ENABLE_STRICTNESS: u32 = 1 << 11;
+
+    /// An `ID3DBlob`'s vtable: IUnknown's three entries, then its own two.
+    #[repr(C)]
+    struct BlobVtbl {
+        _query_interface: usize,
+        _add_ref: usize,
+        release: unsafe extern "system" fn(*mut c_void) -> u32,
+        buffer_pointer: unsafe extern "system" fn(*mut c_void) -> *mut c_void,
+        buffer_size: unsafe extern "system" fn(*mut c_void) -> usize,
+    }
+
+    /// A blob's bytes as text, and the blob released; empty for no blob.
+    ///
+    /// # Safety
+    /// `blob` is null or an `ID3DBlob` this code owns a reference to.
+    unsafe fn take(blob: *mut c_void) -> String {
+        if blob.is_null() {
+            return String::new();
+        }
+        unsafe {
+            let vtbl = &**blob.cast::<*const BlobVtbl>();
+            let bytes = std::slice::from_raw_parts(
+                (vtbl.buffer_pointer)(blob).cast::<u8>(),
+                (vtbl.buffer_size)(blob),
+            );
+            let text = String::from_utf8_lossy(bytes).trim_end_matches('\0').trim().to_string();
+            (vtbl.release)(blob);
+            text
+        }
+    }
+
+    /// Compile `hlsl`'s `entry` as a pixel shader for the shader model wgpu
+    /// asks FXC for (5.1, its last), with wgpu's flags.
+    pub fn compile(hlsl: &str, entry: &str) -> Result<(), String> {
+        let entry = CString::new(entry).map_err(|e| e.to_string())?;
+        let mut code = std::ptr::null_mut();
+        let mut errors = std::ptr::null_mut();
+        // SAFETY: every pointer is valid for the call, the lengths are the
+        // buffers', and the two blobs handed back are ours to release.
+        let (result, errors) = unsafe {
+            let result = D3DCompile(
+                hlsl.as_ptr().cast(),
+                hlsl.len(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                entry.as_ptr(),
+                c"ps_5_1".as_ptr(),
+                D3DCOMPILE_ENABLE_STRICTNESS,
+                0,
+                &mut code,
+                &mut errors,
+            );
+            take(code);
+            (result, take(errors))
+        };
+        if result < 0 {
+            // The warnings come too; the errors are what matter, when FXC
+            // names any.
+            let named: Vec<&str> = errors.lines().filter(|l| l.contains(": error ")).collect();
+            let reason = if named.is_empty() { errors.clone() } else { named.join("\n") };
+            return Err(format!("FXC (0x{result:08x}): {reason}"));
+        }
+        Ok(())
+    }
 }
