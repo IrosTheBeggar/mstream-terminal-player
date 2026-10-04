@@ -169,6 +169,21 @@ pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
     let mut stats = Stats::from_env();
     let mut lap = Lap::start(&stats);
     install_panic_hook();
+    // A crash in the graphics driver, which no hook here sees, ends the
+    // process with its code rather than hanging it behind WER's dialog, so a
+    // launcher waiting on it hears that it died (gpu_pick.rs).
+    #[cfg(windows)]
+    crate::gpu_pick::quiet_native_crashes();
+    // And the one such crash known to be ours to avoid is named before the
+    // GPU thread can meet it: on stderr, for a parent that keeps it (the
+    // mStream launcher's page log), and in the debug log, for a double-click,
+    // whose stderr goes nowhere. The log's file is written unbuffered, so the
+    // line is on disk before the driver can take the process down.
+    #[cfg(windows)]
+    if let Some(line) = crate::gpu_pick::this_long_path_warning("gui --window") {
+        eprintln!("{line}");
+        tracing::warn!("{line}");
+    }
     // The taskbar identity the launcher stub also names (identity.rs), set
     // before any window exists: the taskbar reads it when one first shows.
     #[cfg(all(windows, feature = "desktop"))]
@@ -632,10 +647,14 @@ struct Faces {
     /// own Latin in front of Hack's. Hack is also the builder's last
     /// resort, which is what bold and italic cells fall back to with faked
     /// styles. The emoji face comes last so a character a text face also
-    /// has (✔, ㊗) keeps its text form, as a terminal draws it; a cluster
-    /// only the emoji face has all of (an emoji with VS16, a flag, a ZWJ
-    /// family) still goes to it whole, since the backend picks the first
-    /// face that has every character of a cell.
+    /// has (✔, ㊗, ♥) keeps its text form, as a terminal draws it; a cluster
+    /// only the emoji face has all of still goes to it whole, since the
+    /// backend picks the first face that has every character of a cell. An
+    /// emoji whose presentation is a picture (🎵, an emoji with VS16, a
+    /// flag, a ZWJ family) goes to the face that has it in colour although
+    /// a symbol face before it has an outline for it (Segoe UI Symbol has
+    /// 🎵 and the family's people): the backend prefers a colour glyph for
+    /// such a cell (vendor/ratatui-wgpu/VENDORED.md, change 21).
     fonts: Vec<Font<'static>>,
     took: Vec<(&'static str, Duration)>,
 }
@@ -767,6 +786,12 @@ impl App {
         self.opened_at = Some(Instant::now());
         self.opened_logical = Some(window.inner_size().to_logical(window.scale_factor()));
         self.shown = !cfg!(windows);
+        // The native dialogs (the wizard's Browse, the Add-torrent rooms)
+        // belong to this window from now until the teardown (picker.rs): its
+        // handle is read here because winit gives it out on this thread
+        // alone, and the dialogs open on worker threads.
+        #[cfg(windows)]
+        crate::setup::picker::set_owner(hwnd(&window));
         self.window = Some(window);
         self.poll_build(OPEN_WAIT)
     }
@@ -1597,6 +1622,11 @@ impl App {
             return;
         }
         self.done = true;
+        // The dialogs stop naming the window before it is destroyed below
+        // (or leaked, past a hung build), so no later one is handed a stale
+        // handle for its owner.
+        #[cfg(windows)]
+        crate::setup::picker::set_owner(None);
         if let Some(stats) = &self.stats {
             let covers = self.terminal.as_ref().map(|t| t.backend().post_processor().report());
             stats.write(covers);
@@ -1652,11 +1682,112 @@ impl App {
         // The instance lock is not dropped here: `run` drops it after the
         // App, or `exiting` does when the platform ends the process.
     }
+
+    /// What this turn of the loop is for ([`turn`]).
+    fn turn(&self, event_loop: &ActiveEventLoop) -> Turn {
+        turn(event_loop.exiting(), self.window.is_some(), self.terminal.is_some())
+    }
+
+    /// The window or its backend failed before any frame: said, and the
+    /// loop asked to end with [`NO_WINDOW`]. Said once because the exit
+    /// asked for here is what [`turn`] reads first: nothing is tried again
+    /// on the turns winit still runs on its way out. And polled from here,
+    /// whichever callback failed: winit on Windows waits as the control flow
+    /// says before it looks at the exit, and a failure in `resumed`, or in
+    /// the `about_to_wait` that follows it at once, finds the flow still at
+    /// its first `Wait`, which would hold the loop's end until some message
+    /// came to a window that never opened and need never get one.
+    fn give_up(&mut self, event_loop: &ActiveEventLoop, e: &str) {
+        eprintln!("gui --window: {e}");
+        self.exit_code = end_unopened(event_loop);
+    }
+}
+
+/// The few calls on winit's loop that ending a failed opening takes, as a
+/// trait so that ending can be tested without a loop: winit's
+/// `ActiveEventLoop` exists only inside its own `run_app`, and the failure
+/// it guards (every line said three times, or a loop left waiting for a
+/// message) showed only on a Windows machine with no adapter.
+trait Ending {
+    fn exit(&self);
+    fn exiting(&self) -> bool;
+    fn set_control_flow(&self, flow: ControlFlow);
+}
+
+impl Ending for ActiveEventLoop {
+    fn exit(&self) {
+        ActiveEventLoop::exit(self)
+    }
+    fn exiting(&self) -> bool {
+        ActiveEventLoop::exiting(self)
+    }
+    fn set_control_flow(&self, flow: ControlFlow) {
+        ActiveEventLoop::set_control_flow(self, flow)
+    }
+}
+
+/// What [`App::give_up`] does to the loop, whichever callback failed: the
+/// exit asked for, which every later [`turn`] reads first, and the flow
+/// polled, so winit on Windows does not wait at its first `Wait` before it
+/// looks at the exit. Answers the exit code, [`NO_WINDOW`].
+fn end_unopened(event_loop: &impl Ending) -> i32 {
+    event_loop.exit();
+    event_loop.set_control_flow(ControlFlow::Poll);
+    NO_WINDOW
+}
+
+/// Whether `about_to_wait` goes on past its first look at the turn: not
+/// with no window yet (`resumed` makes it), and not once an exit is asked
+/// for, which is polled so the loop ends now rather than on the next
+/// message, one a window that never opened may never get. Only the build's
+/// turns and the frames' go on, so an exit asked for by a failed opening
+/// begins no build again.
+fn goes_on(event_loop: &impl Ending, turn: Turn) -> bool {
+    match turn {
+        Turn::Open => false,
+        Turn::Leaving => {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            false
+        }
+        Turn::Build | Turn::Frames => true,
+    }
+}
+
+/// What a turn of the loop is for, from where the window's opening stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Turn {
+    /// No window yet: `resumed` makes it.
+    Open,
+    /// The window is made and its backend is not in yet: the turn carries
+    /// the build on.
+    Build,
+    /// The backend is in: the turn is the frames'.
+    Frames,
+    /// An exit was asked for: nothing is begun, and the loop waits for
+    /// nothing on its way out.
+    Leaving,
+}
+
+/// What a turn is for: `exiting` an exit was asked for, `window` the window
+/// is made, `backend` its backend is in. The exit comes first. winit on
+/// Windows runs `about_to_wait` twice after a `resumed` that asks for one
+/// (once before it waits, once as the loop ends), and a failed opening
+/// leaves the window made but the early threads' work spent, which
+/// `Early::ready` reads as done: each of those turns began the build again,
+/// finding the faces and being refused the surface once more, so a
+/// machine with nothing to draw with printed every line three times.
+fn turn(exiting: bool, window: bool, backend: bool) -> Turn {
+    match (exiting, window, backend) {
+        (true, ..) => Turn::Leaving,
+        (false, false, _) => Turn::Open,
+        (false, true, false) => Turn::Build,
+        (false, true, true) => Turn::Frames,
+    }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.turn(event_loop) != Turn::Open {
             return;
         }
         self.lap.mark(&mut self.stats, "to_resumed");
@@ -1668,9 +1799,7 @@ impl ApplicationHandler for App {
             self.lap.mark(&mut self.stats, "dock_icon");
         }
         if let Err(e) = self.open(event_loop) {
-            eprintln!("gui --window: {e}");
-            self.exit_code = NO_WINDOW;
-            event_loop.exit();
+            self.give_up(event_loop, &e);
         }
     }
 
@@ -1796,7 +1925,13 @@ impl ApplicationHandler for App {
     /// the loop wakes — unless the platform has held it back for longer
     /// than a poll, when the loop sleeps between checks rather than spin.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
+        let turn = self.turn(event_loop);
+        // winit on Windows waits as the control flow says before it looks
+        // at the exit: a turn that is leaving is polled ([`goes_on`]), so
+        // the loop ends now rather than on the next message, which a window
+        // that never opened may never get. `give_up` polls already; this
+        // holds for every other exit.
+        if !goes_on(event_loop, turn) {
             return;
         }
         // Until the backend exists the loop polls the early threads, begins
@@ -1804,12 +1939,10 @@ impl ApplicationHandler for App {
         // the build's thread is; meanwhile it answers the window, and a
         // hidden one is shown by its deadline, blank, rather than kept off
         // screen for as long as the GPU takes.
-        if self.terminal.is_none() {
+        if turn == Turn::Build {
             // Before the first frame: the window never showed the player.
             if let Err(e) = self.poll_build(Duration::ZERO) {
-                eprintln!("gui --window: {e}");
-                self.exit_code = NO_WINDOW;
-                event_loop.exit();
+                self.give_up(event_loop, &e);
                 return;
             }
             if self.terminal.is_none() {
@@ -1924,6 +2057,17 @@ fn named_colours(theme: &crate::kit::theme::Theme) -> ColorTable {
         LIGHTMAGENTA: [0xd6, 0x70, 0xd6],
         LIGHTCYAN: [0x29, 0xb8, 0xdb],
         WHITE: [0xe5, 0xe5, 0xe5],
+    }
+}
+
+/// The window's HWND, for the native dialogs to take as their owner. Asked
+/// on the loop's thread: winit refuses the handle on any other.
+#[cfg(windows)]
+fn hwnd(window: &Window) -> Option<std::num::NonZeroIsize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd),
+        _ => None,
     }
 }
 
@@ -2677,6 +2821,84 @@ mod tests {
     fn a_window_that_cannot_open_has_its_own_exit_code() {
         assert_eq!(NO_WINDOW, 3);
         assert!(![0, 1, 2, 101].contains(&NO_WINDOW));
+    }
+
+    /// The decision `resumed` and `about_to_wait` read first ([`turn`]): an
+    /// exit asked for outranks whatever the window holds, so an opening that
+    /// failed with the window made and no backend in is a leaving turn, not
+    /// a build. Before an exit, the window comes first, then its backend,
+    /// then the frames. The table alone: what the callbacks do with it is
+    /// the next test's, and the Windows run with no adapter (one set of
+    /// lines, not three, and a prompt exit) is the checklist's.
+    #[test]
+    fn an_exit_asked_for_comes_before_every_other_turn() {
+        for window in [false, true] {
+            for backend in [false, true] {
+                assert_eq!(turn(true, window, backend), Turn::Leaving);
+            }
+        }
+        assert_eq!(turn(false, false, false), Turn::Open);
+        assert_eq!(turn(false, true, false), Turn::Build);
+        assert_eq!(turn(false, true, true), Turn::Frames);
+    }
+
+    /// A stand-in for winit's loop, which cannot be made outside its own
+    /// `run_app`: the exit asked for, and the control flow last set, which
+    /// starts at winit's own first `Wait`.
+    #[derive(Default)]
+    struct FakeLoop {
+        exiting: std::cell::Cell<bool>,
+        flow: std::cell::Cell<ControlFlow>,
+    }
+
+    impl Ending for FakeLoop {
+        fn exit(&self) {
+            self.exiting.set(true);
+        }
+        fn exiting(&self) -> bool {
+            self.exiting.get()
+        }
+        fn set_control_flow(&self, flow: ControlFlow) {
+            self.flow.set(flow);
+        }
+    }
+
+    /// A failed opening, in `resumed` (no window made) or in the build that
+    /// `about_to_wait` carries on (the window made, no backend), ends the
+    /// loop with [`NO_WINDOW`], polled rather than at winit's first `Wait`;
+    /// and every turn winit still runs after it is a leaving one that
+    /// `about_to_wait` goes no further with, polled too, so the build is
+    /// never begun again and its failure is said once. A turn with no
+    /// window yet goes no further either, and leaves the flow as it was.
+    #[test]
+    fn a_failed_opening_ends_polled_and_no_later_turn_builds_again() {
+        for (window, backend) in [(false, false), (true, false)] {
+            let event_loop = FakeLoop::default();
+            assert_eq!(event_loop.flow.get(), ControlFlow::Wait, "winit's first flow");
+            let before = turn(event_loop.exiting(), window, backend);
+            assert_ne!(before, Turn::Leaving, "window {window}: not leaving yet");
+
+            assert_eq!(end_unopened(&event_loop), NO_WINDOW, "window {window}: its exit code");
+            assert!(event_loop.exiting.get(), "window {window}: the exit is asked for");
+            assert_eq!(event_loop.flow.get(), ControlFlow::Poll, "window {window}: polled");
+
+            // winit runs about_to_wait twice more on its way out; neither
+            // builds, and each polls whatever the flow was left at.
+            for _ in 0..2 {
+                event_loop.flow.set(ControlFlow::Wait);
+                let later = turn(event_loop.exiting(), window, backend);
+                assert_eq!(later, Turn::Leaving, "window {window}: a later turn is leaving");
+                assert!(!goes_on(&event_loop, later), "window {window}: no build begun again");
+                assert_eq!(event_loop.flow.get(), ControlFlow::Poll, "window {window}: polled");
+            }
+        }
+
+        let event_loop = FakeLoop::default();
+        assert!(!goes_on(&event_loop, Turn::Open), "no window yet: resumed makes it");
+        assert_eq!(event_loop.flow.get(), ControlFlow::Wait, "and the flow is left alone");
+        assert!(goes_on(&event_loop, Turn::Build), "the build's turn goes on");
+        assert!(goes_on(&event_loop, Turn::Frames), "the frames' turn goes on");
+        assert!(!event_loop.exiting.get(), "and neither asks for an exit");
     }
 
     /// The X11 keyboard probe: a line only on an X11 session whose loader

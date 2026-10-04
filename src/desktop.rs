@@ -108,14 +108,14 @@ pub fn log_refusal(line: &str, focused: Option<bool>) {
 /// - macOS: NSRunningApplication for the pid, activated with all its
 ///   windows by the cooperative hand-over macOS 14 requires (see
 ///   `focus`). The pid lookup answers nil for a process that is gone.
-/// - Windows: the pid's visible, unowned top-level window (EnumWindows),
-///   restored if minimised and made the foreground window. The foreground
-///   is the user's to give: a process the user just started (by Explorer,
-///   or by the launcher stub, which passes its right on) may take it; when
-///   Windows refuses, the window's taskbar button flashes instead and the
-///   answer is false. Nothing here waits on the holder's thread (the
-///   restore is ShowWindowAsync), and a holder Windows counts as hung is
-///   left alone.
+/// - Windows: the pid's visible, unowned top-level app window (EnumWindows;
+///   `is_app_window` says which those are), restored if minimised and made
+///   the foreground window. The foreground is the user's to give: a process
+///   the user just started (by Explorer, or by the launcher stub, which
+///   passes its right on) may take it; when Windows refuses, the window's
+///   taskbar button flashes instead and the answer is false. Nothing here
+///   waits on the holder's thread (the restore is ShowWindowAsync), and a
+///   holder Windows counts as hung is left alone.
 /// - Linux and the BSDs: false. X11 could be asked through a
 ///   _NET_ACTIVE_WINDOW client message, but x11rb is not a direct
 ///   dependency (only arboard's, for the clipboard) and a window manager
@@ -174,9 +174,10 @@ fn focus(pid: u32) -> bool {
 fn focus(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GW_OWNER, GetWindow,
-        GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindowVisible, SW_RESTORE,
-        SetForegroundWindow, ShowWindowAsync,
+        EnumWindows, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GW_OWNER,
+        GWL_EXSTYLE, GetClassNameW, GetWindow, GetWindowLongW, GetWindowThreadProcessId,
+        IsHungAppWindow, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow,
+        ShowWindowAsync,
     };
     use windows_sys::core::BOOL;
 
@@ -184,12 +185,17 @@ fn focus(pid: u32) -> bool {
         pid: u32,
         found: HWND,
     }
-    /// One top-level window: stop at the first visible, unowned one of the
-    /// pid (winit's hidden helper windows are not visible; a dialog is
-    /// owned).
+    /// One top-level window: stop at the first visible, unowned app window
+    /// of the pid (a dialog is owned; winit's helper window is visible and
+    /// unowned, and so is a console window that reports the pid, which
+    /// `is_app_window` both turn away). The ex-style and the class name are
+    /// read from the window's own record and its class, never by a message,
+    /// so a holder that has stopped pumping costs nothing here either.
     unsafe extern "system" fn visit(hwnd: HWND, search: LPARAM) -> BOOL {
         // SAFETY: `search` is the `&mut Search` EnumWindows was handed,
-        // alive for the whole enumeration; the calls take any HWND.
+        // alive for the whole enumeration; the calls take any HWND, and
+        // GetClassNameW writes at most the length it is handed, the
+        // buffer's (256, a class name's limit).
         unsafe {
             let search = &mut *(search as *mut Search);
             let mut owner = 0u32;
@@ -198,8 +204,13 @@ fn focus(pid: u32) -> bool {
                 && IsWindowVisible(hwnd) != 0
                 && GetWindow(hwnd, GW_OWNER).is_null()
             {
-                search.found = hwnd;
-                return 0;
+                let mut class = [0u16; 256];
+                let len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+                let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+                if is_app_window(&class, GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) {
+                    search.found = hwnd;
+                    return 0;
+                }
             }
         }
         1
@@ -246,6 +257,41 @@ fn focus(pid: u32) -> bool {
         FlashWindowEx(&flash);
     }
     false
+}
+
+/// Whether a visible, unowned top-level window of the holder, by its
+/// extended style, is one the user could mean by "switch to that window":
+/// neither a tool window (left out of the taskbar and Alt+Tab) nor a
+/// no-activate one (a click never makes it the foreground). winit's
+/// "Winit Thread Event Target" helper is both, and it is visible on
+/// purpose (so it still gets WM_PAINT while the real window is resized),
+/// unowned, and a few pixels wide at 0,0. While the real window is merely
+/// behind another it sits above the helper and EnumWindows meets it first;
+/// once it is minimised it sinks to the bottom of the z-order and the
+/// helper comes first: before this rule the foreground went to the
+/// invisible helper and the player stayed minimised (measured on Windows
+/// 10 22H2, v0.12.0). The ex-style is the robust signal: the helper
+/// measured 13 to 26 px, so a zero-size test would not catch it, and
+/// requiring WS_CAPTION would also turn away a borderless window that is
+/// the player. The mStream launcher's search for the player's window
+/// (rust-launcher/src/platform.rs, `is_app_window`) keeps the same rule.
+///
+/// A console window ("ConsoleWindowClass") is skipped too, whatever its
+/// style: conhost answers GetWindowThreadProcessId for its window with a
+/// client's pid, not its own, so a console the holder is attached to (one
+/// it shares with a shell, which `leave_own_console` keeps, and which can
+/// report the player's pid once that shell exits) is visible, unowned and
+/// a plain app window by its style. With the player minimised beneath it,
+/// the console would take the foreground and the player stay minimised.
+/// The class name is read from the window's class, never by a message. The
+/// launcher's search (`is_app_window` in rust-launcher/src/platform.rs)
+/// has this console rule too, with the same exact class match, so a player
+/// raised from the tray and one raised by a second launch pick the same
+/// window. Keep the two in step.
+#[cfg(windows)]
+fn is_app_window(class: &str, ex_style: u32) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW};
+    class != "ConsoleWindowClass" && ex_style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) == 0
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -357,6 +403,65 @@ mod tests {
         };
         assert!(!focus_window_holder(gone), "a pid that has exited has no window to bring");
         assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+
+    /// The class winit registers the player's window under (its default,
+    /// which the player keeps).
+    #[cfg(windows)]
+    const PLAYER: &str = "Window Class";
+
+    #[cfg(windows)]
+    #[test]
+    fn winits_helper_window_is_not_the_holders_window() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+        };
+        // The "Winit Thread Event Target" window's extended style, as winit
+        // creates it and as it measured live.
+        let helper = WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW;
+        assert!(!is_app_window("Winit Thread Event Target", helper));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tool_window_or_a_no_activate_window_alone_is_skipped() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        };
+        assert!(!is_app_window(PLAYER, WS_EX_TOOLWINDOW));
+        assert!(!is_app_window(PLAYER, WS_EX_NOACTIVATE));
+        // WS_EX_APPWINDOW puts a tool window on the taskbar, but it is
+        // still not the window the player draws in; the rule stays simple.
+        assert!(!is_app_window(PLAYER, WS_EX_TOOLWINDOW | WS_EX_APPWINDOW));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_players_own_window_is_kept() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP,
+            WS_EX_WINDOWEDGE,
+        };
+        // A plain window, the player's window as it measured live
+        // (0x00040110), and the bits a transparent-capable winit window adds.
+        assert!(is_app_window(PLAYER, 0));
+        assert!(is_app_window(PLAYER, WS_EX_WINDOWEDGE | WS_EX_ACCEPTFILES | WS_EX_APPWINDOW));
+        assert!(is_app_window(
+            PLAYER,
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_WINDOWEDGE
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_console_window_that_reports_the_holders_pid_is_skipped() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_WINDOWEDGE;
+        // conhost's window answers with a client's pid and is a plain app
+        // window by its style, so only its class tells it from the player's.
+        assert!(!is_app_window("ConsoleWindowClass", 0));
+        assert!(!is_app_window("ConsoleWindowClass", WS_EX_WINDOWEDGE));
+        // The match is exact: a class that merely starts so is not a console.
+        assert!(is_app_window("ConsoleWindowClassic", 0));
     }
 
     #[test]

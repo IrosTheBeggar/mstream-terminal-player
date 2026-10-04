@@ -315,7 +315,7 @@ fn draw_setup(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     } else {
         format!("{}  ", t!("gui.sonic.build"))
     };
-    let width = label.chars().count() as u16 + 6;
+    let width = crate::kit::tall_width(&label);
     let at = Rect {
         x: content.right().saturating_sub(width),
         y: content.bottom().saturating_sub(3),
@@ -545,7 +545,7 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let play = format!("{} {forward}", t!("gui.sonic.play"));
     let queue = t!("gui.sonic.queue_all").to_string();
     let save = t!("gui.sonic.save").to_string();
-    let w = |label: &str| label.chars().count() as u16 + 6;
+    let w = crate::kit::tall_width;
     let play_x = content.right().saturating_sub(w(&play));
     let queue_x = play_x.saturating_sub(w(&queue) + 1);
     let save_x = queue_x.saturating_sub(w(&save) + 1);

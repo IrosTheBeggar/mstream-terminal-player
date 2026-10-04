@@ -1851,7 +1851,8 @@ fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
     if !hosted {
         let title = t!("tor.title").to_string();
         draw_header(frame, area, &title, &host_of(&room.client));
-        let chip_x = area.x + 2 + title.chars().count() as u16 + 1;
+        // In cells, so a Japanese title is not drawn over.
+        let chip_x = area.x + 2 + kit::width(&title) as u16 + 1;
         frame.render_widget(
             Paragraph::new(Span::styled(beta.clone(), Style::default().fg(th().gold))),
             Rect { x: chip_x, y: area.y, width: area.width.saturating_sub(chip_x + 30), height: 1 },
@@ -2289,10 +2290,10 @@ fn draw_connect(frame: &mut Frame, room: &mut Room, column: Rect, c: &Connect) {
     let by = column.bottom().saturating_sub(1).max(y + 2);
     if by < column.bottom() + 1 {
         let connect = t!("tor.connect_button").to_string();
-        let connect_w = connect.chars().count() as u16 + 4;
+        let connect_w = kit::width(&connect) as u16 + 4;
         let connect_rect = kit::button(frame, &mut room.ui, Rect { x: column.right().saturating_sub(connect_w), y: by, width: connect_w, height: 1 }, &connect, true, Act::ConnectSubmit);
         let test = t!("tor.test_button").to_string();
-        let test_w = test.chars().count() as u16 + 4;
+        let test_w = kit::width(&test) as u16 + 4;
         kit::button(frame, &mut room.ui, Rect { x: connect_rect.x.saturating_sub(test_w + 2), y: by, width: test_w, height: 1 }, &test, false, Act::ConnectTest);
     }
     let _ = line;
@@ -2313,7 +2314,11 @@ fn draw_tabs(frame: &mut Frame, room: &mut Room, column: Rect) {
             Tab::Client => t!("tor.tab_client").to_string(),
         };
         let label = format!(" {name} ");
-        let rect = Rect { x, y: tabs_y, width: label.chars().count() as u16, height: 1 };
+        // In cells, as the kit draws the label, and clamped to the column:
+        // counted by characters a Japanese tab got a rect half its width,
+        // so the label was cut there, its click covered only what was left,
+        // and the next tab started inside it.
+        let rect = Rect { x, y: tabs_y, width: (kit::width(&label) as u16).min(column.right().saturating_sub(x)), height: 1 };
         let hover = room.ui.pointer.is_some_and(|pt| rect.contains(pt));
         let style = if tab == room.tab {
             Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD)
@@ -2673,25 +2678,33 @@ fn draw_seeding(frame: &mut Frame, room: &mut Room, body: Rect) {
     let ticks_y = body.y + 7;
     let mut x = body.x;
     let label = format!("{}  ", t!("tor.seed_search"));
-    frame.render_widget(Paragraph::new(Span::styled(label.clone(), dim())), Rect { x, y: ticks_y, width: label.chars().count() as u16, height: 1 });
-    x += label.chars().count() as u16;
+    // The label and each tick in cells, as drawn, the users room's add-form
+    // rule: counted by characters a library named in Japanese got a rect
+    // half its width, so it was cut there and its click covered only what
+    // was left. The first tick is drawn however wide, clamped to the row,
+    // rather than leaving the row empty; a later one that does not fit is
+    // left off.
+    let label_w = kit::width(&label) as u16;
+    frame.render_widget(Paragraph::new(Span::styled(label.clone(), dim())), Rect { x, y: ticks_y, width: label_w.min(body.width), height: 1 });
+    x += label_w;
+    let first_x = x;
     let ticks = room.seed_ticks.clone();
     for (i, (name, on)) in ticks.iter().enumerate() {
         let text = format!("{} {}", if *on { g("[✓]", "[x]") } else { "[ ]" }, printable(name, NAME_MAX));
-        let w = text.chars().count() as u16;
-        if x + w > body.right() {
+        let w = kit::width(&text) as u16;
+        if x + w > body.right() && x > first_x {
             break;
         }
-        let rect = Rect { x, y: ticks_y, width: w, height: 1 };
+        let rect = Rect { x, y: ticks_y, width: w.min(body.right().saturating_sub(x)), height: 1 };
         let hover = room.ui.pointer.is_some_and(|p| rect.contains(p));
         let style = if hover { Style::default().fg(th().bright) } else if *on { Style::default().fg(th().ok) } else { dim() };
         frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
         room.ui.click(rect, Act::SeedTick(i));
-        x += w + 3;
+        x += rect.width + 3;
     }
     if ticks.iter().all(|(_, on)| !*on) {
         let hint = t!("tor.seed_all").to_string();
-        if x + 2 + hint.chars().count() as u16 <= body.right() {
+        if x + 2 + kit::width(&hint) as u16 <= body.right() {
             frame.render_widget(Paragraph::new(Span::styled(hint, dim())).alignment(Alignment::Right), line(ticks_y));
         }
     }
@@ -2870,13 +2883,13 @@ fn draw_client(frame: &mut Frame, room: &mut Room, body: Rect) {
     let by = body.bottom().saturating_sub(1);
     if by > y + 1 {
         let switch = t!("tor.btn_switch").to_string();
-        let switch_w = switch.chars().count() as u16 + 4;
+        let switch_w = kit::width(&switch) as u16 + 4;
         let switch_rect = kit::button(frame, &mut room.ui, Rect { x: body.right().saturating_sub(switch_w), y: by, width: switch_w, height: 1 }, &switch, true, Act::ClientSwitch);
         let disc = t!("tor.btn_disconnect").to_string();
-        let disc_w = disc.chars().count() as u16 + 4;
+        let disc_w = kit::width(&disc) as u16 + 4;
         let disc_rect = kit::button(frame, &mut room.ui, Rect { x: switch_rect.x.saturating_sub(disc_w + 2), y: by, width: disc_w, height: 1 }, &disc, false, Act::Disconnect);
         let test = t!("tor.btn_test").to_string();
-        let test_w = test.chars().count() as u16 + 4;
+        let test_w = kit::width(&test) as u16 + 4;
         kit::button(frame, &mut room.ui, Rect { x: disc_rect.x.saturating_sub(test_w + 2), y: by, width: test_w, height: 1 }, &test, true, Act::ClientTest);
     }
     if room.note.is_none() && room.busy.is_none() {
@@ -2924,7 +2937,7 @@ fn draw_entry_modal(
     let by = inner.bottom().saturating_sub(1);
     let mut right = inner.right().saturating_sub(1);
     for (label, primary, act) in buttons.into_iter().rev() {
-        let bw = label.chars().count() as u16 + 4;
+        let bw = kit::width(&label) as u16 + 4;
         let rect = kit::button(frame, &mut room.ui, Rect { x: right.saturating_sub(bw), y: by, width: bw, height: 1 }, &label, primary, act);
         right = rect.x.saturating_sub(2);
     }
@@ -2941,8 +2954,8 @@ fn draw_gate(frame: &mut Frame, room: &mut Room, area: Rect, title: String, body
         Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(2) },
     );
     let y = inner.bottom().saturating_sub(1);
-    let go_w = go.0.chars().count() as u16 + 4;
-    let safe_w = safe.0.chars().count() as u16 + 4;
+    let go_w = kit::width(&go.0) as u16 + 4;
+    let safe_w = kit::width(&safe.0) as u16 + 4;
     let safe_x = inner.right().saturating_sub(go_w + 2 + safe_w);
     let safe_rect = kit::button(frame, &mut room.ui, Rect { x: safe_x, y, width: inner.width, height: 1 }, &safe.0, true, safe.1);
     kit::button(frame, &mut room.ui, Rect { x: safe_rect.right() + 2, y, width: inner.width, height: 1 }, &go.0, false, go.1);
@@ -3276,6 +3289,45 @@ mod tests {
         assert_eq!(room.connect.as_ref().unwrap().fields(), vec![CField::Host, CField::Port, CField::Password, CField::Https]);
     }
 
+    /// Every tab label draws whole in Japanese at 100×30, its click rect
+    /// as wide as it in cells, and each tab starts past the one before.
+    /// Counted by characters ' 概要 ' got a 4-cell rect for 6 cells of text,
+    /// so it drew as ' 概 ', the next tab started two cells into it, and
+    /// each click covered only what was left. Drawn under the process-wide
+    /// locale (the room reads its labels through `t!`), held for the test.
+    #[test]
+    fn every_tab_label_draws_whole_in_japanese() {
+        let _ja = crate::setup::tests::in_locale("ja");
+        let mut room = connected();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        assert!(!room.torrents.is_empty(), "the Torrents tab carries its count");
+        let tabs: Vec<(Tab, String)> = room
+            .tabs()
+            .into_iter()
+            .map(|tab| {
+                let name = match tab {
+                    Tab::Torrents => t!("tor.tab_torrents_n", n = room.torrents.len()).to_string(),
+                    Tab::Libraries => t!("tor.tab_libraries").to_string(),
+                    Tab::Seeding => t!("tor.tab_seeding").to_string(),
+                    Tab::Access => t!("tor.tab_access").to_string(),
+                    Tab::Client => t!("tor.tab_client").to_string(),
+                };
+                (tab, format!(" {name} "))
+            })
+            .collect();
+        assert_eq!(tabs.len(), 5, "every tab, Access included");
+        let buffer = terminal.backend().buffer().clone();
+        let mut end = 0;
+        for (tab, label) in tabs {
+            let rect = room.ui.clicks.iter().find(|(_, a)| *a == Act::Tab(tab)).map(|(r, _)| *r).unwrap_or_else(|| panic!("{label:?}"));
+            assert_eq!(crate::setup::tests::cells_text(&buffer, rect.y, rect.x, rect.right()), label, "drawn whole");
+            assert_eq!(usize::from(rect.width), kit::width(&label), "{label:?}: its click covers it");
+            assert!(rect.x >= end, "{label:?} starts past the tab before it");
+            end = rect.right();
+        }
+    }
+
     #[test]
     fn connected_the_torrents_tab_lists_filters_and_gates_the_remove() {
         let _en = english();
@@ -3454,6 +3506,44 @@ mod tests {
         assert!(room.note.as_ref().is_some_and(|(n, _)| n == "music: template cleared"));
         room.note = None;
         assert!(row(&draw(&mut room), "music").contains("(none — typed by hand)"));
+    }
+
+    /// The SEARCH IN ticks measure their names in cells, as the users
+    /// room's add form does: two libraries named by ten Japanese
+    /// characters draw whole, 24 cells each and three apart, each click on
+    /// its tick; and a first name wider than the row by itself (fifty
+    /// characters, 100 cells) is still drawn, clamped to the body's right
+    /// edge and cut cleanly, with the next left off, rather than leaving
+    /// the row empty. The body's edges are read off the add card's click,
+    /// which spans it.
+    #[test]
+    fn the_seeding_ticks_measure_japanese_names_in_cells_and_clamp_the_first() {
+        let _en = english();
+        let mut room = connected();
+        room.tab = Tab::Seeding;
+        let tick_text = |room: &Room, buffer: &ratatui::buffer::Buffer, i: usize| {
+            let rect = room.ui.clicks.iter().find(|(_, a)| *a == Act::SeedTick(i)).map(|(r, _)| *r);
+            rect.map(|r| (r, crate::setup::tests::cells_text(buffer, r.y, r.x, r.right())))
+        };
+        let short = ["日本の音楽アーカイブ", "クラシック全集の録音"];
+        room.seed_ticks = short.iter().map(|n| (n.to_string(), false)).collect();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let (a, a_text) = tick_text(&room, &buffer, 0).expect("tick 0");
+        let (b, b_text) = tick_text(&room, &buffer, 1).expect("tick 1");
+        assert_eq!((a.width, b.width, b.x), (24, 24, a.right() + 3), "in cells, three apart");
+        assert_eq!((a_text, b_text), (format!("[ ] {}", short[0]), format!("[ ] {}", short[1])), "whole");
+
+        let long = "日本の音楽アーカイブ".repeat(5);
+        room.seed_ticks = vec![(long.clone(), false), ("music".to_string(), false)];
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let body = room.ui.clicks.iter().find(|(_, a)| *a == Act::SeedAdd).map(|(r, _)| *r).expect("the add card");
+        let (first, text) = tick_text(&room, &buffer, 0).expect("the first tick is drawn");
+        assert_eq!(first.right(), body.right(), "clamped to the body: {first:?} in {body:?}");
+        assert!(text.len() > "[ ] ".len() && format!("[ ] {long}").starts_with(text.trim_end()), "cut, not garbled: {text:?}");
+        assert_eq!(tick_text(&room, &buffer, 1), None, "no room is left for the next");
     }
 
     #[test]
@@ -3823,5 +3913,49 @@ mod tests {
         }
         type_text(&mut room, &"s".repeat(60));
         super::super::assert_caret_between(&draw(&mut room), &room.ui, "•••", "");
+    }
+
+    /// The gold gate places its two buttons by their width in cells, as the
+    /// kit draws them: with Japanese labels ("◂ 残す" is four characters and
+    /// six cells) a count of characters set the pair two cells short each,
+    /// and the danger button, chained off the safe one, ran over the
+    /// modal's right border and out past it, click rect and all. The pair
+    /// ends where the English one does, each label whole. The labels are
+    /// handed in, so no locale is switched under other tests.
+    #[test]
+    fn the_gate_keeps_a_cjk_pair_of_buttons_inside_its_modal() {
+        let _en = english();
+        let gate = |safe: &str, go: &str| {
+            let mut room = new_room();
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    let body = vec!["one".to_string(), "two".to_string()];
+                    let pair = ((safe.to_string(), Act::RemoveCancel), (go.to_string(), Act::RemoveConfirm));
+                    draw_gate(frame, &mut room, area, "Remove?".to_string(), body, pair.0, pair.1);
+                })
+                .unwrap();
+            let rect = |act: Act| room.ui.clicks.iter().find(|(_, a)| *a == act).map(|(r, _)| *r).expect("the button");
+            (terminal.backend().buffer().clone(), rect(Act::RemoveCancel), rect(Act::RemoveConfirm))
+        };
+        // A rect's text, a wide character's hidden cell left out.
+        let shown = |buf: &Buffer, rect: Rect| {
+            let (mut text, mut x) = (String::new(), rect.x);
+            while x < rect.right() {
+                text.push_str(buf[(x, rect.y)].symbol());
+                x += (kit::width(buf[(x, rect.y)].symbol()) as u16).max(1);
+            }
+            text
+        };
+        let (_, _, english_go) = gate("◂ keep", "remove");
+        for (safe, go) in [("◂ 残す", "削除"), ("◂ 残る", "切断"), ("◂ 保留", "移除")] {
+            let (buf, safe_rect, go_rect) = gate(safe, go);
+            assert_eq!(go_rect.right(), english_go.right(), "{go}: the pair ends at the modal's inner edge");
+            assert_eq!(go_rect.width as usize, kit::width(go) + 4, "{go}: its whole label");
+            assert_eq!(safe_rect.right() + 2, go_rect.x, "{safe}: two cells between the pair");
+            assert_eq!(shown(&buf, safe_rect), format!("  {safe}  "), "{safe}: whole");
+            assert_eq!(shown(&buf, go_rect), format!("  {go}  "), "{go}: whole");
+        }
     }
 }

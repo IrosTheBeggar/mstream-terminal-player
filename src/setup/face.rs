@@ -315,7 +315,7 @@ mod tests {
         for (label, _) in done_buttons() {
             let row = text.iter().find(|row| row.contains(&label)).expect("a button");
             let x = row.find(&label).unwrap();
-            let column = row[..x].chars().count();
+            let column = crate::kit::width(&row[..x]);
             assert!(column >= usize::from(left_end), "{label} is in the right column");
         }
         // The picture's cells are left blank for the texture.

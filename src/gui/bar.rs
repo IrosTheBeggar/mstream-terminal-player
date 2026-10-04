@@ -377,7 +377,7 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
     let dj_w = tall_compact(frame, s, DJ_X, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj);
     let (prev, play, next) = play_glyphs(v.paused);
     let group = [repeat, prev, play, next, shuffle];
-    let group_w: u16 = group.iter().map(|l| l.chars().count() as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);
+    let group_w: u16 = group.iter().map(|l| crate::kit::width(l) as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);
     let free_from = DJ_X + dj_w + 1;
     let free_to = card_x(area).saturating_sub(1);
     let mut x = free_from + free_to.saturating_sub(free_from).saturating_sub(group_w) / 2;

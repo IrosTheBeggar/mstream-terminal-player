@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui_wgpu::shaders::DefaultPostProcessor;
 use ratatui_wgpu::wgpu::TextureFormat;
-use ratatui_wgpu::{Builder, Dimensions, Font};
+use ratatui_wgpu::{Builder, Dimensions, Font, Fonts};
 
 use super::{emoji_face, hack, script_fallbacks, symbol_fallback, symbols};
 use crate::runtime::block_on;
@@ -36,6 +36,9 @@ struct Frame {
     width: u32,
     cell_w: u32,
     cell_h: u32,
+    /// The grid as the backend holds it, in `get_text`'s spelling (the
+    /// cell after a wide glyph is an empty string): the dump's text.
+    text: String,
 }
 
 impl Frame {
@@ -84,6 +87,23 @@ fn render_at(
     format: TextureFormat,
 ) -> Result<Frame, String> {
     let rows = frames[0].len() as u32;
+    let paragraph = |frame: &mut ratatui::Frame<'_>, i: usize| {
+        frame.render_widget(Paragraph::new(frames[i].clone()), frame.area());
+    };
+    draw_at(px, faces, (cols, rows), frames.len(), paragraph, format)
+}
+
+/// `steps` frames, each drawn by `draw` (handed the step's number) on a
+/// `cols`×`rows` grid at a type size of `px`, as [`render`] draws its lines:
+/// for a frame drawn by something other than a paragraph (the GUI's own).
+fn draw_at(
+    px: u32,
+    faces: Vec<Font<'_>>,
+    (cols, rows): (u32, u32),
+    steps: usize,
+    mut draw: impl FnMut(&mut ratatui::Frame<'_>, usize),
+    format: TextureFormat,
+) -> Result<Frame, String> {
     let last_resort = faces[0].clone();
     // The cell's width is the narrowest face's, which the backend keeps to
     // itself (as the window finds): built wide first, the width read back
@@ -105,16 +125,15 @@ fn render_at(
     backend.resize(cols * cell_w, rows * px);
 
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
-    for lines in frames {
-        terminal
-            .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
-            .map_err(|e| e.to_string())?;
+    for step in 0..steps {
+        terminal.draw(|frame| draw(frame, step)).map_err(|e| e.to_string())?;
     }
     let backend = terminal.backend();
     let size = backend.size().map_err(|e| e.to_string())?;
     assert_eq!((u32::from(size.width), u32::from(size.height)), (cols, rows));
     let pixels = backend.read_pixels().ok_or("the frame could not be read back")?;
-    Ok(Frame { pixels, width: cols * cell_w, cell_w, cell_h: px })
+    let text = backend.get_text();
+    Ok(Frame { pixels, width: cols * cell_w, cell_w, cell_h: px, text })
 }
 
 /// The frame, or a skip: these tests draw on this machine's GPU through a
@@ -464,6 +483,105 @@ fn an_emoji_widened_in_place_keeps_its_row_in_place() {
     }
 }
 
+/// A wide cell whose second half lands on the first half of another wide glyph erases that glyph
+/// whole, and the rest of the row stays in place. The Windows smoke's bar drew `Heart ❤️ Song`
+/// after `Family 👨‍👩‍👧 Tune` as `Heart ❤️Song`, and `Flag 🇯🇵 Track` after it as `Flag 🇯🇵Track`:
+/// the old emoji began one cell after the new one, so the new one's continuation took the old
+/// one's first cell and left the old one's continuation behind, past the new cell's reach. Nothing
+/// ratatui sends puts that cell right: in the unstyled CJK rows here it equals ratatui's reset
+/// blank behind the old glyph and is never sent, and in the bar's styled title the blank sent was
+/// turned away as one a glyph still covers (change 18's rule). The row lost a cell, in the
+/// backend's text (the dump's) and in its pixels alike (VENDORED.md, change 23), until `draw`
+/// blanked it itself. The text must be a fresh frame's in every case, whatever the faces;
+/// the cells must be a fresh frame's where a CJK face (or Hack's boxes, two cells as well) and the
+/// colour emoji face are at hand.
+#[test]
+fn a_wide_glyph_over_the_first_half_of_another_keeps_the_row_in_place() {
+    let _gpu = one_at_a_time();
+    let cjk = [("a日x|", "日 x|"), ("ab日c|", "a日 c|"), ("a日本x|", "日本 x|")];
+    let family = "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Tune|";
+    let heart = "Heart \u{2764}\u{FE0F} Song|";
+    let emoji = [(family, heart), (heart, "Flag \u{1F1EF}\u{1F1F5} Track|")];
+    // The last frame drawn after `before`, and `after` drawn fresh, in `faces`.
+    let pair = |faces: &[Font<'static>], before: &'static str, after: &'static str| {
+        let frames = vec![vec![Line::from(before)], vec![Line::from(after)]];
+        let frame = frame_or_skip(render(faces.to_vec(), 20, frames, TextureFormat::Rgba8Unorm))?;
+        Some((frame, row(faces, 20, after)?))
+    };
+    for &(before, after) in cjk.iter().chain(&emoji) {
+        let Some((frame, fresh)) = pair(&[hack().unwrap()], before, after) else { return };
+        assert_eq!(frame.text, fresh.text, "{before:?} then {after:?}: the backend's text");
+    }
+
+    let japanese = japanese_face();
+    let mut faces = vec![hack().unwrap()];
+    faces.extend(japanese.as_ref().and_then(|(_, bytes, index)| Font::new_at(bytes, *index)));
+    let mut cases: Vec<_> = cjk.map(|case| (case, faces.clone())).into();
+    if let Some(faces) = emoji_faces() {
+        cases.extend(emoji.map(|case| (case, faces.clone())));
+    }
+    for ((before, after), faces) in cases {
+        let Some((frame, fresh)) = pair(&faces, before, after) else { return };
+        for col in 0..20 {
+            assert!(
+                frame.cell(col, 0) == fresh.cell(col, 0),
+                "{before:?} then {after:?}: cell {col} is not what a fresh {after:?} draws there"
+            );
+        }
+    }
+}
+
+/// The GUI's own bar in the window's backend, as the queue moves from one emoji title to the
+/// next: the card's lines read in the backend's text exactly as a fresh window's do, the title
+/// whole with the space after its emoji. This is the smoke's case end to end, through the bar's
+/// own layout (`gui::bar`) and ratatui's diff of the frame before.
+#[test]
+fn the_bar_in_the_window_keeps_the_space_after_an_emoji_as_the_title_changes() {
+    use crate::gui::{Gui, demo_now, render};
+    let _gpu = one_at_a_time();
+    // The window's glyphs, as the window pins them: the bar's chevron, clip
+    // mark and transport glyphs follow the process-wide tier, which a bare
+    // console resolves to the legacy set and another test may flip mid-run,
+    // so the diffed render and the fresh one could draw different bars.
+    crate::kit::theme::pin_modern_glyphs();
+    let titles = [
+        "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Tune",
+        "Heart \u{2764}\u{FE0F} Song",
+        "Flag \u{1F1EF}\u{1F1F5} Track",
+    ];
+    let now = |title: &str| crate::gui::bar::Now {
+        title: title.to_string(),
+        artist: "Emoji Artist \u{2764}\u{FE0F}".to_string(),
+        year: Some(2026),
+        spec: "MP3 \u{B7} 128 kbps \u{B7} 44.1 kHz".to_string(),
+        ..demo_now()
+    };
+    let bar = |sequence: &[&str]| {
+        let app = crate::tui::app::App::new(None, None, None);
+        let mut gui = Gui::new(crate::config::Config::default(), false, app);
+        let draw = |frame: &mut ratatui::Frame<'_>, step: usize| {
+            gui.demo = Some(now(sequence[step]));
+            render(frame, &mut gui);
+        };
+        let faces = vec![hack().unwrap()];
+        let drawn = draw_at(PX, faces, (100, 30), sequence.len(), draw, TextureFormat::Rgba8Unorm);
+        let frame = frame_or_skip(drawn)?;
+        // The card's four rows, from the seek line's next.
+        Some(frame.text.lines().skip(26).take(4).map(str::to_string).collect::<Vec<_>>())
+    };
+    for pair in titles.windows(2) {
+        let (Some(moved), Some(fresh)) = (bar(pair), bar(&pair[1..])) else { return };
+        assert!(
+            moved[0].contains(&format!(" {} ", pair[1])),
+            "{:?} then {:?}: the bar's title row reads {:?}",
+            pair[0],
+            pair[1],
+            moved[0]
+        );
+        assert_eq!(moved, fresh, "{:?} then {:?}: the card's rows", pair[0], pair[1]);
+    }
+}
+
 /// Whether a pixel is coloured rather than grey: its channels apart by more
 /// than a grey's (white, the ground, and everything blended between them,
 /// are within a few levels of each other).
@@ -598,17 +716,18 @@ const RAINBOW: &str = "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}";
 /// not its base emoji's: the face joined the sequence.
 ///
 /// Faces differ in which sequences they join: Segoe UI Emoji (CI's
-/// windows-latest) has no country flags, so 🇺🇸 there is its first
-/// regional indicator alone. A case the face does not join
+/// windows-latest) has no country flags, so 🇺🇸 there is its two regional
+/// indicators, a letter to a cell. A case the face does not join
 /// ([`Font::joins`]) is skipped with a line, keeping only what holds for
 /// any face: ink in its own cells and nothing in the cells after. England's
 /// flag alone may also be joined yet drawn as its base: Segoe UI Emoji has
-/// a glyph for it and no picture in it (CI run 37028415435), and the base 🏴
-/// is the degradation the window specifies — never a box, never empty
-/// cells. Any other joined case drawn as its base is the renderer drawing a
-/// cluster's first character, and fails; and at least one sequence of
-/// several emoji must be drawn joined, so a skip cannot hide that on every
-/// case at once.
+/// a glyph for it and no picture in it (CI run 37028415435; on Windows 10
+/// it maps no tags, the shaper hides them, and its 🏴 alone is drawn, a
+/// dark flag whose pole alone is ink), and the base 🏴 is the degradation
+/// the window specifies — never a box, never empty cells. Any other joined
+/// case drawn as its base is the renderer drawing a cluster's first
+/// character, and fails; and at least one sequence of several emoji must be
+/// drawn joined, so a skip cannot hide that on every case at once.
 #[test]
 fn emoji_sequences_draw_as_one_picture_in_their_cells() {
     let _gpu = one_at_a_time();
@@ -649,19 +768,28 @@ fn emoji_sequences_draw_as_one_picture_in_their_cells() {
             assert!(!frame.inked(col, 0), "{case}: ink in cell {col}");
         }
         if !emoji.joins(text) {
+            // A country flag the face has no picture for is its two letters, one to a
+            // cell (VENDORED.md, change 21), each exactly as it draws alone: the first
+            // letter alone, centred in both cells, inks both as well.
+            if case == "flag" {
+                for (col, letter) in [(0, "\u{1F1FA}"), (1, "\u{1F1F8}")] {
+                    let Some(alone) = row(&faces, 6, format!("{letter}|")) else { return };
+                    let same = frame.cell(col, 0) == alone.cell(0, 0);
+                    assert!(same, "flag: cell {col} is not {letter}");
+                }
+            }
             eprintln!("skipped {case}: the emoji face has no one picture for it");
             continue;
         }
-        // Both cells first: a face that joined the sequence and drew a picture into
-        // one cell only is a defect, whatever the base comparison below says.
-        assert!(frame.inked(0, 0) && frame.inked(1, 0), "{case}: not over both of its cells");
         if base != text {
             let Some(alone) = row(&faces, 6, format!("{base}|")) else { return };
             if (0..2).all(|col| frame.cell(col, 0) == alone.cell(col, 0)) {
                 // Joined, yet drawn as its base alone. For England's flag
                 // that is a face whose glyph has no picture (Segoe UI
-                // Emoji), and the base is the specified degradation; the
-                // empty cells it must never be are the panic above.
+                // Emoji), and the base is the specified degradation, drawn
+                // as the face draws 🏴: Windows 10's is a dark flag on a
+                // light pole, and only the pole, in the first cell, stands
+                // out from the ground. Its cells are not empty.
                 assert!(may_draw_base, "{case}: drew only its base: the face did not join it");
                 eprintln!(
                     "skipped {case}: the face joined it but has no picture for it (drew the base)"
@@ -670,6 +798,9 @@ fn emoji_sequences_draw_as_one_picture_in_their_cells() {
             }
             drawn_joined += 1;
         }
+        // A face that joined the sequence into a picture of its own and drew it
+        // into one cell only is a defect.
+        assert!(frame.inked(0, 0) && frame.inked(1, 0), "{case}: not over both of its cells");
         if in_colour {
             let pixels = frame.cell(0, 0).into_iter().chain(frame.cell(1, 0));
             let colour = pixels.filter(|&px| coloured(px)).count();
@@ -687,33 +818,78 @@ fn emoji_sequences_draw_as_one_picture_in_their_cells() {
 /// first is drawn. Before, the dinosaur drew in the next two cells, over
 /// what was there.
 ///
-/// Also a pair of regional indicators that is no country (A A): Apple
-/// Color Emoji draws it as Segoe UI Emoji draws every flag, having none (its
-/// first letter alone), so this is that path on a Mac; Noto Color Emoji has
-/// one picture for any unknown pair. Either way: ink in its own two cells,
-/// none after.
+/// Flags are the exception: a pair of regional indicators a face has no
+/// picture for is its two letters, each in a cell of its own, as Windows
+/// Terminal draws it (VENDORED.md, change 21). Its first letter alone, a
+/// narrow letter in two cells, was a sliver: no face the window has on
+/// Windows 10 has country flags, and 🇯🇵 was a sliver of a `J` there. A pair
+/// that is no country (A A) takes that path in Apple Color Emoji too, and
+/// Japan's does in Segoe UI Emoji; Noto Color Emoji has one picture for any
+/// pair. Either way: ink in its own two cells, none after, and a pair the
+/// face does not join is each letter exactly as it draws alone.
+///
+/// The test faces have no symbol face, but the window has one before the
+/// emoji face, and on Windows it is Segoe UI Symbol that draws the letters:
+/// neither face's regional indicators are in colour, so the colour
+/// preference passes them by, and the earlier face with both wins. So the
+/// flag is drawn in the window's order too, where the system's symbol face
+/// has the letters.
 #[test]
 fn an_unjoined_sequence_draws_its_base_and_nothing_after() {
     let _gpu = one_at_a_time();
     let Some(faces) = emoji_faces() else { return };
     let emoji = faces.last().unwrap();
-    let no_country = "\u{1F1E6}\u{1F1E6}";
-    assert_eq!(crate::kit::width(no_country), 2);
-    if emoji.joins(no_country) {
-        eprintln!("the emoji face has one picture for an unknown flag");
-    } else {
-        eprintln!("the emoji face has no picture for an unknown flag: its first letter alone");
-    }
-    let Some(frame) = row(&faces, 6, format!("{no_country}|")) else { return };
     let Some(bar) = row(&faces, 6, "  |") else { return };
-    assert!(ink_extent(&frame, 0, 2).is_some(), "the unknown flag's cells are empty");
-    assert!(frame.cell(2, 0) == bar.cell(2, 0), "the unknown flag drew into cell 2");
-    for col in 3..6 {
-        assert!(!frame.inked(col, 0), "the unknown flag drew into cell {col}");
+    for (first, second) in [('\u{1F1E6}', '\u{1F1E6}'), ('\u{1F1EF}', '\u{1F1F5}')] {
+        let pair = format!("{first}{second}");
+        assert_eq!(crate::kit::width(&pair), 2);
+        let Some(frame) = row(&faces, 6, format!("{pair}|")) else { return };
+        assert!(ink_extent(&frame, 0, 2).is_some(), "{pair}: the flag's cells are empty");
+        assert!(frame.cell(2, 0) == bar.cell(2, 0), "{pair}: the flag drew into cell 2");
+        for col in 3..6 {
+            assert!(!frame.inked(col, 0), "{pair}: the flag drew into cell {col}");
+        }
+        if emoji.joins(&pair) {
+            eprintln!("{pair}: the emoji face has one picture for it");
+            continue;
+        }
+        eprintln!("{pair}: the emoji face has no picture for it: its letters, one to a cell");
+        for (col, letter) in [(0, first), (1, second)] {
+            // A regional indicator alone is one cell wide.
+            assert_eq!(crate::kit::width(&letter.to_string()), 1);
+            let Some(alone) = row(&faces, 6, format!("{letter}|")) else { return };
+            assert!(alone.inked(0, 0), "{pair}: {letter} alone left its cell empty");
+            assert!(frame.cell(col, 0) == alone.cell(0, 0), "{pair}: cell {col} is not {letter}");
+        }
+    }
+    // In the window's order: Hack, the bundled symbols, the system's symbol face, the emoji
+    // face. Where the symbol face has the letters, they are its, each as it draws alone.
+    let (j, p) = ("\u{1F1EF}", "\u{1F1F5}");
+    match symbol_fallback().filter(|symbol| symbol.joins(j) && symbol.joins(p)) {
+        None => eprintln!("no system symbol face with the regional indicators"),
+        Some(symbol) => {
+            let window = [hack().unwrap(), symbols().unwrap(), symbol, emoji.clone()];
+            let pair = format!("{j}{p}");
+            let Some(frame) = row(&window, 6, format!("{pair}|")) else { return };
+            let Some(bar) = row(&window, 6, "  |") else { return };
+            assert!(frame.cell(2, 0) == bar.cell(2, 0), "window order: the flag drew into cell 2");
+            if window[2..].iter().any(|face| face.joins(&pair)) {
+                eprintln!("window order: a face has one picture for {pair}");
+            } else {
+                for (col, letter) in [(0, j), (1, p)] {
+                    let Some(alone) = row(&window, 6, format!("{letter}|")) else { return };
+                    assert!(alone.inked(0, 0), "window order: {letter} alone left its cell empty");
+                    let same = frame.cell(col, 0) == alone.cell(0, 0);
+                    assert!(same, "window order: cell {col} is not {letter}");
+                }
+            }
+        }
     }
     let text = "\u{1F468}\u{200D}\u{1F996}";
     assert_eq!(crate::kit::width(text), 2);
     assert!(!emoji.joins(text), "the emoji face has a picture for a man ZWJ a dinosaur");
+    // Two emoji that both advance are not a composition (change 22): nothing placed them.
+    assert!(!emoji.composes(text), "the emoji face composes a man ZWJ a dinosaur");
     let Some(frame) = row(&faces, 6, text) else { return };
     let Some(alone) = row(&faces, 6, "\u{1F468}") else { return };
     for col in 0..6 {
@@ -721,6 +897,241 @@ fn an_unjoined_sequence_draws_its_base_and_nothing_after() {
     }
     for col in 2..6 {
         assert!(!frame.inked(col, 0), "ink in cell {col}: the dinosaur overdrew the next cells");
+    }
+}
+
+/// A family a colour face composes from its people, rather than joining it into one glyph,
+/// draws whole in its two cells, as Windows Terminal draws it: Windows 10's Segoe UI Emoji
+/// shapes 👨‍👩‍👧 to a man and a woman, who advance, and a girl, who does not and is placed back
+/// in front of them, and the three are drawn into one box, fitted to the run's advance
+/// (VENDORED.md, change 22). Before, the first picture alone was drawn.
+///
+/// What "whole" looks like is the face's to say, so the test asks it: the shape of the drawn
+/// ink, its width over its height, must be the shape of every picture's ink at the place the
+/// face put it (`Font::composition`), within a quarter; and where the first picture alone is
+/// a different shape, the drawing must be nearer the whole than the first picture. On
+/// Windows 10 (Segoe UI Emoji 1.29, COLRv0) the people stand side by side: the whole is 2734
+/// units wide and 2300 tall (1.19), the man who comes first 1366 by 2300 (0.59), and the
+/// family draws 18 px wide and 16 tall (1.12) at 24 px, its first picture alone (as before
+/// change 22) 11 by 20 (0.55). The test once asked only that the family be wider than tall,
+/// which is Windows 10's design and not a rule: GitHub's windows-2025 image (its Segoe UI
+/// Emoji is Windows 11's) drew it 19 wide and 20 tall, the height of an emoji not shrunk, so
+/// its run is no wider than one emoji and its people, it seems, composed inside one emoji's
+/// square.
+///
+/// A face whose first picture is itself about the shape of the whole leaves the shapes
+/// nothing to tell apart, so sizes are held too. The run is fitted to its box at the
+/// renderer's own scale (`Fonts::scale_of`), and that is corrected by how much less of 👨
+/// alone is inked than his box at his own fitted scale (0.89 here, as `ink_extent` passes
+/// over Segoe UI Emoji's dark outlines): the drawing must be within 2 px of the whole so
+/// sized on both axes (18.4 by 15.4 here), and nearer it than the first picture alone, at its
+/// own advance (12.2 by 20.6) or at the run's (9.2 by 15.4), on each axis where that differs
+/// from the whole by more than 2 px. Each check fails here with the first picture drawn
+/// alone, the shape's and the size's apart: with composing switched off in `flush` the family
+/// draws 11 by 20, with the run's later members left unpainted 8 by 15. Where the first
+/// picture is 👨's own glyph, unmoved, the family must also not draw as he does, pixel for
+/// pixel. Where nothing here tells the first picture from the whole, a line says so, so a
+/// passing run is not taken for proof. The shaping, the boxes, the scale and the drawn
+/// extents are printed first, so a failure on a face not met here says which it met.
+///
+/// Nothing reaches the cells around it either: the girl drawn at the man's place once reached
+/// into the cell before the family's. A face that joins the family (Apple, Noto), or neither
+/// joins nor composes it, skips with a line.
+#[test]
+fn a_family_the_face_composes_draws_whole_in_its_cells() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    let emoji = faces.last().unwrap();
+    let shaped = emoji.composition(family);
+    eprintln!(
+        "family: {} glyphs, run advance {} of {} units/em, joins {}, composes {}",
+        shaped.glyphs.len(),
+        shaped.advance,
+        shaped.units_per_em,
+        emoji.joins(family),
+        shaped.composes,
+    );
+    for glyph in &shaped.glyphs {
+        let kind = match (glyph.colour, glyph.v1) {
+            (false, _) => "not a COLR picture",
+            (true, false) => "COLRv0",
+            (true, true) => "COLRv1",
+        };
+        eprintln!(
+            "  glyph {}: advance {}, offset ({}, {}), painted at x {}, {kind}, ink {:?}",
+            glyph.glyph, glyph.x_advance, glyph.x_offset, glyph.y_offset, glyph.x, glyph.ink,
+        );
+    }
+    if emoji.joins(family) || !shaped.composes {
+        eprintln!("skipped: the emoji face does not compose the family from its people");
+        return;
+    }
+    let Some(frame) = row(&faces, 6, format!("|{family}|")) else { return };
+    let Some(bars) = row(&faces, 6, "|  |") else { return };
+    let Some(man) = row(&faces, 6, "\u{1F468}") else { return };
+    let him = emoji.composition("\u{1F468}");
+    let Some(([left, right], [top, bottom])) = ink_extent(&man, 0, 2) else {
+        panic!("👨: his cells are empty");
+    };
+    let (his_wide, his_tall) = (right - left + 1, bottom - top + 1);
+    eprintln!(
+        "the man alone: inked x {left}..={right}, y {top}..={bottom}: {his_wide} by {his_tall}; \
+         advance {}, glyphs {:?}",
+        him.advance,
+        him.glyphs.iter().map(|glyph| (glyph.glyph, glyph.ink)).collect::<Vec<_>>(),
+    );
+    let Some(([left, right], [top, bottom])) = ink_extent(&frame, 1, 2) else {
+        panic!("|family|: the family's cells are empty");
+    };
+    let (wide, tall) = (right - left + 1, bottom - top + 1);
+    let drawn = wide as f32 / tall as f32;
+    let extent = format!("x {left}..={right}, y {top}..={bottom}: {wide} by {tall}");
+    eprintln!("family: inked {extent} ({drawn:.2})");
+    let (Some(whole_ink), Some(first_ink)) = (shaped.ink(), shaped.first_ink()) else {
+        panic!("the face composes the family but none of its pictures has ink");
+    };
+    let Some(his_ink) = him.ink() else { panic!("👨 is drawn but his picture has no ink") };
+    let shape = |[x0, y0, x1, y1]: [f32; 4]| (x1 - x0, y1 - y0, (x1 - x0) / (y1 - y0));
+    let (whole_w, whole_h, whole) = shape(whole_ink);
+    let (first_w, first_h, first) = shape(first_ink);
+    // Sizes as well as shapes: a face whose first picture is the shape of the whole (a figure
+    // as square as the family composed inside it) leaves the shapes nothing to tell apart. The
+    // face's scale is the renderer's own (`Fonts::scale_of`), and a drawing is fitted to its
+    // box of two cells as `rasterize_glyph` fits it: by the box's width over the advance in
+    // whole pixels, never enlarged. The drawn ink is not the ink box at that scale, though:
+    // pixels within 40 of the ground are not ink to `ink_extent`, which takes off Segoe UI
+    // Emoji's dark outlines, and a layer's outline box can hold space its fill leaves clear.
+    // Here the whole would be 20.6 by 17.4 px and is drawn 18 by 16. 👨 alone, drawn by the
+    // same face, says by how much: his drawn height over his box's at his own fitted scale.
+    let scale = Fonts::new(faces[0].clone(), frame.cell_h).scale_of(emoji);
+    let box_w = 2 * frame.cell_w;
+    let fit = |advance: i32| (box_w as f32 / (advance as f32 * scale) as u32 as f32).min(1.0);
+    let his_box = (his_ink[3] - his_ink[1]) * scale * fit(him.advance);
+    let inked = his_tall as f32 / his_box;
+    let at = |[x0, y0, x1, y1]: [f32; 4], advance: i32| {
+        let px = scale * fit(advance) * inked;
+        ((x1 - x0) * px, (y1 - y0) * px)
+    };
+    let leader = shaped.glyphs.iter().find(|glyph| glyph.colour).unwrap();
+    let (whole_x, whole_y) = at(whole_ink, shaped.advance);
+    // What the drawing would be were it not whole: the first picture alone at its own advance,
+    // as before change 22, or alone in the composed box, a member after it painting nothing.
+    let partial = [
+        ("its first picture alone", at(first_ink, leader.x_advance)),
+        ("its first picture alone in the run's box", at(first_ink, shaped.advance)),
+    ];
+    eprintln!(
+        "every picture: {whole_w} by {whole_h} units ({whole:.2}), {whole_x:.1} by {whole_y:.1} \
+         px; the first: {first_w} by {first_h} units ({first:.2}), {:.1} by {:.1} px alone, \
+         {:.1} by {:.1} in the run's box; {scale:.5} px a unit, {box_w} px a box, 👨's drawn \
+         height {inked:.2} of his box's",
+        partial[0].1.0,
+        partial[0].1.1,
+        partial[1].1.0,
+        partial[1].1.1,
+    );
+    for col in [0, 3, 4, 5] {
+        assert!(frame.cell(col, 0) == bars.cell(col, 0), "|family|: cell {col} is not |  |'s");
+    }
+    assert!(
+        (drawn - whole).abs() <= whole / 4.0,
+        "the family is drawn {wide} by {tall} ({drawn:.2}): its pictures together are {whole:.2}",
+    );
+    let shapes_differ = (whole - first).abs() >= whole / 5.0;
+    if shapes_differ {
+        assert!(
+            (drawn - whole).abs() < (drawn - first).abs(),
+            "the family is drawn {wide} by {tall} ({drawn:.2}), nearer its first picture alone \
+             ({first:.2}) than every picture together ({whole:.2})",
+        );
+    }
+    // Two pixels: an inked edge can take one more than the ink box's, at either end.
+    let (wide, tall) = (wide as f32, tall as f32);
+    assert!(
+        (wide - whole_x).abs() <= 2.0 && (tall - whole_y).abs() <= 2.0,
+        "the family is drawn {wide} by {tall}: its pictures together would be {whole_x:.1} by \
+         {whole_y:.1}",
+    );
+    let mut sizes_differ = false;
+    for (what, (x, y)) in partial {
+        let x_differs = (whole_x - x).abs() > 2.0;
+        let y_differs = (whole_y - y).abs() > 2.0;
+        sizes_differ |= x_differs || y_differs;
+        assert!(
+            (!x_differs || (wide - whole_x).abs() < (wide - x).abs())
+                && (!y_differs || (tall - whole_y).abs() < (tall - y).abs()),
+            "the family is drawn {wide} by {tall}, nearer {what} ({x:.1} by {y:.1}) than every \
+             picture together ({whole_x:.1} by {whole_y:.1})",
+        );
+    }
+    // Where the first picture is 👨's own, unmoved, it alone would draw as he does, pixel for
+    // pixel (as 👨‍🦖 does, above): the family must not. Elsewhere, with neither its shape nor
+    // its size apart from the whole's, nothing here could tell the two apart, and a passing
+    // run says so rather than pass for proof.
+    let his_glyph = him.glyphs.iter().find(|glyph| glyph.colour).map(|glyph| glyph.glyph);
+    let unmoved = leader.x_offset == 0 && leader.y_offset == 0;
+    if his_glyph == Some(leader.glyph) && unmoved {
+        let alike = (0..2).all(|col| frame.cell(col + 1, 0) == man.cell(col, 0));
+        assert!(!alike, "the family is drawn as 👨 alone, its first picture");
+    } else if !shapes_differ && !sizes_differ {
+        eprintln!("the first picture alone is indistinguishable from the whole by its extent");
+    }
+    let pixels = frame.cell(1, 0).into_iter().chain(frame.cell(2, 0));
+    assert!(pixels.filter(|&px| coloured(px)).count() > 0, "the family has no colour");
+}
+
+/// A flag no face has letters for draws as one box over its two cells, as any emoji the faces
+/// lack does, not a box to a cell: the split into letters (VENDORED.md, change 21) counts only
+/// glyphs that are not `.notdef`. With Hack alone, the last resort on a system with no emoji
+/// face, 🇯🇵 must draw exactly as 🎵 does, one `.notdef` in a box two cells wide.
+#[test]
+fn a_flag_no_face_has_draws_as_one_box_like_any_missing_emoji() {
+    let _gpu = one_at_a_time();
+    let faces = [hack().unwrap()];
+    assert!(!faces[0].joins("\u{1F1EF}") && !faces[0].joins("\u{1F3B5}"), "Hack has them");
+    let Some(flag) = row(&faces, 6, "\u{1F1EF}\u{1F1F5}|") else { return };
+    let Some(note) = row(&faces, 6, "\u{1F3B5}|") else { return };
+    for col in 0..6 {
+        assert!(flag.cell(col, 0) == note.cell(col, 0), "cell {col} is not what 🎵 draws there");
+    }
+}
+
+/// A glyph that stays where it was while its cell changes owner is drawn as its new owner
+/// draws it: an unjoined flag's second letter stands in its flag's continuation and is the
+/// flag's cell's, so the same letter at the same place can be one cell's on one frame and the
+/// next cell's on the next (`x🇵🇪` then `🇯🇵`: the P in cell 1 is cell 1's, then cell 0's). The
+/// glyphs a frame draws are keyed by place, glyph and width alone, and the old owner's removal
+/// took away the entry the new owner had just put there (VENDORED.md, change 22): the letter
+/// was left on screen as the frame before had drawn it, in that frame's colours, and nothing
+/// drew it again until its row changed. So the first frame is gold and the second white, and
+/// each second frame must draw cell for cell as it does fresh. Japan and Peru shape to their
+/// letters in Segoe UI Emoji, the A pair in Apple Color Emoji too; a face with every pair's
+/// picture (Noto Color Emoji) draws pictures and holds the same.
+#[test]
+fn a_flag_letter_that_changes_cells_in_place_is_drawn_by_its_new_cell() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let (aa, jp, pe) = ("\u{1F1E6}\u{1F1E6}", "\u{1F1EF}\u{1F1F5}", "\u{1F1F5}\u{1F1EA}");
+    let cases = [
+        (format!("x{pe}|"), format!("{jp}|")),
+        (format!("{jp}|"), format!("x{pe}|")),
+        (format!("x{aa}|"), format!("{aa}|")),
+        (format!("{aa}|"), format!("x{aa}|")),
+    ];
+    let gold = Style::new().fg(Color::Rgb(GOLD[0], GOLD[1], GOLD[2]));
+    for (before, after) in cases {
+        let first = Line::from(Span::styled(before.clone(), gold));
+        let frames = vec![vec![first], vec![Line::from(after.clone())]];
+        let drawn = render(faces.clone(), 6, frames, TextureFormat::Rgba8Unorm);
+        let Some(frame) = frame_or_skip(drawn) else { return };
+        let Some(fresh) = row(&faces, 6, after.clone()) else { return };
+        for col in 0..6 {
+            assert!(
+                frame.cell(col, 0) == fresh.cell(col, 0),
+                "{before:?} then {after:?}: cell {col} is not what a fresh {after:?} draws there"
+            );
+        }
     }
 }
 
@@ -746,6 +1157,181 @@ fn a_text_symbol_takes_the_cells_colour_not_the_emoji_faces() {
     assert!(ink.iter().all(|px| px[2] < 0xd0), "the tick has white ink: drawn as colour");
 }
 
+/// Which clusters ask for emoji presentation, the property the window's choice of face turns
+/// on (VENDORED.md, change 21), held to known code points: a character whose default is a
+/// picture (🎵, ⌚, ⭐, 🀄, a regional indicator, a skin tone) is one; a character whose default
+/// is text (♥, ✔, ❤, ★, ✓, ⚠, ☀, a digit, `#`) is not, unless VS16 or the tail of an emoji
+/// sequence follows it; and VS15 makes even a default picture text.
+#[test]
+fn only_emoji_presentation_asks_for_a_colour_face() {
+    use ratatui_wgpu::emoji_presentation;
+    let pictures = [
+        "\u{1F3B5}", "\u{231A}", "\u{2B50}", "\u{26A1}", "\u{1F004}", "\u{1F1EF}", "\u{1F3FD}",
+        "\u{1F1EF}\u{1F1F5}", "\u{2764}\u{FE0F}", "\u{2665}\u{FE0F}", "\u{2714}\u{FE0F}",
+        "\u{263A}\u{FE0F}", "1\u{FE0F}\u{20E3}", "#\u{20E3}", "\u{261D}\u{1F3FD}", ENGLAND,
+        RAINBOW, "\u{1F3F3}\u{200D}\u{1F308}", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+    ];
+    for cluster in pictures {
+        assert!(emoji_presentation(cluster), "{cluster:?} does not ask for emoji presentation");
+    }
+    let text = [
+        "\u{2665}", "\u{2714}", "\u{2764}", "\u{2605}", "\u{2606}", "\u{2713}", "\u{26A0}",
+        "\u{2600}", "\u{266A}", "\u{263A}", "\u{261D}", "1", "#", "a", "\u{65E5}", "",
+        "\u{1F3B5}\u{FE0E}", "\u{2764}\u{FE0E}", "a\u{20E3}", "\u{2026}\u{E0067}\u{E007F}",
+        "b\u{E0067}", "\u{258F}\u{200D}\u{1F308}",
+    ];
+    for cluster in text {
+        assert!(!emoji_presentation(cluster), "{cluster:?} asks for emoji presentation");
+    }
+}
+
+/// A text face that comes before the emoji face in the window and has one of `wanted`: the
+/// system's symbol face or one of its script faces, with the first of `wanted` any of them
+/// has; `None`, with a line saying so, when none has any.
+fn text_face_with(wanted: &[&'static str]) -> Option<(&'static str, Font<'static>)> {
+    let faces: Vec<Font<'static>> =
+        symbol_fallback().into_iter().chain(script_fallbacks("en")).collect();
+    let found = wanted
+        .iter()
+        .find_map(|&text| faces.iter().find(|face| face.joins(text)).map(|f| (text, f.clone())));
+    if found.is_none() {
+        eprintln!("skipped: no text face on this system has any of {}", wanted.concat());
+    }
+    found
+}
+
+/// An emoji whose default is a picture draws from the colour face though a text face before it
+/// has the character: the window puts Segoe UI Symbol ahead of Segoe UI Emoji so that ♥ and ✔
+/// keep their text form, and Segoe UI Symbol has 🎵, which the window drew as its monochrome
+/// outline on Windows 10 where Windows Terminal draws it in colour (VENDORED.md, change 21).
+/// The emoji is drawn with the text face before the emoji face, as the window orders them, and
+/// must draw exactly as it does with the two swapped, where the colour face comes first; the
+/// same faces both times, so the grid is the same. Windows' symbol face has 🎵; elsewhere the
+/// first default picture a text face has stands in, and a system with none skips with a line.
+#[test]
+fn a_default_presentation_emoji_draws_from_the_colour_face_past_a_text_face() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let emoji = faces.last().unwrap().clone();
+    let candidates = [
+        "\u{1F3B5}", "\u{231A}", "\u{231B}", "\u{2B50}", "\u{26A1}", "\u{2615}", "\u{2614}",
+        "\u{2705}", "\u{274C}", "\u{2753}", "\u{2757}", "\u{2B55}", "\u{2B1B}", "\u{25FE}",
+    ];
+    let drawn: Vec<&'static str> = candidates.into_iter().filter(|c| emoji.joins(c)).collect();
+    let Some((text, mono)) = text_face_with(&drawn) else { return };
+    let line = format!("{text}|");
+    let (hack, symbols) = (hack().unwrap(), symbols().unwrap());
+    let text_first = [hack.clone(), symbols.clone(), mono.clone(), emoji.clone()];
+    let colour_first = [hack.clone(), symbols.clone(), emoji, mono.clone()];
+    let Some(frame) = row(&text_first, 4, line.clone()) else { return };
+    let Some(colour) = row(&colour_first, 4, line.clone()) else { return };
+    for col in 0..4 {
+        assert!(
+            frame.cell(col, 0) == colour.cell(col, 0),
+            "{text}: cell {col} is not what the colour face draws there"
+        );
+    }
+    // And the text face draws it otherwise, or the check above could not fail.
+    let Some(outline) = row(&[hack, symbols, mono], 4, line) else { return };
+    let differs = (0..2).any(|col| frame.cell(col, 0) != outline.cell(col, 0));
+    assert!(outline.cell_w != frame.cell_w || differs, "{text}: both faces draw it alike");
+    let tinted = (0..2).flat_map(|col| frame.cell(col, 0)).filter(|&px| coloured(px)).count();
+    eprintln!("{text}: from the colour face past a text face, {tinted} coloured pixels");
+}
+
+/// A keycap draws as the colour face's picture, though its base is a digit every face has in
+/// monochrome, the emoji face included (VENDORED.md, change 24): `1️⃣` and `#️⃣` drawn with the
+/// faces in the window's order (Hack, the bundled symbols, the system's symbol face and script
+/// faces, then the emoji face) are cell for cell what they are with the emoji face right after
+/// Hack, and have colour in them. Judged by the base alone, a text face ahead of the emoji face
+/// with all of the keycap's characters drew it as a plain digit. On Windows 10 no face ahead of
+/// Segoe UI Emoji maps U+FE0F (none in its Fonts folder does), so there the emoji face won on
+/// the count and this holds with or without the change; it is the guard for a system whose
+/// text faces map the variation selectors. The digit and `#` without VS16 and U+20E3 stay text:
+/// drawn exactly as without the emoji face at all. A colour face with no picture for a keycap
+/// skips with a line.
+#[test]
+fn a_keycap_draws_from_the_colour_face_and_a_plain_digit_stays_text() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let emoji = faces.last().unwrap().clone();
+    let keycaps = ["1\u{FE0F}\u{20E3}", "#\u{FE0F}\u{20E3}"];
+    if let Some(missing) = keycaps.iter().find(|k| !emoji.colour_cluster(k)) {
+        eprintln!("skipped: the emoji face has no colour picture for the keycap {missing:?}");
+        return;
+    }
+    let (hack, symbols) = (hack().unwrap(), symbols().unwrap());
+    let text_faces: Vec<Font<'static>> =
+        symbol_fallback().into_iter().chain(script_fallbacks("en")).collect();
+    let mut window = vec![hack.clone(), symbols.clone()];
+    window.extend(text_faces.iter().cloned());
+    let without_emoji = window.clone();
+    window.push(emoji.clone());
+    let mut colour_first = vec![hack, emoji, symbols];
+    colour_first.extend(text_faces);
+    for keycap in keycaps {
+        let line = format!("{keycap}|");
+        let Some(frame) = row(&window, 4, line.clone()) else { return };
+        let Some(colour) = row(&colour_first, 4, line) else { return };
+        for col in 0..4 {
+            assert!(frame.cell(col, 0) == colour.cell(col, 0), "{keycap:?}: cell {col}");
+        }
+        let tinted = (0..2).flat_map(|col| frame.cell(col, 0)).filter(|&px| coloured(px)).count();
+        eprintln!("{keycap:?}: {tinted} coloured pixels");
+        assert!(tinted > 0, "{keycap:?} drew without colour: a plain digit, not the keycap");
+    }
+    let Some(frame) = row(&window, 4, "1#|") else { return };
+    let Some(text) = row(&without_emoji, 4, "1#|") else { return };
+    for col in 0..4 {
+        assert!(frame.cell(col, 0) == text.cell(col, 0), "the plain digit and #: cell {col}");
+    }
+}
+
+/// A character whose default is text keeps its text face, in the cell's colour, though the
+/// colour face has it too: ♥ (U+2665) without VS16 draws from the text face before the emoji
+/// face, gold in a gold cell and not the colour face's red heart, and with VS16 it is the
+/// colour face's picture. Both are drawn with the faces in the window's order and compared
+/// with the same faces with the text face and the emoji face swapped.
+#[test]
+fn a_text_presentation_heart_keeps_its_text_face_and_the_cells_colour() {
+    let _gpu = one_at_a_time();
+    let Some(faces) = emoji_faces() else { return };
+    let emoji = faces.last().unwrap().clone();
+    let Some((heart, mono)) = text_face_with(&["\u{2665}"]) else { return };
+    let (hack, symbols) = (hack().unwrap(), symbols().unwrap());
+    let text_first = [hack.clone(), symbols.clone(), mono.clone(), emoji.clone()];
+    let colour_first = [hack, symbols, emoji.clone(), mono];
+    let gold = Style::new().fg(Color::Rgb(GOLD[0], GOLD[1], GOLD[2]));
+    let Some(frame) = row(&text_first, 4, Span::styled(heart, gold)) else { return };
+    let Some(colour) = row(&colour_first, 4, Span::styled(heart, gold)) else { return };
+    assert!(frame.cell(0, 0) != colour.cell(0, 0), "the heart drew from the colour face");
+    // Every pixel of its ink lies between the ground and the gold: the cell's colour.
+    let ink: Vec<[u8; 3]> = frame
+        .cell(0, 0)
+        .into_iter()
+        .filter(|px| px.iter().zip(GROUND).any(|(&got, ground)| got.abs_diff(ground) > 40))
+        .collect();
+    assert!(!ink.is_empty(), "the heart left its cell empty");
+    for px in ink {
+        let t = (f64::from(px[0]) - f64::from(GROUND[0])) / f64::from(GOLD[0] - GROUND[0]);
+        for c in 1..3 {
+            let want = f64::from(GROUND[c]) + t * (f64::from(GOLD[c]) - f64::from(GROUND[c]));
+            let off = (f64::from(px[c]) - want).abs();
+            assert!(off <= 4.0, "the heart's ink {px:02x?} is not gold");
+        }
+    }
+    let pictured = format!("{heart}\u{FE0F}");
+    if !emoji.joins(&pictured) {
+        eprintln!("skipped: the emoji face has no picture for {pictured}");
+        return;
+    }
+    let Some(frame) = row(&text_first, 4, Span::styled(pictured.clone(), gold)) else { return };
+    let Some(colour) = row(&colour_first, 4, Span::styled(pictured, gold)) else { return };
+    for col in 0..4 {
+        assert!(frame.cell(col, 0) == colour.cell(col, 0), "the VS16 heart's cell {col}");
+    }
+}
+
 /// A pasted England flag shows in a field as one picture: the kit's field
 /// line (the caret after the value, as the search box draws it) keeps 🏴
 /// and its tags together, measures them as the two cells ratatui gives the
@@ -768,8 +1354,13 @@ fn a_pasted_subdivision_flag_shows_in_a_field_as_one_picture() {
     }
     // Only a face with the flag's picture is sure to cover both cells; one
     // without (Segoe UI Emoji has no subdivision flags) draws the black
-    // flag alone, whose ink is the face's to place.
-    if faces.last().unwrap().joins(ENGLAND) {
+    // flag alone, whose ink is the face's to place. Windows 10's maps no
+    // tags, which the shaper hides, so its 🏴 is the one advancing glyph and
+    // `joins` says yes; `joins` alone does not tell the two apart:
+    // the flag drawn exactly as 🏴 is drawn is a face without the picture.
+    let Some(black) = row(&faces, 8, "ab\u{1F3F4}") else { return };
+    let as_black = (2..4).all(|col| flag.cell(col, 0) == black.cell(col, 0));
+    if faces.last().unwrap().joins(ENGLAND) && !as_black {
         assert!(frame.inked(2, 0) && frame.inked(3, 0), "the flag is not over both its cells");
     } else {
         eprintln!("the emoji face has no England flag: drawn as its black flag");
@@ -867,7 +1458,8 @@ fn covers_and_a_modal(watched: bool) -> Result<(Frame, Rect, Rect), String> {
         })
         .map_err(|e| e.to_string())?;
     let pixels = terminal.backend().read_pixels().ok_or("the frame could not be read back")?;
-    Ok((Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX }, under, beside))
+    let text = terminal.backend().get_text();
+    Ok((Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX, text }, under, beside))
 }
 
 /// The cover flash. A draw site asks whether an overlay stood over its
@@ -950,7 +1542,7 @@ fn wizard_in_the_window(
         let (placed, under) = board.placed_rects();
         let text = terminal.backend().get_text();
         let pixels = terminal.backend().read_pixels().ok_or("the frame could not be read back")?;
-        let frame = Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX };
+        let frame = Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX, text: text.clone() };
         frames.push(WizardFrame { frame, placed, under, text });
     }
     Ok(frames)

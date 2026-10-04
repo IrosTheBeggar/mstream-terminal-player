@@ -436,7 +436,7 @@ float hf(sampler2D sampler, vec2 p) {
   p.x = n.x == 0. ? p.x : 1.-p.x;
   p.y = n.y == 0. ? p.y : 1.-p.y;
   // Combine global height function and mountain FBM
-  return mix(wl-1E-2, g*texture(sampler, p).x, g_part > 1. ?smoothstep(.06, .12, f) : 1.);
+  return mix(wl-1E-2, g*textureLod(sampler, p, 0.).x, g_part > 1. ?smoothstep(.06, .12, f) : 1.);
 }
 
 // Raymarches against height function

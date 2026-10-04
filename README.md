@@ -42,7 +42,9 @@ and stapled, so Gatekeeper accepts it.
 it to the taskbar: it is a small launcher that starts the player beside it with no console
 window. `mstream-player.exe` beside it is the player itself, for use from a terminal; the zip
 also holds the icon and a `README.txt`. The build is not code-signed yet, so SmartScreen may warn
-on first run: choose **More info**, then **Run anyway**.
+on first run: choose **More info**, then **Run anyway**. Some NVIDIA drivers (31.0.15.3640 among
+them) crash when the player's path is 253 characters or longer; the player then exits rather
+than hang, so if no window appears, unzip it to a shorter folder.
 
 **Linux** (x64). The tarball unpacks to `mstream-player-desktop/`: the binary, the desktop entry
 `io.mstream.player.desktop`, the icons under `icons/hicolor/` and a `README.txt`. Run it in

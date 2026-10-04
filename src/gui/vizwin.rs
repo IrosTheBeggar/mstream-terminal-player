@@ -149,7 +149,10 @@ fn open(gui: &mut Gui) {
     command.arg("viz-window").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
-        // No console window for the child (contract clause 3).
+        // No console window for the child (contract clause 3). Not
+        // CREATE_DEFAULT_ERROR_MODE, unlike the helper programs: this child
+        // is ours and makes a GPU device too, so the parent's crash quieting
+        // is right for it (it sets the same itself; gpu_pick).
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);

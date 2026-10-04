@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::hash::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::num::NonZeroU64;
@@ -97,7 +100,10 @@ pub(super) struct RenderInfo {
 /// can stand at one place narrow and then wide (an emoji face's ❤ before
 /// and after its VS16 is typed), and keyed without it the new placement and
 /// the old were one entry, which the old one's removal took away — the
-/// grown heart drew nothing and its second cell kept what it held.
+/// grown heart drew nothing and its second cell kept what it held. The key
+/// holds no owner, and one place can be one cell's on a frame and another's
+/// on the next (an unjoined flag's second letter is its flag's cell's), so a
+/// removal takes only an entry its own cell put there (`flush`).
 type Rendered = IndexMap<(i32, i32, GlyphId, u32), RenderInfo, RandomState>;
 
 /// Set of (x, y, glyph, char width).
@@ -520,22 +526,36 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
             // empty continuation, which shapes to nothing, so every glyph
             // after them on the row drew a cell to the left of its own:
             // `│日本│` redrawn as `│ab  │` put the last `│` in cell 4.
+            //
+            // Every glyph the new cell lands on is erased so, not only the
+            // one in its own cell: a wide cell's second half can land on
+            // the first half of a wide glyph that began there, whose own
+            // continuation lies past the new cell's reach (`a日x` redrawn
+            // as `日 x`, the new 日's second cell the old one's first). It
+            // must be blanked here, as nothing ratatui sends will: where
+            // the new cell equals ratatui's old one there (its reset blank
+            // behind the old glyph, as in unstyled text) the diff sends
+            // nothing, and where it is a styled blank (the bar's title) the
+            // rule above turns it away. Left as the empty continuation, the
+            // row lost a cell: the bar's `Heart ❤️ Song`, after a title
+            // with an emoji one cell further on, drew as `Heart ❤️Song`.
             let width = cell.symbol().width().max(1);
-            let old_width = self.cells[index].symbol().width().max(1);
-            if old_width > width {
-                let start = (index + width).min(self.cells.len());
-                let end = (index + old_width).min(self.cells.len());
-                for covered in &mut self.cells[start..end] {
-                    if *covered == NULL_CELL {
-                        *covered = Cell::EMPTY;
-                    }
+            let end = (index + width).min(self.cells.len());
+            let reach = (index..end)
+                .filter(|&at| self.cells[at] != NULL_CELL)
+                .map(|at| at + self.cells[at].symbol().width().max(1))
+                .max()
+                .unwrap_or(end)
+                .clamp(end, self.cells.len());
+            for covered in &mut self.cells[end..reach] {
+                if *covered == NULL_CELL {
+                    *covered = Cell::EMPTY;
                 }
             }
 
             self.cells[index] = cell.clone();
 
             let start = (index + 1).min(self.cells.len());
-            let end = (index + width).min(self.cells.len());
             self.cells[start..end].fill(NULL_CELL);
             self.dirty_rows[y as usize] = true;
         }
@@ -678,8 +698,27 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
             // each advance, and upstream drew the second in the next cell and so on,
             // over whatever that cell held. Only the first is drawn now: the sequence
             // degrades to its base emoji (👨 for an unknown family, 👍 for a tone the
-            // face lacks), in its own cells.
-            let mut placed = vec![false; bounds.width as usize];
+            // face lacks), in its own cells. What follows a glyph left out is left out
+            // too: a glyph that does not advance after one is placed against it, and drawn
+            // at the first glyph's place it lands wrong (a family Windows 10's Segoe UI Emoji
+            // composes, below, drew its girl at the man's place, reaching into the cell
+            // before, while that composition was cut to its man).
+            //
+            // A flag the face has no picture for is one exception: its two regional
+            // indicators shape to two letters, and the first alone, a narrow letter in the
+            // flag's two cells, said nothing (no face the window has on Windows 10 has country
+            // flags: Segoe UI Symbol, ahead of Segoe UI Emoji, draws the pair as its letters,
+            // and 🇯🇵 was a sliver of a `J`). Each letter is drawn in a cell of its own instead,
+            // `J` then `P`, as Windows Terminal draws it. A face with the flag shapes the pair
+            // to one glyph, which covers both cells as before.
+            //
+            // A sequence a colour face composes is the other: Windows 10's Segoe UI Emoji has
+            // no picture for a family, and builds 👨‍👩‍👧 from its people by its positioning, the
+            // man and the woman advancing and the girl placed back in front of them. All of
+            // them are drawn, into the cell's one box, fitted to the run's advance as one
+            // glyph's would be (`composed_runs`), as Windows Terminal draws it; the first
+            // advancing glyph alone was a man where the family was meant.
+            let mut placed = vec![0u8; bounds.width as usize];
             let mut shape = |font: &Font,
                              fake_bold,
                              fake_italic,
@@ -689,6 +728,36 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                 let face_scale = self.fonts.face_scale(metrics);
                 let advance_scale = face_scale.scale;
 
+                // How many glyphs that advance each cell shaped to, for the flags above.
+                // `.notdef` is not counted: a pair the face has no letters for (the last
+                // resort's boxes, on a system with no emoji face) keeps change 16's one glyph
+                // over both cells, as every other emoji there does, not a box to a cell.
+                let mut advancing = vec![0u8; bounds.width as usize];
+                for (info, position) in buffer
+                    .glyph_infos()
+                    .iter()
+                    .zip(buffer.glyph_positions().iter())
+                {
+                    let advances = (position.x_advance as f32 * advance_scale) as i32 != 0;
+                    if info.glyph_id != 0 && advances {
+                        let cell_idx = self.rowmap[info.cluster as usize] as usize;
+                        advancing[cell_idx] = advancing[cell_idx].saturating_add(1);
+                    }
+                }
+                // The cells this face composes from several pictures (above). Only a COLR
+                // face composes: an sbix or CBDT face joins a sequence it knows into one glyph.
+                let composed = if metrics.tables().colr.is_some() {
+                    composed_runs(
+                        metrics,
+                        buffer.glyph_infos(),
+                        buffer.glyph_positions(),
+                        &self.rowmap,
+                        row,
+                    )
+                } else {
+                    Vec::new()
+                };
+
                 for (info, position) in buffer
                     .glyph_infos()
                     .iter()
@@ -696,22 +765,46 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                 {
                     let cell_idx = self.rowmap[info.cluster as usize] as usize;
                     let cell = &row[cell_idx];
-                    let max_width = cell.symbol().width();
+                    let run = composed.get(cell_idx).and_then(Option::as_ref);
+                    // An unjoined flag's letters stand one to a cell, each a cell wide.
+                    let split = run.is_none()
+                        && advancing[cell_idx] == 2
+                        && regional_pair(cell.symbol());
+                    let max_width = if split { 1 } else { cell.symbol().width() };
                     let sourced = &mut new_sourced[cell_idx];
 
-                    let basey = y as i32 * self.fonts.height_px() as i32
+                    let mut basey = y as i32 * self.fonts.height_px() as i32
                         + (position.y_offset as f32 * advance_scale) as i32;
                     let mut advance = (position.x_advance as f32 * advance_scale) as i32;
-                    if advance != 0 {
-                        if std::mem::replace(&mut placed[cell_idx], true) {
+                    if run.is_some() {
+                        // A composed cell is drawn once, as its first glyph, and advances as
+                        // one cell; the run carries its pictures' own offsets.
+                        if std::mem::replace(&mut placed[cell_idx], 1) != 0 {
                             continue;
                         }
+                        basey = y as i32 * self.fonts.height_px() as i32;
+                        advance = 1;
+                    } else {
+                        if advance != 0 {
+                            placed[cell_idx] = placed[cell_idx].saturating_add(1);
+                        }
+                        // Past the glyphs the cell draws (one, or an unjoined flag's two), and
+                        // whatever does not advance after them, which hangs on one left out.
+                        if placed[cell_idx] > 1 + u8::from(split) {
+                            continue;
+                        }
+                    }
+                    if advance != 0 {
                         x += next_advance;
                         advance =
                             max_width as i32 * advance.signum() * self.fonts.min_width_px() as i32;
                         next_advance = advance;
                     }
-                    let basex = x + (position.x_offset as f32 * advance_scale) as i32;
+                    let basex = if run.is_some() {
+                        x
+                    } else {
+                        x + (position.x_offset as f32 * advance_scale) as i32
+                    };
 
                     // This assumes that we only want to underline the first character in the
                     // cluster, and that the remaining characters are all combining characters
@@ -726,10 +819,14 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                     };
 
                     let ch = self.row[info.cluster as usize..].chars().next().unwrap();
-                    let width = (metrics
-                        .glyph_hor_advance(GlyphId(info.glyph_id as _))
-                        .unwrap_or_default() as f32
-                        * advance_scale) as u32;
+                    // A composed run is as wide as its pictures' advances together.
+                    let width = match run {
+                        Some(run) => run.advance as f32,
+                        None => metrics
+                            .glyph_hor_advance(GlyphId(info.glyph_id as _))
+                            .unwrap_or_default() as f32,
+                    };
+                    let width = (width * advance_scale) as u32;
                     // The glyph's box is the cells its cell claims, which ratatui measured
                     // for the whole grapheme. Upstream measured the cluster's first
                     // character alone, which is narrower than the grapheme for an emoji
@@ -746,6 +843,7 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                         glyph: info.glyph_id,
                         font: font.id(),
                         cells: chars_wide,
+                        run: run.map_or(0, |run| run.key),
                     };
                     let width = if width == 0 {
                         chars_wide * self.fonts.min_width_px()
@@ -848,7 +946,8 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                         let (rect, image, colour) = rasterize_glyph(
                             cached,
                             metrics,
-                            info,
+                            GlyphId(info.glyph_id as _),
+                            run.map_or(&[][..], |run| &run.glyphs[..]),
                             fake_italic & !is_emoji,
                             fake_bold & !is_emoji,
                             face_scale,
@@ -914,7 +1013,9 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                 ),
             );
 
-            for (new, old) in new_sourced.into_iter().zip(sourced.iter_mut()) {
+            let cells = new_sourced.into_iter().zip(sourced.iter_mut());
+            for (owner, (new, old)) in cells.enumerate() {
+                let owner = y * bounds.width as usize + owner;
                 if new != *old {
                     for (x, y, glyph, width) in old.difference(&new) {
                         let cell = ((*y).max(0) as usize / self.fonts.height_px() as usize)
@@ -931,7 +1032,14 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                             self.dirty_cells.set(cell + offset_x, true);
                         }
 
-                        self.rendered[cell].shift_remove(&(*x, *y, *glyph, *width));
+                        // Only an entry this cell put there: another cell may have put the
+                        // same glyph at the same place this frame, an unjoined flag's second
+                        // letter handed from one flag to the next (`x🇵🇪` redrawn as `🇯🇵`),
+                        // and taking that away left the letter as the frame before drew it.
+                        let key = (*x, *y, *glyph, *width);
+                        if self.rendered[cell].get(&key).is_some_and(|info| info.cell == owner) {
+                            self.rendered[cell].shift_remove(&key);
+                        }
                     }
                     *old = new;
                 }
@@ -1007,6 +1115,10 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
 
                 let [r, g, b] = bg_color;
                 let bg_color_u32: u32 = u32::from_be_bytes([r, g, b, 255]);
+                // A glyph placed in a wide cell's continuation (an unjoined flag's second
+                // letter, `flush`'s shaping) is its flag's: the continuation's own background
+                // is the default one, which would show as a gap in a highlighted row.
+                let continuation = cell.symbol().is_empty();
 
                 for (
                     (x, y, _, _),
@@ -1026,6 +1138,16 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                         self.colors.c2c(cell.bg, self.reset_bg)
                     } else {
                         self.colors.c2c(cell.fg, self.reset_fg)
+                    };
+                    let bg_color_u32 = if continuation {
+                        let [r, g, b] = if reverse {
+                            self.colors.c2c(cell.fg, self.reset_fg)
+                        } else {
+                            self.colors.c2c(cell.bg, self.reset_bg)
+                        };
+                        u32::from_be_bytes([r, g, b, 255])
+                    } else {
+                        bg_color_u32
                     };
 
                     let alpha = if cell.modifier.contains(Modifier::HIDDEN)
@@ -1171,22 +1293,100 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
     }
 }
 
+/// Whether a cell's grapheme is a flag of regional indicators: two of them, and nothing else.
+fn regional_pair(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    let regional = |ch: Option<char>| matches!(ch, Some('\u{1F1E6}'..='\u{1F1FF}'));
+    regional(chars.next()) && regional(chars.next()) && chars.next().is_none()
+}
+
+/// A cell a COLR face composes from several pictures: the pictures, each with its place from
+/// the cell's origin in font units (its pen position plus its offset, and its vertical
+/// offset), the run's advance in font units, and the atlas key's hash of the two.
+pub(crate) struct Composed {
+    glyphs: Vec<(GlyphId, i32, i32)>,
+    advance: i32,
+    key: u64,
+}
+
+/// The cells of one shaped run that a COLR face composes rather than joins, by cell index;
+/// empty where none is. Windows 10's Segoe UI Emoji has no picture for a family or a couple:
+/// it shapes 👨‍👩‍👧 to a man and a woman that advance and a girl that does not, placed by its
+/// positioning back in front of them, and 👩‍❤️‍👨 to a woman, a heart placed over her and a man.
+/// A cell is composed when it has emoji presentation, every glyph of it with ink is a COLR
+/// picture, and a picture after the first does not advance: the face placed it among the
+/// others, which is what tells a composition from a sequence of separate emoji it cannot join
+/// (👨‍🦖, a man and a dinosaur that both advance, which change 16 draws as its man). Blank
+/// glyphs (a ZWJ the face draws as nothing) are passed over. [`Font::composes`] asks the same.
+pub(crate) fn composed_runs(
+    face: &rustybuzz::Face,
+    infos: &[rustybuzz::GlyphInfo],
+    positions: &[rustybuzz::GlyphPosition],
+    rowmap: &[u16],
+    row: &[Cell],
+) -> Vec<Option<Composed>> {
+    #[derive(Default)]
+    struct Gathered {
+        glyphs: Vec<(GlyphId, i32, i32)>,
+        pen: i32,
+        ink_not_colour: bool,
+        placed: bool,
+    }
+    let mut gathered: Vec<Option<Gathered>> = (0..row.len()).map(|_| None).collect();
+    for (info, position) in infos.iter().zip(positions) {
+        let cell = rowmap[info.cluster as usize] as usize;
+        let at = gathered[cell].get_or_insert_with(Gathered::default);
+        let glyph = GlyphId(info.glyph_id as _);
+        if face.is_color_glyph(glyph) {
+            at.placed |= position.x_advance == 0 && !at.glyphs.is_empty();
+            at.glyphs.push((glyph, at.pen + position.x_offset, position.y_offset));
+        } else if face.glyph_bounding_box(glyph).is_some() {
+            at.ink_not_colour = true;
+        }
+        at.pen += position.x_advance;
+    }
+    gathered
+        .into_iter()
+        .enumerate()
+        .map(|(cell, at)| {
+            let at = at?;
+            let composed = !at.ink_not_colour
+                && at.placed
+                && crate::fonts::emoji_presentation(row[cell].symbol());
+            composed.then(|| {
+                let mut hasher = DefaultHasher::new();
+                at.glyphs.hash(&mut hasher);
+                at.pen.hash(&mut hasher);
+                // Never 0, which is one glyph's.
+                let key = hasher.finish() | 1;
+                Composed { glyphs: at.glyphs, advance: at.pen, key }
+            })
+        })
+        .collect()
+}
+
 /// A glyph's raster for its atlas box, and whether it is in colour: a colour glyph's own pixels
 /// are drawn (the mask's 255), a monochrome one is coverage the cell's foreground colour fills.
 /// Upstream set the mask from the cluster's first character being an emoji, so an emoji drawn
 /// from a text face's outline (a symbol face's ✔) came out white whatever the cell's colour,
 /// and a colour picture of a character that is not an emoji would have been tinted.
+///
+/// `run` is a composed cell's pictures and their places in font units (`composed_runs`), all
+/// painted into the one box, `actual_width` then being the run's advance; empty for `glyph`
+/// alone, which is the run's first picture otherwise.
 fn rasterize_glyph(
     cached: Entry,
     metrics: &rustybuzz::Face,
-    info: &rustybuzz::GlyphInfo,
+    glyph: GlyphId,
+    run: &[(GlyphId, i32, i32)],
     fake_italic: bool,
     fake_bold: bool,
     face: FaceScale,
     actual_width: u32,
 ) -> (CacheRect, Vec<u32>, bool) {
     let advance_scale = face.scale;
-    let glyph = GlyphId(info.glyph_id as _);
+    let alone = [(glyph, 0, 0)];
+    let members = if run.is_empty() { &alone[..] } else { run };
     // `advance_scale` sizes the face (`Fonts::face_scale`). A glyph whose advance is wider than
     // its box is shrunk to the box and centred in the height it no longer fills. One narrower
     // than its box is centred in it at that size, never enlarged: enlarging also grows the line
@@ -1204,17 +1404,25 @@ fn rasterize_glyph(
     // low). Only then is it moved, and only as far as it must be: shifted back inside when
     // its ink is no taller than the box, shrunk to the box's height when it is.
     if !face.primary {
-        if let Some(bounds) = metrics.glyph_bounding_box(glyph) {
+        // The ink's height is every picture's of a composed run, each raised by its offset.
+        let ink = members
+            .iter()
+            .filter_map(|&(member, _, dy)| {
+                let bounds = metrics.glyph_bounding_box(member)?;
+                Some((f32::from(bounds.y_min) + dy as f32, f32::from(bounds.y_max) + dy as f32))
+            })
+            .reduce(|(low, high), (y_min, y_max)| (low.min(y_min), high.max(y_max)));
+        if let Some((y_min, y_max)) = ink {
             let box_h = cached.height as f32 * 2.0;
             let baseline = face.ascender * scale + computed_offset_y;
-            let top = baseline - f32::from(bounds.y_max) * scale;
-            let bottom = baseline - f32::from(bounds.y_min) * scale;
+            let top = baseline - y_max * scale;
+            let bottom = baseline - y_min * scale;
             let ink = bottom - top;
             if ink > box_h {
                 let shrink = box_h / ink;
                 scale *= shrink;
                 computed_offset_x = cached.width as f32 - actual_width as f32 * fit * shrink;
-                computed_offset_y = (f32::from(bounds.y_max) - face.ascender) * scale;
+                computed_offset_y = (y_max - face.ascender) * scale;
             } else if top < 0.0 {
                 computed_offset_y -= top;
             } else if bottom > box_h {
@@ -1244,11 +1452,23 @@ fn rasterize_glyph(
         &mut image[..],
     );
 
-    let mut painter = Painter::new(metrics, &mut target, skew, scale, baseline, computed_offset_x);
-    if metrics
-        .paint_color_glyph(glyph, 0, RgbaColor::new(255, 255, 255, 255), &mut painter)
-        .is_some()
-    {
+    // Each picture at its place: a glyph alone at the box's origin, a composed run's members
+    // where the face's positioning put them.
+    let mut painted = false;
+    for &(member, dx, dy) in members {
+        let mut painter = Painter::new(
+            metrics,
+            &mut target,
+            skew,
+            scale,
+            baseline - dy as f32 * scale,
+            computed_offset_x + dx as f32 * scale,
+        );
+        painted |= metrics
+            .paint_color_glyph(member, 0, RgbaColor::new(255, 255, 255, 255), &mut painter)
+            .is_some();
+    }
+    if painted {
         let mut final_image = DrawTarget::new(cached.width as i32, cached.height as i32);
         final_image.draw_image_with_size_at(
             cached.width as f32,

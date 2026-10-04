@@ -671,6 +671,14 @@ pub fn tall_secondary<A: Clone>(
     tall_frame(frame, s, at, label, 2, tone, Some(act))
 }
 
+/// The cells a [`tall_button`] or [`tall_secondary`] takes across for
+/// `label` (two of padding a side and the border's two), measured as the
+/// frame measures itself, so a caller anchoring one to a right edge puts
+/// its x where the frame will end, not where a character count says.
+pub fn tall_width(label: &str) -> u16 {
+    width(label) as u16 + 6
+}
+
 /// The 3-row frame every tall control shares: the label with `pad` spaces
 /// a side, a Rounded border and the label in one color, the label BOLD or
 /// not — `tone` picks both from whether the pointer is in the frame — and
@@ -703,7 +711,9 @@ pub fn tall_frame_bordered<A: Clone>(
     act: Option<A>,
 ) -> Rect {
     let text = format!("{:pad$}{label}{:pad$}", "", "");
-    let width = (text.chars().count() as u16 + 2).min(at.width);
+    // In cells, as the label is drawn: counting characters framed the
+    // wizard's Japanese "続ける ▸" in eleven cells and cut it to "続け".
+    let width = (self::width(&text) as u16 + 2).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
     let hovered = act.is_some() && s.hovers(rect);
     let (color, bold) = tone(hovered);
@@ -745,7 +755,9 @@ pub fn button<A: Clone>(
     act: A,
 ) -> Rect {
     let text = format!("  {label}  ");
-    let width = (text.chars().count() as u16).min(at.width);
+    // In cells, so a CJK label keeps its tail and a button chained off
+    // this rect's right edge never lands on it.
+    let width = (self::width(&text) as u16).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 1 };
     let hovered = s.hovers(rect);
     let style = match (primary, hovered) {

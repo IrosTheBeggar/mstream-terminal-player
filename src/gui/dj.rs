@@ -722,7 +722,7 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
 fn draw_status(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, forward: &str) {
     let armed = gui.app.dj_armed();
     let label = if armed { t!("gui.dj.stop").to_string() } else { format!("{} {forward}", t!("gui.dj.start")) };
-    let bw = label.chars().count() as u16 + 6;
+    let bw = crate::kit::tall_width(&label);
     let at = Rect { x: (x + w).saturating_sub(bw), y, width: bw, height: 3 };
     let rect = if armed {
         tall_danger(frame, &mut gui.ui, at, &label, Act::DjStartStop)

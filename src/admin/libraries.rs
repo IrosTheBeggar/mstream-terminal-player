@@ -922,12 +922,15 @@ fn draw_libraries(frame: &mut Frame, room: &mut Room, column: Rect) {
     // control sits to the RIGHT of the selection area, not inside it.
     let sel_width = column.width.saturating_sub(REMOVE_W);
     let header = Rect { x: column.x, y, width: sel_width, height: 1 };
+    // The name heading is padded to NAME_W in cells, where the rows start
+    // their paths: `{:<16}` pads characters, which set the folder heading
+    // two cells right of its column under a Japanese "名前" (the wizard's
+    // table measures it the same way).
+    let name_col = t!("folders.col_name").to_string();
+    let name_pad = " ".repeat(usize::from(NAME_W).saturating_sub(kit::width(&name_col)));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{:<width$}", t!("folders.col_name"), width = NAME_W as usize),
-                dim(),
-            ),
+            Span::styled(format!("{name_col}{name_pad}"), dim()),
             Span::styled(t!("folders.col_folder").to_string(), dim()),
         ])),
         header,
@@ -1075,7 +1078,10 @@ fn draw_browser(frame: &mut Frame, room: &mut Room, area: Rect, browse: &Browse)
     }
 
     let y = inner.bottom().saturating_sub(1);
-    let row = |x| Rect { x, y, width: inner.width, height: 1 };
+    // Each button gets the room left before the modal's right edge, so the
+    // kit cuts the last label inside the frame instead of drawing it (and
+    // its click rect) over the border when a CJK row outgrows the modal.
+    let row = |x: u16| Rect { x, y, width: inner.right().saturating_sub(x), height: 1 };
     let up = kit::button(frame, &mut room.ui, row(inner.x), &t!("browse.up"), false, Act::BrowseUp);
     let open = kit::button(
         frame,
@@ -1250,7 +1256,7 @@ fn draw_name(frame: &mut Frame, room: &mut Room, area: Rect, draft: &NameDraft) 
     }
 
     let label = t!("admin.name_add").to_string();
-    let x = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(
         frame,
         &mut room.ui,
@@ -1292,8 +1298,8 @@ fn draw_remove(frame: &mut Frame, room: &mut Room, area: Rect, i: usize) {
     let y = inner.bottom().saturating_sub(1);
     let keep = t!("admin.remove_keep").to_string();
     let remove = t!("admin.remove_confirm").to_string();
-    let remove_w = remove.chars().count() as u16 + 4;
-    let keep_w = keep.chars().count() as u16 + 4;
+    let remove_w = kit::width(&remove) as u16 + 4;
+    let keep_w = kit::width(&keep) as u16 + 4;
     let keep_x = inner.right().saturating_sub(remove_w + 2 + keep_w);
     let keep_rect = kit::button(
         frame,

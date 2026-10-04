@@ -53,6 +53,18 @@ pub struct VizProbeArgs {
 
 pub fn run(args: VizProbeArgs) -> i32 {
     println!("viz-probe: the visualizer presets, on this machine's GPU\n");
+    // A driver that crashes while the device is made ends the probe with its
+    // code, which is the answer, rather than hanging it behind WER's dialog
+    // (gpu_pick.rs).
+    #[cfg(windows)]
+    crate::gpu_pick::quiet_native_crashes();
+    // A probe run to find out why the GPU will not serve says first the one
+    // cause known to be the path's, in its own report, so a run that the
+    // driver ends has the reason above its last line.
+    #[cfg(windows)]
+    if let Some(line) = crate::gpu_pick::this_long_path_warning("viz-probe") {
+        println!("{line}\n");
+    }
     // The instance the visualizer's window would draw with (`gpu_pick`: on
     // Windows DX12 or Vulkan alone, never GL, unless `WGPU_BACKEND` says),
     // so the probe asks the driver the window would get. The last failure

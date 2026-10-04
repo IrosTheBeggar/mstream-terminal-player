@@ -2,7 +2,7 @@
 //!
 //! The files live in `assets/visualizer/`, vendored from the mobile app and
 //! left as the mobile app has them (the README there says what came from
-//! where, and the one line that differs). They are compiled in, because the
+//! where, and the two lines that differ). They are compiled in, because the
 //! binary is installed as one file.
 
 /// One preset compiled into the binary.

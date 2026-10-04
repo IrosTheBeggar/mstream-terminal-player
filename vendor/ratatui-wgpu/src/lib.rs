@@ -172,5 +172,8 @@ pub use backend::RenderSurface;
 pub use backend::RenderTexture;
 pub use backend::Viewport;
 pub use colors::ColorTable;
+pub use fonts::emoji_presentation;
+pub use fonts::Composition;
 pub use fonts::Font;
 pub use fonts::Fonts;
+pub use fonts::Placed;

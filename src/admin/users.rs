@@ -1028,13 +1028,16 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect, hosted: bool) {
     let x_col = sel_end + 1;
     let user_x = column.x;
     let admin_x = user_x + USER_W + 2;
-    let admin_w = (Flag::Admin.header().chars().count() as u16).max(3);
+    // The flag columns are as wide as their headers in cells, as drawn: a
+    // Japanese header counted by characters got half its width, so it was
+    // cut and the glyphs centred under it sat off its middle.
+    let admin_w = (kit::width(&Flag::Admin.header()) as u16).max(3);
     let libs_x = admin_x + admin_w + 2;
     // The four flag columns hang off the selection's right edge.
     let mut flag_cols: Vec<(Flag, u16, u16)> = Vec::new(); // (flag, x, w)
     let mut right = sel_end;
     for flag in [Flag::Modify, Flag::Audio, Flag::Upload, Flag::Mkdir] {
-        let w = (flag.header().chars().count() as u16).max(3);
+        let w = (kit::width(&flag.header()) as u16).max(3);
         right = right.saturating_sub(w);
         flag_cols.push((flag, right, w));
         right = right.saturating_sub(2);
@@ -1248,17 +1251,28 @@ fn draw_add(frame: &mut Frame, room: &mut Room, area: Rect, f: &AddForm) {
         if f.libraries.is_empty() {
             frame.render_widget(Paragraph::new(Span::styled(t!("usr.form_no_libraries").to_string(), dim())), line(y));
         } else {
-            // One row of ticks, each its own click target, 3 cells apart.
+            // One row of ticks, each its own click target, 3 cells apart,
+            // and each as wide as it draws: the label in cells and the
+            // tick's four. Counted by characters, a library named in
+            // Japanese got a rect short by half its name, so the name was
+            // cut there and its click covered only what was left, and the
+            // row took a tick it had no room for instead of leaving it off.
+            // The first tick is drawn however wide, clamped to the row so
+            // its label is cut inside it, as kit::button cuts its own: in
+            // cells a name of forty Japanese characters (well under
+            // NAME_MAX) outgrows the 80-cell row by itself, and breaking on
+            // it left the line blank, every later library hidden with it,
+            // while Tab still walked onto ticks nobody could see.
             let mut lx = x;
             for (i, (name, on)) in f.libraries.iter().enumerate() {
                 let label = printable(name, NAME_MAX);
-                let cw = label.chars().count() as u16 + 4;
-                if lx + cw > x + w {
+                let cw = kit::width(&label) as u16 + 4;
+                if lx + cw > x + w && lx > x {
                     break;
                 }
-                let rect = Rect { x: lx, y, width: cw, height: 1 };
+                let rect = Rect { x: lx, y, width: cw.min((x + w).saturating_sub(lx)), height: 1 };
                 check_row(frame, room, rect, *on, focused == AField::Lib(i), &label, "", Act::FormToggle(index_of(AField::Lib(i))));
-                lx += cw + 3;
+                lx += rect.width + 3;
             }
         }
     }
@@ -1292,7 +1306,7 @@ fn draw_add(frame: &mut Frame, room: &mut Room, area: Rect, f: &AddForm) {
     }
     let by = inner.bottom().saturating_sub(1);
     let label = t!("usr.form_add").to_string();
-    let bw = label.chars().count() as u16 + 4;
+    let bw = kit::width(&label) as u16 + 4;
     kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(bw + 1), y: by, width: bw, height: 1 }, &label, true, Act::FormSubmit);
 }
 
@@ -1343,7 +1357,7 @@ fn draw_libraries(frame: &mut Frame, room: &mut Room, area: Rect, d: &LibsDraft)
     }
     let by = inner.bottom().saturating_sub(1);
     let label = t!("usr.libs_save").to_string();
-    let bw = label.chars().count() as u16 + 4;
+    let bw = kit::width(&label) as u16 + 4;
     kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(bw + 1), y: by, width: bw, height: 1 }, &label, true, Act::LibsSubmit);
 }
 
@@ -1369,7 +1383,7 @@ fn draw_password(frame: &mut Frame, room: &mut Room, area: Rect, d: &PwDraft) {
         frame.render_widget(Paragraph::new(Span::styled(format!("{} {err}", g("!", "!")), Style::default().fg(th().gold))), line(by));
     }
     let label = t!("usr.pw_set").to_string();
-    let bw = label.chars().count() as u16 + 4;
+    let bw = kit::width(&label) as u16 + 4;
     // Dim until the two agree — the button waits, like the kit's disabled.
     kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(bw + 1), y: by, width: bw, height: 1 }, &label, d.ready(), Act::PwSubmit);
 }
@@ -1395,8 +1409,8 @@ fn draw_remove(frame: &mut Frame, room: &mut Room, area: Rect, name: &str) {
     let y = inner.bottom().saturating_sub(1);
     let keep = t!("usr.remove_keep").to_string();
     let remove = t!("usr.remove_confirm").to_string();
-    let remove_w = remove.chars().count() as u16 + 4;
-    let keep_w = keep.chars().count() as u16 + 4;
+    let remove_w = kit::width(&remove) as u16 + 4;
+    let keep_w = kit::width(&keep) as u16 + 4;
     let keep_x = inner.right().saturating_sub(remove_w + 2 + keep_w);
     let keep_rect = kit::button(frame, &mut room.ui, Rect { x: keep_x, y, width: inner.width, height: 1 }, &keep, true, Act::RemoveCancel);
     kit::button(frame, &mut room.ui, Rect { x: keep_rect.right() + 2, y, width: inner.width, height: 1 }, &remove, false, Act::RemoveConfirm);
@@ -1484,6 +1498,91 @@ mod tests {
 
     fn row(frame: &str, needle: &str) -> String {
         frame.lines().find(|l| l.contains(needle)).map(|l| l.to_string()).unwrap_or_else(|| panic!("no row with {needle:?}:\n{frame}"))
+    }
+
+    /// The add form's library ticks measure their names in cells: four
+    /// libraries named in Japanese, ten characters (twenty cells) each, at
+    /// 100×30. Three ticks of 24 cells and their gaps fill 78 of the row's
+    /// 80, so the fourth is left off; each tick's click rect is its drawn
+    /// width and shows its whole name. Counted by characters the row took
+    /// all four, each cut at half its name.
+    #[test]
+    fn the_add_forms_library_ticks_measure_japanese_names_in_cells() {
+        let _en = english();
+        let names = ["日本の音楽アーカイブ", "クラシック全集の録音", "ジャズのレコード盤集", "映画音楽のサウンド集"];
+        let mut r = room();
+        r.queued = None;
+        r.apply(Done::Loaded(Ok((BTreeMap::new(), names.iter().map(|s| s.to_string()).collect()))));
+        press(&mut r, KeyCode::Char('a'));
+        let Modal::Add(f) = &r.modal else { panic!("the add form") };
+        let fields = f.fields();
+        let index_of = |field: AField| fields.iter().position(|x| *x == field).expect("a field");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut r)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let tick = |i: usize| {
+            let act = Act::FormToggle(index_of(AField::Lib(i)));
+            r.ui.clicks.iter().find(|(_, a)| *a == act).map(|(rect, _)| *rect)
+        };
+        let ticks: Vec<Rect> = (0..3).map(|i| tick(i).unwrap_or_else(|| panic!("tick {i}"))).collect();
+        assert_eq!(tick(3), None, "the fourth has no room, so it is left off");
+        for (i, rect) in ticks.iter().enumerate() {
+            assert_eq!(rect.width, 24, "tick {i}: its name's 20 cells and the tick's four");
+            if i > 0 {
+                assert_eq!(rect.x, ticks[i - 1].right() + 3, "tick {i}: three cells past the last");
+            }
+            let mut text = String::new();
+            let mut x = rect.x;
+            while x < rect.right() {
+                let symbol = buffer[(x, rect.y)].symbol();
+                text.push_str(symbol);
+                x += (kit::width(symbol) as u16).max(1);
+            }
+            assert_eq!(text, format!("[✓] {}", names[i]), "tick {i}: its whole name");
+        }
+    }
+
+    /// A first library whose name alone outgrows the row is still drawn:
+    /// forty Japanese characters are 80 cells, so its tick wants 84 of the
+    /// row's 80 at 100×30. The tick starts the row, is clamped to its end
+    /// (the border cell past it survives), shows the start of its name cut
+    /// cleanly, and its click rect is the drawn rect; the second library,
+    /// with no room left, is left off. Breaking on the first tick, as the
+    /// row once did, left the whole line blank.
+    #[test]
+    fn the_add_forms_first_library_tick_is_drawn_clamped_when_its_name_outgrows_the_row() {
+        let _en = english();
+        let long = "日本の音楽アーカイブ".repeat(4);
+        assert_eq!(kit::width(&long), 80);
+        let mut r = room();
+        r.queued = None;
+        r.apply(Done::Loaded(Ok((BTreeMap::new(), vec![long.clone(), "music".to_string()]))));
+        press(&mut r, KeyCode::Char('a'));
+        let Modal::Add(f) = &r.modal else { panic!("the add form") };
+        let fields = f.fields();
+        let index_of = |field: AField| fields.iter().position(|x| *x == field).expect("a field");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut r)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let tick = |i: usize| {
+            let act = Act::FormToggle(index_of(AField::Lib(i)));
+            r.ui.clicks.iter().find(|(_, a)| *a == act).map(|(rect, _)| *rect)
+        };
+        let first = tick(0).expect("the first tick is drawn");
+        assert_eq!(tick(1), None, "no room is left for the second");
+        // The modal is 84 wide at x 8, so the row runs from 10 to 90 and the
+        // border sits at 91.
+        assert_eq!((first.x, first.right()), (10, 90), "clamped to the row: {first:?}");
+        assert_eq!(buffer[(first.right() + 1, first.y)].symbol(), "│", "the border survives");
+        let mut text = String::new();
+        let mut x = first.x;
+        while x < first.right() {
+            let symbol = buffer[(x, first.y)].symbol();
+            text.push_str(symbol);
+            x += (kit::width(symbol) as u16).max(1);
+        }
+        let whole = format!("[✓] {long}");
+        assert!(text.len() > "[✓] ".len() && whole.starts_with(text.trim_end()), "cut, not garbled: {text:?}");
     }
 
     #[test]

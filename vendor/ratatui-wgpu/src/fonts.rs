@@ -4,7 +4,10 @@ use std::hash::RandomState;
 
 use ratatui_core::buffer::Cell;
 use ratatui_core::style::Modifier;
+use rustybuzz::ttf_parser::RasterImageFormat;
 use rustybuzz::Face;
+use unicode_properties::EmojiStatus;
+use unicode_properties::UnicodeEmoji;
 
 /// A Font which can be used for rendering.
 #[derive(Clone)]
@@ -15,6 +18,10 @@ pub struct Font<'a> {
     /// (a symbol or emoji face) only has `.notdef`'s advance to offer, which
     /// says nothing about a cell, so it does not narrow the grid.
     sets_width: bool,
+    /// The face has colour glyphs the backend draws: COLR layers, or sbix or
+    /// CBDT bitmaps. A text face has none, and is never asked which of its
+    /// glyphs are in colour.
+    colour: bool,
     id: u64,
 }
 
@@ -50,10 +57,13 @@ impl<'a> Font<'a> {
             let advance = font
                 .glyph_hor_advance(m.unwrap_or_default())
                 .unwrap_or_default() as f32;
+            let tables = font.tables();
+            let colour = tables.colr.is_some() || tables.sbix.is_some() || tables.cbdt.is_some();
             Self {
                 font,
                 advance,
                 sets_width: m.is_some(),
+                colour,
                 id: hasher.finish(),
             }
         })
@@ -93,6 +103,142 @@ impl Font<'_> {
         )
     }
 
+    /// Whether this face composes `text` from several pictures that its positioning places,
+    /// rather than joining it into one: the renderer then draws every picture of it into the
+    /// cell's box (VENDORED.md, change 22). Windows 10's Segoe UI Emoji composes a family so,
+    /// and [`Font::joins`] says no of it. Public so the player's tests know which to expect.
+    pub fn composes(
+        &self,
+        text: &str,
+    ) -> bool {
+        if self.font.tables().colr.is_none() {
+            return false;
+        }
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let shaped = rustybuzz::shape(&self.font, &[], buffer);
+        let mut cell = Cell::EMPTY;
+        cell.set_symbol(text);
+        let rowmap = vec![0; text.len()];
+        let runs = crate::backend::wgpu_backend::composed_runs(
+            &self.font,
+            shaped.glyph_infos(),
+            shaped.glyph_positions(),
+            &rowmap,
+            std::slice::from_ref(&cell),
+        );
+        runs.into_iter().next().flatten().is_some()
+    }
+
+    /// How this face shapes `text` and where each glyph's ink lies, so a test can say what a
+    /// composed cell must look like on whatever face it meets, and print what it met. Every
+    /// shaped glyph is listed at its place, the pen plus its offset as `composed_runs` puts it,
+    /// with the ink box of a COLR picture taken from the outlines painting it fills
+    /// (`InkBounds`): a COLRv1 picture's own `glyf` entry may be empty, so its bounding box
+    /// says nothing, while the layers it paints are outlines with boxes. Public so the player's
+    /// tests can ask it (VENDORED.md, change 22).
+    pub fn composition(
+        &self,
+        text: &str,
+    ) -> Composition {
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let shaped = rustybuzz::shape(&self.font, &[], buffer);
+        let mut pen = 0;
+        let mut glyphs = vec![];
+        for (info, position) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
+            let id = rustybuzz::ttf_parser::GlyphId(info.glyph_id as u16);
+            let (x, y) = (pen + position.x_offset, position.y_offset);
+            let colour = self.font.is_color_glyph(id);
+            let mut bounds = InkBounds::new(&self.font);
+            if colour {
+                let white = rustybuzz::ttf_parser::RgbaColor::new(255, 255, 255, 255);
+                self.font.paint_color_glyph(id, 0, white, &mut bounds);
+            }
+            let ink = bounds.ink().map(|[x0, y0, x1, y1]| {
+                [x0 + x as f32, y0 + y as f32, x1 + x as f32, y1 + y as f32]
+            });
+            glyphs.push(Placed {
+                glyph: id.0,
+                x_advance: position.x_advance,
+                x_offset: position.x_offset,
+                y_offset: position.y_offset,
+                x,
+                colour,
+                v1: bounds.v1,
+                ink,
+            });
+            pen += position.x_advance;
+        }
+        Composition {
+            glyphs,
+            advance: pen,
+            units_per_em: self.font.units_per_em(),
+            composes: self.composes(text),
+        }
+    }
+
+    /// Whether this face's glyph for `ch` is one the backend draws in colour: COLR layers, or a
+    /// colour bitmap (sbix or CBDT, a PNG or premultiplied BGRA). A face's monochrome bitmaps
+    /// (EBDT, an old CJK face's hinted strikes) and a text face's outlines are not. Asked only
+    /// of a cluster with emoji presentation, by [`Fonts::select_font`].
+    fn colour_glyph(
+        &self,
+        ch: char,
+    ) -> bool {
+        if !self.colour {
+            return false;
+        }
+        let Some(glyph) = self.font.glyph_index(ch) else {
+            return false;
+        };
+        self.colour_glyph_id(glyph)
+    }
+
+    /// Whether this face draws all of `cluster` as one picture in colour: it shapes to a single
+    /// advancing glyph ([`Font::joins`]) that is in colour as [`Font::colour_glyph`] judges a
+    /// glyph. For a keycap (`1️⃣`, `#️⃣`), whose base, a digit or `#`, is a monochrome glyph
+    /// even in the emoji face, the picture being the face's ligature for the whole sequence
+    /// (VENDORED.md, change 24). Public so the player's tests know which to expect.
+    pub fn colour_cluster(
+        &self,
+        cluster: &str,
+    ) -> bool {
+        if !self.colour {
+            return false;
+        }
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(cluster);
+        buffer.guess_segment_properties();
+        let shaped = rustybuzz::shape(&self.font, &[], buffer);
+        let mut advancing = shaped
+            .glyph_infos()
+            .iter()
+            .zip(shaped.glyph_positions())
+            .filter(|(_, position)| position.x_advance != 0);
+        match (advancing.next(), advancing.next()) {
+            (Some((info, _)), None) if info.glyph_id != 0 => u16::try_from(info.glyph_id)
+                .is_ok_and(|id| self.colour_glyph_id(rustybuzz::ttf_parser::GlyphId(id))),
+            _ => false,
+        }
+    }
+
+    /// Whether `glyph` is one the backend draws in colour (see [`Font::colour_glyph`]).
+    fn colour_glyph_id(
+        &self,
+        glyph: rustybuzz::ttf_parser::GlyphId,
+    ) -> bool {
+        self.font.is_color_glyph(glyph)
+            || self.font.glyph_raster_image(glyph, u16::MAX).is_some_and(|raster| {
+                matches!(
+                    raster.format,
+                    RasterImageFormat::PNG | RasterImageFormat::BitmapPremulBgra32
+                )
+            })
+    }
+
     pub(crate) fn char_width(
         &self,
         height_px: u32,
@@ -112,6 +258,173 @@ impl Font<'_> {
             self.char_width(height_px)
         } else {
             u32::MAX
+        }
+    }
+}
+
+/// A string as one face shapes it, from [`Font::composition`]: its glyphs in order and the
+/// run's whole advance, in the face's units.
+#[derive(Clone, Debug)]
+pub struct Composition {
+    pub glyphs: Vec<Placed>,
+    /// The sum of the glyphs' advances: what change 22 fits into the cell's box.
+    pub advance: i32,
+    pub units_per_em: i32,
+    /// [`Font::composes`] of the same string.
+    pub composes: bool,
+}
+
+impl Composition {
+    /// The ink of every COLR picture at its place, together: what a composed cell draws, as
+    /// `[x_min, y_min, x_max, y_max]` in font units, y up. `None` if none has ink.
+    pub fn ink(&self) -> Option<[f32; 4]> {
+        self.glyphs
+            .iter()
+            .filter(|glyph| glyph.colour)
+            .filter_map(|glyph| glyph.ink)
+            .reduce(|[a0, b0, a1, b1], [x0, y0, x1, y1]| {
+                [a0.min(x0), b0.min(y0), a1.max(x1), b1.max(y1)]
+            })
+    }
+
+    /// The first COLR picture's ink at its place: what was drawn of a composition before
+    /// change 22, its first picture alone.
+    pub fn first_ink(&self) -> Option<[f32; 4]> {
+        self.glyphs.iter().find(|glyph| glyph.colour).and_then(|glyph| glyph.ink)
+    }
+}
+
+/// One shaped glyph of a [`Composition`].
+#[derive(Clone, Debug)]
+pub struct Placed {
+    pub glyph: u16,
+    pub x_advance: i32,
+    pub x_offset: i32,
+    pub y_offset: i32,
+    /// Where it is painted: the pen before it plus its `x_offset`.
+    pub x: i32,
+    /// A COLR picture (`Face::is_color_glyph`), as `composed_runs` counts one.
+    pub colour: bool,
+    /// Painted through a COLRv1 paint graph (a clip, a layer or a transform was pushed), not
+    /// COLRv0's flat layers.
+    pub v1: bool,
+    /// The picture's ink at its place, `[x_min, y_min, x_max, y_max]` in font units, y up;
+    /// `None` for a glyph that is not a picture or paints nothing.
+    pub ink: Option<[f32; 4]>,
+}
+
+/// A COLR painter that paints nothing and keeps the box of what would be: the bounding box of
+/// every outline a layer fills, through the transforms pushed around it, cut to the glyph's
+/// clip box when the face gives one. A box, not the ink itself: an outline's box can hold
+/// space its fill leaves clear, so it is an upper bound, tight for the faces' people.
+struct InkBounds<'f, 'a> {
+    face: &'f rustybuzz::Face<'a>,
+    /// The transform in force and the ones it replaced, innermost last.
+    transform: rustybuzz::ttf_parser::Transform,
+    stack: Vec<rustybuzz::ttf_parser::Transform>,
+    ink: Option<[f32; 4]>,
+    /// The base glyph's clip box: the first pushed before any outline.
+    clip: Option<[f32; 4]>,
+    v1: bool,
+}
+
+impl<'f, 'a> InkBounds<'f, 'a> {
+    fn new(face: &'f rustybuzz::Face<'a>) -> Self {
+        Self {
+            face,
+            transform: Default::default(),
+            stack: vec![],
+            ink: None,
+            clip: None,
+            v1: false,
+        }
+    }
+
+    /// `[x0, y0, x1, y1]` through the transform in force: the box of its four corners.
+    fn transformed(
+        &self,
+        [x0, y0, x1, y1]: [f32; 4],
+    ) -> [f32; 4] {
+        let t = self.transform;
+        let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+            .map(|(x, y)| (t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f));
+        corners.iter().fold(
+            [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+            |[a0, b0, a1, b1], &(x, y)| [a0.min(x), b0.min(y), a1.max(x), b1.max(y)],
+        )
+    }
+
+    fn ink(&self) -> Option<[f32; 4]> {
+        let [x0, y0, x1, y1] = self.ink?;
+        let Some([c0, d0, c1, d1]) = self.clip else {
+            return Some([x0, y0, x1, y1]);
+        };
+        let cut = [x0.max(c0), y0.max(d0), x1.min(c1), y1.min(d1)];
+        (cut[0] < cut[2] && cut[1] < cut[3]).then_some(cut)
+    }
+}
+
+impl<'a> rustybuzz::ttf_parser::colr::Painter<'a> for InkBounds<'_, 'a> {
+    fn outline_glyph(
+        &mut self,
+        glyph_id: rustybuzz::ttf_parser::GlyphId,
+    ) {
+        let Some(rect) = self.face.glyph_bounding_box(glyph_id) else {
+            return;
+        };
+        let rect = [rect.x_min, rect.y_min, rect.x_max, rect.y_max].map(f32::from);
+        let [x0, y0, x1, y1] = self.transformed(rect);
+        self.ink = Some(match self.ink {
+            None => [x0, y0, x1, y1],
+            Some([a0, b0, a1, b1]) => [a0.min(x0), b0.min(y0), a1.max(x1), b1.max(y1)],
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: rustybuzz::ttf_parser::colr::Paint<'a>,
+    ) {
+    }
+
+    fn push_clip(&mut self) {
+        self.v1 = true;
+    }
+
+    fn push_clip_box(
+        &mut self,
+        clipbox: rustybuzz::ttf_parser::colr::ClipBox,
+    ) {
+        self.v1 = true;
+        if self.clip.is_none() && self.ink.is_none() {
+            let rect = [clipbox.x_min, clipbox.y_min, clipbox.x_max, clipbox.y_max];
+            self.clip = Some(self.transformed(rect));
+        }
+    }
+
+    fn pop_clip(&mut self) {}
+
+    fn push_layer(
+        &mut self,
+        _: rustybuzz::ttf_parser::colr::CompositeMode,
+    ) {
+        self.v1 = true;
+    }
+
+    fn pop_layer(&mut self) {}
+
+    fn push_transform(
+        &mut self,
+        transform: rustybuzz::ttf_parser::Transform,
+    ) {
+        self.v1 = true;
+        self.stack.push(self.transform);
+        // The outer transform applies last, as the renderer's `Painter` composes them.
+        self.transform = rustybuzz::ttf_parser::Transform::combine(self.transform, transform);
+    }
+
+    fn pop_transform(&mut self) {
+        if let Some(outer) = self.stack.pop() {
+            self.transform = outer;
         }
     }
 }
@@ -340,6 +653,16 @@ impl<'a> Fonts<'a> {
         }
     }
 
+    /// The pixels per font unit `font` is drawn at in these fonts' cells (`face_scale`), before
+    /// a glyph wider than its box is fitted to it. Public so the player's tests can say what
+    /// size a drawing should be, not only what shape (VENDORED.md, change 22).
+    pub fn scale_of(
+        &self,
+        font: &Font,
+    ) -> f32 {
+        self.face_scale(font.font()).scale
+    }
+
     pub(crate) fn count(&self) -> usize {
         1 + self.bold.len() + self.italic.len() + self.bold_italic.len() + self.regular.len()
     }
@@ -403,7 +726,27 @@ impl<'a> Fonts<'a> {
         // has (a stray run of tags, the tail of a flag whose 🏴 a text field clipped) was
         // given to the emoji face, which has no glyph for the base and drew `.notdef`, a box,
         // over it. With the base's face, the shaper hides the default-ignorable rest.
-        let mut max = (false, 0);
+        //
+        // Between those two, a cluster with emoji presentation (🎵, ❤️, a ZWJ family, a flag)
+        // prefers a face whose glyph for its base is in colour. The first face with every
+        // character used to win outright, and a symbol face that comes before the emoji face
+        // so that ♥ and ✔ keep their text form has monochrome outlines for emoji too: Segoe
+        // UI Symbol drew 🎵 as an outline and 👨‍👩‍👧 as one grey silhouette on Windows, where
+        // a terminal draws both from Segoe UI Emoji. A cluster with text presentation (♥, ✔,
+        // ★ without VS16, a digit) is chosen as before, and with no colour face for an emoji
+        // the first face with the most of it still draws it.
+        //
+        // A keycap (a digit, `#` or `*`, VS16, then U+20E3) is the one emoji whose base is
+        // text in every face: the emoji face's `1` is a monochrome digit like any other, and
+        // its picture is the ligature it shapes the whole sequence to. Judged by its base it
+        // was never in colour, so the emoji face drew it only by having the most of it, and a
+        // text face ahead of it with all three characters (one that maps U+FE0F) drew it as a
+        // plain digit beside an enclosing mark. For a keycap the face's shaping of the whole
+        // cluster is asked as well ([`Font::colour_cluster`]): a face that joins it into one
+        // colour picture is in colour. A digit or `#` alone is text and never asks.
+        let emoji = emoji_presentation(cluster);
+        let keycap = emoji && is_keycap(cluster);
+        let mut max = (false, false, 0);
         let mut font = None;
         let base = cluster.chars().next();
         for (candidate, fake_bold, fake_italic) in fonts.into_iter().chain(std::iter::once((
@@ -420,12 +763,18 @@ impl<'a> Fonts<'a> {
                         (count, idx)
                     });
             let has_base = base.is_some_and(|ch| candidate.font().glyph_index(ch).is_some());
-            if (has_base, count) > max {
-                max = (has_base, count);
+            let colour = emoji
+                && has_base
+                && (base.is_some_and(|ch| candidate.colour_glyph(ch))
+                    || (keycap && candidate.colour_cluster(cluster)));
+            if (has_base, colour, count) > max {
+                max = (has_base, colour, count);
                 font = Some((candidate, fake_bold, fake_italic));
             }
 
-            if count == last_idx + 1 {
+            // A face with all of the cluster ends the search, unless the cluster is an emoji
+            // and the face would draw it as an outline: a colour face may still come.
+            if count == last_idx + 1 && (!emoji || colour) {
                 break;
             }
         }
@@ -451,4 +800,62 @@ impl<'a> Fonts<'a> {
             .min()
             .unwrap_or(u32::MAX)
     }
+}
+
+/// Whether a cluster (one cell's grapheme) asks to be drawn as an emoji, a picture, rather than
+/// as text, by Unicode's rules (UTS #51): a character whose default is emoji presentation (🎵,
+/// ⌚, a regional indicator) unless VS15 (U+FE0E) follows it; any character VS16 (U+FE0F)
+/// follows; and an emoji followed by what only an emoji sequence has, a skin tone, a keycap's
+/// U+20E3, tags (a subdivision flag) or a ZWJ and another emoji. A character whose default is
+/// text (♥, ✔, ★, a digit, `#`) with none of those after it is text. Public so the player's
+/// tests can hold it to known code points.
+pub fn emoji_presentation(cluster: &str) -> bool {
+    let mut chars = cluster.chars();
+    let Some(base) = chars.next() else {
+        return false;
+    };
+    match chars.next() {
+        Some('\u{FE0E}') => false,
+        Some('\u{FE0F}') => true,
+        None => default_emoji(base),
+        Some(_) if default_emoji(base) => true,
+        Some(_) if !base.is_emoji_char() => false,
+        Some(_) => {
+            // A skin tone, a keycap, a tag, or an emoji after a ZWJ.
+            let mut after_zwj = false;
+            cluster.chars().skip(1).any(|ch| {
+                let joined = std::mem::replace(&mut after_zwj, ch == '\u{200D}');
+                (joined && ch.is_emoji_char())
+                    || matches!(
+                        ch,
+                        '\u{1F3FB}'..='\u{1F3FF}' | '\u{20E3}' | '\u{E0020}'..='\u{E007F}'
+                    )
+            })
+        }
+    }
+}
+
+/// Whether a cluster is a keycap: a digit, `#` or `*`, VS16 (or, unqualified, nothing), then
+/// U+20E3, and nothing more (UTS #51's `emoji_keycap_sequence`). Its base is text in every
+/// face, so [`Fonts::select_font`] judges a face's colour by the whole sequence instead.
+fn is_keycap(cluster: &str) -> bool {
+    let mut chars = cluster.chars();
+    let base = chars.next().is_some_and(|ch| ch.is_ascii_digit() || ch == '#' || ch == '*');
+    let rest: Vec<char> = chars.collect();
+    base && matches!(rest.as_slice(), ['\u{FE0F}', '\u{20E3}'] | ['\u{20E3}'])
+}
+
+/// `Emoji_Presentation=Yes`: the character is a picture unless asked otherwise. It is the
+/// property, not `Emoji`, which every character with an emoji form has: ♥, ✔ and `#` are
+/// emoji characters whose default is text. No ASCII character has it, so most cells are
+/// answered without the table.
+fn default_emoji(ch: char) -> bool {
+    !ch.is_ascii()
+        && matches!(
+            ch.emoji_status(),
+            EmojiStatus::EmojiPresentation
+                | EmojiStatus::EmojiPresentationAndModifierBase
+                | EmojiStatus::EmojiPresentationAndEmojiComponent
+                | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+        )
 }

@@ -1700,7 +1700,11 @@ fn draw_on(frame: &mut Frame, room: &mut Room, column: Rect, p: &FederationParam
             Tab::Peers => t!("fed.tab_peers").to_string(),
         };
         let label = format!(" {name} ");
-        let rect = Rect { x, y: tabs_y, width: label.chars().count() as u16, height: 1 };
+        // In cells, as the kit draws the label, and clamped to the column:
+        // counted by characters a Japanese tab got a rect half its width,
+        // so the label was cut there, its click covered only what was left,
+        // and the next tab started inside it.
+        let rect = Rect { x, y: tabs_y, width: (kit::width(&label) as u16).min(column.right().saturating_sub(x)), height: 1 };
         let hover = room.ui.pointer.is_some_and(|pt| rect.contains(pt));
         let style = if tab == room.tab {
             Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD)
@@ -2285,7 +2289,7 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
         FormKind::Limits => t!("fed.limits_submit"),
     }
     .to_string();
-    let bx = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let bx = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x: bx, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &label, f.can_submit(), Act::FormSubmit);
 }
 
@@ -2324,11 +2328,11 @@ fn draw_minted(frame: &mut Frame, room: &mut Room, area: Rect, name: &str, ticke
     );
     let y = inner.bottom().saturating_sub(1);
     let done = t!("fed.minted_done").to_string();
-    let done_w = done.chars().count() as u16 + 4;
+    let done_w = kit::width(&done) as u16 + 4;
     let done_rect = kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(done_w), y, width: done_w, height: 1 }, &done, true, Act::MintedDone);
     if ticket.is_some() {
         let copy = t!("fed.minted_copy").to_string();
-        let copy_w = copy.chars().count() as u16 + 4;
+        let copy_w = kit::width(&copy) as u16 + 4;
         kit::button(frame, &mut room.ui, Rect { x: done_rect.x.saturating_sub(copy_w + 2), y, width: copy_w, height: 1 }, &copy, false, Act::MintedCopy);
     }
 }
@@ -2345,7 +2349,7 @@ fn draw_peer_name(frame: &mut Frame, room: &mut Room, area: Rect, name: &Input, 
     frame.render_widget(Paragraph::new(Span::styled(preview_words(preview), Style::default().fg(th().ok))), line(inner.y + 2));
     modal_field(frame, room, Rect { x: inner.x + 1, y: inner.y + 4, width: 40.min(inner.width.saturating_sub(2)), height: 4 }, &t!("fed.peer_name_label"), name, true, Act::PeerNameAdd);
     let label = t!("fed.peer_name_add").to_string();
-    let x = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &label, true, Act::PeerNameAdd);
 }
 
@@ -2361,8 +2365,8 @@ fn draw_gate(frame: &mut Frame, room: &mut Room, area: Rect, title: String, body
         Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(2) },
     );
     let y = inner.bottom().saturating_sub(1);
-    let go_w = go.0.chars().count() as u16 + 4;
-    let safe_w = safe.0.chars().count() as u16 + 4;
+    let go_w = kit::width(&go.0) as u16 + 4;
+    let safe_w = kit::width(&safe.0) as u16 + 4;
     let safe_x = inner.right().saturating_sub(go_w + 2 + safe_w);
     let safe_rect = kit::button(frame, &mut room.ui, Rect { x: safe_x, y, width: inner.width, height: 1 }, &safe.0, true, safe.1);
     kit::button(frame, &mut room.ui, Rect { x: safe_rect.right() + 2, y, width: inner.width, height: 1 }, &go.0, false, go.1);
@@ -2596,6 +2600,36 @@ mod tests {
         assert!(!room.starting);
         assert!(draw(&mut room).contains("Turn federation on"));
         assert!(matches!(press(&mut room, KeyCode::Esc), Some(Outcome::Quit)));
+    }
+
+    /// Every tab label draws whole in Japanese at 100×30, its click rect
+    /// as wide as it in cells, and each tab starts past the one before.
+    /// Counted by characters ' 概要 ' got a 4-cell rect for 6 cells of text,
+    /// so it drew as ' 概 ', the next tab started two cells into it, and
+    /// each click covered only what was left. Drawn under the process-wide
+    /// locale (the room reads its labels through `t!`), held for the test.
+    #[test]
+    fn every_tab_label_draws_whole_in_japanese() {
+        let _ja = crate::setup::tests::in_locale("ja");
+        let mut room = on();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        let pending = room.pending_inbound();
+        assert!(pending > 0, "the Requests tab carries its count");
+        let tabs = [
+            (Tab::Requests, format!(" {} ", t!("fed.tab_requests_n", n = pending))),
+            (Tab::Tickets, format!(" {} ", t!("fed.tab_tickets"))),
+            (Tab::Peers, format!(" {} ", t!("fed.tab_peers"))),
+        ];
+        let buffer = terminal.backend().buffer().clone();
+        let mut end = 0;
+        for (tab, label) in tabs {
+            let rect = room.ui.clicks.iter().find(|(_, a)| *a == Act::Tab(tab)).map(|(r, _)| *r).unwrap_or_else(|| panic!("{label:?}"));
+            assert_eq!(crate::setup::tests::cells_text(&buffer, rect.y, rect.x, rect.right()), label, "drawn whole");
+            assert_eq!(usize::from(rect.width), kit::width(&label), "{label:?}: its click covers it");
+            assert!(rect.x >= end, "{label:?} starts past the tab before it");
+            end = rect.right();
+        }
     }
 
     #[test]

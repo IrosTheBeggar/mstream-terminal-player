@@ -38,7 +38,8 @@ mod serve;
 #[cfg(not(target_arch = "wasm32"))]
 mod shader;
 /// The wgpu instance and adapter every window and probe draws with: on
-/// Windows, DX12 or Vulkan alone, never GL.
+/// Windows, DX12 or Vulkan alone, never GL, and a driver crash that ends the
+/// process instead of hanging it behind WER's dialog.
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu_pick;
 /// The visualizer's window: a child process of the player (PLAN.md, Phase
