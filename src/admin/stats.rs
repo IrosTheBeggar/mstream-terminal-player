@@ -1809,8 +1809,8 @@ fn draw_forget(frame: &mut Frame, page: &mut Page, area: Rect, row: usize) {
     let y = inner.bottom().saturating_sub(1);
     let keep = t!("sta.forget_keep").to_string();
     let go = t!("sta.forget_go").to_string();
-    let go_w = go.chars().count() as u16 + 4;
-    let keep_w = keep.chars().count() as u16 + 4;
+    let go_w = kit::width(&go) as u16 + 4;
+    let keep_w = kit::width(&keep) as u16 + 4;
     let keep_x = inner.right().saturating_sub(go_w + 2 + keep_w);
     let keep_rect = kit::button(frame, &mut page.ui, Rect { x: keep_x, y, width: inner.width, height: 1 }, &keep, true, Act::ForgetCancel);
     kit::button(frame, &mut page.ui, Rect { x: keep_rect.right() + 2, y, width: inner.width, height: 1 }, &go, false, Act::ForgetConfirm);

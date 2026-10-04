@@ -2289,10 +2289,10 @@ fn draw_connect(frame: &mut Frame, room: &mut Room, column: Rect, c: &Connect) {
     let by = column.bottom().saturating_sub(1).max(y + 2);
     if by < column.bottom() + 1 {
         let connect = t!("tor.connect_button").to_string();
-        let connect_w = connect.chars().count() as u16 + 4;
+        let connect_w = kit::width(&connect) as u16 + 4;
         let connect_rect = kit::button(frame, &mut room.ui, Rect { x: column.right().saturating_sub(connect_w), y: by, width: connect_w, height: 1 }, &connect, true, Act::ConnectSubmit);
         let test = t!("tor.test_button").to_string();
-        let test_w = test.chars().count() as u16 + 4;
+        let test_w = kit::width(&test) as u16 + 4;
         kit::button(frame, &mut room.ui, Rect { x: connect_rect.x.saturating_sub(test_w + 2), y: by, width: test_w, height: 1 }, &test, false, Act::ConnectTest);
     }
     let _ = line;
@@ -2870,13 +2870,13 @@ fn draw_client(frame: &mut Frame, room: &mut Room, body: Rect) {
     let by = body.bottom().saturating_sub(1);
     if by > y + 1 {
         let switch = t!("tor.btn_switch").to_string();
-        let switch_w = switch.chars().count() as u16 + 4;
+        let switch_w = kit::width(&switch) as u16 + 4;
         let switch_rect = kit::button(frame, &mut room.ui, Rect { x: body.right().saturating_sub(switch_w), y: by, width: switch_w, height: 1 }, &switch, true, Act::ClientSwitch);
         let disc = t!("tor.btn_disconnect").to_string();
-        let disc_w = disc.chars().count() as u16 + 4;
+        let disc_w = kit::width(&disc) as u16 + 4;
         let disc_rect = kit::button(frame, &mut room.ui, Rect { x: switch_rect.x.saturating_sub(disc_w + 2), y: by, width: disc_w, height: 1 }, &disc, false, Act::Disconnect);
         let test = t!("tor.btn_test").to_string();
-        let test_w = test.chars().count() as u16 + 4;
+        let test_w = kit::width(&test) as u16 + 4;
         kit::button(frame, &mut room.ui, Rect { x: disc_rect.x.saturating_sub(test_w + 2), y: by, width: test_w, height: 1 }, &test, true, Act::ClientTest);
     }
     if room.note.is_none() && room.busy.is_none() {
@@ -2924,7 +2924,7 @@ fn draw_entry_modal(
     let by = inner.bottom().saturating_sub(1);
     let mut right = inner.right().saturating_sub(1);
     for (label, primary, act) in buttons.into_iter().rev() {
-        let bw = label.chars().count() as u16 + 4;
+        let bw = kit::width(&label) as u16 + 4;
         let rect = kit::button(frame, &mut room.ui, Rect { x: right.saturating_sub(bw), y: by, width: bw, height: 1 }, &label, primary, act);
         right = rect.x.saturating_sub(2);
     }
@@ -2941,8 +2941,8 @@ fn draw_gate(frame: &mut Frame, room: &mut Room, area: Rect, title: String, body
         Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(2) },
     );
     let y = inner.bottom().saturating_sub(1);
-    let go_w = go.0.chars().count() as u16 + 4;
-    let safe_w = safe.0.chars().count() as u16 + 4;
+    let go_w = kit::width(&go.0) as u16 + 4;
+    let safe_w = kit::width(&safe.0) as u16 + 4;
     let safe_x = inner.right().saturating_sub(go_w + 2 + safe_w);
     let safe_rect = kit::button(frame, &mut room.ui, Rect { x: safe_x, y, width: inner.width, height: 1 }, &safe.0, true, safe.1);
     kit::button(frame, &mut room.ui, Rect { x: safe_rect.right() + 2, y, width: inner.width, height: 1 }, &go.0, false, go.1);
@@ -3823,5 +3823,49 @@ mod tests {
         }
         type_text(&mut room, &"s".repeat(60));
         super::super::assert_caret_between(&draw(&mut room), &room.ui, "•••", "");
+    }
+
+    /// The gold gate places its two buttons by their width in cells, as the
+    /// kit draws them: with Japanese labels ("◂ 残す" is four characters and
+    /// six cells) a count of characters set the pair two cells short each,
+    /// and the danger button, chained off the safe one, ran over the
+    /// modal's right border and out past it, click rect and all. The pair
+    /// ends where the English one does, each label whole. The labels are
+    /// handed in, so no locale is switched under other tests.
+    #[test]
+    fn the_gate_keeps_a_cjk_pair_of_buttons_inside_its_modal() {
+        let _en = english();
+        let gate = |safe: &str, go: &str| {
+            let mut room = new_room();
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    let body = vec!["one".to_string(), "two".to_string()];
+                    let pair = ((safe.to_string(), Act::RemoveCancel), (go.to_string(), Act::RemoveConfirm));
+                    draw_gate(frame, &mut room, area, "Remove?".to_string(), body, pair.0, pair.1);
+                })
+                .unwrap();
+            let rect = |act: Act| room.ui.clicks.iter().find(|(_, a)| *a == act).map(|(r, _)| *r).expect("the button");
+            (terminal.backend().buffer().clone(), rect(Act::RemoveCancel), rect(Act::RemoveConfirm))
+        };
+        // A rect's text, a wide character's hidden cell left out.
+        let shown = |buf: &Buffer, rect: Rect| {
+            let (mut text, mut x) = (String::new(), rect.x);
+            while x < rect.right() {
+                text.push_str(buf[(x, rect.y)].symbol());
+                x += (kit::width(buf[(x, rect.y)].symbol()) as u16).max(1);
+            }
+            text
+        };
+        let (_, _, english_go) = gate("◂ keep", "remove");
+        for (safe, go) in [("◂ 残す", "削除"), ("◂ 残る", "切断"), ("◂ 保留", "移除")] {
+            let (buf, safe_rect, go_rect) = gate(safe, go);
+            assert_eq!(go_rect.right(), english_go.right(), "{go}: the pair ends at the modal's inner edge");
+            assert_eq!(go_rect.width as usize, kit::width(go) + 4, "{go}: its whole label");
+            assert_eq!(safe_rect.right() + 2, go_rect.x, "{safe}: two cells between the pair");
+            assert_eq!(shown(&buf, safe_rect), format!("  {safe}  "), "{safe}: whole");
+            assert_eq!(shown(&buf, go_rect), format!("  {go}  "), "{go}: whole");
+        }
     }
 }

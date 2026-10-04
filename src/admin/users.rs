@@ -1292,7 +1292,7 @@ fn draw_add(frame: &mut Frame, room: &mut Room, area: Rect, f: &AddForm) {
     }
     let by = inner.bottom().saturating_sub(1);
     let label = t!("usr.form_add").to_string();
-    let bw = label.chars().count() as u16 + 4;
+    let bw = kit::width(&label) as u16 + 4;
     kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(bw + 1), y: by, width: bw, height: 1 }, &label, true, Act::FormSubmit);
 }
 
@@ -1343,7 +1343,7 @@ fn draw_libraries(frame: &mut Frame, room: &mut Room, area: Rect, d: &LibsDraft)
     }
     let by = inner.bottom().saturating_sub(1);
     let label = t!("usr.libs_save").to_string();
-    let bw = label.chars().count() as u16 + 4;
+    let bw = kit::width(&label) as u16 + 4;
     kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(bw + 1), y: by, width: bw, height: 1 }, &label, true, Act::LibsSubmit);
 }
 
@@ -1369,7 +1369,7 @@ fn draw_password(frame: &mut Frame, room: &mut Room, area: Rect, d: &PwDraft) {
         frame.render_widget(Paragraph::new(Span::styled(format!("{} {err}", g("!", "!")), Style::default().fg(th().gold))), line(by));
     }
     let label = t!("usr.pw_set").to_string();
-    let bw = label.chars().count() as u16 + 4;
+    let bw = kit::width(&label) as u16 + 4;
     // Dim until the two agree — the button waits, like the kit's disabled.
     kit::button(frame, &mut room.ui, Rect { x: inner.right().saturating_sub(bw + 1), y: by, width: bw, height: 1 }, &label, d.ready(), Act::PwSubmit);
 }
@@ -1395,8 +1395,8 @@ fn draw_remove(frame: &mut Frame, room: &mut Room, area: Rect, name: &str) {
     let y = inner.bottom().saturating_sub(1);
     let keep = t!("usr.remove_keep").to_string();
     let remove = t!("usr.remove_confirm").to_string();
-    let remove_w = remove.chars().count() as u16 + 4;
-    let keep_w = keep.chars().count() as u16 + 4;
+    let remove_w = kit::width(&remove) as u16 + 4;
+    let keep_w = kit::width(&keep) as u16 + 4;
     let keep_x = inner.right().saturating_sub(remove_w + 2 + keep_w);
     let keep_rect = kit::button(frame, &mut room.ui, Rect { x: keep_x, y, width: inner.width, height: 1 }, &keep, true, Act::RemoveCancel);
     kit::button(frame, &mut room.ui, Rect { x: keep_rect.right() + 2, y, width: inner.width, height: 1 }, &remove, false, Act::RemoveConfirm);

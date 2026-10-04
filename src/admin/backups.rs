@@ -1814,7 +1814,10 @@ fn draw_browser(frame: &mut Frame, room: &mut Room, area: Rect, browse: &Browse)
         );
     }
     let y = inner.bottom().saturating_sub(1);
-    let row = |x| Rect { x, y, width: inner.width, height: 1 };
+    // Each button gets the room left before the modal's right edge, so the
+    // kit cuts the last label inside the frame instead of drawing it (and
+    // its click rect) over the border when a CJK row outgrows the modal.
+    let row = |x: u16| Rect { x, y, width: inner.right().saturating_sub(x), height: 1 };
     let up = kit::button(frame, &mut room.ui, row(inner.x), &t!("browse.up"), false, Act::BrowseUp);
     let open = kit::button(frame, &mut room.ui, row(up.right() + 1), &t!("browse.open"), false, Act::BrowseEnter);
     let choose = kit::button(frame, &mut room.ui, row(open.right() + 1), &t!("bak.browse_use"), true, Act::BrowseChoose);
