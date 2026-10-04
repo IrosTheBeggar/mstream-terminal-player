@@ -17,10 +17,13 @@ collection, a font id that does not read the whole font, failed presents (and ho
 are logged), fallback glyphs that fit their cells, a wide glyph narrowed without shifting the
 row, a public offscreen path for tests, the build's stage timings, a device made before
 the window and the adapter in use, a wgpu that keeps to the player's feature set, fallback
-faces drawn at the main face's size, colour emoji drawn whole in their cells, and a cell's
-face chosen by its first character. They
-land here, one change at a time, each recorded below, until an upstream release carries them
-and the patch entry can go.
+faces drawn at the main face's size, colour emoji drawn whole in their cells, a cell's face
+chosen by its first character, an emoji grown wide in place, the build split so its second half
+runs off the window's thread, a present owed on purpose, an emoji drawn from a colour face ahead
+of the monochrome symbol faces, an unjoined flag drawn as its two letters, a composed emoji (a
+family) drawn whole, and a wide cell that erases every glyph it lands on. They land here, one
+change at a time, each recorded below, until an upstream release carries them and the patch
+entry can go.
 
 ## What differs from 0.6.0
 

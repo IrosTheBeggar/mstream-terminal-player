@@ -464,11 +464,12 @@ winresource = "0.1"
 # terminal build never builds ratatui-wgpu, and its winit, through the
 # visualizer window, is the vendored one as well.
 [patch.crates-io]
-# The GUI window's renderer, and the place its fixes land: twenty
+# The GUI window's renderer, and the place its fixes land: twenty-three
 # recorded changes (surface format, face index, wide-glyph shaping, failed
 # presents, a device made before the window, its wgpu kept to the feature
-# set above, colour emoji, the build off the window's thread, and more);
-# VENDORED.md lists each.
+# set above, colour emoji, the build off the window's thread, an emoji's
+# colour face ahead of the monochrome symbol faces, a wide cell that erases
+# every glyph it lands on, and more); VENDORED.md lists each.
 ratatui-wgpu = { path = "vendor/ratatui-wgpu" }
 # macOS IME: 0.30.13 drops an ASCII key typed right after an input
 # method's commit (Korean `한` then `;` or a digit loses that key) and
