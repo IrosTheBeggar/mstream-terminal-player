@@ -175,8 +175,9 @@ fn focus(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GW_OWNER,
-        GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowThreadProcessId, IsHungAppWindow,
-        IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
+        GWL_EXSTYLE, GetClassNameW, GetWindow, GetWindowLongW, GetWindowThreadProcessId,
+        IsHungAppWindow, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow,
+        ShowWindowAsync,
     };
     use windows_sys::core::BOOL;
 
@@ -186,12 +187,15 @@ fn focus(pid: u32) -> bool {
     }
     /// One top-level window: stop at the first visible, unowned app window
     /// of the pid (a dialog is owned; winit's helper window is visible and
-    /// unowned, and is what `is_app_window` turns away). The ex-style is
-    /// read from the window's own record, never by a message, so a holder
-    /// that has stopped pumping costs nothing here either.
+    /// unowned, and so is a console window that reports the pid, which
+    /// `is_app_window` both turn away). The ex-style and the class name are
+    /// read from the window's own record and its class, never by a message,
+    /// so a holder that has stopped pumping costs nothing here either.
     unsafe extern "system" fn visit(hwnd: HWND, search: LPARAM) -> BOOL {
         // SAFETY: `search` is the `&mut Search` EnumWindows was handed,
-        // alive for the whole enumeration; the calls take any HWND.
+        // alive for the whole enumeration; the calls take any HWND, and
+        // GetClassNameW writes at most the length it is handed, the
+        // buffer's (256, a class name's limit).
         unsafe {
             let search = &mut *(search as *mut Search);
             let mut owner = 0u32;
@@ -199,10 +203,14 @@ fn focus(pid: u32) -> bool {
             if owner == search.pid
                 && IsWindowVisible(hwnd) != 0
                 && GetWindow(hwnd, GW_OWNER).is_null()
-                && is_app_window(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32)
             {
-                search.found = hwnd;
-                return 0;
+                let mut class = [0u16; 256];
+                let len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+                let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+                if is_app_window(&class, GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) {
+                    search.found = hwnd;
+                    return 0;
+                }
             }
         }
         1
@@ -267,10 +275,19 @@ fn focus(pid: u32) -> bool {
 /// requiring WS_CAPTION would also turn away a borderless window that is
 /// the player. The mStream launcher's search for its window keeps the same
 /// rule.
+///
+/// A console window ("ConsoleWindowClass") is skipped too, whatever its
+/// style: conhost answers GetWindowThreadProcessId for its window with a
+/// client's pid, not its own, so a console the holder is attached to (one
+/// it shares with a shell, which `leave_own_console` keeps, and which can
+/// report the player's pid once that shell exits) is visible, unowned and
+/// a plain app window by its style. With the player minimised beneath it,
+/// the console would take the foreground and the player stay minimised.
+/// The class name is read from the window's class, never by a message.
 #[cfg(windows)]
-fn is_app_window(ex_style: u32) -> bool {
+fn is_app_window(class: &str, ex_style: u32) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW};
-    ex_style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) == 0
+    class != "ConsoleWindowClass" && ex_style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) == 0
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -384,6 +401,11 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
     }
 
+    /// The class winit registers the player's window under (its default,
+    /// which the player keeps).
+    #[cfg(windows)]
+    const PLAYER: &str = "Window Class";
+
     #[cfg(windows)]
     #[test]
     fn winits_helper_window_is_not_the_holders_window() {
@@ -393,7 +415,7 @@ mod tests {
         // The "Winit Thread Event Target" window's extended style, as winit
         // creates it and as it measured live.
         let helper = WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW;
-        assert!(!is_app_window(helper));
+        assert!(!is_app_window("Winit Thread Event Target", helper));
     }
 
     #[cfg(windows)]
@@ -402,11 +424,11 @@ mod tests {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
         };
-        assert!(!is_app_window(WS_EX_TOOLWINDOW));
-        assert!(!is_app_window(WS_EX_NOACTIVATE));
+        assert!(!is_app_window(PLAYER, WS_EX_TOOLWINDOW));
+        assert!(!is_app_window(PLAYER, WS_EX_NOACTIVATE));
         // WS_EX_APPWINDOW puts a tool window on the taskbar, but it is
         // still not the window the player draws in; the rule stays simple.
-        assert!(!is_app_window(WS_EX_TOOLWINDOW | WS_EX_APPWINDOW));
+        assert!(!is_app_window(PLAYER, WS_EX_TOOLWINDOW | WS_EX_APPWINDOW));
     }
 
     #[cfg(windows)]
@@ -418,9 +440,21 @@ mod tests {
         };
         // A plain window, the player's window as it measured live
         // (0x00040110), and the bits a transparent-capable winit window adds.
-        assert!(is_app_window(0));
-        assert!(is_app_window(WS_EX_WINDOWEDGE | WS_EX_ACCEPTFILES | WS_EX_APPWINDOW));
-        assert!(is_app_window(WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_WINDOWEDGE));
+        assert!(is_app_window(PLAYER, 0));
+        assert!(is_app_window(PLAYER, WS_EX_WINDOWEDGE | WS_EX_ACCEPTFILES | WS_EX_APPWINDOW));
+        assert!(is_app_window(PLAYER, WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_WINDOWEDGE));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_console_window_that_reports_the_holders_pid_is_skipped() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_WINDOWEDGE;
+        // conhost's window answers with a client's pid and is a plain app
+        // window by its style, so only its class tells it from the player's.
+        assert!(!is_app_window("ConsoleWindowClass", 0));
+        assert!(!is_app_window("ConsoleWindowClass", WS_EX_WINDOWEDGE));
+        // The match is exact: a class that merely starts so is not a console.
+        assert!(is_app_window("ConsoleWindowClassic", 0));
     }
 
     #[test]
