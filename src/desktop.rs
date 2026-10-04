@@ -273,8 +273,8 @@ fn focus(pid: u32) -> bool {
 /// 10 22H2, v0.12.0). The ex-style is the robust signal: the helper
 /// measured 13 to 26 px, so a zero-size test would not catch it, and
 /// requiring WS_CAPTION would also turn away a borderless window that is
-/// the player. The mStream launcher's search for its window keeps the same
-/// rule.
+/// the player. The mStream launcher's search for the player's window
+/// (rust-launcher/src/platform.rs, `is_app_window`) keeps this style rule.
 ///
 /// A console window ("ConsoleWindowClass") is skipped too, whatever its
 /// style: conhost answers GetWindowThreadProcessId for its window with a
@@ -283,7 +283,11 @@ fn focus(pid: u32) -> bool {
 /// report the player's pid once that shell exits) is visible, unowned and
 /// a plain app window by its style. With the player minimised beneath it,
 /// the console would take the foreground and the player stay minimised.
-/// The class name is read from the window's class, never by a message.
+/// The class name is read from the window's class, never by a message. The
+/// launcher's search does not have this rule (as of the launcher branch
+/// that added its style rule): a desktop player started from a shell that
+/// then exited, minimised, and raised from the tray can still bring the
+/// console forward there. Keep the two in step when the launcher gains it.
 #[cfg(windows)]
 fn is_app_window(class: &str, ex_style: u32) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW};
