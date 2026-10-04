@@ -2281,6 +2281,18 @@ a LATER secondary screen (party view), Columns retired.
   Stats tab builds it, and the server's log docked as a column, as a band
   under the room, or as a room of its own, as the window allows. `M` from
   the Library, Stats and Now Playing; Esc back.
+- **The MP3 Player tab ✅ 2026-10-04** — the top bar's fourth tab hosts
+  the firmware page of `mstream-player device flash` with no flags
+  (docs/ux-contracts/mp3-player-screen.md; Phase 13), in place of the
+  tray launcher's dropped menu item: the page grew a hosted mode (no
+  header, no tips row, nothing drawn past its area), the tab builds it on
+  entry and drops it on leaving — its worker restarting a held board as
+  the channel closes — except while it writes, when every key but Ctrl+C
+  is the page's, the top bar is inert and no screen change is honoured; a
+  quit with the board held before the write waits up to two seconds for
+  its restart. `F` from the Library, Now Playing, Stats and the Admin
+  hallway, `F` or Esc back. The strip's fit beside the server label is
+  now tested at 100 columns in every locale.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
@@ -2963,14 +2975,17 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > left, what to do next, the port watch, and the log behind `l`. The pin in
 > `src/device/firmware.rs` is firmware v0.6.0 (2 Oct 2026; the first release, v0.5.0, until
 > 4 Oct) — `device flash` with no flags writes it; `--firmware` / `--release` still override.
-> The mStream launcher's menu item is dropped (Paul, 4 Oct 2026).
+> The mStream launcher's menu item is dropped (Paul, 4 Oct 2026): **the GUI's MP3 Player tab
+> replaces it** (built 2026-10-04, docs/ux-contracts/mp3-player-screen.md) — the same page with
+> no flags, hosted under the GUI's top bar, `F` from the Library, Now Playing, Stats and the
+> Admin hallway.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
 player rather than in the tray launcher (decided 2026-09-30): flashing is a conversation —
 which board, what is on it, erase or not, progress, what went wrong — and this is where the
-pages are; the launcher stays the thin supervisor and opens this page the way it opens the
-admin rooms.
+pages are. The launcher was to open this page the way it opens the admin rooms; since
+2026-10-04 the way in is the GUI's own tab instead, and the launcher has no item for it.
 
 - **espflash as a library** (`default-features = false`, `serialport`): the reset dance, the
   RAM stub, compressed writes, the MD5 skip-and-verify. serialport with libudev off, because

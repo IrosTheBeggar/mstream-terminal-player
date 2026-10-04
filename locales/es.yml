@@ -1329,6 +1329,7 @@ gui:
   top:
     library: "Biblioteca"
     admin: "Admin"
+    mp3: "Reproductor MP3"
     viz: "Visualizador"
     viz_tip: "Abrir el visualizador en su propia ventana — V"
   nav:
@@ -1913,6 +1914,10 @@ dev:
   hint_working: "espera — desconectar ahora dejaría la placa a medio escribir · l registro"
   hint_done: "Enter cerrar · l registro"
   hint_failed: "r reintentar · l registro · Esc cerrar"
+  hint_wait_hosted: "l registro · Esc biblioteca"
+  hint_none_hosted: "r buscar de nuevo · l registro · Esc biblioteca"
+  hint_several_hosted: "↑ ↓ elegir · Enter confirmar · l registro · Esc biblioteca"
+  hint_failed_hosted: "r reintentar · l registro · Esc biblioteca"
   err_list: "no se pudieron listar los puertos serie: %{err}"
   err_busy: "otro programa está usando %{port} (%{err})"
   err_permission: "sin permiso para abrir %{port} (%{err})"

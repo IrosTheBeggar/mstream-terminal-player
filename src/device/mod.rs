@@ -11,7 +11,9 @@
 //! or a fake for the tests), [`flow`] runs the whole write in a worker
 //! thread and reports each step, and [`page`] draws those reports on the
 //! admin hub's terminal session — with a step line, and a log of every
-//! report behind `l`. `--yes` prints the steps as lines instead.
+//! report behind `l`. `--yes` prints the steps as lines instead. The GUI
+//! player hosts the same page, with no flags, as its MP3 Player tab
+//! (src/gui/device.rs, docs/ux-contracts/mp3-player-screen.md).
 
 mod engine;
 mod firmware;
@@ -25,6 +27,15 @@ use clap::{Args, Subcommand};
 use rust_i18n::t;
 
 use self::flow::{Cmd, Event};
+
+// What the GUI's MP3 Player tab holds of this module: the page, and the
+// one way to build it — with no flags — outside the tests, whose page
+// rides channels they hold (`Page::quiet`, its `Ends`).
+#[cfg(not(test))]
+pub(crate) use self::page::hosted;
+pub(crate) use self::page::Page;
+#[cfg(test)]
+pub(crate) use self::{flow::Cmd as WorkerCmd, page::Ends};
 
 #[derive(Args)]
 pub struct DeviceArgs {

@@ -1329,6 +1329,7 @@ gui:
   top:
     library: "Bibliothèque"
     admin: "Admin"
+    mp3: "Lecteur MP3"
     viz: "Visualiseur"
     viz_tip: "Ouvrir le visualiseur dans sa fenêtre — V"
   nav:
@@ -1913,6 +1914,10 @@ dev:
   hint_working: "patientez — débrancher maintenant laisserait la carte à moitié écrite · l journal"
   hint_done: "Entrée fermer · l journal"
   hint_failed: "r réessayer · l journal · Esc fermer"
+  hint_wait_hosted: "l journal · Esc bibliothèque"
+  hint_none_hosted: "r chercher à nouveau · l journal · Esc bibliothèque"
+  hint_several_hosted: "↑ ↓ choisir · Entrée valider · l journal · Esc bibliothèque"
+  hint_failed_hosted: "r réessayer · l journal · Esc bibliothèque"
   err_list: "impossible de lister les ports série : %{err}"
   err_busy: "%{port} est utilisé par un autre programme (%{err})"
   err_permission: "pas la permission d'ouvrir %{port} (%{err})"

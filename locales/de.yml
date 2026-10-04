@@ -1329,6 +1329,7 @@ gui:
   top:
     library: "Bibliothek"
     admin: "Admin"
+    mp3: "MP3-Player"
     viz: "Visualizer"
     viz_tip: "Visualizer in eigenem Fenster öffnen — V"
   nav:
@@ -1913,6 +1914,10 @@ dev:
   hint_working: "bitte warten — jetzt abziehen ließe das Board halb beschrieben zurück · l Protokoll"
   hint_done: "Enter schließen · l Protokoll"
   hint_failed: "r erneut versuchen · l Protokoll · Esc schließen"
+  hint_wait_hosted: "l Protokoll · Esc Bibliothek"
+  hint_none_hosted: "r erneut suchen · l Protokoll · Esc Bibliothek"
+  hint_several_hosted: "↑ ↓ wählen · Enter übernehmen · l Protokoll · Esc Bibliothek"
+  hint_failed_hosted: "r erneut versuchen · l Protokoll · Esc Bibliothek"
   err_list: "serielle Ports konnten nicht aufgelistet werden: %{err}"
   err_busy: "%{port} wird von einem anderen Programm benutzt (%{err})"
   err_permission: "keine Berechtigung, %{port} zu öffnen (%{err})"

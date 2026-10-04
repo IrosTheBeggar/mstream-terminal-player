@@ -1329,6 +1329,7 @@ gui:
   top:
     library: "Biblioteka"
     admin: "Admin"
+    mp3: "Odtwarzacz MP3"
     viz: "Wizualizacja"
     viz_tip: "Otwórz wizualizację w osobnym oknie — V"
   nav:
@@ -1913,6 +1914,10 @@ dev:
   hint_working: "poczekaj — odłączenie teraz zostawiłoby płytkę zapisaną do połowy · l dziennik"
   hint_done: "Enter zamknij · l dziennik"
   hint_failed: "r spróbuj ponownie · l dziennik · Esc zamknij"
+  hint_wait_hosted: "l dziennik · Esc biblioteka"
+  hint_none_hosted: "r szukaj ponownie · l dziennik · Esc biblioteka"
+  hint_several_hosted: "↑ ↓ wybierz · Enter zatwierdź · l dziennik · Esc biblioteka"
+  hint_failed_hosted: "r spróbuj ponownie · l dziennik · Esc biblioteka"
   err_list: "nie udało się wylistować portów szeregowych: %{err}"
   err_busy: "%{port} jest używany przez inny program (%{err})"
   err_permission: "brak uprawnień do otwarcia %{port} (%{err})"

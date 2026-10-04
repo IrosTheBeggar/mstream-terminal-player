@@ -1329,6 +1329,7 @@ gui:
   top:
     library: "Library"
     admin: "Admin"
+    mp3: "MP3 Player"
     viz: "Visualizer"
     viz_tip: "Open the visualizer in its own window — V"
   nav:
@@ -1913,6 +1914,10 @@ dev:
   hint_working: "please wait — unplugging now would leave the board half written · l logs"
   hint_done: "Enter close · l logs"
   hint_failed: "r try again · l logs · Esc close"
+  hint_wait_hosted: "l logs · Esc library"
+  hint_none_hosted: "r look again · l logs · Esc library"
+  hint_several_hosted: "↑ ↓ pick · Enter choose · l logs · Esc library"
+  hint_failed_hosted: "r try again · l logs · Esc library"
   err_list: "could not list the serial ports: %{err}"
   err_busy: "%{port} is in use by another program (%{err})"
   err_permission: "no permission to open %{port} (%{err})"

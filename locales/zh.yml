@@ -1329,6 +1329,7 @@ gui:
   top:
     library: "音乐库"
     admin: "管理"
+    mp3: "MP3 播放器"
     viz: "可视化"
     viz_tip: "在独立窗口中打开可视化 — V"
   nav:
@@ -1913,6 +1914,10 @@ dev:
   hint_working: "请稍候 — 现在拔下会让开发板只写了一半 · l 日志"
   hint_done: "Enter 关闭 · l 日志"
   hint_failed: "r 重试 · l 日志 · Esc 关闭"
+  hint_wait_hosted: "l 日志 · Esc 曲库"
+  hint_none_hosted: "r 再次查找 · l 日志 · Esc 曲库"
+  hint_several_hosted: "↑ ↓ 选择 · Enter 确定 · l 日志 · Esc 曲库"
+  hint_failed_hosted: "r 重试 · l 日志 · Esc 曲库"
   err_list: "无法列出串口：%{err}"
   err_busy: "%{port} 正被其他程序占用（%{err}）"
   err_permission: "没有权限打开 %{port}（%{err}）"

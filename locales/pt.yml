@@ -1329,6 +1329,7 @@ gui:
   top:
     library: "Biblioteca"
     admin: "Admin"
+    mp3: "Leitor MP3"
     viz: "Visualizador"
     viz_tip: "Abrir o visualizador em sua própria janela — V"
   nav:
@@ -1913,6 +1914,10 @@ dev:
   hint_working: "aguarde — desligar agora deixaria a placa escrita a meio · l registo"
   hint_done: "Enter fechar · l registo"
   hint_failed: "r tentar de novo · l registo · Esc fechar"
+  hint_wait_hosted: "l registo · Esc biblioteca"
+  hint_none_hosted: "r procurar de novo · l registo · Esc biblioteca"
+  hint_several_hosted: "↑ ↓ escolher · Enter confirmar · l registo · Esc biblioteca"
+  hint_failed_hosted: "r tentar de novo · l registo · Esc biblioteca"
   err_list: "não foi possível listar as portas série: %{err}"
   err_busy: "%{port} está a ser usada por outro programa (%{err})"
   err_permission: "sem permissão para abrir %{port} (%{err})"

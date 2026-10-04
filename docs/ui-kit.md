@@ -537,11 +537,14 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
-**The GUI player's top bar**: three tabs at the left — Library, Stats,
-Admin — worn as the kit's tab slab for the screen that is up and dim
-text for the others (Now Playing, on `0`, has no tab and lights none
-while it is up), the Visualizer item after them, and the session's server label with
-`[+]` at the right. The
+**The GUI player's top bar**: four tabs at the left — Library, Stats,
+Admin, MP3 Player — worn as the kit's tab slab for the screen that is up
+and dim text for the others (Now Playing, on `0`, has no tab and lights
+none while it is up), the Visualizer item after them, and the session's
+server label with `[+]` at the right; at the 100-column floor the strip
+must end a blank cell short of a local server's label in every locale,
+since nothing else keeps the two apart. While the MP3 Player tab's page
+writes, the strip is inert: no tab lights or answers a click. The
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
 Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok
@@ -567,7 +570,8 @@ one that holds it. A row may carry a dim count after its label (` · 12
 new`), which yields its cells first.
 
 **Hosted rooms.** A page built as its own command (an admin room, the
-stats page) can be hosted inside another screen's area. The room draws
+stats page, the MP3 player's firmware page) can be hosted inside another
+screen's area. The room draws
 its body and its note row and nothing else: no header (the host's bar
 names the server), no tips row (the host's footer carries the room's
 hint, and the room's base hint must say what its keys do THERE — Esc
