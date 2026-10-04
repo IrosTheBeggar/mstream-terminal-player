@@ -526,22 +526,33 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
             // empty continuation, which shapes to nothing, so every glyph
             // after them on the row drew a cell to the left of its own:
             // `│日本│` redrawn as `│ab  │` put the last `│` in cell 4.
+            //
+            // Every glyph the new cell lands on is erased so, not only the
+            // one in its own cell: a wide cell's second half can land on
+            // the first half of a wide glyph that began there, whose own
+            // continuation lies past the new cell's reach (`a日x` redrawn
+            // as `日 x`, the new 日's second cell the old one's first). Left
+            // as the empty continuation, that cell turned away the blank
+            // ratatui does send for it, by the rule above, and the row
+            // lost a cell: the bar's `Heart ❤️ Song`, after a title with an
+            // emoji one cell further on, drew as `Heart ❤️Song`.
             let width = cell.symbol().width().max(1);
-            let old_width = self.cells[index].symbol().width().max(1);
-            if old_width > width {
-                let start = (index + width).min(self.cells.len());
-                let end = (index + old_width).min(self.cells.len());
-                for covered in &mut self.cells[start..end] {
-                    if *covered == NULL_CELL {
-                        *covered = Cell::EMPTY;
-                    }
+            let end = (index + width).min(self.cells.len());
+            let reach = (index..end)
+                .filter(|&at| self.cells[at] != NULL_CELL)
+                .map(|at| at + self.cells[at].symbol().width().max(1))
+                .max()
+                .unwrap_or(end)
+                .clamp(end, self.cells.len());
+            for covered in &mut self.cells[end..reach] {
+                if *covered == NULL_CELL {
+                    *covered = Cell::EMPTY;
                 }
             }
 
             self.cells[index] = cell.clone();
 
             let start = (index + 1).min(self.cells.len());
-            let end = (index + width).min(self.cells.len());
             self.cells[start..end].fill(NULL_CELL);
             self.dirty_rows[y as usize] = true;
         }

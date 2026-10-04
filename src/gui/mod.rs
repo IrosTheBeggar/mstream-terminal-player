@@ -3815,6 +3815,79 @@ mod tests {
         );
     }
 
+    /// The card's words on its `line` (0 is the title) as a screen shows them, from the first
+    /// cell past the cover to the chevron's margin: the cell after a wide glyph is the glyph's
+    /// second half and is skipped, as the window's text and the dump spell it, and the blanks
+    /// after the words are trimmed.
+    fn card_words(gui: &mut Gui, line: u16) -> String {
+        let area = Rect { x: 0, y: 0, width: 100, height: 30 };
+        let buffer = draw_buffer(gui);
+        let cover = bar::cover_rect(area, false);
+        let (left, y) = (cover.right() + 2, cover.y + line);
+        let mut words = String::new();
+        let mut covered = 0;
+        for x in left..area.width - 4 {
+            if covered > 0 {
+                covered -= 1;
+                continue;
+            }
+            let symbol = buffer[(x, y)].symbol();
+            words.push_str(symbol);
+            covered = crate::kit::grapheme_cells(symbol).saturating_sub(1);
+        }
+        words.trim_end().to_string()
+    }
+
+    /// The bar's now-playing lines keep every cell of their words, wide graphemes and all, and a
+    /// title too long for the card is cut on a grapheme's edge with the clip mark. The Windows
+    /// smoke's window showed `Heart ❤️Song` and `Flag 🇯🇵Track` in the bar where the queue showed
+    /// them whole; the buffer the bar draws was never short (the window's backend lost the cell,
+    /// VENDORED.md change 23), and this holds it so: thirty cells of words, each title exact.
+    #[test]
+    fn the_bar_keeps_the_space_after_a_wide_grapheme_and_cuts_between_graphemes() {
+        crate::kit::theme::pin_modern_terminal();
+        let night = "\u{591C}".repeat(20);
+        let night_cut = format!("{}\u{2026}", "\u{591C}".repeat(14));
+        let cases = [
+            ("Heart \u{2764}\u{FE0F} Song", "Heart \u{2764}\u{FE0F} Song"),
+            ("Flag \u{1F1EF}\u{1F1F5} Track", "Flag \u{1F1EF}\u{1F1F5} Track"),
+            (
+                "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Tune",
+                "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Tune",
+            ),
+            (
+                "\u{591C}\u{306E}\u{30C9}\u{30E9}\u{30A4}\u{30D6} Night Drive",
+                "\u{591C}\u{306E}\u{30C9}\u{30E9}\u{30A4}\u{30D6} Night Drive",
+            ),
+            // Too long: the heart that would straddle the mark's cell is left out whole, and the
+            // flag that fits before it is kept whole.
+            (
+                "abcdefghijklmnopqrstuvwxyz12\u{2764}\u{FE0F} and on",
+                "abcdefghijklmnopqrstuvwxyz12\u{2026}",
+            ),
+            (
+                "abcdefghijklmnopqrstuvwxyz1\u{1F1EF}\u{1F1F5} and on",
+                "abcdefghijklmnopqrstuvwxyz1\u{1F1EF}\u{1F1F5}\u{2026}",
+            ),
+            (night.as_str(), night_cut.as_str()),
+        ];
+        for (title, shown) in cases {
+            let mut gui = test_gui();
+            gui.demo = Some(Now {
+                title: title.to_string(),
+                artist: "Emoji Artist \u{2764}\u{FE0F}".to_string(),
+                year: Some(2026),
+                spec: "MP3 \u{B7} 128 kbps \u{B7} 44.1 kHz".to_string(),
+                ..demo_now()
+            });
+            let words = card_words(&mut gui, 0);
+            assert_eq!(words, shown, "the bar's title for {title:?}");
+            assert!(crate::kit::width(&words) <= 30, "{words:?} runs past the card's thirty cells");
+            assert_eq!(card_words(&mut gui, 1), "Emoji Artist \u{2764}\u{FE0F} \u{B7} 2026");
+            assert_eq!(card_words(&mut gui, 2), "MP3 \u{B7} 128 kbps \u{B7} 44.1 kHz");
+        }
+    }
+
     #[test]
     fn the_card_wears_the_cover_once_it_is_decoded() {
         let mut gui = browsing_gui();

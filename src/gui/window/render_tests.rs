@@ -36,6 +36,9 @@ struct Frame {
     width: u32,
     cell_w: u32,
     cell_h: u32,
+    /// The grid as the backend holds it, in `get_text`'s spelling (the
+    /// cell after a wide glyph is an empty string): the dump's text.
+    text: String,
 }
 
 impl Frame {
@@ -84,6 +87,23 @@ fn render_at(
     format: TextureFormat,
 ) -> Result<Frame, String> {
     let rows = frames[0].len() as u32;
+    let paragraph = |frame: &mut ratatui::Frame<'_>, i: usize| {
+        frame.render_widget(Paragraph::new(frames[i].clone()), frame.area());
+    };
+    draw_at(px, faces, (cols, rows), frames.len(), paragraph, format)
+}
+
+/// `steps` frames, each drawn by `draw` (handed the step's number) on a
+/// `cols`×`rows` grid at a type size of `px`, as [`render`] draws its lines:
+/// for a frame drawn by something other than a paragraph (the GUI's own).
+fn draw_at(
+    px: u32,
+    faces: Vec<Font<'_>>,
+    (cols, rows): (u32, u32),
+    steps: usize,
+    mut draw: impl FnMut(&mut ratatui::Frame<'_>, usize),
+    format: TextureFormat,
+) -> Result<Frame, String> {
     let last_resort = faces[0].clone();
     // The cell's width is the narrowest face's, which the backend keeps to
     // itself (as the window finds): built wide first, the width read back
@@ -105,16 +125,15 @@ fn render_at(
     backend.resize(cols * cell_w, rows * px);
 
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
-    for lines in frames {
-        terminal
-            .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
-            .map_err(|e| e.to_string())?;
+    for step in 0..steps {
+        terminal.draw(|frame| draw(frame, step)).map_err(|e| e.to_string())?;
     }
     let backend = terminal.backend();
     let size = backend.size().map_err(|e| e.to_string())?;
     assert_eq!((u32::from(size.width), u32::from(size.height)), (cols, rows));
     let pixels = backend.read_pixels().ok_or("the frame could not be read back")?;
-    Ok(Frame { pixels, width: cols * cell_w, cell_w, cell_h: px })
+    let text = backend.get_text();
+    Ok(Frame { pixels, width: cols * cell_w, cell_w, cell_h: px, text })
 }
 
 /// The frame, or a skip: these tests draw on this machine's GPU through a
@@ -461,6 +480,98 @@ fn an_emoji_widened_in_place_keeps_its_row_in_place() {
                 "{before:?} then {after:?}: cell {col} is not what a fresh {after:?} draws there"
             );
         }
+    }
+}
+
+/// A wide cell whose second half lands on the first half of another wide glyph erases that glyph
+/// whole, and the rest of the row stays in place. The Windows smoke's bar drew `Heart ❤️ Song`
+/// after `Family 👨‍👩‍👧 Tune` as `Heart ❤️Song`, and `Flag 🇯🇵 Track` after it as `Flag 🇯🇵Track`:
+/// the old emoji began one cell after the new one, so the new one's continuation took the old
+/// one's first cell and left the old one's continuation behind, past the new cell's reach. The
+/// blank ratatui sends for that cell was then turned away as one a glyph still covers (change 18's
+/// rule), and the row lost a cell, in the backend's text (the dump's) and in its pixels alike
+/// (VENDORED.md, change 23). The text must be a fresh frame's in every case, whatever the faces;
+/// the cells must be a fresh frame's where a CJK face (or Hack's boxes, two cells as well) and the
+/// colour emoji face are at hand.
+#[test]
+fn a_wide_glyph_over_the_first_half_of_another_keeps_the_row_in_place() {
+    let _gpu = one_at_a_time();
+    let cjk = [("a日x|", "日 x|"), ("ab日c|", "a日 c|"), ("a日本x|", "日本 x|")];
+    let family = "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Tune|";
+    let heart = "Heart \u{2764}\u{FE0F} Song|";
+    let emoji = [(family, heart), (heart, "Flag \u{1F1EF}\u{1F1F5} Track|")];
+    // The last frame drawn after `before`, and `after` drawn fresh, in `faces`.
+    let pair = |faces: &[Font<'static>], before: &'static str, after: &'static str| {
+        let frames = vec![vec![Line::from(before)], vec![Line::from(after)]];
+        let frame = frame_or_skip(render(faces.to_vec(), 20, frames, TextureFormat::Rgba8Unorm))?;
+        Some((frame, row(faces, 20, after)?))
+    };
+    for &(before, after) in cjk.iter().chain(&emoji) {
+        let Some((frame, fresh)) = pair(&[hack().unwrap()], before, after) else { return };
+        assert_eq!(frame.text, fresh.text, "{before:?} then {after:?}: the backend's text");
+    }
+
+    let japanese = japanese_face();
+    let mut faces = vec![hack().unwrap()];
+    faces.extend(japanese.as_ref().and_then(|(_, bytes, index)| Font::new_at(bytes, *index)));
+    let mut cases: Vec<_> = cjk.map(|case| (case, faces.clone())).into();
+    if let Some(faces) = emoji_faces() {
+        cases.extend(emoji.map(|case| (case, faces.clone())));
+    }
+    for ((before, after), faces) in cases {
+        let Some((frame, fresh)) = pair(&faces, before, after) else { return };
+        for col in 0..20 {
+            assert!(
+                frame.cell(col, 0) == fresh.cell(col, 0),
+                "{before:?} then {after:?}: cell {col} is not what a fresh {after:?} draws there"
+            );
+        }
+    }
+}
+
+/// The GUI's own bar in the window's backend, as the queue moves from one emoji title to the
+/// next: the card's lines read in the backend's text exactly as a fresh window's do, the title
+/// whole with the space after its emoji. This is the smoke's case end to end, through the bar's
+/// own layout (`gui::bar`) and ratatui's diff of the frame before.
+#[test]
+fn the_bar_in_the_window_keeps_the_space_after_an_emoji_as_the_title_changes() {
+    use crate::gui::{Gui, demo_now, render};
+    let _gpu = one_at_a_time();
+    let titles = [
+        "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Tune",
+        "Heart \u{2764}\u{FE0F} Song",
+        "Flag \u{1F1EF}\u{1F1F5} Track",
+    ];
+    let now = |title: &str| crate::gui::bar::Now {
+        title: title.to_string(),
+        artist: "Emoji Artist \u{2764}\u{FE0F}".to_string(),
+        year: Some(2026),
+        spec: "MP3 \u{B7} 128 kbps \u{B7} 44.1 kHz".to_string(),
+        ..demo_now()
+    };
+    let bar = |sequence: &[&str]| {
+        let app = crate::tui::app::App::new(None, None, None);
+        let mut gui = Gui::new(crate::config::Config::default(), false, app);
+        let draw = |frame: &mut ratatui::Frame<'_>, step: usize| {
+            gui.demo = Some(now(sequence[step]));
+            render(frame, &mut gui);
+        };
+        let faces = vec![hack().unwrap()];
+        let drawn = draw_at(PX, faces, (100, 30), sequence.len(), draw, TextureFormat::Rgba8Unorm);
+        let frame = frame_or_skip(drawn)?;
+        // The card's four rows, from the seek line's next.
+        Some(frame.text.lines().skip(26).take(4).map(str::to_string).collect::<Vec<_>>())
+    };
+    for pair in titles.windows(2) {
+        let (Some(moved), Some(fresh)) = (bar(pair), bar(&pair[1..])) else { return };
+        assert!(
+            moved[0].contains(&format!(" {} ", pair[1])),
+            "{:?} then {:?}: the bar's title row reads {:?}",
+            pair[0],
+            pair[1],
+            moved[0]
+        );
+        assert_eq!(moved, fresh, "{:?} then {:?}: the card's rows", pair[0], pair[1]);
     }
 }
 
@@ -1145,7 +1256,8 @@ fn covers_and_a_modal(watched: bool) -> Result<(Frame, Rect, Rect), String> {
         })
         .map_err(|e| e.to_string())?;
     let pixels = terminal.backend().read_pixels().ok_or("the frame could not be read back")?;
-    Ok((Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX }, under, beside))
+    let text = terminal.backend().get_text();
+    Ok((Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX, text }, under, beside))
 }
 
 /// The cover flash. A draw site asks whether an overlay stood over its
@@ -1228,7 +1340,7 @@ fn wizard_in_the_window(
         let (placed, under) = board.placed_rects();
         let text = terminal.backend().get_text();
         let pixels = terminal.backend().read_pixels().ok_or("the frame could not be read back")?;
-        let frame = Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX };
+        let frame = Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX, text: text.clone() };
         frames.push(WizardFrame { frame, placed, under, text });
     }
     Ok(frames)

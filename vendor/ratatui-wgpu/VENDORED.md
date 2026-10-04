@@ -459,6 +459,28 @@ and the patch entry can go.
     fresh, and failed at cell 1 before the removal took the owner into account. A row of 👨‍👩‍👧,
     👩‍❤️‍👨, 👨‍👦 and 👨‍👩‍👧‍👦 drawn at 48 px in the window's faces, looked at, showed each group
     whole in its two cells, with 👨‍🦖 still its man.
+23. **A wide cell erases every glyph it lands on** (`backend/wgpu_backend.rs`, `draw`). Change
+    10 erased the glyph in the written cell's own place only. A wide cell's continuation can
+    land on the first half of another wide glyph, one that began a cell after the new one, and
+    that glyph's own continuation lies past the new cell's reach: it was left as the empty
+    continuation (`NULL_CELL`) though nothing covered it. ratatui's diff does send that cell (a
+    blank, since the wide glyph that stood before it is gone), but change 18's rule turned the
+    blank away as one for a cell a glyph still covers, so the row's string lost a cell and every
+    glyph after it on the row drew one cell to the left. Met in the Windows smoke of v0.12.0:
+    the bar's title `Heart ❤️ Song`, drawn after `Family 👨‍👩‍👧 Tune` (whose family began a
+    cell later than the heart), read `Heart ❤️Song` in the window and in its dump's text, and
+    `Flag 🇯🇵 Track` after it read `Flag 🇯🇵Track`; the queue showed both whole, as rows that
+    did not change. Now the cells from the new cell's end to the furthest end of any glyph it
+    lands on (its own cell's, or one its continuation takes) become blanks where they are
+    continuations, as a terminal erases a wide character any part of which is overwritten;
+    change 10's case is the one where that glyph is in the written cell. Only continuations are
+    touched, as before. Checked offscreen (`render_tests.rs`,
+    `a_wide_glyph_over_the_first_half_of_another_keeps_the_row_in_place`: `a日x|` then `日 x|`,
+    `ab日c|` then `a日 c|`, `a日本x|` then `日本 x|` and the two titles above, by the backend's
+    text and cell for cell against a fresh frame; and
+    `the_bar_in_the_window_keeps_the_space_after_an_emoji_as_the_title_changes`, the GUI's own
+    bar drawn through ratatui's diff). Before, each drew its row a cell short (`日x|` for
+    `日 x|`).
 
 ### Tests
 
