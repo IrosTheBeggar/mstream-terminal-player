@@ -1546,12 +1546,17 @@ fn modal_field_labelled(frame: &mut Frame, room: &mut Room, at: Rect, label_w: u
     }
 }
 
-/// A radio choice row: `(•) name` per option, wrapping to the width.
+/// A radio choice row: `(•) name` per option, wrapping to the width. Each
+/// option's rect is its name's width in cells and the glyph's four, as the
+/// form's `lib_rows` counts the rows this wraps to: a library named in
+/// Japanese, counted by characters, got a rect short by half its name, so
+/// the name was cut there, its click covered only what was left, and the
+/// row wrapped later than it should have.
 fn radio_row(frame: &mut Frame, room: &mut Room, at: Rect, options: &[String], chosen: usize, focused: bool, field_index: usize) -> u16 {
     let mut x = at.x;
     let mut y = at.y;
     for (i, name) in options.iter().enumerate() {
-        let w = name.chars().count() as u16 + 4;
+        let w = kit::width(name) as u16 + 4;
         if x + w > at.right() && x > at.x {
             x = at.x;
             y += 1;
@@ -1584,7 +1589,8 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
     let index_of = |field: Field| fields.iter().position(|x| *x == field).unwrap_or(0);
     let editing = f.editing.is_some();
     let library_names: Vec<String> = room.libraries.iter().map(|(n, _)| n.clone()).collect();
-    // Rows the library line takes: a wrapped radio row while adding.
+    // Rows the library line takes: a wrapped radio row while adding, its
+    // options measured in cells as `radio_row` places them.
     let lib_rows = if editing {
         1
     } else {
@@ -1592,7 +1598,7 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
         let mut rows = 1;
         let mut x = 0;
         for name in &library_names {
-            let w = name.chars().count() + 4;
+            let w = kit::width(name) + 4;
             if x + w > width && x > 0 {
                 rows += 1;
                 x = 0;
@@ -2160,6 +2166,56 @@ mod tests {
 
     fn row(frame: &str, name: &str) -> String {
         frame.lines().find(|l| l.starts_with(&format!("  {name}"))).map(str::to_string).unwrap_or_default()
+    }
+
+    /// The add form's library radio measures its names in cells, and the
+    /// form's height counts the rows it wraps to the same way: three
+    /// libraries named in Japanese, ten characters (twenty cells) each, in
+    /// the 60-cell row. Two options of 24 cells and a gap take 51, so the
+    /// third wraps under the first; each option's click rect is its drawn
+    /// width and shows its whole name, and the trigger label sits under the
+    /// second row. Counted by characters all three shared one row, each cut
+    /// at half its name.
+    #[test]
+    fn the_add_forms_library_radio_wraps_japanese_names_by_their_cells() {
+        let _en = english();
+        let names = ["日本の音楽アーカイブ", "クラシック全集の録音", "ジャズのレコード盤集"];
+        let mut room = new_room();
+        room.apply(Done::Platform(Ok(defaults())));
+        room.queued = None;
+        room.busy = None;
+        let libraries = names.iter().zip(1..).map(|(n, id)| (n.to_string(), id * 10)).collect();
+        room.apply(Done::Loaded(Ok(Box::new(Loaded { dests: Vec::new(), status: BackupStatus::default(), libraries: Some(libraries) }))));
+        press(&mut room, KeyCode::Char('a'));
+        let Modal::Form(f) = &room.modal else { panic!("the add form") };
+        let library = f.fields().iter().position(|x| *x == Field::Library).expect("the library field");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let option = |i: usize| {
+            let act = Act::FormPick(library, i);
+            room.ui.clicks.iter().find(|(_, a)| *a == act).map(|(rect, _)| *rect).unwrap_or_else(|| panic!("option {i}"))
+        };
+        let rects: Vec<Rect> = (0..3).map(option).collect();
+        assert_eq!(rects[1].y, rects[0].y, "the second shares the first's row");
+        assert_eq!(rects[1].x, rects[0].right() + 3, "three cells past it");
+        assert_eq!((rects[2].x, rects[2].y), (rects[0].x, rects[0].y + 1), "the third wraps under the first");
+        for (i, rect) in rects.iter().enumerate() {
+            assert_eq!(rect.width, 24, "option {i}: its name's 20 cells and the glyph's four");
+            let mut text = String::new();
+            let mut x = rect.x;
+            while x < rect.right() {
+                let symbol = buffer[(x, rect.y)].symbol();
+                text.push_str(symbol);
+                x += (kit::width(symbol) as u16).max(1);
+            }
+            let glyph = if i == 0 { "(•)" } else { "( )" };
+            assert_eq!(text, format!("{glyph} {}", names[i]), "option {i}: its whole name");
+        }
+        // lib_rows counted the same two rows: TRIGGER starts a blank row on.
+        let trigger_y = rects[2].y + 2;
+        let label: String = (0..buffer.area.width).map(|x| buffer[(x, trigger_y)].symbol()).collect();
+        assert!(label.contains(&*t!("bak.field_trigger")), "the trigger under the wrapped row: {label:?}");
     }
 
     #[test]

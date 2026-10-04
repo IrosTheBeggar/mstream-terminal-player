@@ -1088,7 +1088,8 @@ fn gold_line(frame: &mut Frame, at: Rect, head: &str, tail: &str) {
 fn period_control(frame: &mut Frame, page: &mut Page, x: u16, y: u16) -> u16 {
     let name = page.period.name.clone();
     let chevron = g(" ▾", " v");
-    let rect = Rect { x, y, width: (name.chars().count() + chevron.chars().count()) as u16, height: 1 };
+    // In cells, as the origin row beside it measures: its x follows this.
+    let rect = Rect { x, y, width: (kit::width(&name) + kit::width(chevron)) as u16, height: 1 };
     let hover = page.ui.hovers(rect);
     let (name_style, chevron_style) = if hover {
         let bright = Style::default().fg(th().bright).add_modifier(Modifier::BOLD);
@@ -1107,7 +1108,7 @@ fn period_control(frame: &mut Frame, page: &mut Page, x: u16, y: u16) -> u16 {
 /// a radio row while the log holds peer plays.
 fn draw_controls(frame: &mut Frame, page: &mut Page, at: Rect) {
     let put = |frame: &mut Frame, x: u16, text: &str, style: Style| -> u16 {
-        let w = text.chars().count() as u16;
+        let w = kit::width(text) as u16;
         frame.render_widget(Paragraph::new(Span::styled(text.to_string(), style)), Rect { x, y: at.y, width: w, height: 1 });
         x + w
     };
@@ -1117,7 +1118,7 @@ fn draw_controls(frame: &mut Frame, page: &mut Page, at: Rect) {
     if page.peer_plays() {
         let label = t!("sta.ctl_origin").to_string();
         let options: Vec<String> = Origin::ALL.iter().map(|o| o.label()).collect();
-        let need = label.chars().count() + 2 + options.iter().map(|o| o.chars().count() + 7).sum::<usize>();
+        let need = kit::width(&label) + 2 + options.iter().map(|o| kit::width(o) + 7).sum::<usize>();
         let start = at.right().saturating_sub(need as u16).max(x + 4);
         if start as usize + need <= at.right() as usize {
             let x = put(frame, start, &label, dim()) + 2;
@@ -1127,11 +1128,15 @@ fn draw_controls(frame: &mut Frame, page: &mut Page, at: Rect) {
 }
 
 /// `(•) name   ( ) name   ( ) name` across one row; returns the x past it.
+/// Each option's rect is its name's width in cells and the glyph's four: a
+/// character count made a Japanese option's rect short by half its name,
+/// so the name was cut there and its click covered only what was left; the
+/// `need` each caller right-anchors the row by measures the same way.
 fn radio_row(frame: &mut Frame, page: &mut Page, at: Rect, options: &[String], chosen: usize, act: impl Fn(usize) -> Act) -> u16 {
     let mut x = at.x;
     for (i, name) in options.iter().enumerate() {
         let on = i == chosen;
-        let w = name.chars().count() as u16 + 4;
+        let w = kit::width(name) as u16 + 4;
         if x + w > at.right() {
             break;
         }
@@ -1457,7 +1462,7 @@ fn draw_top(frame: &mut Frame, page: &mut Page, body: Rect) {
     // SHOW and RANK BY, both radio rows.
     let mut x = body.x;
     let put = |frame: &mut Frame, x: u16, text: &str| -> u16 {
-        let w = text.chars().count() as u16;
+        let w = kit::width(text) as u16;
         frame.render_widget(Paragraph::new(Span::styled(text.to_string(), dim())), Rect { x, y, width: w, height: 1 });
         x + w
     };
@@ -1466,7 +1471,7 @@ fn draw_top(frame: &mut Frame, page: &mut Page, body: Rect) {
     x = radio_row(frame, page, Rect { x, y, width: body.right().saturating_sub(x), height: 1 }, &entities, page.entity.index(), Act::Entity);
     let rank = t!("sta.ctl_rank").to_string();
     let metrics = [Metric::Plays.label(), Metric::Time.label()];
-    let need = rank.chars().count() + 2 + metrics.iter().map(|m| m.chars().count() + 7).sum::<usize>();
+    let need = kit::width(&rank) + 2 + metrics.iter().map(|m| kit::width(m) + 7).sum::<usize>();
     let start = body.right().saturating_sub(need as u16).max(x + 2);
     if start as usize + need <= body.right() as usize {
         let x = put(frame, start, &rank) + 2;
@@ -2652,6 +2657,45 @@ mod tests {
 
     fn row(frame: &str, needle: &str) -> String {
         frame.lines().find(|l| l.contains(needle)).map(|l| l.to_string()).unwrap_or_else(|| panic!("no row with {needle:?}:\n{frame}"))
+    }
+
+    /// The radio rows (ORIGIN, SHOW, RANK BY) measure their options in
+    /// cells: the Japanese origin labels, drawn with their glyphs in a
+    /// 40-cell row, each get a click rect of their width in cells and the
+    /// glyph's four, three cells apart, show whole, and the x returned is
+    /// past the last, which is what the callers' `need` counts. Drawn
+    /// through `radio_row` with the labels passed in, so no test switches
+    /// the process-wide locale.
+    #[test]
+    fn the_radio_rows_measure_japanese_options_in_cells() {
+        crate::kit::theme::pin_modern_terminal();
+        let options: Vec<String> = ["すべて", "このサーバー", "ピア"].iter().map(|s| s.to_string()).collect();
+        let mut p = page();
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        let mut end = 0;
+        terminal
+            .draw(|frame| end = radio_row(frame, &mut p, Rect { x: 0, y: 0, width: 40, height: 1 }, &options, 1, Act::Origin))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut x = 0;
+        for (i, name) in options.iter().enumerate() {
+            let act = Act::Origin(i);
+            let rect = p.ui.clicks.iter().find(|(_, a)| *a == act).map(|(r, _)| *r).unwrap_or_else(|| panic!("option {i}"));
+            assert_eq!((rect.x, rect.width), (x, kit::width(name) as u16 + 4), "option {i}: its cells");
+            let mut text = String::new();
+            let mut cx = rect.x;
+            while cx < rect.right() {
+                let symbol = buffer[(cx, 0)].symbol();
+                text.push_str(symbol);
+                cx += (kit::width(symbol) as u16).max(1);
+            }
+            let glyph = if i == 1 { g("(•)", "(*)") } else { "( )" };
+            assert_eq!(text, format!("{glyph} {name}"), "option {i}: whole");
+            x = rect.right() + 3;
+        }
+        assert_eq!(end, x, "the x past the row");
+        let need: usize = options.iter().map(|o| kit::width(o) + 7).sum();
+        assert_eq!(usize::from(end), need, "what the callers right-anchor the row by");
     }
 
     #[test]

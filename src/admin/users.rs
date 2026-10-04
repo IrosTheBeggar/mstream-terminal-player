@@ -1248,11 +1248,16 @@ fn draw_add(frame: &mut Frame, room: &mut Room, area: Rect, f: &AddForm) {
         if f.libraries.is_empty() {
             frame.render_widget(Paragraph::new(Span::styled(t!("usr.form_no_libraries").to_string(), dim())), line(y));
         } else {
-            // One row of ticks, each its own click target, 3 cells apart.
+            // One row of ticks, each its own click target, 3 cells apart,
+            // and each as wide as it draws: the label in cells and the
+            // tick's four. Counted by characters, a library named in
+            // Japanese got a rect short by half its name, so the name was
+            // cut there and its click covered only what was left, and the
+            // row took a tick it had no room for instead of leaving it off.
             let mut lx = x;
             for (i, (name, on)) in f.libraries.iter().enumerate() {
                 let label = printable(name, NAME_MAX);
-                let cw = label.chars().count() as u16 + 4;
+                let cw = kit::width(&label) as u16 + 4;
                 if lx + cw > x + w {
                     break;
                 }
@@ -1484,6 +1489,48 @@ mod tests {
 
     fn row(frame: &str, needle: &str) -> String {
         frame.lines().find(|l| l.contains(needle)).map(|l| l.to_string()).unwrap_or_else(|| panic!("no row with {needle:?}:\n{frame}"))
+    }
+
+    /// The add form's library ticks measure their names in cells: four
+    /// libraries named in Japanese, ten characters (twenty cells) each, at
+    /// 100×30. Three ticks of 24 cells and their gaps fill 78 of the row's
+    /// 80, so the fourth is left off; each tick's click rect is its drawn
+    /// width and shows its whole name. Counted by characters the row took
+    /// all four, each cut at half its name.
+    #[test]
+    fn the_add_forms_library_ticks_measure_japanese_names_in_cells() {
+        let _en = english();
+        let names = ["日本の音楽アーカイブ", "クラシック全集の録音", "ジャズのレコード盤集", "映画音楽のサウンド集"];
+        let mut r = room();
+        r.queued = None;
+        r.apply(Done::Loaded(Ok((BTreeMap::new(), names.iter().map(|s| s.to_string()).collect()))));
+        press(&mut r, KeyCode::Char('a'));
+        let Modal::Add(f) = &r.modal else { panic!("the add form") };
+        let fields = f.fields();
+        let index_of = |field: AField| fields.iter().position(|x| *x == field).expect("a field");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut r)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let tick = |i: usize| {
+            let act = Act::FormToggle(index_of(AField::Lib(i)));
+            r.ui.clicks.iter().find(|(_, a)| *a == act).map(|(rect, _)| *rect)
+        };
+        let ticks: Vec<Rect> = (0..3).map(|i| tick(i).unwrap_or_else(|| panic!("tick {i}"))).collect();
+        assert_eq!(tick(3), None, "the fourth has no room, so it is left off");
+        for (i, rect) in ticks.iter().enumerate() {
+            assert_eq!(rect.width, 24, "tick {i}: its name's 20 cells and the tick's four");
+            if i > 0 {
+                assert_eq!(rect.x, ticks[i - 1].right() + 3, "tick {i}: three cells past the last");
+            }
+            let mut text = String::new();
+            let mut x = rect.x;
+            while x < rect.right() {
+                let symbol = buffer[(x, rect.y)].symbol();
+                text.push_str(symbol);
+                x += (kit::width(symbol) as u16).max(1);
+            }
+            assert_eq!(text, format!("[✓] {}", names[i]), "tick {i}: its whole name");
+        }
     }
 
     #[test]
