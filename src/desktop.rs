@@ -274,7 +274,7 @@ fn focus(pid: u32) -> bool {
 /// measured 13 to 26 px, so a zero-size test would not catch it, and
 /// requiring WS_CAPTION would also turn away a borderless window that is
 /// the player. The mStream launcher's search for the player's window
-/// (rust-launcher/src/platform.rs, `is_app_window`) keeps this style rule.
+/// (rust-launcher/src/platform.rs, `is_app_window`) keeps the same rule.
 ///
 /// A console window ("ConsoleWindowClass") is skipped too, whatever its
 /// style: conhost answers GetWindowThreadProcessId for its window with a
@@ -284,10 +284,10 @@ fn focus(pid: u32) -> bool {
 /// a plain app window by its style. With the player minimised beneath it,
 /// the console would take the foreground and the player stay minimised.
 /// The class name is read from the window's class, never by a message. The
-/// launcher's search does not have this rule (as of the launcher branch
-/// that added its style rule): a desktop player started from a shell that
-/// then exited, minimised, and raised from the tray can still bring the
-/// console forward there. Keep the two in step when the launcher gains it.
+/// launcher's search (`is_app_window` in rust-launcher/src/platform.rs)
+/// has this console rule too, with the same exact class match, so a player
+/// raised from the tray and one raised by a second launch pick the same
+/// window. Keep the two in step.
 #[cfg(windows)]
 fn is_app_window(class: &str, ex_style: u32) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW};
@@ -446,7 +446,10 @@ mod tests {
         // (0x00040110), and the bits a transparent-capable winit window adds.
         assert!(is_app_window(PLAYER, 0));
         assert!(is_app_window(PLAYER, WS_EX_WINDOWEDGE | WS_EX_ACCEPTFILES | WS_EX_APPWINDOW));
-        assert!(is_app_window(PLAYER, WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_WINDOWEDGE));
+        assert!(is_app_window(
+            PLAYER,
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_WINDOWEDGE
+        ));
     }
 
     #[cfg(windows)]
