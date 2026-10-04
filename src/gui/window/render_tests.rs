@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui_wgpu::shaders::DefaultPostProcessor;
 use ratatui_wgpu::wgpu::TextureFormat;
-use ratatui_wgpu::{Builder, Dimensions, Font};
+use ratatui_wgpu::{Builder, Dimensions, Font, Fonts};
 
 use super::{emoji_face, hack, script_fallbacks, symbol_fallback, symbols};
 use crate::runtime::block_on;
@@ -909,18 +909,30 @@ fn an_unjoined_sequence_draws_its_base_and_nothing_after() {
 /// What "whole" looks like is the face's to say, so the test asks it: the shape of the drawn
 /// ink, its width over its height, must be the shape of every picture's ink at the place the
 /// face put it (`Font::composition`), within a quarter; and where the first picture alone is
-/// a different shape, the drawing must be nearer the whole than the first picture. Shapes,
-/// not sizes, as the run is shrunk to fit its box by however much its advance exceeds it. On
+/// a different shape, the drawing must be nearer the whole than the first picture. On
 /// Windows 10 (Segoe UI Emoji 1.29, COLRv0) the people stand side by side: the whole is 2734
 /// units wide and 2300 tall (1.19), the man who comes first 1366 by 2300 (0.59), and the
-/// family draws 18 px wide and 16 tall (1.13) at 24 px, its first picture alone (as before
-/// change 22) 11 by 20 (0.55). The test once asked only that the family be wider than tall, which is
-/// Windows 10's design and not a rule: GitHub's windows-2025 image (its Segoe UI Emoji is
-/// Windows 11's) drew it 19 wide and 20 tall, the height of an emoji not shrunk, so its run is
-/// no wider than one emoji and its people, it seems, composed inside one emoji's square. Nor
-/// would 👨 drawn alone by the same face be a measure: as an emoji of his own he is square too
-/// (18 by 19 here), not the narrow member the family begins with. The shaping, the boxes and
-/// the drawn extents are printed first, so a failure on a face not met here says which it is.
+/// family draws 18 px wide and 16 tall (1.12) at 24 px, its first picture alone (as before
+/// change 22) 11 by 20 (0.55). The test once asked only that the family be wider than tall,
+/// which is Windows 10's design and not a rule: GitHub's windows-2025 image (its Segoe UI
+/// Emoji is Windows 11's) drew it 19 wide and 20 tall, the height of an emoji not shrunk, so
+/// its run is no wider than one emoji and its people, it seems, composed inside one emoji's
+/// square.
+///
+/// A face whose first picture is itself about the shape of the whole leaves the shapes
+/// nothing to tell apart, so sizes are held too. The run is fitted to its box at the
+/// renderer's own scale (`Fonts::scale_of`), and that is corrected by how much less of 👨
+/// alone is inked than his box at his own fitted scale (0.89 here, as `ink_extent` passes
+/// over Segoe UI Emoji's dark outlines): the drawing must be within 2 px of the whole so
+/// sized on both axes (18.4 by 15.4 here), and nearer it than the first picture alone, at its
+/// own advance (12.2 by 20.6) or at the run's (9.2 by 15.4), on each axis where that differs
+/// from the whole by more than 2 px. Each check fails here with the first picture drawn
+/// alone, the shape's and the size's apart: with composing switched off in `flush` the family
+/// draws 11 by 20, with the run's later members left unpainted 8 by 15. Where the first
+/// picture is 👨's own glyph, unmoved, the family must also not draw as he does, pixel for
+/// pixel. Where nothing here tells the first picture from the whole, a line says so, so a
+/// passing run is not taken for proof. The shaping, the boxes, the scale and the drawn
+/// extents are printed first, so a failure on a face not met here says which it met.
 ///
 /// Nothing reaches the cells around it either: the girl drawn at the man's place once reached
 /// into the cell before the family's. A face that joins the family (Apple, Noto), or neither
@@ -958,10 +970,17 @@ fn a_family_the_face_composes_draws_whole_in_its_cells() {
     let Some(frame) = row(&faces, 6, format!("|{family}|")) else { return };
     let Some(bars) = row(&faces, 6, "|  |") else { return };
     let Some(man) = row(&faces, 6, "\u{1F468}") else { return };
-    if let Some(([left, right], [top, bottom])) = ink_extent(&man, 0, 2) {
-        let (wide, tall) = (right - left + 1, bottom - top + 1);
-        eprintln!("the man alone: inked x {left}..={right}, y {top}..={bottom}: {wide} by {tall}");
-    }
+    let him = emoji.composition("\u{1F468}");
+    let Some(([left, right], [top, bottom])) = ink_extent(&man, 0, 2) else {
+        panic!("👨: his cells are empty");
+    };
+    let (his_wide, his_tall) = (right - left + 1, bottom - top + 1);
+    eprintln!(
+        "the man alone: inked x {left}..={right}, y {top}..={bottom}: {his_wide} by {his_tall}; \
+         advance {}, glyphs {:?}",
+        him.advance,
+        him.glyphs.iter().map(|glyph| (glyph.glyph, glyph.ink)).collect::<Vec<_>>(),
+    );
     let Some(([left, right], [top, bottom])) = ink_extent(&frame, 1, 2) else {
         panic!("|family|: the family's cells are empty");
     };
@@ -969,19 +988,48 @@ fn a_family_the_face_composes_draws_whole_in_its_cells() {
     let drawn = wide as f32 / tall as f32;
     let extent = format!("x {left}..={right}, y {top}..={bottom}: {wide} by {tall}");
     eprintln!("family: inked {extent} ({drawn:.2})");
-    let (Some(whole), Some(first)) = (shaped.ink(), shaped.first_ink()) else {
+    let (Some(whole_ink), Some(first_ink)) = (shaped.ink(), shaped.first_ink()) else {
         panic!("the face composes the family but none of its pictures has ink");
     };
+    let Some(his_ink) = him.ink() else { panic!("👨 is drawn but his picture has no ink") };
     let shape = |[x0, y0, x1, y1]: [f32; 4]| (x1 - x0, y1 - y0, (x1 - x0) / (y1 - y0));
-    let (whole_w, whole_h, whole) = shape(whole);
-    let (first_w, first_h, first) = shape(first);
-    // The size each would be drawn at the scale the drawn height says was used.
-    let px = tall as f32 / whole_h;
+    let (whole_w, whole_h, whole) = shape(whole_ink);
+    let (first_w, first_h, first) = shape(first_ink);
+    // Sizes as well as shapes: a face whose first picture is the shape of the whole (a figure
+    // as square as the family composed inside it) leaves the shapes nothing to tell apart. The
+    // face's scale is the renderer's own (`Fonts::scale_of`), and a drawing is fitted to its
+    // box of two cells as `rasterize_glyph` fits it: by the box's width over the advance in
+    // whole pixels, never enlarged. The drawn ink is not the ink box at that scale, though:
+    // pixels within 40 of the ground are not ink to `ink_extent`, which takes off Segoe UI
+    // Emoji's dark outlines, and a layer's outline box can hold space its fill leaves clear.
+    // Here the whole would be 20.6 by 17.4 px and is drawn 18 by 16. 👨 alone, drawn by the
+    // same face, says by how much: his drawn height over his box's at his own fitted scale.
+    let scale = Fonts::new(faces[0].clone(), frame.cell_h).scale_of(emoji);
+    let box_w = 2 * frame.cell_w;
+    let fit = |advance: i32| (box_w as f32 / (advance as f32 * scale) as u32 as f32).min(1.0);
+    let his_box = (his_ink[3] - his_ink[1]) * scale * fit(him.advance);
+    let inked = his_tall as f32 / his_box;
+    let at = |[x0, y0, x1, y1]: [f32; 4], advance: i32| {
+        let px = scale * fit(advance) * inked;
+        ((x1 - x0) * px, (y1 - y0) * px)
+    };
+    let leader = shaped.glyphs.iter().find(|glyph| glyph.colour).unwrap();
+    let (whole_x, whole_y) = at(whole_ink, shaped.advance);
+    // What the drawing would be were it not whole: the first picture alone at its own advance,
+    // as before change 22, or alone in the composed box, a member after it painting nothing.
+    let partial = [
+        ("its first picture alone", at(first_ink, leader.x_advance)),
+        ("its first picture alone in the run's box", at(first_ink, shaped.advance)),
+    ];
     eprintln!(
-        "every picture: {whole_w} by {whole_h} units ({whole:.2}), {:.1} by {tall} px at the \
-         drawn scale; the first alone: {first_w} by {first_h} units ({first:.2}), {:.1} px wide",
-        whole_w * px,
-        first_w * px,
+        "every picture: {whole_w} by {whole_h} units ({whole:.2}), {whole_x:.1} by {whole_y:.1} \
+         px; the first: {first_w} by {first_h} units ({first:.2}), {:.1} by {:.1} px alone, \
+         {:.1} by {:.1} in the run's box; {scale:.5} px a unit, {box_w} px a box, 👨's drawn \
+         height {inked:.2} of his box's",
+        partial[0].1.0,
+        partial[0].1.1,
+        partial[1].1.0,
+        partial[1].1.1,
     );
     for col in [0, 3, 4, 5] {
         assert!(frame.cell(col, 0) == bars.cell(col, 0), "|family|: cell {col} is not |  |'s");
@@ -990,12 +1038,44 @@ fn a_family_the_face_composes_draws_whole_in_its_cells() {
         (drawn - whole).abs() <= whole / 4.0,
         "the family is drawn {wide} by {tall} ({drawn:.2}): its pictures together are {whole:.2}",
     );
-    if (whole - first).abs() >= whole / 5.0 {
+    let shapes_differ = (whole - first).abs() >= whole / 5.0;
+    if shapes_differ {
         assert!(
             (drawn - whole).abs() < (drawn - first).abs(),
             "the family is drawn {wide} by {tall} ({drawn:.2}), nearer its first picture alone \
              ({first:.2}) than every picture together ({whole:.2})",
         );
+    }
+    // Two pixels: an inked edge can take one more than the ink box's, at either end.
+    let (wide, tall) = (wide as f32, tall as f32);
+    assert!(
+        (wide - whole_x).abs() <= 2.0 && (tall - whole_y).abs() <= 2.0,
+        "the family is drawn {wide} by {tall}: its pictures together would be {whole_x:.1} by \
+         {whole_y:.1}",
+    );
+    let mut sizes_differ = false;
+    for (what, (x, y)) in partial {
+        let x_differs = (whole_x - x).abs() > 2.0;
+        let y_differs = (whole_y - y).abs() > 2.0;
+        sizes_differ |= x_differs || y_differs;
+        assert!(
+            (!x_differs || (wide - whole_x).abs() < (wide - x).abs())
+                && (!y_differs || (tall - whole_y).abs() < (tall - y).abs()),
+            "the family is drawn {wide} by {tall}, nearer {what} ({x:.1} by {y:.1}) than every \
+             picture together ({whole_x:.1} by {whole_y:.1})",
+        );
+    }
+    // Where the first picture is 👨's own, unmoved, it alone would draw as he does, pixel for
+    // pixel (as 👨‍🦖 does, above): the family must not. Elsewhere, with neither its shape nor
+    // its size apart from the whole's, nothing here could tell the two apart, and a passing
+    // run says so rather than pass for proof.
+    let his_glyph = him.glyphs.iter().find(|glyph| glyph.colour).map(|glyph| glyph.glyph);
+    let unmoved = leader.x_offset == 0 && leader.y_offset == 0;
+    if his_glyph == Some(leader.glyph) && unmoved {
+        let alike = (0..2).all(|col| frame.cell(col + 1, 0) == man.cell(col, 0));
+        assert!(!alike, "the family is drawn as 👨 alone, its first picture");
+    } else if !shapes_differ && !sizes_differ {
+        eprintln!("the first picture alone is indistinguishable from the whole by its extent");
     }
     let pixels = frame.cell(1, 0).into_iter().chain(frame.cell(2, 0));
     assert!(pixels.filter(|&px| coloured(px)).count() > 0, "the family has no colour");

@@ -448,7 +448,10 @@ release carries them and the patch entry can go.
       picture, and its ink box at that place, taken by a painter that paints nothing and keeps
       the box of every outline a layer fills, through the pushed transforms and cut to the clip
       box (`InkBounds`), as a COLRv1 picture's own `glyf` entry may be empty. The family test
-      compares the drawn shape with it and prints it.
+      compares the drawn shape with it and prints it. `Fonts::scale_of` (public, new) is the
+      pixels per unit a face is drawn at in the fonts' cells (`face_scale`'s), so the same
+      test can hold the drawn size too, which tells the whole from its first picture on a face
+      whose first picture is about the whole's shape.
     - `Rendered` and `Sourced` are keyed by place, glyph and width, and a removal took the
       key out of `Rendered` whichever cell had put it there. Change 21 made one place
       routinely change hands: an unjoined flag's second letter stands in the continuation and
@@ -461,7 +464,7 @@ release carries them and the patch entry can go.
     Checked offscreen on Windows 10 (GTX 1060, DX12) with Segoe UI Emoji
     (`src/gui/window/render_tests.rs`): `a_family_the_face_composes_draws_whole_in_its_cells`
     draws `|👨‍👩‍👧|` with both bars as `|  |` draws them and the family's ink 18 px wide and 16
-    tall at 24 px (1.13), the shape of its three pictures together (2734 by 2300 units, 1.19),
+    tall at 24 px (1.12), the shape of its three pictures together (2734 by 2300 units, 1.19),
     where its first picture alone was drawn 11 wide and 20 tall (0.55; the test fails so, and
     did again with `flush`'s composing switched off). That the family is wider than tall is
     Windows 10's design, not a rule, and the test first asked only that: GitHub's
@@ -469,7 +472,15 @@ release carries them and the patch entry can go.
     height of an emoji not shrunk, so (by inference; that font was not to hand) its run is no
     wider than one emoji and its people are composed inside one emoji's square. The test now
     holds the drawn shape to the face's own (`Font::composition`) within a quarter, and nearer
-    it than to the first picture's where those differ by a fifth or more, and prints both.
+    it than to the first picture's where those differ by a fifth or more, and prints both. As
+    a face's first picture can be about the whole's shape, it holds the size too: the run
+    fitted to its box at `Fonts::scale_of`, scaled by how much of 👨 alone `ink_extent` finds
+    inked (0.89 of his box here, Segoe UI Emoji's dark outlines being near the ground), is
+    18.4 by 15.4 px, within 2 px of the drawing, which must also be nearer it than the first
+    picture alone at its own advance (12.2 by 20.6) or the run's (9.2 by 15.4). The run's
+    later members left unpainted draw 8 by 15 and fail by shape and by size alike. Where the
+    first picture is 👨's own glyph, unmoved, the family must not draw as he does; where
+    nothing tells the two apart, the test says so in a line rather than pass for proof.
     Also `an_unjoined_sequence_draws_its_base_and_nothing_after` holds that 👨‍🦖 is not composed;
     `a_flag_letter_that_changes_cells_in_place_is_drawn_by_its_new_cell` draws `x🇵🇪|` (gold)
     then `🇯🇵|`, the reverse, and the same with 🇦🇦, each cell for cell as the second line draws

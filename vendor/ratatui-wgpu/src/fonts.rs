@@ -653,6 +653,16 @@ impl<'a> Fonts<'a> {
         }
     }
 
+    /// The pixels per font unit `font` is drawn at in these fonts' cells (`face_scale`), before
+    /// a glyph wider than its box is fitted to it. Public so the player's tests can say what
+    /// size a drawing should be, not only what shape (VENDORED.md, change 22).
+    pub fn scale_of(
+        &self,
+        font: &Font,
+    ) -> f32 {
+        self.face_scale(font.font()).scale
+    }
+
     pub(crate) fn count(&self) -> usize {
         1 + self.bold.len() + self.italic.len() + self.bold_italic.len() + self.regular.len()
     }
