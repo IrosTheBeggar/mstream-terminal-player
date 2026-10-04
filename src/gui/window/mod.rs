@@ -670,10 +670,14 @@ struct Faces {
     /// own Latin in front of Hack's. Hack is also the builder's last
     /// resort, which is what bold and italic cells fall back to with faked
     /// styles. The emoji face comes last so a character a text face also
-    /// has (✔, ㊗) keeps its text form, as a terminal draws it; a cluster
-    /// only the emoji face has all of (an emoji with VS16, a flag, a ZWJ
-    /// family) still goes to it whole, since the backend picks the first
-    /// face that has every character of a cell.
+    /// has (✔, ㊗, ♥) keeps its text form, as a terminal draws it; a cluster
+    /// only the emoji face has all of still goes to it whole, since the
+    /// backend picks the first face that has every character of a cell. An
+    /// emoji whose presentation is a picture (🎵, an emoji with VS16, a
+    /// flag, a ZWJ family) goes to the face that has it in colour although
+    /// a symbol face before it has an outline for it (Segoe UI Symbol has
+    /// 🎵 and the family's people): the backend prefers a colour glyph for
+    /// such a cell (vendor/ratatui-wgpu/VENDORED.md, change 21).
     fonts: Vec<Font<'static>>,
     took: Vec<(&'static str, Duration)>,
 }

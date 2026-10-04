@@ -678,8 +678,18 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
             // each advance, and upstream drew the second in the next cell and so on,
             // over whatever that cell held. Only the first is drawn now: the sequence
             // degrades to its base emoji (👨 for an unknown family, 👍 for a tone the
-            // face lacks), in its own cells.
-            let mut placed = vec![false; bounds.width as usize];
+            // face lacks), in its own cells. What follows a glyph left out is left out
+            // too: Windows 10's Segoe UI Emoji composes a family from its people, the man
+            // and the woman advancing and the girl not, placed back over the woman, and
+            // the girl drawn at the man's place reached into the cell before.
+            //
+            // A flag the face has no picture for is the exception: its two regional
+            // indicators shape to two letters, and the first alone, a narrow letter in the
+            // flag's two cells, said nothing (Segoe UI Emoji has no country flags, so 🇯🇵 was
+            // a sliver of a `J` on Windows). Each letter is drawn in a cell of its own
+            // instead, `J` then `P`, as Windows Terminal draws it. A face with the flag
+            // shapes the pair to one glyph, which covers both cells as before.
+            let mut placed = vec![0u8; bounds.width as usize];
             let mut shape = |font: &Font,
                              fake_bold,
                              fake_italic,
@@ -689,6 +699,19 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                 let face_scale = self.fonts.face_scale(metrics);
                 let advance_scale = face_scale.scale;
 
+                // How many glyphs that advance each cell shaped to, for the flags above.
+                let mut advancing = vec![0u8; bounds.width as usize];
+                for (info, position) in buffer
+                    .glyph_infos()
+                    .iter()
+                    .zip(buffer.glyph_positions().iter())
+                {
+                    if (position.x_advance as f32 * advance_scale) as i32 != 0 {
+                        let cell_idx = self.rowmap[info.cluster as usize] as usize;
+                        advancing[cell_idx] = advancing[cell_idx].saturating_add(1);
+                    }
+                }
+
                 for (info, position) in buffer
                     .glyph_infos()
                     .iter()
@@ -696,16 +719,23 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                 {
                     let cell_idx = self.rowmap[info.cluster as usize] as usize;
                     let cell = &row[cell_idx];
-                    let max_width = cell.symbol().width();
+                    // An unjoined flag's letters stand one to a cell, each a cell wide.
+                    let split = advancing[cell_idx] == 2 && regional_pair(cell.symbol());
+                    let max_width = if split { 1 } else { cell.symbol().width() };
                     let sourced = &mut new_sourced[cell_idx];
 
                     let basey = y as i32 * self.fonts.height_px() as i32
                         + (position.y_offset as f32 * advance_scale) as i32;
                     let mut advance = (position.x_advance as f32 * advance_scale) as i32;
                     if advance != 0 {
-                        if std::mem::replace(&mut placed[cell_idx], true) {
-                            continue;
-                        }
+                        placed[cell_idx] = placed[cell_idx].saturating_add(1);
+                    }
+                    // Past the glyphs the cell draws (one, or an unjoined flag's two), and
+                    // whatever does not advance after them, which hangs on one left out.
+                    if placed[cell_idx] > 1 + u8::from(split) {
+                        continue;
+                    }
+                    if advance != 0 {
                         x += next_advance;
                         advance =
                             max_width as i32 * advance.signum() * self.fonts.min_width_px() as i32;
@@ -1007,6 +1037,10 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
 
                 let [r, g, b] = bg_color;
                 let bg_color_u32: u32 = u32::from_be_bytes([r, g, b, 255]);
+                // A glyph placed in a wide cell's continuation (an unjoined flag's second
+                // letter, `flush`'s shaping) is its flag's: the continuation's own background
+                // is the default one, which would show as a gap in a highlighted row.
+                let continuation = cell.symbol().is_empty();
 
                 for (
                     (x, y, _, _),
@@ -1026,6 +1060,16 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
                         self.colors.c2c(cell.bg, self.reset_bg)
                     } else {
                         self.colors.c2c(cell.fg, self.reset_fg)
+                    };
+                    let bg_color_u32 = if continuation {
+                        let [r, g, b] = if reverse {
+                            self.colors.c2c(cell.fg, self.reset_fg)
+                        } else {
+                            self.colors.c2c(cell.bg, self.reset_bg)
+                        };
+                        u32::from_be_bytes([r, g, b, 255])
+                    } else {
+                        bg_color_u32
                     };
 
                     let alpha = if cell.modifier.contains(Modifier::HIDDEN)
@@ -1169,6 +1213,13 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
             }
         }
     }
+}
+
+/// Whether a cell's grapheme is a flag of regional indicators: two of them, and nothing else.
+fn regional_pair(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    let regional = |ch: Option<char>| matches!(ch, Some('\u{1F1E6}'..='\u{1F1FF}'));
+    regional(chars.next()) && regional(chars.next()) && chars.next().is_none()
 }
 
 /// A glyph's raster for its atlas box, and whether it is in colour: a colour glyph's own pixels

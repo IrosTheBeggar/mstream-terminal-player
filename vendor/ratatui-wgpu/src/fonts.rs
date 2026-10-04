@@ -4,7 +4,10 @@ use std::hash::RandomState;
 
 use ratatui_core::buffer::Cell;
 use ratatui_core::style::Modifier;
+use rustybuzz::ttf_parser::RasterImageFormat;
 use rustybuzz::Face;
+use unicode_properties::EmojiStatus;
+use unicode_properties::UnicodeEmoji;
 
 /// A Font which can be used for rendering.
 #[derive(Clone)]
@@ -15,6 +18,10 @@ pub struct Font<'a> {
     /// (a symbol or emoji face) only has `.notdef`'s advance to offer, which
     /// says nothing about a cell, so it does not narrow the grid.
     sets_width: bool,
+    /// The face has colour glyphs the backend draws: COLR layers, or sbix or
+    /// CBDT bitmaps. A text face has none, and is never asked which of its
+    /// glyphs are in colour.
+    colour: bool,
     id: u64,
 }
 
@@ -50,10 +57,13 @@ impl<'a> Font<'a> {
             let advance = font
                 .glyph_hor_advance(m.unwrap_or_default())
                 .unwrap_or_default() as f32;
+            let tables = font.tables();
+            let colour = tables.colr.is_some() || tables.sbix.is_some() || tables.cbdt.is_some();
             Self {
                 font,
                 advance,
                 sets_width: m.is_some(),
+                colour,
                 id: hasher.finish(),
             }
         })
@@ -91,6 +101,29 @@ impl Font<'_> {
             (advancing.next(), advancing.next()),
             (Some((info, _)), None) if info.glyph_id != 0
         )
+    }
+
+    /// Whether this face's glyph for `ch` is one the backend draws in colour: COLR layers, or a
+    /// colour bitmap (sbix or CBDT, a PNG or premultiplied BGRA). A face's monochrome bitmaps
+    /// (EBDT, an old CJK face's hinted strikes) and a text face's outlines are not. Asked only
+    /// of a cluster with emoji presentation, by [`Fonts::select_font`].
+    fn colour_glyph(
+        &self,
+        ch: char,
+    ) -> bool {
+        if !self.colour {
+            return false;
+        }
+        let Some(glyph) = self.font.glyph_index(ch) else {
+            return false;
+        };
+        self.font.is_color_glyph(glyph)
+            || self.font.glyph_raster_image(glyph, u16::MAX).is_some_and(|raster| {
+                matches!(
+                    raster.format,
+                    RasterImageFormat::PNG | RasterImageFormat::BitmapPremulBgra32
+                )
+            })
     }
 
     pub(crate) fn char_width(
@@ -403,7 +436,17 @@ impl<'a> Fonts<'a> {
         // has (a stray run of tags, the tail of a flag whose 🏴 a text field clipped) was
         // given to the emoji face, which has no glyph for the base and drew `.notdef`, a box,
         // over it. With the base's face, the shaper hides the default-ignorable rest.
-        let mut max = (false, 0);
+        //
+        // Between those two, a cluster with emoji presentation (🎵, ❤️, a ZWJ family, a flag)
+        // prefers a face whose glyph for its base is in colour. The first face with every
+        // character used to win outright, and a symbol face that comes before the emoji face
+        // so that ♥ and ✔ keep their text form has monochrome outlines for emoji too: Segoe
+        // UI Symbol drew 🎵 as an outline and 👨‍👩‍👧 as one grey silhouette on Windows, where
+        // a terminal draws both from Segoe UI Emoji. A cluster with text presentation (♥, ✔,
+        // ★ without VS16, a digit) is chosen as before, and with no colour face for an emoji
+        // the first face with the most of it still draws it.
+        let emoji = emoji_presentation(cluster);
+        let mut max = (false, false, 0);
         let mut font = None;
         let base = cluster.chars().next();
         for (candidate, fake_bold, fake_italic) in fonts.into_iter().chain(std::iter::once((
@@ -420,12 +463,15 @@ impl<'a> Fonts<'a> {
                         (count, idx)
                     });
             let has_base = base.is_some_and(|ch| candidate.font().glyph_index(ch).is_some());
-            if (has_base, count) > max {
-                max = (has_base, count);
+            let colour = emoji && has_base && base.is_some_and(|ch| candidate.colour_glyph(ch));
+            if (has_base, colour, count) > max {
+                max = (has_base, colour, count);
                 font = Some((candidate, fake_bold, fake_italic));
             }
 
-            if count == last_idx + 1 {
+            // A face with all of the cluster ends the search, unless the cluster is an emoji
+            // and the face would draw it as an outline: a colour face may still come.
+            if count == last_idx + 1 && (!emoji || colour) {
                 break;
             }
         }
@@ -451,4 +497,52 @@ impl<'a> Fonts<'a> {
             .min()
             .unwrap_or(u32::MAX)
     }
+}
+
+/// Whether a cluster (one cell's grapheme) asks to be drawn as an emoji, a picture, rather than
+/// as text, by Unicode's rules (UTS #51): a character whose default is emoji presentation (🎵,
+/// ⌚, a regional indicator) unless VS15 (U+FE0E) follows it; any character VS16 (U+FE0F)
+/// follows; and an emoji followed by what only an emoji sequence has, a skin tone, a keycap's
+/// U+20E3, tags (a subdivision flag) or a ZWJ and another emoji. A character whose default is
+/// text (♥, ✔, ★, a digit, `#`) with none of those after it is text. Public so the player's
+/// tests can hold it to known code points.
+pub fn emoji_presentation(cluster: &str) -> bool {
+    let mut chars = cluster.chars();
+    let Some(base) = chars.next() else {
+        return false;
+    };
+    match chars.next() {
+        Some('\u{FE0E}') => false,
+        Some('\u{FE0F}') => true,
+        None => default_emoji(base),
+        Some(_) if default_emoji(base) => true,
+        Some(_) if !base.is_emoji_char() => false,
+        Some(_) => {
+            // A skin tone, a keycap, a tag, or an emoji after a ZWJ.
+            let mut after_zwj = false;
+            cluster.chars().skip(1).any(|ch| {
+                let joined = std::mem::replace(&mut after_zwj, ch == '\u{200D}');
+                (joined && ch.is_emoji_char())
+                    || matches!(
+                        ch,
+                        '\u{1F3FB}'..='\u{1F3FF}' | '\u{20E3}' | '\u{E0020}'..='\u{E007F}'
+                    )
+            })
+        }
+    }
+}
+
+/// `Emoji_Presentation=Yes`: the character is a picture unless asked otherwise. It is the
+/// property, not `Emoji`, which every character with an emoji form has: ♥, ✔ and `#` are
+/// emoji characters whose default is text. No ASCII character has it, so most cells are
+/// answered without the table.
+fn default_emoji(ch: char) -> bool {
+    !ch.is_ascii()
+        && matches!(
+            ch.emoji_status(),
+            EmojiStatus::EmojiPresentation
+                | EmojiStatus::EmojiPresentationAndModifierBase
+                | EmojiStatus::EmojiPresentationAndEmojiComponent
+                | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+        )
 }
