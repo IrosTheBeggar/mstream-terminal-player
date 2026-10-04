@@ -463,10 +463,15 @@ and the patch entry can go.
     10 erased the glyph in the written cell's own place only. A wide cell's continuation can
     land on the first half of another wide glyph, one that began a cell after the new one, and
     that glyph's own continuation lies past the new cell's reach: it was left as the empty
-    continuation (`NULL_CELL`) though nothing covered it. ratatui's diff does send that cell (a
-    blank, since the wide glyph that stood before it is gone), but change 18's rule turned the
-    blank away as one for a cell a glyph still covers, so the row's string lost a cell and every
-    glyph after it on the row drew one cell to the left. Met in the Windows smoke of v0.12.0:
+    continuation (`NULL_CELL`) though nothing covered it, and nothing ratatui sends puts it
+    right. Where the new cell there is styled like ratatui's previous one (the old glyph's
+    trailing cell, which ratatui keeps as a default blank: unstyled text such as `a日x|` then
+    `日 x|`), ratatui-core 0.1's `BufferDiff` finds the two equal and never sends it, so the
+    cell simply stays the continuation, change 18 playing no part. Where the style differs
+    (the bar's title is a styled blank there), the diff sends the blank, and change 18's rule
+    turned it away as one for a cell a glyph still covers. Either way the row's string lost a
+    cell and every glyph after it on the row drew one cell to the left, and so `draw` has to
+    blank that cell itself, not count on ratatui to. Met in the Windows smoke of v0.12.0:
     the bar's title `Heart ❤️ Song`, drawn after `Family 👨‍👩‍👧 Tune` (whose family began a
     cell later than the heart), read `Heart ❤️Song` in the window and in its dump's text, and
     `Flag 🇯🇵 Track` after it read `Flag 🇯🇵Track`; the queue showed both whole, as rows that

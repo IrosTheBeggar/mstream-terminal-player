@@ -531,11 +531,14 @@ impl<'s, P: PostProcessor, S: RenderSurface<'s>> Backend for WgpuBackend<'_, 's,
             // one in its own cell: a wide cell's second half can land on
             // the first half of a wide glyph that began there, whose own
             // continuation lies past the new cell's reach (`a日x` redrawn
-            // as `日 x`, the new 日's second cell the old one's first). Left
-            // as the empty continuation, that cell turned away the blank
-            // ratatui does send for it, by the rule above, and the row
-            // lost a cell: the bar's `Heart ❤️ Song`, after a title with an
-            // emoji one cell further on, drew as `Heart ❤️Song`.
+            // as `日 x`, the new 日's second cell the old one's first). It
+            // must be blanked here, as nothing ratatui sends will: where
+            // the new cell equals ratatui's old one there (its reset blank
+            // behind the old glyph, as in unstyled text) the diff sends
+            // nothing, and where it is a styled blank (the bar's title) the
+            // rule above turns it away. Left as the empty continuation, the
+            // row lost a cell: the bar's `Heart ❤️ Song`, after a title
+            // with an emoji one cell further on, drew as `Heart ❤️Song`.
             let width = cell.symbol().width().max(1);
             let end = (index + width).min(self.cells.len());
             let reach = (index..end)

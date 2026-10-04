@@ -487,10 +487,12 @@ fn an_emoji_widened_in_place_keeps_its_row_in_place() {
 /// whole, and the rest of the row stays in place. The Windows smoke's bar drew `Heart ❤️ Song`
 /// after `Family 👨‍👩‍👧 Tune` as `Heart ❤️Song`, and `Flag 🇯🇵 Track` after it as `Flag 🇯🇵Track`:
 /// the old emoji began one cell after the new one, so the new one's continuation took the old
-/// one's first cell and left the old one's continuation behind, past the new cell's reach. The
-/// blank ratatui sends for that cell was then turned away as one a glyph still covers (change 18's
-/// rule), and the row lost a cell, in the backend's text (the dump's) and in its pixels alike
-/// (VENDORED.md, change 23). The text must be a fresh frame's in every case, whatever the faces;
+/// one's first cell and left the old one's continuation behind, past the new cell's reach. Nothing
+/// ratatui sends puts that cell right: in the unstyled CJK rows here it equals ratatui's reset
+/// blank behind the old glyph and is never sent, and in the bar's styled title the blank sent was
+/// turned away as one a glyph still covers (change 18's rule). The row lost a cell, in the
+/// backend's text (the dump's) and in its pixels alike (VENDORED.md, change 23), until `draw`
+/// blanked it itself. The text must be a fresh frame's in every case, whatever the faces;
 /// the cells must be a fresh frame's where a CJK face (or Hack's boxes, two cells as well) and the
 /// colour emoji face are at hand.
 #[test]
@@ -537,6 +539,11 @@ fn a_wide_glyph_over_the_first_half_of_another_keeps_the_row_in_place() {
 fn the_bar_in_the_window_keeps_the_space_after_an_emoji_as_the_title_changes() {
     use crate::gui::{Gui, demo_now, render};
     let _gpu = one_at_a_time();
+    // The window's glyphs, as the window pins them: the bar's chevron, clip
+    // mark and transport glyphs follow the process-wide tier, which a bare
+    // console resolves to the legacy set and another test may flip mid-run,
+    // so the diffed render and the fresh one could draw different bars.
+    crate::kit::theme::pin_modern_glyphs();
     let titles = [
         "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Tune",
         "Heart \u{2764}\u{FE0F} Song",
