@@ -1918,6 +1918,8 @@ dev:
   hint_none_hosted: "r look again · l logs · Esc library"
   hint_several_hosted: "↑ ↓ pick · Enter choose · l logs · Esc library"
   hint_failed_hosted: "r try again · l logs · Esc library"
+  hint_working_unseen: "writing the MP3 player's firmware — please wait: unplugging it or quitting now would leave it half written"
+  letting_go: "restarting the Core2 into its firmware before quitting…"
   err_list: "could not list the serial ports: %{err}"
   err_busy: "%{port} is in use by another program (%{err})"
   err_permission: "no permission to open %{port} (%{err})"

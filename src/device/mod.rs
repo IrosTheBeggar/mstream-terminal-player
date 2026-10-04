@@ -28,12 +28,13 @@ use rust_i18n::t;
 
 use self::flow::{Cmd, Event};
 
-// What the GUI's MP3 Player tab holds of this module: the page, and the
-// one way to build it — with no flags — outside the tests, whose page
-// rides channels they hold (`Page::quiet`, its `Ends`).
+// What the GUI's MP3 Player tab holds of this module: the page, the one
+// way to build it — with no flags — outside the tests, whose page rides
+// channels they hold (`Page::quiet`, its `Ends`), and the line it draws
+// while a page it left lets the board go.
 #[cfg(not(test))]
 pub(crate) use self::page::hosted;
-pub(crate) use self::page::Page;
+pub(crate) use self::page::{Page, draw_waiting};
 #[cfg(test)]
 pub(crate) use self::{flow::Cmd as WorkerCmd, page::Ends};
 
@@ -307,7 +308,7 @@ mod tests {
 
     #[test]
     fn every_error_has_a_sentence_and_the_actionable_ones_a_hint() {
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         let busy = DeviceError::Busy { port: "COM3".into(), detail: "Access is denied".into() };
         assert!(busy.text().contains("COM3"), "{}", busy.text());
         assert!(busy.hint().is_some_and(|h| h.contains("monitor")), "a busy port names the usual holder");

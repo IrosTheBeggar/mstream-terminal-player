@@ -1918,6 +1918,8 @@ dev:
   hint_none_hosted: "r 再次查找 · l 日志 · Esc 曲库"
   hint_several_hosted: "↑ ↓ 选择 · Enter 确定 · l 日志 · Esc 曲库"
   hint_failed_hosted: "r 重试 · l 日志 · Esc 曲库"
+  hint_working_unseen: "正在写入 MP3 播放器固件 — 请稍候：现在拔下或退出会让它只写了一半"
+  letting_go: "退出前正在将 Core2 重启回其固件…"
   err_list: "无法列出串口：%{err}"
   err_busy: "%{port} 正被其他程序占用（%{err}）"
   err_permission: "没有权限打开 %{port}（%{err}）"

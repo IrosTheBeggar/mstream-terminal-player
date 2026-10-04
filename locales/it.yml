@@ -1918,6 +1918,8 @@ dev:
   hint_none_hosted: "r cerca di nuovo · l registro · Esc libreria"
   hint_several_hosted: "↑ ↓ scegli · Invio conferma · l registro · Esc libreria"
   hint_failed_hosted: "r riprova · l registro · Esc libreria"
+  hint_working_unseen: "scrittura del firmware del lettore MP3 — attendi: scollegarlo o uscire adesso lo lascerebbe scritto a metà"
+  letting_go: "riavvio del Core2 nel suo firmware prima di uscire…"
   err_list: "impossibile elencare le porte seriali: %{err}"
   err_busy: "%{port} è in uso da un altro programma (%{err})"
   err_permission: "nessun permesso per aprire %{port} (%{err})"

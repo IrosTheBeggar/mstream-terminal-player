@@ -1918,6 +1918,8 @@ dev:
   hint_none_hosted: "r buscar de nuevo · l registro · Esc biblioteca"
   hint_several_hosted: "↑ ↓ elegir · Enter confirmar · l registro · Esc biblioteca"
   hint_failed_hosted: "r reintentar · l registro · Esc biblioteca"
+  hint_working_unseen: "escribiendo el firmware del reproductor MP3 — espera: desconectarlo o salir ahora lo dejaría a medio escribir"
+  letting_go: "reiniciando el Core2 en su firmware antes de salir…"
   err_list: "no se pudieron listar los puertos serie: %{err}"
   err_busy: "otro programa está usando %{port} (%{err})"
   err_permission: "sin permiso para abrir %{port} (%{err})"

@@ -770,7 +770,7 @@ fn hall_key(gui: &mut Gui, key: KeyEvent, lay: &Layout) -> bool {
         KeyCode::Esc | KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Library)),
         KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
         // The MP3 Player tab (mp3-player-screen contract, entry 2).
-        KeyCode::Char('F') => return gui.act(Act::Screen(Screen::Device)),
+        KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Device)),
         KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         KeyCode::Char(c @ '1'..='9') => return gui.act(Act::Nav(c as usize - '1' as usize)),

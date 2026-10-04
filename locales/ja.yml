@@ -1918,6 +1918,8 @@ dev:
   hint_none_hosted: "r 再検索 · l ログ · Esc ライブラリ"
   hint_several_hosted: "↑ ↓ 選択 · Enter 決定 · l ログ · Esc ライブラリ"
   hint_failed_hosted: "r 再試行 · l ログ · Esc ライブラリ"
+  hint_working_unseen: "MP3プレーヤーのファームウェアを書き込み中 — お待ちください。今取り外すか終了すると書きかけのままになります"
+  letting_go: "終了する前にCore2をファームウェアで再起動しています…"
   err_list: "シリアルポートを列挙できません: %{err}"
   err_busy: "%{port} は別のプログラムが使用中です（%{err}）"
   err_permission: "%{port} を開く権限がありません（%{err}）"

@@ -1918,6 +1918,8 @@ dev:
   hint_none_hosted: "r procurar de novo · l registo · Esc biblioteca"
   hint_several_hosted: "↑ ↓ escolher · Enter confirmar · l registo · Esc biblioteca"
   hint_failed_hosted: "r tentar de novo · l registo · Esc biblioteca"
+  hint_working_unseen: "a escrever o firmware do leitor MP3 — aguarde: desligá-lo ou sair agora deixá-lo-ia escrito a meio"
+  letting_go: "a reiniciar o Core2 no seu firmware antes de sair…"
   err_list: "não foi possível listar as portas série: %{err}"
   err_busy: "%{port} está a ser usada por outro programa (%{err})"
   err_permission: "sem permissão para abrir %{port} (%{err})"

@@ -152,7 +152,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         // The Admin tab, from anywhere (admin-screen contract, clause 1).
         KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
         // The MP3 Player tab (mp3-player-screen contract, entry 2).
-        KeyCode::Char('F') => return gui.act(Act::Screen(Screen::Device)),
+        KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Device)),
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The strip's numbers pick its tabs — a digit past the strip does
         // nothing, the App bounds-checks — and Tab, Shift-Tab cycle them.

@@ -134,6 +134,12 @@ pub(crate) struct Page {
     others: Vec<String>,
     /// Which step the run failed in (the step line's ✗).
     failed_at: Option<usize>,
+    /// The worker has said it is reaching the board and has not yet said
+    /// the board is let go (Cancelled, Done, Failed) or ended: it may hold
+    /// the port, whatever the step — a page that left before it heard the
+    /// worker reach the board is Leaving, and its worker may still be on
+    /// the port.
+    reaching: bool,
     note: Option<(String, bool)>,
     /// When the page opened: the log's clock.
     opened: Instant,
@@ -195,6 +201,7 @@ impl Page {
             time_left: None,
             others: Vec::new(),
             failed_at: None,
+            reaching: false,
             note: None,
             opened: now,
             log: Vec::new(),
@@ -228,9 +235,13 @@ impl Page {
                     self.time_left = None;
                     self.last_logged_pct = None;
                 }
-                let waiting = matches!(self.step, Step::Preparing | Step::NoDevice | Step::Several { .. });
-                if waiting && matches!(phase, Phase::Connecting | Phase::Reading) {
-                    self.step = Step::Probing;
+                if matches!(phase, Phase::Connecting | Phase::Reading) {
+                    self.reaching = true;
+                    let waiting =
+                        matches!(self.step, Step::Preparing | Step::NoDevice | Step::Several { .. });
+                    if waiting {
+                        self.step = Step::Probing;
+                    }
                 }
             }
             Event::Download { done, total } => self.download = Some((done, total)),
@@ -276,6 +287,7 @@ impl Page {
             Event::Board(info) => {
                 self.log_at(now, format!("board: {} · {} baud", info.describe(), info.baud), Tone::Fact);
                 self.board = Some(info);
+                self.reaching = true;
                 if matches!(self.step, Step::Preparing | Step::NoDevice | Step::Several { .. }) {
                     self.step = Step::Probing;
                 }
@@ -306,6 +318,7 @@ impl Page {
             }
             Event::Done { version, skipped, boot } => {
                 self.phase = None;
+                self.reaching = false;
                 if skipped {
                     self.log_at(now, t!("dev.done_skipped").to_string(), Tone::Fact);
                 }
@@ -320,11 +333,13 @@ impl Page {
                 };
             }
             Event::Cancelled => {
+                self.reaching = false;
                 self.log_at(now, t!("dev.cancelled").to_string(), Tone::Fact);
                 self.step = Step::Leaving;
             }
             Event::Failed(e) => {
                 self.phase = None;
+                self.reaching = false;
                 self.failed_at = Some(self.position());
                 self.log_at(now, e.text(), Tone::Fail);
                 if let Some(hint) = e.hint() {
@@ -453,6 +468,7 @@ impl Page {
                     self.write_from = None;
                     self.time_left = None;
                     self.failed_at = None;
+                    self.reaching = false;
                     self.note = None;
                 }
             }
@@ -498,32 +514,32 @@ impl Page {
         self.step == Step::Working
     }
 
-    /// The worker holds the board in its bootloader before the write: the
-    /// board being reached and read, the question, or the restart after a
-    /// cancel (contract clause 11).
+    /// The worker holds the board, or is reaching it, before the write:
+    /// it has said "reaching" and not yet that the board is let go — the
+    /// board being reached and read, the question, the restart after a
+    /// cancel, and a page that left before it heard the worker get there
+    /// (contract clauses 8 and 11). The page's step lags the worker, so it
+    /// is the worker's word that counts here, not the step.
     pub(crate) fn holds_board(&self) -> bool {
-        matches!(self.step, Step::Probing | Step::Confirm { .. } | Step::Cancelling)
+        self.reaching && self.step != Step::Working
     }
 
-    /// The host is going away with the page — the GUI quitting (contract
-    /// clause 11). A board held before the write is asked back into its
-    /// firmware, as Esc asks, and the call waits at most `within`, reading
-    /// the worker's reports, for it to say so: the process's exit would end
-    /// the worker before the restart and leave the Core2 dark in its
-    /// bootloader. Nothing else waits — a page that holds no board, or a
-    /// write, which only the exit can cut short. True when it waited.
-    pub(crate) fn let_go(&mut self, within: Duration) -> bool {
+    /// The host is done with the page — the GUI's tab left, or the player
+    /// quitting (contract clauses 8 and 11). Asks the worker to let go the
+    /// page's own way, as Esc asks: a board held is restarted into its
+    /// firmware; a worker that has not reached one yet stops before it
+    /// opens the port. Never a write, which only the exit can cut short.
+    /// The worker's reports are read after the asking, so whatever
+    /// [`Page::holds_board`] says now holds: false, and the worker will not
+    /// touch the port again (it says "reaching" before its last look for
+    /// the Quit); true, and the host waits, reading on, until it is false.
+    pub(crate) fn release(&mut self) {
         Screen::pump(self);
-        if !self.holds_board() {
-            return false;
+        if self.writing() {
+            return;
         }
         self.leave();
-        let until = Instant::now() + within;
-        while self.holds_board() && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-            Screen::pump(self);
-        }
-        true
+        Screen::pump(self);
     }
 
     /// The tips the GUI's footer shows while the page is hosted (contract
@@ -613,6 +629,8 @@ impl Screen for Page {
                 Ok(event) => self.apply(event),
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
+                    // A worker that ended holds no port, whatever it last said.
+                    self.reaching = false;
                     // A worker that ended without a last word: only a bug
                     // does that; the page says so instead of hanging.
                     if matches!(self.step, Step::Preparing | Step::Probing | Step::Working | Step::Cancelling) {
@@ -866,7 +884,16 @@ fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
             if let Some(boot) = boot {
                 y = wrapped(frame, col, y, &t!("dev.done_booted", line = boot), dim());
             }
-            y = next_block(frame, col, y) + 1;
+            // Close stays whole at the floor (mp3-player-screen contract,
+            // clause 4): where the rows run short — hosted at the GUI's
+            // 100×24 in a long locale, with the board's own boot line, or
+            // under a pick's banner — the blank row over it gives way
+            // first, then the next-step block's last lines. On its own the
+            // page has no floor, and draws it all as it always has.
+            let parts = next_parts(col.w);
+            let room = col.floor.saturating_sub(y).saturating_sub(BUTTON_H);
+            let (shown, gap) = next_fit(&parts, room);
+            y = next_block(frame, col, y, &parts[..shown]) + gap;
             y = buttons(frame, page, col, y, &t!("dev.close"), Act::Close, None);
         }
         Step::Failed { text, hint } => {
@@ -919,6 +946,20 @@ impl Col {
     fn indent(self, dx: u16) -> Col {
         Col { x: self.x + dx, w: self.w.saturating_sub(dx), ..self }
     }
+}
+
+/// What the GUI's MP3 Player tab draws in `area` while the page it was
+/// left with lets the board go and the next waits to be built
+/// (mp3-player-screen contract, clause 8): the restarting words, dim, on
+/// the page's first row under the host's blank one.
+pub(crate) fn draw_waiting(frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height < 3 {
+        return;
+    }
+    let column_w = area.width.saturating_sub(4).min(COLUMN_W);
+    let x = area.x + (area.width - column_w) / 2;
+    let col = Col { x, w: column_w, floor: area.bottom() - 1 };
+    line(frame, col, area.y + 1, &Phase::Restarting.text(), dim());
 }
 
 /// A title that warns: the theme's gold, bold.
@@ -1038,15 +1079,62 @@ fn erase_row(
     y + rows
 }
 
+/// One part of the next-step block: its words, its style, the rows it
+/// takes in the column.
+type Part = (String, Style, u16);
+
 /// What to do once the board runs the firmware: music on the card, by
-/// hand — the card's rules in four lines. Returns the row after.
-fn next_block(frame: &mut Frame, col: Col, mut y: u16) -> u16 {
-    y = line(frame, col, y, &t!("dev.next_title"), bold());
+/// hand — the title, the card's rules in three lines, the link — each
+/// with the rows it takes in `w` cells. The title is one row, never
+/// wrapped.
+fn next_parts(w: u16) -> Vec<Part> {
+    let rows = |text: &str| kit::wrap_words(text, w as usize).len().max(1) as u16;
+    let mut parts = vec![(t!("dev.next_title").to_string(), bold(), 1)];
     for key in ["dev.next_card", "dev.next_layout", "dev.next_cover"] {
-        y = wrapped(frame, col, y, &t!(key), Style::default());
+        let text = t!(key).to_string();
+        let n = rows(&text);
+        parts.push((text, Style::default(), n));
     }
-    wrapped(frame, col, y, &t!("dev.next_link"), dim())
+    let link = t!("dev.next_link").to_string();
+    let n = rows(&link);
+    parts.push((link, dim(), n));
+    parts
 }
+
+/// How many of `parts`, and whether the blank row under them, fit in
+/// `rows`: all of them and the blank where there is room; else the blank
+/// goes, then parts from the end — and a title left with nothing under
+/// it goes too, since it would say nothing.
+fn next_fit(parts: &[Part], rows: u16) -> (usize, u16) {
+    let mut need: u16 = parts.iter().map(|part| part.2).sum();
+    if need < rows {
+        return (parts.len(), 1);
+    }
+    let mut shown = parts.len();
+    while shown > 0 && need > rows {
+        shown -= 1;
+        need -= parts[shown].2;
+    }
+    if shown == 1 {
+        shown = 0;
+    }
+    (shown, 0)
+}
+
+/// The next-step block's `parts`; returns the row after them.
+fn next_block(frame: &mut Frame, col: Col, mut y: u16, parts: &[Part]) -> u16 {
+    for (i, (text, style, _)) in parts.iter().enumerate() {
+        y = if i == 0 {
+            line(frame, col, y, text, *style)
+        } else {
+            wrapped(frame, col, y, text, *style)
+        };
+    }
+    y
+}
+
+/// A tall button's rows: its frame's top and bottom, the label between.
+const BUTTON_H: u16 = 3;
 
 /// The primary and, beside it, the secondary. Always enabled: every step
 /// that draws buttons is one where each of them can be pressed. A pair the
@@ -1061,17 +1149,17 @@ fn buttons(
     act: Act,
     secondary: Option<(&str, Act)>,
 ) -> u16 {
-    let at = col.at(y, 3);
-    if at.height < 3 {
-        return y + 3;
+    let at = col.at(y, BUTTON_H);
+    if at.height < BUTTON_H {
+        return y + BUTTON_H;
     }
     let rect = kit::tall_button(frame, &mut page.ui, at, primary, true, act);
     if let Some((label, act)) = secondary {
         let width = col.w.saturating_sub(rect.width + 2);
-        let at = Rect { x: rect.x + rect.width + 2, y, width, height: 3 };
+        let at = Rect { x: rect.x + rect.width + 2, y, width, height: BUTTON_H };
         kit::tall_secondary(frame, &mut page.ui, at, label, act);
     }
-    y + 3
+    y + BUTTON_H
 }
 
 /// A bar: its words above it, a filled share in the accent, the rest as
@@ -1234,9 +1322,11 @@ impl Ends {
         self.tell([Event::Phase(Phase::Writing), Event::Progress(42)]);
     }
 
-    /// The write done and the board restarted.
+    /// The write done and the board restarted, saying its first line in
+    /// full, as the firmware prints it.
     pub(crate) fn done(&self) {
-        self.tell([Event::Done { version: "v0.6.0".into(), skipped: false, boot: None }]);
+        let boot = Some("mstream-mp3-player v0.6.0 (commit abc1234, 2026-10-02), ELF 1a2b3c4d".into());
+        self.tell([Event::Done { version: "v0.6.0".into(), skipped: false, boot }]);
     }
 
     /// The write failed on the wire.
@@ -1818,13 +1908,10 @@ mod tests {
         r.events.send(Event::Several(vec![candidate("COM3", "CH9102"), candidate("COM7", "CP210x")])).unwrap();
         steps.push(("several", r, vec!["▸ COM3", "COM7 · CP210x", "the list follows the ports"], None));
 
-        // Done is the tallest step: the next-step block, then Close.
-        let mut r = rig();
-        to_question(&mut r, Some(ours("v0.4.0")));
-        r.page.key(key(KeyCode::Enter));
-        let boot = Some("mstream-mp3-player v0.5.0 (commit a, 2026-10-01), ELF 0".to_string());
-        r.events.send(Event::Done { version: "v0.5.0".into(), skipped: true, boot }).unwrap();
-        steps.push(("done", r, vec!["Done", "the firmware's README", "│  Close  │"], None));
+        // Done is the tallest step: the next-step block, then Close — with
+        // a real board's boot line, full length, and in both shapes.
+        steps.push(("done", done_rig(false), vec!["Done", "the firmware's README", "│  Close  │"], None));
+        steps.push(("done, nothing written", done_rig(true), vec!["Done", "│  Close  │"], None));
 
         let r = rig();
         r.events.send(firmware()).unwrap();
@@ -1836,6 +1923,120 @@ mod tests {
             r.page.pump();
         }
         steps
+    }
+
+    /// A real board's first line after a write, full length — what the
+    /// firmware prints (engine.rs's boot-line test has its shape).
+    const BOOT: &str = "mstream-mp3-player v0.6.0 (commit abc1234, 2026-10-02), ELF 1a2b3c4d";
+
+    /// A page at Done after a write, the board reporting [`BOOT`].
+    fn done_rig(skipped: bool) -> Rig {
+        let mut r = rig();
+        to_question(&mut r, Some(ours("v0.4.0")));
+        r.page.key(key(KeyCode::Enter));
+        let boot = Some(BOOT.to_string());
+        r.events.send(Event::Done { version: "v0.6.0".into(), skipped, boot }).unwrap();
+        r.page.pump();
+        r
+    }
+
+    /// The labels of the buttons a step draws, in the locale the test runs.
+    fn button_labels(page: &Page) -> Vec<String> {
+        match &page.step {
+            Step::Confirm { plan, .. } => vec![plan.verb(), t!("dev.cancel").to_string()],
+            Step::NoDevice => vec![t!("dev.rescan").to_string(), t!("dev.close").to_string()],
+            Step::Done { .. } => vec![t!("dev.close").to_string()],
+            Step::Failed { .. } => vec![t!("dev.retry").to_string(), t!("dev.close").to_string()],
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hosted_at_the_guis_floor_every_step_keeps_its_buttons_whole_in_every_locale() {
+        // The locale is the whole process's: drawn here in another language,
+        // the page would switch it under every test running beside this
+        // one, and the GUI's own tests read English with no lock. So each
+        // language runs in a process of its own — this test binary again,
+        // running only the test below, its locale named in the environment.
+        let exe = std::env::current_exe().expect("the test binary");
+        for (code, _) in crate::setup::LANGS {
+            let out = std::process::Command::new(&exe)
+                .args(["--exact", FLOOR_TEST, "--ignored"])
+                .env(FLOOR_LOCALE, code)
+                .output()
+                .expect("the test binary runs again");
+            let (said, err) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && said.contains("1 passed"), "{code}:
+{said}{err}");
+        }
+    }
+
+    /// The test below, by its full name, and the environment variable
+    /// naming its locale.
+    const FLOOR_TEST: &str = "device::page::tests::the_floor_in_this_processs_locale";
+    const FLOOR_LOCALE: &str = "MSTREAM_TEST_FLOOR_LOCALE";
+
+    #[test]
+    #[ignore = "run by the every-locale floor test, a process per locale"]
+    fn the_floor_in_this_processs_locale() {
+        // The GUI's floor is 100×24: with its top bar and its footer the
+        // page gets 22 rows from row 1, and 21 from row 2 under a pick's
+        // banner (mp3-player-screen contract, clause 4). In 22 rows every
+        // step draws its buttons whole in every locale; in 21 a step may
+        // cut itself, but Done — the tallest, with a real boot line —
+        // still keeps Close whole, its extra words giving way. Spaces are
+        // left out of the comparison: a wide glyph's second cell is one.
+        let Ok(code) = std::env::var(FLOOR_LOCALE) else { return };
+        rust_i18n::set_locale(&code);
+        crate::kit::theme::pin_modern_terminal();
+        let floor = Rect { x: 0, y: 1, width: 100, height: 22 };
+        let banner = Rect { x: 0, y: 2, width: 100, height: 21 };
+        for (name, mut r, _, _) in every_step() {
+            for area in [floor, banner] {
+                let buf = hosted_at(&mut r.page, 100, 24, area);
+                let all: String = (0..24).map(|y| row_of(&buf, y) + "\n").collect();
+                let packed = all.replace(' ', "");
+                assert!(outside_untouched(&buf, area), "{code}, {name} in {area:?}: drawn outside its area:\n{all}");
+                assert!(row_of(&buf, area.y).trim_matches('#').trim().is_empty(), "{code}, {name}: the first row is the host's:\n{all}");
+                assert_eq!(all.matches('╭').count(), all.matches('╰').count(), "{code}, {name} in {area:?}: a button whole or not at all:\n{all}");
+                if area == floor || name.starts_with("done") {
+                    for label in button_labels(&r.page) {
+                        let whole = format!("│{}│", label.replace(' ', ""));
+                        assert!(packed.contains(&whole), "{code}, {name} in {area:?}: {label:?} whole:\n{all}");
+                    }
+                }
+                if let Some(words) = r.page.busy() {
+                    let last = row_of(&buf, area.bottom() - 1).replace(' ', "");
+                    assert_eq!(last.trim_matches('#'), words.replace(' ', ""), "{code}, {name} in {area:?}: the busy line keeps its row:\n{all}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn done_gives_its_extra_words_way_before_close_and_only_where_the_rows_run_short() {
+        let _en = english();
+        // Plenty of rows: the whole next-step block and a blank row over
+        // Close, as on its own.
+        let mut r = done_rig(false);
+        let tall = Rect { x: 0, y: 1, width: 100, height: 40 };
+        let buf = hosted_at(&mut r.page, 100, 42, tall);
+        let all: String = (0..42).map(|y| row_of(&buf, y) + "\n").collect();
+        assert!(all.contains("the firmware's README") && all.contains("│  Close  │"), "{all}");
+        let close = (0..42).find(|y| row_of(&buf, *y).contains("╭")).unwrap();
+        assert!(row_of(&buf, close - 1).trim_matches('#').trim().is_empty(), "a blank row over Close:\n{all}");
+        // Short: the blank goes first, then the block from its end — the
+        // link before the card's rules — and Close stays.
+        let parts = next_parts(78);
+        let total: u16 = parts.iter().map(|p| p.2).sum();
+        assert_eq!(next_fit(&parts, total + 1), (5, 1), "room for all and the blank");
+        assert_eq!(next_fit(&parts, total), (5, 0), "the blank goes first");
+        assert_eq!(next_fit(&parts, total - 1).0, 4, "then the link");
+        assert_eq!(next_fit(&parts, 1), (0, 0), "a title alone goes with the rest");
+        // On its own the page draws Done as it always has.
+        let mut r = done_rig(true);
+        let alone = draw_at(&mut r.page, 100, 30);
+        assert!(alone.contains("the firmware's README") && alone.contains("│  Close  │"), "{alone}");
     }
 
     #[test]
@@ -1948,51 +2149,107 @@ mod tests {
     }
 
     #[test]
-    fn letting_go_at_the_question_sends_quit_and_waits_no_longer_than_asked() {
+    fn released_at_the_question_the_page_asks_the_board_back_and_holds_it_until_told() {
         let _en = english();
         let mut r = rig();
         to_question(&mut r, Some(ours("v0.4.0")));
-        let t0 = Instant::now();
-        assert!(r.page.let_go(Duration::from_millis(300)), "it waited");
-        let took = t0.elapsed();
-        assert!(took >= Duration::from_millis(300) && took < Duration::from_secs(3), "the bound: {took:?}");
+        r.page.release();
         assert_eq!(r.cmds.try_recv(), Ok(Cmd::Quit), "the worker was told to let go");
-        assert_eq!(r.page.step, Step::Cancelling, "nobody answered");
+        assert_eq!(r.page.step, Step::Cancelling);
+        assert!(r.page.holds_board(), "until the worker says the board is back");
+        r.events.send(Event::Cancelled).unwrap();
+        r.page.pump();
+        assert!(!r.page.holds_board());
+        assert!(matches!(r.page.finished(), Some(Outcome::Quit)));
     }
 
     #[test]
-    fn letting_go_ends_once_the_worker_says_the_board_restarted() {
+    fn released_before_the_board_is_reached_the_page_tells_the_worker_to_stop_and_holds_nothing() {
         let _en = english();
+        // Finding the firmware, and watching the ports: the worker is told
+        // to stop, and since it never said it was reaching a board, it will
+        // not open a port (it says so before its last look for the Quit).
         let mut r = rig();
-        to_question(&mut r, Some(ours("v0.4.0")));
-        let Rig { mut page, cmds, events, .. } = r;
-        let worker = std::thread::spawn(move || {
-            let heard = cmds.recv_timeout(Duration::from_secs(5));
-            std::thread::sleep(Duration::from_millis(100));
-            let _ = events.send(Event::Cancelled);
-            heard
-        });
-        let t0 = Instant::now();
-        assert!(page.let_go(Duration::from_secs(10)));
-        assert!(t0.elapsed() < Duration::from_secs(5), "it stopped at the answer: {:?}", t0.elapsed());
-        assert_eq!(page.step, Step::Leaving);
-        assert_eq!(worker.join().unwrap(), Ok(Cmd::Quit));
-    }
-
-    #[test]
-    fn letting_go_waits_for_nothing_when_no_board_is_held() {
-        let _en = english();
-        let t0 = Instant::now();
+        r.page.release();
+        assert_eq!(r.cmds.try_recv(), Ok(Cmd::Quit));
+        assert!(!r.page.holds_board() && r.page.finished().is_some());
         let mut r = rig();
-        assert!(!r.page.let_go(Duration::from_secs(5)), "finding the firmware");
         r.events.send(Event::NoDevice { others: vec![] }).unwrap();
-        assert!(!r.page.let_go(Duration::from_secs(5)), "watching the ports");
+        r.page.release();
+        assert_eq!(r.cmds.try_recv(), Ok(Cmd::Quit));
+        assert!(!r.page.holds_board());
+    }
+
+    #[test]
+    fn a_page_that_left_before_it_heard_the_worker_reach_the_board_still_holds_it() {
+        let _en = english();
+        // Esc while the step still says "finding": the worker had already
+        // said it was reaching the board, unread. The step lags; the
+        // worker's word is what holds.
+        let mut r = rig();
+        r.events.send(Event::Phase(Phase::Firmware)).unwrap();
+        r.events.send(Event::Phase(Phase::Connecting)).unwrap();
+        r.page.key(key(KeyCode::Esc));
+        assert_eq!(r.page.step, Step::Leaving);
+        r.page.pump();
+        assert_eq!(r.page.step, Step::Leaving, "the page has left");
+        assert!(r.page.holds_board(), "and the worker may be on the port");
+        r.events.send(Event::Cancelled).unwrap();
+        r.page.pump();
+        assert!(!r.page.holds_board(), "let go");
+        // A worker that ended without a word holds nothing either.
+        let mut r = rig();
+        r.events.send(Event::Phase(Phase::Connecting)).unwrap();
+        r.page.pump();
+        let Rig { mut page, events, .. } = r;
+        drop(events);
+        page.pump();
+        assert!(!page.holds_board());
+    }
+
+    #[test]
+    fn released_during_a_write_the_page_says_nothing_to_it() {
+        let _en = english();
         let mut r = rig();
         to_question(&mut r, Some(ours("v0.4.0")));
         r.page.key(key(KeyCode::Enter));
         assert_eq!(r.cmds.try_recv(), Ok(Cmd::Go { erase: false }));
-        assert!(!r.page.let_go(Duration::from_secs(5)), "a write is never told to stop");
-        assert!(r.cmds.try_recv().is_err(), "and nothing was sent to it");
-        assert!(t0.elapsed() < Duration::from_secs(2), "no wait: {:?}", t0.elapsed());
+        r.page.release();
+        assert!(r.cmds.try_recv().is_err(), "a write is never told to stop");
+        assert!(r.page.writing() && !r.page.holds_board());
+    }
+
+    #[test]
+    fn released_while_espflash_reaches_the_board_the_worker_lets_it_go_once_it_answers() {
+        let _en = english();
+        // The real worker on the fake engine (no serial port), its board a
+        // few hundred milliseconds from answering, as a real connect is.
+        let image = std::env::temp_dir().join(format!("mstream-player-page-release-{}.bin", std::process::id()));
+        let desc = crate::device::firmware::tests::desc_bytes("v0.5.0", AppDesc::OURS);
+        std::fs::write(&image, crate::device::firmware::tests::merged_bytes(&desc)).unwrap();
+        let fake = engine::fake::Fake::new("fresh").with_reach(Duration::from_millis(400));
+        let trace = fake.trace();
+        let source = image.clone();
+        let respawn: Respawn = Box::new(move || {
+            let fake = fake.clone();
+            let make: flow::EngineFactory = Box::new(move || Box::new(fake.clone()));
+            flow::spawn(make, super::super::firmware::Source::Local(source.clone()), None, None)
+        });
+        let mut page = Page::new(respawn);
+        let t0 = Instant::now();
+        while !trace.lock().unwrap().iter().any(|t| t.starts_with("open")) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "the board was never reached");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        page.release();
+        assert!(page.holds_board(), "espflash is still reaching it");
+        while page.holds_board() {
+            assert!(t0.elapsed() < Duration::from_secs(5), "the board was never let go");
+            std::thread::sleep(Duration::from_millis(10));
+            page.pump();
+        }
+        let _ = std::fs::remove_file(&image);
+        assert_eq!(*trace.lock().unwrap(), ["open 921600", "let go"], "reset and freed, never read");
+        assert!(matches!(page.finished(), Some(Outcome::Quit)));
     }
 }

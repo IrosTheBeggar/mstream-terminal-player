@@ -78,8 +78,14 @@ pub(crate) trait Link {
     /// because the board already held exactly these bytes.
     fn write(&mut self, segments: &[Segment], report: &mut dyn FnMut(Report)) -> Result<bool, DeviceError>;
     /// Restart the board into its firmware, and listen a moment for the
-    /// firmware's first line.
+    /// firmware's first line — after a write, whose new firmware says its
+    /// name as it comes up.
     fn restart(self: Box<Self>) -> Result<Option<String>, DeviceError>;
+    /// Restart the board into its firmware and let the port go at once,
+    /// with no listen: the run ends without a write, so there is no new
+    /// line to hear, and a port kept for the listen is one the next worker
+    /// (the GUI's tab opened again, a retry) would find in use.
+    fn let_go(self: Box<Self>);
 }
 
 pub(crate) trait Engine {
@@ -92,6 +98,11 @@ pub(crate) trait Engine {
     /// Reach the board's bootloader on `candidate`, and raise the link to
     /// `baud` for the writes.
     fn open(&self, candidate: &Candidate, baud: u32) -> Result<Box<dyn Link>, DeviceError>;
+    /// Restart the board on `candidate` into its firmware with no link to
+    /// it: an `open` that failed to sync had already reset the board into
+    /// its bootloader, and a run that stops there (a Quit heard between the
+    /// baud ladder's rungs) must not leave it dark.
+    fn let_go(&self, candidate: &Candidate);
 }
 
 /// The engine to use: the fake when `MSTREAM_DEVICE_FAKE` scripts one
@@ -152,6 +163,26 @@ impl Engine for Esp {
             return Err(DeviceError::WrongFlash { found: format!("{flash_mb} MB") });
         }
         Ok(Box::new(EspLink { flasher, info }))
+    }
+
+    fn let_go(&self, candidate: &Candidate) {
+        // The port opened again, the reset line pulsed — espflash's own
+        // reset after a flash, which needs no sync — and the port closed.
+        let Ok(serial) = serialport::new(&candidate.port, SYNC_BAUD)
+            .flow_control(FlowControl::None)
+            .timeout(Duration::from_secs(3))
+            .open_native()
+        else {
+            return;
+        };
+        let mut connection = Connection::new(
+            serial,
+            candidate.usb.clone(),
+            ResetAfterOperation::HardReset,
+            ResetBeforeOperation::DefaultReset,
+            SYNC_BAUD,
+        );
+        let _ = connection.reset();
     }
 }
 
@@ -222,6 +253,12 @@ impl Link for EspLink {
         let _ = port.set_baud_rate(SYNC_BAUD);
         let _ = port.set_timeout(Duration::from_millis(300));
         Ok(boot_line(&mut port, BOOT_LISTEN))
+    }
+
+    fn let_go(self: Box<Self>) {
+        // The reset, then the flasher — and the port it owns — dropped.
+        let mut flasher = self.flasher;
+        let _ = flasher.connection().reset();
     }
 }
 
@@ -354,6 +391,7 @@ fn flash_error(port: &str, e: espflash::Error) -> DeviceError {
 // ── The fake ──────────────────────────────────────────────────────────────
 
 pub(crate) mod fake {
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use super::{DeviceInfo, Engine, Link, Report};
@@ -378,11 +416,21 @@ pub(crate) mod fake {
         FailWrite,
     }
 
+    /// Cloned, it shares its trace: a test keeps one copy and hands the
+    /// worker's engine factory the other.
+    #[derive(Clone)]
     pub(crate) struct Fake {
         spec: Spec,
         /// How long the fake's write takes end to end — the real one takes
         /// half a minute; a test wants the bar to move, not to wait.
         pub pace: Duration,
+        /// How long each `open` takes to answer — espflash's connect, a
+        /// second or more on a real board, during which the worker hears
+        /// nothing. None by default.
+        reach: Duration,
+        /// What was done to the board, in order (`open 921600`, `let go`,
+        /// `restart`, `let go FAKE0`), for the tests to read.
+        trace: Arc<Mutex<Vec<String>>>,
     }
 
     impl Fake {
@@ -398,7 +446,12 @@ pub(crate) mod fake {
                 "failwrite" => Spec::FailWrite,
                 _ => Spec::Fresh,
             };
-            Fake { spec, pace: Duration::from_millis(1200) }
+            Fake {
+                spec,
+                pace: Duration::from_millis(1200),
+                reach: Duration::ZERO,
+                trace: Arc::default(),
+            }
         }
 
         /// The tests' fake: a write that takes a blink, not a second.
@@ -406,6 +459,24 @@ pub(crate) mod fake {
         pub(crate) fn with_pace(mut self, pace: Duration) -> Fake {
             self.pace = pace;
             self
+        }
+
+        /// A board that takes `reach` to answer each `open`, as a real one
+        /// does while espflash syncs with it.
+        #[cfg(test)]
+        pub(crate) fn with_reach(mut self, reach: Duration) -> Fake {
+            self.reach = reach;
+            self
+        }
+
+        /// What was done to the board so far, shared with the fake.
+        #[cfg(test)]
+        pub(crate) fn trace(&self) -> Arc<Mutex<Vec<String>>> {
+            self.trace.clone()
+        }
+
+        fn note(trace: &Mutex<Vec<String>>, what: String) {
+            trace.lock().unwrap_or_else(|e| e.into_inner()).push(what);
         }
 
         fn board(port: &str) -> Candidate {
@@ -442,14 +513,17 @@ pub(crate) mod fake {
         }
 
         fn open(&self, candidate: &Candidate, baud: u32) -> Result<Box<dyn Link>, DeviceError> {
-            match self.spec {
-                Spec::Busy => {
-                    return Err(DeviceError::Busy { port: candidate.port.clone(), detail: "held by the fake".into() });
-                }
-                Spec::NoSync => {
-                    return Err(DeviceError::NoSync { port: candidate.port.clone(), detail: "no answer".into() });
-                }
-                _ => {}
+            if self.spec == Spec::Busy {
+                let detail = "held by the fake".into();
+                return Err(DeviceError::Busy { port: candidate.port.clone(), detail });
+            }
+            // The port opened: the board is reset into its bootloader,
+            // whether or not it then answers.
+            Fake::note(&self.trace, format!("open {baud}"));
+            std::thread::sleep(self.reach);
+            if self.spec == Spec::NoSync {
+                let detail = "no answer".into();
+                return Err(DeviceError::NoSync { port: candidate.port.clone(), detail });
             }
             Ok(Box::new(FakeLink {
                 spec: self.spec.clone(),
@@ -463,7 +537,12 @@ pub(crate) mod fake {
                     baud,
                 },
                 written: None,
+                trace: self.trace.clone(),
             }))
+        }
+
+        fn let_go(&self, candidate: &Candidate) {
+            Fake::note(&self.trace, format!("let go {}", candidate.port));
         }
     }
 
@@ -473,6 +552,7 @@ pub(crate) mod fake {
         info: DeviceInfo,
         /// The version of the image written, for the boot line.
         written: Option<String>,
+        trace: Arc<Mutex<Vec<String>>>,
     }
 
     impl Link for FakeLink {
@@ -526,9 +606,14 @@ pub(crate) mod fake {
         }
 
         fn restart(self: Box<Self>) -> Result<Option<String>, DeviceError> {
+            Fake::note(&self.trace, "restart".to_string());
             Ok(self
                 .written
                 .map(|v| format!("mstream-mp3-player {v} (commit fake000, 2026-10-01), ELF fa4e0000")))
+        }
+
+        fn let_go(self: Box<Self>) {
+            Fake::note(&self.trace, "let go".to_string());
         }
     }
 }

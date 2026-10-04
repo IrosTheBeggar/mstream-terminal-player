@@ -444,7 +444,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_local_path_is_a_file_or_a_build_directory() {
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         let dir = std::env::temp_dir().join(format!("mstream-player-fw-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let merged = merged_bytes(&desc_bytes("v0.5.0-3-gabc1234", "mstream-mp3-player"));
@@ -473,7 +473,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_pin_names_a_release_and_its_checksum_or_says_it_is_empty() {
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         match (PINNED_TAG, PINNED_FULL_SHA256) {
             (Some(tag), Some(sha)) => {
                 assert!(tag.starts_with('v') && tag[1..].split('.').count() == 3, "a release tag: {tag}");

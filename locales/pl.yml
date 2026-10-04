@@ -1918,6 +1918,8 @@ dev:
   hint_none_hosted: "r szukaj ponownie · l dziennik · Esc biblioteka"
   hint_several_hosted: "↑ ↓ wybierz · Enter zatwierdź · l dziennik · Esc biblioteka"
   hint_failed_hosted: "r spróbuj ponownie · l dziennik · Esc biblioteka"
+  hint_working_unseen: "zapisywanie firmware'u odtwarzacza MP3 — poczekaj: odłączenie go lub wyjście teraz zostawiłoby go zapisanego do połowy"
+  letting_go: "ponowne uruchamianie Core2 z jego firmware'em przed wyjściem…"
   err_list: "nie udało się wylistować portów szeregowych: %{err}"
   err_busy: "%{port} jest używany przez inny program (%{err})"
   err_permission: "brak uprawnień do otwarcia %{port} (%{err})"

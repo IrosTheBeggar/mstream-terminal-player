@@ -5,40 +5,58 @@
 //! erase the board decides. No session is involved, so nothing here reads
 //! the App's.
 //!
-//! The page is built on entering the tab and dropped on leaving it, except
-//! while it writes: from Go until Done or Failed the tab holds the GUI —
-//! every key is the page's, the top bar is inert, no screen change is
-//! honoured (contract clause 9) — and a quit with the board held before
-//! the write lets the board go first (clause 11). The page keeps its own
-//! surface; the screen hands it the keys and the pointer, runs its frame
-//! duties, and puts its hint on the GUI's footer.
+//! The page is built on entering the tab and let go of on leaving it: a
+//! worker that holds the board, or is reaching it, is told to let it go
+//! and its page kept aside, read every frame until the board is back in
+//! its firmware, so the next visit never meets its own port in use
+//! (contract clause 8). From Go until Done or Failed the tab holds the
+//! GUI — every key is the page's, the top bar is inert, no screen change
+//! is honoured (clause 9); Ctrl+C, the window's close button and, on
+//! macOS, Cmd-Q or the app menu's Quit still quit, and cut the write
+//! short (clause 10). A quit with the board held before the write lets it
+//! go first (clause 11). The page keeps its own surface; the screen hands
+//! it the keys and the pointer where it is drawn, runs its frame duties,
+//! and puts its hint on the GUI's footer.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
+use rust_i18n::t;
 
-use super::{Act, DJ_NAV, Gui, Screen};
+use super::{Act, DJ_NAV, Gui, SONIC_NAV, Screen};
 use crate::admin::{HostedRoom, Screen as Hosted, drive_pointer};
 use crate::device::Page;
+use crate::tui::app::{Action, Capture, Focus, Tab};
 
-/// How long a quit waits for the worker to restart a board it holds
-/// (contract clause 11): a reset is the first thing the restart does, so
-/// this covers it with room to spare, and a worker still syncing with the
-/// board is not worth a longer hang on the way out.
-const LET_GO: Duration = Duration::from_secs(2);
+/// How long the worker may take to let a board go once told: what is
+/// left of one rung of the baud ladder — an espflash connect that never
+/// syncs gives up after about seven seconds — and the reset after it. At
+/// the question the reset is all there is, a fraction of a second. A quit
+/// waits this long at most (contract clause 11), and so does the next
+/// visit for a page left behind (clause 8).
+const LET_GO: Duration = Duration::from_secs(8);
+/// A quit that waits longer than this says why on stderr: the terminal is
+/// the shell's again by then, and a pause with no word looks like a hang.
+const SAY_AFTER: Duration = Duration::from_secs(1);
 
-/// The screen's state: the page while the tab is up (or writing), and the
-/// page's area in the last frame.
+/// The screen's state: the page while the tab is up (or writing), the one
+/// it was left with while that one lets the board go, and the page's area
+/// in the last frame.
 #[derive(Default)]
 pub(crate) struct DeviceUi {
     page: Option<Page>,
+    /// A page the tab was left with while its worker held the board or was
+    /// reaching it, told to let go, and since when: read every frame until
+    /// the board is back in its firmware (or the wait's bound), then
+    /// dropped. A visit meanwhile builds no page of its own.
+    parting: Option<(Page, Instant)>,
     /// A press began on the page: its drag and release are the page's.
     pressed: bool,
     /// Where the page was drawn this frame — None in a frame drawn as the
     /// mini player, whose page's surface still holds the last frame's
-    /// targets and must not take a click.
+    /// targets and must take neither a click nor a key.
     pub(crate) at: Option<Rect>,
     /// Under test, the far ends of the page's channels: the test is the
     /// worker.
@@ -53,12 +71,32 @@ pub(crate) fn writing(gui: &Gui) -> bool {
 
 /// Open the screen: the page, and its worker with it (clause 5). A page
 /// already up — the tab selected again, or one kept by a write — stays.
+/// The Library's hands are let go first: the queue panel's keys (its
+/// focus stows, as a nav row stows it) and an armed pick (as the banner's
+/// [X] lets it go, home to the room that asked) — on this tab Enter and
+/// Esc are the page's (clause 12), and a pick or a queue left holding them
+/// would name keys that start a write instead.
 pub(crate) fn open(gui: &mut Gui) {
     if gui.device.page.is_some() {
         return;
     }
     gui.device.pressed = false;
-    gui.device.page = Some(build(gui));
+    gui.app.focus = Focus::Browser;
+    gui.queue_view.stow();
+    if gui.app.capture.is_some() {
+        let sonic = matches!(gui.app.capture, Some(Capture::Sonic(_)));
+        gui.forward(Action::Cancel);
+        if sonic {
+            gui.active = SONIC_NAV;
+            gui.app.tab = Tab::SonicPath;
+        }
+    }
+    // The page left a moment ago may still be letting the board go: a
+    // worker started now would find the port in use. `frame` builds this
+    // visit's page once that one has gone.
+    if gui.device.parting.is_none() {
+        gui.device.page = Some(build(gui));
+    }
 }
 
 #[cfg(not(test))]
@@ -75,14 +113,22 @@ fn build(gui: &mut Gui) -> Page {
     page
 }
 
-/// Leaving drops the page, and its worker lets go of the board as its
-/// channel closes (clause 8) — never while it writes, which nothing leaves.
+/// Leaving the tab (clause 8) — never while the page writes, which nothing
+/// leaves. The worker is told to let go the page's own way, as Esc tells
+/// it; a page whose worker holds the board, or was reaching it, is kept
+/// aside until the board is back in its firmware, and any other is
+/// dropped at once.
 pub(crate) fn close(gui: &mut Gui) {
     if writing(gui) {
         return;
     }
-    gui.device.page = None;
     gui.device.pressed = false;
+    let Some(mut page) = gui.device.page.take() else { return };
+    page.release();
+    // At most one page parts at a time: `open` builds none while one does.
+    if page.holds_board() && gui.device.parting.is_none() {
+        gui.device.parting = Some((page, Instant::now()));
+    }
 }
 
 /// `view` is the Now Playing screen's rect, which keeps the top bar's row
@@ -91,7 +137,13 @@ pub(crate) fn close(gui: &mut Gui) {
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     let area = Rect { y: view.y + 1, height: view.height.saturating_sub(1), ..view };
     let hints = gui.ui.key_hints;
-    let Some(page) = gui.device.page.as_mut() else { return };
+    let Some(page) = gui.device.page.as_mut() else {
+        // A visit waiting for the last page to let the board go.
+        if gui.device.parting.is_some() {
+            crate::device::draw_waiting(frame, area);
+        }
+        return;
+    };
     // The erase box's tooltip names its key as the GUI's own tooltips do.
     HostedRoom::set_key_hints(page, hints);
     HostedRoom::draw_in(page, frame, area);
@@ -105,7 +157,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if !writing(gui) {
         match key.code {
             KeyCode::Char('q') => return true,
-            KeyCode::Char('F') => return gui.act(Act::Screen(Screen::Library)),
+            KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Library)),
             KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
             KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
             KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
@@ -116,11 +168,17 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         }
     }
     let Some(page) = gui.device.page.as_mut() else {
+        // The visit waits for the last page: Esc is still the way back.
         if key.code == KeyCode::Esc {
             return gui.act(Act::Screen(Screen::Library));
         }
         return false;
     };
+    // The page's keys reach it only where it was drawn: in the mini player
+    // it is out of sight, and Enter there would start a write nobody sees.
+    if gui.device.at.is_none() {
+        return false;
+    }
     // Esc, Enter on Done and the rest end the page through `finished`,
     // sometimes only once the worker has answered (clause 7).
     HostedRoom::press(page, key);
@@ -128,9 +186,17 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     false
 }
 
-/// The footer's line (clause 15): the page's hint, in its hosted words.
+/// The footer's line (clause 15): the page's hint, in its hosted words —
+/// none while a visit waits for the last page to let the board go.
 pub(crate) fn tips(gui: &Gui) -> String {
     gui.device.page.as_ref().map(Hosted::hint).unwrap_or_default()
+}
+
+/// The mini player's line while the page writes out of sight: the write
+/// is under way and must not be cut — in place of the mini player's own
+/// request for a larger window.
+pub(crate) fn unseen_line(gui: &Gui) -> Option<String> {
+    writing(gui).then(|| t!("dev.hint_working_unseen").to_string())
 }
 
 /// The pointer (clauses 9 and 14). Outside a write, the page's area is the
@@ -138,14 +204,13 @@ pub(crate) fn tips(gui: &Gui) -> String {
 /// press that began there, wherever they land; a GUI modal or the server
 /// menu owns the pointer while open. During a write every event is the
 /// screen's: inside the area the page's, outside it nobody's — the top
-/// bar's clicks do nothing and nothing on the GUI's surface lights. True
-/// when the event was the screen's to take.
+/// bar's clicks do nothing and nothing on the GUI's surface lights, the
+/// mini player's buttons included. True when the event was the screen's
+/// to take.
 pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
     if gui.screen != Screen::Device {
         return false;
     }
-    // A frame drawn as the mini player drew no page.
-    let Some(area) = gui.device.at else { return false };
     let at = Position { x: mouse.column, y: mouse.row };
     let held =
         gui.device.pressed && matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
@@ -154,6 +219,15 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
         gui.device.pressed = false;
     }
     let locked = writing(gui);
+    // A frame drawn as the mini player drew no page: its own buttons answer,
+    // but not during a write.
+    let Some(area) = gui.device.at else {
+        if locked {
+            gui.ui.pointer = None;
+            gui.ui.dismiss_tooltip();
+        }
+        return locked;
+    };
     if !locked && (gui.modal_open() || gui.servers.drop_open) {
         return false;
     }
@@ -185,13 +259,27 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
 /// The page's own per-frame duties, after the draw (clause 6): its
 /// worker's reports, the port watch, a held button and the tooltip clock —
 /// the hub's loop, through `HostedRoom::after_frame` — then whether it has
-/// ended. Returns whether the pointer is over one of its clickables, for
-/// the hand.
+/// ended. A page left behind is read too, until its board is let go; then
+/// a visit that waited for it gets its own page. Returns whether the
+/// pointer is over one of the page's clickables, for the hand.
 pub(crate) fn frame(gui: &mut Gui) -> bool {
     // A page a screen change left behind without passing through `close`
     // goes now; a writing one stays, and the screen change was refused.
     if gui.screen != Screen::Device {
         close(gui);
+    }
+    if let Some((page, since)) = gui.device.parting.as_mut() {
+        Hosted::pump(page);
+        // Past the bound a worker that never answers is let be: a port it
+        // may still hold is the next page's failure to say, not a tab that
+        // never comes back.
+        if !page.holds_board() || since.elapsed() >= LET_GO {
+            gui.device.parting = None;
+        }
+    }
+    if gui.screen == Screen::Device && gui.device.page.is_none() && gui.device.parting.is_none() {
+        gui.device.pressed = false;
+        gui.device.page = Some(build(gui));
     }
     let Some(page) = gui.device.page.as_mut() else { return false };
     let over = HostedRoom::after_frame(page);
@@ -201,7 +289,7 @@ pub(crate) fn frame(gui: &mut Gui) -> bool {
 
 /// The page ended itself — Esc at its base, Close, a cancel once the board
 /// is restarted (clause 7): the screen goes back to the Library, which
-/// drops the page.
+/// lets the page go.
 fn end_if_finished(gui: &mut Gui) {
     let ended = gui.device.page.as_ref().is_some_and(|page| Hosted::finished(page).is_some());
     if !ended {
@@ -214,19 +302,43 @@ fn end_if_finished(gui: &mut Gui) {
     }
 }
 
-/// The player is quitting (clause 11): a board held before the write is
-/// let go first, the wait bounded; then the page goes with the GUI. With no
-/// page, or none holding a board, nothing waits.
+/// The player is quitting (clause 11): the page, and one left behind, let
+/// the board go first — the wait bounded, and said on stderr past a
+/// second; then they go with the GUI. Only a board held, or being
+/// reached, is waited for: no page, a page with no board, or a write
+/// (which only the exit can cut short) waits for nothing.
 pub(crate) fn quit(gui: &mut Gui) {
-    if let Some(page) = gui.device.page.as_mut() {
-        page.let_go(LET_GO);
+    let_go_within(gui, LET_GO);
+}
+
+fn let_go_within(gui: &mut Gui, within: Duration) {
+    let parting = gui.device.parting.take().map(|(page, _)| page);
+    let mut pages: Vec<Page> = gui.device.page.take().into_iter().chain(parting).collect();
+    for page in &mut pages {
+        page.release();
     }
-    gui.device.page = None;
+    let t0 = Instant::now();
+    let mut said = false;
+    loop {
+        pages.retain_mut(|page| {
+            Hosted::pump(page);
+            page.holds_board()
+        });
+        if pages.is_empty() || t0.elapsed() >= within {
+            return;
+        }
+        if !said && t0.elapsed() >= SAY_AFTER {
+            eprintln!("mstream-player: {}", t!("dev.letting_go"));
+            said = true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -237,7 +349,7 @@ mod tests {
     use crate::config::Config;
     use crate::device::{Ends, WorkerCmd};
     use crate::kit::theme::th;
-    use crate::tui::app::App;
+    use crate::tui::app::{App, SonicSide};
 
     fn english() -> std::sync::MutexGuard<'static, ()> {
         let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -247,7 +359,7 @@ mod tests {
     }
 
     /// The GUI with no server at all: the tab needs none (contract clause
-    /// 3).
+    /// 3). Key hints off, the GUI's default.
     fn gui() -> Gui {
         let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
         gui.demo = Some(super::super::demo_now());
@@ -302,10 +414,10 @@ mod tests {
         gui.device.ends.as_ref().expect("the tab built its page on the test's channels")
     }
 
-    /// The tab up: `F` from the Library.
+    /// The tab up: `K` from the Library.
     fn on_tab() -> Gui {
         let mut gui = gui();
-        assert!(!press(&mut gui, KeyCode::Char('F')));
+        assert!(!press(&mut gui, KeyCode::Char('K')));
         assert_eq!(gui.screen, Screen::Device);
         assert!(gui.device.page.is_some(), "entering the tab builds the page");
         gui
@@ -330,13 +442,15 @@ mod tests {
         gui
     }
 
+    /// The question's hint, the page's own words.
+    const CONFIRM: &str = "Enter write · e erase first · l logs · Esc cancel";
+
     // ── The tab ─────────────────────────────────────────────────────────────
 
     #[test]
     fn the_mp3_player_tab_is_fourth_and_hosts_the_page_under_the_top_bar() {
         let _en = english();
         let mut gui = gui();
-        gui.config.gui.key_hints = true; // the footer row, where the page's hint goes
         let buf = render_at(&mut gui, 100, 30);
         let top = row(&buf, 0);
         let (lx, sx, ax, fx, vx) = (
@@ -364,7 +478,7 @@ mod tests {
         assert!(text.contains("Update ▸") && text.contains("COM3 · CH9102"), "the question:\n{text}");
         assert!(!text.contains("Albums") && !text.contains("auto-dj"), "the nav and the bar stand down:\n{text}");
         assert!(!text.contains("mStream MP3 Player"), "no header of the page's own:\n{text}");
-        assert_eq!(row(&buf, 29).trim(), "Enter write · e erase first · l logs · Esc cancel", "the footer is the page's hint");
+        assert_eq!(row(&buf, 29).trim(), CONFIRM, "the footer is the page's hint, key hints or not");
 
         // Selecting the tab again keeps the page — its channels with it.
         gui.act(Act::Screen(Screen::Device));
@@ -373,73 +487,98 @@ mod tests {
     }
 
     #[test]
-    fn every_step_fits_the_guis_floor_with_the_footer_on() {
+    fn every_step_fits_the_guis_floor_whatever_the_key_hints_say() {
         let _en = english();
-        // 100×24 with the footer: the page's 22 rows (contract clause 4).
-        let mut gui = on_tab();
-        gui.config.gui.key_hints = true;
-        let floor = |gui: &mut Gui| {
-            super::super::tests::loop_frame(gui, 100, 24);
-            render_at(gui, 100, 24)
-        };
-        ends(&gui).no_device();
-        let buf = floor(&mut gui);
-        assert!(all(&buf).contains("│  Look again  │"), "{}", all(&buf));
-        assert_eq!(row(&buf, 22).trim(), "looking again every 2 s…", "the busy line over the footer");
-        assert_eq!(row(&buf, 23).trim(), "r look again · l logs · Esc library", "the footer, in the tab's words");
-        let mut gui = on_tab();
-        gui.config.gui.key_hints = true;
-        ends(&gui).to_question();
-        let buf = floor(&mut gui);
-        assert!(all(&buf).contains("│  Update ▸  │") && all(&buf).contains("▸ Show logs"), "{}", all(&buf));
-        press(&mut gui, KeyCode::Enter);
-        ends(&gui).writing();
-        let buf = floor(&mut gui);
-        assert!(all(&buf).contains("█") && row(&buf, 22).contains("writing… 42%"), "{}", all(&buf));
-        ends(&gui).done();
-        let buf = floor(&mut gui);
-        assert!(all(&buf).contains("│  Close  │") && all(&buf).contains("the firmware's README"), "Done whole:\n{}", all(&buf));
-        assert_eq!(row(&buf, 23).trim(), "Enter close · l logs");
+        // 100×24, the footer always the page's: its 22 rows (contract
+        // clause 4), with key hints off and on.
+        for hints in [false, true] {
+            let floor = |gui: &mut Gui| {
+                super::super::tests::loop_frame(gui, 100, 24);
+                render_at(gui, 100, 24)
+            };
+            let mut gui = on_tab();
+            gui.config.gui.key_hints = hints;
+            ends(&gui).no_device();
+            let buf = floor(&mut gui);
+            assert!(all(&buf).contains("│  Look again  │"), "{}", all(&buf));
+            assert_eq!(row(&buf, 22).trim(), "looking again every 2 s…", "the busy line over the footer");
+            assert_eq!(row(&buf, 23).trim(), "r look again · l logs · Esc library", "the footer, in the tab's words");
+            let mut gui = on_tab();
+            gui.config.gui.key_hints = hints;
+            ends(&gui).to_question();
+            let buf = floor(&mut gui);
+            assert!(all(&buf).contains("│  Update ▸  │") && all(&buf).contains("▸ Show logs"), "{}", all(&buf));
+            press(&mut gui, KeyCode::Enter);
+            ends(&gui).writing();
+            let buf = floor(&mut gui);
+            assert!(all(&buf).contains("█") && row(&buf, 22).contains("writing… 42%"), "{}", all(&buf));
+            // Done, the tallest, with the board's own line in full.
+            ends(&gui).done();
+            let buf = floor(&mut gui);
+            assert!(all(&buf).contains("│  Close  │") && all(&buf).contains("The board reports"), "Done whole:\n{}", all(&buf));
+            assert_eq!(row(&buf, 23).trim(), "Enter close · l logs");
+        }
     }
 
     #[test]
-    fn f_opens_the_tab_from_the_library_now_playing_stats_and_the_admin_hallway_and_leads_back() {
+    fn with_key_hints_off_the_footer_is_still_the_pages_and_the_write_warns_against_unplugging() {
+        let _en = english();
+        let mut gui = writing_gui();
+        assert!(!gui.config.gui.key_hints, "the GUI's default");
+        let buf = render_at(&mut gui, 100, 30);
+        assert_eq!(
+            row(&buf, 29).trim(),
+            "please wait — unplugging now would leave the board half written · l logs",
+            "the write's warning, on the footer the page's area leaves it"
+        );
+        assert!(row(&buf, 28).contains("writing… 42%"), "the busy line over it: {}", row(&buf, 28));
+        let mut gui = at_question();
+        let buf = render_at(&mut gui, 100, 30);
+        assert_eq!(row(&buf, 29).trim(), CONFIRM, "the question names its keys");
+    }
+
+    #[test]
+    fn k_opens_the_tab_from_the_library_now_playing_stats_and_the_admin_hallway_and_leads_back() {
         let _en = english();
         let mut gui = gui();
+        // `F` is no longer the tab's: a Caps Lock slip on the browse bar's
+        // `f` must not reset a plugged-in Core2.
         press(&mut gui, KeyCode::Char('F'));
-        assert_eq!(gui.screen, Screen::Device, "F from the Library");
-        press(&mut gui, KeyCode::Char('F'));
-        assert_eq!(gui.screen, Screen::Library, "F on the tab leads back");
-        assert!(gui.device.page.is_none(), "and drops the page");
+        assert_eq!(gui.screen, Screen::Library, "F opens nothing");
+        press(&mut gui, KeyCode::Char('K'));
+        assert_eq!(gui.screen, Screen::Device, "K from the Library");
+        press(&mut gui, KeyCode::Char('K'));
+        assert_eq!(gui.screen, Screen::Library, "K on the tab leads back");
+        assert!(gui.device.page.is_none(), "and lets the page go");
 
         gui.act(Act::Screen(Screen::NowPlaying));
-        press(&mut gui, KeyCode::Char('F'));
-        assert_eq!(gui.screen, Screen::Device, "F from Now Playing");
+        press(&mut gui, KeyCode::Char('K'));
+        assert_eq!(gui.screen, Screen::Device, "K from Now Playing");
         assert!(!gui.app.fullscreen);
 
         gui.act(Act::Screen(Screen::Stats));
-        assert!(gui.device.page.is_none(), "another tab drops the page");
-        press(&mut gui, KeyCode::Char('F'));
-        assert_eq!(gui.screen, Screen::Device, "F from Stats");
+        assert!(gui.device.page.is_none(), "another tab lets the page go");
+        press(&mut gui, KeyCode::Char('K'));
+        assert_eq!(gui.screen, Screen::Device, "K from Stats");
 
         gui.act(Act::Screen(Screen::Admin));
-        press(&mut gui, KeyCode::Char('F'));
-        assert_eq!(gui.screen, Screen::Device, "F from the Admin hallway");
+        press(&mut gui, KeyCode::Char('K'));
+        assert_eq!(gui.screen, Screen::Device, "K from the Admin hallway");
 
         // The GUI's own ways out from the tab, as from the Stats tab.
         press(&mut gui, KeyCode::Char('T'));
         assert_eq!(gui.screen, Screen::Stats);
-        press(&mut gui, KeyCode::Char('F'));
+        press(&mut gui, KeyCode::Char('K'));
         press(&mut gui, KeyCode::Char('M'));
         assert_eq!(gui.screen, Screen::Admin);
-        press(&mut gui, KeyCode::Char('F'));
+        press(&mut gui, KeyCode::Char('K'));
         press(&mut gui, KeyCode::Char('0'));
         assert_eq!(gui.screen, Screen::NowPlaying);
-        press(&mut gui, KeyCode::Char('F'));
+        press(&mut gui, KeyCode::Char('K'));
         press(&mut gui, KeyCode::Char('2'));
         assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::ALBUMS_NAV), "a digit is the Library's room");
         assert!(gui.device.page.is_none());
-        press(&mut gui, KeyCode::Char('F'));
+        press(&mut gui, KeyCode::Char('K'));
         assert!(press(&mut gui, KeyCode::Char('q')), "q quits the player");
     }
 
@@ -459,10 +598,65 @@ mod tests {
         assert_eq!(gui.screen, Screen::Device);
     }
 
+    #[test]
+    fn entering_the_tab_stows_the_queue_and_lets_an_armed_pick_go() {
+        let _en = english();
+        // The queue panel holding the keys: K is none of its own, and the
+        // tab takes them back from it.
+        let mut queue = gui();
+        queue.queue_open = true;
+        queue.app.focus = Focus::Queue;
+        press(&mut queue, KeyCode::Char('K'));
+        assert_eq!(queue.screen, Screen::Device);
+        assert_eq!(queue.app.focus, Focus::Browser, "the queue's keys stowed");
+        ends(&queue).to_question();
+        frame(&mut queue);
+        assert_eq!(row(&render_at(&mut queue, 100, 30), 29).trim(), CONFIRM, "the page's hint, not the queue's");
+        press(&mut queue, KeyCode::Enter);
+        assert_eq!(ends(&queue).sent(), vec![WorkerCmd::Go { erase: false }], "and Enter the page's");
+
+        // A Sonic Path pick: let go, the Library back at the room that asked.
+        let mut sonic = gui();
+        sonic.app.capture = Some(Capture::Sonic(SonicSide::Start));
+        press(&mut sonic, KeyCode::Char('K'));
+        assert_eq!(sonic.screen, Screen::Device);
+        assert_eq!(sonic.app.capture, None, "the pick is let go");
+        assert_eq!(sonic.active, SONIC_NAV, "home to the room that asked");
+
+        // An Auto DJ opening-song pick likewise.
+        let mut dj = gui();
+        dj.app.capture = Some(Capture::DjSeed);
+        press(&mut dj, KeyCode::Char('K'));
+        assert_eq!(dj.app.capture, None);
+    }
+
+    #[test]
+    fn on_the_tab_enter_and_esc_are_the_pages_even_with_a_pick_armed() {
+        let _en = english();
+        // However a pick came to be armed with the tab up, its keys and its
+        // tips are not the tab's.
+        let mut gui = at_question();
+        gui.app.capture = Some(Capture::DjSeed);
+        assert_eq!(row(&render_at(&mut gui, 100, 30), 29).trim(), CONFIRM, "the page's hint, not the pick's");
+        press(&mut gui, KeyCode::Esc);
+        assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Quit], "Esc cancels the question");
+        assert_eq!(gui.app.capture, Some(Capture::DjSeed), "not the pick");
+
+        let mut gui = at_question();
+        gui.app.capture = Some(Capture::Sonic(SonicSide::Start));
+        gui.config.gui.key_hints = true;
+        let buf = render_at(&mut gui, 100, 30);
+        assert_eq!(row(&buf, 29).trim(), CONFIRM);
+        assert!(row(&buf, 1).contains("Pick the start song"), "the banner: {}", row(&buf, 1));
+        assert!(!row(&buf, 1).contains("Esc cancels"), "but it names no Esc here: {}", row(&buf, 1));
+        press(&mut gui, KeyCode::Enter);
+        assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Go { erase: false }], "Enter answers the question");
+    }
+
     // ── The page's own end ──────────────────────────────────────────────────
 
     #[test]
-    fn esc_at_the_pages_base_and_its_close_lead_back_to_the_library_and_drop_the_page() {
+    fn esc_at_the_pages_base_and_its_close_lead_back_to_the_library_and_let_the_page_go() {
         let _en = english();
         // Esc where nothing holds the board: the page ends at once.
         let mut gui = on_tab();
@@ -470,11 +664,11 @@ mod tests {
         frame(&mut gui);
         press(&mut gui, KeyCode::Esc);
         assert_eq!(gui.screen, Screen::Library, "Esc at the page's base is the way back");
-        assert!(gui.device.page.is_none());
+        assert!(gui.device.page.is_none() && gui.device.parting.is_none());
 
         // Esc at the question: the board is restarted first, so the page
         // ends — and the tab with it — once the worker says so.
-        press(&mut gui, KeyCode::Char('F'));
+        press(&mut gui, KeyCode::Char('K'));
         ends(&gui).to_question();
         frame(&mut gui);
         press(&mut gui, KeyCode::Esc);
@@ -486,7 +680,7 @@ mod tests {
         ends(&gui).cancelled();
         frame(&mut gui);
         assert_eq!(gui.screen, Screen::Library, "the page's end, seen by the frame");
-        assert!(gui.device.page.is_none());
+        assert!(gui.device.page.is_none() && gui.device.parting.is_none(), "the board is back: nothing kept");
 
         // Close, after a write: a click on the page's own button.
         let mut gui = writing_gui();
@@ -506,10 +700,10 @@ mod tests {
     fn while_the_page_writes_nothing_leaves_the_tab_but_ctrl_c() {
         let _en = english();
         let mut gui = writing_gui();
-        gui.config.gui.key_hints = true;
         let queue_open = gui.queue_open;
         let codes = [
             KeyCode::Char('q'),
+            KeyCode::Char('K'),
             KeyCode::Char('F'),
             KeyCode::Char('T'),
             KeyCode::Char('M'),
@@ -568,9 +762,9 @@ mod tests {
         click(&mut gui, 96, 0);
         assert!(!gui.servers.drop_open && gui.servers.form.is_none(), "the header's corner opens nothing");
         frame(&mut gui);
-        assert!(gui.device.page.is_some() && writing(&gui), "the page is never dropped");
+        assert!(gui.device.page.is_some() && writing(&gui), "the page is never let go of");
 
-        // Ctrl+C is the one way out, as everywhere.
+        // Ctrl+C is the one key out, as everywhere.
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(super::super::handle_key(&mut gui, ctrl_c), "Ctrl+C still quits");
 
@@ -591,23 +785,162 @@ mod tests {
         assert!(!writing(&gui));
         let text = all(&render_at(&mut gui, 100, 30));
         assert!(text.contains("That did not work") && text.contains("Try again"), "{text}");
-        press(&mut gui, KeyCode::Char('F'));
+        press(&mut gui, KeyCode::Char('K'));
         assert_eq!(gui.screen, Screen::Library);
-        assert!(gui.device.page.is_none());
+        assert!(gui.device.page.is_none() && gui.device.parting.is_none(), "a failed write holds no board");
+    }
+
+    // ── The mini player ─────────────────────────────────────────────────────
+
+    #[test]
+    fn in_the_mini_player_the_unseen_page_takes_no_keys() {
+        let _en = english();
+        let mut gui = at_question();
+        // The window narrows below the GUI's floor: the mini player, the
+        // page out of sight.
+        let text = all(&render_at(&mut gui, 90, 20));
+        assert!(text.contains("Enlarge the terminal"), "{text}");
+        assert!(gui.device.at.is_none());
+        for code in [KeyCode::Enter, KeyCode::Char('e'), KeyCode::Char('r'), KeyCode::Char('l'), KeyCode::Esc] {
+            assert!(!press(&mut gui, code));
+            assert_eq!(gui.screen, Screen::Device, "{code:?}");
+        }
+        assert!(ends(&gui).sent().is_empty(), "no Go, no Quit reached the worker");
+        assert!(!writing(&gui), "no write began out of sight");
+        // Grown back, the page is as it was, and its keys are its own again.
+        let text = all(&render_at(&mut gui, 100, 30));
+        assert!(text.contains("[ ] Erase") && text.contains("▸ Show logs"), "e and l reached nothing:\n{text}");
+        press(&mut gui, KeyCode::Enter);
+        assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Go { erase: false }]);
+    }
+
+    #[test]
+    fn a_write_in_the_mini_player_says_so_and_holds_the_pointer() {
+        let _en = english();
+        let mut gui = writing_gui();
+        let area = Rect { x: 0, y: 0, width: 90, height: 20 };
+        let buf = render_at(&mut gui, area.width, area.height);
+        let text = all(&buf);
+        assert!(!text.contains("Enlarge the terminal"), "{text}");
+        let plan = super::super::mini::plan(&gui, area).mini;
+        let line: Vec<&str> = plan.lines.iter().map(|(_, _, piece)| piece.as_str()).collect();
+        assert_eq!(
+            line.join(" "),
+            "writing the MP3 player's firmware — please wait: unplugging it or quitting now would leave it half written"
+        );
+        for (_, y, piece) in &plan.lines {
+            assert!(row(&buf, *y).contains(piece.as_str()), "{piece:?} on screen:\n{text}");
+        }
+        // The mini player's frames answer nothing while the page writes.
+        let (x, y) = plan.transport.expect("the frames");
+        let paused = gui.demo_paused;
+        for dx in [2, 9, 16] {
+            click(&mut gui, x + dx, y + 1);
+        }
+        assert_eq!(gui.demo_paused, paused, "Play did nothing");
+        press(&mut gui, KeyCode::Char(' '));
+        assert_eq!(gui.demo_paused, paused, "nor did Space");
+        assert!(writing(&gui) && ends(&gui).sent().is_empty());
+        // Once it is done, the mini player is itself again.
+        ends(&gui).done();
+        frame(&mut gui);
+        let text = all(&render_at(&mut gui, area.width, area.height));
+        assert!(text.contains("Enlarge the terminal"), "{text}");
     }
 
     // ── Leaving and quitting ────────────────────────────────────────────────
 
     #[test]
-    fn leaving_at_the_question_drops_the_page_and_its_worker_hears_it() {
+    fn leaving_at_the_question_tells_the_worker_to_let_go_and_keeps_the_page_until_it_has() {
         let _en = english();
         let mut gui = at_question();
         press(&mut gui, KeyCode::Char('T'));
         assert_eq!(gui.screen, Screen::Stats);
-        assert!(gui.device.page.is_none(), "leaving drops the page");
-        let ends = gui.device.ends.as_ref().unwrap();
-        assert!(ends.page_gone(), "the worker's reports have nobody to read them: it restarts the board and ends");
-        assert!(ends.sent().is_empty(), "nothing else was said; the closed channel is the word");
+        assert!(gui.device.page.is_none(), "the tab has no page");
+        assert!(gui.device.parting.is_some(), "the one it had is kept aside while the board is held");
+        assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Quit], "told to let go, the page's own way");
+        for _ in 0..3 {
+            frame(&mut gui);
+        }
+        assert!(gui.device.parting.is_some() && !ends(&gui).page_gone(), "read every frame, kept until the worker answers");
+        ends(&gui).cancelled();
+        frame(&mut gui);
+        assert!(gui.device.parting.is_none(), "the board is back: the page goes");
+        assert!(ends(&gui).page_gone());
+    }
+
+    #[test]
+    fn coming_straight_back_waits_for_the_last_page_to_let_the_board_go() {
+        let _en = english();
+        let mut gui = at_question();
+        // The worker holds the port until it hears the Quit, then takes a
+        // moment to reset the board; only then is the port free and Cancelled said.
+        let held = Arc::new(AtomicBool::new(true));
+        let port = held.clone();
+        let first = gui.device.ends.take().unwrap();
+        let worker = std::thread::spawn(move || {
+            let heard = first.cmds.recv_timeout(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(300));
+            port.store(false, Ordering::SeqCst);
+            first.cancelled();
+            heard
+        });
+        press(&mut gui, KeyCode::Char('K'));
+        assert_eq!(gui.screen, Screen::Library);
+        press(&mut gui, KeyCode::Char('K'));
+        assert_eq!(gui.screen, Screen::Device, "the tab opens");
+        assert!(gui.device.page.is_none() && gui.device.ends.is_none(), "but no worker of its own while the port is held");
+        let buf = render_at(&mut gui, 100, 30);
+        assert!(row(&buf, 2).contains("restarting the board…"), "{}", all(&buf));
+        let t0 = Instant::now();
+        while gui.device.page.is_none() {
+            assert!(t0.elapsed() < Duration::from_secs(5), "the visit never got its page");
+            assert!(gui.device.ends.is_none(), "no second worker meets the held port");
+            frame(&mut gui);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!held.load(Ordering::SeqCst), "the new page came once the port was free");
+        assert_eq!(worker.join().unwrap(), Ok(WorkerCmd::Quit));
+        assert!(gui.device.parting.is_none());
+        ends(&gui).to_question();
+        frame(&mut gui);
+        assert!(all(&render_at(&mut gui, 100, 30)).contains("Update ▸"), "a fresh page, its own question");
+    }
+
+    #[test]
+    fn esc_while_the_tab_waits_for_the_last_page_leads_back() {
+        let _en = english();
+        let mut gui = at_question();
+        press(&mut gui, KeyCode::Char('K'));
+        press(&mut gui, KeyCode::Char('K'));
+        assert!(gui.device.page.is_none() && gui.device.parting.is_some());
+        press(&mut gui, KeyCode::Esc);
+        assert_eq!(gui.screen, Screen::Library);
+        assert!(gui.device.parting.is_some(), "the last page still lets the board go");
+    }
+
+    #[test]
+    fn leaving_before_the_board_is_reached_lets_the_page_go_at_once() {
+        let _en = english();
+        // Watching the ports: the worker is told to stop, holds nothing, and
+        // will open no port (it says "reaching" before its last look).
+        let mut gui = on_tab();
+        ends(&gui).no_device();
+        frame(&mut gui);
+        press(&mut gui, KeyCode::Char('K'));
+        assert!(gui.device.page.is_none() && gui.device.parting.is_none());
+        assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Quit]);
+        assert!(ends(&gui).page_gone());
+
+        // A worker that said it was reaching the board before the page read
+        // it: the page's step lagged, the worker's word holds — kept aside.
+        let mut gui = on_tab();
+        ends(&gui).no_device();
+        frame(&mut gui);
+        ends(&gui).reaching();
+        press(&mut gui, KeyCode::Char('K'));
+        assert!(gui.device.parting.is_some(), "the worker may be on the port");
+        assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Quit]);
     }
 
     #[test]
@@ -647,37 +980,65 @@ mod tests {
         quit(&mut gui);
         let took = t0.elapsed();
         assert_eq!(worker.join().unwrap(), Ok(WorkerCmd::Quit), "the worker was told to let go");
-        assert!(took >= Duration::from_millis(150) && took < LET_GO, "it waited for the answer, no longer: {took:?}");
+        assert!(took >= Duration::from_millis(150) && took < Duration::from_secs(2), "it waited for the answer, no longer: {took:?}");
         assert!(gui.device.page.is_none());
     }
 
     #[test]
-    fn quitting_while_the_board_is_being_reached_lets_it_go_too() {
+    fn quitting_while_the_board_is_being_reached_waits_for_espflash_and_the_reset() {
         let _en = english();
         let mut gui = on_tab();
         ends(&gui).reaching();
         frame(&mut gui);
         let ends = gui.device.ends.take().unwrap();
+        // The worker as flow.rs runs it: deaf while espflash reaches the
+        // board, then it looks for a Quit, resets the board and says so.
         let worker = std::thread::spawn(move || {
-            let heard = ends.cmds.recv_timeout(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(600));
+            let heard = ends.cmds.try_recv();
+            std::thread::sleep(Duration::from_millis(100));
             ends.cancelled();
             heard
         });
         let t0 = Instant::now();
         quit(&mut gui);
-        assert_eq!(worker.join().unwrap(), Ok(WorkerCmd::Quit), "the port it has open is let go");
-        assert!(t0.elapsed() < LET_GO, "{:?}", t0.elapsed());
+        let took = t0.elapsed();
+        assert_eq!(worker.join().unwrap(), Ok(WorkerCmd::Quit), "the Quit waited for it");
+        assert!(took >= Duration::from_millis(650), "the quit waited out the probe and the reset: {took:?}");
+        assert!(took < Duration::from_secs(3), "and no longer: {took:?}");
+    }
+
+    #[test]
+    fn quitting_with_a_page_left_behind_waits_for_it_too() {
+        let _en = english();
+        let mut gui = at_question();
+        press(&mut gui, KeyCode::Char('T'));
+        assert!(gui.device.parting.is_some());
+        let ends = gui.device.ends.take().unwrap();
+        let worker = std::thread::spawn(move || {
+            let heard = ends.cmds.recv_timeout(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(200));
+            ends.cancelled();
+            heard
+        });
+        let t0 = Instant::now();
+        quit(&mut gui);
+        let took = t0.elapsed();
+        assert_eq!(worker.join().unwrap(), Ok(WorkerCmd::Quit));
+        assert!(took >= Duration::from_millis(150) && took < Duration::from_secs(2), "{took:?}");
+        assert!(gui.device.parting.is_none());
     }
 
     #[test]
     fn quitting_at_the_question_with_no_answer_waits_its_bound_and_no_longer() {
         let _en = english();
         let mut gui = at_question();
+        let bound = Duration::from_millis(400);
         let t0 = Instant::now();
-        quit(&mut gui);
+        let_go_within(&mut gui, bound);
         let took = t0.elapsed();
-        assert!(took >= LET_GO - Duration::from_millis(100), "the bound: {took:?}");
-        assert!(took < LET_GO + Duration::from_secs(2), "and no longer: {took:?}");
+        assert!(took >= bound - Duration::from_millis(50), "the bound: {took:?}");
+        assert!(took < bound + Duration::from_secs(2), "and no longer: {took:?}");
         assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Quit]);
     }
 
@@ -688,12 +1049,13 @@ mod tests {
         // The Library, no page.
         let mut gui = gui();
         quit(&mut gui);
-        // The tab watching for a board: nothing is held.
+        // The tab watching for a board: the worker is told to stop before
+        // it opens any port, and nothing waits for it.
         let mut gui = on_tab();
         ends(&gui).no_device();
         frame(&mut gui);
         quit(&mut gui);
-        assert!(ends(&gui).sent().is_empty(), "nothing to let go of");
+        assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Quit]);
         // A write: nothing can stop it but the exit itself.
         let mut gui = writing_gui();
         quit(&mut gui);
@@ -717,7 +1079,7 @@ mod tests {
         gui.files_view.scroll = 0;
         gui.queue_view.scroll = 0;
 
-        press(&mut gui, KeyCode::Char('F'));
+        press(&mut gui, KeyCode::Char('K'));
         ends(&gui).several();
         frame(&mut gui);
         render_at(&mut gui, 100, 30);
