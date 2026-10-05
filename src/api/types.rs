@@ -111,6 +111,16 @@ pub struct Ping {
     /// older one, which counts the legacy thirty-second scrobble instead
     /// (play-reporting contract, clause 10).
     pub stats: Option<u32>,
+    /// The history-seeded Discover page's generation (mStream's discovery
+    /// plan §2.10): 1 = `POST /api/v1/discovery/taste` and its prefs. An
+    /// integer like `stats`, so a later body key ships as 2 with no floor
+    /// table here; an older server omits it (0).
+    #[serde(rename = "discoveryTaste", deserialize_with = "null_default")]
+    pub discovery_taste: u32,
+    /// At least one discovery plug-in is switched on, so a recommendation
+    /// row has actions (`GET /api/v1/discovery/plugins` lists them).
+    #[serde(rename = "discoveryPlugins", deserialize_with = "null_default")]
+    pub discovery_plugins: bool,
 }
 
 /// `GET /api/` — the layered payload (mStream #932): server-wide `features`
@@ -144,6 +154,11 @@ pub struct LayeredFeatures {
     pub discovery_p2p: bool,
     /// The Stats API's version, as the ping carries it.
     pub stats: Option<u32>,
+    /// As [`Ping::discovery_taste`]: `/api/` carries it under `features`.
+    #[serde(rename = "discoveryTaste", deserialize_with = "null_default")]
+    pub discovery_taste: u32,
+    #[serde(rename = "discoveryPlugins", deserialize_with = "null_default")]
+    pub discovery_plugins: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -178,6 +193,8 @@ impl From<LayeredInfo> for Ping {
             federation_browse: info.user.federation_browse,
             federation_direct: info.user.federation_direct,
             stats: info.features.stats,
+            discovery_taste: info.features.discovery_taste,
+            discovery_plugins: info.features.discovery_plugins,
         }
     }
 }
@@ -267,6 +284,21 @@ pub struct Capabilities {
     pub federation_direct: bool,
     /// The server takes play sessions (play-reporting contract, clause 10).
     pub stats: bool,
+    /// The Discover page's generation, kept as the integer the server sent:
+    /// the room asks `>= 1` (discovery-page contract, clause 1), a later
+    /// body key a higher floor.
+    pub discovery_taste: u32,
+    /// Recommendation rows have plug-in actions (discovery-page clause 63).
+    pub discovery_plugins: bool,
+}
+
+impl Capabilities {
+    /// The Discover room's gate (discovery-page contract, clause 1): the
+    /// index on AND the taste route there. A peer session is the room's
+    /// own rule, not the server's, so it is not read here.
+    pub fn taste(&self) -> bool {
+        self.discovery && self.discovery_taste >= 1
+    }
 }
 
 impl From<&Ping> for Capabilities {
@@ -279,6 +311,8 @@ impl From<&Ping> for Capabilities {
             federation_browse: ping.federation_browse,
             federation_direct: ping.federation_direct,
             stats: ping.stats.is_some(),
+            discovery_taste: ping.discovery_taste,
+            discovery_plugins: ping.discovery_plugins,
         }
     }
 }
@@ -1202,6 +1236,513 @@ pub struct SimilarArtist {
     pub entry_points: Vec<Track>,
 }
 
+// ── The Discover page (taste) ───────────────────────────────────────────────
+//
+// mStream's history-seeded page (its docs/discovery-page-plan.md §3.1–§3.3;
+// this repo's docs/ux-contracts/discovery-page.md). Every field is defensive:
+// the route is new, and a reply missing a key it did not need to send must
+// still fill the room. Gated on the ping's `discoveryTaste >= 1` — a flag,
+// never a probe (plan §2.10).
+
+/// Which of the caller's songs the Library source shows (plan §2.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TasteFilter {
+    /// Never played, or not in `staleDays` days — the server's default.
+    #[default]
+    Fresh,
+    /// Never played at all.
+    Unplayed,
+    /// Everything that sounds like the seeds.
+    All,
+    /// A filter a newer server named that this build has no words for.
+    /// Only ever read, never sent.
+    #[serde(other)]
+    Other,
+}
+
+/// `POST /api/v1/discovery/taste` — the body (plan §3.1). All optional: a
+/// field left out lets the user's saved prefs apply (no Joi defaults on
+/// `window`/`filter`/`staleDays`), so nothing here is sent unless set.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasteRequest {
+    /// 7 | 30 | 90 | 0 (all time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<u32>,
+    /// Vpath-form paths, at most 8: songs the user picked (clause 14).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pin: Vec<String>,
+    /// Seed hashes the user dropped this session (clause 13).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Persist window, filter, staleDays and the exclusions server-side, so
+    /// every client opens on the same taste (plan §2.3, §3.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remember: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<TasteFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_days: Option<u32>,
+    /// `library` · `network` · `peers` — the two halves are asked apart
+    /// (clause 30), so this is never empty when the App sends it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_artists_only: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignore_v_paths: Vec<String>,
+}
+
+/// Where the answer's seeds came from (plan §2.2): the header's phrase
+/// (contract clause 11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeedSource {
+    History,
+    Counters,
+    Random,
+    Pinned,
+    /// Missing, or a word a newer server added: the header says nothing it
+    /// cannot stand behind.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// How a history seed's play ended (plan §2.1): "finished" or "listened to".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TasteOutcome {
+    Completed,
+    Stopped,
+    /// A pin, the random seed, the counters — no play outcome to name.
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+/// One seed the server chose, or one the user pinned.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TasteSeed {
+    pub hash: String,
+    pub filepath: String,
+    #[serde(deserialize_with = "null_default")]
+    pub metadata: TrackMetadata,
+    #[serde(deserialize_with = "null_default")]
+    pub outcome: TasteOutcome,
+    /// ISO time of the seed's latest play in the window.
+    pub last_played: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub plays: u64,
+    #[serde(deserialize_with = "null_default")]
+    pub pinned: bool,
+    /// False only when the server says so: a missing key is not a seed the
+    /// scan skipped (the modal's "not analyzed yet" is a claim).
+    #[serde(default = "yes")]
+    pub analyzed: bool,
+}
+
+impl TasteSeed {
+    pub fn to_track(&self) -> Track {
+        Track { filepath: self.filepath.clone(), metadata: self.metadata.clone() }
+    }
+}
+
+/// A saved exclusion the server could still resolve — the seeds modal's
+/// DROPPED section (contract clause 13).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TasteExcluded {
+    pub hash: String,
+    pub filepath: String,
+    #[serde(deserialize_with = "null_default")]
+    pub metadata: TrackMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TasteModel {
+    pub id: Option<String>,
+    pub version: Option<String>,
+}
+
+/// A song in the caller's own libraries (plan §2.5).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TasteTrack {
+    pub filepath: String,
+    #[serde(deserialize_with = "null_default")]
+    pub similarity: f64,
+    /// The seed this row sounds like — the row's "sounds like" tooltip.
+    pub seed_hash: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub metadata: TrackMetadata,
+    #[serde(deserialize_with = "null_default")]
+    pub genre_tags: Vec<String>,
+    pub play_count: Option<u64>,
+    /// ISO; `None` is "never played".
+    pub last_played: Option<String>,
+}
+
+impl TasteTrack {
+    pub fn to_track(&self) -> Track {
+        Track { filepath: self.filepath.clone(), metadata: self.metadata.clone() }
+    }
+}
+
+/// An album card in the caller's libraries (plan §2.6): `/db/albums`' shape
+/// (snake case, as that route sends it) plus the taste facts (camel case).
+/// Its songs are left out of `library.tracks`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TasteAlbum {
+    pub name: Option<String>,
+    pub year: Option<i32>,
+    pub album_art_file: Option<String>,
+    /// Set when one credit covers the whole album.
+    pub album_artist: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub artists: Vec<String>,
+    /// Across all libraries — `/db/albums`' meaning, unchanged.
+    #[serde(deserialize_with = "null_default")]
+    pub track_count: u32,
+    #[serde(deserialize_with = "null_default")]
+    pub similarity: f64,
+    /// The album's songs in the caller's libraries — the row's LENGTH
+    /// (contract clause 51).
+    #[serde(rename = "scopedTracks", deserialize_with = "null_default")]
+    pub scoped_tracks: u32,
+    #[serde(rename = "playedTracks", deserialize_with = "null_default")]
+    pub played_tracks: u32,
+    #[serde(rename = "lastPlayed")]
+    pub last_played: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub tracks: Vec<String>,
+}
+
+impl TasteAlbum {
+    /// The artist the Albums room's drill asks `album-songs` with: the one
+    /// credit when there is one, else the first named.
+    pub fn artist(&self) -> Option<&str> {
+        self.album_artist
+            .as_deref()
+            .or_else(|| self.artists.first().map(String::as_str))
+            .filter(|a| !a.is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TasteLibrary {
+    #[serde(deserialize_with = "null_default")]
+    pub filter: TasteFilter,
+    #[serde(deserialize_with = "null_default")]
+    pub tracks: Vec<TasteTrack>,
+    #[serde(deserialize_with = "null_default")]
+    pub albums: Vec<TasteAlbum>,
+    #[serde(deserialize_with = "null_default")]
+    pub capped: bool,
+}
+
+/// Where a lead or a peer's song was found: a p2p row names the endpoint,
+/// a federation row the peer's id on this server.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LeadPeer {
+    pub id: Option<i64>,
+    pub endpoint_id: Option<String>,
+    pub name: Option<String>,
+}
+
+/// One row from another server: a p2p lead (Network) or a federated peer's
+/// song (Peers). The server stamps `source` on each so the row is a
+/// ready-to-send recommendation (plan §2.7); `raw` keeps it exactly as it
+/// came, because the `links` resolve forwards the row verbatim (contract
+/// clause 63) and a typed copy would drop what a newer server added. The
+/// typed fields are read leniently off `raw`: a lead with an odd field
+/// still lists.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TasteLead {
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<i32>,
+    /// Seconds, when the row carries one.
+    pub duration: Option<f64>,
+    pub similarity: f64,
+    pub recording_mbid: Option<String>,
+    pub seed_hash: Option<String>,
+    /// `p2p` · `federation`.
+    pub source: Option<String>,
+    /// A federation row's path ON THE PEER — what the parent's stream proxy
+    /// plays. A p2p lead has none.
+    pub filepath: Option<String>,
+    pub peer: LeadPeer,
+    pub raw: serde_json::Value,
+}
+
+impl TasteLead {
+    pub fn from_raw(raw: serde_json::Value) -> TasteLead {
+        let text = |key: &str| {
+            raw.get(key).and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
+        };
+        let number = |key: &str| {
+            raw.get(key).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        };
+        let peer = raw.get("peer");
+        let peer = LeadPeer {
+            id: peer.and_then(|p| p.get("id")).and_then(serde_json::Value::as_i64),
+            endpoint_id: peer
+                .and_then(|p| p.get("endpointId"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            name: peer.and_then(|p| p.get("name")).and_then(serde_json::Value::as_str).map(str::to_string),
+        };
+        TasteLead {
+            artist: text("artist"),
+            title: text("title"),
+            album: text("album"),
+            year: number("year").filter(|y| y.is_finite()).map(|y| y as i32),
+            duration: number("duration").filter(|d| d.is_finite() && *d > 0.0),
+            similarity: number("similarity").filter(|s| s.is_finite()).unwrap_or(0.0),
+            recording_mbid: text("recordingMbid"),
+            seed_hash: text("seedHash"),
+            source: text("source"),
+            filepath: text("filepath"),
+            peer,
+            raw,
+        }
+    }
+
+    /// A key for this row that holds across answers — the links cache's
+    /// (contract clause 63: links are "kept with the answer"). The client's
+    /// own: the server's `recommendationKey` is not on the row.
+    pub fn key(&self) -> String {
+        let fold = |s: &Option<String>| s.as_deref().unwrap_or("").trim().to_lowercase();
+        if let Some(mbid) = &self.recording_mbid {
+            return format!("mbid:{}", mbid.to_lowercase());
+        }
+        if let (Some(id), Some(path)) = (self.peer.id, &self.filepath) {
+            return format!("file:{id}:{path}");
+        }
+        format!("text:{}\u{1f}{}\u{1f}{}", fold(&self.artist), fold(&self.title), fold(&self.album))
+    }
+
+    /// The row as a queue track: the peer's path and the row's own facts,
+    /// which are also the play report's snapshot (play-reporting clause 7).
+    /// `None` for a lead with no file to play.
+    pub fn to_track(&self) -> Option<Track> {
+        let filepath = self.filepath.clone()?;
+        Some(Track {
+            filepath,
+            metadata: TrackMetadata {
+                title: self.title.clone(),
+                artist: self.artist.clone(),
+                album: self.album.clone(),
+                year: self.year,
+                duration: self.duration,
+                ..TrackMetadata::default()
+            },
+        })
+    }
+
+    /// "Artist – Title", the lead's copy text (contract clause 63) — the
+    /// title alone when there is no artist.
+    pub fn artist_title(&self) -> String {
+        match (self.artist.as_deref(), self.title.as_deref()) {
+            (Some(a), Some(t)) => format!("{a} \u{2013} {t}"),
+            (None, Some(t)) => t.to_string(),
+            (Some(a), None) => a.to_string(),
+            (None, None) => String::new(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TasteLead {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(TasteLead::from_raw(serde_json::Value::deserialize(d)?))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct NetworkSearched {
+    #[serde(deserialize_with = "null_default")]
+    pub peers: u32,
+    #[serde(deserialize_with = "null_default")]
+    pub tracks: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TasteNetwork {
+    #[serde(deserialize_with = "null_default")]
+    pub results: Vec<TasteLead>,
+    #[serde(deserialize_with = "null_default")]
+    pub searched: NetworkSearched,
+}
+
+/// One federated peer's part of the answer (contract clause 70).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TastePeerGroup {
+    pub id: i64,
+    #[serde(deserialize_with = "null_default")]
+    pub name: String,
+    /// This call's outcome, not a stored status.
+    #[serde(deserialize_with = "null_default")]
+    pub reachable: bool,
+    /// Another sonic model: its vectors can't be compared with ours.
+    #[serde(deserialize_with = "null_default")]
+    pub mismatched: bool,
+    /// ISO, from the server's peer table — may be stale.
+    pub last_seen: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub results: Vec<TasteLead>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PeersSearched {
+    #[serde(deserialize_with = "null_default")]
+    pub peers: u32,
+    #[serde(deserialize_with = "null_default")]
+    pub unreachable: u32,
+    #[serde(deserialize_with = "null_default")]
+    pub mismatched: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TastePeers {
+    #[serde(deserialize_with = "null_default")]
+    pub peers: Vec<TastePeerGroup>,
+    #[serde(deserialize_with = "null_default")]
+    pub searched: PeersSearched,
+}
+
+/// `POST /api/v1/discovery/taste` — the answer (plan §3.1). `network` and
+/// `peers` are `None` when the source was not asked, is not advertised for
+/// this caller, or the seed is the server's random pick.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TasteResponse {
+    /// The window the seeds were read from (0 = all time).
+    pub window: Option<u32>,
+    /// The window asked for, when it held nothing and the server widened.
+    pub widened_from: Option<u32>,
+    #[serde(deserialize_with = "null_default")]
+    pub seed_source: SeedSource,
+    /// The server's random seed is in use: nothing to seed from yet.
+    #[serde(deserialize_with = "null_default")]
+    pub fallback: bool,
+    #[serde(deserialize_with = "null_default")]
+    pub seeds: Vec<TasteSeed>,
+    #[serde(deserialize_with = "null_default")]
+    pub excluded: Vec<TasteExcluded>,
+    /// Pins the server dropped (unknown or forbidden paths).
+    #[serde(deserialize_with = "null_default")]
+    pub dropped: u32,
+    /// The scan has not run: the seeds are listed, nothing is ranked.
+    #[serde(deserialize_with = "null_default")]
+    pub not_analyzed: bool,
+    pub model: Option<TasteModel>,
+    pub library: Option<TasteLibrary>,
+    pub network: Option<TasteNetwork>,
+    pub peers: Option<TastePeers>,
+}
+
+/// `GET` / `PUT /api/v1/discovery/taste/prefs` (plan §3.2): the user's
+/// saved taste, the same on every client.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TastePrefs {
+    pub window: Option<u32>,
+    #[serde(deserialize_with = "null_default")]
+    pub exclude: Vec<String>,
+    pub filter: Option<TasteFilter>,
+    pub stale_days: Option<u32>,
+}
+
+/// A `PUT …/prefs` body: only what is being changed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TastePrefsPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<TasteFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_days: Option<u32>,
+}
+
+/// `GET /api/v1/discovery/plugins` — the switched-on plug-ins this caller
+/// sees. Only the `links` capability is read in v1 (contract clause 63).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct DiscoveryPluginsResponse {
+    #[serde(deserialize_with = "null_default")]
+    pub plugins: Vec<DiscoveryPlugin>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct DiscoveryPlugin {
+    pub name: String,
+    pub title: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub capabilities: Vec<String>,
+    /// The user listing only holds enabled, available plug-ins; a missing
+    /// key is read that way.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default = "yes")]
+    pub available: bool,
+}
+
+impl DiscoveryPlugin {
+    pub fn has_links(&self) -> bool {
+        self.enabled && self.available && self.capabilities.iter().any(|c| c == "links")
+    }
+}
+
+/// One "find it elsewhere" link a `links` plug-in built (mStream's
+/// `src/discovery-plugins/plugins/links.js`): `kind` is `canonical` or
+/// `search`, `label` the plug-in's own words.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PluginLink {
+    pub id: String,
+    pub label: String,
+    pub url: String,
+    pub kind: String,
+}
+
+impl PluginLink {
+    /// Only these go to the operating system's opener, which would run any
+    /// other scheme (contract clause 63).
+    pub fn is_web(&self) -> bool {
+        let lower = self.url.trim().to_ascii_lowercase();
+        lower.starts_with("https://") || lower.starts_with("http://")
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct PluginResolveResponse {
+    pub result: Option<PluginLinksResult>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct PluginLinksResult {
+    #[serde(deserialize_with = "null_default")]
+    pub links: Vec<PluginLink>,
+}
+
 // ── Sonic Journey ───────────────────────────────────────────────────────────
 
 /// `POST /api/v1/discovery/local/path` — a walk along the great-circle arc
@@ -1710,6 +2251,8 @@ mod tests {
                 federation_browse: false,
                 federation_direct: false,
                 stats: false,
+                discovery_taste: 0,
+                discovery_plugins: false,
             }
         );
         assert_eq!(caps.enabled_names(), vec!["similarity", "sonic journey"]);
@@ -1723,6 +2266,114 @@ mod tests {
         let caps = Capabilities::from(&serde_json::from_str::<Ping>(r#"{"vpaths":[]}"#).unwrap());
         assert_eq!(caps, Capabilities::default());
         assert!(caps.enabled_names().is_empty());
+    }
+
+    #[test]
+    fn the_discover_rooms_flags_come_from_the_ping_and_the_layered_payload() {
+        // mStream's plan §2.10: an integer generation, plus the plug-in flag
+        // both payloads already carried.
+        let ping: Ping = serde_json::from_str(
+            r#"{"vpaths":[],"discovery":true,"discoveryTaste":1,"discoveryPlugins":true}"#,
+        )
+        .unwrap();
+        let caps = Capabilities::from(&ping);
+        assert_eq!((caps.discovery_taste, caps.discovery_plugins), (1, true));
+        assert!(caps.taste());
+        // The route without the index, or the index on an older server, is
+        // no room (discovery-page clause 1).
+        let older: Ping = serde_json::from_str(r#"{"discovery":true,"discoveryTaste":null}"#).unwrap();
+        assert!(!Capabilities::from(&older).taste());
+        let off: Ping = serde_json::from_str(r#"{"discovery":false,"discoveryTaste":2}"#).unwrap();
+        assert!(!Capabilities::from(&off).taste());
+
+        let info: LayeredInfo = serde_json::from_str(
+            r#"{"features":{"discovery":true,"discoveryTaste":1,"discoveryPlugins":true},"user":{}}"#,
+        )
+        .unwrap();
+        let caps = Capabilities::from(&Ping::from(info));
+        assert!(caps.taste() && caps.discovery_plugins);
+    }
+
+    #[test]
+    fn a_taste_answer_parses_defensively_and_keeps_each_lead_verbatim() {
+        let row = serde_json::json!({
+            "artist": "Lead", "title": "Far", "album": null, "year": "1999", "duration": 241.5,
+            "similarity": 0.71, "recordingMbid": "MB-1", "exportId": "mbid:mb-1",
+            "peer": { "endpointId": "e1", "name": "Sam's" }, "source": "p2p", "seedHash": "h1",
+            "somethingNewer": { "kept": true }
+        });
+        let json = serde_json::json!({
+            "seedSource": "counters", "widenedFrom": 30, "window": 0,
+            "seeds": [{ "hash": "h1", "filepath": "m/a.mp3", "metadata": null }],
+            "excluded": null,
+            "library": { "filter": "someday", "tracks": [{ "filepath": "m/b.mp3", "metadata": { "title": "B" } }],
+                         "albums": [{ "name": "Al", "artists": ["X", "Y"], "scopedTracks": 3 }] },
+            "network": { "results": [row.clone()] },
+            "peers": null
+        });
+        let answer: TasteResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(answer.seed_source, SeedSource::Counters);
+        assert_eq!((answer.window, answer.widened_from), (Some(0), Some(30)));
+        let seed = &answer.seeds[0];
+        assert!(seed.analyzed, "a missing `analyzed` is not a claim the scan skipped it");
+        assert_eq!(seed.outcome, TasteOutcome::Other);
+        assert!(answer.excluded.is_empty() && answer.peers.is_none());
+        let library = answer.library.unwrap();
+        assert_eq!(library.filter, TasteFilter::Other, "a filter word this build lacks still parses");
+        assert_eq!(library.tracks[0].to_track().title_or_file(), "B");
+        assert_eq!(library.albums[0].artist(), Some("X"));
+        assert_eq!(library.albums[0].scoped_tracks, 3);
+
+        let lead = &answer.network.unwrap().results[0];
+        assert_eq!(lead.raw, row, "the row round-trips unchanged for the resolve");
+        assert_eq!((lead.title.as_deref(), lead.album.as_deref()), (Some("Far"), None));
+        assert_eq!((lead.year, lead.duration), (Some(1999), Some(241.5)));
+        assert_eq!(lead.peer.name.as_deref(), Some("Sam's"));
+        assert_eq!(lead.peer.id, None);
+        assert!(lead.to_track().is_none(), "a lead has no file to play");
+        assert_eq!(lead.key(), "mbid:mb-1");
+
+        // A federation row: the peer's path and id, a track to queue.
+        let fed = TasteLead::from_raw(serde_json::json!({
+            "artist": "Them", "title": "Song", "duration": 180, "similarity": 0.9,
+            "filepath": "music/s.mp3", "peer": { "id": 3, "name": "Attic" }, "source": "federation"
+        }));
+        let track = fed.to_track().unwrap();
+        assert_eq!(track.filepath, "music/s.mp3");
+        assert_eq!(track.metadata.duration, Some(180.0));
+        assert_eq!(fed.key(), "file:3:music/s.mp3");
+    }
+
+    #[test]
+    fn a_taste_body_sends_only_what_was_set() {
+        let body = TasteRequest {
+            window: Some(0),
+            filter: Some(TasteFilter::Unplayed),
+            remember: Some(true),
+            sources: vec!["library".into()],
+            new_artists_only: Some(false),
+            ..TasteRequest::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({ "window": 0, "filter": "unplayed", "remember": true,
+                                "sources": ["library"], "newArtistsOnly": false })
+        );
+        let patch = TastePrefsPatch { exclude: Some(vec![]), ..TastePrefsPatch::default() };
+        assert_eq!(serde_json::to_value(&patch).unwrap(), serde_json::json!({ "exclude": [] }));
+        let prefs: TastePrefs =
+            serde_json::from_str(r#"{"window":30,"exclude":["a"],"filter":"fresh","staleDays":120}"#).unwrap();
+        assert_eq!((prefs.stale_days, prefs.filter), (Some(120), Some(TasteFilter::Fresh)));
+    }
+
+    #[test]
+    fn only_web_links_are_offered_to_the_opener() {
+        let link = |url: &str| PluginLink { url: url.into(), ..PluginLink::default() };
+        assert!(link("https://bandcamp.com/search?q=x").is_web());
+        assert!(link(" HTTP://example.com").is_web());
+        assert!(!link("javascript:alert(1)").is_web());
+        assert!(!link("file:///etc/passwd").is_web());
+        assert!(!link("spotify:track:1").is_web());
     }
 
     #[test]

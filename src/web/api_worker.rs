@@ -197,11 +197,25 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         ApiCmd::DiscoveryProbe => {
+            with_session(session, async |s| s.client.ping_async().await.map(|ping| worker::probe_event(&ping)))
+                .await
+        }
+
+        // The Discover room: the native worker's shapers, so both builds
+        // land the same events with the same words.
+        ApiCmd::Taste { seq, generation, part, body } => {
+            with_session(session, async |s| worker::taste(&s.client, seq, generation, part, &body).await).await
+        }
+        ApiCmd::TastePrefs { generation, patch } => {
+            with_session(session, async |s| worker::taste_prefs(&s.client, generation, patch.as_ref()).await)
+                .await
+        }
+        ApiCmd::TasteRandom { generation } => {
+            with_session(session, async |s| worker::taste_random(&s.client, generation).await).await
+        }
+        ApiCmd::TasteLinks { generation, key, recommendation, plugins } => {
             with_session(session, async |s| {
-                s.client
-                    .ping_async()
-                    .await
-                    .map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+                worker::taste_links(&s.client, generation, key.clone(), &recommendation, plugins.clone()).await
             })
             .await
         }

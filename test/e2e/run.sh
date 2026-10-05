@@ -166,6 +166,24 @@ leg gui-now gui-now.exp "$WORK/h8" "$WORK/gui-now.out"
 # The Admin tab on the same seat: M opens it on its no-session sentence,
 # Esc in the hallway comes back to the Library, q quits.
 leg gui-admin gui-admin.exp "$WORK/h10" "$WORK/gui-admin.out"
+# The Discover room's gate on the same seat: with no server the row is
+# absent, G opens nothing and the Library keeps the keys.
+leg gui-discover gui-discover.exp "$WORK/h11" "$WORK/gui-discover.out"
+
+# ── Scenario T: the GUI's Discover room against the fake's taste route ───
+# The gate open (the ping advertises discoveryTaste): the nav grows its
+# row, G opens the room on the answer's header and rows, and Now Playing's
+# per-song tab reads Similar (docs/ux-contracts/discovery-page.md). The
+# fake counts the asks: the room must have asked the route itself.
+PORT="$(FAKE_TASTE=1 start_fake T)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-room gui-discover-room.exp "$WORK/h12" "$WORK/gui-discover-room.out"
+assert "the room asked the taste route" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['taste_asks'] >= 1, s
+"
+stop_fake
 
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
 # No fake mStream at all: the page talks to a board, and the board is the

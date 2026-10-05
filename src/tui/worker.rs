@@ -19,8 +19,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults, SimilarArtist,
-    Track,
+    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, PluginLink, SearchResults,
+    SimilarArtist, TastePrefs, TastePrefsPatch, TasteRequest, TasteResponse, Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -194,6 +194,29 @@ pub enum ApiCmd {
     DiscoveryProbe,
     /// Fill a Discover view. `seed` is the track it all hangs off.
     Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
+    /// Ask the GUI's Discover room for one part of its answer
+    /// (discovery-page contract, clause 30) — a destination on the command,
+    /// not a second command (the D7 habit). `seq` and `generation` come
+    /// back on [`Event::Taste`]: last ask wins, and a reply from a server
+    /// the session has left fills nothing (clause 31). The session's own
+    /// server always: the room is hidden in a peer session (clause 1).
+    Taste { seq: u64, generation: u64, part: TastePart, body: Box<TasteRequest> },
+    /// The room's prefs: `None` reads them (once a session, clause 16),
+    /// `Some` writes what the patch names — a restored seed (clause 13).
+    TastePrefs { generation: u64, patch: Option<TastePrefsPatch> },
+    /// One random track of the session's server for the room's "another
+    /// pick" (clause 21): the server's own random seed is the same all day.
+    TasteRandom { generation: u64 },
+    /// Where else a Network lead can be found (clause 63): every `links`
+    /// plug-in's resolve, the row forwarded verbatim. `plugins` is the
+    /// list read earlier this session; `None` has the worker read it first
+    /// and hand it back on the event, so it is asked once per session.
+    TasteLinks {
+        generation: u64,
+        key: String,
+        recommendation: Box<serde_json::Value>,
+        plugins: Option<Vec<String>>,
+    },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -264,6 +287,10 @@ impl ApiCmd {
             | ApiCmd::SonicRandom { .. }
             | ApiCmd::DiscoveryProbe
             | ApiCmd::Discover { .. }
+            | ApiCmd::Taste { .. }
+            | ApiCmd::TastePrefs { .. }
+            | ApiCmd::TasteRandom { .. }
+            | ApiCmd::TasteLinks { .. }
             | ApiCmd::SavePlaylist { .. }
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
@@ -376,6 +403,32 @@ pub enum DiscoverDest {
     Browser,
     /// The Discover tab of the full-screen view.
     NowPlaying,
+}
+
+/// Which part of the Discover room's answer an ask fills (discovery-page
+/// contract, clauses 30 and 65). The App keeps a seq per slot, so a part
+/// says which slots its reply may fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TastePart {
+    /// Ask A: `library` + `network` (network only while `discoveryP2p` is
+    /// advertised) — the seeds, the header facts and both lists.
+    Main,
+    /// A filter change: the library alone; Network and Peers stand.
+    Library,
+    /// Ask B: the federated peers (only while `federationDiscovery` is).
+    Peers,
+}
+
+/// Why a taste ask has no answer. A 401 is not here: it is the session's
+/// problem and goes out as [`Event::Unauthorized`] like any read's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TasteFailure {
+    /// 403: switched off, or the index is not there yet — the route says
+    /// both the same way, so the App re-pings before naming one (clause
+    /// 82).
+    Forbidden,
+    /// Transport or server failure, in the server's words (clause 83).
+    Failed(String),
 }
 
 /// A position in the tag-based library hierarchy. Doubles as the request (what
@@ -523,8 +576,10 @@ pub enum Event {
     /// The random pick for one Sonic Path end — `None` when the library
     /// answered empty.
     SonicRandom { side: crate::tui::app::SonicSide, track: Option<Box<Track>> },
-    /// The ping's discovery-path flag, fetched to explain a 403.
-    DiscoveryProbe { available: bool },
+    /// The ping's discovery flags, fetched to explain a 403: `available`
+    /// is the sonic path's (`discoveryPath`), `taste` the Discover room's
+    /// gate (`discovery && discoveryTaste >= 1`, discovery-page clause 82).
+    DiscoveryProbe { available: bool, taste: bool },
     /// A Discover view's contents, tagged with the node they belong to.
     /// `seed` is the filepath it was asked about. The browser tab tells a
     /// stale reply by its node; the now-playing panel follows the speakers,
@@ -535,6 +590,26 @@ pub enum Event {
         note: Option<String>,
         dest: DiscoverDest,
         seed: String,
+    },
+    /// One part of the Discover room's answer, or why there is none —
+    /// never an [`Event::Error`], which would clear every other wait: the
+    /// failed half says so in its own panes and the other stands (clause
+    /// 83).
+    Taste { seq: u64, generation: u64, part: TastePart, answer: Result<Box<TasteResponse>, TasteFailure> },
+    /// The room's prefs as the server holds them after a read (`wrote`
+    /// false) or a write (true); `Err` with the words when it failed.
+    TastePrefs { generation: u64, wrote: bool, answer: Result<TastePrefs, String> },
+    /// "Another pick": `None` when the library answered empty or the ask
+    /// failed.
+    TasteRandom { generation: u64, track: Option<Box<Track>> },
+    /// A lead's links (web links only, canonical first), keyed as asked.
+    /// `plugins` is the `links` plug-ins' names when this ask read the
+    /// list, for the App to keep for the session.
+    TasteLinks {
+        generation: u64,
+        key: String,
+        plugins: Option<Vec<String>>,
+        answer: Result<Vec<PluginLink>, String>,
     },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
@@ -1225,8 +1300,16 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::SonicRandom { side } => c
             .random_song(&crate::api::types::RandomSongRequest::default())
             .map(|r| Event::SonicRandom { side, track: r.songs.into_iter().next().map(Box::new) }),
-        ApiCmd::DiscoveryProbe => {
-            c.ping().map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+        ApiCmd::DiscoveryProbe => c.ping().map(|ping| probe_event(&ping)),
+        ApiCmd::Taste { seq, generation, part, body } => {
+            crate::api::wait(taste(c, seq, generation, part, &body))
+        }
+        ApiCmd::TastePrefs { generation, patch } => {
+            crate::api::wait(taste_prefs(c, generation, patch.as_ref()))
+        }
+        ApiCmd::TasteRandom { generation } => crate::api::wait(taste_random(c, generation)),
+        ApiCmd::TasteLinks { generation, key, recommendation, plugins } => {
+            crate::api::wait(taste_links(c, generation, key, &recommendation, plugins))
         }
         // A failed ask is `None`: nothing about the saved peers changes.
         ApiCmd::FederationPeers { parent } => {
@@ -2071,6 +2154,112 @@ pub(crate) async fn dj_probe(client: &Client) -> Option<DjServerInfo> {
     }
 }
 
+// ── The Discover room (discovery-page contract) ─────────────────────────────
+
+/// The probe's reading of a ping: the sonic path's flag and the Discover
+/// room's gate, both from one GET.
+pub(crate) fn probe_event(ping: &Ping) -> Event {
+    let caps = crate::api::types::Capabilities::from(ping);
+    Event::DiscoveryProbe { available: ping.discovery_path, taste: caps.taste() }
+}
+
+/// One part of the room's answer. Only a 401 fails as an error (the
+/// session is no good); a 403 and every other failure are the answer's.
+pub(crate) async fn taste(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    part: TastePart,
+    body: &TasteRequest,
+) -> Result<Event, ApiError> {
+    let answer = match client.taste_async(body).await {
+        Ok(response) => Ok(Box::new(response)),
+        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+        Err(ApiError::Forbidden(_)) => Err(TasteFailure::Forbidden),
+        Err(e) => Err(TasteFailure::Failed(e.to_string())),
+    };
+    Ok(Event::Taste { seq, generation, part, answer })
+}
+
+/// Read the prefs (`patch` `None`) or write them.
+pub(crate) async fn taste_prefs(
+    client: &Client,
+    generation: u64,
+    patch: Option<&TastePrefsPatch>,
+) -> Result<Event, ApiError> {
+    let result = match patch {
+        Some(patch) => client.set_taste_prefs_async(patch).await,
+        None => client.taste_prefs_async().await,
+    };
+    let answer = match result {
+        Ok(prefs) => Ok(prefs),
+        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+        Err(e) => Err(e.to_string()),
+    };
+    Ok(Event::TastePrefs { generation, wrote: patch.is_some(), answer })
+}
+
+/// "Another pick" (clause 21): one random track, as the sonic room's ends
+/// ask for theirs.
+pub(crate) async fn taste_random(client: &Client, generation: u64) -> Result<Event, ApiError> {
+    let track = match client.random_song_async(&crate::api::types::RandomSongRequest::default()).await {
+        Ok(r) => r.songs.into_iter().next().map(Box::new),
+        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+        Err(_) => None,
+    };
+    Ok(Event::TasteRandom { generation, track })
+}
+
+/// A lead's links (clause 63): every `links` plug-in, in the list's order,
+/// canonical links ahead of searches, `http`/`https` only — a link goes to
+/// the operating system's opener, which would run any other scheme. One
+/// plug-in failing while another answered keeps what did answer.
+pub(crate) async fn taste_links(
+    client: &Client,
+    generation: u64,
+    key: String,
+    recommendation: &serde_json::Value,
+    plugins: Option<Vec<String>>,
+) -> Result<Event, ApiError> {
+    let (listed, names) = match plugins {
+        Some(names) => (None, names),
+        None => match client.discovery_plugins_async().await {
+            Ok(list) => {
+                let names: Vec<String> =
+                    list.plugins.iter().filter(|p| p.has_links()).map(|p| p.name.clone()).collect();
+                (Some(names.clone()), names)
+            }
+            Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+            Err(e) => {
+                return Ok(Event::TasteLinks { generation, key, plugins: None, answer: Err(e.to_string()) });
+            }
+        },
+    };
+    let mut links = Vec::new();
+    let mut failure = None;
+    for name in &names {
+        match client.plugin_links_async(name, recommendation).await {
+            Ok(found) => links.extend(found),
+            Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+            Err(e) => {
+                failure.get_or_insert(e.to_string());
+            }
+        }
+    }
+    let answer = match failure {
+        Some(err) if links.is_empty() => Err(err),
+        _ => Ok(order_links(links)),
+    };
+    Ok(Event::TasteLinks { generation, key, plugins: listed, answer })
+}
+
+/// Web links only, canonical first, each tier in the order it came.
+pub(crate) fn order_links(mut links: Vec<PluginLink>) -> Vec<PluginLink> {
+    links.retain(PluginLink::is_web);
+    links.sort_by_key(|link| link.kind != "canonical");
+    links
+}
+
 /// How many neighbours a Discover view asks for. Deep enough to browse,
 /// short enough that the tail is still relevant rather than noise.
 const DISCOVER_LIMIT: u32 = 40;
@@ -2230,6 +2419,33 @@ pub(crate) fn journey_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leads_links_are_web_only_canonical_first_each_tier_in_its_order() {
+        let link = |id: &str, url: &str, kind: &str| PluginLink {
+            id: id.into(),
+            label: id.into(),
+            url: url.into(),
+            kind: kind.into(),
+        };
+        let ordered = order_links(vec![
+            link("search-a", "https://a.example/s", "search"),
+            link("odd", "mailto:x@example.com", "search"),
+            link("canon-1", "https://musicbrainz.org/recording/1", "canonical"),
+            link("search-b", "https://b.example/s", "search"),
+            link("canon-2", "https://musicbrainz.org/isrc/2", "canonical"),
+        ]);
+        let ids: Vec<&str> = ordered.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["canon-1", "canon-2", "search-a", "search-b"]);
+    }
+
+    #[test]
+    fn the_probe_reads_both_rooms_flags_off_one_ping() {
+        let ping = Ping { discovery: true, discovery_path: true, discovery_taste: 1, ..Ping::default() };
+        assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: true }));
+        let ping = Ping { discovery: true, discovery_path: true, ..Ping::default() };
+        assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: false }));
+    }
 
     fn play(url: &str) -> AudioCmd {
         AudioCmd::Play { url: url.to_string(), duration_hint: None }

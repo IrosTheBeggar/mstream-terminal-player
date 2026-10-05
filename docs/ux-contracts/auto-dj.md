@@ -715,3 +715,12 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   through the locale table (the TUI boots no language and stays English).
   The Auto-DJ tab's keyword row names the key the keymap binds to
   remove-from-queue instead of an unbound `x`.
+- **2026-10-05 — TOOLS holds three rooms** (entry point 2; the
+  translation table's "Auto DJ, then Sonic path"): the Discover room joins
+  the group under Sonic path (docs/ux-contracts/discovery-page.md, clause
+  2), and the group moves up a row to fit it — the TOOLS label on row 13,
+  **Auto DJ on 14**, Sonic path 15, Discover 16, Settings still on the
+  content's last row. The row keeps its `•` while armed and its `D`.
+  Entry point 4 is unchanged: "Start a sonic session" belongs to the
+  record's per-song Discover screen, and the GUI's Discover room is the
+  history-seeded page, which does not carry it.

@@ -543,6 +543,15 @@ impl App {
             // The opening song: the DJ arms for the server it was chosen
             // from and the session starts there (auto-dj contract, clause 4).
             Capture::DjSeed => self.dj_seed_chosen(track),
+            // A pin for the GUI's Discover room (discovery-page clause 14);
+            // a refusal is the room's to word.
+            Capture::TasteSeed => match self.taste_picked(track) {
+                Ok(effects) => effects,
+                Err(refusal) => {
+                    self.taste.refused = Some(refusal);
+                    Vec::new()
+                }
+            },
         }
     }
 

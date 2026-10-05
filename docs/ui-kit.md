@@ -545,9 +545,11 @@ while it is up), the Visualizer item after them, and the session's server label 
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
 Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok
-colour while the DJ is armed, and the capability-gated Sonic path),
-Settings on the column's last row; fourteen rows, the 24-row minimum's
-worth with the footer on. Now Playing is the TUI's full-screen view,
+colour while the DJ is armed, the capability-gated Sonic path, and
+Discover on row 16, gated by the server's `discoveryTaste` —
+docs/ux-contracts/discovery-page.md), Settings on the column's last row;
+fifteen rows, the 24-row minimum's worth with the footer on, Discover and
+Settings never on one row. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);

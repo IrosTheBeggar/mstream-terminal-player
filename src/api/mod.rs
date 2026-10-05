@@ -1008,6 +1008,57 @@ impl Client {
     // No sync twin: its only callers (worker::discover) drive the async
     // version through `wait` themselves. Same for `journey_async` below.
 
+    // ── The Discover page (discovery-page contract) ─────────────────────────
+    //
+    // No sync twins: the worker's shared shapers drive these through `wait`.
+    // Unlike the similar routes above, a 403 is NOT folded into `Ok(None)`:
+    // the room has to tell "switched off" and "scan pending" apart, and it
+    // does so by re-pinging after an `ApiError::Forbidden` (clause 82).
+
+    /// `POST /api/v1/discovery/taste` — one half of the room's answer (plan
+    /// §3.1; the App asks library+network and peers apart, clause 30).
+    pub async fn taste_async(&self, body: &TasteRequest) -> Result<TasteResponse, ApiError> {
+        let body = serde_json::to_value(body)
+            .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
+        self.post("api/v1/discovery/taste", body).await
+    }
+
+    /// `GET /api/v1/discovery/taste/prefs` — the user's saved window,
+    /// filter, stale days and dropped seeds (plan §3.2).
+    pub async fn taste_prefs_async(&self) -> Result<TastePrefs, ApiError> {
+        self.get("api/v1/discovery/taste/prefs").await
+    }
+
+    /// `PUT /api/v1/discovery/taste/prefs` — change what `patch` names; the
+    /// server answers with the merged prefs.
+    pub async fn set_taste_prefs_async(&self, patch: &TastePrefsPatch) -> Result<TastePrefs, ApiError> {
+        let body = serde_json::to_value(patch)
+            .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
+        self.send(Method::PUT, "api/v1/discovery/taste/prefs", Some(body)).await
+    }
+
+    /// `GET /api/v1/discovery/plugins` — the plug-ins switched on for this
+    /// caller. Asked only while the ping says `discoveryPlugins`.
+    pub async fn discovery_plugins_async(&self) -> Result<DiscoveryPluginsResponse, ApiError> {
+        self.get("api/v1/discovery/plugins").await
+    }
+
+    /// `POST /api/v1/discovery/plugins/{plugin}/resolve` on a `links`
+    /// plug-in: where else this recommendation can be found. The row is
+    /// forwarded verbatim — the server's schema strips what it does not
+    /// know (contract clause 63). A plug-in failure is the server's 502, or
+    /// its 429 passed through.
+    pub async fn plugin_links_async(
+        &self,
+        plugin: &str,
+        recommendation: &serde_json::Value,
+    ) -> Result<Vec<PluginLink>, ApiError> {
+        let body = serde_json::json!({ "recommendation": recommendation });
+        let path = format!("api/v1/discovery/plugins/{}/resolve", urlencode(plugin));
+        let answer: PluginResolveResponse = self.post(&path, body).await?;
+        Ok(answer.result.map(|r| r.links).unwrap_or_default())
+    }
+
     /// A journey from one track to another through the embedding space.
     ///
     /// `length` counts the total rows including both seeds, so the answer is

@@ -518,6 +518,12 @@ pub struct GuiPrefs {
     /// ` — key` tail on a tooltip. Off by default — this surface is the
     /// pointer's, and the classic TUI is the keyboard's room.
     pub key_hints: bool,
+    /// The Discover room's tab in front — `library`, `network` or `peers`
+    /// (discovery-page contract, clause 40): the room's one memory of its
+    /// own; its window, filter and dropped seeds are the server's prefs.
+    /// A word this build does not know reads as no memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discover_tab: Option<String>,
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -1628,6 +1634,27 @@ mod tests {
         let raw = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
         assert!(raw.contains("[lyrics]"), "written as a section, not inlined:\n{raw}");
         assert!(raw.contains("[visualizer]"), "and the known section too:\n{raw}");
+    }
+
+    #[test]
+    fn the_discover_rooms_tab_round_trips_and_stays_out_of_the_file_when_unset() {
+        let scratch = Scratch::new("discover-tab");
+        save(&Config::default()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("discover_tab"), "no tab chosen, nothing written: {text}");
+
+        let mut config = Config::default();
+        config.gui.discover_tab = Some("peers".into());
+        save(&config).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("[gui]") && text.contains("discover_tab = \"peers\""), "{text}");
+        assert_eq!(load().unwrap().gui.discover_tab.as_deref(), Some("peers"));
+
+        // Beside a key a newer player wrote into the same section.
+        fs::write(scratch.dir.join(CONFIG_FILE), "[gui]\ndiscover_tab = \"network\"\nzoom = 2\n").unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded.gui.discover_tab.as_deref(), Some("network"));
+        assert_eq!(loaded.gui.extra.get("zoom").and_then(toml::Value::as_integer), Some(2));
     }
 
     #[test]

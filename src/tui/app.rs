@@ -275,7 +275,10 @@ impl NowTab {
         match self {
             NowTab::Queue => "Queue",
             NowTab::Lyrics => "Lyrics",
-            NowTab::Discover => "Discover",
+            // "Similar" since 2026-10-05: "Discover" names the GUI's
+            // history-seeded room now, and this tab is the per-song lens
+            // (mStream's discovery-page plan §2.12; now-playing log).
+            NowTab::Discover => "Similar",
             NowTab::AutoDj => "Auto-DJ",
             NowTab::Visualizer => "Visualizer",
         }
@@ -1091,12 +1094,18 @@ pub(crate) mod entries;
 mod nav;
 mod session;
 mod sonic;
+pub(crate) mod taste;
 
 // The row builders moved out whole (audit #61); the app and its tests
 // go on naming them exactly as they did.
 use entries::*;
 pub use nav::Drill;
 pub use session::{CONNECT_METHODS, ConnectForm, ConnectStage, Session};
+// The GUI's Discover room names these; the browser shell has no room yet.
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
+pub use taste::{
+    TASTE_MAX_PINS, TasteLatch, TasteLinks, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb,
+};
 
 /// How many recent tracks to keep for anchoring and cooldown. The sonic
 /// centroid takes at most 8 (the server's cap), the artist cooldown at most
@@ -1273,6 +1282,10 @@ pub enum Capture {
     /// Auto DJ's opening song, chosen from the library (auto-dj contract,
     /// clause 4): the DJ switches on when the row lands, not before.
     DjSeed,
+    /// A song for the GUI's Discover room to start from (discovery-page
+    /// contract, clauses 14 and 21) — its own, never `Discover`, which is
+    /// the TUI's.
+    TasteSeed,
 }
 
 impl Capture {
@@ -1282,6 +1295,7 @@ impl Capture {
             Capture::Sonic(side) => side.shout(),
             Capture::Discover => "SEED",
             Capture::DjSeed => "OPENER",
+            Capture::TasteSeed => "SEED",
         }
     }
 }
@@ -1701,6 +1715,9 @@ pub struct App {
     pub capture: Option<Capture>,
     /// The playlist name being typed, when the save prompt is up.
     pub sonic_playlist_name: Option<String>,
+    /// The GUI's Discover room: its own row model (docs/ux-contracts/
+    /// discovery-page.md), apart from the TUI's Discover tab above.
+    pub taste: taste::TasteState,
     /// Tracks played recently, newest first. Feeds both the sonic anchor and
     /// the artist cooldown, so the session anchors on where it has been
     /// rather than only on the song currently sounding.
@@ -1942,6 +1959,7 @@ impl App {
             sonic_pane: Pane::default(),
             sonic_stack: Drill::new(SonicNode::Root),
             capture: None,
+            taste: taste::TasteState::default(),
             sonic_playlist_name: None,
             autodj_recent: Vec::new(),
             status: PlayerStatus::default(),
@@ -2306,6 +2324,8 @@ impl App {
             self.sonic.probe = false;
             self.refresh_sonic_rows();
         }
+        // The Discover room's probe and its parts, for the same reason.
+        self.clear_taste_waits();
         // So does the full-screen Discover panel. Its wait is only ever
         // cleared by a matching reply, and `refresh_now_discover` will not
         // re-ask while an entry for this seed exists — so an error left it
@@ -2475,6 +2495,9 @@ impl App {
                             self.info("Auto DJ stays off");
                             Vec::new()
                         }
+                        // The room is the GUI's; it goes back there itself
+                        // (discovery-page clause 14).
+                        Capture::TasteSeed => Vec::new(),
                     };
                 }
                 // The guaranteed way out of the settings value rows, where
@@ -5438,6 +5461,7 @@ impl App {
                 if connected {
                     self.stats.retry_at = None;
                     self.stats.flush_wanted = true;
+                    self.taste_reconnected();
                 }
                 effects
             }
@@ -5576,7 +5600,17 @@ impl App {
                     Vec::new()
                 }
             },
-            Event::DiscoveryProbe { available } => self.consume_discovery_probe(available),
+            Event::DiscoveryProbe { available, taste } => {
+                let mut effects = self.consume_discovery_probe(available);
+                effects.extend(self.consume_taste_probe(taste));
+                effects
+            }
+            // The GUI's Discover room keeps its own replies (clause 31's
+            // guards live there).
+            event @ (Event::Taste { .. }
+            | Event::TastePrefs { .. }
+            | Event::TasteRandom { .. }
+            | Event::TasteLinks { .. }) => self.consume_taste(event),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just

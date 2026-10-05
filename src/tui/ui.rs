@@ -3196,6 +3196,8 @@ mod tests {
             federation_browse: false,
             federation_direct: false,
             stats: true,
+            discovery_taste: 0,
+            discovery_plugins: false,
         };
         // What a real ping does on the way in: the Auto-DJ rows depend on it.
         app.dj_panel.rebuild(&app.dj, None, false);
@@ -4329,7 +4331,7 @@ mod tests {
         // reaches it.
         let wide = draw_sized(&mut app, 110, 16);
         assert!(
-            wide.contains("[1:Queue]  2:Lyrics   3:Discover   4:Auto-DJ   5:Visualizer "),
+            wide.contains("[1:Queue]  2:Lyrics   3:Similar   4:Auto-DJ   5:Visualizer "),
             "{wide}"
         );
 
@@ -4338,7 +4340,7 @@ mod tests {
         // survives the squeeze — it is the way out of wherever you are.
         let narrow = draw_sized(&mut app, 64, 16);
         assert!(narrow.contains("‹ 1:Queue ›"), "{narrow}");
-        assert!(!narrow.contains("Discover"), "{narrow}");
+        assert!(!narrow.contains("Similar"), "{narrow}");
     }
 
     #[test]

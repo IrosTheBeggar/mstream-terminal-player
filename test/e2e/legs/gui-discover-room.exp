@@ -1,0 +1,58 @@
+#!/usr/bin/expect -f
+# The GUI player's Discover room against the fake server's taste route
+# (test/e2e/fake_mstream.py, FAKE_TASTE=1; docs/ux-contracts/
+# discovery-page.md). The ping advertises `discoveryTaste`, so the nav
+# grows its Discover row (clause 1); `G` opens the room, which asks the
+# route and paints its answer: the header's "based on" phrase over the
+# Library tab with its rows (clauses 3, 30, 40). `0` opens Now Playing,
+# whose per-song tab reads Similar now (plan §2.12). Esc comes back, q
+# quits. Gates on first-paint words only (the header's phrase is a word
+# the room paints only once the answer landed, the title a row's), and
+# each gate's braces span lines: expect reads a braced list on one line as
+# a single pattern, which never matches and lets the leg run on past a
+# screen that never painted.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+spawn {*}$argv
+exec stty rows 34 columns 120 < $spawn_out(slave,name)
+expect {
+    "Discover" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-DISCOVER-ROW" 2 }
+}
+drain 1
+send "G"
+expect {
+    "based on 2 songs" {}
+    eof { puts "DIED-ON-G"; exit 7 }
+    timeout { fail "NO-ROOM-HEADER" 3 }
+}
+expect {
+    "Aurora" {}
+    eof { puts "DIED-ON-ROWS"; exit 8 }
+    timeout { fail "NO-ROOM-ROWS" 4 }
+}
+drain 1
+send "0"
+expect {
+    "Similar" {}
+    eof { puts "DIED-ON-0"; exit 9 }
+    timeout { fail "NO-SIMILAR-TAB" 5 }
+}
+drain 1
+send "\x1b"
+drain 1
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 10 }
+}
+catch wait result
+exit [lindex $result 3]
