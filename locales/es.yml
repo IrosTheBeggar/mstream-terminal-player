@@ -1970,7 +1970,7 @@ dev:
   several_follow: "Desconecta la que no quieras — la lista sigue a los puertos."
   next_title: "Siguiente: música en la tarjeta"
   next_card: "Una tarjeta FAT32 en la ranura del Core2; se lee al arrancar el reproductor."
-  next_layout: "/music/Artista/Álbum/NN - Título.mp3 — MP3 o FLAC, hasta 48 kHz"
+  next_layout: "/music/Artista/Álbum/NN - Título.mp3 — MP3, FLAC u Opus, hasta 48 kHz"
   next_cover: "Un cover.jpg junto a los archivos se muestra; la tarjeta es toda la biblioteca."
   next_link: "el README del firmware: github.com/IrosTheBeggar/mstream-mp3-player"
   logs_show: "▸ Mostrar registro"

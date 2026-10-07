@@ -1970,7 +1970,7 @@ dev:
   several_follow: "使わない方を取り外してください — 一覧はポートに追従します。"
   next_title: "次は: カードに音楽を"
   next_card: "Core2のスロットにFAT32のカードを。プレーヤー起動時に読み込まれます。"
-  next_layout: "/music/アーティスト/アルバム/NN - 曲名.mp3 — MP3またはFLAC、48 kHzまで"
+  next_layout: "/music/アーティスト/アルバム/NN - 曲名.mp3 — MP3・FLAC・Opus、48 kHzまで"
   next_cover: "ファイルの横のcover.jpgが表示されます。カードがライブラリ全体です。"
   next_link: "ファームウェアのREADME: github.com/IrosTheBeggar/mstream-mp3-player"
   logs_show: "▸ ログを表示"

@@ -1970,7 +1970,7 @@ dev:
   several_follow: "拔掉不想用的那块 — 列表会跟随端口变化。"
   next_title: "接下来：把音乐放进卡里"
   next_card: "把 FAT32 格式的卡插入 Core2 的卡槽；播放器启动时读取。"
-  next_layout: "/music/艺术家/专辑/NN - 曲名.mp3 — MP3 或 FLAC，最高 48 kHz"
+  next_layout: "/music/艺术家/专辑/NN - 曲名.mp3 — MP3、FLAC 或 Opus，最高 48 kHz"
   next_cover: "文件旁的 cover.jpg 会显示；这张卡就是整个曲库。"
   next_link: "固件的 README：github.com/IrosTheBeggar/mstream-mp3-player"
   logs_show: "▸ 显示日志"

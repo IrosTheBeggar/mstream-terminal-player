@@ -1970,7 +1970,7 @@ dev:
   several_follow: "Отключите ненужную плату — список следует за портами."
   next_title: "Дальше: музыка на карту"
   next_card: "Карта FAT32 в слоте Core2; читается при запуске плеера."
-  next_layout: "/music/Исполнитель/Альбом/NN - Название.mp3 — MP3 или FLAC, до 48 кГц"
+  next_layout: "/music/Исполнитель/Альбом/NN - Название.mp3 — MP3, FLAC или Opus, до 48 кГц"
   next_cover: "cover.jpg рядом с файлами показывается; карта — вся библиотека."
   next_link: "README прошивки: github.com/IrosTheBeggar/mstream-mp3-player"
   logs_show: "▸ Показать журнал"
