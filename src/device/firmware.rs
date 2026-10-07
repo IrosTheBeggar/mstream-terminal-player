@@ -27,14 +27,14 @@ const ASSET_STEM: &str = "mstream-player-core2";
 /// The release this player pins: what `device flash` writes when no
 /// `--firmware` or `--release` says otherwise. Bumped by hand with player
 /// releases, once a firmware release has been tried on a board.
-pub(crate) const PINNED_TAG: Option<&str> = Some("v0.6.0");
+pub(crate) const PINNED_TAG: Option<&str> = Some("v0.7.0");
 /// The sha256 of that release's `*-full.bin`, from its SHA256SUMS. Release
 /// assets are mutable on GitHub; this is the trust anchor, not the file.
-/// v0.6.0's `-full.bin` runs the flash in QIO; the release's `-dio-full.bin`
-/// (the same firmware in DIO, for a Core2 that keeps restarting on QIO) goes
-/// on with `--firmware`.
+/// v0.7.0's `-full.bin` runs the flash in QIO, as every release has since
+/// v0.6.0; the release's `-dio-full.bin` (the same firmware in DIO, for a
+/// Core2 that keeps restarting on QIO) goes on with `--firmware`.
 pub(crate) const PINNED_FULL_SHA256: Option<&str> =
-    Some("afcad72c393b4106f0326617a7be619a08fd8030dd696fefc69cc96a8ab0be0e");
+    Some("b26f56b369ec0b493d9ff13c276794abfd09705485c07d23f0171861da147113");
 
 /// Where the merged image expects the app: ota_0 in the firmware's
 /// partition table, and where the bootloader at 0x1000 sits inside it.
@@ -236,7 +236,7 @@ fn vetted(bytes: &[u8], what: &str) -> Result<(Layout, AppDesc), DeviceError> {
     Ok((layout, desc))
 }
 
-/// `mstream-player-core2-v0.6.0-full.bin`: the release's merged image. The
+/// `mstream-player-core2-v0.7.0-full.bin`: the release's merged image. The
 /// firmware's packager replaces what a file name cannot carry (a `+` in a
 /// dev build's version) with `_`; a release tag has none, but the rule is
 /// the same here so a `--release` of such a build still resolves.

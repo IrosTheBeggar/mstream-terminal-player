@@ -2980,8 +2980,9 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
 > (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
 > left, what to do next, the port watch, and the log behind `l`. The pin in
-> `src/device/firmware.rs` is firmware v0.6.0 (2 Oct 2026; the first release, v0.5.0, until
-> 4 Oct) — `device flash` with no flags writes it; `--firmware` / `--release` still override.
+> `src/device/firmware.rs` is firmware v0.7.0 (7 Oct 2026; before it v0.6.0 from 4 Oct, and
+> the first release, v0.5.0) — `device flash` with no flags writes it; `--firmware` /
+> `--release` still override.
 > The mStream launcher's menu item is dropped (Paul, 4 Oct 2026): **the GUI's MP3 Player tab
 > replaces it** (built 2026-10-04, docs/ux-contracts/mp3-player-screen.md) — the same page with
 > no flags, hosted under the GUI's top bar, `K` from the Library, Now Playing, Stats and the
@@ -3008,9 +3009,9 @@ pages are. The launcher was to open this page the way it opens the admin rooms; 
   write, so one reset serves both, and restarts it on every way out before the write; the page
   cannot leave a write. The baud ladder (921600 → 460800 → 115200) covers bridges and cables
   that cannot hold the fast rate, on connect and again on a write that dies.
-- **Left:** a way to v0.6.0's `-dio-full.bin` from the page (today `--firmware`, for a Core2
-  that keeps restarting on the QIO image); Wi-Fi and pairing over the same port (the hidden
-  `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
+- **Left:** a way to the pinned release's `-dio-full.bin` from the page (today `--firmware`,
+  for a Core2 that keeps restarting on the QIO image); Wi-Fi and pairing over the same port
+  (the hidden `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
 
 ### Phase 14 — The window spike: the GUI in a window of its own (2026-09-29/30)
 
