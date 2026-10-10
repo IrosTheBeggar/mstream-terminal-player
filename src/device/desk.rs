@@ -155,17 +155,14 @@ pub(crate) enum Cmd {
     /// again. The image is had at once: a release downloaded, a local build
     /// read and vetted (merged images only), and the board told whole as it
     /// goes. Refused while the board is being written.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the sheet sends it: the page's half of Advanced options"))]
     Choose { port: String, choice: Option<Choice> },
     /// What a local path holds, for the sheet before Apply: read and
     /// vetted on a thread, answered by [`Event::Vetted`].
-    #[cfg_attr(not(test), expect(dead_code, reason = "the sheet sends it: the page's half of Advanced options"))]
     Vet { path: PathBuf },
     /// The release list, for the sheet's Another release: one request to
     /// GitHub, then kept for the visit; answered by [`Event::Releases`].
     /// Asked again while a request is out, the one answer serves both.
     /// (`device releases` asks the supply itself: no worker, no port.)
-    #[cfg_attr(not(test), expect(dead_code, reason = "the sheet sends it: the page's half of Advanced options"))]
     Releases,
     /// Leave: listens let go at once, a read finishes and restarts its
     /// board, a write is never cut; then Released.

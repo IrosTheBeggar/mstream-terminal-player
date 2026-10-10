@@ -3017,6 +3017,20 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > replaces it** (built 2026-10-04, docs/ux-contracts/mp3-player-screen.md) — the same page with
 > no flags, hosted under the GUI's top bar, `K` from the Library, Now Playing, Stats and the
 > Admin hallway.
+> **2026-10-10, Advanced options** (mStream `docs/designs/mp3-tab`, card 07, alternate A "An
+> options sheet", with the grafts of cards 08 and 09; Paul: "Go with alternate A, build it"):
+> the worker and the command line first — an image is a source and a flash mode, the pin
+> carries its DIO build's checksum too, a board's mode is read from its ELF against every
+> release's QIO/DIO pair, `--release` and `--firmware` are a next write instead of what boards
+> are measured against, `--flash-mode qio|dio`, `device releases`, a restart loop heard after a
+> write; then the contract's clauses 33–43, then the sheet (`src/device/page/sheet.rs`):
+> *Advanced…* and `o` open the kit's neutral sheet — Firmware (this player's release, another
+> release listed from GitHub only when chosen, a local build by the system's dialog or a typed
+> path), Flash mode, Erase — and Apply leaves one *Next write* line on the board's card with a
+> Reset (`x`); the primary and the gate follow it, and the write uses it up. A Core2 that keeps
+> restarting after a write is a gold card whose primary is *Write the DIO image ▸*, through the
+> gate. Still to verify on a Core2 that really loops on QIO (R5.8): what the ROM prints, and
+> how often.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
@@ -3040,9 +3054,11 @@ pages are. The launcher was to open this page the way it opens the admin rooms; 
   no reset and reaches a bootloader only for a write or a read someone asked for; the page
   cannot leave a write. The baud ladder (921600 → 460800 → 115200) covers bridges and cables
   that cannot hold the fast rate, on connect and again on a write that dies.
-- **Left:** a way to the pinned release's `-dio-full.bin` from the page (today `--firmware`,
-  for a Core2 that keeps restarting on the QIO image); Wi-Fi and pairing over the same port
-  (the hidden `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
+- **Left:** the restart loop heard at open, before any write (R5.8 first: the banners of a
+  Core2 that really loops have not been seen); a `mode=` field in `@status` for a local
+  build's mode on the board (firmware work, not needed for releases); Wi-Fi and pairing over
+  the same port (the hidden `--server` flag is accepted for it); a udev rule in mStream's
+  deb/rpm.
 
 ### Phase 14 — The window spike: the GUI in a window of its own (2026-09-29/30)
 

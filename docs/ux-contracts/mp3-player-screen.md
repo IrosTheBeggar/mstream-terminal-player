@@ -254,7 +254,9 @@ comes from the cache, or a download, beside them.
       that follows the verdict: *Update ▸*, *Install ▸*, *Read the board ▸*,
       *Try again ▸*, or none — or, with a next write chosen, that write's
       direction (*Write ▸*, *Update ▸*, *Go back ▸*, *Install ▸*, *Write the
-      DIO image ▸*; clause 38).
+      DIO image ▸*; clause 38). The text buttons stop short of the primary:
+      one that would run under it (a long locale, two boards, the console)
+      is not drawn, and its key still works.
       While another board is written it is the kit's disabled frame (dim,
       no `▸`, a tooltip saying why) under a line saying why (clause 26);
     - **Details** (`d`, `l` kept; it opens by itself when a write fails):
@@ -601,10 +603,13 @@ comes from the cache, or a download, beside them.
     choice in the accent — "v0.7.0 in QIO (faster)", "v0.8.0 in DIO (runs
     on every Core2)", "local build v0.8.0-5-g4e94418 in QIO (faster)", with
     ", erasing first" when the box was ticked — and a dim text button
-    **Reset** (`x`) at the value column's right edge; while the image is
-    fetched, its percent after it; one that cannot be had, why, in gold,
-    under it. Applying starts the image's download (or reads the build
-    again) at once, so the gate's yes rarely waits. The chip, the port
+    **Reset** (`x`) at the value column's right edge, on the first of its
+    lines with room for it (else on a row of its own); while the image is
+    fetched, a dim line under it with its percent ("getting it… 42%"); one
+    that cannot be had, why, in gold, under it. Applying starts the image's
+    download (or reads the build again) at once, so the gate's yes rarely
+    waits. The write's own words name the version it puts on and, where
+    the gate names one, the mode ("writing v0.8.0 in DIO… 41%"). The chip, the port
     tabs' marks and the count never move: up to date is the pin (clause
     19), and after going back to v0.7.0 the card offers the update. The
     primary follows the choice: *Write ▸* for the same version in another
@@ -652,8 +657,8 @@ comes from the cache, or a download, beside them.
     Core2 that really loops on QIO, R5.8), the board keeps restarting: the
     chip is gold **✗ Keeps restarting · v0.8.0 in QIO**, two dim lines
     under it say what probably happened and what fixes it ("Restarted 3
-    times in 6 s: its flash may not run QIO, the faster image." "The DIO
-    image of v0.8.0 starts on every Core2, and the settings stay."), the
+    times in 6 s: its flash may not run QIO. DIO starts on every Core2, and
+    the settings stay."), the
     SD card is unknown until the firmware runs, Details opens on the
     banners, and the busy row says "v0.8.0 went on, then the board kept
     restarting. The SD card was not touched." The worker fills in the cure
@@ -998,3 +1003,18 @@ line: they are lines a script reads.
   its title. Where two boards or more need an update but fewer than two
   would be written, the row's right edge says how many need one (a new
   string) rather than offer *Update all* for one board.
+  **Found while building it.** The restart loop's two lines are one
+  sentence pair that wraps to two rows of the value column ("Restarted 3
+  times in 6 s: its flash may not run QIO. DIO starts on every Core2, and
+  the settings stay."): card 09's longer words took four rows, which the
+  console's card cannot spare. The Next write line's Reset sits on the
+  first of its lines with room for it — at the console's 50 value cells
+  "Next write: v0.8.0 in DIO (runs on every Core2)" leaves none, and Reset
+  takes a row of its own — and a download's percent is a dim line of its
+  own, so no "·" ends a wrapped line. The card's text buttons now stop
+  short of the primary, where before they ran under it in a long locale.
+  The release list's rows over the sheet are blanked to the sheet's edge,
+  and a wide character left of its border is dropped, so a Japanese
+  choice never breaks the frame. Choosing *Another release* with ↓ opens
+  its list (card 07's rule), so ↓ ↓ from the pin stops in the list: Esc,
+  then ↓, reaches *A local build*.

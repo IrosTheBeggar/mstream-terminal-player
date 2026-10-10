@@ -17,7 +17,11 @@
 //! and cut the write short (clause 10). A quit lets the boards go first
 //! (clause 11). The page keeps its own surface; the screen hands it the
 //! keys and the pointer where it is drawn, runs its frame duties, and puts
-//! its hint on the GUI's footer.
+//! its hint on the GUI's footer. Its Advanced options sheet (clauses 33–43)
+//! is the page's too: `o` and `x` are free in the GUI, Tab walks the
+//! sheet's groups, and while its path field has the keyboard the GUI keeps
+//! none of its letters and lifts the field's caret to its own surface, so
+//! the window's input method and paste work there.
 
 use std::time::{Duration, Instant};
 
@@ -27,7 +31,7 @@ use ratatui::layout::{Position, Rect};
 use rust_i18n::t;
 
 use super::{Act, DJ_NAV, Gui, SONIC_NAV, Screen};
-use crate::admin::{HostedRoom, Screen as Hosted, drive_pointer};
+use crate::admin::{Claim, HostedRoom, Screen as Hosted, drive_pointer};
 use crate::device::Page;
 use crate::tui::app::{Action, Capture, Focus, Tab};
 
@@ -138,6 +142,7 @@ pub(crate) fn close(gui: &mut Gui) {
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     let area = Rect { y: view.y + 1, height: view.height.saturating_sub(1), ..view };
     let hints = gui.ui.key_hints;
+    let composition = if gui.modal_open() { String::new() } else { gui.ui.composition().to_string() };
     let Some(page) = gui.device.page.as_mut() else {
         // A visit waiting for the last page to let its ports go.
         if let Some((parting, _)) = &gui.device.parting {
@@ -147,15 +152,25 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     };
     // The page's tooltips name their keys as the GUI's own tooltips do.
     HostedRoom::set_key_hints(page, hints);
+    // The sheet's path field is the window's field (clause 36), as an Admin
+    // room's is: the input method's composition goes down before the draw,
+    // and the caret the field noted comes up to the GUI's surface after,
+    // where the window turns its input method and paste on for it.
+    HostedRoom::set_composition(page, &composition);
     HostedRoom::draw_in(page, frame, area);
+    if let Some(at) = HostedRoom::caret_at(page) {
+        gui.ui.note_caret(at);
+    }
     gui.device.at = Some(area);
 }
 
 /// The screen's keys (clauses 9 and 12). Returns true to quit.
 pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     // A write holds every key: the page's own (only `l` does anything
-    // then), and nothing of the GUI's.
-    if !writing(gui) {
+    // then), and nothing of the GUI's. The sheet's path field holds them
+    // too: a typed `q` or digit is a character of the path (clause 12).
+    let typing = gui.device.page.as_ref().is_some_and(|page| HostedRoom::claims(page) == Claim::All);
+    if !writing(gui) && !typing {
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Library)),
@@ -451,7 +466,7 @@ mod tests {
     }
 
     /// The card's hint, in the tab's words.
-    const CARD: &str = "Enter update · d details · Esc library";
+    const CARD: &str = "Enter update · o advanced · d details · Esc library";
     /// The gate's.
     const GATE: &str = "y update · Enter or Esc cancel";
 
@@ -536,7 +551,7 @@ mod tests {
             let buf = floor(&mut gui);
             assert!(all(&buf).contains("✓ Up to date · v0.8.0 · just written"), "Done is the card again:\n{}", all(&buf));
             assert_eq!(row(&buf, 22).trim(), "Updated from v0.7.0 just now. The SD card was not touched.");
-            assert_eq!(row(&buf, 23).trim(), "d details · Esc library");
+            assert_eq!(row(&buf, 23).trim(), "o advanced · d details · Esc library");
         }
     }
 
@@ -756,6 +771,65 @@ mod tests {
         assert!(writing(&gui));
     }
 
+    // ── The Advanced options sheet ──────────────────────────────────────────
+
+    #[test]
+    fn o_opens_the_sheet_on_the_tab_its_keys_are_its_own_and_its_path_field_keeps_every_letter() {
+        let _en = english();
+        let mut gui = at_card();
+        let queue_open = gui.queue_open;
+        assert!(!press(&mut gui, KeyCode::Char('o')));
+        let buf = render_at(&mut gui, 100, 30);
+        assert!(all(&buf).contains("Advanced options · COM3"), "{}", all(&buf));
+        let sheet = "Tab next group · ↑↓ choose · Space tick · Enter apply · Esc close";
+        assert_eq!(row(&buf, 29).trim(), sheet, "the footer is the sheet's");
+        // Tab walks the sheet's groups; the queue panel is not toggled.
+        press(&mut gui, KeyCode::Tab);
+        assert_eq!(gui.queue_open, queue_open, "Tab is the sheet's");
+        assert_eq!(gui.screen, Screen::Device);
+        // The path field holds every key: the GUI's letters are characters.
+        for code in [KeyCode::BackTab, KeyCode::Down, KeyCode::Esc, KeyCode::Down, KeyCode::Tab] {
+            press(&mut gui, code);
+        }
+        for code in [KeyCode::Right, KeyCode::Right, KeyCode::Enter] {
+            press(&mut gui, code);
+        }
+        ends(&gui).sent();
+        for c in ['q', 'K', 'T', '1', 'D', 'V'] {
+            assert!(!press(&mut gui, KeyCode::Char(c)), "{c} does not quit");
+            assert_eq!(gui.screen, Screen::Device, "{c} does not leave the tab");
+        }
+        let buf = render_at(&mut gui, 100, 30);
+        assert!(all(&buf).contains("qKT1DV▏"), "typed into the field:\n{}", all(&buf));
+        assert_eq!(row(&buf, 29).trim(), "Tab complete · Enter read it · Esc back");
+        // Its caret is the window's: the input method and paste turn on there.
+        let caret = gui.ui.caret_at().expect("the field noted its caret on the GUI's surface");
+        assert_eq!(buf[(caret.x - 1, caret.y)].symbol(), "V", "the caret after what was typed");
+        assert!(ends(&gui).sent().is_empty(), "typing asked nothing of the worker");
+        // Out of the field the GUI's own letters are the GUI's again: `K`
+        // leaves, and the sheet goes with the page (nothing was chosen).
+        press(&mut gui, KeyCode::Esc);
+        press(&mut gui, KeyCode::Char('K'));
+        assert_eq!(gui.screen, Screen::Library);
+        assert_eq!(ends(&gui).sent(), vec![WorkerCmd::Quit], "the boards let go; no choice was sent");
+    }
+
+    #[test]
+    fn a_next_write_on_the_tab_shows_its_line_and_x_resets_it() {
+        let _en = english();
+        let mut gui = on_tab();
+        ends(&gui).next_write();
+        frame(&mut gui);
+        let buf = render_at(&mut gui, 100, 30);
+        let text = all(&buf);
+        assert!(text.contains("Next write: v0.8.0 in DIO (runs on every Core2)") && text.contains("│  Write ▸  │"), "{text}");
+        assert_eq!(row(&buf, 29).trim(), "Enter write · o advanced · x reset · d details · Esc library");
+        press(&mut gui, KeyCode::Char('x'));
+        let reset = WorkerCmd::Choose { port: "COM3".into(), choice: None };
+        assert_eq!(ends(&gui).sent(), vec![reset], "x is the page's Reset");
+        assert_eq!(gui.screen, Screen::Device);
+    }
+
     // ── The write ───────────────────────────────────────────────────────────
 
     #[test]
@@ -790,6 +864,9 @@ mod tests {
             KeyCode::Char('A'),
             KeyCode::Char('-'),
             KeyCode::Char('+'),
+            // The Advanced options sheet and Reset: nothing during a write.
+            KeyCode::Char('o'),
+            KeyCode::Char('x'),
         ];
         for code in codes {
             assert!(!press(&mut gui, code), "{code:?} does not quit");
