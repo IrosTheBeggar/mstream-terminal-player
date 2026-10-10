@@ -278,8 +278,8 @@ comes from the cache, or a download, beside them.
       the board for a few seconds.": *Read the board ▸* (clause 22).
     - **✗ Not a Core2** (gold), under the label *Board* instead of
       *Firmware*, after a read found another chip or another flash size:
-      "A Core2 is an ESP32 with 16 MB of flash. Nothing will be written to
-      it." No primary, no SD card row, never Install or Try again.
+      "A Core2 is an ESP32 with 16 MB. Nothing is written to it." No
+      primary, no SD card row, never Install or Try again.
     - **! In use by another program** (gold): clause 29.
     - **✗ Write failed · the board is half written** (gold), "It cannot
       start until it is written again." — or `· nothing was changed` when
@@ -288,8 +288,8 @@ comes from the cache, or a download, beside them.
     - While the board is asked: the kit's scan widget, **asking the
       player…**, and under it C's line "over USB, without restarting it —
       its music plays on". While it is read: **reading it over its
-      bootloader…** and "Its screen is dark for a few seconds; it restarts
-      as it was."
+      bootloader…** and "The screen is dark a few seconds; it restarts as
+      it was."
     - During its write the row is the write itself (clause 23).
 20. **The SD card row** shows only what the running firmware just reported
     — never a number from before a reset, never a guess — in decimal GB

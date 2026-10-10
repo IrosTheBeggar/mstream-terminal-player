@@ -2585,9 +2585,10 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         // The Admin screen (admin-screen contract, entry 2).
         KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
         // The MP3 Player screen (mp3-player-screen contract, entry 2): `K`,
-        // whose lowercase is no key of the GUI's. Opening the tab resets a
-        // plugged-in Core2, so Shift or Caps Lock on a key that is one (the
-        // browse bar's `f`, when the tab's key was `F`) must never open it.
+        // whose lowercase is no key of the GUI's — and the page's `d`, `s`,
+        // `a`, `c`, `w` and `r` are lowercase — so Shift or Caps Lock on a
+        // key that is one (the browse bar's `f`, when the tab's key was
+        // `F`) never opens it.
         KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Device)),
         // The visualizer's window (visualizer-window contract, entry 2).
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
@@ -3479,8 +3480,9 @@ fn start(
 /// The player's teardown that owes nothing to a terminal, after whatever
 /// showed it has let go.
 fn finish(gui: &mut Gui, ctx: &Ctx) {
-    // A Core2 the MP3 Player tab holds in its bootloader is let go before
-    // the exit can end its worker (mp3-player-screen contract, clause 11).
+    // The MP3 Player tab's worker lets every port go — a board being read
+    // is restarted — before the exit can end it (mp3-player-screen
+    // contract, clause 11).
     device::quit(gui);
     // The visualizer window, if one is open, closes with the player.
     vizwin::close(gui);

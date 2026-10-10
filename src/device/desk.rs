@@ -76,9 +76,6 @@ impl Timing {
 }
 
 /// What the page tells the worker. Boards are named by their port.
-// The MP3 Player tab's page draws from this; until it moves onto the desk,
-// only the tests and the command line do.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Cmd {
     /// Ask the board again, with no reset: Ask again (`r`) on a board in
@@ -1179,7 +1176,6 @@ fn write_job(
             work(Phase::Writing, Some(n));
         }
         flow::Event::Log(text) => log(text, LogKind::Fact),
-        _ => {}
     };
     let end = |end: Result<Done, Failure>| {
         let _ = notes.send(Note::Ended { port: port.clone(), id, end: End::Written(end) });

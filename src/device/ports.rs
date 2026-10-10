@@ -91,36 +91,6 @@ pub(crate) fn filter(ports: Vec<SerialPortInfo>) -> Vec<Candidate> {
         .collect()
 }
 
-/// What a scan found, against what was asked for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Pick {
-    /// The board to use.
-    One(Candidate),
-    /// Nothing Core2-shaped is plugged in.
-    None,
-    /// More than one, and no `--port` to choose: the page asks.
-    Several,
-}
-
-/// The board to use: the one named (listed or not), else the only one.
-/// Port names are compared case-insensitively — `com3` and `COM3` are the
-/// same port on Windows, and nothing else ever differs by case.
-pub(crate) fn pick(found: &[Candidate], wanted: Option<&str>) -> Pick {
-    if let Some(name) = wanted.map(str::trim).filter(|n| !n.is_empty()) {
-        return Pick::One(
-            found
-                .iter()
-                .find(|c| c.port.eq_ignore_ascii_case(name))
-                .cloned()
-                .unwrap_or_else(|| Candidate::bare(name)),
-        );
-    }
-    match found {
-        [] => Pick::None,
-        [one] => Pick::One(one.clone()),
-        _ => Pick::Several,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -158,18 +128,5 @@ mod tests {
         assert_eq!(found[1].bridge, "CP210x");
         assert_eq!(found[0].describe(), "COM3 · CH9102 · serial 5B1F007751");
         assert_eq!(found[1].describe(), "COM4 · CP210x", "no serial, no serial column");
-    }
-
-    #[test]
-    fn a_named_port_wins_listed_or_not_else_the_only_board() {
-        let found = filter(vec![usb("COM3", 0x1A86, 0x55D4, None), usb("COM7", 0x10C4, 0xEA60, None)]);
-        assert_eq!(pick(&found, None), Pick::Several);
-        assert!(matches!(pick(&found, Some("com7")), Pick::One(c) if c.port == "COM7" && c.bridge == "CP210x"));
-        assert!(
-            matches!(pick(&found, Some("COM9")), Pick::One(c) if c.port == "COM9" && c.bridge == "?"),
-            "an unlisted port is still opened, as asked"
-        );
-        assert_eq!(pick(&found[..1], Some("  ")), Pick::One(found[0].clone()), "blank means not asked");
-        assert_eq!(pick(&[], None), Pick::None);
     }
 }

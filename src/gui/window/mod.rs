@@ -2119,12 +2119,13 @@ fn hack() -> Result<Font<'static>, String> {
 }
 
 /// What the GUI draws that Hack has no glyph for, CJK aside: the rating
-/// stars and the checkbox tick. A terminal borrows these from its own font
-/// fallback without being asked; the window has to be handed a face that
-/// has them, or they draw as boxes. The census test below keeps the list
-/// complete as the GUI grows new glyphs, and checks that [`SYMBOLS`] has
-/// every one of them.
-const BEYOND_HACK: &str = "★☆✓";
+/// stars, the checkbox tick, and the MP3 Player tab's ✗ (a verdict's mark:
+/// other firmware, a failed write). A terminal borrows these from its own
+/// font fallback without being asked; the window has to be handed a face
+/// that has them, or they draw as boxes. The census test below keeps the
+/// list complete as the GUI grows new glyphs, and checks that [`SYMBOLS`]
+/// has every one of them.
+const BEYOND_HACK: &str = "★☆✓✗";
 
 /// The window's own symbol face (assets/fonts/, made by
 /// scripts/symbol-font.py on Hack's metrics, under the OFL): every glyph of
@@ -2590,14 +2591,16 @@ mod tests {
     /// than the wide CJK the borrowed CJK face is for, must be in
     /// [`BEYOND_HACK`], or the window would draw it as a box where a
     /// terminal would not. The census reads what the GUI can draw from
-    /// its sources — the string and char literals of the GUI and the kit,
-    /// with whole-line comments dropped — and from every locale's strings.
+    /// its sources — the string and char literals of the GUI, the kit and
+    /// the device page the GUI hosts, with whole-line comments dropped — and
+    /// from every locale's strings.
     #[test]
     fn every_glyph_hack_lacks_has_a_fallback() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let literal = regex::Regex::new(r#""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)'"#).unwrap();
         let mut drawn = String::new();
-        let mut dirs = vec![root.join("src/gui"), root.join("src/kit")];
+        // The device page draws inside the GUI too, as its MP3 Player tab.
+        let mut dirs = vec![root.join("src/gui"), root.join("src/kit"), root.join("src/device")];
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).unwrap().map(Result::unwrap) {
                 let path = entry.path();

@@ -205,9 +205,6 @@ pub(crate) enum Verdict {
 }
 
 /// The card's primary, as the verdict decides it.
-// The MP3 Player tab's page draws from this; until it moves onto the desk,
-// only the tests and the command line do.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Primary {
     Update,
@@ -310,9 +307,6 @@ pub(crate) struct Board {
     pub written: Option<Written>,
 }
 
-// The MP3 Player tab's page draws from this; until it moves onto the desk,
-// only the tests and the command line do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl Board {
     pub fn new(candidate: Candidate) -> Board {
         Board {
@@ -519,9 +513,6 @@ pub(crate) enum CardUnknown {
     Unreadable,
 }
 
-// The MP3 Player tab's page draws from this; until it moves onto the desk,
-// only the tests and the command line do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl Card {
     /// Used bytes: the size less the free space, when both are known.
     pub fn used(&self) -> Option<u64> {

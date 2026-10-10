@@ -11,10 +11,11 @@
 //! and espflash, or a fake for the tests), [`listen`] asks the running
 //! firmware what it is and what its card holds — with no reset — and
 //! [`board`] is one board as the page draws it. [`desk`] is the worker
-//! that watches every board and does what is asked of each; [`flow`] is the
-//! write it reuses, and the whole run today's page still drives; [`page`]
-//! draws it on the admin hub's terminal session, and the GUI player hosts
-//! the same page, with no flags, as its MP3 Player tab (src/gui/device.rs,
+//! that watches every board and does what is asked of each; [`flow`] holds
+//! the write's pieces it reuses (the plan, the baud ladder, the write and
+//! its retry); [`page`] draws it — one card about the board in view — on
+//! the admin hub's terminal session, and the GUI player hosts the same
+//! page, with no flags, as its MP3 Player tab (src/gui/device.rs,
 //! docs/ux-contracts/mp3-player-screen.md). `--yes` prints the steps as
 //! lines instead.
 
@@ -44,12 +45,12 @@ use self::firmware::Target;
 // What the GUI's MP3 Player tab holds of this module: the page, the one
 // way to build it — with no flags — outside the tests, whose page rides
 // channels they hold (`Page::quiet`, its `Ends`), and the line it draws
-// while a page it left lets the board go.
+// while a page it left lets its ports go.
 #[cfg(not(test))]
 pub(crate) use self::page::hosted;
-pub(crate) use self::page::{Page, draw_waiting};
+pub(crate) use self::page::{LET_GO, Page, draw_waiting};
 #[cfg(test)]
-pub(crate) use self::{flow::Cmd as WorkerCmd, page::Ends};
+pub(crate) use self::{desk::Cmd as WorkerCmd, page::Ends};
 
 #[derive(Args)]
 pub struct DeviceArgs {
