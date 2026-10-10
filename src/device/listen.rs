@@ -20,6 +20,13 @@
 //! by its first word and everything else passes by. Nothing here resets
 //! anything: a board that says nothing is reported as silent, and only a
 //! reset someone asks for (desk's Read) can learn more.
+//!
+//! The firmware serves its console from its main loop alone, and lists the
+//! card's library before that loop first runs: for a while after each
+//! start nothing answers, while its other tasks go on printing. A board
+//! that answers nothing but shows itself ours that way ([`sign`]) is
+//! starting up, not silent, and the page's listens ask it again until it
+//! answers ([`ask_till_up`]).
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
@@ -28,6 +35,7 @@ use std::time::{Duration, Instant};
 
 use super::DeviceError;
 use super::board::{CardKind, CountWhy, Free, Heard, PlayState, Status, Tracks};
+use super::firmware::Version;
 
 /// An open port to a running firmware: bytes both ways, a read that gives
 /// up after a moment (the serial port's timeout) so the waits below can
@@ -39,6 +47,21 @@ impl<T: Read + Write + Send + ?Sized> Wire for T {}
 /// line can be longer (the console's stack report), and what runs past
 /// this is cut — memory stays bounded whatever a board sends.
 const LINE_KEEP: usize = 1024;
+/// The lines a question keeps of what went by, newest last, for [`sign`]:
+/// enough to hold two of the firmware's own among the Arduino core's.
+const HEARD_KEEP: usize = 32;
+
+/// How long a board that is ours and starting up is given to answer, from
+/// the first sign of it. Its firmware answers once its main loop runs, and
+/// lists the card's library before that: v0.8.0 and later about 20 s for
+/// 20,000 tracks on a card another version used (1.5 s otherwise), v0.7.0
+/// about 90 s at every start and minutes on its first start after v0.8.0
+/// used the card. Past this, the board is called not answering, as before.
+pub(crate) const STARTING_UP: Duration = Duration::from_secs(180);
+
+/// The first release whose firmware answers the host lines, if only with
+/// `@err 7`: one older that came up and said its name never will.
+const HOST_LINES: (u64, u64, u64) = (0, 6, 0);
 
 /// How long each question waits for its answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,7 +70,8 @@ pub(crate) struct Waits {
     pub l: Duration,
     /// Past a boot line seen while waiting: the firmware is coming up and
     /// answers once its loop runs (its setup mounts the card, reads the
-    /// library's index).
+    /// library's index). A board that talks and has shown nothing yet is
+    /// listened to this long too ([`Sign::Talk`]).
     pub boot: Duration,
     /// `@count`'s first line, and `@identify`'s answer.
     pub reply: Duration,
@@ -55,6 +79,14 @@ pub(crate) struct Waits {
     /// tenth, or every five seconds while the count moves — a 1 TB card's
     /// tenth can take twelve.
     pub count_idle: Duration,
+    /// A board starting up is asked again this often, on the same port. A
+    /// question it already holds is answered as soon as its loop runs, so
+    /// asking again only covers a line lost on the way; every ask waits in
+    /// the board's serial buffer (a few hundred bytes) while the loop is
+    /// busy, so it is rare: at 30 s, [`STARTING_UP`] queues at most six.
+    pub again: Duration,
+    /// …and given this long to answer ([`STARTING_UP`]).
+    pub up: Duration,
 }
 
 impl Waits {
@@ -63,6 +95,8 @@ impl Waits {
         boot: Duration::from_secs(8),
         reply: Duration::from_millis(1500),
         count_idle: Duration::from_secs(60),
+        again: Duration::from_secs(30),
+        up: STARTING_UP,
     };
 }
 
@@ -106,11 +140,22 @@ pub(crate) struct Console<'a> {
     /// The firmware's first line, if it went by: the board restarted while
     /// it was asked.
     pub boot: Option<String>,
+    /// The lines that went by unpicked, the last [`HEARD_KEEP`].
+    heard: Vec<String>,
 }
 
 impl<'a> Console<'a> {
     pub fn new(wire: &'a mut dyn Wire, port: &str, stop: &'a AtomicBool) -> Console<'a> {
-        Console { wire, port: port.to_string(), lines: Lines::default(), stop, boot: None }
+        Console { wire, port: port.to_string(), lines: Lines::default(), stop, boot: None, heard: Vec::new() }
+    }
+
+    /// What the lines that went by say of the board ([`sign`]).
+    fn sign(&self) -> Sign {
+        sign(self.boot.as_deref(), &self.heard)
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
     }
 
     /// One whole line or one key, in a single write: `@` lines with their
@@ -175,6 +220,10 @@ impl<'a> Console<'a> {
             if let Some(found) = pick(&line) {
                 return Ok(Some(found));
             }
+            if self.heard.len() == HEARD_KEEP {
+                self.heard.remove(0);
+            }
+            self.heard.push(line);
             if !extended && self.boot.is_some() {
                 extended = true;
                 deadline = deadline.max(Instant::now() + boot_wait);
@@ -196,7 +245,9 @@ pub(crate) struct Asked {
 
 /// Ask the running firmware what it is: `@status`, waiting `wait` for the
 /// answer; on `@err … status` (our firmware, older than the query), `L`
-/// for the version. Silence is an answer too.
+/// for the version. Silence is an answer too, and what went by meanwhile
+/// says whose ([`sign`]): ours starting up, ours from before the host
+/// lines, or silent.
 pub(crate) fn ask(
     wire: &mut dyn Wire,
     port: &str,
@@ -205,10 +256,23 @@ pub(crate) fn ask(
     stop: &AtomicBool,
     note: Note,
 ) -> Result<Asked, DeviceError> {
-    let mut console = Console::new(wire, port, stop);
+    ask_on(&mut Console::new(wire, port, stop), wait, waits, true, note)
+}
+
+/// [`ask`] on a conversation under way. `linger`: a board that talks and
+/// has shown nothing yet is given the boot wait before it is called silent
+/// — our firmware busy listing its library prints a log line every few
+/// seconds, and the first wait is only a second or so.
+fn ask_on(
+    console: &mut Console,
+    wait: Duration,
+    waits: Waits,
+    linger: bool,
+    note: Note,
+) -> Result<Asked, DeviceError> {
     note("@status".to_string());
     console.send(b"@status\n")?;
-    let answer = console.reply(Instant::now() + wait, waits.boot, &mut *note, |line| {
+    let pick = |line: &str| {
         if let Some(status) = parse_status(line) {
             return Some(Ok(status));
         }
@@ -216,29 +280,139 @@ pub(crate) fn ask(
             Some(err) if err.verb == "status" => Some(Err(err.code)),
             _ => None,
         }
-    })?;
+    };
+    let mut answer = console.reply(Instant::now() + wait, waits.boot, &mut *note, pick)?;
+    if answer.is_none() && linger && !console.stopped() && console.sign() == Sign::Talk {
+        answer = console.reply(Instant::now() + waits.boot, waits.boot, &mut *note, pick)?;
+    }
+    let boot = console.boot.clone();
     match answer {
-        Some(Ok(status)) => Ok(Asked { heard: Heard::Status(status), flash_mb: None, boot: console.boot }),
+        Some(Ok(status)) => Ok(Asked { heard: Heard::Status(status), flash_mb: None, boot }),
         Some(Err(_code)) => {
-            let facts = facts_on(&mut console, waits, &mut *note)?;
+            let facts = facts_on(console, waits, &mut *note)?;
             let (version, elf) = match (facts.version, console.boot.as_deref().and_then(parse_boot_line)) {
                 (Some(version), _) => (Some(version), facts.elf),
                 (None, Some((version, elf))) => (Some(version), elf),
                 (None, None) => (None, None),
             };
-            Ok(Asked { heard: Heard::Old { version, elf }, flash_mb: facts.flash_mb, boot: console.boot })
+            let boot = console.boot.clone();
+            Ok(Asked { heard: Heard::Old { version, elf }, flash_mb: facts.flash_mb, boot })
         }
-        None if console.stop.load(Ordering::Relaxed) => {
-            Ok(Asked { heard: Heard::Nothing, flash_mb: None, boot: console.boot })
+        None if console.stopped() => Ok(Asked { heard: Heard::Nothing, flash_mb: None, boot }),
+        None => {
+            let heard = match console.sign() {
+                Sign::Starting { version, elf } => Heard::Starting { version, elf },
+                // It came up while asked, said its name, and never answered
+                // an `@` line: our firmware from before the host lines.
+                Sign::Mute { version, elf } => Heard::Old { version: Some(version), elf },
+                Sign::Talk | Sign::Nothing => Heard::Silent,
+            };
+            Ok(Asked { heard, flash_mb: None, boot })
         }
-        // It came up while asked, said its name, and never answered an `@`
-        // line: our firmware from before the host lines (v0.5.0 and older).
-        None => match console.boot.as_deref().and_then(parse_boot_line) {
-            Some((version, elf)) => {
-                Ok(Asked { heard: Heard::Old { version: Some(version), elf }, flash_mb: None, boot: console.boot })
+    }
+}
+
+/// [`ask`], and again every `waits.again` on the same port while the board
+/// is ours and starting up, until it answers — `waits.up` at most from the
+/// first sign of it, after which it is silent, as one that never showed
+/// itself. `since`: a sign heard already, before this listen (the write's
+/// boot line): from the first question on, a board that says nothing is
+/// still starting. `told` hears the board starting up, and again whenever
+/// what is known of it grows (its version, from a boot line).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ask_till_up(
+    wire: &mut dyn Wire,
+    port: &str,
+    wait: Duration,
+    waits: Waits,
+    since: Option<Heard>,
+    stop: &AtomicBool,
+    note: Note,
+    told: &mut dyn FnMut(&Heard),
+) -> Result<Asked, DeviceError> {
+    let mut until = since.as_ref().map(|_| Instant::now() + waits.up);
+    let mut starting = since;
+    let mut said: Option<Heard> = None;
+    let mut wait = wait;
+    // The bytes of a line under way when one question ended: the next
+    // reads it whole.
+    let mut lines = Lines::default();
+    loop {
+        let mut console = Console::new(&mut *wire, port, stop);
+        console.lines = std::mem::take(&mut lines);
+        let asked = ask_on(&mut console, wait, waits, until.is_none(), &mut *note);
+        lines = std::mem::take(&mut console.lines);
+        let asked = asked?;
+        let now = match (&asked.heard, &starting) {
+            (Heard::Starting { version, elf }, kept) => {
+                let (was, had) = match kept {
+                    Some(Heard::Starting { version, elf }) => (version.clone(), elf.clone()),
+                    _ => (None, None),
+                };
+                Heard::Starting { version: version.clone().or(was), elf: elf.clone().or(had) }
             }
-            None => Ok(Asked { heard: Heard::Silent, flash_mb: None, boot: console.boot }),
-        },
+            // Nothing went by this time: still listing, as far as anyone
+            // can tell.
+            (Heard::Silent, Some(kept)) => kept.clone(),
+            _ => return Ok(asked),
+        };
+        let deadline = *until.get_or_insert_with(|| Instant::now() + waits.up);
+        if Instant::now() >= deadline {
+            return Ok(Asked { heard: Heard::Silent, ..asked });
+        }
+        if said.as_ref() != Some(&now) {
+            told(&now);
+            said = Some(now.clone());
+        }
+        starting = Some(now);
+        wait = waits.again;
+    }
+}
+
+// ── A board that does not answer ────────────────────────────────────────────
+
+/// What the lines a board printed say of it when nothing answered — the one
+/// rule that tells our firmware, busy, from a board that is not ours.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Sign {
+    /// Not a line: other firmware, none running, or a hung board.
+    Nothing,
+    /// Lines, none of them ours by this rule: a board that talks is given
+    /// the boot wait before it is called silent.
+    Talk,
+    /// Our firmware with its console not served yet: its boot line (its
+    /// version and ELF), or its own log lines.
+    Starting { version: Option<String>, elf: Option<String> },
+    /// Our firmware from before the host lines (its boot line names v0.5.0
+    /// or older): it never answers.
+    Mute { version: String, elf: Option<String> },
+}
+
+/// `boot`, the firmware's first line if it went by, and the `lines` that
+/// went by unanswered. Conservative, since a board called ours is asked
+/// again for minutes and offered no read meanwhile: its boot line, or two
+/// lines or more shaped like its own log — a lowercase tag in brackets, a
+/// space, words (`[bt] reconnect: paging the remembered headphones …`,
+/// `[stats] bat=87`) — never the Arduino core's `[ 11267][W][…]` or
+/// ESP-IDF's `I (123) tag:`, which any firmware prints. One such line
+/// alone is not enough.
+pub(crate) fn sign(boot: Option<&str>, lines: &[String]) -> Sign {
+    if let Some((version, elf)) = boot.and_then(parse_boot_line) {
+        if Version::parse(&version).is_some_and(|v| v.core < HOST_LINES) {
+            return Sign::Mute { version, elf };
+        }
+        return Sign::Starting { version: Some(version), elf };
+    }
+    let ours = |line: &&String| {
+        let Some((tag, text)) = line.trim().strip_prefix('[').and_then(|rest| rest.split_once("] ")) else {
+            return false;
+        };
+        (2..=10).contains(&tag.len()) && tag.bytes().all(|b| b.is_ascii_lowercase()) && !text.trim().is_empty()
+    };
+    match lines.iter().filter(ours).count() {
+        2.. => Sign::Starting { version: None, elf: None },
+        _ if lines.iter().any(|line| !line.trim().is_empty()) => Sign::Talk,
+        _ => Sign::Nothing,
     }
 }
 
@@ -588,6 +762,8 @@ pub(crate) mod tests {
         boot: Duration::from_millis(800),
         reply: Duration::from_millis(800),
         count_idle: Duration::from_millis(1500),
+        again: Duration::from_millis(200),
+        up: Duration::from_millis(2500),
     };
 
     fn asked(script: &mut Script) -> Asked {
@@ -735,6 +911,106 @@ pub(crate) mod tests {
             }
             self.inner.read(buf)
         }
+    }
+
+    /// Lines in the shapes the real Core2 printed while v0.7.0 listed 19,410
+    /// tracks (2026-10-10): its own Bluetooth task's, and the Arduino core's.
+    const BT: &str = "[bt] reconnect: paging the remembered headphones …";
+    const ARDUINO: &str = "[ 11267][W][BluetoothA2DPSource.cpp:551] av_hdl_stack_evt(): av_hdl_stack_evt type 2";
+
+    fn lines(of: &[&str]) -> Vec<String> {
+        of.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn only_a_boot_line_or_two_lines_of_our_own_log_say_ours_starting_up() {
+        let starting = Sign::Starting { version: None, elf: None };
+        assert_eq!(sign(None, &[]), Sign::Nothing);
+        assert_eq!(sign(None, &lines(&[BT, ARDUINO, "[stats] bat=87 state=paused"])), starting);
+        assert_eq!(sign(None, &lines(&[BT, ARDUINO, BT])), starting, "the same tag twice is two lines");
+        assert_eq!(sign(None, &lines(&[ARDUINO, BT, ARDUINO])), Sign::Talk, "one line of ours is not enough");
+        // Other firmwares' logs, and lines only shaped like ours at a glance.
+        let others = [ARDUINO, "I (1234) wifi: connected", "[INFO] booting", "[Wifi] up", "[a] one letter"];
+        let almost = ["[gaplesspadding] too long a tag", "[bt]", "[bt]no space", "[bt]  ", "[b t] spaced", "[bt2] digit"];
+        assert_eq!(sign(None, &lines(&[others.as_slice(), almost.as_slice()].concat())), Sign::Talk);
+        let boot = "mstream-mp3-player v0.8.0-5-g4e94418 (commit 4e94418, 2026-10-10), ELF be894f89";
+        let named = Sign::Starting { version: Some("v0.8.0-5-g4e94418".into()), elf: Some("be894f89".into()) };
+        assert_eq!(sign(Some(boot), &[]), named, "its boot line alone, with its version");
+        let old = "mstream-mp3-player v0.5.0 (commit 1, 2026-09-30), ELF 17352e55";
+        let mute = Sign::Mute { version: "v0.5.0".into(), elf: Some("17352e55".into()) };
+        assert_eq!(sign(Some(old), &lines(&[BT, BT])), mute, "from before the host lines: it never answers");
+    }
+
+    #[test]
+    fn a_board_that_prints_its_own_log_and_never_answers_is_ours_starting_up() {
+        let busy = format!("{BT}\r\n{ARDUINO}\r\n[bt] reconnect: page timeout\r\n");
+        let asked = asked(&mut Script::new(&[("@status\n", busy.as_str())]));
+        assert_eq!(asked.heard, Heard::Starting { version: None, elf: None });
+    }
+
+    #[test]
+    fn a_board_that_talks_is_listened_to_for_the_boot_wait_and_one_that_prints_nothing_is_not() {
+        let stop = AtomicBool::new(false);
+        let wait = Duration::from_millis(200);
+        let t0 = Instant::now();
+        let quiet = ask(&mut Script::new(&[]), "COM3", wait, QUICK, &stop, &mut |_| {}).unwrap();
+        assert_eq!(quiet.heard, Heard::Silent);
+        assert!(t0.elapsed() < wait + QUICK.boot, "nothing printed: today's one wait, {:?}", t0.elapsed());
+        let chatty = format!("{ARDUINO}\r\nI (1234) wifi: connected\r\n");
+        let t0 = Instant::now();
+        let talking = ask(&mut Script::new(&[("@status\n", chatty.as_str())]), "COM3", wait, QUICK, &stop, &mut |_| {});
+        assert_eq!(talking.unwrap().heard, Heard::Silent, "talk that is not ours is silence, after all");
+        assert!(t0.elapsed() >= wait + QUICK.boot, "but heard out: {:?}", t0.elapsed());
+    }
+
+    /// `ask_till_up` on `wire` with nothing known before it, the starts it
+    /// told.
+    fn till_up(wire: &mut dyn Wire, waits: Waits, since: Option<Heard>) -> (Asked, Vec<Heard>) {
+        let stop = AtomicBool::new(false);
+        let mut told = Vec::new();
+        let wait = Duration::from_millis(300);
+        let asked = ask_till_up(wire, "COM3", wait, waits, since, &stop, &mut |_| {}, &mut |h| told.push(h.clone()));
+        (asked.unwrap(), told)
+    }
+
+    #[test]
+    fn a_board_starting_up_is_asked_again_on_the_same_port_until_it_answers() {
+        let busy = format!("{BT}\r\n{BT}\r\n");
+        let script = Script::new(&[("@status\n", busy.as_str())]);
+        let sent = script.sent.clone();
+        let late = b"[stats] bat=87\r\n@status fw=v0.9.0 card=none\r\n".to_vec();
+        let mut wire = Delayed { inner: script, late, after: Instant::now() + Duration::from_millis(900) };
+        let (asked, told) = till_up(&mut wire, QUICK, None);
+        assert!(matches!(asked.heard, Heard::Status(ref s) if s.fw == "v0.9.0"), "{asked:?}");
+        assert_eq!(told, [Heard::Starting { version: None, elf: None }], "told once that it is starting up");
+        let asks = sent.lock().unwrap().iter().filter(|s| *s == "@status\n").count();
+        assert!(asks >= 3, "asked every `again` meanwhile: {asks}");
+    }
+
+    #[test]
+    fn a_board_that_never_answers_is_silent_once_its_time_is_up() {
+        let waits = Waits { up: Duration::from_millis(700), ..QUICK };
+        let busy = format!("{BT}\r\n{BT}\r\n");
+        let t0 = Instant::now();
+        let (asked, told) = till_up(&mut Script::new(&[("@status\n", busy.as_str())]), waits, None);
+        assert_eq!(asked.heard, Heard::Silent, "not answering after all");
+        assert_eq!(told.len(), 1);
+        assert!(t0.elapsed() >= Duration::from_millis(1000), "300 ms, then 700 more: {:?}", t0.elapsed());
+        // One that prints nothing is never starting up: asked once.
+        let (asked, told) = till_up(&mut Script::new(&[]), waits, None);
+        assert_eq!((asked.heard, told.len()), (Heard::Silent, 0));
+    }
+
+    #[test]
+    fn after_a_boot_line_a_board_that_says_nothing_yet_is_still_starting_up() {
+        // The write heard the boot line; the board then lists its library
+        // with its radio off: not a line, until it answers.
+        let since = Heard::Starting { version: Some("v0.8.0".into()), elf: Some("3523b80e".into()) };
+        let late = b"@err 7 status\r\n[flash] running app: version \"v0.8.0\" (app description), ELF 3523b80e\r\n".to_vec();
+        let mut wire = Delayed { inner: Script::new(&[]), late, after: Instant::now() + Duration::from_millis(600) };
+        let (asked, told) = till_up(&mut wire, QUICK, Some(since.clone()));
+        assert_eq!(asked.heard, Heard::Old { version: Some("v0.8.0".into()), elf: Some("3523b80e".into()) });
+        assert_eq!(told, [since], "the card says it is starting up meanwhile");
     }
 
     #[test]

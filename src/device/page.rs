@@ -18,9 +18,16 @@
 //! the other boards can be looked at while it runs and never written. Done
 //! is the card again: the worker listens for the board coming back, and
 //! the chip and the card say what it runs now.
+//!
+//! What a write puts on a board is chosen behind *Advanced…* (`o`): the
+//! Advanced options sheet (sheet.rs) makes the board's next write, one
+//! write long, which the card shows on one line under its chip and the gate
+//! names again (contract clauses 33–43). The verdict never moves with it.
+
+mod sheet;
 
 use std::collections::HashSet;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -31,17 +38,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use rust_i18n::t;
 
+use self::sheet::{Dialogs, Listing, Sheet, mode_words, next_what};
 use super::FlashArgs;
-use super::board::{Board, Card, CardKind, CardUnknown, Count, CountWhy, Free, Heard, Primary, Probe, Tracks};
-use super::board::{Verdict, Work, Written, gb};
+use super::board::{Board, By, Card, CardKind, CardUnknown, Count, CountWhy, Free, Heard, Next, NextState};
+use super::board::{Primary, Probe, Tracks, Verdict, Work, Written, gb};
 use super::desk::{self, All, Cmd, Event, LogKind, Refusal};
-use super::firmware::{Origin, Place, Target, place};
+use super::firmware::{Check, Image, Mode, Origin, Place, Target, place};
 use super::flow::Phase;
 use super::listen::{self, IdentifyWhy};
 use super::{DeviceError, engine};
-use crate::admin::{Outcome, Screen, draw_foot, draw_header_as, fmt_count, frame_ground};
+use crate::admin::{Claim, Outcome, Screen, draw_foot, draw_header_as, fmt_count, frame_ground};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{self, Surface, accent, bold, dim};
+use crate::setup::picker::Pick;
 
 /// The standalone page's least window: the card at 68 cells with its
 /// tallest content, the header above and the busy and tips rows below.
@@ -95,6 +104,28 @@ pub(crate) enum Act {
     Write,
     /// The install gate's erase box.
     Erase,
+    /// Advanced…: the sheet for the board in view (clause 33).
+    Advanced,
+    /// Reset: the board's next write back to the defaults (clause 38).
+    Reset,
+    /// The sheet's `[X]`.
+    SheetClose,
+    /// The sheet's firmware choice, by its place.
+    SheetSource(usize),
+    SheetMode(Mode),
+    SheetErase,
+    /// The release control: its list opens.
+    ListOpen,
+    /// A click off the release list's rows: it closes.
+    ListClose,
+    /// A row of the release list, by its place among the rows it picks.
+    ListPick(usize),
+    /// A local build's chooser, by its place.
+    SheetChooser(usize),
+    /// Use defaults.
+    Defaults,
+    /// Apply.
+    Apply,
 }
 
 /// What a gate writes: its title, its words and its button follow.
@@ -112,6 +143,17 @@ enum Kind {
     Back,
     /// Update all.
     All,
+    /// The same version in its other build: a next write's mode change.
+    Mode,
+    /// A local build over our firmware: never called an update.
+    Local,
+}
+
+/// How a gate's line is meant: plain, or gold for what may go wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Plain,
+    Gold,
 }
 
 /// The gate: one function's titles over every write (contract clause 23).
@@ -126,6 +168,25 @@ struct Gate {
     name: Option<String>,
     erase: bool,
     rows: Vec<GateRow>,
+    /// The build the title names after the version (`· DIO`), where the
+    /// write is not QIO or not the board's own (clause 39).
+    title_mode: Option<Mode>,
+    /// Under the title: what is written and the check it passed, and what
+    /// may go wrong.
+    lines: Vec<(String, Tone)>,
+    /// Under the green line: going back in a beta.
+    after: Vec<(String, Tone)>,
+    /// The sheet's Erase chose to erase a write that is not an install:
+    /// the green line splits, what goes in gold.
+    erase_any: bool,
+    /// The board's next write was chosen (the sheet, the flags, the loop).
+    chosen: bool,
+    /// Update all's boards left out for their own next write: the port, and
+    /// what that write is.
+    left_out: Vec<(String, String)>,
+    /// What this gate names, for one board: its yes asks the worker for this
+    /// image and no other (desk::Cmd::Write).
+    image: Option<Image>,
 }
 
 /// One board in Update all's gate.
@@ -134,6 +195,8 @@ struct GateRow {
     port: String,
     serial: Option<String>,
     from: String,
+    /// It is written in DIO, by its ELF or its sheet's choice.
+    dio: bool,
 }
 
 /// The write the page is locked to (contract clause 9), from the gate's
@@ -141,19 +204,21 @@ struct GateRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Lock {
     /// One board's. `seen` once its board has shown the write under way, so
-    /// a result it carried from before is not taken for this one's.
-    One { port: String, kind: Kind, from: Option<String>, seen: bool },
+    /// a result it carried from before is not taken for this one's;
+    /// `chosen` when its next write was (Done's line says what went on).
+    One { port: String, kind: Kind, from: Option<String>, seen: bool, chosen: bool },
     /// Update all's: its boards, the one at its turn, and the one seen
     /// under way (whose end is told on the busy line).
     All { ports: Vec<String>, at: usize, current: Option<String> },
 }
 
-/// The image the worker has in hand.
+/// The image the worker has in hand: the page's own.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Image {
+struct InHand {
     version: String,
     origin: String,
     kind: Origin,
+    mode: Option<Mode>,
 }
 
 /// A line on the busy row: a result, a board plugged in, a refusal.
@@ -189,8 +254,11 @@ pub(crate) struct Page {
     events: Receiver<Event>,
     /// `--erase` / `--no-erase` on the standalone page: the gate's erase.
     erase_asked: Option<bool>,
+    /// The flags that chose the next write on the standalone page, for its
+    /// "set by" line (clause 43): none hosted.
+    flags: Option<String>,
     target: Option<Target>,
-    image: Option<Image>,
+    image: Option<InHand>,
     download: Option<(u64, Option<u64>)>,
     /// Why the image could not be had (Details' "This player" row).
     image_failed: Option<String>,
@@ -207,6 +275,15 @@ pub(crate) struct Page {
     /// Details (or, with no board, "Not showing up?") open.
     details: bool,
     gate: Option<Gate>,
+    /// The Advanced options sheet, while it is up (clause 34).
+    sheet: Option<Sheet>,
+    /// GitHub's release list, as the page has it this visit (clause 35).
+    listing: Listing,
+    /// The list shows its pre-releases: this visit only.
+    show_pre: bool,
+    /// The native dialogs' answers, from their thread.
+    picks: (Sender<Pick>, Receiver<Pick>),
+    dialogs: Dialogs,
     lock: Option<Lock>,
     rate: Option<Rate>,
     time_left: Option<u64>,
@@ -232,13 +309,36 @@ pub(crate) struct Page {
 pub(crate) fn run(args: FlashArgs) -> i32 {
     let engine: desk::Shared = std::sync::Arc::from(engine::from_env());
     // Not the firmware first: the boards are judged while the image comes.
-    let (cmds, events) = desk::spawn(engine, args.source(), args.port.clone(), desk::Timing::REAL, false);
+    // The flags are each board's next write, not what it is measured
+    // against: that stays the pin.
+    let setup = desk::Setup {
+        supply: super::firmware::net(),
+        preset: args.preset(),
+        flags_mode: args.flash_mode,
+        port: args.port.clone(),
+        timing: desk::Timing::REAL,
+        firmware_first: false,
+    };
+    let (cmds, events) = desk::spawn(engine, setup);
     let mut page = Page::with_channels(cmds, events, args.erase_asked());
+    page.flags = flag_words(&args);
     let code = crate::admin::run_tui_as(&mut page, "mStream MP3 Player");
     // Ctrl+C leaves the loop at once: a read under way still restarts its
     // board, and every listen lets its port go, before the process ends.
     page.let_go_within(LET_GO);
     code
+}
+
+/// The flags that choose a next write, as the card names them under it:
+/// `--release, --flash-mode`.
+fn flag_words(args: &FlashArgs) -> Option<String> {
+    let given = [
+        (args.firmware.is_some(), "--firmware"),
+        (args.release.is_some(), "--release"),
+        (args.flash_mode.is_some(), "--flash-mode"),
+    ];
+    let names: Vec<&str> = given.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect();
+    (!names.is_empty()).then(|| names.join(", "))
 }
 
 /// The page the GUI's MP3 Player tab hosts (contract clauses 1 and 5):
@@ -249,8 +349,15 @@ pub(crate) fn run(args: FlashArgs) -> i32 {
 #[cfg(not(test))]
 pub(crate) fn hosted() -> Page {
     let engine: desk::Shared = std::sync::Arc::from(engine::from_env());
-    let source = super::firmware::Source::Pinned;
-    let (cmds, events) = desk::spawn(engine, source, None, desk::Timing::REAL, false);
+    let setup = desk::Setup {
+        supply: super::firmware::net(),
+        preset: None,
+        flags_mode: None,
+        port: None,
+        timing: desk::Timing::REAL,
+        firmware_first: false,
+    };
+    let (cmds, events) = desk::spawn(engine, setup);
     Page::with_channels(cmds, events, None)
 }
 
@@ -260,6 +367,7 @@ impl Page {
             cmds,
             events,
             erase_asked,
+            flags: None,
             target: None,
             image: None,
             download: None,
@@ -272,6 +380,11 @@ impl Page {
             open: None,
             details: false,
             gate: None,
+            sheet: None,
+            listing: Listing::NotAsked,
+            show_pre: false,
+            picks: channel(),
+            dialogs: Dialogs::default(),
             lock: None,
             rate: None,
             time_left: None,
@@ -298,10 +411,10 @@ impl Page {
         match event {
             Event::Target(target) => self.target = Some(target),
             Event::Download { done, total } => self.download = Some((done, total)),
-            Event::Firmware { version, origin, kind, .. } => {
+            Event::Firmware { version, origin, kind, mode, .. } => {
                 self.download = None;
                 self.image_failed = None;
-                self.image = Some(Image { version, origin, kind });
+                self.image = Some(InHand { version, origin, kind, mode });
             }
             Event::FirmwareFailed(e) => {
                 self.download = None;
@@ -318,6 +431,12 @@ impl Page {
             Event::Log { port, text, kind } => self.log_at(now, port, text, kind),
             Event::Failed(e) => self.list_failed = Some(e),
             Event::Released => self.released = true,
+            // The sheet's: a local path read, the release list.
+            Event::Vetted { path, result } => self.vetted(path, result),
+            Event::Releases(result) => self.listed(result),
+            // Every image the worker gets: the board it is for carries it
+            // in its next write, which is what the card draws.
+            Event::Image { .. } => {}
         }
     }
 
@@ -380,13 +499,13 @@ impl Page {
         }
         let ended = !under_way && board.written.is_some();
         match &mut self.lock {
-            Some(Lock::One { port: locked, seen, kind, from }) if *locked == port => {
+            Some(Lock::One { port: locked, seen, kind, from, chosen }) if *locked == port => {
                 if under_way {
                     *seen = true;
                 } else if *seen && ended {
-                    let (kind, from) = (*kind, from.clone());
+                    let (kind, from, chosen) = (*kind, from.clone(), *chosen);
                     self.lock = None;
-                    self.ended(board, kind, from);
+                    self.ended(board, kind, from, chosen);
                 }
             }
             Some(Lock::All { current, .. }) => {
@@ -408,14 +527,23 @@ impl Page {
     }
 
     /// One board's write ended: Done's one line (contract clause 24), or
-    /// the board in view with Details open on its log.
-    fn ended(&mut self, board: &Board, kind: Kind, from: Option<String>) {
+    /// the board in view with Details open on its log — after a failure,
+    /// and after a write that left the board restarting (clause 40).
+    fn ended(&mut self, board: &Board, kind: Kind, from: Option<String>, chosen: bool) {
         self.rate = None;
         self.time_left = None;
         let text = match &board.written {
+            Some(Written::Done { looping: Some(_), version, .. }) => {
+                self.failed_open(board.port());
+                t!("dev.note_looping", version = version).to_string()
+            }
             Some(Written::Done { skipped: true, .. }) => t!("dev.done_skipped").to_string(),
             Some(Written::Done { install: true, .. }) => t!("dev.note_installed").to_string(),
-            Some(Written::Done { version, .. }) => match (kind, from) {
+            Some(Written::Done { version, image, .. }) => match (kind, from) {
+                (Kind::Mode, _) => t!("dev.note_mode", mode = image.mode.map_or("?", Mode::word)).to_string(),
+                (Kind::Local, Some(from)) => t!("dev.note_local", from = from).to_string(),
+                // A release chosen behind the board's version: gone back to it.
+                (Kind::Back, _) if chosen => t!("dev.note_back", to = version).to_string(),
                 // Only a step forward is an update. Going back from a newer
                 // version, or over one the order cannot place, replaced it.
                 (Kind::Update | Kind::Replace, Some(from)) if place(&from, version) == Place::Older => {
@@ -446,6 +574,11 @@ impl Page {
         self.order.retain(|p| p != port);
         if matches!(&self.lock, Some(Lock::One { port: locked, .. }) if locked == port) {
             self.lock = None;
+        }
+        // Its choice goes with it: plugged in again, it starts at the
+        // defaults (clause 38).
+        if self.sheet.as_ref().is_some_and(|s| s.port == port) {
+            self.sheet = None;
         }
         if self.open.as_deref() == Some(port) {
             // The next to the right, else the left.
@@ -527,6 +660,9 @@ impl Page {
             Refusal::Busy => t!("dev.refused_busy", port = name),
             Refusal::NotAnswering => t!("dev.refused_not_answering", port = name),
             Refusal::NothingToUpdate => t!("dev.refused_nothing"),
+            Refusal::Changed { was, now: built } => t!("dev.log_changed", port = name, was = was, now = built),
+            Refusal::Moved => t!("dev.refused_moved", port = name),
+            Refusal::Image(e) => e.text().into(),
         };
         self.say(text, false, Some(now + NOTE_FOR));
     }
@@ -577,6 +713,7 @@ impl Page {
         self.released = true;
         self.lock = None;
         self.gate = None;
+        self.sheet = None;
         if !self.quitting {
             self.say(t!("note.worker_gone"), true, None);
         }
@@ -617,12 +754,15 @@ impl Page {
         matches!(board.work, Work::Writing { .. } | Work::Queued) || self.writing_port() == Some(board.port())
     }
 
+    /// Details' Write again: the pin, for ours with no write primary — and
+    /// none while a next write is chosen, whose primary writes that.
     fn can_write_again(&self, board: &Board) -> bool {
         self.details
             && self.lock.is_none()
             && self.target.is_some()
             && board.work == Work::Idle
             && board.ours()
+            && board.pending().is_none()
             && matches!(board.verdict, Verdict::UpToDate | Verdict::Newer | Verdict::Unplaced)
             && !matches!(board.written, Some(Written::Failed { .. }))
     }
@@ -645,18 +785,32 @@ impl Page {
             && matches!(board.heard, Heard::InUse { .. } | Heard::Failed(_))
     }
 
+    /// The boards behind the pin: what the tab marks and the count say.
     fn needing(&self) -> Vec<&Board> {
         self.boards.iter().filter(|b| b.needs_update()).collect()
     }
 
+    /// The boards Update all would write: behind the pin, and with no
+    /// release or build of their own chosen (clause 42).
+    fn writing_all(&self) -> Vec<&Board> {
+        self.boards.iter().filter(|b| b.in_update_all()).collect()
+    }
+
     fn can_update_all(&self) -> bool {
-        self.lock.is_none() && self.target.is_some() && self.needing().len() >= 2
+        self.lock.is_none() && self.target.is_some() && self.writing_all().len() >= 2
     }
 
     /// The gate for `board`: its primary's (`again` false) or Details'
     /// Write again.
     fn gate_for(&self, board: &Board, again: bool) -> Option<Gate> {
-        let to = self.target.as_ref()?.version.clone();
+        // A next write chosen (the sheet, the flags, or the page's own after
+        // a restart loop) names its own version and direction: the gate
+        // never says the pin for an image that is not the pin.
+        let chosen = board.pending().filter(|_| !again);
+        let to = match chosen {
+            Some(next) => next.version()?,
+            None => self.target.as_ref()?.version.clone(),
+        };
         let from = board.version().map(str::to_string);
         let read_name = match &board.probe {
             Some(Ok(Probe { on_board: Some(desc), .. })) if !desc.is_ours() => Some(desc.project.clone()),
@@ -679,6 +833,24 @@ impl Page {
                 _ if board.ours() => Kind::Again,
                 _ => Kind::Install,
             }
+        } else if let Some(next) = chosen {
+            match board.primary() {
+                Some(Primary::Install) => Kind::Install,
+                // A local build is written over ours, never an update.
+                _ if next.image.is_local() => Kind::Local,
+                Some(Primary::Update) => Kind::Update,
+                Some(Primary::Back) => Kind::Back,
+                // A version the order cannot place replaces what is on the
+                // board; the same version in its other build is a mode
+                // change — DIO, or QIO put back on a DIO board — and in its
+                // own build a repair.
+                _ if from.as_deref() != Some(to.as_str()) => Kind::Replace,
+                _ => {
+                    let named = next.mode().filter(|m| *m == Mode::Dio || board.default_mode() == Mode::Dio);
+                    let runs = board.mode().map(|m| m.mode);
+                    if named.is_some() && named != runs { Kind::Mode } else { Kind::Again }
+                }
+            }
         } else {
             match board.verdict {
                 Verdict::Update => Kind::Update,
@@ -689,28 +861,131 @@ impl Page {
         };
         let erase = match kind {
             Kind::Install => self.erase_asked.unwrap_or(true),
-            _ => self.erase_asked.unwrap_or(false),
+            _ => self.erase_asked.unwrap_or(chosen.is_some_and(|next| next.erase)),
         };
         let name = match (&board.verdict, read_name) {
             (Verdict::Other { name }, _) => Some(name.clone()),
             (_, name) => name,
         };
-        Some(Gate { kind, port: Some(board.port().to_string()), from, to, name, erase, rows: Vec::new() })
+        let erase_any = kind != Kind::Install && chosen.is_some_and(|next| next.erase) && erase;
+        let mut gate = Gate {
+            kind,
+            port: Some(board.port().to_string()),
+            from,
+            to,
+            name,
+            erase,
+            rows: Vec::new(),
+            title_mode: None,
+            lines: Vec::new(),
+            after: Vec::new(),
+            erase_any,
+            chosen: chosen.is_some(),
+            left_out: Vec::new(),
+            image: Some(board.write_image()),
+        };
+        self.gate_words(&mut gate, board);
+        Some(gate)
     }
 
-    /// Update all's gate: every board that needs it, named.
+    /// The gate's words for what this write puts on `board` (clause 39):
+    /// the mode in the title where it is not QIO or not the board's own,
+    /// and under it what is written, the check it passed, and what may go
+    /// wrong. At the defaults, nothing: today's gates.
+    fn gate_words(&self, gate: &mut Gate, board: &Board) {
+        let image = board.write_image();
+        let pending = board.pending();
+        let mode = pending.and_then(Next::mode).or_else(|| image.mode());
+        let pin = self.target.as_ref().map_or("?", |t| t.version.as_str()).to_string();
+        let gold = |text: String| (text, Tone::Gold);
+        let plain = |text: String| (text, Tone::Plain);
+        if !image.is_local() {
+            gate.title_mode = match mode {
+                Some(Mode::Dio) => Some(Mode::Dio),
+                Some(Mode::Qio) if board.default_mode() == Mode::Dio => Some(Mode::Qio),
+                _ => None,
+            };
+        }
+        match (&image, mode) {
+            (Image::Local(path), _) => {
+                let facts = pending.and_then(Next::facts);
+                let version = facts.map_or_else(|| gate.to.clone(), |f| f.version.clone());
+                let path = sheet::local_tail(path);
+                let words = t!("dev.gate_src_local", version = version, mode = mode_words(mode), path = path);
+                gate.lines.push(gold(words.to_string()));
+            }
+            (Image::Pin(_), Some(Mode::Dio)) => match pending {
+                None => {
+                    // DIO by the board's own ELF: the update keeps it.
+                    if let (Some(elf), Some(by_elf)) = (board.elf(), board.mode()) {
+                        let port = short(board.port());
+                        let words = t!("dev.gate_kept", port = port, elf = elf, tag = by_elf.version);
+                        gate.lines.push(plain(words.to_string()));
+                    }
+                }
+                Some(next) if next.by == By::Loop => {
+                    let words = format!("{} {}", t!("dev.gate_loop"), t!("dev.gate_dio"));
+                    gate.lines.push(plain(words));
+                }
+                Some(_) => gate.lines.push(plain(t!("dev.gate_dio").to_string())),
+            },
+            (Image::Pin(_), Some(Mode::Qio)) if board.default_mode() == Mode::Dio => {
+                gate.lines.push(plain(t!("dev.gate_qio_back").to_string()));
+            }
+            (Image::Release { tag, .. }, _) => {
+                let words = t!("dev.gate_src_release", tag = tag, mode = mode_words(mode));
+                gate.lines.push(plain(words.to_string()));
+                if place(&pin, tag) == Place::Older {
+                    let words = t!("dev.gate_newer", pin = pin, to = tag);
+                    gate.lines.push(gold(words.to_string()));
+                } else if gate.kind == Kind::Back {
+                    let from = gate.from.clone().unwrap_or_else(|| "?".to_string());
+                    let words = t!("dev.gate_back_beta", to = tag, from = from);
+                    gate.after.push(gold(words.to_string()));
+                } else if place(tag, &pin) == Place::Older {
+                    gate.lines.push(gold(t!("dev.gate_not_pin", pin = pin).to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Update all's gate: every board it writes, named, each in its own
+    /// mode — and the boards left out for their own next write.
     fn gate_all(&self) -> Option<Gate> {
         let to = self.target.as_ref()?.version.clone();
         let rows: Vec<GateRow> = self
-            .needing()
+            .writing_all()
             .into_iter()
             .map(|b| GateRow {
                 port: b.port().to_string(),
                 serial: b.serial().map(str::to_string),
                 from: b.version().unwrap_or("?").to_string(),
+                dio: b.update_image().mode() == Some(Mode::Dio),
             })
             .collect();
-        let gate = Gate { kind: Kind::All, port: None, from: None, to, name: None, erase: false, rows };
+        let left_out: Vec<(String, String)> = self
+            .boards
+            .iter()
+            .filter(|b| b.left_out())
+            .filter_map(|b| Some((b.port().to_string(), next_what(b.pending()?))))
+            .collect();
+        let gate = Gate {
+            kind: Kind::All,
+            port: None,
+            from: None,
+            to,
+            name: None,
+            erase: false,
+            rows,
+            title_mode: None,
+            lines: Vec::new(),
+            after: Vec::new(),
+            erase_any: false,
+            chosen: false,
+            left_out,
+            image: None,
+        };
         (gate.rows.len() >= 2).then_some(gate)
     }
 
@@ -789,6 +1064,24 @@ impl Page {
                     gate.erase = !gate.erase;
                 }
             }
+            Act::Advanced => self.open_sheet(),
+            Act::Reset => {
+                if let Some(board) = self.shown().cloned()
+                    && self.offers_reset(&board)
+                {
+                    self.reset_next(board.port());
+                }
+            }
+            Act::SheetClose
+            | Act::SheetSource(_)
+            | Act::SheetMode(_)
+            | Act::SheetErase
+            | Act::ListOpen
+            | Act::ListClose
+            | Act::ListPick(_)
+            | Act::SheetChooser(_)
+            | Act::Defaults
+            | Act::Apply => self.sheet_act(act),
         }
         None
     }
@@ -800,14 +1093,17 @@ impl Page {
         self.rate = None;
         self.time_left = None;
         if gate.kind == Kind::All {
+            // The boards it names: a board left out for its own next write
+            // is not among them (clause 42).
             let ports: Vec<String> = gate.rows.iter().map(|r| r.port.clone()).collect();
             if self.send(Cmd::UpdateAll { ports: ports.clone() }) {
                 self.lock = Some(Lock::All { ports, at: 0, current: None });
             }
         } else if let Some(port) = gate.port
-            && self.send(Cmd::Write { port: port.clone(), erase: Some(gate.erase) })
+            && self.send(Cmd::Write { port: port.clone(), erase: Some(gate.erase), image: gate.image })
         {
-            self.lock = Some(Lock::One { port, kind: gate.kind, from: gate.from, seen: false });
+            let (kind, from, chosen) = (gate.kind, gate.from, gate.chosen);
+            self.lock = Some(Lock::One { port, kind, from, seen: false, chosen });
         }
     }
 
@@ -846,6 +1142,7 @@ impl Page {
             return;
         }
         self.gate = None;
+        self.sheet = None;
         self.quitting = true;
         if self.cmds.send(Cmd::Quit).is_err() {
             self.released = true;
@@ -903,10 +1200,24 @@ impl Page {
     /// The write's words for `board`: its phase, and while it writes the
     /// version, the percent and the time left.
     fn write_words(&self, board: &Board) -> String {
-        let to = self.target.as_ref().map_or("?", |t| t.version.as_str());
+        // The version this write puts on, and its build where the gate named
+        // it (clause 39): a chosen next write's, else the pin's.
+        let pin = self.target.as_ref().map_or("?", |t| t.version.as_str()).to_string();
+        let (to, mode) = match board.pending() {
+            Some(next) => (next.version().unwrap_or(pin), next.mode()),
+            None => (pin, Some(board.default_mode())),
+        };
+        let named = match mode {
+            Some(Mode::Dio) => Some(Mode::Dio),
+            Some(Mode::Qio) if board.default_mode() == Mode::Dio => Some(Mode::Qio),
+            _ => None,
+        };
         match board.work {
             Work::Writing { phase: Phase::Writing, pct } => {
-                let mut text = t!("dev.fw_writing", version = to).to_string();
+                let mut text = match named {
+                    Some(mode) => t!("dev.fw_writing_mode", version = to, mode = mode.word()).to_string(),
+                    None => t!("dev.fw_writing", version = to).to_string(),
+                };
                 if let Some(pct) = pct {
                     text.push_str(&format!(" {pct}%"));
                     let mine = self.rate.as_ref().is_some_and(|r| r.port == board.port());
@@ -957,13 +1268,19 @@ impl Page {
     fn hint_parts(&self, hosted: bool) -> Vec<(String, u8)> {
         let mut parts: Vec<(String, u8)> = Vec::new();
         let switch = |word: String| format!("{} {word}", glyphs().switch);
+        if self.sheet.is_some() {
+            return self.sheet_hint_parts();
+        }
         if let Some(gate) = &self.gate {
             let yes = match gate.kind {
+                Kind::Update | Kind::Replace if gate.erase_any => "dev.hint_gate_erase_update",
+                _ if gate.erase_any => "dev.hint_gate_erase_write",
                 Kind::Update | Kind::Replace => "dev.hint_gate_update",
                 Kind::Install => "dev.hint_gate_install",
                 Kind::Again => "dev.hint_gate_again",
                 Kind::Back => "dev.hint_gate_back",
                 Kind::All => "dev.hint_gate_all",
+                Kind::Mode | Kind::Local => "dev.hint_gate_write",
             };
             parts.push((t!(yes).to_string(), 0));
             if gate.kind == Kind::Install {
@@ -998,6 +1315,9 @@ impl Page {
             Some(Primary::Install) => Some("dev.hint_enter_install"),
             Some(Primary::Read) => Some("dev.hint_enter_read"),
             Some(Primary::TryAgain) => Some("dev.hint_enter_retry"),
+            Some(Primary::Write) => Some("dev.hint_enter_write"),
+            Some(Primary::Back) => Some("dev.hint_enter_back"),
+            Some(Primary::Dio) => Some("dev.hint_enter_dio"),
             None => None,
         };
         if let Some(key) = enter {
@@ -1017,6 +1337,12 @@ impl Page {
         }
         if self.offers_ask(board) {
             parts.push((t!("dev.hint_ask").to_string(), 1));
+        }
+        if self.can_advance(board) {
+            parts.push((t!("dev.hint_advanced").to_string(), 2));
+        }
+        if self.offers_reset(board) {
+            parts.push((t!("dev.hint_reset").to_string(), 1));
         }
         parts.push((t!("dev.hint_details").to_string(), 0));
         parts.push((back, 0));
@@ -1076,6 +1402,10 @@ impl Screen for Page {
     }
 
     fn pump(&mut self) {
+        // A native dialog's answer, from its thread (the sheet's choosers).
+        while let Ok(pick) = self.picks.1.try_recv() {
+            self.picked(pick);
+        }
         loop {
             match self.events.try_recv() {
                 Ok(event) => self.apply(event),
@@ -1114,10 +1444,27 @@ impl Screen for Page {
     }
 
     fn modal_open(&self) -> bool {
-        self.gate.is_some()
+        self.gate.is_some() || self.sheet.is_some()
+    }
+
+    /// The path field takes every key; the sheet walks its groups with Tab;
+    /// the gate and the card leave the host its own letters (clause 12).
+    fn claim(&self) -> Claim {
+        if self.typing() {
+            Claim::All
+        } else if self.sheet.is_some() {
+            Claim::OwnTab
+        } else {
+            Claim::Open
+        }
     }
 
     fn key(&mut self, key: KeyEvent) -> Option<Outcome> {
+        // The sheet is a modal: its keys and nothing else (clause 34).
+        if self.sheet.is_some() {
+            self.sheet_key(key);
+            return None;
+        }
         // The gate is a modal: its keys and nothing else (the kit's gates:
         // Enter, Esc and n keep, y writes).
         if self.gate.is_some() {
@@ -1141,6 +1488,8 @@ impl Screen for Page {
             KeyCode::Char('s') => Some(Act::Show),
             KeyCode::Char('a') => Some(Act::UpdateAll),
             KeyCode::Char('r') => Some(Act::Ask),
+            KeyCode::Char('o') => Some(Act::Advanced),
+            KeyCode::Char('x') => Some(Act::Reset),
             KeyCode::Left => {
                 self.switch(-1);
                 None
@@ -1186,8 +1535,12 @@ struct Glyphs {
     empty: &'static str,
     bullet: &'static str,
     switch: &'static str,
+    updown: &'static str,
     busy: &'static str,
     rule: &'static str,
+    /// The kit's chosen radio, and its ticked box.
+    radio_on: &'static str,
+    checked: &'static str,
 }
 
 fn glyphs() -> Glyphs {
@@ -1205,8 +1558,11 @@ fn glyphs() -> Glyphs {
             empty: "-",
             bullet: "*",
             switch: "<>",
+            updown: "^v",
             busy: "...",
             rule: "-",
+            radio_on: "(*)",
+            checked: "[x]",
         }
     } else {
         Glyphs {
@@ -1222,8 +1578,11 @@ fn glyphs() -> Glyphs {
             empty: "▱",
             bullet: "•",
             switch: "←→",
+            updown: "↑↓",
             busy: "…",
             rule: "─",
+            radio_on: "(•)",
+            checked: "[✓]",
         }
     }
 }
@@ -1259,6 +1618,8 @@ fn render_hosted(frame: &mut Frame, page: &mut Page, area: Rect) {
 /// last row; hosted, under a blank row with only the busy line below it.
 fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
     if !hosted {
+        // The image the page writes, its build named where it is DIO
+        // (clause 43): `firmware v0.7.0 · DIO · release`.
         let right = match &page.image {
             Some(image) => {
                 let word = t!(match image.kind {
@@ -1266,7 +1627,11 @@ fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
                     Origin::Cached => "dev.kind_cached",
                     Origin::File => "dev.kind_file",
                 });
-                t!("dev.head_firmware", version = image.version, kind = word).to_string()
+                let version = match image.mode {
+                    Some(Mode::Dio) => format!("{} · {}", image.version, Mode::Dio.word()),
+                    _ => image.version.clone(),
+                };
+                t!("dev.head_firmware", version = version, kind = word).to_string()
             }
             None => String::new(),
         };
@@ -1278,9 +1643,11 @@ fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
     // The first row the card may not reach: the busy line's (and on its
     // own, the tips' under it).
     let floor = if hosted { area.bottom() - 1 } else { area.bottom().saturating_sub(2) };
-    // A gate makes the card beneath inert (the kit's modal rule): drawn
-    // with no pointer, its clicks and tips dropped before the gate draws.
-    let pointer = if page.gate.is_some() { page.ui.pointer.take() } else { None };
+    // A gate or the sheet makes the card beneath inert (the kit's modal
+    // rule): drawn with no pointer, its clicks and tips dropped before the
+    // modal draws.
+    let modal = page.gate.is_some() || page.sheet.is_some();
+    let pointer = if modal { page.ui.pointer.take() } else { None };
     let mut y = top;
     if page.boards.len() >= 2 && y < floor {
         tab_row(frame, page, Rect { x, y, width, height: 1 });
@@ -1297,10 +1664,14 @@ fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
     let note = page.note.as_ref().map(|n| (n.text.clone(), n.gold));
     let tips = page.hint_line(hosted, usize::from(area.width.saturating_sub(4)));
     draw_foot(frame, area, note.as_ref(), busy.as_deref(), &tips, hosted);
-    if page.gate.is_some() {
+    if modal {
         page.ui.clear_registries();
         page.ui.pointer = pointer;
-        draw_gate(frame, page, area);
+        if page.gate.is_some() {
+            draw_gate(frame, page, area);
+        } else {
+            sheet::draw_sheet(frame, page, area);
+        }
     }
     if let Some((target, text)) = page.ui.ripe_tooltip() {
         kit::draw_tooltip(frame, area, target, text);
@@ -1333,7 +1704,9 @@ fn mark(page: &Page, board: &Board) -> (String, Color) {
     if page.written_now(board) {
         return (g.busy.to_string(), th().accent);
     }
-    if matches!(board.work, Work::Queued | Work::Reading) || board.verdict == Verdict::Asking {
+    // Being asked, or starting up and asked again: the verdict is coming.
+    let coming = matches!(board.verdict, Verdict::Asking | Verdict::Starting);
+    if matches!(board.work, Work::Queued | Work::Reading) || coming {
         return (g.busy.to_string(), th().dim);
     }
     if matches!(board.written, Some(Written::Failed { .. })) {
@@ -1348,7 +1721,9 @@ fn mark(page: &Page, board: &Board) -> (String, Color) {
         | Verdict::NotCore2 { .. }
         | Verdict::HalfWritten
         | Verdict::Unreadable => (g.no.to_string(), th().gold),
-        Verdict::Silent | Verdict::Unplaced | Verdict::Asking => (g.unknown.to_string(), th().dim),
+        Verdict::Silent | Verdict::Unplaced | Verdict::Asking | Verdict::Starting => {
+            (g.unknown.to_string(), th().dim)
+        }
     }
 }
 
@@ -1415,11 +1790,17 @@ fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
     }
     let needing = page.needing().len();
     if page.can_update_all() {
-        return (t!("dev.tabs_all", n = needing).to_string(), dim(), Some(Act::UpdateAll));
+        // It counts only the boards it writes (clause 42).
+        let n = page.writing_all().len();
+        return (t!("dev.tabs_all", n = n).to_string(), dim(), Some(Act::UpdateAll));
     }
     let n = page.boards.len();
-    if needing == 1 {
-        return (t!("dev.tabs_needs_one", n = n).to_string(), Style::default().fg(th().gold), None);
+    let gold = Style::default().fg(th().gold);
+    match needing {
+        1 => return (t!("dev.tabs_needs_one", n = n).to_string(), gold, None),
+        // Two or more, kept out of Update all by their own next writes.
+        k if k >= 2 => return (t!("dev.tabs_needs", k = k, n = n).to_string(), gold, None),
+        _ => {}
     }
     // Each board in one place: in use, being asked, a player (it answered
     // as mStream firmware), or another board.
@@ -1471,6 +1852,9 @@ enum Row {
     /// A dim text button, in the value column or across the content, with
     /// a dim note after it.
     Link { wide: bool, text: String, act: Act, note: Option<String> },
+    /// A line of the Next write in the value column, the first with Reset
+    /// at the column's right edge (clause 38).
+    Next { line: Line<'static>, reset: bool },
     /// The bottom row: text buttons at the left, the primary at the right
     /// (enabled, or the kit's disabled frame with why in a tooltip).
     Actions { links: Vec<(String, Act)>, primary: Option<(String, bool, Option<String>)> },
@@ -1693,6 +2077,14 @@ fn firmware_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             second.push(error.text());
             chip(g.no, gold, &t!("dev.fw_failed"), &[t!("dev.fw_not_written").to_string()])
         }
+    } else if let (Some(looping), Some(Written::Done { image, .. })) = (board.looping(), &board.written) {
+        // The restart loop (clause 40): what went on, what probably
+        // happened, what fixes it.
+        let (n, secs) = (looping.restarts, looping.secs);
+        second.push(t!("dev.fw_looping_2", n = n, secs = secs).to_string());
+        let mode = image.mode.map_or("?", Mode::word);
+        let went_on = t!("dev.next_in", what = image.version, mode = mode).to_string();
+        chip(g.no, gold, &t!("dev.fw_looping"), &[went_on])
     } else {
         match &board.verdict {
             Verdict::UpToDate => {
@@ -1723,6 +2115,13 @@ fn firmware_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             }
             Verdict::Other { name } => chip(g.no, gold, &t!("dev.fw_other"), std::slice::from_ref(name)),
             Verdict::Blank => chip(g.no, gold, &t!("dev.fw_blank"), &[]),
+            // Ours, busy listing its library: nothing to read or write yet,
+            // and nothing that says it may not be an MP3 player.
+            Verdict::Starting => {
+                let mut facts: Vec<String> = board.version().map(str::to_string).into_iter().collect();
+                facts.push(t!("dev.fw_starting_why").to_string());
+                chip(g.unknown, th().dim, &t!("dev.fw_starting"), &facts)
+            }
             Verdict::Silent => {
                 second.push(t!("dev.fw_silent_2").to_string());
                 second.push(t!("dev.fw_read_cost").to_string());
@@ -1765,12 +2164,63 @@ fn firmware_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
     for line in &second {
         rows.extend(dim_rows(None, line, w));
     }
+    match board.pending() {
+        Some(next) => rows.extend(next_rows(page, board, next, w)),
+        // A board on DIO by its own choice says so once; QIO is quiet
+        // (clause 37).
+        None if board.looping().is_none()
+            && board.default_mode() == Mode::Dio
+            && !matches!(board.written, Some(Written::Failed { .. })) =>
+        {
+            rows.extend(dim_rows(None, &t!("dev.fw_in_dio"), w));
+        }
+        None => {}
+    }
     // Look, don't write: a board whose primary would act waits its turn.
     if let Some(port) = page.writing_port()
         && port != board.port()
         && board.primary().is_some()
     {
         rows.extend(dim_rows(None, &t!("dev.fw_one_at_a_time", port = short(port)), w));
+    }
+    rows
+}
+
+/// The board's next write under its chip (clause 38): "Next write:" dim,
+/// the choice in the accent — the selection's colour, not a warning — and
+/// Reset at the value column's right edge; the image's percent while it is
+/// fetched; where the flags set it, which; one that cannot be had, why.
+fn next_rows(page: &Page, board: &Board, next: &Next, w: u16) -> Vec<Row> {
+    let mut words = t!("dev.next_in", what = next_what(next), mode = mode_words(next.mode())).to_string();
+    if next.erase {
+        words.push_str(&t!("dev.next_erasing"));
+    }
+    let pieces = [(format!("{} ", t!("dev.next_write")), dim()), (words, accent())];
+    let mut lines = wrap_spans(&pieces, usize::from(w));
+    if let NextState::Getting { done, total } = &next.state {
+        let mut getting = t!("dev.next_getting").to_string();
+        if let Some(total) = total.filter(|t| *t > 0) {
+            getting.push_str(&format!(" {}%", (done * 100 / total).min(100)));
+        }
+        lines.extend(wrap_spans(&[(getting, dim())], usize::from(w)));
+    }
+    if next.by == By::Flags
+        && let Some(flags) = &page.flags
+    {
+        lines.extend(wrap_spans(&[(t!("dev.next_set_by", flags = flags).to_string(), dim())], usize::from(w)));
+    }
+    // Reset at the value column's right edge, on the first of the lines
+    // with room for it, else on a row of its own.
+    let reset = page.offers_reset(board);
+    let cells = kit::width(&t!("dev.link_reset")) as u16 + 2;
+    let at = lines.iter().position(|line| line.width() as u16 + cells <= w);
+    let mut rows: Vec<Row> =
+        lines.into_iter().enumerate().map(|(i, line)| Row::Next { line, reset: reset && at == Some(i) }).collect();
+    if reset && at.is_none() {
+        rows.push(Row::Next { line: Line::default(), reset: true });
+    }
+    if let NextState::Failed(e) = &next.state {
+        rows.extend(value_rows(None, &[(e.text(), Style::default().fg(th().gold))], w));
     }
     rows
 }
@@ -1809,6 +2259,7 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             CardUnknown::Asking => dim_rows(label, &t!("dev.card_asking"), w),
             CardUnknown::Writing => dim_rows(label, &t!("dev.card_untouched"), w),
             CardUnknown::HalfWritten | CardUnknown::NotRunning => unknown(t!("dev.card_unknown_runs").to_string()),
+            CardUnknown::Starting => unknown(t!("dev.card_starting").to_string()),
             CardUnknown::OldFirmware => {
                 let mut words = match board.version() {
                     Some(version) => t!("dev.card_old", version = version).to_string(),
@@ -1919,9 +2370,11 @@ fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
     if let Some(serial) = board.serial() {
         port.push_str(&format!(" · {}", t!("dev.serial", serial = serial)));
     }
+    let listened =
+        matches!(board.heard, Heard::Status(_) | Heard::Old { .. } | Heard::Starting { .. } | Heard::Silent);
     match &board.probe {
         Some(Ok(probe)) => port.push_str(&format!(" · {} baud", probe.info.baud)),
-        _ if matches!(board.heard, Heard::Status(_) | Heard::Old { .. } | Heard::Silent) => {
+        _ if listened => {
             port.push_str(&format!(" · {} baud · {}", engine::CONSOLE_BAUD, t!("dev.no_reset")));
         }
         _ => {}
@@ -1946,8 +2399,11 @@ fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
             (Verdict::Blank, _) => t!("dev.on_board_unknown").to_string(),
             (_, Some(version)) => {
                 let mut text = t!("dev.on_board_ours", version = version).to_string();
+                // Its mode where its ELF tells it, never a guess (clause 41).
                 if let Some(elf) = board.elf().filter(|e| !e.is_empty()) {
-                    text.push_str(&format!(" · ELF {elf}"));
+                    let mode = board.mode().map(|m| m.mode.word().to_string());
+                    let mode = mode.unwrap_or_else(|| t!("dev.mode_unknown").to_string());
+                    text.push_str(&format!(" · {mode} · ELF {elf}"));
                 }
                 text
             }
@@ -1967,6 +2423,17 @@ fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
             }
         };
         rows.push(Row::Fact { label: t!("dev.label_player").to_string(), value: player, style });
+        // What the last write this visit put on, read-only (clause 41).
+        if let Some(Written::Done { image, .. }) = &board.written {
+            let mode = image.mode.map_or_else(|| t!("dev.mode_unknown").to_string(), |m| m.word().into());
+            let (version, tag) = (&image.version, image.image.tag().unwrap_or("?"));
+            let value = match image.check {
+                Check::Pinned => t!("dev.fact_written_pin", version = version, mode = mode),
+                Check::Sums => t!("dev.fact_written_sums", version = version, mode = mode, tag = tag),
+                Check::Description => t!("dev.fact_written_local", version = version, mode = mode),
+            };
+            rows.push(fact("dev.label_written", value.to_string()));
+        }
         if let Some(status) = board.status() {
             let kind = match &status.card {
                 CardKind::None => None,
@@ -2029,12 +2496,18 @@ fn card_layout(page: &Page, board: &Board, content_w: u16) -> Vec<Row> {
     if page.offers_ask(board) {
         links.push((t!("dev.link_ask").to_string(), Act::Ask));
     }
+    if page.can_advance(board) {
+        links.push((t!("dev.link_advanced").to_string(), Act::Advanced));
+    }
     let primary = page.primary_of(board).map(|p| {
         let word = t!(match p {
             Primary::Update => "dev.btn_update",
             Primary::Install => "dev.btn_install",
             Primary::Read => "dev.btn_read",
             Primary::TryAgain => "dev.retry",
+            Primary::Write => "dev.btn_write",
+            Primary::Back => "dev.btn_back",
+            Primary::Dio => "dev.btn_dio",
         });
         match page.writing_port() {
             // The kit's disabled frame: dim, no ▸, why in its tooltip.
@@ -2127,19 +2600,33 @@ fn draw_rows(frame: &mut Frame, page: &mut Page, port: &str, rows: &[Row], conte
                     }
                 }
             }
+            Row::Next { line, reset } => {
+                frame.render_widget(Paragraph::new(line.clone()), value(y));
+                if *reset {
+                    let words = t!("dev.link_reset").to_string();
+                    let cells = (kit::width(&words) as u16).min(value(y).width);
+                    let at = Rect { x: value(y).right() - cells, width: cells, ..value(y) };
+                    text_button(frame, page, at, &words, Act::Reset);
+                }
+            }
             Row::Actions { links, primary } => {
                 let tall = primary.is_some();
                 // Half a frame is not a button: short of rows, the primary
                 // is not drawn and Enter still does what it would.
                 let whole_button = tall && bottom - y >= BUTTON_H;
                 let mid = if tall { y + 1 } else { y };
+                // The links stop short of the primary: one that would run
+                // under it is not drawn, its key still works.
+                let primary_w = primary.as_ref().map_or(0, |(label, ..)| kit::tall_width(label) + 2);
+                let links_end = content.right().saturating_sub(primary_w);
                 if mid < bottom {
                     let mut x = content.x;
-                    for (text, act) in links {
-                        if x >= content.right() {
+                    for (i, (text, act)) in links.iter().enumerate() {
+                        let cells = kit::width(text) as u16;
+                        if x >= links_end || (i > 0 && x + cells > links_end) {
                             break;
                         }
-                        let at = Rect { x, y: mid, width: content.right() - x, height: 1 };
+                        let at = Rect { x, y: mid, width: links_end.saturating_sub(x).max(1), height: 1 };
                         let rect = text_button(frame, page, at, text, act.clone());
                         x = rect.right() + 3;
                     }
@@ -2360,7 +2847,12 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
         }
     };
     let from = gate.from.clone().unwrap_or_else(|| "?".to_string());
-    let to = gate.to.clone();
+    // The build the write puts on, after the version, where the gate names
+    // it (clause 39): `Update from v0.7.0 to v0.8.0 · DIO?`.
+    let to = match gate.title_mode {
+        Some(mode) => format!("{} · {}", gate.to, mode.word()),
+        None => gate.to.clone(),
+    };
     let title = match gate.kind {
         Kind::Update => t!("dev.gate_title_update", from = from, to = to),
         Kind::Replace => t!("dev.gate_title_replace", from = from, to = to),
@@ -2368,25 +2860,47 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
         Kind::Again => t!("dev.gate_title_again", to = to),
         Kind::Back => t!("dev.gate_title_back", from = from, to = to),
         Kind::All => t!("dev.gate_title_all", n = gate.rows.len(), to = to),
+        Kind::Mode => t!("dev.gate_title_mode", to = to),
+        Kind::Local => t!("dev.gate_title_local", from = from),
     };
     text(&mut lines, title.to_string(), gold.add_modifier(Modifier::BOLD));
     lines.push(GateLine::Blank);
+    // What a chosen write puts on and the check it passed, and what may go
+    // wrong: under the title, before today's words.
+    let tone = |tone: Tone| if tone == Tone::Gold { gold } else { Style::default() };
+    for (words, how) in &gate.lines {
+        text(&mut lines, words.clone(), tone(*how));
+    }
+    if !gate.lines.is_empty() {
+        lines.push(GateLine::Blank);
+    }
     let old = gate.name.clone().unwrap_or_else(|| t!("dev.gate_old_firmware").to_string());
     match gate.kind {
         Kind::All => {
             text(&mut lines, t!("dev.gate_all_time").to_string(), Style::default());
             lines.push(GateLine::Blank);
-            for row in gate.rows.iter().take(GATE_ROWS) {
+            // Six boards at most, the boards left out among them.
+            let left = gate.left_out.len().min(GATE_ROWS.saturating_sub(gate.rows.len().min(GATE_ROWS)));
+            let shown = GATE_ROWS - left;
+            for row in gate.rows.iter().take(shown) {
                 let mut words = short(&row.port);
                 if let Some(serial) = &row.serial {
                     words.push_str(&format!(" · {}", t!("dev.serial", serial = serial)));
                 }
+                let to = match row.dio {
+                    true => t!("dev.next_in", what = to, mode = Mode::Dio.word()).to_string(),
+                    false => to.clone(),
+                };
                 words.push_str(&format!(" · {} {} {to}", row.from, g.arrow));
                 lines.push(GateLine::Text(Line::from(Span::raw(fit(&words, width)))));
             }
-            if gate.rows.len() > GATE_ROWS {
-                let more = t!("dev.gate_all_more", n = gate.rows.len() - GATE_ROWS).to_string();
+            if gate.rows.len() > shown {
+                let more = t!("dev.gate_all_more", n = gate.rows.len() - shown).to_string();
                 lines.push(GateLine::Text(Line::from(Span::styled(more, dim()))));
+            }
+            for (port, what) in gate.left_out.iter().take(left) {
+                let words = t!("dev.gate_all_left_out", port = short(port), what = what).to_string();
+                lines.push(GateLine::Text(Line::from(Span::styled(fit(&words, width), dim()))));
             }
             lines.push(GateLine::Blank);
             text(&mut lines, t!("dev.gate_all_stays").to_string(), green);
@@ -2415,9 +2929,19 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
         _ => {
             text(&mut lines, t!("dev.gate_time").to_string(), Style::default());
             lines.push(GateLine::Blank);
-            text(&mut lines, t!("dev.gate_stays").to_string(), green);
+            if gate.erase_any {
+                // The sheet's Erase: what goes in gold, what stays in green.
+                text(&mut lines, t!("dev.gate_erase_any").to_string(), gold);
+                text(&mut lines, t!("dev.gate_card_stays").to_string(), green);
+            } else {
+                text(&mut lines, t!("dev.gate_stays").to_string(), green);
+            }
+            for (words, how) in &gate.after {
+                text(&mut lines, words.clone(), tone(*how));
+            }
             lines.push(GateLine::Blank);
-            text(&mut lines, t!("dev.gate_plugged").to_string(), Style::default());
+            let plugged = if gate.kind == Kind::Local { "dev.gate_plugged_local" } else { "dev.gate_plugged" };
+            text(&mut lines, t!(plugged).to_string(), Style::default());
         }
     }
     lines.push(GateLine::Blank);
@@ -2430,19 +2954,26 @@ fn gate_buttons(gate: &Gate) -> (String, String) {
     let back = glyphs().back;
     let keep = match gate.kind {
         Kind::All => t!("dev.gate_keep_all").to_string(),
-        Kind::Install => t!("dev.gate_keep_as_is").to_string(),
+        Kind::Install | Kind::Mode => t!("dev.gate_keep_as_is").to_string(),
         _ => match &gate.from {
             Some(from) => t!("dev.gate_keep", version = from).to_string(),
             None => t!("dev.gate_keep_as_is").to_string(),
         },
     };
-    let write = t!(match gate.kind {
-        Kind::Update | Kind::Replace => "dev.gate_do_update",
-        Kind::Install => "dev.gate_do_install",
-        Kind::Again => "dev.gate_do_again",
-        Kind::Back => "dev.gate_do_back",
-        Kind::All => "dev.gate_do_all",
-    });
+    let write = match gate.kind {
+        // An erase the sheet chose: the button says both verbs.
+        Kind::Update | Kind::Replace if gate.erase_any => t!("dev.gate_do_erase_update"),
+        _ if gate.erase_any => t!("dev.gate_do_erase_write"),
+        Kind::Mode => t!("dev.gate_do_mode", mode = gate.title_mode.map_or("?", Mode::word)),
+        kind => t!(match kind {
+            Kind::Update | Kind::Replace => "dev.gate_do_update",
+            Kind::Install => "dev.gate_do_install",
+            Kind::Again => "dev.gate_do_again",
+            Kind::Back => "dev.gate_do_back",
+            Kind::All => "dev.gate_do_all",
+            Kind::Mode | Kind::Local => "dev.gate_do_local",
+        }),
+    };
     (format!("{back} {keep}"), write.to_string())
 }
 
@@ -2536,7 +3067,7 @@ pub(crate) mod fixtures {
     use crate::device::board::Status;
     use crate::device::board::tests::{candidate, status};
     use crate::device::engine::DeviceInfo;
-    use crate::device::firmware::AppDesc;
+    use crate::device::firmware::{AppDesc, ImageFacts};
 
     /// The pin: v0.8.0, which does not answer the status query.
     pub(crate) fn pin() -> Target {
@@ -2595,6 +3126,86 @@ pub(crate) mod fixtures {
         board.probe = Some(Ok(Probe { info: info(port), on_board }));
         judged(board)
     }
+
+    /// Our firmware listing its library on `port`: its boot line heard, with
+    /// `version`, or only its log lines (none). Asked on meanwhile.
+    pub(crate) fn starting(port: &str, version: Option<&str>) -> Board {
+        let mut board = heard(port, Heard::Starting { version: version.map(str::to_string), elf: None });
+        board.work = Work::Listening;
+        board
+    }
+
+    /// Our firmware too old for the status query, on the ELF `elf`: v0.7.0's
+    /// DIO build is `aa45f60e`, v0.8.0's `3523b80e`.
+    pub(crate) fn old_on(port: &str, version: &str, elf: &str) -> Board {
+        heard(port, Heard::Old { version: Some(version.into()), elf: Some(elf.into()) })
+    }
+
+    /// `board` with a next write chosen by `by`: its image in hand where it
+    /// is the pin's or `facts` say it, else still coming.
+    pub(crate) fn chosen(mut board: Board, image: Image, by: By, facts: Option<ImageFacts>) -> Board {
+        let state = match (&image, facts) {
+            (_, Some(facts)) => NextState::Ready(facts),
+            (Image::Pin(mode), None) => NextState::Ready(crate::device::firmware::tests::pin_facts("v0.8.0", *mode)),
+            _ => NextState::Getting { done: 0, total: None },
+        };
+        board.next = Some(Next { image, erase: false, by, state });
+        judged(board)
+    }
+
+    /// A local build's facts as the worker reads a PlatformIO folder: the
+    /// real Core2's dev build, merged, its mode from its header. Built by
+    /// hand, so no test's run learns its ELF.
+    pub(crate) fn local_facts(folder: &str, version: &str, mode: Mode) -> ImageFacts {
+        use crate::device::firmware::Layout;
+        let clock = if mode == Mode::Qio { 0x4F } else { 0x40 };
+        let file = std::path::PathBuf::from(folder).join("firmware.factory.bin");
+        ImageFacts {
+            image: Image::Local(folder.into()),
+            version: version.into(),
+            origin: format!("file {}", file.display()),
+            kind: Origin::File,
+            bytes: 2_701_840,
+            layout: Layout::Merged,
+            mode: Some(mode),
+            header: Some([0xE9, 0x03, 0x02, clock]),
+            elf: "be894f89".into(),
+            check: Check::Description,
+            file: Some(file),
+        }
+    }
+
+    /// GitHub's list as it came on 2026-10-10, asked at 08:41 UTC.
+    pub(crate) fn listed() -> Event {
+        let asked = std::time::UNIX_EPOCH + Duration::from_secs(1_791_621_660);
+        let releases = crate::device::firmware::tests::listed();
+        Event::Releases(Ok(desk::ReleaseList { releases, asked }))
+    }
+
+    /// GitHub out of reach, v0.7.0's QIO build already on this computer.
+    pub(crate) fn offline() -> Event {
+        use crate::device::firmware::{Cached, ListWhy};
+        let since = Some(std::time::UNIX_EPOCH + Duration::from_secs(1_791_394_200));
+        let cached = vec![Cached { tag: "v0.7.0".into(), modes: vec![Mode::Qio], since }];
+        Event::Releases(Err(desk::ListFailed { why: ListWhy::Offline("no route".into()), cached }))
+    }
+
+    /// A write done that left the board restarting: v0.8.0's QIO build on a
+    /// flash that cannot run it, and the loop's cure filled in.
+    pub(crate) fn looping(port: &str) -> Board {
+        use crate::device::board::Looping;
+        let mut board = read(port, Some(ours("v0.8.0")));
+        board.written = Some(Written::Done {
+            version: "v0.8.0".into(),
+            took: Duration::from_secs(41),
+            skipped: false,
+            install: false,
+            boot: None,
+            image: crate::device::firmware::tests::pin_facts("v0.8.0", Mode::Qio),
+            looping: Some(Looping { restarts: 3, secs: 6 }),
+        });
+        chosen(board, Image::Pin(Mode::Dio), By::Loop, None)
+    }
 }
 
 #[cfg(test)]
@@ -2627,6 +3238,7 @@ impl Ends {
                 origin: "release v0.8.0, downloaded earlier".into(),
                 bytes: 2_431_000,
                 kind: Origin::Cached,
+                mode: Some(crate::device::firmware::Mode::Qio),
             },
         ]);
         self.tell(boards.into_iter().map(Event::Board));
@@ -2648,6 +3260,13 @@ impl Ends {
         self.boards(vec![fixtures::answering("COM3", "v0.8.0"), fixtures::old("COM5", "v0.7.0")]);
     }
 
+    /// COM3 on v0.8.0's QIO build, its next write the same version in DIO
+    /// (card 07's frame 4).
+    pub(crate) fn next_write(&self) {
+        let board = fixtures::old_on("COM3", "v0.8.0", "e127a6bf");
+        self.boards(vec![fixtures::chosen(board, Image::Pin(Mode::Dio), By::Sheet, None)]);
+    }
+
     /// No Core2-shaped port; COM1 is another serial port.
     pub(crate) fn no_board(&self) {
         self.tell([Event::Target(fixtures::pin()), Event::Watch { ports: Vec::new(), others: vec!["COM1".into()] }]);
@@ -2662,7 +3281,17 @@ impl Ends {
 
     /// COM3 written and restarted, its new firmware being asked.
     pub(crate) fn written(&self) {
-        let mut board = fixtures::heard("COM3", Heard::Nothing);
+        self.written_heard(Heard::Nothing);
+    }
+
+    /// COM3 written and restarted, its new firmware listing its library:
+    /// asked on until it answers.
+    pub(crate) fn written_starting(&self) {
+        self.written_heard(Heard::Starting { version: Some("v0.8.0".into()), elf: Some("11c35a4a".into()) });
+    }
+
+    fn written_heard(&self, heard: Heard) {
+        let mut board = fixtures::heard("COM3", heard);
         board.probe = Some(Ok(Probe { info: fixtures::info("COM3"), on_board: Some(fixtures::ours("v0.8.0")) }));
         board.written = Some(Written::Done {
             version: "v0.8.0".into(),
@@ -2670,6 +3299,8 @@ impl Ends {
             skipped: false,
             install: false,
             boot: Some("mstream-mp3-player v0.8.0 (commit 4e94418, 2026-10-10), ELF 11c35a4a".into()),
+            image: crate::device::firmware::tests::pin_facts("v0.8.0", crate::device::firmware::Mode::Qio),
+            looping: None,
         });
         board.work = Work::Listening;
         self.tell([Event::Board(fixtures::judged(board))]);
@@ -2793,14 +3424,15 @@ mod tests {
             "           │  SD card       █████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │",
             "           │                21.4 of 59.6 GB used · 1,284 tracks           38.2 GB free  │",
             "           │                                                                            │",
-            "           │  ▸ Details                                                                 │",
+            "           │  ▸ Details   Advanced…                                                     │",
             "           │                                                                            │",
             "           ╰────────────────────────────────────────────────────────────────────────────╯",
         ];
-        assert_eq!(rows(&frame, 2, 12), card, "card 02's frame, character for character:\n{frame}");
+        let says = "card 02's frame and card 07's link, character for character";
+        assert_eq!(rows(&frame, 2, 12), card, "{says}:\n{frame}");
         assert!(rows(&frame, 1, 1)[0].trim().is_empty(), "the area's first row is the host's");
         assert!(ends.sent().is_empty(), "opening only listens: the page asked nothing");
-        assert_eq!(page.hint(), "d details · Esc library", "no primary, nothing for Enter");
+        assert_eq!(page.hint(), "o advanced · d details · Esc library", "no primary, nothing for Enter");
         press(&mut page, KeyCode::Enter);
         assert!(ends.sent().is_empty() && page.gate.is_none(), "Enter does nothing with no primary");
     }
@@ -2816,13 +3448,13 @@ mod tests {
             "           │  SD card       ? v0.7.0 can't report the card.                             │",
             "           │                                                                            │",
             "           │                                                            ╭────────────╮  │",
-            "           │  ▸ Details                                                 │  Update ▸  │  │",
+            "           │  ▸ Details   Advanced…                                     │  Update ▸  │  │",
             "           │                                                            ╰────────────╯  │",
             "           │                                                                            │",
             "           ╰────────────────────────────────────────────────────────────────────────────╯",
         ];
-        assert_eq!(rows(&frame, 6, 9), card, "{frame}");
-        assert_eq!(page.hint(), "Enter update · d details · Esc library");
+        assert_eq!(rows(&frame, 6, 9), card, "card 07's frame 1, character for character:\n{frame}");
+        assert_eq!(page.hint(), "Enter update · o advanced · d details · Esc library");
         press(&mut page, KeyCode::Enter);
         assert!(ends.sent().is_empty(), "the gate first: nothing was reset");
         let frame = window(&mut page);
@@ -2842,8 +3474,51 @@ mod tests {
             press(&mut page, KeyCode::Enter);
         }
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }], "y writes, never erasing an update");
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)], "y writes, never erasing an update");
         assert!(page.writing(), "locked from the yes");
+    }
+
+    #[test]
+    fn a_chosen_next_write_names_its_own_version_at_the_gate_never_the_pins() {
+        use crate::device::board::{By, Looping, Next, NextState};
+        use crate::device::firmware::{Image, Mode};
+        let _en = english();
+        // The flags chose v0.7.0 for a board on the pin: the chip stays the
+        // pin's, and the primary and the gate say where the write goes.
+        let mut board = fixtures::old("COM3", "v0.8.0");
+        let state = NextState::Getting { done: 0, total: None };
+        board.next = Some(Next { image: Image::release("v0.7.0", Mode::Qio), erase: false, by: By::Flags, state });
+        let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::judged(board)]));
+        let frame = window(&mut page);
+        assert!(frame.contains("✓ Up to date · v0.8.0") && frame.contains("Go back ▸"), "{frame}");
+        assert_eq!(page.hint(), "Enter go back · o advanced · x reset · d details · Esc library");
+        press(&mut page, KeyCode::Enter);
+        assert!(window(&mut page).contains("│ Go back from v0.8.0 to v0.7.0?"), "{}", window(&mut page));
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [wrote(Image::release("v0.7.0", Mode::Qio), false)]);
+
+        // A write that left the board restarting: its cure is the primary.
+        let mut board = fixtures::read("COM3", Some(fixtures::ours("v0.8.0")));
+        let image = crate::device::firmware::tests::pin_facts("v0.8.0", Mode::Qio);
+        let looping = Some(Looping { restarts: 3, secs: 6 });
+        board.written = Some(Written::Done {
+            version: "v0.8.0".into(),
+            took: Duration::from_secs(41),
+            skipped: false,
+            install: false,
+            boot: None,
+            image,
+            looping,
+        });
+        let cure = crate::device::firmware::tests::pin_facts("v0.8.0", Mode::Dio);
+        let state = NextState::Ready(cure);
+        board.next = Some(Next { image: Image::Pin(Mode::Dio), erase: false, by: By::Loop, state });
+        let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::judged(board)]));
+        assert!(window(&mut page).contains("Write the DIO image ▸"), "{}", window(&mut page));
+        let hint = "Enter write the DIO image · o advanced · x reset · d details · Esc library";
+        assert_eq!(page.hint(), hint);
+        press(&mut page, KeyCode::Enter);
+        assert!(window(&mut page).contains("│ Write v0.8.0 · DIO?"), "the same version, its other build");
     }
 
     #[test]
@@ -2941,11 +3616,11 @@ mod tests {
         assert!(frame.contains("Port          COM3 · CH9102 · serial 5B1F00COM3 · 921600 baud"), "only the port before the log:\n{frame}");
         assert!(!frame.contains("This player"), "{frame}");
         assert!(frame.contains("the board stopped answering at 38%"), "the log's last lines:\n{frame}");
-        assert_eq!(page.hint(), "Enter try again · d details · Esc library");
+        assert_eq!(page.hint(), "Enter try again · o advanced · d details · Esc library");
         press(&mut page, KeyCode::Enter);
         assert!(window(&mut page).contains("Write v0.8.0 again?"), "behind the gate again");
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)]);
     }
 
     #[test]
@@ -2969,6 +3644,49 @@ mod tests {
         let frame = window(&mut page);
         assert!(frame.contains("reading it over its bootloader…"), "{frame}");
         assert!(frame.contains("The screen is dark a few seconds; it restarts as it was."), "{frame}");
+    }
+
+    #[test]
+    fn a_board_still_listing_its_library_is_a_core2_starting_up_with_nothing_to_press() {
+        // The real Core2 on v0.7.0, the tab opened while it listed 19,410
+        // tracks: it answered nothing and printed its Bluetooth lines.
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::starting("COM3", Some("v0.7.0"))]));
+        let frame = window(&mut page);
+        assert!(frame.contains("│  M5Stack Core2"), "ours, by its own lines:\n{frame}");
+        assert!(frame.contains("Firmware      ? Starting up · v0.7.0 · it answers once its library is"), "{frame}");
+        assert!(frame.contains("SD card       ? starting up — reading its library"), "{frame}");
+        for never in ["may not be an MP3 player", "Read the board", "Unknown board", "Advanced…", "said nothing"] {
+            assert!(!frame.contains(never), "{never:?}:\n{frame}");
+        }
+        assert_eq!(page.hint(), "d details · Esc library", "nothing for Enter while it lists");
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('o'));
+        assert!(page.gate.is_none() && page.sheet.is_none() && ends.sent().is_empty(), "nothing to do yet");
+        // Its log alone: no version to name.
+        let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::starting("COM3", None)]));
+        let frame = window(&mut page);
+        assert!(frame.contains("Firmware      ? Starting up · it answers once its library is listed"), "{frame}");
+    }
+
+    #[test]
+    fn after_the_write_a_board_listing_its_library_says_so_and_the_tab_can_be_left() {
+        let _en = english();
+        let (mut page, ends) = page_with(Ends::update_available);
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('y'));
+        assert!(page.writing());
+        let _ = ends.sent();
+        ends.writing(40);
+        ends.written_starting();
+        page.pump();
+        assert!(!page.writing(), "the write ended with its restart: the lock with it");
+        let frame = window(&mut page);
+        assert!(frame.contains("Firmware      ✓ Up to date · v0.8.0 · just written"), "{frame}");
+        assert!(frame.contains("SD card       ? starting up — reading its library"), "not 'unknown':\n{frame}");
+        assert!(!frame.contains("unknown until the firmware runs again"), "{frame}");
+        press(&mut page, KeyCode::Esc);
+        assert_eq!(ends.sent(), [Cmd::Quit], "leaving stops the asking");
     }
 
     #[test]
@@ -2996,7 +3714,7 @@ mod tests {
         assert!(frame.contains("[ ] Erase the whole flash first"), "{frame}");
         assert!(frame.contains("Not erased: what UIFlow kept on the board stays"), "{frame}");
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)]);
         // A blank board: the same gate, saying so.
         let (mut page, _ends) = page_with(|e| e.boards(vec![read("COM3", None)]));
         assert!(window(&mut page).contains("✗ Nothing installed"));
@@ -3037,7 +3755,7 @@ mod tests {
             assert_eq!(ends.sent(), [Cmd::Facts { port: "COM3".into() }], "Details asks L for the flash size");
             let frame = window(&mut page);
             assert!(frame.contains("Write v0.8.0 again"), "{frame}");
-            assert_eq!(page.hint(), "w write again · d details · Esc library");
+            assert_eq!(page.hint(), "w write again · o advanced · d details · Esc library");
             press(&mut page, KeyCode::Char('w'));
             let frame = window(&mut page);
             assert!(frame.contains(&format!("Go back from {fw} to v0.8.0?")), "{frame}");
@@ -3045,7 +3763,7 @@ mod tests {
             // Gone back, Done's one line says what was replaced — never that
             // the board was updated.
             press(&mut page, KeyCode::Char('y'));
-            assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+            assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)]);
             ends.writing(62);
             ends.written();
             page.pump();
@@ -3067,7 +3785,7 @@ mod tests {
         press(&mut page, KeyCode::Char('d'));
         press(&mut page, KeyCode::Enter);
         press(&mut page, KeyCode::Char('y'));
-        let write = Cmd::Write { port: "COM3".into(), erase: Some(false) };
+        let write = wrote(Image::Pin(Mode::Qio), false);
         assert_eq!(ends.sent(), [Cmd::Facts { port: "COM3".into() }, write.clone()]);
         ends.tell([Event::Refused { port: Some("COM3".into()), why: Refusal::Busy, write: false }]);
         page.pump();
@@ -3096,7 +3814,7 @@ mod tests {
         press(&mut page, KeyCode::Enter);
         assert!(window(&mut page).contains("Replace v0.6.0-37-g221d99d with v0.8.0?"));
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }], "ours: never an erase");
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)], "ours: never an erase");
     }
 
     /// The card for a board whose status `change` made.
@@ -3145,7 +3863,7 @@ mod tests {
         assert!(frame.contains("SD card       59.6 GB · 1,284 tracks · free space not counted"), "no bar:\n{frame}");
         assert!(frame.contains("Count free space   a minute or more on a big card"), "{frame}");
         assert!(!frame.contains("█"), "half a bar would be a guess");
-        assert_eq!(page.hint(), "c count · d details · Esc library");
+        assert_eq!(page.hint(), "c count · o advanced · d details · Esc library");
         press(&mut page, KeyCode::Char('c'));
         assert_eq!(ends.sent(), [Cmd::Count { port: "COM3".into() }]);
         let mut counting = answering_with("COM3", "v0.8.0", |s| s.free = Free::NotCounted);
@@ -3182,7 +3900,8 @@ mod tests {
         assert!(frame.contains("▾ Details"), "{frame}");
         assert!(frame.contains("Port          COM3 · CH9102 · serial 5B1F00COM3 · 115200 baud · no reset"), "{frame}");
         assert!(frame.contains("Board         M5Stack Core2"), "{frame}");
-        assert!(frame.contains("On the board  mstream-mp3-player v0.8.0 · ELF 63ee7a2b"), "{frame}");
+        let on_board = "On the board  mstream-mp3-player v0.8.0 · QIO · ELF 63ee7a2b";
+        assert!(frame.contains(on_board), "its mode, by its ELF:\n{frame}");
         assert!(frame.contains("This player   carries v0.8.0 · release v0.8.0, downloaded earlier"), "{frame}");
         assert!(frame.contains("Card          FAT32 · 59,617,918,976 bytes · free from FSINFO"), "{frame}");
         assert!(frame.contains("00:00  listening on COM3 — DTR and RTS low, no reset"), "{frame}");
@@ -3252,12 +3971,12 @@ mod tests {
         assert!(frame.contains("M5Stack Core2                                          serial 5B1F00COM3"), "the serial on the head:\n{frame}");
         assert!(frame.contains("87 % battery · no headphones paired"), "the identity line:\n{frame}");
         assert!(frame.contains("▸ Details   Show on the player"), "{frame}");
-        assert_eq!(page.hint(), "←→ player · s show on the player · d details · Esc library");
+        assert_eq!(page.hint(), "←→ player · s show on the player · o advanced · d details · Esc library");
         press(&mut page, KeyCode::Right);
         let frame = window(&mut page);
         assert!(frame.contains("! Update available · v0.7.0 → v0.8.0") && frame.contains("Update ▸"), "{frame}");
         assert!(!frame.contains("battery"), "v0.7.0 reports none:\n{frame}");
-        assert_eq!(page.hint(), "←→ player · Enter update · d details · Esc library");
+        assert_eq!(page.hint(), "←→ player · Enter update · o advanced · d details · Esc library");
         press(&mut page, KeyCode::Right);
         assert_eq!(page.open.as_deref(), Some("COM3"), "wrapping");
         let frame = window(&mut page);
@@ -3298,7 +4017,8 @@ mod tests {
         let (mut page, ends) = page_with(|e| e.boards(boards));
         let frame = window(&mut page);
         assert!(rows(&frame, 2, 1)[0].ends_with("Update all (2)"), "{frame}");
-        assert_eq!(page.hint(), "←→ player · Enter update · a update all · d details · Esc library");
+        let hint = "←→ player · Enter update · a update all · o advanced · d details · Esc library";
+        assert_eq!(page.hint(), hint);
         press(&mut page, KeyCode::Char('a'));
         let frame = window(&mut page);
         assert!(frame.contains("Update 2 players to v0.8.0?"), "{frame}");
@@ -3485,12 +4205,17 @@ mod tests {
         let _en = english();
         // The desk on the fake engine (no serial port): an old board heard,
         // the gate's yes, the write, the board heard again.
-        let image = crate::device::desk::tests::image("page", "v0.8.0");
         let fake = engine::fake::Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60));
         let trace = fake.trace();
-        let source = crate::device::firmware::Source::Local(image.clone());
-        let timing = crate::device::desk::tests::QUICK;
-        let (cmds, events) = desk::spawn(std::sync::Arc::new(fake), source, None, timing, false);
+        let setup = desk::Setup {
+            supply: std::sync::Arc::new(crate::device::firmware::tests::Shelf::new("v0.8.0")),
+            preset: None,
+            flags_mode: None,
+            port: None,
+            timing: crate::device::desk::tests::QUICK,
+            firmware_first: false,
+        };
+        let (cmds, events) = desk::spawn(std::sync::Arc::new(fake), setup);
         let mut page = Page::with_channels(cmds, events, None);
         let until = |page: &mut Page, what: &str, done: &dyn Fn(&Page) -> bool| {
             let t0 = Instant::now();
@@ -3508,11 +4233,804 @@ mod tests {
         until(&mut page, "written and heard", &|p| {
             !p.writing() && p.shown().is_some_and(|b| b.verdict == Verdict::UpToDate && b.work == Work::Idle)
         });
-        let _ = std::fs::remove_file(&image);
         assert_eq!(*trace.lock().unwrap(), ["listen FAKE0", "open 921600", "restart", "listen FAKE0"]);
         assert!(window(&mut page).contains("✓ Up to date · v0.8.0 · just written"));
         page.let_go_within(Duration::from_secs(5));
         assert!(!page.holds_board() && Screen::finished(&page).is_some());
+    }
+
+    // ── Advanced options ────────────────────────────────────────────────────
+
+    /// Card 07's COM3: v0.8.0 in QIO, by its ELF, too old to report its card.
+    fn on_pin_qio() -> Board {
+        fixtures::old_on("COM3", "v0.8.0", "e127a6bf")
+    }
+
+    /// `board` with the sheet's next write `image` in hand.
+    fn with_next(board: Board, image: Image) -> Board {
+        fixtures::chosen(board, image, By::Sheet, None)
+    }
+
+    /// The write the gate's yes sent: the image it named, and its erase.
+    fn wrote(image: Image, erase: bool) -> Cmd {
+        Cmd::Write { port: "COM3".into(), erase: Some(erase), image: Some(image) }
+    }
+
+    /// The choice Apply sent.
+    fn choose(image: Image, erase: bool) -> Cmd {
+        Cmd::Choose { port: "COM3".into(), choice: Some(desk::Choice { image, erase }) }
+    }
+
+    /// Typed into the page, a key at a time.
+    fn type_in(page: &mut Page, text: &str) {
+        for c in text.chars() {
+            press(page, KeyCode::Char(c));
+        }
+    }
+
+    /// The page's own events until `done`, the dialogs' thread answering in
+    /// its own time.
+    fn pump_until(page: &mut Page, what: &str, done: impl Fn(&Page) -> bool) {
+        let t0 = Instant::now();
+        while !done(page) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "never: {what}");
+            std::thread::sleep(Duration::from_millis(5));
+            page.pump();
+        }
+    }
+
+    #[test]
+    fn advanced_is_a_dim_link_and_o_and_is_not_offered_where_nothing_can_be_written() {
+        let _en = english();
+        let (mut page, _ends) = page_with(Ends::update_available);
+        let frame = window(&mut page);
+        assert!(frame.contains("│  ▸ Details   Advanced…"), "three cells after Details:\n{frame}");
+        assert_eq!(page.hint(), "Enter update · o advanced · d details · Esc library");
+        // Never in front of the primary, never by itself: Enter still opens
+        // the gate for the board's own write.
+        press(&mut page, KeyCode::Enter);
+        assert!(page.gate.is_some() && page.sheet.is_none());
+        press(&mut page, KeyCode::Esc);
+        // A board nothing can be written to has no link and no `o`.
+        let in_use = heard("COM3", Heard::InUse { detail: "busy".into() });
+        let mut chip = heard("COM3", Heard::Silent);
+        chip.probe = Some(Err(DeviceError::WrongFlash { found: "4 MB".into() }));
+        let boards = [in_use, fixtures::judged(chip), heard("COM3", Heard::Silent), heard("COM3", Heard::Nothing)];
+        for board in boards {
+            let (mut page, ends) = page_with(|e| e.boards(vec![board.clone()]));
+            assert!(!window(&mut page).contains("Advanced…"), "{:?}", board.verdict);
+            assert!(!page.hint().contains("o advanced"), "{:?}", board.verdict);
+            press(&mut page, KeyCode::Char('o'));
+            assert!(page.sheet.is_none() && ends.sent().is_empty(), "{:?}", board.verdict);
+        }
+        let (mut page, _ends) = page_with(Ends::no_board);
+        press(&mut page, KeyCode::Char('o'));
+        assert!(page.sheet.is_none());
+        // While a write runs: gone, and `o` does nothing.
+        press(&mut page, KeyCode::Esc);
+        let (mut page, ends) = page_with(Ends::update_available);
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('y'));
+        ends.writing(41);
+        page.pump();
+        assert!(!window(&mut page).contains("Advanced…"));
+        press(&mut page, KeyCode::Char('o'));
+        assert!(page.sheet.is_none());
+        assert_eq!(ends.sent().len(), 1, "the write, and nothing after it");
+    }
+
+    #[test]
+    fn o_opens_the_sheet_at_its_defaults_over_an_inert_card_and_esc_changes_nothing() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        press(&mut page, KeyCode::Char('o'));
+        assert!(Screen::modal_open(&page) && Screen::claim(&page) == Claim::OwnTab);
+        let frame = window(&mut page);
+        let sheet = [
+            "           ╭────────────────────────────────────────────────────────────────────────────╮",
+            "           │ ╭────────────────────────────────────────────────────────────────────────╮ │",
+            "           │ │ Advanced options · COM3                                             [X]│ │",
+            "           │ │                                                                        │ │",
+            "           │ │ FIRMWARE                                                               │ │",
+            "           │ │   (•) v0.8.0 — this player's release, recommended                      │ │",
+            "           │ │   ( ) Another release — listed from GitHub when you choose it          │ │",
+            "           │ │   ( ) A local build — a file or a build folder on this computer        │ │",
+            "           │ │                                                                        │ │",
+            "           │ │ FLASH MODE                                                             │ │",
+            "           ╰─│   (•) QIO — faster, as COM3 runs now                                   │─╯",
+            "             │   ( ) DIO — runs on every Core2, a little slower                       │",
+            "             │                                                                        │",
+            "             │ ERASE                                                                  │",
+            "             │   [ ] Erase the whole flash first — loses the settings                 │",
+            "             │ ────────────────────────────────────────────────────────────────────── │",
+            "             │ v0.8.0 is the release this player was made with, checked by its        │",
+            "             │ built-in checksum. “Up to date” here always means v0.8.0.              │",
+            "             │                                                                        │",
+            "             │                                               Use defaults      Apply  │",
+            "             ╰────────────────────────────────────────────────────────────────────────╯",
+        ];
+        assert_eq!(rows(&frame, 2, 21), sheet, "card 07's frame 2, character for character:\n{frame}");
+        assert_eq!(page.hint(), "Tab next group · ↑↓ choose · Space tick · Enter apply · Esc close");
+        // The card beneath is inert: a click where its link was is nobody's.
+        click(&mut page, 25, 12);
+        assert!(page.sheet.is_some() && ends.sent().is_empty());
+        // Esc, and [X], close it and change nothing.
+        press(&mut page, KeyCode::Esc);
+        assert!(page.sheet.is_none() && ends.sent().is_empty());
+        press(&mut page, KeyCode::Char('o'));
+        let frame = window(&mut page);
+        let y = frame.lines().position(|l| l.contains("[X]")).unwrap();
+        click(&mut page, col(frame.lines().nth(y).unwrap(), "[X]") + 1, y as u16);
+        assert!(page.sheet.is_none() && ends.sent().is_empty(), "[X] closes too");
+        // Enter at the defaults chose nothing: no choice is sent for them.
+        press(&mut page, KeyCode::Char('o'));
+        press(&mut page, KeyCode::Enter);
+        assert!(page.sheet.is_none() && ends.sent().is_empty(), "the defaults are no choice");
+    }
+
+    #[test]
+    fn dio_for_the_pin_is_the_boards_next_write_and_the_card_says_it_on_one_line() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        press(&mut page, KeyCode::Char('o'));
+        press(&mut page, KeyCode::Tab);
+        press(&mut page, KeyCode::Down);
+        let frame = window(&mut page);
+        assert!(frame.contains("│   ( ) QIO — faster, as COM3 runs now      "), "one mark a row:\n{frame}");
+        assert!(frame.contains("│   (•) DIO — runs on every Core2, a little slower"), "{frame}");
+        assert!(frame.contains("│ DIO reads it on 2 lines, as M5Stack ships the Core2: a little slower,  │"), "frame 3's help:\n{frame}");
+        assert!(ends.sent().is_empty(), "nothing in the sheet writes, or asks");
+        press(&mut page, KeyCode::Enter);
+        assert!(page.sheet.is_none(), "Apply closes it");
+        assert_eq!(ends.sent(), [choose(Image::Pin(Mode::Dio), false)]);
+        // The worker tells the board with its next write: frame 4.
+        ends.tell([Event::Board(with_next(on_pin_qio(), Image::Pin(Mode::Dio)))]);
+        page.pump();
+        let frame = window(&mut page);
+        let card = [
+            "           │  Firmware      ✓ Up to date · v0.8.0                                       │",
+            "           │                Next write: v0.8.0 in DIO (runs on every Core2)      Reset  │",
+            "           │                                                                            │",
+            "           │  SD card       ? v0.8.0 can't report the card.                             │",
+            "           │                                                                            │",
+            "           │                                                             ╭───────────╮  │",
+            "           │  ▸ Details   Advanced…                                      │  Write ▸  │  │",
+            "           │                                                             ╰───────────╯  │",
+        ];
+        assert_eq!(rows(&frame, 6, 8), card, "card 07's frame 4, character for character:\n{frame}");
+        assert_eq!(page.hint(), "Enter write · o advanced · x reset · d details · Esc library");
+        // The sheet opens on the choice made.
+        press(&mut page, KeyCode::Char('o'));
+        assert!(window(&mut page).contains("│   (•) DIO — runs on every Core2"), "{}", window(&mut page));
+    }
+
+    #[test]
+    fn the_dio_gate_names_the_mode_and_the_write_and_done_say_it_too() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![with_next(on_pin_qio(), Image::Pin(Mode::Dio))]));
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("│ Write v0.8.0 · DIO?"), "card 09's suffix:\n{frame}");
+        assert!(frame.contains("The DIO image reads the flash on 2 lines, as M5Stack ships the Core2."), "{frame}");
+        assert!(frame.contains("Settings, paired headphones and the SD card's music all stay."), "the green line holds:\n{frame}");
+        assert!(frame.contains("◂ Keep it as it is      Write in DIO  │"), "{frame}");
+        assert_eq!(page.hint(), "y write · Enter or Esc cancel");
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Dio), false)]);
+        let mut writing = with_next(on_pin_qio(), Image::Pin(Mode::Dio));
+        writing.work = Work::Writing { phase: Phase::Writing, pct: Some(41) };
+        ends.tell([Event::Board(writing)]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("Firmware      writing v0.8.0 in DIO… 41%"), "frame 6:\n{frame}");
+        assert!(!frame.contains("Advanced…"), "gone until the write ends:\n{frame}");
+        // Done: the choice spent, the board on v0.8.0's DIO build by its ELF.
+        let mut done = fixtures::old_on("COM3", "v0.8.0", "3523b80e");
+        done.written = Some(Written::Done {
+            version: "v0.8.0".into(),
+            took: Duration::from_secs(44),
+            skipped: false,
+            install: false,
+            boot: None,
+            image: crate::device::firmware::tests::pin_facts("v0.8.0", Mode::Dio),
+            looping: None,
+        });
+        ends.tell([Event::Board(fixtures::judged(done))]);
+        page.pump();
+        assert!(!page.writing());
+        let frame = window(&mut page);
+        assert_eq!(rows(&frame, 28, 1)[0].trim(), "Written in DIO just now. The SD card was not touched.", "{frame}");
+        assert!(frame.contains("Firmware      ✓ Up to date · v0.8.0 · just written"), "{frame}");
+        assert!(frame.contains("In DIO (runs on every Core2): updates keep it."), "frame 7's line:\n{frame}");
+        assert!(!frame.contains("Next write"), "one board, one write:\n{frame}");
+        press(&mut page, KeyCode::Char('d'));
+        let frame = window(&mut page);
+        assert!(frame.contains("On the board  mstream-mp3-player v0.8.0 · DIO · ELF 3523b80e"), "{frame}");
+        let written = "Written       v0.8.0 · DIO · this player's release, checked by its";
+        assert!(frame.contains(written), "card 09's Written row:\n{frame}");
+    }
+
+    #[test]
+    fn reset_and_use_defaults_put_the_defaults_back_and_say_so_once() {
+        let _en = english();
+        let board = || with_next(on_pin_qio(), Image::release("v0.7.0", Mode::Qio));
+        let (mut page, ends) = page_with(|e| e.boards(vec![board()]));
+        let frame = window(&mut page);
+        assert!(frame.contains("Next write: v0.7.0 in QIO (faster)") && frame.contains("Reset  │"), "{frame}");
+        press(&mut page, KeyCode::Char('x'));
+        assert_eq!(ends.sent(), [Cmd::Choose { port: "COM3".into(), choice: None }]);
+        let said = "COM3's next write is back to the defaults: v0.8.0 in QIO (faster).";
+        assert_eq!(page.note.as_ref().map(|n| n.text.as_str()), Some(said));
+        // The Reset beside the line does the same, and so does Use defaults.
+        let frame = window(&mut page);
+        let y = frame.lines().position(|l| l.contains("Next write")).unwrap();
+        click(&mut page, col(frame.lines().nth(y).unwrap(), "Reset") + 1, y as u16);
+        assert_eq!(ends.sent(), [Cmd::Choose { port: "COM3".into(), choice: None }]);
+        press(&mut page, KeyCode::Char('o'));
+        assert!(window(&mut page).contains("(•) Another release  v0.7.0 ▾"), "the sheet opens on the choice");
+        press(&mut page, KeyCode::BackTab);
+        press(&mut page, KeyCode::Left);
+        assert_eq!(page.hint(), "←→ choose · Enter use defaults · Tab next group · Esc close");
+        press(&mut page, KeyCode::Enter);
+        assert!(page.sheet.is_none());
+        assert_eq!(ends.sent(), [Cmd::Choose { port: "COM3".into(), choice: None }]);
+        // With nothing chosen there is no Reset, and `x` asks nothing.
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        press(&mut page, KeyCode::Char('x'));
+        assert!(ends.sent().is_empty() && page.note.is_none());
+    }
+
+    #[test]
+    fn a_write_that_leaves_the_board_restarting_opens_details_and_offers_the_dio_image_through_the_gate() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::old("COM3", "v0.7.0")]));
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('y'));
+        ends.sent();
+        ends.writing(62);
+        let line = "rst:0x10 (RTCWDT_RTC_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)";
+        ends.tell([Event::Log { port: Some("COM3".into()), text: line.into(), kind: LogKind::Quiet }]);
+        ends.tell([Event::Board(fixtures::looping("COM3"))]);
+        page.pump();
+        assert!(!page.writing() && page.details, "Details opened on the banners");
+        let frame = window(&mut page);
+        assert!(frame.contains("Firmware      ✗ Keeps restarting · v0.8.0 in QIO"), "{frame}");
+        assert!(frame.contains("Restarted 3 times in 6 s: its flash may not run QIO."), "{frame}");
+        assert!(frame.contains("Next write: v0.8.0 in DIO (runs on every Core2)"), "the cure, filled in:\n{frame}");
+        assert!(frame.contains("│  Write the DIO image ▸  │"), "the primary:\n{frame}");
+        assert!(frame.contains("rst:0x10 (RTCWDT_RTC_RESET)"), "the log:\n{frame}");
+        let said = "v0.8.0 went on, then the board kept restarting. The SD card was not touched.";
+        assert_eq!(rows(&frame, 28, 1)[0].trim(), said);
+        assert!(ends.sent().is_empty(), "nothing is written by itself");
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("│ Write v0.8.0 · DIO?"), "{frame}");
+        assert!(frame.contains("It keeps restarting on the QIO image. The DIO image reads the flash on"), "{frame}");
+        press(&mut page, KeyCode::Esc);
+        // Reset takes the offer back: the card stays gold, with no primary.
+        press(&mut page, KeyCode::Char('x'));
+        assert_eq!(ends.sent(), [Cmd::Choose { port: "COM3".into(), choice: None }]);
+        let mut reset = fixtures::looping("COM3");
+        reset.next = None;
+        ends.tell([Event::Board(reset)]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("✗ Keeps restarting") && !frame.contains("▸  │"), "{frame}");
+        assert!(frame.contains("Advanced…"), "where DIO waits:\n{frame}");
+    }
+
+    #[test]
+    fn another_release_is_asked_of_github_only_when_chosen_and_the_list_is_kept_for_the_visit() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        press(&mut page, KeyCode::Char('o'));
+        assert!(ends.sent().is_empty(), "opening the sheet asks nothing");
+        press(&mut page, KeyCode::Down);
+        assert_eq!(ends.sent(), [Cmd::Releases], "one request, as Another release is chosen");
+        let frame = window(&mut page);
+        assert!(frame.contains("(•) Another release  pick one ▾"), "{frame}");
+        assert!(frame.contains("│ ▱▱▱▱▱▱▱▱▱▱ asking GitHub for the releases… │"), "frame 9:\n{frame}");
+        assert_eq!(page.hint(), "Esc close the list");
+        ends.tell([fixtures::listed()]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("│   v0.7.0         2026-10-07  QIO and DIO │"), "frame 10:\n{frame}");
+        assert!(frame.contains("│   v0.6.0         2026-10-02  QIO and DIO │"), "{frame}");
+        assert!(frame.contains("│   v0.5.0         2026-10-01  DIO only    │"), "{frame}");
+        assert!(frame.contains("│   Show 1 pre-release"), "{frame}");
+        let at = crate::device::firmware::clock_at(1_791_621_660);
+        assert!(frame.contains(&format!("│   asked GitHub at {at}")), "{frame}");
+        assert!(!frame.contains("beta"), "pre-releases hidden:\n{frame}");
+        assert_eq!(page.hint(), "↑↓ choose · Enter pick · Esc close the list");
+        // Esc keeps "pick one", and the sheet will not apply.
+        press(&mut page, KeyCode::Esc);
+        press(&mut page, KeyCode::Enter);
+        assert!(page.sheet.as_ref().is_some_and(|s| s.list.is_some()), "Enter asks for a pick instead");
+        assert!(ends.sent().is_empty(), "the list is in hand: GitHub is not asked again");
+        // The pre-releases' switch, marked in their own rows.
+        press(&mut page, KeyCode::Down);
+        press(&mut page, KeyCode::Down);
+        press(&mut page, KeyCode::Down);
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("v0.5.0-beta.1  2026-10-01  pre-release, DIO only"), "frame 12:\n{frame}");
+        assert!(frame.contains("Hide pre-releases"), "{frame}");
+        // v0.7.0 picked: the facts and the direction under the control.
+        press(&mut page, KeyCode::Up);
+        press(&mut page, KeyCode::Up);
+        press(&mut page, KeyCode::Up);
+        press(&mut page, KeyCode::Up);
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("(•) Another release  v0.7.0 ▾"), "{frame}");
+        assert!(frame.contains("│       2026-10-07 · QIO and DIO · a step back from COM3's v0.8.0"), "frame 13:\n{frame}");
+        assert!(frame.contains("v0.7.0 downloads on Apply and is checked against its own SHA256SUMS."), "{frame}");
+        press(&mut page, KeyCode::Enter);
+        assert_eq!(ends.sent(), [choose(Image::release("v0.7.0", Mode::Qio), false)]);
+        // Each visit starts over: nothing asked, the pre-releases hidden.
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        assert!(!page.show_pre && page.listing == Listing::NotAsked);
+        press(&mut page, KeyCode::Char('o'));
+        press(&mut page, KeyCode::Down);
+        assert_eq!(ends.sent(), [Cmd::Releases]);
+    }
+
+    #[test]
+    fn offline_the_list_says_why_offers_the_releases_on_this_computer_and_asks_again() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        press(&mut page, KeyCode::Char('o'));
+        press(&mut page, KeyCode::Down);
+        ends.sent();
+        ends.tell([fixtures::offline()]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("│ ✗ GitHub did not answer: offline?"), "frame 11:\n{frame}");
+        assert!(frame.contains("│   v0.7.0 · on this computer since 2026-10-07 │"), "{frame}");
+        assert!(frame.contains("│   Try again"), "{frame}");
+        press(&mut page, KeyCode::Down);
+        press(&mut page, KeyCode::Enter);
+        assert_eq!(ends.sent(), [Cmd::Releases], "a failure is never kept: asked again");
+        ends.tell([fixtures::offline()]);
+        page.pump();
+        // What is on this computer writes offline: its one build offered.
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("(•) Another release  v0.7.0 ▾"), "{frame}");
+        assert!(frame.contains("( ) DIO — not in v0.7.0, which has one image"), "{frame}");
+        press(&mut page, KeyCode::Enter);
+        assert_eq!(ends.sent(), [choose(Image::release("v0.7.0", Mode::Qio), false)]);
+    }
+
+    #[test]
+    fn a_release_with_one_image_fixes_the_mode_and_says_why() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        press(&mut page, KeyCode::Char('o'));
+        press(&mut page, KeyCode::Down);
+        ends.tell([fixtures::listed()]);
+        page.pump();
+        press(&mut page, KeyCode::Down);
+        press(&mut page, KeyCode::Down);
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("│   ( ) QIO — not in v0.5.0, which has one image"), "{frame}");
+        assert!(frame.contains("│   (•) DIO — runs on every Core2, a little slower"), "{frame}");
+        // ↑ cannot choose what the release does not have.
+        press(&mut page, KeyCode::Tab);
+        press(&mut page, KeyCode::Tab);
+        press(&mut page, KeyCode::Up);
+        assert!(window(&mut page).contains("│   (•) DIO"));
+        ends.sent();
+        press(&mut page, KeyCode::Enter);
+        assert_eq!(ends.sent(), [choose(Image::release("v0.5.0", Mode::Dio), false)]);
+    }
+
+    #[test]
+    fn going_back_to_a_release_passes_the_go_back_gate_and_the_verdict_stays_the_pins() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![with_next(on_pin_qio(), Image::release("v0.7.0", Mode::Qio))]));
+        let frame = window(&mut page);
+        assert!(frame.contains("Firmware      ✓ Up to date · v0.8.0"), "a choice never moves the verdict:\n{frame}");
+        assert!(frame.contains("Next write: v0.7.0 in QIO (faster)") && frame.contains("│  Go back ▸  │"), "frame 14:\n{frame}");
+        assert_eq!(page.hint(), "Enter go back · o advanced · x reset · d details · Esc library");
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("│ Go back from v0.8.0 to v0.7.0?"), "frame 15:\n{frame}");
+        assert!(frame.contains("│ Release v0.7.0 in QIO (faster), from GitHub, checked against its own"), "{frame}");
+        assert!(frame.contains("A step back in a beta: v0.7.0 may not read every setting v0.8.0 saved."), "{frame}");
+        assert!(frame.contains("◂ Keep v0.8.0      Go back  │"), "{frame}");
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [wrote(Image::release("v0.7.0", Mode::Qio), false)]);
+        let mut writing = with_next(on_pin_qio(), Image::release("v0.7.0", Mode::Qio));
+        writing.work = Work::Writing { phase: Phase::Writing, pct: Some(20) };
+        ends.tell([Event::Board(writing)]);
+        page.pump();
+        assert!(window(&mut page).contains("writing v0.7.0… 20%"), "the write names its own version");
+        let mut done = fixtures::old_on("COM3", "v0.7.0", "63ee7a2b");
+        let mut image = crate::device::firmware::tests::pin_facts("v0.7.0", Mode::Qio);
+        (image.image, image.check) = (Image::release("v0.7.0", Mode::Qio), Check::Sums);
+        done.written = Some(Written::Done {
+            version: "v0.7.0".into(),
+            took: Duration::from_secs(44),
+            skipped: false,
+            install: false,
+            boot: None,
+            image,
+            looping: None,
+        });
+        ends.tell([Event::Board(fixtures::judged(done))]);
+        page.pump();
+        let frame = window(&mut page);
+        assert_eq!(rows(&frame, 28, 1)[0].trim(), "Went back to v0.7.0 just now. The SD card was not touched.");
+        assert!(frame.contains("! Update available · v0.7.0 → v0.8.0") && frame.contains("Update ▸"), "frame 16:\n{frame}");
+        press(&mut page, KeyCode::Char('d'));
+        let frame = window(&mut page);
+        assert!(frame.contains("Written       v0.7.0 · QIO · release v0.7.0, checked against"), "{frame}");
+    }
+
+    #[test]
+    fn a_release_newer_than_the_pin_is_an_update_this_player_has_not_been_tried_with() {
+        let _en = english();
+        let (mut page, _ends) = page_with(|e| e.boards(vec![with_next(on_pin_qio(), Image::release("v0.9.0", Mode::Qio))]));
+        assert!(window(&mut page).contains("│  Update ▸  │"));
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("│ Update from v0.8.0 to v0.9.0?"), "frame 17:\n{frame}");
+        assert!(frame.contains("Newer than this player: it was made with v0.8.0 and has not been tried"), "{frame}");
+        // Behind the pin and not it: the card will still offer the pin.
+        let (mut page, _ends) =
+            page_with(|e| e.boards(vec![with_next(fixtures::old("COM3", "v0.6.0"), Image::release("v0.7.0", Mode::Qio))]));
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("│ Update from v0.6.0 to v0.7.0?"), "{frame}");
+        assert!(frame.contains("Not this player's v0.8.0: the card will still offer that update."), "{frame}");
+    }
+
+    /// The local build's folder, and the sheet open on it with its path field.
+    /// A path of the platform's own: the page shortens a path at its last
+    /// separator, and a backslash is none outside Windows.
+    #[cfg(windows)]
+    const BUILD: &str = "C:\\code\\mstream-mp3-player\\.pio\\build\\core2";
+    #[cfg(not(windows))]
+    const BUILD: &str = "/code/mstream-mp3-player/.pio/build/core2";
+    #[cfg(windows)]
+    const REFUSED: &str = "C:\\Downloads\\core2-factory.bin";
+    #[cfg(not(windows))]
+    const REFUSED: &str = "/Downloads/core2-factory.bin";
+    const SEP: char = std::path::MAIN_SEPARATOR;
+
+    fn build_facts() -> crate::device::firmware::ImageFacts {
+        fixtures::local_facts(BUILD, "v0.8.0-5-g4e94418", Mode::Qio)
+    }
+
+    #[test]
+    fn a_local_build_is_typed_vetted_and_written_through_its_own_gate() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        press(&mut page, KeyCode::Char('o'));
+        press(&mut page, KeyCode::Down);
+        press(&mut page, KeyCode::Esc);
+        press(&mut page, KeyCode::Down);
+        ends.sent();
+        let frame = window(&mut page);
+        assert!(frame.contains("│       Choose a file…   Choose a folder…   Type a path"), "frame 18:\n{frame}");
+        assert!(frame.contains("│       the image's own: read from it once you choose one"), "{frame}");
+        press(&mut page, KeyCode::Tab);
+        assert_eq!(page.hint(), "←→ choose · Enter open · Tab next group · Esc close");
+        press(&mut page, KeyCode::Right);
+        press(&mut page, KeyCode::Right);
+        press(&mut page, KeyCode::Enter);
+        assert_eq!(Screen::claim(&page), Claim::All, "the field takes every key");
+        assert_eq!(page.hint(), "Tab complete · Enter read it · Esc back");
+        if let Some(field) = page.sheet.as_mut().and_then(|s| s.field.as_mut()) {
+            *field = tui_input::Input::default();
+        }
+        type_in(&mut page, "qK1");
+        assert!(window(&mut page).contains("qK1▏"), "letters and digits are the path's");
+        for _ in 0..3 {
+            press(&mut page, KeyCode::Backspace);
+        }
+        type_in(&mut page, BUILD);
+        press(&mut page, KeyCode::Enter);
+        assert_eq!(ends.sent(), [Cmd::Vet { path: BUILD.into() }], "read on the worker at once");
+        assert!(window(&mut page).contains("│       reading it…"));
+        ends.tell([Event::Vetted { path: BUILD.into(), result: Ok(build_facts()) }]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains(&format!("(•) A local build — {BUILD}")), "{frame}");
+        assert!(frame.contains("│       firmware.factory.bin · v0.8.0-5-g4e94418 · 2,701,840 B"), "frame 19:\n{frame}");
+        assert!(frame.contains("│       QIO, from its header · a local build, not a release"), "{frame}");
+        assert!(frame.contains("│   (•) QIO — the image's own (80 MHz in its header)"), "{frame}");
+        assert!(frame.contains("│   ( ) DIO — not this image's: build the DIO variant for it"), "{frame}");
+        assert!(frame.contains("│ Checked only for being mStream firmware, not for working. Read again"), "{frame}");
+        press(&mut page, KeyCode::Tab);
+        press(&mut page, KeyCode::Tab);
+        press(&mut page, KeyCode::Enter);
+        assert_eq!(ends.sent(), [choose(Image::Local(BUILD.into()), false)]);
+        // Its card and its gate: a local build, never an update.
+        let local = fixtures::chosen(on_pin_qio(), Image::Local(BUILD.into()), By::Sheet, Some(build_facts()));
+        ends.tell([Event::Board(local)]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("Next write: local build v0.8.0-5-g4e94418 in QIO (faster)"), "{frame}");
+        assert!(frame.contains("│  Write ▸  │"), "{frame}");
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("│ Write a local build over v0.8.0?"), "frame 22:\n{frame}");
+        assert!(frame.contains("A local build, not a release: v0.8.0-5-g4e94418 in QIO (faster), from"), "{frame}");
+        let shortened = format!("…{SEP}core2. Checked only for being mStream firmware, not for working.");
+        assert!(frame.contains(&shortened), "{frame}");
+        assert!(frame.contains("the board's bootloader"), "a build that does not start is recoverable:\n{frame}");
+        assert!(frame.contains("◂ Keep v0.8.0      Write  │"), "{frame}");
+        assert_eq!(page.hint(), "y write · Enter or Esc cancel");
+    }
+
+    #[test]
+    fn a_refused_build_says_why_in_gold_and_apply_waits() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        for code in [KeyCode::Char('o'), KeyCode::Down, KeyCode::Esc, KeyCode::Down, KeyCode::Tab] {
+            press(&mut page, code);
+        }
+        for code in [KeyCode::Right, KeyCode::Right, KeyCode::Enter] {
+            press(&mut page, code);
+        }
+        if let Some(field) = page.sheet.as_mut().and_then(|s| s.field.as_mut()) {
+            *field = tui_input::Input::default();
+        }
+        let file = REFUSED;
+        type_in(&mut page, file);
+        press(&mut page, KeyCode::Enter);
+        ends.sent();
+        let why = format!("{file} is not an mstream-mp3-player image — it says arduino-lib-builder");
+        ends.tell([Event::Vetted { path: file.into(), result: Err(DeviceError::Firmware(why)) }]);
+        page.pump();
+        let frame = window(&mut page);
+        let refused = format!("│       ✗ …{SEP}core2-factory.bin is not an mstream-mp3-player image");
+        assert!(frame.contains(&refused), "frame 20:\n{frame}");
+        assert!(frame.contains("Only builds of mstream-mp3-player go on from here"), "{frame}");
+        press(&mut page, KeyCode::Tab);
+        press(&mut page, KeyCode::Tab);
+        press(&mut page, KeyCode::Enter);
+        assert!(ends.sent().is_empty(), "Apply waits for a vetted pick");
+        assert!(page.sheet.is_some());
+    }
+
+    #[test]
+    fn the_native_dialogs_answer_on_a_thread_and_where_none_can_open_the_path_field_takes_the_keys() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        page.dialogs.stub = Some(std::sync::Arc::new(|chooser| match chooser {
+            sheet::Chooser::Folder => Pick::Folder(BUILD.into()),
+            _ => Pick::Cancelled,
+        }));
+        for code in [KeyCode::Char('o'), KeyCode::Down, KeyCode::Esc, KeyCode::Down, KeyCode::Tab, KeyCode::Right] {
+            press(&mut page, code);
+        }
+        assert_eq!(ends.sent(), [Cmd::Releases], "Another release, passed through on the way down");
+        press(&mut page, KeyCode::Enter);
+        pump_until(&mut page, "the folder's dialog answered", |p| p.sheet.as_ref().is_some_and(|s| !s.dialog));
+        assert_eq!(ends.sent(), [Cmd::Vet { path: BUILD.into() }]);
+        // A dialog declined changes nothing.
+        press(&mut page, KeyCode::Left);
+        press(&mut page, KeyCode::Enter);
+        pump_until(&mut page, "the file's dialog answered", |p| p.sheet.as_ref().is_some_and(|s| !s.dialog));
+        assert!(ends.sent().is_empty());
+        // No dialog here (over SSH, a refused portal): the field takes the keys.
+        page.dialogs.stub = Some(std::sync::Arc::new(|_| Pick::Unavailable("no session bus".into())));
+        press(&mut page, KeyCode::Enter);
+        pump_until(&mut page, "the field opened", |p| p.typing());
+        press(&mut page, KeyCode::Esc);
+        let frame = window(&mut page);
+        assert!(frame.contains("│       Type a path   no dialog here: no session bus"), "{frame}");
+        assert!(!frame.contains("Choose a file…"), "{frame}");
+    }
+
+    #[test]
+    fn tab_completes_a_typed_path_from_the_disk_and_the_last_path_is_offered_again() {
+        let _en = english();
+        let root = std::env::temp_dir().join(format!("mstream-sheet-{}", std::process::id()));
+        let build = root.join("core2-build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("firmware.factory.bin"), b"not read here").unwrap();
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        for code in [KeyCode::Char('o'), KeyCode::Down, KeyCode::Esc, KeyCode::Down, KeyCode::Tab] {
+            press(&mut page, code);
+        }
+        for code in [KeyCode::Right, KeyCode::Right, KeyCode::Enter] {
+            press(&mut page, code);
+        }
+        if let Some(field) = page.sheet.as_mut().and_then(|s| s.field.as_mut()) {
+            *field = tui_input::Input::default();
+        }
+        assert_eq!(ends.sent(), [Cmd::Releases], "Another release, passed through on the way down");
+        type_in(&mut page, &format!("{}{}core2-b", root.display(), std::path::MAIN_SEPARATOR));
+        press(&mut page, KeyCode::Tab);
+        let typed = page.sheet.as_ref().and_then(|s| s.field.as_ref()).map(|f| f.value().to_string());
+        let want = format!("{}{}", build.display(), std::path::MAIN_SEPARATOR);
+        assert_eq!(typed.as_deref(), Some(want.as_str()), "the folder completed");
+        press(&mut page, KeyCode::Tab);
+        let typed = page.sheet.as_ref().and_then(|s| s.field.as_ref()).map(|f| f.value().to_string());
+        assert_eq!(typed, Some(format!("{want}firmware.factory.bin")), "and the image in it");
+        press(&mut page, KeyCode::Enter);
+        let sent = ends.sent();
+        let Some(Cmd::Vet { path }) = sent.first() else { panic!("{sent:?}") };
+        ends.tell([Event::Vetted { path: path.clone(), result: Ok(build_facts()) }]);
+        page.pump();
+        // The next visit's field starts from it.
+        let (mut page, _ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        for code in [KeyCode::Char('o'), KeyCode::Down, KeyCode::Esc, KeyCode::Down, KeyCode::Tab] {
+            press(&mut page, code);
+        }
+        for code in [KeyCode::Right, KeyCode::Right, KeyCode::Enter] {
+            press(&mut page, code);
+        }
+        let typed = page.sheet.as_ref().and_then(|s| s.field.as_ref()).map(|f| f.value().to_string());
+        assert_eq!(typed, Some(path.display().to_string()), "the last local path, offered again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn erase_ticked_in_the_sheet_splits_the_green_line_and_the_button_says_both_verbs() {
+        let _en = english();
+        let (mut page, ends) = page_with(Ends::update_available);
+        for code in [KeyCode::Char('o'), KeyCode::Tab, KeyCode::Tab, KeyCode::Char(' ')] {
+            press(&mut page, code);
+        }
+        assert!(window(&mut page).contains("[✓] Erase the whole flash first — loses the settings"));
+        press(&mut page, KeyCode::Enter);
+        assert_eq!(ends.sent(), [choose(Image::Pin(Mode::Qio), true)], "the default, erased first, is a choice");
+        let mut erased = with_next(fixtures::old("COM3", "v0.7.0"), Image::Pin(Mode::Qio));
+        if let Some(next) = erased.next.as_mut() {
+            next.erase = true;
+        }
+        ends.tell([Event::Board(erased)]);
+        page.pump();
+        assert!(window(&mut page).contains("Next write: v0.8.0 in QIO (faster), erasing first"), "{}", window(&mut page));
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("The whole flash is erased first: settings, paired headphones, touch"), "frame 28:\n{frame}");
+        assert!(frame.contains("The SD card's music stays.") && !frame.contains("all stay"), "{frame}");
+        assert!(frame.contains("◂ Keep v0.7.0      Erase and update  │"), "{frame}");
+        assert_eq!(page.hint(), "y erase and update · Enter or Esc cancel");
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), true)]);
+    }
+
+    #[test]
+    fn a_board_on_dio_by_its_elf_says_so_and_its_update_keeps_dio() {
+        let _en = english();
+        let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::old_on("COM3", "v0.7.0", "aa45f60e")]));
+        let frame = window(&mut page);
+        assert!(frame.contains("! Update available · v0.7.0 → v0.8.0"), "the verdict, as ever:\n{frame}");
+        assert!(frame.contains("│                In DIO (runs on every Core2): updates keep it."), "frame 25:\n{frame}");
+        press(&mut page, KeyCode::Enter);
+        let frame = window(&mut page);
+        assert!(frame.contains("│ Update from v0.7.0 to v0.8.0 · DIO?"), "{frame}");
+        assert!(frame.contains("COM3 runs the DIO image now: its ELF, aa45f60e, is v0.7.0's DIO build."), "{frame}");
+        press(&mut page, KeyCode::Esc);
+        press(&mut page, KeyCode::Char('o'));
+        let frame = window(&mut page);
+        assert!(frame.contains("│   (•) DIO — runs on every Core2, as COM3 runs now       "), "whole, not cut:\n{frame}");
+        assert!(frame.contains("│   ( ) QIO — faster      "), "its default goes unsaid: it runs DIO by choice:\n{frame}");
+        // A board on v0.5.0's one image runs DIO by no choice: its update is QIO.
+        let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::old_on("COM3", "v0.5.0", "17352e55")]));
+        let frame = window(&mut page);
+        assert!(!frame.contains("In DIO"), "{frame}");
+        press(&mut page, KeyCode::Enter);
+        assert!(window(&mut page).contains("│ Update from v0.5.0 to v0.8.0?"));
+        press(&mut page, KeyCode::Esc);
+        press(&mut page, KeyCode::Char('o'));
+        let frame = window(&mut page);
+        assert!(frame.contains("│   (•) QIO — faster (the default)      "), "{frame}");
+        assert!(frame.contains("│   ( ) DIO — runs on every Core2, as COM3 runs now      "), "{frame}");
+    }
+
+    #[test]
+    fn a_choice_is_the_board_in_views_and_update_all_leaves_out_a_board_with_its_own() {
+        let _en = english();
+        let released = with_next(fixtures::old("COM9", "v0.6.0"), Image::release("v0.7.0", Mode::Qio));
+        let boards = vec![fixtures::old("COM3", "v0.7.0"), fixtures::old_on("COM5", "v0.7.0", "aa45f60e"), released];
+        let (mut page, ends) = page_with(|e| e.boards(boards));
+        let frame = window(&mut page);
+        let tabs = &rows(&frame, 2, 1)[0];
+        assert!(tabs.starts_with("            COM3 !   COM5 !   COM9 !"), "no mark for a choice: {tabs:?}");
+        assert!(tabs.ends_with("Update all (2)"), "it counts the boards it writes: {tabs:?}");
+        assert!(!frame.contains("Next write"), "COM3 has none:\n{frame}");
+        press(&mut page, KeyCode::Right);
+        press(&mut page, KeyCode::Right);
+        let frame = window(&mut page);
+        assert!(frame.contains("Next write: v0.7.0 in QIO (faster)"), "COM9's own:\n{frame}");
+        assert!(frame.contains("! Update available · v0.6.0 → v0.8.0"), "its verdict the pin's:\n{frame}");
+        press(&mut page, KeyCode::Char('o'));
+        assert!(window(&mut page).contains("Advanced options · COM9"), "the sheet names its port");
+        press(&mut page, KeyCode::Esc);
+        press(&mut page, KeyCode::Char('a'));
+        let frame = window(&mut page);
+        assert!(frame.contains("Update 2 players to v0.8.0?"), "frame 26:\n{frame}");
+        assert!(frame.contains("COM3 · serial 5B1F00COM3 · v0.7.0 → v0.8.0  "), "{frame}");
+        assert!(frame.contains("COM5 · serial 5B1F00COM5 · v0.7.0 → v0.8.0 in DIO"), "its own mode:\n{frame}");
+        assert!(frame.contains("COM9 is left out: its next write is v0.7.0. Write it from its tab."), "{frame}");
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [Cmd::UpdateAll { ports: vec!["COM3".into(), "COM5".into()] }]);
+        // Two that need it, one kept out: no Update all for one board.
+        let released = with_next(fixtures::old("COM9", "v0.6.0"), Image::release("v0.7.0", Mode::Qio));
+        let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::old("COM3", "v0.7.0"), released]));
+        let frame = window(&mut page);
+        assert!(rows(&frame, 2, 1)[0].ends_with("2 of 2 need an update"), "{frame}");
+        press(&mut page, KeyCode::Char('a'));
+        assert!(page.gate.is_none());
+    }
+
+    #[test]
+    fn the_flags_next_write_says_where_it_came_from_and_the_header_names_its_mode() {
+        let _en = english();
+        let flagged = fixtures::chosen(on_pin_qio(), Image::release("v0.7.0", Mode::Dio), By::Flags, None);
+        let (mut page, ends) = page_with(|e| {
+            e.boards(vec![flagged.clone()]);
+            e.tell([Event::Firmware {
+                version: "v0.7.0".into(),
+                origin: "release v0.7.0, downloaded now".into(),
+                bytes: 2_431_000,
+                kind: Origin::Release,
+                mode: Some(Mode::Dio),
+            }]);
+        });
+        page.flags = Some("--release, --flash-mode".into());
+        let frame = alone(&mut page, 72, 24);
+        assert!(rows(&frame, 0, 1)[0].ends_with("firmware v0.7.0 · DIO · release"), "frame 30's header:\n{frame}");
+        assert!(frame.contains("Firmware      ✓ Up to date · v0.8.0"), "judged against the pin:\n{frame}");
+        assert!(frame.contains("Next write: v0.7.0 in DIO (runs on every Core2)"), "{frame}");
+        assert!(frame.contains("set by --release, --flash-mode"), "{frame}");
+        assert!(frame.contains("│  Go back ▸  │"), "{frame}");
+        press(&mut page, KeyCode::Char('x'));
+        assert_eq!(ends.sent(), [Cmd::Choose { port: "COM3".into(), choice: None }], "Reset goes back to the pin");
+        // The sheet at the console's width opens on the flags' choice.
+        press(&mut page, KeyCode::Char('o'));
+        let frame = alone(&mut page, 72, 24);
+        assert!(frame.contains("│ Advanced options · COM3                                       [X]│"), "frame 31:\n{frame}");
+        assert!(frame.contains("│   (•) Another release  v0.7.0 ▾"), "{frame}");
+        assert!(frame.contains("│   (•) DIO — runs on every Core2, a little slower"), "{frame}");
+    }
+
+    #[test]
+    fn the_sheet_holds_its_top_and_gives_up_its_help_first_at_the_floor() {
+        let _en = english();
+        let top = |frame: &str| frame.lines().position(|l| l.contains("Advanced options")).expect("the sheet");
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin_qio()]));
+        press(&mut page, KeyCode::Char('o'));
+        let at_rest = top(&window(&mut page));
+        for code in [KeyCode::Down, KeyCode::Esc, KeyCode::Down, KeyCode::Tab, KeyCode::Right, KeyCode::Right] {
+            press(&mut page, code);
+        }
+        press(&mut page, KeyCode::Enter);
+        if let Some(field) = page.sheet.as_mut().and_then(|s| s.field.as_mut()) {
+            *field = tui_input::Input::default();
+        }
+        type_in(&mut page, BUILD);
+        press(&mut page, KeyCode::Enter);
+        ends.tell([Event::Vetted { path: BUILD.into(), result: Ok(build_facts()) }]);
+        page.pump();
+        let frame = window(&mut page);
+        assert_eq!(top(&frame), at_rest, "a row appearing under a choice never moves it:\n{frame}");
+        assert!(frame.contains("Checked only for being mStream firmware"), "the help at 100×30:\n{frame}");
+        let floor = text_of(&hosted_at(&mut page, 100, 24, FLOOR));
+        assert!(!floor.contains("Checked only for being mStream firmware"), "frame 21: the help gave way:\n{floor}");
+        assert!(floor.contains("Use defaults      Apply  │"), "{floor}");
+        assert!(floor.contains("firmware.factory.bin · v0.8.0-5-g4e94418 · 2,701,840 B"), "{floor}");
+    }
+
+    #[test]
+    fn a_board_unplugged_takes_its_sheet_and_its_choice_with_it() {
+        let _en = english();
+        let (mut page, ends) = page_with(Ends::two);
+        press(&mut page, KeyCode::Char('o'));
+        assert!(page.sheet.is_some());
+        ends.tell([Event::Gone { port: "COM3".into() }]);
+        page.pump();
+        assert!(page.sheet.is_none(), "the sheet was COM3's");
+        assert!(ends.sent().is_empty());
     }
 
     // ── The footer, the floor and the console ───────────────────────────────
@@ -3524,7 +5042,8 @@ mod tests {
         let frame = alone(&mut page, 72, 24);
         assert!(frame.starts_with("  mStream MP3 Player"), "{frame}");
         assert!(rows(&frame, 0, 1)[0].ends_with("firmware v0.8.0 · cached"), "{frame}");
-        assert_eq!(frame.lines().last().map(str::trim), Some("Enter update · d details · Esc leave"), "{frame}");
+        let tips = "Enter update · o advanced · d details · Esc leave";
+        assert_eq!(frame.lines().last().map(str::trim), Some(tips), "{frame}");
         assert!(frame.contains("│  Update ▸  │"), "{frame}");
         let (mut page, _ends) = page_with(Ends::up_to_date);
         let frame = alone(&mut page, 72, 24);
@@ -3569,6 +5088,12 @@ mod tests {
         add("install", &|e| e.boards(vec![other.clone()]), &[]);
         add("install, the gate", &|e| e.boards(vec![other.clone()]), &[KeyCode::Enter]);
         add("silent", &|e| e.boards(vec![heard("COM3", Heard::Silent)]), &[]);
+        add("starting up", &|e| e.boards(vec![fixtures::starting("COM3", Some("v0.8.0-5-g4e94418"))]), &[]);
+        add("starting up, its log alone", &|e| e.boards(vec![fixtures::starting("COM3", None)]), &[]);
+        add("starting up after the write", &|e| {
+            e.update_available();
+            e.written_starting();
+        }, &[]);
         add("newer", &|e| e.boards(vec![answering("COM3", "v0.9.0")]), &[]);
         let newer = || vec![answering("COM3", "v0.9.0")];
         add("go back, the gate", &|e| e.boards(newer()), &[KeyCode::Char('d'), KeyCode::Char('w')]);
@@ -3606,15 +5131,120 @@ mod tests {
             KeyCode::Right,
             KeyCode::Char('d'),
         ]);
+        // The Advanced options sheet, its groups and its states (clauses 33–36).
+        use KeyCode::{BackTab, Char, Down, Enter, Esc, Right, Tab};
+        let o = Char('o');
+        add("advanced", &Ends::up_to_date, &[o]);
+        add("advanced, dio", &Ends::up_to_date, &[o, Tab, Down]);
+        add("advanced, erase", &Ends::up_to_date, &[o, Tab, Tab, Char(' ')]);
+        add("advanced, buttons", &Ends::up_to_date, &[o, BackTab, Right]);
+        add("advanced, asking github", &Ends::up_to_date, &[o, Down]);
+        add("advanced, a local build", &Ends::up_to_date, &[o, Down, Esc, Down]);
+        add("advanced, the choosers", &Ends::up_to_date, &[o, Down, Esc, Down, Tab]);
+        add("advanced, a path typed", &Ends::update_available, &[o, Down, Esc, Down, Tab, Right, Right, Enter]);
+        add("advanced, on the console with dio", &Ends::update_available, &[o, Tab, Down]);
+        // The card with a next write, and the gates it opens (clauses 38–40).
+        let mut erased = fixtures::chosen(old("COM3", "v0.7.0"), Image::Pin(Mode::Qio), By::Sheet, None);
+        if let Some(next) = erased.next.as_mut() {
+            next.erase = true;
+        }
+        let on_pin = || answering("COM3", "v0.8.0");
+        let next = |image: Image| vec![fixtures::chosen(on_pin(), image, By::Sheet, None)];
+        let built = fixtures::local_facts("C:\\code\\mstream-mp3-player\\.pio\\build\\core2", "v0.8.0-5-g4e94418", Mode::Qio);
+        let local = vec![fixtures::chosen(on_pin(), built.image.clone(), By::Sheet, Some(built.clone()))];
+        add("next write", &|e| e.boards(next(Image::Pin(Mode::Dio))), &[]);
+        add("next write, the gate", &|e| e.boards(next(Image::Pin(Mode::Dio))), &[Enter]);
+        add("a release, the gate", &|e| e.boards(next(Image::release("v0.7.0", Mode::Qio))), &[Enter]);
+        add("a newer release, the gate", &|e| e.boards(next(Image::release("v0.9.0", Mode::Dio))), &[Enter]);
+        add("a local build", &|e| e.boards(local.clone()), &[]);
+        add("a local build, the gate", &|e| e.boards(local.clone()), &[Enter]);
+        add("erase first, the gate", &|e| e.boards(vec![erased.clone()]), &[Enter]);
+        let dio = || vec![fixtures::old_on("COM3", "v0.7.0", "aa45f60e")];
+        add("on dio", &|e| e.boards(dio()), &[]);
+        add("on dio, the gate", &|e| e.boards(dio()), &[Enter]);
+        // The real Core2's sheet, 2026-10-10: its DIO row ran past its width.
+        add("advanced, a board on dio", &|e| e.boards(dio()), &[o]);
+        add("advanced, v0.5.0's one image", &|e| e.boards(vec![fixtures::old_on("COM3", "v0.5.0", "17352e55")]), &[o]);
+        add("keeps restarting", &|e| e.boards(vec![fixtures::looping("COM3")]), &[Char('d')]);
+        add("keeps restarting, the gate", &|e| e.boards(vec![fixtures::looping("COM3")]), &[Enter]);
+        let three = || {
+            let released = fixtures::chosen(old("COM9", "v0.6.0"), Image::release("v0.7.0", Mode::Qio), By::Sheet, None);
+            vec![old("COM3", "v0.7.0"), fixtures::old_on("COM5", "v0.7.0", "aa45f60e"), released]
+        };
+        add("update all, one left out", &|e| e.boards(three()), &[]);
+        add("update all, one left out, the gate", &|e| e.boards(three()), &[Char('a')]);
+        // The states the release list and a local build reach once the worker
+        // has answered.
+        let then = |tell: &dyn Fn(&Ends), keys: &[KeyCode], after: &dyn Fn(&mut Page, &Ends)| {
+            let (mut page, ends) = page_with(tell);
+            for code in keys {
+                press(&mut page, *code);
+            }
+            after(&mut page, &ends);
+            page.pump();
+            (page, ends)
+        };
+        let listed = |page: &mut Page, ends: &Ends| {
+            ends.tell([fixtures::listed()]);
+            page.pump();
+        };
+        let keys = |page: &mut Page, codes: &[KeyCode]| {
+            for code in codes {
+                press(page, *code);
+            }
+        };
+        let path = "C:\\code\\mstream-mp3-player\\.pio\\build\\core2";
+        let vetted = |page: &mut Page, ends: &Ends, result: Result<crate::device::firmware::ImageFacts, DeviceError>| {
+            // The field starts from the last path vetted on this thread.
+            if let Some(field) = page.sheet.as_mut().and_then(|s| s.field.as_mut()) {
+                *field = tui_input::Input::default();
+            }
+            for c in path.chars() {
+                press(page, Char(c));
+            }
+            press(page, Enter);
+            ends.tell([Event::Vetted { path: path.into(), result }]);
+        };
+        let open_local: &[KeyCode] = &[o, Down, Esc, Down, Tab, Right, Right, Enter];
+        let more = [
+            ("advanced, the release list", then(&Ends::up_to_date, &[o, Down], &listed)),
+            ("advanced, pre-releases", then(&Ends::up_to_date, &[o, Down], &|p, e| {
+                listed(p, e);
+                keys(p, &[Down, Down, Down, Enter]);
+            })),
+            ("advanced, v0.7.0 picked", then(&Ends::up_to_date, &[o, Down], &|p, e| {
+                listed(p, e);
+                keys(p, &[Enter]);
+            })),
+            ("advanced, v0.5.0 picked", then(&Ends::up_to_date, &[o, Down], &|p, e| {
+                listed(p, e);
+                keys(p, &[Down, Down, Enter, Tab, Tab]);
+            })),
+            ("advanced, offline", then(&Ends::up_to_date, &[o, Down], &|_, e| e.tell([fixtures::offline()]))),
+            ("advanced, a build vetted", then(&Ends::up_to_date, open_local, &|p, e| vetted(p, e, Ok(built.clone())))),
+            ("advanced, a build refused", then(&Ends::up_to_date, open_local, &|p, e| {
+                let why = DeviceError::Firmware(format!("{path}\\firmware.factory.bin is not an mstream-mp3-player image — it says arduino-lib-builder"));
+                vetted(p, e, Err(why));
+            })),
+            ("set by the flags", then(&|e| e.boards(vec![fixtures::chosen(on_pin(), Image::release("v0.7.0", Mode::Dio), By::Flags, None)]), &[], &|p, _| {
+                p.flags = Some("--release, --flash-mode".into());
+            })),
+        ];
+        for (name, (page, ends)) in more {
+            states.push((name, page, ends));
+        }
         states
     }
 
-    /// The labels the state's buttons wear — its primary and its gate's —
-    /// in the locale the test runs.
+    /// The labels the state's buttons wear — its primary, its gate's, the
+    /// sheet's — in the locale the test runs.
     fn buttons(page: &Page) -> Vec<String> {
         if let Some(gate) = &page.gate {
             let (keep, write) = gate_buttons(gate);
             return vec![keep, write];
+        }
+        if page.sheet.is_some() {
+            return vec![t!("dev.adv_defaults").to_string(), t!("dev.adv_apply").to_string()];
         }
         let Some(board) = page.shown() else { return Vec::new() };
         let Some(primary) = page.primary_of(board) else { return Vec::new() };
@@ -3623,8 +5253,19 @@ mod tests {
             Primary::Install => "dev.btn_install",
             Primary::Read => "dev.btn_read",
             Primary::TryAgain => "dev.retry",
+            Primary::Write => "dev.btn_write",
+            Primary::Back => "dev.btn_back",
+            Primary::Dio => "dev.btn_dio",
         });
         vec![if page.writing() { word.to_string() } else { format!("{word} ▸") }]
+    }
+
+    /// What must be drawn whole: the state's buttons, and the sheet's
+    /// radio rows (a row past its width ends in `…`).
+    fn whole(page: &Page) -> Vec<String> {
+        let mut words = buttons(page);
+        words.extend(sheet::radio_words(page));
+        words
     }
 
     #[test]
@@ -3657,9 +5298,10 @@ mod tests {
         // The GUI's floor is 100×24: with its top bar and its footer the
         // page gets 22 rows from row 1, and 21 from row 2 under a pick's
         // banner (contract clause 4). Every state draws its frames whole
-        // and its buttons whole there, nothing outside its area, and its
-        // hint in 99 cells; the console page does the same at 72×24. Spaces
-        // are left out of the comparison: a wide glyph's second cell is one.
+        // and its buttons and the sheet's rows whole there, nothing outside
+        // its area, and its hint in 99 cells; the console page does the same
+        // at 72×24. Spaces are left out of the comparison: a wide glyph's
+        // second cell is one.
         let Ok(code) = std::env::var(FLOOR_LOCALE) else { return };
         rust_i18n::set_locale(&code);
         crate::kit::theme::pin_modern_terminal();
@@ -3678,7 +5320,7 @@ mod tests {
                 assert!(first.trim_matches('#').trim().is_empty(), "{code}, {name}: the first row is the host's:\n{all}");
                 assert_eq!(all.matches('╭').count(), all.matches('╰').count(), "{code}, {name} in {area:?}: frames whole:\n{all}");
                 assert!(!all.contains("dev."), "{code}, {name}: a key with no words:\n{all}");
-                for label in buttons(&page) {
+                for label in whole(&page) {
                     let whole = packed.contains(&label.replace(' ', ""));
                     assert!(whole, "{code}, {name} in {area:?}: {label:?} whole:\n{all}");
                 }
@@ -3694,7 +5336,7 @@ mod tests {
                 assert_eq!(tops, bottoms, "{code}, {name} at 72×24: frames whole:\n{all}");
             }
             let packed = all.replace(' ', "");
-            for label in buttons(&page) {
+            for label in whole(&page) {
                 let whole = packed.contains(&label.replace(' ', ""));
                 assert!(whole, "{code}, {name} at 72×24: {label:?} whole:\n{all}");
             }
@@ -3762,7 +5404,8 @@ mod tests {
             e.boards(boards);
         });
         let full = page.hint_line(true, 200);
-        assert_eq!(full, "←→ player · s show on the player · a update all · c count · d details · Esc library");
+        let all = "←→ player · s show on the player · a update all · c count · o advanced · d details · Esc library";
+        assert_eq!(full, all);
         assert_eq!(page.hint_line(true, 60), "←→ player · c count · d details · Esc library", "s and a first");
         assert_eq!(page.hint_line(true, 10), "←→ player · d details · Esc library", "never the switch, Details or Esc");
     }
