@@ -2121,6 +2121,7 @@ dev:
   refused_not_answering: "%{port} muss dafür den Status des Players beantworten."
   refused_nothing: "Kein Player braucht ein Update."
   refused_gone: "%{port} ist nicht mehr eingesteckt."
+  refused_moved: "Der nächste Schreibvorgang für %{port} hat sich vor dem Ja geändert; nichts geschrieben — die Karte noch einmal ansehen."
   letting_ports_go: "USB-Ports werden freigegeben…"
   dur_s: "%{s} s"
   dur_min: "%{m} min %{s} s"

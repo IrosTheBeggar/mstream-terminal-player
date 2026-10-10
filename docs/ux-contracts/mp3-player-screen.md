@@ -650,7 +650,13 @@ comes from the cache, or a download, beside them.
     again ("the board's bootloader always answers"), and it is read again
     at the `y`: changed since it was picked, nothing is written, the busy
     row says so, and the card's next write names the new build for the
-    gate to show. At the defaults today's gates are unchanged.
+    gate to show. The `y` hands the worker the image the gate named, and
+    no other: a board whose next write moved before the worker read the
+    yes — a choice or a Reset sent a moment before, not yet on the card, or
+    a mode a listen just brought — is not written; the busy row says so
+    ("COM3's next write changed before the yes; nothing written — look at
+    its card again.") and the card shows the board as it is, for the gate
+    to be drawn again. At the defaults today's gates are unchanged.
 40. **The restart loop.** After a write the worker listens 6 s for the
     board's first line. Heard the ROM's reset banner twice or more and the
     firmware never (`engine::restart_loop`, the one rule — to verify on a
@@ -1018,3 +1024,13 @@ line: they are lines a script reads.
   choice never breaks the frame. Choosing *Another release* with ↓ opens
   its list (card 07's rule), so ↓ ↓ from the pin stops in the list: Esc,
   then ↓, reaches *A local build*.
+- **2026-10-10 — Revised after review.** `--release <tag>` with no
+  `--flash-mode` took the release's QIO build on every board, a board whose
+  ELF says DIO included — and `--release v0.8.0` put QIO back on a DIO
+  board the pin alone would have kept on DIO — against clause 43. The
+  flags' choice now follows each board's mode once its listen has read the
+  ELF, where the release has that build; `--flash-mode` named is obeyed as
+  named. And the gate's `y` now names its image to the worker (clause 39):
+  a choice or a Reset still on its way when the gate was drawn — the
+  worker can be a scan of the ports behind — could otherwise write an
+  image the gate never showed.

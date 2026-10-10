@@ -53,6 +53,8 @@ pub(crate) use self::page::hosted;
 pub(crate) use self::page::{LET_GO, Page, draw_waiting};
 #[cfg(test)]
 pub(crate) use self::{desk::Cmd as WorkerCmd, page::Ends};
+#[cfg(test)]
+pub(crate) use self::firmware::{Image as WorkerImage, Mode as WorkerMode};
 
 #[derive(Args)]
 pub struct DeviceArgs {
@@ -347,6 +349,7 @@ fn lines(args: FlashArgs) -> i32 {
     let setup = desk::Setup {
         supply: firmware::net(),
         preset: args.preset(),
+        flags_mode: args.flash_mode,
         port: args.port.clone(),
         timing: desk::Timing::REAL,
         firmware_first: true,
@@ -598,7 +601,9 @@ fn lines_on(
             return 1;
         }
         current = Some(board.port().to_string());
-        if cmds.send(Cmd::Write { port: board.port().to_string(), erase: mode.erase }).is_err() {
+        // No gate: the write is whatever the board's next write is.
+        let write = Cmd::Write { port: board.port().to_string(), erase: mode.erase, image: None };
+        if cmds.send(write).is_err() {
             return 1;
         }
     }
@@ -881,21 +886,23 @@ mod tests {
     /// `device flash --yes` on the fake, the image `version` its firmware:
     /// the exit code, stdout, stderr, and the fake for its trace.
     fn flashed(spec: &str, version: &str, port: Option<&str>, mode: Mode) -> (i32, String, String, Fake) {
-        flashed_with(spec, version, None, port, mode)
+        flashed_with(spec, version, (None, None), port, mode)
     }
 
-    /// …with the flags' image (`--release`, `--firmware`, `--flash-mode`).
+    /// …with `--release` and `--flash-mode`, handed to the worker as
+    /// [`lines`] hands them.
     fn flashed_with(
         spec: &str,
         version: &str,
-        preset: Option<Image>,
+        (release, flash_mode): (Option<&str>, Option<Build>),
         port: Option<&str>,
         mode: Mode,
     ) -> (i32, String, String, Fake) {
         let fake = Fake::new(spec).with_pace(Duration::from_millis(60));
         let setup = desk::Setup {
             supply: Arc::new(Shelf::new(version)),
-            preset,
+            preset: Image::from_flags(None, release.map(str::to_string), flash_mode),
+            flags_mode: flash_mode,
             port: port.map(str::to_string),
             timing: QUICK,
             firmware_first: true,
@@ -1012,8 +1019,8 @@ mod tests {
     #[test]
     fn flash_yes_with_another_release_says_what_it_writes_and_still_measures_against_the_pin() {
         let _en = crate::setup::tests::in_locale("en");
-        let release = Some(Image::release("v0.7.0", Build::Qio));
-        let (code, out, err, fake) = flashed_with("old:v0.6.0", "v0.8.0", release.clone(), None, ONE);
+        let release = (Some("v0.7.0"), None);
+        let (code, out, err, fake) = flashed_with("old:v0.6.0", "v0.8.0", release, None, ONE);
         assert_eq!(code, 0, "{out}{err}");
         let plan = "plan: update, no erase · v0.7.0 in QIO, release v0.7.0 — not this player's release (v0.8.0)\n";
         assert!(out.contains(plan), "{out}");
@@ -1023,6 +1030,28 @@ mod tests {
         let (code, out, _, _) = flashed_with("old:v0.8.0", "v0.8.0", release, None, ONE);
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("plan: go back, no erase · v0.7.0 in QIO, release v0.7.0"), "{out}");
+    }
+
+    #[test]
+    fn flash_yes_with_a_release_and_no_mode_keeps_a_board_on_dio_and_a_named_mode_is_obeyed() {
+        let _en = crate::setup::tests::in_locale("en");
+        // `--release` alone: the board's own build, as its ELF says.
+        let dio = "old:v0.6.0/mode=dio";
+        let (code, out, err, fake) = flashed_with(dio, "v0.8.0", (Some("v0.7.0"), None), None, ONE);
+        assert_eq!(code, 0, "{out}{err}");
+        let plan = "plan: update, no erase · v0.7.0 in DIO, release v0.7.0";
+        assert!(out.contains(plan), "never QIO put back:\n{out}");
+        assert_eq!(fake.version_on("FAKE0").as_deref(), Some("v0.7.0"));
+        // The pin's tag alone: the pin in the board's own build.
+        let on_v070 = "old:v0.7.0/mode=dio";
+        let (code, out, err, _) = flashed_with(on_v070, "v0.8.0", (Some("v0.8.0"), None), None, ONE);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.contains("plan: update, no erase · v0.8.0 in DIO\n"), "{out}");
+        // `--flash-mode qio` named: QIO, as asked, and the plan says so.
+        let named = (Some("v0.7.0"), Some(Build::Qio));
+        let (code, out, err, _) = flashed_with(dio, "v0.8.0", named, None, ONE);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.contains("plan: update, no erase · v0.7.0 in QIO, release v0.7.0"), "{out}");
     }
 
     #[test]

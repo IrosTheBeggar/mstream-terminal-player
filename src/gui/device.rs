@@ -363,7 +363,7 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use crate::device::{Ends, WorkerCmd};
+    use crate::device::{Ends, WorkerCmd, WorkerImage, WorkerMode};
     use crate::kit::theme::th;
     use crate::tui::app::{App, SonicSide};
 
@@ -449,7 +449,8 @@ mod tests {
 
     /// The write the gate's yes asks for.
     fn write_com3() -> WorkerCmd {
-        WorkerCmd::Write { port: "COM3".into(), erase: Some(false) }
+        let image = Some(WorkerImage::Pin(WorkerMode::Qio));
+        WorkerCmd::Write { port: "COM3".into(), erase: Some(false), image }
     }
 
     /// The tab with the write under way: Enter opens the gate, `y` writes.

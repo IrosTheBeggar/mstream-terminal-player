@@ -184,6 +184,9 @@ struct Gate {
     /// Update all's boards left out for their own next write: the port, and
     /// what that write is.
     left_out: Vec<(String, String)>,
+    /// What this gate names, for one board: its yes asks the worker for this
+    /// image and no other (desk::Cmd::Write).
+    image: Option<Image>,
 }
 
 /// One board in Update all's gate.
@@ -311,6 +314,7 @@ pub(crate) fn run(args: FlashArgs) -> i32 {
     let setup = desk::Setup {
         supply: super::firmware::net(),
         preset: args.preset(),
+        flags_mode: args.flash_mode,
         port: args.port.clone(),
         timing: desk::Timing::REAL,
         firmware_first: false,
@@ -348,6 +352,7 @@ pub(crate) fn hosted() -> Page {
     let setup = desk::Setup {
         supply: super::firmware::net(),
         preset: None,
+        flags_mode: None,
         port: None,
         timing: desk::Timing::REAL,
         firmware_first: false,
@@ -656,6 +661,7 @@ impl Page {
             Refusal::NotAnswering => t!("dev.refused_not_answering", port = name),
             Refusal::NothingToUpdate => t!("dev.refused_nothing"),
             Refusal::Changed { was, now: built } => t!("dev.log_changed", port = name, was = was, now = built),
+            Refusal::Moved => t!("dev.refused_moved", port = name),
             Refusal::Image(e) => e.text().into(),
         };
         self.say(text, false, Some(now + NOTE_FOR));
@@ -876,6 +882,7 @@ impl Page {
             erase_any,
             chosen: chosen.is_some(),
             left_out: Vec::new(),
+            image: Some(board.write_image()),
         };
         self.gate_words(&mut gate, board);
         Some(gate)
@@ -977,6 +984,7 @@ impl Page {
             erase_any: false,
             chosen: false,
             left_out,
+            image: None,
         };
         (gate.rows.len() >= 2).then_some(gate)
     }
@@ -1092,7 +1100,7 @@ impl Page {
                 self.lock = Some(Lock::All { ports, at: 0, current: None });
             }
         } else if let Some(port) = gate.port
-            && self.send(Cmd::Write { port: port.clone(), erase: Some(gate.erase) })
+            && self.send(Cmd::Write { port: port.clone(), erase: Some(gate.erase), image: gate.image })
         {
             let (kind, from, chosen) = (gate.kind, gate.from, gate.chosen);
             self.lock = Some(Lock::One { port, kind, from, seen: false, chosen });
@@ -3434,7 +3442,7 @@ mod tests {
             press(&mut page, KeyCode::Enter);
         }
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }], "y writes, never erasing an update");
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)], "y writes, never erasing an update");
         assert!(page.writing(), "locked from the yes");
     }
 
@@ -3455,7 +3463,7 @@ mod tests {
         press(&mut page, KeyCode::Enter);
         assert!(window(&mut page).contains("│ Go back from v0.8.0 to v0.7.0?"), "{}", window(&mut page));
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+        assert_eq!(ends.sent(), [wrote(Image::release("v0.7.0", Mode::Qio), false)]);
 
         // A write that left the board restarting: its cure is the primary.
         let mut board = fixtures::read("COM3", Some(fixtures::ours("v0.8.0")));
@@ -3580,7 +3588,7 @@ mod tests {
         press(&mut page, KeyCode::Enter);
         assert!(window(&mut page).contains("Write v0.8.0 again?"), "behind the gate again");
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)]);
     }
 
     #[test]
@@ -3631,7 +3639,7 @@ mod tests {
         assert!(frame.contains("[ ] Erase the whole flash first"), "{frame}");
         assert!(frame.contains("Not erased: what UIFlow kept on the board stays"), "{frame}");
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)]);
         // A blank board: the same gate, saying so.
         let (mut page, _ends) = page_with(|e| e.boards(vec![read("COM3", None)]));
         assert!(window(&mut page).contains("✗ Nothing installed"));
@@ -3680,7 +3688,7 @@ mod tests {
             // Gone back, Done's one line says what was replaced — never that
             // the board was updated.
             press(&mut page, KeyCode::Char('y'));
-            assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+            assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)]);
             ends.writing(62);
             ends.written();
             page.pump();
@@ -3702,7 +3710,7 @@ mod tests {
         press(&mut page, KeyCode::Char('d'));
         press(&mut page, KeyCode::Enter);
         press(&mut page, KeyCode::Char('y'));
-        let write = Cmd::Write { port: "COM3".into(), erase: Some(false) };
+        let write = wrote(Image::Pin(Mode::Qio), false);
         assert_eq!(ends.sent(), [Cmd::Facts { port: "COM3".into() }, write.clone()]);
         ends.tell([Event::Refused { port: Some("COM3".into()), why: Refusal::Busy, write: false }]);
         page.pump();
@@ -3731,7 +3739,7 @@ mod tests {
         press(&mut page, KeyCode::Enter);
         assert!(window(&mut page).contains("Replace v0.6.0-37-g221d99d with v0.8.0?"));
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }], "ours: never an erase");
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), false)], "ours: never an erase");
     }
 
     /// The card for a board whose status `change` made.
@@ -4127,6 +4135,7 @@ mod tests {
         let setup = desk::Setup {
             supply: std::sync::Arc::new(crate::device::firmware::tests::Shelf::new("v0.8.0")),
             preset: None,
+            flags_mode: None,
             port: None,
             timing: crate::device::desk::tests::QUICK,
             firmware_first: false,
@@ -4165,6 +4174,11 @@ mod tests {
     /// `board` with the sheet's next write `image` in hand.
     fn with_next(board: Board, image: Image) -> Board {
         fixtures::chosen(board, image, By::Sheet, None)
+    }
+
+    /// The write the gate's yes sent: the image it named, and its erase.
+    fn wrote(image: Image, erase: bool) -> Cmd {
+        Cmd::Write { port: "COM3".into(), erase: Some(erase), image: Some(image) }
     }
 
     /// The choice Apply sent.
@@ -4327,7 +4341,7 @@ mod tests {
         assert!(frame.contains("◂ Keep it as it is      Write in DIO  │"), "{frame}");
         assert_eq!(page.hint(), "y write · Enter or Esc cancel");
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Dio), false)]);
         let mut writing = with_next(on_pin_qio(), Image::Pin(Mode::Dio));
         writing.work = Work::Writing { phase: Phase::Writing, pct: Some(41) };
         ends.tell([Event::Board(writing)]);
@@ -4552,7 +4566,7 @@ mod tests {
         assert!(frame.contains("A step back in a beta: v0.7.0 may not read every setting v0.8.0 saved."), "{frame}");
         assert!(frame.contains("◂ Keep v0.8.0      Go back  │"), "{frame}");
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+        assert_eq!(ends.sent(), [wrote(Image::release("v0.7.0", Mode::Qio), false)]);
         let mut writing = with_next(on_pin_qio(), Image::release("v0.7.0", Mode::Qio));
         writing.work = Work::Writing { phase: Phase::Writing, pct: Some(20) };
         ends.tell([Event::Board(writing)]);
@@ -4794,7 +4808,7 @@ mod tests {
         assert!(frame.contains("◂ Keep v0.7.0      Erase and update  │"), "{frame}");
         assert_eq!(page.hint(), "y erase and update · Enter or Esc cancel");
         press(&mut page, KeyCode::Char('y'));
-        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(true) }]);
+        assert_eq!(ends.sent(), [wrote(Image::Pin(Mode::Qio), true)]);
     }
 
     #[test]

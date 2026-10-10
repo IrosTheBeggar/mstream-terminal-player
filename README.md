@@ -731,8 +731,9 @@ pins (its tag and the checksums of both its builds sit in `src/device/firmware.r
 player releases), `--release <tag>` for another one (checked against that release's
 `SHA256SUMS`), or `--firmware` for a file — a release's `*-full.bin`, or a build folder with
 its `firmware.factory.bin` (a PlatformIO `.pio/build/` with one environment in it will do).
-`--flash-mode qio|dio` picks the build of the pin or of `--release`; a file has its own, read
-from its header, and a flag that says otherwise is refused. A board is always measured against
+`--flash-mode qio|dio` picks the build of the pin or of `--release`; without it each board keeps
+the mode its ELF says, where the release has that build. A file has its own, read from its
+header, and a flag that says otherwise is refused. A board is always measured against
 the pin, whatever the flags choose: they are what the next write puts on it, and the `plan:`
 line says so (`v0.7.0 in QIO, release v0.7.0 — not this player's release`). Downloads are kept
 under the player's cache directory, each release's beside the `SHA256SUMS` it was checked

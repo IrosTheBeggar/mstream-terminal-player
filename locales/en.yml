@@ -2121,6 +2121,7 @@ dev:
   refused_not_answering: "%{port} has to answer the player's status for that."
   refused_nothing: "No player needs an update."
   refused_gone: "%{port} is not plugged in any more."
+  refused_moved: "%{port}'s next write changed before the yes; nothing written — look at its card again."
   letting_ports_go: "letting the USB ports go…"
   dur_s: "%{s} s"
   dur_min: "%{m} min %{s} s"

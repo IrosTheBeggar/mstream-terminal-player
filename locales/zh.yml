@@ -2121,6 +2121,7 @@ dev:
   refused_not_answering: "这需要 %{port} 能应答播放器的状态查询。"
   refused_nothing: "没有播放器需要更新。"
   refused_gone: "%{port} 已不再连接。"
+  refused_moved: "%{port} 的下一次写入在确认前已更改；未写入任何内容 — 请再看一下它的卡片。"
   letting_ports_go: "正在释放 USB 端口…"
   dur_s: "%{s} 秒"
   dur_min: "%{m} 分 %{s} 秒"

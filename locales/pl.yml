@@ -2121,6 +2121,7 @@ dev:
   refused_not_answering: "%{port} musi do tego odpowiadać na pytanie o stan odtwarzacza."
   refused_nothing: "Żaden odtwarzacz nie wymaga aktualizacji."
   refused_gone: "%{port} nie jest już podłączony."
+  refused_moved: "Następny zapis %{port} zmienił się przed potwierdzeniem; nic nie zapisano — spójrz jeszcze raz na kartę."
   letting_ports_go: "zwalniam porty USB…"
   dur_s: "%{s} s"
   dur_min: "%{m} min %{s} s"

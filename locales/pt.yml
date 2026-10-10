@@ -2121,6 +2121,7 @@ dev:
   refused_not_answering: "%{port} tem de responder ao estado do leitor para isso."
   refused_nothing: "Nenhum leitor precisa de atualização."
   refused_gone: "%{port} já não está ligado."
+  refused_moved: "A próxima escrita de %{port} mudou antes do sim; nada foi escrito — veja de novo o seu cartão."
   letting_ports_go: "a libertar as portas USB…"
   dur_s: "%{s} s"
   dur_min: "%{m} min %{s} s"

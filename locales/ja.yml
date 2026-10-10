@@ -2121,6 +2121,7 @@ dev:
   refused_not_answering: "そのためには %{port} がプレーヤーの状態問い合わせに応答する必要があります。"
   refused_nothing: "更新が必要なプレーヤーはありません。"
   refused_gone: "%{port} はもう接続されていません。"
+  refused_moved: "%{port} の次の書き込みが「はい」の前に変わりました。何も書き込んでいません — カードをもう一度確認してください。"
   letting_ports_go: "USB ポートを解放中…"
   dur_s: "%{s} 秒"
   dur_min: "%{m} 分 %{s} 秒"

@@ -173,7 +173,9 @@ impl Image {
     /// outranks a tag, and the mode applies to the pin or the tag (a file
     /// has its own, checked against the flag before anything starts). A tag
     /// with no mode is its release's own image: QIO where it has both, the
-    /// one it has otherwise (v0.5.0's is DIO).
+    /// one it has otherwise (v0.5.0's is DIO) — until a board's ELF says
+    /// it runs DIO, when the worker moves that board's copy to DIO
+    /// (desk::Setup::flags_mode).
     pub fn from_flags(firmware: Option<PathBuf>, release: Option<String>, mode: Option<Mode>) -> Option<Image> {
         match (firmware, release, mode) {
             (Some(path), _, _) => Some(Image::Local(path)),
