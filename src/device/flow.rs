@@ -16,7 +16,7 @@ use rust_i18n::t;
 
 use super::DeviceError;
 use super::engine::{BAUDS, Engine, Link, Report};
-use super::firmware::{AppDesc, Firmware};
+use super::firmware::{AppDesc, Firmware, Place, place};
 use super::ports::Candidate;
 
 /// What the pieces report as they go.
@@ -64,8 +64,11 @@ impl Phase {
 pub(crate) enum Kind {
     /// Nothing of ours on the board: a blank one, or other firmware.
     Install { found: Option<String> },
-    /// Our firmware, another version.
+    /// Our firmware, an older version (or one the order cannot place).
     Update { from: String },
+    /// Our firmware, newer than the target (a later release, a build past
+    /// it): the write goes back, and is never called an update.
+    Back { from: String },
     /// Our firmware, this very version — allowed, and a no-op on the wire
     /// (the engine skips bytes the board already holds).
     Same,
@@ -84,6 +87,7 @@ impl Plan {
         let kind = match &self.kind {
             Kind::Install { .. } => "install",
             Kind::Update { .. } => "update",
+            Kind::Back { .. } => "go back",
             Kind::Same => "same version again",
         };
         format!("{kind}, {}", if self.erase { "erase first" } else { "no erase" })
@@ -97,6 +101,9 @@ impl Plan {
 pub(crate) fn plan(on_board: Option<&AppDesc>, target: &str, asked: Option<bool>) -> Plan {
     let kind = match on_board {
         Some(desc) if desc.is_ours() && desc.version == target => Kind::Same,
+        Some(desc) if desc.is_ours() && place(&desc.version, target) == Place::Newer => {
+            Kind::Back { from: desc.version.clone() }
+        }
         Some(desc) if desc.is_ours() => Kind::Update { from: desc.version.clone() },
         Some(desc) => Kind::Install { found: Some(desc.project.clone()) },
         None => Kind::Install { found: None },
@@ -280,6 +287,12 @@ mod tests {
         assert!(plan(Some(&ours("v0.4.0")), "v0.5.0", Some(true)).erase, "--erase wins");
         assert!(!plan(None, "v0.5.0", Some(false)).erase, "--no-erase wins");
         assert_eq!(older.describe(), "update, no erase");
+        // The real Core2 of 2026-10-10, a build past the pin: writing the
+        // pin goes back, and the line --yes prints says so.
+        let ahead = plan(Some(&ours("v0.8.0-5-g4e94418")), "v0.8.0", None);
+        assert_eq!(ahead, Plan { kind: Kind::Back { from: "v0.8.0-5-g4e94418".into() }, erase: false });
+        assert_eq!(ahead.describe(), "go back, no erase", "a step back is never an update");
+        assert_eq!(plan(Some(&ours("v0.9.0")), "v0.8.0", None).kind, Kind::Back { from: "v0.9.0".into() });
         assert_eq!(blank.describe(), "install, erase first");
         assert_eq!(on_board_text(Some(&ours("v0.4.0"))), "mstream-mp3-player v0.4.0");
         assert!(on_board_text(None).contains("nothing"));

@@ -2105,6 +2105,7 @@ dev:
   gate_do_back: "Wróć"
   gate_do_all: "Zaktualizuj wszystkie"
   note_updated: "Właśnie zaktualizowano z %{from}. Karta SD nie była ruszana."
+  note_replaced: "Właśnie zastąpiono %{from}. Karta SD nie była ruszana."
   note_again: "Właśnie zapisano ponownie. Karta SD nie była ruszana."
   note_installed: "Właśnie zainstalowano. Dalej: twoja muzyka w /music na karcie FAT32."
   note_all_one: "%{port} zapisany i sprawdzony w %{secs} s"

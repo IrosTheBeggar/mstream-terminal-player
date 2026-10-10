@@ -361,8 +361,10 @@ comes from the cache, or a download, beside them.
     v0.8.0 · just written`) and its card as the firmware reports it; the
     busy line says it in one dim line — "Updated from v0.7.0 just now. The
     SD card was not touched.", after a first install "Installed just now.
-    Next: your music in /music on a FAT32 card." The board's own first
-    line, the plan and the checksum are in the log.
+    Next: your music in /music on a FAT32 card." Only a step forward is
+    "Updated": after *Go back* (or over a version the order cannot place)
+    the line is "Replaced v0.9.0 just now. The SD card was not touched."
+    The board's own first line, the plan and the checksum are in the log.
 
 ### Several boards
 
@@ -438,18 +440,19 @@ comes from the cache, or a download, beside them.
     board, and `--erase` / `--no-erase` set the gate's erase (clause 23).
 32. **`--yes` keeps its printed steps.** One board: today's lines — the
     firmware, the board as its bootloader read it, the plan, the percents,
-    Done and the board's first line — with no gate (the flags answer it). A
-    port another program holds is said on stderr with the serial-monitor
-    hint, exit 1. Several boards with no `--port`: a refusal listing each
-    board with its verdict and card, exit 1 — unless `--all`, which updates
-    every board running an older release of ours, one after another, with
-    the steps under each port, stopping at the first failure (exit 1), and
-    names the boards it left alone (`updated 2 of 2 · skipped: COM9 (not
-    answering)`). `--all` needs `--yes` and refuses `--port`, `--erase` and
-    `--firmware`. `device list` asks every board at once with no reset and
-    prints today's line, then its verdict and its card; `--ports` prints
-    today's lines and opens nothing; exit 0 with boards, 1 with none, 2 when
-    the ports cannot be listed.
+    Done and the board's first line — with no gate (the flags answer it);
+    the plan calls a write over a newer version of ours `go back`, never
+    `update`. A port another program holds is said on stderr with the
+    serial-monitor hint, exit 1. Several boards with no `--port`: a refusal
+    listing each board with its verdict and card, exit 1 — unless `--all`,
+    which updates every board running an older release of ours, one after
+    another, with the steps under each port, stopping at the first failure
+    (exit 1), and names the boards it left alone (`updated 2 of 2 · skipped:
+    COM9 (not answering)`). `--all` needs `--yes` and refuses `--port`,
+    `--erase` and `--firmware`. `device list` asks every board at once with
+    no reset and prints today's line, then its verdict and its card;
+    `--ports` prints today's lines and opens nothing; exit 0 with boards, 1
+    with none, 2 when the ports cannot be listed.
 
 ## Wording
 

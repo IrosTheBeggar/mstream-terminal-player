@@ -2105,6 +2105,7 @@ dev:
   gate_do_back: "戻す"
   gate_do_all: "すべて更新"
   note_updated: "%{from} から更新しました。SD カードには触れていません。"
+  note_replaced: "%{from} を置き換えました。SD カードには触れていません。"
   note_again: "再書き込みしました。SD カードには触れていません。"
   note_installed: "インストールしました。次は: FAT32 カードの /music に音楽を。"
   note_all_one: "%{port} を書き込み・確認しました (%{secs} 秒)"

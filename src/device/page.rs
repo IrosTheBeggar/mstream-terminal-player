@@ -35,7 +35,7 @@ use super::FlashArgs;
 use super::board::{Board, Card, CardKind, CardUnknown, Count, CountWhy, Free, Heard, Primary, Probe, Tracks};
 use super::board::{Verdict, Work, Written, gb};
 use super::desk::{self, All, Cmd, Event, LogKind, Refusal};
-use super::firmware::{Origin, Target};
+use super::firmware::{Origin, Place, Target, place};
 use super::flow::Phase;
 use super::listen::{self, IdentifyWhy};
 use super::{DeviceError, engine};
@@ -415,9 +415,14 @@ impl Page {
         let text = match &board.written {
             Some(Written::Done { skipped: true, .. }) => t!("dev.done_skipped").to_string(),
             Some(Written::Done { install: true, .. }) => t!("dev.note_installed").to_string(),
-            Some(Written::Done { .. }) => match (kind, from) {
-                (Kind::Update | Kind::Replace | Kind::Back, Some(from)) => {
+            Some(Written::Done { version, .. }) => match (kind, from) {
+                // Only a step forward is an update. Going back from a newer
+                // version, or over one the order cannot place, replaced it.
+                (Kind::Update | Kind::Replace, Some(from)) if place(&from, version) == Place::Older => {
                     t!("dev.note_updated", from = from).to_string()
+                }
+                (Kind::Update | Kind::Replace | Kind::Back, Some(from)) => {
+                    t!("dev.note_replaced", from = from).to_string()
                 }
                 _ => t!("dev.note_again").to_string(),
             },
@@ -3028,6 +3033,18 @@ mod tests {
             let frame = window(&mut page);
             assert!(frame.contains(&format!("Go back from {fw} to v0.8.0?")), "{frame}");
             assert!(frame.contains(&format!("◂ Keep {fw}")) && frame.contains("Go back  │"), "{frame}");
+            // Gone back, Done's one line says what was replaced — never that
+            // the board was updated.
+            press(&mut page, KeyCode::Char('y'));
+            assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+            ends.writing(62);
+            ends.written();
+            page.pump();
+            assert!(!page.writing());
+            let frame = window(&mut page);
+            let note = rows(&frame, 28, 1)[0].trim().to_string();
+            assert_eq!(note, format!("Replaced {fw} just now. The SD card was not touched."), "{frame}");
+            assert!(!frame.contains("Updated"), "a step back is never an update:\n{frame}");
         }
     }
 

@@ -2105,6 +2105,7 @@ dev:
   gate_do_back: "Voltar"
   gate_do_all: "Atualizar todos"
   note_updated: "Atualizado de %{from} agora mesmo. O cartão SD não foi tocado."
+  note_replaced: "%{from} substituído agora mesmo. O cartão SD não foi tocado."
   note_again: "Escrito de novo agora mesmo. O cartão SD não foi tocado."
   note_installed: "Instalado agora mesmo. A seguir: a sua música em /music num cartão FAT32."
   note_all_one: "%{port} escrito e verificado em %{secs} s"

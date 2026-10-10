@@ -2105,6 +2105,7 @@ dev:
   gate_do_back: "退回"
   gate_do_all: "全部更新"
   note_updated: "刚刚从 %{from} 更新。没有改动 SD 卡。"
+  note_replaced: "刚刚替换了 %{from}。没有改动 SD 卡。"
   note_again: "刚刚再次写入。没有改动 SD 卡。"
   note_installed: "刚刚安装。下一步：把音乐放进 FAT32 卡的 /music。"
   note_all_one: "%{port} 已写入并校验，用时 %{secs} 秒"
