@@ -232,7 +232,16 @@ pub(crate) struct Page {
 pub(crate) fn run(args: FlashArgs) -> i32 {
     let engine: desk::Shared = std::sync::Arc::from(engine::from_env());
     // Not the firmware first: the boards are judged while the image comes.
-    let (cmds, events) = desk::spawn(engine, args.source(), args.port.clone(), desk::Timing::REAL, false);
+    // The flags are each board's next write, not what it is measured
+    // against: that stays the pin.
+    let setup = desk::Setup {
+        supply: super::firmware::net(),
+        preset: args.preset(),
+        port: args.port.clone(),
+        timing: desk::Timing::REAL,
+        firmware_first: false,
+    };
+    let (cmds, events) = desk::spawn(engine, setup);
     let mut page = Page::with_channels(cmds, events, args.erase_asked());
     let code = crate::admin::run_tui_as(&mut page, "mStream MP3 Player");
     // Ctrl+C leaves the loop at once: a read under way still restarts its
@@ -249,8 +258,14 @@ pub(crate) fn run(args: FlashArgs) -> i32 {
 #[cfg(not(test))]
 pub(crate) fn hosted() -> Page {
     let engine: desk::Shared = std::sync::Arc::from(engine::from_env());
-    let source = super::firmware::Source::Pinned;
-    let (cmds, events) = desk::spawn(engine, source, None, desk::Timing::REAL, false);
+    let setup = desk::Setup {
+        supply: super::firmware::net(),
+        preset: None,
+        port: None,
+        timing: desk::Timing::REAL,
+        firmware_first: false,
+    };
+    let (cmds, events) = desk::spawn(engine, setup);
     Page::with_channels(cmds, events, None)
 }
 
@@ -318,6 +333,9 @@ impl Page {
             Event::Log { port, text, kind } => self.log_at(now, port, text, kind),
             Event::Failed(e) => self.list_failed = Some(e),
             Event::Released => self.released = true,
+            // The Advanced options sheet's: every image the worker gets, a
+            // local path vetted, the release list.
+            Event::Image { .. } | Event::Vetted { .. } | Event::Releases(_) => {}
         }
     }
 
@@ -527,6 +545,8 @@ impl Page {
             Refusal::Busy => t!("dev.refused_busy", port = name),
             Refusal::NotAnswering => t!("dev.refused_not_answering", port = name),
             Refusal::NothingToUpdate => t!("dev.refused_nothing"),
+            Refusal::Changed { was, now: built } => t!("dev.log_changed", port = name, was = was, now = built),
+            Refusal::Image(e) => e.text().into(),
         };
         self.say(text, false, Some(now + NOTE_FOR));
     }
@@ -656,7 +676,14 @@ impl Page {
     /// The gate for `board`: its primary's (`again` false) or Details'
     /// Write again.
     fn gate_for(&self, board: &Board, again: bool) -> Option<Gate> {
-        let to = self.target.as_ref()?.version.clone();
+        // A next write chosen (the flags, or the page's own after a restart
+        // loop) names its own version and direction: the gate never says
+        // the pin for an image that is not the pin.
+        let chosen = board.pending().filter(|_| !again);
+        let to = match chosen {
+            Some(next) => next.version()?,
+            None => self.target.as_ref()?.version.clone(),
+        };
         let from = board.version().map(str::to_string);
         let read_name = match &board.probe {
             Some(Ok(Probe { on_board: Some(desc), .. })) if !desc.is_ours() => Some(desc.project.clone()),
@@ -679,6 +706,17 @@ impl Page {
                 _ if board.ours() => Kind::Again,
                 _ => Kind::Install,
             }
+        } else if chosen.is_some() {
+            match board.primary() {
+                Some(Primary::Update) => Kind::Update,
+                Some(Primary::Back) => Kind::Back,
+                Some(Primary::Install) => Kind::Install,
+                // A local build, or a version the order cannot place,
+                // replaces what is on the board; the same version in
+                // another mode is written again.
+                _ if from.as_deref() != Some(to.as_str()) => Kind::Replace,
+                _ => Kind::Again,
+            }
         } else {
             match board.verdict {
                 Verdict::Update => Kind::Update,
@@ -689,7 +727,7 @@ impl Page {
         };
         let erase = match kind {
             Kind::Install => self.erase_asked.unwrap_or(true),
-            _ => self.erase_asked.unwrap_or(false),
+            _ => self.erase_asked.unwrap_or(chosen.is_some_and(|next| next.erase)),
         };
         let name = match (&board.verdict, read_name) {
             (Verdict::Other { name }, _) => Some(name.clone()),
@@ -998,6 +1036,9 @@ impl Page {
             Some(Primary::Install) => Some("dev.hint_enter_install"),
             Some(Primary::Read) => Some("dev.hint_enter_read"),
             Some(Primary::TryAgain) => Some("dev.hint_enter_retry"),
+            Some(Primary::Write) => Some("dev.hint_enter_write"),
+            Some(Primary::Back) => Some("dev.hint_enter_back"),
+            Some(Primary::Dio) => Some("dev.hint_enter_dio"),
             None => None,
         };
         if let Some(key) = enter {
@@ -2035,6 +2076,9 @@ fn card_layout(page: &Page, board: &Board, content_w: u16) -> Vec<Row> {
             Primary::Install => "dev.btn_install",
             Primary::Read => "dev.btn_read",
             Primary::TryAgain => "dev.retry",
+            Primary::Write => "dev.btn_write",
+            Primary::Back => "dev.btn_back",
+            Primary::Dio => "dev.btn_dio",
         });
         match page.writing_port() {
             // The kit's disabled frame: dim, no ▸, why in its tooltip.
@@ -2627,6 +2671,7 @@ impl Ends {
                 origin: "release v0.8.0, downloaded earlier".into(),
                 bytes: 2_431_000,
                 kind: Origin::Cached,
+                mode: Some(crate::device::firmware::Mode::Qio),
             },
         ]);
         self.tell(boards.into_iter().map(Event::Board));
@@ -2670,6 +2715,8 @@ impl Ends {
             skipped: false,
             install: false,
             boot: Some("mstream-mp3-player v0.8.0 (commit 4e94418, 2026-10-10), ELF 11c35a4a".into()),
+            image: crate::device::firmware::tests::pin_facts("v0.8.0", crate::device::firmware::Mode::Qio),
+            looping: None,
         });
         board.work = Work::Listening;
         self.tell([Event::Board(fixtures::judged(board))]);
@@ -2844,6 +2891,48 @@ mod tests {
         press(&mut page, KeyCode::Char('y'));
         assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }], "y writes, never erasing an update");
         assert!(page.writing(), "locked from the yes");
+    }
+
+    #[test]
+    fn a_chosen_next_write_names_its_own_version_at_the_gate_never_the_pins() {
+        use crate::device::board::{By, Looping, Next, NextState};
+        use crate::device::firmware::{Image, Mode};
+        let _en = english();
+        // The flags chose v0.7.0 for a board on the pin: the chip stays the
+        // pin's, and the primary and the gate say where the write goes.
+        let mut board = fixtures::old("COM3", "v0.8.0");
+        let state = NextState::Getting { done: 0, total: None };
+        board.next = Some(Next { image: Image::release("v0.7.0", Mode::Qio), erase: false, by: By::Flags, state });
+        let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::judged(board)]));
+        let frame = window(&mut page);
+        assert!(frame.contains("✓ Up to date · v0.8.0") && frame.contains("Go back ▸"), "{frame}");
+        assert_eq!(page.hint(), "Enter go back · d details · Esc library");
+        press(&mut page, KeyCode::Enter);
+        assert!(window(&mut page).contains("│ Go back from v0.8.0 to v0.7.0?"), "{}", window(&mut page));
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [Cmd::Write { port: "COM3".into(), erase: Some(false) }]);
+
+        // A write that left the board restarting: its cure is the primary.
+        let mut board = fixtures::read("COM3", Some(fixtures::ours("v0.8.0")));
+        let image = crate::device::firmware::tests::pin_facts("v0.8.0", Mode::Qio);
+        let looping = Some(Looping { restarts: 3, secs: 6 });
+        board.written = Some(Written::Done {
+            version: "v0.8.0".into(),
+            took: Duration::from_secs(41),
+            skipped: false,
+            install: false,
+            boot: None,
+            image,
+            looping,
+        });
+        let cure = crate::device::firmware::tests::pin_facts("v0.8.0", Mode::Dio);
+        let state = NextState::Ready(cure);
+        board.next = Some(Next { image: Image::Pin(Mode::Dio), erase: false, by: By::Loop, state });
+        let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::judged(board)]));
+        assert!(window(&mut page).contains("Write the DIO image ▸"), "{}", window(&mut page));
+        assert_eq!(page.hint(), "Enter write the DIO image · d details · Esc library");
+        press(&mut page, KeyCode::Enter);
+        assert!(window(&mut page).contains("│ Write v0.8.0 again?"), "the same version, its other build");
     }
 
     #[test]
@@ -3485,12 +3574,16 @@ mod tests {
         let _en = english();
         // The desk on the fake engine (no serial port): an old board heard,
         // the gate's yes, the write, the board heard again.
-        let image = crate::device::desk::tests::image("page", "v0.8.0");
         let fake = engine::fake::Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60));
         let trace = fake.trace();
-        let source = crate::device::firmware::Source::Local(image.clone());
-        let timing = crate::device::desk::tests::QUICK;
-        let (cmds, events) = desk::spawn(std::sync::Arc::new(fake), source, None, timing, false);
+        let setup = desk::Setup {
+            supply: std::sync::Arc::new(crate::device::firmware::tests::Shelf::new("v0.8.0")),
+            preset: None,
+            port: None,
+            timing: crate::device::desk::tests::QUICK,
+            firmware_first: false,
+        };
+        let (cmds, events) = desk::spawn(std::sync::Arc::new(fake), setup);
         let mut page = Page::with_channels(cmds, events, None);
         let until = |page: &mut Page, what: &str, done: &dyn Fn(&Page) -> bool| {
             let t0 = Instant::now();
@@ -3508,7 +3601,6 @@ mod tests {
         until(&mut page, "written and heard", &|p| {
             !p.writing() && p.shown().is_some_and(|b| b.verdict == Verdict::UpToDate && b.work == Work::Idle)
         });
-        let _ = std::fs::remove_file(&image);
         assert_eq!(*trace.lock().unwrap(), ["listen FAKE0", "open 921600", "restart", "listen FAKE0"]);
         assert!(window(&mut page).contains("✓ Up to date · v0.8.0 · just written"));
         page.let_go_within(Duration::from_secs(5));
@@ -3623,6 +3715,9 @@ mod tests {
             Primary::Install => "dev.btn_install",
             Primary::Read => "dev.btn_read",
             Primary::TryAgain => "dev.retry",
+            Primary::Write => "dev.btn_write",
+            Primary::Back => "dev.btn_back",
+            Primary::Dio => "dev.btn_dio",
         });
         vec![if page.writing() { word.to_string() } else { format!("{word} ▸") }]
     }

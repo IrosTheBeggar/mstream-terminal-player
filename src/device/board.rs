@@ -3,8 +3,12 @@
 //! firmware's `@status`, or its console's `L`, or nothing), what its
 //! bootloader said when it was read (only after a reset someone asked
 //! for), and from those the two answers the MP3 Player tab gives — the
-//! firmware's verdict against the target, and the SD card's state — with
-//! what the worker is doing with it now and how its last write went.
+//! firmware's verdict against the pin, and the SD card's state — with
+//! what the worker is doing with it now and how its last write went. Its
+//! next write is the pin in the board's own flash mode, read from its ELF,
+//! unless something chose otherwise for that one write ([`Next`]): the
+//! Advanced options sheet, the flags, or the page itself after a write that
+//! left the board restarting. A choice never moves the verdict.
 //!
 //! The worker sends the whole board each time any of it changes
 //! (desk::Event::Board), so a page draws from its last copy and never
@@ -16,7 +20,7 @@ use std::time::Duration;
 
 use super::DeviceError;
 use super::engine::DeviceInfo;
-use super::firmware::{AppDesc, Place, Target, place};
+use super::firmware::{AppDesc, ElfMode, Image, ImageFacts, Mode, Place, Target, elf_mode, place};
 use super::flow::Phase;
 use super::ports::Candidate;
 
@@ -204,13 +208,24 @@ pub(crate) enum Verdict {
     HalfWritten,
 }
 
-/// The card's primary, as the verdict decides it.
+/// The card's primary, as the verdict decides it — or, with a next write
+/// chosen, as that write's direction does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Primary {
     Update,
     Install,
     Read,
     TryAgain,
+    /// A chosen write that is neither a step forward nor back: the same
+    /// version in another mode, a local build, a version the order cannot
+    /// place. Write ▸.
+    Write,
+    /// A chosen write older than what the board runs: Go back ▸ — a step
+    /// back is never called an update.
+    Back,
+    /// The board keeps restarting after a write, and the page filled in its
+    /// cure: Write the DIO image ▸, through the gate like every write.
+    Dio,
 }
 
 /// What the worker is doing with the board now. One thing at a time per
@@ -285,11 +300,87 @@ pub(crate) enum Count {
 pub(crate) enum Written {
     /// Written and checked, the board restarted (its first line, when it
     /// said one in time). `install` over other firmware or a blank board.
-    Done { version: String, took: Duration, skipped: bool, install: bool, boot: Option<String> },
+    /// `image`: what went on — its version, build, source and the check it
+    /// passed, for Details' Written row. `looping`: the restart's listen
+    /// heard the ROM's banners again and again and never the firmware.
+    Done {
+        version: String,
+        took: Duration,
+        skipped: bool,
+        install: bool,
+        boot: Option<String>,
+        image: ImageFacts,
+        looping: Option<Looping>,
+    },
     /// It failed. `half`: the erase or the write had begun, so the board
     /// cannot start until it is written again (its ROM bootloader always
     /// answers); else nothing was touched. `pct` where the write stopped.
     Failed { error: DeviceError, half: bool, pct: Option<u8> },
+}
+
+/// A board that kept restarting after a write: how many restarts the
+/// listen heard, in how long (engine::restart_loop says when it is one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Looping {
+    pub restarts: usize,
+    pub secs: u64,
+}
+
+/// The board's next write when something chose it: one write long. Cleared
+/// by that write (done, not failed — Try again writes the same image), by
+/// Reset or Use defaults, and with the board when it is unplugged or the
+/// page is left; the flash mode outlives it in the board's own ELF.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Next {
+    pub image: Image,
+    /// Erase the whole flash first: the sheet's Erase box, for any write.
+    pub erase: bool,
+    pub by: By,
+    pub state: NextState,
+}
+
+/// Who chose a next write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum By {
+    /// The Advanced options sheet's Apply.
+    Sheet,
+    /// `device flash`'s flags: `--release`, `--firmware`, `--flash-mode`.
+    Flags,
+    /// The page, after a write left the board restarting: the same version
+    /// in DIO. Still only offered: the gate asks.
+    Loop,
+}
+
+/// The chosen image as the worker has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NextState {
+    /// Being read or downloaded: the bytes so far, and the total when the
+    /// server said.
+    Getting { done: u64, total: Option<u64> },
+    Ready(ImageFacts),
+    /// It could not be had, or is not one the page writes (an app alone, a
+    /// release without that build): why, in one line.
+    Failed(DeviceError),
+}
+
+impl Next {
+    pub fn facts(&self) -> Option<&ImageFacts> {
+        match &self.state {
+            NextState::Ready(facts) => Some(facts),
+            _ => None,
+        }
+    }
+
+    /// The version it writes: the image's own once read, else its tag.
+    pub fn version(&self) -> Option<String> {
+        self.facts().map(|f| f.version.clone()).or_else(|| self.image.tag().map(str::to_string))
+    }
+
+    /// The build it writes: the image's own once read, else the one asked
+    /// for.
+    pub fn mode(&self) -> Option<Mode> {
+        self.facts().and_then(|f| f.mode).or_else(|| self.image.mode())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -305,6 +396,9 @@ pub(crate) struct Board {
     pub work: Work,
     pub count: Count,
     pub written: Option<Written>,
+    /// Its next write, when something chose it ([`Board::pending`] says
+    /// whether it differs from the default).
+    pub next: Option<Next>,
 }
 
 impl Board {
@@ -318,6 +412,7 @@ impl Board {
             work: Work::Idle,
             count: Count::Idle,
             written: None,
+            next: None,
         }
     }
 
@@ -415,11 +510,64 @@ impl Board {
         }
     }
 
+    /// Its flash mode, from the ELF it reports against every release's
+    /// pair (and the images the player has had in hand): none for an ELF
+    /// the player has never seen — never a guess from the version.
+    pub fn mode(&self) -> Option<ElfMode> {
+        self.elf().and_then(elf_mode)
+    }
+
+    /// The build its next write takes when nothing chose one: DIO where its
+    /// ELF says DIO was chosen for it (a release that had both builds), so
+    /// Update ▸ and Update all never bring a restart loop back; QIO
+    /// otherwise — v0.5.0's DIO was no choice.
+    pub fn default_mode(&self) -> Mode {
+        match self.mode() {
+            Some(ElfMode { mode: Mode::Dio, choice: true, .. }) => Mode::Dio,
+            _ => Mode::Qio,
+        }
+    }
+
+    /// What its next write puts on it with nothing chosen: the pin, in its
+    /// own mode.
+    pub fn default_image(&self) -> Image {
+        Image::Pin(self.default_mode())
+    }
+
+    /// Its next write when something chose one that differs from the
+    /// default: a choice of the default is no choice (the flags'
+    /// `--flash-mode qio` on a QIO board, say).
+    pub fn pending(&self) -> Option<&Next> {
+        self.next.as_ref().filter(|next| next.erase || next.image != self.default_image())
+    }
+
+    /// What its next write puts on it.
+    pub fn write_image(&self) -> Image {
+        self.pending().map_or_else(|| self.default_image(), |next| next.image.clone())
+    }
+
+    /// It keeps restarting since its last write, and has not been heard
+    /// running since.
+    pub fn looping(&self) -> Option<&Looping> {
+        match &self.written {
+            Some(Written::Done { looping: Some(looping), .. }) => Some(looping),
+            _ => None,
+        }
+    }
+
     /// The card's one action, from the verdict — or Try again after a write
-    /// that failed, whatever the board said before it.
+    /// that failed, whatever the board said before it; or, with a next
+    /// write chosen, that write's direction. A board that keeps restarting
+    /// has none of its own: its cure is a next write the page fills in.
     pub fn primary(&self) -> Option<Primary> {
         if let Some(Written::Failed { .. }) = self.written {
             return Some(Primary::TryAgain);
+        }
+        if let Some(primary) = self.pending().and_then(|next| self.primary_for(next)) {
+            return Some(primary);
+        }
+        if self.looping().is_some() {
+            return None;
         }
         match self.verdict {
             Verdict::Update | Verdict::DevUpdate => Some(Primary::Update),
@@ -429,12 +577,54 @@ impl Board {
         }
     }
 
-    /// What Update all writes: our firmware behind the target, nothing
-    /// under way on it, and no failure to look at first.
+    /// A chosen write's primary, named by its direction against what the
+    /// board runs: none where nothing is known of it yet (the verdict's own
+    /// primary stands — Read the board ▸ for a silent one).
+    fn primary_for(&self, next: &Next) -> Option<Primary> {
+        if next.by == By::Loop {
+            return Some(Primary::Dio);
+        }
+        match self.verdict {
+            Verdict::Other { .. } | Verdict::Blank => return Some(Primary::Install),
+            Verdict::Update | Verdict::DevUpdate | Verdict::UpToDate | Verdict::Newer | Verdict::Unplaced => {}
+            _ => return None,
+        }
+        if next.image.is_local() {
+            return Some(Primary::Write);
+        }
+        let (Some(from), Some(to)) = (self.version(), next.version()) else { return Some(Primary::Write) };
+        Some(match place(from, &to) {
+            Place::Older => Primary::Update,
+            Place::Newer => Primary::Back,
+            Place::Same | Place::Unknown => Primary::Write,
+        })
+    }
+
+    /// What Update all writes: our firmware behind the pin, nothing under
+    /// way on it, and no failure to look at first.
     pub fn needs_update(&self) -> bool {
         matches!(self.verdict, Verdict::Update | Verdict::DevUpdate)
             && self.work == Work::Idle
             && !matches!(self.written, Some(Written::Failed { .. }))
+    }
+
+    /// Update all takes it: it needs an update, and no other release or
+    /// local build is chosen for it — that board is left out and named, its
+    /// own write to make from its tab.
+    pub fn in_update_all(&self) -> bool {
+        self.needs_update() && self.pending().is_none_or(|next| next.image.is_pin())
+    }
+
+    /// Needs an update, and its own next write leaves it out of Update all.
+    pub fn left_out(&self) -> bool {
+        self.needs_update() && !self.in_update_all()
+    }
+
+    /// The image Update all writes to it: the pin, in the mode chosen for
+    /// it, else its own.
+    pub fn update_image(&self) -> Image {
+        let chosen = self.pending().filter(|next| next.image.is_pin()).and_then(|next| next.image.mode());
+        Image::Pin(chosen.unwrap_or_else(|| self.default_mode()))
     }
 
     /// The SD card row: only what the running firmware just reported,
@@ -697,5 +887,99 @@ pub(crate) mod tests {
         assert_eq!(bare.serial(), None);
         bare.candidate.usb.serial_number = Some(String::new());
         assert_eq!(bare.serial(), None, "an empty serial is none");
+    }
+
+    /// `board` on `elf`, as `@status` says it.
+    fn on_elf(fw: &str, elf: &str) -> Board {
+        let mut status = status(fw);
+        status.elf = Some(elf.into());
+        heard(Heard::Status(status))
+    }
+
+    fn chosen(image: Image, by: By) -> Next {
+        let state = match &image {
+            Image::Pin(mode) => NextState::Ready(crate::device::firmware::tests::pin_facts("v0.8.0", *mode)),
+            _ => NextState::Getting { done: 0, total: None },
+        };
+        Next { image, erase: false, by, state }
+    }
+
+    #[test]
+    fn a_boards_mode_is_its_elfs_and_an_update_keeps_a_dio_that_was_chosen() {
+        let dio = on_elf("v0.7.0", "aa45f60e");
+        assert_eq!(dio.mode().map(|m| (m.mode, m.version)), Some((Mode::Dio, "v0.7.0".into())));
+        assert_eq!((dio.default_mode(), dio.default_image()), (Mode::Dio, Image::Pin(Mode::Dio)));
+        assert_eq!(dio.update_image(), Image::Pin(Mode::Dio), "Update all keeps it on DIO too");
+        let qio = on_elf("v0.8.0", "e127a6bf");
+        assert_eq!((qio.mode().map(|m| m.mode), qio.default_mode()), (Some(Mode::Qio), Mode::Qio));
+        // v0.5.0 ran DIO because nothing else existed: its update is QIO.
+        let old = on_elf("v0.5.0", "17352e55");
+        assert_eq!((old.mode().map(|m| m.mode), old.default_mode()), (Some(Mode::Dio), Mode::Qio));
+        let unknown = on_elf("v0.8.0-5-g4e94418", "be894f89");
+        assert_eq!((unknown.mode(), unknown.default_mode()), (None, Mode::Qio), "never a guess");
+        assert_eq!(heard(Heard::Silent).mode(), None);
+    }
+
+    #[test]
+    fn a_choice_names_its_primary_by_direction_and_never_moves_the_verdict() {
+        let primary = |fw: &str, image: Image| {
+            let mut board = on_elf(fw, "e127a6bf");
+            board.next = Some(chosen(image, By::Sheet));
+            (board.verdict.clone(), board.primary())
+        };
+        let release = |tag: &str| Image::release(tag, Mode::Qio);
+        assert_eq!(primary("v0.8.0", release("v0.7.0")), (Verdict::UpToDate, Some(Primary::Back)));
+        assert_eq!(primary("v0.6.0", release("v0.7.0")), (Verdict::Update, Some(Primary::Update)));
+        assert_eq!(primary("v0.8.0", Image::Pin(Mode::Dio)), (Verdict::UpToDate, Some(Primary::Write)), "a mode change");
+        assert_eq!(primary("v0.7.0", Image::Pin(Mode::Dio)), (Verdict::Update, Some(Primary::Update)));
+        let local = Image::Local("build".into());
+        assert_eq!(primary("v0.6.0", local.clone()), (Verdict::Update, Some(Primary::Write)), "a build is written, never an update");
+        // The default chosen is no choice: today's primary.
+        assert_eq!(primary("v0.8.0", Image::Pin(Mode::Qio)), (Verdict::UpToDate, None));
+        let mut blank = probed(None);
+        blank.next = Some(chosen(release("v0.7.0"), By::Sheet));
+        assert_eq!(blank.primary(), Some(Primary::Install));
+        let mut silent = heard(Heard::Silent);
+        silent.next = Some(chosen(local, By::Flags));
+        assert_eq!(silent.primary(), Some(Primary::Read), "nothing known of it: read it first");
+        let mut erase = on_elf("v0.8.0", "e127a6bf");
+        erase.next = Some(Next { erase: true, ..chosen(Image::Pin(Mode::Qio), By::Sheet) });
+        assert_eq!(erase.primary(), Some(Primary::Write), "the default, erased first, is a choice");
+    }
+
+    #[test]
+    fn a_board_that_keeps_restarting_offers_only_the_cure_the_page_filled_in() {
+        let mut board = probed(Some(desc("v0.8.0", AppDesc::OURS)));
+        let image = crate::device::firmware::tests::pin_facts("v0.8.0", Mode::Qio);
+        let looping = Some(Looping { restarts: 3, secs: 6 });
+        board.written = Some(Written::Done {
+            version: "v0.8.0".into(),
+            took: Duration::from_secs(40),
+            skipped: false,
+            install: false,
+            boot: None,
+            image,
+            looping,
+        });
+        board.verdict = board.judge(Some(&pin()));
+        assert_eq!(board.looping(), Some(&Looping { restarts: 3, secs: 6 }));
+        assert_eq!(board.primary(), None, "reset: the card stays gold, the cure waits in Advanced");
+        board.next = Some(chosen(Image::Pin(Mode::Dio), By::Loop));
+        assert_eq!(board.primary(), Some(Primary::Dio));
+        assert_eq!(board.verdict, Verdict::UpToDate, "the verdict is the pin's whatever runs");
+    }
+
+    #[test]
+    fn update_all_takes_a_board_with_a_mode_chosen_and_leaves_out_one_with_a_release() {
+        let mut moded = heard(Heard::Old { version: Some("v0.7.0".into()), elf: Some("63ee7a2b".into()) });
+        moded.next = Some(chosen(Image::Pin(Mode::Dio), By::Sheet));
+        assert!(moded.in_update_all() && !moded.left_out());
+        assert_eq!(moded.update_image(), Image::Pin(Mode::Dio), "the mode chosen for it");
+        let mut released = heard(Heard::Old { version: Some("v0.6.0".into()), elf: None });
+        released.next = Some(chosen(Image::release("v0.7.0", Mode::Qio), By::Sheet));
+        assert!(!released.in_update_all() && released.left_out());
+        assert_eq!(released.write_image(), Image::release("v0.7.0", Mode::Qio), "its own tab writes its own");
+        let current = heard(Heard::Status(status("v0.8.0")));
+        assert!(!current.in_update_all() && !current.left_out(), "up to date: neither");
     }
 }

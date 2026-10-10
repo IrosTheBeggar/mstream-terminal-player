@@ -706,17 +706,26 @@ Esc (or `K`) back to the Library. Opening the tab resets nothing; leaving it let
 (coming straight back waits a moment for that), and quitting the player waits for a board
 being read to restart. While a write runs the tab cannot be left; Ctrl+C, closing the window
 and, on macOS, Cmd-Q still quit, and leave the board half written. `--firmware`, `--release`,
-`--port`, `--erase` / `--no-erase` and `--yes` are the command line's alone; `device flash` on
-its own is the same page in a terminal of 72×24 or more.
+`--flash-mode`, `--port`, `--erase` / `--no-erase` and `--yes` are the command line's alone;
+`device flash` on its own is the same page in a terminal of 72×24 or more.
 
 The firmware comes from the firmware repository's GitHub Releases: the release this player
-pins (its tag and checksum sit in `src/device/firmware.rs`, bumped with player releases),
-`--release <tag>` for another one (checked against that release's `SHA256SUMS`), or
-`--firmware` for a file — a release's `*-full.bin`, or a build directory with its
-`firmware.factory.bin`. Downloads are kept under the player's cache directory and re-checked
-every time; `MSTREAM_FIRMWARE_BASE` points them at a mirror. `--erase` and `--no-erase` set the
-install warning's erase box (and an update's erase); `--yes` prints each step and writes
-without a screen, the flags answering the warning.
+pins (its tag and the checksums of both its builds sit in `src/device/firmware.rs`, bumped with
+player releases), `--release <tag>` for another one (checked against that release's
+`SHA256SUMS`), or `--firmware` for a file — a release's `*-full.bin`, or a build folder with
+its `firmware.factory.bin` (a PlatformIO `.pio/build/` with one environment in it will do).
+`--flash-mode qio|dio` picks the build of the pin or of `--release`; a file has its own, read
+from its header, and a flag that says otherwise is refused. A board is always measured against
+the pin, whatever the flags choose: they are what the next write puts on it, and the `plan:`
+line says so (`v0.7.0 in QIO, release v0.7.0 — not this player's release`). Downloads are kept
+under the player's cache directory, each release's beside the `SHA256SUMS` it was checked
+against, so a release downloaded once is written again without the network;
+`MSTREAM_FIRMWARE_BASE` points the downloads at a mirror (`{tag}` in it becomes the release's
+tag). `device releases` lists the firmware's releases — one request to GitHub's API, which
+`MSTREAM_FIRMWARE_API` can point elsewhere — newest first, with each one's date, its builds and
+what of it is on this computer; `--pre-releases` adds the pre-releases. `--erase` and
+`--no-erase` set the install warning's erase box (and an update's erase); `--yes` prints each
+step and writes without a screen, the flags answering the warning.
 
 `device list` asks each board what it runs over USB, all at once and with no reset (the port is
 opened with DTR and RTS held low, so the music on it plays on): the firmware's `@status` line —
@@ -726,14 +735,19 @@ its firmware against the pin (`v0.7.0, update to v0.8.0`) and its card (`card 38
 59.6 GB, 1,284 tracks`); a board that says nothing is `not answering`, and a port another
 program holds is `in use by another program`. With several boards, `--yes` still asks for
 `--port` — its refusal lists each board's firmware now — or `--all`, which updates every board
-running an older release of this firmware, one after another, stopping at the first failure;
-it never installs over other firmware, never erases and never goes back, and names the boards
-it left alone.
+running an older release of this firmware to the pin, one after another, each in the flash mode
+it runs (or the one `--flash-mode` names), stopping at the first failure; it never installs
+over other firmware, never erases and never goes back, and names the boards it left alone.
 
 The pinned release is v0.8.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
 ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
-`-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install, download
-that file from the release and write it with `--firmware`. It keeps the settings like any update.
+`-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install,
+`device flash --flash-mode dio` writes it. It keeps the settings like any update. A board's
+mode is read from the ELF id it reports, against every release's pair, so a Core2 on DIO stays
+on DIO through every update with nothing remembered anywhere; `device list` says `· DIO` beside
+its version. After a write, a board that prints the chip's reset banner again and again and
+never its firmware's first line is said to keep restarting, and its DIO image is offered —
+never written by itself.
 
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported
@@ -743,8 +757,10 @@ the running firmware's answers `status:<version>` (answers `@status`), `old:<ver
 then `L`), `silent:<version>` (ours, not running) and `chip` (a board that only shares the USB
 chip). Several boards are words separated by commas, and options after slashes script the rest:
 `status:v0.9.0/free=?,old:v0.7.0,chip/in=3` is three boards, the last plugged in three seconds
-on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field;
-src/device/engine.rs has the whole grammar).
+on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). `/mode=dio`
+runs a release's DIO build (its ELF id), `/elf=<hex>` any ELF, and `/loop=qio` is a Core2
+whose flash cannot run QIO: a QIO image written to it keeps it restarting. src/device/engine.rs
+has the whole grammar.
 
 ## Now playing
 

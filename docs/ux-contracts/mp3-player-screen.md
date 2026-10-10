@@ -544,8 +544,10 @@ line: they are lines a script reads.
   serial port is opened by `cargo test` (a Core2 may well be plugged in).
   The worker's own tests run it on the fake engine (`MSTREAM_DEVICE_FAKE`'s
   grammar: `status:`, `old:`, `silent:`, `chip`, `busy`, `/in=`, `/out=`,
-  `/held=`, and any `@status` field), whose trace says what was done to
-  each board.
+  `/held=`, `/mode=dio`, `/elf=`, `/loop=qio`, and any `@status` field),
+  whose trace says what was done to each board, and on a shelf of images
+  and a release list in GitHub's place (`firmware::tests::Shelf`): no test
+  reaches GitHub either.
 - Machine translations for the nine non-English locales, as everywhere;
   key names are never translated, and every new key sits on the same line
   of all ten files.

@@ -20,29 +20,46 @@
 //! and restarts the board it reset, a write is never cut — and then
 //! [`Event::Released`] says every port is free.
 //!
-//! Before the boards, the target: the pin's tag is known at once, so the
-//! boards are judged while the image downloads beside them (on a thread
-//! of its own); a write waits for the image, and never reaches a board's
-//! bootloader without it.
+//! Every board is measured against the pin, said at once ([`Event::Target`])
+//! and never moved: a choice, or a flag, decides what the next write puts
+//! on one board ([`Cmd::Choose`], board::Next), not whether a board is up
+//! to date. The images are the worker's: the page's own (the flags' choice,
+//! else the pin's QIO build) fetched as it starts, on a thread of its own,
+//! so the boards are judged while it downloads; any other — the pin's DIO
+//! build for a board that runs DIO, a release or a build chosen in the
+//! Advanced options sheet — when something needs it. A write waits for its
+//! image and never reaches a board's bootloader without it. The release
+//! list is asked of GitHub only when the page asks ([`Cmd::Releases`]), and
+//! kept for the visit.
 
 use std::cell::Cell;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rust_i18n::t;
 
 use super::DeviceError;
-use super::board::{Board, Count, CountWhy, Free, Heard, Probe, Verdict, Work, Written};
-use super::engine::{DeviceInfo, Engine};
-use super::firmware::{AppDesc, Firmware, Origin, Place, Source, Target, place};
+use super::board::{Board, By, Count, CountWhy, Free, Heard, Looping, Next, NextState, Probe, Verdict, Work, Written};
+use super::engine::{BOOT_LISTEN, DeviceInfo, Engine, restart_loop};
+use super::firmware::{AppDesc, Cached, Firmware, Image, ImageFacts, ListWhy, Mode, Origin, Place, Release, Supply};
+use super::firmware::{Target, header_line, merged_only, pin_target, place};
 use super::flow::{self, Kind, Phase, Plan, Stop};
 use super::listen::{self, Asked, Facts, IdentifyWhy, Waits};
 use super::ports::Candidate;
 
 /// The engine the worker and its jobs share.
 pub(crate) type Shared = Arc<dyn Engine>;
+
+/// How long the release list is kept once GitHub sent it: the visit's,
+/// unless the page stays open for long. A failure is never kept.
+const LIST_KEEP: Duration = Duration::from_secs(15 * 60);
+/// The ROM lines a restart that never reached the firmware puts in the log
+/// before it says how many more there were.
+const ROM_LOG: usize = 8;
 
 /// The worker's clocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +92,31 @@ impl Timing {
     };
 }
 
+/// What the worker starts with.
+pub(crate) struct Setup {
+    /// Where the images and the release list come from.
+    pub supply: Arc<dyn Supply>,
+    /// The flags' choice (`--release`, `--firmware`, `--flash-mode`): every
+    /// board's next write, until it is written or reset. None: each board's
+    /// own default, the pin in its own mode.
+    pub preset: Option<Image>,
+    /// `--port`: that board alone, listed or not.
+    pub port: Option<String>,
+    pub timing: Timing,
+    /// No board is looked at until the page's image is in hand — `--yes`,
+    /// which writes whatever it finds, prints its lines in today's order
+    /// and never touches a board for an image it cannot have.
+    pub firmware_first: bool,
+}
+
+/// A next write, as the sheet's Apply sends it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Choice {
+    pub image: Image,
+    /// Erase the whole flash first (the sheet's Erase box).
+    pub erase: bool,
+}
+
 /// What the page tells the worker. Boards are named by their port.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Cmd {
@@ -93,16 +135,38 @@ pub(crate) enum Cmd {
     /// Show on the player (`@identify <port>`): boards that answer
     /// `@status` only, never during a write.
     Identify { port: String },
-    /// Write the firmware to the board — after the gate's yes. `erase` as
-    /// the gate left it; none lets the board decide once its bootloader is
-    /// read (erase over anything that is not ours — `--yes` with no erase
-    /// flag). Waits for the image, and refused while another board is in
-    /// its bootloader.
+    /// Write the board's next image (board::Board::write_image: a choice,
+    /// else the pin in its own mode) — after the gate's yes. `erase` as the
+    /// gate left it; none lets the choice's Erase box, else the board,
+    /// decide once its bootloader is read (erase over anything that is not
+    /// ours — `--yes` with no erase flag). Waits for the image, and refused
+    /// while another board is in its bootloader. A local build is read
+    /// again first: changed since it was picked, the write is refused
+    /// ([`Refusal::Changed`]) and the board carries the new one.
     Write { port: String, erase: Option<bool> },
     /// Update all: every one of `ports` that still needs an update, one
-    /// after another, never erasing and never over anything but an older
-    /// release of ours; stops at the first failure.
+    /// after another, each with the pin in its own mode (or the one chosen
+    /// for it), never erasing and never over anything but an older release
+    /// of ours; stops at the first failure. A board whose next write is
+    /// another release or a local build is left out, and logged by name.
     UpdateAll { ports: Vec<String> },
+    /// The Advanced options sheet's Apply: the board's next write, one
+    /// write long — or, with none (Reset, Use defaults), its defaults
+    /// again. The image is had at once: a release downloaded, a local build
+    /// read and vetted (merged images only), and the board told whole as it
+    /// goes. Refused while the board is being written.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the sheet sends it: the page's half of Advanced options"))]
+    Choose { port: String, choice: Option<Choice> },
+    /// What a local path holds, for the sheet before Apply: read and
+    /// vetted on a thread, answered by [`Event::Vetted`].
+    #[cfg_attr(not(test), expect(dead_code, reason = "the sheet sends it: the page's half of Advanced options"))]
+    Vet { path: PathBuf },
+    /// The release list, for the sheet's Another release: one request to
+    /// GitHub, then kept for the visit; answered by [`Event::Releases`].
+    /// Asked again while a request is out, the one answer serves both.
+    /// (`device releases` asks the supply itself: no worker, no port.)
+    #[cfg_attr(not(test), expect(dead_code, reason = "the sheet sends it: the page's half of Advanced options"))]
+    Releases,
     /// Leave: listens let go at once, a read finishes and restarts its
     /// board, a write is never cut; then Released.
     Quit,
@@ -111,28 +175,40 @@ pub(crate) enum Cmd {
 /// What the worker tells the page, in the order things happen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
-    /// What every board is measured against — said first when the source
-    /// knows it (the pin, a release), and again once the image says.
+    /// What every board is measured against: the pin, said first, never
+    /// moved.
     Target(Target),
-    /// The image's download: bytes so far, and the total when the server
-    /// said.
+    /// The page's own image downloading (the flags' choice, else the pin's
+    /// QIO build): bytes so far, and the total when the server said.
     Download { done: u64, total: Option<u64> },
-    /// The image ready to write.
-    Firmware { version: String, origin: String, bytes: usize, kind: Origin },
-    /// The image could not be had: no write can start (the boards are read
-    /// all the same; a write asked for later tries again).
+    /// The page's own image ready to write.
+    Firmware { version: String, origin: String, bytes: usize, kind: Origin, mode: Option<Mode> },
+    /// The page's own image could not be had: a write that needs it cannot
+    /// start (the boards are read all the same; a write asked for later
+    /// tries again).
     FirmwareFailed(DeviceError),
+    /// Any image the worker gets — the page's own, the pin's other build,
+    /// a release or build chosen for a board — as it comes.
+    Image { image: Image, state: ImageState },
+    /// What a local path holds ([`Cmd::Vet`]): its facts, or why the sheet
+    /// cannot take it.
+    Vetted { path: PathBuf, result: Result<ImageFacts, DeviceError> },
+    /// The release list ([`Cmd::Releases`]), or why not with the releases
+    /// this computer can write offline.
+    Releases(Result<ReleaseList, ListFailed>),
     /// The watch looked: the boards' ports in the OS's order, and the
     /// other serial ports (the no-player card's "ports seen"). Said after
     /// the first look and whenever either changed.
     Watch { ports: Vec<String>, others: Vec<String> },
-    /// A board, whole, as it is now: arrived, heard, working, written.
+    /// A board, whole, as it is now: arrived, heard, working, written,
+    /// chosen for.
     Board(Board),
     /// A board unplugged (or, mid-write, gone once its job ended).
     Gone { port: String },
     /// A write reached the board's bootloader and read it: what it found,
-    /// and what it will do — for the log and `--yes`'s lines.
-    Plan { port: String, info: DeviceInfo, on_board: Option<AppDesc>, plan: Plan },
+    /// what it will do, and the image it writes — for the log and
+    /// `--yes`'s lines.
+    Plan { port: String, info: DeviceInfo, on_board: Option<AppDesc>, plan: Plan, image: ImageFacts },
     /// Show on the player's answer: the label on the board's screen, or
     /// why not.
     Identified { port: String, label: String, result: Result<(), IdentifyWhy> },
@@ -151,6 +227,29 @@ pub(crate) enum Event {
     /// After Quit: every port let go, every board the worker reset
     /// restarted. The worker has ended.
     Released,
+}
+
+/// An image as the worker has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ImageState {
+    /// Being read or downloaded.
+    Getting { done: u64, total: Option<u64> },
+    Ready(ImageFacts),
+    Failed(DeviceError),
+}
+
+/// GitHub's list, and when it was asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReleaseList {
+    pub releases: Vec<Release>,
+    pub asked: SystemTime,
+}
+
+/// The list did not come: why, and what can be written without it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListFailed {
+    pub why: ListWhy,
+    pub cached: Vec<Cached>,
 }
 
 /// How a log line is meant: a phase (the accent), a fact, a quiet line
@@ -177,6 +276,12 @@ pub(crate) enum Refusal {
     NotAnswering,
     /// Update all found no board that needs an update.
     NothingToUpdate,
+    /// The local build chosen changed since it was picked — rebuilt, or
+    /// replaced: the board carries the new one, and nothing was written
+    /// until the gate has shown it.
+    Changed { was: String, now: String },
+    /// The image chosen is one the page does not write (an app alone).
+    Image(DeviceError),
     /// The worker is letting go.
     Leaving,
 }
@@ -197,21 +302,12 @@ pub(crate) enum All {
 
 /// Start the worker. The page keeps the two channel ends; the worker ends
 /// once Quit (or the page's end dropped) has let every port go.
-/// `firmware_first`: no board is looked at until the image is in hand —
-/// `--yes`, which writes whatever it finds, prints its lines in today's
-/// order and never touches a board for an image it cannot have.
-pub(crate) fn spawn(
-    engine: Shared,
-    source: Source,
-    port: Option<String>,
-    timing: Timing,
-    firmware_first: bool,
-) -> (Sender<Cmd>, Receiver<Event>) {
+pub(crate) fn spawn(engine: Shared, setup: Setup) -> (Sender<Cmd>, Receiver<Event>) {
     let (cmd_tx, cmd_rx) = channel();
     let (event_tx, event_rx) = channel();
     std::thread::Builder::new()
         .name("mstream-desk".to_string())
-        .spawn(move || run(engine, source, port, timing, firmware_first, &cmd_rx, &event_tx))
+        .spawn(move || run(engine, setup, &cmd_rx, &event_tx))
         .expect("spawn the device worker");
     (cmd_tx, event_rx)
 }
@@ -221,9 +317,11 @@ enum Note {
     Log { port: String, text: String, kind: LogKind },
     Work { port: String, id: u64, work: Work },
     Counted { port: String, id: u64, pct: u8 },
-    Plan { port: String, id: u64, info: DeviceInfo, on_board: Option<AppDesc>, plan: Plan },
+    Plan { port: String, id: u64, info: DeviceInfo, on_board: Option<AppDesc>, plan: Plan, image: ImageFacts },
     Ended { port: String, id: u64, end: End },
-    Fetched(Result<Firmware, DeviceError>),
+    Progress { image: Image, done: u64, total: Option<u64> },
+    Fetched { image: Image, result: Result<Firmware, DeviceError> },
+    Listed(Result<ReleaseList, ListFailed>),
 }
 
 /// How a job ended.
@@ -233,7 +331,7 @@ enum End {
     Read(Result<Probe, DeviceError>),
     Count(Result<u64, (CountWhy, bool)>),
     Identify { label: String, result: Result<(), IdentifyWhy> },
-    Written(Result<Done, Failure>),
+    Written(Box<Result<Done, Failure>>),
     /// Told to stop before it learned anything.
     Stopped,
 }
@@ -245,6 +343,8 @@ struct Done {
     install: bool,
     boot: Option<String>,
     info: DeviceInfo,
+    image: ImageFacts,
+    looping: Option<Looping>,
 }
 
 enum Failure {
@@ -278,11 +378,12 @@ struct Job {
 }
 
 /// A write asked for and not started yet.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Queued {
     erase: Option<bool>,
     /// Update all's: only over an older release of ours.
     guard: bool,
+    image: Image,
 }
 
 struct Slot {
@@ -294,8 +395,10 @@ struct Slot {
     queued: Option<Queued>,
 }
 
+/// An image in the worker's hands. One that could not be had is asked for
+/// again by the next thing that needs it (its reason went to the page).
 enum Fw {
-    Fetching,
+    Getting { done: u64, total: Option<u64> },
     Ready(Arc<Firmware>),
     Failed,
 }
@@ -309,14 +412,21 @@ struct AllRun {
 
 struct Desk {
     engine: Shared,
-    source: Source,
+    supply: Arc<dyn Supply>,
+    preset: Option<Image>,
+    /// The flags' choice, else the pin's QIO build: fetched first, and what
+    /// Download, Firmware and FirmwareFailed are about.
+    page_image: Image,
     scope: Option<String>,
     timing: Timing,
     events: Sender<Event>,
     notes_tx: Sender<Note>,
     notes: Receiver<Note>,
     target: Option<Target>,
-    firmware: Fw,
+    images: HashMap<Image, Fw>,
+    /// GitHub's list, kept for the visit, and a request out for it.
+    listed: Option<(Instant, ReleaseList)>,
+    listing: bool,
     slots: Vec<Slot>,
     others: Vec<String>,
     /// The first look at the ports is done.
@@ -330,26 +440,24 @@ struct Desk {
 
 /// The worker's whole life. Every `send` may fail once the page is gone;
 /// the page's end dropped is a Quit.
-pub(crate) fn run(
-    engine: Shared,
-    source: Source,
-    scope: Option<String>,
-    timing: Timing,
-    firmware_first: bool,
-    cmds: &Receiver<Cmd>,
-    events: &Sender<Event>,
-) {
+pub(crate) fn run(engine: Shared, setup: Setup, cmds: &Receiver<Cmd>, events: &Sender<Event>) {
     let (notes_tx, notes) = channel();
+    let page_image = setup.preset.clone().unwrap_or(Image::Pin(Mode::Qio));
+    let firmware_first = setup.firmware_first;
     let mut desk = Desk {
         engine,
-        target: source.target(),
-        source,
-        scope: scope.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
-        timing,
+        supply: setup.supply,
+        preset: setup.preset,
+        page_image,
+        scope: setup.port.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
+        timing: setup.timing,
         events: events.clone(),
         notes_tx,
         notes,
-        firmware: Fw::Fetching,
+        target: pin_target(),
+        images: HashMap::new(),
+        listed: None,
+        listing: false,
         slots: Vec::new(),
         others: Vec::new(),
         watched: false,
@@ -362,7 +470,7 @@ pub(crate) fn run(
     if let Some(target) = desk.target.clone() {
         desk.tell(Event::Target(target));
     }
-    desk.fetch();
+    desk.fetch(desk.page_image.clone());
     let mut page = true;
     loop {
         if page {
@@ -381,7 +489,7 @@ pub(crate) fn run(
             desk.note(note);
         }
         let due = desk.last_scan.is_none_or(|at| at.elapsed() >= desk.timing.watch);
-        let may_look = !firmware_first || matches!(desk.firmware, Fw::Ready(_));
+        let may_look = !firmware_first || matches!(desk.images.get(&desk.page_image), Some(Fw::Ready(_)));
         if !desk.quitting && due && may_look {
             desk.scan();
         }
@@ -406,12 +514,18 @@ impl Desk {
         self.slots.iter().position(|s| s.board.port().eq_ignore_ascii_case(port))
     }
 
-    /// The board on `port` judged again and told whole.
+    /// The board on `port` judged again and told whole. A board that runs
+    /// DIO and is behind the pin has the pin's DIO build fetched for it
+    /// now, so Update's yes rarely waits for it.
     fn show(&mut self, i: usize) {
         let target = self.target.clone();
         let board = &mut self.slots[i].board;
         board.verdict = board.judge(target.as_ref());
         let board = board.clone();
+        let own = board.default_image();
+        if board.pending().is_none() && board.needs_update() && !self.images.contains_key(&own) {
+            self.fetch(own);
+        }
         self.tell(Event::Board(board));
     }
 
@@ -424,67 +538,195 @@ impl Desk {
             .map(|s| s.board.port())
     }
 
-    // ── The image ───────────────────────────────────────────────────────────
+    // ── The images ──────────────────────────────────────────────────────────
 
-    /// The image, fetched on a thread of its own: a download the first
-    /// time, the cache after, a file's read.
-    fn fetch(&mut self) {
-        self.firmware = Fw::Fetching;
+    /// An image, had on a thread of its own: a download the first time, the
+    /// cache after, a file's read. Asked for while it comes, it comes once.
+    fn fetch(&mut self, image: Image) {
+        if matches!(self.images.get(&image), Some(Fw::Getting { .. })) {
+            return;
+        }
+        self.images.insert(image.clone(), Fw::Getting { done: 0, total: None });
         self.log(None, Phase::Firmware.text(), LogKind::Phase);
-        let source = self.source.clone();
-        let (events, notes) = (self.events.clone(), self.notes_tx.clone());
+        self.tell(Event::Image { image: image.clone(), state: ImageState::Getting { done: 0, total: None } });
+        let (supply, notes) = (self.supply.clone(), self.notes_tx.clone());
         std::thread::Builder::new()
             .name("mstream-firmware".to_string())
             .spawn(move || {
-                let result = source.resolve(&mut |done, total| {
-                    let _ = events.send(Event::Download { done, total });
+                let result = supply.resolve(&image, &mut |done, total| {
+                    let _ = notes.send(Note::Progress { image: image.clone(), done, total });
                 });
-                let _ = notes.send(Note::Fetched(result));
+                let _ = notes.send(Note::Fetched { image, result });
             })
             .expect("spawn the firmware fetch");
     }
 
-    fn fetched(&mut self, result: Result<Firmware, DeviceError>) {
+    /// A download moved: the page hears it, and a board waiting for this
+    /// image hears it at each whole percent.
+    fn progress(&mut self, image: Image, done: u64, total: Option<u64>) {
+        if !matches!(self.images.get(&image), Some(Fw::Getting { .. })) {
+            return;
+        }
+        self.images.insert(image.clone(), Fw::Getting { done, total });
+        if image == self.page_image {
+            self.tell(Event::Download { done, total });
+        }
+        self.tell(Event::Image { image: image.clone(), state: ImageState::Getting { done, total } });
+        let pct = |done: u64, total: Option<u64>| total.filter(|t| *t > 0).map(|t| done * 100 / t);
+        for i in 0..self.slots.len() {
+            let Some(next) = &mut self.slots[i].board.next else { continue };
+            if next.image != image {
+                continue;
+            }
+            let moved = match next.state {
+                NextState::Getting { done: was, total: had } => pct(was, had) != pct(done, total),
+                _ => false,
+            };
+            if moved {
+                next.state = NextState::Getting { done, total };
+                self.show(i);
+            }
+        }
+    }
+
+    fn fetched(&mut self, image: Image, result: Result<Firmware, DeviceError>) {
         match result {
             Ok(firmware) => {
-                let target = self.source.target_of(&firmware);
-                self.tell(Event::Firmware {
-                    version: firmware.version.clone(),
-                    origin: firmware.origin.clone(),
-                    bytes: firmware.bytes(),
-                    kind: firmware.kind,
-                });
-                let kb = firmware.bytes() / 1024;
-                let line = format!("firmware: {} ({}, {kb} KB)", firmware.version, firmware.origin);
-                self.log(None, line, LogKind::Fact);
-                self.firmware = Fw::Ready(Arc::new(firmware));
-                // The boards judged again first: whoever has heard the new
-                // target has heard every verdict it changed.
-                if self.target.as_ref() != Some(&target) {
-                    self.target = Some(target.clone());
-                    for i in 0..self.slots.len() {
+                let facts = firmware.facts.clone();
+                self.log(None, flow::firmware_line(&facts), LogKind::Fact);
+                if let Some(line) = header_line(&facts) {
+                    self.log(None, line, LogKind::Quiet);
+                }
+                self.images.insert(image.clone(), Fw::Ready(Arc::new(firmware)));
+                if image == self.page_image {
+                    self.tell(Event::Firmware {
+                        version: facts.version.clone(),
+                        origin: facts.origin.clone(),
+                        bytes: facts.bytes,
+                        kind: facts.kind,
+                        mode: facts.mode,
+                    });
+                }
+                self.tell(Event::Image { image: image.clone(), state: ImageState::Ready(facts.clone()) });
+                for i in 0..self.slots.len() {
+                    if let Some(next) = &mut self.slots[i].board.next
+                        && next.image == image
+                    {
+                        next.state = next_state(&facts, next.by);
                         self.show(i);
                     }
-                    self.tell(Event::Target(target));
                 }
             }
             Err(e) => {
-                self.firmware = Fw::Failed;
+                self.images.insert(image.clone(), Fw::Failed);
                 self.log(None, e.text(), LogKind::Fail);
-                self.tell(Event::FirmwareFailed(e.clone()));
+                if image == self.page_image {
+                    self.tell(Event::FirmwareFailed(e.clone()));
+                }
+                self.tell(Event::Image { image: image.clone(), state: ImageState::Failed(e.clone()) });
                 // The writes that waited for it fail with its reason: no
                 // board was touched.
+                let current = self.all.as_ref().and_then(|run| run.ports.get(run.at).cloned());
+                let mut all_failed = false;
                 for i in 0..self.slots.len() {
-                    if self.slots[i].queued.take().is_some() {
+                    let mut changed = false;
+                    if let Some(next) = &mut self.slots[i].board.next
+                        && next.image == image
+                    {
+                        next.state = NextState::Failed(e.clone());
+                        changed = true;
+                    }
+                    if self.slots[i].queued.as_ref().is_some_and(|q| q.image == image) {
+                        self.slots[i].queued = None;
                         let board = &mut self.slots[i].board;
                         board.work = Work::Idle;
                         board.written = Some(Written::Failed { error: e.clone(), half: false, pct: None });
+                        all_failed |= current.as_deref() == Some(board.port());
+                        changed = true;
+                    }
+                    if changed {
                         self.show(i);
                     }
                 }
-                self.all_step(false, Some(e));
+                if all_failed {
+                    self.all_step(false, Some(e));
+                }
             }
         }
+    }
+
+    // ── The choices ─────────────────────────────────────────────────────────
+
+    /// Board `i`'s next write: `image` — or, when it is the board's default
+    /// and nothing else is asked (no erase, not the flags'), none at all.
+    /// The image is had now: a local build the sheet applies read again, a
+    /// release downloaded, one in hand at once.
+    fn choose(&mut self, i: usize, image: Image, erase: bool, by: By) {
+        let board = &self.slots[i].board;
+        if !erase && by != By::Flags && image == board.default_image() {
+            self.slots[i].board.next = None;
+            return;
+        }
+        // A file may have been rebuilt since it was last read. The flags'
+        // was read as the worker started, and every yes reads it again.
+        let coming = matches!(self.images.get(&image), Some(Fw::Getting { .. }));
+        if by == By::Sheet && image.is_local() && !coming {
+            self.images.remove(&image);
+        }
+        let state = match self.images.get(&image) {
+            Some(Fw::Ready(firmware)) => next_state(&firmware.facts, by),
+            Some(Fw::Getting { done, total }) => NextState::Getting { done: *done, total: *total },
+            Some(Fw::Failed) | None => {
+                self.fetch(image.clone());
+                NextState::Getting { done: 0, total: None }
+            }
+        };
+        self.slots[i].board.next = Some(Next { image, erase, by, state });
+    }
+
+    // ── The release list ────────────────────────────────────────────────────
+
+    /// The list: the one kept for the visit, else one request on a thread
+    /// of its own. A failure says why, with what this computer has.
+    fn releases(&mut self) {
+        if let Some((at, list)) = &self.listed
+            && at.elapsed() < LIST_KEEP
+        {
+            return self.tell(Event::Releases(Ok(list.clone())));
+        }
+        if self.listing {
+            return;
+        }
+        self.listing = true;
+        let (supply, notes) = (self.supply.clone(), self.notes_tx.clone());
+        std::thread::Builder::new()
+            .name("mstream-releases".to_string())
+            .spawn(move || {
+                let result = match supply.releases() {
+                    Ok(releases) => Ok(ReleaseList { releases, asked: SystemTime::now() }),
+                    Err(why) => Err(ListFailed { why, cached: supply.cached() }),
+                };
+                let _ = notes.send(Note::Listed(result));
+            })
+            .expect("spawn the release list");
+    }
+
+    fn listed(&mut self, result: Result<ReleaseList, ListFailed>) {
+        self.listing = false;
+        match &result {
+            Ok(list) => {
+                self.log(None, t!("dev.log_releases", n = list.releases.len()).to_string(), LogKind::Fact);
+                self.listed = Some((Instant::now(), list.clone()));
+            }
+            Err(failed) => {
+                let mut line = failed.why.text();
+                if let Some(detail) = failed.why.detail() {
+                    line.push_str(&format!(" ({detail})"));
+                }
+                self.log(None, line, LogKind::Fail);
+            }
+        }
+        self.tell(Event::Releases(result));
     }
 
     // ── The ports ───────────────────────────────────────────────────────────
@@ -557,6 +799,11 @@ impl Desk {
             };
             self.slots.push(Slot { board: Board::new(candidate.clone()), job: None, present: true, queued: None });
             let at = self.slots.len() - 1;
+            // The flags' choice is every board's next write, each its own
+            // to write or reset.
+            if let Some(preset) = self.preset.clone() {
+                self.choose(at, preset, false, By::Flags);
+            }
             self.show(at);
             self.listen(at, wait);
             changed = true;
@@ -615,7 +862,13 @@ impl Desk {
                 if self.all.is_some() || self.slots[i].job.as_ref().is_some_and(|j| j.kind.bootloader()) {
                     return self.refuse(&port, Refusal::Busy, true);
                 }
-                self.queue(i, Queued { erase, guard: false });
+                let board = &self.slots[i].board;
+                let image = board.write_image();
+                let erase = erase.or_else(|| board.pending().filter(|next| next.erase).map(|_| true));
+                if image.is_local() && !self.read_again(i, &image) {
+                    return;
+                }
+                self.queue(i, Queued { erase, guard: false, image });
             }
             Cmd::UpdateAll { ports } => {
                 if let Some(busy) = self.in_bootloader() {
@@ -623,10 +876,17 @@ impl Desk {
                     let why = Refusal::OneAtATime { busy };
                     return self.tell(Event::Refused { port: None, why, write: true });
                 }
-                let wanted: Vec<String> = ports
-                    .iter()
-                    .filter_map(|p| self.find(p))
-                    .filter(|i| self.slots[*i].present && self.slots[*i].board.needs_update())
+                let named: Vec<usize> =
+                    ports.iter().filter_map(|p| self.find(p)).filter(|i| self.slots[*i].present).collect();
+                for i in named.iter().copied().filter(|i| self.slots[*i].board.left_out()) {
+                    let board = &self.slots[i].board;
+                    let what = board.pending().map(next_words).unwrap_or_default();
+                    let line = t!("dev.log_all_left", port = board.port(), what = what).to_string();
+                    self.log(Some(board.port()), line, LogKind::Fact);
+                }
+                let wanted: Vec<String> = named
+                    .into_iter()
+                    .filter(|i| self.slots[*i].board.in_update_all())
                     .map(|i| self.slots[i].board.port().to_string())
                     .collect();
                 if wanted.is_empty() {
@@ -637,6 +897,21 @@ impl Desk {
                 self.all = Some(AllRun { ports: wanted, at: 0, passed: Vec::new(), since: Instant::now() });
                 self.all_turn();
             }
+            Cmd::Choose { port, choice } => {
+                let Some(i) = self.board_for(&port, false) else { return };
+                let writing = self.slots[i].queued.is_some()
+                    || self.slots[i].job.as_ref().is_some_and(|j| j.kind == JobKind::Write);
+                if writing {
+                    return self.refuse(&port, Refusal::Busy, false);
+                }
+                match choice {
+                    Some(choice) => self.choose(i, choice.image, choice.erase, By::Sheet),
+                    None => self.slots[i].board.next = None,
+                }
+                self.show(i);
+            }
+            Cmd::Vet { path } => self.vet(path),
+            Cmd::Releases => self.releases(),
         }
     }
 
@@ -652,6 +927,73 @@ impl Desk {
             self.refuse(port, Refusal::NoBoard, write);
         }
         found
+    }
+
+    /// The gate's yes on a local build: the file read again here — a
+    /// build folder may have been rebuilt since it was picked — before the
+    /// write is queued. A different version or ELF than the gate showed is
+    /// refused, with the board carrying the new facts for the gate to show;
+    /// a file that cannot be read now fails the write with nothing touched.
+    fn read_again(&mut self, i: usize, image: &Image) -> bool {
+        let port = self.slots[i].board.port().to_string();
+        let shown = self.slots[i].board.pending().and_then(Next::facts);
+        let shown = shown.map(|f| (f.version.clone(), f.elf.clone()));
+        let result = self.supply.resolve(image, &mut |_, _| {});
+        let firmware = match result {
+            Ok(firmware) => firmware,
+            Err(_) => {
+                // Unreadable now: the queued write reads it once more and
+                // fails with the reason, nothing touched.
+                self.images.insert(image.clone(), Fw::Failed);
+                return true;
+            }
+        };
+        let facts = firmware.facts.clone();
+        let by = self.slots[i].board.pending().map_or(By::Flags, |next| next.by);
+        if let Some(next) = &mut self.slots[i].board.next
+            && next.image == *image
+        {
+            next.state = next_state(&facts, by);
+        }
+        if by == By::Sheet
+            && let Err(e) = merged_only(&facts)
+        {
+            self.show(i);
+            self.refuse(&port, Refusal::Image(e), true);
+            return false;
+        }
+        self.images.insert(image.clone(), Fw::Ready(Arc::new(firmware)));
+        match shown {
+            Some((version, elf)) if version != facts.version || elf != facts.elf => {
+                let line = t!("dev.log_changed", port = port, was = version, now = facts.version).to_string();
+                self.log(Some(&port), line, LogKind::Fail);
+                self.show(i);
+                self.refuse(&port, Refusal::Changed { was: version, now: facts.version }, true);
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// A local path read for the sheet, on a thread: its facts, or why the
+    /// tab will not take it.
+    fn vet(&mut self, path: PathBuf) {
+        let (supply, events) = (self.supply.clone(), self.events.clone());
+        std::thread::Builder::new()
+            .name("mstream-vet".to_string())
+            .spawn(move || {
+                let result = supply.resolve(&Image::Local(path.clone()), &mut |_, _| {}).and_then(|firmware| {
+                    merged_only(&firmware.facts)?;
+                    Ok(firmware.facts)
+                });
+                let line = match &result {
+                    Ok(facts) => (flow::local_line(facts), LogKind::Fact),
+                    Err(e) => (e.text(), LogKind::Fail),
+                };
+                let _ = events.send(Event::Log { port: None, text: line.0, kind: line.1 });
+                let _ = events.send(Event::Vetted { path, result });
+            })
+            .expect("spawn the vet");
     }
 
     /// A job other than a listen or a write, once its rules allow: nothing
@@ -689,24 +1031,29 @@ impl Desk {
         if let Some(job) = &self.slots[i].job {
             job.stop.store(true, Ordering::Relaxed);
         }
+        let image = queued.image.clone();
         self.slots[i].queued = Some(queued);
         self.slots[i].board.work = Work::Queued;
         self.show(i);
-        if matches!(self.firmware, Fw::Failed) {
-            self.fetch();
+        if matches!(self.images.get(&image), Some(Fw::Failed) | None) {
+            self.fetch(image);
         }
     }
 
-    /// Start the write that waits, once its board is free and the image is
+    /// Start the write that waits, once its board is free and its image is
     /// in hand.
     fn start_queued(&mut self) {
         if self.quitting {
             return;
         }
-        let Fw::Ready(firmware) = &self.firmware else { return };
-        let firmware = firmware.clone();
-        let Some(i) = self.slots.iter().position(|s| s.queued.is_some() && s.job.is_none()) else { return };
+        let ready = |desk: &Desk, slot: &Slot| {
+            slot.job.is_none()
+                && slot.queued.as_ref().is_some_and(|q| matches!(desk.images.get(&q.image), Some(Fw::Ready(_))))
+        };
+        let Some(i) = self.slots.iter().position(|s| ready(self, s)) else { return };
         let queued = self.slots[i].queued.take().expect("queued");
+        let Some(Fw::Ready(firmware)) = self.images.get(&queued.image) else { return };
+        let firmware = firmware.clone();
         let guard = if queued.guard { self.target.clone() } else { None };
         let id = self.job(i, JobKind::Write);
         let (engine, notes) = (self.engine.clone(), self.notes_tx.clone());
@@ -813,7 +1160,9 @@ impl Desk {
         };
         match note {
             Note::Log { port, text, kind } => self.log(Some(&port), text, kind),
-            Note::Fetched(result) => self.fetched(result),
+            Note::Progress { image, done, total } => self.progress(image, done, total),
+            Note::Fetched { image, result } => self.fetched(image, result),
+            Note::Listed(result) => self.listed(result),
             Note::Work { port, id, work } => {
                 if let Some(i) = mine(self, &port, id) {
                     self.slots[i].board.work = work;
@@ -826,14 +1175,14 @@ impl Desk {
                     self.show(i);
                 }
             }
-            Note::Plan { port, id, info, on_board, plan } => {
+            Note::Plan { port, id, info, on_board, plan, image } => {
                 if let Some(i) = mine(self, &port, id) {
                     let board = &mut self.slots[i].board;
                     board.flash_mb = info.flash_mb.or(board.flash_mb);
                     board.probe = Some(Ok(Probe { info: info.clone(), on_board: on_board.clone() }));
                     self.show(i);
                 }
-                self.tell(Event::Plan { port, info, on_board, plan });
+                self.tell(Event::Plan { port, info, on_board, plan, image });
             }
             Note::Ended { port, id, end } => {
                 let Some(i) = mine(self, &port, id) else { return };
@@ -856,11 +1205,19 @@ impl Desk {
             End::Heard(Asked { heard: Heard::Nothing, .. }) => {}
             End::Heard(asked) => {
                 let board = &mut self.slots[i].board;
-                if matches!(asked.heard, Heard::Status(_) | Heard::Old { .. })
-                    && matches!(board.written, Some(Written::Failed { .. }))
-                {
-                    // It runs again: whatever went wrong is behind it.
-                    board.written = None;
+                if matches!(asked.heard, Heard::Status(_) | Heard::Old { .. }) {
+                    // It runs again: whatever went wrong is behind it — a
+                    // failed write, or a restart loop (and the DIO image
+                    // the page offered for it).
+                    if matches!(board.written, Some(Written::Failed { .. })) {
+                        board.written = None;
+                    }
+                    if let Some(Written::Done { looping: looping @ Some(_), .. }) = &mut board.written {
+                        *looping = None;
+                        if board.next.as_ref().is_some_and(|next| next.by == By::Loop) {
+                            board.next = None;
+                        }
+                    }
                 }
                 board.flash_mb = asked.flash_mb.or(board.flash_mb);
                 board.heard = asked.heard;
@@ -917,47 +1274,64 @@ impl Desk {
                 }
                 self.tell(Event::Identified { port: port.clone(), label, result });
             }
-            End::Written(Ok(done)) => {
-                let elf = done.boot.as_deref().and_then(listen::parse_boot_line).and_then(|(_, elf)| elf);
-                let written = AppDesc {
-                    version: done.version.clone(),
-                    project: AppDesc::OURS.to_string(),
-                    idf: String::new(),
-                    elf8: elf.unwrap_or_default(),
-                };
-                let board = &mut self.slots[i].board;
-                // What the board said before is history; until it speaks
-                // again, the image just written is what it runs.
-                board.heard = Heard::Nothing;
-                board.count = Count::Idle;
-                board.flash_mb = done.info.flash_mb.or(board.flash_mb);
-                board.probe = Some(Ok(Probe { info: done.info, on_board: Some(written) }));
-                board.written = Some(Written::Done {
-                    version: done.version,
-                    took: done.took,
-                    skipped: done.skipped,
-                    install: done.install,
-                    boot: done.boot,
-                });
-                then_listen = Some(self.timing.after_write);
-                all = Some((true, None));
-            }
-            End::Written(Err(Failure::Failed { error, half, pct })) => {
-                let board = &mut self.slots[i].board;
-                if half {
+            End::Written(written) => match *written {
+                Ok(done) => {
+                    // What went on, as its own description says — the ELF
+                    // the board will report, read from the image.
+                    let written = AppDesc {
+                        version: done.version.clone(),
+                        project: AppDesc::OURS.to_string(),
+                        idf: String::new(),
+                        elf8: done.image.elf.clone(),
+                    };
+                    let cure = done.looping.and_then(|_| dio_cure(&done.image));
+                    let board = &mut self.slots[i].board;
+                    // What the board said before is history; until it speaks
+                    // again, the image just written is what it runs.
                     board.heard = Heard::Nothing;
+                    board.count = Count::Idle;
+                    board.flash_mb = done.info.flash_mb.or(board.flash_mb);
+                    board.probe = Some(Ok(Probe { info: done.info, on_board: Some(written) }));
+                    board.written = Some(Written::Done {
+                        version: done.version,
+                        took: done.took,
+                        skipped: done.skipped,
+                        install: done.install,
+                        boot: done.boot,
+                        image: done.image,
+                        looping: done.looping,
+                    });
+                    // One board, one write: the choice is spent.
+                    board.next = None;
+                    // It keeps restarting on the QIO build: the same
+                    // version's DIO build is filled in as its next write —
+                    // offered, never written by itself.
+                    if let Some(cure) = cure {
+                        self.choose(i, cure, false, By::Loop);
+                    }
+                    then_listen = Some(self.timing.after_write);
+                    all = Some((true, None));
                 }
-                board.written = Some(Written::Failed { error: error.clone(), half, pct });
-                self.log(Some(&port), error.text(), LogKind::Fail);
-                if let Some(hint) = error.hint() {
-                    self.log(Some(&port), hint, LogKind::Quiet);
+                Err(Failure::Failed { error, half, pct }) => {
+                    let board = &mut self.slots[i].board;
+                    if half {
+                        board.heard = Heard::Nothing;
+                    }
+                    // The choice stays: Try again writes the same image
+                    // through the same gate.
+                    board.written = Some(Written::Failed { error: error.clone(), half, pct });
+                    self.log(Some(&port), error.text(), LogKind::Fail);
+                    if let Some(hint) = error.hint() {
+                        self.log(Some(&port), hint, LogKind::Quiet);
+                    }
+                    all = Some((false, Some(error)));
                 }
-                all = Some((false, Some(error)));
-            }
-            End::Written(Err(Failure::NotOlder { found })) => {
-                self.log(Some(&port), t!("dev.log_guard", port = port, found = found).to_string(), LogKind::Fail);
-                all = Some((false, None));
-            }
+                Err(Failure::NotOlder { found }) => {
+                    let line = t!("dev.log_guard", port = port, found = found).to_string();
+                    self.log(Some(&port), line, LogKind::Fail);
+                    all = Some((false, None));
+                }
+            },
         }
         if !self.slots[i].present {
             // Unplugged while it was in its bootloader: told now, dropped.
@@ -992,9 +1366,9 @@ impl Desk {
         self.all_turn();
     }
 
-    /// Queue Update all's board at its place, passing over the ones that
-    /// no longer need it (unplugged, written meanwhile); done past the
-    /// last.
+    /// Queue Update all's board at its place, with the pin in its own mode,
+    /// passing over the ones that no longer need it (unplugged, written
+    /// meanwhile); done past the last.
     fn all_turn(&mut self) {
         loop {
             let Some(run) = &self.all else { return };
@@ -1009,12 +1383,15 @@ impl Desk {
             let at = run.at;
             let ready = self.find(&port).filter(|i| {
                 let slot = &self.slots[*i];
-                slot.present && matches!(slot.board.verdict, Verdict::Update | Verdict::DevUpdate)
+                slot.present
+                    && matches!(slot.board.verdict, Verdict::Update | Verdict::DevUpdate)
+                    && slot.board.pending().is_none_or(|next| next.image.is_pin())
             });
             match ready {
                 Some(i) => {
                     let ports = run.ports.clone();
-                    self.queue(i, Queued { erase: Some(false), guard: true });
+                    let image = self.slots[i].board.update_image();
+                    self.queue(i, Queued { erase: Some(false), guard: true, image });
                     self.tell(Event::All(All::Running { ports, at }));
                     return;
                 }
@@ -1030,11 +1407,51 @@ impl Desk {
     }
 }
 
-/// The log's line for what a listen heard.
+/// A next write's state once its image is in hand: the page writes a
+/// merged image only, so an app alone chosen in the sheet is refused there
+/// (the flags may write one: `--firmware` always has).
+fn next_state(facts: &ImageFacts, by: By) -> NextState {
+    match merged_only(facts) {
+        Err(e) if by == By::Sheet => NextState::Failed(e),
+        _ => NextState::Ready(facts.clone()),
+    }
+}
+
+/// The cure for a board that keeps restarting on `facts`: the same
+/// source's DIO build, when the image written was QIO and its source has
+/// one (a local build has none the player knows).
+pub(crate) fn dio_cure(facts: &ImageFacts) -> Option<Image> {
+    if facts.mode != Some(Mode::Qio) {
+        return None;
+    }
+    let image = facts.image.in_mode(Mode::Dio)?;
+    (image.has(Mode::Dio) != Some(false)).then_some(image)
+}
+
+/// A next write in a few words, for the log: `v0.7.0 in QIO`, `a local
+/// build`.
+fn next_words(next: &Next) -> String {
+    match (&next.image, next.version(), next.mode()) {
+        (Image::Local(_), Some(version), _) => t!("dev.next_local", version = version).to_string(),
+        (_, Some(version), Some(mode)) => format!("{version} {}", mode.word()),
+        (_, Some(version), None) => version,
+        _ => String::new(),
+    }
+}
+
+/// The log's line for what a listen heard. A board on DIO says so; QIO,
+/// the default, goes unsaid.
 fn heard_line(board: &Board) -> String {
     let port = board.port();
+    let dio = board.mode().is_some_and(|m| m.mode == Mode::Dio);
     match &board.heard {
+        Heard::Status(status) if dio => {
+            t!("dev.log_heard_mode", port = port, version = status.fw, mode = Mode::Dio.word()).to_string()
+        }
         Heard::Status(status) => t!("dev.log_heard", port = port, version = status.fw).to_string(),
+        Heard::Old { version: Some(version), .. } if dio => {
+            t!("dev.log_heard_old_mode", port = port, version = version, mode = Mode::Dio.word()).to_string()
+        }
         Heard::Old { version: Some(version), .. } => {
             t!("dev.log_heard_old", port = port, version = version).to_string()
         }
@@ -1143,7 +1560,8 @@ fn read_job(engine: &dyn Engine, candidate: &Candidate, stop: &AtomicBool, notes
 
 /// The write, start to finish, for one board: its bootloader reached and
 /// read, Update all's look (`guard`), the plan, the erase, the write, the
-/// restart and its first line. Nothing stops it once it has begun.
+/// restart and what the board said after it — its first line, or the
+/// ROM's banners again and again. Nothing stops it once it has begun.
 fn write_job(
     engine: &dyn Engine,
     candidate: &Candidate,
@@ -1186,7 +1604,7 @@ fn write_job(
         flow::Event::Log(text) => log(text, LogKind::Fact),
     };
     let end = |end: Result<Done, Failure>| {
-        let _ = notes.send(Note::Ended { port: port.clone(), id, end: End::Written(end) });
+        let _ = notes.send(Note::Ended { port: port.clone(), id, end: End::Written(Box::new(end)) });
     };
     let failed = |error: DeviceError, half: bool, at: Option<u8>| Err(Failure::Failed { error, half, pct: at });
 
@@ -1220,7 +1638,8 @@ fn write_job(
             return end(Err(Failure::NotOlder { found: flow::on_board_text(on_board.as_ref()) }));
         }
     }
-    let plan = flow::plan(on_board.as_ref(), &firmware.version, erase);
+    let facts = firmware.facts.clone();
+    let plan = flow::plan(on_board.as_ref(), &facts.version, erase);
     let install = matches!(plan.kind, Kind::Install { .. });
     let _ = notes.send(Note::Plan {
         port: port.clone(),
@@ -1228,8 +1647,10 @@ fn write_job(
         info: info.clone(),
         on_board: on_board.clone(),
         plan: plan.clone(),
+        image: facts.clone(),
     });
-    log(t!("dev.log_go", plan = plan.describe()).to_string(), LogKind::Fact);
+    let what = format!("{} · {}", plan.describe(), flow::image_words(&facts));
+    log(t!("dev.log_go", plan = what).to_string(), LogKind::Fact);
     if plan.erase {
         tell(flow::Event::Phase(Phase::Erasing));
         if let Err(e) = link.erase() {
@@ -1242,14 +1663,29 @@ fn write_job(
     };
     log(t!(if skipped { "dev.log_same" } else { "dev.log_checked" }).to_string(), LogKind::Fact);
     tell(flow::Event::Phase(Phase::Restarting));
-    log(t!("dev.log_restart", secs = super::engine::BOOT_LISTEN.as_secs()).to_string(), LogKind::Fact);
+    let secs = BOOT_LISTEN.as_secs();
+    log(t!("dev.log_restart", secs = secs).to_string(), LogKind::Fact);
     match link.restart() {
-        Ok(boot) => {
-            if let Some(line) = &boot {
+        Ok(restart) => {
+            let looping = restart_loop(&restart).map(|restarts| Looping { restarts, secs });
+            if let Some(line) = &restart.boot {
                 log(line.clone(), LogKind::Quiet);
+            } else {
+                // No firmware line: what came instead is the evidence.
+                for line in restart.rom.iter().take(ROM_LOG) {
+                    log(line.clone(), LogKind::Quiet);
+                }
+                if restart.rom.len() > ROM_LOG {
+                    log(t!("dev.log_rom_more", n = restart.rom.len() - ROM_LOG).to_string(), LogKind::Quiet);
+                }
             }
-            let version = firmware.version.clone();
-            end(Ok(Done { version, took: since.elapsed(), skipped, install, boot, info }))
+            if let Some(looping) = looping {
+                let key = if dio_cure(&facts).is_some() { "dev.log_loop" } else { "dev.log_loop_plain" };
+                log(t!(key, secs = secs, n = looping.restarts).to_string(), LogKind::Fail);
+            }
+            let version = facts.version.clone();
+            let boot = restart.boot;
+            end(Ok(Done { version, took: since.elapsed(), skipped, install, boot, info, image: facts, looping }))
         }
         // Written and checked, and the reset's line would not go: the image
         // is whole; the board needs its reset button, not another write.
@@ -1266,7 +1702,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::device::board::{Card, CardKind, CardUnknown, Primary};
     use crate::device::engine::fake::Fake;
-    use crate::device::firmware::tests::{desc_bytes, merged_bytes};
+    use crate::device::firmware::Check;
+    use crate::device::firmware::tests::{Shelf, desc_bytes, desc_with_elf, elf_bytes, merged_in};
 
     /// The worker's clocks in miniature: the boards here answer at once, or
     /// never, so a wait is only how long a silent board takes — long
@@ -1281,41 +1718,39 @@ pub(crate) mod tests {
         waits: listen::tests::QUICK,
     };
 
-    /// An image in miniature, named per test (they run in parallel).
-    pub(crate) fn image(test: &str, version: &str) -> PathBuf {
-        let name = format!("mstream-player-desk-{}-{test}-{version}.bin", std::process::id());
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, merged_bytes(&desc_bytes(version, AppDesc::OURS))).unwrap();
-        path
+    /// The worker's start on `supply`: no flag, every board.
+    pub(crate) fn setup(supply: Arc<dyn Supply>) -> Setup {
+        Setup { supply, preset: None, port: None, timing: QUICK, firmware_first: false }
     }
 
-    /// A worker on `fake`, the image `version` beside it, its two far ends
-    /// the test's, and what it said folded as it comes.
+    /// A worker on `fake`, the pin's two builds of `version` on the test's
+    /// shelf in GitHub's place, its two far ends the test's, and what it
+    /// said folded as it comes.
     struct Rig {
         cmds: Sender<Cmd>,
         events: Receiver<Event>,
         boards: BTreeMap<String, Board>,
         seen: Vec<Event>,
         trace: Arc<Mutex<Vec<String>>>,
-        image: PathBuf,
+        shelf: Arc<Shelf>,
     }
 
-    impl Drop for Rig {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.image);
-        }
+    fn rig(fake: Fake, version: &str) -> Rig {
+        rig_with(fake, Shelf::new(version), None, None, false)
     }
 
-    fn rig(test: &str, fake: Fake, version: &str) -> Rig {
-        rig_with(test, fake, version, None, false)
-    }
-
-    fn rig_with(test: &str, fake: Fake, version: &str, port: Option<&str>, first: bool) -> Rig {
+    fn rig_with(fake: Fake, shelf: Shelf, preset: Option<Image>, port: Option<&str>, first: bool) -> Rig {
         let trace = fake.trace();
-        let image = image(test, version);
-        let source = Source::Local(image.clone());
-        let (cmds, events) = spawn(Arc::new(fake), source, port.map(str::to_string), QUICK, first);
-        Rig { cmds, events, boards: BTreeMap::new(), seen: Vec::new(), trace, image }
+        let shelf = Arc::new(shelf);
+        let setup = Setup {
+            supply: shelf.clone(),
+            preset,
+            port: port.map(str::to_string),
+            timing: QUICK,
+            firmware_first: first,
+        };
+        let (cmds, events) = spawn(Arc::new(fake), setup);
+        Rig { cmds, events, boards: BTreeMap::new(), seen: Vec::new(), trace, shelf }
     }
 
     impl Rig {
@@ -1403,6 +1838,39 @@ pub(crate) mod tests {
                 .collect()
         }
 
+        /// The sheet's Apply (or Reset, with none), read on until the board
+        /// carries it: its image in hand, or why not.
+        fn choose(&mut self, port: &str, image: Option<Image>) {
+            let before = self.seen.len();
+            let choice = image.map(|image| Choice { image, erase: false });
+            self.send(Cmd::Choose { port: port.into(), choice });
+            self.until("the choice carried", |r| {
+                r.seen[before..].iter().any(|e| match e {
+                    Event::Board(b) if b.port() == port => {
+                        b.next.as_ref().is_none_or(|n| !matches!(n.state, NextState::Getting { .. }))
+                    }
+                    _ => false,
+                })
+            });
+        }
+
+        fn written(&mut self, port: &str, what: &str) {
+            self.until(what, |r| {
+                let b = r.board(port);
+                matches!(b.written, Some(Written::Done { .. })) && b.work == Work::Idle && b.heard != Heard::Nothing
+            });
+        }
+
+        fn plans(&self) -> Vec<ImageFacts> {
+            self.seen
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Plan { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
         fn quit(mut self) -> Rig {
             self.send(Cmd::Quit);
             self.until("released", |r| r.seen.last() == Some(&Event::Released));
@@ -1413,7 +1881,7 @@ pub(crate) mod tests {
     #[test]
     fn opening_listens_to_every_board_and_resets_none() {
         let _en = crate::setup::tests::in_locale("en");
-        let mut r = rig("open", Fake::new("status:v0.8.0,old:v0.7.0,silent:v0.7.0"), "v0.8.0");
+        let mut r = rig(Fake::new("status:v0.8.0,old:v0.7.0,silent:v0.7.0"), "v0.8.0");
         r.settled(3);
         let up = r.board("FAKE0");
         assert_eq!(up.verdict, Verdict::UpToDate);
@@ -1430,7 +1898,7 @@ pub(crate) mod tests {
         assert!(r.resets().is_empty(), "nothing reset, nothing opened but to listen: {:?}", r.trace());
         let all_three = ["FAKE0", "FAKE1", "FAKE2"];
         assert!(r.seen.iter().any(|e| matches!(e, Event::Watch { ports, .. } if ports == &all_three)));
-        assert!(r.seen.iter().any(|e| matches!(e, Event::Target(t) if t.version == "v0.8.0")), "the image's own version");
+        assert!(r.seen.iter().any(|e| matches!(e, Event::Target(t) if t.version == "v0.8.0")), "the pin");
         let logs = r.logs();
         assert!(logs.contains(&"listening on FAKE0 — DTR and RTS low, no reset".to_string()), "{logs:?}");
         assert!(logs.iter().any(|l| l.starts_with("@status fw=v0.8.0")), "the host lines, word for word: {logs:?}");
@@ -1442,7 +1910,7 @@ pub(crate) mod tests {
     fn a_board_plugged_in_is_heard_without_a_reset_and_one_unplugged_is_dropped() {
         let _en = crate::setup::tests::in_locale("en");
         let fake = Fake::new("status:v0.8.0,old:v0.7.0/in=1.2,status:v0.9.0/out=1.2");
-        let mut r = rig("plug", fake, "v0.8.0");
+        let mut r = rig(fake, "v0.8.0");
         r.settled(2);
         assert!(r.boards.contains_key("FAKE2") && !r.boards.contains_key("FAKE1"));
         r.until("FAKE1 in, FAKE2 out", |r| {
@@ -1456,7 +1924,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_port_another_program_holds_is_that_boards_state_and_ask_again_reads_it_once_free() {
-        let mut r = rig("busy", Fake::new("status:v0.8.0,status:v0.8.0/held=0.5"), "v0.8.0");
+        let mut r = rig(Fake::new("status:v0.8.0,status:v0.8.0/held=0.5"), "v0.8.0");
         r.settled(2);
         assert_eq!(r.board("FAKE0").verdict, Verdict::UpToDate, "the other board is read as usual");
         let held = r.board("FAKE1");
@@ -1472,7 +1940,7 @@ pub(crate) mod tests {
 
     #[test]
     fn read_the_board_is_the_one_reset_and_restarts_it_as_it_was() {
-        let mut r = rig("read", Fake::new("other,chip,silent:v0.7.0,fresh"), "v0.8.0");
+        let mut r = rig(Fake::new("other,chip,silent:v0.7.0,fresh"), "v0.8.0");
         r.settled(4);
         r.send(Cmd::Read { port: "FAKE0".into() });
         r.send(Cmd::Read { port: "FAKE1".into() });
@@ -1505,7 +1973,7 @@ pub(crate) mod tests {
     fn a_write_resets_writes_restarts_and_listens_again_for_the_new_verdict() {
         let fake = Fake::new("old:v0.7.0").with_pace(Duration::from_millis(100));
         let probe = fake.clone();
-        let mut r = rig("write", fake, "v0.8.0");
+        let mut r = rig(fake, "v0.8.0");
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
         r.until("written and heard", |r| {
@@ -1542,7 +2010,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_write_leaves_the_board_half_written_with_try_again() {
-        let mut r = rig("failed", Fake::new("failwrite").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new("failwrite").with_pace(Duration::from_millis(60)), "v0.8.0");
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: None });
         r.until("failed", |r| {
@@ -1559,7 +2027,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_board_unplugged_mid_write_fails_half_written_and_then_goes() {
-        let mut r = rig("unplug", Fake::new("old:v0.7.0/out=1.2").with_pace(Duration::from_millis(2500)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0/out=1.2").with_pace(Duration::from_millis(2500)), "v0.8.0");
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
         r.until("gone", |r| r.seen.iter().any(|e| matches!(e, Event::Gone { .. })));
@@ -1577,7 +2045,7 @@ pub(crate) mod tests {
     fn update_all_writes_each_board_that_needs_it_one_after_another_and_never_installs() {
         let fake = Fake::new("old:v0.7.0,status:v0.8.0,old:v0.6.0-37-g221d99d,other").with_pace(Duration::from_millis(60));
         let probe = fake.clone();
-        let mut r = rig("all", fake, "v0.8.0");
+        let mut r = rig(fake, "v0.8.0");
         r.settled(4);
         let every: Vec<String> = (0..4).map(|i| format!("FAKE{i}")).collect();
         assert_eq!(r.board("FAKE2").verdict, Verdict::DevUpdate);
@@ -1613,7 +2081,7 @@ pub(crate) mod tests {
         // FAKE1 leaves while FAKE0 is written: after both were heard, before
         // its turn.
         let fake = Fake::new("old:v0.7.0,old:v0.6.0/out=1.2").with_pace(Duration::from_millis(2500));
-        let mut r = rig("all-gone", fake, "v0.8.0");
+        let mut r = rig(fake, "v0.8.0");
         r.settled(2);
         r.send(Cmd::UpdateAll { ports: vec!["FAKE0".into(), "FAKE1".into()] });
         r.until("done", |r| r.all().iter().any(|a| matches!(a, All::Done { .. })));
@@ -1628,7 +2096,7 @@ pub(crate) mod tests {
     fn update_all_stops_at_the_first_failure_and_never_starts_the_next() {
         let fake = Fake::new("old:v0.7.0/fail=write,old:v0.6.0").with_pace(Duration::from_millis(60));
         let probe = fake.clone();
-        let mut r = rig("all-stop", fake, "v0.8.0");
+        let mut r = rig(fake, "v0.8.0");
         r.settled(2);
         r.send(Cmd::UpdateAll { ports: vec!["FAKE0".into(), "FAKE1".into()] });
         r.until("stopped", |r| r.all().iter().any(|a| matches!(a, All::Stopped { .. })));
@@ -1644,7 +2112,7 @@ pub(crate) mod tests {
     fn update_all_lets_a_board_go_untouched_when_its_bootloader_shows_other_firmware() {
         // It said v0.7.0 over USB; its flash holds someone else's image.
         let fake = Fake::new("status:v0.7.0/flash=other/fw=v0.7.0");
-        let mut r = rig("guard", fake, "v0.8.0");
+        let mut r = rig(fake, "v0.8.0");
         r.settled(1);
         assert_eq!(r.board("FAKE0").verdict, Verdict::Update);
         r.send(Cmd::UpdateAll { ports: vec!["FAKE0".into()] });
@@ -1658,7 +2126,7 @@ pub(crate) mod tests {
     fn during_a_write_the_other_boards_are_looked_at_and_never_written() {
         // FAKE2 arrives while FAKE0 is written.
         let fake = Fake::new("old:v0.7.0,status:v0.9.0/free=?,status:v0.8.0/in=1.2").with_pace(Duration::from_millis(2500));
-        let mut r = rig("look", fake, "v0.8.0");
+        let mut r = rig(fake, "v0.8.0");
         r.settled(2);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
         r.until("writing", |r| matches!(r.board("FAKE0").work, Work::Writing { pct: Some(_), .. }));
@@ -1700,7 +2168,7 @@ pub(crate) mod tests {
     fn the_count_reports_its_progress_and_free_bytes_and_says_why_it_would_not() {
         let fake = Fake::new("status:v0.9.0/free=?,status:v0.9.0/state=playing,old:v0.7.0")
             .with_pace(Duration::from_millis(100));
-        let mut r = rig("count", fake, "v0.9.0");
+        let mut r = rig(fake, "v0.9.0");
         r.settled(3);
         assert!(matches!(r.board("FAKE0").card(), Card::Fat { free: Free::NotCounted, .. }));
         r.send(Cmd::Count { port: "FAKE0".into() });
@@ -1733,7 +2201,7 @@ pub(crate) mod tests {
 
     #[test]
     fn show_on_the_player_puts_the_port_on_its_screen_or_says_why_not() {
-        let mut r = rig("identify", Fake::new("status:v0.9.0,status:v0.9.0/identify=ui,old:v0.8.0"), "v0.9.0");
+        let mut r = rig(Fake::new("status:v0.9.0,status:v0.9.0/identify=ui,old:v0.8.0"), "v0.9.0");
         r.settled(3);
         let answers = |r: &Rig| {
             r.seen
@@ -1762,7 +2230,7 @@ pub(crate) mod tests {
 
     #[test]
     fn details_facts_come_from_l_without_a_reset() {
-        let mut r = rig("facts", Fake::new("status:v0.9.0"), "v0.9.0");
+        let mut r = rig(Fake::new("status:v0.9.0"), "v0.9.0");
         r.settled(1);
         assert_eq!(r.board("FAKE0").flash_mb, None, "@status says no flash size");
         r.send(Cmd::Facts { port: "FAKE0".into() });
@@ -1774,21 +2242,20 @@ pub(crate) mod tests {
     #[test]
     fn quit_lets_every_listen_go_at_once_and_waits_for_a_read_to_restart_its_board() {
         // A silent board takes the whole of its wait: Quit cuts it short.
-        let slow = Timing { at_rest: Duration::from_secs(3), ..QUICK };
-        let image = image("quit", "v0.8.0");
+        let timing = Timing { at_rest: Duration::from_secs(3), ..QUICK };
+        let slow = Setup { timing, ..setup(Arc::new(Shelf::new("v0.8.0"))) };
         let fake = Fake::new("status:v0.8.0,silent");
-        let (cmds, events) = spawn(Arc::new(fake), Source::Local(image.clone()), None, slow, false);
+        let (cmds, events) = spawn(Arc::new(fake), slow);
         std::thread::sleep(Duration::from_millis(100));
         let t0 = Instant::now();
         cmds.send(Cmd::Quit).unwrap();
         let rest: Vec<Event> = events.iter().collect();
-        let _ = std::fs::remove_file(&image);
         assert_eq!(rest.last(), Some(&Event::Released));
         assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
 
         // A read under way: the board is reached, read and restarted first.
         let fake = Fake::new("other").with_reach(Duration::from_millis(300));
-        let mut r = rig("quit-read", fake, "v0.8.0");
+        let mut r = rig(fake, "v0.8.0");
         r.settled(1);
         r.send(Cmd::Read { port: "FAKE0".into() });
         let trace = r.trace.clone();
@@ -1803,7 +2270,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_write_is_never_cut_by_a_quit() {
-        let mut r = rig("quit-write", Fake::new("old:v0.7.0").with_pace(Duration::from_millis(300)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(300)), "v0.8.0");
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
         r.until("writing", |r| matches!(r.board("FAKE0").work, Work::Writing { .. }));
@@ -1816,12 +2283,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_page_gone_is_a_quit() {
-        let image = image("gone", "v0.8.0");
         let fake = Fake::new("status:v0.8.0");
-        let (cmds, events) = spawn(Arc::new(fake), Source::Local(image.clone()), None, QUICK, false);
+        let (cmds, events) = spawn(Arc::new(fake), setup(Arc::new(Shelf::new("v0.8.0"))));
         drop(cmds);
         let rest: Vec<Event> = events.iter().collect();
-        let _ = std::fs::remove_file(&image);
         assert_eq!(rest.last(), Some(&Event::Released), "and then the worker ends");
     }
 
@@ -1829,8 +2294,9 @@ pub(crate) mod tests {
     fn with_the_firmware_first_no_board_is_asked_for_an_image_it_cannot_have() {
         let fake = Fake::new("status:v0.8.0");
         let trace = fake.trace();
-        let missing = Source::Local("/nowhere/at/all.bin".into());
-        let (cmds, events) = spawn(Arc::new(fake), missing, None, QUICK, true);
+        let missing = Image::Local("/nowhere/at/all.bin".into());
+        let first = Setup { preset: Some(missing), firmware_first: true, ..setup(Arc::new(Shelf::new("v0.8.0"))) };
+        let (cmds, events) = spawn(Arc::new(fake), first);
         let failed = events.iter().find(|e| matches!(e, Event::FirmwareFailed(_)));
         assert!(matches!(failed, Some(Event::FirmwareFailed(DeviceError::Firmware(_)))));
         std::thread::sleep(Duration::from_millis(200));
@@ -1840,11 +2306,11 @@ pub(crate) mod tests {
 
     #[test]
     fn a_named_port_is_the_only_board_and_an_unlisted_one_is_opened_as_named() {
-        let mut r = rig_with("named", Fake::new("status:v0.8.0,old:v0.7.0"), "v0.8.0", Some("fake1"), false);
+        let mut r = rig_with(Fake::new("status:v0.8.0,old:v0.7.0"), Shelf::new("v0.8.0"), None, Some("fake1"), false);
         r.settled(1);
         assert_eq!(r.boards.keys().collect::<Vec<_>>(), ["FAKE1"]);
         r.quit();
-        let mut r = rig_with("bare", Fake::new("nodevice"), "v0.8.0", Some("COM9"), false);
+        let mut r = rig_with(Fake::new("nodevice"), Shelf::new("v0.8.0"), None, Some("COM9"), false);
         r.settled(1);
         assert_eq!(r.board("COM9").candidate.bridge, "?");
         assert_eq!(r.board("COM9").verdict, Verdict::Silent);
@@ -1853,7 +2319,7 @@ pub(crate) mod tests {
 
     #[test]
     fn no_board_says_so_with_the_other_ports_and_the_watch_goes_on() {
-        let mut r = rig("none", Fake::new("status:v0.8.0/in=1.2"), "v0.8.0");
+        let mut r = rig(Fake::new("status:v0.8.0/in=1.2"), "v0.8.0");
         r.until("watched", |r| r.seen.iter().any(|e| matches!(e, Event::Watch { .. })));
         let none = |e: &Event| matches!(e, Event::Watch { ports, others } if ports.is_empty() && others == &["FAKECOM1"]);
         assert!(r.seen.iter().any(none));
@@ -1866,10 +2332,286 @@ pub(crate) mod tests {
     #[test]
     fn a_card_the_player_cannot_read_and_no_card_are_said_as_such() {
         let fake = Fake::new("status:v0.9.0/card=exfat/free=?/tracks=-,status:v0.9.0/card=none/size=-/free=?/tracks=-");
-        let mut r = rig("cards", fake, "v0.9.0");
+        let mut r = rig(fake, "v0.9.0");
         r.settled(2);
         assert_eq!(r.board("FAKE0").card(), Card::Foreign { kind: CardKind::ExFat, size: Some(63_864_569_856) });
         assert_eq!(r.board("FAKE1").card(), Card::Empty);
+        r.quit();
+    }
+
+    // ── Advanced options ────────────────────────────────────────────────────
+
+    #[test]
+    fn a_board_that_runs_dio_is_updated_in_dio_and_says_so() {
+        let _en = crate::setup::tests::in_locale("en");
+        let mut r = rig(Fake::new("old:v0.7.0/mode=dio").with_pace(Duration::from_millis(60)), "v0.8.0");
+        r.settled(1);
+        let board = r.board("FAKE0");
+        assert_eq!(board.mode().map(|m| m.mode), Some(Mode::Dio), "aa45f60e: v0.7.0's DIO build");
+        assert_eq!(board.default_image(), Image::Pin(Mode::Dio));
+        assert_eq!((board.verdict.clone(), board.primary()), (Verdict::Update, Some(Primary::Update)));
+        assert!(board.pending().is_none(), "nothing chosen: its own mode is the default");
+        assert!(r.logs().contains(&"FAKE0: v0.7.0 in DIO, too old to report its card".to_string()), "{:?}", r.logs());
+        // Its image is had beside the page's, before the yes.
+        let dio_ready = |e: &Event| {
+            matches!(e, Event::Image { image: Image::Pin(Mode::Dio), state: ImageState::Ready(_) })
+        };
+        r.until("the pin's DIO build in hand", |r| r.seen.iter().any(dio_ready));
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
+        r.written("FAKE0", "written and heard");
+        let plans = r.plans();
+        assert_eq!(plans.len(), 1);
+        assert_eq!((&plans[0].image, plans[0].mode, plans[0].elf.as_str()), (&Image::Pin(Mode::Dio), Some(Mode::Dio), "3523b80e"));
+        let board = r.board("FAKE0");
+        assert_eq!(board.verdict, Verdict::UpToDate);
+        assert_eq!(board.mode().map(|m| m.mode), Some(Mode::Dio), "DIO again, by its new ELF");
+        assert!(r.logs().iter().any(|l| l == "write: update, no erase · v0.8.0 in DIO"), "{:?}", r.logs());
+        r.quit();
+    }
+
+    #[test]
+    fn a_choice_lasts_one_write_and_never_moves_the_verdict() {
+        let mut r = rig(Fake::new("old:v0.8.0").with_pace(Duration::from_millis(60)), "v0.8.0");
+        r.settled(1);
+        assert_eq!((r.board("FAKE0").verdict.clone(), r.board("FAKE0").primary()), (Verdict::UpToDate, None));
+        r.choose("FAKE0", Some(Image::Pin(Mode::Dio)));
+        let board = r.board("FAKE0");
+        assert_eq!((board.verdict.clone(), board.primary()), (Verdict::UpToDate, Some(Primary::Write)), "a mode change");
+        let ready = |n: &Next| matches!(&n.state, NextState::Ready(f) if f.mode == Some(Mode::Dio));
+        assert!(board.pending().is_some_and(|n| n.by == By::Sheet && ready(n)));
+        r.choose("FAKE0", Some(Image::release("v0.7.0", Mode::Qio)));
+        let board = r.board("FAKE0");
+        assert_eq!((board.verdict.clone(), board.primary()), (Verdict::UpToDate, Some(Primary::Back)), "still the pin's chip");
+        r.choose("FAKE0", None);
+        assert_eq!(r.board("FAKE0").primary(), None, "Reset: the defaults again");
+        r.choose("FAKE0", Some(Image::Pin(Mode::Qio)));
+        assert!(r.board("FAKE0").next.is_none(), "applying the defaults is no choice");
+        r.choose("FAKE0", Some(Image::Pin(Mode::Dio)));
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: None });
+        r.written("FAKE0", "the DIO build written and heard");
+        let board = r.board("FAKE0");
+        assert!(board.next.is_none(), "one board, one write");
+        let pinned = |image: &ImageFacts| image.mode == Some(Mode::Dio) && image.check == Check::Pinned;
+        assert!(matches!(&board.written, Some(Written::Done { image, looping: None, .. }) if pinned(image)));
+        assert_eq!(board.default_mode(), Mode::Dio, "the mode outlives the choice, in the board's own ELF");
+        assert_eq!(board.verdict, Verdict::UpToDate);
+        r.quit();
+    }
+
+    #[test]
+    fn a_write_that_leaves_the_board_restarting_offers_its_dio_build_and_writes_nothing_by_itself() {
+        let _en = crate::setup::tests::in_locale("en");
+        let mut r = rig(Fake::new("old:v0.7.0/loop=qio").with_pace(Duration::from_millis(60)), "v0.8.0");
+        r.settled(1);
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
+        r.until("written, then heard saying nothing", |r| {
+            let b = r.board("FAKE0");
+            matches!(b.written, Some(Written::Done { .. })) && b.work == Work::Idle && b.heard == Heard::Silent
+        });
+        let board = r.board("FAKE0");
+        assert_eq!(board.looping(), Some(&Looping { restarts: 3, secs: 6 }));
+        let next = board.pending().expect("the cure filled in");
+        assert_eq!((next.image.clone(), next.by), (Image::Pin(Mode::Dio), By::Loop));
+        assert!(matches!(next.state, NextState::Ready(_)), "had before the gate's yes");
+        assert_eq!(board.primary(), Some(Primary::Dio));
+        assert_eq!(board.verdict, Verdict::UpToDate, "the pin's verdict: v0.8.0 went on");
+        assert_eq!(board.card(), Card::Unknown(CardUnknown::NotRunning));
+        let logs = r.logs();
+        assert!(logs.contains(&"rst:0x10 (RTCWDT_RTC_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)".to_string()), "{logs:?}");
+        assert!(logs.contains(&"no boot line in 6 s: 3 restarts heard — the DIO image is offered".to_string()), "{logs:?}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(r.trace().iter().filter(|t| t.starts_with("open")).count(), 1, "offered, never written by itself");
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
+        r.until("the DIO build written and heard running", |r| {
+            let b = r.board("FAKE0");
+            b.looping().is_none() && b.work == Work::Idle && matches!(b.heard, Heard::Old { .. })
+        });
+        let board = r.board("FAKE0");
+        assert!(board.next.is_none() && board.primary().is_none(), "cured: nothing left to do");
+        assert_eq!(board.mode().map(|m| m.mode), Some(Mode::Dio));
+        r.quit();
+    }
+
+    #[test]
+    fn update_all_writes_each_board_in_its_own_mode_and_leaves_out_one_with_its_own_release() {
+        let _en = crate::setup::tests::in_locale("en");
+        let fake = Fake::new("old:v0.7.0,old:v0.7.0/mode=dio,old:v0.6.0").with_pace(Duration::from_millis(60));
+        let probe = fake.clone();
+        let mut r = rig(fake, "v0.8.0");
+        r.settled(3);
+        r.choose("FAKE2", Some(Image::release("v0.7.0", Mode::Qio)));
+        assert!(r.board("FAKE2").left_out(), "behind the pin, with a release of its own to write");
+        r.send(Cmd::UpdateAll { ports: (0..3).map(|i| format!("FAKE{i}")).collect() });
+        r.until("all done", |r| r.all().iter().any(|a| matches!(a, All::Done { .. })));
+        let both = vec!["FAKE0".to_string(), "FAKE1".to_string()];
+        assert!(matches!(r.all().last(), Some(All::Done { ports, passed, .. }) if *ports == both && passed.is_empty()));
+        let modes: Vec<Option<Mode>> = r.plans().iter().map(|f| f.mode).collect();
+        assert_eq!(modes, [Some(Mode::Qio), Some(Mode::Dio)], "each board in the mode it ran");
+        let left = "update all: FAKE2 is left out — its next write is v0.7.0 QIO; write it from its tab";
+        assert!(r.logs().contains(&left.to_string()), "{:?}", r.logs());
+        assert_eq!(probe.version_on("FAKE2").as_deref(), Some("v0.6.0"), "its own write, from its own tab");
+        assert!(r.board("FAKE2").pending().is_some(), "and its choice still waits for it");
+        r.quit();
+    }
+
+    #[test]
+    fn a_release_chosen_is_had_at_once_and_one_that_cannot_be_had_says_why_and_touches_nothing() {
+        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60)), "v0.8.0");
+        r.settled(1);
+        r.choose("FAKE0", Some(Image::release("v0.6.0", Mode::Dio)));
+        let next = r.board("FAKE0").pending().cloned().expect("chosen");
+        assert_eq!((next.version().as_deref(), next.mode()), (Some("v0.6.0"), Some(Mode::Dio)));
+        assert_eq!(r.board("FAKE0").primary(), Some(Primary::Back), "v0.7.0 → v0.6.0 goes back");
+        r.choose("FAKE0", Some(Image::release("v0.9.0", Mode::Qio)));
+        let failed = |n: &Next| matches!(&n.state, NextState::Failed(e) if e.text().contains("not on the test's shelf"));
+        assert!(r.board("FAKE0").pending().is_some_and(failed), "{:?}", r.board("FAKE0").next);
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
+        r.until("the write failed", |r| {
+            let b = r.board("FAKE0");
+            matches!(b.written, Some(Written::Failed { half: false, .. })) && b.work == Work::Idle
+        });
+        assert!(r.resets().is_empty(), "no board touched for an image it could not have: {:?}", r.trace());
+        assert!(r.board("FAKE0").pending().is_some(), "a failure keeps the choice: Try again writes the same image");
+        r.quit();
+    }
+
+    #[test]
+    fn a_local_build_is_vetted_for_the_sheet_and_read_again_at_the_yes() {
+        let _en = crate::setup::tests::in_locale("en");
+        let scratch = crate::device::firmware::tests::Scratch::new("desk-local");
+        let build = scratch.0.join("firmware.factory.bin");
+        let write = |version: &str, elf: &str| {
+            let desc = desc_with_elf(version, AppDesc::OURS, &elf_bytes(elf));
+            std::fs::write(&build, merged_in(&desc, Mode::Dio)).unwrap();
+        };
+        write("v0.8.0-5-g4e94418", "be894f8b");
+        let mut app = vec![0u8; AppDesc::OFFSET_IN_APP];
+        app[0] = 0xE9;
+        app.extend_from_slice(&desc_bytes("v0.8.0", AppDesc::OURS));
+        let alone = scratch.0.join("firmware.bin");
+        std::fs::write(&alone, &app).unwrap();
+
+        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60)), "v0.8.0");
+        r.settled(1);
+        r.send(Cmd::Vet { path: scratch.0.clone() });
+        r.until("the folder vetted", |r| r.seen.iter().any(|e| matches!(e, Event::Vetted { .. })));
+        r.send(Cmd::Vet { path: alone.clone() });
+        let vetted = |r: &Rig| -> Vec<(PathBuf, Result<ImageFacts, DeviceError>)> {
+            r.seen
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Vetted { path, result } => Some((path.clone(), result.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        r.until("the app vetted", |r| vetted(r).len() == 2);
+        let found = vetted(&r);
+        let folder = found[0].1.as_ref().expect("a merged build");
+        assert_eq!((folder.version.as_str(), folder.mode), ("v0.8.0-5-g4e94418", Some(Mode::Dio)));
+        assert_eq!(folder.file.as_deref(), Some(build.as_path()), "the folder's merged image, named");
+        let refused = found[1].1.as_ref().unwrap_err().text();
+        assert!(refused.contains("device flash --firmware"), "an app alone stays the command line's: {refused}");
+
+        r.choose("FAKE0", Some(Image::Local(scratch.0.clone())));
+        assert_eq!(r.board("FAKE0").primary(), Some(Primary::Write), "a local build is written, never an update");
+        // Rebuilt after it was picked: the yes reads it again, and refuses.
+        write("v0.8.0-6-gabcdef0", "be894f8c");
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
+        r.until("refused", |r| !r.refused().is_empty());
+        let changed = Refusal::Changed { was: "v0.8.0-5-g4e94418".into(), now: "v0.8.0-6-gabcdef0".into() };
+        assert_eq!(r.refused(), [(Some("FAKE0".into()), changed)]);
+        let shown = r.board("FAKE0").pending().and_then(Next::facts).map(|f| f.version.clone());
+        assert_eq!(shown.as_deref(), Some("v0.8.0-6-gabcdef0"), "the gate shows the new one");
+        assert!(r.resets().is_empty(), "nothing written unseen");
+        // Seen, and written.
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
+        r.written("FAKE0", "the build written and heard");
+        let board = r.board("FAKE0");
+        let local = |image: &ImageFacts| image.check == Check::Description && image.image.is_local();
+        assert!(matches!(&board.written, Some(Written::Done { version, image, .. }) if version == "v0.8.0-6-gabcdef0" && local(image)));
+        assert!(board.next.is_none());
+        assert_eq!(board.mode().map(|m| m.mode), Some(Mode::Dio), "a build in hand teaches its ELF");
+        assert_eq!(board.verdict, Verdict::Newer, "measured against the pin: ahead of it");
+        // An app alone chosen in the sheet: refused, never written.
+        r.choose("FAKE0", Some(Image::Local(alone.clone())));
+        assert!(r.board("FAKE0").pending().is_some_and(|n| matches!(n.state, NextState::Failed(_))));
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false) });
+        r.until("refused again", |r| r.refused().len() == 2);
+        assert!(matches!(r.refused()[1].1, Refusal::Image(_)));
+        assert_eq!(r.resets().iter().filter(|t| t.starts_with("open")).count(), 1, "the one write");
+        r.quit();
+    }
+
+    #[test]
+    fn the_release_list_is_asked_once_a_visit_and_a_failure_is_never_kept() {
+        let mut shelf = Shelf::new("v0.8.0");
+        *shelf.list.lock().unwrap() = Err(ListWhy::Offline("no route to host".into()));
+        shelf.cached = vec![Cached { tag: "v0.7.0".into(), modes: vec![Mode::Dio], since: None }];
+        let mut r = rig_with(Fake::new("nodevice"), shelf, None, None, false);
+        let answers = |r: &Rig| -> Vec<Result<ReleaseList, ListFailed>> {
+            r.seen
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Releases(result) => Some(result.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        r.send(Cmd::Releases);
+        r.until("the failure", |r| answers(r).len() == 1);
+        let failed = answers(&r)[0].clone().unwrap_err();
+        assert_eq!(failed.why, ListWhy::Offline("no route to host".into()));
+        assert_eq!(failed.cached[0].tag, "v0.7.0", "what this computer can write without it");
+        *r.shelf.list.lock().unwrap() = Ok(crate::device::firmware::tests::listed());
+        r.send(Cmd::Releases);
+        r.until("the list", |r| answers(r).len() == 2);
+        r.send(Cmd::Releases);
+        r.until("the list again", |r| answers(r).len() == 3);
+        assert!(answers(&r)[1..].iter().all(|a| a.as_ref().is_ok_and(|l| l.releases.len() == 5)));
+        assert_eq!(r.shelf.asked.load(Ordering::Relaxed), 2, "the failure was asked again; the list, once");
+        r.quit();
+    }
+
+    #[test]
+    fn a_release_downloading_for_a_board_is_on_its_card_at_each_whole_percent() {
+        let shelf = Shelf { pace: Duration::from_millis(200), ..Shelf::new("v0.8.0") };
+        let mut r = rig_with(Fake::new("old:v0.7.0"), shelf, None, None, false);
+        r.settled(1);
+        r.choose("FAKE0", Some(Image::release("v0.7.0", Mode::Dio)));
+        let getting: Vec<u64> = r
+            .seen
+            .iter()
+            .filter_map(|e| match e {
+                Event::Board(b) => match b.next.as_ref().map(|n| &n.state) {
+                    Some(NextState::Getting { done, total: Some(_) }) => Some(*done),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert!(getting.len() >= 3 && getting.windows(2).all(|w| w[0] < w[1]), "the bar moves: {getting:?}");
+        let heard = |e: &Event| match e {
+            Event::Image { image, state: ImageState::Getting { done, .. } } => *done > 0 && image.tag() == Some("v0.7.0"),
+            _ => false,
+        };
+        assert!(r.seen.iter().any(heard), "and the page hears the image itself");
+        assert!(r.board("FAKE0").pending().is_some_and(|n| matches!(n.state, NextState::Ready(_))));
+        r.quit();
+    }
+
+    #[test]
+    fn the_flags_choice_is_each_boards_next_write_and_the_verdict_stays_the_pins() {
+        let preset = Image::release("v0.7.0", Mode::Qio);
+        let mut r = rig_with(Fake::new("old:v0.8.0,old:v0.6.0"), Shelf::new("v0.8.0"), Some(preset), None, false);
+        r.settled(2);
+        assert!(r.seen.iter().any(|e| matches!(e, Event::Target(t) if t.version == "v0.8.0")), "the pin, never the flag's");
+        let flagged = |e: &Event| matches!(e, Event::Firmware { version, .. } if version == "v0.7.0");
+        r.until("the page's image, the flag's", |r| r.seen.iter().any(flagged));
+        let (up, behind) = (r.board("FAKE0"), r.board("FAKE1"));
+        assert_eq!((up.verdict.clone(), up.primary()), (Verdict::UpToDate, Some(Primary::Back)));
+        assert_eq!((behind.verdict.clone(), behind.primary()), (Verdict::Update, Some(Primary::Update)));
+        assert!(up.pending().is_some_and(|n| n.by == By::Flags));
         r.quit();
     }
 }

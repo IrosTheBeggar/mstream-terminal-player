@@ -16,7 +16,7 @@ use rust_i18n::t;
 
 use super::DeviceError;
 use super::engine::{BAUDS, Engine, Link, Report};
-use super::firmware::{AppDesc, Firmware, Place, place};
+use super::firmware::{AppDesc, Firmware, Image, ImageFacts, Layout, PINNED_TAG, Place, place};
 use super::ports::Candidate;
 
 /// What the pieces report as they go.
@@ -119,6 +119,46 @@ pub(crate) fn on_board_text(on_board: Option<&AppDesc>) -> String {
         Some(desc) => t!("dev.on_board_other", name = desc.project).to_string(),
         None => t!("dev.on_board_unknown").to_string(),
     }
+}
+
+/// What an image is, in the plain words of `--yes`'s `plan:` line and the
+/// log's `write:` line: `v0.8.0 in DIO`, and for anything but the pin where
+/// it comes from and that it is not this player's release — a script that
+/// reads the line, or a person, never takes it for the pin.
+pub(crate) fn image_words(facts: &ImageFacts) -> String {
+    let mut words = match (facts.layout, facts.mode) {
+        (Layout::App, _) => format!("{}, an app alone (the board's bootloader keeps its mode)", facts.version),
+        (Layout::Merged, Some(mode)) => format!("{} in {}", facts.version, mode.word()),
+        (Layout::Merged, None) => format!("{}, mode not known", facts.version),
+    };
+    match &facts.image {
+        Image::Pin(_) => return words,
+        Image::Release { tag, .. } => words.push_str(&format!(", release {tag}")),
+        Image::Local(_) => words.push_str(", a local build"),
+    }
+    if let Some(pin) = PINNED_TAG {
+        words.push_str(&format!(" — not this player's release ({pin})"));
+    }
+    words
+}
+
+/// `firmware: v0.8.0 in DIO (release v0.8.0, downloaded now, 2636 KB)` —
+/// the image in hand, for the log and `--yes`, in the plain words its
+/// lines have always had.
+pub(crate) fn firmware_line(facts: &ImageFacts) -> String {
+    let kb = facts.bytes / 1024;
+    match facts.mode {
+        Some(mode) => format!("firmware: {} in {} ({}, {kb} KB)", facts.version, mode.word(), facts.origin),
+        None => format!("firmware: {} ({}, {kb} KB)", facts.version, facts.origin),
+    }
+}
+
+/// A local build as the sheet's vet read it, for the log: its file, its
+/// version, its mode and its size.
+pub(crate) fn local_line(facts: &ImageFacts) -> String {
+    let path = facts.file.as_ref().map(|f| f.display().to_string()).unwrap_or_default();
+    let mode = facts.mode.map_or_else(|| t!("dev.mode_unknown").to_string(), |m| m.word().to_string());
+    t!("dev.log_local", path = path, version = facts.version, mode = mode, bytes = grouped(facts.bytes)).to_string()
 }
 
 /// `1,118` — a count with its thousands marked, for the log.
@@ -259,7 +299,7 @@ mod tests {
 
     use super::*;
     use crate::device::engine::fake::Fake;
-    use crate::device::firmware::tests::{desc_bytes, merged_bytes};
+    use crate::device::firmware::tests::{desc_bytes, in_hand, merged_bytes};
 
     fn ours(version: &str) -> AppDesc {
         AppDesc { version: version.into(), project: AppDesc::OURS.into(), idf: "v5.5.5".into(), elf8: "00".into() }
@@ -368,13 +408,7 @@ mod tests {
         let board = fake.candidates().unwrap().remove(0);
         let (seen, tell) = gather();
         let link = open(&fake, &board, None, None, &tell).ok().expect("reached");
-        let desc = desc_bytes("v0.5.0", AppDesc::OURS);
-        let firmware = Firmware {
-            version: "v0.5.0".into(),
-            origin: "a test".into(),
-            kind: crate::device::firmware::Origin::File,
-            segments: vec![crate::device::firmware::Segment { offset: 0, data: merged_bytes(&desc) }],
-        };
+        let firmware = in_hand(merged_bytes(&desc_bytes("v0.5.0", AppDesc::OURS)));
         let failed = write(&fake, &board, link, &firmware, &tell);
         assert!(matches!(failed, Err(DeviceError::Link(_))));
         let log = logs(&seen.lock().unwrap());
@@ -389,13 +423,7 @@ mod tests {
         let board = fake.candidates().unwrap().remove(0);
         let (seen, tell) = gather();
         let link = open(&fake, &board, None, None, &tell).ok().expect("reached");
-        let desc = desc_bytes("v0.5.0", AppDesc::OURS);
-        let firmware = Firmware {
-            version: "v0.5.0".into(),
-            origin: "a test".into(),
-            kind: crate::device::firmware::Origin::File,
-            segments: vec![crate::device::firmware::Segment { offset: 0, data: merged_bytes(&desc) }],
-        };
+        let firmware = in_hand(merged_bytes(&desc_bytes("v0.5.0", AppDesc::OURS)));
         let (link, skipped) = write(&fake, &board, link, &firmware, &tell).expect("written");
         assert!(!skipped);
         let phases: Vec<Phase> = seen
@@ -409,7 +437,7 @@ mod tests {
             .collect();
         assert_eq!(phases, [Phase::Comparing, Phase::Writing, Phase::Verifying]);
         assert!(seen.lock().unwrap().contains(&Event::Progress(100)));
-        let boot = link.restart().unwrap().expect("the fake boots what it wrote");
+        let boot = link.restart().unwrap().boot.expect("the fake boots what it wrote");
         assert!(boot.starts_with("mstream-mp3-player v0.5.0"), "{boot}");
         assert_eq!(fake.version_on("FAKE0").as_deref(), Some("v0.5.0"));
     }
