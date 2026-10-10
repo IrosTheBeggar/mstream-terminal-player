@@ -57,6 +57,12 @@ const IMAGE_MAGIC: u8 = 0xE9;
 const MAX_IMAGE: usize = 8 * 1024 * 1024;
 const MAX_SUMS: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The longest a download goes on with no byte coming. The MP3 Player page
+/// takes the gate's yes while the image still downloads, and is locked from
+/// that yes until the write ends (the screen's contract, clause 9): a
+/// connection that stalls must fail, failing the write that waits for it
+/// with nothing touched, rather than hold the page for good.
+const READ_STALL: Duration = Duration::from_secs(30);
 
 /// A piece of the image and where it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -507,10 +513,22 @@ fn fetch(
     progress: &mut dyn FnMut(u64, Option<u64>),
     what: &str,
 ) -> Result<Vec<u8>, DeviceError> {
+    fetch_within(url, cap, progress, what, READ_STALL)
+}
+
+/// [`fetch`], giving up once `stall` passes with no byte.
+fn fetch_within(
+    url: &str,
+    cap: usize,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+    what: &str,
+    stall: Duration,
+) -> Result<Vec<u8>, DeviceError> {
     let failed = |err: String| DeviceError::Firmware(t!("dev.fw_download", what = what, err = err).to_string());
     let result = crate::runtime::block_on(async {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(stall)
             .build()
             .map_err(|e| e.to_string())?;
         let mut response = client
@@ -708,6 +726,32 @@ pub(crate) mod tests {
         assert_eq!(place("v0.9.0-rc.2", "v0.9.0-rc.10"), Place::Older, "numeric identifiers as numbers");
         assert_eq!(place("v0.9.0-alpha", "v0.9.0-1"), Place::Newer, "alphanumeric after numeric");
         assert_eq!(place("nightly", pin), Place::Unknown);
+    }
+
+    #[test]
+    fn a_download_that_stalls_fails_instead_of_holding_the_write_that_waits_for_it() {
+        use std::io::{Read, Write};
+        // A server on loopback that sends the head and a first piece, then
+        // holds the socket open in silence: a connection that stalled.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut head = [0u8; 2048];
+                let _ = stream.read(&mut head);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n0123456789");
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        });
+        let url = format!("http://{addr}/image.bin");
+        let t0 = std::time::Instant::now();
+        let mut seen = 0;
+        let stall = Duration::from_millis(300);
+        let got = fetch_within(&url, MAX_IMAGE, &mut |done, _| seen = done, "image.bin", stall);
+        assert!(matches!(got, Err(DeviceError::Firmware(_))), "{got:?}");
+        assert_eq!(seen, 10, "the piece that came was heard");
+        assert!(t0.elapsed() < Duration::from_secs(5), "given up after the stall, not the server's silence");
+        assert!(READ_STALL >= Duration::from_secs(10), "a slow link that still moves is no stall");
     }
 
     #[test]
