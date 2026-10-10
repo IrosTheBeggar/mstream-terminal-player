@@ -2982,7 +2982,15 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > left, what to do next, the port watch, and the log behind `l`. The pin in
 > `src/device/firmware.rs` is firmware v0.8.0 (10 Oct 2026; before it v0.7.0 from 7 Oct,
 > v0.6.0 from 4 Oct, and the first release, v0.5.0) — `device flash` with no flags writes it;
-> `--firmware` / `--release` still override.
+> `--firmware` / `--release` still override. v0.8.0 does not answer the running firmware's
+> `@status` (the release after it does), which the pin says beside its checksum
+> (`PINNED_ANSWERS_STATUS`).
+> **2026-10-10:** the backend of the MP3 Player tab's redesign (mStream
+> `docs/designs/mp3-tab`, alternate A, "One card"): `src/device/listen.rs` asks the running
+> firmware with no reset, `board.rs` is one board's verdict and card, `desk.rs` the worker that
+> watches every board, reads one on request, counts, identifies and writes one or all;
+> `device list` and `device flash --yes --all` run on it. The page still drives `flow.rs`'s
+> run until its redesign moves it onto the desk.
 > The mStream launcher's menu item is dropped (Paul, 4 Oct 2026): **the GUI's MP3 Player tab
 > replaces it** (built 2026-10-04, docs/ux-contracts/mp3-player-screen.md) — the same page with
 > no flags, hosted under the GUI's top bar, `K` from the Library, Now Playing, Stats and the

@@ -16,6 +16,11 @@
 //! Beside the steps it reports the details the page's busy line never
 //! says — which baud answered, what the descriptor held, how many chunks
 //! a segment takes — as `Event::Log` lines, for the page's log.
+//!
+//! The whole run is today's page's. The desk (desk.rs), which the MP3
+//! Player tab's redesign and `--yes` run on, reuses its pieces — the
+//! plan, the baud ladder ([`open`]) and the write with its retry
+//! ([`write`]) — with a callback where this worker has its channel.
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
@@ -237,7 +242,11 @@ pub(crate) fn run(
         tell(Event::Cancelled);
         return;
     }
-    let mut link = match open(engine, &candidate, None, Some(cmds), events) {
+    let send = |event: Event| {
+        let _ = events.send(event);
+    };
+    let quit = || quit_asked(cmds);
+    let mut link = match open(engine, &candidate, None, Some(&quit), &send) {
         Ok(link) => link,
         Err(Stop::Quit) => {
             tell(Event::Cancelled);
@@ -294,7 +303,7 @@ pub(crate) fn run(
             return;
         }
     }
-    let (link, skipped) = match write(engine, &candidate, link, &firmware, events) {
+    let (link, skipped) = match write(engine, &candidate, link, &firmware, &send) {
         Ok(done) => done,
         Err(e) => {
             tell(Event::Failed(e));
@@ -317,7 +326,7 @@ pub(crate) fn run(
 /// The descriptor as the log says it: the address it was read from, then
 /// what it held — a firmware's name and version (ours or not), or nothing
 /// readable.
-fn descriptor_line(on_board: Option<&AppDesc>) -> String {
+pub(crate) fn descriptor_line(on_board: Option<&AppDesc>) -> String {
     let at = format!("{:X}", super::firmware::APP_OFFSET + AppDesc::OFFSET_IN_APP);
     match on_board {
         Some(desc) => {
@@ -403,7 +412,7 @@ fn quit_asked(cmds: &Receiver<Cmd>) -> bool {
 }
 
 /// Why reaching the board stopped short of a link.
-enum Stop {
+pub(crate) enum Stop {
     /// The page asked to leave between the ladder's rungs; the board was
     /// let go.
     Quit,
@@ -415,21 +424,22 @@ enum Stop {
 /// next one down; a port that is busy, forbidden or gone is final. `below`
 /// starts the ladder under a speed that already failed mid-write. Every
 /// rung goes to the log — the one place the ladder is ever visible. With
-/// `cmds`, before the write, a Quit is heard after each rung that failed:
+/// `quit`, before the write, a Quit is heard after each rung that failed:
 /// that rung reset the board into its bootloader, so it is let go before
 /// the worker stops. The write's own retry passes none — nothing cuts it.
-fn open(
+/// `tell` hears the log lines: this worker's channel, or the desk's.
+pub(crate) fn open(
     engine: &dyn Engine,
     candidate: &Candidate,
     below: Option<u32>,
-    cmds: Option<&Receiver<Cmd>>,
-    events: &Sender<Event>,
+    quit: Option<&dyn Fn() -> bool>,
+    tell: &dyn Fn(Event),
 ) -> Result<Box<dyn Link>, Stop> {
     let mut last = None;
     for baud in BAUDS.iter().copied().filter(|b| below.is_none_or(|limit| *b < limit)) {
         match engine.open(candidate, baud) {
             Ok(link) => {
-                let _ = events.send(Event::Log(t!("dev.log_baud_ok", baud = baud).to_string()));
+                tell(Event::Log(t!("dev.log_baud_ok", baud = baud).to_string()));
                 return Ok(link);
             }
             Err(e @ DeviceError::NoSync { .. }) => {
@@ -438,9 +448,9 @@ fn open(
                     _ => String::new(),
                 };
                 let line = t!("dev.log_baud_no", baud = baud, err = detail).to_string();
-                let _ = events.send(Event::Log(line));
+                tell(Event::Log(line));
                 last = Some(e);
-                if cmds.is_some_and(quit_asked) {
+                if quit.is_some_and(|asked| asked()) {
                     engine.let_go(candidate);
                     return Err(Stop::Quit);
                 }
@@ -457,22 +467,22 @@ fn open(
 /// The write, retried one baud step down when it fails on the wire — a
 /// fresh link each time, since the failed one may be anywhere. Returns
 /// the link that wrote (for the restart) and whether nothing needed
-/// writing.
-fn write(
+/// writing. `tell` hears the phases, the percent and the log lines.
+pub(crate) fn write(
     engine: &dyn Engine,
     candidate: &Candidate,
     mut link: Box<dyn Link>,
     firmware: &Firmware,
-    events: &Sender<Event>,
+    tell: &dyn Fn(Event),
 ) -> Result<(Box<dyn Link>, bool), DeviceError> {
     let list: Vec<String> = firmware
         .segments
         .iter()
         .map(|s| format!("0x{:X} · {} B", s.offset, grouped(s.data.len())))
         .collect();
-    let _ = events.send(Event::Log(t!("dev.log_segments", list = list.join("; ")).to_string()));
+    tell(Event::Log(t!("dev.log_segments", list = list.join("; ")).to_string()));
     loop {
-        let _ = events.send(Event::Phase(Phase::Comparing));
+        tell(Event::Phase(Phase::Comparing));
         let mut phase = Phase::Comparing;
         let result = link.write(&firmware.segments, &mut |report| {
             let next = match report {
@@ -481,15 +491,13 @@ fn write(
             };
             if next != phase {
                 phase = next;
-                let _ = events.send(Event::Phase(next));
+                tell(Event::Phase(next));
             }
             match report {
-                Report::Percent(pct) => {
-                    let _ = events.send(Event::Progress(pct));
-                }
+                Report::Percent(pct) => tell(Event::Progress(pct)),
                 Report::Chunks { addr, chunks } => {
                     let line = t!("dev.log_chunks", at = format!("{addr:X}"), n = grouped(chunks));
-                    let _ = events.send(Event::Log(line.to_string()));
+                    tell(Event::Log(line.to_string()));
                 }
                 Report::Verifying => {}
             }
@@ -500,10 +508,10 @@ fn write(
                 let failed_at = link.info().baud;
                 let next = BAUDS.iter().copied().find(|b| *b < failed_at).unwrap_or(BAUDS[BAUDS.len() - 1]);
                 let line = t!("dev.log_retry", baud = failed_at, next = next).to_string();
-                let _ = events.send(Event::Log(line));
+                tell(Event::Log(line));
                 drop(link);
-                let _ = events.send(Event::Phase(Phase::Connecting));
-                link = open(engine, candidate, Some(failed_at), None, events).map_err(|_| e)?;
+                tell(Event::Phase(Phase::Connecting));
+                link = open(engine, candidate, Some(failed_at), None, tell).map_err(|_| e)?;
             }
             Err(e) => return Err(e),
         }

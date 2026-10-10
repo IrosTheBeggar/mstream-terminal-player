@@ -656,11 +656,13 @@ a total under a minute reads in seconds.
 ## MP3 player (M5Stack Core2)
 
 ```
-mstream-player device list                        # the Core2-shaped boards on USB
+mstream-player device list                        # the Core2-shaped boards on USB, each with its firmware and card
+mstream-player device list --ports                # just the ports: nothing is opened
 mstream-player device flash                       # install or update the player firmware on one
 mstream-player device flash --firmware .pio/build/core2   # a build of your own (or its *-full.bin)
 mstream-player device flash --release v0.5.0      # a particular release
 mstream-player device flash --yes --port COM3     # no screen, no questions
+mstream-player device flash --yes --all           # update every board that runs an older release
 ```
 
 The [mStream MP3 player](https://github.com/IrosTheBeggar/mstream-mp3-player) is an M5Stack
@@ -701,6 +703,18 @@ pins (its tag and checksum sit in `src/device/firmware.rs`, bumped with player r
 every time; `MSTREAM_FIRMWARE_BASE` points them at a mirror. `--erase` and `--no-erase` decide
 the erase instead of the board; `--yes` prints each step and writes without a screen.
 
+`device list` asks each board what it runs over USB, all at once and with no reset (the port is
+opened with DTR and RTS held low, so the music on it plays on): the firmware's `@status` line —
+its version and its SD card's size, free space and tracks — or, from firmware older than the
+query, the console's `L` for the version alone. Each board's line is the port's as before, then
+its firmware against the pin (`v0.7.0, update to v0.8.0`) and its card (`card 38.2 GB free of
+59.6 GB, 1,284 tracks`); a board that says nothing is `not answering`, and a port another
+program holds is `in use by another program`. With several boards, `--yes` still asks for
+`--port` — its refusal lists each board's firmware now — or `--all`, which updates every board
+running an older release of this firmware, one after another, stopping at the first failure;
+it never installs over other firmware, never erases and never goes back, and names the boards
+it left alone.
+
 The pinned release is v0.8.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
 ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
 `-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install, download
@@ -709,7 +723,13 @@ that file from the release and write it with `--firmware`. It keeps the settings
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported
 as such. `MSTREAM_DEVICE_FAKE=<word>` runs everything against a scripted board, for tests:
-`fresh`, `ours:<version>`, `other`, `nodevice`, `two`, `busy`, `nosync`, `failwrite`.
+`fresh`, `ours:<version>`, `other`, `nodevice`, `two`, `busy`, `nosync`, `failwrite`, and for
+the running firmware's answers `status:<version>` (answers `@status`), `old:<version>` (`@err 7`,
+then `L`), `silent:<version>` (ours, not running) and `chip` (a board that only shares the USB
+chip). Several boards are words separated by commas, and options after slashes script the rest:
+`status:v0.9.0/free=?,old:v0.7.0,chip/in=3` is three boards, the last plugged in three seconds
+on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field;
+src/device/engine.rs has the whole grammar).
 
 ## Now playing
 
