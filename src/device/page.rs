@@ -4688,7 +4688,17 @@ mod tests {
     }
 
     /// The local build's folder, and the sheet open on it with its path field.
+    /// A path of the platform's own: the page shortens a path at its last
+    /// separator, and a backslash is none outside Windows.
+    #[cfg(windows)]
     const BUILD: &str = "C:\\code\\mstream-mp3-player\\.pio\\build\\core2";
+    #[cfg(not(windows))]
+    const BUILD: &str = "/code/mstream-mp3-player/.pio/build/core2";
+    #[cfg(windows)]
+    const REFUSED: &str = "C:\\Downloads\\core2-factory.bin";
+    #[cfg(not(windows))]
+    const REFUSED: &str = "/Downloads/core2-factory.bin";
+    const SEP: char = std::path::MAIN_SEPARATOR;
 
     fn build_facts() -> crate::device::firmware::ImageFacts {
         fixtures::local_facts(BUILD, "v0.8.0-5-g4e94418", Mode::Qio)
@@ -4728,7 +4738,7 @@ mod tests {
         ends.tell([Event::Vetted { path: BUILD.into(), result: Ok(build_facts()) }]);
         page.pump();
         let frame = window(&mut page);
-        assert!(frame.contains("(•) A local build — C:\\code\\mstream-mp3-player\\.pio\\build\\core2"), "{frame}");
+        assert!(frame.contains(&format!("(•) A local build — {BUILD}")), "{frame}");
         assert!(frame.contains("│       firmware.factory.bin · v0.8.0-5-g4e94418 · 2,701,840 B"), "frame 19:\n{frame}");
         assert!(frame.contains("│       QIO, from its header · a local build, not a release"), "{frame}");
         assert!(frame.contains("│   (•) QIO — the image's own (80 MHz in its header)"), "{frame}");
@@ -4749,7 +4759,8 @@ mod tests {
         let frame = window(&mut page);
         assert!(frame.contains("│ Write a local build over v0.8.0?"), "frame 22:\n{frame}");
         assert!(frame.contains("A local build, not a release: v0.8.0-5-g4e94418 in QIO (faster), from"), "{frame}");
-        assert!(frame.contains("…\\core2. Checked only for being mStream firmware, not for working."), "{frame}");
+        let shortened = format!("…{SEP}core2. Checked only for being mStream firmware, not for working.");
+        assert!(frame.contains(&shortened), "{frame}");
         assert!(frame.contains("the board's bootloader"), "a build that does not start is recoverable:\n{frame}");
         assert!(frame.contains("◂ Keep v0.8.0      Write  │"), "{frame}");
         assert_eq!(page.hint(), "y write · Enter or Esc cancel");
@@ -4768,7 +4779,7 @@ mod tests {
         if let Some(field) = page.sheet.as_mut().and_then(|s| s.field.as_mut()) {
             *field = tui_input::Input::default();
         }
-        let file = "C:\\Downloads\\core2-factory.bin";
+        let file = REFUSED;
         type_in(&mut page, file);
         press(&mut page, KeyCode::Enter);
         ends.sent();
@@ -4776,7 +4787,8 @@ mod tests {
         ends.tell([Event::Vetted { path: file.into(), result: Err(DeviceError::Firmware(why)) }]);
         page.pump();
         let frame = window(&mut page);
-        assert!(frame.contains("│       ✗ …\\core2-factory.bin is not an mstream-mp3-player image"), "frame 20:\n{frame}");
+        let refused = format!("│       ✗ …{SEP}core2-factory.bin is not an mstream-mp3-player image");
+        assert!(frame.contains(&refused), "frame 20:\n{frame}");
         assert!(frame.contains("Only builds of mstream-mp3-player go on from here"), "{frame}");
         press(&mut page, KeyCode::Tab);
         press(&mut page, KeyCode::Tab);
