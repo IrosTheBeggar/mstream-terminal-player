@@ -25,16 +25,26 @@ use super::DeviceError;
 const REPO: &str = "IrosTheBeggar/mstream-mp3-player";
 const ASSET_STEM: &str = "mstream-player-core2";
 /// The release this player pins: what `device flash` writes when no
-/// `--firmware` or `--release` says otherwise. Bumped by hand with player
-/// releases, once a firmware release has been tried on a board.
-pub(crate) const PINNED_TAG: Option<&str> = Some("v0.7.0");
-/// The sha256 of that release's `*-full.bin`, from its SHA256SUMS. Release
-/// assets are mutable on GitHub; this is the trust anchor, not the file.
-/// v0.7.0's `-full.bin` runs the flash in QIO, as every release has since
-/// v0.6.0; the release's `-dio-full.bin` (the same firmware in DIO, for a
-/// Core2 that keeps restarting on QIO) goes on with `--firmware`.
+/// `--firmware` or `--release` says otherwise, and what a board's firmware
+/// is measured against ("up to date" is this, exactly). Bumped by hand
+/// with player releases, once a firmware release has been tried on a board.
+pub(crate) const PINNED_TAG: Option<&str> = Some("v0.8.0");
+/// The sha256 of that release's `*-full.bin`, from its SHA256SUMS (and the
+/// same as GitHub's own digest of the asset, checked when it was pinned).
+/// Release assets are mutable on GitHub; this is the trust anchor, not the
+/// file. v0.8.0's `-full.bin` runs the flash in QIO, as every release has
+/// since v0.6.0; the release's `-dio-full.bin` (the same firmware in DIO,
+/// for a Core2 that keeps restarting on QIO) goes on with `--firmware`.
 pub(crate) const PINNED_FULL_SHA256: Option<&str> =
-    Some("b26f56b369ec0b493d9ff13c276794abfd09705485c07d23f0171861da147113");
+    Some("ba77f290f7159b2e40a7d0907a05b1400ed6529abe297437595259ed8d0671a3");
+/// Whether a board running the pinned release answers `@status` — the
+/// running firmware's report of its card (the firmware repo's
+/// docs/HOST-STATUS.md: the release after v0.8.0). v0.8.0 does not: it
+/// says `@err 7 status`, so its board shows its version but not its card,
+/// and "update to see the card" would be a promise the update does not
+/// keep. Flipped with the pin, when the pin moves to a release that
+/// answers.
+pub(crate) const PINNED_ANSWERS_STATUS: bool = false;
 
 /// Where the merged image expects the app: ota_0 in the firmware's
 /// partition table, and where the bootloader at 0x1000 sits inside it.
@@ -47,6 +57,12 @@ const IMAGE_MAGIC: u8 = 0xE9;
 const MAX_IMAGE: usize = 8 * 1024 * 1024;
 const MAX_SUMS: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The longest a download goes on with no byte coming. The MP3 Player page
+/// takes the gate's yes while the image still downloads, and is locked from
+/// that yes until the write ends (the screen's contract, clause 9): a
+/// connection that stalls must fail, failing the write that waits for it
+/// with nothing touched, rather than hold the page for good.
+const READ_STALL: Duration = Duration::from_secs(30);
 
 /// A piece of the image and where it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +181,137 @@ pub(crate) fn classify(bytes: &[u8]) -> Option<(Layout, AppDesc)> {
     None
 }
 
+/// A firmware version, in the shapes the firmware's `tools/version.py`
+/// writes into its app description: a release (`v0.8.0`, or a pre-release
+/// `v0.9.0-rc.1`), a build past one (`git describe`'s `v0.8.0-5-g4e94418`,
+/// `-dirty` when the tree had changes), or a build with no tag reachable
+/// (`v0.9.0-dev+abc1234`: the NEXT release's dev build, so before it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Version {
+    pub core: (u64, u64, u64),
+    /// SemVer's pre-release identifiers (`rc.1`, `dev`); none for a final
+    /// release.
+    pub pre: Vec<String>,
+    /// Commits past the tag (`git describe`'s count).
+    pub ahead: u32,
+    /// Not a release: past a tag, a `-dev+` build, or a dirty tree.
+    pub dev: bool,
+}
+
+/// Where a board's version stands against the target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Place {
+    /// The very version: up to date.
+    Same,
+    /// Before it: an older release, or a dev build based below it.
+    Older,
+    /// It, or after it, and not the very version: a newer release, or a
+    /// dev build on the target or later. Never offered as an update — the
+    /// write would go back.
+    Newer,
+    /// A version the order cannot place (not one of the shapes above).
+    Unknown,
+}
+
+impl Version {
+    pub fn parse(text: &str) -> Option<Version> {
+        let mut rest = text.trim().strip_prefix('v')?;
+        let mut dev = false;
+        if let Some(clean) = rest.strip_suffix("-dirty") {
+            rest = clean;
+            dev = true;
+        }
+        // Build metadata (`+abc1234`) says nothing about the order; its
+        // presence says the build is not a release.
+        if let Some((base, _build)) = rest.split_once('+') {
+            rest = base;
+            dev = true;
+        }
+        // `git describe`'s tail: `-<n>-g<hash>`.
+        let mut ahead = 0;
+        if let Some((base, tail)) = rest.rsplit_once("-g")
+            && !tail.is_empty()
+            && tail.chars().all(|c| c.is_ascii_hexdigit())
+            && let Some((base, count)) = base.rsplit_once('-')
+            && let Ok(n) = count.parse::<u32>()
+        {
+            rest = base;
+            ahead = n;
+            dev = true;
+        }
+        let (core, pre) = match rest.split_once('-') {
+            Some((core, pre)) => (core, pre.split('.').map(str::to_string).collect::<Vec<_>>()),
+            None => (rest, Vec::new()),
+        };
+        if pre.iter().any(String::is_empty) {
+            return None;
+        }
+        let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
+        let (Some(Some(major)), Some(Some(minor)), Some(Some(patch)), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        Some(Version { core: (major, minor, patch), pre, ahead, dev })
+    }
+
+    /// SemVer's order (a pre-release before its release, identifiers
+    /// numeric before alphanumeric), then the commits past the tag.
+    fn order(&self, other: &Version) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let pre = match (self.pre.is_empty(), other.pre.is_empty()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => {
+                let ident = |a: &String, b: &String| match (a.parse::<u64>(), b.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => a.cmp(b),
+                };
+                self.pre
+                    .iter()
+                    .zip(&other.pre)
+                    .map(|(a, b)| ident(a, b))
+                    .find(|o| o.is_ne())
+                    .unwrap_or_else(|| self.pre.len().cmp(&other.pre.len()))
+            }
+        };
+        self.core.cmp(&other.core).then(pre).then(self.ahead.cmp(&other.ahead))
+    }
+}
+
+/// Where `version` (a board's) stands against `target`. Up to date is the
+/// same text and nothing else: a dirty build of the tag, or one a commit
+/// past it, is the board running something the player does not carry.
+pub(crate) fn place(version: &str, target: &str) -> Place {
+    if version.trim() == target.trim() {
+        return Place::Same;
+    }
+    match (Version::parse(version), Version::parse(target)) {
+        (Some(board), Some(target)) => {
+            if board.order(&target).is_lt() {
+                Place::Older
+            } else {
+                Place::Newer
+            }
+        }
+        _ => Place::Unknown,
+    }
+}
+
+/// What every board is measured against: the version a write would put on
+/// it, and whether a board running that version answers `@status`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Target {
+    pub version: String,
+    /// Only the pin knows ([`PINNED_ANSWERS_STATUS`]); a `--release` or a
+    /// file is taken not to, so the page never promises a card the update
+    /// may not show.
+    pub answers_status: bool,
+}
+
 /// Where the image comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Source {
@@ -180,6 +327,29 @@ impl Source {
             (None, Some(tag)) => Source::Release(tag),
             (None, None) => Source::Pinned,
         }
+    }
+
+    /// The target as far as it is known before anything is fetched: the
+    /// pin's tag, a release's tag — the boards can be judged at once, while
+    /// the image downloads — or nothing for a file, whose version is inside
+    /// it (known once it is read, which is quick: it is on disk).
+    pub fn target(&self) -> Option<Target> {
+        match self {
+            Source::Pinned => PINNED_TAG
+                .map(|tag| Target { version: tag.to_string(), answers_status: PINNED_ANSWERS_STATUS }),
+            Source::Release(tag) => Some(Target { version: tag.clone(), answers_status: false }),
+            Source::Local(_) => None,
+        }
+    }
+
+    /// The target once the image is in hand: its own description's
+    /// version, which is the truth whatever the tag said.
+    pub fn target_of(&self, firmware: &Firmware) -> Target {
+        let answers_status = match self {
+            Source::Pinned => PINNED_ANSWERS_STATUS,
+            _ => false,
+        };
+        Target { version: firmware.version.clone(), answers_status }
     }
 
     /// The image, read or downloaded. `progress` hears a download's bytes
@@ -343,10 +513,22 @@ fn fetch(
     progress: &mut dyn FnMut(u64, Option<u64>),
     what: &str,
 ) -> Result<Vec<u8>, DeviceError> {
+    fetch_within(url, cap, progress, what, READ_STALL)
+}
+
+/// [`fetch`], giving up once `stall` passes with no byte.
+fn fetch_within(
+    url: &str,
+    cap: usize,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+    what: &str,
+    stall: Duration,
+) -> Result<Vec<u8>, DeviceError> {
     let failed = |err: String| DeviceError::Firmware(t!("dev.fw_download", what = what, err = err).to_string());
     let result = crate::runtime::block_on(async {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(stall)
             .build()
             .map_err(|e| e.to_string())?;
         let mut response = client
@@ -493,6 +675,83 @@ pub(crate) mod tests {
         );
         assert_eq!(Source::from_args(None, Some("v9".into())), Source::Release("v9".into()));
         assert_eq!(Source::from_args(None, None), Source::Pinned);
+    }
+
+    #[test]
+    fn the_pin_says_whether_its_release_answers_the_status_query() {
+        // v0.8.0 answers `@err 7 status`: the page must not promise the
+        // card after an update to it. The release after it answers.
+        assert_eq!(PINNED_TAG, Some("v0.8.0"));
+        assert!(!PINNED_ANSWERS_STATUS, "v0.8.0 has no @status");
+        assert_eq!(
+            Source::Pinned.target(),
+            Some(Target { version: "v0.8.0".into(), answers_status: PINNED_ANSWERS_STATUS })
+        );
+        let release = Source::Release("v0.9.0".into()).target().unwrap();
+        assert!(!release.answers_status, "a release by tag promises nothing it cannot know");
+        assert_eq!(Source::Local(PathBuf::from("x.bin")).target(), None, "a file's version is inside it");
+    }
+
+    #[test]
+    fn versions_order_releases_pre_releases_and_describe_builds() {
+        let v = |s: &str| Version::parse(s).unwrap_or_else(|| panic!("{s} parses"));
+        assert_eq!(v("v0.8.0"), Version { core: (0, 8, 0), pre: vec![], ahead: 0, dev: false });
+        assert_eq!(v("v0.8.0-5-g4e94418").ahead, 5);
+        assert!(v("v0.8.0-5-g4e94418").dev);
+        assert_eq!(v("v0.5.0-3-gabc1234-dirty"), Version { core: (0, 5, 0), pre: vec![], ahead: 3, dev: true });
+        assert_eq!(v("v0.9.0-dev+abc1234-dirty"), Version { core: (0, 9, 0), pre: vec!["dev".into()], ahead: 0, dev: true });
+        assert_eq!(v("v0.9.0-rc.1").pre, ["rc", "1"]);
+        assert!(!v("v0.9.0-rc.1").dev, "a pre-release tag is a release");
+        assert_eq!(v("v0.9.0-rc.1-2-gdeadbee").pre, ["rc", "1"], "describe past a pre-release tag");
+        for junk in ["", "0.8", "v0.8", "v0.8.0.1", "3.3.12x", "va.b.c", "v0.8.0-"] {
+            assert_eq!(Version::parse(junk), None, "{junk:?}");
+        }
+        assert!(Version::parse("3.3.12").is_none(), "another project's bare version is not ours to order");
+    }
+
+    #[test]
+    fn a_board_is_up_to_date_only_on_the_very_version_and_never_offered_a_step_back() {
+        let pin = "v0.8.0";
+        assert_eq!(place("v0.8.0", pin), Place::Same);
+        assert_eq!(place("v0.7.0", pin), Place::Older);
+        assert_eq!(place("v0.6.0-37-g221d99d", pin), Place::Older, "a dev build based below the pin");
+        assert_eq!(place("v0.9.0-rc.1", "v0.9.0"), Place::Older, "a pre-release before its release");
+        assert_eq!(place("v0.9.0-dev+abc1234", "v0.9.0"), Place::Older, "the next release's dev build comes before it");
+        assert_eq!(place("v0.9.0-dev+abc1234", pin), Place::Newer);
+        // The real Core2 of 2026-10-10: a build five commits past the pin.
+        assert_eq!(place("v0.8.0-5-g4e94418", pin), Place::Newer, "a dev build on the pin is ahead of it");
+        assert_eq!(place("v0.8.0-dirty", pin), Place::Newer, "the tag with local changes is not the release");
+        assert_eq!(place("v0.9.0", pin), Place::Newer);
+        assert_eq!(place("v0.10.0", "v0.9.0"), Place::Newer, "numbers, not text");
+        assert_eq!(place("v0.9.0-rc.2", "v0.9.0-rc.10"), Place::Older, "numeric identifiers as numbers");
+        assert_eq!(place("v0.9.0-alpha", "v0.9.0-1"), Place::Newer, "alphanumeric after numeric");
+        assert_eq!(place("nightly", pin), Place::Unknown);
+    }
+
+    #[test]
+    fn a_download_that_stalls_fails_instead_of_holding_the_write_that_waits_for_it() {
+        use std::io::{Read, Write};
+        // A server on loopback that sends the head and a first piece, then
+        // holds the socket open in silence: a connection that stalled.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut head = [0u8; 2048];
+                let _ = stream.read(&mut head);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n0123456789");
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        });
+        let url = format!("http://{addr}/image.bin");
+        let t0 = std::time::Instant::now();
+        let mut seen = 0;
+        let stall = Duration::from_millis(300);
+        let got = fetch_within(&url, MAX_IMAGE, &mut |done, _| seen = done, "image.bin", stall);
+        assert!(matches!(got, Err(DeviceError::Firmware(_))), "{got:?}");
+        assert_eq!(seen, 10, "the piece that came was heard");
+        assert!(t0.elapsed() < Duration::from_secs(5), "given up after the stall, not the server's silence");
+        assert!(READ_STALL >= Duration::from_secs(10), "a slow link that still moves is no stall");
     }
 
     #[test]

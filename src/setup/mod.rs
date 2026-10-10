@@ -3958,32 +3958,54 @@ pub(crate) mod tests {
 
     #[test]
     fn the_mp3_player_tabs_footer_lines_fit_ninety_nine_cells_in_every_locale() {
-        // Every hint the MP3 Player tab can put on the GUI's footer, drawn
-        // from x 1 (mp3-player-screen contract, clause 15): the hosted
-        // words where Esc leads back to the Library, the page's own for the
-        // question, the write and Done. And the hosted words say where Esc
-        // goes in each locale's own word for the Library tab's way back.
-        let keys = [
-            "dev.hint_wait_hosted",
-            "dev.hint_none_hosted",
-            "dev.hint_several_hosted",
-            "dev.hint_failed_hosted",
-            "dev.hint_confirm",
-            "dev.hint_working",
-            "dev.hint_done",
-        ];
+        // The MP3 Player tab's footer is drawn from x 1 (mp3-player-screen
+        // contract, clause 15). The page fits its hint in 99 cells by
+        // dropping its lesser keys, but what never gives way must fit
+        // together: the write's warning with the keys after it, each gate's
+        // keys, and the card's switch, primary, Details and way back. And
+        // the way back reads as the Stats tab's, in each locale's own words
+        // for Esc and the Library.
         for (code, body) in LOCALE_FILES {
             let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
-            for key in keys {
-                let line = locale_text(&parsed, code, key);
+            let text = |key: &str| locale_text(&parsed, code, &format!("dev.{key}"));
+            // The longest short port name the page says (listen::label_for).
+            let port = |key: &str| text(key).replace("%{port}", "cu.usbmodem14101");
+            let switch = |key: &str| format!("←→ {}", text(key));
+            let enters = ["hint_enter_update", "hint_enter_install", "hint_enter_read", "hint_enter_retry"];
+            let gates = ["hint_gate_update", "hint_gate_install", "hint_gate_again", "hint_gate_back", "hint_gate_all"];
+            let mut lines = vec![
+                vec![port("hint_working_port"), switch("hint_look"), text("hint_details")],
+                vec![text("hint_working"), text("hint_details")],
+                vec![text("hint_help"), text("hint_library")],
+            ];
+            for enter in enters {
+                lines.push(vec![switch("hint_player"), text(enter), text("hint_details"), text("hint_library")]);
+            }
+            for gate in gates {
+                lines.push(vec![text(gate), text("hint_gate_erase"), text("hint_gate_cancel")]);
+            }
+            for parts in lines {
+                let line = parts.join(" · ");
                 let cells = crate::kit::width(&line);
-                assert!(cells <= 99, "{code}: {key} is {cells} cells: {line}");
+                assert!(cells <= 99, "{code}: {cells} cells: {line}");
             }
             let back = locale_text(&parsed, code, "gui.tips.stats_back");
-            let library = back.split_once(' ').map_or(back.as_str(), |(_, word)| word);
-            for key in &keys[..4] {
-                let line = locale_text(&parsed, code, key);
-                assert!(line.ends_with(&format!("Esc {library}")), "{code}: {key} ends with Esc and {library:?}: {line}");
+            assert_eq!(text("hint_library"), back, "{code}: the way back reads as the Stats tab's");
+        }
+    }
+
+    #[test]
+    fn the_mp3_player_cards_labels_leave_a_gap_in_their_column_in_every_locale() {
+        // The card's labels stand in a 14-cell column before the values
+        // (src/device/page.rs, LABEL_W): 13 cells at most, so one is left
+        // between a label and its value.
+        let labels = ["label_firmware", "sd_card", "board", "port", "on_board", "label_player", "label_card_fact"];
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            for key in labels {
+                let label = locale_text(&parsed, code, &format!("dev.{key}"));
+                let cells = crate::kit::width(&label);
+                assert!(cells <= 13, "{code}: dev.{key} is {cells} cells: {label}");
             }
         }
     }

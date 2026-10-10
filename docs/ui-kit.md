@@ -165,7 +165,11 @@ BOLD), two cells apart. `←`/`→` and clicks switch; the pane beneath keeps
 one fixed height whatever the tab, so nothing below it moves. The tab
 row's right edge may carry the active pane's one-line note (the log's
 "newest first"), dropped when the row is too narrow. First consumer:
-the admin panel's Discovery room.
+the admin panel's Discovery room. The MP3 Player page's port tabs are the
+second: each tab wears its board's mark after the name (✓ ok, ! and ✗
+gold, ? and … DarkGray, a write's percentage in the accent; on the slab
+the mark takes the slab's colours), and the right edge carries a count or
+a text button (Update all).
 
 ### Dropdown
 A choice among many that has one home on the screen: the current value
@@ -472,7 +476,9 @@ close on the title row, right edge: DIM, hover BRIGHT + BOLD —
 dismissal is neutral; red stays reserved for the destructive row
 remove. Its tooltip names the keyboard path ("Close — Esc"). Warning
 gates (the public-mode modal) get NO `[X]` — they force an explicit
-choice.
+choice. A gate may name its safe choice for what it keeps rather than
+"Cancel" (the MP3 Player page's "◂ Keep v0.8.0"); it is still first and
+still the modal primary.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
 **Over pixels**: on a screen that draws real pixels (the queue's and the

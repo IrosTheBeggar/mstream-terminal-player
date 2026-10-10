@@ -2300,6 +2300,20 @@ a LATER secondary screen (party view), Columns retired.
   `K` or Esc back (`F` was first; Caps Lock on the filter key's `f` reset
   a plugged-in Core2). The server label is cut to keep off the strip,
   tested at 100 columns in every locale.
+- **The MP3 Player tab redrawn as "One card" ✅ 2026-10-10** — mStream
+  `docs/designs/mp3-tab` alternate A, chosen by Paul on 2026-10-09, with
+  the set README's grafts (docs/ux-contracts/mp3-player-screen.md, rewritten
+  first; Phase 13). Opening the tab only listens — no board is reset to be
+  shown — and the page is one card: the head, the Firmware chip (✓ ! ✗ ?),
+  the SD card's bar and numbers as the running firmware reports them, one
+  primary that follows the chip, Details (`d`) for the facts and the log.
+  Every write passes the kit's gold gate (B's titles, the safe button named
+  for what stays, the erase box in the install gate only); Done is the card
+  again. Several boards are port tabs with marks and C's count; Show on the
+  player (`s`), Update all (`a`), look-don't-write during a write. The tab's
+  lock lasts from the gate's yes until the board's write has ended; leaving
+  keeps a page that saw a board aside until its worker says every port is
+  free. The standalone `device flash` is the same page at 72×24.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
@@ -2980,9 +2994,25 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
 > (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
 > left, what to do next, the port watch, and the log behind `l`. The pin in
-> `src/device/firmware.rs` is firmware v0.7.0 (7 Oct 2026; before it v0.6.0 from 4 Oct, and
-> the first release, v0.5.0) — `device flash` with no flags writes it; `--firmware` /
-> `--release` still override.
+> `src/device/firmware.rs` is firmware v0.8.0 (10 Oct 2026; before it v0.7.0 from 7 Oct,
+> v0.6.0 from 4 Oct, and the first release, v0.5.0) — `device flash` with no flags writes it;
+> `--firmware` / `--release` still override. v0.8.0 does not answer the running firmware's
+> `@status` (the release after it does), which the pin says beside its checksum
+> (`PINNED_ANSWERS_STATUS`).
+> **2026-10-10:** the backend of the MP3 Player tab's redesign (mStream
+> `docs/designs/mp3-tab`, alternate A, "One card"): `src/device/listen.rs` asks the running
+> firmware with no reset, `board.rs` is one board's verdict and card, `desk.rs` the worker that
+> watches every board, reads one on request, counts, identifies and writes one or all;
+> `device list` and `device flash --yes --all` run on it.
+> **2026-10-10, later:** the page redrawn as alternate A on the desk
+> (docs/ux-contracts/mp3-player-screen.md, rewritten first): opening the page or the GUI's
+> tab only listens; one card per board — the Firmware chip against the pin, the SD card as
+> the firmware reports it (firmware 0.9.0's `@status`; v0.8.0 and older say their version only,
+> and "updating shows it" waits for a pin that answers), one primary, Details; the gold gate
+> before every write; port tabs, Show on the player and Update all for several boards; the
+> standalone page the same at 72×24. `flow.rs` keeps only the pieces the desk reuses (the plan,
+> the baud ladder, the write and its retry); its whole-run worker, which reset a board to show
+> it, is gone.
 > The mStream launcher's menu item is dropped (Paul, 4 Oct 2026): **the GUI's MP3 Player tab
 > replaces it** (built 2026-10-04, docs/ux-contracts/mp3-player-screen.md) — the same page with
 > no flags, hosted under the GUI's top bar, `K` from the Library, Now Playing, Stats and the
@@ -3005,8 +3035,9 @@ pages are. The launcher was to open this page the way it opens the admin rooms; 
 - **Trust.** The pin is a tag plus the sha256 of its `-full.bin` (release assets are mutable);
   `--release` trusts the release's own `SHA256SUMS`; every local file is vetted by its
   description before anything is written.
-- **The worker** (src/device/flow.rs) holds the board in its bootloader from the probe to the
-  write, so one reset serves both, and restarts it on every way out before the write; the page
+- **The worker** was src/device/flow.rs, holding the board in its bootloader from the probe to
+  the write; since 2026-10-10 it is the desk (src/device/desk.rs), which asks every board with
+  no reset and reaches a bootloader only for a write or a read someone asked for; the page
   cannot leave a write. The baud ladder (921600 → 460800 → 115200) covers bridges and cables
   that cannot hold the fast rate, on connect and again on a write that dies.
 - **Left:** a way to the pinned release's `-dio-full.bin` from the page (today `--firmware`,
