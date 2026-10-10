@@ -1401,7 +1401,12 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         }
         return Some(false);
     }
-    if gui.app.capture == Some(Capture::DjSeed) && key.code == KeyCode::Esc {
+    // Not on the MP3 Player tab, whose Esc is the page's (mp3-player-screen
+    // contract, clause 12); entering the tab lets the pick go anyway.
+    if gui.app.capture == Some(Capture::DjSeed)
+        && key.code == KeyCode::Esc
+        && gui.screen != Screen::Device
+    {
         gui.forward(Action::Cancel);
         return Some(false);
     }

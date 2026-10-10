@@ -457,14 +457,19 @@ is playing, a seek line, and prev · play · next — until there is room again.
 In the desktop player, started with no arguments or as `gui --window`, it
 opens in its own window instead (see [Two flavours](#two-flavours)).
 
-- **Four screens**: **Library** (the nav column and its rooms), **Stats**
-  (`T`) and **Admin** (`M`) are the top bar's tabs; **Now Playing** (`0`, no
-  tab of its own) is the classic player's full-screen view — the facts, the
-  cover, the tabbed panel and the waveform band — with prev · play · next
-  under the cover; Stats is the listening log of `mstream-player stats` on
-  the session's server, whole: the same tabs, periods and keys, Esc back to
-  the Library. Admin is the admin panel below, its six rooms in a hallway
-  at the left, with the server's own log beside them.
+- **Five screens**: **Library** (the nav column and its rooms), **Stats**
+  (`T`), **Admin** (`M`) and **MP3 Player** (`K`) are the top bar's tabs;
+  **Now Playing** (`0`, no tab of its own) is the classic player's
+  full-screen view — the facts, the cover, the tabbed panel and the waveform
+  band — with prev · play · next under the cover; Stats is the listening log
+  of `mstream-player stats` on the session's server, whole: the same tabs,
+  periods and keys, Esc back to the Library. Admin is the admin panel below,
+  its six rooms in a hallway at the left, with the server's own log beside
+  them. MP3 Player is the firmware page of `mstream-player device flash`
+  ([below](#mp3-player-m5stack-core2)) with no flags, and needs no server: a
+  write, once started, cannot be left — the tab holds every key but Ctrl+C
+  until it is done, and its footer, drawn on this tab whatever the key-hints
+  setting, warns against unplugging the board.
   Beside them, the
   **Visualizer** item (`V`) opens the mobile app's shader presets in a
   window of their own, moving to what is playing. Move the pointer over it
@@ -677,6 +682,17 @@ and lists the serial ports it did see, so plugging the Core2 in is enough; with 
 list follows the ports. No mStream session is involved, and a write cannot be left halfway —
 Esc before it restarts the board into what it had.
 
+The GUI player has the same page as its **MP3 Player** tab (`K`): `device flash` with no
+flags — the pinned release, the port found by itself, the erase the board decides — under the
+top bar, its hint on the footer, Esc (or `K`) back to the Library. Opening the tab starts the
+page as the command does, so a Core2 already plugged in is reset into its bootloader and read
+at once; leaving the tab before the write restarts it and frees its port (coming straight back
+waits a moment for that), and quitting the player waits for that restart too — under a second at
+the question, up to eight while the board is still being reached. While the write runs the tab
+cannot be left; Ctrl+C, closing the window and, on macOS, Cmd-Q still quit, and leave the board
+half written. `--firmware`, `--release`, `--port`, `--erase` / `--no-erase` and `--yes` are the
+command line's alone.
+
 The firmware comes from the firmware repository's GitHub Releases: the release this player
 pins (its tag and checksum sit in `src/device/firmware.rs`, bumped with player releases),
 `--release <tag>` for another one (checked against that release's `SHA256SUMS`), or
@@ -684,6 +700,11 @@ pins (its tag and checksum sit in `src/device/firmware.rs`, bumped with player r
 `firmware.factory.bin`. Downloads are kept under the player's cache directory and re-checked
 every time; `MSTREAM_FIRMWARE_BASE` points them at a mirror. `--erase` and `--no-erase` decide
 the erase instead of the board; `--yes` prints each step and writes without a screen.
+
+The pinned release is v0.7.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
+ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
+`-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install, download
+that file from the release and write it with `--firmware`. It keeps the settings like any update.
 
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported

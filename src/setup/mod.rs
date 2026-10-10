@@ -3957,6 +3957,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_mp3_player_tabs_footer_lines_fit_ninety_nine_cells_in_every_locale() {
+        // Every hint the MP3 Player tab can put on the GUI's footer, drawn
+        // from x 1 (mp3-player-screen contract, clause 15): the hosted
+        // words where Esc leads back to the Library, the page's own for the
+        // question, the write and Done. And the hosted words say where Esc
+        // goes in each locale's own word for the Library tab's way back.
+        let keys = [
+            "dev.hint_wait_hosted",
+            "dev.hint_none_hosted",
+            "dev.hint_several_hosted",
+            "dev.hint_failed_hosted",
+            "dev.hint_confirm",
+            "dev.hint_working",
+            "dev.hint_done",
+        ];
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            for key in keys {
+                let line = locale_text(&parsed, code, key);
+                let cells = crate::kit::width(&line);
+                assert!(cells <= 99, "{code}: {key} is {cells} cells: {line}");
+            }
+            let back = locale_text(&parsed, code, "gui.tips.stats_back");
+            let library = back.split_once(' ').map_or(back.as_str(), |(_, word)| word);
+            for key in &keys[..4] {
+                let line = locale_text(&parsed, code, key);
+                assert!(line.ends_with(&format!("Esc {library}")), "{code}: {key} ends with Esc and {library:?}: {line}");
+            }
+        }
+    }
+
+    #[test]
     fn the_hallway_labels_fit_their_column_in_every_locale() {
         // A room label is drawn at x 3 and a group label at x 1, both
         // stopping before the hallway's rule at x 16.

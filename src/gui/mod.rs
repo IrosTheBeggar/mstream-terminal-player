@@ -24,6 +24,7 @@ pub(crate) mod control;
 mod actions;
 mod admin;
 mod cover;
+mod device;
 mod dj;
 mod library;
 mod log_file;
@@ -115,8 +116,8 @@ pub(crate) enum Act {
     Chip(usize),
     /// The query card: start (or resume) editing the search text.
     EditQuery,
-    /// A screen: the Library, Stats or Admin from their top-bar tabs, Now
-    /// Playing from `0` — it has no tab.
+    /// A screen: the Library, Stats, Admin or the MP3 Player from their
+    /// top-bar tabs, Now Playing from `0` — it has no tab.
     Screen(Screen),
     /// The Admin tab's own pointer ways (see gui::admin): a hallway row,
     /// a column taking the keys, the log's controls.
@@ -361,6 +362,9 @@ pub(crate) enum Screen {
     /// The admin rooms and the server's log, hosted (docs/ux-contracts/
     /// admin-screen.md).
     Admin,
+    /// The MP3 player's firmware page, `device flash` with no flags,
+    /// hosted (docs/ux-contracts/mp3-player-screen.md).
+    Device,
 }
 
 /// The sub-view a Settings room shows in place of its rows. At most one is
@@ -555,6 +559,8 @@ pub(crate) struct Gui {
     stats: stats::StatsUi,
     /// The Admin screen: its hallway, the room it hosts and the log.
     admin: admin::AdminUi,
+    /// The MP3 Player screen's firmware page, while the screen is up.
+    device: device::DeviceUi,
     /// The visualizer window's child process, while one is open.
     vizwin: vizwin::VizWindow,
     /// The Settings sub-view standing in for its rows, when one is open.
@@ -619,6 +625,7 @@ impl Gui {
             now: now::NowUi::new(),
             stats: stats::StatsUi::default(),
             admin: admin::AdminUi::new(),
+            device: device::DeviceUi::default(),
             vizwin: vizwin::VizWindow::new(),
             settings_room: None,
             servers: servers::ServersUi::new(),
@@ -774,6 +781,12 @@ impl Gui {
 
     /// Everything a click or key resolved to. Returns true to quit.
     pub(super) fn act(&mut self, act: Act) -> bool {
+        // The MP3 Player tab's write cannot be left (mp3-player-screen
+        // contract, clause 9): whatever asks — a key, a click, a room's own
+        // way to another room — the screen stays while the page writes.
+        if device::writing(self) && matches!(act, Act::Screen(_) | Act::Nav(_) | Act::CaptureCancel) {
+            return false;
+        }
         if actions::act(self, &act) {
             return false;
         }
@@ -808,6 +821,9 @@ impl Gui {
                 let sonic = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
                 self.forward(Action::Cancel);
                 if sonic {
+                    // Home to the Library leaves the MP3 Player tab too, and
+                    // its page goes with it (clause 8).
+                    device::close(self);
                     self.screen = Screen::Library;
                     self.active = SONIC_NAV;
                     self.app.tab = Tab::SonicPath;
@@ -839,6 +855,14 @@ impl Gui {
                 } else if screen != Screen::Admin {
                     admin::close(self);
                 }
+                // The MP3 Player screen's page likewise: built on entry, its
+                // worker with it, and dropped on leaving (mp3-player-screen
+                // contract, clauses 5 and 8).
+                if screen == Screen::Device && was != Screen::Device {
+                    device::open(self);
+                } else if screen != Screen::Device {
+                    device::close(self);
+                }
             }
             Act::VizWindow => vizwin::toggle(self),
             Act::Nav(i) => {
@@ -847,6 +871,7 @@ impl Gui {
                 self.app.fullscreen = false;
                 stats::close(self);
                 admin::close(self);
+                device::close(self);
                 // The gated room: with the flag gone the row isn't drawn,
                 // and its digit must be as dead as the row (contract §1).
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
@@ -1168,45 +1193,51 @@ fn demo_now() -> Now {
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
-/// One run of text at a cell, clipped at the frame's edge — written into
-/// the buffer directly: the hub's primitive runs a few hundred times a
-/// frame, and a `Paragraph` per call was a handful of allocations each.
-/// The top bar's tabs at the left — Library, Stats, Admin: the kit's tab
-/// slab for the screen that is up, dim text for the others, bright under
-/// the pointer. Now Playing has no tab (it opens on `0`), so while it is
-/// up no tab wears the slab.
+/// The top bar's tabs at the left — Library, Stats, Admin, MP3 Player: the
+/// kit's tab slab for the screen that is up, dim text for the others,
+/// bright under the pointer. Now Playing has no tab (it opens on `0`), so
+/// while it is up no tab wears the slab. While the MP3 Player tab's page
+/// writes, the strip is drawn inert — nothing lights, nothing answers a
+/// click — since the tab cannot be left (mp3-player-screen contract,
+/// clause 9).
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
     let tabs = [
         (Screen::Library, t!("gui.top.library")),
         (Screen::Stats, t!("sta.title")),
         (Screen::Admin, t!("gui.top.admin")),
+        (Screen::Device, t!("gui.top.mp3")),
     ];
     let viz = t!("gui.top.viz");
-    let rects = top_rects([&tabs[0].1, &tabs[1].1, &tabs[2].1, &viz]);
+    let rects = top_rects([&tabs[0].1, &tabs[1].1, &tabs[2].1, &tabs[3].1, &viz]);
+    let live = !device::writing(gui);
     for ((screen, label), rect) in tabs.into_iter().zip(rects) {
         let style = if gui.screen == screen {
             sel().add_modifier(Modifier::BOLD)
-        } else if gui.ui.hovers(rect) {
+        } else if live && gui.ui.hovers(rect) {
             bright_bold()
         } else {
             dim()
         };
         put(frame, rect.x, 0, &format!(" {label} "), style);
-        gui.ui.click(rect, Act::Screen(screen));
+        if live {
+            gui.ui.click(rect, Act::Screen(screen));
+        }
     }
     // The Visualizer item: not a screen but a window (visualizer-window
     // contract, entry 1) — lit while one is open, bright under the pointer.
-    let rect = rects[3];
+    let rect = rects[4];
     let style = if vizwin::is_open(gui) {
         Style::default().fg(th().accent).add_modifier(Modifier::BOLD)
-    } else if gui.ui.hovers(rect) {
+    } else if live && gui.ui.hovers(rect) {
         bright_bold()
     } else {
         dim()
     };
     put(frame, rect.x, 0, &format!(" {viz} "), style);
-    gui.ui.click(rect, Act::VizWindow);
-    gui.ui.tip_keyed(rect, t!("gui.top.viz_tip").to_string());
+    if live {
+        gui.ui.click(rect, Act::VizWindow);
+        gui.ui.tip_keyed(rect, t!("gui.top.viz_tip").to_string());
+    }
 }
 
 /// Where the top bar's items stand, left to right from x 1 with a cell
@@ -1223,6 +1254,23 @@ fn top_rects<const N: usize>(labels: [&str; N]) -> [Rect; N] {
     })
 }
 
+/// The top bar's labels, left to right: the four tabs, then the
+/// Visualizer item.
+const TOP_KEYS: [&str; 5] =
+    ["gui.top.library", "sta.title", "gui.top.admin", "gui.top.mp3", "gui.top.viz"];
+
+/// Where the top bar's strip ends — the cell after the Visualizer item —
+/// in the language on screen: the header's server label starts a blank
+/// cell past it, cut short where it would not (servers::draw_header;
+/// mp3-player-screen contract, clause 16).
+pub(super) fn top_strip_end() -> u16 {
+    let labels = TOP_KEYS.map(|key| t!(key).to_string());
+    top_rects([&labels[0], &labels[1], &labels[2], &labels[3], &labels[4]])[4].right()
+}
+
+/// One run of text at a cell, clipped at the frame's edge — written into
+/// the buffer directly: the hub's primitive runs a few hundred times a
+/// frame, and a `Paragraph` per call was a handful of allocations each.
 fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
     let buf = frame.buffer_mut();
     if !buf.area.contains(Position { x, y }) {
@@ -1398,6 +1446,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // a frame drawn as the mini player leaves no target behind.
     gui.admin.room_at = Rect::default();
     gui.admin.log_at = None;
+    // The MP3 Player screen's page likewise: the pointer reaches it only
+    // where this frame drew it.
+    gui.device.at = None;
     let area = frame.area();
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
@@ -1477,6 +1528,19 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
                 draw_capture_banner(frame, gui, Rect { x: 1, y: 1, width: area.width - 2, height: 1 }, text);
             }
         }
+        Screen::Device => {
+            // The firmware page, whole, under the top bar in the Stats
+            // screen's rows (mp3-player-screen contract, clauses 1–2); a
+            // pick's banner takes the row under the bar first. The footer
+            // row is always the page's, key hints or not: its hint is part
+            // of the page — the write's warning not to unplug the board
+            // above all (clause 15).
+            let view = now::view_rect(area, banner.is_some(), true);
+            if let Some(text) = &banner {
+                draw_capture_banner(frame, gui, Rect { x: 1, y: 1, width: area.width - 2, height: 1 }, text);
+            }
+            device::draw(frame, gui, view);
+        }
     }
 
     if gui.queue_open && gui.screen == Screen::Library {
@@ -1493,7 +1557,14 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, note.x, note.y, &bar::clip(&text, note.width as usize), style);
     }
-    let tips = if let Some(tip) = actions::tips(gui) {
+    // On the MP3 Player tab the page's hint outranks the queue's and an
+    // armed pick's tips, since its keys are the page's there (mp3-player-
+    // screen contract, clauses 12 and 15) — only a GUI modal's own tips
+    // come first, and not even those during a write, which holds every key
+    // (clause 9).
+    let tips = if gui.screen == Screen::Device && (device::writing(gui) || !gui.modal_open()) {
+        std::borrow::Cow::from(device::tips(gui))
+    } else if let Some(tip) = actions::tips(gui) {
         std::borrow::Cow::from(tip)
     } else if let Some(tip) = dj::tips(gui) {
         std::borrow::Cow::from(tip)
@@ -1559,8 +1630,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         }
     };
     // The footer of keys only when asked for: this surface is the
-    // pointer's, and the classic TUI is the keyboard's room.
-    if gui.config.gui.key_hints {
+    // pointer's, and the classic TUI is the keyboard's room. The MP3
+    // Player tab's is always drawn, since there it is the page's own hint.
+    if gui.footer() || gui.screen == Screen::Device {
         put(frame, 1, area.height - 1, &tips, dim());
     }
 
@@ -1649,7 +1721,9 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
 
 /// The words of an armed pick (sonic-path clause 4, auto-dj clause 4) —
 /// with the "· Esc cancels" tail cut while the keyboard's names are
-/// hidden: the banner's [X] stands for it then.
+/// hidden, and on the MP3 Player tab, whose Esc is the page's
+/// (mp3-player-screen contract, clause 12): the banner's [X] stands for it
+/// then.
 fn capture_banner(gui: &Gui) -> Option<String> {
     let text = match gui.app.capture {
         Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start)) => {
@@ -1660,7 +1734,7 @@ fn capture_banner(gui: &Gui) -> Option<String> {
         }
         _ => dj::banner(gui)?,
     };
-    if gui.config.gui.key_hints {
+    if gui.config.gui.key_hints && gui.screen != Screen::Device {
         return Some(text);
     }
     Some(text.rsplit_once(" · ").map_or(text.clone(), |(head, _)| head.to_string()))
@@ -2345,6 +2419,12 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return true;
     }
+    // A write on the MP3 Player tab holds every key but Ctrl+C, ahead of
+    // any modal a worker's answer opened over it (mp3-player-screen
+    // contract, clauses 9–10).
+    if gui.screen == Screen::Device && device::writing(gui) {
+        return device::handle_key(gui, key);
+    }
     // Auto DJ's chooser owns the keyboard while it is up, and Esc leaves the
     // opening-song road; then the servers surfaces: an open modal owns the
     // keyboard outright, the room takes its row keys, and everything else
@@ -2376,6 +2456,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     // room's, or the log's.
     if gui.screen == Screen::Admin {
         return admin::handle_key(gui, key);
+    }
+    // The MP3 Player screen hosts the firmware page: its keys are the
+    // page's, and the GUI keeps its own few.
+    if gui.screen == Screen::Device {
+        return device::handle_key(gui, key);
     }
     let browse = gui.browse_room()
         && gui.app.connected
@@ -2499,6 +2584,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
         // The Admin screen (admin-screen contract, entry 2).
         KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
+        // The MP3 Player screen (mp3-player-screen contract, entry 2): `K`,
+        // whose lowercase is no key of the GUI's. Opening the tab resets a
+        // plugged-in Core2, so Shift or Caps Lock on a key that is one (the
+        // browse bar's `f`, when the tab's key was `F`) must never open it.
+        KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Device)),
         // The visualizer's window (visualizer-window contract, entry 2).
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The tenth room has no digit; `D` is the capital beside `A`'s toggle.
@@ -2746,9 +2836,12 @@ where
     // and the Admin screen its room and its log.
     let stats_over = stats::frame(gui);
     let admin_over = admin::frame(gui);
+    // The MP3 Player screen's page: its worker's reports, its port watch,
+    // and whether it has ended (mp3-player-screen contract, clause 6).
+    let device_over = device::frame(gui);
     // The visualizer window's host: the child's exit, the next texture.
     vizwin::tick(gui);
-    let over = gui.ui.hovering_clickable() || stats_over || admin_over;
+    let over = gui.ui.hovering_clickable() || stats_over || admin_over || device_over;
     if over != ctx.hand {
         ctx.hand = over;
         host.pointer(ctx.hand);
@@ -2841,6 +2934,13 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                 if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
                     gui.ui.motion(at);
                 }
+                return Flow::Continue;
+            }
+            // The MP3 Player screen's page takes the pointer inside its
+            // area, and while it writes every event, the top bar's too
+            // (mp3-player-screen contract, clauses 9 and 14); it moves the
+            // GUI's own surface itself, since a write lights nothing there.
+            if !gripping && device::pointer(gui, mouse) {
                 return Flow::Continue;
             }
             match mouse.kind {
@@ -3193,8 +3293,12 @@ impl Gui {
             return;
         }
         // A modal owns the pointer whole; the Now Playing screen scrolls
-        // nothing yet (its queue panel is not on screen).
-        if self.modal_open() || matches!(self.screen, Screen::NowPlaying | Screen::Stats) {
+        // nothing yet (its queue panel is not on screen), and the hosted
+        // pages' wheels reached their pages through their pointers — the
+        // Library's room and queue are hidden under every one of them.
+        if self.modal_open()
+            || matches!(self.screen, Screen::NowPlaying | Screen::Stats | Screen::Device)
+        {
             return;
         }
         if self.queue_open && at.x >= self.queue_panel_x() {
@@ -3375,6 +3479,9 @@ fn start(
 /// The player's teardown that owes nothing to a terminal, after whatever
 /// showed it has let go.
 fn finish(gui: &mut Gui, ctx: &Ctx) {
+    // A Core2 the MP3 Player tab holds in its bootloader is let go before
+    // the exit can end its worker (mp3-player-screen contract, clause 11).
+    device::quit(gui);
     // The visualizer window, if one is open, closes with the player.
     vizwin::close(gui);
     let _ = ctx.channels.audio_tx.send(AudioCmd::Shutdown);
@@ -4271,8 +4378,8 @@ mod tests {
         // character, and rects counted in characters left the Admin tab's
         // right half under the Visualizer item.
         for locale in ["en", "ja", "zh"] {
-            let labels = ["gui.top.library", "sta.title", "gui.top.admin", "gui.top.viz"].map(|key| t!(key, locale = locale).to_string());
-            let rects = top_rects([&labels[0], &labels[1], &labels[2], &labels[3]]);
+            let labels = TOP_KEYS.map(|key| t!(key, locale = locale).to_string());
+            let rects = top_rects([&labels[0], &labels[1], &labels[2], &labels[3], &labels[4]]);
             assert_eq!(rects[0].x, 1);
             for (label, rect) in labels.iter().zip(rects) {
                 assert_eq!(rect.width as usize, crate::kit::width(label) + 2, "{locale}: {label}");
@@ -4281,20 +4388,95 @@ mod tests {
                 assert_eq!(pair[1].x, pair[0].right() + 1, "{locale}: one cell between {pair:?}");
             }
         }
-        let ja = top_rects(["ライブラリ", "統計", "管理", "ビジュアライザー"]);
+        let ja = top_rects(["ライブラリ", "統計", "管理", "MP3プレーヤー", "ビジュアライザー"]);
         assert_eq!(ja[2], Rect { x: 21, y: 0, width: 6, height: 1 }, "管理 is four cells and its two spaces");
-        assert_eq!(ja[3].x, 28, "the Visualizer item a cell after it");
+        assert_eq!(ja[3], Rect { x: 28, y: 0, width: 15, height: 1 }, "MP3プレーヤー is three cells and five wide glyphs");
+        assert_eq!(ja[4].x, 44, "the Visualizer item a cell after it");
 
         // Drawn, every cell of an item answers for it (here in English).
         let mut gui = browsing_gui();
         draw(&mut gui);
-        let acts = [Act::Screen(Screen::Library), Act::Screen(Screen::Stats), Act::Screen(Screen::Admin), Act::VizWindow];
-        let en = ["Library", "Stats", "Admin", "Visualizer"];
+        let acts = [
+            Act::Screen(Screen::Library),
+            Act::Screen(Screen::Stats),
+            Act::Screen(Screen::Admin),
+            Act::Screen(Screen::Device),
+            Act::VizWindow,
+        ];
+        let en = ["Library", "Stats", "Admin", "MP3 Player", "Visualizer"];
         for (rect, act) in top_rects(en).into_iter().zip(acts) {
             for x in rect.left()..rect.right() {
                 assert_eq!(gui.ui.hit(Position { x, y: 0 }), Some(act.clone()), "cell {x}");
             }
         }
+    }
+
+    #[test]
+    fn at_a_hundred_columns_the_server_label_keeps_off_the_strip_in_every_locale() {
+        // The header's label stands right-aligned before `[+]`; drawn over
+        // the strip it would take the tabs' clicks, so where it would reach
+        // it, it is cut short to start a blank cell past the strip, its menu
+        // mark kept (mp3-player-screen contract, clause 16). The realistic
+        // worst labels at the GUI's 100 columns, the window's own width: a
+        // quick-connect session and a LAN address, each with the menu mark,
+        // and a local server's. Each locale's strip is measured from its
+        // labels asked for by name, so the process's locale — and every
+        // test reading English — is left alone.
+        let plus = MIN_W - 5;
+        let quick = crate::quickconnect::display_server(&format!(
+            "{}1a2b3c4d5e6f{}",
+            crate::quickconnect::TUNNEL_ID_PREFIX,
+            "7".repeat(40)
+        ));
+        assert_eq!(quick, "quick connect · 1a2b3c4d5e6f");
+        for (code, _) in crate::setup::LANGS {
+            let labels = TOP_KEYS.map(|key| t!(key, locale = code).to_string());
+            let end = top_rects([&labels[0], &labels[1], &labels[2], &labels[3], &labels[4]])[4].right();
+            for shown in [quick.as_str(), "http://192.168.178.20:3000", "http://localhost:3000"] {
+                let (x, label) = servers::header_label(shown, " ▾", end, plus).expect("room for a label");
+                let width = crate::kit::width(&label) as u16;
+                assert!(x > end, "{code}: {label:?} starts at {x}, the strip ends at {end}: {labels:?}");
+                assert_eq!(x + width, plus - 1, "{code}: {label:?} ends a blank cell short of [+]");
+                assert!(label == format!("{shown} ▾") || label.ends_with("… ▾"), "{code}: whole, or cut with the mark: {label:?}");
+            }
+            let (_, local) = servers::header_label("http://localhost:3000", " ▾", end, plus).unwrap();
+            assert_eq!(local, "http://localhost:3000 ▾", "{code}: a local server's label stands whole");
+        }
+
+        // Drawn (in English), with a name long enough to be cut there too:
+        // every cell of the strip answers for its item, a blank cell after
+        // it answers nothing, and the cut label is the menu's to its mark.
+        let _en = crate::setup::tests::in_locale("en");
+        let labels = TOP_KEYS.map(|key| t!(key).to_string());
+        let strip = top_rects([&labels[0], &labels[1], &labels[2], &labels[3], &labels[4]]);
+        let end = strip[4].right();
+        assert_eq!(top_strip_end(), end);
+        let mut gui = test_gui();
+        let long = "http://a-rather-long-hostname.home.example.internal:3000";
+        gui.app.session.server = long.into();
+        gui.app.session.server_id = long.into();
+        for url in [long, "http://attic.local:3000"] {
+            gui.config.servers.push(config::ServerEntry { url: url.into(), ..Default::default() });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(MIN_W, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let top = rows(&terminal).remove(0);
+        let acts = [
+            Act::Screen(Screen::Library),
+            Act::Screen(Screen::Stats),
+            Act::Screen(Screen::Admin),
+            Act::Screen(Screen::Device),
+            Act::VizWindow,
+        ];
+        for (rect, act) in strip.iter().zip(acts) {
+            for x in rect.left()..rect.right() {
+                assert_eq!(gui.ui.hit(Position { x, y: 0 }), Some(act.clone()), "cell {x} is the strip's:\n{top}");
+            }
+        }
+        assert_eq!(gui.ui.hit(Position { x: end, y: 0 }), None, "a blank cell after the strip:\n{top}");
+        assert_eq!(gui.ui.hit(Position { x: end + 1, y: 0 }), Some(Act::SrvMenu), "the label from the next:\n{top}");
+        assert_eq!(gui.ui.hit(Position { x: plus - 2, y: 0 }), Some(Act::SrvMenu), "to its mark:\n{top}");
+        assert!(top.contains("… ▾") && top.contains("http://a-rather"), "cut, the mark kept:\n{top}");
     }
 
     #[test]

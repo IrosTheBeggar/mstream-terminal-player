@@ -1427,9 +1427,10 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // missing peers do not count (contract clause 12).
     let many = gui.config.servers.iter().filter(|e| config::selectable(e)).count() > 1;
     let chevron = if legacy_conhost() { " v" } else { " ▾" };
-    let label = if many { format!("{server}{chevron}") } else { server };
-    let width = label.chars().count() as u16;
-    let x = plus.x.saturating_sub(width + 1);
+    let mark = if many { chevron } else { "" };
+    let strip_end = super::top_strip_end();
+    let Some((x, label)) = header_label(&server, mark, strip_end, plus.x) else { return };
+    let width = crate::kit::width(&label) as u16;
     let rect = Rect { x, y: 0, width, height: 1 };
     let hover = many && gui.ui.hovers(rect);
     put(frame, x, 0, &label, if hover { bright_bold() } else { dim() });
@@ -1438,6 +1439,29 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // opens and sat on top of the first rows.
         gui.ui.click(rect, Act::SrvMenu);
     }
+}
+
+/// Where the header's server label stands, and what it says: right-aligned
+/// a blank cell short of `[+]` at `plus`, and starting at least a blank cell
+/// past the top bar's strip, which ends at `strip_end` — the label must
+/// never cover the strip, whose clicks it would take (mp3-player-screen
+/// contract, clause 16). A name longer than the room between is cut short
+/// with the kit's mark, the menu `mark` kept after it. Cells, not
+/// characters. None when not even two cells of the name fit.
+pub(super) fn header_label(
+    server: &str,
+    mark: &str,
+    strip_end: u16,
+    plus: u16,
+) -> Option<(u16, String)> {
+    let room = plus.saturating_sub(1).saturating_sub(strip_end + 1) as usize;
+    let fits = room.saturating_sub(crate::kit::width(mark));
+    if fits < 2 {
+        return None;
+    }
+    let label = format!("{}{mark}", super::bar::clip(server, fits));
+    let width = crate::kit::width(&label) as u16;
+    Some((plus.saturating_sub(width + 1), label))
 }
 
 /// What a room shows while no session is up, `gap` rows under `content`'s

@@ -2281,6 +2281,25 @@ a LATER secondary screen (party view), Columns retired.
   Stats tab builds it, and the server's log docked as a column, as a band
   under the room, or as a room of its own, as the window allows. `M` from
   the Library, Stats and Now Playing; Esc back.
+- **The MP3 Player tab ✅ 2026-10-04** — the top bar's fourth tab hosts
+  the firmware page of `mstream-player device flash` with no flags
+  (docs/ux-contracts/mp3-player-screen.md; Phase 13), in place of the
+  tray launcher's dropped menu item: the page grew a hosted mode (no
+  header, no tips row, nothing drawn past its area, Done's extra words
+  giving way before its Close at the floor), the tab builds it on entry
+  and lets it go on leaving — its worker told to let the board go, the
+  page kept aside until it has, a quick return waiting for it — except
+  while it writes, when every key but Ctrl+C is the page's, the top bar
+  is inert and no screen change is honoured; a quit with the board held,
+  or being reached, waits up to eight seconds for its restart. The worker
+  hears Quit early (before a port, between baud rungs, once the board
+  answers) and lets a board go with no boot-line listen, which the
+  command's Esc gains too. The footer is the page's whatever the key
+  hints say; the mini player hides the page's keys and says when it
+  writes. `K` from the Library, Now Playing, Stats and the Admin hallway,
+  `K` or Esc back (`F` was first; Caps Lock on the filter key's `f` reset
+  a plugged-in Core2). The server label is cut to keep off the strip,
+  tested at 100 columns in every locale.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
@@ -2957,20 +2976,24 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 
 ### Phase 13 — The MP3 player's flasher (`mstream-player device flash`)
 
-> **Status 2026-10-01: built, unreleased** — the page, the `--yes` line mode, `device list`,
-> the fake board and its e2e leg; then the page's UX from the design cards (mStream
-> `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time left,
-> what to do next, the port watch, and the log behind `l`. The firmware's first release,
-> v0.5.0 (1 Oct 2026), is the pin in `src/device/firmware.rs` — `device flash` with no flags
-> writes it; `--firmware` / `--release` still override. The mStream launcher's menu item is
-> the next slice there.
+> **Status 2026-10-04: shipped in v0.10.0** (built 2026-10-01) — the page, the `--yes` line
+> mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
+> (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
+> left, what to do next, the port watch, and the log behind `l`. The pin in
+> `src/device/firmware.rs` is firmware v0.7.0 (7 Oct 2026; before it v0.6.0 from 4 Oct, and
+> the first release, v0.5.0) — `device flash` with no flags writes it; `--firmware` /
+> `--release` still override.
+> The mStream launcher's menu item is dropped (Paul, 4 Oct 2026): **the GUI's MP3 Player tab
+> replaces it** (built 2026-10-04, docs/ux-contracts/mp3-player-screen.md) — the same page with
+> no flags, hosted under the GUI's top bar, `K` from the Library, Now Playing, Stats and the
+> Admin hallway.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
 player rather than in the tray launcher (decided 2026-09-30): flashing is a conversation —
 which board, what is on it, erase or not, progress, what went wrong — and this is where the
-pages are; the launcher stays the thin supervisor and opens this page the way it opens the
-admin rooms.
+pages are. The launcher was to open this page the way it opens the admin rooms; since
+2026-10-04 the way in is the GUI's own tab instead, and the launcher has no item for it.
 
 - **espflash as a library** (`default-features = false`, `serialport`): the reset dance, the
   RAM stub, compressed writes, the MD5 skip-and-verify. serialport with libudev off, because
@@ -2986,8 +3009,8 @@ admin rooms.
   write, so one reset serves both, and restarts it on every way out before the write; the page
   cannot leave a write. The baud ladder (921600 → 460800 → 115200) covers bridges and cables
   that cannot hold the fast rate, on connect and again on a write that dies.
-- **Left:** the pin (after firmware v0.5.0); the launcher's item (mStream: `PlayerPage::Device`,
-  a version gate, the web installer as the fallback); Wi-Fi and pairing over the same port
+- **Left:** a way to the pinned release's `-dio-full.bin` from the page (today `--firmware`,
+  for a Core2 that keeps restarting on the QIO image); Wi-Fi and pairing over the same port
   (the hidden `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
 
 ### Phase 14 — The window spike: the GUI in a window of its own (2026-09-29/30)

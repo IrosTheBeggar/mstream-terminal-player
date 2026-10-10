@@ -6,11 +6,18 @@
 //! can leave at any point before the write begins (the board is restarted
 //! on the way out, never left in its bootloader).
 //!
+//! Leaving is heard as early as the board allows: a Quit, or the page's
+//! end of the channel dropped, stops the worker before it opens a port,
+//! between the baud ladder's rungs, and as soon as the board is reached;
+//! a board it holds is restarted and its port let go at once, with no
+//! listen for a boot line, so the next worker finds the port free. Once
+//! Go has arrived nothing is heard: an erase or a write is never cut.
+//!
 //! Beside the steps it reports the details the page's busy line never
 //! says — which baud answered, what the descriptor held, how many chunks
 //! a segment takes — as `Event::Log` lines, for the page's log.
 
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 use rust_i18n::t;
 
@@ -28,7 +35,8 @@ pub(crate) enum Cmd {
     Rescan,
     /// Write, erasing the whole flash first or not.
     Go { erase: bool },
-    /// Leave. A board held in its bootloader is restarted first.
+    /// Leave. A board held in its bootloader is restarted first; a board
+    /// not reached yet is never opened.
     Quit,
 }
 
@@ -48,7 +56,8 @@ pub(crate) enum Event {
     Probed { on_board: Option<AppDesc>, plan: Plan },
     Progress(u8),
     Done { version: String, skipped: bool, boot: Option<String> },
-    /// Quit answered while the board was held: it was restarted untouched.
+    /// Quit answered once the board was being reached: it was restarted
+    /// untouched, or never opened, and its port is free.
     Cancelled,
     Failed(DeviceError),
     /// A detail for the page's log, drawn nowhere else.
@@ -215,21 +224,43 @@ pub(crate) fn run(
         return;
     };
 
-    // 3. Reach it, read it, plan.
-    tell(Event::Phase(Phase::Connecting));
-    let mut link = match open(engine, &candidate, None, events) {
+    // 3. Reach it, read it, plan. The step is told BEFORE the last look for
+    //    a Quit, and the port opened only after it: a page that sent Quit
+    //    and has not heard "reaching" since knows the port will never be
+    //    opened, and one that has heard it waits for Cancelled — the GUI's
+    //    tab leans on this when it is left (mp3-player-screen contract,
+    //    clause 8).
+    if !tell(Event::Phase(Phase::Connecting)) {
+        return;
+    }
+    if quit_asked(cmds) {
+        tell(Event::Cancelled);
+        return;
+    }
+    let mut link = match open(engine, &candidate, None, Some(cmds), events) {
         Ok(link) => link,
-        Err(e) => {
+        Err(Stop::Quit) => {
+            tell(Event::Cancelled);
+            return;
+        }
+        Err(Stop::Failed(e)) => {
             tell(Event::Failed(e));
             return;
         }
     };
+    // A Quit that came while espflash was reaching the board: let it go
+    // now rather than after the read.
+    if quit_asked(cmds) {
+        link.let_go();
+        tell(Event::Cancelled);
+        return;
+    }
     tell(Event::Board(link.info().clone()));
     tell(Event::Phase(Phase::Reading));
     let on_board = match link.app_desc() {
         Ok(desc) => desc,
         Err(e) => {
-            let _ = link.restart();
+            link.let_go();
             tell(Event::Failed(e));
             return;
         }
@@ -237,17 +268,21 @@ pub(crate) fn run(
     tell(Event::Log(descriptor_line(on_board.as_ref())));
     let plan = plan(on_board.as_ref(), &firmware.version, erase_asked);
     if !tell(Event::Probed { on_board, plan }) {
-        let _ = link.restart();
+        link.let_go();
         return;
     }
 
-    // 4. The one decision.
-    let erase = match cmds.recv() {
-        Ok(Cmd::Go { erase }) => erase,
-        _ => {
-            let _ = link.restart();
-            tell(Event::Cancelled);
-            return;
+    // 4. The one decision. A watch's Rescan or a Pick the page sent before
+    //    it heard the board was reached is no answer, and is passed over.
+    let erase = loop {
+        match cmds.recv() {
+            Ok(Cmd::Go { erase }) => break erase,
+            Ok(Cmd::Rescan | Cmd::Pick(_)) => continue,
+            Ok(Cmd::Quit) | Err(_) => {
+                link.let_go();
+                tell(Event::Cancelled);
+                return;
+            }
         }
     };
 
@@ -353,17 +388,43 @@ fn find_board(
     }
 }
 
+/// Whether the page has asked the worker to stop — a Quit, or its end of
+/// the channel dropped — among the commands waiting, without waiting for
+/// one. Asked only before the write, where any other command is stale (a
+/// watch's Rescan, a Pick the worker no longer needs) and is dropped.
+fn quit_asked(cmds: &Receiver<Cmd>) -> bool {
+    loop {
+        match cmds.try_recv() {
+            Ok(Cmd::Quit) | Err(TryRecvError::Disconnected) => return true,
+            Ok(_) => continue,
+            Err(TryRecvError::Empty) => return false,
+        }
+    }
+}
+
+/// Why reaching the board stopped short of a link.
+enum Stop {
+    /// The page asked to leave between the ladder's rungs; the board was
+    /// let go.
+    Quit,
+    Failed(DeviceError),
+}
+
 /// Reach the bootloader at the fastest baud the link holds: a failure to
 /// sync at one speed (a bridge or a cable that cannot keep it) tries the
 /// next one down; a port that is busy, forbidden or gone is final. `below`
 /// starts the ladder under a speed that already failed mid-write. Every
-/// rung goes to the log — the one place the ladder is ever visible.
+/// rung goes to the log — the one place the ladder is ever visible. With
+/// `cmds`, before the write, a Quit is heard after each rung that failed:
+/// that rung reset the board into its bootloader, so it is let go before
+/// the worker stops. The write's own retry passes none — nothing cuts it.
 fn open(
     engine: &dyn Engine,
     candidate: &Candidate,
     below: Option<u32>,
+    cmds: Option<&Receiver<Cmd>>,
     events: &Sender<Event>,
-) -> Result<Box<dyn Link>, DeviceError> {
+) -> Result<Box<dyn Link>, Stop> {
     let mut last = None;
     for baud in BAUDS.iter().copied().filter(|b| below.is_none_or(|limit| *b < limit)) {
         match engine.open(candidate, baud) {
@@ -379,14 +440,18 @@ fn open(
                 let line = t!("dev.log_baud_no", baud = baud, err = detail).to_string();
                 let _ = events.send(Event::Log(line));
                 last = Some(e);
+                if cmds.is_some_and(quit_asked) {
+                    engine.let_go(candidate);
+                    return Err(Stop::Quit);
+                }
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(Stop::Failed(e)),
         }
     }
-    Err(last.unwrap_or_else(|| DeviceError::NoSync {
+    Err(Stop::Failed(last.unwrap_or_else(|| DeviceError::NoSync {
         port: candidate.port.clone(),
         detail: t!("dev.err_no_slower").to_string(),
-    }))
+    })))
 }
 
 /// The write, retried one baud step down when it fails on the wire — a
@@ -438,7 +503,7 @@ fn write(
                 let _ = events.send(Event::Log(line));
                 drop(link);
                 let _ = events.send(Event::Phase(Phase::Connecting));
-                link = open(engine, candidate, Some(failed_at), events).map_err(|_| e)?;
+                link = open(engine, candidate, Some(failed_at), None, events).map_err(|_| e)?;
             }
             Err(e) => return Err(e),
         }
@@ -459,7 +524,7 @@ mod tests {
 
     #[test]
     fn the_plan_erases_over_strangers_and_never_over_our_own_unless_told() {
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         let blank = plan(None, "v0.5.0", None);
         assert_eq!(blank, Plan { kind: Kind::Install { found: None }, erase: true });
         let other = AppDesc {
@@ -487,7 +552,7 @@ mod tests {
 
     #[test]
     fn the_descriptor_line_names_the_address_and_what_it_held() {
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         let line = descriptor_line(Some(&ours("v0.4.0")));
         assert_eq!(line, "0x10020: mstream-mp3-player v0.4.0 · idf v5.5.5 · elf 00");
         assert_eq!(descriptor_line(None), "0x10020: nothing readable");
@@ -496,9 +561,13 @@ mod tests {
 
     /// A worker on the fake, driven to the end: every report in order.
     fn drive(spec: &str, source: Source, port: Option<&str>, answer: Cmd) -> Vec<Event> {
+        drive_fake(Fake::new(spec).with_pace(Duration::from_millis(30)), source, port, answer)
+    }
+
+    /// `drive`, on a fake the test built (to read its trace after).
+    fn drive_fake(fake: Fake, source: Source, port: Option<&str>, answer: Cmd) -> Vec<Event> {
         let (cmd_tx, cmd_rx) = channel();
         let (event_tx, event_rx) = channel();
-        let fake = Fake::new(spec).with_pace(Duration::from_millis(30));
         let port = port.map(str::to_string);
         std::thread::spawn(move || run(&fake, &source, port.as_deref(), None, &cmd_rx, &event_tx));
         let mut seen = Vec::new();
@@ -536,10 +605,13 @@ mod tests {
 
     #[test]
     fn a_write_runs_firmware_board_probe_go_write_restart() {
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         let image = image_file("write", "v0.5.0");
-        let seen = drive("ours:v0.4.0", Source::Local(image.clone()), None, Cmd::Go { erase: false });
+        let fake = Fake::new("ours:v0.4.0").with_pace(Duration::from_millis(30));
+        let trace = fake.trace();
+        let seen = drive_fake(fake, Source::Local(image.clone()), None, Cmd::Go { erase: false });
         let _ = std::fs::remove_file(&image);
+        assert_eq!(*trace.lock().unwrap(), ["open 921600", "restart"], "only a write's restart listens for the boot line");
         let phases: Vec<Phase> = seen
             .iter()
             .filter_map(|e| match e {
@@ -581,13 +653,130 @@ mod tests {
     }
 
     #[test]
-    fn quit_at_the_question_restarts_the_board_and_says_cancelled() {
+    fn quit_at_the_question_lets_the_board_go_without_a_listen_and_says_cancelled() {
         let image = image_file("quit", "v0.5.0");
-        let seen = drive("fresh", Source::Local(image.clone()), None, Cmd::Quit);
+        let fake = Fake::new("fresh").with_pace(Duration::from_millis(30));
+        let trace = fake.trace();
+        let seen = drive_fake(fake, Source::Local(image.clone()), None, Cmd::Quit);
         let _ = std::fs::remove_file(&image);
         assert!(seen.iter().any(|e| matches!(e, Event::Probed { on_board: None, plan } if plan.erase)));
         assert_eq!(seen.last(), Some(&Event::Cancelled));
         assert!(!seen.iter().any(|e| matches!(e, Event::Progress(_))), "nothing was written");
+        assert_eq!(*trace.lock().unwrap(), ["open 921600", "let go"], "reset and the port free at once, no boot line awaited");
+    }
+
+    /// A worker on `fake` with its two far ends, run on a thread of its own;
+    /// `before` is said to it before it starts.
+    fn spawn_on(fake: Fake, image: &std::path::Path, before: Option<Cmd>) -> (Sender<Cmd>, Receiver<Event>) {
+        let (cmd_tx, cmd_rx) = channel();
+        let (event_tx, event_rx) = channel();
+        if let Some(cmd) = before {
+            cmd_tx.send(cmd).unwrap();
+        }
+        let source = Source::Local(image.to_path_buf());
+        std::thread::spawn(move || run(&fake, &source, None, None, &cmd_rx, &event_tx));
+        (cmd_tx, event_rx)
+    }
+
+    #[test]
+    fn a_quit_before_the_board_is_reached_never_opens_its_port() {
+        let image = image_file("early", "v0.5.0");
+        // Quit already waiting when the board is found: told "reaching",
+        // then Cancelled, and the port never touched.
+        let fake = Fake::new("fresh");
+        let trace = fake.trace();
+        let (_cmds, events) = spawn_on(fake, &image, Some(Cmd::Quit));
+        let seen: Vec<Event> = events.iter().collect();
+        assert!(seen.ends_with(&[Event::Phase(Phase::Connecting), Event::Cancelled]), "{seen:?}");
+        assert!(trace.lock().unwrap().is_empty(), "no port opened: {:?}", trace.lock().unwrap());
+
+        // The page's end dropped instead: the same, with nobody to tell.
+        let fake = Fake::new("fresh");
+        let trace = fake.trace();
+        let (cmds, events) = spawn_on(fake, &image, None);
+        drop(cmds);
+        let _: Vec<Event> = events.iter().collect();
+        assert!(trace.lock().unwrap().is_empty(), "no port opened: {:?}", trace.lock().unwrap());
+        let _ = std::fs::remove_file(&image);
+    }
+
+    /// Wait until the fake has begun its `open` — the port opened, espflash
+    /// reaching the board — so a Quit sent now lands mid-connect.
+    fn until_opened(trace: &std::sync::Mutex<Vec<String>>) {
+        let t0 = std::time::Instant::now();
+        while !trace.lock().unwrap().iter().any(|t| t.starts_with("open")) {
+            assert!(t0.elapsed() < Duration::from_secs(5), "the fake was never opened");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_quit_while_the_board_is_being_reached_lets_it_go_as_soon_as_it_answers() {
+        let _en = crate::setup::tests::in_locale("en");
+        let image = image_file("reaching", "v0.5.0");
+        let reach = Duration::from_millis(400);
+        let fake = Fake::new("fresh").with_reach(reach);
+        let trace = fake.trace();
+        let (cmds, events) = spawn_on(fake, &image, None);
+        let mut seen = Vec::new();
+        let mut asked = None;
+        for event in events.iter() {
+            if event == Event::Phase(Phase::Connecting) {
+                until_opened(&trace);
+                cmds.send(Cmd::Quit).unwrap();
+                asked = Some(std::time::Instant::now());
+            }
+            seen.push(event);
+        }
+        let took = asked.expect("the board was reached").elapsed();
+        assert_eq!(seen.last(), Some(&Event::Cancelled), "{seen:?}");
+        assert!(!seen.iter().any(|e| matches!(e, Event::Board(_) | Event::Probed { .. })), "nothing read: {seen:?}");
+        assert_eq!(*trace.lock().unwrap(), ["open 921600", "let go"]);
+        assert!(took < reach + Duration::from_secs(2), "let go once the board answered, no listen: {took:?}");
+        let _ = std::fs::remove_file(&image);
+    }
+
+    #[test]
+    fn a_quit_between_the_ladders_rungs_lets_the_reset_board_go() {
+        let _en = crate::setup::tests::in_locale("en");
+        let image = image_file("rungs", "v0.5.0");
+        let fake = Fake::new("nosync").with_reach(Duration::from_millis(300));
+        let trace = fake.trace();
+        let (cmds, events) = spawn_on(fake, &image, None);
+        let mut seen = Vec::new();
+        for event in events.iter() {
+            if event == Event::Phase(Phase::Connecting) {
+                until_opened(&trace);
+                cmds.send(Cmd::Quit).unwrap();
+            }
+            seen.push(event);
+        }
+        assert_eq!(seen.last(), Some(&Event::Cancelled), "{seen:?}");
+        let rungs = logs(&seen).iter().filter(|l| l.contains("baud: no answer")).count();
+        assert_eq!(rungs, 1, "no second rung: {:?}", logs(&seen));
+        assert_eq!(*trace.lock().unwrap(), ["open 921600", "let go FAKE0"], "the board the rung reset is restarted");
+        let _ = std::fs::remove_file(&image);
+    }
+
+    #[test]
+    fn a_stale_rescan_at_the_question_is_no_answer() {
+        let image = image_file("stale", "v0.5.0");
+        let (cmd_tx, cmd_rx) = channel();
+        let (event_tx, event_rx) = channel();
+        let source = Source::Local(image.clone());
+        let fake = Fake::new("ours:v0.4.0").with_pace(Duration::from_millis(30));
+        std::thread::spawn(move || run(&fake, &source, None, None, &cmd_rx, &event_tx));
+        let mut last = None;
+        for event in event_rx.iter() {
+            if matches!(event, Event::Probed { .. }) {
+                // The watch's request, sent before the page heard the board.
+                cmd_tx.send(Cmd::Rescan).unwrap();
+                cmd_tx.send(Cmd::Go { erase: false }).unwrap();
+            }
+            last = Some(event);
+        }
+        let _ = std::fs::remove_file(&image);
+        assert!(matches!(last, Some(Event::Done { .. })), "the Go after it is the answer: {last:?}");
     }
 
     #[test]
@@ -604,7 +793,7 @@ mod tests {
             named.iter().any(|e| matches!(e, Event::Board(info) if info.port == "FAKE0")),
             "the listed board, found by its name whatever the case: {named:?}"
         );
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         let bare = drive("nodevice", Source::Local(image.clone()), Some("COM9"), Cmd::Quit);
         assert!(
             logs(&bare).contains(&"the port named by hand: COM9"),
@@ -627,7 +816,7 @@ mod tests {
 
     #[test]
     fn a_firmware_that_cannot_be_read_fails_before_any_board_is_touched() {
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         let seen = drive("ours", Source::Local("/nowhere/at/all.bin".into()), None, Cmd::Quit);
         assert!(matches!(seen.last(), Some(Event::Failed(DeviceError::Firmware(_)))));
         assert!(!seen.iter().any(|e| matches!(e, Event::Phase(Phase::Scanning))));
@@ -635,7 +824,7 @@ mod tests {
 
     #[test]
     fn a_held_port_and_a_dying_write_are_reported_as_what_they_are() {
-        rust_i18n::set_locale("en");
+        let _en = crate::setup::tests::in_locale("en");
         let image = image_file("held", "v0.5.1");
         let busy = drive("busy", Source::Local(image.clone()), None, Cmd::Quit);
         assert!(matches!(busy.last(), Some(Event::Failed(DeviceError::Busy { .. }))));

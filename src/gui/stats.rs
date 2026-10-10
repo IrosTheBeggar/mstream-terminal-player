@@ -109,6 +109,8 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             // The Admin tab, as from the Library (admin-screen contract,
             // clause 1).
             KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
+            // The MP3 Player tab (mp3-player-screen contract, entry 2).
+            KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Device)),
             KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
             KeyCode::Char('V') => return gui.act(Act::VizWindow),
             KeyCode::Char(c @ '1'..='9') => return gui.act(Act::Nav(c as usize - '1' as usize)),
