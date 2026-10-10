@@ -79,7 +79,11 @@ pub(crate) struct Waits {
     /// tenth, or every five seconds while the count moves — a 1 TB card's
     /// tenth can take twelve.
     pub count_idle: Duration,
-    /// A board starting up is asked again this often, on the same port.
+    /// A board starting up is asked again this often, on the same port. A
+    /// question it already holds is answered as soon as its loop runs, so
+    /// asking again only covers a line lost on the way; every ask waits in
+    /// the board's serial buffer (a few hundred bytes) while the loop is
+    /// busy, so it is rare: at 30 s, [`STARTING_UP`] queues at most six.
     pub again: Duration,
     /// …and given this long to answer ([`STARTING_UP`]).
     pub up: Duration,
@@ -91,7 +95,7 @@ impl Waits {
         boot: Duration::from_secs(8),
         reply: Duration::from_millis(1500),
         count_idle: Duration::from_secs(60),
-        again: Duration::from_secs(5),
+        again: Duration::from_secs(30),
         up: STARTING_UP,
     };
 }

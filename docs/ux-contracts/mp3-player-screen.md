@@ -408,7 +408,9 @@ comes from the cache, or a download, beside them.
     v0.8.0 · just written`) and its card as the firmware reports it. Once
     its boot line is heard the board is starting up — listing its library
     before it answers, a minute and a half for a big card on v0.7.0 — and
-    the worker asks it every 5 s, for 3 minutes at most, until it does:
+    the worker keeps listening, asking again every 30 s (a question it
+    already holds is answered as soon as its loop runs), for 3 minutes at
+    most, until it does:
     meanwhile the SD card row says "? starting up — reading its library"
     and the log "COM3 is starting up — it answers once its library is
     listed", never "said nothing". The write's lock ended with the restart
@@ -1095,7 +1097,8 @@ line: they are lines a script reads.
   every start on v0.7.0 with a big card. So a board that answers nothing
   but prints its boot line, or two lines of its own log, is now *starting
   up* (clauses 5, 19): "M5Stack Core2" with **? Starting up**, no primary,
-  asked every 5 s on the port it holds for 3 minutes at most — and so is
+  listened to on the port it holds, asked again every 30 s, for 3 minutes
+  at most — and so is
   the board after the page's own write, once its boot line is heard
   (clause 24). One rule, `listen::sign`, decides it, conservatively: the
   Arduino core's `[ 11267][W][…]` lines never count, one line of ours is
@@ -1103,8 +1106,9 @@ line: they are lines a script reads.
   its first second. A board that prints lines but none of ours is listened
   to for 8 s before it is called not answering, since our firmware's
   Bluetooth task prints only every few seconds. Not tried on the real board
-  yet: whether the queued `@status` lines (one every 5 s, at most 36) are
-  read through in a burst once the loop runs, which is what the fake does.
+  yet: whether the queued `@status` lines (one every 30 s, at most six,
+  well inside the board's serial buffer) are read through once the loop
+  runs, which is what the fake does.
   Still open: a v0.5.0 board (no host lines) that prints its log at rest
   now reads as starting up for 3 minutes before *Read the board ▸*; its
   boot line, when heard, still names it at once. The sheet's mode rows
