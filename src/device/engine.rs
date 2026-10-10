@@ -566,6 +566,14 @@ pub(crate) mod fake {
         /// Its flash cannot run QIO: an image in QIO, once written, keeps
         /// it restarting.
         qio_loops: bool,
+        /// How long its firmware lists the card's library after each start
+        /// (plugged in, written, read): its main loop, which serves the
+        /// console, does not run meanwhile — the host lines wait in its
+        /// port, read once it does — while its Bluetooth task prints.
+        listing: Duration,
+        /// The fake's age when its main loop runs: its last start, and its
+        /// listing.
+        loop_at: Duration,
     }
 
     impl FakeBoard {
@@ -597,6 +605,8 @@ pub(crate) mod fake {
                 counted: None,
                 elf: None,
                 qio_loops: false,
+                listing: Duration::ZERO,
+                loop_at: Duration::ZERO,
             };
             let ours = |default: &str| version.clone().unwrap_or_else(|| default.to_string());
             match kind {
@@ -645,6 +655,7 @@ pub(crate) mod fake {
                     "fail" => board.failwrite = value == "write",
                     "elf" => board.elf = Some(value.to_ascii_lowercase()),
                     "loop" => board.qio_loops = value.eq_ignore_ascii_case("qio"),
+                    "listing" => board.listing = secs(value),
                     "flash" => {
                         board.flash = match value {
                             "blank" => Flash::Blank,
@@ -667,7 +678,13 @@ pub(crate) mod fake {
                     Mode::Dio => Some(builds.dio.to_string()),
                 };
             }
+            board.loop_at = board.arrives + board.listing;
             board
+        }
+
+        /// Its main loop has not run yet since its last start.
+        fn listing_at(&self, age: Duration) -> bool {
+            age < self.loop_at
         }
 
         /// The ELF id it reports where `default` is what that channel says
@@ -772,6 +789,13 @@ pub(crate) mod fake {
     /// run QIO: an image whose header says QIO, once written, keeps it
     /// restarting — the ROM's banner three times in the listen, no boot
     /// line, and nothing said after — while a DIO image starts as usual.
+    /// `/listing=<s>` is a board starting up: after each start (plugged in,
+    /// written, read) its firmware lists the card's library that long, and
+    /// answers nothing meanwhile — the host lines wait in its port and are
+    /// answered once it is done — while its Bluetooth task prints a line
+    /// every tenth of a second, `[bt] reconnect: …` and the Arduino core's
+    /// `[ 11267][W][…]` in turn. A `silent` board prints nothing at all;
+    /// `silent:<v>/listing=<s>` prints those lines and never answers.
     /// A written image is the board's from then on, its ELF included: a
     /// local file in either mode (a header's fourth byte at 0x1000 ending
     /// in `F` is the QIO build, in `0` the DIO one) writes like a release.
@@ -903,6 +927,9 @@ pub(crate) mod fake {
                 index,
                 line: Vec::new(),
                 out: VecDeque::new(),
+                waiting: Vec::new(),
+                chatter: Instant::now(),
+                said: 0,
             }))
         }
 
@@ -1051,7 +1078,9 @@ pub(crate) mod fake {
             Fake::note(&self.fake.trace, "restart".to_string());
             let Some(written) = &self.written else { return Ok(Restart::default()) };
             let loops = self.board().qio_loops && written.mode == Some(Mode::Qio);
+            let age = self.fake.age();
             self.change(|b| {
+                b.loop_at = age + b.listing;
                 b.flash = Flash::Ours(written.version.clone());
                 // Looping, it never gets as far as its host lines.
                 b.talk = if loops { Talk::Silent } else { talk_of(&written.version) };
@@ -1082,6 +1111,9 @@ pub(crate) mod fake {
 
         fn let_go(self: Box<Self>) {
             Fake::note(&self.fake.trace, "let go".to_string());
+            // Restarted as it was: it lists its library again.
+            let age = self.fake.age();
+            self.change(|b| b.loop_at = age + b.listing);
         }
     }
 
@@ -1096,11 +1128,59 @@ pub(crate) mod fake {
         line: Vec<u8>,
         /// Bytes to read, each piece from its moment on.
         out: VecDeque<(Instant, Vec<u8>)>,
+        /// What the host wrote while the board listed its library: read
+        /// once its main loop runs.
+        waiting: Vec<u8>,
+        /// When its next log line is due while it lists.
+        chatter: Instant,
+        /// The log lines it printed while listing.
+        said: usize,
     }
+
+    /// A board listing its library prints a line this often.
+    const CHATTER: Duration = Duration::from_millis(100);
 
     impl FakeWire {
         fn board(&self) -> Option<FakeBoard> {
             self.index.map(|i| lock(&self.fake.boards)[i].clone())
+        }
+
+        /// While it lists its library: its Bluetooth task's lines, ours and
+        /// the Arduino core's in turn, in the shapes the real Core2 printed
+        /// (2026-10-10).
+        fn chatter(&mut self) {
+            let now = Instant::now();
+            if now < self.chatter {
+                return;
+            }
+            self.chatter = now + CHATTER;
+            let line = if self.said.is_multiple_of(2) {
+                "[bt] reconnect: paging the remembered headphones …"
+            } else {
+                "[ 11267][W][BluetoothA2DPSource.cpp:551] av_hdl_stack_evt(): av_hdl_stack_evt type 2"
+            };
+            self.said += 1;
+            self.say(now, line);
+        }
+
+        /// The host's bytes as its firmware reads them: `@` lines to their
+        /// newline, console keys alone.
+        fn hear(&mut self, buf: &[u8]) {
+            for &b in buf {
+                if self.line.is_empty() {
+                    match b {
+                        b'@' => self.line.push(b),
+                        b'L' => self.console_l(),
+                        // Other keys and lone line ends: nothing the fake does.
+                        _ => {}
+                    }
+                } else if b == b'\n' || b == b'\r' {
+                    let line = String::from_utf8_lossy(&std::mem::take(&mut self.line)).into_owned();
+                    self.host_line(&line);
+                } else {
+                    self.line.push(b);
+                }
+            }
         }
 
         fn say(&mut self, at: Instant, text: &str) {
@@ -1182,20 +1262,9 @@ pub(crate) mod fake {
 
     impl Write for FakeWire {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            for &b in buf {
-                if self.line.is_empty() {
-                    match b {
-                        b'@' => self.line.push(b),
-                        b'L' => self.console_l(),
-                        // Other keys and lone line ends: nothing the fake does.
-                        _ => {}
-                    }
-                } else if b == b'\n' || b == b'\r' {
-                    let line = String::from_utf8_lossy(&std::mem::take(&mut self.line)).into_owned();
-                    self.host_line(&line);
-                } else {
-                    self.line.push(b);
-                }
+            match self.board() {
+                Some(board) if board.listing_at(self.fake.age()) => self.waiting.extend_from_slice(buf),
+                _ => self.hear(buf),
             }
             Ok(buf.len())
         }
@@ -1207,10 +1276,18 @@ pub(crate) mod fake {
 
     impl Read for FakeWire {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if let Some(board) = self.board()
-                && !board.present(self.fake.age())
-            {
-                return Err(io::Error::new(ErrorKind::BrokenPipe, "the fake board was unplugged"));
+            if let Some(board) = self.board() {
+                let age = self.fake.age();
+                if !board.present(age) {
+                    return Err(io::Error::new(ErrorKind::BrokenPipe, "the fake board was unplugged"));
+                }
+                if board.listing_at(age) {
+                    self.chatter();
+                } else if !self.waiting.is_empty() {
+                    // Its loop runs: what waited in the port is read now.
+                    let waiting = std::mem::take(&mut self.waiting);
+                    self.hear(&waiting);
+                }
             }
             match self.out.front_mut() {
                 Some((at, bytes)) if *at <= Instant::now() => {

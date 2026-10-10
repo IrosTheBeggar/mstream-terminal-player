@@ -268,6 +268,14 @@ fn verdict_words(board: &Board, target: Option<&Target>) -> String {
         Verdict::Unplaced => format!("{version}, not comparable with {to}"),
         Verdict::Other { name } => format!("other firmware ({name})"),
         Verdict::Blank => "nothing installed".to_string(),
+        // `device list` asks once: a board listing its library is said so,
+        // not waited for.
+        Verdict::Starting if board.version().is_some() => {
+            format!("{version}, starting up — it answers once its library is listed")
+        }
+        Verdict::Starting => {
+            "mStream firmware, starting up — it answers once its library is listed".to_string()
+        }
         Verdict::Silent => "not answering — may not be an MP3 player".to_string(),
         Verdict::NotCore2 { found } => format!("not a Core2 ({found})"),
         Verdict::InUse => "in use by another program".to_string(),
@@ -331,6 +339,7 @@ fn skip_words(board: &Board) -> &'static str {
     match board.verdict {
         Verdict::UpToDate => "up to date",
         Verdict::Newer => "up to date, ahead of this player's release",
+        Verdict::Starting => "starting up",
         Verdict::Silent => "not answering",
         Verdict::InUse => "in use",
         Verdict::Other { .. } | Verdict::Blank => "not mStream firmware",

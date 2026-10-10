@@ -2,7 +2,9 @@
 //! (and `device flash --yes`'s) view of the Core2s plugged in. It watches
 //! the ports every couple of seconds; each board that arrives is asked
 //! over USB what it runs — `@status`, else `L` — with no reset, so its
-//! music plays on and nothing about it is guessed; a board that leaves is
+//! music plays on and nothing about it is guessed; one that is ours and
+//! starting up — busy listing its library, as after a write — is asked
+//! again on the same port until it answers; a board that leaves is
 //! dropped. Everything else waits for the page to ask: ask again, read the
 //! board's bootloader (a reset, said out loud), count the card's free
 //! space, show "This one" on its screen, and the write — today's flow.rs
@@ -75,8 +77,9 @@ pub(crate) struct Timing {
     /// …from a board plugged in while the page watched: it may be booting
     /// from the cable's power, and answers once its setup is done.
     pub arrival: Duration,
-    /// …after a write's restart (the boot line came already: the setup
-    /// mounts the card and reads the library's index).
+    /// …after a write's restart that heard no boot line. With one, the
+    /// board is starting up already, and is asked every `waits.again` until
+    /// it answers (listen::ask_till_up).
     pub after_write: Duration,
     pub waits: Waits,
 }
@@ -327,6 +330,8 @@ pub(crate) fn spawn(engine: Shared, setup: Setup) -> (Sender<Cmd>, Receiver<Even
 enum Note {
     Log { port: String, text: String, kind: LogKind },
     Work { port: String, id: u64, work: Work },
+    /// A listen found the board starting up, and asks on.
+    Starting { port: String, id: u64, heard: Heard },
     Counted { port: String, id: u64, pct: u8 },
     Plan { port: String, id: u64, info: DeviceInfo, on_board: Option<AppDesc>, plan: Plan, image: ImageFacts },
     Ended { port: String, id: u64, end: End },
@@ -849,7 +854,7 @@ impl Desk {
                 self.choose(at, preset, false, By::Flags);
             }
             self.show(at);
-            self.listen(at, wait);
+            self.listen(at, wait, None);
             changed = true;
         }
         let order = |s: &Slot| found.iter().position(|c| same(c, &s.board.candidate)).unwrap_or(usize::MAX);
@@ -890,7 +895,7 @@ impl Desk {
                     Some(job) if job.kind == JobKind::Listen => {}
                     Some(_) => self.refuse(&port, Refusal::Busy, false),
                     None if self.slots[i].queued.is_some() => self.refuse(&port, Refusal::Busy, false),
-                    None => self.listen(i, self.timing.at_rest),
+                    None => self.listen(i, self.timing.at_rest, None),
                 }
             }
             Cmd::Facts { port } => self.light(&port, JobKind::Facts),
@@ -1141,8 +1146,11 @@ impl Desk {
         id
     }
 
-    /// Ask board `i` what it runs, giving it `wait` to answer.
-    fn listen(&mut self, i: usize, wait: Duration) {
+    /// Ask board `i` what it runs, giving it `wait` to answer — and while
+    /// it is ours and starting up, again and again on the same port until
+    /// it answers (listen::ask_till_up), the board told meanwhile. `since`:
+    /// the board is starting up already (the write's boot line).
+    fn listen(&mut self, i: usize, wait: Duration, since: Option<Heard>) {
         let id = self.job(i, JobKind::Listen);
         let stop = self.slots[i].job.as_ref().expect("just made").stop.clone();
         self.slots[i].board.work = Work::Listening;
@@ -1150,8 +1158,14 @@ impl Desk {
         let (engine, notes, waits) = (self.engine.clone(), self.notes_tx.clone(), self.timing.waits);
         let candidate = self.slots[i].board.candidate.clone();
         std::thread::spawn(move || {
-            let asked = listen_one(&*engine, &candidate, wait, waits, &stop, &notes);
-            let _ = notes.send(Note::Ended { port: candidate.port.clone(), id, end: End::Heard(asked) });
+            let port = candidate.port.clone();
+            let asked = listen_with(&*engine, &candidate, &notes, |wire, note| {
+                let mut told = |heard: &Heard| {
+                    let _ = notes.send(Note::Starting { port: port.clone(), id, heard: heard.clone() });
+                };
+                listen::ask_till_up(wire, &port, wait, waits, since, &stop, note, &mut told)
+            });
+            let _ = notes.send(Note::Ended { port, id, end: End::Heard(asked) });
         });
     }
 
@@ -1217,6 +1231,20 @@ impl Desk {
                     self.show(i);
                 }
             }
+            // Said once a listen: the card says why it waits, in place of
+            // "said nothing".
+            Note::Starting { port, id, heard } => {
+                if let Some(i) = mine(self, &port, id) {
+                    let board = &mut self.slots[i].board;
+                    let first = !matches!(board.heard, Heard::Starting { .. });
+                    runs_again(board);
+                    board.heard = heard;
+                    if first {
+                        self.log(Some(&port), t!("dev.log_starting", port = port).to_string(), LogKind::Fact);
+                    }
+                    self.show(i);
+                }
+            }
             Note::Counted { port, id, pct } => {
                 if let Some(i) = mine(self, &port, id) {
                     self.slots[i].board.count = Count::Running { pct };
@@ -1253,19 +1281,8 @@ impl Desk {
             End::Heard(Asked { heard: Heard::Nothing, .. }) => {}
             End::Heard(asked) => {
                 let board = &mut self.slots[i].board;
-                if matches!(asked.heard, Heard::Status(_) | Heard::Old { .. }) {
-                    // It runs again: whatever went wrong is behind it — a
-                    // failed write, or a restart loop (and the DIO image
-                    // the page offered for it).
-                    if matches!(board.written, Some(Written::Failed { .. })) {
-                        board.written = None;
-                    }
-                    if let Some(Written::Done { looping: looping @ Some(_), .. }) = &mut board.written {
-                        *looping = None;
-                        if board.next.as_ref().is_some_and(|next| next.by == By::Loop) {
-                            board.next = None;
-                        }
-                    }
+                if matches!(asked.heard, Heard::Status(_) | Heard::Old { .. } | Heard::Starting { .. }) {
+                    runs_again(board);
                 }
                 board.flash_mb = asked.flash_mb.or(board.flash_mb);
                 board.heard = asked.heard;
@@ -1301,7 +1318,7 @@ impl Desk {
                 // Restarted, our firmware may well answer now (a board
                 // that had hung): asked once more, with a boot's wait.
                 if ours {
-                    then_listen = Some(self.timing.arrival);
+                    then_listen = Some((self.timing.arrival, None));
                 }
             }
             End::Count(Ok(free)) => {
@@ -1333,6 +1350,14 @@ impl Desk {
                         elf8: done.image.elf.clone(),
                     };
                     let cure = done.looping.and_then(|_| dio_cure(&done.image));
+                    // Its boot line came: the new firmware is up, listing
+                    // the card's library before it answers — v0.7.0 takes
+                    // a minute and a half for a big one. Asked every few
+                    // seconds till then, and the card says why it waits.
+                    let since = done.boot.as_deref().filter(|_| done.looping.is_none());
+                    let since = since.and_then(listen::parse_boot_line);
+                    let since = since.map(|(version, elf)| Heard::Starting { version: Some(version), elf });
+                    let wait = if since.is_some() { self.timing.waits.again } else { self.timing.after_write };
                     let board = &mut self.slots[i].board;
                     // What the board said before is history; until it speaks
                     // again, the image just written is what it runs.
@@ -1357,7 +1382,7 @@ impl Desk {
                     if let Some(cure) = cure {
                         self.choose(i, cure, false, By::Loop);
                     }
-                    then_listen = Some(self.timing.after_write);
+                    then_listen = Some((wait, since));
                     all = Some((true, None));
                 }
                 Err(Failure::Failed { error, half, pct }) => {
@@ -1386,8 +1411,8 @@ impl Desk {
             self.show(i);
             self.slots.remove(i);
             self.gone(&port);
-        } else if let Some(wait) = then_listen.filter(|_| !self.quitting) {
-            self.listen(i, wait);
+        } else if let Some((wait, since)) = then_listen.filter(|_| !self.quitting) {
+            self.listen(i, wait, since);
         } else {
             self.show(i);
         }
@@ -1476,6 +1501,21 @@ pub(crate) fn dio_cure(facts: &ImageFacts) -> Option<Image> {
     (image.has(Mode::Dio) != Some(false)).then_some(image)
 }
 
+/// The board runs again — it answered, or it is ours coming up: whatever
+/// went wrong is behind it — a failed write, or a restart loop (and the DIO
+/// image the page offered for it).
+fn runs_again(board: &mut Board) {
+    if matches!(board.written, Some(Written::Failed { .. })) {
+        board.written = None;
+    }
+    if let Some(Written::Done { looping: looping @ Some(_), .. }) = &mut board.written {
+        *looping = None;
+        if board.next.as_ref().is_some_and(|next| next.by == By::Loop) {
+            board.next = None;
+        }
+    }
+}
+
 /// A next write in a few words, for the log: `v0.7.0 in QIO`, `a local
 /// build`.
 fn next_words(next: &Next) -> String {
@@ -1504,6 +1544,7 @@ fn heard_line(board: &Board) -> String {
             t!("dev.log_heard_old", port = port, version = version).to_string()
         }
         Heard::Old { version: None, .. } => t!("dev.log_heard_old_unknown", port = port).to_string(),
+        Heard::Starting { .. } => t!("dev.log_starting", port = port).to_string(),
         Heard::Silent | Heard::Nothing => t!("dev.log_silent", port = port).to_string(),
         Heard::InUse { detail } => DeviceError::Busy { port: port.to_string(), detail: detail.clone() }.text(),
         Heard::Failed(e) => e.text(),
@@ -1526,8 +1567,31 @@ fn talk<T>(
     with(&mut *wire, &mut note)
 }
 
-/// Listen to one board: `@status`, else `L`, with no reset. A port in use
-/// is that board's state; one that would not open, its failure.
+/// Listen to one board with no reset, `ask` holding the conversation. A
+/// port in use is that board's state; one that would not open, its
+/// failure.
+fn listen_with(
+    engine: &dyn Engine,
+    candidate: &Candidate,
+    notes: &Sender<Note>,
+    ask: impl FnOnce(&mut dyn listen::Wire, listen::Note) -> Result<Asked, DeviceError>,
+) -> Asked {
+    let port = candidate.port.clone();
+    let _ = notes.send(Note::Log {
+        port: port.clone(),
+        text: t!("dev.log_listen", port = port).to_string(),
+        kind: LogKind::Phase,
+    });
+    let heard = |heard: Heard| Asked { heard, flash_mb: None, boot: None };
+    match talk(engine, candidate, notes, ask) {
+        Ok(asked) => asked,
+        Err(DeviceError::Busy { detail, .. }) => heard(Heard::InUse { detail }),
+        Err(e) => heard(Heard::Failed(e)),
+    }
+}
+
+/// Listen to one board once: `@status`, else `L`. A board starting up is
+/// said as such, not waited for.
 fn listen_one(
     engine: &dyn Engine,
     candidate: &Candidate,
@@ -1537,17 +1601,7 @@ fn listen_one(
     notes: &Sender<Note>,
 ) -> Asked {
     let port = candidate.port.clone();
-    let _ = notes.send(Note::Log {
-        port: port.clone(),
-        text: t!("dev.log_listen", port = port).to_string(),
-        kind: LogKind::Phase,
-    });
-    let heard = |heard: Heard| Asked { heard, flash_mb: None, boot: None };
-    match talk(engine, candidate, notes, |wire, note| listen::ask(wire, &port, wait, waits, stop, note)) {
-        Ok(asked) => asked,
-        Err(DeviceError::Busy { detail, .. }) => heard(Heard::InUse { detail }),
-        Err(e) => heard(Heard::Failed(e)),
-    }
+    listen_with(engine, candidate, notes, |wire, note| listen::ask(wire, &port, wait, waits, stop, note))
 }
 
 /// Every board in `found`, asked at once, each on a thread of its own: the
@@ -2406,6 +2460,100 @@ pub(crate) mod tests {
         r.settled(2);
         assert_eq!(r.board("FAKE0").card(), Card::Foreign { kind: CardKind::ExFat, size: Some(63_864_569_856) });
         assert_eq!(r.board("FAKE1").card(), Card::Empty);
+        r.quit();
+    }
+
+    // ── Starting up ─────────────────────────────────────────────────────────
+
+    /// The board on `port` was told starting up at some point.
+    fn seen_starting(r: &Rig, port: &str) -> bool {
+        let starting = |b: &Board| b.port() == port && matches!(b.heard, Heard::Starting { .. });
+        r.seen.iter().any(|e| matches!(e, Event::Board(b) if starting(b)))
+    }
+
+    #[test]
+    fn a_board_still_listing_its_library_is_ours_starting_up_and_asked_until_it_answers() {
+        let _en = crate::setup::tests::in_locale("en");
+        let mut r = rig(Fake::new("old:v0.7.0/listing=1.5"), "v0.8.0");
+        r.until("starting up", |r| r.boards.get("FAKE0").is_some_and(|b| b.verdict == Verdict::Starting));
+        let busy = r.board("FAKE0");
+        assert!(busy.ours(), "an M5Stack Core2, not an unknown board");
+        assert_eq!((busy.primary(), busy.card()), (None, Card::Unknown(CardUnknown::Starting)), "no Read the board");
+        assert_eq!(busy.work, Work::Listening, "asked on, on the port it holds");
+        r.settled(1);
+        let board = r.board("FAKE0");
+        assert_eq!((board.verdict.clone(), board.version()), (Verdict::Update, Some("v0.7.0")), "it answered");
+        let logs = r.logs();
+        assert!(logs.contains(&"FAKE0 is starting up — it answers once its library is listed".to_string()), "{logs:?}");
+        assert!(!logs.iter().any(|l| l.contains("said nothing")), "{logs:?}");
+        assert!(logs.iter().filter(|l| *l == "@status").count() >= 2, "asked again: {logs:?}");
+        assert_eq!(r.trace(), ["listen FAKE0"], "one port held the whole time, nothing reset");
+        r.quit();
+    }
+
+    #[test]
+    fn a_board_that_shows_itself_ours_and_never_answers_is_not_answering_once_its_time_is_up() {
+        let _en = crate::setup::tests::in_locale("en");
+        // FAKE0 prints its log for a minute and never answers; FAKE1 prints
+        // nothing at all, and is today's silent board at once.
+        let mut r = rig(Fake::new("silent:v0.7.0/listing=60,silent:v0.7.0"), "v0.8.0");
+        r.until("FAKE0 starting up", |r| r.boards.get("FAKE0").is_some_and(|b| b.verdict == Verdict::Starting));
+        r.settled(2);
+        assert_eq!(r.board("FAKE1").verdict, Verdict::Silent);
+        let board = r.board("FAKE0");
+        assert_eq!((board.verdict.clone(), board.primary()), (Verdict::Silent, Some(Primary::Read)), "today's card");
+        assert!(r.logs().contains(&"FAKE0 said nothing — other firmware, or none running".to_string()), "{:?}", r.logs());
+        assert!(!seen_starting(&r, "FAKE1"), "a board that prints nothing is never starting up");
+        r.quit();
+    }
+
+    #[test]
+    fn after_its_own_write_a_board_listing_its_library_says_so_until_it_answers() {
+        let _en = crate::setup::tests::in_locale("en");
+        let mut r = rig(Fake::new("old:v0.7.0/listing=0.8").with_pace(Duration::from_millis(60)), "v0.8.0");
+        r.settled(1);
+        let before = r.seen.len();
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
+        let starting = |b: &Board| matches!(b.written, Some(Written::Done { .. })) && matches!(b.heard, Heard::Starting { .. });
+        r.until("written, then starting up", |r| r.boards.get("FAKE0").is_some_and(starting));
+        let board = r.board("FAKE0");
+        assert_eq!(board.verdict, Verdict::UpToDate, "the version just written: ✓ just written");
+        assert_eq!(board.card(), Card::Unknown(CardUnknown::Starting), "not 'unknown until the firmware runs'");
+        assert_eq!(board.version(), Some("v0.8.0"));
+        r.written("FAKE0", "answered");
+        assert!(matches!(r.board("FAKE0").heard, Heard::Old { version: Some(ref v), .. } if v == "v0.8.0"));
+        let after: Vec<String> = r.seen[before..]
+            .iter()
+            .filter_map(|e| match e {
+                Event::Log { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(after.contains(&"FAKE0 is starting up — it answers once its library is listed".to_string()), "{after:?}");
+        assert!(!after.iter().any(|l| l.contains("said nothing")), "{after:?}");
+        assert_eq!(r.trace(), ["listen FAKE0", "open 921600", "restart", "listen FAKE0"]);
+        r.quit();
+    }
+
+    #[test]
+    fn after_its_own_write_a_board_that_never_answers_is_said_as_today_once_its_time_is_up() {
+        let _en = crate::setup::tests::in_locale("en");
+        let fake = Fake::new("old:v0.7.0/listing=60").with_pace(Duration::from_millis(60));
+        let trace = fake.trace();
+        let timing = Timing { waits: Waits { up: Duration::from_millis(800), ..QUICK.waits }, ..QUICK };
+        let shelf = Arc::new(Shelf::new("v0.8.0"));
+        let mut r = rig_on(fake, Setup { timing, ..setup(shelf.clone()) }, shelf, trace);
+        r.settled(1);
+        assert_eq!(r.board("FAKE0").verdict, Verdict::Silent, "it never answered this visit");
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
+        r.until("written, then given up on", |r| {
+            let b = r.board("FAKE0");
+            matches!(b.written, Some(Written::Done { .. })) && b.work == Work::Idle && b.heard == Heard::Silent
+        });
+        let board = r.board("FAKE0");
+        assert!(seen_starting(&r, "FAKE0"), "starting up meanwhile");
+        assert_eq!(board.card(), Card::Unknown(CardUnknown::NotRunning), "today's words, and `r` to ask again");
+        assert!(r.logs().iter().filter(|l| l.contains("said nothing")).count() >= 2, "{:?}", r.logs());
         r.quit();
     }
 

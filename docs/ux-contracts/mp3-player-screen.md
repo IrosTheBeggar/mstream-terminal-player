@@ -101,7 +101,20 @@ comes from the cache, or a download, beside them.
    firmware with the status query (`@status`, firmware 0.9.0) says its
    version and its SD card; an older mStream firmware answers `@err 7
    status`, and the console's `L`, sent on its own, gives its version; a
-   board that says nothing within about a second is *not answering*. The
+   board that says nothing within about a second is *not answering*. Unless
+   it showed itself ours: the firmware serves its console only from its main
+   loop, and lists the card's library before that loop runs — about 20 s
+   for 20,000 tracks on v0.8.0 and later after another version used the
+   card, 90 s at every start on v0.7.0 — while its other tasks print. A
+   board that printed the firmware's boot line, or two lines or more in its
+   own log's shape (`[bt] reconnect: …`: a lowercase tag in brackets, a
+   space, words — never the Arduino core's `[ 11267][W][…]`; one rule,
+   `listen::sign`), is *starting up* (clause 19): it is asked again every
+   5 s on the port it holds, for 3 minutes at most from the first sign
+   (`listen::STARTING_UP`), and only then called not answering. A board
+   that prints lines but none of ours is listened to for 8 s before it is
+   called not answering; one that prints nothing, after the first second,
+   as before. The
    bootloader is reached only after a gate's yes (clause 23), or by **Read
    the board** on a board that does not answer (clause 22). Selecting the
    tab while it is up does nothing; the page is built once per visit. A
@@ -236,7 +249,8 @@ comes from the cache, or a download, beside them.
       port — or, with several boards plugged in, its USB serial (`serial
       5B1F007751`; the port is on its tab), with the bridge before it for a
       board that has not answered as mStream firmware. The name is "M5Stack
-      Core2" for a board running mStream firmware, or one whose bootloader
+      Core2" for a board running mStream firmware (answering, or starting
+      up), or one whose bootloader
       showed an ESP32 with 16 MB of flash; "Unknown board" for one that has
       not answered; "ESP32 board" for one that turned out not to be a
       Core2; "Board on COM5" for a port that would not open;
@@ -299,6 +313,13 @@ comes from the cache, or a download, beside them.
     - **? Not answering · may not be an MP3 player** (dim), "Its USB chip is
       a Core2's, but many ESP32 boards share it." and "Reading it restarts
       the board for a few seconds.": *Read the board ▸* (clause 22).
+    - **? Starting up · v0.7.0 · it answers once its library is listed**
+      (dim; the version where its boot line named it): mStream firmware
+      listing its library (clause 5), asked again until it answers. No
+      primary — a read would only restart the listing — no *Advanced…*,
+      its tab `…`. After a write or a read this visit the chip is the
+      version in its flash instead (`✓ Up to date · v0.8.0 · just
+      written`), and the SD card row says it is starting up (clause 24).
     - **✗ Not a Core2** (gold), under the label *Board* instead of
       *Firmware*, after a read found another chip or another flash size:
       "A Core2 is an ESP32 with 16 MB. Nothing is written to it." No
@@ -328,7 +349,8 @@ comes from the cache, or a download, beside them.
     - no card: **! No card** (gold) and its fix; an exFAT or NTFS card, a
       GPT card, a card it cannot read: what it is, why it does not play,
       and the fix and its cost, in gold and dim;
-    - **unknown**, dim, saying why: being asked; during a write or a read
+    - **unknown**, dim, saying why: being asked; starting up ("? starting
+      up — reading its library", clause 5); during a write or a read
       ("untouched · shown again once the board restarts"); a board half
       written or ours not running ("? unknown until the firmware runs
       again"); firmware too old to report it ("? v0.7.0 can't report the
@@ -383,8 +405,17 @@ comes from the cache, or a download, beside them.
 24. **Done is the card again.** There is no Done page and no Close. The
     board restarts, the worker listens again (the boot line, then the
     status), and the card comes back with the new verdict (`✓ Up to date ·
-    v0.8.0 · just written`) and its card as the firmware reports it; the
-    busy line says it in one dim line — "Updated from v0.7.0 just now. The
+    v0.8.0 · just written`) and its card as the firmware reports it. Once
+    its boot line is heard the board is starting up — listing its library
+    before it answers, a minute and a half for a big card on v0.7.0 — and
+    the worker asks it every 5 s, for 3 minutes at most, until it does:
+    meanwhile the SD card row says "? starting up — reading its library"
+    and the log "COM3 is starting up — it answers once its library is
+    listed", never "said nothing". The write's lock ended with the restart
+    (clause 9): the tab can be left meanwhile, which stops the asking. Past
+    3 minutes the card is as for a board that never answered ("? unknown
+    until the firmware runs again"), and `r` asks again. The
+    busy line says the write's end in one dim line — "Updated from v0.7.0 just now. The
     SD card was not touched.", after a first install "Installed just now.
     Next: your music in /music on a FAT32 card." Only a step forward is
     "Updated": after *Go back* (or over a version the order cannot place)
@@ -491,9 +522,10 @@ comes from the cache, or a download, beside them.
     `o` or a click opens the sheet for the board in view; nothing else
     does — the sheet never opens by itself, and Enter still opens the gate
     for the board's own write. It is not offered while a write runs, nor
-    on a board not heard yet, one that does not answer (Read the board
-    first), one that is not a Core2, one whose port would not open or is in
-    use by another program, nor with no board at all.
+    on a board not heard yet, one starting up with nothing else known of it
+    (clause 19), one that does not answer (Read the board first), one that
+    is not a Core2, one whose port would not open or is in use by another
+    program, nor with no board at all.
 34. **The sheet** is the kit's neutral modal: the accent border, the title
     "Advanced options · COM3" in the accent and bold, `[X]` dim at its
     right (bright under the pointer), no scrim, the card beneath inert (the
@@ -509,8 +541,12 @@ comes from the cache, or a download, beside them.
       release — listed from GitHub when you choose it* (clause 35); *A
       local build — a file or a build folder on this computer* (clause 36).
     - **FLASH MODE**: *QIO — faster* and *DIO — runs on every Core2, a
-      little slower*. The row the board runs now says so (", as COM3 runs
-      now", from its ELF), and the board's default says "(the default)". A
+      little slower*. A row carries one mark at most, so it fits the
+      console's sheet in every locale: the row the board runs now says so
+      (", as COM3 runs now", from its ELF) — that is its default too, but
+      for v0.5.0's one image — else the board's default says "(the
+      default)"; beside a mark DIO's meaning is its short one (*DIO — runs
+      on every Core2, as COM3 runs now*). A
       release with one image has its other row dim, saying why ("not in
       v0.5.0, which has one image"); a local build's mode is its own
       (clause 36).
@@ -735,6 +771,12 @@ ASCII on the bare Windows console.
 | `dev.letting_go` | restarting the Core2 into its firmware before quitting… |
 | `dev.letting_ports_go` | letting the USB ports go… |
 
+A board starting up (clauses 5, 19, 24) is `dev.fw_starting` "Starting
+up" with `dev.fw_starting_why` "it answers once its library is listed",
+`dev.card_starting` "starting up — reading its library" and the log's
+`dev.log_starting` "%{port} is starting up — it answers once its library
+is listed".
+
 `dev.hint_working_unseen` is the mini player's line while the page writes
 out of sight (it wraps, so it has no footer's width to keep);
 `dev.letting_go` is the quit's stderr line (clause 11). The no-player
@@ -834,7 +876,9 @@ line: they are lines a script reads.
   serial port is opened by `cargo test` (a Core2 may well be plugged in).
   The worker's own tests run it on the fake engine (`MSTREAM_DEVICE_FAKE`'s
   grammar: `status:`, `old:`, `silent:`, `chip`, `busy`, `/in=`, `/out=`,
-  `/held=`, `/mode=dio`, `/elf=`, `/loop=qio`, and any `@status` field),
+  `/held=`, `/mode=dio`, `/elf=`, `/loop=qio`, `/listing=<s>` — a board
+  starting up, answering nothing for that long after each start while it
+  prints `[bt]` and Arduino lines — and any `@status` field),
   whose trace says what was done to each board, and on a shelf of images
   and a release list in GitHub's place (`firmware::tests::Shelf`): no test
   reaches GitHub either.
@@ -1034,3 +1078,38 @@ line: they are lines a script reads.
   a choice or a Reset still on its way when the gate was drawn — the
   worker can be a scan of the ports behind — could otherwise write an
   image the gate never showed.
+- **2026-10-10 — A board starting up is not a silent one; the mode rows
+  fit.** The real-board smoke (Windows, COM3, a 31.9 GB card with 19,410
+  tracks) found three things. After the page's own write (v0.8.0 DIO →
+  v0.7.0 DIO, and v0.7.0 → a local v0.8.0-5-g4e94418) the page heard the
+  boot line, sent `@status` once, gave up after 12 s — "COM3 said nothing
+  — other firmware, or none running" — and left the SD card row "?
+  unknown until the firmware runs again" until `r`; the board answered a
+  little later. Opening the tab while a v0.7.0 board still listed its
+  library drew "Unknown board · ? Not answering · may not be an MP3
+  player" with *Read the board ▸* and no *Advanced…*, though it printed
+  `[bt]` and Bluetooth lines all along. And the sheet's DIO row ran past
+  its width at 100×30: "(•) DIO — runs on every Core2, a little slower,
+  as COM3 runs now (t…". The firmware serves its console only from its
+  main loop, which waits for the library's listing: a minute and a half at
+  every start on v0.7.0 with a big card. So a board that answers nothing
+  but prints its boot line, or two lines of its own log, is now *starting
+  up* (clauses 5, 19): "M5Stack Core2" with **? Starting up**, no primary,
+  asked every 5 s on the port it holds for 3 minutes at most — and so is
+  the board after the page's own write, once its boot line is heard
+  (clause 24). One rule, `listen::sign`, decides it, conservatively: the
+  Arduino core's `[ 11267][W][…]` lines never count, one line of ours is
+  not enough, and a board that prints nothing is today's silent board after
+  its first second. A board that prints lines but none of ours is listened
+  to for 8 s before it is called not answering, since our firmware's
+  Bluetooth task prints only every few seconds. Not tried on the real board
+  yet: whether the queued `@status` lines (one every 5 s, at most 36) are
+  read through in a burst once the loop runs, which is what the fake does.
+  Still open: a v0.5.0 board (no host lines) that prints its log at rest
+  now reads as starting up for 3 minutes before *Read the board ▸*; its
+  boot line, when heard, still names it at once. The sheet's mode rows
+  carry one mark each, and DIO's meaning is its short one beside a mark
+  (clause 34); the every-locale floor test now checks every radio row of
+  the sheet is drawn whole, which also found the local build's row cut in
+  seven locales, French *Another release* and Japanese "not this image's",
+  all shortened.

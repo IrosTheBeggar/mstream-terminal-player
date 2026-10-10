@@ -1104,8 +1104,8 @@ fn sheet_lines(page: &Page, sheet: &Sheet, board: &Board, w: u16) -> Vec<SheetLi
 }
 
 /// The Flash mode group's rows (clause 34): the pin and a release offer
-/// the builds they have, the board's own and default marked; a local
-/// build's is its own.
+/// the builds they have, the board's own or else its default marked; a
+/// local build's is its own.
 fn mode_lines(page: &Page, sheet: &Sheet, board: &Board, focused: bool) -> Vec<SheetLine> {
     let port = short(board.port());
     let runs = board.mode().map(|m| m.mode).filter(|_| board.ours());
@@ -1117,14 +1117,23 @@ fn mode_lines(page: &Page, sheet: &Sheet, board: &Board, focused: bool) -> Vec<S
             Source::Pin | Source::Release => {
                 let usable = sheet.offers(mode);
                 let desc = if usable {
-                    let mut desc = base;
-                    if runs == Some(mode) {
-                        desc.push_str(&t!("dev.adv_as_runs", port = port));
+                    // One mark a row, and DIO's meaning short beside it, so
+                    // the row fits the console's sheet in every language:
+                    // the mode the board runs now — its default as well,
+                    // but on v0.5.0's one image, whose QIO row then says
+                    // so — else the default.
+                    let mark = if runs == Some(mode) {
+                        Some(t!("dev.adv_as_runs", port = port))
+                    } else if board.default_mode() == mode {
+                        Some(t!("dev.adv_default"))
+                    } else {
+                        None
+                    };
+                    match mark {
+                        Some(mark) if mode == Mode::Dio => format!("{}{mark}", t!("dev.adv_dio_short")),
+                        Some(mark) => format!("{base}{mark}"),
+                        None => base,
                     }
-                    if board.default_mode() == mode {
-                        desc.push_str(&t!("dev.adv_default"));
-                    }
-                    desc
                 } else {
                     let version = match (&sheet.picked, sheet.source) {
                         (Some(picked), Source::Release) => picked.tag.clone(),
@@ -1318,6 +1327,27 @@ fn fit_line(pieces: &[(String, Style)], width: usize) -> Line<'static> {
         break;
     }
     Line::from(spans)
+}
+
+/// The words of the sheet's radio rows as they are meant to read whole —
+/// the name, ` — `, the description — but a path's, which is cut at its
+/// front by design, and the release control's: what a test finds in the
+/// frame, or the row was cut. None while the release list hangs over them.
+#[cfg(test)]
+pub(super) fn radio_words(page: &Page) -> Vec<String> {
+    let Some(sheet) = page.sheet.clone().filter(|s| s.list.is_none()) else { return Vec::new() };
+    let Some(board) = page.boards.iter().find(|b| b.port() == sheet.port).cloned() else { return Vec::new() };
+    let mut words = Vec::new();
+    for line in sheet_lines(page, &sheet, &board, GATE_W) {
+        if let SheetLine::Radio(radio) = line
+            && !radio.front
+            && radio.control.is_none()
+        {
+            let desc: String = radio.desc.iter().map(|(text, _)| text.as_str()).collect();
+            words.push(if desc.is_empty() { radio.name } else { format!("{} — {desc}", radio.name) });
+        }
+    }
+    words
 }
 
 /// A radio row (the kit's: `(•)` in the accent on the focused group's

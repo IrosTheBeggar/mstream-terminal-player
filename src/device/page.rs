@@ -1704,7 +1704,9 @@ fn mark(page: &Page, board: &Board) -> (String, Color) {
     if page.written_now(board) {
         return (g.busy.to_string(), th().accent);
     }
-    if matches!(board.work, Work::Queued | Work::Reading) || board.verdict == Verdict::Asking {
+    // Being asked, or starting up and asked again: the verdict is coming.
+    let coming = matches!(board.verdict, Verdict::Asking | Verdict::Starting);
+    if matches!(board.work, Work::Queued | Work::Reading) || coming {
         return (g.busy.to_string(), th().dim);
     }
     if matches!(board.written, Some(Written::Failed { .. })) {
@@ -1719,7 +1721,9 @@ fn mark(page: &Page, board: &Board) -> (String, Color) {
         | Verdict::NotCore2 { .. }
         | Verdict::HalfWritten
         | Verdict::Unreadable => (g.no.to_string(), th().gold),
-        Verdict::Silent | Verdict::Unplaced | Verdict::Asking => (g.unknown.to_string(), th().dim),
+        Verdict::Silent | Verdict::Unplaced | Verdict::Asking | Verdict::Starting => {
+            (g.unknown.to_string(), th().dim)
+        }
     }
 }
 
@@ -2111,6 +2115,13 @@ fn firmware_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             }
             Verdict::Other { name } => chip(g.no, gold, &t!("dev.fw_other"), std::slice::from_ref(name)),
             Verdict::Blank => chip(g.no, gold, &t!("dev.fw_blank"), &[]),
+            // Ours, busy listing its library: nothing to read or write yet,
+            // and nothing that says it may not be an MP3 player.
+            Verdict::Starting => {
+                let mut facts: Vec<String> = board.version().map(str::to_string).into_iter().collect();
+                facts.push(t!("dev.fw_starting_why").to_string());
+                chip(g.unknown, th().dim, &t!("dev.fw_starting"), &facts)
+            }
             Verdict::Silent => {
                 second.push(t!("dev.fw_silent_2").to_string());
                 second.push(t!("dev.fw_read_cost").to_string());
@@ -2248,6 +2259,7 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             CardUnknown::Asking => dim_rows(label, &t!("dev.card_asking"), w),
             CardUnknown::Writing => dim_rows(label, &t!("dev.card_untouched"), w),
             CardUnknown::HalfWritten | CardUnknown::NotRunning => unknown(t!("dev.card_unknown_runs").to_string()),
+            CardUnknown::Starting => unknown(t!("dev.card_starting").to_string()),
             CardUnknown::OldFirmware => {
                 let mut words = match board.version() {
                     Some(version) => t!("dev.card_old", version = version).to_string(),
@@ -2358,9 +2370,11 @@ fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
     if let Some(serial) = board.serial() {
         port.push_str(&format!(" · {}", t!("dev.serial", serial = serial)));
     }
+    let listened =
+        matches!(board.heard, Heard::Status(_) | Heard::Old { .. } | Heard::Starting { .. } | Heard::Silent);
     match &board.probe {
         Some(Ok(probe)) => port.push_str(&format!(" · {} baud", probe.info.baud)),
-        _ if matches!(board.heard, Heard::Status(_) | Heard::Old { .. } | Heard::Silent) => {
+        _ if listened => {
             port.push_str(&format!(" · {} baud · {}", engine::CONSOLE_BAUD, t!("dev.no_reset")));
         }
         _ => {}
@@ -3113,6 +3127,14 @@ pub(crate) mod fixtures {
         judged(board)
     }
 
+    /// Our firmware listing its library on `port`: its boot line heard, with
+    /// `version`, or only its log lines (none). Asked on meanwhile.
+    pub(crate) fn starting(port: &str, version: Option<&str>) -> Board {
+        let mut board = heard(port, Heard::Starting { version: version.map(str::to_string), elf: None });
+        board.work = Work::Listening;
+        board
+    }
+
     /// Our firmware too old for the status query, on the ELF `elf`: v0.7.0's
     /// DIO build is `aa45f60e`, v0.8.0's `3523b80e`.
     pub(crate) fn old_on(port: &str, version: &str, elf: &str) -> Board {
@@ -3259,7 +3281,17 @@ impl Ends {
 
     /// COM3 written and restarted, its new firmware being asked.
     pub(crate) fn written(&self) {
-        let mut board = fixtures::heard("COM3", Heard::Nothing);
+        self.written_heard(Heard::Nothing);
+    }
+
+    /// COM3 written and restarted, its new firmware listing its library:
+    /// asked on until it answers.
+    pub(crate) fn written_starting(&self) {
+        self.written_heard(Heard::Starting { version: Some("v0.8.0".into()), elf: Some("11c35a4a".into()) });
+    }
+
+    fn written_heard(&self, heard: Heard) {
+        let mut board = fixtures::heard("COM3", heard);
         board.probe = Some(Ok(Probe { info: fixtures::info("COM3"), on_board: Some(fixtures::ours("v0.8.0")) }));
         board.written = Some(Written::Done {
             version: "v0.8.0".into(),
@@ -3612,6 +3644,49 @@ mod tests {
         let frame = window(&mut page);
         assert!(frame.contains("reading it over its bootloader…"), "{frame}");
         assert!(frame.contains("The screen is dark a few seconds; it restarts as it was."), "{frame}");
+    }
+
+    #[test]
+    fn a_board_still_listing_its_library_is_a_core2_starting_up_with_nothing_to_press() {
+        // The real Core2 on v0.7.0, the tab opened while it listed 19,410
+        // tracks: it answered nothing and printed its Bluetooth lines.
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::starting("COM3", Some("v0.7.0"))]));
+        let frame = window(&mut page);
+        assert!(frame.contains("│  M5Stack Core2"), "ours, by its own lines:\n{frame}");
+        assert!(frame.contains("Firmware      ? Starting up · v0.7.0 · it answers once its library is"), "{frame}");
+        assert!(frame.contains("SD card       ? starting up — reading its library"), "{frame}");
+        for never in ["may not be an MP3 player", "Read the board", "Unknown board", "Advanced…", "said nothing"] {
+            assert!(!frame.contains(never), "{never:?}:\n{frame}");
+        }
+        assert_eq!(page.hint(), "d details · Esc library", "nothing for Enter while it lists");
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('o'));
+        assert!(page.gate.is_none() && page.sheet.is_none() && ends.sent().is_empty(), "nothing to do yet");
+        // Its log alone: no version to name.
+        let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::starting("COM3", None)]));
+        let frame = window(&mut page);
+        assert!(frame.contains("Firmware      ? Starting up · it answers once its library is listed"), "{frame}");
+    }
+
+    #[test]
+    fn after_the_write_a_board_listing_its_library_says_so_and_the_tab_can_be_left() {
+        let _en = english();
+        let (mut page, ends) = page_with(Ends::update_available);
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('y'));
+        assert!(page.writing());
+        let _ = ends.sent();
+        ends.writing(40);
+        ends.written_starting();
+        page.pump();
+        assert!(!page.writing(), "the write ended with its restart: the lock with it");
+        let frame = window(&mut page);
+        assert!(frame.contains("Firmware      ✓ Up to date · v0.8.0 · just written"), "{frame}");
+        assert!(frame.contains("SD card       ? starting up — reading its library"), "not 'unknown':\n{frame}");
+        assert!(!frame.contains("unknown until the firmware runs again"), "{frame}");
+        press(&mut page, KeyCode::Esc);
+        assert_eq!(ends.sent(), [Cmd::Quit], "leaving stops the asking");
     }
 
     #[test]
@@ -4262,7 +4337,7 @@ mod tests {
             "           │ │   ( ) A local build — a file or a build folder on this computer        │ │",
             "           │ │                                                                        │ │",
             "           │ │ FLASH MODE                                                             │ │",
-            "           ╰─│   (•) QIO — faster, as COM3 runs now (the default)                     │─╯",
+            "           ╰─│   (•) QIO — faster, as COM3 runs now                                   │─╯",
             "             │   ( ) DIO — runs on every Core2, a little slower                       │",
             "             │                                                                        │",
             "             │ ERASE                                                                  │",
@@ -4301,7 +4376,7 @@ mod tests {
         press(&mut page, KeyCode::Tab);
         press(&mut page, KeyCode::Down);
         let frame = window(&mut page);
-        assert!(frame.contains("│   ( ) QIO — faster, as COM3 runs now (the default)"), "{frame}");
+        assert!(frame.contains("│   ( ) QIO — faster, as COM3 runs now      "), "one mark a row:\n{frame}");
         assert!(frame.contains("│   (•) DIO — runs on every Core2, a little slower"), "{frame}");
         assert!(frame.contains("│ DIO reads it on 2 lines, as M5Stack ships the Core2: a little slower,  │"), "frame 3's help:\n{frame}");
         assert!(ends.sent().is_empty(), "nothing in the sheet writes, or asks");
@@ -4825,13 +4900,19 @@ mod tests {
         press(&mut page, KeyCode::Esc);
         press(&mut page, KeyCode::Char('o'));
         let frame = window(&mut page);
-        assert!(frame.contains("(•) DIO — runs on every Core2, a little slower, as COM3 runs now"), "{frame}");
+        assert!(frame.contains("│   (•) DIO — runs on every Core2, as COM3 runs now       "), "whole, not cut:\n{frame}");
+        assert!(frame.contains("│   ( ) QIO — faster      "), "its default goes unsaid: it runs DIO by choice:\n{frame}");
         // A board on v0.5.0's one image runs DIO by no choice: its update is QIO.
         let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::old_on("COM3", "v0.5.0", "17352e55")]));
         let frame = window(&mut page);
         assert!(!frame.contains("In DIO"), "{frame}");
         press(&mut page, KeyCode::Enter);
         assert!(window(&mut page).contains("│ Update from v0.5.0 to v0.8.0?"));
+        press(&mut page, KeyCode::Esc);
+        press(&mut page, KeyCode::Char('o'));
+        let frame = window(&mut page);
+        assert!(frame.contains("│   (•) QIO — faster (the default)      "), "{frame}");
+        assert!(frame.contains("│   ( ) DIO — runs on every Core2, as COM3 runs now      "), "{frame}");
     }
 
     #[test]
@@ -4995,6 +5076,12 @@ mod tests {
         add("install", &|e| e.boards(vec![other.clone()]), &[]);
         add("install, the gate", &|e| e.boards(vec![other.clone()]), &[KeyCode::Enter]);
         add("silent", &|e| e.boards(vec![heard("COM3", Heard::Silent)]), &[]);
+        add("starting up", &|e| e.boards(vec![fixtures::starting("COM3", Some("v0.8.0-5-g4e94418"))]), &[]);
+        add("starting up, its log alone", &|e| e.boards(vec![fixtures::starting("COM3", None)]), &[]);
+        add("starting up after the write", &|e| {
+            e.update_available();
+            e.written_starting();
+        }, &[]);
         add("newer", &|e| e.boards(vec![answering("COM3", "v0.9.0")]), &[]);
         let newer = || vec![answering("COM3", "v0.9.0")];
         add("go back, the gate", &|e| e.boards(newer()), &[KeyCode::Char('d'), KeyCode::Char('w')]);
@@ -5063,6 +5150,9 @@ mod tests {
         let dio = || vec![fixtures::old_on("COM3", "v0.7.0", "aa45f60e")];
         add("on dio", &|e| e.boards(dio()), &[]);
         add("on dio, the gate", &|e| e.boards(dio()), &[Enter]);
+        // The real Core2's sheet, 2026-10-10: its DIO row ran past its width.
+        add("advanced, a board on dio", &|e| e.boards(dio()), &[o]);
+        add("advanced, v0.5.0's one image", &|e| e.boards(vec![fixtures::old_on("COM3", "v0.5.0", "17352e55")]), &[o]);
         add("keeps restarting", &|e| e.boards(vec![fixtures::looping("COM3")]), &[Char('d')]);
         add("keeps restarting, the gate", &|e| e.boards(vec![fixtures::looping("COM3")]), &[Enter]);
         let three = || {
@@ -5158,6 +5248,14 @@ mod tests {
         vec![if page.writing() { word.to_string() } else { format!("{word} ▸") }]
     }
 
+    /// What must be drawn whole: the state's buttons, and the sheet's
+    /// radio rows (a row past its width ends in `…`).
+    fn whole(page: &Page) -> Vec<String> {
+        let mut words = buttons(page);
+        words.extend(sheet::radio_words(page));
+        words
+    }
+
     #[test]
     fn at_the_guis_floor_and_on_the_console_every_state_keeps_its_buttons_whole_in_every_locale() {
         // The locale is the whole process's: drawn here in another language,
@@ -5188,9 +5286,10 @@ mod tests {
         // The GUI's floor is 100×24: with its top bar and its footer the
         // page gets 22 rows from row 1, and 21 from row 2 under a pick's
         // banner (contract clause 4). Every state draws its frames whole
-        // and its buttons whole there, nothing outside its area, and its
-        // hint in 99 cells; the console page does the same at 72×24. Spaces
-        // are left out of the comparison: a wide glyph's second cell is one.
+        // and its buttons and the sheet's rows whole there, nothing outside
+        // its area, and its hint in 99 cells; the console page does the same
+        // at 72×24. Spaces are left out of the comparison: a wide glyph's
+        // second cell is one.
         let Ok(code) = std::env::var(FLOOR_LOCALE) else { return };
         rust_i18n::set_locale(&code);
         crate::kit::theme::pin_modern_terminal();
@@ -5209,7 +5308,7 @@ mod tests {
                 assert!(first.trim_matches('#').trim().is_empty(), "{code}, {name}: the first row is the host's:\n{all}");
                 assert_eq!(all.matches('╭').count(), all.matches('╰').count(), "{code}, {name} in {area:?}: frames whole:\n{all}");
                 assert!(!all.contains("dev."), "{code}, {name}: a key with no words:\n{all}");
-                for label in buttons(&page) {
+                for label in whole(&page) {
                     let whole = packed.contains(&label.replace(' ', ""));
                     assert!(whole, "{code}, {name} in {area:?}: {label:?} whole:\n{all}");
                 }
@@ -5225,7 +5324,7 @@ mod tests {
                 assert_eq!(tops, bottoms, "{code}, {name} at 72×24: frames whole:\n{all}");
             }
             let packed = all.replace(' ', "");
-            for label in buttons(&page) {
+            for label in whole(&page) {
                 let whole = packed.contains(&label.replace(' ', ""));
                 assert!(whole, "{code}, {name} at 72×24: {label:?} whole:\n{all}");
             }

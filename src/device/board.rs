@@ -1,6 +1,7 @@
 //! One board on the desk, as the worker knows it: who it is (its port, its
 //! USB bridge and serial), what it said without a reset (the running
-//! firmware's `@status`, or its console's `L`, or nothing), what its
+//! firmware's `@status`, or its console's `L`, or that it is starting up,
+//! or nothing), what its
 //! bootloader said when it was read (only after a reset someone asked
 //! for), and from those the two answers the MP3 Player tab gives — the
 //! firmware's verdict against the pin, and the SD card's state — with
@@ -150,6 +151,12 @@ pub(crate) enum Heard {
     /// just coming up). Too old to report the card. The version is none
     /// when `L` said nothing in time.
     Old { version: Option<String>, elf: Option<String> },
+    /// Nothing answered, but our firmware showed itself (listen::sign): its
+    /// boot line went by, with its version and ELF, or its own log lines
+    /// did. It is starting up — listing the card's library before its main
+    /// loop serves the console — and answers once that is done: asked again
+    /// meanwhile, for minutes at most (listen::ask_till_up).
+    Starting { version: Option<String>, elf: Option<String> },
     /// Neither `@status` nor anything else in time: other firmware, none
     /// running, or a hung board. Only a reset can say more.
     Silent,
@@ -194,6 +201,10 @@ pub(crate) enum Verdict {
     /// Nothing installed (a read found no app description): Install ▸,
     /// erasing first.
     Blank,
+    /// Our firmware starting up, and nothing else known of it (no read, no
+    /// write this visit): no primary while it lists its library — reading
+    /// it would only restart that.
+    Starting,
     /// Said nothing to the listen: Read the board ▸, which resets it.
     Silent,
     /// The read found something that is not a Core2 — not an ESP32, or not
@@ -438,7 +449,9 @@ impl Board {
     pub fn version(&self) -> Option<&str> {
         match &self.heard {
             Heard::Status(status) => Some(&status.fw),
-            Heard::Old { version: Some(version), .. } => Some(version),
+            Heard::Old { version: Some(version), .. } | Heard::Starting { version: Some(version), .. } => {
+                Some(version)
+            }
             _ => self.probed_ours().map(|desc| desc.version.as_str()),
         }
     }
@@ -447,6 +460,7 @@ impl Board {
         match &self.heard {
             Heard::Status(status) => status.elf.as_deref(),
             Heard::Old { elf, .. } => elf.as_deref(),
+            Heard::Starting { elf: Some(elf), .. } => Some(elf),
             _ => self.probed_ours().map(|desc| desc.elf8.as_str()),
         }
     }
@@ -467,7 +481,8 @@ impl Board {
     /// It runs our firmware, by its own word or its bootloader's: "your MP3
     /// player"; anything else is "this Core2", or an unknown board.
     pub fn ours(&self) -> bool {
-        matches!(self.heard, Heard::Status(_) | Heard::Old { .. }) || self.probed_ours().is_some()
+        matches!(self.heard, Heard::Status(_) | Heard::Old { .. } | Heard::Starting { .. })
+            || self.probed_ours().is_some()
     }
 
     /// The verdict from what is known, against `target` (none until the
@@ -496,6 +511,12 @@ impl Board {
             },
             Heard::InUse { .. } => Verdict::InUse,
             Heard::Failed(_) => Verdict::Unreadable,
+            // Starting up after a write or a read this visit: the version in
+            // its flash says it, as for a board that says nothing.
+            Heard::Starting { .. } => match self.probed_ours() {
+                Some(desc) => by_version(&desc.version),
+                None => Verdict::Starting,
+            },
             Heard::Silent | Heard::Nothing => match &self.probe {
                 Some(Ok(Probe { on_board: Some(desc), .. })) if desc.is_ours() => by_version(&desc.version),
                 Some(Ok(Probe { on_board: Some(desc), .. })) => Verdict::Other { name: desc.project.clone() },
@@ -654,6 +675,7 @@ impl Board {
                 }
             }
             Heard::Old { .. } => Card::Unknown(CardUnknown::OldFirmware),
+            Heard::Starting { .. } => Card::Unknown(CardUnknown::Starting),
             Heard::InUse { .. } => Card::Unknown(CardUnknown::InUse),
             Heard::Failed(_) => Card::Unknown(CardUnknown::Unreadable),
             // Being asked (after a write, the new firmware coming up).
@@ -698,6 +720,9 @@ pub(crate) enum CardUnknown {
     /// Our firmware is on the board (its bootloader said) but did not
     /// answer: unknown until it runs.
     NotRunning,
+    /// Our firmware starting up: it reports the card once its library is
+    /// listed.
+    Starting,
     /// Unknown until the port is free.
     InUse,
     Unreadable,
@@ -876,6 +901,28 @@ pub(crate) mod tests {
         assert_eq!(heard(Heard::Silent).card(), Card::Unknown(CardUnknown::NotOurs));
         assert_eq!(heard(Heard::Nothing).card(), Card::Unknown(CardUnknown::Asking));
         assert_eq!(heard(Heard::InUse { detail: String::new() }).card(), Card::Unknown(CardUnknown::InUse));
+    }
+
+    #[test]
+    fn a_board_starting_up_is_ours_with_nothing_offered_until_it_answers() {
+        let named = Heard::Starting { version: Some("v0.7.0".into()), elf: Some("aa45f60e".into()) };
+        let board = heard(named);
+        assert_eq!(board.verdict, Verdict::Starting, "busy is not behind: no update offered yet");
+        assert!(board.ours(), "M5Stack Core2, never 'may not be an MP3 player'");
+        assert_eq!((board.version(), board.elf()), (Some("v0.7.0"), Some("aa45f60e")), "its boot line's");
+        assert_eq!(board.primary(), None, "no Read the board while it lists its library");
+        assert_eq!(board.card(), Card::Unknown(CardUnknown::Starting));
+        assert!(!board.needs_update() && !board.answers_status());
+        let unnamed = heard(Heard::Starting { version: None, elf: None });
+        assert_eq!((unnamed.verdict.clone(), unnamed.version()), (Verdict::Starting, None), "its log lines alone");
+        // Just written (or read): the version in its flash gives the verdict,
+        // and the card still waits for the firmware.
+        let mut written = probed(Some(desc("v0.8.0", AppDesc::OURS)));
+        written.heard = Heard::Starting { version: Some("v0.8.0".into()), elf: None };
+        written.verdict = written.judge(Some(&pin()));
+        assert_eq!(written.verdict, Verdict::UpToDate);
+        assert_eq!(written.elf(), Some("11c35a4a"), "the read's ELF where the boot line gave none");
+        assert_eq!(written.card(), Card::Unknown(CardUnknown::Starting));
     }
 
     #[test]
