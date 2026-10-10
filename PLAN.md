@@ -3511,6 +3511,18 @@ the tag the way mStream does and fails loud with GitHub's answer when the token 
 The proof: hand-crank the tag mStream currently pins (an older one would open a downgrade PR
 there), and its workflow answers "pins already current — nothing to do".
 
+**The mstream.io stamp (2026-10-10).** mstream.io's /software page offers the desktop packages
+(Windows zip, both macOS apps, the Linux tarball) and its homepage shows the app; the site links
+them by exact name under one tag, kept in the `player` block of its `src/data/release.json`, the
+same file mStream's update-website.yaml stamps its `server` block into. release.yml's `website`
+job stamps each stable release whose desktop packages were built, beside `channels` and
+`notify` for the same reason, and update-website.yml is the hand crank (and the way to roll the
+site back: it refuses an older tag unless told). Both run scripts/update-website.sh, which checks
+the four packages are on the release before it writes, and pushes to the site's master with
+WEBSITE_KEY, a write deploy key on the site's repo; that push is what deploys the site. The
+proof: hand-crank the tag the site shows, and it answers "site already at <tag> — nothing to
+stamp".
+
 **The manual checklist** (`docs/window-spike/checklist.md` has every item with its expected
 result; the shape): macOS — launch from Terminal and iTerm; the key walk (digits, arrows,
 Home/End, PageUp/Down, Tab and Shift+Tab, Enter, Esc, Backspace, Space, T); key repeat on
