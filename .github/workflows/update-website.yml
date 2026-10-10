@@ -1,0 +1,51 @@
+# The hand-cranked mstream.io stamp: write a release's tag into the site's
+# src/data/release.json and push, which deploys the site. The automatic path
+# is the `website` job inside release.yml — it cannot live here behind
+# `release: published`, because our releases are created with the workflow's
+# own GITHUB_TOKEN and GITHUB_TOKEN events never trigger workflows. This
+# stays for re-runs and repairs (a release stamped before WEBSITE_KEY was
+# set, say), for rollbacks, and for proving the key: the tag the site
+# already shows makes scripts/update-website.sh answer "site already at
+# <tag> — nothing to stamp", the harmless end-to-end proof.
+#
+# Needs WEBSITE_KEY: the private half of an SSH deploy key with write access
+# on IrosTheBeggar/mstream-website (its Settings > Deploy keys).
+name: Update mstream.io (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to stamp into mstream.io, e.g. v0.12.1"
+        required: true
+      allow_downgrade:
+        description: "Allow a tag older than the one the site shows (a rollback)"
+        type: boolean
+        default: false
+
+# The push goes out with the deploy key; GITHUB_TOKEN only reads this repo's
+# release and the script.
+permissions:
+  contents: read
+
+jobs:
+  website:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out mstream-website
+        uses: actions/checkout@v6
+        with:
+          repository: IrosTheBeggar/mstream-website
+          ref: master
+          path: website
+          ssh-key: ${{ secrets.WEBSITE_KEY }}
+
+      - name: Stamp release.json and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          ALLOW_DOWNGRADE: ${{ inputs.allow_downgrade && '1' || '' }}
+          SITE_DIR: website
+        run: sh scripts/update-website.sh
