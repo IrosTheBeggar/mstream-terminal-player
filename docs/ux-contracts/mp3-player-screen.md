@@ -225,7 +225,7 @@ the page's own `dev.phase_restarting`.
 - **The command's flags.** `--firmware`, `--release`, `--port`, `--erase`,
   `--no-erase` and `--yes` stay the command line's: the tab always writes
   the pinned release, finds the port itself and lets the board decide the
-  erase. A Core2 that keeps restarting on the pinned QIO image (v0.7.0's)
+  erase. A Core2 that keeps restarting on the pinned QIO image (v0.8.0's)
   still needs `--firmware` with the release's `-dio-full.bin`.
 - **The tray launcher's item.** mStream's launcher gets no "MP3 player"
   entry; the GUI's tab is the way in.

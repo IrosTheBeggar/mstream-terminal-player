@@ -27,14 +27,15 @@ const ASSET_STEM: &str = "mstream-player-core2";
 /// The release this player pins: what `device flash` writes when no
 /// `--firmware` or `--release` says otherwise. Bumped by hand with player
 /// releases, once a firmware release has been tried on a board.
-pub(crate) const PINNED_TAG: Option<&str> = Some("v0.7.0");
-/// The sha256 of that release's `*-full.bin`, from its SHA256SUMS. Release
-/// assets are mutable on GitHub; this is the trust anchor, not the file.
-/// v0.7.0's `-full.bin` runs the flash in QIO, as every release has since
-/// v0.6.0; the release's `-dio-full.bin` (the same firmware in DIO, for a
-/// Core2 that keeps restarting on QIO) goes on with `--firmware`.
+pub(crate) const PINNED_TAG: Option<&str> = Some("v0.8.0");
+/// The sha256 of that release's `*-full.bin`, from its SHA256SUMS (and the
+/// same as GitHub's own digest of the asset, checked when it was pinned).
+/// Release assets are mutable on GitHub; this is the trust anchor, not the
+/// file. v0.8.0's `-full.bin` runs the flash in QIO, as every release has
+/// since v0.6.0; the release's `-dio-full.bin` (the same firmware in DIO,
+/// for a Core2 that keeps restarting on QIO) goes on with `--firmware`.
 pub(crate) const PINNED_FULL_SHA256: Option<&str> =
-    Some("b26f56b369ec0b493d9ff13c276794abfd09705485c07d23f0171861da147113");
+    Some("ba77f290f7159b2e40a7d0907a05b1400ed6529abe297437595259ed8d0671a3");
 
 /// Where the merged image expects the app: ota_0 in the firmware's
 /// partition table, and where the bootloader at 0x1000 sits inside it.
