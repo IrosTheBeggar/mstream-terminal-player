@@ -314,7 +314,7 @@ impl Page {
             Event::Plan { .. } => {}
             Event::Identified { port, label, result } => self.identified(&port, &label, result, now),
             Event::All(all) => self.all(all),
-            Event::Refused { port, why } => self.refused(port, why, now),
+            Event::Refused { port, why, write } => self.refused(port, why, write, now),
             Event::Log { port, text, kind } => self.log_at(now, port, text, kind),
             Event::Failed(e) => self.list_failed = Some(e),
             Event::Released => self.released = true,
@@ -504,13 +504,18 @@ impl Page {
     }
 
     /// A command the worker would not run: nothing was touched, so a write
-    /// it refused unlocks the page.
-    fn refused(&mut self, port: Option<String>, why: Refusal, now: Instant) {
-        let unlock = match (&self.lock, &port) {
-            (Some(Lock::One { port: locked, seen: false, .. }), Some(port)) => locked == port,
-            (Some(Lock::All { current: None, .. }), None) => true,
-            _ => false,
-        };
+    /// it refused unlocks the page. Only the write's own refusal does: one
+    /// of a command sent before the gate's yes (Details' `L`, a count, an
+    /// ask) names the same board and can come after the yes, while the
+    /// write it came ahead of goes on — and an unlocked page could be left,
+    /// or the player quit, under it (contract clause 9).
+    fn refused(&mut self, port: Option<String>, why: Refusal, write: bool, now: Instant) {
+        let unlock = write
+            && match (&self.lock, &port) {
+                (Some(Lock::One { port: locked, seen: false, .. }), Some(port)) => locked == port,
+                (Some(Lock::All { current: None, .. }), None) => true,
+                _ => false,
+            };
         if unlock {
             self.lock = None;
         }
@@ -3046,6 +3051,36 @@ mod tests {
             assert_eq!(note, format!("Replaced {fw} just now. The SD card was not touched."), "{frame}");
             assert!(!frame.contains("Updated"), "a step back is never an update:\n{frame}");
         }
+    }
+
+    #[test]
+    fn only_the_writes_own_refusal_unlocks_the_page() {
+        let _en = english();
+        // Details asks L, and the gate's yes comes before the worker has
+        // answered: the L's refusal, after the yes, is not the write's, and
+        // the write it came ahead of goes on — locked.
+        let (mut page, ends) = page_with(Ends::update_available);
+        press(&mut page, KeyCode::Char('d'));
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('y'));
+        let write = Cmd::Write { port: "COM3".into(), erase: Some(false) };
+        assert_eq!(ends.sent(), [Cmd::Facts { port: "COM3".into() }, write.clone()]);
+        ends.tell([Event::Refused { port: Some("COM3".into()), why: Refusal::Busy, write: false }]);
+        page.pump();
+        assert!(page.writing(), "another command's refusal leaves the write locked");
+        ends.writing(10);
+        page.pump();
+        page.release();
+        assert!(page.writing() && ends.sent().is_empty(), "nothing leaves the write");
+        // The write's own refusal: nothing was touched, the page is free.
+        let (mut page, ends) = page_with(Ends::update_available);
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [write]);
+        let why = Refusal::OneAtATime { busy: "COM5".into() };
+        ends.tell([Event::Refused { port: Some("COM3".into()), why, write: true }]);
+        page.pump();
+        assert!(!page.writing(), "the write refused: nothing to wait for");
     }
 
     #[test]

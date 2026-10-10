@@ -527,8 +527,11 @@ line: they are lines a script reads.
   it is up.
 - *Writing* is the page's lock: set when the gate's `y` sends the write,
   cleared when that board's write has ended — the worker's board carries
-  its `written` again — or, for Update all, when its end is told; a
-  refusal clears it too. *Holds the board* is "told to let go, not yet
+  its `written` again — or, for Update all, when its end is told; the
+  worker's refusal of that write (or of Update all) clears it too, and no
+  other refusal does: one of a command sent before the `y` (Details' `L`,
+  a count) can name the same board after it, while the write goes on.
+  *Holds the board* is "told to let go, not yet
   `Released`, and a board was seen": a page that never saw a board holds
   nothing. `Page::release` is the host's one way to let a page go — Esc's
   way, then the worker's reports read again.

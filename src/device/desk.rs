@@ -139,7 +139,11 @@ pub(crate) enum Event {
     /// Update all, as it goes.
     All(All),
     /// A command that cannot run now, and why. Nothing was touched.
-    Refused { port: Option<String>, why: Refusal },
+    /// `write`: it was a Write or Update all — the refusal the page that
+    /// locked itself at the gate's yes waits for. A refusal of a command
+    /// sent before that yes (Details' `L`, a count) can name the same board
+    /// and arrive after it, and the write it came ahead of goes on.
+    Refused { port: Option<String>, why: Refusal, write: bool },
     /// A line for the page's log.
     Log { port: Option<String>, text: String, kind: LogKind },
     /// The ports could not be listed at all (said once; the watch goes on).
@@ -581,19 +585,20 @@ impl Desk {
     fn command(&mut self, cmd: Cmd) {
         if self.quitting {
             if cmd != Cmd::Quit {
-                self.tell(Event::Refused { port: None, why: Refusal::Leaving });
+                let write = matches!(cmd, Cmd::Write { .. } | Cmd::UpdateAll { .. });
+                self.tell(Event::Refused { port: None, why: Refusal::Leaving, write });
             }
             return;
         }
         match cmd {
             Cmd::Quit => self.leave(),
             Cmd::Listen { port } => {
-                let Some(i) = self.board_for(&port) else { return };
+                let Some(i) = self.board_for(&port, false) else { return };
                 match &self.slots[i].job {
                     // Asked already: the answer is coming.
                     Some(job) if job.kind == JobKind::Listen => {}
-                    Some(_) => self.refuse(&port, Refusal::Busy),
-                    None if self.slots[i].queued.is_some() => self.refuse(&port, Refusal::Busy),
+                    Some(_) => self.refuse(&port, Refusal::Busy, false),
+                    None if self.slots[i].queued.is_some() => self.refuse(&port, Refusal::Busy, false),
                     None => self.listen(i, self.timing.at_rest),
                 }
             }
@@ -602,20 +607,21 @@ impl Desk {
             Cmd::Count { port } => self.light(&port, JobKind::Count),
             Cmd::Identify { port } => self.light(&port, JobKind::Identify),
             Cmd::Write { port, erase } => {
-                let Some(i) = self.board_for(&port) else { return };
+                let Some(i) = self.board_for(&port, true) else { return };
                 if let Some(busy) = self.in_bootloader().filter(|b| !b.eq_ignore_ascii_case(&port)) {
                     let busy = busy.to_string();
-                    return self.refuse(&port, Refusal::OneAtATime { busy });
+                    return self.refuse(&port, Refusal::OneAtATime { busy }, true);
                 }
                 if self.all.is_some() || self.slots[i].job.as_ref().is_some_and(|j| j.kind.bootloader()) {
-                    return self.refuse(&port, Refusal::Busy);
+                    return self.refuse(&port, Refusal::Busy, true);
                 }
                 self.queue(i, Queued { erase, guard: false });
             }
             Cmd::UpdateAll { ports } => {
                 if let Some(busy) = self.in_bootloader() {
                     let busy = busy.to_string();
-                    return self.tell(Event::Refused { port: None, why: Refusal::OneAtATime { busy } });
+                    let why = Refusal::OneAtATime { busy };
+                    return self.tell(Event::Refused { port: None, why, write: true });
                 }
                 let wanted: Vec<String> = ports
                     .iter()
@@ -624,7 +630,8 @@ impl Desk {
                     .map(|i| self.slots[i].board.port().to_string())
                     .collect();
                 if wanted.is_empty() {
-                    return self.tell(Event::Refused { port: None, why: Refusal::NothingToUpdate });
+                    let why = Refusal::NothingToUpdate;
+                    return self.tell(Event::Refused { port: None, why, write: true });
                 }
                 self.log(None, t!("dev.log_all", list = wanted.join(", ")).to_string(), LogKind::Phase);
                 self.all = Some(AllRun { ports: wanted, at: 0, passed: Vec::new(), since: Instant::now() });
@@ -633,15 +640,16 @@ impl Desk {
         }
     }
 
-    fn refuse(&self, port: &str, why: Refusal) {
-        self.tell(Event::Refused { port: Some(port.to_string()), why });
+    /// `write`: the refusal answers a Write (see [`Event::Refused`]).
+    fn refuse(&self, port: &str, why: Refusal, write: bool) {
+        self.tell(Event::Refused { port: Some(port.to_string()), why, write });
     }
 
     /// The board on `port`, or a refusal said.
-    fn board_for(&self, port: &str) -> Option<usize> {
+    fn board_for(&self, port: &str, write: bool) -> Option<usize> {
         let found = self.find(port);
         if found.is_none() {
-            self.refuse(port, Refusal::NoBoard);
+            self.refuse(port, Refusal::NoBoard, write);
         }
         found
     }
@@ -652,13 +660,13 @@ impl Desk {
     /// player only on a board that answers `@status`, Details' `L` on one
     /// that answers at all.
     fn light(&mut self, port: &str, kind: JobKind) {
-        let Some(i) = self.board_for(port) else { return };
+        let Some(i) = self.board_for(port, false) else { return };
         if let Some(busy) = self.in_bootloader() {
             let busy = busy.to_string();
-            return self.refuse(port, Refusal::OneAtATime { busy });
+            return self.refuse(port, Refusal::OneAtATime { busy }, false);
         }
         if self.slots[i].job.is_some() {
-            return self.refuse(port, Refusal::Busy);
+            return self.refuse(port, Refusal::Busy, false);
         }
         let board = &self.slots[i].board;
         let answers = match kind {
@@ -667,7 +675,7 @@ impl Desk {
             _ => true,
         };
         if !answers {
-            return self.refuse(port, Refusal::NotAnswering);
+            return self.refuse(port, Refusal::NotAnswering, false);
         }
         if kind == JobKind::Read {
             self.log(Some(port), t!("dev.log_read", port = port).to_string(), LogKind::Phase);
@@ -1369,7 +1377,7 @@ pub(crate) mod tests {
             self.seen
                 .iter()
                 .filter_map(|e| match e {
-                    Event::Refused { port, why } => Some((port.clone(), why.clone())),
+                    Event::Refused { port, why, .. } => Some((port.clone(), why.clone())),
                     _ => None,
                 })
                 .collect()
@@ -1672,6 +1680,16 @@ pub(crate) mod tests {
         let refused = r.refused();
         assert_eq!(refused.len(), 5, "{refused:?}");
         assert!(refused.iter().all(|(_, why)| *why == busy), "{refused:?}");
+        // Which refusals answer a write: the page unlocks on those alone.
+        let writes: Vec<bool> = r
+            .seen
+            .iter()
+            .filter_map(|e| match e {
+                Event::Refused { write, .. } => Some(*write),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes, [true, false, false, false, true], "the Write and Update all, nothing else");
         let listens = r.trace().iter().filter(|t| *t == "listen FAKE1").count();
         assert_eq!(listens, 2, "looking is allowed: {:?}", r.trace());
         assert_eq!(r.trace().iter().filter(|t| t.starts_with("open")).count(), 1, "one write: {:?}", r.trace());

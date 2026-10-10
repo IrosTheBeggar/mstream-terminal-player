@@ -459,7 +459,7 @@ fn lines_on(
                 let _ = writeln!(out, "{}", updated_line(0, 0, &skipped));
                 return 0;
             }
-            Event::Refused { port, why } => {
+            Event::Refused { port, why, .. } => {
                 let _ = writeln!(err, "mstream-player: {} — {why:?}", port.unwrap_or_default());
                 return 1;
             }
