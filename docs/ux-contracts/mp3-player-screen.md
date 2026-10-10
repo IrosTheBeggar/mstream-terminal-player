@@ -263,11 +263,13 @@ comes from the cache, or a download, beside them.
       *Update ▸*.
     - **! Development build · v0.6.0-37-g221d99d → v0.8.0** (gold): a build
       based below the pin. *Update ▸*, the same gate.
-    - **! Newer than this player · v0.9.0** (gold), "This player carries
-      v0.8.0; the board is fine as it is.": a newer release, or a
+    - **✓ Up to date · v0.9.0** (ok green), with a second line "Ahead of
+      v0.8.0, the release this player installs.": a newer release, or a
       development build based on the pin or past it (the real Core2's
-      `v0.8.0-5-g4e94418`). No primary — installing the pin would go back;
-      Details' Write again is titled *Go back*.
+      `v0.8.0-5-g4e94418`). Nothing to do, so no warning mark and no
+      primary — installing the pin would go back; Details' Write again is
+      titled *Go back*. Its port tab wears ✓ too, and `device list` says
+      "up to date (ahead of this player's v0.8.0)".
     - **? Version not recognised · …** (dim): a version the order cannot
       place. No primary.
     - **✗ Not mStream firmware · UIFlow** (gold — never danger red: a fact,
@@ -632,3 +634,13 @@ line: they are lines a script reads.
   The footer drops its lesser keys in a long locale rather than run past
   99 cells. Show on the player appears with two boards or more, as in
   card 05's frames — a single board has nothing to be told apart from.
+
+- **2026-10-10 — Ahead of the pin is up to date.** The design set drew a
+  board past the pin as a gold **! Newer than this player** with "the board
+  is fine as it is." under it; on the real Core2 Paul read the mark as a
+  warning the next line took back. Nothing is to be done for such a board,
+  so it now wears the ok chip, **✓ Up to date · <its version>**, and the
+  second line says why its version is not the pin's ("Ahead of v0.8.0, the
+  release this player installs."); its tab mark is ✓ and `device list` says
+  "up to date (ahead of …)". Going back stays behind Details and the
+  *Go back* gate.

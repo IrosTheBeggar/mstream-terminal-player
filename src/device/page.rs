@@ -1340,8 +1340,8 @@ fn mark(page: &Page, board: &Board) -> (String, Color) {
         return (g.no.to_string(), th().gold);
     }
     match board.verdict {
-        Verdict::UpToDate => (g.ok.to_string(), th().ok),
-        Verdict::Update | Verdict::DevUpdate | Verdict::Newer => (g.warn.to_string(), th().gold),
+        Verdict::UpToDate | Verdict::Newer => (g.ok.to_string(), th().ok),
+        Verdict::Update | Verdict::DevUpdate => (g.warn.to_string(), th().gold),
         Verdict::InUse => (t!("dev.tab_in_use").to_string(), th().dim),
         Verdict::Other { .. }
         | Verdict::Blank
@@ -1706,9 +1706,12 @@ fn firmware_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             }
             Verdict::Update => chip(g.warn, gold, &t!("dev.fw_update"), &[format!("{version} {} {pin}", g.arrow)]),
             Verdict::DevUpdate => chip(g.warn, gold, &t!("dev.fw_dev"), &[format!("{version} {} {pin}", g.arrow)]),
+            // Past the pin is nothing to do, so it wears the up-to-date chip;
+            // the second line says why the version is not the pin's. A gold !
+            // here read as a warning the next line took back (Paul, 10 Oct).
             Verdict::Newer => {
                 second.push(t!("dev.fw_newer_2", pin = pin).to_string());
-                chip(g.warn, gold, &t!("dev.fw_newer"), std::slice::from_ref(&version))
+                chip(g.ok, th().ok, &t!("dev.fw_up_to_date"), std::slice::from_ref(&version))
             }
             Verdict::Unplaced if board.version().is_some() => {
                 second.push(t!("dev.fw_unplaced_2", pin = pin).to_string());
@@ -3023,8 +3026,9 @@ mod tests {
         for fw in ["v0.9.0", "v0.8.0-5-g4e94418"] {
             let (mut page, ends) = page_with(|e| e.boards(vec![answering("COM3", fw)]));
             let frame = window(&mut page);
-            assert!(frame.contains(&format!("Firmware      ! Newer than this player · {fw}")), "{frame}");
-            assert!(frame.contains("This player carries v0.8.0; the board is fine as it is."), "{frame}");
+            assert!(frame.contains(&format!("Firmware      ✓ Up to date · {fw}")), "{frame}");
+            assert!(frame.contains("Ahead of v0.8.0, the release this player installs."), "{frame}");
+            assert!(!frame.contains(" ! "), "nothing to do wears no warning mark:\n{frame}");
             assert!(!frame.contains("▸  │"), "no primary: the pin would go back:\n{frame}");
             press(&mut page, KeyCode::Enter);
             press(&mut page, KeyCode::Char('w'));

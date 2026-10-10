@@ -211,7 +211,7 @@ fn verdict_words(board: &Board, target: Option<&Target>) -> String {
         Verdict::UpToDate => format!("{version}, up to date"),
         Verdict::Update => format!("{version}, update to {to}"),
         Verdict::DevUpdate => format!("{version}, a development build — update to {to}"),
-        Verdict::Newer => format!("{version}, newer than this player's {to}"),
+        Verdict::Newer => format!("{version}, up to date (ahead of this player's {to})"),
         Verdict::Unplaced if board.version().is_none() => "mStream firmware, too old to say its version".to_string(),
         Verdict::Unplaced => format!("{version}, not comparable with {to}"),
         Verdict::Other { name } => format!("other firmware ({name})"),
@@ -275,7 +275,7 @@ fn card_words(board: &Board) -> Option<String> {
 fn skip_words(board: &Board) -> &'static str {
     match board.verdict {
         Verdict::UpToDate => "up to date",
-        Verdict::Newer => "newer than this player",
+        Verdict::Newer => "up to date, ahead of this player's release",
         Verdict::Silent => "not answering",
         Verdict::InUse => "in use",
         Verdict::Other { .. } | Verdict::Blank => "not mStream firmware",
@@ -678,7 +678,7 @@ mod tests {
                 "FAKE1 · CH9102 · serial FAKE1 · v0.7.0, update to v0.8.0 · card not reported by v0.7.0",
                 "FAKE2 · CP210x · serial CHIP2 · not answering — may not be an MP3 player",
                 "FAKE3 · CH9102 · serial FAKE3 · in use by another program",
-                "FAKE4 · CH9102 · serial FAKE4 · v0.9.0, newer than this player's v0.8.0 · an exFAT card — the player reads FAT32 only (63.9 GB)",
+                "FAKE4 · CH9102 · serial FAKE4 · v0.9.0, up to date (ahead of this player's v0.8.0) · an exFAT card — the player reads FAT32 only (63.9 GB)",
             ]
         );
         let trace = fake.trace().lock().unwrap().clone();
