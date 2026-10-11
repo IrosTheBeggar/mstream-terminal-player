@@ -1455,11 +1455,12 @@ pub struct LeadPeer {
     pub name: Option<String>,
 }
 
-/// One row from another server: a p2p lead (Network) or a federated peer's
-/// song (Peers). The server stamps `source` on each so the row is a
-/// ready-to-send recommendation (plan §2.7); `raw` keeps it exactly as it
-/// came, because the `links` resolve forwards the row verbatim (contract
-/// clause 63) and a typed copy would drop what a newer server added. The
+/// One row from another server: a p2p lead (the answer's `network` half,
+/// which the play-now room no longer asks for) or a connected server's
+/// song. The server stamps `source` on each so the row is a ready-to-send
+/// recommendation (plan §2.7); `raw` keeps it exactly as it came, for a
+/// resolve that forwards the row verbatim (the later Explore room's) — a
+/// typed copy would drop what a newer server added. The
 /// typed fields are read leniently off `raw`: a lead with an odd field
 /// still lists.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1515,20 +1516,6 @@ impl TasteLead {
         }
     }
 
-    /// A key for this row that holds across answers — the links cache's
-    /// (contract clause 63: links are "kept with the answer"). The client's
-    /// own: the server's `recommendationKey` is not on the row.
-    pub fn key(&self) -> String {
-        let fold = |s: &Option<String>| s.as_deref().unwrap_or("").trim().to_lowercase();
-        if let Some(mbid) = &self.recording_mbid {
-            return format!("mbid:{}", mbid.to_lowercase());
-        }
-        if let (Some(id), Some(path)) = (self.peer.id, &self.filepath) {
-            return format!("file:{id}:{path}");
-        }
-        format!("text:{}\u{1f}{}\u{1f}{}", fold(&self.artist), fold(&self.title), fold(&self.album))
-    }
-
     /// The row as a queue track: the peer's path and the row's own facts,
     /// which are also the play report's snapshot (play-reporting clause 7).
     /// `None` for a lead with no file to play.
@@ -1545,17 +1532,6 @@ impl TasteLead {
                 ..TrackMetadata::default()
             },
         })
-    }
-
-    /// "Artist – Title", the lead's copy text (contract clause 63) — the
-    /// title alone when there is no artist.
-    pub fn artist_title(&self) -> String {
-        match (self.artist.as_deref(), self.title.as_deref()) {
-            (Some(a), Some(t)) => format!("{a} \u{2013} {t}"),
-            (None, Some(t)) => t.to_string(),
-            (Some(a), None) => a.to_string(),
-            (None, None) => String::new(),
-        }
     }
 }
 
@@ -1677,70 +1653,6 @@ pub struct TastePrefsPatch {
     pub filter: Option<TasteFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_days: Option<u32>,
-}
-
-/// `GET /api/v1/discovery/plugins` — the switched-on plug-ins this caller
-/// sees. Only the `links` capability is read in v1 (contract clause 63).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct DiscoveryPluginsResponse {
-    #[serde(deserialize_with = "null_default")]
-    pub plugins: Vec<DiscoveryPlugin>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct DiscoveryPlugin {
-    pub name: String,
-    pub title: Option<String>,
-    #[serde(deserialize_with = "null_default")]
-    pub capabilities: Vec<String>,
-    /// The user listing only holds enabled, available plug-ins; a missing
-    /// key is read that way.
-    #[serde(default = "yes")]
-    pub enabled: bool,
-    #[serde(default = "yes")]
-    pub available: bool,
-}
-
-impl DiscoveryPlugin {
-    pub fn has_links(&self) -> bool {
-        self.enabled && self.available && self.capabilities.iter().any(|c| c == "links")
-    }
-}
-
-/// One "find it elsewhere" link a `links` plug-in built (mStream's
-/// `src/discovery-plugins/plugins/links.js`): `kind` is `canonical` or
-/// `search`, `label` the plug-in's own words.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default)]
-pub struct PluginLink {
-    pub id: String,
-    pub label: String,
-    pub url: String,
-    pub kind: String,
-}
-
-impl PluginLink {
-    /// Only these go to the operating system's opener, which would run any
-    /// other scheme (contract clause 63).
-    pub fn is_web(&self) -> bool {
-        let lower = self.url.trim().to_ascii_lowercase();
-        lower.starts_with("https://") || lower.starts_with("http://")
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub(crate) struct PluginResolveResponse {
-    pub result: Option<PluginLinksResult>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub(crate) struct PluginLinksResult {
-    #[serde(deserialize_with = "null_default")]
-    pub links: Vec<PluginLink>,
 }
 
 // ── Sonic Journey ───────────────────────────────────────────────────────────
@@ -2331,7 +2243,6 @@ mod tests {
         assert_eq!(lead.peer.name.as_deref(), Some("Sam's"));
         assert_eq!(lead.peer.id, None);
         assert!(lead.to_track().is_none(), "a lead has no file to play");
-        assert_eq!(lead.key(), "mbid:mb-1");
 
         // A federation row: the peer's path and id, a track to queue.
         let fed = TasteLead::from_raw(serde_json::json!({
@@ -2341,7 +2252,6 @@ mod tests {
         let track = fed.to_track().unwrap();
         assert_eq!(track.filepath, "music/s.mp3");
         assert_eq!(track.metadata.duration, Some(180.0));
-        assert_eq!(fed.key(), "file:3:music/s.mp3");
     }
 
     #[test]
@@ -2364,16 +2274,6 @@ mod tests {
         let prefs: TastePrefs =
             serde_json::from_str(r#"{"window":30,"exclude":["a"],"filter":"fresh","staleDays":120}"#).unwrap();
         assert_eq!((prefs.stale_days, prefs.filter), (Some(120), Some(TasteFilter::Fresh)));
-    }
-
-    #[test]
-    fn only_web_links_are_offered_to_the_opener() {
-        let link = |url: &str| PluginLink { url: url.into(), ..PluginLink::default() };
-        assert!(link("https://bandcamp.com/search?q=x").is_web());
-        assert!(link(" HTTP://example.com").is_web());
-        assert!(!link("javascript:alert(1)").is_web());
-        assert!(!link("file:///etc/passwd").is_web());
-        assert!(!link("spotify:track:1").is_web());
     }
 
     #[test]

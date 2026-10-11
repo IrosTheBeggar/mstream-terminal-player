@@ -1104,7 +1104,7 @@ pub use session::{CONNECT_METHODS, ConnectForm, ConnectStage, Session};
 // The GUI's Discover room names these; the browser shell has no room yet.
 #[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 pub use taste::{
-    TASTE_MAX_PINS, TasteLatch, TasteLinks, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb,
+    TASTE_MAX_PINS, TasteLatch, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb,
 };
 
 /// How many recent tracks to keep for anchoring and cooldown. The sonic
@@ -5610,7 +5610,7 @@ impl App {
             event @ (Event::Taste { .. }
             | Event::TastePrefs { .. }
             | Event::TasteRandom { .. }
-            | Event::TasteLinks { .. }) => self.consume_taste(event),
+            | Event::TasteAlbum { .. }) => self.consume_taste(event),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just

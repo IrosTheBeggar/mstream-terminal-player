@@ -213,11 +213,8 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         ApiCmd::TasteRandom { generation } => {
             with_session(session, async |s| worker::taste_random(&s.client, generation).await).await
         }
-        ApiCmd::TasteLinks { generation, key, recommendation, plugins } => {
-            with_session(session, async |s| {
-                worker::taste_links(&s.client, generation, key.clone(), &recommendation, plugins.clone()).await
-            })
-            .await
+        ApiCmd::TasteAlbum { name, generation } => {
+            with_session(session, async |s| worker::taste_album(&s.client, name.clone(), generation).await).await
         }
 
         ApiCmd::Discover { node, seed, dest } => {

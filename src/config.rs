@@ -518,10 +518,11 @@ pub struct GuiPrefs {
     /// ` — key` tail on a tooltip. Off by default — this surface is the
     /// pointer's, and the classic TUI is the keyboard's room.
     pub key_hints: bool,
-    /// The Discover room's tab in front — `library`, `network` or `peers`
+    /// The Discover room's tab in front — `library` or `servers`
     /// (discovery-page contract, clause 40): the room's one memory of its
     /// own; its window, filter and dropped seeds are the server's prefs.
-    /// A word this build does not know reads as no memory.
+    /// The tab's old name `peers` reads as `servers`; `network`, or a word
+    /// this build does not know, reads as no memory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discover_tab: Option<String>,
     #[serde(flatten)]

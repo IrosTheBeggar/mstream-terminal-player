@@ -6,17 +6,23 @@
 //! its drill and seed), the Now Playing panel's neighbours (`App.now_discover`)
 //! or `Capture::Discover` — clause 67. The GUI draws from [`TasteState`] and
 //! calls the `taste_*` methods; every queue row they build is stamped here,
-//! the session's origin on a Library song and the peer's on a Peers row.
+//! the session's origin on a Library song and the peer's on a connected
+//! server's row.
 //!
-//! The answer comes in parts asked in parallel (clause 30): **Main** (library
-//! and network), **Peers**, and a filter change's **Library** alone. Each list
+//! The room is the PLAY-NOW page (the contract's 2026-10-11 log): only songs
+//! you can play now — your library's and your connected servers'. The p2p
+//! network's leads are not asked here; a later Explore room draws them.
+//!
+//! The answer comes in parts asked in parallel (clause 30): **Main** (the
+//! library), **Peers** (the connected servers), and a filter change's
+//! **Library** alone. Each list
 //! is a [`TasteSlot`] holding the seq of the ask it waits for, so the last ask
 //! wins per list and a slow part never overwrites a newer one (clause 31).
 
 use super::*;
 use crate::api::types::{
-    PluginLink, SeedSource, TasteFilter, TasteLead, TasteLibrary, TasteNetwork, TastePeers,
-    TastePrefs, TastePrefsPatch, TasteRequest, TasteResponse,
+    SeedSource, TasteFilter, TasteLead, TasteLibrary, TastePeerGroup, TastePeers, TastePrefs,
+    TastePrefsPatch, TasteRequest, TasteResponse,
 };
 use crate::tui::worker::{TasteFailure, TastePart};
 
@@ -38,17 +44,13 @@ pub const TASTE_EXCLUDE_CAP: usize = 200;
 /// room would read as the whole server's scan not run (clause 81).
 pub const TASTE_REDRAWS: u8 = 3;
 
-/// The stale-days the `fresh` filter means when the prefs never said (plan
-/// §2.5).
-pub const TASTE_STALE_DAYS: u32 = 90;
-
-/// The room's tabs (clause 40), and what `[gui] discover_tab` stores.
+/// The room's two tabs (clause 40), and what `[gui] discover_tab` stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TasteTab {
     #[default]
     Library,
-    Network,
-    Peers,
+    /// Your connected (federated) servers' songs.
+    Servers,
 }
 
 impl TasteTab {
@@ -56,17 +58,17 @@ impl TasteTab {
     pub fn as_str(self) -> &'static str {
         match self {
             TasteTab::Library => "library",
-            TasteTab::Network => "network",
-            TasteTab::Peers => "peers",
+            TasteTab::Servers => "servers",
         }
     }
 
-    /// A remembered tab; anything else is no memory at all.
+    /// A remembered tab; anything else is no memory at all. `peers` is the
+    /// tab's spelling before the play-now page; `network`, a tab that left
+    /// the room, reads as no memory and opens on Library.
     pub fn parse(word: &str) -> Option<TasteTab> {
         match word.trim() {
             "library" => Some(TasteTab::Library),
-            "network" => Some(TasteTab::Network),
-            "peers" => Some(TasteTab::Peers),
+            "servers" | "peers" => Some(TasteTab::Servers),
             _ => None,
         }
     }
@@ -83,8 +85,7 @@ pub struct TasteSlot<T> {
     pub(crate) seq: u64,
     /// That ask is out.
     pub pending: bool,
-    /// The source was asked in the latest round. A tab not asked shows `–`
-    /// for a count (clause 40).
+    /// The source was asked in the latest round.
     pub asked: bool,
     /// The server answered `null` for a seed that was not its random pick:
     /// this caller lacks the source, and its tab hides until the next
@@ -141,14 +142,6 @@ pub enum TasteLatch {
     Off,
 }
 
-/// A lead's "find it elsewhere" links, kept with the answer (clause 63).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TasteLinks {
-    Asking,
-    Ready(Vec<PluginLink>),
-    Failed(String),
-}
-
 /// A song the user picked to start from (clause 14). `random` marks the
 /// fallback card's "another pick" (clause 21), which the next such pick
 /// replaces in place.
@@ -172,8 +165,8 @@ pub enum TastePinRefusal {
 }
 
 /// A row the room's verbs act on: a Library song by its index in
-/// `library.tracks` (albums are containers, clause 61), or a Peers row by
-/// its group and its index in that group (clause 70).
+/// `library.tracks` (albums are containers, clause 61), or a connected
+/// server's row by its group and its index in that group (clause 53).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TasteRow {
     Song(usize),
@@ -206,9 +199,11 @@ pub struct TasteState {
     /// The window chosen in this session; `None` lets the saved one apply
     /// (clause 16).
     pub window: Option<u32>,
-    /// The filter chosen in this session; `None` as for `window`.
+    /// The filter chosen in this session — `fresh` or `all`, the one
+    /// checkbox (clause 65); `None` as for `window`.
     pub filter: Option<TasteFilter>,
-    /// The saved prefs, read once a session for `staleDays` (clause 16).
+    /// The saved prefs, read once a session: the window and the filter the
+    /// room shows before an answer says them (clause 16).
     pub prefs: Option<TastePrefs>,
     prefs_asked: bool,
     pub pins: Vec<TastePin>,
@@ -221,7 +216,6 @@ pub struct TasteState {
     /// lists moved into the slots below.
     pub head: Option<TasteResponse>,
     pub library: TasteSlot<TasteLibrary>,
-    pub network: TasteSlot<TasteNetwork>,
     pub peers: TasteSlot<TastePeers>,
     pub latch: TasteLatch,
     /// The fallback card's memory (clause 20): set by a pinless answer that
@@ -240,10 +234,6 @@ pub struct TasteState {
     redraws: u8,
     /// When the last complete Main answer landed (the 5-minute reuse).
     pub arrived: Option<crate::clock::Instant>,
-    /// Links per lead key (`TasteLead::key`).
-    pub links: HashMap<String, TasteLinks>,
-    /// The `links` plug-ins' names, once read this session.
-    link_plugins: Option<Vec<String>>,
     /// "Another pick" is out.
     pub random_pending: bool,
     /// The last capture pick the room refused, for the GUI to word once
@@ -269,19 +259,24 @@ impl TasteState {
             .or_else(|| self.prefs.as_ref().and_then(|p| p.window))
     }
 
-    /// The library filter the bottom row shows (clause 65): this session's
-    /// choice, else the answer's, else the saved one, else `fresh`.
+    /// The library filter the bottom row's checkbox shows (clause 65):
+    /// this session's choice, else the answer's, else the saved one —
+    /// `all` ticked, anything else unticked: a saved `unplayed` (the old
+    /// "Never played") reads as `fresh`, as does a word this build lacks.
     pub fn shown_filter(&self) -> TasteFilter {
-        self.filter
+        let filter = self
+            .filter
             .or_else(|| self.library.data.as_ref().map(|l| l.filter))
-            .or_else(|| self.prefs.as_ref().and_then(|p| p.filter))
-            .filter(|f| *f != TasteFilter::Other)
-            .unwrap_or_default()
+            .or_else(|| self.prefs.as_ref().and_then(|p| p.filter));
+        match filter {
+            Some(TasteFilter::All) => TasteFilter::All,
+            _ => TasteFilter::Fresh,
+        }
     }
 
-    /// `fresh`'s n — "Not in n days" (clause 65).
-    pub fn stale_days(&self) -> u32 {
-        self.prefs.as_ref().and_then(|p| p.stale_days).unwrap_or(TASTE_STALE_DAYS)
+    /// "Include songs I've played lately" is ticked (clause 65).
+    pub fn includes_played(&self) -> bool {
+        self.shown_filter() == TasteFilter::All
     }
 
     /// Scan pending, by the answer or by a 403's probe (clauses 81–82).
@@ -293,7 +288,6 @@ impl TasteState {
     /// "another pick", whose ask follows its song.
     pub fn asking(&self) -> bool {
         self.library.pending
-            || self.network.pending
             || self.peers.pending
             || self.random_pending
             || self.latch == TasteLatch::Probing
@@ -304,20 +298,35 @@ impl TasteState {
         self.head.as_ref()?.seeds.iter().find(|seed| seed.hash == hash)
     }
 
-    /// The Peers tab's playable rows in order, each with its peer's id.
-    pub fn peer_rows(&self) -> Vec<(i64, &TasteLead)> {
-        self.peers
-            .data
-            .iter()
-            .flat_map(|p| &p.peers)
-            .flat_map(|group| group.results.iter().map(move |row| (group.id, row)))
-            .filter(|(_, row)| row.filepath.is_some())
-            .collect()
+    /// The Connected servers tab's rows in the server's order, as (group,
+    /// row) in the answer: only what plays now (clause 53) — a server that
+    /// did not answer or speaks another sonic model shows no rows, and a row
+    /// without a file is not one.
+    pub fn peer_lines(&self) -> Vec<(usize, usize)> {
+        let shown = |group: &TastePeerGroup| group.reachable && !group.mismatched;
+        let mut out = Vec::new();
+        for (g, group) in self.peers.data.iter().flat_map(|p| &p.peers).enumerate() {
+            if !shown(group) {
+                continue;
+            }
+            for (r, row) in group.results.iter().enumerate() {
+                if row.filepath.is_some() {
+                    out.push((g, r));
+                }
+            }
+        }
+        out
     }
 
-    /// The network lead at `index`.
-    pub fn lead(&self, index: usize) -> Option<&TasteLead> {
-        self.network.data.as_ref()?.results.get(index)
+    /// A connected server's row and its server's id.
+    pub fn peer_row(&self, group: usize, row: usize) -> Option<(i64, &TasteLead)> {
+        let group = self.peers.data.as_ref()?.peers.get(group)?;
+        Some((group.id, group.results.get(row)?))
+    }
+
+    /// The name of the server a connected server's row plays from (ON).
+    pub fn peer_name(&self, group: usize) -> Option<&str> {
+        Some(self.peers.data.as_ref()?.peers.get(group)?.name.as_str())
     }
 
     fn reset(&mut self) {
@@ -362,8 +371,9 @@ impl App {
         self.taste_ask(false)
     }
 
-    /// Both parts (clause 30): Main always, Peers while the server federates
-    /// discovery; and the prefs, once a session. `remember` rides Main alone.
+    /// Both parts (clause 30): Main (the library) always, Peers while the
+    /// server federates discovery; and the prefs, once a session. `remember`
+    /// rides Main alone.
     pub(crate) fn taste_ask(&mut self, remember: bool) -> Vec<Effect> {
         self.taste_sync();
         if !self.connected || !self.capabilities.taste() || self.session.peer.is_some() {
@@ -388,9 +398,9 @@ impl App {
     pub(crate) fn taste_request(&mut self, part: TastePart, remember: bool) -> Effect {
         self.taste_sync();
         let seq = self.taste.next_seq();
-        let p2p = self.capabilities.discovery_p2p;
+        // The play-now page asks for nothing it cannot play: never the p2p
+        // network (the contract's 2026-10-11 log).
         let sources: Vec<String> = match part {
-            TastePart::Main if p2p => vec!["library".into(), "network".into()],
             TastePart::Main | TastePart::Library => vec!["library".into()],
             TastePart::Peers => vec!["peers".into()],
         };
@@ -414,11 +424,6 @@ impl App {
         match part {
             TastePart::Main => {
                 self.taste.library.ask(seq);
-                if p2p {
-                    self.taste.network.ask(seq);
-                } else {
-                    self.taste.network = TasteSlot::default();
-                }
                 self.taste.main_pinned = !self.taste.pins.is_empty();
                 self.taste.main_seq = seq;
                 self.taste.main_pending = true;
@@ -441,9 +446,10 @@ impl App {
     }
 
     /// The library filter (clause 65): the library alone, remembered; the
-    /// Network and Peers rows stand.
+    /// connected servers' rows stand. Only `fresh` and `all` are ever sent.
     pub(crate) fn set_taste_filter(&mut self, filter: TasteFilter) -> Vec<Effect> {
         self.taste_sync();
+        let filter = if filter == TasteFilter::All { TasteFilter::All } else { TasteFilter::Fresh };
         if self.taste.shown_filter() == filter {
             return Vec::new();
         }
@@ -452,6 +458,13 @@ impl App {
             return Vec::new();
         }
         vec![self.taste_request(TastePart::Library, true)]
+    }
+
+    /// The checkbox, ticked or unticked: "Include songs I've played lately"
+    /// is `all`, unticked `fresh` (clause 65).
+    pub(crate) fn toggle_taste_played(&mut self) -> Vec<Effect> {
+        let next = if self.taste.includes_played() { TasteFilter::Fresh } else { TasteFilter::All };
+        self.set_taste_filter(next)
     }
 
     // ── Seeds and pins (clauses 13, 14, 21) ─────────────────────────────────
@@ -594,7 +607,8 @@ impl App {
     // ── Rows ────────────────────────────────────────────────────────────────
 
     /// A row verb (clauses 60 and 62). Library songs carry the session's
-    /// origin; a Peers row the parent's with the peer's id, so its bytes
+    /// origin; a connected server's row the parent's with that server's id
+    /// (the Listen verb's way), so its bytes
     /// come through `/api/v1/federation/peers/{id}/stream/…` (or the peer's
     /// own tunnel) and its play is reported with `peerId` and the row's
     /// snapshot (multi-server clause 27, play-reporting clause 7).
@@ -632,8 +646,8 @@ impl App {
     }
 
     /// The bottom row's play and shuffle (clause 64, browser-top-bar clauses
-    /// 10 and 12): the tab's playable rows replace the queue; `shuffle`
-    /// reorders them once. Network has nothing to play.
+    /// 10 and 12): the tab's rows replace the queue; `shuffle` reorders them
+    /// once.
     pub(crate) fn taste_play_all(&mut self, shuffle: bool) -> Vec<Effect> {
         let mut items = self.taste_tab_items();
         if items.is_empty() {
@@ -650,6 +664,12 @@ impl App {
     /// append, say how many, and start an empty idle queue.
     pub(crate) fn taste_queue_all(&mut self) -> Vec<Effect> {
         let items = self.taste_tab_items();
+        self.taste_append(items)
+    }
+
+    /// Append rows the way queue all does: say how many, and start an
+    /// empty idle queue.
+    fn taste_append(&mut self, items: Vec<Queued>) -> Vec<Effect> {
         if items.is_empty() {
             return Vec::new();
         }
@@ -677,83 +697,45 @@ impl App {
         Some(LibraryNode::Album { name, artist: None })
     }
 
+    /// An album row's `[+]` or `a` (clause 61, the webapp's album play
+    /// control): its songs are asked by name, as the drill asks them, and
+    /// appended when they land.
+    pub(crate) fn taste_queue_album(&mut self, index: usize) -> Vec<Effect> {
+        let Some(LibraryNode::Album { name, .. }) = self.taste_album_node(index) else { return Vec::new() };
+        vec![Effect::Api(ApiCmd::TasteAlbum { name, generation: self.session_gen })]
+    }
+
     /// The Library tab's songs as tracks, in the server's order.
     fn taste_songs(&self) -> Vec<Track> {
         self.taste.library.data.iter().flat_map(|l| &l.tracks).map(|t| t.to_track()).collect()
     }
 
-    /// The Peers tab's playable rows as queue rows, each stamped with the
+    /// The Connected servers tab's rows as queue rows, each stamped with the
     /// session server and its own peer.
     fn taste_peer_items(&self) -> Vec<Queued> {
         let server = self.origin().server;
         self.taste
-            .peer_rows()
+            .peer_lines()
             .into_iter()
-            .filter_map(|(peer, row)| {
+            .filter_map(|(group, row)| {
+                let (peer, lead) = self.taste.peer_row(group, row)?;
                 let origin = Origin { server: server.clone(), peer: Some(peer) };
-                row.to_track().map(|track| Queued { dj: None, origin, track })
+                lead.to_track().map(|track| Queued { dj: None, origin, track })
             })
             .collect()
     }
 
-    /// Where row `row` of group `group` sits among the playable rows.
+    /// Where row `row` of group `group` sits among the tab's rows.
     fn taste_peer_position(&self, group: usize, row: usize) -> Option<usize> {
-        let groups = &self.taste.peers.data.as_ref()?.peers;
-        let target = groups.get(group)?.results.get(row)?;
-        target.filepath.as_ref()?;
-        let before: usize = groups[..group]
-            .iter()
-            .map(|g| g.results.iter().filter(|r| r.filepath.is_some()).count())
-            .sum();
-        let within = groups[group].results[..row].iter().filter(|r| r.filepath.is_some()).count();
-        Some(before + within)
+        self.taste.peer_lines().iter().position(|at| *at == (group, row))
     }
 
-    /// The tab in front's playable rows (clause 64).
+    /// The tab in front's rows (clause 64).
     fn taste_tab_items(&self) -> Vec<Queued> {
         match self.taste.tab {
             TasteTab::Library => self.queued_all(self.taste_songs()),
-            TasteTab::Peers => self.taste_peer_items(),
-            TasteTab::Network => Vec::new(),
+            TasteTab::Servers => self.taste_peer_items(),
         }
-    }
-
-    // ── Leads (clause 63) ───────────────────────────────────────────────────
-
-    /// The menu opened on lead `index`: its links are asked for the first
-    /// time it opens, and kept with the answer. Nothing is asked while the
-    /// server lists no plug-ins, or once the list held no `links` one.
-    pub(crate) fn taste_links_for(&mut self, index: usize) -> Vec<Effect> {
-        self.taste_sync();
-        if !self.capabilities.discovery_plugins {
-            return Vec::new();
-        }
-        if self.taste.link_plugins.as_ref().is_some_and(Vec::is_empty) {
-            return Vec::new();
-        }
-        let Some(lead) = self.taste.lead(index) else { return Vec::new() };
-        let key = lead.key();
-        if matches!(self.taste.links.get(&key), Some(TasteLinks::Asking | TasteLinks::Ready(_))) {
-            return Vec::new();
-        }
-        let recommendation = Box::new(lead.raw.clone());
-        self.taste.links.insert(key.clone(), TasteLinks::Asking);
-        vec![Effect::Api(ApiCmd::TasteLinks {
-            generation: self.session_gen,
-            key,
-            recommendation,
-            plugins: self.taste.link_plugins.clone(),
-        })]
-    }
-
-    /// THIS LEAD's copy text, "Artist – Title" (clause 63).
-    pub fn taste_copy_text(&self, index: usize) -> Option<String> {
-        self.taste.lead(index).map(TasteLead::artist_title).filter(|text| !text.is_empty())
-    }
-
-    /// Whether the menu has a FIND ELSEWHERE section to draw at all.
-    pub fn taste_offers_links(&self) -> bool {
-        self.capabilities.discovery_plugins && !self.taste.link_plugins.as_ref().is_some_and(Vec::is_empty)
     }
 
     // ── Replies ─────────────────────────────────────────────────────────────
@@ -803,6 +785,17 @@ impl App {
                     _ => Vec::new(),
                 }
             }
+            Event::TasteAlbum { generation, tracks } => {
+                if generation != self.session_gen {
+                    return Vec::new();
+                }
+                let Some(tracks) = tracks else {
+                    self.error(t!("gui.discover.album_failed").to_string());
+                    return Vec::new();
+                };
+                let items = self.queued_all(tracks);
+                self.taste_append(items)
+            }
             Event::TasteRandom { generation, track } => {
                 if generation != self.session_gen {
                     return Vec::new();
@@ -821,23 +814,6 @@ impl App {
                 self.taste.pins.push(TastePin { track: *track, random: true });
                 self.taste_ask(false)
             }
-            Event::TasteLinks { generation, key, plugins, answer } => {
-                if generation != self.session_gen {
-                    return Vec::new();
-                }
-                self.taste_sync();
-                if let Some(plugins) = plugins {
-                    self.taste.link_plugins = Some(plugins);
-                }
-                let state = match answer {
-                    Ok(links) => TasteLinks::Ready(links),
-                    Err(err) => TasteLinks::Failed(err),
-                };
-                // A failure is not kept as the answer: the next open asks
-                // again.
-                self.taste.links.insert(key, state);
-                Vec::new()
-            }
             _ => Vec::new(),
         }
     }
@@ -851,12 +827,11 @@ impl App {
         let t = &mut self.taste;
         // Which slots this reply may still fill: last ask wins per list.
         let library = part != TastePart::Peers && t.library.seq == seq;
-        let network = part == TastePart::Main && t.network.seq == seq;
         let peers = part == TastePart::Peers && t.peers.seq == seq;
         // And whether it is the latest Main, whose head it carries whatever
         // a later Library ask did to the library slot.
         let main = part == TastePart::Main && t.main_seq == seq;
-        if !library && !network && !peers && !main {
+        if !library && !peers && !main {
             return Vec::new();
         }
         if main {
@@ -876,10 +851,8 @@ impl App {
         {
             t.redraws += 1;
             t.pins.retain(|pin| !pin.random);
-            for (wanted, slot_pending) in [(library, &mut t.library.pending), (network, &mut t.network.pending)] {
-                if wanted {
-                    *slot_pending = false;
-                }
+            if library {
+                t.library.pending = false;
             }
             return self.taste_draw();
         }
@@ -891,10 +864,6 @@ impl App {
                     t.library.pending = false;
                     t.library.failed = Some(err.clone());
                 }
-                if network {
-                    t.network.pending = false;
-                    t.network.failed = Some(err.clone());
-                }
                 if peers {
                     t.peers.pending = false;
                     t.peers.failed = Some(err);
@@ -902,11 +871,7 @@ impl App {
                 return Vec::new();
             }
             Err(TasteFailure::Forbidden) => {
-                for (wanted, slot_pending) in [
-                    (library, &mut t.library.pending),
-                    (network, &mut t.network.pending),
-                    (peers, &mut t.peers.pending),
-                ] {
+                for (wanted, slot_pending) in [(library, &mut t.library.pending), (peers, &mut t.peers.pending)] {
                     if wanted {
                         *slot_pending = false;
                     }
@@ -920,6 +885,13 @@ impl App {
             }
         };
         let random = response.seed_source == SeedSource::Random || response.fallback;
+        // A saved `unplayed` (the old "Never played") applied to an ask that
+        // named no filter: the checkbox reads it as unticked, so the rows
+        // must be `fresh`'s too — asked again, once, as `fresh` (clause 65).
+        let mut effects = Vec::new();
+        let stale_filter = library
+            && t.filter.is_none()
+            && response.library.as_ref().is_some_and(|l| l.filter != TasteFilter::All && l.filter != TasteFilter::Fresh);
         if library {
             let lists = response.library.take();
             t.library.pending = false;
@@ -928,14 +900,6 @@ impl App {
             // rows stand under the card.
             t.library.absent = lists.is_none() && !random;
             t.library.data = lists;
-        }
-        if network {
-            let lists = response.network.take();
-            t.network.pending = false;
-            t.network.failed = None;
-            t.network.absent = lists.is_none() && !random;
-            t.network.not_asked_random = lists.is_none() && random;
-            t.network.data = lists;
         }
         if peers {
             let lists = response.peers.take();
@@ -959,10 +923,12 @@ impl App {
             response.peers = None;
             t.head = Some(*response);
             t.arrived = Some(crate::clock::Instant::now());
-            // A new answer, new leads: the links were kept with the old one.
-            t.links.clear();
         }
-        Vec::new()
+        if stale_filter && self.connected {
+            self.taste.filter = Some(TasteFilter::Fresh);
+            effects.push(self.taste_request(TastePart::Library, false));
+        }
+        effects
     }
 
     /// The probe's verdict for the room (clause 82): the gate still on is
@@ -1000,10 +966,6 @@ impl App {
         if t.library.pending {
             t.library.pending = false;
             t.library.failed = Some(reason());
-        }
-        if t.network.pending {
-            t.network.pending = false;
-            t.network.failed = Some(reason());
         }
         if t.peers.pending {
             t.peers.pending = false;

@@ -19,7 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, PluginLink, SearchResults,
+    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
     SimilarArtist, TastePrefs, TastePrefsPatch, TasteRequest, TasteResponse, Track,
 };
 use crate::api::{ApiError, Client};
@@ -207,16 +207,9 @@ pub enum ApiCmd {
     /// One random track of the session's server for the room's "another
     /// pick" (clause 21): the server's own random seed is the same all day.
     TasteRandom { generation: u64 },
-    /// Where else a Network lead can be found (clause 63): every `links`
-    /// plug-in's resolve, the row forwarded verbatim. `plugins` is the
-    /// list read earlier this session; `None` has the worker read it first
-    /// and hand it back on the event, so it is asked once per session.
-    TasteLinks {
-        generation: u64,
-        key: String,
-        recommendation: Box<serde_json::Value>,
-        plugins: Option<Vec<String>>,
-    },
+    /// An album row's `[+]` (clause 61): the album's songs by its name — the
+    /// Albums room's ask — for the App to append to the queue.
+    TasteAlbum { name: String, generation: u64 },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -290,7 +283,7 @@ impl ApiCmd {
             | ApiCmd::Taste { .. }
             | ApiCmd::TastePrefs { .. }
             | ApiCmd::TasteRandom { .. }
-            | ApiCmd::TasteLinks { .. }
+            | ApiCmd::TasteAlbum { .. }
             | ApiCmd::SavePlaylist { .. }
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
@@ -410,12 +403,14 @@ pub enum DiscoverDest {
 /// says which slots its reply may fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TastePart {
-    /// Ask A: `library` + `network` (network only while `discoveryP2p` is
-    /// advertised) — the seeds, the header facts and both lists.
+    /// Ask A: `library` — the seeds, the header facts and the library's
+    /// lists. Never `network`: the play-now room shows only what plays.
     Main,
-    /// A filter change: the library alone; Network and Peers stand.
+    /// The checkbox ticked or unticked: the library alone; the connected
+    /// servers' rows stand.
     Library,
-    /// Ask B: the federated peers (only while `federationDiscovery` is).
+    /// Ask B: the connected (federated) servers, only while
+    /// `federationDiscovery` is advertised.
     Peers,
 }
 
@@ -602,15 +597,8 @@ pub enum Event {
     /// "Another pick": `None` when the library answered empty or the ask
     /// failed.
     TasteRandom { generation: u64, track: Option<Box<Track>> },
-    /// A lead's links (web links only, canonical first), keyed as asked.
-    /// `plugins` is the `links` plug-ins' names when this ask read the
-    /// list, for the App to keep for the session.
-    TasteLinks {
-        generation: u64,
-        key: String,
-        plugins: Option<Vec<String>>,
-        answer: Result<Vec<PluginLink>, String>,
-    },
+    /// An album row's songs to queue: `None` when the ask failed.
+    TasteAlbum { generation: u64, tracks: Option<Vec<Track>> },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
@@ -1308,9 +1296,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             crate::api::wait(taste_prefs(c, generation, patch.as_ref()))
         }
         ApiCmd::TasteRandom { generation } => crate::api::wait(taste_random(c, generation)),
-        ApiCmd::TasteLinks { generation, key, recommendation, plugins } => {
-            crate::api::wait(taste_links(c, generation, key, &recommendation, plugins))
-        }
+        ApiCmd::TasteAlbum { name, generation } => crate::api::wait(taste_album(c, name, generation)),
         // A failed ask is `None`: nothing about the saved peers changes.
         ApiCmd::FederationPeers { parent } => {
             Ok(Event::FederationPeers { parent, peers: c.federation_peers().ok() })
@@ -2210,54 +2196,17 @@ pub(crate) async fn taste_random(client: &Client, generation: u64) -> Result<Eve
     Ok(Event::TasteRandom { generation, track })
 }
 
-/// A lead's links (clause 63): every `links` plug-in, in the list's order,
-/// canonical links ahead of searches, `http`/`https` only — a link goes to
-/// the operating system's opener, which would run any other scheme. One
-/// plug-in failing while another answered keeps what did answer.
-pub(crate) async fn taste_links(
-    client: &Client,
-    generation: u64,
-    key: String,
-    recommendation: &serde_json::Value,
-    plugins: Option<Vec<String>>,
-) -> Result<Event, ApiError> {
-    let (listed, names) = match plugins {
-        Some(names) => (None, names),
-        None => match client.discovery_plugins_async().await {
-            Ok(list) => {
-                let names: Vec<String> =
-                    list.plugins.iter().filter(|p| p.has_links()).map(|p| p.name.clone()).collect();
-                (Some(names.clone()), names)
-            }
-            Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
-            Err(e) => {
-                return Ok(Event::TasteLinks { generation, key, plugins: None, answer: Err(e.to_string()) });
-            }
-        },
+/// An album row's `[+]` (clause 61): its songs, asked by name alone as the
+/// Albums room asks (the 2026-10-05 log).
+pub(crate) async fn taste_album(client: &Client, name: String, generation: u64) -> Result<Event, ApiError> {
+    let node = LibraryNode::Album { name, artist: None };
+    let tracks = match load_library(client, &node).await {
+        Ok(LibraryData::Tracks(tracks)) => Some(tracks),
+        Ok(_) => None,
+        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+        Err(_) => None,
     };
-    let mut links = Vec::new();
-    let mut failure = None;
-    for name in &names {
-        match client.plugin_links_async(name, recommendation).await {
-            Ok(found) => links.extend(found),
-            Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
-            Err(e) => {
-                failure.get_or_insert(e.to_string());
-            }
-        }
-    }
-    let answer = match failure {
-        Some(err) if links.is_empty() => Err(err),
-        _ => Ok(order_links(links)),
-    };
-    Ok(Event::TasteLinks { generation, key, plugins: listed, answer })
-}
-
-/// Web links only, canonical first, each tier in the order it came.
-pub(crate) fn order_links(mut links: Vec<PluginLink>) -> Vec<PluginLink> {
-    links.retain(PluginLink::is_web);
-    links.sort_by_key(|link| link.kind != "canonical");
-    links
+    Ok(Event::TasteAlbum { generation, tracks })
 }
 
 /// How many neighbours a Discover view asks for. Deep enough to browse,
@@ -2419,25 +2368,6 @@ pub(crate) fn journey_note(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_leads_links_are_web_only_canonical_first_each_tier_in_its_order() {
-        let link = |id: &str, url: &str, kind: &str| PluginLink {
-            id: id.into(),
-            label: id.into(),
-            url: url.into(),
-            kind: kind.into(),
-        };
-        let ordered = order_links(vec![
-            link("search-a", "https://a.example/s", "search"),
-            link("odd", "mailto:x@example.com", "search"),
-            link("canon-1", "https://musicbrainz.org/recording/1", "canonical"),
-            link("search-b", "https://b.example/s", "search"),
-            link("canon-2", "https://musicbrainz.org/isrc/2", "canonical"),
-        ]);
-        let ids: Vec<&str> = ordered.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["canon-1", "canon-2", "search-a", "search-b"]);
-    }
 
     #[test]
     fn the_probe_reads_both_rooms_flags_off_one_ping() {

@@ -3,8 +3,14 @@
 # (test/e2e/fake_mstream.py, FAKE_TASTE=1; docs/ux-contracts/
 # discovery-page.md). The ping advertises `discoveryTaste`, so the nav
 # grows its Discover row (clause 1); `G` opens the room, which asks the
-# route and paints its answer: the header's "based on" phrase over the
-# Library tab with its rows (clauses 3, 30, 40). `0` opens Now Playing,
+# route and paints its answer: the header's "based on" phrase — words, no
+# count, the play-now page (the contract's 2026-10-11 log) — over the
+# Library tab with its rows (clauses 3, 30, 40). The bottom row's one
+# checkbox, "Include songs I've played lately" (clause 65), paints with
+# the room's first frame, before the answer, so it is gated first, on
+# one word (the terminal is sent only what changed, word by word with the
+# cursor moved over the spaces, and the answer's frame repaints the header
+# and rows, not the bottom row). `0` opens Now Playing,
 # whose per-song tab reads Similar now (plan §2.12). Esc comes back, q
 # quits. Gates on first-paint words only (the header's phrase is a word
 # the room paints only once the answer landed, the title a row's), and
@@ -30,7 +36,12 @@ expect {
 drain 1
 send "G"
 expect {
-    "based on 2 songs" {}
+    "lately" {}
+    eof { puts "DIED-ON-CHECKBOX"; exit 11 }
+    timeout { fail "NO-CHECKBOX" 12 }
+}
+expect {
+    "based on songs you finished" {}
     eof { puts "DIED-ON-G"; exit 7 }
     timeout { fail "NO-ROOM-HEADER" 3 }
 }

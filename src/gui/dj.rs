@@ -2166,6 +2166,9 @@ mod tests {
 
     #[test]
     fn a_failed_genres_load_says_so_in_the_picker_instead_of_loading_forever() {
+        // It reads English: hold the locale against the tests that switch it.
+        let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
         let mut gui = room_gui();
         gui.act(Act::DjPickGenres);
         let all = draw_tall(&mut gui).join("\n");

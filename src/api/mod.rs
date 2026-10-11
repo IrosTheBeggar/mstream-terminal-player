@@ -1037,28 +1037,6 @@ impl Client {
         self.send(Method::PUT, "api/v1/discovery/taste/prefs", Some(body)).await
     }
 
-    /// `GET /api/v1/discovery/plugins` — the plug-ins switched on for this
-    /// caller. Asked only while the ping says `discoveryPlugins`.
-    pub async fn discovery_plugins_async(&self) -> Result<DiscoveryPluginsResponse, ApiError> {
-        self.get("api/v1/discovery/plugins").await
-    }
-
-    /// `POST /api/v1/discovery/plugins/{plugin}/resolve` on a `links`
-    /// plug-in: where else this recommendation can be found. The row is
-    /// forwarded verbatim — the server's schema strips what it does not
-    /// know (contract clause 63). A plug-in failure is the server's 502, or
-    /// its 429 passed through.
-    pub async fn plugin_links_async(
-        &self,
-        plugin: &str,
-        recommendation: &serde_json::Value,
-    ) -> Result<Vec<PluginLink>, ApiError> {
-        let body = serde_json::json!({ "recommendation": recommendation });
-        let path = format!("api/v1/discovery/plugins/{}/resolve", urlencode(plugin));
-        let answer: PluginResolveResponse = self.post(&path, body).await?;
-        Ok(answer.result.map(|r| r.links).unwrap_or_default())
-    }
-
     /// A journey from one track to another through the embedding space.
     ///
     /// `length` counts the total rows including both seeds, so the answer is
