@@ -481,8 +481,8 @@ choice. A gate may name its safe choice for what it keeps rather than
 still the modal primary.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
-**Over pixels**: on a screen that draws real pixels (the queue's and the
-wall's covers), every overlay — a modal frame (`modal_frame_on`), the
+**Over pixels**: on a screen that draws real pixels (the queue's, the
+wall's and the Discover strip's covers), every overlay — a modal frame (`modal_frame_on`), the
 header dropdown, the tooltip — registers its footprint with the surface
 (`Surface::overlay`), and a cover the footprint touched LAST frame draws
 as the ▀-mosaic for that frame. The terminal writer skips a picture's

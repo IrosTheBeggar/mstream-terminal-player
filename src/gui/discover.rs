@@ -12,17 +12,23 @@
 //! doing too much, so the room shows only songs you can play now — no
 //! percentages, no counts, no "never played", no p2p network leads (a later
 //! Explore room draws those). Where the webapp and this surface part — album
-//! ROWS ahead of the songs, not cards; the library filter one checkbox at
+//! ROWS ahead of the songs at the floor; the library filter one checkbox at
 //! the bottom row's left — the contract's log says why.
 //!
 //! One answer, two tabs, top to bottom (clause 90): the header with the
 //! window dropdown, the state line, the fallback card while nothing is
-//! finished yet, the tabs, the seeds line, the tab's table, the bottom row
-//! with the "Include songs I've played lately" checkbox and the whole-list
-//! verbs. The seeds modal and the window's list draw last, from
-//! [`draw_modals`], so they win the pointer.
+//! finished yet, the tabs, the seeds line, the tab's album strip where the
+//! room is tall enough (clauses 45–49, the 2026-10-11 strip log: the
+//! webapp's horizontal scroller of album cards, covers as real pixels
+//! through `cover::Slot` the way the queue panel's are), the tab's table,
+//! the bottom row with the "Include songs I've played lately" checkbox and
+//! the whole-list verbs. The seeds modal and the window's list draw last,
+//! from [`draw_modals`], so they win the pointer.
+
+use std::collections::{HashMap, HashSet};
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -31,8 +37,10 @@ use rust_i18n::t;
 use crate::api::types::{SeedSource, TasteOutcome, Track};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, dim, frame_at, modal_close, modal_frame_on, scroll_list, width};
+use crate::tui::app::taste::{TASTE_STRIP_MAX, TastePeerAlbum};
 use crate::tui::app::{App, Capture, Origin, TasteLatch, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb};
 
+use super::cover::{Pace, Slot};
 use super::{Act, Gui, List, RowVerb, Screen, accent, bright_bold, bullet_glyph, check_glyphs, put, sel};
 
 /// The window dropdown's choices, in days (0 = all time) — clause 15.
@@ -62,6 +70,27 @@ const CARD_W: u16 = 66;
 const CARD_FULL: u16 = 7;
 const CARD_COMPACT: u16 = 5;
 
+/// The album strip's tile (clause 45): a cover 12 cells by 5 rows, the
+/// album's title and its artist under it, one cell between tiles.
+const TILE_W: u16 = 12;
+const TILE_COVER_H: u16 = 5;
+const TILE_H: u16 = TILE_COVER_H + 2;
+const TILE_STRIDE: u16 = TILE_W + 1;
+/// The rows the strip takes from the table: its tiles and the gap under
+/// them.
+const STRIP_ROWS: u16 = TILE_H + 1;
+/// The strip stands only where the table keeps at least this many rows
+/// under it (clause 49): with the room's six rows above the strip and its
+/// table header, rule and bottom row, a content area of 20 rows — the
+/// installer's 100×30 window has 22 or 23 — and never the 24-row floor's
+/// 16 or 17, which keep the album rows.
+const STRIP_TABLE_MIN: u16 = 3;
+/// The skeleton tiles the first ask draws, the webapp's four cards.
+const STRIP_SKELETON: u16 = 4;
+/// Covers kept encoded past the strip's view, so a scroll back or a tab
+/// switch back finds them warm — both tabs' whole strips.
+const STRIP_SLACK: usize = 2 * TASTE_STRIP_MAX;
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 /// The room's own state: the table's cursor and wheel, the window's list or
@@ -79,6 +108,33 @@ pub(crate) struct DiscoverUi {
     window_at: Rect,
     /// The local zone for "today" and "yesterday", read once.
     zone: Option<Option<crate::admin::tz::Zone>>,
+    /// The album strip's view and keyboard hand (clauses 45–49).
+    pub strip: StripUi,
+    /// The room's content as last drawn: whether the strip stands is the
+    /// layout's word for that rect, and the keys walk what the frame showed.
+    content: Rect,
+    /// The strip's tiles as last drawn — what the wheel scrolls.
+    strip_at: Option<Rect>,
+    /// The tab in front and whether its strip stood, last frame: a change
+    /// on the same tab re-indexes the table under the cursor.
+    stood: Option<(TasteTab, bool)>,
+    /// A slot per strip cover on view, keyed by the art's id — the queue
+    /// panel's pool: an encoded picture draws anywhere for free, so a
+    /// scroll moves each cover with its tile and only a cover newly
+    /// revealed pays an encode.
+    slots: HashMap<u64, Slot>,
+}
+
+/// The album strip's own state (clauses 46–47).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StripUi {
+    /// The first tile shown — the strip's horizontal scroll.
+    pub first: usize,
+    /// The keyboard's tile, an index into the tab's [`tiles`].
+    pub cursor: usize,
+    /// The keyboard's hand is on the strip (lit only then — the list-cursor
+    /// law); the table's cursor is stowed meanwhile.
+    pub on: bool,
 }
 
 impl DiscoverUi {
@@ -90,13 +146,28 @@ impl DiscoverUi {
             seeds: None,
             window_at: Rect::default(),
             zone: None,
+            strip: StripUi::default(),
+            content: Rect::default(),
+            strip_at: None,
+            stood: None,
+            slots: HashMap::new(),
         }
     }
 
-    /// The keyboard's hand down: no row lit (the kit's list-cursor law).
+    /// The keyboard's hand down: no row lit, no tile lit (the kit's
+    /// list-cursor law).
     fn stow(&mut self) {
         self.cursor = None;
         self.view.stow();
+        self.strip.on = false;
+    }
+
+    /// A resize changes the cell-to-pixel mapping every slot encoded
+    /// against — the wall's rule, per cover.
+    pub(crate) fn on_resize(&mut self) {
+        for slot in self.slots.values_mut() {
+            slot.on_resize();
+        }
     }
 }
 
@@ -129,6 +200,9 @@ pub(crate) enum DiscAct {
     /// A table line with the verb the click meant: the row itself or one
     /// of its hover verbs.
     Row(usize, RowVerb),
+    /// A strip tile, by its place in the tab's [`tiles`]: the tile itself
+    /// (`Open`) or its `[+]` (`Queue`) — clause 48.
+    Tile(usize, RowVerb),
     /// A song's `[⋯]` (the track-actions sheet), and a right click — a
     /// library song's, or a connected server's with its peer origin.
     More(usize),
@@ -204,6 +278,115 @@ pub(crate) fn lines(app: &App, tab: TasteTab) -> Vec<Line> {
             .flat_map(|l| (0..l.albums.len()).map(Line::Album).chain((0..l.tracks.len()).map(Line::Song)))
             .collect(),
         TasteTab::Servers => taste.peer_lines().into_iter().map(|(group, row)| Line::Peer { group, row }).collect(),
+    }
+}
+
+/// The tab's table where the album strip stands: its albums left the table
+/// for the strip (clause 45); at the floor the table keeps them as rows.
+pub(crate) fn table_lines(app: &App, tab: TasteTab, strip: bool) -> Vec<Line> {
+    lines(app, tab).into_iter().filter(|line| !(strip && matches!(line, Line::Album(_)))).collect()
+}
+
+/// One tile of the album strip (clause 45).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tile {
+    /// `library.albums[i]`.
+    Library(usize),
+    /// [`crate::tui::app::taste::TasteState::peer_albums`]`[i]`.
+    Peer(usize),
+}
+
+/// The tab's album strip, best match first, capped at twelve (clause 45).
+pub(crate) fn tiles(app: &App, tab: TasteTab) -> Vec<Tile> {
+    match tab {
+        TasteTab::Library => app.taste.library_strip().into_iter().map(Tile::Library).collect(),
+        TasteTab::Servers => (0..app.taste.peer_albums().len()).map(Tile::Peer).collect(),
+    }
+}
+
+/// What the strip would draw on `tab`: the first ask's skeleton tiles, or
+/// the tab's albums — `None` where the pane holds no rows (a sentence, a
+/// failure, the switched-off line) or the answer carries no album.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StripFill {
+    Skeleton,
+    Tiles(Vec<Tile>),
+}
+
+fn strip_fill(app: &App, tab: TasteTab) -> Option<StripFill> {
+    match pane(app, tab, lines(app, tab).is_empty()) {
+        Pane::Loading => Some(StripFill::Skeleton),
+        Pane::Rows { .. } => Some(tiles(app, tab)).filter(|t| !t.is_empty()).map(StripFill::Tiles),
+        _ => None,
+    }
+}
+
+/// The tiles the strip shows on the tab in front, in the content the last
+/// frame laid out — empty where no strip of albums stands (clause 49).
+fn strip_tiles(gui: &Gui) -> Vec<Tile> {
+    match strip_fill(&gui.app, gui.app.taste.tab) {
+        Some(StripFill::Tiles(tiles)) if layout(gui.discover.content, gui.app.taste.no_history, true).strip_y.is_some() => {
+            tiles
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The table's lines as the last frame drew them: the cursor, the keys and
+/// the clicks index these.
+fn rows(gui: &Gui) -> Vec<Line> {
+    table_lines(&gui.app, gui.app.taste.tab, !strip_tiles(gui).is_empty())
+}
+
+/// How many tiles the strip shows whole in `width` cells — at its end, where
+/// nothing follows them.
+fn whole_tiles(width: u16) -> usize {
+    usize::from(((width + 1) / TILE_STRIDE).max(1))
+}
+
+/// How many tiles the strip shows whole while more follow them (clause 47):
+/// the last one shown must then be cut. Where the cells end on a tile's own
+/// edge or its gap (`width` mod 13 is 12 or 0) nothing would be cut, so the
+/// last whole tile gives its place up to a half tile.
+fn whole_tiles_overflowing(width: u16) -> usize {
+    let whole = whole_tiles(width);
+    if cut_width(width, whole) == 0 && whole > 1 { whole - 1 } else { whole }
+}
+
+/// The cells left for a cut tile after `whole` tiles and their gaps, at most
+/// a tile less a cell; a tile's worth (the edge case above) is cut to half.
+fn cut_width(width: u16, whole: usize) -> u16 {
+    let rest = width.saturating_sub(whole as u16 * TILE_STRIDE);
+    if rest >= TILE_W { TILE_W / 2 } else { rest }
+}
+
+/// The strip's view from `first` of `n` tiles in `width` cells: the tiles
+/// shown whole, and the cut tile's width after them (0: none) — a cut tile
+/// stands exactly while more tiles follow the whole ones.
+fn strip_view(width: u16, n: usize, first: usize) -> (usize, u16) {
+    let left = n.saturating_sub(first);
+    if left <= whole_tiles(width) {
+        return (left, 0);
+    }
+    let whole = whole_tiles_overflowing(width);
+    (whole, cut_width(width, whole))
+}
+
+/// The strip's scroll, never past the last whole view, and — while the
+/// keyboard's hand is on the strip — wherever keeps its tile whole in view
+/// (clause 47): a key, a narrowed room (the queue opening, a resize) or a
+/// new answer never leaves the lit tile off screen.
+fn keep_in_view(strip: &mut StripUi, width: u16, n: usize) {
+    let last = n.saturating_sub(whole_tiles(width));
+    strip.cursor = strip.cursor.min(n.saturating_sub(1));
+    strip.first = strip.first.min(last);
+    if !strip.on {
+        return;
+    }
+    if strip.cursor < strip.first {
+        strip.first = strip.cursor;
+    } else if strip.cursor >= strip.first + strip_view(width, n, strip.first).0 {
+        strip.first = (strip.cursor + 1).saturating_sub(whole_tiles_overflowing(width)).min(last);
     }
 }
 
@@ -376,12 +559,17 @@ pub(crate) struct Layout {
     pub card: Option<(Rect, bool)>,
     pub tabs_y: u16,
     pub seeds_y: u16,
+    /// The album strip's first row, where it stands (clause 49).
+    pub strip_y: Option<u16>,
     /// The table's header row; its rule is the next, its rows after that.
     pub table_y: u16,
     pub bottom_y: u16,
 }
 
-pub(crate) fn layout(content: Rect, card: bool) -> Layout {
+/// `strip`: the tab has a strip to draw. It stands where the table keeps
+/// [`STRIP_TABLE_MIN`] rows under it — a content area of 20 rows with no
+/// card (clause 49) — and gives way to the card, which comes first.
+pub(crate) fn layout(content: Rect, card: bool, strip: bool) -> Layout {
     let y = content.y;
     let bottom_y = content.bottom().saturating_sub(1);
     let mut tabs_y = y + 3;
@@ -397,13 +585,18 @@ pub(crate) fn layout(content: Rect, card: bool) -> Layout {
         card_at = Some((Rect { x, y: y + 3, width, height }, !whole));
         tabs_y = y + 3 + height + 1;
     }
+    // The rows the table would hold without the strip.
+    let table_y = tabs_y + 3;
+    let rows = bottom_y.saturating_sub(table_y + 2);
+    let strip_y = (strip && rows >= STRIP_ROWS + STRIP_TABLE_MIN).then_some(table_y);
     Layout {
         header_y: y,
         state_y: y + 1,
         card: card_at,
         tabs_y,
         seeds_y: tabs_y + 1,
-        table_y: tabs_y + 3,
+        strip_y,
+        table_y: if strip_y.is_some() { table_y + STRIP_ROWS } else { table_y },
         bottom_y,
     }
 }
@@ -494,7 +687,9 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         gui.app.taste.tab = TasteTab::Library;
         gui.discover.stow();
     }
-    let lay = layout(content, gui.app.taste.no_history);
+    gui.discover.content = content;
+    let fill = strip_fill(&gui.app, gui.app.taste.tab);
+    let lay = layout(content, gui.app.taste.no_history, fill.is_some());
     draw_header(frame, gui, content, lay.header_y);
     draw_state(frame, gui, content, lay.state_y);
     if let Some((rect, compact)) = lay.card {
@@ -502,8 +697,78 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
     draw_tabs(frame, gui, content, lay.tabs_y);
     draw_seeds_line(frame, gui, content, lay.seeds_y);
-    draw_table(frame, gui, content, lay.table_y, lay.bottom_y);
+    gui.discover.strip_at = None;
+    // Whether tiles of albums stand this frame; when that changed on the
+    // same tab (a resize across the height gate, the queue opening) the
+    // keyboard's hand keeps the thing it was on (clause 49).
+    let stands = lay.strip_y.is_some() && matches!(fill, Some(StripFill::Tiles(_)));
+    let tab = gui.app.taste.tab;
+    if let Some((was_tab, was)) = gui.discover.stood.replace((tab, stands))
+        && was_tab == tab
+        && was != stands
+    {
+        carry_hand(gui, tab, stands);
+    }
+    let strip = match (lay.strip_y, fill) {
+        (Some(y), Some(fill)) => draw_strip(frame, gui, content, y, fill),
+        _ => false,
+    };
+    // The keyboard's hand cannot rest on a strip that is not there (a tab
+    // with no albums, a new answer).
+    if !strip {
+        gui.discover.strip.on = false;
+    }
+    draw_table(frame, gui, content, (lay.table_y, lay.bottom_y), strip);
     draw_bottom(frame, gui, content, lay.bottom_y);
+}
+
+/// The strip came (`stands`) or went on the same tab: the table's rows are
+/// re-indexed (its album rows leave for the strip or come back), so the
+/// keyboard's hand moves with what it was on — a song stays that song, an
+/// album row becomes its tile and a library tile its row again; what has no
+/// place on the other side (a connected server's tile at the floor) puts
+/// the hand down rather than lighting something else.
+fn carry_hand(gui: &mut Gui, tab: TasteTab, stands: bool) {
+    let held = gui.discover.view.held.then_some(gui.discover.cursor).flatten();
+    if !stands && gui.discover.strip.on {
+        let tile = tiles(&gui.app, tab).get(gui.discover.strip.cursor).copied();
+        let row = match tile {
+            Some(Tile::Library(i)) => table_lines(&gui.app, tab, false).iter().position(|l| *l == Line::Album(i)),
+            _ => None,
+        };
+        gui.discover.stow();
+        if let Some(row) = row {
+            gui.discover.cursor = Some(row);
+            gui.discover.view.pick_up();
+        }
+        return;
+    }
+    let Some(at) = held else {
+        // A cursor nobody holds indexes nothing worth keeping.
+        if gui.discover.cursor.is_some() {
+            gui.discover.stow();
+        }
+        return;
+    };
+    let line = table_lines(&gui.app, tab, !stands).get(at).copied();
+    gui.discover.stow();
+    match line {
+        Some(Line::Album(i)) if stands => {
+            if let Some(to) = tiles(&gui.app, tab).iter().position(|t| *t == Tile::Library(i)) {
+                gui.discover.strip.on = true;
+                gui.discover.strip.cursor = to;
+                let (width, n) = (gui.discover.content.width, tiles(&gui.app, tab).len());
+                keep_in_view(&mut gui.discover.strip, width, n);
+            }
+        }
+        Some(line) => {
+            if let Some(to) = table_lines(&gui.app, tab, stands).iter().position(|l| *l == line) {
+                gui.discover.cursor = Some(to);
+                gui.discover.view.pick_up();
+            }
+        }
+        None => {}
+    }
 }
 
 /// A refused pick, worded once (clause 14).
@@ -708,6 +973,213 @@ fn draw_seeds_line(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     }
 }
 
+// ── The album strip ─────────────────────────────────────────────────────────
+
+/// One tile's words and art file, owned so the drawing can borrow freely.
+struct TileFace {
+    title: String,
+    artist: Option<String>,
+    art: Option<String>,
+    tip: String,
+}
+
+fn tile_face(app: &App, tile: Tile, peers: &[TastePeerAlbum]) -> Option<TileFace> {
+    let nonempty = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    match tile {
+        Tile::Library(i) => {
+            let album = app.taste.library.data.as_ref()?.albums.get(i)?;
+            Some(TileFace {
+                title: nonempty(album.name.as_deref()).unwrap_or_else(|| dash().to_string()),
+                artist: nonempty(album.artist()),
+                art: nonempty(album.album_art_file.as_deref()),
+                tip: t!("gui.discover.album_tip").to_string(),
+            })
+        }
+        Tile::Peer(i) => {
+            let album = peers.get(i)?;
+            Some(TileFace {
+                title: album.album.clone(),
+                artist: album.artist.clone(),
+                art: album.art.clone(),
+                tip: t!("gui.discover.peer_album_tip", server = album.server).to_string(),
+            })
+        }
+    }
+}
+
+/// The strip (clauses 45–48) at row `y`: the first ask's skeleton tiles, or
+/// the tab's albums from the strip's scroll on, the last one cut at the
+/// right edge when more follow. True when tiles of albums stand — what the
+/// wheel and the keys may then walk.
+fn draw_strip(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, fill: StripFill) -> bool {
+    let row = Rect { x: content.x, y, width: content.width, height: TILE_H };
+    let tiles = match fill {
+        StripFill::Skeleton => {
+            draw_strip_skeleton(frame, row);
+            return false;
+        }
+        StripFill::Tiles(tiles) => tiles,
+    };
+    gui.discover.strip_at = Some(row);
+    let n = tiles.len();
+    // A new answer can leave the scroll or the hand past the tiles, and a
+    // narrowed room the hand's tile out of view; the scroll never leaves
+    // blank cells where more tiles could stand.
+    keep_in_view(&mut gui.discover.strip, row.width, n);
+    let first = gui.discover.strip.first;
+    let (whole, cut_w) = strip_view(row.width, n, first);
+    // Every tile that shows, whole or cut.
+    let shown = whole + usize::from(cut_w > 0);
+    let peers = if gui.app.taste.tab == TasteTab::Servers { gui.app.taste.peer_albums() } else { Vec::new() };
+
+    // The covers these tiles still owe the cache, claimed through the App's
+    // own fetch — a library album's from the session, a connected server's
+    // through the parent's art proxy; hashmap lookups after the first frame.
+    let mut fetches = Vec::new();
+    for tile in &tiles[first..first + shown] {
+        let effect = match *tile {
+            Tile::Library(i) => {
+                let file = gui.app.taste.library.data.as_ref().and_then(|l| l.albums.get(i)).and_then(|a| a.album_art_file.clone());
+                file.filter(|f| !f.is_empty()).and_then(|f| gui.app.fetch_art_file(&f))
+            }
+            Tile::Peer(i) => peers.get(i).and_then(|album| gui.app.taste_peer_album_art(album)),
+        };
+        fetches.extend(effect);
+    }
+    gui.pend(fetches);
+
+    // Split borrows: the faces and covers are READ from the App while each
+    // slot's caches are written — the queue panel's move, so a frame never
+    // clones a decoded cover.
+    let pace = Pace::frame();
+    let mut on_view: HashSet<u64> = HashSet::new();
+    let [_, _, plus, _] = verb_glyphs();
+    {
+        let Gui { app, discover, ui, .. } = &mut *gui;
+        let StripUi { cursor, on, .. } = discover.strip;
+        for (k, index) in (first..first + shown).enumerate() {
+            let x = row.x + k as u16 * TILE_STRIDE;
+            let w = if k < whole { TILE_W } else { cut_w };
+            let cut = w < TILE_W;
+            let Some(face) = tile_face(app, tiles[index], &peers) else { continue };
+            // The cover: real pixels where the terminal draws them, the
+            // ▀-mosaic where it does not, where an overlay stood last frame
+            // (the kit's Over pixels) or where the tile is cut — a picture
+            // cannot be cut; the note tile where the album has no art.
+            let size = Rect { x, y, width: TILE_W, height: TILE_COVER_H };
+            let cover = Rect { width: w, ..size };
+            let art = face.art.as_deref().and_then(|file| app.art.get(file)).and_then(|art| art.as_ref());
+            match art {
+                Some(art) => {
+                    let slot = discover.slots.entry(art.id()).or_insert_with(|| Slot::new(app.graphics.fork()));
+                    on_view.insert(art.id());
+                    if cut {
+                        slot.draw_mosaic_cut(frame, size, cover, art);
+                    } else if ui.covered_last_frame(cover) {
+                        slot.draw_mosaic(frame, cover, art);
+                    } else {
+                        slot.draw_paced(frame, cover, art, &pace);
+                    }
+                }
+                None => note_tile(frame, cover),
+            }
+            // The title (BOLD and bright under the pointer, the slab under
+            // the keyboard's hand) and the artist DIM; a hovered whole tile
+            // gives its title's tail to its one verb, `[+]`.
+            let tile = Rect { x, y, width: w, height: TILE_H };
+            let selected = on && cursor == index;
+            let hover = ui.hovers(tile);
+            let verb = hover && !selected && !cut;
+            let name_y = y + TILE_COVER_H;
+            let name = Rect { x, y: name_y, width: w, height: 1 };
+            if selected {
+                frame.render_widget(ratatui::widgets::Block::default().style(sel()), name);
+            }
+            let title_style = match (selected, hover) {
+                (true, _) => sel().add_modifier(Modifier::BOLD),
+                (false, true) => bright_bold(),
+                (false, false) => Style::default(),
+            };
+            let room = if verb { TILE_W - 4 } else { w };
+            let title = super::bar::clip(&face.title, usize::from(room)).into_owned();
+            put(frame, x, name_y, &title, title_style);
+            // The artist stays DIM on the ground under the hand too: the slab
+            // is the title line's alone (clause 47), never a ragged second
+            // run of accent under it.
+            if let Some(artist) = &face.artist {
+                put(frame, x, name_y + 1, &super::bar::clip(artist, usize::from(w)), dim());
+            }
+            // The tile's click first, its verb after: the last registered wins.
+            ui.click(tile, Act::Disc(DiscAct::Tile(index, RowVerb::Open)));
+            ui.tip_keyed(Rect { width: (width(&title) as u16).max(1), ..name }, face.tip);
+            if verb {
+                let cell = Rect { x: x + TILE_W - 3, y: name_y, width: 3, height: 1 };
+                put(frame, cell.x, name_y, plus, if ui.hovers(cell) { bright_bold() } else { dim() });
+                ui.click(cell, Act::Disc(DiscAct::Tile(index, RowVerb::Queue)));
+                ui.tip_keyed(cell, t!("gui.discover.album_queue_tip").to_string());
+            }
+        }
+    }
+    // Slots for covers that left the view are let go once the pool outgrows
+    // both tabs' strips — a scroll or a tab switch back finds them warm.
+    if gui.discover.slots.len() > on_view.len() + STRIP_SLACK {
+        gui.discover.slots.retain(|id, _| on_view.contains(id));
+    }
+    // Covers the budget turned away want the very next frame.
+    if pace.starved() {
+        gui.hot = true;
+    }
+    true
+}
+
+/// The house placeholder for an album with no art (the webapp's note
+/// tile): the empty cover slot's DIM rounded frame with the note in it,
+/// drawn whole and shown in `cover` — cut at the right edge like any tile.
+fn note_tile(frame: &mut Frame, cover: Rect) {
+    let size = Rect { x: 0, y: 0, width: TILE_W, height: TILE_COVER_H };
+    let mut tile = Buffer::empty(size);
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(dim());
+    ratatui::widgets::Widget::render(block, size, &mut tile);
+    // No note on the legacy console, which draws it as a question mark.
+    if !legacy_conhost() {
+        tile[((TILE_W - 1) / 2, TILE_COVER_H / 2)].set_symbol("♪").set_style(dim());
+    }
+    // Glyph and ink only: the frame's own ground stays under them (the owned
+    // ground the shell painted), never the scratch buffer's Reset.
+    let area = frame.area();
+    let buffer = frame.buffer_mut();
+    for dy in 0..cover.height.min(TILE_COVER_H) {
+        for dx in 0..cover.width.min(TILE_W) {
+            let (x, y) = (cover.x + dx, cover.y + dy);
+            if x < area.right() && y < area.bottom() {
+                let from = &tile[(dx, dy)];
+                let cell = &mut buffer[(x, y)];
+                cell.set_symbol(from.symbol()).set_fg(from.fg);
+                cell.modifier = from.modifier;
+            }
+        }
+    }
+}
+
+/// The first ask's skeleton tiles (clause 32's, for the strip): the empty
+/// cover frame and DIM runs where the title and the artist will stand —
+/// whole tiles only.
+fn draw_strip_skeleton(frame: &mut Frame, row: Rect) {
+    let glyph = if legacy_conhost() { "·" } else { "░" };
+    for k in 0..STRIP_SKELETON {
+        let x = row.x + k * TILE_STRIDE;
+        if x + TILE_W > row.right() {
+            break;
+        }
+        super::bar::cover_slot(frame, x, row.y, TILE_W, TILE_COVER_H);
+        put(frame, x, row.y + TILE_COVER_H, &glyph.repeat(9 - usize::from(k % 2) * 2), dim());
+        put(frame, x, row.y + TILE_COVER_H + 1, &glyph.repeat(6 + usize::from(k % 2)), dim());
+    }
+}
+
 /// One row's words, owned so the drawing can borrow the surface freely.
 /// No match, no percentage, no last-played: what the row is, by whom, from
 /// which album, and how long (the 2026-10-11 log).
@@ -881,8 +1353,9 @@ fn sentence_lines(frame: &mut Frame, list: Rect, sentence: &str, style: Style) -
 }
 
 /// The tab's table: header and rule, then the rows or what stands for them,
-/// and the kit scrollbar while the rows overflow.
-fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, table_y: u16, bottom_y: u16) {
+/// and the kit scrollbar while the rows overflow. `strip`: the album strip
+/// stands above it and holds the albums (clause 45).
+fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, (table_y, bottom_y): (u16, u16), strip: bool) {
     let tab = gui.app.taste.tab;
     let list = Rect {
         x: content.x,
@@ -890,7 +1363,14 @@ fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, table_y: u16, bot
         width: content.width.saturating_sub(2),
         height: bottom_y.saturating_sub(table_y + 2),
     };
-    let all = lines(&gui.app, tab);
+    let all = table_lines(&gui.app, tab, strip);
+    // An answer of albums and no songs: the strip holds all of it, and an
+    // empty table (its header, its rule, nothing under them) would read as
+    // something missing — no table stands under the strip then.
+    let pane_now = pane(&gui.app, tab, lines(&gui.app, tab).is_empty());
+    if strip && all.is_empty() && matches!(pane_now, Pane::Rows { failed_over: None }) {
+        return;
+    }
     let row_cells: Vec<Option<Cells>> = all.iter().map(|line| cells(&gui.app, *line)).collect();
 
     let head = |key: &str| t!(key).to_uppercase();
@@ -922,7 +1402,7 @@ fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, table_y: u16, bot
     put(frame, list.x, table_y + 1, &"─".repeat(content.width as usize), dim());
 
     let mut list = list;
-    match pane(&gui.app, tab, all.is_empty()) {
+    match pane_now {
         Pane::Off => {
             sentence_lines(frame, list, &t!("gui.discover.turned_off"), Style::default().fg(th().gold));
             return;
@@ -1459,6 +1939,12 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             // list-cursor law); the keys put theirs back after this.
             gui.discover.stow();
         }
+        // Only the pointer sends this (the keys call `tile_act` and keep
+        // the hand on the strip): a click acts on its tile and stows.
+        DiscAct::Tile(index, verb) => {
+            gui.discover.stow();
+            tile_act(gui, index, verb);
+        }
         // Only the pointer sends this (`m` calls `more` itself, keeping the
         // hand up): a click acts on its row and stows (clause 57).
         DiscAct::More(index) => {
@@ -1541,6 +2027,7 @@ fn set_tab(gui: &mut Gui, tab: TasteTab) {
     gui.app.taste.tab = tab;
     gui.discover.stow();
     gui.discover.view.scroll = 0;
+    gui.discover.strip = StripUi::default();
     gui.config.gui.discover_tab = Some(tab.as_str().to_string());
     gui.save_now();
 }
@@ -1550,7 +2037,7 @@ fn set_tab(gui: &mut Gui, tab: TasteTab) {
 /// server, the Listen verb's way — and an album into the Albums room, or
 /// onto the queue.
 fn row_act(gui: &mut Gui, index: usize, verb: RowVerb) {
-    let line = lines(&gui.app, gui.app.taste.tab).get(index).copied();
+    let line = rows(gui).get(index).copied();
     let taste_verb = match verb {
         RowVerb::Open => TasteVerb::PlayFrom,
         RowVerb::Now => TasteVerb::Now,
@@ -1588,11 +2075,52 @@ fn open_album(gui: &mut Gui, index: usize) {
     gui.pend(effects);
 }
 
+/// A strip tile's verb (clause 48): a library album opens in the Albums
+/// room as its row did (clause 61) and its `[+]` queues it by name; a
+/// connected server's album plays (it has no drill here to open into) and
+/// its `[+]` queues it, its songs asked of that server through the parent's
+/// federation proxy.
+fn tile_act(gui: &mut Gui, index: usize, verb: RowVerb) {
+    let play = verb != RowVerb::Queue;
+    match tiles(&gui.app, gui.app.taste.tab).get(index).copied() {
+        Some(Tile::Library(i)) if play => open_album(gui, i),
+        Some(Tile::Library(i)) => {
+            let effects = gui.app.taste_queue_album(i);
+            gui.pend(effects);
+        }
+        Some(Tile::Peer(i)) => {
+            let effects = gui.app.taste_peer_album(i, play);
+            gui.pend(effects);
+        }
+        None => {}
+    }
+}
+
+/// The strip's scroll by `step` tiles, never past the last whole view
+/// (clause 47).
+fn scroll_strip(gui: &mut Gui, step: i64) {
+    let n = strip_tiles(gui).len();
+    let whole = whole_tiles(gui.discover.content.width);
+    let last = n.saturating_sub(whole) as i64;
+    let strip = &mut gui.discover.strip;
+    strip.first = (strip.first as i64 + step).clamp(0, last) as usize;
+}
+
+/// The keyboard's tile moves to `to` and the strip scrolls to keep it whole
+/// in view (clause 47).
+fn strip_to(gui: &mut Gui, to: usize) {
+    let n = strip_tiles(gui).len();
+    let width = gui.discover.content.width;
+    let strip = &mut gui.discover.strip;
+    strip.cursor = to;
+    keep_in_view(strip, width, n);
+}
+
 /// `[⋯]`, `m` or a right click on a song: the track-actions sheet — a
 /// connected server's row with its peer origin, so the sheet offers what a
 /// peer's track can do, as for a queued peer row (clause 62).
 fn more(gui: &mut Gui, index: usize) {
-    let (origin, track) = match lines(&gui.app, gui.app.taste.tab).get(index).copied() {
+    let (origin, track) = match rows(gui).get(index).copied() {
         Some(Line::Song(i)) => {
             let song = gui.app.taste.library.data.as_ref().and_then(|l| l.tracks.get(i));
             let Some(track) = song.map(|t| t.to_track()) else { return };
@@ -1695,9 +2223,16 @@ pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
         modal.view.step(delta);
         return;
     }
-    if gui.discover.menu.is_none() {
-        gui.act(Act::ScrollBy(List::Discover, delta));
+    if gui.discover.menu.is_some() {
+        return;
     }
+    // Over the strip, one tile a notch (clause 47).
+    let over_strip = gui.discover.strip_at.zip(gui.ui.pointer).is_some_and(|(at, p)| at.contains(p));
+    if over_strip && !strip_tiles(gui).is_empty() {
+        scroll_strip(gui, i64::from(delta.signum()));
+        return;
+    }
+    gui.act(Act::ScrollBy(List::Discover, delta));
 }
 
 // ── Keys ────────────────────────────────────────────────────────────────────
@@ -1720,9 +2255,30 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         return None;
     }
     let tab = gui.app.taste.tab;
-    let all = lines(&gui.app, tab);
+    let all = rows(gui);
+    let tiles = strip_tiles(gui);
+    if tiles.is_empty() {
+        gui.discover.strip.on = false;
+    }
+    if gui.discover.strip.on
+        && let Some(quit) = strip_key(gui, key, tiles.len(), all.len())
+    {
+        return Some(quit);
+    }
     let held = gui.discover.view.held.then_some(gui.discover.cursor).flatten();
     match key.code {
+        // The strip is the room's top stop (clause 47): a stowed ↓ or
+        // PageDown lands on its first tile in view, ↑ or PageUp from the
+        // table's first row goes back to the tile it left — as do they with
+        // no rows under the strip.
+        KeyCode::Down | KeyCode::PageDown if held.is_none() && !tiles.is_empty() => {
+            let first = gui.discover.strip.first;
+            to_strip(gui, first);
+        }
+        KeyCode::Up | KeyCode::PageUp if !tiles.is_empty() && (held == Some(0) || (held.is_none() && all.is_empty())) => {
+            let back = gui.discover.strip.cursor.min(tiles.len() - 1);
+            to_strip(gui, back);
+        }
         KeyCode::Down => walk(gui, all.len(), 1),
         KeyCode::Up => walk(gui, all.len(), -1),
         KeyCode::PageDown => walk(gui, all.len(), 7),
@@ -1786,6 +2342,43 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         KeyCode::Char('p') if playable(&gui.app, tab) => return Some(gui.act(Act::Disc(DiscAct::PlayAll))),
         KeyCode::Char('A') if playable(&gui.app, tab) => return Some(gui.act(Act::Disc(DiscAct::QueueAll))),
         KeyCode::Char('S') if playable(&gui.app, tab) => return Some(gui.act(Act::Disc(DiscAct::Shuffle))),
+        _ => return None,
+    }
+    Some(false)
+}
+
+/// The keyboard's hand onto the strip's tile `to`, scrolled into view; the
+/// table's cursor goes down (one hand, one lit thing).
+fn to_strip(gui: &mut Gui, to: usize) {
+    gui.discover.cursor = None;
+    gui.discover.view.stow();
+    gui.discover.strip.on = true;
+    strip_to(gui, to);
+}
+
+/// A key while the hand is on the strip (clauses 47–48): ← → walk the
+/// tiles, ↓ goes to the table's first row, Enter opens (or plays) the tile,
+/// `+` and `a` queue it; `None` passes the key on to the room's own keys.
+fn strip_key(gui: &mut Gui, key: KeyEvent, tiles: usize, rows: usize) -> Option<bool> {
+    let index = gui.discover.strip.cursor.min(tiles - 1);
+    match key.code {
+        KeyCode::Left => strip_to(gui, index.saturating_sub(1)),
+        KeyCode::Right => strip_to(gui, (index + 1).min(tiles - 1)),
+        KeyCode::Down | KeyCode::PageDown => {
+            if rows > 0 {
+                gui.discover.strip.on = false;
+                gui.discover.cursor = Some(0);
+                gui.discover.view.pick_up();
+            }
+        }
+        // The strip is the top: nothing above it to walk to.
+        KeyCode::Up | KeyCode::PageUp => {}
+        KeyCode::Esc => gui.discover.stow(),
+        // Acted by key: the hand stays on the tile.
+        KeyCode::Enter => tile_act(gui, index, RowVerb::Open),
+        KeyCode::Char('a' | '+') => tile_act(gui, index, RowVerb::Queue),
+        // A tile's one verb is its queue (clause 48).
+        KeyCode::Char('N' | 'P' | 'm') => {}
         _ => return None,
     }
     Some(false)
@@ -1865,14 +2458,26 @@ pub(crate) fn tips(gui: &Gui) -> String {
     if gui.discover.menu.is_some() {
         return t!("gui.tips.discover_menu").to_string();
     }
+    // The strip's tiles (clause 47): ← → walk them here, and switch tabs
+    // everywhere else — the tips say which.
+    if gui.discover.strip.on {
+        let tiles = strip_tiles(gui);
+        match tiles.get(gui.discover.strip.cursor.min(tiles.len().saturating_sub(1))) {
+            Some(Tile::Library(_)) => return t!("gui.tips.discover_tile").to_string(),
+            Some(Tile::Peer(_)) => return t!("gui.tips.discover_peer_tile").to_string(),
+            None => {}
+        }
+    }
     let held = gui.discover.view.held.then_some(gui.discover.cursor).flatten();
-    match held.and_then(|i| lines(&gui.app, gui.app.taste.tab).get(i).copied()) {
+    match held.and_then(|i| rows(gui).get(i).copied()) {
         // Only what works on THIS row (the kit's tips law): an album opens
         // or queues whole (clause 61); a connected server's row has every
         // song verb (clause 62).
         Some(Line::Album(_)) => t!("gui.tips.discover_album").to_string(),
         Some(Line::Song(_) | Line::Peer { .. }) => t!("gui.tips.discover_row").to_string(),
         None if gui.app.taste.no_history => t!("gui.tips.discover_fallback").to_string(),
+        // At rest over a strip, ↓ lands on its albums, not a row.
+        None if !strip_tiles(gui).is_empty() => t!("gui.tips.discover_strip").to_string(),
         None => t!("gui.tips.discover").to_string(),
     }
 }
@@ -2107,6 +2712,51 @@ mod tests {
         gui
     }
 
+    /// Eight library albums (the server's default cap), best match first
+    /// but sent out of order, the even ones with art the cache already
+    /// decoded: more than the room's 80 cells show whole.
+    fn strip_answer() -> TasteResponse {
+        let mut answer = main_answer();
+        let albums: Vec<serde_json::Value> = (0..8)
+            .map(|i| {
+                let mut album = json!({
+                    "name": format!("Album {i}"), "album_artist": format!("Band {i}"),
+                    "similarity": 0.9 - f64::from(i) * 0.01
+                });
+                if i % 2 == 0 {
+                    album["album_art_file"] = json!(format!("art{i}.jpg"));
+                }
+                album
+            })
+            .rev()
+            .collect();
+        answer.library.as_mut().unwrap().albums = serde_json::from_value(json!(albums)).unwrap();
+        answer
+    }
+
+    /// A cover with its own colours, decoded the way the worker decodes one.
+    fn a_cover(seed: u8) -> crate::tui::art::Art {
+        let pixels = image::RgbImage::from_fn(64, 64, |x, y| {
+            image::Rgb([seed.wrapping_mul(40), (x * 4) as u8, (y * 4) as u8])
+        });
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        pixels.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        crate::tui::art::decode(&bytes.into_inner()).unwrap()
+    }
+
+    /// The room answered with [`strip_answer`], the even albums' covers in
+    /// the cache.
+    fn strip_gui() -> Gui {
+        let mut gui = session_gui();
+        key(&mut gui, KeyCode::Char('G'));
+        land(&mut gui, TastePart::Main, strip_answer());
+        land(&mut gui, TastePart::Peers, peers_answer());
+        for i in (0..8).step_by(2) {
+            gui.app.art.insert(format!("art{i}.jpg"), Some(a_cover(i as u8)));
+        }
+        gui
+    }
+
     // ── The row ─────────────────────────────────────────────────────────
 
     #[test]
@@ -2191,18 +2841,24 @@ mod tests {
         let all = rows.join("\n");
         assert!(rows[3].contains("• asking…"), "the state word says it is asking:\n{all}");
         assert!(all.contains("TRACK") && all.contains("ARTIST"), "the table's header stands:\n{all}");
-        // Four skeleton rows under the rule, and no "asking…" line in the pane.
-        for y in 10..14 {
+        // Four skeleton tiles on the strip (clause 45: the webapp's four
+        // cards), four skeleton rows under the rule, and no "asking…" line.
+        assert_eq!(rows[8].matches('╭').count(), 4, "four empty cover frames:\n{all}");
+        assert!(rows[13].contains("░░░") && rows[14].contains("░░░"), "title and artist runs:\n{all}");
+        for y in 18..22 {
             assert!(rows[y].contains("░░░"), "a skeleton row at {y}:\n{all}");
         }
-        assert!(!rows[14].contains('░'), "four of them:\n{all}");
+        assert!(!rows[22].contains('░'), "four of them:\n{all}");
         assert_eq!(all.matches("asking").count(), 1, "the state word alone says it:\n{all}");
         assert_no_counts(&rows);
         key(&mut gui, KeyCode::Right);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[10].contains("░░░") && rows[8].contains(" ON "), "the Connected servers skeleton:\n{all}");
+        assert!(rows[18].contains("░░░") && rows[16].contains(" ON "), "the Connected servers skeleton:\n{all}");
         assert_eq!(all.matches("asking").count(), 1, "{all}");
+        // At the floor the strip gives way: the rows stand under the tabs.
+        let rows = draw_sized(&mut gui, 100, 24);
+        assert!(rows[10].contains("░░░") && rows[8].contains(" ON ") && !rows[8].contains('╭'), "{}", rows.join("\n"));
     }
 
     #[test]
@@ -2217,20 +2873,26 @@ mod tests {
         assert!(rows[5].contains(" Library ") && rows[5].contains(" Connected servers "), "two tabs:\n{}", rows[5]);
         assert!(!all.contains("Network") && !all.contains("Peers"), "the network and the old Peers name are gone:\n{all}");
         assert!(rows[6].contains("seeds") && rows[6].contains("Manor · ALM") && rows[6].contains("edit"), "seeds:\n{}", rows[6]);
+        // The album strip under the seeds line (clause 45): the album with
+        // no art is the note tile, its title and its artist under it.
+        let room = |y: usize| rows[y].chars().skip(17).collect::<String>();
+        assert!(room(8).starts_with("╭──────────╮"), "the note tile's frame:\n{all}");
+        assert!(rows[10].contains("│    ♪     │"), "the note in it:\n{all}");
+        assert_eq!(at(&rows, "Night Album"), Position { x: 17, y: 13 }, "the title under the cover:\n{all}");
+        assert_eq!(at(&rows, "Moon"), Position { x: 17, y: 14 }, "the artist under it:\n{all}");
         for head in ["TRACK", "ARTIST", "ALBUM", "LENGTH"] {
-            assert!(rows[8].contains(head), "{head} in the header:\n{}", rows[8]);
+            assert!(rows[16].contains(head), "{head} in the header:\n{}", rows[16]);
         }
-        assert!(!rows[8].contains("MATCH") && !rows[8].contains("LAST PLAYED"), "no meter, no last played:\n{}", rows[8]);
-        // Albums first, a container with its marker and its artist; then the
-        // songs: title, artist, album, length (clauses 50–51).
-        assert!(rows[10].contains("Night Album album") && rows[10].contains("Moon"), "album row:\n{}", rows[10]);
-        assert!(!rows[10].contains("songs"), "no song count on an album:\n{}", rows[10]);
+        assert!(!rows[16].contains("MATCH") && !rows[16].contains("LAST PLAYED"), "no meter, no last played:\n{}", rows[16]);
+        // The album left the table for the strip; the songs: title, artist,
+        // album, length (clauses 50–51).
+        assert!(!all.contains("Night Album album"), "no album row where the strip stands:\n{all}");
         for cell in ["Aurora", "Ray", "Dawn", "4:11"] {
-            assert!(rows[11].contains(cell), "{cell} on the song row:\n{}", rows[11]);
+            assert!(rows[18].contains(cell), "{cell} on the song row:\n{}", rows[18]);
         }
         assert_eq!(at(&rows, "Ray").x, at(&rows, "ARTIST").x, "ARTIST over its words");
         assert_eq!(at(&rows, "Dawn").x, at(&rows, "ALBUM").x, "ALBUM over its words");
-        assert!(rows[13].contains("Cirrus") && rows[13].contains("—"), "a missing artist is the dash:\n{}", rows[13]);
+        assert!(rows[20].contains("Cirrus") && rows[20].contains("—"), "a missing artist is the dash:\n{}", rows[20]);
         // The bottom row: the checkbox at the left, the verbs at the right.
         assert!(rows[24].contains("[ ] Include songs I've played lately"), "the checkbox, unticked:\n{}", rows[24]);
         assert!(rows[24].contains("play · + queue all"), "bottom:\n{}", rows[24]);
@@ -2244,20 +2906,20 @@ mod tests {
         let mut gui = answered_gui();
         gui.queue_open = true;
         let rows = draw(&mut gui);
-        assert!(rows[8].contains("TRACK") && rows[8].contains("ARTIST") && rows[8].contains("LENGTH"), "{}", rows[8]);
-        assert!(!rows[8].contains("ALBUM"), "47 cells: ALBUM goes first:\n{}", rows[8]);
+        assert!(rows[16].contains("TRACK") && rows[16].contains("ARTIST") && rows[16].contains("LENGTH"), "{}", rows[16]);
+        assert!(!rows[16].contains("ALBUM"), "47 cells: ALBUM goes first:\n{}", rows[16]);
         assert!(rows[2].contains("Last 30 days ▾"), "the window control keeps its home:\n{}", rows[2]);
         assert!(rows[24].contains("[ ] Include songs"), "the checkbox keeps its home:\n{}", rows[24]);
         assert_no_counts(&rows);
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         let rows = draw(&mut gui);
-        assert!(rows[8].contains("TRACK") && rows[8].contains("ARTIST") && rows[8].contains("LENGTH"), "{}", rows[8]);
-        assert!(!rows[8].contains("ALBUM") && !rows[8].contains(" ON "), "then ON:\n{}", rows[8]);
+        assert!(rows[16].contains("TRACK") && rows[16].contains("ARTIST") && rows[16].contains("LENGTH"), "{}", rows[16]);
+        assert!(!rows[16].contains("ALBUM") && !rows[16].contains(" ON "), "then ON:\n{}", rows[16]);
         // With the room's 80 cells, all five stand.
         gui.queue_open = false;
         let rows = draw(&mut gui);
         for head in ["TRACK", "ARTIST", "ALBUM", "ON", "LENGTH"] {
-            assert!(rows[8].contains(head), "{head} at 80 cells:\n{}", rows[8]);
+            assert!(rows[16].contains(head), "{head} at 80 cells:\n{}", rows[16]);
         }
     }
 
@@ -2270,16 +2932,22 @@ mod tests {
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(rows[3].contains("• ready to play · streams through your server"), "{}", rows[3]);
+        // The strip: the one album-tagged row's album, from Sam's server.
+        assert_eq!(at(&rows, "Theirs"), Position { x: 17, y: 13 }, "the album's tile:\n{all}");
+        assert!(rows[14].contains("Pia"), "{}", rows[14]);
         // No group lines: the rows start under the rule.
-        assert!(rows[10].contains("Peer One") && rows[10].contains("Pia") && rows[10].contains("Theirs"), "{}", rows[10]);
-        assert!(rows[10].contains("Sam's server") && rows[10].contains("3:20"), "ON and LENGTH:\n{}", rows[10]);
-        assert!(rows[11].contains("Peer Two"), "{}", rows[11]);
+        assert!(rows[18].contains("Peer One") && rows[18].contains("Pia") && rows[18].contains("Theirs"), "{}", rows[18]);
+        assert!(rows[18].contains("Sam's server") && rows[18].contains("3:20"), "ON and LENGTH:\n{}", rows[18]);
+        assert!(rows[19].contains("Peer Two"), "{}", rows[19]);
         for gone in ["Far box", "Odd model", "Elsewhere", "online", "not answering", "last seen", "sonic model"] {
             assert!(!all.contains(gone), "{gone:?} is not drawn:\n{all}");
         }
         assert_no_counts(&rows);
-        // ↓ lands on the first song; Enter plays it through your server (the
-        // Listen verb's way) and queues the tab's rows after it.
+        // ↓ lands on the strip, ↓ again on the first song; Enter plays it
+        // through your server (the Listen verb's way) and queues the tab's
+        // rows after it.
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.discover.strip.on && gui.discover.cursor.is_none(), "the strip is the top stop");
         key(&mut gui, KeyCode::Down);
         assert_eq!(gui.discover.cursor, Some(0));
         gui.pending.clear();
@@ -2307,19 +2975,23 @@ mod tests {
         let mut gui = answered_gui();
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         draw(&mut gui);
-        gui.ui.pointer = Some(Position { x: 30, y: 11 });
+        gui.ui.pointer = Some(Position { x: 30, y: 19 });
         let rows = draw(&mut gui);
-        assert!(rows[11].contains("[▸] [»] [+] [⋯]"), "the song verbs, [⋯] among them:\n{}", rows[11]);
-        let dots = Position { x: rows[11].find("[⋯]").map(|i| rows[11][..i].chars().count()).unwrap() as u16, y: 11 };
+        assert!(rows[19].contains("[▸] [»] [+] [⋯]"), "the song verbs, [⋯] among them:\n{}", rows[19]);
+        let dots = Position { x: rows[19].find("[⋯]").map(|i| rows[19][..i].chars().count()).unwrap() as u16, y: 19 };
         assert_eq!(gui.ui.hit(dots), Some(Act::Disc(DiscAct::More(1))));
-        assert_eq!(gui.ui.hit_context(Position { x: 30, y: 10 }), Some(Act::Disc(DiscAct::More(0))), "a right click too");
+        assert_eq!(gui.ui.hit_context(Position { x: 30, y: 18 }), Some(Act::Disc(DiscAct::More(0))), "a right click too");
         gui.act(Act::Disc(DiscAct::More(1)));
         let sheet = gui.actions.sheet.as_ref().expect("the sheet opens");
         assert_eq!((sheet.origin.server.as_str(), sheet.origin.peer), (HOST, Some(7)), "the peer's origin");
         assert_eq!(sheet.track.filepath, "Music/p2.mp3");
         assert_eq!(sheet.queue_row, None);
-        // `m` with the cursor up, too.
+        // `m` with the cursor up, too — not on the strip, whose tile has
+        // one verb.
         gui.actions.sheet = None;
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Char('m'));
+        assert!(gui.actions.sheet.is_none(), "a tile has no sheet");
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Char('m'));
         assert_eq!(gui.actions.sheet.as_ref().map(|s| s.track.filepath.as_str()), Some("Music/p1.mp3"));
@@ -2329,8 +3001,9 @@ mod tests {
     fn an_album_rows_play_control_queues_the_album() {
         let _en = english();
         let mut gui = answered_gui();
+        // At the floor, where the album stays a row (clause 49).
         gui.ui.pointer = Some(Position { x: 30, y: 10 });
-        let rows = draw(&mut gui);
+        let rows = draw_sized(&mut gui, 100, 24);
         assert!(rows[10].contains("[+]") && !rows[10].contains("[»]") && !rows[10].contains("[⋯]"), "one control:\n{}", rows[10]);
         let plus = Position { x: rows[10].find("[+]").map(|i| rows[10][..i].chars().count()).unwrap() as u16, y: 10 };
         assert_eq!(gui.ui.hit(plus), Some(Act::Disc(DiscAct::Row(0, RowVerb::Queue))));
@@ -2340,7 +3013,11 @@ mod tests {
             .pending
             .iter()
             .find_map(|e| match e {
-                Effect::Api(ApiCmd::TasteAlbum { name, generation }) if name == "Night Album" => Some(*generation),
+                Effect::Api(ApiCmd::TasteAlbum { name, generation, peer: None, reach: None, play: false, .. })
+                    if name == "Night Album" =>
+                {
+                    Some(*generation)
+                }
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the album's songs are asked by name: {:?}", gui.pending));
@@ -2350,14 +3027,22 @@ mod tests {
             { "filepath": "music/n2.mp3", "metadata": { "title": "Night Two" } }
         ]))
         .unwrap();
-        let effects = gui.app.apply_event(Event::TasteAlbum { generation, tracks: Some(tracks.clone()) });
+        let landed = |generation: u64, tracks: Option<Vec<crate::api::types::Track>>| Event::TasteAlbum {
+            generation,
+            tracks,
+            name: "Night Album".into(),
+            artist: None,
+            peer: None,
+            play: false,
+        };
+        let effects = gui.app.apply_event(landed(generation, Some(tracks.clone())));
         gui.pend(effects);
         let queued: Vec<_> = gui.app.queue.items.iter().map(|q| (q.filepath.as_str(), q.origin.peer)).collect();
         assert_eq!(queued, vec![("music/n1.mp3", None), ("music/n2.mp3", None)], "appended with the session's origin");
         // Another generation fills nothing; a failure says so.
-        gui.app.apply_event(Event::TasteAlbum { generation: generation + 1, tracks: Some(tracks) });
+        gui.app.apply_event(landed(generation + 1, Some(tracks)));
         assert_eq!(gui.app.queue.items.len(), 2);
-        gui.app.apply_event(Event::TasteAlbum { generation, tracks: None });
+        gui.app.apply_event(landed(generation, None));
         assert_eq!(gui.app.message.as_ref().map(|m| m.text.as_str()), Some("couldn't load the album"));
         // `a` on the album row with the cursor up asks the same.
         gui.pending.clear();
@@ -2371,18 +3056,18 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let rows = draw(&mut gui);
-        gui.ui.pointer = Some(Position { x: 30, y: 11 });
+        gui.ui.pointer = Some(Position { x: 30, y: 18 });
         let rows_hover = draw(&mut gui);
-        assert!(rows_hover[11].contains("[▸] [»] [+] [⋯]"), "the hover verbs:\n{}", rows_hover[11]);
-        assert!(rows_hover[11].contains("Aurora") && rows_hover[11].contains("Ray"), "TRACK and ARTIST stay:\n{}", rows_hover[11]);
-        assert!(!rows_hover[10].contains("[▸]"), "an album has no play-now:\n{}", rows_hover[10]);
+        assert!(rows_hover[18].contains("[▸] [»] [+] [⋯]"), "the hover verbs:\n{}", rows_hover[18]);
+        assert!(rows_hover[18].contains("Aurora") && rows_hover[18].contains("Ray"), "TRACK and ARTIST stay:\n{}", rows_hover[18]);
+        assert!(!rows_hover[13].contains("[▸]"), "an album has no play-now:\n{}", rows_hover[13]);
         assert_eq!(gui.discover.cursor, None, "hover never selects");
-        let plus = Position { x: rows_hover[11].find("[+]").map(|i| rows_hover[11][..i].chars().count()).unwrap() as u16, y: 11 };
-        assert_eq!(gui.ui.hit(plus), Some(Act::Disc(DiscAct::Row(1, RowVerb::Queue))));
-        gui.act(Act::Disc(DiscAct::Row(1, RowVerb::Queue)));
+        let plus = Position { x: rows_hover[18].find("[+]").map(|i| rows_hover[18][..i].chars().count()).unwrap() as u16, y: 18 };
+        assert_eq!(gui.ui.hit(plus), Some(Act::Disc(DiscAct::Row(0, RowVerb::Queue))));
+        gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Queue)));
         let item = &gui.app.queue.items[0];
         assert_eq!((item.filepath.as_str(), item.origin.server.as_str(), item.origin.peer), ("music/a.mp3", HOST, None));
-        assert!(rows[11].contains("4:11"), "at rest the row keeps its columns");
+        assert!(rows[18].contains("4:11"), "at rest the row keeps its columns");
     }
 
     #[test]
@@ -2390,19 +3075,23 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let buffer = draw_buffer(&mut gui);
-        assert!((10..16).all(|y| buffer[(40, y)].bg != th().accent), "nothing lit on arrival");
+        assert!((8..24).all(|y| (17..97).all(|x| buffer[(x, y)].bg != th().accent)), "nothing lit on arrival");
         // Stowed, Enter and `a` do nothing (clause 57).
         key(&mut gui, KeyCode::Enter);
         key(&mut gui, KeyCode::Char('a'));
         assert!(gui.app.queue.items.is_empty(), "no verb on a row nobody can see");
         key(&mut gui, KeyCode::Down);
         let buffer = draw_buffer(&mut gui);
-        assert_eq!(buffer[(40, 10)].bg, th().accent, "↓ lights the top row");
+        assert_eq!(buffer[(20, 13)].bg, th().accent, "↓ lights the top: the strip's first tile");
+        assert_ne!(buffer[(40, 18)].bg, th().accent, "one thing lit");
         key(&mut gui, KeyCode::Down);
+        let buffer = draw_buffer(&mut gui);
+        assert_eq!(buffer[(40, 18)].bg, th().accent, "↓ again lights the first song");
+        assert_ne!(buffer[(20, 13)].bg, th().accent, "and the tile goes dark");
         key(&mut gui, KeyCode::Enter);
         assert_eq!(gui.app.queue.items.len(), 4, "Enter plays from here: the tab's songs");
         assert_eq!(gui.app.queue.current, Some(0), "the row it was on");
-        assert_eq!(gui.discover.cursor, Some(1), "played by key, the cursor stays up");
+        assert_eq!(gui.discover.cursor, Some(0), "played by key, the cursor stays up");
         key(&mut gui, KeyCode::Esc);
         assert_eq!(gui.discover.cursor, None, "Esc stows it");
         assert_eq!(gui.active, DISCOVER_NAV);
@@ -2628,7 +3317,7 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         gui.ui.pointer = Some(Position { x: 30, y: 10 });
-        draw(&mut gui);
+        draw_sized(&mut gui, 100, 24);
         assert_eq!(gui.ui.hit(Position { x: 30, y: 10 }), Some(Act::Disc(DiscAct::Row(0, RowVerb::Open))));
         gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Open)));
         assert_eq!(gui.active, super::super::ALBUMS_NAV);
@@ -2652,11 +3341,494 @@ mod tests {
         gui.act(Act::Disc(DiscAct::Again));
         land(&mut gui, TastePart::Main, answer);
         draw(&mut gui);
-        gui.wheel(Position { x: 40, y: 12 }, 3);
+        gui.wheel(Position { x: 40, y: 20 }, 3);
         draw(&mut gui);
         assert_eq!(gui.discover.view.scroll, 3, "the wheel scrolls the list under the pointer");
         gui.act(Act::ScrollBy(List::Discover, -1));
         assert_eq!(gui.discover.view.scroll, 2);
+    }
+
+    // ── The album strip (clauses 45–49) ─────────────────────────────────
+
+    /// The room's own cells of screen row `y`, right of the nav column.
+    fn room(rows: &[String], y: usize) -> String {
+        rows[y].chars().skip(17).collect()
+    }
+
+    #[test]
+    fn the_strip_stands_from_twenty_content_rows_and_the_floor_keeps_the_album_rows() {
+        let _en = english();
+        // The layout math (clause 49): the strip's seven rows and its gap
+        // stand where the table keeps three rows under them.
+        let content = |height: u16| Rect { x: 17, y: 2, width: 80, height };
+        assert_eq!(layout(content(19), false, true).strip_y, None, "19 rows: the table would keep two");
+        let twenty = layout(content(20), false, true);
+        assert_eq!((twenty.strip_y, twenty.table_y), (Some(8), 16), "{twenty:?}");
+        assert_eq!(twenty.bottom_y - (twenty.table_y + 2), 3, "three rows under the strip");
+        assert_eq!(layout(content(20), false, false).strip_y, None, "no albums, no strip");
+        // The card comes first: its whole height and the strip want 28.
+        assert_eq!(layout(content(27), true, true).strip_y, None);
+        assert!(layout(content(28), true, true).strip_y.is_some());
+        // 100×30 with the footer on (22 rows): the strip, five rows under it.
+        let mut gui = answered_gui();
+        gui.config.gui.key_hints = true;
+        gui.ui.key_hints = true;
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(room(&rows, 8).starts_with("╭──────────╮") && room(&rows, 13).starts_with("Night Album"), "{all}");
+        assert!(rows[18].contains("Aurora") && rows[23].contains("[ ] Include songs"), "{all}");
+        // The floor, footer on and off: the album stays a row, no strip.
+        for footer in [false, true] {
+            gui.config.gui.key_hints = footer;
+            gui.ui.key_hints = footer;
+            let rows = draw_sized(&mut gui, 100, 24);
+            let all = rows.join("\n");
+            assert!(rows[10].contains("Night Album album") && rows[11].contains("Aurora"), "{footer}:\n{all}");
+            let room_rows: String = (2..18).map(|y| room(&rows, y)).collect();
+            assert!(!room_rows.contains('♪') && !room_rows.contains('╭'), "{footer}: no tile at the floor:\n{all}");
+        }
+        // The card at 100×30 keeps the table's rows: no strip under it.
+        let mut gui = session_gui();
+        key(&mut gui, KeyCode::Char('G'));
+        let mut answer = fallback_answer();
+        answer.library.as_mut().unwrap().albums = main_answer().library.unwrap().albums;
+        land(&mut gui, TastePart::Main, answer);
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("Night Album album") && !all.contains('♪'), "{all}");
+    }
+
+    #[test]
+    fn the_strip_scrolls_with_the_wheel_and_cuts_its_last_tile() {
+        let _en = english();
+        let mut gui = strip_gui();
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        // Best match first; six whole tiles in the room's 80 cells, the
+        // seventh cut at the right edge — the cut says there is more.
+        assert!(room(&rows, 13).starts_with("Album 0      Album 1"), "{all}");
+        assert!(room(&rows, 13).trim_end().ends_with("Album 5      A…"), "the cut tile:\n{all}");
+        assert!(room(&rows, 14).trim_end().ends_with("Band 5       B…"), "{all}");
+        // Covers as the mosaic here (no pixels under TestBackend), the note
+        // tile where an album has no art; the cut cover is cut, not squeezed.
+        assert!(room(&rows, 10).starts_with("▀▀▀▀▀▀▀▀▀▀▀▀ │    ♪     │ ▀▀▀▀▀▀▀▀▀▀▀▀"), "{all}");
+        assert_eq!(room(&rows, 10).trim_end().chars().rev().take(3).collect::<String>(), "▀▀ ", "{all}");
+        // The wheel over the strip: one tile a notch, whatever the notch,
+        // never past the last whole view; the table stays.
+        gui.wheel(Position { x: 40, y: 10 }, 1);
+        assert_eq!(gui.discover.strip.first, 1);
+        gui.wheel(Position { x: 40, y: 13 }, 3);
+        assert_eq!(gui.discover.strip.first, 2);
+        gui.wheel(Position { x: 40, y: 10 }, 1);
+        assert_eq!(gui.discover.strip.first, 2, "eight tiles, six whole: two is the end");
+        let rows = draw(&mut gui);
+        assert!(room(&rows, 13).starts_with("Album 2") && room(&rows, 13).trim_end().ends_with("Album 7"), "{}", rows.join("\n"));
+        assert!(!rows[13].contains('…'), "the end: nothing cut");
+        gui.wheel(Position { x: 40, y: 10 }, -1);
+        assert_eq!(gui.discover.strip.first, 1);
+        assert_eq!((gui.discover.view.scroll, gui.discover.cursor, gui.discover.strip.on), (0, None, false), "the wheel lights nothing");
+        // The wheel over the table scrolls the table, not the strip.
+        gui.wheel(Position { x: 40, y: 19 }, 1);
+        assert_eq!(gui.discover.strip.first, 1);
+    }
+
+    #[test]
+    fn the_cut_tile_stands_whatever_the_width() {
+        let _en = english();
+        // Content of 90 and 91 cells (110 and 111 columns, the queue
+        // folded): seven tiles would end exactly at the edge, so the seventh
+        // gives its place up to a half tile — the cut that says there is more.
+        for width in [110u16, 111] {
+            let mut gui = strip_gui();
+            let rows = draw_sized(&mut gui, width, 30);
+            let all = rows.join("\n");
+            assert_eq!(gui.discover.content.width, width - 20);
+            let line = room(&rows, 13);
+            assert!(line.trim_end().ends_with("Album 5      Album…"), "{width}: the cut tile:\n{all}");
+            assert_eq!(super::strip_view(width - 20, 8, 0), (6, 6), "{width}");
+            // At the end nothing follows: seven whole tiles, nothing cut.
+            gui.discover.strip.first = 9;
+            let rows = draw_sized(&mut gui, width, 30);
+            assert_eq!(gui.discover.strip.first, 1, "{width}: clamped to the last whole view");
+            let line = room(&rows, 13);
+            assert!(line.starts_with("Album 1") && line.trim_end().ends_with("Album 7"), "{width}:\n{}", rows.join("\n"));
+            assert!(!line.contains('…'), "{width}: the end, nothing cut");
+        }
+        // Every width from one tile to twelve: while tiles follow, a cut
+        // tile of at least one cell stands, and nothing reaches past the edge.
+        for width in 25u16..=170 {
+            let (whole, cut) = super::strip_view(width, 20, 0);
+            assert!(cut > 0 && cut < super::TILE_W, "{width}: ({whole}, {cut})");
+            assert!(whole as u16 * super::TILE_STRIDE + cut <= width, "{width}: ({whole}, {cut})");
+        }
+    }
+
+    #[test]
+    fn a_narrowed_room_keeps_the_lit_tile_in_view() {
+        let _en = english();
+        let mut gui = strip_gui();
+        draw(&mut gui);
+        key(&mut gui, KeyCode::Down);
+        for _ in 0..6 {
+            key(&mut gui, KeyCode::Right);
+        }
+        assert_eq!((gui.discover.strip.cursor, gui.discover.strip.first), (6, 1));
+        // The queue opens: three whole tiles in 47 cells, and the hand's
+        // tile stays among them.
+        gui.queue_open = true;
+        let rows = draw(&mut gui);
+        assert_eq!((gui.discover.strip.cursor, gui.discover.strip.first), (6, 4), "{}", rows.join("\n"));
+        let (whole, _) = super::strip_view(gui.discover.content.width, 8, 4);
+        assert!(6 < 4 + whole, "the lit tile is whole in view");
+        assert!(room(&rows, 13).contains("Album 6"), "{}", rows.join("\n"));
+        // Enter acts on the album the user sees lit.
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Char('a'));
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::TasteAlbum { name, .. }) if name == "Album 6")));
+    }
+
+    #[test]
+    fn the_hand_keeps_its_row_across_the_height_gate() {
+        let _en = english();
+        let mut gui = answered_gui();
+        draw(&mut gui);
+        // A song, lit at 100×30 (the strip holds the album): the floor puts
+        // the album row back above it, and the hand stays on the song.
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Down);
+        assert_eq!(gui.discover.cursor, Some(0));
+        draw_sized(&mut gui, 100, 24);
+        let held = gui.discover.cursor.map(|c| super::rows(&gui)[c]);
+        assert_eq!(held, Some(Line::Song(0)), "Aurora still");
+        assert!(gui.discover.view.held);
+        draw(&mut gui);
+        assert_eq!(gui.discover.cursor, Some(0), "and back");
+        assert_eq!(super::rows(&gui)[0], Line::Song(0));
+        // The album row at the floor becomes its tile where the strip stands,
+        // and its row again at the floor.
+        key(&mut gui, KeyCode::Esc);
+        draw_sized(&mut gui, 100, 24);
+        key(&mut gui, KeyCode::Down);
+        assert_eq!(gui.discover.cursor.map(|c| super::rows(&gui)[c]), Some(Line::Album(0)));
+        draw(&mut gui);
+        assert_eq!((gui.discover.strip.on, gui.discover.strip.cursor, gui.discover.cursor), (true, 0, None));
+        let buffer = draw_buffer(&mut gui);
+        assert_eq!(buffer[(18, 13)].bg, th().accent, "the tile wears the slab");
+        draw_sized(&mut gui, 100, 24);
+        assert!(!gui.discover.strip.on);
+        assert_eq!(gui.discover.cursor.map(|c| super::rows(&gui)[c]), Some(Line::Album(0)));
+        assert!(gui.discover.view.held);
+    }
+
+    #[test]
+    fn an_answer_of_albums_alone_draws_no_empty_table() {
+        let _en = english();
+        let mut gui = session_gui();
+        key(&mut gui, KeyCode::Char('G'));
+        let mut answer = main_answer();
+        answer.library.as_mut().unwrap().tracks.clear();
+        land(&mut gui, TastePart::Main, answer);
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(room(&rows, 13).starts_with("Night Album"), "the strip holds the album:\n{all}");
+        assert!(!all.contains("TRACK") && !all.contains("LENGTH"), "no table header under it:\n{all}");
+        // ↓ and ↑ find the strip; nothing below it to walk to.
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.discover.strip.on);
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.discover.strip.on && gui.discover.cursor.is_none());
+    }
+
+    #[test]
+    fn the_note_tile_keeps_the_ground_under_it() {
+        let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
+        let ground = ratatui::style::Color::Rgb(1, 2, 3);
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                frame.render_widget(ratatui::widgets::Block::default().style(ratatui::style::Style::default().bg(ground)), area);
+                super::note_tile(frame, Rect { x: 2, y: 0, width: 12, height: 5 });
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, 0)].symbol(), "╭");
+        assert!((2..14).all(|x| (0..5).all(|y| buffer[(x, y)].bg == ground)), "the owned ground stays");
+    }
+
+    #[test]
+    fn the_arrows_walk_the_strip_and_switch_tabs_off_it() {
+        let _en = english();
+        let mut gui = strip_gui();
+        draw(&mut gui);
+        key(&mut gui, KeyCode::Down);
+        assert_eq!((gui.discover.strip.on, gui.discover.strip.cursor), (true, 0), "↓ lands on the first tile in view");
+        for _ in 0..6 {
+            key(&mut gui, KeyCode::Right);
+        }
+        assert_eq!(gui.app.taste.tab, TasteTab::Library, "← → walk the tiles while the hand is on the strip");
+        assert_eq!((gui.discover.strip.cursor, gui.discover.strip.first), (6, 1), "scrolled to keep the tile whole");
+        let buffer = draw_buffer(&mut gui);
+        let lit = 17 + 5 * 13;
+        assert_eq!(buffer[(lit + 1, 13)].bg, th().accent, "the slab on the hand's tile");
+        assert_eq!(buffer[(lit, 13)].symbol(), "A", "Album 6, whole at the fifth place");
+        assert_ne!(buffer[(lit - 12, 13)].bg, th().accent, "one tile lit");
+        key(&mut gui, KeyCode::Right);
+        key(&mut gui, KeyCode::Right);
+        assert_eq!((gui.discover.strip.cursor, gui.discover.strip.first), (7, 2), "the last tile stops the hand");
+        for _ in 0..9 {
+            key(&mut gui, KeyCode::Left);
+        }
+        assert_eq!((gui.discover.strip.cursor, gui.discover.strip.first), (0, 0));
+        assert_eq!(gui.app.taste.tab, TasteTab::Library);
+        let tips = super::tips(&gui);
+        assert!(tips.starts_with("← → albums") && tips.contains("Enter open the album") && tips.contains("+ a queue"), "{tips}");
+        // Off the strip, ← → switch tabs as they always did — the tips say so.
+        key(&mut gui, KeyCode::Esc);
+        assert!(!gui.discover.strip.on, "Esc stows the hand");
+        assert!(super::tips(&gui).contains("← → tabs"), "{}", super::tips(&gui));
+        key(&mut gui, KeyCode::Right);
+        assert_eq!(gui.app.taste.tab, TasteTab::Servers);
+        assert_eq!(gui.discover.strip, super::StripUi::default(), "a tab switch starts its strip from the left");
+    }
+
+    #[test]
+    fn the_strip_is_a_cursor_stop_above_the_table() {
+        let _en = english();
+        let mut gui = answered_gui();
+        let buffer = draw_buffer(&mut gui);
+        assert!((17..29).all(|x| buffer[(x, 13)].bg != th().accent), "nothing lit on arrival");
+        assert!(super::tips(&gui).starts_with("↓ pick an album · ← → tabs"), "{}", super::tips(&gui));
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.discover.strip.on && gui.discover.cursor.is_none(), "↓ from rest: the strip, the top");
+        assert_eq!(super::tips(&gui), "← → albums · Enter open the album · + a queue · ↓ songs · Esc done");
+        key(&mut gui, KeyCode::Up);
+        assert!(gui.discover.strip.on, "nothing above the strip");
+        key(&mut gui, KeyCode::Down);
+        assert_eq!((gui.discover.strip.on, gui.discover.cursor), (false, Some(0)), "↓ from the strip: the first song");
+        assert!(super::tips(&gui).contains("m actions"), "{}", super::tips(&gui));
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Up);
+        assert_eq!(gui.discover.cursor, Some(0), "↑ walks the table");
+        key(&mut gui, KeyCode::Up);
+        assert_eq!((gui.discover.strip.on, gui.discover.cursor), (true, None), "↑ from the first song: back to the strip");
+        // PageDown from rest stops on the strip too, PageUp from the first
+        // row goes back to it (clause 57).
+        key(&mut gui, KeyCode::Esc);
+        key(&mut gui, KeyCode::PageDown);
+        assert_eq!((gui.discover.strip.on, gui.discover.cursor), (true, None), "PageDown from rest: the strip");
+        key(&mut gui, KeyCode::PageDown);
+        assert_eq!((gui.discover.strip.on, gui.discover.cursor), (false, Some(0)));
+        key(&mut gui, KeyCode::PageUp);
+        assert_eq!((gui.discover.strip.on, gui.discover.cursor), (true, None), "PageUp from the first row: the strip");
+        // A row's verbs are not a tile's: N, P and m do nothing there.
+        key(&mut gui, KeyCode::Char('P'));
+        key(&mut gui, KeyCode::Char('m'));
+        assert!(gui.app.queue.items.is_empty() && gui.actions.sheet.is_none());
+        // A click stows the hand (the list-cursor law).
+        gui.act(Act::Disc(DiscAct::Tile(0, RowVerb::Queue)));
+        assert!(!gui.discover.strip.on);
+        // At the floor the album is a row again, the first stop of ↓.
+        draw_sized(&mut gui, 100, 24);
+        key(&mut gui, KeyCode::Down);
+        assert_eq!((gui.discover.strip.on, gui.discover.cursor), (false, Some(0)));
+        assert_eq!(super::tips(&gui), "Enter open the album · a queue · ← → tabs · Esc done");
+    }
+
+    #[test]
+    fn a_tile_opens_its_album_and_its_plus_queues_it() {
+        let _en = english();
+        let mut gui = answered_gui();
+        draw(&mut gui);
+        // Hover brightens the title BOLD and shows the one verb at the
+        // tile's corner; it never selects (clause 48).
+        gui.ui.pointer = Some(Position { x: 20, y: 10 });
+        let buffer = draw_buffer(&mut gui);
+        let title = &buffer[(17, 13)];
+        assert!(title.modifier.contains(ratatui::style::Modifier::BOLD) && title.fg == th().bright, "{title:?}");
+        let corner: String = (26..29).map(|x| buffer[(x, 13)].symbol()).collect();
+        assert_eq!(corner, "[+]");
+        assert_eq!(buffer[(17 + 7, 13)].symbol(), "…", "the title gives its tail to the verb");
+        assert!(!gui.discover.strip.on, "hover never selects");
+        assert_eq!(gui.ui.hit(Position { x: 20, y: 10 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Open))));
+        assert_eq!(gui.ui.hit(Position { x: 27, y: 13 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Queue))));
+        // [+] queues the album by name, the row's way (clause 61).
+        gui.pending.clear();
+        gui.act(Act::Disc(DiscAct::Tile(0, RowVerb::Queue)));
+        let album = |gui: &Gui| {
+            gui.pending.iter().find_map(|e| match e {
+                Effect::Api(ApiCmd::TasteAlbum { name, peer, play, .. }) => Some((name.clone(), *peer, *play)),
+                _ => None,
+            })
+        };
+        assert_eq!(album(&gui), Some(("Night Album".to_string(), None, false)));
+        assert_eq!(gui.active, DISCOVER_NAV);
+        // The keys, with the hand on the tile: `+` and `a` queue, Enter opens.
+        for c in ['+', 'a'] {
+            gui.pending.clear();
+            key(&mut gui, KeyCode::Down);
+            key(&mut gui, KeyCode::Char(c));
+            assert_eq!(album(&gui), Some(("Night Album".to_string(), None, false)), "{c}");
+            assert!(gui.discover.strip.on, "acted by key, the hand stays");
+            key(&mut gui, KeyCode::Esc);
+        }
+        // A click opens it in the Albums room, its row's way (clause 61).
+        gui.act(Act::Disc(DiscAct::Tile(0, RowVerb::Open)));
+        assert_eq!(gui.active, super::super::ALBUMS_NAV);
+        assert!(matches!(
+            gui.app.library_stack.here(),
+            crate::tui::worker::LibraryNode::Album { name, artist } if name == "Night Album" && artist.is_none()
+        ));
+        // And Enter by key, the hand on the tile: the same drill.
+        let mut gui = answered_gui();
+        draw(&mut gui);
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.discover.strip.on);
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(gui.active, super::super::ALBUMS_NAV, "Enter opens the album");
+        assert!(matches!(
+            gui.app.library_stack.here(),
+            crate::tui::worker::LibraryNode::Album { name, .. } if name == "Night Album"
+        ));
+    }
+
+    #[test]
+    fn a_connected_servers_album_plays_and_queues_through_its_server() {
+        let _en = english();
+        let mut gui = answered_gui();
+        gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        draw(&mut gui);
+        assert_eq!(gui.ui.hit(Position { x: 20, y: 10 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Open))));
+        gui.pending.clear();
+        gui.act(Act::Disc(DiscAct::Tile(0, RowVerb::Open)));
+        let ask = gui
+            .pending
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::TasteAlbum { name, artist, generation, peer, reach, play }) => {
+                    Some((name.clone(), artist.clone(), *generation, *peer, reach.as_ref().and_then(|r| r.peer), *play))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the album is asked of its server: {:?}", gui.pending));
+        let (_, _, generation, _, _, _) = ask.clone();
+        assert_eq!(ask, ("Theirs".into(), Some("Pia".into()), generation, Some(7), Some(7), true), "through the proxy, to play");
+        assert_eq!(gui.active, DISCOVER_NAV, "no drill to open into: the room stays");
+        // Its songs land: they play, with that server's origin.
+        let tracks: Vec<crate::api::types::Track> = serde_json::from_value(json!([
+            { "filepath": "Music/t1.mp3", "metadata": { "title": "Theirs One" } },
+            { "filepath": "Music/t2.mp3", "metadata": { "title": "Theirs Two" } }
+        ]))
+        .unwrap();
+        let landed = |tracks, play| Event::TasteAlbum {
+            generation,
+            tracks,
+            name: "Theirs".into(),
+            artist: Some("Pia".into()),
+            peer: Some(7),
+            play,
+        };
+        let effects = gui.app.apply_event(landed(Some(tracks), true));
+        gui.pend(effects);
+        let queued: Vec<_> = gui.app.queue.items.iter().map(|q| (q.filepath.as_str(), q.origin.peer)).collect();
+        assert_eq!(queued, vec![("Music/t1.mp3", Some(7)), ("Music/t2.mp3", Some(7))]);
+        assert_eq!(gui.app.queue.current, Some(0));
+        let url = gui
+            .pending
+            .iter()
+            .find_map(|e| match e {
+                Effect::Audio(crate::tui::worker::AudioCmd::Play { url, .. }) => Some(url.clone()),
+                _ => None,
+            })
+            .expect("it plays");
+        assert!(url.starts_with("http://host:3000/api/v1/federation/peers/7/stream/Music/t1.mp3"), "{url}");
+        // `[+]`: a server that will not list it leaves the rows that matched,
+        // appended.
+        gui.pending.clear();
+        gui.act(Act::Disc(DiscAct::Tile(0, RowVerb::Queue)));
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::TasteAlbum { play: false, .. }))));
+        gui.app.apply_event(landed(None, false));
+        let last = gui.app.queue.items.last().map(|q| (q.filepath.as_str(), q.origin.peer));
+        assert_eq!((gui.app.queue.items.len(), last), (3, Some(("Music/p1.mp3", Some(7)))));
+        let tips = {
+            draw(&mut gui);
+            key(&mut gui, KeyCode::Down);
+            super::tips(&gui)
+        };
+        assert!(tips.contains("Enter play the album"), "{tips}");
+        // Enter by key: the album plays through its server, the hand stays.
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        assert!(
+            gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::TasteAlbum { play: true, peer: Some(7), .. }))),
+            "{:?}",
+            gui.pending
+        );
+        assert!(gui.discover.strip.on && gui.active == DISCOVER_NAV, "played by key, the hand stays on the tile");
+    }
+
+    #[test]
+    fn strip_covers_are_claimed_once_from_their_own_servers() {
+        let _en = english();
+        let mut gui = strip_gui();
+        gui.app.art.clear();
+        gui.pending.clear();
+        draw(&mut gui);
+        let claims = |gui: &Gui| -> Vec<(String, Option<i64>)> {
+            gui.pending
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Api(ApiCmd::AlbumArt { file, reach }) => Some((file.clone(), reach.as_ref().and_then(|r| r.peer))),
+                    _ => None,
+                })
+                .collect()
+        };
+        // The tiles in view, the cut one among them, from the session.
+        let expected: Vec<(String, Option<i64>)> = ["art0.jpg", "art2.jpg", "art4.jpg", "art6.jpg"].iter().map(|f| (f.to_string(), None)).collect();
+        assert_eq!(claims(&gui), expected);
+        gui.pending.clear();
+        draw(&mut gui);
+        assert!(claims(&gui).is_empty(), "claimed once");
+        // A connected server's album with art: through the parent's proxy.
+        let mut gui = answered_gui();
+        let mut answer = peers_answer();
+        answer.peers.as_mut().unwrap().peers[0].results[0].raw["art"] = json!("pc.jpg");
+        gui.act(Act::Disc(DiscAct::Again));
+        land(&mut gui, TastePart::Peers, answer);
+        gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        gui.pending.clear();
+        draw(&mut gui);
+        assert_eq!(claims(&gui), vec![("pc.jpg".to_string(), Some(7))]);
+    }
+
+    #[test]
+    fn strip_covers_are_pixels_where_the_terminal_draws_them_and_a_cut_tile_the_mosaic() {
+        use ratatui_image::picker::ProtocolType;
+        let _en = english();
+        for protocol in [ProtocolType::Kitty, ProtocolType::Sixel, ProtocolType::Iterm2] {
+            let mut gui = strip_gui();
+            gui.app.graphics = crate::tui::graphics::Graphics::forced(protocol);
+            let id = |gui: &Gui, i: usize| gui.app.art[&format!("art{i}.jpg")].as_ref().unwrap().id();
+            let (whole, cut) = ([id(&gui, 0), id(&gui, 2), id(&gui, 4)], id(&gui, 6));
+            // Paced: the frames run until every whole tile's cover is pixels.
+            let mut frames = 0;
+            let rows = loop {
+                frames += 1;
+                assert!(frames <= 30, "{protocol:?}: the covers never upgraded");
+                let rows = draw(&mut gui);
+                if whole.iter().all(|w| gui.discover.slots.get(w).is_some_and(|s| s.key.is_some())) {
+                    break rows;
+                }
+            };
+            assert!(gui.discover.slots.get(&cut).is_some_and(|s| s.key.is_none()), "{protocol:?}: the cut tile encoded nothing");
+            assert!(!room(&rows, 10).starts_with("▀▀▀"), "{protocol:?}: the first cover is a picture:\n{}", rows[10]);
+            assert!(room(&rows, 10).trim_end().ends_with("▀▀"), "{protocol:?}: the cut cover is the mosaic:\n{}", rows[10]);
+            // A scroll moves each cover with its tile and encodes nothing new
+            // for a cover already encoded at this size.
+            let before: u32 = gui.discover.slots.values().map(|s| s.encodes()).sum();
+            gui.wheel(Position { x: 40, y: 10 }, 1);
+            draw(&mut gui);
+            let after: u32 = gui.discover.slots.values().map(|s| s.encodes()).sum();
+            assert!(after <= before + 1, "{protocol:?}: only the newly whole cover may encode ({before} → {after})");
+        }
     }
 
     #[test]
@@ -2703,7 +3875,7 @@ mod tests {
     fn dump_discover_frames() {
         let _en = english();
         let mut gui = answered_gui();
-        gui.ui.pointer = Some(Position { x: 30, y: 11 });
+        gui.ui.pointer = Some(Position { x: 30, y: 18 });
         println!("{}", draw(&mut gui).join("\n"));
         gui.ui.pointer = None;
         gui.queue_open = true;
@@ -2719,6 +3891,25 @@ mod tests {
         gui.queue_open = false;
         key(&mut gui, KeyCode::Char('e'));
         println!("{}", draw(&mut gui).join("\n"));
+        // The album strip (the 2026-10-11 strip log): eight albums, covers
+        // as the mosaic (no pixels under TestBackend) and the note tile,
+        // the last tile cut at the right edge; a hovered tile's `[+]`; the
+        // hand on the strip, scrolled; the queue open; the floor's rows.
+        let mut gui = strip_gui();
+        gui.ui.pointer = Some(Position { x: 32, y: 10 });
+        println!("{}", draw(&mut gui).join("\n"));
+        gui.ui.pointer = None;
+        key(&mut gui, KeyCode::Down);
+        for _ in 0..6 {
+            key(&mut gui, KeyCode::Right);
+        }
+        println!("{}", draw(&mut gui).join("\n"));
+        gui.queue_open = true;
+        println!("{}", draw(&mut gui).join("\n"));
+        println!("{}", draw_sized(&mut gui, 100, 24).join("\n"));
+        // A width whose whole tiles end at the edge: the half tile's cut.
+        let mut gui = strip_gui();
+        println!("{}", draw_sized(&mut gui, 110, 30).join("\n"));
     }
 
     // ── Pure pieces ─────────────────────────────────────────────────────
@@ -2739,13 +3930,13 @@ mod tests {
     fn the_layout_keeps_a_table_row_at_the_floor() {
         // 100×24 with the footer on: 16 content rows.
         let content = Rect { x: 17, y: 2, width: 80, height: 16 };
-        let plain = layout(content, false);
+        let plain = layout(content, false, false);
         assert_eq!((plain.tabs_y, plain.seeds_y, plain.table_y, plain.bottom_y), (5, 6, 8, 17));
         assert_eq!(plain.bottom_y - (plain.table_y + 2), 7, "seven rows with the footer on (clause 90)");
-        let card = layout(content, true);
+        let card = layout(content, true, false);
         assert_eq!(card.card.map(|(r, compact)| (r.height, compact)), Some((5, true)), "the card gives up its body");
         assert!(card.bottom_y > card.table_y + 2, "the table keeps a row: {card:?}");
-        let tall = layout(Rect { height: 23, ..content }, true);
+        let tall = layout(Rect { height: 23, ..content }, true, false);
         assert_eq!(tall.card.map(|(r, compact)| (r.height, compact)), Some((7, false)));
     }
 
@@ -2823,7 +4014,7 @@ mod tests {
         let _fr = locale("fr");
         let mut gui = answered_gui();
         let rows = draw(&mut gui);
-        let header = &rows[8];
+        let header = &rows[16];
         for head in ["TITRE", "ARTISTE", "ALBUM", "DURÉE"] {
             assert!(header.contains(head), "{head}:\n{header}");
         }
@@ -2841,9 +4032,9 @@ mod tests {
         // cells. The artist's first letter stands under the heading's first
         // cell, and the album's under アルバム's, whatever the glyph widths.
         let find = |y: u16, symbol: &str| (17..100).find(|x| buffer[(*x, y)].symbol() == symbol).expect(symbol);
-        assert_eq!(find(11, "R"), find(8, "ア"), "ARTIST in cells, not chars");
-        let album = (find(8, "ア") + 1..100).find(|x| buffer[(*x, 8)].symbol() == "ア").expect("アルバム");
-        assert_eq!(find(11, "D"), album, "ALBUM in cells, not chars");
+        assert_eq!(find(18, "R"), find(16, "ア"), "ARTIST in cells, not chars");
+        let album = (find(16, "ア") + 1..100).find(|x| buffer[(*x, 16)].symbol() == "ア").expect("アルバム");
+        assert_eq!(find(18, "D"), album, "ALBUM in cells, not chars");
     }
 
     #[test]
@@ -2883,16 +4074,16 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let _legacy = crate::kit::theme::legacy_glyphs_here();
-        gui.ui.pointer = Some(Position { x: 30, y: 11 });
+        gui.ui.pointer = Some(Position { x: 30, y: 18 });
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(rows[2].trim_end().ends_with("Last 30 days v"), "the dropdown's caret:\n{}", rows[2]);
-        assert!(rows[11].contains("[>] [^] [+] [.]"), "the hover verbs:\n{}", rows[11]);
-        assert!(rows[13].contains(" - "), "the missing artist:\n{}", rows[13]);
+        assert!(rows[18].contains("[>] [^] [+] [.]"), "the hover verbs:\n{}", rows[18]);
+        assert!(rows[20].contains(" - "), "the missing artist:\n{}", rows[20]);
         gui.act(Act::Disc(DiscAct::Played));
         let rows = draw(&mut gui);
         assert!(rows[24].contains("[x] Include songs"), "the checkmark's stand-in:\n{}", rows[24]);
-        for glyph in ['▾', '▸', '»', '⋯', '▇', '—', '–', '✓'] {
+        for glyph in ['▾', '▸', '»', '⋯', '▇', '—', '–', '✓', '♪'] {
             assert!(!all.contains(glyph), "{glyph:?} on the legacy console:\n{all}");
         }
     }
@@ -2924,7 +4115,7 @@ mod tests {
         let mut gui = answered_gui();
         assert!(super::tips(&gui).contains("f played lately"), "the checkbox's key: {}", super::tips(&gui));
         key(&mut gui, KeyCode::Down);
-        assert_eq!(super::tips(&gui), "Enter open the album · a queue · Esc done", "an album row");
+        assert_eq!(super::tips(&gui), "Enter open the album · a queue · ← → tabs · Esc done", "an album row");
         key(&mut gui, KeyCode::Down);
         assert!(super::tips(&gui).contains("m actions"), "a song row");
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));

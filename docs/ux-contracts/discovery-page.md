@@ -6,7 +6,7 @@
 | **Server API** | **`POST /api/v1/discovery/taste`** (§3.1) `{window?, pin?, exclude?, remember?, filter?, staleDays?, sources?, limit?, newArtistsOnly?, ignoreVPaths?}` → `{window, widenedFrom, seedSource, fallback, seeds: [{hash, filepath, metadata, outcome, lastPlayed, plays, pinned, analyzed}], excluded: [{hash, filepath, metadata}], dropped, notAnalyzed, model, library: {filter, tracks: [{filepath, similarity, seedHash, metadata, genreTags, playCount, lastPlayed}], albums: [{…Album, similarity, scopedTracks, playedTracks, lastPlayed, tracks: [path]}], capped}, network: {results: [p2p row + {source: 'p2p', seedHash}], searched: {peers, tracks}} \| null, peers: {peers: [{id, name, reachable, mismatched, lastSeen, results: [federation row + {source: 'federation', seedHash: null}]}], searched: {peers, unreachable, mismatched}} \| null}` — an account only (403 for a federation key or a guest), 403 `Discovery is disabled` when discovery is off or the index is unavailable; `network`/`peers` are `null` when the source is not advertised for the caller or a random seed is in use. **`GET` / `PUT /api/v1/discovery/taste/prefs`** (§3.2) `{window, exclude: [hash], filter, staleDays}`, the user's `discovery:page` settings. **`POST /api/v1/discovery/plugin-jobs/lookup/batch`** (§3.3) — phase B; **v1 calls only the taste route and its prefs** (the `links` plug-in's resolve left with the Network tab on 2026-10-11 — the later Explore room's), plus routes the player already speaks: `POST /api/v1/db/random-songs` (another pick), the federation byte proxy `GET /api/v1/federation/peers/{id}/stream/…` and `POST /api/v1/stats/plays` with `peerId`, both through the queue as it is. **Gate**: the ping's `discovery === true && discoveryTaste >= 1` (§2.10) — here `capabilities.discovery && capabilities.discovery_taste >= 1`; the Connected servers source rides `federationDiscovery`; `discoveryP2p` (the Network source) and `discoveryPlugins` are parsed but read by nothing here since 2026-10-11 — the later Explore room's. |
 | **Already in this repo** | The App/worker pair every room rides: `Effect::Api(ApiCmd::…)` drained onto the api thread, answered by `worker::answer` (and `src/web/api_worker.rs` in the browser build) as an `Event` that `App::apply_event` folds in, stale replies dropped by seq / node / session-generation guards. The **Sonic room's own row model** — `List::Sonic` maps to no App pane (`List::tab()` → `None`), its rows live in App state and its verbs call App methods that build the queue rows themselves (`src/gui/sonic.rs`), with `sonic::meter_glyph` for the one-cell match meter. The kit's **Tabs** (first consumer: the admin Discovery room), **Dropdown** (the header's server switcher, the stats page's period), **Table** (`table_view`, `scroll_list`, `ListView`), a list hung from a control (`frame_at` + `Surface::overlay`, the dropdown's own grammar) and **modals** (`modal_frame_on`). `Client::stats_history_async` (the one outcome-bearing history read — named so nobody reaches for it: the server picks the seeds, clause 10). `Client::random_song_async`; `gui::opener::open_target` (honours `MSTREAM_NO_OPEN`); `kit::clipboard::copy`; the track-actions sheet (`actions::Sheet { origin, track }`); the capture banner (`Capture`); `App::origin()` and `App::reach(&Origin)` for a peer origin (multi-server clauses 27, 30); `ApiCmd::DiscoveryProbe`; `GuiPrefs` (`[gui]`, unknown keys kept). **Missing**: `Ping.discovery_taste` / `discovery_plugins` and their `Capabilities` mirrors, the taste types and client calls, `ApiCmd::Taste` / `Event::Taste`, the App's taste state, `NavId::Discover`, `src/gui/discover.rs`, a capture for a seed pick, the `gui.discover.*` strings. |
 | **Target surface** | the GUI player (`mstream-player gui`, both flavours — the window host draws the same `render`) as a **TOOLS nav room**. **The TUI changes nothing**: its Discover tab (`Tab::Discover`, the explicit-seed lookup), the Now Playing panel's neighbours (`App.now_discover`) and `Capture::Discover` stay exactly as they are. The one shared change is a title: the Now Playing view's Discover tab becomes **Similar** (plan §2.12; docs/ux-contracts/now-playing.md) |
-| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11 (the log) |
+| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11 (the log) |
 
 ## Intent
 
@@ -51,7 +51,9 @@ so the Library never waits on a 4 s server deadline.
   for the tab in front, in words (`• ready to play`); the **tabs**
   `Library · Connected servers`, names only (absent sources not drawn);
   the **seeds line** (`seeds  Title · Artist … and more  edit`) whose
-  `edit` opens the **seeds modal**; the tab's table; the bottom row with
+  `edit` opens the **seeds modal**; the tab's **album strip** — a row of
+  album tiles with their covers that scrolls sideways — where the room is
+  20 rows tall or more (clauses 45–49); the tab's table; the bottom row with
   the **"Include songs I've played lately" checkbox** (Library tab) and
   the whole-list verbs.
 - **Nothing finished yet** (`fallback: true`, the server's random seed) —
@@ -214,9 +216,11 @@ session generation, clause 31).
     all. A `null` half for a non-random seed (the server says this caller
     lacks the source) hides the tab until the next answer, as does an
     answer that searched no servers at all (`searched.peers` 0 and no
-    groups: nothing is connected). `←` `→` and clicks switch; switching
-    asks nothing; the pane under the tabs keeps one height whatever the
-    tab. The tab in front is remembered in `GuiPrefs` (`[gui]
+    groups: nothing is connected). `←` `→` (while the keyboard's hand is
+    not on the album strip, clause 47) and clicks switch; switching asks
+    nothing; the pane under the tabs keeps one height whatever the tab,
+    save the album strip, which stands only over a tab that has albums
+    (clause 45). The tab in front is remembered in `GuiPrefs` (`[gui]
     discover_tab`: `library` · `servers`; a saved `peers`, the tab's old
     name, reads as `servers`, a saved `network` as no memory); a
     remembered tab whose source is gone falls back to Library.
@@ -231,6 +235,132 @@ session generation, clause 31).
 42. **The tab row carries no note** (the old "not in your library" / "you
     don't own these" went with the busy page).
 
+### The album strip
+
+45. **A strip of album tiles under each tab's seeds line**, above its
+    table — the webapp's "Albums from your library" / "Albums from
+    {server}" scrollers, without their labels (the tab names the source).
+    **Library**: the answer's `library.albums`, best match first (by
+    `similarity`; ties keep the server's order). **Connected servers**:
+    the tab's playable rows (clause 53) grouped by server + album +
+    artist — album and artist trimmed and folded to lower case, a row
+    with no album tag joining none — best match first by each album's
+    best row, the webapp's `peerAlbums`. Both are capped at **12** (the
+    webapp's `ALBUM_STRIP_MAX`; the server sends eight library albums at
+    most when no `limit` is asked). Where the strip stands, **the album
+    container rows leave the table** (clause 51); a tab with no album to
+    show draws no strip and its table takes the rows. While the first ask
+    is out the strip holds **four skeleton tiles** — the empty cover
+    frame and DIM `░` runs where the title and the artist will stand —
+    over the table's skeleton rows (clause 32). A sentence pane (clauses
+    22, 80–83) draws no strip. A library answer of **albums and no
+    songs** draws the strip and **no table under it** — no header, no
+    rule, no empty rows: the strip holds the whole answer.
+46. **A tile is 12 cells wide**: the cover 12 cells × 5 rows, then the
+    album's title (one line, clipped with the house `…`) and its artist
+    (DIM; the album's credit — `album_artist`, else the first of
+    `artists` — or the rows' artist on a connected server's album); one
+    cell between tiles. **A 12 × 5 box is not square** at the terminal's
+    1:2 cell: the picture is fitted inside it the way every cover is
+    (`tui::graphics` keeps the art's aspect — a square cover is 10 cells ×
+    5 rows, centred, one blank cell either side), while the mosaic fills
+    the box (the shared `CoverPane`, as the Now Playing and queue
+    mosaics do), a square cover's mosaic about a fifth wider than its
+    picture. So a tile whose cover swaps between picture and mosaic (an
+    overlay passing over it, the cut tile beside whole ones) changes its
+    cover's width, never its tile's: the title and artist stand at the
+    tile's left edge either way. The brief fixed the 12 × 5 box; the
+    album wall's square 12 × 6 is the alternative should this read badly
+    on a pixel terminal. **The cover is real pixels** through the player's
+    graphics probe (`tui::graphics` — kitty, sixel, iTerm2) on the very
+    path the album wall and the queue panel draw theirs (`cover::Slot`,
+    one per cover on view keyed by the art's id, paced by the frame's
+    encode budget, the slots refreshed on a resize): the same claim and
+    cache as the Now Playing cover (`App::fetch_art_file` — a library
+    album's `album_art_file` from `/album-art/<file>`; a connected
+    server's album only when one of its rows names art (`art`,
+    `albumArt`, `album-art` or `album_art_file`, the webapp's
+    `peerArtOf`) and then through the parent's federation art proxy,
+    `/api/v1/federation/peers/{id}/art/<file>`, the queue panel's peer
+    reach — else no art). Where pixels are not drawn the cover is the
+    same **▀-mosaic** the Now Playing cover falls back to; an album with
+    no art (or none decoded yet) is the **note tile**: the empty cover
+    slot's DIM rounded frame with `♪` at its centre (the frame alone on
+    the legacy console). The kit's picture rules hold: a cover an overlay
+    touched last frame (the window's list, the seeds modal, a tooltip)
+    draws as the mosaic for that frame (Over pixels); pictures are
+    placed with the frame and go with it — a scrolled strip moves each
+    cover with its tile (an encoded picture draws anywhere for free) and
+    the cells a tile left are repainted by the next frame, so nothing is
+    left behind; sixel's lack of alpha costs nothing because a cover is
+    opaque and fitted inside its own box (the owned-ground rule is the
+    flattened logo's, whose alpha needs a known ground — covers draw on
+    any ground, as the wall's and the queue's do).
+47. **The strip scrolls sideways.** The **wheel** over it scrolls by one
+    tile a notch, whatever the notch, never past the last view of whole
+    tiles; the wheel over the table scrolls the table. While the strip
+    overflows, **the last tile shown is cut at the right edge** — its
+    cover cut (always the mosaic: a picture cannot be cut), its words
+    clipped — so the cut says there is more, as the webapp's strip does.
+    Where the whole tiles would end exactly at the edge (the content
+    width mod 13 is 0 or 12 — 110 or 111 columns with the queue folded,
+    104 or 105 with it open), the last whole tile gives its place up to a
+    **half tile** (six cells) so a cut always stands while tiles follow;
+    at the strip's end nothing follows and nothing is cut.
+    **The strip is a cursor stop above the table** (the list-cursor law,
+    clause 57): ↓ or PageDown from rest lands on the first tile in view,
+    `←` `→` move the hand one tile and scroll to keep it whole, ↓ or
+    PageDown goes to the table's first row, ↑ or PageUp from the table's
+    first row comes back to the tile it left (and from rest, with no rows
+    under the strip); ↑ on the strip does nothing; Esc stows. Nothing is
+    lit on arrival; the keyboard's tile wears the slab on its **title
+    line alone** (its artist stays DIM on the ground); the pointer never
+    lights a tile — hover brightens its title to BRIGHT + BOLD. The lit
+    tile is always whole in view: a narrowed room (the queue panel
+    opening, a resize) scrolls the strip to keep it, so Enter and `+`
+    never act on an album off screen. **`←` `→` switch tabs whenever the
+    hand is not on the strip** (clause 40); the tips say which (`← →
+    albums` on the strip; `← → tabs` at rest — "↓ pick an album" where the
+    strip stands — and on a song or album row). A tab switch starts its
+    strip from the left.
+48. **A tile's verbs.** A click or Enter on a **library album** opens it
+    in the Albums room, its row's way (clause 61); a hovered tile shows
+    one verb at its corner — `[+]` at the right of its title line, the
+    title giving way — and `[+]`, `+` or `a` with the hand on it **queues
+    the album** (`ApiCmd::TasteAlbum`, clause 61). A **connected server's
+    album** has no drill here to open into (the room cannot browse a
+    peer), so its click or Enter **plays** it — the queue replaced, the
+    first song started — and `[+]` / `+` / `a` queue it; either way its
+    songs are asked **of that server** through the parent's federation
+    proxy (`album-songs` by name and the rows' track artist, a client
+    aimed by the command's peer reach), stamped with `Origin { server,
+    peer: Some(id) }` (clause 62); a server that will not list the album
+    leaves **the rows that matched** (the webapp's
+    `discoveryQueuePeerAlbum`), and nothing at all says "couldn't load
+    the album". `N`, `P`, `m` do nothing on a tile. The tile's title has
+    a tooltip ("Open the album — Enter"; "Play the album from {server} —
+    Enter"), its `[+]` "Add the album to the queue — a". A library album
+    is opened and queued **by name alone**, as its row always was (clause
+    61): two albums of one name by different artists (two "Greatest
+    Hits") open and queue the songs of both — the strip, showing both
+    credits side by side, makes this visible (the log).
+49. **The height gate.** The strip's seven rows and the gap under them
+    stand only where the table keeps **at least three rows** under the
+    strip: the room's six rows above it (header, state, blank, tabs,
+    seeds, blank), the table's header and rule and the bottom row mean a
+    content area of **20 rows** with no card. The installer's default
+    100×30 window qualifies (22 rows with the footer on, 23 off: five or
+    six rows under the strip); the **100×24 floor** (16 or 17) does not
+    and keeps today's album container rows in the table, so the floor
+    never loses its songs. The fallback card comes first (clause 20): with
+    it whole the strip wants 28 rows. With the queue panel open (47
+    cells) the strip shows three whole tiles and the fourth cut. **A
+    resize across the gate keeps the keyboard's hand on what it was on**:
+    a song row stays that song as the album rows come or go above it, an
+    album row becomes its tile where the strip stands and the tile its row
+    again at the floor; what has no place on the other side (a connected
+    server's tile at the floor) puts the hand down.
+
 ### The table
 
 50. **One kit table per tab**, in the server's order (most similar
@@ -238,8 +368,9 @@ session generation, clause 31).
     PLAYED**): Library **TRACK · ARTIST · ALBUM · LENGTH**; Connected
     servers **TRACK · ARTIST · ALBUM · ON · LENGTH**. TRACK starts two
     cells in, where the playing row's `▸` stands (clause 55).
-51. **Library rows, albums first** (§2.6): the server's albums, then its
-    songs. An album row's TRACK is the album's name with a DIM `album`
+51. **Library rows, albums first** (§2.6): where the album strip does not
+    stand (clause 49 — the floor, the card's height), the server's albums,
+    then its songs; where it stands, the songs alone (clause 45). An album row's TRACK is the album's name with a DIM `album`
     beside it, its ARTIST the album's credit, its ALBUM and LENGTH empty —
     no song count, no "never played". A song row's TRACK is the title (the
     file name when there is none); ARTIST, ALBUM; LENGTH is m:ss. A
@@ -264,13 +395,15 @@ session generation, clause 31).
     `seedHash` is one of the answer's seeds has a tooltip "sounds like
     {title · artist}" — a pointer enhancement; nothing lives only there.
 57. **The list-cursor law** (docs/ui-kit.md): the room opens with no row
-    lit; ↓ ↑ PageUp PageDown pick the cursor up (at the top on ↓, the
-    bottom on ↑ — the room has no resting place of its own) and walk it;
+    lit; ↓ ↑ PageUp PageDown pick the cursor up (at the top on ↓ and
+    PageDown — the album strip where it stands, clause 47 — the bottom on
+    ↑ and PageUp; the room has
+    no resting place of its own) and walk it;
     every line is a row; Esc stows it; a click acts on its row and
     stows it; Enter, `a`, `N`, `P`, `m` do nothing while it is stowed.
     Hover brightens, never selects.
 58. **The wheel scrolls the list under the pointer** — the table, the
-    seeds modal's rows — and the kit scrollbar stands at the table's right
+    album strip (one tile a notch, clause 47), the seeds modal's rows — and the kit scrollbar stands at the table's right
     while the rows overflow. The window dropdown's four choices always
     show whole, so the wheel over it moves nothing, and not the table
     under it either.
@@ -290,7 +423,7 @@ session generation, clause 31).
     (`ApiCmd::TasteAlbum`), appended when they land with the session's
     origin, queue all's way (say how many, start an empty idle queue); a
     failed ask says "couldn't load the album". A click or Enter opens the
-    album's tracks in the Albums room — the wall's drilled album view, its
+    album's tracks in the Albums room (as does its strip tile, clause 48) — the wall's drilled album view, its
     Back leading to the wall — and `G` brings this room back as it was
     left (clause 3's reuse).
 62. **Connected servers rows play through your server**, as library rows
@@ -384,7 +517,8 @@ session generation, clause 31).
     card (clause 20) pushes the table down; when the room is short the
     card gives up its blank line and its body sentence first (the title,
     the pick and its two actions stay), so the table keeps at least its
-    header, rule and one row, and scrolls.
+    header, rule and one row, and scrolls. The album strip does not stand
+    at the floor (clause 49): the albums are the table's first rows.
 91. **With the queue panel open** (47 cells at 100 columns) the header's
     "based on…" clips before the window control, the tab row
     has none to drop (clause 42), the table narrows by clause 54, and the
@@ -407,8 +541,11 @@ itself shows no count.
 | Discover (the nav row and the room's heading) | `gui.nav.discover` — at most 12 cells in every locale |
 | base tips: … · D Auto DJ · **G discover** · T stats · … | `gui.tips.base` (amended) |
 | ↓ pick a row · ← → tabs · w window · f played lately · e seeds · G ask again | `gui.tips.discover` |
-| Enter play from here · a queue · N next · P play now · m actions · Esc done (a library song's row and a connected server's) | `gui.tips.discover_row` (one key since 2026-10-11) |
-| Enter open the album · a queue · Esc done | `gui.tips.discover_album` |
+| ↓ pick an album · ← → tabs · w window · f played lately · e seeds · G ask again (at rest where the album strip stands) | `gui.tips.discover_strip` |
+| Enter play from here · a queue · N next · P play now · m actions · ← → tabs · Esc done (a library song's row and a connected server's) | `gui.tips.discover_row` (one key since 2026-10-11) |
+| Enter open the album · a queue · ← → tabs · Esc done | `gui.tips.discover_album` |
+| ← → albums · Enter open the album · + a queue · ↓ songs · Esc done (the hand on a library album's tile) | `gui.tips.discover_tile` |
+| ← → albums · Enter play the album · + a queue · ↓ songs · Esc done (the hand on a connected server's album's tile) | `gui.tips.discover_peer_tile` |
 | r another pick · e seeds · ← → tabs | `gui.tips.discover_fallback` |
 | ↑ ↓ rows · Space keep or drop · x unpin · Esc apply | `gui.tips.discover_seeds` |
 | ↑ ↓ rows · Enter pick · Esc close (the window's list) | `gui.tips.discover_menu` |
@@ -446,8 +583,9 @@ itself shows no count.
 | today · yesterday (the seeds modal) | `gui.discover.today` · `yesterday` |
 | %{count} days ago · %{count} months ago · %{count} years ago (the seeds modal) | `gui.discover.days_ago_*` · `months_ago_*` · `years_ago_*` |
 | album (an album row's marker) | `gui.discover.album` |
-| Open the album — Enter | `gui.discover.album_tip` |
-| Add the album to the queue — a (an album row's `[+]`) | `gui.discover.album_queue_tip` |
+| Open the album — Enter (an album row's title, a library tile's) | `gui.discover.album_tip` |
+| Play the album from %{server} — Enter (a connected server's tile) | `gui.discover.peer_album_tip` |
+| Add the album to the queue — a (an album row's `[+]`, a tile's) | `gui.discover.album_queue_tip` |
 | couldn't load the album | `gui.discover.album_failed` |
 | sounds like %{track} | `gui.discover.seed_tip` |
 | Listen through your server — P | `gui.discover.listen_tip` |
@@ -471,9 +609,10 @@ Data is never translated: titles, artists, album and server names.
   **Explore** room draws them (the webapp's `discoveryPanel({ page:
   'explore' })`); the answer's `network` half stays in the data model
   (`TasteResponse.network`), never asked for here.
-- **Album cards for the connected servers** (the webapp's "Albums from
-  {server}"): the Connected servers table lists their songs; an album of
-  theirs would open in a peer-browse view this room has no way into yet.
+- **Opening a connected server's album** (the webapp's peer-browse view):
+  the room has no way into a peer's library, so that album's tile plays
+  it instead (clause 48). The strips' section labels ("Albums from your
+  library", "Albums from {server}") are the tab's name here.
 - **"Save as playlist"** under the library's songs (the webapp's third
   footer verb): the bottom row keeps the browse bar's three.
 - **Phase B** (plan §4.3): the 30 s **preview**, **Get it** (the YouTube
@@ -515,7 +654,7 @@ Data is never translated: titles, artists, album and server names.
 | Segmented switch (the play-now page's two sources) | The kit's Tabs, Library · Connected servers, names only; `[gui] discover_tab` in `GuiPrefs` |
 | "Based on the last [window]" | The kit's Dropdown at the header's right (`Last 30 days ▾`) |
 | "Include songs I've played lately" (the webapp's checkbox under More options) | The kit's checkbox glyphs inline at the bottom row's left (`[✓]` Green / `[ ]` DarkGray, `check_glyphs`), the settings rows' one-line form of the kit's opt-in row — a dense row has no room for its 4-row card |
-| Album cards (12 × 6 covers), the two song columns | Album rows ahead of the songs in one table per tab (see the log) |
+| Album cards (the strips' scrollers), the two song columns | The album strip over each tab's table — 12 × 5 covers through `cover::Slot`, real pixels or the mosaic — where the room has 20 rows; album rows ahead of the songs below that (clauses 45–49, the log); the songs in one table per tab |
 | A row's art tile, title and "Artist · Album" | TRACK · ARTIST · ALBUM (· ON) · LENGTH columns: a terminal has no art tile in chrome, and columns read faster than a joined line at 80 cells |
 | The seeds sheet (PhoneSeeds) | A kit modal (`modal_frame_on`) with `[✓]` / `[ ]` rows and a modal primary Done; the window stays the header's dropdown, not repeated in the modal |
 | "Start from a song…" (§2.8) | A capture of its own — a new `Capture` variant beside `Sonic` and `DjSeed`, never `Capture::Discover` (the TUI's) — with the banner over the room |
@@ -553,7 +692,37 @@ row's m:ss and the window's days carry digits (the seeds modal behind
 is the webapp's own sentence); the two tabs, names only, and
 the remembered tab (`peers` → servers, `network` → Library); the table's
 columns per tab and the narrow-width order (ALBUM, then ON); albums first
-with one hover verb that queues the album by name; the checkbox
+with one hover verb that queues the album by name (at the floor); **the
+album strip** (clauses 45–49, the pixel path off unless said): at 100×30
+(footer on and off) the tiles with their mosaic or note covers, titles
+and artists over the songs and no album row, at 100×24 the album rows
+and no tile, the layout's 20-row gate and the card coming first, the
+first ask's four skeleton tiles; best match first and the cut last tile,
+**a cut standing at every width while tiles follow** (110 and 111
+columns, where whole tiles would end at the edge, cut a half tile; every
+content width from 25 to 170 cells keeps a cut inside the edge) and
+nothing cut at the strip's end; an answer of albums alone drawing no
+empty table; the wheel one tile a notch, clamped, the table's wheel
+apart; `←` `→` walking the tiles and scrolling to keep the hand's tile
+whole, and switching tabs off the strip, the tips saying which (the rest
+tip "↓ pick an album" over the strip, `← → tabs` on a row); the queue
+panel opening with the hand on a far tile scrolling it back into view;
+↓ or PageDown from rest onto the strip, ↓ to the first song, ↑ or PageUp
+back, nothing lit on arrival, a click stowing; a resize across the
+height gate keeping the hand on its song, and carrying an album row to
+its tile and back; hover brightening the title BOLD with `[+]` at its
+corner and never selecting; a library tile opening in the Albums room by
+click and by Enter, and `[+]`, `+`, `a` queueing it by name; a connected
+server's tile playing through its server by click and by Enter (the hand
+staying) (`TasteAlbum` with the peer's reach, the songs stamped with the
+peer's origin, the stream through the proxy) and its `[+]` falling back
+to the matched rows; the note tile keeping the owned ground under it;
+the covers claimed once, a connected server's through the proxy; with a
+forced kitty, sixel and iTerm2 picker the whole tiles' covers encoded as
+pictures, the cut tile the mosaic, a scroll encoding only the newly
+whole cover; end to end, the gui-discover-room leg (120×34, pixels off)
+gating on the fake answer's album tile above the songs and the fake
+counting the cover's `/album-art/` fetch; the checkbox
 (unticked by default and for a saved `unplayed` — the prefs alone, before
 any answer — a click or `f` asks `all` then `fresh`, the empty library's
 button ticks it); the fallback card; the scan-pending, off and failure
@@ -571,7 +740,12 @@ queues with the session's origin; **a Connected servers row queues with
 proxy path, and its play report carries `peerId`**; activating
 any row leaves `App.discover`, `App.now_discover` and the TUI's capture
 unchanged; another pick pins a random song; the seeds modal's close sends
-the exclusions once. The locale parity test. Expect legs
+the exclusions once; the strips' order and grouping (folded server +
+album + artist, a row with no album, no file, or from a mismatched or
+unreachable server joining none, the best row's spelling and first art,
+the cap of twelve, ties in the server's order) and a connected server's
+album asked with its peer's reach and falling back to its matched rows.
+The locale parity test. Expect legs
 (`test/e2e/legs/gui-discover.exp`, `MSTREAM_GUI_DEMO=1`; and
 `gui-discover-room.exp` against the fake's taste route: the checkbox, the
 header's words, a row; first-paint gates, drain-not-sleep). `cargo test --features desktop`; `cargo check --target
@@ -703,3 +877,69 @@ wasm32-unknown-unknown`.
     "couldn't reach this source" with Try again and keeps the server's
     words for the tooltip (clause 83); "streams through your server"
     stands only beside rows (clause 41).
+- **2026-10-11 — The album strip.** The user asked for the webapp's
+  horizontal album scroller here too — its "Albums from your library" /
+  "Albums from {server}" strips of album cards with real covers (mStream's
+  `discoveryPlayHtml`) — and approved this design (clauses 45–49):
+  - **A strip of album tiles over each tab's table** — Library the
+    answer's albums, Connected servers their playable rows grouped by
+    server + album + artist, both best match first and capped at twelve,
+    the webapp's `peerAlbums` and `ALBUM_STRIP_MAX` — and the album
+    container rows leave the table where it stands. The 2026-10-05
+    "album rows, not album cards" holds only below the strip's height:
+    the floor's sixteen rows still cannot hold seven rows of tiles and a
+    table, so there the albums stay rows (clause 49, the gate measured
+    from the layout: the table keeps three rows under the strip from a
+    20-row content area; the installer's 100×30 window has 22 or 23).
+  - **Tiles 12 cells wide, covers 12 × 5**, one cell apart: the webapp's
+    cards worn terminal. The covers are real pixels on kitty, sixel and
+    iTerm2 through the album wall's and the queue panel's `cover::Slot`
+    (paced encodes, a slot per cover keyed by its art, the Over-pixels
+    mosaic under an overlay), the ▀-mosaic where pixels are not drawn,
+    the note tile (the empty slot frame with `♪`) where an album has no
+    art. A cut tile is always the mosaic: a picture cannot be cut, and a
+    squeezed one would read as a smaller album, not as more to come.
+  - **The verb at the corner sits beside the title, not over the cover**:
+    the webapp's play button floats over the art, but a picture's cells
+    are skipped by the terminal writer, so text over a cover would not
+    land (or would turn the cover to the mosaic for as long as the
+    pointer rests). The title gives its tail to `[+]` instead.
+  - **A connected server's tile plays where the webapp's opens**: the
+    webapp follows the card into a peer-browse view, which this room has
+    no way into (the header's server switcher reaches a peer, and the
+    room is hidden in a peer session, clause 1). So its click and Enter
+    play the album and `[+]` queues it, its songs asked of that server
+    through the parent's federation proxy with the rows' track artist —
+    `ApiCmd::TasteAlbum` gains the peer, its reach and `play` — and a
+    server that will not list it leaves the rows that matched, as the
+    webapp's queue button does. The browser build, with one client,
+    queues the matched rows at once.
+  - **`+` queues on a tile** as the brief asked, beside `a`: it is the
+    volume key everywhere else and stays so off the strip. `←` `→` walk
+    the tiles while the hand is on the strip and switch tabs everywhere
+    else; the tips say which (`gui.tips.discover_tile` /
+    `discover_peer_tile`, ten locales).
+  - **No labels over the strips**: the tab in front names the source, and
+    a label row would cost the floor-adjacent heights a table row.
+  - **After review, the same day**: a cut tile stands at every width
+    while tiles follow — where whole tiles would end exactly at the edge
+    the last one gives its place up to a half tile (clause 47); the lit
+    tile is kept whole in view when the room narrows; a resize across the
+    height gate carries the keyboard's hand to the same song, album row
+    or tile (clause 49); PageDown and PageUp stop on the strip like ↓ and
+    ↑; the slab sits on the tile's title line alone; an answer of albums
+    alone draws no empty table; the rest tip over a strip reads "↓ pick
+    an album" (`gui.tips.discover_strip`) and the row tips name `← →
+    tabs` (ten locales); the note tile keeps the owned ground under it.
+    **Known limitation — library albums are drilled and queued by name
+    alone** (clause 48), inherited from the container rows and the Albums
+    room: mStream's `album-songs` has taken an `album_artist` selector
+    since `a63f44a0` (2026-09-08) and the webapp's library card sends it,
+    but the player's `album_songs` and `LibraryNode::Album` cannot carry
+    it yet (its `artist` is the TRACK-artist filter, the 2026-10-05 log).
+    Two same-named albums by different artists open and queue together;
+    the strip, showing both credits side by side, makes that visible. The
+    fix is the drill's, not the strip's: plumb `album_artist` through
+    `LibraryNode::Album` and `album_songs` for the Albums room and here
+    at once. The 12 × 5 cover box's letterbox and stretch (clause 46) are
+    likewise recorded rather than changed: the brief fixed the box.

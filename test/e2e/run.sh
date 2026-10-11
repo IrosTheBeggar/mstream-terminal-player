@@ -183,6 +183,11 @@ import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert s['taste_asks'] >= 1, s
 "
+assert "the strip fetched its album's cover" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['art_gets'] >= 1, s
+"
 stop_fake
 
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──

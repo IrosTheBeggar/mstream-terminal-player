@@ -5,7 +5,10 @@
 # grows its Discover row (clause 1); `G` opens the room, which asks the
 # route and paints its answer: the header's "based on" phrase — words, no
 # count, the play-now page (the contract's 2026-10-11 log) — over the
-# Library tab with its rows (clauses 3, 30, 40). The bottom row's one
+# Library tab with its album strip — the answer's one album, a tile whose
+# title paints above the table and whose cover the room fetches from
+# /album-art/ (clauses 45-49; the window's 34 rows clear the strip's height
+# gate) — and its rows (clauses 3, 30, 40). The bottom row's one
 # checkbox, "Include songs I've played lately" (clause 65), paints with
 # the room's first frame, before the answer, so it is gated first, on
 # one word (the terminal is sent only what changed, word by word with the
@@ -44,6 +47,11 @@ expect {
     "based on songs you finished" {}
     eof { puts "DIED-ON-G"; exit 7 }
     timeout { fail "NO-ROOM-HEADER" 3 }
+}
+expect {
+    "Nightfall" {}
+    eof { puts "DIED-ON-STRIP"; exit 13 }
+    timeout { fail "NO-ALBUM-STRIP" 14 }
 }
 expect {
     "Aurora" {}

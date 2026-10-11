@@ -208,8 +208,19 @@ pub enum ApiCmd {
     /// pick" (clause 21): the server's own random seed is the same all day.
     TasteRandom { generation: u64 },
     /// An album row's `[+]` (clause 61): the album's songs by its name — the
-    /// Albums room's ask — for the App to append to the queue.
-    TasteAlbum { name: String, generation: u64 },
+    /// Albums room's ask — for the App to append to the queue. A connected
+    /// server's album on the strip (the 2026-10-11 strip log) names its
+    /// `peer`, its track `artist`, and the `reach` through the parent's
+    /// federation proxy; `play` replaces the queue and plays instead of
+    /// appending.
+    TasteAlbum {
+        name: String,
+        artist: Option<String>,
+        generation: u64,
+        peer: Option<i64>,
+        reach: Option<crate::tui::app::Reach>,
+        play: bool,
+    },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -259,7 +270,9 @@ impl ApiCmd {
             | ApiCmd::AddToPlaylist { reach, .. }
             | ApiCmd::TrackInfo { reach, .. }
             | ApiCmd::Genres { reach }
-            | ApiCmd::PlaylistNames { reach } => reach.as_ref(),
+            | ApiCmd::PlaylistNames { reach }
+            // A connected server's album asks THAT server, through the proxy.
+            | ApiCmd::TasteAlbum { reach, .. } => reach.as_ref(),
             // The DJ's turns go to ITS server (auto-dj contract, clause 19).
             ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
             // A play goes to its row's server, a peer's to the parent.
@@ -283,7 +296,6 @@ impl ApiCmd {
             | ApiCmd::Taste { .. }
             | ApiCmd::TastePrefs { .. }
             | ApiCmd::TasteRandom { .. }
-            | ApiCmd::TasteAlbum { .. }
             | ApiCmd::SavePlaylist { .. }
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
@@ -598,7 +610,15 @@ pub enum Event {
     /// failed.
     TasteRandom { generation: u64, track: Option<Box<Track>> },
     /// An album row's songs to queue: `None` when the ask failed.
-    TasteAlbum { generation: u64, tracks: Option<Vec<Track>> },
+    /// `name`, `artist`, `peer` and `play` as the ask carried them.
+    TasteAlbum {
+        generation: u64,
+        tracks: Option<Vec<Track>>,
+        name: String,
+        artist: Option<String>,
+        peer: Option<i64>,
+        play: bool,
+    },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
@@ -1296,7 +1316,9 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             crate::api::wait(taste_prefs(c, generation, patch.as_ref()))
         }
         ApiCmd::TasteRandom { generation } => crate::api::wait(taste_random(c, generation)),
-        ApiCmd::TasteAlbum { name, generation } => crate::api::wait(taste_album(c, name, generation)),
+        ApiCmd::TasteAlbum { name, artist, generation, peer, play, .. } => {
+            crate::api::wait(taste_album(c, TasteAlbumAsk { name, artist, peer, play }, generation))
+        }
         // A failed ask is `None`: nothing about the saved peers changes.
         ApiCmd::FederationPeers { parent } => {
             Ok(Event::FederationPeers { parent, peers: c.federation_peers().ok() })
@@ -2196,17 +2218,30 @@ pub(crate) async fn taste_random(client: &Client, generation: u64) -> Result<Eve
     Ok(Event::TasteRandom { generation, track })
 }
 
+/// What a [`ApiCmd::TasteAlbum`] asks, carried back on its event.
+pub(crate) struct TasteAlbumAsk {
+    pub name: String,
+    pub artist: Option<String>,
+    pub peer: Option<i64>,
+    pub play: bool,
+}
+
 /// An album row's `[+]` (clause 61): its songs, asked by name alone as the
-/// Albums room asks (the 2026-10-05 log).
-pub(crate) async fn taste_album(client: &Client, name: String, generation: u64) -> Result<Event, ApiError> {
-    let node = LibraryNode::Album { name, artist: None };
+/// Albums room asks (the 2026-10-05 log). A connected server's album asks
+/// by name and its track artist through a client aimed at that server, and
+/// any failure there — a 401 among them, which is the peer's word and not
+/// the session's — is `None`: the App queues the rows that matched.
+pub(crate) async fn taste_album(client: &Client, ask: TasteAlbumAsk, generation: u64) -> Result<Event, ApiError> {
+    let TasteAlbumAsk { name, artist, peer, play } = ask;
+    let asked = if peer.is_some() { artist.clone() } else { None };
+    let node = LibraryNode::Album { name: name.clone(), artist: asked };
     let tracks = match load_library(client, &node).await {
         Ok(LibraryData::Tracks(tracks)) => Some(tracks),
         Ok(_) => None,
-        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+        Err(ApiError::Unauthorized) if peer.is_none() => return Err(ApiError::Unauthorized),
         Err(_) => None,
     };
-    Ok(Event::TasteAlbum { generation, tracks })
+    Ok(Event::TasteAlbum { generation, tracks, name, artist, peer, play })
 }
 
 /// How many neighbours a Discover view asks for. Deep enough to browse,

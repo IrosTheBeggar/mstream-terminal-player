@@ -3125,13 +3125,14 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             }
         }
         // A resized window changes the cell-to-pixel mapping the
-        // cover encodes against — the card's, every album slot's
-        // and every queue row's alike.
+        // cover encodes against — the card's, every album slot's, every
+        // queue row's and the Discover strip's alike.
         TermEvent::Resize(..) => {
             gui.app.graphics.refresh();
             gui.albums.on_resize();
             gui.queue.on_resize();
             gui.actions.on_resize();
+            gui.discover.on_resize();
         }
         _ => {}
     }

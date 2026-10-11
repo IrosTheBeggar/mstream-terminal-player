@@ -26,7 +26,9 @@ Usage: fake_mstream.py PORT
 """
 import json
 import os
+import struct
 import sys
+import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT = int(sys.argv[1])
@@ -50,7 +52,11 @@ TASTE_ANSWER = {
     ],
     "excluded": [], "dropped": 0, "notAnalyzed": False,
     "library": {
-        "filter": "fresh", "albums": [], "capped": False,
+        # One album with a cover: the room's strip draws its tile (the
+        # 2026-10-11 strip log) and fetches the cover from /album-art/.
+        "filter": "fresh", "capped": False,
+        "albums": [{"name": "Nightfall", "album_artist": "Moon", "album_art_file": "nightfall.png",
+                    "similarity": 0.86, "scopedTracks": 3, "playedTracks": 0}],
         "tracks": [
             {"filepath": "music/aurora.mp3", "similarity": 0.83, "seedHash": "h1",
              "metadata": {"title": "Aurora", "artist": "Ray", "duration": 251}, "playCount": 0, "lastPlayed": None},
@@ -88,7 +94,20 @@ STATUS_STEPS = [
 ]
 
 calls = {"n": 0, "s": 0}
-state = {"directories": {}, "users": [], "taste_asks": 0}
+state = {"directories": {}, "users": [], "taste_asks": 0, "art_gets": 0}
+
+
+def _png(w=4, h=4, rgb=(200, 120, 40)):
+    """A small solid PNG: a cover the player decodes the way it decodes any."""
+    def chunk(kind, data):
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + bytes(rgb) * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+COVER = _png()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -162,6 +181,14 @@ class Handler(BaseHTTPRequestHandler):
                     "qr": "mstr1:FAKE-TICKET-0123456789abcdef-for-widget-smoke-testing-only",
                 }
             )
+        if TASTE and self.path.split("?")[0].startswith("/album-art/"):
+            state["art_gets"] += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(COVER)))
+            self.end_headers()
+            self.wfile.write(COVER)
+            return
         if self.path == "/_state":
             return self._json(state)
         return self._json({})

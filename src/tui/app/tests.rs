@@ -7363,6 +7363,116 @@ fn the_discover_room_asks_two_parts_in_parallel_with_the_bodies_the_contract_nam
     assert!(app.taste_open().is_empty());
 }
 
+/// The Discover room's album strips (the 2026-10-11 strip log): the
+/// library's albums best match first, and the connected servers' playable
+/// rows grouped by server + album + artist the webapp's `peerAlbums` way.
+#[test]
+fn the_album_strips_rank_and_group_as_the_webapp_does() {
+    let mut app = taste_app();
+    let peers: TasteResponse = serde_json::from_value(serde_json::json!({
+        "peers": { "peers": [
+            { "id": 3, "name": "Attic", "reachable": true, "results": [
+                { "artist": "Them", "title": "One", "album": "Theirs", "similarity": 0.7, "filepath": "a/1.mp3" },
+                { "artist": "them ", "title": "Two", "album": " THEIRS", "similarity": 0.9, "filepath": "a/2.mp3", "art": "t.jpg" },
+                { "artist": "Other", "title": "Three", "album": "Theirs", "similarity": 0.8, "filepath": "a/3.mp3", "albumArt": "o.jpg" },
+                { "artist": "Them", "title": "Loose", "similarity": 0.95, "filepath": "a/4.mp3" },
+                { "artist": "Them", "title": "No file", "album": "Ghost", "similarity": 0.99 }
+            ] },
+            { "id": 5, "name": "Den", "reachable": true, "results": [
+                { "artist": "Them", "title": "Elsewhere", "album": "Theirs", "similarity": 0.85, "filepath": "d/1.mp3" }
+            ] },
+            { "id": 6, "name": "Odd", "reachable": true, "mismatched": true, "results": [
+                { "artist": "Zed", "title": "Z", "album": "Zeds", "similarity": 0.99, "filepath": "z.mp3" }
+            ] },
+            { "id": 9, "name": "Gone", "reachable": false, "results": [] }
+        ], "searched": { "peers": 4 } }
+    }))
+    .unwrap();
+    app.taste.peers.data = peers.peers;
+    let albums = app.taste.peer_albums();
+    let seen: Vec<_> = albums
+        .iter()
+        .map(|a| (a.peer, a.server.as_str(), a.album.as_str(), a.artist.as_deref(), a.art.as_deref(), a.rows.clone()))
+        .collect();
+    // By its best row; one server's case and blanks folded together, the
+    // best row's spelling kept; another server's same album apart; a row
+    // with no album, no file, or from a server that did not answer on this
+    // model joins nothing.
+    assert_eq!(
+        seen,
+        vec![
+            (3, "Attic", "THEIRS", Some("them"), Some("t.jpg"), vec![(0, 1), (0, 0)]),
+            (5, "Den", "Theirs", Some("Them"), None, vec![(1, 0)]),
+            (3, "Attic", "Theirs", Some("Other"), Some("o.jpg"), vec![(0, 2)]),
+        ]
+    );
+    // Twelve at most, as the webapp caps its strip.
+    let many: Vec<serde_json::Value> = (0..15)
+        .map(|i| serde_json::json!({ "artist": "A", "title": "T", "album": format!("Album {i}"), "similarity": 0.5, "filepath": format!("m/{i}.mp3") }))
+        .collect();
+    let peers: TasteResponse = serde_json::from_value(serde_json::json!({
+        "peers": { "peers": [ { "id": 3, "name": "Attic", "reachable": true, "results": many } ], "searched": { "peers": 1 } }
+    }))
+    .unwrap();
+    app.taste.peers.data = peers.peers;
+    let albums = app.taste.peer_albums();
+    assert_eq!(albums.len(), 12);
+    assert_eq!(albums[0].album, "Album 0", "ties keep the server's order");
+    // The library's strip: best match first, ties in the server's order,
+    // capped the same.
+    let mut main = taste_main();
+    let library = main.library.as_mut().unwrap();
+    library.albums = (0..14)
+        .map(|i| crate::api::types::TasteAlbum {
+            name: Some(format!("L{i}")),
+            similarity: if i == 5 { 0.99 } else { 0.5 },
+            ..Default::default()
+        })
+        .collect();
+    app.taste.library.data = main.library;
+    let strip = app.taste.library_strip();
+    assert_eq!(strip.len(), 12);
+    assert_eq!(strip[..3], [5, 0, 1]);
+}
+
+/// A connected server's album on the strip plays or queues through its
+/// server; unreachable, it queues the rows that matched at once.
+#[test]
+fn a_connected_servers_album_is_asked_of_its_server_with_its_origin() {
+    let mut app = answered_taste();
+    let effects = app.taste_peer_album(0, false);
+    let ask = effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::TasteAlbum { name, artist, peer, reach, play, .. }) => {
+            Some((name.clone(), artist.clone(), *peer, reach.as_ref().map(|r| (r.base.clone(), r.peer)), *play))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        ask,
+        Some(("Theirs".into(), Some("Them".into()), Some(3), Some((app.session.server.clone(), Some(3))), false)),
+        "{effects:?}"
+    );
+    // The reach is the command's: the worker builds a client for the peer.
+    assert!(effects.iter().all(|e| match e {
+        Effect::Api(cmd) => cmd.reach().is_some_and(|r| r.peer == Some(3)),
+        _ => false,
+    }));
+    // Landed with nothing listed: the matched rows, the peer's origin.
+    let generation = app.session_gen();
+    app.apply_event(Event::TasteAlbum {
+        generation,
+        tracks: None,
+        name: "Theirs".into(),
+        artist: Some("Them".into()),
+        peer: Some(3),
+        play: false,
+    });
+    let queued: Vec<_> = app.queue.items.iter().map(|q| (q.filepath.as_str(), q.origin.peer)).collect();
+    assert_eq!(queued, vec![("music/peer.mp3", Some(3))]);
+    // An index past the strip asks nothing.
+    assert!(app.taste_peer_album(5, true).is_empty());
+}
+
 #[test]
 fn a_taste_answer_lands_its_parts_and_is_reused_for_five_minutes() {
     let mut app = answered_taste();
