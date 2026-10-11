@@ -457,14 +457,21 @@ is playing, a seek line, and prev · play · next — until there is room again.
 In the desktop player, started with no arguments or as `gui --window`, it
 opens in its own window instead (see [Two flavours](#two-flavours)).
 
-- **Four screens**: **Library** (the nav column and its rooms), **Stats**
-  (`T`) and **Admin** (`M`) are the top bar's tabs; **Now Playing** (`0`, no
-  tab of its own) is the classic player's full-screen view — the facts, the
-  cover, the tabbed panel and the waveform band — with prev · play · next
-  under the cover; Stats is the listening log of `mstream-player stats` on
-  the session's server, whole: the same tabs, periods and keys, Esc back to
-  the Library. Admin is the admin panel below, its six rooms in a hallway
-  at the left, with the server's own log beside them.
+- **Five screens**: **Library** (the nav column and its rooms), **Stats**
+  (`T`), **Admin** (`M`) and **MP3 Player** (`K`) are the top bar's tabs;
+  **Now Playing** (`0`, no tab of its own) is the classic player's
+  full-screen view — the facts, the cover, the tabbed panel and the waveform
+  band — with prev · play · next under the cover; Stats is the listening log
+  of `mstream-player stats` on the session's server, whole: the same tabs,
+  periods and keys, Esc back to the Library. Admin is the admin panel below,
+  its six rooms in a hallway at the left, with the server's own log beside
+  them. MP3 Player is the page of `mstream-player device flash`
+  ([below](#mp3-player-m5stack-core2)) with no flags, and needs no server:
+  one card about the Core2 plugged in, read over USB without restarting it —
+  whether its firmware is up to date, and what its SD card holds. A write
+  passes a warning first and, once started, cannot be left — the tab holds
+  every key but Ctrl+C until it is done, and its footer, drawn on this tab
+  whatever the key-hints setting, warns against unplugging the board.
   Beside them, the
   **Visualizer** item (`V`) opens the mobile app's shader presets in a
   window of their own, moving to what is playing. Move the pointer over it
@@ -651,44 +658,129 @@ a total under a minute reads in seconds.
 ## MP3 player (M5Stack Core2)
 
 ```
-mstream-player device list                        # the Core2-shaped boards on USB
+mstream-player device list                        # the Core2-shaped boards on USB, each with its firmware and card
+mstream-player device list --ports                # just the ports: nothing is opened
 mstream-player device flash                       # install or update the player firmware on one
 mstream-player device flash --firmware .pio/build/core2   # a build of your own (or its *-full.bin)
 mstream-player device flash --release v0.5.0      # a particular release
+mstream-player device flash --flash-mode dio      # this player's release, in DIO
+mstream-player device releases --pre-releases     # the firmware's releases on GitHub
 mstream-player device flash --yes --port COM3     # no screen, no questions
+mstream-player device flash --yes --all           # update every board that runs an older release
 ```
 
 The [mStream MP3 player](https://github.com/IrosTheBeggar/mstream-mp3-player) is an M5Stack
-Core2 running its own firmware, and this is how the firmware gets onto one, over the board's
-USB cable. The page finds the board by the USB serial chip M5Stack ships (a CH9102 or a
-CP2104), reaches its bootloader, reads what is on it — the firmware names itself and its
-version inside the image — and asks: the board and port as read, what is on it, what will go
-on it (the SD card is never touched), and whether to erase the whole flash first (`e`). The
-default erases over anything that is not this firmware (a new board's demo, another project)
-and never over an earlier version of it: the settings, the paired headphones and the touch
-calibration live above the image and survive an update. Then the write, checked by checksum,
-and the board restarts into it; the page shows the first line it says, and how music gets onto
-the card. A step line under the subtitle (Firmware · Board · Write · Restart) says where the
-run is, the write says how long it has left, and `l` opens the run's log under the content —
-every report with a clock, plus what the busy line never says: which baud answered, what the
-descriptor held, the segments and their chunks, the checksum. The log opens by itself when
-something fails. With no board plugged in the page watches the USB ports every two seconds
-and lists the serial ports it did see, so plugging the Core2 in is enough; with several, the
-list follows the ports. No mStream session is involved, and a write cannot be left halfway —
-Esc before it restarts the board into what it had.
+Core2 running its own firmware, and this is how you see what it runs and how the firmware gets
+onto it, over the board's USB cable. The page finds the board by the USB serial chip M5Stack
+ships (a CH9102 or a CP2104) and **asks the firmware running on it, without restarting it**:
+the port is opened with DTR and RTS held low, so the board's screen stays on and its music
+plays on. What comes back is one card. Its head is the board's name and port; its **Firmware**
+row is one chip — ✓ *Up to date* (the board runs exactly the release this player carries, or
+one ahead of it, which is never offered a step back), ! *Update available* (an older release,
+or a development build based below it), ✗ *Not mStream firmware*, ? *Not answering*; its
+**SD card** row is a bar of the space used with `21.4 of 59.6 GB used · 1,284 tracks` and the
+free space under it, in decimal GB as the Core2's About shows them — or what the card is and
+how to fix it (no card, exFAT, GPT), or why it cannot be shown (firmware too old to report it,
+a write under way): the card comes from the firmware's `@status`, which firmware 0.9.0 and
+later answer — v0.8.0, the release this player pins, says its version only. Free space a card never counted is offered as one count (`c`), never
+started by itself. One button follows the chip — *Update ▸*, *Install ▸*, *Read the board ▸*
+(a board that does not answer: reading it restarts it, said on the card first), *Try again ▸*,
+or none — and **every write passes a warning first**: what goes on, the dark screen while it
+writes, what stays (settings, the paired headphones, the music on the SD card), and that
+unplugging halfway leaves it half written; Enter, Esc and `n` keep the board as it is, `y`
+writes, and the board is reset only then. The erase box is in the install's warning alone, on
+by default over other firmware. When the board restarts, the card is the board again — `✓ Up
+to date · v0.8.0 · just written` — and one line says what was done. Everything technical — the
+port and bridge, the flash size, the firmware's ELF, where this player's image came from, the
+card's bytes, the run's log with a clock, and *Write again* — is behind **Details** (`d`, or
+`l`), which opens by itself when a write fails. With several boards plugged in, each gets a
+port tab wearing its mark (✓ ! ✗ ?, or a write's percent), `←` `→` switch, *Show on the player*
+(`s`) puts "This one" on a board's own screen, and *Update all* (`a`) writes every board that
+needs it, one after another, behind one warning that names them all; while one board is
+written the others can be looked at, never written. With no board the card watches the USB
+ports by itself (*Not showing up?* holds the cable, driver and dialout hints and the serial
+ports seen). A port another program holds is that board's own state, *Ask again* (`r`) once
+it is free. No mStream session is involved.
+
+What a write puts on a board is chosen behind **Advanced…** (`o`), a sheet over the card:
+the **firmware** — this player's release, another release (listed from GitHub only when you
+choose it; pre-releases behind a switch), or a local build (a merged `.bin` or a PlatformIO
+build folder, picked with your system's own file or folder dialog or typed with Tab
+completing it, and read at once to check it is mStream firmware) — the **flash mode**, *QIO*
+(faster) or *DIO* (runs on every Core2), and an optional **erase**. Apply makes that board's
+next write: one line under its chip says it (`Next write: v0.7.0 in QIO (faster)`, with a
+*Reset*, `x`), its button follows it (*Write ▸*, *Update ▸*, *Go back ▸*), the warning names
+the source, the mode and the check it passed, and the write uses it up. Nothing in the sheet
+writes anything, and up to date is still this player's release: after going back to v0.7.0 the
+card offers the update again. A board running DIO says so under its chip, and its updates keep
+it; one that keeps restarting after a write is offered its DIO image as its button.
+
+The GUI player has the same page as its **MP3 Player** tab (`K`): `device flash` with no
+flags — the pinned release, every board watched — under the top bar, its hint on the footer,
+Esc (or `K`) back to the Library. Opening the tab resets nothing; leaving it lets the ports go
+(coming straight back waits a moment for that), and quitting the player waits for a board
+being read to restart. While a write runs the tab cannot be left; Ctrl+C, closing the window
+and, on macOS, Cmd-Q still quit, and leave the board half written. The tab's Advanced
+options are the flags' choices — `--firmware`, `--release`, `--flash-mode`, an erase — for the
+board in view; `--port`, `--yes` and an app-only image are the command line's alone.
+`device flash` on its own is the same page in a terminal of 72×24 or more, its flags filling
+in each board's next write (the card says which flags set it, and `x` goes back to the pin).
 
 The firmware comes from the firmware repository's GitHub Releases: the release this player
-pins (its tag and checksum sit in `src/device/firmware.rs`, bumped with player releases),
-`--release <tag>` for another one (checked against that release's `SHA256SUMS`), or
-`--firmware` for a file — a release's `*-full.bin`, or a build directory with its
-`firmware.factory.bin`. Downloads are kept under the player's cache directory and re-checked
-every time; `MSTREAM_FIRMWARE_BASE` points them at a mirror. `--erase` and `--no-erase` decide
-the erase instead of the board; `--yes` prints each step and writes without a screen.
+pins (its tag and the checksums of both its builds sit in `src/device/firmware.rs`, bumped with
+player releases), `--release <tag>` for another one (checked against that release's
+`SHA256SUMS`), or `--firmware` for a file — a release's `*-full.bin`, or a build folder with
+its `firmware.factory.bin` (a PlatformIO `.pio/build/` with one environment in it will do).
+`--flash-mode qio|dio` picks the build of the pin or of `--release`; without it each board keeps
+the mode its ELF says, where the release has that build. A file has its own, read from its
+header, and a flag that says otherwise is refused. A board is always measured against
+the pin, whatever the flags choose: they are what the next write puts on it, and the `plan:`
+line says so (`v0.7.0 in QIO, release v0.7.0 — not this player's release`). Downloads are kept
+under the player's cache directory, each release's beside the `SHA256SUMS` it was checked
+against, so a release downloaded once is written again without the network;
+`MSTREAM_FIRMWARE_BASE` points the downloads at a mirror (`{tag}` in it becomes the release's
+tag). `device releases` lists the firmware's releases — one request to GitHub's API, which
+`MSTREAM_FIRMWARE_API` can point elsewhere — newest first, with each one's date, its builds and
+what of it is on this computer; `--pre-releases` adds the pre-releases. `--erase` and
+`--no-erase` set the install warning's erase box (and an update's erase); `--yes` prints each
+step and writes without a screen, the flags answering the warning.
+
+`device list` asks each board what it runs over USB, all at once and with no reset (the port is
+opened with DTR and RTS held low, so the music on it plays on): the firmware's `@status` line —
+its version and its SD card's size, free space and tracks — or, from firmware older than the
+query, the console's `L` for the version alone. Each board's line is the port's as before, then
+its firmware against the pin (`v0.7.0, update to v0.8.0`) and its card (`card 38.2 GB free of
+59.6 GB, 1,284 tracks`); a board that says nothing is `not answering`, and a port another
+program holds is `in use by another program`. With several boards, `--yes` still asks for
+`--port` — its refusal lists each board's firmware now — or `--all`, which updates every board
+running an older release of this firmware to the pin, one after another, each in the flash mode
+it runs (or the one `--flash-mode` names), stopping at the first failure; it never installs
+over other firmware, never erases and never goes back, and names the boards it left alone.
+
+The pinned release is v0.8.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
+ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
+`-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install,
+`device flash --flash-mode dio` writes it, or the tab's Advanced… does (Flash mode, DIO). It
+keeps the settings like any update. A board's
+mode is read from the ELF id it reports, against every release's pair, so a Core2 on DIO stays
+on DIO through every update with nothing remembered anywhere; `device list` says `· DIO` beside
+its version. After a write, a board that prints the chip's reset banner again and again and
+never its firmware's first line is said to keep restarting: the card goes gold, *✗ Keeps
+restarting*, and its button is *Write the DIO image ▸* — through the warning, never written by
+itself.
 
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported
 as such. `MSTREAM_DEVICE_FAKE=<word>` runs everything against a scripted board, for tests:
-`fresh`, `ours:<version>`, `other`, `nodevice`, `two`, `busy`, `nosync`, `failwrite`.
+`fresh`, `ours:<version>`, `other`, `nodevice`, `two`, `busy`, `nosync`, `failwrite`, and for
+the running firmware's answers `status:<version>` (answers `@status`), `old:<version>` (`@err 7`,
+then `L`), `silent:<version>` (ours, not running) and `chip` (a board that only shares the USB
+chip). Several boards are words separated by commas, and options after slashes script the rest:
+`status:v0.9.0/free=?,old:v0.7.0,chip/in=3` is three boards, the last plugged in three seconds
+on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). `/mode=dio`
+runs a release's DIO build (its ELF id), `/elf=<hex>` any ELF, and `/loop=qio` is a Core2
+whose flash cannot run QIO: a QIO image written to it keeps it restarting. src/device/engine.rs
+has the whole grammar.
 
 ## Now playing
 

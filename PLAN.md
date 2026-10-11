@@ -2281,6 +2281,39 @@ a LATER secondary screen (party view), Columns retired.
   Stats tab builds it, and the server's log docked as a column, as a band
   under the room, or as a room of its own, as the window allows. `M` from
   the Library, Stats and Now Playing; Esc back.
+- **The MP3 Player tab ✅ 2026-10-04** — the top bar's fourth tab hosts
+  the firmware page of `mstream-player device flash` with no flags
+  (docs/ux-contracts/mp3-player-screen.md; Phase 13), in place of the
+  tray launcher's dropped menu item: the page grew a hosted mode (no
+  header, no tips row, nothing drawn past its area, Done's extra words
+  giving way before its Close at the floor), the tab builds it on entry
+  and lets it go on leaving — its worker told to let the board go, the
+  page kept aside until it has, a quick return waiting for it — except
+  while it writes, when every key but Ctrl+C is the page's, the top bar
+  is inert and no screen change is honoured; a quit with the board held,
+  or being reached, waits up to eight seconds for its restart. The worker
+  hears Quit early (before a port, between baud rungs, once the board
+  answers) and lets a board go with no boot-line listen, which the
+  command's Esc gains too. The footer is the page's whatever the key
+  hints say; the mini player hides the page's keys and says when it
+  writes. `K` from the Library, Now Playing, Stats and the Admin hallway,
+  `K` or Esc back (`F` was first; Caps Lock on the filter key's `f` reset
+  a plugged-in Core2). The server label is cut to keep off the strip,
+  tested at 100 columns in every locale.
+- **The MP3 Player tab redrawn as "One card" ✅ 2026-10-10** — mStream
+  `docs/designs/mp3-tab` alternate A, chosen by Paul on 2026-10-09, with
+  the set README's grafts (docs/ux-contracts/mp3-player-screen.md, rewritten
+  first; Phase 13). Opening the tab only listens — no board is reset to be
+  shown — and the page is one card: the head, the Firmware chip (✓ ! ✗ ?),
+  the SD card's bar and numbers as the running firmware reports them, one
+  primary that follows the chip, Details (`d`) for the facts and the log.
+  Every write passes the kit's gold gate (B's titles, the safe button named
+  for what stays, the erase box in the install gate only); Done is the card
+  again. Several boards are port tabs with marks and C's count; Show on the
+  player (`s`), Update all (`a`), look-don't-write during a write. The tab's
+  lock lasts from the gate's yes until the board's write has ended; leaving
+  keeps a page that saw a board aside until its worker says every port is
+  free. The standalone `device flash` is the same page at 72×24.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
@@ -2957,20 +2990,54 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 
 ### Phase 13 — The MP3 player's flasher (`mstream-player device flash`)
 
-> **Status 2026-10-01: built, unreleased** — the page, the `--yes` line mode, `device list`,
-> the fake board and its e2e leg; then the page's UX from the design cards (mStream
-> `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time left,
-> what to do next, the port watch, and the log behind `l`. The firmware's first release,
-> v0.5.0 (1 Oct 2026), is the pin in `src/device/firmware.rs` — `device flash` with no flags
-> writes it; `--firmware` / `--release` still override. The mStream launcher's menu item is
-> the next slice there.
+> **Status 2026-10-04: shipped in v0.10.0** (built 2026-10-01) — the page, the `--yes` line
+> mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
+> (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
+> left, what to do next, the port watch, and the log behind `l`. The pin in
+> `src/device/firmware.rs` is firmware v0.8.0 (10 Oct 2026; before it v0.7.0 from 7 Oct,
+> v0.6.0 from 4 Oct, and the first release, v0.5.0) — `device flash` with no flags writes it;
+> `--firmware` / `--release` still override. v0.8.0 does not answer the running firmware's
+> `@status` (the release after it does), which the pin says beside its checksum
+> (`PINNED_ANSWERS_STATUS`).
+> **2026-10-10:** the backend of the MP3 Player tab's redesign (mStream
+> `docs/designs/mp3-tab`, alternate A, "One card"): `src/device/listen.rs` asks the running
+> firmware with no reset, `board.rs` is one board's verdict and card, `desk.rs` the worker that
+> watches every board, reads one on request, counts, identifies and writes one or all;
+> `device list` and `device flash --yes --all` run on it.
+> **2026-10-10, later:** the page redrawn as alternate A on the desk
+> (docs/ux-contracts/mp3-player-screen.md, rewritten first): opening the page or the GUI's
+> tab only listens; one card per board — the Firmware chip against the pin, the SD card as
+> the firmware reports it (firmware 0.9.0's `@status`; v0.8.0 and older say their version only,
+> and "updating shows it" waits for a pin that answers), one primary, Details; the gold gate
+> before every write; port tabs, Show on the player and Update all for several boards; the
+> standalone page the same at 72×24. `flow.rs` keeps only the pieces the desk reuses (the plan,
+> the baud ladder, the write and its retry); its whole-run worker, which reset a board to show
+> it, is gone.
+> The mStream launcher's menu item is dropped (Paul, 4 Oct 2026): **the GUI's MP3 Player tab
+> replaces it** (built 2026-10-04, docs/ux-contracts/mp3-player-screen.md) — the same page with
+> no flags, hosted under the GUI's top bar, `K` from the Library, Now Playing, Stats and the
+> Admin hallway.
+> **2026-10-10, Advanced options** (mStream `docs/designs/mp3-tab`, card 07, alternate A "An
+> options sheet", with the grafts of cards 08 and 09; Paul: "Go with alternate A, build it"):
+> the worker and the command line first — an image is a source and a flash mode, the pin
+> carries its DIO build's checksum too, a board's mode is read from its ELF against every
+> release's QIO/DIO pair, `--release` and `--firmware` are a next write instead of what boards
+> are measured against, `--flash-mode qio|dio`, `device releases`, a restart loop heard after a
+> write; then the contract's clauses 33–43, then the sheet (`src/device/page/sheet.rs`):
+> *Advanced…* and `o` open the kit's neutral sheet — Firmware (this player's release, another
+> release listed from GitHub only when chosen, a local build by the system's dialog or a typed
+> path), Flash mode, Erase — and Apply leaves one *Next write* line on the board's card with a
+> Reset (`x`); the primary and the gate follow it, and the write uses it up. A Core2 that keeps
+> restarting after a write is a gold card whose primary is *Write the DIO image ▸*, through the
+> gate. Still to verify on a Core2 that really loops on QIO (R5.8): what the ROM prints, and
+> how often.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
 player rather than in the tray launcher (decided 2026-09-30): flashing is a conversation —
 which board, what is on it, erase or not, progress, what went wrong — and this is where the
-pages are; the launcher stays the thin supervisor and opens this page the way it opens the
-admin rooms.
+pages are. The launcher was to open this page the way it opens the admin rooms; since
+2026-10-04 the way in is the GUI's own tab instead, and the launcher has no item for it.
 
 - **espflash as a library** (`default-features = false`, `serialport`): the reset dance, the
   RAM stub, compressed writes, the MD5 skip-and-verify. serialport with libudev off, because
@@ -2982,13 +3049,16 @@ admin rooms.
 - **Trust.** The pin is a tag plus the sha256 of its `-full.bin` (release assets are mutable);
   `--release` trusts the release's own `SHA256SUMS`; every local file is vetted by its
   description before anything is written.
-- **The worker** (src/device/flow.rs) holds the board in its bootloader from the probe to the
-  write, so one reset serves both, and restarts it on every way out before the write; the page
+- **The worker** was src/device/flow.rs, holding the board in its bootloader from the probe to
+  the write; since 2026-10-10 it is the desk (src/device/desk.rs), which asks every board with
+  no reset and reaches a bootloader only for a write or a read someone asked for; the page
   cannot leave a write. The baud ladder (921600 → 460800 → 115200) covers bridges and cables
   that cannot hold the fast rate, on connect and again on a write that dies.
-- **Left:** the pin (after firmware v0.5.0); the launcher's item (mStream: `PlayerPage::Device`,
-  a version gate, the web installer as the fallback); Wi-Fi and pairing over the same port
-  (the hidden `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
+- **Left:** the restart loop heard at open, before any write (R5.8 first: the banners of a
+  Core2 that really loops have not been seen); a `mode=` field in `@status` for a local
+  build's mode on the board (firmware work, not needed for releases); Wi-Fi and pairing over
+  the same port (the hidden `--server` flag is accepted for it); a udev rule in mStream's
+  deb/rpm.
 
 ### Phase 14 — The window spike: the GUI in a window of its own (2026-09-29/30)
 

@@ -3957,6 +3957,96 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_mp3_player_tabs_footer_lines_fit_ninety_nine_cells_in_every_locale() {
+        // The MP3 Player tab's footer is drawn from x 1 (mp3-player-screen
+        // contract, clause 15). The page fits its hint in 99 cells by
+        // dropping its lesser keys, but what never gives way must fit
+        // together: the write's warning with the keys after it, each gate's
+        // keys, the card's switch, primary, Details and way back, and the
+        // Advanced options sheet's Enter and Esc in each of its states
+        // (clause 34). And the way back reads as the Stats tab's, in each
+        // locale's own words for Esc and the Library.
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            let text = |key: &str| locale_text(&parsed, code, &format!("dev.{key}"));
+            // The longest short port name the page says (listen::label_for).
+            let port = |key: &str| text(key).replace("%{port}", "cu.usbmodem14101");
+            let switch = |key: &str| format!("←→ {}", text(key));
+            let enters = [
+                "hint_enter_update",
+                "hint_enter_install",
+                "hint_enter_read",
+                "hint_enter_retry",
+                "hint_enter_write",
+                "hint_enter_back",
+                "hint_enter_dio",
+            ];
+            let gates = [
+                "hint_gate_update",
+                "hint_gate_install",
+                "hint_gate_again",
+                "hint_gate_back",
+                "hint_gate_all",
+                "hint_gate_write",
+                "hint_gate_erase_update",
+                "hint_gate_erase_write",
+            ];
+            let mut lines = vec![
+                vec![port("hint_working_port"), switch("hint_look"), text("hint_details")],
+                vec![text("hint_working"), text("hint_details")],
+                vec![text("hint_help"), text("hint_library")],
+            ];
+            for enter in enters {
+                lines.push(vec![switch("hint_player"), text(enter), text("hint_details"), text("hint_library")]);
+            }
+            for gate in gates {
+                lines.push(vec![text(gate), text("hint_gate_erase"), text("hint_gate_cancel")]);
+            }
+            // The sheet's Enter and Esc never give way, and the console's tips
+            // row is 68 cells: they fit there together.
+            let sheet = [
+                ["hint_sheet_apply", "hint_sheet_close"],
+                ["hint_sheet_open", "hint_sheet_close"],
+                ["hint_sheet_defaults", "hint_sheet_close"],
+                ["hint_list_pick", "hint_list_close"],
+                ["hint_field_read", "hint_field_back"],
+            ];
+            for keys in sheet {
+                let line = keys.map(|key| text(key)).join(" · ");
+                let cells = crate::kit::width(&line);
+                assert!(cells <= 68, "{code}: the sheet's {cells} cells: {line}");
+            }
+            let back = locale_text(&parsed, code, "gui.tips.stats_back");
+            assert_eq!(text("hint_library"), back, "{code}: the way back reads as the Stats tab's");
+        }
+    }
+
+    #[test]
+    fn the_mp3_player_cards_labels_leave_a_gap_in_their_column_in_every_locale() {
+        // The card's labels stand in a 14-cell column before the values
+        // (src/device/page.rs, LABEL_W): 13 cells at most, so one is left
+        // between a label and its value.
+        let labels = [
+            "label_firmware",
+            "sd_card",
+            "board",
+            "port",
+            "on_board",
+            "label_player",
+            "label_card_fact",
+            "label_written",
+        ];
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            for key in labels {
+                let label = locale_text(&parsed, code, &format!("dev.{key}"));
+                let cells = crate::kit::width(&label);
+                assert!(cells <= 13, "{code}: dev.{key} is {cells} cells: {label}");
+            }
+        }
+    }
+
+    #[test]
     fn the_hallway_labels_fit_their_column_in_every_locale() {
         // A room label is drawn at x 3 and a group label at x 1, both
         // stopping before the hallway's rule at x 16.

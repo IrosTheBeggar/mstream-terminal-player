@@ -317,11 +317,15 @@ pub(super) struct Plan {
 }
 
 /// The plan for `area` — what [`draw`] draws, and what the tests click.
+/// While the MP3 Player tab's page writes out of sight, the line says so
+/// in place of asking for room (mp3-player-screen contract, clause 4).
 pub(super) fn plan(gui: &Gui, area: Rect) -> Plan {
     let now = gui.bar_now();
     let words = words(now.as_ref());
     let widths: Vec<u16> = words.iter().map(width_of).collect();
-    let mini = layout(area, &widths, now.is_some(), &t!("gui.mini.enlarge"));
+    let line =
+        super::device::unseen_line(gui).unwrap_or_else(|| t!("gui.mini.enlarge").to_string());
+    let mini = layout(area, &widths, now.is_some(), &line);
     Plan { now, words, mini }
 }
 

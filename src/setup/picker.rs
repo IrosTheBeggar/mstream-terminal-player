@@ -1,7 +1,9 @@
 //! The native folder picker, one backend per platform — and, through
 //! [`pick_torrent`], the `.torrent` file picker on the same three backends,
 //! shared by the GUI's Add-torrent room (docs/ux-contracts/add-torrent.md,
-//! clause 2) and the admin Torrents room's seeding tab.
+//! clause 2) and the admin Torrents room's seeding tab; through
+//! [`pick_firmware`] and [`pick_build_folder`], the MP3 Player tab's local
+//! build (docs/ux-contracts/mp3-player-screen.md, clause 36).
 //!
 //! Split on purpose (the mStream-side picker spike, 2026-08-21): rfd's Linux
 //! backends either link libwayland-client into NEEDED (portal flavor — a
@@ -44,9 +46,9 @@ pub const DIALOG_TITLE: &str = "Add a music folder to mStream";
 /// own localized one.
 pub const TORRENT_TITLE: &str = "Choose a .torrent file for mStream";
 
-/// `MSTREAM_NO_PICKER`: refuse to open the torrent dialog at all — the
-/// harness seam that lets a pty smoke reach the typed fallback instead
-/// of popping a window on whoever is running it.
+/// `MSTREAM_NO_PICKER`: refuse to open the torrent and firmware dialogs at
+/// all — the harness seam that lets a pty smoke reach the typed fallback
+/// instead of popping a window on whoever is running it.
 fn torrent_dialogs_disabled() -> bool {
     std::env::var("MSTREAM_NO_PICKER").is_ok_and(|v| !v.is_empty() && v != "0")
 }
@@ -56,14 +58,28 @@ fn torrent_dialogs_disabled() -> bool {
 /// inside quoted strings, so their quotes and backslashes are escaped.
 #[cfg(any(target_os = "macos", test))]
 fn torrent_script(title: &str, start: Option<&Path>) -> String {
+    file_script("torrent", title, start)
+}
+
+/// The AppleScript for a file dialog typed to `extension`, opening in
+/// `start` when there is one: the torrent's and the firmware image's.
+#[cfg(any(target_os = "macos", test))]
+fn file_script(extension: &str, title: &str, start: Option<&Path>) -> String {
     let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let location = start
         .map(|p| format!(" default location (POSIX file \"{}\")", escape(&p.to_string_lossy())))
         .unwrap_or_default();
     format!(
-        "POSIX path of (choose file of type {{\"torrent\"}} with prompt \"{}\"{location})",
+        "POSIX path of (choose file of type {{\"{extension}\"}} with prompt \"{}\"{location})",
         escape(title)
     )
+}
+
+/// The AppleScript for a folder dialog under `title`.
+#[cfg(any(target_os = "macos", test))]
+fn folder_script(title: &str) -> String {
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("POSIX path of (choose folder with prompt \"{}\")", escape(title))
 }
 
 #[cfg(target_os = "macos")]
@@ -92,6 +108,34 @@ pub fn pick_torrent(title: &str, start: Option<&Path>) -> Pick {
     }
     match osascript_path(&torrent_script(title, start)) {
         Ok(Some(path)) => Pick::File(path),
+        Ok(None) => Pick::Cancelled,
+        Err(why) => Pick::Unavailable(why),
+    }
+}
+
+/// A firmware image for the MP3 player: `choose file` typed to `.bin`,
+/// started in `start` when given (the folder of the last one picked).
+#[cfg(target_os = "macos")]
+pub fn pick_firmware(title: &str, start: Option<&Path>) -> Pick {
+    if torrent_dialogs_disabled() {
+        return Pick::Unavailable("dialogs are switched off".to_string());
+    }
+    match osascript_path(&file_script("bin", title, start)) {
+        Ok(Some(path)) => Pick::File(path),
+        Ok(None) => Pick::Cancelled,
+        Err(why) => Pick::Unavailable(why),
+    }
+}
+
+/// A firmware build folder (a PlatformIO `.pio/build/<env>`, or the
+/// project above it).
+#[cfg(target_os = "macos")]
+pub fn pick_build_folder(title: &str) -> Pick {
+    if torrent_dialogs_disabled() {
+        return Pick::Unavailable("dialogs are switched off".to_string());
+    }
+    match osascript_path(&folder_script(title)) {
+        Ok(Some(path)) => Pick::Folder(path),
         Ok(None) => Pick::Cancelled,
         Err(why) => Pick::Unavailable(why),
     }
@@ -230,6 +274,39 @@ pub fn pick_torrent(title: &str, start: Option<&Path>) -> Pick {
     }
 }
 
+/// The firmware image dialog `pick_firmware` opens: typed to `.bin`,
+/// owned like the others.
+#[cfg(windows)]
+fn firmware_dialog(title: &str, start: Option<&Path>) -> rfd::FileDialog {
+    let mut dialog = rfd::FileDialog::new().set_title(title).add_filter("Firmware image", &["bin"]);
+    if let Some(start) = start {
+        dialog = dialog.set_directory(start);
+    }
+    owned(dialog)
+}
+
+#[cfg(windows)]
+pub fn pick_firmware(title: &str, start: Option<&Path>) -> Pick {
+    if torrent_dialogs_disabled() {
+        return Pick::Unavailable("dialogs are switched off".to_string());
+    }
+    match firmware_dialog(title, start).pick_file() {
+        Some(path) => Pick::File(path),
+        None => Pick::Cancelled,
+    }
+}
+
+#[cfg(windows)]
+pub fn pick_build_folder(title: &str) -> Pick {
+    if torrent_dialogs_disabled() {
+        return Pick::Unavailable("dialogs are switched off".to_string());
+    }
+    match owned(rfd::FileDialog::new().set_title(title)).pick_folder() {
+        Some(path) => Pick::Folder(path),
+        None => Pick::Cancelled,
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn pick_folder() -> Pick {
     use ashpd::desktop::file_chooser::SelectedFiles;
@@ -280,6 +357,59 @@ pub fn pick_torrent(title: &str, start: Option<&Path>) -> Pick {
     }
 }
 
+/// The firmware image dialog: the portal's file chooser filtered to
+/// `.bin`, started in `start` when given.
+#[cfg(target_os = "linux")]
+pub fn pick_firmware(title: &str, start: Option<&Path>) -> Pick {
+    use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
+
+    if torrent_dialogs_disabled() {
+        return Pick::Unavailable("dialogs are switched off".to_string());
+    }
+    let title = title.to_string();
+    let start = start.map(Path::to_path_buf);
+    let request = async move {
+        let filter = FileFilter::new("Firmware image").glob("*.bin");
+        let mut open = SelectedFiles::open_file().title(title.as_str()).filter(filter);
+        if let Some(start) = start.as_deref() {
+            open = open.current_folder(start)?;
+        }
+        open.send().await?.response()
+    };
+    match crate::runtime::block_on(request) {
+        Ok(Ok(files)) => match files.uris().first().and_then(|uri| uri.to_file_path().ok()) {
+            Some(path) => Pick::File(path),
+            None => Pick::Cancelled,
+        },
+        Ok(Err(ashpd::Error::Response(_))) => Pick::Cancelled,
+        Ok(Err(e)) => Pick::Unavailable(e.to_string()),
+        Err(e) => Pick::Unavailable(e),
+    }
+}
+
+/// A firmware build folder, the portal's directory chooser.
+#[cfg(target_os = "linux")]
+pub fn pick_build_folder(title: &str) -> Pick {
+    use ashpd::desktop::file_chooser::SelectedFiles;
+
+    if torrent_dialogs_disabled() {
+        return Pick::Unavailable("dialogs are switched off".to_string());
+    }
+    let title = title.to_string();
+    let request = async move {
+        SelectedFiles::open_file().title(title.as_str()).directory(true).send().await?.response()
+    };
+    match crate::runtime::block_on(request) {
+        Ok(Ok(files)) => match files.uris().first().and_then(|uri| uri.to_file_path().ok()) {
+            Some(path) => Pick::Folder(path),
+            None => Pick::Cancelled,
+        },
+        Ok(Err(ashpd::Error::Response(_))) => Pick::Cancelled,
+        Ok(Err(e)) => Pick::Unavailable(e.to_string()),
+        Err(e) => Pick::Unavailable(e),
+    }
+}
+
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn pick_folder() -> Pick {
     Pick::Unavailable("no native picker on this platform".to_string())
@@ -288,6 +418,16 @@ pub fn pick_folder() -> Pick {
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn pick_torrent(_title: &str, _start: Option<&Path>) -> Pick {
     let _ = torrent_dialogs_disabled();
+    Pick::Unavailable("no native picker on this platform".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+pub fn pick_firmware(_title: &str, _start: Option<&Path>) -> Pick {
+    Pick::Unavailable("no native picker on this platform".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+pub fn pick_build_folder(_title: &str) -> Pick {
     Pick::Unavailable("no native picker on this platform".to_string())
 }
 
@@ -306,6 +446,15 @@ mod tests {
         // The admin room's localized title lands in the same quoted string.
         let titled = torrent_script("Add a \"seed\"", None);
         assert!(titled.contains("with prompt \"Add a \\\"seed\\\"\""), "{titled}");
+    }
+
+    #[test]
+    fn the_firmware_scripts_are_typed_to_bin_and_a_folder_is_a_folder() {
+        let file = file_script("bin", "Choose a firmware image", Some(Path::new("/Users/me/core2")));
+        assert!(file.starts_with("POSIX path of (choose file of type {\"bin\"} with prompt \""), "{file}");
+        assert!(file.contains("default location (POSIX file \"/Users/me/core2\")"), "{file}");
+        let folder = folder_script("Choose a \"build\" folder");
+        assert_eq!(folder, "POSIX path of (choose folder with prompt \"Choose a \\\"build\\\" folder\")");
     }
 
     /// A published HWND is handed out as the Win32 window handle rfd's
@@ -331,7 +480,12 @@ mod tests {
         // The dialogs the pickers open, as rfd prints them (0x1234 is 4660).
         let dialogs = || {
             let torrent = torrent_dialog(TORRENT_TITLE, Some(Path::new("C:\\Users")));
-            [("folder", format!("{:?}", folder_dialog())), ("torrent", format!("{torrent:?}"))]
+            let firmware = firmware_dialog("Choose a firmware image", None);
+            [
+                ("folder", format!("{:?}", folder_dialog())),
+                ("torrent", format!("{torrent:?}")),
+                ("firmware", format!("{firmware:?}")),
+            ]
         };
         for (picker, dialog) in dialogs() {
             assert!(dialog.contains("parent: Some(Win32("), "{picker}: unowned: {dialog}");

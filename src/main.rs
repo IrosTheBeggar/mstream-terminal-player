@@ -269,7 +269,8 @@ enum Command {
     )]
     Tui(TuiArgs),
     /// Launch the GUI player — the mouse-first surface the installers open:
-    /// the library rooms, the queue, Auto DJ, servers and tunnels, Now Playing
+    /// the library rooms, the queue, Auto DJ, servers and tunnels, Now Playing,
+    /// Stats, Admin, and the MP3 player's firmware
     Gui(GuiArgs),
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),

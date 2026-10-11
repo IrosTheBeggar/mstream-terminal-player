@@ -165,7 +165,11 @@ BOLD), two cells apart. `←`/`→` and clicks switch; the pane beneath keeps
 one fixed height whatever the tab, so nothing below it moves. The tab
 row's right edge may carry the active pane's one-line note (the log's
 "newest first"), dropped when the row is too narrow. First consumer:
-the admin panel's Discovery room.
+the admin panel's Discovery room. The MP3 Player page's port tabs are the
+second: each tab wears its board's mark after the name (✓ ok, ! and ✗
+gold, ? and … DarkGray, a write's percentage in the accent; on the slab
+the mark takes the slab's colours), and the right edge carries a count or
+a text button (Update all).
 
 ### Dropdown
 A choice among many that has one home on the screen: the current value
@@ -472,7 +476,9 @@ close on the title row, right edge: DIM, hover BRIGHT + BOLD —
 dismissal is neutral; red stays reserved for the destructive row
 remove. Its tooltip names the keyboard path ("Close — Esc"). Warning
 gates (the public-mode modal) get NO `[X]` — they force an explicit
-choice.
+choice. A gate may name its safe choice for what it keeps rather than
+"Cancel" (the MP3 Player page's "◂ Keep v0.8.0"); it is still first and
+still the modal primary.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
 **Over pixels**: on a screen that draws real pixels (the queue's and the
@@ -537,11 +543,16 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
-**The GUI player's top bar**: three tabs at the left — Library, Stats,
-Admin — worn as the kit's tab slab for the screen that is up and dim
-text for the others (Now Playing, on `0`, has no tab and lights none
-while it is up), the Visualizer item after them, and the session's server label with
-`[+]` at the right. The
+**The GUI player's top bar**: four tabs at the left — Library, Stats,
+Admin, MP3 Player — worn as the kit's tab slab for the screen that is up
+and dim text for the others (Now Playing, on `0`, has no tab and lights
+none while it is up), the Visualizer item after them, and the session's
+server label with `[+]` at the right. The label never covers the strip —
+drawn over a tab it would take its clicks — so it starts at least a blank
+cell past the Visualizer item, cut short with the kit's mark (its menu
+mark kept) where it would not; at the 100-column floor a local server's
+label stands whole in every locale. While the MP3 Player tab's page
+writes, the strip is inert: no tab lights or answers a click. The
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
 Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok
@@ -569,7 +580,8 @@ one that holds it. A row may carry a dim count after its label (` · 12
 new`), which yields its cells first.
 
 **Hosted rooms.** A page built as its own command (an admin room, the
-stats page) can be hosted inside another screen's area. The room draws
+stats page, the MP3 player's firmware page) can be hosted inside another
+screen's area. The room draws
 its body and its note row and nothing else: no header (the host's bar
 names the server), no tips row (the host's footer carries the room's
 hint, and the room's base hint must say what its keys do THERE — Esc
