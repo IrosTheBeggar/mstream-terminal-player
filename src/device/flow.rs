@@ -333,6 +333,9 @@ mod tests {
         assert_eq!(ahead, Plan { kind: Kind::Back { from: "v0.8.0-5-g4e94418".into() }, erase: false });
         assert_eq!(ahead.describe(), "go back, no erase", "a step back is never an update");
         assert_eq!(plan(Some(&ours("v0.9.0")), "v0.8.0", None).kind, Kind::Back { from: "v0.9.0".into() });
+        // Across the first two-digit minor, by number and not as text.
+        assert_eq!(plan(Some(&ours("v0.9.0")), "v0.10.0", None).kind, Kind::Update { from: "v0.9.0".into() });
+        assert_eq!(plan(Some(&ours("v0.10.0")), "v0.9.0", None).kind, Kind::Back { from: "v0.10.0".into() });
         assert_eq!(blank.describe(), "install, erase first");
         assert_eq!(on_board_text(Some(&ours("v0.4.0"))), "mstream-mp3-player v0.4.0");
         assert!(on_board_text(None).contains("nothing"));

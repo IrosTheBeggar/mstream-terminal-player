@@ -1804,8 +1804,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::device::board::{Card, CardKind, CardUnknown, Primary};
     use crate::device::engine::fake::Fake;
-    use crate::device::firmware::Check;
-    use crate::device::firmware::tests::{Shelf, desc_bytes, desc_with_elf, elf_bytes, merged_in};
+    use crate::device::firmware::tests::{Shelf, desc_bytes, desc_with_elf, elf_bytes, merged_in, pin, pin_elf};
+    use crate::device::firmware::{Check, PINNED_ANSWERS_STATUS};
 
     /// The worker's clocks in miniature: the boards here answer at once, or
     /// never, so a wait is only how long a silent board takes — long
@@ -1825,9 +1825,9 @@ pub(crate) mod tests {
         Setup { supply, preset: None, flags_mode: None, port: None, timing: QUICK, firmware_first: false }
     }
 
-    /// A worker on `fake`, the pin's two builds of `version` on the test's
-    /// shelf in GitHub's place, its two far ends the test's, and what it
-    /// said folded as it comes.
+    /// A worker on `fake`, the pin's two builds on the test's shelf in
+    /// GitHub's place, its two far ends the test's, and what it said folded
+    /// as it comes.
     struct Rig {
         cmds: Sender<Cmd>,
         events: Receiver<Event>,
@@ -1837,8 +1837,8 @@ pub(crate) mod tests {
         shelf: Arc<Shelf>,
     }
 
-    fn rig(fake: Fake, version: &str) -> Rig {
-        rig_with(fake, Shelf::new(version), None, None, false)
+    fn rig(fake: Fake) -> Rig {
+        rig_with(fake, Shelf::new(), None, None, false)
     }
 
     fn rig_with(fake: Fake, shelf: Shelf, preset: Option<Image>, port: Option<&str>, first: bool) -> Rig {
@@ -1859,7 +1859,7 @@ pub(crate) mod tests {
     /// `--release` and `--flash-mode`, read as the command line reads them.
     fn rig_flags(fake: Fake, release: Option<&str>, mode: Option<Mode>) -> Rig {
         let trace = fake.trace();
-        let shelf = Arc::new(Shelf::new("v0.8.0"));
+        let shelf = Arc::new(Shelf::new());
         let preset = Image::from_flags(None, release.map(str::to_string), mode);
         let setup = Setup {
             supply: shelf.clone(),
@@ -2002,10 +2002,22 @@ pub(crate) mod tests {
         }
     }
 
+    /// The board heard running the pin, as a board on it answers: through
+    /// `@status` when the pin answers the status query, else `@err 7` and
+    /// `L`'s version — the fake answers as each release does, so this holds
+    /// only while PINNED_ANSWERS_STATUS says what the pin does.
+    fn runs_the_pin(board: &Board) -> bool {
+        match &board.heard {
+            Heard::Status(status) => PINNED_ANSWERS_STATUS && status.fw == pin(),
+            Heard::Old { version: Some(version), .. } => !PINNED_ANSWERS_STATUS && version == pin(),
+            _ => false,
+        }
+    }
+
     #[test]
     fn opening_listens_to_every_board_and_resets_none() {
         let _en = crate::setup::tests::in_locale("en");
-        let mut r = rig(Fake::new("status:v0.8.0,old:v0.7.0,silent:v0.7.0"), "v0.8.0");
+        let mut r = rig(Fake::new(&format!("status:{},old:v0.7.0,silent:v0.7.0", pin())));
         r.settled(3);
         let up = r.board("FAKE0");
         assert_eq!(up.verdict, Verdict::UpToDate);
@@ -2022,10 +2034,11 @@ pub(crate) mod tests {
         assert!(r.resets().is_empty(), "nothing reset, nothing opened but to listen: {:?}", r.trace());
         let all_three = ["FAKE0", "FAKE1", "FAKE2"];
         assert!(r.seen.iter().any(|e| matches!(e, Event::Watch { ports, .. } if ports == &all_three)));
-        assert!(r.seen.iter().any(|e| matches!(e, Event::Target(t) if t.version == "v0.8.0")), "the pin");
+        assert!(r.seen.iter().any(|e| matches!(e, Event::Target(t) if t.version == pin())), "the pin");
         let logs = r.logs();
         assert!(logs.contains(&"listening on FAKE0 — DTR and RTS low, no reset".to_string()), "{logs:?}");
-        assert!(logs.iter().any(|l| l.starts_with("@status fw=v0.8.0")), "the host lines, word for word: {logs:?}");
+        let said = format!("@status fw={}", pin());
+        assert!(logs.iter().any(|l| l.starts_with(&said)), "the host lines, word for word: {logs:?}");
         assert!(logs.contains(&"FAKE1: v0.7.0, too old to report its card".to_string()), "{logs:?}");
         r.quit();
     }
@@ -2034,7 +2047,7 @@ pub(crate) mod tests {
     fn a_board_plugged_in_is_heard_without_a_reset_and_one_unplugged_is_dropped() {
         let _en = crate::setup::tests::in_locale("en");
         let fake = Fake::new("status:v0.8.0,old:v0.7.0/in=1.2,status:v0.9.0/out=1.2");
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(2);
         assert!(r.boards.contains_key("FAKE2") && !r.boards.contains_key("FAKE1"));
         r.until("FAKE1 in, FAKE2 out", |r| {
@@ -2048,7 +2061,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_port_another_program_holds_is_that_boards_state_and_ask_again_reads_it_once_free() {
-        let mut r = rig(Fake::new("status:v0.8.0,status:v0.8.0/held=0.5"), "v0.8.0");
+        let mut r = rig(Fake::new(&format!("status:{0},status:{0}/held=0.5", pin())));
         r.settled(2);
         assert_eq!(r.board("FAKE0").verdict, Verdict::UpToDate, "the other board is read as usual");
         let held = r.board("FAKE1");
@@ -2064,7 +2077,7 @@ pub(crate) mod tests {
 
     #[test]
     fn read_the_board_is_the_one_reset_and_restarts_it_as_it_was() {
-        let mut r = rig(Fake::new("other,chip,silent:v0.7.0,fresh"), "v0.8.0");
+        let mut r = rig(Fake::new("other,chip,silent:v0.7.0,fresh"));
         r.settled(4);
         r.send(Cmd::Read { port: "FAKE0".into() });
         r.send(Cmd::Read { port: "FAKE1".into() });
@@ -2097,7 +2110,7 @@ pub(crate) mod tests {
     fn a_write_resets_writes_restarts_and_listens_again_for_the_new_verdict() {
         let fake = Fake::new("old:v0.7.0").with_pace(Duration::from_millis(100));
         let probe = fake.clone();
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
         r.until("written and heard", |r| {
@@ -2105,14 +2118,15 @@ pub(crate) mod tests {
             matches!(b.written, Some(Written::Done { .. })) && b.work == Work::Idle && b.heard != Heard::Nothing
         });
         let board = r.board("FAKE0");
-        assert_eq!(board.verdict, Verdict::UpToDate, "v0.8.0 says so through L");
+        assert_eq!(board.verdict, Verdict::UpToDate, "the pin, heard again: {:?}", board.heard);
+        assert!(runs_the_pin(board), "through @status if the pin answers it, L if not: {:?}", board.heard);
         let Some(Written::Done { version, skipped: false, install: false, boot: Some(boot), .. }) = &board.written
         else {
             panic!("{:?}", board.written)
         };
-        assert_eq!(version, "v0.8.0");
-        assert!(boot.starts_with("mstream-mp3-player v0.8.0"), "{boot}");
-        assert_eq!(probe.version_on("FAKE0").as_deref(), Some("v0.8.0"));
+        assert_eq!(version, pin());
+        assert!(boot.starts_with(&format!("mstream-mp3-player {} ", pin())), "{boot}");
+        assert_eq!(probe.version_on("FAKE0").as_deref(), Some(pin()));
         let trace = ["listen FAKE0", "open 921600", "restart", "listen FAKE0"];
         assert_eq!(r.trace(), trace, "listened, reset once for the write, listened again");
         let plan = r.seen.iter().find_map(|e| match e {
@@ -2134,7 +2148,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_write_leaves_the_board_half_written_with_try_again() {
-        let mut r = rig(Fake::new("failwrite").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new("failwrite").with_pace(Duration::from_millis(60)));
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: None, image: None });
         r.until("failed", |r| {
@@ -2151,7 +2165,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_board_unplugged_mid_write_fails_half_written_and_then_goes() {
-        let mut r = rig(Fake::new("old:v0.7.0/out=1.2").with_pace(Duration::from_millis(2500)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0/out=1.2").with_pace(Duration::from_millis(2500)));
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
         r.until("gone", |r| r.seen.iter().any(|e| matches!(e, Event::Gone { .. })));
@@ -2167,9 +2181,10 @@ pub(crate) mod tests {
 
     #[test]
     fn update_all_writes_each_board_that_needs_it_one_after_another_and_never_installs() {
-        let fake = Fake::new("old:v0.7.0,status:v0.8.0,old:v0.6.0-37-g221d99d,other").with_pace(Duration::from_millis(60));
+        let spec = format!("old:v0.7.0,status:{},old:v0.6.0-37-g221d99d,other", pin());
+        let fake = Fake::new(&spec).with_pace(Duration::from_millis(60));
         let probe = fake.clone();
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(4);
         let every: Vec<String> = (0..4).map(|i| format!("FAKE{i}")).collect();
         assert_eq!(r.board("FAKE2").verdict, Verdict::DevUpdate);
@@ -2184,9 +2199,9 @@ pub(crate) mod tests {
         assert!(matches!(&r.all()[2], All::Done { ports, passed, .. } if *ports == both && passed.is_empty()));
         let resets = ["open 921600", "restart", "open 921600", "restart"];
         assert_eq!(r.resets(), resets, "one board in its bootloader at a time");
-        assert_eq!(probe.version_on("FAKE0").as_deref(), Some("v0.8.0"));
-        assert_eq!(probe.version_on("FAKE2").as_deref(), Some("v0.8.0"));
-        assert_eq!(probe.version_on("FAKE1").as_deref(), Some("v0.8.0"), "up to date: untouched");
+        assert_eq!(probe.version_on("FAKE0").as_deref(), Some(pin()));
+        assert_eq!(probe.version_on("FAKE2").as_deref(), Some(pin()));
+        assert_eq!(probe.version_on("FAKE1").as_deref(), Some(pin()), "up to date: untouched");
         assert_eq!(probe.version_on("FAKE3"), None, "other firmware: never installed over");
         let plans: Vec<String> = r
             .seen
@@ -2205,7 +2220,7 @@ pub(crate) mod tests {
         // FAKE1 leaves while FAKE0 is written: after both were heard, before
         // its turn.
         let fake = Fake::new("old:v0.7.0,old:v0.6.0/out=1.2").with_pace(Duration::from_millis(2500));
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(2);
         r.send(Cmd::UpdateAll { ports: vec!["FAKE0".into(), "FAKE1".into()] });
         r.until("done", |r| r.all().iter().any(|a| matches!(a, All::Done { .. })));
@@ -2220,7 +2235,7 @@ pub(crate) mod tests {
     fn update_all_stops_at_the_first_failure_and_never_starts_the_next() {
         let fake = Fake::new("old:v0.7.0/fail=write,old:v0.6.0").with_pace(Duration::from_millis(60));
         let probe = fake.clone();
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(2);
         r.send(Cmd::UpdateAll { ports: vec!["FAKE0".into(), "FAKE1".into()] });
         r.until("stopped", |r| r.all().iter().any(|a| matches!(a, All::Stopped { .. })));
@@ -2236,7 +2251,7 @@ pub(crate) mod tests {
     fn update_all_lets_a_board_go_untouched_when_its_bootloader_shows_other_firmware() {
         // It said v0.7.0 over USB; its flash holds someone else's image.
         let fake = Fake::new("status:v0.7.0/flash=other/fw=v0.7.0");
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(1);
         assert_eq!(r.board("FAKE0").verdict, Verdict::Update);
         r.send(Cmd::UpdateAll { ports: vec!["FAKE0".into()] });
@@ -2249,8 +2264,9 @@ pub(crate) mod tests {
     #[test]
     fn during_a_write_the_other_boards_are_looked_at_and_never_written() {
         // FAKE2 arrives while FAKE0 is written.
-        let fake = Fake::new("old:v0.7.0,status:v0.9.0/free=?,status:v0.8.0/in=1.2").with_pace(Duration::from_millis(2500));
-        let mut r = rig(fake, "v0.8.0");
+        let spec = format!("old:v0.7.0,status:v0.9.0/free=?,status:{}/in=1.2", pin());
+        let fake = Fake::new(&spec).with_pace(Duration::from_millis(2500));
+        let mut r = rig(fake);
         r.settled(2);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
         r.until("writing", |r| matches!(r.board("FAKE0").work, Work::Writing { pct: Some(_), .. }));
@@ -2292,7 +2308,7 @@ pub(crate) mod tests {
     fn the_count_reports_its_progress_and_free_bytes_and_says_why_it_would_not() {
         let fake = Fake::new("status:v0.9.0/free=?,status:v0.9.0/state=playing,old:v0.7.0")
             .with_pace(Duration::from_millis(100));
-        let mut r = rig(fake, "v0.9.0");
+        let mut r = rig(fake);
         r.settled(3);
         assert!(matches!(r.board("FAKE0").card(), Card::Fat { free: Free::NotCounted, .. }));
         r.send(Cmd::Count { port: "FAKE0".into() });
@@ -2325,7 +2341,7 @@ pub(crate) mod tests {
 
     #[test]
     fn show_on_the_player_puts_the_port_on_its_screen_or_says_why_not() {
-        let mut r = rig(Fake::new("status:v0.9.0,status:v0.9.0/identify=ui,old:v0.8.0"), "v0.9.0");
+        let mut r = rig(Fake::new("status:v0.9.0,status:v0.9.0/identify=ui,old:v0.8.0"));
         r.settled(3);
         let answers = |r: &Rig| {
             r.seen
@@ -2354,7 +2370,7 @@ pub(crate) mod tests {
 
     #[test]
     fn details_facts_come_from_l_without_a_reset() {
-        let mut r = rig(Fake::new("status:v0.9.0"), "v0.9.0");
+        let mut r = rig(Fake::new("status:v0.9.0"));
         r.settled(1);
         assert_eq!(r.board("FAKE0").flash_mb, None, "@status says no flash size");
         r.send(Cmd::Facts { port: "FAKE0".into() });
@@ -2367,7 +2383,7 @@ pub(crate) mod tests {
     fn quit_lets_every_listen_go_at_once_and_waits_for_a_read_to_restart_its_board() {
         // A silent board takes the whole of its wait: Quit cuts it short.
         let timing = Timing { at_rest: Duration::from_secs(3), ..QUICK };
-        let slow = Setup { timing, ..setup(Arc::new(Shelf::new("v0.8.0"))) };
+        let slow = Setup { timing, ..setup(Arc::new(Shelf::new())) };
         let fake = Fake::new("status:v0.8.0,silent");
         let (cmds, events) = spawn(Arc::new(fake), slow);
         std::thread::sleep(Duration::from_millis(100));
@@ -2379,7 +2395,7 @@ pub(crate) mod tests {
 
         // A read under way: the board is reached, read and restarted first.
         let fake = Fake::new("other").with_reach(Duration::from_millis(300));
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(1);
         r.send(Cmd::Read { port: "FAKE0".into() });
         let trace = r.trace.clone();
@@ -2394,7 +2410,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_write_is_never_cut_by_a_quit() {
-        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(300)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(300)));
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
         r.until("writing", |r| matches!(r.board("FAKE0").work, Work::Writing { .. }));
@@ -2408,7 +2424,7 @@ pub(crate) mod tests {
     #[test]
     fn the_page_gone_is_a_quit() {
         let fake = Fake::new("status:v0.8.0");
-        let (cmds, events) = spawn(Arc::new(fake), setup(Arc::new(Shelf::new("v0.8.0"))));
+        let (cmds, events) = spawn(Arc::new(fake), setup(Arc::new(Shelf::new())));
         drop(cmds);
         let rest: Vec<Event> = events.iter().collect();
         assert_eq!(rest.last(), Some(&Event::Released), "and then the worker ends");
@@ -2419,7 +2435,7 @@ pub(crate) mod tests {
         let fake = Fake::new("status:v0.8.0");
         let trace = fake.trace();
         let missing = Image::Local("/nowhere/at/all.bin".into());
-        let first = Setup { preset: Some(missing), firmware_first: true, ..setup(Arc::new(Shelf::new("v0.8.0"))) };
+        let first = Setup { preset: Some(missing), firmware_first: true, ..setup(Arc::new(Shelf::new())) };
         let (cmds, events) = spawn(Arc::new(fake), first);
         let failed = events.iter().find(|e| matches!(e, Event::FirmwareFailed(_)));
         assert!(matches!(failed, Some(Event::FirmwareFailed(DeviceError::Firmware(_)))));
@@ -2430,11 +2446,11 @@ pub(crate) mod tests {
 
     #[test]
     fn a_named_port_is_the_only_board_and_an_unlisted_one_is_opened_as_named() {
-        let mut r = rig_with(Fake::new("status:v0.8.0,old:v0.7.0"), Shelf::new("v0.8.0"), None, Some("fake1"), false);
+        let mut r = rig_with(Fake::new("status:v0.8.0,old:v0.7.0"), Shelf::new(), None, Some("fake1"), false);
         r.settled(1);
         assert_eq!(r.boards.keys().collect::<Vec<_>>(), ["FAKE1"]);
         r.quit();
-        let mut r = rig_with(Fake::new("nodevice"), Shelf::new("v0.8.0"), None, Some("COM9"), false);
+        let mut r = rig_with(Fake::new("nodevice"), Shelf::new(), None, Some("COM9"), false);
         r.settled(1);
         assert_eq!(r.board("COM9").candidate.bridge, "?");
         assert_eq!(r.board("COM9").verdict, Verdict::Silent);
@@ -2443,7 +2459,7 @@ pub(crate) mod tests {
 
     #[test]
     fn no_board_says_so_with_the_other_ports_and_the_watch_goes_on() {
-        let mut r = rig(Fake::new("status:v0.8.0/in=1.2"), "v0.8.0");
+        let mut r = rig(Fake::new("status:v0.8.0/in=1.2"));
         r.until("watched", |r| r.seen.iter().any(|e| matches!(e, Event::Watch { .. })));
         let none = |e: &Event| matches!(e, Event::Watch { ports, others } if ports.is_empty() && others == &["FAKECOM1"]);
         assert!(r.seen.iter().any(none));
@@ -2456,7 +2472,7 @@ pub(crate) mod tests {
     #[test]
     fn a_card_the_player_cannot_read_and_no_card_are_said_as_such() {
         let fake = Fake::new("status:v0.9.0/card=exfat/free=?/tracks=-,status:v0.9.0/card=none/size=-/free=?/tracks=-");
-        let mut r = rig(fake, "v0.9.0");
+        let mut r = rig(fake);
         r.settled(2);
         assert_eq!(r.board("FAKE0").card(), Card::Foreign { kind: CardKind::ExFat, size: Some(63_864_569_856) });
         assert_eq!(r.board("FAKE1").card(), Card::Empty);
@@ -2474,7 +2490,7 @@ pub(crate) mod tests {
     #[test]
     fn a_board_still_listing_its_library_is_ours_starting_up_and_asked_until_it_answers() {
         let _en = crate::setup::tests::in_locale("en");
-        let mut r = rig(Fake::new("old:v0.7.0/listing=1.5"), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0/listing=1.5"));
         r.until("starting up", |r| r.boards.get("FAKE0").is_some_and(|b| b.verdict == Verdict::Starting));
         let busy = r.board("FAKE0");
         assert!(busy.ours(), "an M5Stack Core2, not an unknown board");
@@ -2496,7 +2512,7 @@ pub(crate) mod tests {
         let _en = crate::setup::tests::in_locale("en");
         // FAKE0 prints its log for a minute and never answers; FAKE1 prints
         // nothing at all, and is today's silent board at once.
-        let mut r = rig(Fake::new("silent:v0.7.0/listing=60,silent:v0.7.0"), "v0.8.0");
+        let mut r = rig(Fake::new("silent:v0.7.0/listing=60,silent:v0.7.0"));
         r.until("FAKE0 starting up", |r| r.boards.get("FAKE0").is_some_and(|b| b.verdict == Verdict::Starting));
         r.settled(2);
         assert_eq!(r.board("FAKE1").verdict, Verdict::Silent);
@@ -2510,7 +2526,7 @@ pub(crate) mod tests {
     #[test]
     fn after_its_own_write_a_board_listing_its_library_says_so_until_it_answers() {
         let _en = crate::setup::tests::in_locale("en");
-        let mut r = rig(Fake::new("old:v0.7.0/listing=0.8").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0/listing=0.8").with_pace(Duration::from_millis(60)));
         r.settled(1);
         let before = r.seen.len();
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
@@ -2519,9 +2535,9 @@ pub(crate) mod tests {
         let board = r.board("FAKE0");
         assert_eq!(board.verdict, Verdict::UpToDate, "the version just written: ✓ just written");
         assert_eq!(board.card(), Card::Unknown(CardUnknown::Starting), "not 'unknown until the firmware runs'");
-        assert_eq!(board.version(), Some("v0.8.0"));
+        assert_eq!(board.version(), Some(pin()));
         r.written("FAKE0", "answered");
-        assert!(matches!(r.board("FAKE0").heard, Heard::Old { version: Some(ref v), .. } if v == "v0.8.0"));
+        assert!(runs_the_pin(r.board("FAKE0")), "it answered as the pin does: {:?}", r.board("FAKE0").heard);
         let after: Vec<String> = r.seen[before..]
             .iter()
             .filter_map(|e| match e {
@@ -2541,7 +2557,7 @@ pub(crate) mod tests {
         let fake = Fake::new("old:v0.7.0/listing=60").with_pace(Duration::from_millis(60));
         let trace = fake.trace();
         let timing = Timing { waits: Waits { up: Duration::from_millis(800), ..QUICK.waits }, ..QUICK };
-        let shelf = Arc::new(Shelf::new("v0.8.0"));
+        let shelf = Arc::new(Shelf::new());
         let mut r = rig_on(fake, Setup { timing, ..setup(shelf.clone()) }, shelf, trace);
         r.settled(1);
         assert_eq!(r.board("FAKE0").verdict, Verdict::Silent, "it never answered this visit");
@@ -2562,7 +2578,7 @@ pub(crate) mod tests {
     #[test]
     fn a_board_that_runs_dio_is_updated_in_dio_and_says_so() {
         let _en = crate::setup::tests::in_locale("en");
-        let mut r = rig(Fake::new("old:v0.7.0/mode=dio").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0/mode=dio").with_pace(Duration::from_millis(60)));
         r.settled(1);
         let board = r.board("FAKE0");
         assert_eq!(board.mode().map(|m| m.mode), Some(Mode::Dio), "aa45f60e: v0.7.0's DIO build");
@@ -2579,18 +2595,20 @@ pub(crate) mod tests {
         r.written("FAKE0", "written and heard");
         let plans = r.plans();
         assert_eq!(plans.len(), 1);
-        assert_eq!((&plans[0].image, plans[0].mode, plans[0].elf.as_str()), (&Image::Pin(Mode::Dio), Some(Mode::Dio), "3523b80e"));
+        let dio = (&Image::Pin(Mode::Dio), Some(Mode::Dio), pin_elf(Mode::Dio));
+        assert_eq!((&plans[0].image, plans[0].mode, plans[0].elf.as_str()), dio);
         let board = r.board("FAKE0");
         assert_eq!(board.verdict, Verdict::UpToDate);
         assert_eq!(board.mode().map(|m| m.mode), Some(Mode::Dio), "DIO again, by its new ELF");
-        assert!(r.logs().iter().any(|l| l == "write: update, no erase · v0.8.0 in DIO"), "{:?}", r.logs());
+        let written = format!("write: update, no erase · {} in DIO", pin());
+        assert!(r.logs().contains(&written), "{:?}", r.logs());
         r.quit();
     }
 
     #[test]
     fn a_yes_for_an_image_the_board_no_longer_has_next_is_refused_with_nothing_touched() {
         let _en = crate::setup::tests::in_locale("en");
-        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60)));
         r.settled(1);
         // The page drew its gate for the pin; a choice it sent just before
         // reached the worker first (a scan held the worker meanwhile).
@@ -2614,7 +2632,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_choice_lasts_one_write_and_never_moves_the_verdict() {
-        let mut r = rig(Fake::new("old:v0.8.0").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new(&format!("ours:{}", pin())).with_pace(Duration::from_millis(60)));
         r.settled(1);
         assert_eq!((r.board("FAKE0").verdict.clone(), r.board("FAKE0").primary()), (Verdict::UpToDate, None));
         r.choose("FAKE0", Some(Image::Pin(Mode::Dio)));
@@ -2644,7 +2662,7 @@ pub(crate) mod tests {
     #[test]
     fn a_write_that_leaves_the_board_restarting_offers_its_dio_build_and_writes_nothing_by_itself() {
         let _en = crate::setup::tests::in_locale("en");
-        let mut r = rig(Fake::new("old:v0.7.0/loop=qio").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0/loop=qio").with_pace(Duration::from_millis(60)));
         r.settled(1);
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
         r.until("written, then heard saying nothing", |r| {
@@ -2657,7 +2675,7 @@ pub(crate) mod tests {
         assert_eq!((next.image.clone(), next.by), (Image::Pin(Mode::Dio), By::Loop));
         assert!(matches!(next.state, NextState::Ready(_)), "had before the gate's yes");
         assert_eq!(board.primary(), Some(Primary::Dio));
-        assert_eq!(board.verdict, Verdict::UpToDate, "the pin's verdict: v0.8.0 went on");
+        assert_eq!(board.verdict, Verdict::UpToDate, "the pin's verdict: {} went on", pin());
         assert_eq!(board.card(), Card::Unknown(CardUnknown::NotRunning));
         let logs = r.logs();
         assert!(logs.contains(&"rst:0x10 (RTCWDT_RTC_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)".to_string()), "{logs:?}");
@@ -2667,7 +2685,7 @@ pub(crate) mod tests {
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
         r.until("the DIO build written and heard running", |r| {
             let b = r.board("FAKE0");
-            b.looping().is_none() && b.work == Work::Idle && matches!(b.heard, Heard::Old { .. })
+            b.looping().is_none() && b.work == Work::Idle && runs_the_pin(b)
         });
         let board = r.board("FAKE0");
         assert!(board.next.is_none() && board.primary().is_none(), "cured: nothing left to do");
@@ -2680,7 +2698,7 @@ pub(crate) mod tests {
         let _en = crate::setup::tests::in_locale("en");
         let fake = Fake::new("old:v0.7.0,old:v0.7.0/mode=dio,old:v0.6.0").with_pace(Duration::from_millis(60));
         let probe = fake.clone();
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(3);
         r.choose("FAKE2", Some(Image::release("v0.7.0", Mode::Qio)));
         assert!(r.board("FAKE2").left_out(), "behind the pin, with a release of its own to write");
@@ -2700,7 +2718,7 @@ pub(crate) mod tests {
     #[test]
     fn update_all_takes_a_boards_chosen_mode_and_never_its_erase() {
         let fake = Fake::new("old:v0.7.0,old:v0.6.0").with_pace(Duration::from_millis(60));
-        let mut r = rig(fake, "v0.8.0");
+        let mut r = rig(fake);
         r.settled(2);
         let choice = Choice { image: Image::Pin(Mode::Dio), erase: true };
         r.send(Cmd::Choose { port: "FAKE1".into(), choice: Some(choice) });
@@ -2722,7 +2740,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_release_chosen_is_had_at_once_and_one_that_cannot_be_had_says_why_and_touches_nothing() {
-        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60)));
         r.settled(1);
         r.choose("FAKE0", Some(Image::release("v0.6.0", Mode::Dio)));
         let next = r.board("FAKE0").pending().cloned().expect("chosen");
@@ -2750,14 +2768,16 @@ pub(crate) mod tests {
             let desc = desc_with_elf(version, AppDesc::OURS, &elf_bytes(elf));
             std::fs::write(&build, merged_in(&desc, Mode::Dio)).unwrap();
         };
-        write("v0.8.0-5-g4e94418", "be894f8b");
+        // Builds past the pin, as a checkout of the firmware makes them.
+        let (built, rebuilt) = (format!("{}-5-g4e94418", pin()), format!("{}-6-gabcdef0", pin()));
+        write(&built, "be894f8b");
         let mut app = vec![0u8; AppDesc::OFFSET_IN_APP];
         app[0] = 0xE9;
         app.extend_from_slice(&desc_bytes("v0.8.0", AppDesc::OURS));
         let alone = scratch.0.join("firmware.bin");
         std::fs::write(&alone, &app).unwrap();
 
-        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60)), "v0.8.0");
+        let mut r = rig(Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60)));
         r.settled(1);
         r.send(Cmd::Vet { path: scratch.0.clone() });
         r.until("the folder vetted", |r| r.seen.iter().any(|e| matches!(e, Event::Vetted { .. })));
@@ -2774,7 +2794,7 @@ pub(crate) mod tests {
         r.until("the app vetted", |r| vetted(r).len() == 2);
         let found = vetted(&r);
         let folder = found[0].1.as_ref().expect("a merged build");
-        assert_eq!((folder.version.as_str(), folder.mode), ("v0.8.0-5-g4e94418", Some(Mode::Dio)));
+        assert_eq!((folder.version.as_str(), folder.mode), (built.as_str(), Some(Mode::Dio)));
         assert_eq!(folder.file.as_deref(), Some(build.as_path()), "the folder's merged image, named");
         let refused = found[1].1.as_ref().unwrap_err().text();
         assert!(refused.contains("device flash --firmware"), "an app alone stays the command line's: {refused}");
@@ -2782,20 +2802,20 @@ pub(crate) mod tests {
         r.choose("FAKE0", Some(Image::Local(scratch.0.clone())));
         assert_eq!(r.board("FAKE0").primary(), Some(Primary::Write), "a local build is written, never an update");
         // Rebuilt after it was picked: the yes reads it again, and refuses.
-        write("v0.8.0-6-gabcdef0", "be894f8c");
+        write(&rebuilt, "be894f8c");
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
         r.until("refused", |r| !r.refused().is_empty());
-        let changed = Refusal::Changed { was: "v0.8.0-5-g4e94418".into(), now: "v0.8.0-6-gabcdef0".into() };
+        let changed = Refusal::Changed { was: built.clone(), now: rebuilt.clone() };
         assert_eq!(r.refused(), [(Some("FAKE0".into()), changed)]);
         let shown = r.board("FAKE0").pending().and_then(Next::facts).map(|f| f.version.clone());
-        assert_eq!(shown.as_deref(), Some("v0.8.0-6-gabcdef0"), "the gate shows the new one");
+        assert_eq!(shown.as_deref(), Some(rebuilt.as_str()), "the gate shows the new one");
         assert!(r.resets().is_empty(), "nothing written unseen");
         // Seen, and written.
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
         r.written("FAKE0", "the build written and heard");
         let board = r.board("FAKE0");
         let local = |image: &ImageFacts| image.check == Check::Description && image.image.is_local();
-        assert!(matches!(&board.written, Some(Written::Done { version, image, .. }) if version == "v0.8.0-6-gabcdef0" && local(image)));
+        assert!(matches!(&board.written, Some(Written::Done { version, image, .. }) if *version == rebuilt && local(image)));
         assert!(board.next.is_none());
         assert_eq!(board.mode().map(|m| m.mode), Some(Mode::Dio), "a build in hand teaches its ELF");
         assert_eq!(board.verdict, Verdict::Newer, "measured against the pin: ahead of it");
@@ -2811,7 +2831,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_release_list_is_asked_once_a_visit_and_a_failure_is_never_kept() {
-        let mut shelf = Shelf::new("v0.8.0");
+        let mut shelf = Shelf::new();
         *shelf.list.lock().unwrap() = Err(ListWhy::Offline("no route to host".into()));
         shelf.cached = vec![Cached { tag: "v0.7.0".into(), modes: vec![Mode::Dio], since: None }];
         let mut r = rig_with(Fake::new("nodevice"), shelf, None, None, false);
@@ -2841,7 +2861,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_release_downloading_for_a_board_is_on_its_card_at_each_whole_percent() {
-        let shelf = Shelf { pace: Duration::from_millis(200), ..Shelf::new("v0.8.0") };
+        let shelf = Shelf { pace: Duration::from_millis(200), ..Shelf::new() };
         let mut r = rig_with(Fake::new("old:v0.7.0"), shelf, None, None, false);
         r.settled(1);
         r.choose("FAKE0", Some(Image::release("v0.7.0", Mode::Dio)));
@@ -2869,9 +2889,10 @@ pub(crate) mod tests {
     #[test]
     fn the_flags_choice_is_each_boards_next_write_and_the_verdict_stays_the_pins() {
         let preset = Image::release("v0.7.0", Mode::Qio);
-        let mut r = rig_with(Fake::new("old:v0.8.0,old:v0.6.0"), Shelf::new("v0.8.0"), Some(preset), None, false);
+        let fake = Fake::new(&format!("ours:{},old:v0.6.0", pin()));
+        let mut r = rig_with(fake, Shelf::new(), Some(preset), None, false);
         r.settled(2);
-        assert!(r.seen.iter().any(|e| matches!(e, Event::Target(t) if t.version == "v0.8.0")), "the pin, never the flag's");
+        assert!(r.seen.iter().any(|e| matches!(e, Event::Target(t) if t.version == pin())), "the pin, never the flag's");
         let flagged = |e: &Event| matches!(e, Event::Firmware { version, .. } if version == "v0.7.0");
         r.until("the page's image, the flag's", |r| r.seen.iter().any(flagged));
         let (up, behind) = (r.board("FAKE0"), r.board("FAKE1"));
@@ -2906,7 +2927,7 @@ pub(crate) mod tests {
 
         // The pin's own tag with no mode is the pin in the board's mode: on
         // a board that runs DIO, no choice at all, and nothing put back.
-        let mut r = rig_flags(Fake::new("old:v0.7.0/mode=dio"), Some("v0.8.0"), None);
+        let mut r = rig_flags(Fake::new("old:v0.7.0/mode=dio"), Some(pin()), None);
         r.settled(1);
         let own = |r: &Rig| r.board("FAKE0").next.as_ref().is_some_and(|n| n.image == Image::Pin(Mode::Dio));
         r.until("the board's own build, the flags'", own);

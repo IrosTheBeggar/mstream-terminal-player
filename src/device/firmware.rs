@@ -39,27 +39,28 @@ const ASSET_STEM: &str = "mstream-player-core2";
 /// date" is this, exactly, whatever image is chosen for a write). Bumped by
 /// hand with player releases, once a firmware release has been tried on a
 /// board.
-pub(crate) const PINNED_TAG: Option<&str> = Some("v0.8.0");
+pub(crate) const PINNED_TAG: Option<&str> = Some("v0.10.0");
 /// The sha256 of that release's `*-full.bin` (the QIO build), from its
 /// SHA256SUMS (and the same as GitHub's own digest of the asset, checked
 /// when it was pinned). Release assets are mutable on GitHub; this is the
 /// trust anchor, not the file.
 pub(crate) const PINNED_FULL_SHA256: Option<&str> =
-    Some("ba77f290f7159b2e40a7d0907a05b1400ed6529abe297437595259ed8d0671a3");
+    Some("452058e5294601baf01ee4715f2dc709f2d6ae6263ef0e7e0482db978656a706");
 /// The sha256 of that release's `*-dio-full.bin`: the same firmware with
-/// the flash in DIO, for a Core2 that keeps restarting on QIO. From v0.8.0's
-/// SHA256SUMS and GitHub's digest of the asset (both `01de38ec…`, checked
-/// 2026-10-10); bumped with the pin, or none for a pin with no DIO build.
+/// the flash in DIO, for a Core2 that keeps restarting on QIO. From
+/// v0.10.0's SHA256SUMS and GitHub's digest of the asset (both `2753aede…`,
+/// checked 2026-10-12); bumped with the pin, or none for a pin with no DIO
+/// build.
 pub(crate) const PINNED_DIO_SHA256: Option<&str> =
-    Some("01de38ec86dbad5b37b278ec30a159c93fede0a7a834e12ab8a6202cf5a3af8e");
+    Some("2753aede09b3bc5078bad3a1cf1b464be474eab75d25160d02e6ba0cee09980d");
 /// Whether a board running the pinned release answers `@status` — the
 /// running firmware's report of its card (the firmware repo's
-/// docs/HOST-STATUS.md: the release after v0.8.0). v0.8.0 does not: it
-/// says `@err 7 status`, so its board shows its version but not its card,
-/// and "update to see the card" would be a promise the update does not
-/// keep. Flipped with the pin, when the pin moves to a release that
-/// answers.
-pub(crate) const PINNED_ANSWERS_STATUS: bool = false;
+/// docs/HOST-STATUS.md, from v0.9.0 on). v0.8.0 and older say `@err 7
+/// status`: their boards show their version but not their card, and "update
+/// to see the card" is a promise only an update to a pin that answers keeps.
+/// v0.10.0 answers (its HostStatus and HOST-STATUS.md are the ones the
+/// player was built against, unchanged since they were merged).
+pub(crate) const PINNED_ANSWERS_STATUS: bool = true;
 
 /// Where the merged image expects the app: ota_0 in the firmware's
 /// partition table, and where the bootloader at 0x1000 sits inside it.
@@ -584,8 +585,11 @@ pub(crate) struct Builds {
 /// Checked on 2026-10-10 against each release's notes ("ELF … for this
 /// build; ELF … for the `-dio-full.bin`") and against the images
 /// themselves: v0.8.0's two, v0.7.0's and v0.5.0's `-full.bin` carry these
-/// ids in their app descriptions.
+/// ids in their app descriptions. v0.9.0's and v0.10.0's from their notes,
+/// 2026-10-12.
 pub(crate) const BUILDS: &[Builds] = &[
+    Builds { tag: "v0.10.0", qio: Some("dbd6d45e"), dio: "1826743e" },
+    Builds { tag: "v0.9.0", qio: Some("fdfe6de2"), dio: "0917a266" },
     Builds { tag: "v0.8.0", qio: Some("e127a6bf"), dio: "3523b80e" },
     Builds { tag: "v0.7.0", qio: Some("63ee7a2b"), dio: "aa45f60e" },
     Builds { tag: "v0.6.0", qio: Some("cd2ab3b1"), dio: "925d9680" },
@@ -714,7 +718,14 @@ impl Release {
     /// Newer than this player's release: offered as an update this player
     /// has not been tried with.
     pub fn newer_than_pin(&self) -> bool {
-        PINNED_TAG.is_some_and(|pin| place(pin, &self.tag) == Place::Older)
+        PINNED_TAG.is_some_and(|pin| self.newer_than(pin))
+    }
+
+    /// Newer than `pin`, by the version order (numbers, not text: v0.10.0
+    /// is after v0.9.0). The page asks it of the target its worker told it,
+    /// as it measures everything else; the command line of the pin.
+    pub fn newer_than(&self, pin: &str) -> bool {
+        place(pin, &self.tag) == Place::Older
     }
 }
 
@@ -1393,20 +1404,58 @@ pub(crate) mod tests {
         build(image, bytes, "test.bin", origin, Origin::File, Check::Description, None).expect("an image of ours")
     }
 
-    /// The pin's two builds in miniature, with their real ELF ids.
-    pub(crate) fn pin_image(version: &str, mode: Mode) -> Vec<u8> {
-        let elf = match mode {
-            Mode::Qio => "e127a6bf",
-            Mode::Dio => "3523b80e",
-        };
-        merged_in(&desc_with_elf(version, AppDesc::OURS, &elf_bytes(elf)), mode)
+    /// The release this build pins, for every test that means it: taken
+    /// from here and never written out, so a bump of the pin touches no
+    /// test. (A build with no pin has nothing to measure a board against;
+    /// the one test that covers it is the_pin_names_a_release_….)
+    pub(crate) fn pin() -> &'static str {
+        PINNED_TAG.expect("this build pins a firmware release")
     }
 
-    /// The facts of the pin's build in miniature, as a write's Done carries
-    /// them.
+    /// The pin's two builds by their ELF ids, from the table.
+    pub(crate) fn pin_builds() -> Builds {
+        *BUILDS.iter().find(|b| Some(b.tag) == PINNED_TAG).expect("the pin is in the table")
+    }
+
+    /// The ELF id of the pin's build in `mode`: what a board reports once
+    /// it runs it.
+    pub(crate) fn pin_elf(mode: Mode) -> &'static str {
+        match mode {
+            Mode::Qio => pin_builds().qio.expect("the pin has a QIO build"),
+            Mode::Dio => pin_builds().dio,
+        }
+    }
+
+    /// A release after the pin — its next minor — newer than this player
+    /// and in no table yet, whichever release the pin is.
+    pub(crate) fn past_pin() -> String {
+        let (major, minor, _) = Version::parse(pin()).expect("the pin is a version").core;
+        format!("v{major}.{}.0", minor + 1)
+    }
+
+    /// A release as the list holds one, by its tag alone.
+    fn tagged(tag: &str) -> Release {
+        Release { tag: tag.into(), title: String::new(), date: String::new(), pre: false, images: Images::Both }
+    }
+
+    /// A release's build in miniature: its app description says `tag`, with
+    /// the ELF id the release's notes name for that build (the table's).
+    pub(crate) fn release_image(tag: &str, mode: Mode) -> Vec<u8> {
+        let builds = BUILDS.iter().find(|b| b.tag == tag).unwrap_or_else(|| panic!("{tag} in the table"));
+        let elf = match mode {
+            Mode::Qio => builds.qio.unwrap_or_else(|| panic!("{tag} has a QIO build")),
+            Mode::Dio => builds.dio,
+        };
+        merged_in(&desc_with_elf(tag, AppDesc::OURS, &elf_bytes(elf)), mode)
+    }
+
+    /// The facts of `version`'s build written as the pin is (checked by the
+    /// built-in checksum), as a write's Done carries them. `version` is the
+    /// pin the test measures against: this build's ([`pin`]), or the
+    /// stand-in the page's tests draw the design cards' frames with.
     pub(crate) fn pin_facts(version: &str, mode: Mode) -> ImageFacts {
         let origin = format!("release {version}, downloaded earlier");
-        let bytes = pin_image(version, mode);
+        let bytes = release_image(version, mode);
         build(Image::Pin(mode), bytes, version, origin, Origin::Cached, Check::Pinned, None).expect("ours").facts
     }
 
@@ -1424,19 +1473,18 @@ pub(crate) mod tests {
     }
 
     impl Shelf {
-        /// The pin's two builds of `version`, and the three releases before
-        /// it.
-        pub(crate) fn new(version: &str) -> Shelf {
+        /// The pin's two builds — whichever release this build pins, each
+        /// saying its version and its own ELF — and three older releases:
+        /// v0.7.0 and v0.6.0 in both builds, v0.5.0's one image (DIO).
+        pub(crate) fn new() -> Shelf {
             let mut images = HashMap::new();
-            images.insert(Image::Pin(Mode::Qio), pin_image(version, Mode::Qio));
-            images.insert(Image::Pin(Mode::Dio), pin_image(version, Mode::Dio));
-            for (tag, qio, dio) in [("v0.7.0", "63ee7a2b", "aa45f60e"), ("v0.6.0", "cd2ab3b1", "925d9680")] {
-                let image = |elf: &str, mode| merged_in(&desc_with_elf(tag, AppDesc::OURS, &elf_bytes(elf)), mode);
-                images.insert(Image::release(tag, Mode::Qio), image(qio, Mode::Qio));
-                images.insert(Image::release(tag, Mode::Dio), image(dio, Mode::Dio));
+            for mode in [Mode::Qio, Mode::Dio] {
+                images.insert(Image::Pin(mode), release_image(pin(), mode));
+                for tag in ["v0.7.0", "v0.6.0"] {
+                    images.insert(Image::release(tag, mode), release_image(tag, mode));
+                }
             }
-            let v050 = merged_in(&desc_with_elf("v0.5.0", AppDesc::OURS, &elf_bytes("17352e55")), Mode::Dio);
-            images.insert(Image::release("v0.5.0", Mode::Dio), v050);
+            images.insert(Image::release("v0.5.0", Mode::Dio), release_image("v0.5.0", Mode::Dio));
             Shelf {
                 images: Mutex::new(images),
                 list: Mutex::new(Ok(listed())),
@@ -1712,6 +1760,18 @@ pub(crate) mod tests {
                 assert!(hex(sha), "{sha}");
                 assert!(PINNED_DIO_SHA256.is_none_or(hex));
                 assert_ne!(PINNED_DIO_SHA256, Some(sha), "two builds, two checksums");
+                // The checksums and the ELF table agree on the pin's builds:
+                // a release with a QIO build has its DIO one too (every one
+                // since v0.6.0), each checked by its own built-in checksum.
+                let builds = pin_builds();
+                assert_eq!(PINNED_DIO_SHA256.is_some(), builds.qio.is_some(), "{builds:?}: a checksum a build");
+                let has = |mode| Image::Pin(mode).has(mode);
+                assert_eq!((has(Mode::Qio), has(Mode::Dio)), (Some(true), Some(true)));
+                assert_eq!(Image::Pin(Mode::Qio).tag(), Some(tag));
+                let named = Image::from_flags(None, Some(tag.into()), Some(Mode::Dio));
+                assert_eq!(named, Some(Image::Pin(Mode::Dio)), "the pin's tag is the pin");
+                let spaced = Image::from_flags(None, Some(format!(" {tag} ")), None);
+                assert_eq!(spaced, Some(Image::Pin(Mode::Qio)), "trimmed, and in its QIO with no mode");
             }
             (None, None) => {
                 let err = Net::from_env().resolve(&Image::Pin(Mode::Qio), &mut |_, _| {}).unwrap_err();
@@ -1719,13 +1779,10 @@ pub(crate) mod tests {
             }
             other => panic!("a tag without its checksum, or the other way round: {other:?}"),
         }
-        // v0.8.0's -dio-full.bin, by its SHA256SUMS and GitHub's digest.
-        assert_eq!(PINNED_DIO_SHA256, Some("01de38ec86dbad5b37b278ec30a159c93fede0a7a834e12ab8a6202cf5a3af8e"));
         let path = PathBuf::from("x.bin");
         assert_eq!(Image::from_flags(Some(path.clone()), Some("v9".into()), None), Some(Image::Local(path)), "a path outranks a tag");
         let v070 = Image::Release { tag: "v0.7.0".into(), mode: Mode::Qio };
         assert_eq!(Image::from_flags(None, Some("v0.7.0".into()), None), Some(v070));
-        assert_eq!(Image::from_flags(None, Some("v0.8.0".into()), Some(Mode::Dio)), Some(Image::Pin(Mode::Dio)), "the pin's tag is the pin");
         assert_eq!(Image::from_flags(None, None, Some(Mode::Dio)), Some(Image::Pin(Mode::Dio)));
         let v050 = Image::Release { tag: "v0.5.0".into(), mode: Mode::Dio };
         assert_eq!(Image::from_flags(None, Some("v0.5.0".into()), None), Some(v050), "its one image, which is DIO");
@@ -1734,11 +1791,13 @@ pub(crate) mod tests {
 
     #[test]
     fn the_pin_says_whether_its_release_answers_the_status_query() {
-        // v0.8.0 answers `@err 7 status`: the page must not promise the
-        // card after an update to it. The release after it answers.
-        assert_eq!(PINNED_TAG, Some("v0.8.0"));
-        assert!(!PINNED_ANSWERS_STATUS, "v0.8.0 has no @status");
-        assert_eq!(pin_target(), Some(Target { version: "v0.8.0".into(), answers_status: PINNED_ANSWERS_STATUS }));
+        // `@status` is the firmware's from v0.9.0 on (its docs/HOST-STATUS.md);
+        // v0.8.0 and older answer `@err 7 status`. The flag is set by hand
+        // with the pin, and must say what the pin does: the page promises
+        // the card after an update only when it is true.
+        let answers = place(pin(), "v0.9.0") != Place::Older;
+        assert_eq!(PINNED_ANSWERS_STATUS, answers, "{} and the status query", pin());
+        assert_eq!(pin_target(), Some(Target { version: pin().into(), answers_status: PINNED_ANSWERS_STATUS }));
     }
 
     #[test]
@@ -1771,14 +1830,21 @@ pub(crate) mod tests {
         let tags: Vec<&str> = releases.iter().map(|r| r.tag.as_str()).collect();
         assert_eq!(tags, ["v0.8.0", "v0.7.0", "v0.6.0", "v0.5.0", "v0.5.0-beta.1"], "no draft, no release without a merged image");
         assert_eq!(releases[0].images, Images::Both);
-        assert!(releases[0].is_pin() && !releases[0].newer_than_pin());
+        // Marked against the pin, whichever release it is: none of the
+        // 2026-10-10 list is newer than a pin since.
+        for release in &releases {
+            assert_eq!(release.is_pin(), release.tag == pin(), "{}", release.tag);
+            assert!(!release.newer_than_pin(), "{} after {}", release.tag, pin());
+        }
         assert_eq!(releases[1].date, "2026-10-07");
         assert_eq!(releases[1].title, "mStream Player v0.7.0 (beta)");
         assert_eq!(releases[3].images, Images::DioOnly, "v0.5.0: one image, from before QIO");
         assert_eq!(releases[4].images, Images::DioOnly);
         assert!(releases[4].pre && !releases[3].pre);
-        let newer = Release { tag: "v0.9.0".into(), title: String::new(), date: String::new(), pre: false, images: Images::Both };
-        assert!(newer.newer_than_pin());
+        let (ours, after) = (tagged(pin()), tagged(&past_pin()));
+        assert!(ours.is_pin() && !ours.newer_than_pin(), "this player's, never newer than itself");
+        assert!(after.newer_than_pin() && !after.is_pin(), "{}: newer than this player", after.tag);
+        assert!(after.newer_than(pin()) && !ours.newer_than(&after.tag), "measured against any pin given");
         assert!(parse_releases("{\"message\":\"Not Found\"}").is_err());
         assert!(parse_releases("<html>").is_err());
     }
@@ -1839,7 +1905,9 @@ pub(crate) mod tests {
         let no_qio = none.resolve(&Image::release("v0.5.0", Mode::Qio), &mut |_, _| {}).unwrap_err().text();
         assert!(no_qio.contains("v0.5.0 has one image, and it is DIO"), "{no_qio}");
         assert_eq!(Image::release("v0.5.0", Mode::Qio).has(Mode::Qio), Some(false));
-        assert_eq!(Image::release("v0.9.0", Mode::Qio).has(Mode::Dio), None, "not known before asking");
+        // A release after the pin is in no table yet: its builds are its
+        // SHA256SUMS's to say.
+        assert_eq!(Image::release(&past_pin(), Mode::Qio).has(Mode::Dio), None, "not known before asking");
     }
 
     #[test]
@@ -1885,6 +1953,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_board_is_up_to_date_only_on_the_very_version_and_never_offered_a_step_back() {
+        // The pin of 2026-10-10, when the real Core2 below was read: place()
+        // is told its target, whichever release this build pins.
         let pin = "v0.8.0";
         assert_eq!(place("v0.8.0", pin), Place::Same);
         assert_eq!(place("v0.7.0", pin), Place::Older);
@@ -1900,6 +1970,75 @@ pub(crate) mod tests {
         assert_eq!(place("v0.9.0-rc.2", "v0.9.0-rc.10"), Place::Older, "numeric identifiers as numbers");
         assert_eq!(place("v0.9.0-alpha", "v0.9.0-1"), Place::Newer, "alphanumeric after numeric");
         assert_eq!(place("nightly", pin), Place::Unknown);
+    }
+
+    #[test]
+    fn a_two_digit_minor_is_ordered_by_number_wherever_versions_are_compared() {
+        // v0.10.0 is the first release whose minor has two digits. As text
+        // it comes before v0.9.0 ('1' < '9') and before v0.6.0, the first
+        // release with a QIO build; every comparison of versions here must
+        // be of numbers.
+        let v = |s: &str| Version::parse(s).unwrap_or_else(|| panic!("{s} parses"));
+        assert_eq!(v("v0.10.0"), Version { core: (0, 10, 0), pre: vec![], ahead: 0, dev: false });
+        assert_eq!(v("v0.10.0-2-gabc1234"), Version { core: (0, 10, 0), pre: vec![], ahead: 2, dev: true });
+        assert!(v("v0.10.0").order(&v("v0.9.0")).is_gt() && v("v0.9.0").order(&v("v0.10.0")).is_lt());
+
+        // The verdict and the update gate's direction (board::primary_for
+        // and flow::plan ask place()): forward is an update, back is never
+        // one.
+        assert_eq!(place("v0.9.0", "v0.10.0"), Place::Older, "v0.9.0 → v0.10.0 is an update");
+        assert_eq!(place("v0.10.0", "v0.9.0"), Place::Newer, "v0.10.0 → v0.9.0 is a step back");
+        // The dev-build rule across the boundary.
+        assert_eq!(place("v0.9.0-3-gabc1234", "v0.10.0"), Place::Older, "a build past v0.9.0 is still below v0.10.0");
+        assert_eq!(place("v0.10.0-2-gabc1234", "v0.10.0"), Place::Newer, "a build past v0.10.0 is ahead of it");
+        assert_eq!(place("v0.10.0-dev+abc1234", "v0.10.0"), Place::Older, "v0.10.0's own dev build comes before it");
+        assert_eq!(place("v0.10.0-dev+abc1234", "v0.9.0"), Place::Newer);
+        assert_eq!(place("v0.10.0-rc.1", "v0.9.0"), Place::Newer, "a pre-release of v0.10.0 is after v0.9.0");
+        assert!(tagged("v0.10.0").newer_than("v0.9.0") && !tagged("v0.9.0").newer_than("v0.10.0"));
+
+        // The release list, newest first, whatever order GitHub gives.
+        let entry = |tag: &str| {
+            serde_json::json!({
+                "tag_name": tag, "name": tag, "draft": false, "prerelease": false,
+                "published_at": "2026-10-12T00:00:00Z", "assets": [{ "name": full_asset_name(tag) }],
+            })
+        };
+        let shuffled = ["v0.9.0", "v0.10.0", "v0.8.0", "v0.10.0-rc.1", "v0.10.1", "v0.6.0"];
+        let json = serde_json::Value::Array(shuffled.iter().map(|t| entry(t)).collect()).to_string();
+        let listed: Vec<String> = parse_releases(&json).unwrap().into_iter().map(|r| r.tag).collect();
+        assert_eq!(listed, ["v0.10.1", "v0.10.0", "v0.10.0-rc.1", "v0.9.0", "v0.8.0", "v0.6.0"]);
+
+        // …and the releases kept on this computer, offered offline in the
+        // same order. (Tags that are never a pin: a pin is checked by its
+        // built-in checksums, not a SHA256SUMS of the test's own.)
+        let scratch = Scratch::new("order");
+        for tag in ["v0.9.0", "v0.10.0-rc.1", "v0.8.0"] {
+            let (dir, name, bytes) = (scratch.0.join(tag), full_asset_name(tag), tag.as_bytes());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(&name), bytes).unwrap();
+            std::fs::write(dir.join("SHA256SUMS"), format!("{}  {name}\n", sha256_hex(bytes))).unwrap();
+        }
+        let net = Net { dir: Some(scratch.0.clone()), assets: None, api: String::new() };
+        let kept: Vec<String> = net.cached().into_iter().map(|c| c.tag).collect();
+        assert_eq!(kept, ["v0.10.0-rc.1", "v0.9.0", "v0.8.0"]);
+
+        // The ELF table holds both releases, and a release in no table yet
+        // with a two-digit minor is not taken for one from before QIO.
+        let mode = |elf: &str| elf_mode(elf).map(|m| (m.mode, m.version, m.choice));
+        assert_eq!(mode("dbd6d45e"), Some((Mode::Qio, "v0.10.0".into(), true)));
+        assert_eq!(mode("1826743e"), Some((Mode::Dio, "v0.10.0".into(), true)));
+        assert_eq!(mode("fdfe6de2"), Some((Mode::Qio, "v0.9.0".into(), true)));
+        assert_eq!(mode("0917a266"), Some((Mode::Dio, "v0.9.0".into(), true)));
+        let later = Image::from_flags(None, Some("v0.12.0-rc.1".into()), None);
+        let qio = Image::Release { tag: "v0.12.0-rc.1".into(), mode: Mode::Qio };
+        assert_eq!(later, Some(qio), "its QIO by default, never a DIO-only image");
+        assert_eq!(Image::release("v0.12.0-rc.1", Mode::Qio).has(Mode::Dio), None, "its builds: its sums' to say");
+        // …nor a local build past v0.10.0, whose DIO was a choice.
+        let file = scratch.0.join("dio.bin");
+        let desc = desc_with_elf("v0.10.0-5-gabc1234", AppDesc::OURS, &elf_bytes("be894f8d"));
+        std::fs::write(&file, merged_in(&desc, Mode::Dio)).unwrap();
+        read_local(&file).unwrap();
+        assert_eq!(mode("be894f8d"), Some((Mode::Dio, "v0.10.0-5-gabc1234".into(), true)));
     }
 
     #[test]

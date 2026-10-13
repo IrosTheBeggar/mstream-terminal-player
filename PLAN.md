@@ -2994,11 +2994,12 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
 > (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
 > left, what to do next, the port watch, and the log behind `l`. The pin in
-> `src/device/firmware.rs` is firmware v0.8.0 (10 Oct 2026; before it v0.7.0 from 7 Oct,
-> v0.6.0 from 4 Oct, and the first release, v0.5.0) — `device flash` with no flags writes it;
-> `--firmware` / `--release` still override. v0.8.0 does not answer the running firmware's
-> `@status` (the release after it does), which the pin says beside its checksum
-> (`PINNED_ANSWERS_STATUS`).
+> `src/device/firmware.rs` is firmware v0.10.0 (13 Oct 2026; before it v0.9.0 from 11 Oct,
+> v0.8.0 from 10 Oct, v0.7.0 from 7 Oct, v0.6.0 from 4 Oct, and the first release, v0.5.0) —
+> `device flash` with no flags writes it; `--firmware` / `--release` still override. v0.10.0
+> answers the running firmware's `@status` (v0.9.0 and later do; v0.8.0 and older say their
+> version only), which the pin says beside its checksums (`PINNED_ANSWERS_STATUS`, true since
+> the bump to v0.10.0 below).
 > **2026-10-10:** the backend of the MP3 Player tab's redesign (mStream
 > `docs/designs/mp3-tab`, alternate A, "One card"): `src/device/listen.rs` asks the running
 > firmware with no reset, `board.rs` is one board's verdict and card, `desk.rs` the worker that
@@ -3031,6 +3032,19 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > restarting after a write is a gold card whose primary is *Write the DIO image ▸*, through the
 > gate. Still to verify on a Core2 that really loops on QIO (R5.8): what the ROM prints, and
 > how often.
+> **2026-10-12, the pin moves to v0.10.0** (the firmware's v0.9.0 came out 11 Oct, v0.10.0 on
+> 13 Oct; both checksums checked against its SHA256SUMS and GitHub's digests, the ELF table
+> given v0.9.0's and v0.10.0's pairs from their notes). Both answer `@status`, so
+> `PINNED_ANSWERS_STATUS` is true: a board on the pin reports its card, Show on the player and
+> the count included; a board too old to report its card is told "Updating shows it."; one that
+> says `@err 7` and no version in time is behind the pin, and offered the update. v0.10.0 is the
+> first release with a two-digit minor: every comparison of versions is of numbers, now tested
+> at that boundary (the verdict, the dev-build rule, the update gate's direction, the release
+> list's order, the ELF table). The device tests no longer name the pin: its tag, checksums,
+> ELF ids and flag come from the constants, so a bump touches no test. The page's frames keep
+> a stand-in pin of their own (v0.8.0, the design cards'), which the page is told as the worker
+> would tell it — so the sheet's release list now leaves out, and marks newer than, the pin the
+> page was told, as the rest of the page always measured, instead of the constant.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this

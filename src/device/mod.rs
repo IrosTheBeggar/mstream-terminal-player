@@ -772,7 +772,7 @@ mod tests {
 
     use super::desk::tests::QUICK;
     use super::engine::fake::Fake;
-    use super::firmware::tests::{Scratch, Shelf, desc_bytes, merged_in};
+    use super::firmware::tests::{Scratch, Shelf, desc_bytes, merged_in, past_pin, pin, pin_elf};
     use super::firmware::{AppDesc, Mode as Build};
     use super::*;
 
@@ -842,10 +842,12 @@ mod tests {
         assert!(matches!(parse(&["list", "--ports"]), Ok(DeviceCmd::List(ListArgs { ports: true }))));
     }
 
+    /// `device list` on the fake, measured against this build's pin as
+    /// `list` measures it.
     fn listed(fake: &Fake, ports_only: bool) -> (i32, Vec<String>) {
-        let target = Target { version: "v0.8.0".into(), answers_status: false };
+        let target = firmware::pin_target();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = list_on(fake, ports_only, Some(&target), QUICK, &mut out, &mut err);
+        let code = list_on(fake, ports_only, target.as_ref(), QUICK, &mut out, &mut err);
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
         (code, String::from_utf8(out).unwrap().lines().map(str::to_string).collect())
     }
@@ -853,17 +855,19 @@ mod tests {
     #[test]
     fn device_list_adds_each_boards_firmware_and_card_asked_without_a_reset() {
         let _en = crate::setup::tests::in_locale("en");
-        let fake = Fake::new("status:v0.8.0,old:v0.7.0,chip,busy,status:v0.9.0/card=exfat/free=?/tracks=-");
+        let (pin, after) = (pin(), past_pin());
+        let fake = Fake::new(&format!("status:{pin},old:v0.7.0,chip,busy,status:{after}/card=exfat/free=?/tracks=-"));
         let (code, lines) = listed(&fake, false);
         assert_eq!(code, 0);
+        let ahead = format!("{after}, up to date (ahead of this player's {pin})");
         assert_eq!(
             lines,
             [
-                "FAKE0 · CH9102 · serial FAKE0 · v0.8.0, up to date · card 38.2 GB free of 63.9 GB, 1,284 tracks",
-                "FAKE1 · CH9102 · serial FAKE1 · v0.7.0, update to v0.8.0 · card not reported by v0.7.0",
-                "FAKE2 · CP210x · serial CHIP2 · not answering — may not be an MP3 player",
-                "FAKE3 · CH9102 · serial FAKE3 · in use by another program",
-                "FAKE4 · CH9102 · serial FAKE4 · v0.9.0, up to date (ahead of this player's v0.8.0) · an exFAT card — the player reads FAT32 only (63.9 GB)",
+                format!("FAKE0 · CH9102 · serial FAKE0 · {pin}, up to date · card 38.2 GB free of 63.9 GB, 1,284 tracks"),
+                format!("FAKE1 · CH9102 · serial FAKE1 · v0.7.0, update to {pin} · card not reported by v0.7.0"),
+                "FAKE2 · CP210x · serial CHIP2 · not answering — may not be an MP3 player".into(),
+                "FAKE3 · CH9102 · serial FAKE3 · in use by another program".into(),
+                format!("FAKE4 · CH9102 · serial FAKE4 · {ahead} · an exFAT card — the player reads FAT32 only (63.9 GB)"),
             ]
         );
         let trace = fake.trace().lock().unwrap().clone();
@@ -883,33 +887,33 @@ mod tests {
     #[test]
     fn device_list_words_a_count_under_way_an_empty_card_and_a_dev_build() {
         let _en = crate::setup::tests::in_locale("en");
-        let spec = "status:v0.8.0/free=counting/tracks=building,status:v0.8.0/card=none/size=-/tracks=-,old:v0.6.0-37-g221d99d";
-        let (_, lines) = listed(&Fake::new(spec), false);
-        let counting = "v0.8.0, up to date · card 63.9 GB, counting free space, tracks being indexed";
+        let pin = pin();
+        let spec = format!("status:{pin}/free=counting/tracks=building,status:{pin}/card=none/size=-/tracks=-,old:v0.6.0-37-g221d99d");
+        let (_, lines) = listed(&Fake::new(&spec), false);
+        let counting = format!("{pin}, up to date · card 63.9 GB, counting free space, tracks being indexed");
         assert_eq!(lines[0], format!("FAKE0 · CH9102 · serial FAKE0 · {counting}"));
-        assert_eq!(lines[1], "FAKE1 · CH9102 · serial FAKE1 · v0.8.0, up to date · no card");
-        let dev = "v0.6.0-37-g221d99d, a development build — update to v0.8.0 · card not reported by v0.6.0-37-g221d99d";
+        assert_eq!(lines[1], format!("FAKE1 · CH9102 · serial FAKE1 · {pin}, up to date · no card"));
+        let dev = format!("v0.6.0-37-g221d99d, a development build — update to {pin} · card not reported by v0.6.0-37-g221d99d");
         assert_eq!(lines[2], format!("FAKE2 · CH9102 · serial FAKE2 · {dev}"));
     }
 
-    /// `device flash --yes` on the fake, the image `version` its firmware:
-    /// the exit code, stdout, stderr, and the fake for its trace.
-    fn flashed(spec: &str, version: &str, port: Option<&str>, mode: Mode) -> (i32, String, String, Fake) {
-        flashed_with(spec, version, (None, None), port, mode)
+    /// `device flash --yes` on the fake, the pin's builds on the shelf: the
+    /// exit code, stdout, stderr, and the fake for its trace.
+    fn flashed(spec: &str, port: Option<&str>, mode: Mode) -> (i32, String, String, Fake) {
+        flashed_with(spec, (None, None), port, mode)
     }
 
     /// …with `--release` and `--flash-mode`, handed to the worker as
     /// [`lines`] hands them.
     fn flashed_with(
         spec: &str,
-        version: &str,
         (release, flash_mode): (Option<&str>, Option<Build>),
         port: Option<&str>,
         mode: Mode,
     ) -> (i32, String, String, Fake) {
         let fake = Fake::new(spec).with_pace(Duration::from_millis(60));
         let setup = desk::Setup {
-            supply: Arc::new(Shelf::new(version)),
+            supply: Arc::new(Shelf::new()),
             preset: Image::from_flags(None, release.map(str::to_string), flash_mode),
             flags_mode: flash_mode,
             port: port.map(str::to_string),
@@ -928,22 +932,26 @@ mod tests {
     #[test]
     fn flash_yes_on_one_board_prints_todays_steps() {
         let _en = crate::setup::tests::in_locale("en");
-        let (code, out, err, _) = flashed("fresh", "v0.8.0", None, ONE);
+        let pin = pin();
+        let (code, out, err, _) = flashed("fresh", None, ONE);
         assert_eq!(code, 0, "{out}{err}");
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "getting the firmware…");
-        assert!(lines[1].starts_with("firmware: v0.8.0 in QIO (release v0.8.0"), "{out}");
+        assert!(lines[1].starts_with(&format!("firmware: {pin} in QIO (release {pin}")), "{out}");
         assert_eq!(lines[2], "looking for a Core2…");
         assert!(out.contains("reaching the board's bootloader…\n"), "{out}");
         assert!(out.contains("board: FAKE0 · CH9102 · esp32 rev 3.1 · 16 MB\n"), "{out}");
-        assert!(out.contains("plan: install, erase first · v0.8.0 in QIO\n"), "the pin, in its default build:\n{out}");
+        assert!(out.contains(&format!("plan: install, erase first · {pin} in QIO\n")), "the pin, in its default build:\n{out}");
         assert!(out.contains("  50%\n") && out.contains("  100%\n"), "{out}");
-        let done = "v0.8.0 is on the board. It is restarting — unplug it when its screen comes up.\n\
-                    The board reports: mstream-mp3-player v0.8.0 (commit fake000, 2026-10-01), ELF e127a6bf";
-        assert!(out.trim_end().ends_with(done), "Done, then the board's own first line:\n{out}");
+        let elf = pin_elf(Build::Qio);
+        let done = format!(
+            "{pin} is on the board. It is restarting — unplug it when its screen comes up.\n\
+             The board reports: mstream-mp3-player {pin} (commit fake000, 2026-10-01), ELF {elf}"
+        );
+        assert!(out.trim_end().ends_with(&done), "Done, then the board's own first line:\n{out}");
         assert!(err.is_empty(), "{err}");
 
-        let (code, out, err, fake) = flashed("busy", "v0.8.0", None, ONE);
+        let (code, out, err, fake) = flashed("busy", None, ONE);
         assert_eq!(code, 1, "{out}");
         assert!(err.contains("FAKE0 is in use by another program") && err.contains("serial monitor"), "{err}");
         assert!(!fake.trace().lock().unwrap().iter().any(|t| t.starts_with("open")), "nothing tried");
@@ -952,49 +960,56 @@ mod tests {
     #[test]
     fn flash_yes_with_several_boards_refuses_and_names_each_boards_firmware() {
         let _en = crate::setup::tests::in_locale("en");
-        let (code, out, _, fake) = flashed("old:v0.7.0,status:v0.8.0", "v0.8.0", None, ONE);
+        let pin = pin();
+        let spec = format!("old:v0.7.0,status:{pin}");
+        let (code, out, _, fake) = flashed(&spec, None, ONE);
         assert_eq!(code, 1);
         let tail: Vec<&str> = out.lines().skip_while(|l| !l.starts_with("Several")).collect();
+        let (behind, current) = (
+            format!("  FAKE0 · CH9102 · serial FAKE0 · v0.7.0, update to {pin} · card not reported by v0.7.0"),
+            format!("  FAKE1 · CH9102 · serial FAKE1 · {pin}, up to date · card 38.2 GB free of 63.9 GB, 1,284 tracks"),
+        );
         assert_eq!(
             tail,
             [
                 "Several boards look like a Core2 — which one?",
-                "  FAKE0 · CH9102 · serial FAKE0 · v0.7.0, update to v0.8.0 · card not reported by v0.7.0",
-                "  FAKE1 · CH9102 · serial FAKE1 · v0.8.0, up to date · card 38.2 GB free of 63.9 GB, 1,284 tracks",
+                &behind,
+                &current,
                 "pass --port with one of them, or --all to update every one that needs it",
             ]
         );
         assert!(!fake.trace().lock().unwrap().iter().any(|t| t.starts_with("open")), "no board reset");
 
         let named = Mode { named: true, ..ONE };
-        let (code, out, _, fake) = flashed("old:v0.7.0,status:v0.8.0", "v0.8.0", Some("FAKE0"), named);
+        let (code, out, _, fake) = flashed(&spec, Some("FAKE0"), named);
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("plan: update, no erase"), "{out}");
-        assert_eq!(fake.version_on("FAKE0").as_deref(), Some("v0.8.0"));
+        assert_eq!(fake.version_on("FAKE0").as_deref(), Some(pin));
     }
 
     #[test]
     fn flash_yes_all_updates_each_board_that_needs_it_and_names_the_rest() {
         let _en = crate::setup::tests::in_locale("en");
+        let pin = pin();
         let all = Mode { all: true, ..ONE };
-        let spec = "old:v0.7.0,status:v0.8.0,old:v0.6.0,silent";
-        let (code, out, err, fake) = flashed(spec, "v0.8.0", None, all);
+        let spec = format!("old:v0.7.0,status:{pin},old:v0.6.0,silent");
+        let (code, out, err, fake) = flashed(&spec, None, all);
         assert_eq!(code, 0, "{out}{err}");
         let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("{needle:?} in:\n{out}"));
-        assert!(at("FAKE0 · v0.7.0 → v0.8.0\n") < at("FAKE2 · v0.6.0 → v0.8.0\n"), "one after another");
+        assert!(at(&format!("FAKE0 · v0.7.0 → {pin}\n")) < at(&format!("FAKE2 · v0.6.0 → {pin}\n")), "one after another");
         assert!(out.contains("  reaching the board's bootloader…\n"), "the steps under each port:\n{out}");
-        assert_eq!(out.matches("  done: v0.8.0 written and checked in ").count(), 2, "{out}");
+        assert_eq!(out.matches(&format!("  done: {pin} written and checked in ")).count(), 2, "{out}");
         let summary = "updated 2 of 2 · skipped: FAKE1 (up to date), FAKE3 (not answering)";
         assert!(out.trim_end().ends_with(summary), "{out}");
         assert_eq!(fake.version_on("FAKE3").as_deref(), Some("v0.7.0"), "not answering: left as it was");
 
-        let (code, out, err, fake) = flashed("old:v0.7.0/fail=write,old:v0.6.0", "v0.8.0", None, all);
+        let (code, out, err, fake) = flashed("old:v0.7.0/fail=write,old:v0.6.0", None, all);
         assert_eq!(code, 1, "{out}");
         assert!(err.contains("the board stopped answering"), "{err}");
         assert!(out.trim_end().ends_with("updated 0 of 2"), "{out}");
         assert_eq!(fake.version_on("FAKE1").as_deref(), Some("v0.6.0"), "never started");
 
-        let (code, out, _, _) = flashed("status:v0.8.0", "v0.8.0", None, all);
+        let (code, out, _, _) = flashed(&format!("status:{pin}"), None, all);
         assert_eq!(code, 0, "none needed one");
         assert!(out.trim_end().ends_with("updated 0 of 0 · skipped: FAKE0 (up to date)"), "{out}");
     }
@@ -1002,23 +1017,27 @@ mod tests {
     #[test]
     fn flash_yes_on_a_board_that_runs_dio_writes_the_pins_dio_build() {
         let _en = crate::setup::tests::in_locale("en");
-        let (code, out, err, fake) = flashed("old:v0.7.0/mode=dio", "v0.8.0", None, ONE);
+        let pin = pin();
+        let (code, out, err, fake) = flashed("old:v0.7.0/mode=dio", None, ONE);
         assert_eq!(code, 0, "{out}{err}");
-        assert!(out.contains("firmware: v0.8.0 in DIO (release v0.8.0"), "its own build fetched:\n{out}");
-        assert!(out.contains("plan: update, no erase · v0.8.0 in DIO\n"), "{out}");
-        assert_eq!(fake.version_on("FAKE0").as_deref(), Some("v0.8.0"));
+        assert!(out.contains(&format!("firmware: {pin} in DIO (release {pin}")), "its own build fetched:\n{out}");
+        assert!(out.contains(&format!("plan: update, no erase · {pin} in DIO\n")), "{out}");
+        let elf = format!("ELF {}", pin_elf(Build::Dio));
+        assert!(out.trim_end().ends_with(&elf), "the board reports the DIO build's ELF:\n{out}");
+        assert_eq!(fake.version_on("FAKE0").as_deref(), Some(pin));
         let all = Mode { all: true, ..ONE };
-        let (code, out, _, _) = flashed("old:v0.7.0,old:v0.6.0/mode=dio", "v0.8.0", None, all);
+        let (code, out, _, _) = flashed("old:v0.7.0,old:v0.6.0/mode=dio", None, all);
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("FAKE0 · v0.7.0 → v0.8.0\n") && out.contains("FAKE1 · v0.6.0 → v0.8.0 · DIO\n"), "{out}");
+        let (qio, dio) = (format!("FAKE0 · v0.7.0 → {pin}\n"), format!("FAKE1 · v0.6.0 → {pin} · DIO\n"));
+        assert!(out.contains(&qio) && out.contains(&dio), "{out}");
     }
 
     #[test]
     fn flash_yes_on_a_board_that_keeps_restarting_says_so_and_names_the_dio_build() {
         let _en = crate::setup::tests::in_locale("en");
-        let (code, out, err, fake) = flashed("old:v0.7.0/loop=qio", "v0.8.0", None, ONE);
+        let (code, out, err, fake) = flashed("old:v0.7.0/loop=qio", None, ONE);
         assert_eq!(code, 1, "written and checked is not running:\n{out}{err}");
-        assert!(out.contains("v0.8.0 is on the board."), "{out}");
+        assert!(out.contains(&format!("{} is on the board.", pin())), "{out}");
         let line = "mstream-player: the board keeps restarting: 3 restarts in 6 s, and never its first line \
                     — its flash may not run QIO; --flash-mode dio writes the DIO build\n";
         assert_eq!(err, line);
@@ -1028,15 +1047,17 @@ mod tests {
     #[test]
     fn flash_yes_with_another_release_says_what_it_writes_and_still_measures_against_the_pin() {
         let _en = crate::setup::tests::in_locale("en");
+        let pin = pin();
         let release = (Some("v0.7.0"), None);
-        let (code, out, err, fake) = flashed_with("old:v0.6.0", "v0.8.0", release, None, ONE);
+        let (code, out, err, fake) = flashed_with("old:v0.6.0", release, None, ONE);
         assert_eq!(code, 0, "{out}{err}");
-        let plan = "plan: update, no erase · v0.7.0 in QIO, release v0.7.0 — not this player's release (v0.8.0)\n";
-        assert!(out.contains(plan), "{out}");
+        let plan = format!("plan: update, no erase · v0.7.0 in QIO, release v0.7.0 — not this player's release ({pin})\n");
+        assert!(out.contains(&plan), "{out}");
         assert!(out.contains("v0.7.0 is on the board."), "{out}");
         assert_eq!(fake.version_on("FAKE0").as_deref(), Some("v0.7.0"));
-        // Over the pin itself, the release is a step back, and says so.
-        let (code, out, _, _) = flashed_with("old:v0.8.0", "v0.8.0", release, None, ONE);
+        // Over the pin itself — a board running it, answering as it does —
+        // the release is a step back, and says so.
+        let (code, out, _, _) = flashed_with(&format!("ours:{pin}"), release, None, ONE);
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("plan: go back, no erase · v0.7.0 in QIO, release v0.7.0"), "{out}");
     }
@@ -1044,21 +1065,22 @@ mod tests {
     #[test]
     fn flash_yes_with_a_release_and_no_mode_keeps_a_board_on_dio_and_a_named_mode_is_obeyed() {
         let _en = crate::setup::tests::in_locale("en");
+        let pin = pin();
         // `--release` alone: the board's own build, as its ELF says.
         let dio = "old:v0.6.0/mode=dio";
-        let (code, out, err, fake) = flashed_with(dio, "v0.8.0", (Some("v0.7.0"), None), None, ONE);
+        let (code, out, err, fake) = flashed_with(dio, (Some("v0.7.0"), None), None, ONE);
         assert_eq!(code, 0, "{out}{err}");
         let plan = "plan: update, no erase · v0.7.0 in DIO, release v0.7.0";
         assert!(out.contains(plan), "never QIO put back:\n{out}");
         assert_eq!(fake.version_on("FAKE0").as_deref(), Some("v0.7.0"));
         // The pin's tag alone: the pin in the board's own build.
         let on_v070 = "old:v0.7.0/mode=dio";
-        let (code, out, err, _) = flashed_with(on_v070, "v0.8.0", (Some("v0.8.0"), None), None, ONE);
+        let (code, out, err, _) = flashed_with(on_v070, (Some(pin), None), None, ONE);
         assert_eq!(code, 0, "{out}{err}");
-        assert!(out.contains("plan: update, no erase · v0.8.0 in DIO\n"), "{out}");
+        assert!(out.contains(&format!("plan: update, no erase · {pin} in DIO\n")), "{out}");
         // `--flash-mode qio` named: QIO, as asked, and the plan says so.
         let named = (Some("v0.7.0"), Some(Build::Qio));
-        let (code, out, err, _) = flashed_with(dio, "v0.8.0", named, None, ONE);
+        let (code, out, err, _) = flashed_with(dio, named, None, ONE);
         assert_eq!(code, 0, "{out}{err}");
         assert!(out.contains("plan: update, no erase · v0.7.0 in QIO, release v0.7.0"), "{out}");
     }
@@ -1097,16 +1119,32 @@ mod tests {
     #[test]
     fn device_list_says_a_board_runs_dio_and_says_nothing_of_qio() {
         let _en = crate::setup::tests::in_locale("en");
+        let pin = pin();
         let (_, lines) = listed(&Fake::new("old:v0.7.0/mode=dio,old:v0.7.0"), false);
-        assert_eq!(lines[0], "FAKE0 · CH9102 · serial FAKE0 · v0.7.0 · DIO, update to v0.8.0 · card not reported by v0.7.0");
-        assert_eq!(lines[1], "FAKE1 · CH9102 · serial FAKE1 · v0.7.0, update to v0.8.0 · card not reported by v0.7.0");
+        assert_eq!(lines[0], format!("FAKE0 · CH9102 · serial FAKE0 · v0.7.0 · DIO, update to {pin} · card not reported by v0.7.0"));
+        assert_eq!(lines[1], format!("FAKE1 · CH9102 · serial FAKE1 · v0.7.0, update to {pin} · card not reported by v0.7.0"));
     }
 
     #[test]
     fn device_releases_lists_newest_first_with_what_this_computer_has_and_hides_the_pre_release() {
-        let mut shelf = Shelf::new("v0.8.0");
+        // GitHub's list of 2026-10-10 with this player's pin on top of it
+        // and a release after the pin above that — on dates of the test's
+        // own — so the marks follow the pin, whichever release it is.
+        let (pin, after) = (pin(), past_pin());
+        let release = |tag: &str, date: &str| Release {
+            tag: tag.into(),
+            title: format!("mStream Player {tag} (beta)"),
+            date: date.into(),
+            pre: false,
+            images: Images::Both,
+        };
+        let mut list = firmware::tests::listed();
+        list.retain(|r| r.tag != pin);
+        list.splice(0..0, [release(&after, "2099-01-02"), release(pin, "2099-01-01")]);
+        let mut shelf = Shelf::new();
+        *shelf.list.lock().unwrap() = Ok(list);
         shelf.cached = vec![
-            Cached { tag: "v0.8.0".into(), modes: vec![Build::Qio], since: None },
+            Cached { tag: pin.into(), modes: vec![Build::Qio], since: None },
             Cached { tag: "v0.5.0".into(), modes: vec![Build::Dio], since: None },
         ];
         let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -1114,10 +1152,16 @@ mod tests {
         assert!(err.is_empty());
         let out = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = out.lines().collect();
+        let (newer, ours) = (
+            format!("{after:<15} 2099-01-02  QIO and DIO · newer than this player"),
+            format!("{pin:<15} 2099-01-01  QIO and DIO · this player's release · on this computer: QIO"),
+        );
         assert_eq!(
             lines,
             [
-                "v0.8.0          2026-10-10  QIO and DIO · this player's release · on this computer: QIO",
+                &newer,
+                &ours,
+                "v0.8.0          2026-10-10  QIO and DIO",
                 "v0.7.0          2026-10-07  QIO and DIO",
                 "v0.6.0          2026-10-02  QIO and DIO",
                 "v0.5.0          2026-10-01  DIO only · on this computer: DIO",
@@ -1134,7 +1178,7 @@ mod tests {
     #[test]
     fn device_releases_without_github_says_why_and_names_what_can_be_written_without_it() {
         let _en = crate::setup::tests::in_locale("en");
-        let mut shelf = Shelf::new("v0.8.0");
+        let mut shelf = Shelf::new();
         *shelf.list.lock().unwrap() = Err(firmware::ListWhy::Limited { reset: None });
         shelf.cached = vec![Cached { tag: "v0.7.0".into(), modes: vec![Build::Qio, Build::Dio], since: None }];
         let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -1148,7 +1192,7 @@ mod tests {
     #[test]
     fn flash_yes_with_no_board_says_so_with_the_ports_it_saw() {
         let _en = crate::setup::tests::in_locale("en");
-        let (code, out, _, _) = flashed("nodevice", "v0.8.0", None, ONE);
+        let (code, out, _, _) = flashed("nodevice", None, ONE);
         assert_eq!(code, 1);
         assert!(out.contains("No Core2 found\n") && out.contains("Serial ports seen: FAKECOM1"), "{out}");
     }

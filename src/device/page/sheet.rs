@@ -648,12 +648,20 @@ impl Page {
         sheet.list = Some(at.unwrap_or(0));
     }
 
+    /// The release the sheet measures against: the target the worker told
+    /// the page — the pin, as everything on the page is measured — or,
+    /// before the worker said it, the one this build carries.
+    pub(super) fn pin_tag(&self) -> Option<&str> {
+        self.target.as_ref().map(|t| t.version.as_str()).or(PINNED_TAG)
+    }
+
     /// The release list's rows that can be picked, in their order: the
     /// releases (the pin left out — it is the first choice; pre-releases only
     /// once shown) and the switch for the pre-releases; offline, the
     /// releases already on this computer and Try again.
     pub(super) fn entries(&self) -> Vec<Entry> {
-        let not_pin = |tag: &str| PINNED_TAG != Some(tag);
+        let pin = self.pin_tag();
+        let not_pin = |tag: &str| pin != Some(tag);
         match &self.listing {
             Listing::Listed(list) => {
                 let shown = |r: &&Release| not_pin(&r.tag) && (self.show_pre || !r.pre);
@@ -1540,7 +1548,9 @@ fn list_rows(page: &Page) -> Vec<ListRow> {
                         if release.pre {
                             words = format!("{}, {words}", t!("dev.adv_pre"));
                         }
-                        if release.newer_than_pin() {
+                        // Against the page's pin, as the line under a picked
+                        // release is (release_facts).
+                        if page.pin_tag().is_some_and(|pin| release.newer_than(pin)) {
                             words = format!("{words} · {}", t!("dev.adv_newer"));
                         }
                         let pieces = vec![
@@ -1551,7 +1561,7 @@ fn list_rows(page: &Page) -> Vec<ListRow> {
                         rows.push((pieces, Some(i), true));
                     }
                     Entry::Toggle => {
-                        let not_pin = |r: &&Release| PINNED_TAG != Some(r.tag.as_str());
+                        let not_pin = |r: &&Release| page.pin_tag() != Some(r.tag.as_str());
                         let pre = list.releases.iter().filter(|r| r.pre).filter(not_pin).count();
                         let words = match (page.show_pre, pre) {
                             (true, _) => t!("dev.adv_list_pre_hide").to_string(),
