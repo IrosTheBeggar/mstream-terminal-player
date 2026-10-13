@@ -997,6 +997,32 @@ pub(crate) mod tests {
         let mut erase = on_elf("v0.8.0", "e127a6bf");
         erase.next = Some(Next { erase: true, ..chosen(Image::Pin(Mode::Qio), By::Sheet) });
         assert_eq!(erase.primary(), Some(Primary::Write), "the default, erased first, is a choice");
+        // Across the first two-digit minor, by number: forward is an
+        // update, back is a step back. (Named as releases, not through
+        // Image::release, which turns the pin's own tag into the pin.)
+        let named = |tag: &str| Image::Release { tag: tag.into(), mode: Mode::Qio };
+        assert_eq!(primary("v0.9.0", named("v0.10.0")).1, Some(Primary::Update), "v0.9.0 → v0.10.0");
+        assert_eq!(primary("v0.10.0", named("v0.9.0")).1, Some(Primary::Back), "v0.10.0 → v0.9.0");
+    }
+
+    #[test]
+    fn the_verdict_orders_a_two_digit_minor_by_number() {
+        let target = Target { version: "v0.10.0".into(), answers_status: true };
+        let judged = |heard: Heard| {
+            let mut board = Board::new(candidate("COM3", "5B1F007751"));
+            board.heard = heard;
+            board.judge(Some(&target))
+        };
+        let old = |version: &str| Heard::Old { version: Some(version.into()), elf: None };
+        assert_eq!(judged(old("v0.9.0")), Verdict::Update, "v0.9.0 is behind v0.10.0, not ahead of it");
+        assert_eq!(judged(old("v0.9.0-3-gabc1234")), Verdict::DevUpdate, "a build past v0.9.0 is still behind");
+        assert_eq!(judged(Heard::Status(status("v0.10.0"))), Verdict::UpToDate);
+        assert_eq!(judged(Heard::Status(status("v0.10.0-2-gabc1234"))), Verdict::Newer, "a build past v0.10.0");
+        assert_eq!(judged(Heard::Status(status("v0.11.0"))), Verdict::Newer);
+        let behind = Target { version: "v0.9.0".into(), answers_status: true };
+        let mut ahead = Board::new(candidate("COM3", "5B1F007751"));
+        ahead.heard = Heard::Status(status("v0.10.0"));
+        assert_eq!(ahead.judge(Some(&behind)), Verdict::Newer, "never offered v0.9.0 as an update");
     }
 
     #[test]

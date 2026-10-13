@@ -1973,6 +1973,75 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_two_digit_minor_is_ordered_by_number_wherever_versions_are_compared() {
+        // v0.10.0 is the first release whose minor has two digits. As text
+        // it comes before v0.9.0 ('1' < '9') and before v0.6.0, the first
+        // release with a QIO build; every comparison of versions here must
+        // be of numbers.
+        let v = |s: &str| Version::parse(s).unwrap_or_else(|| panic!("{s} parses"));
+        assert_eq!(v("v0.10.0"), Version { core: (0, 10, 0), pre: vec![], ahead: 0, dev: false });
+        assert_eq!(v("v0.10.0-2-gabc1234"), Version { core: (0, 10, 0), pre: vec![], ahead: 2, dev: true });
+        assert!(v("v0.10.0").order(&v("v0.9.0")).is_gt() && v("v0.9.0").order(&v("v0.10.0")).is_lt());
+
+        // The verdict and the update gate's direction (board::primary_for
+        // and flow::plan ask place()): forward is an update, back is never
+        // one.
+        assert_eq!(place("v0.9.0", "v0.10.0"), Place::Older, "v0.9.0 → v0.10.0 is an update");
+        assert_eq!(place("v0.10.0", "v0.9.0"), Place::Newer, "v0.10.0 → v0.9.0 is a step back");
+        // The dev-build rule across the boundary.
+        assert_eq!(place("v0.9.0-3-gabc1234", "v0.10.0"), Place::Older, "a build past v0.9.0 is still below v0.10.0");
+        assert_eq!(place("v0.10.0-2-gabc1234", "v0.10.0"), Place::Newer, "a build past v0.10.0 is ahead of it");
+        assert_eq!(place("v0.10.0-dev+abc1234", "v0.10.0"), Place::Older, "v0.10.0's own dev build comes before it");
+        assert_eq!(place("v0.10.0-dev+abc1234", "v0.9.0"), Place::Newer);
+        assert_eq!(place("v0.10.0-rc.1", "v0.9.0"), Place::Newer, "a pre-release of v0.10.0 is after v0.9.0");
+        assert!(tagged("v0.10.0").newer_than("v0.9.0") && !tagged("v0.9.0").newer_than("v0.10.0"));
+
+        // The release list, newest first, whatever order GitHub gives.
+        let entry = |tag: &str| {
+            serde_json::json!({
+                "tag_name": tag, "name": tag, "draft": false, "prerelease": false,
+                "published_at": "2026-10-12T00:00:00Z", "assets": [{ "name": full_asset_name(tag) }],
+            })
+        };
+        let shuffled = ["v0.9.0", "v0.10.0", "v0.8.0", "v0.10.0-rc.1", "v0.10.1", "v0.6.0"];
+        let json = serde_json::Value::Array(shuffled.iter().map(|t| entry(t)).collect()).to_string();
+        let listed: Vec<String> = parse_releases(&json).unwrap().into_iter().map(|r| r.tag).collect();
+        assert_eq!(listed, ["v0.10.1", "v0.10.0", "v0.10.0-rc.1", "v0.9.0", "v0.8.0", "v0.6.0"]);
+
+        // …and the releases kept on this computer, offered offline in the
+        // same order. (Tags that are never a pin: a pin is checked by its
+        // built-in checksums, not a SHA256SUMS of the test's own.)
+        let scratch = Scratch::new("order");
+        for tag in ["v0.9.0", "v0.10.0-rc.1", "v0.8.0"] {
+            let (dir, name, bytes) = (scratch.0.join(tag), full_asset_name(tag), tag.as_bytes());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(&name), bytes).unwrap();
+            std::fs::write(dir.join("SHA256SUMS"), format!("{}  {name}\n", sha256_hex(bytes))).unwrap();
+        }
+        let net = Net { dir: Some(scratch.0.clone()), assets: None, api: String::new() };
+        let kept: Vec<String> = net.cached().into_iter().map(|c| c.tag).collect();
+        assert_eq!(kept, ["v0.10.0-rc.1", "v0.9.0", "v0.8.0"]);
+
+        // The ELF table holds both releases, and a release in no table yet
+        // with a two-digit minor is not taken for one from before QIO.
+        let mode = |elf: &str| elf_mode(elf).map(|m| (m.mode, m.version, m.choice));
+        assert_eq!(mode("dbd6d45e"), Some((Mode::Qio, "v0.10.0".into(), true)));
+        assert_eq!(mode("1826743e"), Some((Mode::Dio, "v0.10.0".into(), true)));
+        assert_eq!(mode("fdfe6de2"), Some((Mode::Qio, "v0.9.0".into(), true)));
+        assert_eq!(mode("0917a266"), Some((Mode::Dio, "v0.9.0".into(), true)));
+        let later = Image::from_flags(None, Some("v0.12.0-rc.1".into()), None);
+        let qio = Image::Release { tag: "v0.12.0-rc.1".into(), mode: Mode::Qio };
+        assert_eq!(later, Some(qio), "its QIO by default, never a DIO-only image");
+        assert_eq!(Image::release("v0.12.0-rc.1", Mode::Qio).has(Mode::Dio), None, "its builds: its sums' to say");
+        // …nor a local build past v0.10.0, whose DIO was a choice.
+        let file = scratch.0.join("dio.bin");
+        let desc = desc_with_elf("v0.10.0-5-gabc1234", AppDesc::OURS, &elf_bytes("be894f8d"));
+        std::fs::write(&file, merged_in(&desc, Mode::Dio)).unwrap();
+        read_local(&file).unwrap();
+        assert_eq!(mode("be894f8d"), Some((Mode::Dio, "v0.10.0-5-gabc1234".into(), true)));
+    }
+
+    #[test]
     fn a_download_that_stalls_fails_instead_of_holding_the_write_that_waits_for_it() {
         // A server on loopback that sends the head and a first piece, then
         // holds the socket open in silence: a connection that stalled.
