@@ -3045,6 +3045,12 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > a stand-in pin of their own (v0.8.0, the design cards'), which the page is told as the worker
 > would tell it — so the sheet's release list now leaves out, and marks newer than, the pin the
 > page was told, as the rest of the page always measured, instead of the constant.
+> **2026-10-13: shipped in v0.13.0** (0332561, tag v0.13.0, release run 38397753045: all 19 jobs
+> green, 21 assets, every `manifest.json` entry matching GitHub's digest): the GUI's MP3 Player
+> tab (#50), the page as one card read with no reset (#52), the Advanced options (#53) and the
+> pin on firmware v0.10.0, which reports its card (#55). The published Windows binaries said
+> 0.13.0, and `device list` read the real Core2 with no reset ("v0.10.0, up to date · card
+> 1022.1 GB free of 1023.9 GB, 113 tracks"). The pin PR opened itself: mStream #1070.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
