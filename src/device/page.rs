@@ -2266,7 +2266,10 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
                     None => t!("dev.card_old_this").to_string(),
                 };
                 // Only a pin that answers the status query can keep this
-                // promise; v0.8.0 does not (firmware.rs, PINNED_ANSWERS_STATUS).
+                // promise (firmware.rs, PINNED_ANSWERS_STATUS): v0.9.0 and
+                // later answer it — the pin does from v0.10.0 on; v0.8.0 did
+                // not. A board this old is behind any pin that answers, so
+                // its card has Update ▸ beside the promise.
                 if page.target.as_ref().is_some_and(|t| t.answers_status) {
                     words.push(' ');
                     words.push_str(&t!("dev.card_old_update"));
@@ -3069,7 +3072,14 @@ pub(crate) mod fixtures {
     use crate::device::engine::DeviceInfo;
     use crate::device::firmware::{AppDesc, ImageFacts};
 
-    /// The pin: v0.8.0, which does not answer the status query.
+    /// The pin the page's tests draw against: v0.8.0, which does not answer
+    /// the status query — the design cards' pin, so their frames are
+    /// compared character for character. It is told to the page in place
+    /// of this build's pin (firmware::PINNED_TAG), as the worker tells it,
+    /// and the page measures against what it is told — its release list
+    /// included — so a bump of the pin moves none of these frames. The test
+    /// that runs the real worker (the_page_over_the_real_worker_…) meets
+    /// the real pin instead.
     pub(crate) fn pin() -> Target {
         Target { version: "v0.8.0".into(), answers_status: false }
     }
@@ -4205,10 +4215,11 @@ mod tests {
         let _en = english();
         // The desk on the fake engine (no serial port): an old board heard,
         // the gate's yes, the write, the board heard again.
+        use crate::device::firmware::{PINNED_ANSWERS_STATUS, tests::pin};
         let fake = engine::fake::Fake::new("old:v0.7.0").with_pace(Duration::from_millis(60));
         let trace = fake.trace();
         let setup = desk::Setup {
-            supply: std::sync::Arc::new(crate::device::firmware::tests::Shelf::new("v0.8.0")),
+            supply: std::sync::Arc::new(crate::device::firmware::tests::Shelf::new()),
             preset: None,
             flags_mode: None,
             port: None,
@@ -4227,6 +4238,10 @@ mod tests {
         };
         until(&mut page, "the update offered", &|p| p.shown().is_some_and(|b| p.primary_of(b) == Some(Primary::Update)));
         assert_eq!(*trace.lock().unwrap(), ["listen FAKE0"], "opening only listened");
+        // A board too old to report its card is promised it after the
+        // update exactly when this build's pin can keep the promise.
+        let promised = window(&mut page).contains("? v0.7.0 can't report the card. Updating shows it.");
+        assert_eq!(promised, PINNED_ANSWERS_STATUS, "{}", window(&mut page));
         press(&mut page, KeyCode::Enter);
         assert_eq!(*trace.lock().unwrap(), ["listen FAKE0"], "the gate is the board's last untouched moment");
         press(&mut page, KeyCode::Char('y'));
@@ -4234,7 +4249,12 @@ mod tests {
             !p.writing() && p.shown().is_some_and(|b| b.verdict == Verdict::UpToDate && b.work == Work::Idle)
         });
         assert_eq!(*trace.lock().unwrap(), ["listen FAKE0", "open 921600", "restart", "listen FAKE0"]);
-        assert!(window(&mut page).contains("✓ Up to date · v0.8.0 · just written"));
+        assert!(window(&mut page).contains(&format!("✓ Up to date · {} · just written", pin())), "{}", window(&mut page));
+        // …and kept: on the pin, the board reports its card when the pin
+        // answers the status query.
+        let board = page.shown().expect("the board in view");
+        assert_eq!(board.answers_status(), PINNED_ANSWERS_STATUS, "{:?}", board.heard);
+        assert_eq!(window(&mut page).contains("can't report the card"), !PINNED_ANSWERS_STATUS, "{}", window(&mut page));
         page.let_go_within(Duration::from_secs(5));
         assert!(!page.holds_board() && Screen::finished(&page).is_some());
     }
@@ -4537,6 +4557,10 @@ mod tests {
         assert!(frame.contains("│   v0.7.0         2026-10-07  QIO and DIO │"), "frame 10:\n{frame}");
         assert!(frame.contains("│   v0.6.0         2026-10-02  QIO and DIO │"), "{frame}");
         assert!(frame.contains("│   v0.5.0         2026-10-01  DIO only    │"), "{frame}");
+        // The pin the page was told (v0.8.0, of 2026-10-10) is the first
+        // choice, never a row: left out by the target, not by whatever
+        // release this build pins.
+        assert!(!frame.contains("2026-10-10"), "{frame}");
         assert!(frame.contains("│   Show 1 pre-release"), "{frame}");
         let at = crate::device::firmware::clock_at(1_791_621_660);
         assert!(frame.contains(&format!("│   asked GitHub at {at}")), "{frame}");
@@ -4624,6 +4648,25 @@ mod tests {
         ends.sent();
         press(&mut page, KeyCode::Enter);
         assert_eq!(ends.sent(), [choose(Image::release("v0.5.0", Mode::Dio), false)]);
+    }
+
+    #[test]
+    fn the_release_list_leaves_out_and_measures_against_the_pin_the_page_was_told() {
+        let _en = english();
+        // A worker that pins v0.7.0: the list leaves v0.7.0 out (it is the
+        // first choice) and marks v0.8.0 as newer than this player, by the
+        // target alone — whatever release this build pins.
+        let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::old("COM3", "v0.6.0")]));
+        ends.tell([Event::Target(Target { version: "v0.7.0".into(), answers_status: false })]);
+        page.pump();
+        press(&mut page, KeyCode::Char('o'));
+        press(&mut page, KeyCode::Down);
+        ends.tell([fixtures::listed()]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("v0.8.0         2026-10-10  QIO and DIO · newer than this player"), "{frame}");
+        assert!(!frame.contains("2026-10-07"), "v0.7.0 is the first choice, never a row:\n{frame}");
+        assert!(frame.contains("v0.6.0         2026-10-02  QIO and DIO "), "{frame}");
     }
 
     #[test]

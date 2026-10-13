@@ -682,17 +682,19 @@ or a development build based below it), ✗ *Not mStream firmware*, ? *Not answe
 free space under it, in decimal GB as the Core2's About shows them — or what the card is and
 how to fix it (no card, exFAT, GPT), or why it cannot be shown (firmware too old to report it,
 a write under way): the card comes from the firmware's `@status`, which firmware 0.9.0 and
-later answer — v0.8.0, the release this player pins, says its version only. Free space a card never counted is offered as one count (`c`), never
-started by itself. One button follows the chip — *Update ▸*, *Install ▸*, *Read the board ▸*
-(a board that does not answer: reading it restarts it, said on the card first), *Try again ▸*,
-or none — and **every write passes a warning first**: what goes on, the dark screen while it
-writes, what stays (settings, the paired headphones, the music on the SD card), and that
-unplugging halfway leaves it half written; Enter, Esc and `n` keep the board as it is, `y`
-writes, and the board is reset only then. The erase box is in the install's warning alone, on
-by default over other firmware. When the board restarts, the card is the board again — `✓ Up
-to date · v0.8.0 · just written` — and one line says what was done. Everything technical — the
-port and bridge, the flash size, the firmware's ELF, where this player's image came from, the
-card's bytes, the run's log with a clock, and *Write again* — is behind **Details** (`d`, or
+later answer — v0.10.0, the release this player pins, among them, so a board on v0.8.0 or
+older is told *Updating shows it.* Free space a card never counted is offered as one count
+(`c`), never started by itself. One button follows the chip — *Update ▸*, *Install ▸*,
+*Read the board ▸* (a board that does not answer: reading it restarts it, said on the card
+first), *Try again ▸*, or none — and **every write passes a warning first**: what goes on, the
+dark screen while it writes, what stays (settings, the paired headphones, the music on the SD
+card), and that unplugging halfway leaves it half written; Enter, Esc and `n` keep the board
+as it is, `y` writes, and the board is reset only then. The erase box is in the install's
+warning alone, on by default over other firmware. When the board restarts, the card is the
+board again — `✓ Up to date · v0.10.0 · just written`, its SD card as the new firmware reports
+it — and one line says what was done. Everything technical — the port and bridge, the flash
+size, the firmware's ELF, where this player's image came from, the card's bytes, the run's log
+with a clock, and *Write again* — is behind **Details** (`d`, or
 `l`), which opens by itself when a write fails. With several boards plugged in, each gets a
 port tab wearing its mark (✓ ! ✗ ?, or a write's percent), `←` `→` switch, *Show on the player*
 (`s`) puts "This one" on a board's own screen, and *Update all* (`a`) writes every board that
@@ -749,7 +751,7 @@ step and writes without a screen, the flags answering the warning.
 opened with DTR and RTS held low, so the music on it plays on): the firmware's `@status` line —
 its version and its SD card's size, free space and tracks — or, from firmware older than the
 query, the console's `L` for the version alone. Each board's line is the port's as before, then
-its firmware against the pin (`v0.7.0, update to v0.8.0`) and its card (`card 38.2 GB free of
+its firmware against the pin (`v0.7.0, update to v0.10.0`) and its card (`card 38.2 GB free of
 59.6 GB, 1,284 tracks`); a board that says nothing is `not answering`, and a port another
 program holds is `in use by another program`. With several boards, `--yes` still asks for
 `--port` — its refusal lists each board's firmware now — or `--all`, which updates every board
@@ -757,7 +759,7 @@ running an older release of this firmware to the pin, one after another, each in
 it runs (or the one `--flash-mode` names), stopping at the first failure; it never installs
 over other firmware, never erases and never goes back, and names the boards it left alone.
 
-The pinned release is v0.8.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
+The pinned release is v0.10.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
 ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
 `-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install,
 `device flash --flash-mode dio` writes it, or the tab's Advanced… does (Flash mode, DIO). It

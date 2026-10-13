@@ -356,9 +356,10 @@ comes from the cache, or a download, beside them.
       again"); firmware too old to report it ("? v0.7.0 can't report the
       card." — and "Updating shows it." only when the pinned release
       answers the status query, which the pin says beside its checksum:
-      v0.8.0 does not); a board that is not mStream firmware ("? Only
-      mStream firmware can read the card"); a port in use ("? unknown until
-      the port is free").
+      v0.10.0 does, as every release from v0.9.0 on; v0.8.0, the pin the
+      examples here were drawn with, did not); a board that is not
+      mStream firmware ("? Only mStream firmware can read the card"); a
+      port in use ("? unknown until the port is free").
 21. **The count.** Where free space is not counted, on a board that
     answers the status query, the row offers **Count free space** (`c`, a
     dim text button, "a minute or more on a big card"): one `@count`, never
@@ -627,7 +628,7 @@ comes from the cache, or a download, beside them.
     its own bootloader header (byte 3's low nibble: `F` the QIO build, `0`
     the DIO build), never from its name; a board's from the ELF id it
     reports, against every release's QIO/DIO pair the player carries
-    (v0.5.0–v0.8.0, bumped with the pin) and the images it has had in hand
+    (v0.5.0–v0.10.0, bumped with the pin) and the images it has had in hand
     this run. A board whose ELF says its DIO was chosen (a release that had
     both builds) says so under its chip, once, dim: "In DIO (runs on every
     Core2): updates keep it." — and its Update ▸ and Update all write the
@@ -1117,3 +1118,26 @@ line: they are lines a script reads.
   the sheet is drawn whole, which also found the local build's row cut in
   seven locales, French *Another release* and Japanese "not this image's",
   all shortened.
+- **2026-10-12 — The pin moves to v0.10.0, which answers the status
+  query.** Firmware v0.9.0 (11 Oct) and v0.10.0 (13 Oct) answer `@status`,
+  `@count` and `@identify`; the player pins v0.10.0, and
+  `PINNED_ANSWERS_STATUS` is true. No clause is rewritten for it, but what
+  they say plays out differently: a board on the pin reports its SD card
+  (clause 20) — the row, the count (clause 21) and *Show on the player*
+  (clause 27) are there after an update, where a board just written with
+  v0.8.0 said "? v0.8.0 can't report the card."; an older board's row adds
+  "Updating shows it.", a promise the update now keeps; and a board that
+  answers `@err 7` with no version in time is judged behind the pin and
+  offered *Update ▸* (clause 19) rather than left unrecognised — older
+  firmware is behind any pin that answers. The ELF table (clause 37)
+  gains v0.9.0's and v0.10.0's pairs. v0.10.0 is the first release whose
+  minor has two digits; versions were always compared as numbers, and the
+  order is now tested across that boundary. The clauses' examples keep
+  v0.8.0 as the pin: the design cards drew them so, and the page's tests
+  compare the cards' frames character for character against a stand-in
+  pin of v0.8.0 that does not answer the status query
+  (`page::fixtures::pin`), told to the page as the worker tells it its
+  target — read "v0.8.0" in them as "the pin". So the release list
+  (clause 35) now leaves out, and marks newer than, the pin the page was
+  told, as the line under a picked release always did, rather than the
+  build's constant; in a real run the two are the same release.

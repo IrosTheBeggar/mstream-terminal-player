@@ -787,6 +787,11 @@ pub(crate) mod tests {
         }
     }
 
+    /// The target these tests judge against: v0.8.0, a pin that does not
+    /// answer the status query, as the page's tests draw against it
+    /// (page::fixtures::pin). judge() is told its target, so these stay
+    /// whatever release this build pins; a target that answers is told
+    /// where the verdict differs.
     fn pin() -> Target {
         Target { version: "v0.8.0".into(), answers_status: false }
     }
