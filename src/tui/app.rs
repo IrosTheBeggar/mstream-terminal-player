@@ -5607,10 +5607,7 @@ impl App {
             }
             // The GUI's Discover room keeps its own replies (clause 31's
             // guards live there).
-            event @ (Event::Taste { .. }
-            | Event::TastePrefs { .. }
-            | Event::TasteRandom { .. }
-            | Event::TasteAlbum { .. }) => self.consume_taste(event),
+            event @ (Event::Taste { .. } | Event::TasteAlbum { .. }) => self.consume_taste(event),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just

@@ -1016,25 +1016,12 @@ impl Client {
     // does so by re-pinging after an `ApiError::Forbidden` (clause 82).
 
     /// `POST /api/v1/discovery/taste` — one half of the room's answer (plan
-    /// §3.1; the App asks library+network and peers apart, clause 30).
+    /// §3.1; the App asks the library and the peers apart, clause 30). The
+    /// route is stateless: nothing is stored between calls.
     pub async fn taste_async(&self, body: &TasteRequest) -> Result<TasteResponse, ApiError> {
         let body = serde_json::to_value(body)
             .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
         self.post("api/v1/discovery/taste", body).await
-    }
-
-    /// `GET /api/v1/discovery/taste/prefs` — the user's saved window,
-    /// filter, stale days and dropped seeds (plan §3.2).
-    pub async fn taste_prefs_async(&self) -> Result<TastePrefs, ApiError> {
-        self.get("api/v1/discovery/taste/prefs").await
-    }
-
-    /// `PUT /api/v1/discovery/taste/prefs` — change what `patch` names; the
-    /// server answers with the merged prefs.
-    pub async fn set_taste_prefs_async(&self, patch: &TastePrefsPatch) -> Result<TastePrefs, ApiError> {
-        let body = serde_json::to_value(patch)
-            .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
-        self.send(Method::PUT, "api/v1/discovery/taste/prefs", Some(body)).await
     }
 
     /// A journey from one track to another through the embedding space.

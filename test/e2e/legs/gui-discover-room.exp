@@ -8,12 +8,13 @@
 # Library tab with its album strip — the answer's one album, a tile whose
 # title paints above the table and whose cover the room fetches from
 # /album-art/ (clauses 45-49; the window's 34 rows clear the strip's height
-# gate) — and its rows (clauses 3, 30, 40). The bottom row's one
-# checkbox, "Include songs I've played lately" (clause 65), paints with
-# the room's first frame, before the answer, so it is gated first, on
+# gate) — and its rows (clauses 3, 30, 40). The header's window dropdown,
+# "Last 30 days" (clause 15 — the default, nothing remembered yet), paints
+# with the room's first frame, before the answer, so it is gated first, on
 # one word (the terminal is sent only what changed, word by word with the
-# cursor moved over the spaces, and the answer's frame repaints the header
-# and rows, not the bottom row). `0` opens Now Playing,
+# cursor moved over the spaces). The page is stateless since 2026-10-14:
+# no filter checkbox, no prefs (the fake 404s the prefs route and 400s
+# `remember`/`filter`, and run.sh asserts the last body). `0` opens Now Playing,
 # whose per-song tab reads Similar now (plan §2.12). Esc comes back, q
 # quits. Gates on first-paint words only (the header's phrase is a word
 # the room paints only once the answer landed, the title a row's), and
@@ -39,9 +40,9 @@ expect {
 drain 1
 send "G"
 expect {
-    "lately" {}
-    eof { puts "DIED-ON-CHECKBOX"; exit 11 }
-    timeout { fail "NO-CHECKBOX" 12 }
+    "days" {}
+    eof { puts "DIED-ON-WINDOW"; exit 11 }
+    timeout { fail "NO-WINDOW-DROPDOWN" 12 }
 }
 expect {
     "based on songs you finished" {}

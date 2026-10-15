@@ -12,8 +12,11 @@
 //! doing too much, so the room shows only songs you can play now — no
 //! percentages, no counts, no "never played", no p2p network leads (a later
 //! Explore room draws those). Where the webapp and this surface part — album
-//! ROWS ahead of the songs at the floor; the library filter one checkbox at
-//! the bottom row's left — the contract's log says why.
+//! ROWS ahead of the songs at the floor — the contract's log says why. Since
+//! 2026-10-14 the page is simple (the contract's log): every visit asks, the
+//! server draws a new random batch of seeds each time and keeps nothing; the
+//! window is remembered in `[gui] discover_window`, and pins and drops last
+//! for the visit.
 //!
 //! One answer, two tabs, top to bottom (clause 90): the header with the
 //! window dropdown, the state line, the fallback card while nothing is
@@ -21,8 +24,7 @@
 //! room is tall enough (clauses 45–49, the 2026-10-11 strip log: the
 //! webapp's horizontal scroller of album cards, covers as real pixels
 //! through `cover::Slot` the way the queue panel's are), the tab's table,
-//! the bottom row with the "Include songs I've played lately" checkbox and
-//! the whole-list verbs. The seeds modal and the window's list draw last,
+//! the bottom row with the whole-list verbs. The seeds modal and the window's list draw last,
 //! from [`draw_modals`], so they win the pointer.
 
 use std::collections::{HashMap, HashSet};
@@ -44,11 +46,11 @@ use super::cover::{Pace, Slot};
 use super::{Act, Gui, List, RowVerb, Screen, accent, bright_bold, bullet_glyph, check_glyphs, put, sel};
 
 /// The window dropdown's choices, in days (0 = all time) — clause 15.
-const WINDOWS: [u32; 4] = [7, 30, 90, 0];
+use crate::tui::app::taste::TASTE_WINDOWS as WINDOWS;
 
-/// The window the header shows before the server or the prefs said one:
-/// the server's own default (plan §2.2).
-const WINDOW_DEFAULT: u32 = 30;
+/// The window the header shows before any was chosen or answered: the
+/// server's own default (plan §2.2).
+use crate::tui::app::taste::TASTE_WINDOW_DEFAULT as WINDOW_DEFAULT;
 
 /// The kit table's column gap.
 const GAP: u16 = 2;
@@ -211,9 +213,6 @@ pub(crate) enum DiscAct {
     WindowPick(u32),
     /// A click outside the open list closes and keeps (the Dropdown law).
     MenuClose,
-    /// "Include songs I've played lately", ticked or unticked (clause 65) —
-    /// the checkbox, and the empty library's button that ticks it.
-    Played,
     /// The seeds line's `edit` (and `e`).
     Seeds,
     /// A modal row, clicked: toggle it, or do what it says.
@@ -1283,8 +1282,7 @@ enum Pane {
     Loading,
     Failed(String),
     Sentence(String),
-    /// The library answered nothing new: the sentence, and — while the
-    /// checkbox is unticked — a button that ticks it (clause 80).
+    /// The library answered nothing new: the sentence alone (clause 80).
     LibraryEmpty,
 }
 
@@ -1427,13 +1425,7 @@ fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, (table_y, bottom_
             return;
         }
         Pane::LibraryEmpty => {
-            let short = Rect { height: list.height.saturating_sub(1), ..list };
-            let shown = sentence_lines(frame, short, &t!("gui.discover.empty_library"), dim());
-            // The way out is the checkbox's own words, ticking it (clause 80).
-            if !gui.app.taste.includes_played() {
-                let label = t!("gui.discover.include_played").to_string();
-                again_button(frame, gui, (list.x, list.y + shown), &label, DiscAct::Played);
-            }
+            sentence_lines(frame, list, &t!("gui.discover.empty_library"), dim());
             return;
         }
         Pane::Rows { failed_over } => {
@@ -1589,32 +1581,12 @@ fn draw_row(
     }
 }
 
-/// The bottom row (clauses 64–65): on the Library tab the one checkbox at
-/// the left — "Include songs I've played lately" — and the whole-list verbs
-/// at the right on a tab that has something to play, dropped from the tail
-/// when squeezed; the checkbox never moves (clause 91).
+/// The bottom row (clause 64): the whole-list verbs — play · queue all ·
+/// shuffle — at the right on a tab that has something to play, dropped from
+/// the tail when squeezed.
 fn draw_bottom(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     let tab = gui.app.taste.tab;
-    let mut left = content.x;
-    if tab == TasteTab::Library {
-        let (on_glyph, off_glyph) = check_glyphs();
-        let on = gui.app.taste.includes_played();
-        let label = t!("gui.discover.include_played").to_string();
-        let room = content.width.saturating_sub(4) as usize;
-        let label = super::bar::clip(&label, room).into_owned();
-        let rect = Rect { x: content.x, y, width: 4 + width(&label) as u16, height: 1 };
-        let hover = gui.ui.hovers(rect);
-        let glyph_style = match (hover, on) {
-            (true, _) => bright_bold(),
-            (false, true) => Style::default().fg(th().ok),
-            (false, false) => dim(),
-        };
-        put(frame, rect.x, y, if on { on_glyph } else { off_glyph }, glyph_style);
-        put(frame, rect.x + 4, y, &label, if hover { bright_bold() } else { Style::default() });
-        gui.ui.click(rect, Act::Disc(DiscAct::Played));
-        gui.ui.tip_keyed(rect, t!("gui.discover.include_tip").to_string());
-        left = rect.right() + 2;
-    }
+    let left = content.x;
     if !playable(&gui.app, tab) {
         return;
     }
@@ -1689,9 +1661,12 @@ fn seed_lines(app: &App) -> Vec<SeedLine> {
             out.push(SeedLine::Head(t!("gui.discover.sec_seeds").to_uppercase()));
             out.extend(history);
         }
-        if !head.excluded.is_empty() {
+        // This visit's drops the answer resolved (its `excluded`), never a
+        // random pick passed over with "another pick" (clause 21).
+        let dropped = taste.dropped_seeds();
+        if !dropped.is_empty() {
             out.push(SeedLine::Head(t!("gui.discover.sec_dropped").to_uppercase()));
-            out.extend(head.excluded.iter().map(|e| SeedLine::Dropped(e.hash.clone())));
+            out.extend(dropped.iter().map(|e| SeedLine::Dropped(e.hash.clone())));
         }
     }
     // Hidden, never grey, when it cannot be done (clause 14).
@@ -1807,8 +1782,7 @@ fn draw_seeds_modal(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let (check, words, facts): (Option<bool>, String, String) = match line {
             SeedLine::Pin(i) => {
                 let pin = &taste.pins[*i];
-                let marker = t!(if pin.random { "gui.discover.seed_random" } else { "gui.discover.seed_pinned" });
-                (None, track_words(&pin.track), marker.to_string())
+                (None, track_words(&pin.track), t!("gui.discover.seed_pinned").to_string())
             }
             SeedLine::Seed(hash) => {
                 let Some(seed) = taste.seed(hash) else { continue };
@@ -1890,9 +1864,10 @@ pub(crate) fn modal_open(gui: &Gui) -> bool {
     gui.discover.menu.is_some() || gui.discover.seeds.is_some()
 }
 
-/// The room is entered — a fresh visit reuses an answer under five minutes
-/// old; `again` (the nav row or `G` while the room is up) asks now (clause
-/// 3). Either way the room opens with its cursor stowed and nothing hung.
+/// The room is entered — every visit asks (clause 3): a fresh one lets the
+/// last visit's pins and drops go; `again` (the nav row or `G` while the
+/// room is up, or the way back from a pick) keeps them. Either way the room
+/// opens with nothing hung, and the old answer stands until the new lands.
 pub(crate) fn enter(gui: &mut Gui, again: bool) {
     gui.discover.menu = None;
     // The list stays where it was left (clause 61's way back); only the
@@ -1962,15 +1937,9 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         }
         DiscAct::WindowPick(window) => {
             gui.discover.menu = None;
-            let effects = gui.app.set_taste_window(window);
-            gui.pend(effects);
+            pick_window(gui, window);
         }
         DiscAct::MenuClose => gui.discover.menu = None,
-        DiscAct::Played => {
-            gui.discover.menu = None;
-            let effects = gui.app.toggle_taste_played();
-            gui.pend(effects);
-        }
         DiscAct::Seeds => {
             gui.discover.menu = None;
             gui.discover.seeds = Some(SeedsModal::default());
@@ -2016,6 +1985,17 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         }
     }
     true
+}
+
+/// A window picked (clause 15): asked at once, and remembered in `[gui]
+/// discover_window` — the server keeps nothing between calls.
+fn pick_window(gui: &mut Gui, window: u32) {
+    let effects = gui.app.set_taste_window(window);
+    gui.pend(effects);
+    if gui.config.gui.discover_window != Some(window) {
+        gui.config.gui.discover_window = Some(window);
+        gui.save_now();
+    }
 }
 
 /// Switch tabs (clause 40): asks nothing; the tab is remembered.
@@ -2181,8 +2161,8 @@ fn seed_row(gui: &mut Gui, index: usize) {
     }
 }
 
-/// The modal closes: newly dropped seeds go out as `exclude` with
-/// `remember`, a restore is a prefs write first, then one ask; nothing
+/// The modal closes: the visit's drops (and "use again") change the
+/// `exclude` the asks carry, pins came or went — then one ask; nothing
 /// changed asks nothing (clause 13).
 fn close_seeds(gui: &mut Gui) {
     let Some(modal) = gui.discover.seeds.take() else { return };
@@ -2327,13 +2307,10 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             let at = WINDOWS.iter().position(|w| *w == current).unwrap_or(1);
             let next = if c == '[' { at.saturating_sub(1) } else { (at + 1).min(WINDOWS.len() - 1) };
             if next != at {
-                let effects = gui.app.set_taste_window(WINDOWS[next]);
-                gui.pend(effects);
+                pick_window(gui, WINDOWS[next]);
             }
         }
         KeyCode::Char('e') => return Some(gui.act(Act::Disc(DiscAct::Seeds))),
-        // The checkbox, on the tab that draws it (clause 65).
-        KeyCode::Char('f') if tab == TasteTab::Library => return Some(gui.act(Act::Disc(DiscAct::Played))),
         // Another pick, only while the card stands (clause 21); otherwise
         // `r` stays the transport's repeat.
         KeyCode::Char('r') if gui.app.taste.no_history => return Some(gui.act(Act::Disc(DiscAct::Another))),
@@ -2499,7 +2476,7 @@ mod tests {
 
     use super::super::{Act, DISCOVER_NAV, FILES_NAV, Gui, List, RowVerb, Screen, render};
     use super::{DiscAct, Line, Wants, age_words, columns, layout, lines};
-    use crate::api::types::{Capabilities, TasteFilter, TasteResponse};
+    use crate::api::types::{Capabilities, TasteResponse};
     use crate::config::Config;
     use crate::kit::theme::th;
     use crate::tui::app::{App, Effect, TasteLatch, TasteTab};
@@ -2529,7 +2506,12 @@ mod tests {
     /// A connected session whose server carries the room's gate, the queue
     /// panel folded so the room has its 80 cells.
     fn session_gui() -> Gui {
-        let mut gui = Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None));
+        session_gui_with(Config::default())
+    }
+
+    /// [`session_gui`] over a given config (a remembered window or tab).
+    fn session_gui_with(config: Config) -> Gui {
+        let mut gui = Gui::new(config, false, App::new(Some(HOST.into()), None, None));
         gui.app.connected = true;
         gui.app.session.server = HOST.into();
         gui.app.session.server_id = HOST.into();
@@ -2682,24 +2664,42 @@ mod tests {
         gui.pend(effects);
     }
 
+    /// Land the last Main ask's answer, the pended effects cleared first:
+    /// what is pended after is what the answer sent — the peers ask
+    /// (clause 30), for the next [`land`] of `Peers`.
+    fn land_main(gui: &mut Gui, answer: TasteResponse) {
+        let (seq, generation) = ask_of(gui, TastePart::Main);
+        gui.pending.clear();
+        let effects = gui.app.apply_event(Event::Taste { seq, generation, part: TastePart::Main, answer: Ok(Box::new(answer)) });
+        gui.pend(effects);
+    }
+
     fn fail(gui: &mut Gui, part: TastePart, failure: TasteFailure) {
         let (seq, generation) = ask_of(gui, part);
         let effects = gui.app.apply_event(Event::Taste { seq, generation, part, answer: Err(failure) });
         gui.pend(effects);
     }
 
-    /// The asks a set of pended effects carries: part, sources, filter,
-    /// remember.
-    fn asks(gui: &Gui) -> Vec<(TastePart, Vec<String>, Option<TasteFilter>, Option<bool>)> {
+    /// The asks a set of pended effects carries: part, sources, window.
+    fn asks(gui: &Gui) -> Vec<(TastePart, Vec<String>, Option<u32>)> {
         gui.pending
             .iter()
             .filter_map(|e| match e {
-                Effect::Api(ApiCmd::Taste { part, body, .. }) => {
-                    Some((*part, body.sources.clone(), body.filter, body.remember))
-                }
+                Effect::Api(ApiCmd::Taste { part, body, .. }) => Some((*part, body.sources.clone(), body.window)),
                 _ => None,
             })
             .collect()
+    }
+
+    /// The Main ask's body among the pended effects.
+    fn main_body(gui: &Gui) -> crate::api::types::TasteRequest {
+        gui.pending
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::Taste { part: TastePart::Main, body, .. }) => Some((**body).clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no Main ask in {:?}", gui.pending))
     }
 
     /// The room entered with `G` and both halves answered.
@@ -2815,19 +2815,28 @@ mod tests {
         key(&mut gui, KeyCode::Char('G'));
         assert_eq!(
             asks(&gui),
-            vec![(TastePart::Main, vec!["library".to_string()], None, None), (TastePart::Peers, vec!["peers".to_string()], None, None)],
-            "two asks in parallel, the p2p network in neither, even advertised (clause 30)"
+            vec![(TastePart::Main, vec!["library".to_string()], Some(30))],
+            "the library first, never the p2p network, even advertised (clause 30)"
         );
-        land(&mut gui, TastePart::Main, main_answer());
+        assert!(gui.pending.iter().all(|e| matches!(e, Effect::Api(ApiCmd::Taste { .. }))), "no prefs: {:?}", gui.pending);
+        land_main(&mut gui, main_answer());
+        assert_eq!(
+            asks(&gui),
+            vec![(TastePart::Peers, vec!["peers".to_string()], Some(30))],
+            "the connected servers once the library's batch is in, pinned to it (clause 30)"
+        );
         land(&mut gui, TastePart::Peers, peers_answer());
         gui.pending.clear();
-        // A fresh visit within five minutes reuses the answer…
+        // Every visit asks — no answer is reused (clause 3) — and the old
+        // rows stand until the new land.
         gui.act(Act::Nav(FILES_NAV));
         gui.act(Act::Nav(DISCOVER_NAV));
-        assert!(asks(&gui).is_empty(), "re-entry reuses a fresh answer: {:?}", gui.pending);
+        assert_eq!(asks(&gui).len(), 1, "re-entry asks: {:?}", gui.pending);
+        assert!(draw(&mut gui).join("\n").contains("Aurora"), "the previous answer stays drawn");
+        gui.pending.clear();
         // …and G (or the row) while the room is up asks at once.
         key(&mut gui, KeyCode::Char('G'));
-        assert_eq!(asks(&gui).len(), 2, "G asks again: {:?}", gui.pending);
+        assert_eq!(asks(&gui).len(), 1, "G asks again: {:?}", gui.pending);
     }
 
     // ── States ──────────────────────────────────────────────────────────
@@ -2893,9 +2902,9 @@ mod tests {
         assert_eq!(at(&rows, "Ray").x, at(&rows, "ARTIST").x, "ARTIST over its words");
         assert_eq!(at(&rows, "Dawn").x, at(&rows, "ALBUM").x, "ALBUM over its words");
         assert!(rows[20].contains("Cirrus") && rows[20].contains("—"), "a missing artist is the dash:\n{}", rows[20]);
-        // The bottom row: the checkbox at the left, the verbs at the right.
-        assert!(rows[24].contains("[ ] Include songs I've played lately"), "the checkbox, unticked:\n{}", rows[24]);
-        assert!(rows[24].contains("play · + queue all"), "bottom:\n{}", rows[24]);
+        // The bottom row: the whole-list verbs alone, no checkbox.
+        assert!(rows[24].contains("play · + queue all · ⇄ shuffle"), "bottom:\n{}", rows[24]);
+        assert!(!all.contains("Include songs") && !all.contains("[ ]"), "the filter left the page:\n{all}");
         assert!(!all.contains("asking"), "nothing asking once both halves landed:\n{all}");
         assert_no_counts(&rows);
     }
@@ -2909,7 +2918,7 @@ mod tests {
         assert!(rows[16].contains("TRACK") && rows[16].contains("ARTIST") && rows[16].contains("LENGTH"), "{}", rows[16]);
         assert!(!rows[16].contains("ALBUM"), "47 cells: ALBUM goes first:\n{}", rows[16]);
         assert!(rows[2].contains("Last 30 days ▾"), "the window control keeps its home:\n{}", rows[2]);
-        assert!(rows[24].contains("[ ] Include songs"), "the checkbox keeps its home:\n{}", rows[24]);
+        assert!(rows[24].contains("play"), "the verbs keep their home:\n{}", rows[24]);
         assert_no_counts(&rows);
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         let rows = draw(&mut gui);
@@ -3102,8 +3111,8 @@ mod tests {
         let _en = english();
         let mut gui = session_gui();
         key(&mut gui, KeyCode::Char('G'));
-        land(&mut gui, TastePart::Main, fallback_answer());
-        land(&mut gui, TastePart::Peers, serde_json::from_value(json!({ "seedSource": "random", "peers": null })).unwrap());
+        land_main(&mut gui, fallback_answer());
+        assert!(asks(&gui).is_empty(), "a random seed asks no connected server (clause 22): {:?}", gui.pending);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(rows[2].contains("Discover · nothing finished yet"), "{}", rows[2]);
@@ -3121,10 +3130,13 @@ mod tests {
         let all = rows.join("\n");
         assert!(all.contains("Asked once you've finished a song"), "{all}");
         assert_no_counts(&rows);
-        // Another pick asks random-songs (clause 21).
+        // Another pick is the plain ask again, the random picks shown in
+        // the visit passed over (clause 21).
         gui.pending.clear();
         key(&mut gui, KeyCode::Char('r'));
-        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::TasteRandom { .. }))), "{:?}", gui.pending);
+        assert_eq!(asks(&gui).len(), 1, "{:?}", gui.pending);
+        let body = main_body(&gui);
+        assert_eq!((body.exclude, body.pin.len()), (vec!["r1".to_string()], 0));
         // At the floor with the footer on, the card gives up its body and
         // the table keeps its header, rule and a row.
         gui.config.gui.key_hints = true;
@@ -3176,7 +3188,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_library_offers_the_checkbox_and_quiet_servers_say_so() {
+    fn an_empty_library_and_quiet_servers_say_so_in_one_line() {
         let _en = english();
         let mut gui = session_gui();
         key(&mut gui, KeyCode::Char('G'));
@@ -3198,15 +3210,7 @@ mod tests {
         assert!(all.contains("Nothing new in your library sounds like these songs."), "{all}");
         assert!(rows[3].contains("• nothing new"), "{}", rows[3]);
         assert_no_counts(&rows);
-        let button = at(&rows, "Include songs I've played lately");
-        assert!(button.y < 24, "the button stands under the sentence, not the bottom row's checkbox:\n{all}");
-        assert_eq!(gui.ui.hit(button), Some(Act::Disc(DiscAct::Played)));
-        gui.pending.clear();
-        gui.act(Act::Disc(DiscAct::Played));
-        assert_eq!(asks(&gui), vec![(TastePart::Library, vec!["library".to_string()], Some(TasteFilter::All), Some(true))]);
-        let rows = draw(&mut gui);
-        assert!(rows[24].contains("[✓] Include songs I've played lately"), "ticked:\n{}", rows[24]);
-        assert_eq!(rows.iter().filter(|r| r.contains("Include songs")).count(), 1, "ticked, the button goes");
+        assert!(!all.contains("Include songs"), "the line alone, no way to widen the filter:\n{all}");
         // A connected server answering nothing: one quiet line, and the
         // state line claims nothing streams (clause 41).
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
@@ -3217,6 +3221,7 @@ mod tests {
         assert_no_counts(&rows);
         // No connected servers at all: no tab.
         gui.act(Act::Disc(DiscAct::Again));
+        land_main(&mut gui, main_answer());
         land(
             &mut gui,
             TastePart::Peers,
@@ -3228,15 +3233,17 @@ mod tests {
     }
 
     #[test]
-    fn the_seeds_modal_sends_the_exclusions_once_when_it_closes() {
+    fn the_seeds_modal_sends_the_visits_drops_once_when_it_closes() {
         let _en = english();
         let mut gui = answered_gui();
         key(&mut gui, KeyCode::Char('e'));
         let all = draw(&mut gui).join("\n");
-        assert!(all.contains("Based on") && all.contains("FROM YOUR PLAYS") && all.contains("DROPPED"), "{all}");
+        assert!(all.contains("Based on") && all.contains("FROM YOUR PLAYS"), "{all}");
         assert!(all.contains("[✓] Manor · ALM") && all.contains("finished"), "{all}");
         assert!(!all.contains("plays ·") && !all.contains("4 plays"), "no play counts:\n{all}");
-        assert!(all.contains("not analyzed yet") && all.contains("[ ] Old Song · Gone"), "{all}");
+        assert!(all.contains("not analyzed yet"), "{all}");
+        // An exclusion the visit did not drop is not offered back.
+        assert!(!all.contains("DROPPED") && !all.contains("Old Song"), "nothing dropped yet:\n{all}");
         gui.pending.clear();
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Char(' '));
@@ -3245,25 +3252,41 @@ mod tests {
         assert!(gui.pending.is_empty(), "nothing goes out while it is open");
         key(&mut gui, KeyCode::Esc);
         assert!(gui.discover.seeds.is_none());
-        let bodies: Vec<_> = gui
-            .pending
-            .iter()
-            .filter_map(|e| match e {
-                Effect::Api(ApiCmd::Taste { part: TastePart::Main, body, .. }) => Some(body.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(bodies.len(), 1, "one ask: {:?}", gui.pending);
-        assert_eq!((bodies[0].exclude.clone(), bodies[0].remember), (vec!["h1".to_string()], Some(true)));
+        assert_eq!(asks(&gui).len(), 1, "one ask, the library's: {:?}", gui.pending);
+        assert_eq!(main_body(&gui).exclude, vec!["h1".to_string()]);
+        // The answer lists it under DROPPED; checked again ("use again") it
+        // leaves the list and the room asks without it.
+        let mut answer = main_answer();
+        answer.seeds.remove(0);
+        answer.excluded = serde_json::from_value(json!([
+            { "hash": "h1", "filepath": "music/manor.mp3", "metadata": { "title": "Manor", "artist": "ALM" } }
+        ]))
+        .unwrap();
+        land(&mut gui, TastePart::Main, answer);
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Char('e'));
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("DROPPED") && all.contains("[ ] Manor · ALM"), "{all}");
+        let rows = super::seed_lines(&gui.app);
+        let at_row = rows.iter().position(|l| *l == super::SeedLine::Dropped("h1".into())).unwrap();
+        gui.act(Act::Disc(DiscAct::SeedRow(at_row)));
+        key(&mut gui, KeyCode::Esc);
+        assert!(main_body(&gui).exclude.is_empty(), "{:?}", gui.pending);
         // A modal closed with nothing changed asks nothing.
         gui.pending.clear();
         key(&mut gui, KeyCode::Char('e'));
         key(&mut gui, KeyCode::Esc);
         assert!(gui.pending.is_empty(), "{:?}", gui.pending);
+        // A fresh visit lets the drops and pins go.
+        gui.app.taste.dropped.push("h2".into());
+        gui.act(Act::Nav(FILES_NAV));
+        gui.act(Act::Nav(DISCOVER_NAV));
+        let body = main_body(&gui);
+        assert!(body.exclude.is_empty() && body.pin.is_empty(), "{body:?}");
     }
 
     #[test]
-    fn the_window_is_a_dropdown_and_the_filter_one_checkbox() {
+    fn the_window_is_a_dropdown_remembered_in_the_gui_config() {
         let _en = english();
         let mut gui = answered_gui();
         gui.pending.clear();
@@ -3274,42 +3297,34 @@ mod tests {
         let pick = at(&rows, "All time");
         assert_eq!(gui.ui.hit(pick), Some(Act::Disc(DiscAct::WindowPick(0))));
         gui.act(Act::Disc(DiscAct::WindowPick(0)));
-        let main = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::Taste { part: TastePart::Main, body, .. }) => Some(body.clone()),
-            _ => None,
-        });
-        let main = main.expect("a window change asks");
-        assert_eq!((main.window, main.remember), (Some(0), Some(true)));
-        // The checkbox: a click (or `f`) ticks it — `all`, the library alone,
-        // remembered; again unticks it — `fresh` (clause 65).
-        let rows = draw(&mut gui);
-        let check = at(&rows, "[ ] Include songs I've played lately");
-        assert_eq!(gui.ui.hit(Position { x: check.x + 6, y: check.y }), Some(Act::Disc(DiscAct::Played)));
+        assert_eq!(asks(&gui).iter().map(|a| a.2).collect::<Vec<_>>(), vec![Some(0)], "the library's part");
+        assert_eq!(gui.config.gui.discover_window, Some(0), "remembered beside the tab");
+        let mut answer = main_answer();
+        answer.window = Some(0);
+        land_main(&mut gui, answer);
+        assert_eq!(asks(&gui).iter().map(|a| a.2).collect::<Vec<_>>(), vec![Some(0)], "and the servers' after it");
+        // `[` steps it without the list, remembered too.
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Char('['));
+        assert_eq!(main_body(&gui).window, Some(90));
+        assert_eq!(gui.config.gui.discover_window, Some(90));
+        // `f` is nothing here any more.
         gui.pending.clear();
         key(&mut gui, KeyCode::Char('f'));
-        assert_eq!(asks(&gui), vec![(TastePart::Library, vec!["library".to_string()], Some(TasteFilter::All), Some(true))]);
-        assert!(draw(&mut gui)[24].contains("[✓] Include songs I've played lately"));
-        gui.pending.clear();
-        gui.act(Act::Disc(DiscAct::Played));
-        assert_eq!(asks(&gui), vec![(TastePart::Library, vec!["library".to_string()], Some(TasteFilter::Fresh), Some(true))]);
-        assert!(gui.discover.menu.is_none(), "no list hangs from the checkbox");
-        // A session's leftover "Never played" reads as unticked.
-        gui.app.taste.filter = Some(TasteFilter::Unplayed);
-        assert!(draw(&mut gui)[24].contains("[ ] Include songs"));
-    }
-
-    #[test]
-    fn a_saved_never_played_reads_as_unticked_before_any_answer() {
-        let _en = english();
-        let mut gui = session_gui();
+        assert!(asks(&gui).is_empty(), "{:?}", gui.pending);
+        // A remembered window is the one a new shell asks with.
+        let mut config = Config::default();
+        config.gui.discover_window = Some(7);
+        let mut gui = session_gui_with(config);
         key(&mut gui, KeyCode::Char('G'));
-        // The prefs read landed first: only they say the filter.
-        let prefs = |filter| crate::api::types::TastePrefs { filter: Some(filter), ..Default::default() };
-        gui.app.taste.prefs = Some(prefs(TasteFilter::Unplayed));
-        assert!(gui.app.taste.library.data.is_none() && gui.app.taste.filter.is_none());
-        assert!(draw(&mut gui)[24].contains("[ ] Include songs I've played lately"), "a saved unplayed is unticked");
-        gui.app.taste.prefs = Some(prefs(TasteFilter::All));
-        assert!(draw(&mut gui)[24].contains("[✓] Include songs I've played lately"), "a saved all is ticked");
+        assert_eq!(main_body(&gui).window, Some(7));
+        assert!(draw(&mut gui)[2].contains("Last 7 days ▾"), "shown before any answer");
+        // A number not among the four is no memory.
+        let mut config = Config::default();
+        config.gui.discover_window = Some(14);
+        let mut gui = session_gui_with(config);
+        key(&mut gui, KeyCode::Char('G'));
+        assert_eq!(main_body(&gui).window, Some(30));
     }
 
     #[test]
@@ -3376,7 +3391,7 @@ mod tests {
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(room(&rows, 8).starts_with("╭──────────╮") && room(&rows, 13).starts_with("Night Album"), "{all}");
-        assert!(rows[18].contains("Aurora") && rows[23].contains("[ ] Include songs"), "{all}");
+        assert!(rows[18].contains("Aurora") && rows[23].contains("play"), "{all}");
         // The floor, footer on and off: the album stays a row, no strip.
         for footer in [false, true] {
             gui.config.gui.key_hints = footer;
@@ -3792,6 +3807,7 @@ mod tests {
         let mut answer = peers_answer();
         answer.peers.as_mut().unwrap().peers[0].results[0].raw["art"] = json!("pc.jpg");
         gui.act(Act::Disc(DiscAct::Again));
+        land_main(&mut gui, main_answer());
         land(&mut gui, TastePart::Peers, answer);
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         gui.pending.clear();
@@ -4020,7 +4036,7 @@ mod tests {
         }
         assert_eq!(at(&rows, "Aurora").x, at(&rows, "TITRE").x, "the title under its heading:\n{}", rows.join("\n"));
         assert_eq!(at(&rows, "Ray").x, at(&rows, "ARTISTE").x, "the artist under its heading");
-        assert!(rows[24].contains("[ ] Inclure les morceaux écoutés récemment"), "{}", rows[24]);
+        assert!(rows[24].contains("lire · + tout en file · ⇄ aléatoire"), "the bottom row's verbs:\n{}", rows[24]);
     }
 
     #[test]
@@ -4080,9 +4096,10 @@ mod tests {
         assert!(rows[2].trim_end().ends_with("Last 30 days v"), "the dropdown's caret:\n{}", rows[2]);
         assert!(rows[18].contains("[>] [^] [+] [.]"), "the hover verbs:\n{}", rows[18]);
         assert!(rows[20].contains(" - "), "the missing artist:\n{}", rows[20]);
-        gui.act(Act::Disc(DiscAct::Played));
-        let rows = draw(&mut gui);
-        assert!(rows[24].contains("[x] Include songs"), "the checkmark's stand-in:\n{}", rows[24]);
+        gui.act(Act::Disc(DiscAct::Seeds));
+        let modal = draw(&mut gui).join("\n");
+        assert!(modal.contains("[x] Manor"), "the checkmark's stand-in:\n{modal}");
+        gui.act(Act::Disc(DiscAct::SeedsDone));
         for glyph in ['▾', '▸', '»', '⋯', '▇', '—', '–', '✓', '♪'] {
             assert!(!all.contains(glyph), "{glyph:?} on the legacy console:\n{all}");
         }
@@ -4113,7 +4130,7 @@ mod tests {
     fn the_tips_name_only_what_works_on_the_row() {
         let _en = english();
         let mut gui = answered_gui();
-        assert!(super::tips(&gui).contains("f played lately"), "the checkbox's key: {}", super::tips(&gui));
+        assert!(!super::tips(&gui).contains("played lately"), "no checkbox, no key: {}", super::tips(&gui));
         key(&mut gui, KeyCode::Down);
         assert_eq!(super::tips(&gui), "Enter open the album · a queue · ← → tabs · Esc done", "an album row");
         key(&mut gui, KeyCode::Down);

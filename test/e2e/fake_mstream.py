@@ -18,9 +18,12 @@ server, and no audio files:
   - /_state: the test oracle — directories and users as JSON.
   - FAKE_TASTE=1: the GUI's Discover room's server half — the ping
     advertises `discovery` + `discoveryTaste`, POST /discovery/taste
-    answers one fixed history-seeded answer (two seeds, two songs) and
-    the prefs read is empty (docs/ux-contracts/discovery-page.md; mStream's
-    docs/discovery-page-plan.md §3.1–§3.3). /_state counts the asks.
+    answers one fixed history-seeded answer (two seeds, two songs). The
+    route is stateless, as the real one since 2026-10-14: `remember`,
+    `filter` and `staleDays` answer 400 and the old …/taste/prefs route
+    404 (docs/ux-contracts/discovery-page.md; mStream's
+    docs/discovery-page-plan.md §3.1). /_state counts the asks, keeps the
+    last body, and counts any prefs call.
 
 Usage: fake_mstream.py PORT
 """
@@ -54,7 +57,7 @@ TASTE_ANSWER = {
     "library": {
         # One album with a cover: the room's strip draws its tile (the
         # 2026-10-11 strip log) and fetches the cover from /album-art/.
-        "filter": "fresh", "capped": False,
+        "capped": False,
         "albums": [{"name": "Nightfall", "album_artist": "Moon", "album_art_file": "nightfall.png",
                     "similarity": 0.86, "scopedTracks": 3, "playedTracks": 0}],
         "tracks": [
@@ -94,7 +97,10 @@ STATUS_STEPS = [
 ]
 
 calls = {"n": 0, "s": 0}
-state = {"directories": {}, "users": [], "taste_asks": 0, "art_gets": 0}
+state = {"directories": {}, "users": [], "taste_asks": 0, "taste_body": None, "prefs_calls": 0, "art_gets": 0}
+
+# Keys the stateless taste route refuses (mStream 8dcfad0e): a 400.
+TASTE_GONE = ("remember", "filter", "staleDays")
 
 
 def _png(w=4, h=4, rgb=(200, 120, 40)):
@@ -114,6 +120,14 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, payload):
         body = json.dumps(payload).encode()
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _status(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -166,7 +180,8 @@ class Handler(BaseHTTPRequestHandler):
                 ping.update({"discovery": True, "discoveryTaste": 1})
             return self._json(ping)
         if TASTE and self.path == "/api/v1/discovery/taste/prefs":
-            return self._json({"exclude": []})
+            state["prefs_calls"] += 1
+            return self._status(404, {"error": "Not Found"})
         if self.path == "/api/v1/admin/directories":
             return self._json(
                 {name: {"root": root} for name, root in state["directories"].items()}
@@ -203,10 +218,17 @@ class Handler(BaseHTTPRequestHandler):
             )
         if TASTE and self.path == "/api/v1/discovery/taste":
             state["taste_asks"] += 1
+            state["taste_body"] = body
+            gone = [k for k in TASTE_GONE if k in body]
+            if gone:
+                return self._status(400, {"error": f'"{gone[0]}" is not allowed'})
             return self._json(TASTE_ANSWER)
         return self._json({})
 
     def do_PUT(self):
+        if TASTE and self.path == "/api/v1/discovery/taste/prefs":
+            state["prefs_calls"] += 1
+            return self._status(404, {"error": "Not Found"})
         if self._walled():
             return self._deny()
         body = self._body()

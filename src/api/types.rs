@@ -1244,46 +1244,24 @@ pub struct SimilarArtist {
 // still fill the room. Gated on the ping's `discoveryTaste >= 1` — a flag,
 // never a probe (plan §2.10).
 
-/// Which of the caller's songs the Library source shows (plan §2.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TasteFilter {
-    /// Never played, or not in `staleDays` days — the server's default.
-    #[default]
-    Fresh,
-    /// Never played at all.
-    Unplayed,
-    /// Everything that sounds like the seeds.
-    All,
-    /// A filter a newer server named that this build has no words for.
-    /// Only ever read, never sent.
-    #[serde(other)]
-    Other,
-}
-
-/// `POST /api/v1/discovery/taste` — the body (plan §3.1). All optional: a
-/// field left out lets the user's saved prefs apply (no Joi defaults on
-/// `window`/`filter`/`staleDays`), so nothing here is sent unless set.
+/// `POST /api/v1/discovery/taste` — the body (plan §3.1). All optional,
+/// and nothing is stored between calls: each call is answered from this
+/// body alone (the route turned stateless on 2026-10-14; `remember`,
+/// `filter` and `staleDays` are a 400 now and never sent).
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TasteRequest {
-    /// 7 | 30 | 90 | 0 (all time).
+    /// 7 | 30 | 90 | 0 (all time); the server's default is 30.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window: Option<u32>,
-    /// Vpath-form paths, at most 8: songs the user picked (clause 14).
+    /// Vpath-form paths, at most 12 (the server's `PIN_CAP`, its seed
+    /// cap): songs the user picked (clause 14), or the Main answer's whole
+    /// batch on the peers ask (clause 30).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pin: Vec<String>,
-    /// Seed hashes the user dropped this session (clause 13).
+    /// Seed hashes left out of THIS call (clauses 13, 21), at most 200.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
-    /// Persist window, filter, staleDays and the exclusions server-side, so
-    /// every client opens on the same taste (plan §2.3, §3.2).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remember: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<TasteFilter>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stale_days: Option<u32>,
     /// `library` · `network` · `peers` — the two halves are asked apart
     /// (clause 30), so this is never empty when the App sends it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1292,6 +1270,19 @@ pub struct TasteRequest {
     pub new_artists_only: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignore_v_paths: Vec<String>,
+    /// Caps the server applies to this call; `None` takes its defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<TasteLimit>,
+}
+
+/// The `limit` of a taste ask (plan §3.1): only what the room sets is sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasteLimit {
+    /// The batch size: the peers ask sets it to its pins, so the server
+    /// adds no seed of its own to the Main answer's batch (clause 30).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<u32>,
 }
 
 /// Where the answer's seeds came from (plan §2.2): the header's phrase
@@ -1436,8 +1427,6 @@ impl TasteAlbum {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct TasteLibrary {
-    #[serde(deserialize_with = "null_default")]
-    pub filter: TasteFilter,
     #[serde(deserialize_with = "null_default")]
     pub tracks: Vec<TasteTrack>,
     #[serde(deserialize_with = "null_default")]
@@ -1627,32 +1616,6 @@ pub struct TasteResponse {
     pub library: Option<TasteLibrary>,
     pub network: Option<TasteNetwork>,
     pub peers: Option<TastePeers>,
-}
-
-/// `GET` / `PUT /api/v1/discovery/taste/prefs` (plan §3.2): the user's
-/// saved taste, the same on every client.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct TastePrefs {
-    pub window: Option<u32>,
-    #[serde(deserialize_with = "null_default")]
-    pub exclude: Vec<String>,
-    pub filter: Option<TasteFilter>,
-    pub stale_days: Option<u32>,
-}
-
-/// A `PUT …/prefs` body: only what is being changed.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TastePrefsPatch {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub window: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclude: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<TasteFilter>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stale_days: Option<u32>,
 }
 
 // ── Sonic Journey ───────────────────────────────────────────────────────────
@@ -2231,7 +2194,6 @@ mod tests {
         assert_eq!(seed.outcome, TasteOutcome::Other);
         assert!(answer.excluded.is_empty() && answer.peers.is_none());
         let library = answer.library.unwrap();
-        assert_eq!(library.filter, TasteFilter::Other, "a filter word this build lacks still parses");
         assert_eq!(library.tracks[0].to_track().title_or_file(), "B");
         assert_eq!(library.albums[0].artist(), Some("X"));
         assert_eq!(library.albums[0].scoped_tracks, 3);
@@ -2258,22 +2220,29 @@ mod tests {
     fn a_taste_body_sends_only_what_was_set() {
         let body = TasteRequest {
             window: Some(0),
-            filter: Some(TasteFilter::Unplayed),
-            remember: Some(true),
+            exclude: vec!["h1".into()],
             sources: vec!["library".into()],
             new_artists_only: Some(false),
             ..TasteRequest::default()
         };
         assert_eq!(
             serde_json::to_value(&body).unwrap(),
-            serde_json::json!({ "window": 0, "filter": "unplayed", "remember": true,
-                                "sources": ["library"], "newArtistsOnly": false })
+            serde_json::json!({ "window": 0, "exclude": ["h1"], "sources": ["library"], "newArtistsOnly": false })
         );
-        let patch = TastePrefsPatch { exclude: Some(vec![]), ..TastePrefsPatch::default() };
-        assert_eq!(serde_json::to_value(&patch).unwrap(), serde_json::json!({ "exclude": [] }));
-        let prefs: TastePrefs =
-            serde_json::from_str(r#"{"window":30,"exclude":["a"],"filter":"fresh","staleDays":120}"#).unwrap();
-        assert_eq!((prefs.stale_days, prefs.filter), (Some(120), Some(TasteFilter::Fresh)));
+        // No pins, no exclusions: neither key is sent (an empty list is
+        // nothing to say).
+        let bare = TasteRequest { window: Some(30), ..TasteRequest::default() };
+        assert_eq!(serde_json::to_value(&bare).unwrap(), serde_json::json!({ "window": 30 }));
+        // The peers ask's batch: its pins and a seed limit of their count.
+        let peers = TasteRequest {
+            pin: vec!["a.mp3".into(), "b.mp3".into()],
+            limit: Some(TasteLimit { seeds: Some(2) }),
+            ..TasteRequest::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&peers).unwrap(),
+            serde_json::json!({ "pin": ["a.mp3", "b.mp3"], "limit": { "seeds": 2 } })
+        );
     }
 
     #[test]

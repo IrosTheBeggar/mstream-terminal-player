@@ -183,6 +183,14 @@ import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert s['taste_asks'] >= 1, s
 "
+assert "the asks were stateless: the window, no prefs, no remember/filter" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+b=s['taste_body'] or {}
+assert s['prefs_calls'] == 0, s
+assert b.get('window') == 30, b
+assert not any(k in b for k in ('remember','filter','staleDays')), b
+"
 assert "the strip fetched its album's cover" "
 import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))

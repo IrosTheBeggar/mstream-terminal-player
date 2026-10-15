@@ -616,11 +616,13 @@ impl Gui {
         app.connect_screen = false;
         let mut ui = Surface::new();
         ui.key_hints = config.gui.key_hints;
-        // The Discover room's one memory of its own (discovery-page clause
-        // 40): the tab in front, seeded before the first frame.
+        // The Discover room's memories of its own (discovery-page clauses
+        // 15 and 40): the window and the tab in front, seeded before the
+        // first frame.
         if let Some(tab) = config.gui.discover_tab.as_deref().and_then(crate::tui::app::TasteTab::parse) {
             app.taste.tab = tab;
         }
+        app.taste.window = config.gui.discover_window.and_then(crate::tui::app::taste::taste_window);
         Gui {
             app,
             pending: Vec::new(),
@@ -733,6 +735,7 @@ impl Gui {
         config.player.adopt(self.app.prefs());
         config.gui.key_hints = self.config.gui.key_hints;
         config.gui.discover_tab = self.config.gui.discover_tab.clone();
+        config.gui.discover_window = self.config.gui.discover_window;
         match config::save(&config) {
             Ok(()) => self.config = config,
             Err(e) => {
@@ -1026,15 +1029,18 @@ impl Gui {
                     }
                     self.app.tab = Tab::SonicPath;
                 }
-                // The Discover room: a fresh visit reuses an answer under
-                // five minutes old, the row or `G` while it is up asks again
-                // (discovery-page clause 3); re-entering disarms its pick
-                // left standing, as the sonic room's (clause 14).
+                // The Discover room: every visit asks; a fresh one lets the
+                // last visit's pins and drops go, while the row or `G` with
+                // the room up asks again keeping them (discovery-page clause
+                // 3). Re-entering disarms its pick left standing, as the
+                // sonic room's (clause 14) — a way back from the pick, not a
+                // new visit.
                 if i == DISCOVER_NAV {
-                    if self.app.capture == Some(crate::tui::app::Capture::TasteSeed) {
+                    let picking = self.app.capture == Some(crate::tui::app::Capture::TasteSeed);
+                    if picking {
                         self.forward(Action::Cancel);
                     }
-                    discover::enter(self, was == Some(DISCOVER_NAV));
+                    discover::enter(self, was == Some(DISCOVER_NAV) || picking);
                 }
                 // Playlists: a fresh visit fetches the list; a return finds
                 // it (or a drilled playlist) standing — the albums pattern.

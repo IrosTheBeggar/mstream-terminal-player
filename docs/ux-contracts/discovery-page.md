@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Design of record** | mStream's plan, `docs/discovery-page-plan.md` @ `a6076a7a` (2026-10-05, plan v2 after its adversarial review) — §1 (the three sources and the verbs a row carries on every client), §2 (the decisions: seed rule 2.1, window and widening 2.2, pins and remembered exclusions 2.3, the library filter 2.5, albums before songs 2.6, source stamping 2.7, the random fallback 2.8, placement 2.9, flag-never-probe 2.10, naming 2.12, **2.13: where the plan departs from the canvas — the plan wins**), §3.1–§3.3 (the server contract), §4.3 (this surface). The canvas "mStream Discovery Page" (https://claude.ai/artifact/SgZVPShtC92MFhkrkJbLcA) — boards `Tui` (Library tab, pointer on a row), `TuiNetwork` (the `[⋯]` menu open), `TuiPeers` (keyboard cursor), `TuiEmpty` (nothing finished yet) and the notes `n_tui` / `n_tui_ill` — is the record **for visuals only**: layout, wording and order; where it and the plan disagree, the plan is followed and the difference is logged below. **Amended 2026-10-11: the PLAY-NOW page** — plan §2.13's 2026-10-11 lines (as built on the webapp, mStream `6b33af36` / `9a3e492f`) and the design canvas https://claude.ai/artifact/AyZ2yH6431ajvmWgxjZuxo: only songs you can play now, no counts, no percentages, no p2p network (see the log). |
-| **Server API** | **`POST /api/v1/discovery/taste`** (§3.1) `{window?, pin?, exclude?, remember?, filter?, staleDays?, sources?, limit?, newArtistsOnly?, ignoreVPaths?}` → `{window, widenedFrom, seedSource, fallback, seeds: [{hash, filepath, metadata, outcome, lastPlayed, plays, pinned, analyzed}], excluded: [{hash, filepath, metadata}], dropped, notAnalyzed, model, library: {filter, tracks: [{filepath, similarity, seedHash, metadata, genreTags, playCount, lastPlayed}], albums: [{…Album, similarity, scopedTracks, playedTracks, lastPlayed, tracks: [path]}], capped}, network: {results: [p2p row + {source: 'p2p', seedHash}], searched: {peers, tracks}} \| null, peers: {peers: [{id, name, reachable, mismatched, lastSeen, results: [federation row + {source: 'federation', seedHash: null}]}], searched: {peers, unreachable, mismatched}} \| null}` — an account only (403 for a federation key or a guest), 403 `Discovery is disabled` when discovery is off or the index is unavailable; `network`/`peers` are `null` when the source is not advertised for the caller or a random seed is in use. **`GET` / `PUT /api/v1/discovery/taste/prefs`** (§3.2) `{window, exclude: [hash], filter, staleDays}`, the user's `discovery:page` settings. **`POST /api/v1/discovery/plugin-jobs/lookup/batch`** (§3.3) — phase B; **v1 calls only the taste route and its prefs** (the `links` plug-in's resolve left with the Network tab on 2026-10-11 — the later Explore room's), plus routes the player already speaks: `POST /api/v1/db/random-songs` (another pick), the federation byte proxy `GET /api/v1/federation/peers/{id}/stream/…` and `POST /api/v1/stats/plays` with `peerId`, both through the queue as it is. **Gate**: the ping's `discovery === true && discoveryTaste >= 1` (§2.10) — here `capabilities.discovery && capabilities.discovery_taste >= 1`; the Connected servers source rides `federationDiscovery`; `discoveryP2p` (the Network source) and `discoveryPlugins` are parsed but read by nothing here since 2026-10-11 — the later Explore room's. |
+| **Design of record** | mStream's plan, `docs/discovery-page-plan.md` @ `a6076a7a` (2026-10-05, plan v2 after its adversarial review) — §1 (the three sources and the verbs a row carries on every client), §2 (the decisions: seed rule 2.1, window and widening 2.2, pins and remembered exclusions 2.3, the library filter 2.5, albums before songs 2.6, source stamping 2.7, the random fallback 2.8, placement 2.9, flag-never-probe 2.10, naming 2.12, **2.13: where the plan departs from the canvas — the plan wins**), §3.1–§3.3 (the server contract), §4.3 (this surface). The canvas "mStream Discovery Page" (https://claude.ai/artifact/SgZVPShtC92MFhkrkJbLcA) — boards `Tui` (Library tab, pointer on a row), `TuiNetwork` (the `[⋯]` menu open), `TuiPeers` (keyboard cursor), `TuiEmpty` (nothing finished yet) and the notes `n_tui` / `n_tui_ill` — is the record **for visuals only**: layout, wording and order; where it and the plan disagree, the plan is followed and the difference is logged below. **Amended 2026-10-11: the PLAY-NOW page** — plan §2.13's 2026-10-11 lines (as built on the webapp, mStream `6b33af36` / `9a3e492f`) and the design canvas https://claude.ai/artifact/AyZ2yH6431ajvmWgxjZuxo: only songs you can play now, no counts, no percentages, no p2p network (see the log). **Amended 2026-10-14: the stateless page** — mStream `8dcfad0e` (the plan's §1, §2, §3.1 and §2.13's dated note): every call draws a new random batch of seeds, nothing is stored on the server, the library filter and the prefs routes are gone (see the log). |
+| **Server API** | **`POST /api/v1/discovery/taste`** (§3.1), stateless since 2026-10-14 — nothing is stored or cached between calls — `{window? (7 \| 30 \| 90 \| 0, default 30), pin? (≤ 12 — `PIN_CAP`, the seed cap, since 2026-10-14 — seed first), exclude? (seed hashes left out of THIS call only, ≤ 200), sources?, limit?, newArtistsOnly?, ignoreVPaths?}` (`remember`, `filter` and `staleDays` are a 400) → `{window, widenedFrom, seedSource, fallback, seeds: [{hash, filepath, metadata, outcome, lastPlayed, plays, pinned, analyzed}], excluded: [{hash, filepath, metadata}] (this call's `exclude` hashes that resolve), dropped, notAnalyzed, model, library: {tracks: [{filepath, similarity, seedHash, metadata, genreTags, playCount, lastPlayed}], albums: [{…Album, similarity, scopedTracks, playedTracks, lastPlayed, tracks: [path]}], capped}, network: {results: [p2p row + {source: 'p2p', seedHash}], searched: {peers, tracks}} \| null, peers: {peers: [{id, name, reachable, mismatched, lastSeen, results: [federation row + {source: 'federation', seedHash: null}]}], searched: {peers, unreachable, mismatched}} \| null}` — an account only (403 for a federation key or a guest), 403 `Discovery is disabled` when discovery is off or the index is unavailable; `network`/`peers` are `null` when the source is not advertised for the caller or a random seed is in use. The seeds are the pins, then a **random batch** of the account's finished songs in the window — a different batch on every call — widening window → all time → counters → one random library song (drawn afresh on every call, 2026-10-14; never one in `exclude`). The library half is the fixed rule "songs you haven't played lately" (never, or more than 90 days ago). *(`GET` / `PUT …/taste/prefs` are gone since 2026-10-14 — a 404.)* **`POST /api/v1/discovery/plugin-jobs/lookup/batch`** (§3.3) — phase B; **v1 calls only the taste route** (the `links` plug-in's resolve left with the Network tab on 2026-10-11 — the later Explore room's), plus routes the player already speaks: the federation byte proxy `GET /api/v1/federation/peers/{id}/stream/…` and `POST /api/v1/stats/plays` with `peerId`, both through the queue as it is. **Gate**: the ping's `discovery === true && discoveryTaste >= 1` (§2.10) — here `capabilities.discovery && capabilities.discovery_taste >= 1`; the Connected servers source rides `federationDiscovery`; `discoveryP2p` (the Network source) and `discoveryPlugins` are parsed but read by nothing here since 2026-10-11 — the later Explore room's. |
 | **Already in this repo** | The App/worker pair every room rides: `Effect::Api(ApiCmd::…)` drained onto the api thread, answered by `worker::answer` (and `src/web/api_worker.rs` in the browser build) as an `Event` that `App::apply_event` folds in, stale replies dropped by seq / node / session-generation guards. The **Sonic room's own row model** — `List::Sonic` maps to no App pane (`List::tab()` → `None`), its rows live in App state and its verbs call App methods that build the queue rows themselves (`src/gui/sonic.rs`), with `sonic::meter_glyph` for the one-cell match meter. The kit's **Tabs** (first consumer: the admin Discovery room), **Dropdown** (the header's server switcher, the stats page's period), **Table** (`table_view`, `scroll_list`, `ListView`), a list hung from a control (`frame_at` + `Surface::overlay`, the dropdown's own grammar) and **modals** (`modal_frame_on`). `Client::stats_history_async` (the one outcome-bearing history read — named so nobody reaches for it: the server picks the seeds, clause 10). `Client::random_song_async`; `gui::opener::open_target` (honours `MSTREAM_NO_OPEN`); `kit::clipboard::copy`; the track-actions sheet (`actions::Sheet { origin, track }`); the capture banner (`Capture`); `App::origin()` and `App::reach(&Origin)` for a peer origin (multi-server clauses 27, 30); `ApiCmd::DiscoveryProbe`; `GuiPrefs` (`[gui]`, unknown keys kept). **Missing**: `Ping.discovery_taste` / `discovery_plugins` and their `Capabilities` mirrors, the taste types and client calls, `ApiCmd::Taste` / `Event::Taste`, the App's taste state, `NavId::Discover`, `src/gui/discover.rs`, a capture for a seed pick, the `gui.discover.*` strings. |
 | **Target surface** | the GUI player (`mstream-player gui`, both flavours — the window host draws the same `render`) as a **TOOLS nav room**. **The TUI changes nothing**: its Discover tab (`Tab::Discover`, the explicit-seed lookup), the Now Playing panel's neighbours (`App.now_discover`) and `Capture::Discover` stay exactly as they are. The one shared change is a title: the Now Playing view's Discover tab becomes **Similar** (plan §2.12; docs/ux-contracts/now-playing.md) |
 | **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11 (the log) |
@@ -11,9 +11,9 @@
 ## Intent
 
 A room that knows what you like because you finished it, and offers only
-what you can **play now**. The server takes the songs you played to the
-end (or most of the way) in a window you choose, never the ones you
-skipped, and answers with songs and albums in **your own library** that
+what you can **play now**. The server takes a random batch of the songs
+you played to the end (or most of the way) in a window you choose, never
+the ones you skipped — a new batch every visit — and answers with songs and albums in **your own library** that
 sound like them and that you have not played lately, and songs on your
 **connected servers** you can play through your own server. The seeds are
 visible and yours to edit, the room says in words what it is based on —
@@ -38,9 +38,11 @@ cannot play, and a later Explore room draws them.
 
 ## States & flows
 
-One room, one answer, two tabs. The answer arrives in two halves asked
-in parallel (clause 30): **the library**, then **the connected servers**,
-so the Library never waits on a 4 s server deadline.
+One room, one answer, two tabs. The answer arrives in two halves
+(clause 30): **the library**, then **the connected servers**, asked once
+the library's answer lands and pinned to its batch of seeds — so the
+Library never waits on a 4 s server deadline, and both tabs and the seeds
+line come from one batch.
 
 - **Asking** — the first ask: the state line reads `• asking…` and each
   tab's pane holds four DIM skeleton rows where its columns will stand —
@@ -54,7 +56,6 @@ so the Library never waits on a 4 s server deadline.
   `edit` opens the **seeds modal**; the tab's **album strip** — a row of
   album tiles with their covers that scrolls sideways — where the room is
   20 rows tall or more (clauses 45–49); the tab's table; the bottom row with
-  the **"Include songs I've played lately" checkbox** (Library tab) and
   the whole-list verbs.
 - **Nothing finished yet** (`fallback: true`, the server's random seed) —
   the fallback card above the tabs: what the room needs, the random
@@ -67,8 +68,7 @@ so the Library never waits on a 4 s server deadline.
   retry; the nav row leaves with the next ping and the room yields to
   Files.
 - **A source that answers nothing** — one DIM line where its rows would
-  be (the library's with a button that ticks the checkbox); the tab
-  stays.
+  be; the tab stays.
 - **Failed** — the half that failed says "couldn't reach this source"
   with Try again; the other half stands.
 
@@ -76,14 +76,14 @@ What persists, and what asks again:
 
 | Kept | For how long | Asks again when |
 |---|---|---|
-| The answer (both halves) | the session; reused on re-entry within **5 minutes** of its arrival (the server's own cache window) | re-entry after 5 minutes; the nav row or `G` while the room is up; a window change; a seeds-modal change; a pin |
-| The library half alone | — | the checkbox ticked or unticked (clause 65) |
-| Pins | the session — a server switch or quit lets them go (clause 14) | — |
-| Window, filter (the checkbox), dropped seeds | **the server's** prefs: every client opens on the same taste | — |
+| The answer (both halves) | on screen until the next one lands — **never reused**: every visit asks | every visit; the nav row or `G` while the room is up; a window change; a seeds-modal change; a pin; another pick; Try again / Check again |
+| Pins, dropped seeds, random picks passed over | **the visit** — a fresh entry into the room, a server switch or quit lets them go (clauses 13, 14, 21); never stored anywhere | — |
+| The window | `GuiPrefs` (`[gui] discover_window`, beside the tab; default 30) | — |
 | The tab in front | `GuiPrefs` (`[gui] discover_tab`) | — |
 
-A server switch drops the answer, the pins and the prefs read (the
-session generation, clause 31).
+Nothing is the server's: the route keeps nothing between calls, and its
+random batch is what makes each answer new. A server switch drops the
+answer and the visit (the session generation, clause 31).
 
 ## Behavior contract
 
@@ -107,21 +107,25 @@ session generation, clause 31).
 3. **`G` opens it** wherever the Library screen takes keys; the hosted
    screens' key tables (Now Playing, Stats, Admin) are not touched — this
    is a room, not a screen (plan §4.3). `G` does nothing while the row is
-   absent, as digit 9 goes dead with the sonic row. `G` or a click on the
-   row while the room is up asks again at once (clause 30), bypassing the
-   5-minute reuse.
+   absent, as digit 9 goes dead with the sonic row. **Every visit asks**
+   (clause 30) — no earlier answer is reused, and the old rows stand until
+   the new land (clause 32). Entering the room afresh lets the last
+   visit's pins, drops and passed-over picks go; `G` or a click on the row
+   while the room is up asks again keeping them, as does the way back
+   from a pick (clause 14).
 4. **The label fits twelve cells** in every locale (the nav column's
    width).
 
 ### Seeds — what the server decides, what the room shows
 
-10. **The server picks the seeds** (plan §2.1–§2.2): the distinct songs
-    the user finished, or stopped after half their length, counted plays
-    only, in the window, newest first, never a song whose latest play in
-    the window was a skip; widening to all time, then to the play
-    counters, then to one random song from the user's own libraries. The
-    room reads no history of its own and sends only the window, the pins
-    and the exclusions.
+10. **The server picks the seeds** (plan §2.1–§2.2): a **random batch**
+    of the distinct songs the user finished, or stopped after half their
+    length, counted plays only, in the window, never a song whose latest
+    play in the window was a skip — a different batch on every call
+    (2026-10-14: "that's actually a feature"); widening to all time, then
+    to the play counters, then to one random song from the user's own
+    libraries. The room reads no history of its own and sends only the
+    window, the pins and the visit's exclusions.
 11. **The header says what the answer is based on**, by `seedSource`:
     `history` → "based on songs you finished" (no count — the 2026-10-11
     log); `counters` → "based on
@@ -137,12 +141,15 @@ session generation, clause 31).
     **PINNED** (each with an unpin), **FROM YOUR PLAYS** (the history seeds,
     checked: the relative last play, "finished" or "listened to" by
     `outcome` — no play count — "not analyzed yet" when `analyzed` is
-    false) and **DROPPED** (the server's `excluded`, unchecked). Space,
-    Enter or a click toggles a row; `x` unpins. **Changes apply when the
-    modal closes** (Esc, or Done): newly dropped seeds go out as `exclude`
-    with `remember: true` — the server keeps them for every client
-    (§2.3); a restored seed is a `PUT …/prefs` with `exclude` minus its
-    hash; then one ask. A modal closed with nothing changed asks nothing.
+    false) — the batch the answer was built from — and **DROPPED** (this
+    visit's drops that the answer's `excluded` resolved, unchecked; a
+    random pick passed over, clause 21, is not one). Space, Enter or a
+    click toggles a row; `x` unpins. **Changes apply when the modal
+    closes** (Esc, or Done), then one ask: a seed unchecked joins the
+    visit's drop list, sent as `exclude` on every ask of the visit (this
+    call only on the server — never stored); a dropped one checked again
+    ("use again") leaves it. A modal closed with nothing changed asks
+    nothing. A fresh visit starts with no drops.
 14. **Pins are explicit** — the room never pins on its own. The modal
     offers **Pin the playing song** (only while the playing track is the
     session server's own, not a peer's, not already a seed, and fewer than
@@ -150,19 +157,22 @@ session generation, clause 31).
     capture pick in the sonic room's grammar (its clauses 10–13: the banner
     above the room, a pick consumed, a pick from another server rejected
     with "Pick a track on {server}", Esc returns, re-entry disarms). A pin
-    asks when the modal closes, or when the pick lands. Pins last for the
-    session and are sent with every ask; the server never stores them. A
-    changed playing track never re-asks.
+    asks when the modal closes, or when the pick lands; unpinning asks
+    without it. Pins last for **the visit** and are sent with every ask of
+    it; the server never stores them. A changed playing track never
+    re-asks.
 15. **The window** is the header's dropdown: Last 7 days · Last 30 days ·
     Last 90 days · All time, the current one wearing `•`. It shows the
     window **asked for** (`widenedFrom` when set, else `window`). `w` opens
     it, `[` `]` step it without the list. A change asks both halves with
-    `remember: true`.
-16. **Prefs are the server's.** The room opens with no window, filter or
-    stale-days of its own in the body, so the saved ones apply; it reads
-    `GET …/prefs` once per session, for the window and the checkbox the
-    room shows before an answer says them (clauses 15, 65). Its only
-    memory of its own is the tab (clause 40).
+    it, and the choice is **remembered locally** in `[gui]
+    discover_window` (7, 30, 90 or 0; unset or any other number asks the
+    default 30). Every ask sends the window.
+16. **Nothing is the server's** (2026-10-14). The route keeps nothing
+    between calls: no prefs are read or written, no `remember`, `filter`
+    or `staleDays` is sent (they are a 400). The room's memories of its
+    own are the window (clause 15) and the tab (clause 40), both in
+    `[gui]`.
 
 ### Nothing finished yet
 
@@ -177,29 +187,56 @@ session generation, clause 31).
     pick replaced it); then **another pick** and **choose a song…**. The
     state line reads `• no seeds` (DarkGray) · "suggestions around a
     random pick until you finish a song".
-21. **Another pick** (`r`, only while the card stands) asks
-    `random-songs` for one track of this server and pins it in place of
-    the previous such pick — the server's random seed is the same all day
-    (§2.8), so a new one has to come from here. **Choose a song…** is clause
-    14's capture pick. Either answer is `pinned`, so the connected servers
-    are asked from then on.
-22. **A random seed searches the library only** (§2.8): `peers` comes back
-    `null`, and the Connected servers tab holds one DIM line — "Asked once
+21. **Another pick** (`r`, only while the card stands) re-asks with
+    **every random pick the card showed in this visit** in `exclude` — a
+    visit-local list beside the drops, never listed under DROPPED: every
+    random pick the card showed joins it as it lands, whatever ask drew
+    it (`G`, a window change and Retry draw afresh too, but pass nothing
+    over themselves), so an earlier pick never comes back, even when a
+    chosen song now stands in the card's place — and
+    any pin the card stands around is let go (pins alone make a page; the
+    server draws a random song only when none stands). The server draws
+    its random seed afresh on every call (2026-10-14), never one in
+    `exclude`. A fresh entry into the room empties the list. **No pick
+    left**: when an answer comes back with no seed — every song the
+    server could draw was shown, so it answers `notAnalyzed` with nothing
+    to show; pinned or not, since a chosen song the server cannot resolve
+    falls back to the random draw too — the room empties the list and
+    asks once more (the old rows
+    and card standing meanwhile), so the card starts over instead of
+    stranding on a false scan-pending card; an empty list asks nothing
+    more. **Choose a song…** is clause 14's capture pick; its answer is
+    `pinned`, so the connected servers are asked from then on.
+22. **A random seed searches the library only** (§2.8): the connected
+    servers are not asked (clause 30 — the server would answer `peers:
+    null`), and the Connected servers tab holds one DIM line — "Asked once
     you've finished a song — a random pick only searches your library."
     (no `–`: the tabs carry no counts).
 
 ### Asking
 
-30. **Two asks in parallel**, never one: **A** `sources: ['library']`
-    — never `'network'`, even advertised (the 2026-10-11 log) — and **B**
-    `sources: ['peers']` (only while `federation_discovery` is) —
-    §3.1's "SHOULD", so the library renders without the peers' 4 s
-    deadline. Both carry the same pins and exclusions; only A carries
-    `remember`. No `limit`, so the server's defaults apply.
+30. **Two asks, one batch**: **A** `sources: ['library']` — never
+    `'network'`, even advertised (the 2026-10-11 log) — with the window,
+    the pins and the visit's exclusions and no `limit`, so the server's
+    defaults apply; then **B** `sources: ['peers']` (only while
+    `federation_discovery` is) — §3.1's "SHOULD", so the library renders
+    without the peers' 4 s deadline. Every call draws its own random
+    batch (2026-10-14), so B goes out **once A's answer lands**, pinned
+    to that answer's seeds alone (the user's pins that resolved are among
+    them; one that did not is not sent, so it cannot push a seed out at
+    the cap; at most 12, the server's `PIN_CAP`) with `limit: {seeds: n}` their count, so the
+    server adds no seed of its own: the Connected servers tab is built
+    from the batch the seeds line and modal show. The same window and
+    exclusions ride it. While A is out, B's tab reads asking. **No B**
+    for an A whose seed is the random pick (clause 22), an A with no
+    seed at all, an A that failed (B's pane fails with it — clause 83)
+    or was refused (clause 82), or an A that is not the latest ask
+    (clause 31).
 31. **Last ask wins.** Each ask takes a new seq and the session's
     generation; each half's reply carries both back and fills nothing
     under an older seq or another generation (a reply from the server the
-    session has left). Each half lands on its own.
+    session has left). Each half lands on its own; only the latest A,
+    landed once, sends B.
 32. **While asking**: the first ask shows the state line `• asking…` in
     the getting-there colour and, in each tab's pane, **four skeleton
     rows** — DIM `░` runs of varied lengths where TRACK, ARTIST, ALBUM
@@ -424,8 +461,8 @@ session generation, clause 31).
     origin, queue all's way (say how many, start an empty idle queue); a
     failed ask says "couldn't load the album". A click or Enter opens the
     album's tracks in the Albums room (as does its strip tile, clause 48) — the wall's drilled album view, its
-    Back leading to the wall — and `G` brings this room back as it was
-    left (clause 3's reuse).
+    Back leading to the wall — and `G` brings this room back, asking again
+    with the old rows standing until the new land (clause 3).
 62. **Connected servers rows play through your server**, as library rows
     play: `[▸]` Listen (play now), `[»]` add next, `[+]` add to the end,
     `[⋯]` the track-actions sheet; a click or Enter plays the row and
@@ -453,17 +490,10 @@ session generation, clause 31).
     in order), only while the tab has rows (the bar's law: verbs appear
     only when they would do something). Keys `p`, `A`, `S`, as in the
     browse rooms.
-65. **The library filter is one checkbox**, at the left of the bottom
-    row, on the Library tab only: `[ ] Include songs I've played lately`
-    (`[✓]` Green when ticked, `[ ]` DarkGray; the label in the row's own
-    weight; BRIGHT + BOLD under the pointer). Unticked is **`fresh`** (the
-    default, §2.5: never played, or not in the prefs' `staleDays`),
-    ticked **`all`**. The old "Never played" (`unplayed`) is never sent: a
-    saved `unplayed` — or any word this build lacks — reads as unticked,
-    and an answer that applied one to an ask that named no filter is
-    asked again once as `fresh` (the prefs left alone). A click
-    or `f` toggles it and asks the library half alone (`sources:
-    ['library']`, `remember: true`); the connected servers' rows stand.
+65. *(The library filter's checkbox, "Include songs I've played lately",
+    and its `f` left on 2026-10-14: the library half is the server's fixed
+    rule — songs you haven't played lately, never or more than 90 days
+    ago — and the bottom row keeps the whole-list verbs alone.)*
 66. **Plays started here are ordinary plays** — `manual`, `shuffle` or
     `autodj` as the play-reporting contract decides; there is no
     `discovery` source in v1 (plan §6, question 8).
@@ -486,10 +516,8 @@ session generation, clause 31).
 80. **Each source explains itself in one DIM line** where its first row
     would be, under the table's header and rule — no number; the tab
     never disappears for being empty (clause 72 aside). Library: "Nothing
-    new in your library sounds like these songs.", and under it, while the
-    checkbox is unticked, an accent text button with the checkbox's own
-    words — **Include songs I've played lately** — that ticks it and asks
-    (clause 65). Connected servers: "Nothing from your connected servers
+    new in your library sounds like these songs." (no button since
+    2026-10-14). Connected servers: "Nothing from your connected servers
     right now."
 81. **Scan pending** — `notAnalyzed: true`: the seeds line and modal list
     the seeds; every tab's pane reads "This server hasn't analyzed any
@@ -500,11 +528,15 @@ session generation, clause 31).
     clause 81's sentence and Check again (the index is not there yet); the
     gate gone → `• switched off` and "Sonic discovery has been switched
     off on this server.", no retry, and the row goes with the next ping
-    (clause 1). A failed probe leaves no "asking…" standing.
+    (clause 1). A failed probe leaves no "asking…" standing. Entering
+    the room while the probe is out starts the visit afresh but asks
+    nothing: the probe's verdict lands first.
 83. **Transport and server errors** say "couldn't reach this source" (the
     webapp's words) in the warning colour, with **Try again**, in the
     panes of the half that failed — the state line `• no answer` — and the
     other half's rows stand, as do the old rows of the half that failed.
+    A failed A fails B too (B waited on it, clause 30); Try again asks
+    both.
     The server's own words (a status code among them) are the line's
     tooltip, never on the page.
 
@@ -522,8 +554,8 @@ session generation, clause 31).
 91. **With the queue panel open** (47 cells at 100 columns) the header's
     "based on…" clips before the window control, the tab row
     has none to drop (clause 42), the table narrows by clause 54, and the
-    bottom row keeps the checkbox whole and drops the verbs from the tail
-    by the bar's rules — no control moves for the width.
+    bottom row drops the verbs from the tail by the bar's rules — no
+    control moves for the width.
 
 ## Wording
 
@@ -540,8 +572,8 @@ itself shows no count.
 |---|---|
 | Discover (the nav row and the room's heading) | `gui.nav.discover` — at most 12 cells in every locale |
 | base tips: … · D Auto DJ · **G discover** · T stats · … | `gui.tips.base` (amended) |
-| ↓ pick a row · ← → tabs · w window · f played lately · e seeds · G ask again | `gui.tips.discover` |
-| ↓ pick an album · ← → tabs · w window · f played lately · e seeds · G ask again (at rest where the album strip stands) | `gui.tips.discover_strip` |
+| ↓ pick a row · ← → tabs · w window · e seeds · G ask again | `gui.tips.discover` |
+| ↓ pick an album · ← → tabs · w window · e seeds · G ask again (at rest where the album strip stands) | `gui.tips.discover_strip` |
 | Enter play from here · a queue · N next · P play now · m actions · ← → tabs · Esc done (a library song's row and a connected server's) | `gui.tips.discover_row` (one key since 2026-10-11) |
 | Enter open the album · a queue · ← → tabs · Esc done | `gui.tips.discover_album` |
 | ← → albums · Enter open the album · + a queue · ↓ songs · Esc done (the hand on a library album's tile) | `gui.tips.discover_tile` |
@@ -590,12 +622,9 @@ itself shows no count.
 | sounds like %{track} | `gui.discover.seed_tip` |
 | Listen through your server — P | `gui.discover.listen_tip` |
 | Add next — N · Add to the queue — a · Play now — P · More actions | reused: `gui.files.next_tip` · `gui.files.queue_tip` · `gui.files.now_tip` · `gui.act.more_tip` |
-| Include songs I've played lately (the checkbox, and the empty library's button) | `gui.discover.include_played` |
-| Show the songs you've played lately too — f | `gui.discover.include_tip` |
 | play · queue all · shuffle (the bottom row) | reused: `gui.bar.play` · `gui.bar.queue` · `gui.shuffle_word` |
 | Nothing new in your library sounds like these songs. | `gui.discover.empty_library` |
 | Nothing from your connected servers right now. | `gui.discover.empty_servers` |
-| couldn't restore the seed: %{err} | `gui.discover.restore_failed` |
 | couldn't reach this source · Try again | `gui.discover.failed` · `gui.discover.retry` |
 | This server hasn't analyzed any music yet — suggestions appear once the discovery scan has run. · Check again | `gui.discover.scan_pending` · `gui.discover.check_again` |
 | Sonic discovery has been switched off on this server. | `gui.discover.turned_off` — the sonic-path contract's `discoverTurnedOff` words |
@@ -634,8 +663,7 @@ Data is never translated: titles, artists, album and server names.
   connected server.
 - **"browse the library"** on the fallback card: the Files row is one
   click away; "choose a song…" is the card's way into the library.
-- **The stale-days setting** (`staleDays` is never written here) and the
-  `limit` caps (the server's defaults stand).
+- **The `limit` caps** (the server's defaults stand).
 - **A text filter** over the rows (the browse bar's), and the webapp's
   "Show more" (sixteen rows a column): the table scrolls, so every row
   the server sent is in it.
@@ -649,11 +677,10 @@ Data is never translated: titles, artists, album and server names.
 | A TOOLS room "under Sonic path" (§2.9; canvas row 17) | `NavId::Discover` last in `NAV`; `draw_nav` gates it like the sonic row and hides it for a peer like the play lists; rows TOOLS 13 · Auto DJ 14 · Sonic 15 · Discover 16 · Settings on the content's last row; `G` in the Library screen's global table, recorded in `gui.tips.base`; `render`'s match over `NAV` and `Gui::wheel` get their arms |
 | The room's own rows | **Its own row model** (`App.taste`), the sonic room's precedent: `List::Discover` maps to no pane (`List::tab()` → `None`), and the verbs call App methods that build the queue rows themselves — play from here, play now, add next, add to the end, play / queue / shuffle all — stamping `self.origin()` on Library rows and the peer origin on Connected servers rows (`TasteState::peer_lines`, the rows that play now). The TUI's `Tab::Discover` pane is never written |
 | A federation row | Flat (`artist`, `title`, `album`, `year`, `duration`, `filepath` = the **peer's** path, `peer: {id, name}`), not the `{filepath, metadata}` envelope: the App builds the queue row's `Track` metadata from those fields, which is also the play report's snapshot |
-| Two calls (§3.1) | `ApiCmd::Taste { seq, generation, half, body }` → `Event::Taste { seq, generation, half, answer }` — one command, a half on it (the D7 habit: a destination on the command, not a second command); arms in `worker::answer`, `web/api_worker.rs` and `App::apply_event`; the prefs read and write ride their own small command with the same guards |
+| Two calls (§3.1) | `ApiCmd::Taste { seq, generation, half, body }` → `Event::Taste { seq, generation, half, answer }` — one command, a half on it (the D7 habit: a destination on the command, not a second command); arms in `worker::answer`, `web/api_worker.rs` and `App::apply_event` (the prefs command and the "another pick" `random-songs` command left on 2026-10-14) |
 | The webapp's re-ping on 403 | `ApiCmd::DiscoveryProbe`, reading `discovery && discovery_taste >= 1` for this room (the sonic room's probe reads its own flag) |
 | Segmented switch (the play-now page's two sources) | The kit's Tabs, Library · Connected servers, names only; `[gui] discover_tab` in `GuiPrefs` |
-| "Based on the last [window]" | The kit's Dropdown at the header's right (`Last 30 days ▾`) |
-| "Include songs I've played lately" (the webapp's checkbox under More options) | The kit's checkbox glyphs inline at the bottom row's left (`[✓]` Green / `[ ]` DarkGray, `check_glyphs`), the settings rows' one-line form of the kit's opt-in row — a dense row has no room for its 4-row card |
+| "Based on the last [window]" | The kit's Dropdown at the header's right (`Last 30 days ▾`), remembered in `[gui] discover_window` (the webapp's localStorage) |
 | Album cards (the strips' scrollers), the two song columns | The album strip over each tab's table — 12 × 5 covers through `cover::Slot`, real pixels or the mosaic — where the room has 20 rows; album rows ahead of the songs below that (clauses 45–49, the log); the songs in one table per tab |
 | A row's art tile, title and "Artist · Album" | TRACK · ARTIST · ALBUM (· ON) · LENGTH columns: a terminal has no art tile in chrome, and columns read faster than a joined line at 80 cells |
 | The seeds sheet (PhoneSeeds) | A kit modal (`modal_frame_on`) with `[✓]` / `[ ]` rows and a modal primary Done; the window stays the header's dropdown, not repeated in the modal |
@@ -664,17 +691,11 @@ Data is never translated: titles, artists, album and server names.
 
 Open at implementation (decide, then log):
 
-- **Restoring a dropped seed** (clause 13) assumes `PUT …/prefs` with an
-  `exclude` list *replaces* the saved list; §3.2 says the PUT returns
-  "the merged prefs". Confirm against the server's S5 piece — if
-  `exclude` merges, the restore needs another body shape.
 - **The fallback card's memory** (clause 20) is the room's: the server
   says `fallback` only for its own random seed, so once a pin stands the
   room keeps "no history yet" from the last pinless answer. Confirm what
   `seedSource` reads for pins plus history (the plan names the values,
   not the mix).
-- **The 5-minute reuse** (clause 3) mirrors the server's cache window;
-  an answer that failed is never reused.
 
 ### What the tests pin
 
@@ -722,33 +743,51 @@ forced kitty, sixel and iTerm2 picker the whole tiles' covers encoded as
 pictures, the cut tile the mosaic, a scroll encoding only the newly
 whole cover; end to end, the gui-discover-room leg (120×34, pixels off)
 gating on the fake answer's album tile above the songs and the fake
-counting the cover's `/album-art/` fetch; the checkbox
-(unticked by default and for a saved `unplayed` — the prefs alone, before
-any answer — a click or `f` asks `all` then `fresh`, the empty library's
-button ticks it); the fallback card; the scan-pending, off and failure
+counting the cover's `/album-art/` fetch, and its last body carrying the
+window and no `remember` / `filter` / `staleDays` with no prefs call (the
+fake 404s the prefs route and 400s the gone keys); no checkbox and no `f`
+anywhere; the window dropdown asking both parts and saved in `[gui]
+discover_window`, a remembered window asked by a new shell and an
+unknown number reading as 30; every visit asking with the old rows
+standing; the seeds modal's drops sent once, listed under DROPPED only
+once dropped in the visit, "use again" asking without, a fresh visit
+letting them go; the fallback card; the scan-pending, off and failure
 lines; the Connected servers rows with an offline and a mismatched
 server's left out, Enter playing through the federation proxy, and `[⋯]`,
 `m` and a right click opening the sheet with the peer's origin; the
 list-cursor law (nothing lit on arrival, a click stows, verbs need the
 cursor up); the wheel; the glyph fallbacks; cells in French and Japanese.
 App tests: the two asks and their bodies (`library` alone, never
-`network`; peers only when advertised; `remember` on A alone; the
-checkbox asks the library alone; a saved `unplayed` asked again once as
-`fresh`); a stale seq and another generation fill nothing; a Library row
+`network`; the window always, 30 by default; nothing but the taste asks
+— no prefs); the peers ask following the Main answer, pinned to its
+batch (its seeds alone, an unresolved pin left out, capped at 12) with `limit.seeds` their count, and
+none for a stale Main, a Main landing twice, a random Main, a Main with
+no seed, a failed or refused Main, or federation discovery gone; every visit asks, `G` keeping
+the visit's pins and drops and a fresh visit letting them go, the window
+kept; the exclusions capped at the server's 200, newest kept; a stale
+seq and another generation fill nothing; a Library row
 queues with the session's origin; **a Connected servers row queues with
 `Origin { server, peer: Some(id) }`, its stream URL is the federation
 proxy path, and its play report carries `peerId`**; activating
 any row leaves `App.discover`, `App.now_discover` and the TUI's capture
-unchanged; another pick pins a random song; the seeds modal's close sends
-the exclusions once; the strips' order and grouping (folded server +
+unchanged; another pick re-asks with every random pick shown in the
+visit passed over, whatever ask drew it (never a pin, never a dropped
+seed, forgotten by a fresh visit; `G` passing nothing over), the one
+shown before a chosen song included, and an answer with no pick left —
+pinned or not — emptying the list and asking once more — once only,
+the old card standing meanwhile; a window picked while
+another is still asked for is asked, not ignored; a visit begun while
+a 403's probe is out waits for the verdict;
+the seeds modal's close sends the visit's drops once and "use again"
+takes one back; the strips' order and grouping (folded server +
 album + artist, a row with no album, no file, or from a mismatched or
 unreachable server joining none, the best row's spelling and first art,
 the cap of twelve, ties in the server's order) and a connected server's
 album asked with its peer's reach and falling back to its matched rows.
 The locale parity test. Expect legs
 (`test/e2e/legs/gui-discover.exp`, `MSTREAM_GUI_DEMO=1`; and
-`gui-discover-room.exp` against the fake's taste route: the checkbox, the
-header's words, a row; first-paint gates, drain-not-sleep). `cargo test --features desktop`; `cargo check --target
+`gui-discover-room.exp` against the fake's taste route: the window
+dropdown, the header's words, a row; first-paint gates, drain-not-sleep). `cargo test --features desktop`; `cargo check --target
 wasm32-unknown-unknown`.
 
 ## Deviations log
@@ -943,3 +982,67 @@ wasm32-unknown-unknown`.
     `LibraryNode::Album` and `album_songs` for the Albums room and here
     at once. The 12 × 5 cover box's letterbox and stretch (clause 46) are
     likewise recorded rather than changed: the brief fixed the box.
+- **2026-10-14 — The stateless page.** The user's decision, in their
+  words: "This feature should be simple: pull in song history; pick a
+  batch of random seeds and pull in discovery suggestions. It doesn't
+  matter if the seeds are different every time the page opens, that's
+  actually a feature. Getting new results every time is the expected
+  behaviour." The seed picker stays ("a nice power feature for users who
+  want to make targeted discovery queries"), as does the window. The
+  server went first (mStream `8dcfad0e`: `POST …/taste` stateless —
+  `remember`, `filter` and `staleDays` a 400 — and `GET`/`PUT …/prefs`
+  gone, a 404); every client follows the same rules:
+  - **No prefs**: `ApiCmd`/`Event::TastePrefs`, the `TastePrefs` /
+    `TastePrefsPatch` types, the client calls, the once-a-session read,
+    the restore's `PUT` and its "couldn't restore the seed" note are
+    removed (clauses 13, 16). The request carries the window, the pins
+    and the visit's exclusions only.
+  - **The window is remembered locally**, in `[gui] discover_window`
+    beside `discover_tab` (default 30; clause 15), the webapp's
+    localStorage and the phone's settings store being the others'.
+  - **The library filter's checkbox goes**, with its `f`, its tooltip,
+    the empty library's "include played" button and the
+    `TasteFilter` type and `TastePart::Library` ask (clauses 65, 80); the
+    bottom row keeps play · queue all · shuffle, and the empty-library
+    line stays.
+  - **Pins and drops are the visit's** (clauses 3, 13, 14): a dropped
+    seed joins a visit-local exclude list, "use again" takes it back,
+    both re-asking; a fresh entry into the room clears pins, drops and
+    passed-over picks; `G` with the room up and the way back from a pick
+    keep them. DROPPED lists the answer's `excluded` rows for this visit's
+    drops.
+  - **No reuse** (clause 3): the 5-minute reuse clock (`TASTE_REUSE`,
+    `arrived`, `taste_open_at`) is gone — every visit asks, and the old
+    answer stays drawn until the new one lands. `G ask again` is the same
+    plain ask; the server's random batch is what makes it new.
+  - **Another pick** (clause 21) — settled the same day for every
+    client: the server's random fallback, salted by user + UTC day, gave
+    the same song all day, so a plain re-ask could not give another pick;
+    it is now drawn **afresh on every call**, honouring `exclude`. Every
+    client's another pick re-asks with the random picks shown in this
+    visit in `exclude` — a visit-local list beside the drops (here
+    `skipped`, fed by `shown_random`, which gathers every random pick
+    the card showed, whatever ask drew it; not listed as a drop),
+    emptied on a fresh entry — and, when the answer comes back with no
+    pick left (no seed, `notAnalyzed` with nothing to show — pinned or
+    not, as the webapp's `noPickLeft`), empties the
+    list and asks once more, so the card starts over instead of
+    stranding on a false scan-pending card. The card's pin, if any, is
+    let go, as built. The `random-songs` draw
+    (`ApiCmd`/`Event::TasteRandom`), the random pin and the 2026-10-05
+    "draws again up to three times when not analyzed" re-draw retire —
+    the server's random seed is analyzed by construction.
+  - **One batch per visit across the halves** (clause 30) — settled the
+    same day for every client: each call draws its own batch, so a peers
+    ask sent in parallel with Main was built from a different batch than
+    the one the seeds line shows. The peers half now goes out **after**
+    the Main answer lands, pinned to all of its seeds and nothing else
+    (as the webapp's `peersRequest`: a resolved pin is a seed already, an
+    unresolved one would push a seed out at the cap) with `limit.seeds`
+    their count; the server's `PIN_CAP` rose
+    8 → 12 (= the seed cap) so a whole batch fits. A random Main sends no
+    peers ask (the server asks no connected server for a random seed),
+    nor does a stale Main (the seq guard), a failed or refused one, or
+    one with no seed. The user still picks at most 8 songs (clause 14);
+    `TasteRequest` gains `limit` (`TasteLimit { seeds }`), sent only on
+    the peers ask.

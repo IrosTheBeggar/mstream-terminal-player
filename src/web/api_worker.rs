@@ -206,13 +206,6 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         ApiCmd::Taste { seq, generation, part, body } => {
             with_session(session, async |s| worker::taste(&s.client, seq, generation, part, &body).await).await
         }
-        ApiCmd::TastePrefs { generation, patch } => {
-            with_session(session, async |s| worker::taste_prefs(&s.client, generation, patch.as_ref()).await)
-                .await
-        }
-        ApiCmd::TasteRandom { generation } => {
-            with_session(session, async |s| worker::taste_random(&s.client, generation).await).await
-        }
         // The browser build has one client, the session's: a connected
         // server's album is not asked of its server here, and the App
         // queues the rows that matched instead.

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::api::types::{
     Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
-    SimilarArtist, TastePrefs, TastePrefsPatch, TasteRequest, TasteResponse, Track,
+    SimilarArtist, TasteRequest, TasteResponse, Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -201,12 +201,6 @@ pub enum ApiCmd {
     /// the session has left fills nothing (clause 31). The session's own
     /// server always: the room is hidden in a peer session (clause 1).
     Taste { seq: u64, generation: u64, part: TastePart, body: Box<TasteRequest> },
-    /// The room's prefs: `None` reads them (once a session, clause 16),
-    /// `Some` writes what the patch names — a restored seed (clause 13).
-    TastePrefs { generation: u64, patch: Option<TastePrefsPatch> },
-    /// One random track of the session's server for the room's "another
-    /// pick" (clause 21): the server's own random seed is the same all day.
-    TasteRandom { generation: u64 },
     /// An album row's `[+]` (clause 61): the album's songs by its name — the
     /// Albums room's ask — for the App to append to the queue. A connected
     /// server's album on the strip (the 2026-10-11 strip log) names its
@@ -294,8 +288,6 @@ impl ApiCmd {
             | ApiCmd::DiscoveryProbe
             | ApiCmd::Discover { .. }
             | ApiCmd::Taste { .. }
-            | ApiCmd::TastePrefs { .. }
-            | ApiCmd::TasteRandom { .. }
             | ApiCmd::SavePlaylist { .. }
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
@@ -418,9 +410,6 @@ pub enum TastePart {
     /// Ask A: `library` — the seeds, the header facts and the library's
     /// lists. Never `network`: the play-now room shows only what plays.
     Main,
-    /// The checkbox ticked or unticked: the library alone; the connected
-    /// servers' rows stand.
-    Library,
     /// Ask B: the connected (federated) servers, only while
     /// `federationDiscovery` is advertised.
     Peers,
@@ -603,12 +592,6 @@ pub enum Event {
     /// failed half says so in its own panes and the other stands (clause
     /// 83).
     Taste { seq: u64, generation: u64, part: TastePart, answer: Result<Box<TasteResponse>, TasteFailure> },
-    /// The room's prefs as the server holds them after a read (`wrote`
-    /// false) or a write (true); `Err` with the words when it failed.
-    TastePrefs { generation: u64, wrote: bool, answer: Result<TastePrefs, String> },
-    /// "Another pick": `None` when the library answered empty or the ask
-    /// failed.
-    TasteRandom { generation: u64, track: Option<Box<Track>> },
     /// An album row's songs to queue: `None` when the ask failed.
     /// `name`, `artist`, `peer` and `play` as the ask carried them.
     TasteAlbum {
@@ -1312,10 +1295,6 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::Taste { seq, generation, part, body } => {
             crate::api::wait(taste(c, seq, generation, part, &body))
         }
-        ApiCmd::TastePrefs { generation, patch } => {
-            crate::api::wait(taste_prefs(c, generation, patch.as_ref()))
-        }
-        ApiCmd::TasteRandom { generation } => crate::api::wait(taste_random(c, generation)),
         ApiCmd::TasteAlbum { name, artist, generation, peer, play, .. } => {
             crate::api::wait(taste_album(c, TasteAlbumAsk { name, artist, peer, play }, generation))
         }
@@ -2187,35 +2166,6 @@ pub(crate) async fn taste(
         Err(e) => Err(TasteFailure::Failed(e.to_string())),
     };
     Ok(Event::Taste { seq, generation, part, answer })
-}
-
-/// Read the prefs (`patch` `None`) or write them.
-pub(crate) async fn taste_prefs(
-    client: &Client,
-    generation: u64,
-    patch: Option<&TastePrefsPatch>,
-) -> Result<Event, ApiError> {
-    let result = match patch {
-        Some(patch) => client.set_taste_prefs_async(patch).await,
-        None => client.taste_prefs_async().await,
-    };
-    let answer = match result {
-        Ok(prefs) => Ok(prefs),
-        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
-        Err(e) => Err(e.to_string()),
-    };
-    Ok(Event::TastePrefs { generation, wrote: patch.is_some(), answer })
-}
-
-/// "Another pick" (clause 21): one random track, as the sonic room's ends
-/// ask for theirs.
-pub(crate) async fn taste_random(client: &Client, generation: u64) -> Result<Event, ApiError> {
-    let track = match client.random_song_async(&crate::api::types::RandomSongRequest::default()).await {
-        Ok(r) => r.songs.into_iter().next().map(Box::new),
-        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
-        Err(_) => None,
-    };
-    Ok(Event::TasteRandom { generation, track })
 }
 
 /// What a [`ApiCmd::TasteAlbum`] asks, carried back on its event.

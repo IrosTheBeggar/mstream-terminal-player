@@ -519,12 +519,17 @@ pub struct GuiPrefs {
     /// pointer's, and the classic TUI is the keyboard's room.
     pub key_hints: bool,
     /// The Discover room's tab in front — `library` or `servers`
-    /// (discovery-page contract, clause 40): the room's one memory of its
-    /// own; its window, filter and dropped seeds are the server's prefs.
-    /// The tab's old name `peers` reads as `servers`; `network`, or a word
-    /// this build does not know, reads as no memory.
+    /// (discovery-page contract, clause 40). The tab's old name `peers`
+    /// reads as `servers`; `network`, or a word this build does not know,
+    /// reads as no memory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discover_tab: Option<String>,
+    /// The Discover room's window, in days — 7, 30, 90 or 0 for all time
+    /// (clause 15). The server keeps nothing between calls (the contract's
+    /// 2026-10-14 log), so the choice is remembered here; unset, or a
+    /// number not among the four, asks the default 30.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discover_window: Option<u32>,
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -1656,6 +1661,23 @@ mod tests {
         let loaded = load().unwrap();
         assert_eq!(loaded.gui.discover_tab.as_deref(), Some("network"));
         assert_eq!(loaded.gui.extra.get("zoom").and_then(toml::Value::as_integer), Some(2));
+    }
+
+    #[test]
+    fn the_discover_rooms_window_round_trips_beside_the_tab() {
+        let scratch = Scratch::new("discover-window");
+        save(&Config::default()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("discover_window"), "no window chosen, nothing written: {text}");
+
+        let mut config = Config::default();
+        config.gui.discover_tab = Some("library".into());
+        config.gui.discover_window = Some(0);
+        save(&config).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("[gui]") && text.contains("discover_window = 0"), "{text}");
+        let loaded = load().unwrap();
+        assert_eq!((loaded.gui.discover_window, loaded.gui.discover_tab.as_deref()), (Some(0), Some("library")));
     }
 
     #[test]
