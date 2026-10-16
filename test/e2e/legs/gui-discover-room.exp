@@ -3,23 +3,29 @@
 # (test/e2e/fake_mstream.py, FAKE_TASTE=1; docs/ux-contracts/
 # discovery-page.md). The ping advertises `discoveryTaste`, so the nav
 # grows its Discover row (clause 1); `G` opens the room, which asks the
-# route and paints its answer: the header's "based on" phrase — words, no
-# count, the play-now page (the contract's 2026-10-11 log) — over the
-# Library tab with its album strip — the answer's one album, a tile whose
+# route and paints its answer: the refresh's "new seeds" (clause 17 —
+# "asking…" while the ask is out), then the tagline at the tabs row's
+# right, "based on songs you finished" — words, no count, the play-now
+# page (the contract's 2026-10-11 log; the tabs row's since 2026-10-16,
+# where the queue-open room's 67 cells at 120 columns hold it whole) —
+# over the Library tab with its album strip — the answer's one album, a tile whose
 # title paints above the table and whose cover the room fetches from
-# /album-art/ (clauses 45-49; the window's 34 rows clear the strip's height
-# gate) — then the verbs line over the table, whose "save as playlist…"
+# /album-art/ (clauses 45-49; the strip stands at every height the GUI
+# draws since 2026-10-16) — then the verbs line over the table, whose "save as playlist…"
 # paints between the strip and the rows (clause 64, the 2026-10-16 log:
 # the webapp's whole-list verbs ahead of its songs; no bottom row) — and
-# its rows (clauses 3, 30, 40). The header's window dropdown,
-# "Last 30 days" (clause 15 — the default, nothing remembered yet), paints
-# with the room's first frame, before the answer, so it is gated first, on
+# its rows (clauses 3, 30, 40). The header's controls paint with the
+# room's first frame, before the answer, so they are gated first, each on
 # one word (the terminal is sent only what changed, word by word with the
-# cursor moved over the spaces). The page is stateless since 2026-10-14:
-# no filter checkbox, no prefs (the fake 404s the prefs route and 400s
+# cursor moved over the spaces): the window dropdown, "Last 30 days"
+# (clause 15 — the default, nothing remembered yet), then "more options"
+# (clause 17, the 2026-10-16 header log: the seeds modal's way in — the
+# room shows no state line and no seeds line any more; its two words are
+# one DIM run, so the space between them is sent too). The page is
+# stateless since 2026-10-14: no filter checkbox, no prefs (the fake 404s the prefs route and 400s
 # `remember`/`filter`, and run.sh asserts the last body). `0` opens Now Playing,
 # whose per-song tab reads Similar now (plan §2.12). Esc comes back, q
-# quits. Gates on first-paint words only (the header's phrase is a word
+# quits. Gates on first-paint words only (the tagline is a phrase
 # the room paints only once the answer landed, the title a row's), and
 # each gate's braces span lines: expect reads a braced list on one line as
 # a single pattern, which never matches and lets the leg run on past a
@@ -46,6 +52,16 @@ expect {
     "days" {}
     eof { puts "DIED-ON-WINDOW"; exit 11 }
     timeout { fail "NO-WINDOW-DROPDOWN" 12 }
+}
+expect {
+    "more options" {}
+    eof { puts "DIED-ON-OPTIONS"; exit 17 }
+    timeout { fail "NO-MORE-OPTIONS" 18 }
+}
+expect {
+    "new seeds" {}
+    eof { puts "DIED-ON-REFRESH"; exit 19 }
+    timeout { fail "NO-NEW-SEEDS" 20 }
 }
 expect {
     "based on songs you finished" {}

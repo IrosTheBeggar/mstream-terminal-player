@@ -307,6 +307,17 @@ impl TasteState {
             .or(self.window)
     }
 
+    /// The asked window where the shown answer widened it to all time
+    /// (`widenedFrom`) — none while a Main ask carrying a new choice is
+    /// out, whose window the dropdown already shows (the GUI header's
+    /// "Last 30 days → All time", discovery-page clause 15).
+    pub fn widened_shown(&self) -> Option<u32> {
+        if self.main_pending && self.window.is_some() {
+            return None;
+        }
+        self.head.as_ref()?.widened_from
+    }
+
     /// What every ask sends as `exclude` (clauses 13, 21): this visit's
     /// drops and passed-over random picks, newest kept under the cap.
     pub fn exclusions(&self) -> Vec<String> {
@@ -332,9 +343,8 @@ impl TasteState {
         self.latch == TasteLatch::ScanPending || self.head.as_ref().is_some_and(|h| h.not_analyzed)
     }
 
-    /// Any part still out — what the state line's `• asking…` reads per
-    /// tab (clause 41), whole.
-    #[cfg(test)]
+    /// Any part still out, or a 403's probe — what the GUI header's
+    /// refresh reads as `↻ asking…` (discovery-page clause 17).
     pub fn asking(&self) -> bool {
         self.library.pending || self.peers.pending || self.latch == TasteLatch::Probing
     }
@@ -542,7 +552,7 @@ impl App {
     /// and one that did not would only push a seed out at the cap — capped
     /// at the server's [`TASTE_PIN_CAP`], with `limit.seeds` their count so
     /// the server adds none, and the Connected servers tab is built from
-    /// the batch the seeds line shows (the webapp's `peersRequest`). A
+    /// the batch the seeds modal shows (the webapp's `peersRequest`). A
     /// random seed asks no connected server (clause 22), and neither does
     /// an answer with no seed at all.
     fn taste_ask_peers(&mut self, head: &TasteResponse, random: bool) -> Vec<Effect> {
@@ -1126,7 +1136,7 @@ impl App {
     }
 
     /// An error cleared every wait (`clear_pending`): a probe or a part
-    /// nothing will answer must not leave "asking…" standing (clauses 41
+    /// nothing will answer must not leave "asking…" standing (clauses 17
     /// and 82) — nor keep [`App::taste_open`] from asking after a re-login
     /// to the same server, which resets nothing. Each part still out ends
     /// as a failure, so its pane offers Retry (clause 83); a reply that

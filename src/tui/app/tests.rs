@@ -7372,7 +7372,7 @@ fn the_discover_room_asks_main_then_the_peers_pinned_to_its_batch() {
     });
     assert!(!app.taste.asking() && app.taste.peers.data.is_some());
     let seeds: Vec<&str> = app.taste.head.as_ref().unwrap().seeds.iter().map(|s| s.hash.as_str()).collect();
-    assert_eq!(seeds, ["h1", "h2"], "the seeds line keeps Main's batch — the one the peers were built from");
+    assert_eq!(seeds, ["h1", "h2"], "the seeds modal keeps Main's batch — the one the peers were built from");
 
     // The batch is the answer's seeds alone — a resolved pin is among them
     // (first, as the server leads with it), an unresolved one is not sent,
@@ -7558,7 +7558,7 @@ fn a_taste_answer_lands_its_parts_and_every_visit_asks_again() {
     let effects = app.taste_open();
     assert_eq!(taste_asks(&effects).len(), 1, "Main; the peers follow its answer");
     assert!(app.taste.library.data.is_some(), "a re-ask keeps the rows standing (clause 32)");
-    assert!(app.taste.head.is_some(), "and the seeds line its seeds");
+    assert!(app.taste.head.is_some(), "and the seeds modal its seeds");
     assert!(app.taste.library.pending && !app.taste.library.first_wait());
     // G while the room is up asks at once.
     let mut app = answered_taste();

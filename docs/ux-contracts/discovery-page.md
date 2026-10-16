@@ -6,7 +6,7 @@
 | **Server API** | **`POST /api/v1/discovery/taste`** (§3.1), stateless since 2026-10-14 — nothing is stored or cached between calls — `{window? (7 \| 30 \| 90 \| 0, default 30), pin? (≤ 12 — `PIN_CAP`, the seed cap, since 2026-10-14 — seed first), exclude? (seed hashes left out of THIS call only, ≤ 200), sources?, limit?, newArtistsOnly?, ignoreVPaths?}` (`remember`, `filter` and `staleDays` are a 400) → `{window, widenedFrom, seedSource, fallback, seeds: [{hash, filepath, metadata, outcome, lastPlayed, plays, pinned, analyzed}], excluded: [{hash, filepath, metadata}] (this call's `exclude` hashes that resolve), dropped, notAnalyzed, model, library: {tracks: [{filepath, similarity, seedHash, metadata, genreTags, playCount, lastPlayed}], albums: [{…Album, similarity, scopedTracks, playedTracks, lastPlayed, tracks: [path]}], capped}, network: {results: [p2p row + {source: 'p2p', seedHash}], searched: {peers, tracks}} \| null, peers: {peers: [{id, name, reachable, mismatched, lastSeen, results: [federation row + {source: 'federation', seedHash: null}]}], searched: {peers, unreachable, mismatched}} \| null}` — an account only (403 for a federation key or a guest), 403 `Discovery is disabled` when discovery is off or the index is unavailable; `network`/`peers` are `null` when the source is not advertised for the caller or a random seed is in use. The seeds are the pins, then a **random batch** of the account's finished songs in the window — a different batch on every call — widening window → all time → counters → one random library song (drawn afresh on every call, 2026-10-14; never one in `exclude`). The library half is the fixed rule "songs you haven't played lately" (never, or more than 90 days ago). *(`GET` / `PUT …/taste/prefs` are gone since 2026-10-14 — a 404.)* **`POST /api/v1/discovery/plugin-jobs/lookup/batch`** (§3.3) — phase B; **v1 calls only the taste route** (the `links` plug-in's resolve left with the Network tab on 2026-10-11 — the later Explore room's), plus routes the player already speaks: the federation byte proxy `GET /api/v1/federation/peers/{id}/stream/…` and `POST /api/v1/stats/plays` with `peerId`, both through the queue as it is. **Gate**: the ping's `discovery === true && discoveryTaste >= 1` (§2.10) — here `capabilities.discovery && capabilities.discovery_taste >= 1`; the Connected servers source rides `federationDiscovery`; `discoveryP2p` (the Network source) and `discoveryPlugins` are parsed but read by nothing here since 2026-10-11 — the later Explore room's. |
 | **Already in this repo** | The App/worker pair every room rides: `Effect::Api(ApiCmd::…)` drained onto the api thread, answered by `worker::answer` (and `src/web/api_worker.rs` in the browser build) as an `Event` that `App::apply_event` folds in, stale replies dropped by seq / node / session-generation guards. The **Sonic room's own row model** — `List::Sonic` maps to no App pane (`List::tab()` → `None`), its rows live in App state and its verbs call App methods that build the queue rows themselves (`src/gui/sonic.rs`), with `sonic::meter_glyph` for the one-cell match meter. The kit's **Tabs** (first consumer: the admin Discovery room), **Dropdown** (the header's server switcher, the stats page's period), **Table** (`table_view`, `scroll_list`, `ListView`), a list hung from a control (`frame_at` + `Surface::overlay`, the dropdown's own grammar) and **modals** (`modal_frame_on`). `Client::stats_history_async` (the one outcome-bearing history read — named so nobody reaches for it: the server picks the seeds, clause 10). `Client::random_song_async`; `gui::opener::open_target` (honours `MSTREAM_NO_OPEN`); `kit::clipboard::copy`; the track-actions sheet (`actions::Sheet { origin, track }`); the capture banner (`Capture`); `App::origin()` and `App::reach(&Origin)` for a peer origin (multi-server clauses 27, 30); `ApiCmd::DiscoveryProbe`; `GuiPrefs` (`[gui]`, unknown keys kept). **Missing**: `Ping.discovery_taste` / `discovery_plugins` and their `Capabilities` mirrors, the taste types and client calls, `ApiCmd::Taste` / `Event::Taste`, the App's taste state, `NavId::Discover`, `src/gui/discover.rs`, a capture for a seed pick, the `gui.discover.*` strings. |
 | **Target surface** | the GUI player (`mstream-player gui`, both flavours — the window host draws the same `render`) as a **TOOLS nav room**. **The TUI changes nothing**: its Discover tab (`Tab::Discover`, the explicit-seed lookup), the Now Playing panel's neighbours (`App.now_discover`) and `Capture::Discover` stay exactly as they are. The one shared change is a title: the Now Playing view's Discover tab becomes **Similar** (plan §2.12; docs/ux-contracts/now-playing.md) |
-| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11; the verbs line over the table and save as playlist 2026-10-16 (the log) |
+| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11; the verbs line over the table and save as playlist 2026-10-16; the header's controls — no state line, no seeds line — 2026-10-16 (the log) |
 
 ## Intent
 
@@ -16,7 +16,8 @@ you played to the end (or most of the way) in a window you choose, never
 the ones you skipped — a new batch every visit — and answers with songs and albums in **your own library** that
 sound like them and that you have not played lately, and songs on your
 **connected servers** you can play through your own server. The seeds are
-visible and yours to edit, the room says in words what it is based on —
+yours to edit behind **more options**, a new batch is one click away
+(**↻ new seeds**), the room says in words what it is based on —
 never a count, a percentage or a "never played" — and every row plays and
 queues. The room never goes blank: with nothing finished yet it starts
 from a random pick and says so. The p2p network's leads are not here: they
@@ -42,22 +43,24 @@ One room, one answer, two tabs. The answer arrives in two halves
 (clause 30): **the library**, then **the connected servers**, asked once
 the library's answer lands and pinned to its batch of seeds — so the
 Library never waits on a 4 s server deadline, and both tabs and the seeds
-line come from one batch.
+modal come from one batch.
 
-- **Asking** — the first ask: the state line reads `• asking…` and each
-  tab's pane holds four DIM skeleton rows where its columns will stand —
-  no "asking…" sentence in the pane; a re-ask keeps the rows on screen
-  until the new ones land.
-- **Answered** — header `Discover · based on songs you finished` with
-  the **window dropdown** at its right (`Last 30 days ▾`); the state line
-  for the tab in front, in words (`• ready to play`); the **tabs**
-  `Library · Connected servers`, names only (absent sources not drawn);
-  the **seeds line** (`seeds  Title · Artist … and more  edit`) whose
-  `edit` opens the **seeds modal**; the tab's **album strip** — a row of
-  album tiles with their covers that scrolls sideways — where the room is
-  20 rows tall or more (clauses 45–49); the **verbs line** with the tab's
+- **Asking** — the first ask: the header's refresh reads `↻ asking…` and
+  each tab's strip and pane hold DIM skeleton tiles and rows where they
+  will stand — no "asking…" sentence in the pane; a re-ask keeps the rows
+  on screen until the new ones land, the refresh saying it is asking.
+- **Answered** — header `Discover` with its
+  **controls** at its right (clause 17): the **window dropdown**
+  (`Last 30 days ▾`), **more options** (the **seeds modal**) and **↻ new
+  seeds** (ask again); the **tabs** `Library · Connected servers`, names
+  only (absent sources not drawn), with the DIM tagline `based on songs
+  you finished` at their row's right (clause 11); the tab's **album strip** — a row of
+  album tiles with their covers that scrolls sideways — at every height
+  the GUI draws (clauses 45–49); the **verbs line** with the tab's
   whole-list verbs, right over its table (clause 64); the tab's table, down
-  to the room's last row — there is no bottom row (2026-10-16).
+  to the room's last row — there is no bottom row (2026-10-16). No state
+  line and no seeds line (2026-10-16): the seeds are reached only through
+  more options, as on the webapp.
 - **Nothing finished yet** (`fallback: true`, the server's random seed) —
   the fallback card above the tabs: what the room needs, the random
   pick it started from, **another pick** and **choose a song…**; the
@@ -77,7 +80,7 @@ What persists, and what asks again:
 
 | Kept | For how long | Asks again when |
 |---|---|---|
-| The answer (both halves) | on screen until the next one lands — **never reused**: every visit asks | every visit; the nav row or `G` while the room is up; a window change; a seeds-modal change; a pin; another pick; Try again / Check again |
+| The answer (both halves) | on screen until the next one lands — **never reused**: every visit asks | every visit; the nav row, `G` or **↻ new seeds** while the room is up; a window change; a seeds-modal change; a pin; another pick; Try again / Check again |
 | Pins, dropped seeds, random picks passed over | **the visit** — a fresh entry into the room, a server switch or quit lets them go (clauses 13, 14, 21); never stored anywhere | — |
 | The window | `GuiPrefs` (`[gui] discover_window`, beside the tab; default 30) | — |
 | The tab in front | `GuiPrefs` (`[gui] discover_tab`) | — |
@@ -111,9 +114,9 @@ answer and the visit (the session generation, clause 31).
    absent, as digit 9 goes dead with the sonic row. **Every visit asks**
    (clause 30) — no earlier answer is reused, and the old rows stand until
    the new land (clause 32). Entering the room afresh lets the last
-   visit's pins, drops and passed-over picks go; `G` or a click on the row
-   while the room is up asks again keeping them, as does the way back
-   from a pick (clause 14).
+   visit's pins, drops and passed-over picks go; `G`, a click on the row
+   or the header's **↻ new seeds** (clause 17) while the room is up asks
+   again keeping them, as does the way back from a pick (clause 14).
 4. **The label fits twelve cells** in every locale (the nav column's
    width).
 
@@ -127,18 +130,32 @@ answer and the visit (the session generation, clause 31).
     to the play counters, then to one random song from the user's own
     libraries. The room reads no history of its own and sends only the
     window, the pins and the visit's exclusions.
-11. **The header says what the answer is based on**, by `seedSource`:
+11. **The room says what the answer is based on**, by `seedSource`:
     `history` → "based on songs you finished" (no count — the 2026-10-11
     log); `counters` → "based on
     songs you've played before"; `pinned` → "based on the songs you
-    picked"; `random` → "nothing finished yet". When `widenedFrom` is set
-    the state line adds "nothing in the last n days — all time instead"
-    (or "from your play counts" for `counters`).
-12. **The seeds line** shows the seeds that fit — the title (the file name
-    when there is none) and the artist — pins first, then a DIM "and more"
-    for the rest (never `+n`), then the `edit` text button. The server's random seed wears a
-    DIM `random`; a pinned one `picked`. It never wraps; it never scrolls.
-13. **The seeds modal** (`edit`, `e`) — a kit modal titled "Based on":
+    picked"; `random` → "nothing finished yet" — the room's DIM tagline,
+    right-aligned on the **tabs row** (since 2026-10-16: the header's
+    right is its controls', and beside them the phrase did not fit at the
+    design size's 80 cells — see the 2026-10-16 log's review). When
+    `widenedFrom` is set the tagline adds "nothing in the last n days —
+    all time instead" as its second fact (since 2026-10-16, when the
+    state line that carried it left; for `counters` the phrase already
+    says where the seeds came from, and the old "from your play counts"
+    fact went); the window dropdown names the widening at every width
+    (clause 15) and its tooltip leads with the fact in full. The
+    tagline's facts drop whole, from the right, never closer than two
+    cells to the last tab: at 80 and 100 cells English shows "based on
+    songs you finished" (the widened fact beside it from 108 cells, 128 columns), at
+    the queue panel's 47 cells it drops.
+12. *(The seeds line — "seeds  Title · Artist … and more  edit", the
+    `random` marker — left the room on 2026-10-16, the user's "make the
+    seeds hidden but discoverable like the webapp": the seeds are shown
+    only in the seeds modal, reached through the header's **more
+    options**, as the webapp's "More options" reveals its seed picker. The
+    modal keeps its `picked` marker; `random`, "and more" and `edit` went
+    with the line.)*
+13. **The seeds modal** (the header's **more options**, `e`) — a kit modal titled "Based on":
     **PINNED** (each with an unpin), **FROM YOUR PLAYS** (the history seeds,
     checked: the relative last play, "finished" or "listened to" by
     `outcome` — no play count — "not analyzed yet" when `analyzed` is
@@ -164,20 +181,63 @@ answer and the visit (the session generation, clause 31).
     re-asks.
 15. **The window** is the header's dropdown: Last 7 days · Last 30 days ·
     Last 90 days · All time, the current one wearing `•`. It shows the
-    window **asked for** (`widenedFrom` when set, else `window`). `w` opens
+    window **asked for** (`widenedFrom` when set, else `window`; the list's
+    `•` too) — and, where the server widened it, where it went: `Last 30
+    days → All time ▾` (`->` on the legacy console), or, short of width
+    (clause 17), the window the answer came from, `All time ▾` — never a
+    window the answer did not use; while a new choice is out, that choice
+    alone. The value stands in a slot as wide as the widest of the four
+    windows, so choosing one moves nothing (a widened value may be wider:
+    a new answer, not a choice, moves it). `w` opens
     it, `[` `]` step it without the list. A change asks both halves with
     it, and the choice is **remembered locally** in `[gui]
     discover_window` (7, 30, 90 or 0; unset or any other number asks the
-    default 30). Every ask sends the window.
+    default 30). Every ask sends the window. It is the first of the
+    header's controls (clause 17).
 16. **Nothing is the server's** (2026-10-14). The route keeps nothing
     between calls: no prefs are read or written, no `remember`, `filter`
     or `staleDays` is sent (they are a 400). The room's memories of its
     own are the window (clause 15) and the tab (clause 40), both in
     `[gui]`.
+17. **The header's controls** (2026-10-16 — the webapp's configuration
+    bar, mStream `m.js` `discoveryHeadHtml`: "Based on the last [30 days]",
+    "More options", the ⟳ "New seeds" button). The header row carries, after
+    the room's name (BOLD) — and nothing else: the tagline is the tabs
+    row's (clause 11) — right-aligned
+    in this order, two cells apart: the **window dropdown** `Last 30 days
+    ▾` (clause 15, `w`); **more options**, a DIM text button that opens the
+    seeds modal (clause 13, `e`); and **↻ new seeds**, the accent's text
+    button — the header's one primary — that asks again plainly, the
+    visit's window, pins and drops kept (clause 3, `G`). The `↻` is gated
+    like the kit's other glyphs (none on the legacy console, where the
+    words always stand). Hover brightens each (BRIGHT + BOLD), a click acts
+    on it, the click rects are their labels' cells, and each tooltip names
+    its key ("The plays your seeds come from — w", "Choose what this room
+    starts from — e", "Ask again around a new batch of seeds — G"). **While
+    an ask is out** (either half, or a 403's probe) the refresh reads
+    `↻ asking…` in the getting-there colour (GOLD), in a slot as wide as
+    the wider of its two words, drawn from the slot's left so its glyph
+    stays under the pointer — the state line's old "asking…" (clause 32).
+    Where the refresh's words dropped it reads `↻ …`, the glyph keeping
+    the two cells after it for the mark at rest too: an ask is never
+    shown by the colour alone, and nothing moves.
+    **The drop order**, when the row is short of cells (the tagline is
+    not on it): the refresh's words first (its glyph stays — the queue
+    panel's 47 cells in English), then "more options" shortens to
+    "options" (German, French and Russian at 47 cells; Chinese keeps all
+    three whole there; the legacy console, with no glyph to keep, goes
+    straight from the words to "options"), then a widened window's mark
+    gives way to the window the answer came from, `All time` (clause 15;
+    every locale but Chinese at 47), then the room's name — whole, never
+    drawn over — which the nav row names already (the legacy console at
+    47 in German, Spanish, French, Japanese, Portuguese and Russian). The
+    three controls never leave the row and never move for anything but
+    the width (and a widened answer's wider value): they stay reachable
+    at 47 cells in every locale, on both glyph tiers.
 
 ### Nothing finished yet
 
-20. **The fallback card** stands between the state line and the tabs
+20. **The fallback card** stands between the header and the tabs
     while the server has no history to seed from — learned from the last
     answer asked without pins (`fallback: true`) and kept until an answer
     carries history seeds; the tabs and the Library's rows stay under it,
@@ -185,9 +245,9 @@ answer and the visit (the session generation, clause 31).
     this room learns your taste" (BOLD); "Songs you play to the end — or
     most of the way — become seeds. Skips never count."; "Until then,
     around a random pick: {title · artist}" ("around your pick" once a
-    pick replaced it); then **another pick** and **choose a song…**. The
-    state line reads `• no seeds` (DarkGray) · "suggestions around a
-    random pick until you finish a song".
+    pick replaced it); then **another pick** and **choose a song…**. (The
+    state line's `• no seeds` · "suggestions around a random pick until you
+    finish a song" left with the line on 2026-10-16: the card says it.)
 21. **Another pick** (`r`, only while the card stands) re-asks with
     **every random pick the card showed in this visit** in `exclude` — a
     visit-local list beside the drops, never listed under DROPPED: every
@@ -227,7 +287,7 @@ answer and the visit (the session generation, clause 31).
     them; one that did not is not sent, so it cannot push a seed out at
     the cap; at most 12, the server's `PIN_CAP`) with `limit: {seeds: n}` their count, so the
     server adds no seed of its own: the Connected servers tab is built
-    from the batch the seeds line and modal show. The same window and
+    from the batch the seeds modal shows. The same window and
     exclusions ride it. While A is out, B's tab reads asking. **No B**
     for an A whose seed is the random pick (clause 22), an A with no
     seed at all, an A that failed (B's pane fails with it — clause 83)
@@ -238,15 +298,15 @@ answer and the visit (the session generation, clause 31).
     under an older seq or another generation (a reply from the server the
     session has left). Each half lands on its own; only the latest A,
     landed once, sends B.
-32. **While asking**: the first ask shows the state line `• asking…` in
-    the getting-there colour and, in each tab's pane, **four skeleton
-    rows** — DIM `░` runs of varied lengths where TRACK, ARTIST, ALBUM
-    (ON) and LENGTH will stand (the webapp's four skeleton rows) — and no
-    sentence: the state word is the only "asking…". A re-ask leaves the
-    rows standing until the new ones land; only the state line says it is
-    asking.
+32. **While asking**: the first ask shows the header's refresh as
+    `↻ asking…` in the getting-there colour (clause 17) and, in each tab's
+    pane, **four skeleton rows** — DIM `░` runs of varied lengths where
+    TRACK, ARTIST, ALBUM (ON) and LENGTH will stand (the webapp's four
+    skeleton rows) — and no sentence: the refresh is the only "asking…". A
+    re-ask leaves the rows standing until the new ones land; only the
+    refresh says it is asking.
 
-### Tabs and the state line
+### Tabs
 
 40. **The tabs** are the kit's, two of them, **names only — no counts**:
     **Library** always; **Connected servers** while `federation_discovery`
@@ -262,20 +322,27 @@ answer and the visit (the session generation, clause 31).
     discover_tab`: `library` · `servers`; a saved `peers`, the tab's old
     name, reads as `servers`, a saved `network` as no memory); a
     remembered tab whose source is gone falls back to Library.
-41. **The state line follows the tab in front** (the kit's state line),
-    **in words — never a count**: Green `• ready to play` when the tab
-    holds rows (Connected servers adds "streams through your server"),
-    DarkGray `• nothing new` when it holds none, Yellow while asking
-    (`• asking…`), waiting for the scan (`• waiting for the scan`) or
-    after a failure (`• no answer`), DarkGray `• switched off` (clause
-    82); the widened fact (clause 11) after; the facts drop from the
-    right, the state never clips.
+41. *(The state line — `• ready to play`, `• nothing new`, `• asking…`,
+    `• waiting for the scan`, `• no answer`, `• switched off`, `• no
+    seeds`, "streams through your server" — left the room on 2026-10-16,
+    the user's "remove the 'ready to play' line". What it alone said moved
+    to the table region's own states: the skeleton while the first ask is
+    out (clause 32), the empty lines (clause 80), the scan-pending and
+    switched-off sentences (clauses 81–82), the failure line with Try
+    again (clause 83); "asking…" to the header's refresh (clause 17); the
+    widened fact to the tagline at the tabs row's right and to the window
+    dropdown's value and tooltip (clauses 11, 15); the fallback's
+    "no seeds" fact to the card, which says it (clause 20). "Streams
+    through your server" is **dropped**: a Connected servers row's `[▸]`
+    tooltip already reads "Listen through your server — P" (clause 62).
+    "No answer" stays only as a cleared wait's failure words, the failure
+    line's tooltip (clause 83).)*
 42. **The tab row carries no note** (the old "not in your library" / "you
     don't own these" went with the busy page).
 
 ### The album strip
 
-45. **A strip of album tiles under each tab's seeds line**, above its
+45. **A strip of album tiles under the tabs**, above the tab's
     table — the webapp's "Albums from your library" / "Albums from
     {server}" scrollers, without their labels (the tab names the source).
     **Library**: the answer's `library.albums`, best match first (by
@@ -384,22 +451,30 @@ answer and the visit (the session generation, clause 31).
     credits side by side, makes this visible (the log).
 49. **The height gate.** The strip's seven rows and the gap under them
     stand only where the table keeps **at least three rows** under the
-    strip: the room's six rows above it (header, state, blank, tabs,
-    seeds, blank), and the verbs line and the table's header and rule
-    under it (no bottom row since 2026-10-16: the verbs line took its row
-    and its place moved above the table), mean a content area of **20
-    rows** with no card — 6 + 8 + 3 + 3. The installer's default
-    100×30 window qualifies (22 rows with the footer on, 23 off: five or
-    six rows under the strip); the **100×24 floor** (16 or 17) does not
-    and keeps today's album container rows in the table, so the floor
-    never loses its songs. The fallback card comes first (clause 20): with
-    it whole the strip wants 28 rows. With the queue panel open (47
-    cells) the strip shows three whole tiles and the fourth cut. **A
-    resize across the gate keeps the keyboard's hand on what it was on**:
+    strip. Above it stand the header and the tabs, and the blank under
+    each **as the height allows** (2026-10-16, the rows the state line, the
+    seeds line and their blanks gave back): both blanks from 18 content
+    rows, the header's alone at 17, neither at 16 — by the height alone,
+    never the tab, so a tab switch moves nothing; under it the verbs line
+    and the table's header and rule. So the strip stands from a content
+    area of **16 rows** with no card — 2 + 8 + 3 + 3 — which is **every
+    height the GUI draws** (its floor is 100×24): the **100×24 floor**
+    with the footer on (16 rows: header, tabs, the strip, three songs) and
+    off (17: the header's blank back, three songs), and the installer's
+    100×30 window (22 rows with the footer on, 23 off: seven or eight rows
+    under the strip). The floor trades four of its song rows for the
+    album tiles. The fallback card comes first (clause 20): with it whole
+    the strip wants **26 rows** (100×33 with the footer off), so under the
+    card at the usual sizes the albums are the table's first rows — the
+    one place the album container rows (clause 51) still show. With the
+    queue panel open (47 cells) the strip shows three whole tiles and the
+    fourth cut. **A resize across the gate keeps the keyboard's hand on
+    what it was on**:
     a song row stays that song as the album rows come or go above it, an
     album row becomes its tile where the strip stands and the tile its row
-    again at the floor; what has no place on the other side (a connected
-    server's tile at the floor) puts the hand down.
+    again where it does not (under the card, short of 26 rows); what has
+    no place on the other side (a connected server's tile) puts the hand
+    down.
 
 ### The table
 
@@ -409,7 +484,8 @@ answer and the visit (the session generation, clause 31).
     servers **TRACK · ARTIST · ALBUM · ON · LENGTH**. TRACK starts two
     cells in, where the playing row's `▸` stands (clause 55).
 51. **Library rows, albums first** (§2.6): where the album strip does not
-    stand (clause 49 — the floor, the card's height), the server's albums,
+    stand (clause 49 — under the fallback card short of 26 rows, since the
+    strip stands at the floor from 2026-10-16), the server's albums,
     then its songs; where it stands, the songs alone (clause 45). An album row's TRACK is the album's name with a DIM `album`
     beside it, its ARTIST the album's credit, its ALBUM and LENGTH empty —
     no song count, no "never played". A song row's TRACK is the title (the
@@ -487,7 +563,7 @@ answer and the visit (the session generation, clause 31).
     the code.)*
 64. **The whole-list verbs** stand on the **verbs line**, from the room's
     left edge, right over the tab's table — under the album strip where it
-    stands, under the seeds line's blank where it does not — the webapp's
+    stands, under the tabs (and their blank) where it does not — the webapp's
     verbs under its songs' header, ahead of the rows (mStream `141e1a9c`,
     the 2026-10-16 log). **Library**: **▸ play · + queue all · ⇄ shuffle ·
     save as playlist…**; **Connected servers**: **▸ play · + queue all ·
@@ -546,50 +622,58 @@ answer and the visit (the session generation, clause 31).
     new in your library sounds like these songs." (no button since
     2026-10-14). Connected servers: "Nothing from your connected servers
     right now."
-81. **Scan pending** — `notAnalyzed: true`: the seeds line and modal list
-    the seeds; every tab's pane reads "This server hasn't analyzed any
+81. **Scan pending** — `notAnalyzed: true`: the seeds modal lists the
+    seeds; every tab's pane reads "This server hasn't analyzed any
     music yet — suggestions appear once the discovery scan has run." with
     **Check again** (asks again).
 82. **A 403 re-pings before it names a reason** (the sonic-path contract's
     clause 40, same probe, reading this room's gate): the gate still on →
     clause 81's sentence and Check again (the index is not there yet); the
-    gate gone → `• switched off` and "Sonic discovery has been switched
-    off on this server.", no retry, and the row goes with the next ping
-    (clause 1). A failed probe leaves no "asking…" standing. Entering
+    gate gone → "Sonic discovery has been switched off on this server."
+    in the pane (no state line since 2026-10-16), no retry, and the row
+    goes with the next ping (clause 1). A failed probe leaves no "asking…" standing. Entering
     the room while the probe is out starts the visit afresh but asks
     nothing: the probe's verdict lands first.
 83. **Transport and server errors** say "couldn't reach this source" (the
     webapp's words) in the warning colour, with **Try again**, in the
-    panes of the half that failed — the state line `• no answer` — and the
-    other half's rows stand, as do the old rows of the half that failed.
+    panes of the half that failed — the line alone says so since the
+    state line left (2026-10-16) — and the other half's rows stand, as do
+    the old rows of the half that failed.
     A failed A fails B too (B waited on it, clause 30); Try again asks
     both.
     The server's own words (a status code among them) are the line's
-    tooltip, never on the page.
+    tooltip, never on the page; a wait an error cleared reads "no answer"
+    there.
 
 ### The floor
 
 90. **At 100×24**, footer on or off, the nav column holds every row
-    (clause 2) and the room holds, top to bottom: the header, the state
-    line, a blank, the tabs, the seeds line, a blank, the verbs line, the
-    table's header and rule, the rows (seven with the footer on, eight
-    off) down to the room's last row — no bottom row (2026-10-16). The
-    card (clause 20) pushes the table down; when the room is short the
-    card gives up its blank line and its body sentence first (the title,
-    the pick and its two actions stay), so the table keeps at least its
-    header, rule and one row, and scrolls. The album strip does not stand
-    at the floor (clause 49): the albums are the table's first rows.
-91. **With the queue panel open** (47 cells at 100 columns) the header's
-    "based on…" clips before the window control, the tab row
-    has none to drop (clause 42), the table narrows by clause 54, and the
-    verbs line drops its verbs from the tail by the bar's rules (save as
-    playlist first: English keeps play · queue all · shuffle there) — no
-    control moves for the width.
+    (clause 2) and the room holds, top to bottom (2026-10-16): the header
+    with its controls, a blank with the footer off (none with it on), the
+    tabs, the album strip and its gap where the tab has albums (clause 49),
+    the verbs line, the table's header and rule, the rows down to the
+    room's last row — three under the strip, footer on or off; eleven
+    where the tab has no album (both blanks give way at 16 rows, one at
+    17) — and no bottom row. **No state line, no seeds line.** The card
+    (clause 20) pushes the table down and stands whole at the floor (the
+    header, the card and its blank, the tabs, the verbs line, the table's
+    header, rule and three rows at 16); only in a room shorter than the
+    GUI's floor does it give up its blank line and its body sentence first
+    (whole from 14 rows; the title, the pick and its two actions stay), so
+    the table keeps at least its header, rule and one row, and scrolls.
+91. **With the queue panel open** (47 cells at 100 columns) the tabs
+    row's tagline drops (clause 11), the header's refresh keeps its glyph
+    alone — "options" for "more options" in the longest locales, `All
+    time` for a widened window's mark (clause 17) — the tabs themselves
+    have nothing to drop (clause 42), the table narrows by clause 54, and the verbs line
+    drops its verbs from the tail by the bar's rules (save as playlist
+    first: English keeps play · queue all · shuffle there) — no control
+    moves for anything but the width.
 
 ## Wording
 
 English reference; every string through `t!()` in all ten locales (de en
-es fr it ja pl pt ru zh). Glyphs (`▸ » ⋯ • ▾ ✓ —`) are drawn by the code
+es fr it ja pl pt ru zh). Glyphs (`▸ » ⋯ • ▾ ✓ — ↻`) are drawn by the code
 beside the words, never in the strings (docs/ui-kit.md, Glyphs). Keys
 ending `_*` are plural families — `_one`, `_few`, `_many`, `_other`, chosen
 the way the DJ room's `songs_words` chooses (English and the one-plural
@@ -601,14 +685,14 @@ itself shows no count.
 |---|---|
 | Discover (the nav row and the room's heading) | `gui.nav.discover` — at most 12 cells in every locale |
 | base tips: … · D Auto DJ · **G discover** · T stats · … | `gui.tips.base` (amended) |
-| ↓ pick a row · ← → tabs · w window · e seeds · G ask again | `gui.tips.discover` |
-| ↓ pick an album · ← → tabs · w window · e seeds · G ask again (at rest where the album strip stands) | `gui.tips.discover_strip` |
+| ↓ pick a row · ← → tabs · w window · e more options · G new seeds (2026-10-16; German, Spanish, French, Japanese and Russian name `e` by the short "options" to fit the 99-cell footer with the save words) | `gui.tips.discover` |
+| ↓ pick an album · ← → tabs · w window · e more options · G new seeds (at rest where the album strip stands) | `gui.tips.discover_strip` |
 | s save as playlist (appended to every rest tip — `discover`, `discover_strip` and the fallback card's `discover_fallback` — after ` · `, while the Library tab has songs; 2026-10-16) | `gui.tips.discover_save` |
 | Enter play from here · a queue · N next · P play now · m actions · ← → tabs · Esc done (a library song's row and a connected server's) | `gui.tips.discover_row` (one key since 2026-10-11) |
 | Enter open the album · a queue · ← → tabs · Esc done | `gui.tips.discover_album` |
 | ← → albums · Enter open the album · + a queue · ↓ songs · Esc done (the hand on a library album's tile) | `gui.tips.discover_tile` |
 | ← → albums · Enter play the album · + a queue · ↓ songs · Esc done (the hand on a connected server's album's tile) | `gui.tips.discover_peer_tile` |
-| r another pick · e seeds · ← → tabs | `gui.tips.discover_fallback` |
+| r another pick · e more options · ← → tabs | `gui.tips.discover_fallback` |
 | ↑ ↓ rows · Space keep or drop · x unpin · Esc apply | `gui.tips.discover_seeds` |
 | ↑ ↓ rows · Enter pick · Esc close (the window's list) | `gui.tips.discover_menu` |
 | based on songs you finished | `gui.discover.based_on_history` |
@@ -617,15 +701,16 @@ itself shows no count.
 | nothing finished yet | `gui.discover.nothing_finished` |
 | Last %{days} days · All time (the window; days are 7, 30, 90) | `gui.discover.window_days` · `gui.discover.window_all` |
 | The plays your seeds come from — w | `gui.discover.window_tip` |
-| nothing in the last %{days} days — all time instead | `gui.discover.widened` |
-| from your play counts | `gui.discover.from_counts` |
-| asking… · ready to play · nothing new · no answer · waiting for the scan · switched off · no seeds (state words) | `gui.discover.asking` · `state_ready` · `state_empty` · `state_failed` · `state_pending` · `state_off` · `no_seeds` |
-| suggestions around a random pick until you finish a song | `gui.discover.no_seeds_fact` |
-| streams through your server | `gui.discover.through_server` |
+| nothing in the last %{days} days — all time instead (the tagline's second fact; the window dropdown's tooltip leads with it) | `gui.discover.widened` |
+| asking… (the header's refresh while an ask is out) | `gui.discover.asking` |
+| no answer (a cleared wait's failure words: the failure line's tooltip) | `gui.discover.state_failed` |
 | Library · Connected servers | `gui.discover.tab_library` · `tab_servers` |
-| seeds · and more · edit | `gui.discover.seeds` · `seeds_more` · `seeds_edit` |
-| Choose what this room starts from — e | `gui.discover.seeds_tip` |
-| random · picked (a seed's marker) | `gui.discover.seed_random` · `seed_pinned` |
+| more options · options (the header's control, and its short form at the narrowest, clause 17) | `gui.discover.more_options` · `options_short` |
+| new seeds (the header's refresh, after the gated `↻`) | `gui.discover.new_seeds` |
+| Ask again around a new batch of seeds — G (the refresh's tooltip) | `gui.discover.new_seeds_tip` |
+| Choose what this room starts from — e (more options' tooltip) | `gui.discover.seeds_tip` |
+| picked (a pin's marker in the seeds modal) | `gui.discover.seed_pinned` |
+| *(gone 2026-10-16 with the state line and the seeds line: `from_counts`, `state_ready`, `state_empty`, `state_pending`, `state_off`, `no_seeds`, `no_seeds_fact`, `through_server`, `seeds`, `seeds_more`, `seeds_edit`, `seed_random`)* | — |
 | Based on (the modal's title) | `gui.discover.seeds_title` |
 | songs you finished or mostly heard · skips never count | `gui.discover.seeds_sub` |
 | PINNED · FROM YOUR PLAYS · DROPPED | `gui.discover.sec_pinned` · `sec_seeds` · `sec_dropped` |
@@ -712,15 +797,15 @@ Data is never translated: titles, artists, album and server names.
 | Two calls (§3.1) | `ApiCmd::Taste { seq, generation, half, body }` → `Event::Taste { seq, generation, half, answer }` — one command, a half on it (the D7 habit: a destination on the command, not a second command); arms in `worker::answer`, `web/api_worker.rs` and `App::apply_event` (the prefs command and the "another pick" `random-songs` command left on 2026-10-14) |
 | The webapp's re-ping on 403 | `ApiCmd::DiscoveryProbe`, reading `discovery && discovery_taste >= 1` for this room (the sonic room's probe reads its own flag) |
 | Segmented switch (the play-now page's two sources) | The kit's Tabs, Library · Connected servers, names only; `[gui] discover_tab` in `GuiPrefs` |
-| "Based on the last [window]" | The kit's Dropdown at the header's right (`Last 30 days ▾`), remembered in `[gui] discover_window` (the webapp's localStorage) |
+| The configuration bar: "Based on the last [window]", "More options", ⟳ "New seeds" (mStream `m.js` `discoveryHeadHtml`) | The header's controls (clause 17): the kit's Dropdown (`Last 30 days ▾`), remembered in `[gui] discover_window` (the webapp's localStorage); **more options**, a text button that opens the seeds modal — not an inline reveal: the room has no rows to unfold a picker above the table, and the modal was there; **↻ new seeds**, the accent's text button, `G`'s ask |
 | The songs' whole-list verbs under each column's header, ahead of the rows (mStream `141e1a9c`) | The verbs line over the tab's table (clause 64): the Library's four, the Connected servers' three; the bottom row is gone |
-| Album cards (the strips' scrollers), the two song columns | The album strip over each tab's table — 12 × 5 covers through `cover::Slot`, real pixels or the mosaic — where the room has 20 rows; album rows ahead of the songs below that (clauses 45–49, the log); the songs in one table per tab |
+| Album cards (the strips' scrollers), the two song columns | The album strip over each tab's table — 12 × 5 covers through `cover::Slot`, real pixels or the mosaic — at every height the GUI draws (16 content rows since 2026-10-16); album rows ahead of the songs only under the fallback card short of 26 rows (clauses 45–49, the log); the songs in one table per tab |
 | A row's art tile, title and "Artist · Album" | TRACK · ARTIST · ALBUM (· ON) · LENGTH columns: a terminal has no art tile in chrome, and columns read faster than a joined line at 80 cells |
 | The seeds sheet (PhoneSeeds) | A kit modal (`modal_frame_on`) with `[✓]` / `[ ]` rows and a modal primary Done; the window stays the header's dropdown, not repeated in the modal |
 | "Start from a song…" (§2.8) | A capture of its own — a new `Capture` variant beside `Sonic` and `DjSeed`, never `Capture::Discover` (the TUI's) — with the banner over the room |
 | Relative ages ("8 months ago") | The seeds modal's only: computed on the local clock from the seed's ISO `lastPlayed`; plural families (Wording) |
 | Section skeletons while asking | Four DIM `░` rows in the table's own columns (clause 32) |
-| Glyphs | `[▸] [»] [+] [⋯]` → `[>] [^] [+] [.]`, `•` → `*`, `▾` → `v`, the skeleton's `░` → `·`, `[✓]` → `[x]`, `—` → `-` on `legacy_conhost()` |
+| Glyphs | `[▸] [»] [+] [⋯]` → `[>] [^] [+] [.]`, `•` → `*`, `▾` → `v`, the skeleton's `░` → `·`, `[✓]` → `[x]`, `—` → `-`, the refresh's `↻` → nothing (its words stand) on `legacy_conhost()` |
 
 Open at implementation (decide, then log):
 
@@ -736,22 +821,25 @@ Render tests at TestBackend 100×30 and 100×24, footer on and off,
 injecting `Event::Taste`: the row's gate (absent without either flag,
 absent in a peer session, gone with a ping that drops it, the room
 yielding to Files); TOOLS at 13, Auto DJ 14, Sonic 15, Discover 16, and
-Discover and Settings never on one row; `G` opens it; the header's phrase
-per `seedSource` and the widened fact; **no count, no meter, no
+Discover and Settings never on one row; `G` opens it; the tabs row's
+tagline per `seedSource` and the widened fact; **no count, no meter, no
 percentage and no "never played" on the page** — the answered tabs, the
 queue-open view, the first ask's skeletons, the fallback card, scan
 pending, a failure (no status code) and both empty states — where only a
 row's m:ss and the window's days carry digits (the seeds modal behind
-`edit` keeps its relative ages; the fallback card's "Skips never count."
+more options keeps its relative ages; the fallback card's "Skips never count."
 is the webapp's own sentence); the two tabs, names only, and
 the remembered tab (`peers` → servers, `network` → Library); the table's
 columns per tab and the narrow-width order (ALBUM, then ON); albums first
-with one hover verb that queues the album by name (at the floor); **the
-album strip** (clauses 45–49, the pixel path off unless said): at 100×30
-(footer on and off) the tiles with their mosaic or note covers, titles
-and artists over the songs and no album row, at 100×24 the album rows
-and no tile, the layout's 20-row gate and the card coming first, the
-first ask's four skeleton tiles; best match first and the cut last tile,
+with one hover verb that queues the album by name (under the fallback
+card); **the album strip** (clauses 45–49, the pixel path off unless
+said): at 100×30 and at the 100×24 floor (footer on and off) the tiles
+with their mosaic or note covers, titles and artists over the songs and
+no album row, three songs under the strip at the floor, the album rows
+under the fallback card at 100×30, the layout's 16-row gate (the blanks
+under the header and the tabs by height: none at 16, one at 17, both
+from 18) and the card coming first (26 rows), the first ask's four
+skeleton tiles at 100×30 and at the floor; best match first and the cut last tile,
 **a cut standing at every width while tiles follow** (110 and 111
 columns, where whole tiles would end at the edge, cut a half tile; every
 content width from 25 to 170 cells keeps a cut inside the edge) and
@@ -763,8 +851,8 @@ tip "↓ pick an album" over the strip, `← → tabs` on a row); the queue
 panel opening with the hand on a far tile scrolling it back into view;
 ↓ or PageDown from rest onto the strip, ↓ to the first song, ↑ or PageUp
 back, nothing lit on arrival, a click stowing; a resize across the
-height gate keeping the hand on its song, and carrying an album row to
-its tile and back; hover brightening the title BOLD with `[+]` at its
+height gate (under the card: 100×34 and 100×30) keeping the hand on its
+song, and carrying an album row to its tile and back; hover brightening the title BOLD with `[+]` at its
 corner and never selecting; a library tile opening in the Albums room by
 click and by Enter, and `[+]`, `+`, `a` queueing it by name; a connected
 server's tile playing through its server by click and by Enter (the hand
@@ -774,8 +862,11 @@ to the matched rows; the note tile keeping the owned ground under it;
 the covers claimed once, a connected server's through the proxy; with a
 forced kitty, sixel and iTerm2 picker the whole tiles' covers encoded as
 pictures, the cut tile the mosaic, a scroll encoding only the newly
-whole cover; end to end, the gui-discover-room leg (120×34, pixels off)
-gating on the fake answer's album tile above the songs and the fake
+whole cover; end to end, the gui-discover-room leg (120×34, pixels off,
+the queue open: the room's 67 cells) gating on the header's "more
+options" with the first frame, on "new seeds" and the tabs row's "based
+on songs you finished" once the answer lands, then
+on the fake answer's album tile above the songs and the fake
 counting the cover's `/album-art/` fetch, and its last body carrying the
 window and no `remember` / `filter` / `staleDays` with no prefs call (the
 fake 404s the prefs route and 400s the gone keys); no checkbox and no `f`
@@ -790,19 +881,46 @@ server's left out, Enter playing through the federation proxy, and `[⋯]`,
 `m` and a right click opening the sheet with the peer's origin; the
 list-cursor law (nothing lit on arrival, a click stows, verbs need the
 cursor up); the wheel; the glyph fallbacks; cells in French and Japanese;
-**the verbs line** (2026-10-16) at 100×30 under the strip and over the
-table's header, and at 100×24 under the seeds line's blank, footer on and
-off, with no bottom row and the table reaching the room's last row; the
-layout's numbers (the strip from 20 content rows with three rows under
-it, the card whole from 18, seven rows at the floor with the footer on);
+**the verbs line** (2026-10-16) at 100×30 and at 100×24 under the strip
+and over the table's header, footer on and off, with no bottom row and
+the table reaching the room's last row; the layout's numbers (the strip
+from 16 content rows with three rows under it, eleven rows at the floor
+where no strip stands, the card whole at the floor and from 14 rows);
+**the header's controls** (2026-10-16): the window dropdown, more options
+and ↻ new seeds right-aligned in that order on the header row at 100×30
+and 100×24, both tabs, queue open and closed, footer on and off; the drop
+order — the header holding the controls alone, the tabs row's tagline
+whole at 80 and 100 cells and dropped (never clipped) at 47, the
+refresh's words gone at the queue's 47 (`↻ …` there while an ask is
+out), "options" for "more options" in German there and on the legacy
+console (whose refresh keeps its words and has no `↻`); in every locale
+at 47 cells, on both glyph tiers and for a widened answer too, the three
+controls standing as click targets two cells clear of the room's name
+wherever it stands; a widened answer at 100×30 and 100×24 reading `Last
+30 days → All time ▾` with the tagline whole, its tooltip leading with
+the fact, `All time` at 47 and a new choice out reading alone; the
+window's slot as wide as the widest window (`Last 7 days  ▾`); the refresh the accent, more
+options DIM, hover brightening both, the tooltips naming `w`, `e`, `G`;
+more options opening the seeds modal by click and by `e`, its flows
+unchanged (nothing asked while it is up, a close with nothing changed
+asking nothing); ↻ new seeds asking again by click exactly as `G` does —
+one ask, the window, the pins and the drops kept, a fresh visit still
+letting the pins and drops go — reading `↻ asking…` in GOLD while the
+ask is out and the old rows stand; **no state line and no seeds line**:
+no `•` state, no "ready to play", "nothing new", "no answer", "waiting
+for the scan", "no seeds", "streams through your server", no seed's
+words, "and more" or `edit` anywhere in a frame — the answered tabs, the
+first ask, the fallback card, scan pending, switched off, a failure and
+both empty states;
 play the one accent, hover brightening; each verb by click and by key on
 both tabs (`p` `A` `S`, and `s` on the Library tab only — the Connected
 servers tab has no save, by click, key or act); save as playlist opening
 the sonic room's prompt empty, typed letters staying letters, Enter
 sending `SavePlaylist` with the Library's songs in order and no album,
 Esc forgetting them; save dropping first with the queue open; the rest
-tips naming `s` on the Library tab only; the e2e leg gating on the verbs
-line's "playlist" between the strip and the rows.
+tips naming `s` on the Library tab only, every rest tip fitting the
+99-cell footer in all ten locales; the e2e leg gating on the verbs line's
+"playlist" between the strip and the rows.
 App tests: the two asks and their bodies (`library` alone, never
 `network`; the window always, 30 by default; nothing but the taste asks
 — no prefs); the peers ask following the Main answer, pinned to its
@@ -833,7 +951,7 @@ album asked with its peer's reach and falling back to its matched rows.
 The locale parity test. Expect legs
 (`test/e2e/legs/gui-discover.exp`, `MSTREAM_GUI_DEMO=1`; and
 `gui-discover-room.exp` against the fake's taste route: the window
-dropdown, the header's words, a row; first-paint gates, drain-not-sleep). `cargo test --features desktop`; `cargo check --target
+dropdown, more options, the header's words, a row; first-paint gates, drain-not-sleep). `cargo test --features desktop`; `cargo check --target
 wasm32-unknown-unknown`.
 
 ## Deviations log
@@ -1137,3 +1255,73 @@ wasm32-unknown-unknown`.
     the tabs and the seeds line have always stood fixed above the table,
     which scrolls alone — the webapp's sticky bar is this room's shape
     already.
+- **2026-10-16 — The header's controls; no state line, no seeds line.**
+  The user's words: "The terminal/desktop needs some work. First, there is
+  no obvious refresh. Remove the 'ready to play' line. Make the seeds
+  hidden but discoverable like the webapp." The webapp's reference is its
+  configuration bar (mStream `m.js` `discoveryHeadHtml`): "Based on the
+  last [30 days]", a "More options" toggle that reveals the seed picker,
+  and a ⟳ "New seeds" button — the seeds are never on the page itself.
+  Here:
+  - **The header carries the controls** (clause 17): after the room's
+    name, right-aligned, the window dropdown (unchanged,
+    `w`), **more options** (a DIM text button that opens the existing
+    seeds modal — seeds on or off for the visit, pins, "Pin a song…",
+    "Pin the playing song"; `e`, its key since 2026-10-05, renamed in the
+    tips) and **↻ new seeds** (the accent's text button, the header's
+    one primary: `G`'s plain ask, the visit's window, pins and drops kept
+    — `G` still works). The refresh is the obvious one the user asked
+    for; the transport's repeat button wears `↻` too, in the bar's
+    own frame, a different place and shape, and the header's always
+    carries its words but at the queue's width. Short of width the
+    refresh's words drop first (the glyph stays), then "more options"
+    shortens to "options", then a widened window's mark, then the room's
+    name: at the queue panel's 47 cells English keeps "more options  ↻",
+    German, French and Russian read "options  ↻", Chinese keeps all three
+    whole.
+  - **Review (same day): the tagline moves to the tabs row.** Beside the
+    three controls the header had 29 cells left at the design size's 80:
+    "· based on songs you finished" was one short, the `counters` and
+    `pinned` phrases further, and the widened fact — which only the state
+    line had carried — first stood at 160 columns, while the dropdown
+    still read "Last 30 days" over an all-time answer. So the tagline is
+    the tabs row's, right-aligned (clause 11: whole at 80 and 100 cells,
+    dropped at 47); the dropdown says a widening itself, `Last 30 days →
+    All time ▾`, or `All time ▾` short of width, its tooltip leading
+    with the fact (clause 15), in a slot as wide as the widest window so
+    choosing one moves nothing; where the refresh's words dropped an ask
+    reads `↻ …`, never the colour alone; and on the legacy console, where
+    six locales' controls would have drawn over the room's name at 47
+    cells, the name gives way, last (clause 17). The e2e leg is back at
+    120 columns, gating on "more options" and "new seeds".
+  - **The state line is removed** (clause 41). What it alone said moved:
+    "asking…" to the refresh, which reads `↻ asking…` in GOLD while an ask
+    is out (the old rows standing, as before); the widened fact to the
+    tagline and the window dropdown (review, above); "no seeds" to the fallback card, which already said it; the
+    scan-pending, switched-off, failure and empty states were the table
+    region's own lines already. "Streams through your server" is
+    **dropped**: a connected server's `[▸]` tooltip says "Listen through
+    your server". "From your play counts" is dropped (the `counters`
+    phrase says it).
+  - **The seeds line is removed** (clause 12): the seeds are reached only
+    through more options, as on the webapp; its `edit`, "and more" and the
+    `random` marker went with it (the modal keeps `picked`).
+  - **The freed rows go to the strip and the table** (clauses 49, 90):
+    with the header and the tabs alone above it — and the blank under
+    each as the height allows (both from 18 content rows, the header's at
+    17, neither at 16) — the strip stands from 16 content rows with three
+    rows under it: **at the 100×24 floor, footer on (16) and off (17)**,
+    three songs under the strip, and at 100×30 seven or eight (five or six
+    before). The floor gives four song rows for the album tiles; where a
+    tab has no album the floor's table has eleven rows (seven or eight
+    before). The fallback card stands whole at the floor now, and with the
+    strip under it from 26 rows (28 before); under the card at the usual
+    sizes the album container rows are the table's first rows — the one
+    place they still show. The verbs line (2026-10-16, above) stays right
+    over the table.
+  - **Ten locales** for `more_options`, `options_short`, `new_seeds`,
+    `new_seeds_tip` and the amended rest tips; twelve keys left
+    (Wording). Five locales name `e` by the short "options" in the rest
+    tips so every rest tip with the save words fits the 99-cell footer;
+    French says "autres graines" ("other seeds") on the button and in the
+    tips for the same reason.

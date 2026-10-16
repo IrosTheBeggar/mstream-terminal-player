@@ -12,23 +12,27 @@
 //! doing too much, so the room shows only songs you can play now — no
 //! percentages, no counts, no "never played", no p2p network leads (a later
 //! Explore room draws those). Where the webapp and this surface part — album
-//! ROWS ahead of the songs at the floor — the contract's log says why. Since
+//! ROWS ahead of the songs where no strip stands (under the fallback card
+//! since 2026-10-16) — the contract's log says why. Since
 //! 2026-10-14 the page is simple (the contract's log): every visit asks, the
 //! server draws a new random batch of seeds each time and keeps nothing; the
 //! window is remembered in `[gui] discover_window`, and pins and drops last
 //! for the visit.
 //!
-//! One answer, two tabs, top to bottom (clause 90): the header with the
-//! window dropdown, the state line, the fallback card while nothing is
-//! finished yet, the tabs, the seeds line, the tab's album strip where the
-//! room is tall enough (clauses 45–49, the 2026-10-11 strip log: the
-//! webapp's horizontal scroller of album cards, covers as real pixels
-//! through `cover::Slot` the way the queue panel's are), the verbs line
-//! with the tab's whole-list verbs ahead of its songs (clause 64, the
-//! 2026-10-16 log: the webapp's verbs under its songs' header), the tab's
-//! table down to the room's last row. The seeds modal and the window's
-//! list draw last, from [`draw_modals`], so they win the pointer; the save
-//! prompt is the sonic room's (`sonic::draw_modals`).
+//! One answer, two tabs, top to bottom (clause 90): the header with its
+//! controls — the window dropdown, "more options" (the seeds modal) and
+//! "↻ new seeds" (the 2026-10-16 header log: the webapp's configuration
+//! bar; no state line, no seeds line) — the fallback card while nothing is
+//! finished yet, the tabs with the tagline at their row's right (what the
+//! answer is based on, clause 11), the tab's album strip where the room is tall
+//! enough (clauses 45–49, the 2026-10-11 strip log: the webapp's
+//! horizontal scroller of album cards, covers as real pixels through
+//! `cover::Slot` the way the queue panel's are), the verbs line with the
+//! tab's whole-list verbs ahead of its songs (clause 64, the 2026-10-16
+//! log: the webapp's verbs under its songs' header), the tab's table down
+//! to the room's last row. The seeds modal and the window's list draw
+//! last, from [`draw_modals`], so they win the pointer; the save prompt is
+//! the sonic room's (`sonic::draw_modals`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -70,7 +74,8 @@ const ON_MAX: u16 = 16;
 /// The tabs' spacing — the kit's Tabs, the admin rooms' value.
 const TAB_GAP: u16 = 2;
 /// The fallback card's widest, and its two heights: whole, and with its
-/// body sentence and blank given up at the floor (clause 90).
+/// body sentence and blank given up in a room shorter than the GUI's
+/// floor (clause 90).
 const CARD_W: u16 = 66;
 const CARD_FULL: u16 = 7;
 const CARD_COMPACT: u16 = 5;
@@ -85,11 +90,14 @@ const TILE_STRIDE: u16 = TILE_W + 1;
 /// them.
 const STRIP_ROWS: u16 = TILE_H + 1;
 /// The strip stands only where the table keeps at least this many rows
-/// under it (clause 49): with the room's six rows above the strip and the
-/// verbs line, table header and rule under it, a content area of 20 rows —
-/// the installer's 100×30 window has 22 or 23 — and never the 24-row
-/// floor's 16 or 17, which keep the album rows.
+/// under it (clause 49): with the header and the tabs above the strip (and
+/// the blanks under them as the height allows, [`blanks`]) and the verbs
+/// line, table header and rule under it, a content area of 16 rows — the
+/// 24-row floor's 16 or 17 among them, the installer's 100×30 window's 22
+/// or 23 with seven or eight rows under it.
 const STRIP_TABLE_MIN: u16 = 3;
+/// The cells between the header's controls, and before the first of them.
+const HEAD_GAP: u16 = 2;
 /// The skeleton tiles the first ask draws, the webapp's four cards.
 const STRIP_SKELETON: u16 = 4;
 /// Covers kept encoded past the strip's view, so a scroll back or a tab
@@ -216,8 +224,11 @@ pub(crate) enum DiscAct {
     WindowPick(u32),
     /// A click outside the open list closes and keeps (the Dropdown law).
     MenuClose,
-    /// The seeds line's `edit` (and `e`).
+    /// The header's "more options" (and `e`): the seeds modal.
     Seeds,
+    /// The header's "↻ new seeds": ask again now, the visit's window, pins
+    /// and drops kept — `G` with the room up (clause 3).
+    NewSeeds,
     /// A modal row, clicked: toggle it, or do what it says.
     SeedRow(usize),
     /// A pin's `[X]` in the modal, by its index in the pins.
@@ -286,7 +297,8 @@ pub(crate) fn lines(app: &App, tab: TasteTab) -> Vec<Line> {
 }
 
 /// The tab's table where the album strip stands: its albums left the table
-/// for the strip (clause 45); at the floor the table keeps them as rows.
+/// for the strip (clause 45); where it does not stand (under the card,
+/// short of 26 rows) the table keeps them as rows.
 pub(crate) fn table_lines(app: &App, tab: TasteTab, strip: bool) -> Vec<Line> {
     lines(app, tab).into_iter().filter(|line| !(strip && matches!(line, Line::Album(_)))).collect()
 }
@@ -467,11 +479,7 @@ fn track_words(track: &Track) -> String {
 }
 
 fn window_label(days: u32) -> String {
-    if days == 0 {
-        t!("gui.discover.window_all").to_string()
-    } else {
-        t!("gui.discover.window_days", days = days).to_string()
-    }
+    window_label_in(days, &rust_i18n::locale())
 }
 
 /// The hover verbs' glyphs: play now, add next, add to the end, more —
@@ -509,54 +517,19 @@ fn based_on(app: &App) -> Option<String> {
     })
 }
 
-/// The widened fact (clause 11), when the server widened the window.
+/// The widened fact (clause 11), when the server widened the window to
+/// all time — for `counters` the header's "based on songs you've played
+/// before" already says where the seeds came from.
 fn widened(app: &App) -> Option<String> {
     let head = app.taste.head.as_ref()?;
     let from = head.widened_from?;
-    Some(if head.seed_source == SeedSource::Counters {
-        t!("gui.discover.from_counts").to_string()
-    } else {
-        t!("gui.discover.widened", days = from).to_string()
-    })
+    (head.seed_source != SeedSource::Counters).then(|| t!("gui.discover.widened", days = from).to_string())
 }
 
-/// The state line's word, its colour and its facts for the tab in front
-/// (clause 41) — words only: the state is never clipped, the facts drop
-/// from the right.
-fn state_line(app: &App, tab: TasteTab) -> (String, Style, Vec<String>) {
-    let taste = &app.taste;
-    let ok = Style::default().fg(th().ok);
-    let gold = Style::default().fg(th().gold);
-    let grey = dim();
-    let word = |key: &str| t!(key).to_string();
-    if taste.latch == TasteLatch::Off {
-        return (word("gui.discover.state_off"), grey, Vec::new());
-    }
-    let (pending, failed) = match tab {
-        TasteTab::Library => (taste.library.pending, taste.library.failed.is_some()),
-        TasteTab::Servers => (taste.peers.pending, taste.peers.failed.is_some()),
-    };
-    if pending || taste.latch == TasteLatch::Probing {
-        return (word("gui.discover.asking"), gold, Vec::new());
-    }
-    if taste.scan_pending() {
-        return (word("gui.discover.state_pending"), gold, Vec::new());
-    }
-    if failed {
-        return (word("gui.discover.state_failed"), gold, Vec::new());
-    }
-    if taste.no_history {
-        return (word("gui.discover.no_seeds"), grey, vec![word("gui.discover.no_seeds_fact")]);
-    }
-    let mut facts: Vec<String> = widened(app).into_iter().collect();
-    if lines(app, tab).is_empty() {
-        return (word("gui.discover.state_empty"), grey, facts);
-    }
-    // Only a tab holding rows streams anything (clause 41).
-    if tab == TasteTab::Servers {
-        facts.insert(0, word("gui.discover.through_server"));
-    }
-    (word("gui.discover.state_ready"), ok, facts)
+/// The refresh's glyph, gated like the kit's others: none on the legacy
+/// console, where its words always stand.
+fn refresh_glyph() -> Option<&'static str> {
+    (!legacy_conhost()).then_some("↻")
 }
 
 // ── Pure geometry ───────────────────────────────────────────────────────────
@@ -565,54 +538,56 @@ fn state_line(app: &App, tab: TasteTab) -> (String, Style, Vec<String>) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Layout {
     pub header_y: u16,
-    pub state_y: u16,
     /// The fallback card, and whether it gave up its body and blank.
     pub card: Option<(Rect, bool)>,
     pub tabs_y: u16,
-    pub seeds_y: u16,
     /// The album strip's first row, where it stands (clause 49).
     pub strip_y: Option<u16>,
     /// The verbs line (clause 64): under the strip where it stands, else
-    /// under the seeds line's blank — always right over the table.
+    /// under the tabs (and their blank) — always right over the table.
     pub verbs_y: u16,
     /// The table's header row; its rule is the next, its rows after that,
     /// down to the room's last row.
     pub table_y: u16,
 }
 
+/// The blank under the header and the one under the tabs, as the height
+/// allows (clause 90): both from 18 content rows, the header's alone at 17
+/// (the floor with the footer off), neither at 16 (the floor with it on) —
+/// so the strip stands at the floor with three rows under it (clause 49).
+/// By the height alone, never the tab: switching tabs moves nothing.
+fn blanks(height: u16) -> (u16, u16) {
+    (u16::from(height >= 17), u16::from(height >= 18))
+}
+
 /// `strip`: the tab has a strip to draw. It stands where the table keeps
-/// [`STRIP_TABLE_MIN`] rows under it — a content area of 20 rows with no
+/// [`STRIP_TABLE_MIN`] rows under it — a content area of 16 rows with no
 /// card (clause 49) — and gives way to the card, which comes first.
 pub(crate) fn layout(content: Rect, card: bool, strip: bool) -> Layout {
     let y = content.y;
-    let mut tabs_y = y + 3;
+    let (under_header, under_tabs) = blanks(content.height);
+    let top = 1 + under_header;
+    let mut tabs_y = y + top;
     let mut card_at = None;
     if card {
-        // Header, state, blank · the card and its blank · tabs, seeds,
-        // blank · the verbs line · the table's header, rule and one row.
-        let whole = 3 + CARD_FULL + 1 + 3 + 1 + 3 <= content.height;
+        // The header (and its blank) · the card and its blank · the tabs
+        // (and theirs) · the verbs line · the table's header, rule and one
+        // row.
+        let wants = top + CARD_FULL + 1 + 1 + under_tabs + 3 + 1;
+        let whole = wants <= content.height;
         let height = if whole { CARD_FULL } else { CARD_COMPACT };
         let width = content.width.min(CARD_W);
         let x = content.x + (content.width - width) / 2;
-        card_at = Some((Rect { x, y: y + 3, width, height }, !whole));
-        tabs_y = y + 3 + height + 1;
+        card_at = Some((Rect { x, y: y + top, width, height }, !whole));
+        tabs_y = y + top + height + 1;
     }
     // The rows the table would hold without the strip: under the verbs
     // line, the table's header and rule, to the room's last row.
-    let verbs_y = tabs_y + 3;
+    let verbs_y = tabs_y + 1 + under_tabs;
     let rows = content.bottom().saturating_sub(verbs_y + 3);
     let strip_y = (strip && rows >= STRIP_ROWS + STRIP_TABLE_MIN).then_some(verbs_y);
     let verbs_y = if strip_y.is_some() { verbs_y + STRIP_ROWS } else { verbs_y };
-    Layout {
-        header_y: y,
-        state_y: y + 1,
-        card: card_at,
-        tabs_y,
-        seeds_y: tabs_y + 1,
-        strip_y,
-        verbs_y,
-        table_y: verbs_y + 1,
-    }
+    Layout { header_y: y, card: card_at, tabs_y, strip_y, verbs_y, table_y: verbs_y + 1 }
 }
 
 /// What the table's optional columns would like, in cells — the widest of
@@ -705,12 +680,11 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let fill = strip_fill(&gui.app, gui.app.taste.tab);
     let lay = layout(content, gui.app.taste.no_history, fill.is_some());
     draw_header(frame, gui, content, lay.header_y);
-    draw_state(frame, gui, content, lay.state_y);
     if let Some((rect, compact)) = lay.card {
         draw_card(frame, gui, rect, compact);
     }
-    draw_tabs(frame, gui, content, lay.tabs_y);
-    draw_seeds_line(frame, gui, content, lay.seeds_y);
+    let tabs_end = draw_tabs(frame, gui, content, lay.tabs_y);
+    draw_tagline(frame, gui, content, lay.tabs_y, tabs_end);
     gui.discover.strip_at = None;
     // Whether tiles of albums stand this frame; when that changed on the
     // same tab (a resize across the height gate, the queue opening) the
@@ -740,7 +714,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 /// re-indexed (its album rows leave for the strip or come back), so the
 /// keyboard's hand moves with what it was on — a song stays that song, an
 /// album row becomes its tile and a library tile its row again; what has no
-/// place on the other side (a connected server's tile at the floor) puts
+/// place on the other side (a connected server's tile with no strip) puts
 /// the hand down rather than lighting something else.
 fn carry_hand(gui: &mut Gui, tab: TasteTab, stands: bool) {
     let held = gui.discover.view.held.then_some(gui.discover.cursor).flatten();
@@ -803,44 +777,212 @@ fn word_refusal(gui: &mut Gui, refusal: TastePinRefusal) {
     }
 }
 
-/// The header: the room's name BOLD, what the answer is based on DIM, the
-/// window dropdown at the right (clauses 11, 15) — the value in the row's
-/// own weight, the chevron dim, both BRIGHT + BOLD under the pointer (the
-/// kit's Dropdown). The phrase clips before the control moves (clause 91).
-fn draw_header(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
-    let name = t!("gui.nav.discover").to_string();
-    put(frame, content.x, y, &name, Style::default().add_modifier(Modifier::BOLD));
-    let window = gui.app.taste.shown_window().unwrap_or(WINDOW_DEFAULT);
-    let label = window_label(window);
-    let w = width(&label) as u16;
-    let rect = Rect { x: content.right().saturating_sub(w + 2), y, width: w + 2, height: 1 };
-    let hover = gui.ui.hovers(rect);
-    put(frame, rect.x, y, &label, if hover { bright_bold() } else { Style::default() });
-    put(frame, rect.x + w + 1, y, chevron(), if hover { bright_bold() } else { dim() });
-    gui.ui.click(rect, Act::Disc(DiscAct::Window));
-    gui.ui.tip_keyed(rect, t!("gui.discover.window_tip").to_string());
-    gui.discover.window_at = rect;
-    if let Some(phrase) = based_on(&gui.app) {
-        let x = content.x + width(&name) as u16 + 1;
-        let room = rect.x.saturating_sub(x + 2) as usize;
-        put(frame, x, y, &super::bar::clip(&format!("· {phrase}"), room), dim());
+/// One way the header's controls can stand (clause 17), the widest first:
+/// the refresh with its words, "more options" long, the widened window's
+/// mark ("Last 30 days → All time") and the room's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeadStep {
+    words: bool,
+    long: bool,
+    mark: bool,
+    name: bool,
+}
+
+/// The header's steps, in the drop order (clause 17): the refresh's words
+/// (its glyph stays; the legacy console has none, so its words always
+/// stand), then "more options" shortens to "options", then a widened
+/// window's mark gives way to the window the answer came from, then the
+/// room's name — the nav row already names the room — so the controls
+/// stand whole at the queue's 47 cells in every locale.
+fn head_steps(glyph: bool) -> Vec<HeadStep> {
+    let mut steps = vec![HeadStep { words: true, long: true, mark: true, name: true }];
+    if glyph {
+        steps.push(HeadStep { words: false, long: true, mark: true, name: true });
+    }
+    for (mark, name) in [(true, true), (false, true), (false, false)] {
+        steps.push(HeadStep { words: !glyph, long: false, mark, name });
+    }
+    steps
+}
+
+fn window_label_in(days: u32, locale: &str) -> String {
+    if days == 0 {
+        t!("gui.discover.window_all", locale = locale).to_string()
+    } else {
+        t!("gui.discover.window_days", locale = locale, days = days).to_string()
     }
 }
 
-/// The kit's state line for the tab in front (clause 41).
-fn draw_state(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
-    let (state, style, facts) = state_line(&gui.app, gui.app.taste.tab);
-    let head = format!("{} {state}", bullet_glyph());
-    put(frame, content.x, y, &head, style.add_modifier(Modifier::BOLD));
-    let mut x = content.x + width(&head) as u16;
+fn widen_arrow() -> &'static str {
+    if legacy_conhost() { "->" } else { "→" }
+}
+
+/// The header's words in one language: what [`head_plan`] lays out.
+#[derive(Debug, Clone)]
+struct HeadWords {
+    name: String,
+    /// The window dropdown's value (clauses 11, 15) with a widened
+    /// answer's mark and without it: the window asked, or — where the
+    /// server widened it to all time — the asked window and where it went,
+    /// "Last 30 days → All time"; without the mark, the window the answer
+    /// came from, "All time". Never a window the answer did not use.
+    window: (String, String),
+    /// The widest of the four windows: the dropdown's slot.
+    widest: u16,
+    /// "more options" and its short "options".
+    more: (String, String),
+    /// "new seeds" and "asking…".
+    refresh: (String, String),
+}
+
+impl HeadWords {
+    fn of(app: &App, locale: &str) -> Self {
+        let asked = app.taste.shown_window().unwrap_or(WINDOW_DEFAULT);
+        let window = match app.taste.widened_shown() {
+            Some(from) => (
+                format!("{} {} {}", window_label_in(from, locale), widen_arrow(), window_label_in(0, locale)),
+                window_label_in(0, locale),
+            ),
+            None => (window_label_in(asked, locale), window_label_in(asked, locale)),
+        };
+        HeadWords {
+            name: t!("gui.nav.discover", locale = locale).to_string(),
+            window,
+            widest: WINDOWS.iter().map(|w| width(&window_label_in(*w, locale))).max().unwrap_or(0) as u16,
+            more: (t!("gui.discover.more_options", locale = locale).to_string(), t!("gui.discover.options_short", locale = locale).to_string()),
+            refresh: (t!("gui.discover.new_seeds", locale = locale).to_string(), t!("gui.discover.asking", locale = locale).to_string()),
+        }
+    }
+}
+
+/// Where the header's parts stand on its row: the step taken, and each
+/// control's x and width (the refresh's is its slot's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeadPlan {
+    step: HeadStep,
+    window: (u16, u16),
+    more: (u16, u16),
+    refresh: (u16, u16),
+}
+
+/// The header's geometry (clause 17) in `content`'s width: the first of
+/// [`head_steps`] whose row fits, the controls right-aligned two cells
+/// apart. The refresh's slot is as wide as the wider of its words, or the
+/// glyph and the two cells it keeps for " …" while asking; the window's
+/// slot is the widest window's (or the widened value, when wider).
+fn head_plan(words: &HeadWords, content: Rect, glyph: Option<&str>) -> HeadPlan {
+    let words_w = width(&words.refresh.0).max(width(&words.refresh.1)) as u16;
+    let refresh_w = |with_words: bool| match glyph {
+        Some(g) if with_words => width(g) as u16 + 1 + words_w,
+        Some(g) => width(g) as u16 + 2,
+        None => words_w,
+    };
+    let window_w = |mark: bool| {
+        let value = if mark { &words.window.0 } else { &words.window.1 };
+        (width(value) as u16).max(words.widest) + 2
+    };
+    let more_w = |long: bool| width(if long { &words.more.0 } else { &words.more.1 }) as u16;
+    let need = |s: &HeadStep| {
+        let name = if s.name { width(&words.name) as u16 + HEAD_GAP } else { 0 };
+        name + window_w(s.mark) + HEAD_GAP + more_w(s.long) + HEAD_GAP + refresh_w(s.words)
+    };
+    let steps = head_steps(glyph.is_some());
+    let step = steps.iter().copied().find(|s| need(s) <= content.width).unwrap_or(steps[steps.len() - 1]);
+    let slot_w = refresh_w(step.words);
+    let slot_x = content.right().saturating_sub(slot_w);
+    let more_w = more_w(step.long);
+    let more_x = slot_x.saturating_sub(HEAD_GAP + more_w);
+    let window_w = window_w(step.mark);
+    let window_x = more_x.saturating_sub(HEAD_GAP + window_w).max(content.x);
+    HeadPlan { step, window: (window_x, window_w), more: (more_x, more_w), refresh: (slot_x, slot_w) }
+}
+
+/// The header (clauses 11, 15, 17, 91): the room's name BOLD, then, at the
+/// right, the controls: the window dropdown (the value in the row's own
+/// weight, the chevron dim, both BRIGHT + BOLD under the pointer — the
+/// kit's Dropdown — in a slot as wide as its widest window, so choosing one
+/// moves nothing), "more options" (a DIM text button: the seeds modal) and
+/// "↻ new seeds" (the accent's text button, the row's one primary: ask
+/// again). While an ask is out the refresh reads "asking…" in the
+/// getting-there colour — "↻ …" where its words dropped, never the colour
+/// alone — in a slot as wide as the wider of its words, so nothing moves.
+/// Short of width the steps of [`head_steps`] apply. What the answer is
+/// based on is the tabs row's tagline ([`draw_tagline`]).
+fn draw_header(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
+    let locale = rust_i18n::locale();
+    let words = HeadWords::of(&gui.app, &locale);
+    let glyph = refresh_glyph();
+    let plan = head_plan(&words, content, glyph);
+    let step = plan.step;
+    if step.name {
+        put(frame, content.x, y, &words.name, bold());
+    }
+
+    let (window_x, window_w) = plan.window;
+    let window = if step.mark { &words.window.0 } else { &words.window.1 };
+    let rect = Rect { x: window_x, y, width: window_w, height: 1 };
+    let hover = gui.ui.hovers(rect);
+    put(frame, rect.x, y, window, if hover { bright_bold() } else { Style::default() });
+    put(frame, rect.x + window_w - 1, y, chevron(), if hover { bright_bold() } else { dim() });
+    gui.ui.click(rect, Act::Disc(DiscAct::Window));
+    let tip = t!("gui.discover.window_tip").to_string();
+    // A widened answer's fact, in full, under the pointer (clause 11).
+    let tip = match widened(&gui.app) {
+        Some(fact) if gui.app.taste.widened_shown().is_some() => format!("{fact} · {tip}"),
+        _ => tip,
+    };
+    gui.ui.tip_keyed(rect, tip);
+    gui.discover.window_at = rect;
+
+    let (more_x, more_w) = plan.more;
+    let more = if step.long { &words.more.0 } else { &words.more.1 };
+    super::text_button(frame, gui, more_x, y, more, false, Act::Disc(DiscAct::Seeds));
+    gui.ui.tip_keyed(Rect { x: more_x, y, width: more_w, height: 1 }, t!("gui.discover.seeds_tip").to_string());
+
+    // An ask out (either half, or a 403's probe): the refresh says so —
+    // the state line's word before the line left (2026-10-16, clause 32).
+    let asking = gui.app.taste.asking();
+    let said = if asking { &words.refresh.1 } else { &words.refresh.0 };
+    let label = match glyph {
+        Some(g) if step.words => format!("{g} {said}"),
+        Some(g) if asking => format!("{g} …"),
+        Some(g) => g.to_string(),
+        None => said.clone(),
+    };
+    let label_w = width(&label) as u16;
+    // From its slot's left: the glyph stays put, under the pointer that
+    // clicked it, while the words turn to "asking…" and back.
+    let refresh = Rect { x: plan.refresh.0, y, width: label_w, height: 1 };
+    let style = if gui.ui.hovers(refresh) {
+        bright_bold()
+    } else if asking {
+        Style::default().fg(th().gold)
+    } else {
+        accent()
+    };
+    put(frame, refresh.x, y, &label, style);
+    gui.ui.click(refresh, Act::Disc(DiscAct::NewSeeds));
+    gui.ui.tip_keyed(refresh, t!("gui.discover.new_seeds_tip").to_string());
+}
+
+/// The tagline (clause 11), DIM at the tabs row's right: what the answer
+/// is based on, and the widened fact — words, never a count — each whole
+/// or not at all, dropped from the right (the kit's state-line grammar),
+/// never closer than two cells to the last tab. `after` is where the tabs
+/// end.
+fn draw_tagline(frame: &mut Frame, gui: &Gui, content: Rect, y: u16, after: u16) {
+    let facts: Vec<String> = based_on(&gui.app).into_iter().chain(widened(&gui.app)).collect();
+    let room = content.right().saturating_sub(after + HEAD_GAP);
+    let mut line = String::new();
     for fact in facts {
-        let piece = format!(" · {fact}");
-        let w = width(&piece) as u16;
-        if x + w > content.right() {
+        let next = if line.is_empty() { fact } else { format!("{line} · {fact}") };
+        if width(&next) as u16 > room {
             break;
         }
-        put(frame, x, y, &piece, dim());
-        x += w;
+        line = next;
+    }
+    if !line.is_empty() {
+        put(frame, content.right() - width(&line) as u16, y, &line, dim());
     }
 }
 
@@ -905,9 +1047,10 @@ fn draw_card(frame: &mut Frame, gui: &mut Gui, rect: Rect, compact: bool) {
 }
 
 /// The kit's Tabs (clause 40): the active one a slab, the rest text
-/// buttons — names only, never a count.
-fn draw_tabs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
+/// buttons — names only, never a count. Returns where the last tab ends.
+fn draw_tabs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) -> u16 {
     let mut x = content.x;
+    let mut end = x;
     for tab in visible_tabs(&gui.app) {
         let name = match tab {
             TasteTab::Library => t!("gui.discover.tab_library"),
@@ -926,65 +1069,10 @@ fn draw_tabs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
         };
         put(frame, x, y, &super::bar::clip(&label, w as usize), style);
         gui.ui.click(rect, Act::Disc(DiscAct::Tab(tab)));
-        x = rect.right() + TAB_GAP;
+        end = rect.right();
+        x = end + TAB_GAP;
     }
-}
-
-/// The seeds line (clause 12): what the answer starts from, pins first,
-/// "and more" for the rest — never a count — then `edit`. It never wraps
-/// and never scrolls.
-fn draw_seeds_line(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
-    let label = t!("gui.discover.seeds").to_string();
-    put(frame, content.x, y, &label, dim());
-    // (words, marker) in the order the line shows them.
-    let taste = &gui.app.taste;
-    let random = taste.head.as_ref().is_some_and(|h| h.seed_source == SeedSource::Random);
-    let mut seeds: Vec<(String, Option<String>)> = Vec::new();
-    match &taste.head {
-        Some(head) => {
-            let (pinned, rest): (Vec<_>, Vec<_>) = head.seeds.iter().partition(|seed| seed.pinned);
-            for seed in pinned {
-                seeds.push((track_words(&seed.to_track()), Some(t!("gui.discover.seed_pinned").to_string())));
-            }
-            for seed in rest {
-                let marker = random.then(|| t!("gui.discover.seed_random").to_string());
-                seeds.push((track_words(&seed.to_track()), marker));
-            }
-        }
-        None => {
-            for pin in &taste.pins {
-                seeds.push((track_words(&pin.track), Some(t!("gui.discover.seed_pinned").to_string())));
-            }
-        }
-    }
-    let edit = t!("gui.discover.seeds_edit").to_string();
-    let edit_w = width(&edit) as u16;
-    let more = t!("gui.discover.seeds_more").to_string();
-    let more_w = width(&more) as u16 + 2;
-    let mut x = content.x + width(&label) as u16 + 2;
-    let total = seeds.len();
-    for (i, (words, marker)) in seeds.iter().enumerate() {
-        let piece_w = width(words) as u16 + marker.as_ref().map_or(0, |m| width(m) as u16 + 1);
-        // What must still fit after this seed: "and more" while seeds are
-        // left after it, and `edit`.
-        let tail = if i + 1 < total { more_w } else { 0 } + edit_w + 2;
-        if x + piece_w + tail > content.right() {
-            put(frame, x, y, &more, dim());
-            x += more_w;
-            break;
-        }
-        put(frame, x, y, words, Style::default());
-        x += width(words) as u16;
-        if let Some(marker) = marker {
-            put(frame, x + 1, y, marker, dim());
-            x += width(marker) as u16 + 1;
-        }
-        x += 2;
-    }
-    if x + edit_w <= content.right() {
-        let w = super::text_button(frame, gui, x, y, &edit, false, Act::Disc(DiscAct::Seeds));
-        gui.ui.tip_keyed(Rect { x, y, width: w, height: 1 }, t!("gui.discover.seeds_tip").to_string());
-    }
+    end
 }
 
 // ── The album strip ─────────────────────────────────────────────────────────
@@ -1965,6 +2053,8 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.discover.menu = None;
             gui.discover.seeds = Some(SeedsModal::default());
         }
+        // `G`'s ask (clause 3): the window, the pins and the drops kept.
+        DiscAct::NewSeeds => enter(gui, true),
         // A click, never a key (Space and Enter call `seed_row` and keep the
         // cursor up): the modal's hand goes down (the list-cursor law).
         DiscAct::SeedRow(index) => {
@@ -2602,7 +2692,7 @@ mod tests {
     /// percentage and no "never played" anywhere on the page (the
     /// 2026-10-11 log). The only digits allowed are a row's m:ss length and
     /// the window's days. (The fallback card's "Skips never count." is the
-    /// webapp's own sentence; the seeds modal behind `edit` keeps its ages.)
+    /// webapp's own sentence; the seeds modal behind "more options" keeps its ages.)
     fn assert_no_counts(rows: &[String]) {
         let time = regex::Regex::new(r"\b\d+:\d\d\b").unwrap();
         let window = regex::Regex::new(r"Last \d+ days").unwrap();
@@ -2801,6 +2891,26 @@ mod tests {
         gui
     }
 
+    /// Nothing finished yet, the library answering an album around the
+    /// random pick: the card stands, and under 26 content rows no strip can
+    /// stand under it, so the album is the table's first row (clause 49) —
+    /// the one place the album container rows still show since the strip
+    /// stands at the floor (2026-10-16).
+    fn card_albums_gui() -> Gui {
+        let mut gui = session_gui();
+        key(&mut gui, KeyCode::Char('G'));
+        let mut answer = fallback_answer();
+        answer.library.as_mut().unwrap().albums = main_answer().library.unwrap().albums;
+        land_main(&mut gui, answer);
+        gui
+    }
+
+    fn draw_buffer_sized(gui: &mut Gui, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, gui)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
     // ── The row ─────────────────────────────────────────────────────────
 
     #[test]
@@ -2886,79 +2996,108 @@ mod tests {
     // ── States ──────────────────────────────────────────────────────────
 
     #[test]
-    fn the_first_ask_shows_the_scan_bar_and_asking() {
+    fn the_first_ask_shows_the_skeletons_and_the_refresh_says_asking() {
         let _en = english();
         let mut gui = session_gui();
         key(&mut gui, KeyCode::Char('G'));
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[3].contains("• asking…"), "the state word says it is asking:\n{all}");
+        // No state line since 2026-10-16: the header's refresh says it, in
+        // the getting-there colour.
+        assert!(rows[2].trim_end().ends_with("more options  ↻ asking…"), "the refresh says it is asking:\n{all}");
+        let buffer = draw_buffer(&mut gui);
+        let refresh = at(&rows, "↻ asking…");
+        assert_eq!(buffer[(refresh.x, refresh.y)].fg, th().gold, "asking wears the getting-there colour");
+        assert!((3..25).all(|y| !room(&rows, y).contains('•')), "no state line:\n{all}");
         assert!(all.contains("TRACK") && all.contains("ARTIST"), "the table's header stands:\n{all}");
         // Four skeleton tiles on the strip (clause 45: the webapp's four
         // cards), four skeleton rows under the rule, and no "asking…" line.
-        assert_eq!(rows[8].matches('╭').count(), 4, "four empty cover frames:\n{all}");
-        assert!(rows[13].contains("░░░") && rows[14].contains("░░░"), "title and artist runs:\n{all}");
-        for y in 19..23 {
+        assert_eq!(rows[6].matches('╭').count(), 4, "four empty cover frames:\n{all}");
+        assert!(rows[11].contains("░░░") && rows[12].contains("░░░"), "title and artist runs:\n{all}");
+        for y in 17..21 {
             assert!(rows[y].contains("░░░"), "a skeleton row at {y}:\n{all}");
         }
-        assert!(!rows[23].contains('░'), "four of them:\n{all}");
-        assert_eq!(all.matches("asking").count(), 1, "the state word alone says it:\n{all}");
+        assert!(!rows[21].contains('░'), "four of them:\n{all}");
+        assert_eq!(all.matches("asking").count(), 1, "the refresh alone says it:\n{all}");
         assert_no_counts(&rows);
         key(&mut gui, KeyCode::Right);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[19].contains("░░░") && rows[17].contains(" ON "), "the Connected servers skeleton:\n{all}");
+        assert!(rows[17].contains("░░░") && rows[15].contains(" ON "), "the Connected servers skeleton:\n{all}");
         assert_eq!(all.matches("asking").count(), 1, "{all}");
-        // At the floor the strip gives way: the rows stand under the tabs.
+        // The floor (17 rows, the footer off): the strip's skeleton stands
+        // there too since 2026-10-16, three rows under the rule.
         let rows = draw_sized(&mut gui, 100, 24);
-        assert!(rows[11].contains("░░░") && rows[9].contains(" ON ") && !rows[9].contains('╭'), "{}", rows.join("\n"));
+        let all = rows.join("\n");
+        assert_eq!(rows[5].matches('╭').count(), 4, "{all}");
+        assert!(rows[14].contains(" ON ") && rows[16].contains("░░░") && rows[18].contains("░░░"), "{all}");
         // Nothing to play yet: the verbs line is hidden, never grey, and
         // keeps its row.
-        assert!(rows[8].chars().skip(17).all(|c| c == ' '), "{}", rows.join("\n"));
+        assert!(room(&rows, 13).chars().all(|c| c == ' '), "{all}");
+        // The answer lands: the refresh reads "new seeds" again, in the
+        // accent.
+        land(&mut gui, TastePart::Main, main_answer());
+        land(&mut gui, TastePart::Peers, peers_answer());
+        let rows = draw(&mut gui);
+        assert!(rows[2].trim_end().ends_with("↻ new seeds") && !rows.join("\n").contains("asking"), "{}", rows[2]);
     }
 
     #[test]
-    fn an_answer_fills_the_header_the_tabs_the_seeds_and_the_table_with_no_counts() {
+    fn an_answer_fills_the_header_the_tabs_and_the_table_with_no_counts() {
         let _en = english();
         let mut gui = answered_gui();
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[2].contains("Discover · based on songs you finished"), "the header:\n{}", rows[2]);
-        assert!(rows[2].trim_end().ends_with("Last 30 days ▾"), "the window dropdown at its right:\n{}", rows[2]);
-        assert!(rows[3].contains("• ready to play"), "the state line, words only:\n{}", rows[3]);
-        assert!(rows[5].contains(" Library ") && rows[5].contains(" Connected servers "), "two tabs:\n{}", rows[5]);
+        // The header (clause 17): the room's name, the window dropdown, more
+        // options and the refresh at its right — nothing else.
+        assert!(room(&rows, 2).starts_with("Discover "), "the header:\n{}", rows[2]);
+        assert!(rows[2].trim_end().ends_with("Last 30 days ▾  more options  ↻ new seeds"), "the controls:\n{}", rows[2]);
+        assert!(!rows[2].contains("based on") && !rows[2].contains('…'), "the tagline is the tabs row's:\n{}", rows[2]);
+        // The tagline at the tabs row's right (clause 11), at the design
+        // size's 80 cells.
+        assert!(rows[4].trim_end().ends_with("based on songs you finished"), "the tagline:\n{}", rows[4]);
+        // No state line and no seeds line (2026-10-16): the seeds are behind
+        // "more options", as on the webapp.
+        let page: String = (3..25).map(|y| room(&rows, y)).collect::<Vec<_>>().join("\n");
+        for gone in ["ready to play", "•", "Manor", "Kite", "and more", "edit", "streams through"] {
+            assert!(!page.contains(gone), "{gone:?} on the page:\n{all}");
+        }
+        assert!(room(&rows, 3).trim().is_empty(), "a blank under the header:\n{all}");
+        assert!(rows[4].contains(" Library ") && rows[4].contains(" Connected servers "), "two tabs:\n{}", rows[4]);
         assert!(!all.contains("Network") && !all.contains("Peers"), "the network and the old Peers name are gone:\n{all}");
-        assert!(rows[6].contains("seeds") && rows[6].contains("Manor · ALM") && rows[6].contains("edit"), "seeds:\n{}", rows[6]);
-        // The album strip under the seeds line (clause 45): the album with
-        // no art is the note tile, its title and its artist under it.
-        let room = |y: usize| rows[y].chars().skip(17).collect::<String>();
-        assert!(room(8).starts_with("╭──────────╮"), "the note tile's frame:\n{all}");
-        assert!(rows[10].contains("│    ♪     │"), "the note in it:\n{all}");
-        assert_eq!(at(&rows, "Night Album"), Position { x: 17, y: 13 }, "the title under the cover:\n{all}");
-        assert_eq!(at(&rows, "Moon"), Position { x: 17, y: 14 }, "the artist under it:\n{all}");
+        // The album strip under the tabs and their blank (clause 45): the
+        // album with no art is the note tile, its title and artist under it.
+        assert!(room(&rows, 6).starts_with("╭──────────╮"), "the note tile's frame:\n{all}");
+        assert!(rows[8].contains("│    ♪     │"), "the note in it:\n{all}");
+        assert_eq!(at(&rows, "Night Album"), Position { x: 17, y: 11 }, "the title under the cover:\n{all}");
+        assert_eq!(at(&rows, "Moon"), Position { x: 17, y: 12 }, "the artist under it:\n{all}");
         // The verbs line under the strip, right over the table (clause 64,
         // the webapp's verbs under its songs' header): play the accent,
         // save as playlist on the Library tab.
-        assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: 16 }, "{all}");
+        assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: 14 }, "{all}");
         for head in ["TRACK", "ARTIST", "ALBUM", "LENGTH"] {
-            assert!(rows[17].contains(head), "{head} in the header:\n{}", rows[17]);
+            assert!(rows[15].contains(head), "{head} in the header:\n{}", rows[15]);
         }
-        assert!(!rows[17].contains("MATCH") && !rows[17].contains("LAST PLAYED"), "no meter, no last played:\n{}", rows[17]);
+        assert!(!rows[15].contains("MATCH") && !rows[15].contains("LAST PLAYED"), "no meter, no last played:\n{}", rows[15]);
         // The album left the table for the strip; the songs: title, artist,
         // album, length (clauses 50–51).
         assert!(!all.contains("Night Album album"), "no album row where the strip stands:\n{all}");
         for cell in ["Aurora", "Ray", "Dawn", "4:11"] {
-            assert!(rows[19].contains(cell), "{cell} on the song row:\n{}", rows[19]);
+            assert!(rows[17].contains(cell), "{cell} on the song row:\n{}", rows[17]);
         }
         assert_eq!(at(&rows, "Ray").x, at(&rows, "ARTIST").x, "ARTIST over its words");
         assert_eq!(at(&rows, "Dawn").x, at(&rows, "ALBUM").x, "ALBUM over its words");
-        assert!(rows[21].contains("Cirrus") && rows[21].contains("—"), "a missing artist is the dash:\n{}", rows[21]);
+        assert!(rows[19].contains("Cirrus") && rows[19].contains("—"), "a missing artist is the dash:\n{}", rows[19]);
         // No bottom row: the verbs left it for the verbs line, and the
         // checkbox left the page.
         assert_eq!(all.matches("queue all").count(), 1, "the verbs stand once:\n{all}");
         assert!(!all.contains("Include songs") && !all.contains("[ ]"), "the filter left the page:\n{all}");
         assert!(!all.contains("asking"), "nothing asking once both halves landed:\n{all}");
         assert_no_counts(&rows);
+        // 100 cells (120 columns): the same, wider.
+        let rows = draw_sized(&mut gui, 120, 30);
+        assert!(rows[4].trim_end().ends_with("based on songs you finished"), "the tagline:\n{}", rows[4]);
+        assert!(rows[2].trim_end().ends_with("Last 30 days ▾  more options  ↻ new seeds"), "{}", rows[2]);
     }
 
     #[test]
@@ -2967,23 +3106,28 @@ mod tests {
         let mut gui = answered_gui();
         gui.queue_open = true;
         let rows = draw(&mut gui);
-        assert!(rows[17].contains("TRACK") && rows[17].contains("ARTIST") && rows[17].contains("LENGTH"), "{}", rows[17]);
-        assert!(!rows[17].contains("ALBUM"), "47 cells: ALBUM goes first:\n{}", rows[17]);
-        assert!(rows[2].contains("Last 30 days ▾"), "the window control keeps its home:\n{}", rows[2]);
+        assert!(rows[15].contains("TRACK") && rows[15].contains("ARTIST") && rows[15].contains("LENGTH"), "{}", rows[15]);
+        assert!(!rows[15].contains("ALBUM"), "47 cells: ALBUM goes first:\n{}", rows[15]);
+        // The header at 47 cells: the refresh's words have gone — its glyph
+        // stays — while "more options" keeps its words (English fits at
+        // that step); the tabs row's tagline dropped.
+        assert!(head_of(&gui, &rows).ends_with("Last 30 days ▾  more options  ↻"), "the controls keep their order:\n{}", rows[2]);
+        assert!(!rows[2].contains("based on") && !rows[2].contains("new seeds"), "{}", rows[2]);
+        assert!(!rows[4].contains("based on"), "the tagline drops whole:\n{}", rows[4]);
         // 47 cells: the verbs line drops save as playlist from its tail and
         // keeps its home over the table.
-        assert!(rows[16].contains("▸ play · + queue all · ⇄ shuffle"), "the verbs keep their home:\n{}", rows[16]);
-        assert!(!rows[16].contains("save as"), "save drops first:\n{}", rows[16]);
+        assert!(rows[14].contains("▸ play · + queue all · ⇄ shuffle"), "the verbs keep their home:\n{}", rows[14]);
+        assert!(!rows[14].contains("save as"), "save drops first:\n{}", rows[14]);
         assert_no_counts(&rows);
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         let rows = draw(&mut gui);
-        assert!(rows[17].contains("TRACK") && rows[17].contains("ARTIST") && rows[17].contains("LENGTH"), "{}", rows[17]);
-        assert!(!rows[17].contains("ALBUM") && !rows[17].contains(" ON "), "then ON:\n{}", rows[17]);
+        assert!(rows[15].contains("TRACK") && rows[15].contains("ARTIST") && rows[15].contains("LENGTH"), "{}", rows[15]);
+        assert!(!rows[15].contains("ALBUM") && !rows[15].contains(" ON "), "then ON:\n{}", rows[15]);
         // With the room's 80 cells, all five stand.
         gui.queue_open = false;
         let rows = draw(&mut gui);
         for head in ["TRACK", "ARTIST", "ALBUM", "ON", "LENGTH"] {
-            assert!(rows[17].contains(head), "{head} at 80 cells:\n{}", rows[17]);
+            assert!(rows[15].contains(head), "{head} at 80 cells:\n{}", rows[15]);
         }
     }
 
@@ -2995,18 +3139,20 @@ mod tests {
         assert_eq!(gui.config.gui.discover_tab.as_deref(), Some("servers"), "the tab is remembered");
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[3].contains("• ready to play · streams through your server"), "{}", rows[3]);
+        // No state line (2026-10-16): a row's [▸] says it plays through
+        // your server, under the pointer.
+        assert!(!all.contains("ready to play") && !all.contains("streams through"), "{all}");
         // The strip: the one album-tagged row's album, from Sam's server.
-        assert_eq!(at(&rows, "Theirs"), Position { x: 17, y: 13 }, "the album's tile:\n{all}");
-        assert!(rows[14].contains("Pia"), "{}", rows[14]);
+        assert_eq!(at(&rows, "Theirs"), Position { x: 17, y: 11 }, "the album's tile:\n{all}");
+        assert!(rows[12].contains("Pia"), "{}", rows[12]);
         // The verbs line: play, queue all and shuffle — no save, a
         // connected server's songs are not this server's.
-        assert!(rows[16].contains("▸ play · + queue all · ⇄ shuffle"), "{all}");
+        assert!(rows[14].contains("▸ play · + queue all · ⇄ shuffle"), "{all}");
         assert!(!all.contains("save as playlist"), "no save on this tab:\n{all}");
         // No group lines: the rows start under the rule.
-        assert!(rows[19].contains("Peer One") && rows[19].contains("Pia") && rows[19].contains("Theirs"), "{}", rows[19]);
-        assert!(rows[19].contains("Sam's server") && rows[19].contains("3:20"), "ON and LENGTH:\n{}", rows[19]);
-        assert!(rows[20].contains("Peer Two"), "{}", rows[20]);
+        assert!(rows[17].contains("Peer One") && rows[17].contains("Pia") && rows[17].contains("Theirs"), "{}", rows[17]);
+        assert!(rows[17].contains("Sam's server") && rows[17].contains("3:20"), "ON and LENGTH:\n{}", rows[17]);
+        assert!(rows[18].contains("Peer Two"), "{}", rows[18]);
         for gone in ["Far box", "Odd model", "Elsewhere", "online", "not answering", "last seen", "sonic model"] {
             assert!(!all.contains(gone), "{gone:?} is not drawn:\n{all}");
         }
@@ -3043,12 +3189,12 @@ mod tests {
         let mut gui = answered_gui();
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         draw(&mut gui);
-        gui.ui.pointer = Some(Position { x: 30, y: 20 });
+        gui.ui.pointer = Some(Position { x: 30, y: 18 });
         let rows = draw(&mut gui);
-        assert!(rows[20].contains("[▸] [»] [+] [⋯]"), "the song verbs, [⋯] among them:\n{}", rows[20]);
-        let dots = Position { x: rows[20].find("[⋯]").map(|i| rows[20][..i].chars().count()).unwrap() as u16, y: 20 };
+        assert!(rows[18].contains("[▸] [»] [+] [⋯]"), "the song verbs, [⋯] among them:\n{}", rows[18]);
+        let dots = Position { x: rows[18].find("[⋯]").map(|i| rows[18][..i].chars().count()).unwrap() as u16, y: 18 };
         assert_eq!(gui.ui.hit(dots), Some(Act::Disc(DiscAct::More(1))));
-        assert_eq!(gui.ui.hit_context(Position { x: 30, y: 19 }), Some(Act::Disc(DiscAct::More(0))), "a right click too");
+        assert_eq!(gui.ui.hit_context(Position { x: 30, y: 17 }), Some(Act::Disc(DiscAct::More(0))), "a right click too");
         gui.act(Act::Disc(DiscAct::More(1)));
         let sheet = gui.actions.sheet.as_ref().expect("the sheet opens");
         assert_eq!((sheet.origin.server.as_str(), sheet.origin.peer), (HOST, Some(7)), "the peer's origin");
@@ -3068,12 +3214,15 @@ mod tests {
     #[test]
     fn an_album_rows_play_control_queues_the_album() {
         let _en = english();
-        let mut gui = answered_gui();
-        // At the floor, where the album stays a row (clause 49).
-        gui.ui.pointer = Some(Position { x: 30, y: 11 });
-        let rows = draw_sized(&mut gui, 100, 24);
-        assert!(rows[11].contains("[+]") && !rows[11].contains("[»]") && !rows[11].contains("[⋯]"), "one control:\n{}", rows[11]);
-        let plus = Position { x: rows[11].find("[+]").map(|i| rows[11][..i].chars().count()).unwrap() as u16, y: 11 };
+        // Under the fallback card at 100×30, where no strip can stand and
+        // the album stays a row (clause 49).
+        let mut gui = card_albums_gui();
+        let y = at(&draw(&mut gui), "Night Album album").y;
+        gui.ui.pointer = Some(Position { x: 30, y });
+        let rows = draw(&mut gui);
+        let row = &rows[y as usize];
+        assert!(row.contains("[+]") && !row.contains("[»]") && !row.contains("[⋯]"), "one control:\n{row}");
+        let plus = Position { x: row.find("[+]").map(|i| row[..i].chars().count()).unwrap() as u16, y };
         assert_eq!(gui.ui.hit(plus), Some(Act::Disc(DiscAct::Row(0, RowVerb::Queue))));
         gui.pending.clear();
         gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Queue)));
@@ -3124,18 +3273,18 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let rows = draw(&mut gui);
-        gui.ui.pointer = Some(Position { x: 30, y: 19 });
+        gui.ui.pointer = Some(Position { x: 30, y: 17 });
         let rows_hover = draw(&mut gui);
-        assert!(rows_hover[19].contains("[▸] [»] [+] [⋯]"), "the hover verbs:\n{}", rows_hover[19]);
-        assert!(rows_hover[19].contains("Aurora") && rows_hover[19].contains("Ray"), "TRACK and ARTIST stay:\n{}", rows_hover[19]);
-        assert!(!rows_hover[13].contains("[▸]"), "an album has no play-now:\n{}", rows_hover[13]);
+        assert!(rows_hover[17].contains("[▸] [»] [+] [⋯]"), "the hover verbs:\n{}", rows_hover[17]);
+        assert!(rows_hover[17].contains("Aurora") && rows_hover[17].contains("Ray"), "TRACK and ARTIST stay:\n{}", rows_hover[17]);
+        assert!(!rows_hover[11].contains("[▸]"), "an album has no play-now:\n{}", rows_hover[11]);
         assert_eq!(gui.discover.cursor, None, "hover never selects");
-        let plus = Position { x: rows_hover[19].find("[+]").map(|i| rows_hover[19][..i].chars().count()).unwrap() as u16, y: 19 };
+        let plus = Position { x: rows_hover[17].find("[+]").map(|i| rows_hover[17][..i].chars().count()).unwrap() as u16, y: 17 };
         assert_eq!(gui.ui.hit(plus), Some(Act::Disc(DiscAct::Row(0, RowVerb::Queue))));
         gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Queue)));
         let item = &gui.app.queue.items[0];
         assert_eq!((item.filepath.as_str(), item.origin.server.as_str(), item.origin.peer), ("music/a.mp3", HOST, None));
-        assert!(rows[19].contains("4:11"), "at rest the row keeps its columns");
+        assert!(rows[17].contains("4:11"), "at rest the row keeps its columns");
     }
 
     #[test]
@@ -3143,19 +3292,19 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let buffer = draw_buffer(&mut gui);
-        assert!((8..25).all(|y| (17..97).all(|x| buffer[(x, y)].bg != th().accent)), "nothing lit on arrival");
+        assert!((6..25).all(|y| (17..97).all(|x| buffer[(x, y)].bg != th().accent)), "nothing lit on arrival");
         // Stowed, Enter and `a` do nothing (clause 57).
         key(&mut gui, KeyCode::Enter);
         key(&mut gui, KeyCode::Char('a'));
         assert!(gui.app.queue.items.is_empty(), "no verb on a row nobody can see");
         key(&mut gui, KeyCode::Down);
         let buffer = draw_buffer(&mut gui);
-        assert_eq!(buffer[(20, 13)].bg, th().accent, "↓ lights the top: the strip's first tile");
-        assert_ne!(buffer[(40, 19)].bg, th().accent, "one thing lit");
+        assert_eq!(buffer[(20, 11)].bg, th().accent, "↓ lights the top: the strip's first tile");
+        assert_ne!(buffer[(40, 17)].bg, th().accent, "one thing lit");
         key(&mut gui, KeyCode::Down);
         let buffer = draw_buffer(&mut gui);
-        assert_eq!(buffer[(40, 19)].bg, th().accent, "↓ again lights the first song");
-        assert_ne!(buffer[(20, 13)].bg, th().accent, "and the tile goes dark");
+        assert_eq!(buffer[(40, 17)].bg, th().accent, "↓ again lights the first song");
+        assert_ne!(buffer[(20, 11)].bg, th().accent, "and the tile goes dark");
         key(&mut gui, KeyCode::Enter);
         assert_eq!(gui.app.queue.items.len(), 4, "Enter plays from here: the tab's songs");
         assert_eq!(gui.app.queue.current, Some(0), "the row it was on");
@@ -3174,15 +3323,17 @@ mod tests {
         assert!(asks(&gui).is_empty(), "a random seed asks no connected server (clause 22): {:?}", gui.pending);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[2].contains("Discover · nothing finished yet"), "{}", rows[2]);
-        assert!(rows[3].contains("• no seeds · suggestions around a random pick"), "{}", rows[3]);
+        assert!(!rows[2].contains("nothing finished"), "the header holds the controls alone:\n{}", rows[2]);
+        // No state line: the card says what the room needs (clause 20).
+        assert!(!all.contains("no seeds") && !all.contains("•"), "{all}");
         assert!(all.contains("Finish a few songs and this room learns your taste"), "{all}");
         assert!(all.contains("Skips never count."), "the body at the design size:\n{all}");
         assert!(all.contains("Until then, around a random pick: Random One · Dice"), "{all}");
         assert!(all.contains("another pick") && all.contains("choose a song…"), "{all}");
-        let tabs = &rows[13];
+        let tabs = &rows[12];
         assert!(tabs.contains("Library") && tabs.contains("Connected servers") && !tabs.contains('–'), "no counts:\n{tabs}");
-        assert!(rows[14].contains("Random One · Dice random"), "the seed wears `random`:\n{}", rows[14]);
+        assert!(tabs.trim_end().ends_with("nothing finished yet"), "the tagline:\n{tabs}");
+        assert!(!all.contains("Dice random"), "no seeds line: the card names the pick:\n{all}");
         assert_no_counts(&rows);
         key(&mut gui, KeyCode::Right);
         let rows = draw(&mut gui);
@@ -3196,14 +3347,16 @@ mod tests {
         assert_eq!(asks(&gui).len(), 1, "{:?}", gui.pending);
         let body = main_body(&gui);
         assert_eq!((body.exclude, body.pin.len()), (vec!["r1".to_string()], 0));
-        // At the floor with the footer on, the card gives up its body and
-        // the table keeps its header, rule and a row.
+        // At the floor with the footer on the card stands whole since
+        // 2026-10-16 (the rows the state and seeds lines gave back), the
+        // table keeping its header, rule and rows under it.
         gui.config.gui.key_hints = true;
         gui.ui.key_hints = true;
+        key(&mut gui, KeyCode::Left);
         let rows = draw_sized(&mut gui, 100, 24);
         let all = rows.join("\n");
-        assert!(all.contains("Finish a few songs") && !all.contains("Skips never count."), "{all}");
-        assert!(all.contains("TRACK") && all.contains("another pick"), "{all}");
+        assert!(all.contains("Finish a few songs") && all.contains("Skips never count."), "{all}");
+        assert!(all.contains("TRACK") && all.contains("another pick") && all.contains("Aurora"), "{all}");
     }
 
     #[test]
@@ -3218,7 +3371,7 @@ mod tests {
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("This server hasn't analyzed any music yet") && all.contains("Check again"), "{all}");
-        assert!(all.contains("• waiting for the scan"), "{all}");
+        assert!(!all.contains("waiting for the scan") && !all.contains("•"), "the sentence alone, no state line:\n{all}");
         assert_no_counts(&rows);
         // A 403 whose probe lost the gate: switched off, no retry.
         let mut gui = session_gui();
@@ -3227,7 +3380,7 @@ mod tests {
         assert_eq!(gui.app.taste.latch, TasteLatch::Probing);
         gui.app.apply_event(Event::DiscoveryProbe { available: false, taste: false });
         let all = draw(&mut gui).join("\n");
-        assert!(all.contains("• switched off") && all.contains("Sonic discovery has been switched off on this server."), "{all}");
+        assert!(all.contains("Sonic discovery has been switched off on this server.") && !all.contains("• switched off"), "{all}");
         assert!(!all.contains("Try again") && !all.contains("Check again"), "no retry:\n{all}");
         // A transport failure: the half that failed says so, with Try again.
         let mut gui = session_gui();
@@ -3237,7 +3390,7 @@ mod tests {
         let all = rows.join("\n");
         assert!(all.contains("couldn't reach this source") && all.contains("Try again"), "{all}");
         assert!(!all.contains("502") && !all.contains("bad gateway"), "no status code on the page:\n{all}");
-        assert!(rows[3].contains("• no answer"), "{}", rows[3]);
+        assert!(!all.contains("no answer"), "the failure line alone, no state line:\n{all}");
         assert_no_counts(&rows);
         gui.pending.clear();
         let retry = at(&rows, "Try again");
@@ -3267,16 +3420,15 @@ mod tests {
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("Nothing new in your library sounds like these songs."), "{all}");
-        assert!(rows[3].contains("• nothing new"), "{}", rows[3]);
+        assert!(!all.contains("nothing new"), "the sentence alone, no state line:\n{all}");
         assert_no_counts(&rows);
         assert!(!all.contains("Include songs"), "the line alone, no way to widen the filter:\n{all}");
-        // A connected server answering nothing: one quiet line, and the
-        // state line claims nothing streams (clause 41).
+        // A connected server answering nothing: one quiet line.
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("Nothing from your connected servers right now."), "{all}");
-        assert!(rows[3].contains("• nothing new") && !rows[3].contains("streams"), "{}", rows[3]);
+        assert!(!all.contains("nothing new") && !all.contains("streams"), "{all}");
         assert_no_counts(&rows);
         // No connected servers at all: no tab.
         gui.act(Act::Disc(DiscAct::Again));
@@ -3287,7 +3439,7 @@ mod tests {
             serde_json::from_value(json!({ "seedSource": "history", "peers": { "peers": [], "searched": { "peers": 0 } } })).unwrap(),
         );
         let rows = draw(&mut gui);
-        assert!(!rows[5].contains("Connected servers"), "nothing connected, no tab:\n{}", rows[5]);
+        assert!(!rows[4].contains("Connected servers"), "nothing connected, no tab:\n{}", rows[4]);
         assert_eq!(gui.app.taste.tab, TasteTab::Library);
     }
 
@@ -3377,7 +3529,8 @@ mod tests {
         let mut gui = session_gui_with(config);
         key(&mut gui, KeyCode::Char('G'));
         assert_eq!(main_body(&gui).window, Some(7));
-        assert!(draw(&mut gui)[2].contains("Last 7 days ▾"), "shown before any answer");
+        // In the slot of the widest window, so choosing one moves nothing.
+        assert!(draw(&mut gui)[2].contains("Last 7 days  ▾  more options"), "shown before any answer");
         // A number not among the four is no memory.
         let mut config = Config::default();
         config.gui.discover_window = Some(14);
@@ -3389,10 +3542,12 @@ mod tests {
     #[test]
     fn an_album_row_opens_in_the_albums_room() {
         let _en = english();
-        let mut gui = answered_gui();
-        gui.ui.pointer = Some(Position { x: 30, y: 11 });
-        draw_sized(&mut gui, 100, 24);
-        assert_eq!(gui.ui.hit(Position { x: 30, y: 11 }), Some(Act::Disc(DiscAct::Row(0, RowVerb::Open))));
+        let mut gui = card_albums_gui();
+        let row = at(&draw(&mut gui), "Night Album album");
+        let pos = Position { x: 30, y: row.y };
+        gui.ui.pointer = Some(pos);
+        draw(&mut gui);
+        assert_eq!(gui.ui.hit(pos), Some(Act::Disc(DiscAct::Row(0, RowVerb::Open))));
         gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Open)));
         assert_eq!(gui.active, super::super::ALBUMS_NAV);
         assert!(matches!(
@@ -3430,49 +3585,54 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_stands_from_twenty_content_rows_and_the_floor_keeps_the_album_rows() {
+    fn the_strip_stands_from_sixteen_content_rows_the_floor_among_them() {
         let _en = english();
         // The layout math (clause 49): the strip's seven rows and its gap
         // stand where the table keeps three rows under them — the verbs
-        // line, the table's header and rule between, no bottom row.
+        // line, the table's header and rule between, no bottom row — with
+        // the header and the tabs above, and their blanks as the height
+        // allows: neither at 16, the header's at 17, both from 18.
         let content = |height: u16| Rect { x: 17, y: 2, width: 80, height };
-        assert_eq!(layout(content(19), false, true).strip_y, None, "19 rows: the table would keep two");
-        let twenty = layout(content(20), false, true);
-        assert_eq!((twenty.strip_y, twenty.verbs_y, twenty.table_y), (Some(8), 16, 17), "{twenty:?}");
-        assert_eq!(content(20).bottom() - (twenty.table_y + 2), 3, "three rows under the strip");
-        assert_eq!(layout(content(20), false, false).strip_y, None, "no albums, no strip");
-        // The card comes first: its whole height and the strip want 28.
-        assert_eq!(layout(content(27), true, true).strip_y, None);
-        assert!(layout(content(28), true, true).strip_y.is_some());
+        assert_eq!(layout(content(15), false, true).strip_y, None, "15 rows: the table would keep two");
+        for (height, strip_y, verbs_y) in [(16u16, 4u16, 12u16), (17, 5, 13), (18, 6, 14), (22, 6, 14)] {
+            let lay = layout(content(height), false, true);
+            assert_eq!((lay.strip_y, lay.verbs_y, lay.table_y), (Some(strip_y), verbs_y, verbs_y + 1), "{height}: {lay:?}");
+            let under = content(height).bottom() - (lay.table_y + 2);
+            assert_eq!(under, if height == 22 { 7 } else { 3 }, "{height}: rows under the strip");
+        }
+        assert_eq!(layout(content(16), false, false).strip_y, None, "no albums, no strip");
+        // The card comes first: its whole height and the strip want 26.
+        assert_eq!(layout(content(25), true, true).strip_y, None);
+        assert!(layout(content(26), true, true).strip_y.is_some());
         // 100×30 with the footer on (22 rows): the strip, the verbs line
-        // under it, five rows under the table's header and rule — the
+        // under it, seven rows under the table's header and rule — the
         // room's last row is a row (no bottom row).
         let mut gui = answered_gui();
         gui.config.gui.key_hints = true;
         gui.ui.key_hints = true;
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(room(&rows, 8).starts_with("╭──────────╮") && room(&rows, 13).starts_with("Night Album"), "{all}");
-        assert!(room(&rows, 16).starts_with("▸ play · + queue all"), "{all}");
-        assert!(rows[17].contains("TRACK") && rows[19].contains("Aurora"), "{all}");
+        assert!(room(&rows, 6).starts_with("╭──────────╮") && room(&rows, 11).starts_with("Night Album"), "{all}");
+        assert!(room(&rows, 14).starts_with("▸ play · + queue all"), "{all}");
+        assert!(rows[15].contains("TRACK") && rows[17].contains("Aurora"), "{all}");
         assert!(!rows[23].contains("play"), "no bottom row:\n{all}");
-        // The floor, footer on and off: the album stays a row, no strip.
-        for footer in [false, true] {
+        // The floor, footer off (17 rows) and on (16): the strip stands, the
+        // album off the table, three songs under the rule.
+        for (footer, tabs) in [(false, 4usize), (true, 3)] {
             gui.config.gui.key_hints = footer;
             gui.ui.key_hints = footer;
             let rows = draw_sized(&mut gui, 100, 24);
             let all = rows.join("\n");
-            assert!(room(&rows, 8).starts_with("▸ play · + queue all"), "{footer}: the verbs line over the table:\n{all}");
-            assert!(rows[11].contains("Night Album album") && rows[12].contains("Aurora"), "{footer}:\n{all}");
-            let room_rows: String = (2..18).map(|y| room(&rows, y)).collect();
-            assert!(!room_rows.contains('♪') && !room_rows.contains('╭'), "{footer}: no tile at the floor:\n{all}");
+            assert!(room(&rows, tabs).contains(" Library "), "{footer}: the tabs:\n{all}");
+            assert!(room(&rows, tabs + 1).starts_with("╭──────────╮"), "{footer}: the strip right under them:\n{all}");
+            assert!(room(&rows, tabs + 6).starts_with("Night Album"), "{footer}: the tile's title:\n{all}");
+            assert!(room(&rows, tabs + 9).starts_with("▸ play · + queue all"), "{footer}: the verbs line over the table:\n{all}");
+            assert!(room(&rows, tabs + 10).contains("TRACK") && room(&rows, tabs + 12).contains("Aurora"), "{footer}:\n{all}");
+            assert!(room(&rows, tabs + 14).contains("Cirrus") && !all.contains("Delta"), "{footer}: three songs:\n{all}");
+            assert!(!all.contains("Night Album album"), "{footer}: no album row:\n{all}");
         }
         // The card at 100×30 keeps the table's rows: no strip under it.
-        let mut gui = session_gui();
-        key(&mut gui, KeyCode::Char('G'));
-        let mut answer = fallback_answer();
-        answer.library.as_mut().unwrap().albums = main_answer().library.unwrap().albums;
-        land(&mut gui, TastePart::Main, answer);
+        let mut gui = card_albums_gui();
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("Night Album album") && !all.contains('♪'), "{all}");
     }
@@ -3485,29 +3645,29 @@ mod tests {
         let all = rows.join("\n");
         // Best match first; six whole tiles in the room's 80 cells, the
         // seventh cut at the right edge — the cut says there is more.
-        assert!(room(&rows, 13).starts_with("Album 0      Album 1"), "{all}");
-        assert!(room(&rows, 13).trim_end().ends_with("Album 5      A…"), "the cut tile:\n{all}");
-        assert!(room(&rows, 14).trim_end().ends_with("Band 5       B…"), "{all}");
+        assert!(room(&rows, 11).starts_with("Album 0      Album 1"), "{all}");
+        assert!(room(&rows, 11).trim_end().ends_with("Album 5      A…"), "the cut tile:\n{all}");
+        assert!(room(&rows, 12).trim_end().ends_with("Band 5       B…"), "{all}");
         // Covers as the mosaic here (no pixels under TestBackend), the note
         // tile where an album has no art; the cut cover is cut, not squeezed.
-        assert!(room(&rows, 10).starts_with("▀▀▀▀▀▀▀▀▀▀▀▀ │    ♪     │ ▀▀▀▀▀▀▀▀▀▀▀▀"), "{all}");
-        assert_eq!(room(&rows, 10).trim_end().chars().rev().take(3).collect::<String>(), "▀▀ ", "{all}");
+        assert!(room(&rows, 8).starts_with("▀▀▀▀▀▀▀▀▀▀▀▀ │    ♪     │ ▀▀▀▀▀▀▀▀▀▀▀▀"), "{all}");
+        assert_eq!(room(&rows, 8).trim_end().chars().rev().take(3).collect::<String>(), "▀▀ ", "{all}");
         // The wheel over the strip: one tile a notch, whatever the notch,
         // never past the last whole view; the table stays.
-        gui.wheel(Position { x: 40, y: 10 }, 1);
+        gui.wheel(Position { x: 40, y: 8 }, 1);
         assert_eq!(gui.discover.strip.first, 1);
-        gui.wheel(Position { x: 40, y: 13 }, 3);
+        gui.wheel(Position { x: 40, y: 11 }, 3);
         assert_eq!(gui.discover.strip.first, 2);
-        gui.wheel(Position { x: 40, y: 10 }, 1);
+        gui.wheel(Position { x: 40, y: 8 }, 1);
         assert_eq!(gui.discover.strip.first, 2, "eight tiles, six whole: two is the end");
         let rows = draw(&mut gui);
-        assert!(room(&rows, 13).starts_with("Album 2") && room(&rows, 13).trim_end().ends_with("Album 7"), "{}", rows.join("\n"));
-        assert!(!rows[13].contains('…'), "the end: nothing cut");
-        gui.wheel(Position { x: 40, y: 10 }, -1);
+        assert!(room(&rows, 11).starts_with("Album 2") && room(&rows, 11).trim_end().ends_with("Album 7"), "{}", rows.join("\n"));
+        assert!(!rows[11].contains('…'), "the end: nothing cut");
+        gui.wheel(Position { x: 40, y: 8 }, -1);
         assert_eq!(gui.discover.strip.first, 1);
         assert_eq!((gui.discover.view.scroll, gui.discover.cursor, gui.discover.strip.on), (0, None, false), "the wheel lights nothing");
         // The wheel over the table scrolls the table, not the strip.
-        gui.wheel(Position { x: 40, y: 19 }, 1);
+        gui.wheel(Position { x: 40, y: 17 }, 1);
         assert_eq!(gui.discover.strip.first, 1);
     }
 
@@ -3522,14 +3682,14 @@ mod tests {
             let rows = draw_sized(&mut gui, width, 30);
             let all = rows.join("\n");
             assert_eq!(gui.discover.content.width, width - 20);
-            let line = room(&rows, 13);
+            let line = room(&rows, 11);
             assert!(line.trim_end().ends_with("Album 5      Album…"), "{width}: the cut tile:\n{all}");
             assert_eq!(super::strip_view(width - 20, 8, 0), (6, 6), "{width}");
             // At the end nothing follows: seven whole tiles, nothing cut.
             gui.discover.strip.first = 9;
             let rows = draw_sized(&mut gui, width, 30);
             assert_eq!(gui.discover.strip.first, 1, "{width}: clamped to the last whole view");
-            let line = room(&rows, 13);
+            let line = room(&rows, 11);
             assert!(line.starts_with("Album 1") && line.trim_end().ends_with("Album 7"), "{width}:\n{}", rows.join("\n"));
             assert!(!line.contains('…'), "{width}: the end, nothing cut");
         }
@@ -3559,7 +3719,7 @@ mod tests {
         assert_eq!((gui.discover.strip.cursor, gui.discover.strip.first), (6, 4), "{}", rows.join("\n"));
         let (whole, _) = super::strip_view(gui.discover.content.width, 8, 4);
         assert!(6 < 4 + whole, "the lit tile is whole in view");
-        assert!(room(&rows, 13).contains("Album 6"), "{}", rows.join("\n"));
+        assert!(room(&rows, 11).contains("Album 6"), "{}", rows.join("\n"));
         // Enter acts on the album the user sees lit.
         gui.pending.clear();
         key(&mut gui, KeyCode::Char('a'));
@@ -3569,31 +3729,37 @@ mod tests {
     #[test]
     fn the_hand_keeps_its_row_across_the_height_gate() {
         let _en = english();
-        let mut gui = answered_gui();
-        draw(&mut gui);
-        // A song, lit at 100×30 (the strip holds the album): the floor puts
-        // the album row back above it, and the hand stays on the song.
+        // The gate bites under the fallback card since 2026-10-16 (the strip
+        // stands at the floor otherwise): with the card the strip wants 26
+        // content rows — 100×34 has 27, 100×30 23.
+        let mut gui = card_albums_gui();
+        draw_sized(&mut gui, 100, 34);
+        // A song, lit where the strip holds the album: under it the album
+        // row comes back above it, and the hand stays on the song.
         key(&mut gui, KeyCode::Down);
+        assert!(gui.discover.strip.on, "the strip stands under the card at 100×34");
         key(&mut gui, KeyCode::Down);
         assert_eq!(gui.discover.cursor, Some(0));
-        draw_sized(&mut gui, 100, 24);
+        draw(&mut gui);
         let held = gui.discover.cursor.map(|c| super::rows(&gui)[c]);
         assert_eq!(held, Some(Line::Song(0)), "Aurora still");
         assert!(gui.discover.view.held);
-        draw(&mut gui);
+        draw_sized(&mut gui, 100, 34);
         assert_eq!(gui.discover.cursor, Some(0), "and back");
         assert_eq!(super::rows(&gui)[0], Line::Song(0));
-        // The album row at the floor becomes its tile where the strip stands,
-        // and its row again at the floor.
+        // The album row becomes its tile where the strip stands, and its row
+        // again where it does not.
         key(&mut gui, KeyCode::Esc);
-        draw_sized(&mut gui, 100, 24);
+        draw(&mut gui);
         key(&mut gui, KeyCode::Down);
         assert_eq!(gui.discover.cursor.map(|c| super::rows(&gui)[c]), Some(Line::Album(0)));
-        draw(&mut gui);
+        draw_sized(&mut gui, 100, 34);
         assert_eq!((gui.discover.strip.on, gui.discover.strip.cursor, gui.discover.cursor), (true, 0, None));
-        let buffer = draw_buffer(&mut gui);
-        assert_eq!(buffer[(18, 13)].bg, th().accent, "the tile wears the slab");
-        draw_sized(&mut gui, 100, 24);
+        let rows = draw_sized(&mut gui, 100, 34);
+        let title = at(&rows, "Night Album");
+        let buffer = draw_buffer_sized(&mut gui, 100, 34);
+        assert_eq!(buffer[(title.x + 1, title.y)].bg, th().accent, "the tile wears the slab");
+        draw(&mut gui);
         assert!(!gui.discover.strip.on);
         assert_eq!(gui.discover.cursor.map(|c| super::rows(&gui)[c]), Some(Line::Album(0)));
         assert!(gui.discover.view.held);
@@ -3609,7 +3775,7 @@ mod tests {
         land(&mut gui, TastePart::Main, answer);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(room(&rows, 13).starts_with("Night Album"), "the strip holds the album:\n{all}");
+        assert!(room(&rows, 11).starts_with("Night Album"), "the strip holds the album:\n{all}");
         assert!(!all.contains("TRACK") && !all.contains("LENGTH"), "no table header under it:\n{all}");
         // ↓ and ↑ find the strip; nothing below it to walk to.
         key(&mut gui, KeyCode::Down);
@@ -3648,9 +3814,9 @@ mod tests {
         assert_eq!((gui.discover.strip.cursor, gui.discover.strip.first), (6, 1), "scrolled to keep the tile whole");
         let buffer = draw_buffer(&mut gui);
         let lit = 17 + 5 * 13;
-        assert_eq!(buffer[(lit + 1, 13)].bg, th().accent, "the slab on the hand's tile");
-        assert_eq!(buffer[(lit, 13)].symbol(), "A", "Album 6, whole at the fifth place");
-        assert_ne!(buffer[(lit - 12, 13)].bg, th().accent, "one tile lit");
+        assert_eq!(buffer[(lit + 1, 11)].bg, th().accent, "the slab on the hand's tile");
+        assert_eq!(buffer[(lit, 11)].symbol(), "A", "Album 6, whole at the fifth place");
+        assert_ne!(buffer[(lit - 12, 11)].bg, th().accent, "one tile lit");
         key(&mut gui, KeyCode::Right);
         key(&mut gui, KeyCode::Right);
         assert_eq!((gui.discover.strip.cursor, gui.discover.strip.first), (7, 2), "the last tile stops the hand");
@@ -3675,7 +3841,7 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let buffer = draw_buffer(&mut gui);
-        assert!((17..29).all(|x| buffer[(x, 13)].bg != th().accent), "nothing lit on arrival");
+        assert!((17..29).all(|x| buffer[(x, 11)].bg != th().accent), "nothing lit on arrival");
         assert!(super::tips(&gui).starts_with("↓ pick an album · ← → tabs"), "{}", super::tips(&gui));
         key(&mut gui, KeyCode::Down);
         assert!(gui.discover.strip.on && gui.discover.cursor.is_none(), "↓ from rest: the strip, the top");
@@ -3706,8 +3872,20 @@ mod tests {
         // A click stows the hand (the list-cursor law).
         gui.act(Act::Disc(DiscAct::Tile(0, RowVerb::Queue)));
         assert!(!gui.discover.strip.on);
-        // At the floor the album is a row again, the first stop of ↓.
-        draw_sized(&mut gui, 100, 24);
+        // At the floor the strip stands too (2026-10-16), the first stop of
+        // ↓, footer on or off.
+        for footer in [false, true] {
+            gui.config.gui.key_hints = footer;
+            gui.ui.key_hints = footer;
+            key(&mut gui, KeyCode::Esc);
+            draw_sized(&mut gui, 100, 24);
+            key(&mut gui, KeyCode::Down);
+            assert_eq!((gui.discover.strip.on, gui.discover.cursor), (true, None), "{footer}");
+        }
+        // Under the card, where no strip stands, the album is a row, the
+        // first stop of ↓.
+        let mut gui = card_albums_gui();
+        draw(&mut gui);
         key(&mut gui, KeyCode::Down);
         assert_eq!((gui.discover.strip.on, gui.discover.cursor), (false, Some(0)));
         assert_eq!(super::tips(&gui), "Enter open the album · a queue · ← → tabs · Esc done");
@@ -3720,16 +3898,16 @@ mod tests {
         draw(&mut gui);
         // Hover brightens the title BOLD and shows the one verb at the
         // tile's corner; it never selects (clause 48).
-        gui.ui.pointer = Some(Position { x: 20, y: 10 });
+        gui.ui.pointer = Some(Position { x: 20, y: 8 });
         let buffer = draw_buffer(&mut gui);
-        let title = &buffer[(17, 13)];
+        let title = &buffer[(17, 11)];
         assert!(title.modifier.contains(ratatui::style::Modifier::BOLD) && title.fg == th().bright, "{title:?}");
-        let corner: String = (26..29).map(|x| buffer[(x, 13)].symbol()).collect();
+        let corner: String = (26..29).map(|x| buffer[(x, 11)].symbol()).collect();
         assert_eq!(corner, "[+]");
-        assert_eq!(buffer[(17 + 7, 13)].symbol(), "…", "the title gives its tail to the verb");
+        assert_eq!(buffer[(17 + 7, 11)].symbol(), "…", "the title gives its tail to the verb");
         assert!(!gui.discover.strip.on, "hover never selects");
-        assert_eq!(gui.ui.hit(Position { x: 20, y: 10 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Open))));
-        assert_eq!(gui.ui.hit(Position { x: 27, y: 13 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Queue))));
+        assert_eq!(gui.ui.hit(Position { x: 20, y: 8 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Open))));
+        assert_eq!(gui.ui.hit(Position { x: 27, y: 11 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Queue))));
         // [+] queues the album by name, the row's way (clause 61).
         gui.pending.clear();
         gui.act(Act::Disc(DiscAct::Tile(0, RowVerb::Queue)));
@@ -3776,7 +3954,7 @@ mod tests {
         let mut gui = answered_gui();
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         draw(&mut gui);
-        assert_eq!(gui.ui.hit(Position { x: 20, y: 10 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Open))));
+        assert_eq!(gui.ui.hit(Position { x: 20, y: 8 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Open))));
         gui.pending.clear();
         gui.act(Act::Disc(DiscAct::Tile(0, RowVerb::Open)));
         let ask = gui
@@ -3900,12 +4078,12 @@ mod tests {
                 }
             };
             assert!(gui.discover.slots.get(&cut).is_some_and(|s| s.key.is_none()), "{protocol:?}: the cut tile encoded nothing");
-            assert!(!room(&rows, 10).starts_with("▀▀▀"), "{protocol:?}: the first cover is a picture:\n{}", rows[10]);
-            assert!(room(&rows, 10).trim_end().ends_with("▀▀"), "{protocol:?}: the cut cover is the mosaic:\n{}", rows[10]);
+            assert!(!room(&rows, 8).starts_with("▀▀▀"), "{protocol:?}: the first cover is a picture:\n{}", rows[8]);
+            assert!(room(&rows, 8).trim_end().ends_with("▀▀"), "{protocol:?}: the cut cover is the mosaic:\n{}", rows[8]);
             // A scroll moves each cover with its tile and encodes nothing new
             // for a cover already encoded at this size.
             let before: u32 = gui.discover.slots.values().map(|s| s.encodes()).sum();
-            gui.wheel(Position { x: 40, y: 10 }, 1);
+            gui.wheel(Position { x: 40, y: 8 }, 1);
             draw(&mut gui);
             let after: u32 = gui.discover.slots.values().map(|s| s.encodes()).sum();
             assert!(after <= before + 1, "{protocol:?}: only the newly whole cover may encode ({before} → {after})");
@@ -3949,6 +4127,273 @@ mod tests {
         assert!(all.contains(":Similar") && !all.contains(":Discover"), "the per-song lens is Similar now:\n{all}");
     }
 
+    // ── The header's controls (2026-10-16) ──────────────────────────────
+
+    /// The header row's own cells, as the last frame laid the room out —
+    /// the queue panel's cells left out — its trailing blanks trimmed.
+    fn head_of(gui: &Gui, rows: &[String]) -> String {
+        let content = gui.discover.content;
+        rows[content.y as usize].chars().skip(content.x as usize).take(content.width as usize).collect::<String>().trim_end().to_string()
+    }
+
+    #[test]
+    fn the_header_controls_wear_the_kit_and_act_by_click_and_by_key() {
+        let _en = english();
+        let mut gui = answered_gui();
+        let rows = draw(&mut gui);
+        let (window, more, refresh) = (at(&rows, "Last 30 days ▾"), at(&rows, "more options"), at(&rows, "↻ new seeds"));
+        assert!(window.y == 2 && more.y == 2 && refresh.y == 2, "all three on the header:\n{}", rows[2]);
+        assert!(window.x < more.x && more.x < refresh.x, "window · more options · new seeds");
+        // The kit: the refresh the row's one primary (the accent), more
+        // options a DIM text button, the window in the row's own weight;
+        // hover brightens, and the tooltips name the keys.
+        let buffer = draw_buffer(&mut gui);
+        assert_eq!(buffer[(refresh.x, 2)].fg, th().accent, "the refresh is the primary");
+        assert_eq!(buffer[(more.x, 2)].fg, th().dim, "more options is a text button");
+        for (pos, cells) in [(more, 12u16), (refresh, 11)] {
+            gui.ui.pointer = Some(Position { x: pos.x + cells - 1, y: 2 });
+            let buffer = draw_buffer(&mut gui);
+            let cell = &buffer[(pos.x, 2)];
+            assert!(cell.fg == th().bright && cell.modifier.contains(ratatui::style::Modifier::BOLD), "hover brightens: {cell:?}");
+        }
+        gui.ui.pointer = None;
+        gui.config.gui.key_hints = true;
+        gui.ui.key_hints = true;
+        draw(&mut gui);
+        let tip = |gui: &Gui, pos: Position| {
+            gui.ui.tips.iter().rev().find(|(rect, _)| rect.contains(pos)).map(|(_, text)| text.clone()).unwrap_or_default()
+        };
+        assert!(tip(&gui, more).ends_with("— e") && tip(&gui, refresh).ends_with("— G") && tip(&gui, window).ends_with("— w"));
+        // More options opens the seeds modal, by click and by `e`; its
+        // flows are the modal's (clause 13): nothing asked while it is up,
+        // a close with nothing changed asks nothing.
+        for by_key in [false, true] {
+            gui.pending.clear();
+            if by_key {
+                key(&mut gui, KeyCode::Char('e'));
+            } else {
+                assert_eq!(gui.ui.hit(more), Some(Act::Disc(DiscAct::Seeds)));
+                gui.act(Act::Disc(DiscAct::Seeds));
+            }
+            let all = draw(&mut gui).join("\n");
+            assert!(all.contains("Based on") && all.contains("[✓] Manor · ALM") && all.contains("Pin a song…"), "{by_key}:\n{all}");
+            assert!(gui.pending.is_empty(), "{by_key}: {:?}", gui.pending);
+            key(&mut gui, KeyCode::Esc);
+            assert!(gui.discover.seeds.is_none() && gui.pending.is_empty(), "{by_key}: {:?}", gui.pending);
+        }
+        // The window's list hangs from its control, by click and by `w`.
+        draw(&mut gui);
+        assert_eq!(gui.ui.hit(window), Some(Act::Disc(DiscAct::Window)));
+        gui.act(Act::Disc(DiscAct::Window));
+        assert!(draw(&mut gui).join("\n").contains("All time"));
+        key(&mut gui, KeyCode::Char('w'));
+        assert!(gui.discover.menu.is_none());
+        // A visit with a window, a pin and a drop: new seeds asks again with
+        // all three kept, by click as `G` does — and a fresh visit lets the
+        // pin and the drop go.
+        gui.act(Act::Disc(DiscAct::WindowPick(90)));
+        key(&mut gui, KeyCode::Char('e'));
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Char(' '));
+        key(&mut gui, KeyCode::Esc);
+        let mut answer = main_answer();
+        answer.window = Some(90);
+        land_main(&mut gui, answer);
+        land(&mut gui, TastePart::Peers, peers_answer());
+        gui.app.taste.pins.push(crate::tui::app::taste::TastePin {
+            track: crate::api::types::Track { filepath: "music/pin.mp3".into(), metadata: Default::default() },
+        });
+        let mut bodies = Vec::new();
+        for by_key in [false, true] {
+            gui.pending.clear();
+            if by_key {
+                key(&mut gui, KeyCode::Char('G'));
+            } else {
+                let rows = draw(&mut gui);
+                let refresh = at(&rows, "↻ new seeds");
+                assert_eq!(gui.ui.hit(refresh), Some(Act::Disc(DiscAct::NewSeeds)));
+                gui.act(Act::Disc(DiscAct::NewSeeds));
+            }
+            assert_eq!(gui.active, DISCOVER_NAV);
+            assert_eq!(asks(&gui).len(), 1, "{by_key}: one ask, the library's: {:?}", gui.pending);
+            let body = main_body(&gui);
+            assert_eq!((body.window, body.exclude.clone()), (Some(90), vec!["h1".to_string()]), "{by_key}: the window and the drop kept");
+            assert_eq!(body.pin, vec!["music/pin.mp3".to_string()], "{by_key}: the pin kept");
+            bodies.push(body);
+        }
+        assert_eq!(bodies[0], bodies[1], "the click asks what G asks");
+        // The answer stands while the new one is out; the refresh says so.
+        let rows = draw(&mut gui);
+        assert!(rows[2].trim_end().ends_with("↻ asking…") && rows.join("\n").contains("Aurora"), "{}", rows.join("\n"));
+        // Where the refresh's words dropped (the queue's 47 cells) the ask
+        // still shows in a mark, never the colour alone, in the cells the
+        // glyph keeps for it: nothing moves.
+        gui.queue_open = true;
+        let rows = draw(&mut gui);
+        let asking = head_of(&gui, &rows);
+        assert!(asking.ends_with("more options  ↻ …"), "{asking}");
+        gui.queue_open = false;
+        gui.pending.clear();
+        gui.act(Act::Nav(FILES_NAV));
+        gui.act(Act::Nav(DISCOVER_NAV));
+        let body = main_body(&gui);
+        assert!(body.exclude.is_empty() && body.pin.is_empty() && body.window == Some(90), "{body:?}");
+    }
+
+    #[test]
+    fn the_header_drops_the_refreshs_words_then_shortens_more_options_then_the_name() {
+        let _en = english();
+        // (columns, queue open, what the header ends with, the tabs row's
+        // tagline shown)
+        for (width, queue, ends, tagline) in [
+            (120u16, false, "Last 30 days ▾  more options  ↻ new seeds", true),
+            (100, false, "Last 30 days ▾  more options  ↻ new seeds", true),
+            (100, true, "Last 30 days ▾  more options  ↻", false),
+        ] {
+            for footer in [false, true] {
+                for tab in [TasteTab::Library, TasteTab::Servers] {
+                    let mut gui = answered_gui();
+                    gui.queue_open = queue;
+                    gui.config.gui.key_hints = footer;
+                    gui.ui.key_hints = footer;
+                    gui.act(Act::Disc(DiscAct::Tab(tab)));
+                    for height in [30u16, 24] {
+                        let rows = draw_sized(&mut gui, width, height);
+                        let head = &head_of(&gui, &rows);
+                        assert!(head.starts_with("Discover ") && head.ends_with(ends), "{width}/{queue}/{footer}/{tab:?}/{height}:\n{head}");
+                        assert!(!head.contains("based on") && !head.contains('…'), "the controls alone, nothing clipped:\n{head}");
+                        let tabs_y = layout(gui.discover.content, false, true).tabs_y as usize;
+                        let tabs = head_of_row(&gui, &rows, tabs_y);
+                        assert_eq!(tabs.ends_with("based on songs you finished"), tagline, "{width}/{queue}/{height}:\n{tabs}");
+                        assert!(!tabs.contains("based on songs you fin") || tagline, "whole or not at all:\n{tabs}");
+                    }
+                }
+            }
+        }
+        // The legacy console: no glyph, so the refresh keeps its words and
+        // the next step shortens more options at 47 cells.
+        {
+            let _legacy = crate::kit::theme::legacy_glyphs_here();
+            let mut gui = answered_gui();
+            gui.queue_open = true;
+            let rows = draw(&mut gui);
+            assert!(head_of(&gui, &rows).ends_with("Last 30 days v  options  new seeds"), "{}", rows[2]);
+            assert_eq!(gui.ui.hit(at(&rows, "new seeds")), Some(Act::Disc(DiscAct::NewSeeds)));
+        }
+        drop(_en);
+        // Every locale at the queue's 47 cells, both glyph tiers, a widened
+        // answer too: the header's own geometry (`head_plan`, which the
+        // drawing follows), read in each language by `t!`'s locale
+        // argument — never by switching the process-wide locale, which the
+        // tests beside this one read: the three controls stand in order,
+        // two cells apart, inside the room, two cells clear of the room's
+        // name where it stands — the name gives way last rather than be
+        // drawn over.
+        // No lock: nothing here reads the process-wide locale's words (a
+        // draw only lays the room out).
+        let guis = {
+            let mut guis = [answered_gui(), widened_gui()];
+            for gui in &mut guis {
+                gui.queue_open = true;
+                draw(gui);
+            }
+            guis
+        };
+        let mut named_out = Vec::new();
+        for legacy in [false, true] {
+            let _tier = legacy.then(crate::kit::theme::legacy_glyphs_here);
+            let glyph = super::refresh_glyph();
+            assert_eq!(glyph.is_none(), legacy);
+            for (gui, widened) in guis.iter().zip([false, true]) {
+                let content = gui.discover.content;
+                assert_eq!(content.width, 47);
+                for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+                    let words = super::HeadWords::of(&gui.app, code);
+                    let plan = super::head_plan(&words, content, glyph);
+                    let what = format!("{code}/legacy {legacy}/widened {widened}: {plan:?}");
+                    let (wx, ww) = plan.window;
+                    let (mx, mw) = plan.more;
+                    let (rx, rw) = plan.refresh;
+                    let name_end = content.x + crate::kit::width(&words.name) as u16;
+                    assert!(wx >= content.x && (!plan.step.name || wx >= name_end + 2), "{what}");
+                    assert!(wx + ww + 2 <= mx && mx + mw + 2 <= rx && rx + rw <= content.right(), "{what}");
+                    if !plan.step.name {
+                        named_out.push(format!("{code}/{legacy}/{widened}"));
+                    }
+                    if code == "de" && !legacy && !widened {
+                        assert!(!plan.step.long, "de shortens more options at 47: {what}");
+                    }
+                }
+            }
+        }
+        // The name gives way only on the legacy console, where no glyph
+        // spares the refresh's words.
+        assert!(named_out.iter().all(|w| w.contains("/true/")), "{named_out:?}");
+        // The drawing follows the plan (`draw_header` places each control
+        // at its x): the English renders above, and the legacy console's
+        // at 47 cells, pin it.
+    }
+
+    /// The row `y`'s own cells in the room, trailing blanks trimmed.
+    fn head_of_row(gui: &Gui, rows: &[String], y: usize) -> String {
+        let content = gui.discover.content;
+        rows[y].chars().skip(content.x as usize).take(content.width as usize).collect::<String>().trim_end().to_string()
+    }
+
+    /// The answer the server widened from 30 days to all time.
+    fn widened_gui() -> Gui {
+        let mut gui = session_gui();
+        key(&mut gui, KeyCode::Char('G'));
+        let mut answer = main_answer();
+        answer.window = Some(0);
+        answer.widened_from = Some(30);
+        land(&mut gui, TastePart::Main, answer);
+        land(&mut gui, TastePart::Peers, peers_answer());
+        gui
+    }
+
+    #[test]
+    fn a_widened_answer_says_so_at_the_design_size_and_at_the_queues_width() {
+        let _en = english();
+        let mut gui = widened_gui();
+        for (width, height) in [(100u16, 30u16), (100, 24)] {
+            let rows = draw_sized(&mut gui, width, height);
+            let head = head_of(&gui, &rows);
+            // The dropdown names the window asked and where it went
+            // (clause 15): never "Last 30 days" alone over an all-time
+            // answer.
+            assert!(head.ends_with("Last 30 days → All time ▾  more options  ↻ new seeds"), "{width}×{height}:\n{head}");
+            let tabs = head_of_row(&gui, &rows, 4);
+            assert!(tabs.ends_with("based on songs you finished"), "the tagline, whole:\n{tabs}");
+        }
+        // Its tooltip says the fact in full, with its key.
+        gui.config.gui.key_hints = true;
+        gui.ui.key_hints = true;
+        let rows = draw(&mut gui);
+        let window = at(&rows, "Last 30 days →");
+        let tip = gui.ui.tips.iter().rev().find(|(rect, _)| rect.contains(window)).map(|(_, text)| text.clone()).unwrap_or_default();
+        assert_eq!(tip, "nothing in the last 30 days — all time instead · The plays your seeds come from — w");
+        gui.config.gui.key_hints = false;
+        gui.ui.key_hints = false;
+        // Wide enough, the tagline carries the fact too.
+        let rows = draw_sized(&mut gui, 128, 30);
+        let tabs = head_of_row(&gui, &rows, 4);
+        assert!(tabs.ends_with("based on songs you finished · nothing in the last 30 days — all time instead"), "{tabs}");
+        // At the queue's 47 cells the mark gives way to the window the
+        // answer came from — still never "Last 30 days" — while the name
+        // stands.
+        gui.queue_open = true;
+        let rows = draw(&mut gui);
+        let head = head_of(&gui, &rows);
+        assert!(head.starts_with("Discover ") && head.ends_with("All time     ▾  options  ↻"), "{head}");
+        assert!(!head.contains("30 days"), "{head}");
+        // A new choice is out: the dropdown shows it, no mark.
+        gui.queue_open = false;
+        gui.act(Act::Disc(DiscAct::WindowPick(7)));
+        let rows = draw(&mut gui);
+        assert!(head_of(&gui, &rows).contains("Last 7 days  ▾  more options"), "{}", rows[2]);
+    }
+
     // ── The verbs line ──────────────────────────────────────────────────
 
     /// Click the verb whose label starts with `label` on the frame `rows`,
@@ -3973,30 +4418,32 @@ mod tests {
             let mut gui = answered_gui();
             gui.config.gui.key_hints = footer;
             gui.ui.key_hints = footer;
-            // 100×30: the tabs, the seeds line, the strip, then the verbs
-            // line right over the table's header (clause 64), and the
-            // table down to the room's last row.
+            // 100×30: the tabs, the strip, then the verbs line right over the
+            // table's header (clause 64), and the table down to the room's
+            // last row. No state line, no seeds line (2026-10-16).
             let rows = draw(&mut gui);
             let all = rows.join("\n");
             let last = if footer { 23 } else { 24 };
-            assert!(room(&rows, 5).contains(" Library ") && room(&rows, 6).starts_with("seeds"), "{footer}:\n{all}");
-            assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: 16 }, "{footer}:\n{all}");
-            assert!(room(&rows, 17).contains("TRACK"), "{footer}: the header right under it:\n{all}");
+            assert!(room(&rows, 4).contains(" Library ") && room(&rows, 5).trim().is_empty(), "{footer}:\n{all}");
+            assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: 14 }, "{footer}:\n{all}");
+            assert!(room(&rows, 15).contains("TRACK"), "{footer}: the header right under it:\n{all}");
             assert_eq!(all.matches("queue all").count(), 1, "{footer}: no bottom row:\n{all}");
-            // Four songs under the strip — five or six rows of room for
+            // Four songs under the strip — seven or eight rows of room for
             // them, the room's last row among them.
-            let table = || (19..=last).map(|y| room(&rows, y)).collect::<Vec<_>>();
+            let table = || (17..=last).map(|y| room(&rows, y)).collect::<Vec<_>>();
             assert!(table()[3].contains("Delta"), "{footer}:\n{all}");
-            // 100×24: no strip; the verbs line under the seeds line's blank,
-            // the album row and the songs under the header, seven rows with
-            // the footer on and eight off, the last on the room's last row.
+            // 100×24: the strip stands, the verbs line under it, three songs
+            // under the header, the last on the room's last row.
             let rows = draw_sized(&mut gui, 100, 24);
             let all = rows.join("\n");
-            assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: 8 }, "{footer}:\n{all}");
-            assert!(room(&rows, 9).contains("TRACK") && room(&rows, 11).contains("Night Album album"), "{footer}:\n{all}");
+            let verbs = if footer { 12 } else { 13 };
+            assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: verbs }, "{footer}:\n{all}");
+            assert!(room(&rows, verbs as usize - 2).starts_with("Moon"), "{footer}: the strip above it:\n{all}");
+            assert!(room(&rows, verbs as usize + 1).contains("TRACK"), "{footer}:\n{all}");
+            assert!(room(&rows, verbs as usize + 5).contains("Cirrus"), "{footer}: the room's last row:\n{all}");
             assert_eq!(all.matches("queue all").count(), 1, "{footer}: no bottom row:\n{all}");
-            let room_rows: String = (2..18).map(|y| room(&rows, y)).collect();
-            assert!(!room_rows.contains('╭'), "{footer}: no strip at the floor:\n{all}");
+            let page: String = (2..19).map(|y| room(&rows, y)).collect::<Vec<_>>().join("\n");
+            assert!(!page.contains("Manor") && !page.contains("•") && !page.contains(" edit"), "{footer}: no seeds or state line:\n{all}");
         }
     }
 
@@ -4011,11 +4458,13 @@ mod tests {
                              "metadata": { "title": format!("Song {i:02}"), "artist": "Ray" } }))
             .collect();
         answer.library.as_mut().unwrap().tracks = serde_json::from_value(json!(tracks)).unwrap();
-        // (height, footer, the room's last row, the last song shown):
-        // 100×30 under the strip — rows 19..23 (5) with the footer, 19..24
-        // (6) without; 100×24, no strip — the album row then songs on rows
-        // 11..17 (7) with the footer, 11..18 (8) without.
-        for (height, footer, last, song) in [(30u16, true, 23usize, 5usize), (30, false, 24, 6), (24, true, 17, 6), (24, false, 18, 7)] {
+        // (height, footer, the first song row, the room's last row, the last
+        // song shown), the strip standing at every size: 100×30 — rows
+        // 17..23 (7) with the footer, 17..24 (8) without; 100×24 — 15..17
+        // (3) with the footer, 16..18 (3) without.
+        for (height, footer, first, last, song) in
+            [(30u16, true, 17usize, 23usize, 7usize), (30, false, 17, 24, 8), (24, true, 15, 17, 3), (24, false, 16, 18, 3)]
+        {
             let mut gui = session_gui();
             gui.config.gui.key_hints = footer;
             gui.ui.key_hints = footer;
@@ -4023,10 +4472,9 @@ mod tests {
             land(&mut gui, TastePart::Main, answer.clone());
             land(&mut gui, TastePart::Peers, peers_answer());
             let rows = draw_sized(&mut gui, 100, height);
-            let all = rows.join("
-");
-            let first = if height == 30 { 19 } else { 11 };
-            assert_eq!(last - first + 1, if height == 30 { song } else { song + 1 }, "{height}/{footer}: the row count");
+            let all = rows.join("\n");
+            assert_eq!(last - first + 1, song, "{height}/{footer}: the row count");
+            assert!(room(&rows, first).contains("Song 01"), "{height}/{footer}: the first song on row {first}:\n{all}");
             assert!(room(&rows, last).contains(&format!("Song {song:02}")), "{height}/{footer}: song {song} on row {last}:\n{all}");
             assert!(!all.contains(&format!("Song {:02}", song + 1)), "{height}/{footer}: nothing past the last row:\n{all}");
             assert_eq!(all.matches("queue all").count(), 1, "{height}/{footer}: no bottom row:\n{all}");
@@ -4107,7 +4555,7 @@ mod tests {
         land(&mut gui, TastePart::Main, answer);
         land(&mut gui, TastePart::Peers, peers_answer());
         let rows = draw(&mut gui);
-        assert!(super::tips(&gui).ends_with("G ask again · s save as playlist"), "{}", super::tips(&gui));
+        assert!(super::tips(&gui).ends_with("G new seeds · s save as playlist"), "{}", super::tips(&gui));
         click_verb(&mut gui, &rows, "save as playlist");
         // The sonic room's prompt, over the Discover room.
         let rows = draw(&mut gui);
@@ -4149,9 +4597,22 @@ mod tests {
         for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
             let _guard = locale(code);
             for strip in [false, true] {
-                let mut gui = if strip { strip_gui() } else { answered_gui() };
+                // Where the tab has no album no strip stands, and the rest tip
+                // is the plain one.
+                let mut gui = if strip {
+                    strip_gui()
+                } else {
+                    let mut gui = session_gui();
+                    key(&mut gui, KeyCode::Char('G'));
+                    let mut answer = main_answer();
+                    answer.library.as_mut().unwrap().albums.clear();
+                    land(&mut gui, TastePart::Main, answer);
+                    gui
+                };
                 draw_sized(&mut gui, 100, if strip { 30 } else { 24 });
                 let tips = super::tips(&gui);
+                let rest = if strip { rust_i18n::t!("gui.tips.discover_strip") } else { rust_i18n::t!("gui.tips.discover") };
+                assert!(tips.starts_with(&*rest), "{code} ({strip}): {tips}");
                 assert!(tips.ends_with(&*rust_i18n::t!("gui.tips.discover_save")), "{code}: {tips}");
                 assert!(crate::kit::width(&tips) <= 99, "{code} ({strip}): {} cells: {tips}", crate::kit::width(&tips));
             }
@@ -4178,7 +4639,7 @@ mod tests {
             gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
             let rows = draw(&mut gui);
             let all = rows.join("\n");
-            assert!(room(&rows, 16).starts_with("▸ play · + queue all · ⇄ shuffle"), "{all}");
+            assert!(room(&rows, 14).starts_with("▸ play · + queue all · ⇄ shuffle"), "{all}");
             assert!(!all.contains("save as"), "no save on this tab:\n{all}");
             if by_key {
                 key(&mut gui, KeyCode::Char('p'));
@@ -4221,9 +4682,11 @@ mod tests {
     fn dump_discover_frames() {
         let _en = english();
         let mut gui = answered_gui();
-        gui.ui.pointer = Some(Position { x: 30, y: 19 });
+        gui.ui.pointer = Some(Position { x: 30, y: 17 });
         println!("{}", draw(&mut gui).join("\n"));
         gui.ui.pointer = None;
+        // The floor, queue folded, footer off: the strip stands there now.
+        println!("{}", draw_sized(&mut gui, 100, 24).join("\n"));
         gui.queue_open = true;
         gui.config.gui.key_hints = true;
         gui.ui.key_hints = true;
@@ -4274,19 +4737,27 @@ mod tests {
 
     #[test]
     fn the_layout_keeps_a_table_row_at_the_floor() {
-        // 100×24 with the footer on: 16 content rows.
+        // 100×24 with the footer on: 16 content rows, no blank under the
+        // header or the tabs; 17 with it off, the header's blank back; both
+        // from 18 (clause 90).
         let content = Rect { x: 17, y: 2, width: 80, height: 16 };
-        let plain = layout(content, false, false);
-        assert_eq!((plain.tabs_y, plain.seeds_y, plain.verbs_y, plain.table_y), (5, 6, 8, 9));
-        assert_eq!(content.bottom() - (plain.table_y + 2), 7, "seven rows with the footer on (clause 90)");
+        for (height, tabs_y, verbs_y) in [(16u16, 3u16, 4u16), (17, 4, 5), (18, 4, 6)] {
+            let plain = layout(Rect { height, ..content }, false, false);
+            assert_eq!((plain.header_y, plain.tabs_y, plain.verbs_y, plain.table_y), (2, tabs_y, verbs_y, verbs_y + 1), "{height}");
+            assert_eq!(2 + height - (plain.table_y + 2), 11, "{height}: eleven rows without the strip");
+        }
+        // The card stands whole at the floor now: the rows the state and
+        // seeds lines gave back hold it (2026-10-16), three rows under it.
         let card = layout(content, true, false);
-        assert_eq!(card.card.map(|(r, compact)| (r.height, compact)), Some((5, true)), "the card gives up its body");
-        assert!(content.bottom() > card.table_y + 2, "the table keeps a row: {card:?}");
-        // The card stands whole from 18 rows, as it did with the bottom row.
+        assert_eq!(card.card.map(|(r, compact)| (r.y, r.height, compact)), Some((3, 7, false)), "{card:?}");
+        assert_eq!(content.bottom() - (card.table_y + 2), 3, "{card:?}");
+        // Shorter than the GUI's floor it gives up its body and blank first
+        // (the pure geometry keeps the rule): whole from 14 rows.
         let whole = |height: u16| layout(Rect { height, ..content }, true, false).card.is_some_and(|(_, compact)| !compact);
-        assert!(!whole(17) && whole(18));
-        let tall = layout(Rect { height: 23, ..content }, true, false);
-        assert_eq!(tall.card.map(|(r, compact)| (r.height, compact)), Some((7, false)));
+        assert!(!whole(13) && whole(14));
+        let short = layout(Rect { height: 13, ..content }, true, false);
+        assert_eq!(short.card.map(|(r, compact)| (r.height, compact)), Some((5, true)));
+        assert!(2 + 13 > short.table_y + 2, "the table keeps a row: {short:?}");
     }
 
     #[test]
@@ -4363,13 +4834,16 @@ mod tests {
         let _fr = locale("fr");
         let mut gui = answered_gui();
         let rows = draw(&mut gui);
-        let header = &rows[17];
+        let header = &rows[15];
         for head in ["TITRE", "ARTISTE", "ALBUM", "DURÉE"] {
             assert!(header.contains(head), "{head}:\n{header}");
         }
         assert_eq!(at(&rows, "Aurora").x, at(&rows, "TITRE").x, "the title under its heading:\n{}", rows.join("\n"));
         assert_eq!(at(&rows, "Ray").x, at(&rows, "ARTISTE").x, "the artist under its heading");
-        assert!(rows[16].contains("▸ lire · + tout en file · ⇄ aléatoire · enregistrer comme playlist…"), "the verbs line:\n{}", rows[16]);
+        assert!(rows[14].contains("▸ lire · + tout en file · ⇄ aléatoire · enregistrer comme playlist…"), "the verbs line:\n{}", rows[14]);
+        // The header's controls in French, in cells: all three with their
+        // words at 80 cells.
+        assert!(rows[2].trim_end().ends_with("30 derniers jours ▾  plus d'options  ↻ autres graines"), "{}", rows[2]);
     }
 
     #[test]
@@ -4381,9 +4855,9 @@ mod tests {
         // cells. The artist's first letter stands under the heading's first
         // cell, and the album's under アルバム's, whatever the glyph widths.
         let find = |y: u16, symbol: &str| (17..100).find(|x| buffer[(*x, y)].symbol() == symbol).expect(symbol);
-        assert_eq!(find(19, "R"), find(17, "ア"), "ARTIST in cells, not chars");
-        let album = (find(17, "ア") + 1..100).find(|x| buffer[(*x, 17)].symbol() == "ア").expect("アルバム");
-        assert_eq!(find(19, "D"), album, "ALBUM in cells, not chars");
+        assert_eq!(find(17, "R"), find(15, "ア"), "ARTIST in cells, not chars");
+        let album = (find(15, "ア") + 1..100).find(|x| buffer[(*x, 15)].symbol() == "ア").expect("アルバム");
+        assert_eq!(find(17, "D"), album, "ALBUM in cells, not chars");
     }
 
     #[test]
@@ -4423,18 +4897,18 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let _legacy = crate::kit::theme::legacy_glyphs_here();
-        gui.ui.pointer = Some(Position { x: 30, y: 19 });
+        gui.ui.pointer = Some(Position { x: 30, y: 17 });
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[2].trim_end().ends_with("Last 30 days v"), "the dropdown's caret:\n{}", rows[2]);
-        assert!(rows[19].contains("[>] [^] [+] [.]"), "the hover verbs:\n{}", rows[19]);
-        assert!(rows[16].contains("> play · + queue all · shuffle · save as playlist"), "the verbs line's glyphs:\n{}", rows[16]);
-        assert!(rows[21].contains(" - "), "the missing artist:\n{}", rows[21]);
+        assert!(rows[2].trim_end().ends_with("Last 30 days v  more options  new seeds"), "the dropdown's caret, the refresh's words alone:\n{}", rows[2]);
+        assert!(rows[17].contains("[>] [^] [+] [.]"), "the hover verbs:\n{}", rows[17]);
+        assert!(rows[14].contains("> play · + queue all · shuffle · save as playlist"), "the verbs line's glyphs:\n{}", rows[14]);
+        assert!(rows[19].contains(" - "), "the missing artist:\n{}", rows[19]);
         gui.act(Act::Disc(DiscAct::Seeds));
         let modal = draw(&mut gui).join("\n");
         assert!(modal.contains("[x] Manor"), "the checkmark's stand-in:\n{modal}");
         gui.act(Act::Disc(DiscAct::SeedsDone));
-        for glyph in ['▾', '▸', '»', '⋯', '▇', '—', '–', '✓', '♪'] {
+        for glyph in ['▾', '▸', '»', '⋯', '▇', '—', '–', '✓', '♪', '↻'] {
             assert!(!all.contains(glyph), "{glyph:?} on the legacy console:\n{all}");
         }
     }
@@ -4467,7 +4941,7 @@ mod tests {
         assert!(!super::tips(&gui).contains("played lately"), "no checkbox, no key: {}", super::tips(&gui));
         // At rest the Library tab names its save (clause 64) after the rest
         // words (no frame drawn yet: no strip).
-        assert_eq!(super::tips(&gui), "↓ pick a row · ← → tabs · w window · e seeds · G ask again · s save as playlist");
+        assert_eq!(super::tips(&gui), "↓ pick a row · ← → tabs · w window · e more options · G new seeds · s save as playlist");
         key(&mut gui, KeyCode::Down);
         assert_eq!(super::tips(&gui), "Enter open the album · a queue · ← → tabs · Esc done", "an album row");
         key(&mut gui, KeyCode::Down);
