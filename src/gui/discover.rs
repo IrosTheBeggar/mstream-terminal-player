@@ -23,9 +23,12 @@
 //! finished yet, the tabs, the seeds line, the tab's album strip where the
 //! room is tall enough (clauses 45–49, the 2026-10-11 strip log: the
 //! webapp's horizontal scroller of album cards, covers as real pixels
-//! through `cover::Slot` the way the queue panel's are), the tab's table,
-//! the bottom row with the whole-list verbs. The seeds modal and the window's list draw last,
-//! from [`draw_modals`], so they win the pointer.
+//! through `cover::Slot` the way the queue panel's are), the verbs line
+//! with the tab's whole-list verbs ahead of its songs (clause 64, the
+//! 2026-10-16 log: the webapp's verbs under its songs' header), the tab's
+//! table down to the room's last row. The seeds modal and the window's
+//! list draw last, from [`draw_modals`], so they win the pointer; the save
+//! prompt is the sonic room's (`sonic::draw_modals`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -82,10 +85,10 @@ const TILE_STRIDE: u16 = TILE_W + 1;
 /// them.
 const STRIP_ROWS: u16 = TILE_H + 1;
 /// The strip stands only where the table keeps at least this many rows
-/// under it (clause 49): with the room's six rows above the strip and its
-/// table header, rule and bottom row, a content area of 20 rows — the
-/// installer's 100×30 window has 22 or 23 — and never the 24-row floor's
-/// 16 or 17, which keep the album rows.
+/// under it (clause 49): with the room's six rows above the strip and the
+/// verbs line, table header and rule under it, a content area of 20 rows —
+/// the installer's 100×30 window has 22 or 23 — and never the 24-row
+/// floor's 16 or 17, which keep the album rows.
 const STRIP_TABLE_MIN: u16 = 3;
 /// The skeleton tiles the first ask draws, the webapp's four cards.
 const STRIP_SKELETON: u16 = 4;
@@ -226,10 +229,12 @@ pub(crate) enum DiscAct {
     Choose,
     /// Try again and Check again: ask again now (clauses 81, 83).
     Again,
-    /// The bottom row's whole-list verbs (clause 64).
+    /// The verbs line's whole-list verbs (clause 64); save as playlist on
+    /// the Library tab only.
     PlayAll,
     QueueAll,
     Shuffle,
+    SavePlaylist,
 }
 
 // ── The row model ───────────────────────────────────────────────────────────
@@ -397,6 +402,13 @@ fn playable(app: &App, tab: TasteTab) -> bool {
     }
 }
 
+/// Whether the tab's songs can be saved as a playlist (clause 64): the
+/// Library tab's, while it has songs. A connected server's songs are not
+/// this server's to save — the webapp's servers column has no save either.
+fn saveable(app: &App, tab: TasteTab) -> bool {
+    tab == TasteTab::Library && playable(app, tab)
+}
+
 // ── Words ───────────────────────────────────────────────────────────────────
 
 /// The plural form a count takes in the running locale — the DJ room's
@@ -560,9 +572,12 @@ pub(crate) struct Layout {
     pub seeds_y: u16,
     /// The album strip's first row, where it stands (clause 49).
     pub strip_y: Option<u16>,
-    /// The table's header row; its rule is the next, its rows after that.
+    /// The verbs line (clause 64): under the strip where it stands, else
+    /// under the seeds line's blank — always right over the table.
+    pub verbs_y: u16,
+    /// The table's header row; its rule is the next, its rows after that,
+    /// down to the room's last row.
     pub table_y: u16,
-    pub bottom_y: u16,
 }
 
 /// `strip`: the tab has a strip to draw. It stands where the table keeps
@@ -570,24 +585,24 @@ pub(crate) struct Layout {
 /// card (clause 49) — and gives way to the card, which comes first.
 pub(crate) fn layout(content: Rect, card: bool, strip: bool) -> Layout {
     let y = content.y;
-    let bottom_y = content.bottom().saturating_sub(1);
     let mut tabs_y = y + 3;
     let mut card_at = None;
     if card {
         // Header, state, blank · the card and its blank · tabs, seeds,
-        // blank · the table's header, rule and one row — and still room
-        // for the bottom row under them.
-        let whole = 3 + CARD_FULL + 1 + 3 + 3 < content.height;
+        // blank · the verbs line · the table's header, rule and one row.
+        let whole = 3 + CARD_FULL + 1 + 3 + 1 + 3 <= content.height;
         let height = if whole { CARD_FULL } else { CARD_COMPACT };
         let width = content.width.min(CARD_W);
         let x = content.x + (content.width - width) / 2;
         card_at = Some((Rect { x, y: y + 3, width, height }, !whole));
         tabs_y = y + 3 + height + 1;
     }
-    // The rows the table would hold without the strip.
-    let table_y = tabs_y + 3;
-    let rows = bottom_y.saturating_sub(table_y + 2);
-    let strip_y = (strip && rows >= STRIP_ROWS + STRIP_TABLE_MIN).then_some(table_y);
+    // The rows the table would hold without the strip: under the verbs
+    // line, the table's header and rule, to the room's last row.
+    let verbs_y = tabs_y + 3;
+    let rows = content.bottom().saturating_sub(verbs_y + 3);
+    let strip_y = (strip && rows >= STRIP_ROWS + STRIP_TABLE_MIN).then_some(verbs_y);
+    let verbs_y = if strip_y.is_some() { verbs_y + STRIP_ROWS } else { verbs_y };
     Layout {
         header_y: y,
         state_y: y + 1,
@@ -595,8 +610,8 @@ pub(crate) fn layout(content: Rect, card: bool, strip: bool) -> Layout {
         tabs_y,
         seeds_y: tabs_y + 1,
         strip_y,
-        table_y: if strip_y.is_some() { table_y + STRIP_ROWS } else { table_y },
-        bottom_y,
+        verbs_y,
+        table_y: verbs_y + 1,
     }
 }
 
@@ -717,8 +732,8 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if !strip {
         gui.discover.strip.on = false;
     }
-    draw_table(frame, gui, content, (lay.table_y, lay.bottom_y), strip);
-    draw_bottom(frame, gui, content, lay.bottom_y);
+    draw_verbs(frame, gui, content, lay.verbs_y);
+    draw_table(frame, gui, content, lay.table_y, strip);
 }
 
 /// The strip came (`stands`) or went on the same tab: the table's rows are
@@ -1353,13 +1368,13 @@ fn sentence_lines(frame: &mut Frame, list: Rect, sentence: &str, style: Style) -
 /// The tab's table: header and rule, then the rows or what stands for them,
 /// and the kit scrollbar while the rows overflow. `strip`: the album strip
 /// stands above it and holds the albums (clause 45).
-fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, (table_y, bottom_y): (u16, u16), strip: bool) {
+fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, table_y: u16, strip: bool) {
     let tab = gui.app.taste.tab;
     let list = Rect {
         x: content.x,
         y: table_y + 2,
         width: content.width.saturating_sub(2),
-        height: bottom_y.saturating_sub(table_y + 2),
+        height: content.bottom().saturating_sub(table_y + 2),
     };
     let all = table_lines(&gui.app, tab, strip);
     // An answer of albums and no songs: the strip holds all of it, and an
@@ -1581,12 +1596,15 @@ fn draw_row(
     }
 }
 
-/// The bottom row (clause 64): the whole-list verbs — play · queue all ·
-/// shuffle — at the right on a tab that has something to play, dropped from
-/// the tail when squeezed.
-fn draw_bottom(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
+/// The verbs line (clause 64, the webapp's whole-list verbs under its
+/// songs' header since mStream `141e1a9c`): play · queue all · shuffle, and
+/// save as playlist on the Library tab, from the room's left edge right
+/// over the table, on a tab that has something to play — the browse bar's
+/// grammar: play the one accent, the rest DIM text buttons, the keys in
+/// their tooltips, dropped from the tail when squeezed. Hidden, never grey,
+/// while the tab has no rows; the line keeps its row so nothing moves.
+fn draw_verbs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     let tab = gui.app.taste.tab;
-    let left = content.x;
     if !playable(&gui.app, tab) {
         return;
     }
@@ -1597,15 +1615,18 @@ fn draw_bottom(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
         (format!("+ {}", t!("gui.bar.queue")), DiscAct::QueueAll, "A"),
         (format!("{shuffle}{}", t!("gui.shuffle_word")), DiscAct::Shuffle, "S"),
     ];
+    if saveable(&gui.app, tab) {
+        verbs.push((t!("gui.discover.save_playlist").to_string(), DiscAct::SavePlaylist, "s"));
+    }
     let sep = " · ";
     let width_of = |verbs: &[(String, DiscAct, &str)]| -> u16 {
         let labels: u16 = verbs.iter().map(|(l, _, _)| width(l) as u16).sum();
         labels + width(sep) as u16 * verbs.len().saturating_sub(1) as u16
     };
-    while !verbs.is_empty() && content.right().saturating_sub(left) < width_of(&verbs) + 1 {
+    while verbs.len() > 1 && content.width.saturating_sub(1) < width_of(&verbs) {
         verbs.pop();
     }
-    let mut x = content.right().saturating_sub(width_of(&verbs) + 1);
+    let mut x = content.x;
     for (i, (label, act, key)) in verbs.into_iter().enumerate() {
         if i > 0 {
             put(frame, x, y, sep, dim());
@@ -1983,6 +2004,14 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             let effects = gui.app.taste_queue_all();
             gui.pend(effects);
         }
+        // The house name prompt, the sonic room's (`sonic::draw_modals`
+        // draws it, `sonic::handle_key` types into it): the menu folds so
+        // one modal stands.
+        DiscAct::SavePlaylist => {
+            if gui.app.taste_save_playlist() {
+                gui.discover.menu = None;
+            }
+        }
     }
     true
 }
@@ -2315,10 +2344,12 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         // `r` stays the transport's repeat.
         KeyCode::Char('r') if gui.app.taste.no_history => return Some(gui.act(Act::Disc(DiscAct::Another))),
         // The whole-list verbs, where the tab has something to play (clause
-        // 64); otherwise the keys keep their global meanings.
+        // 64) — `s` saves where the tab's songs are saveable, the sonic
+        // room's save key; otherwise the keys keep their global meanings.
         KeyCode::Char('p') if playable(&gui.app, tab) => return Some(gui.act(Act::Disc(DiscAct::PlayAll))),
         KeyCode::Char('A') if playable(&gui.app, tab) => return Some(gui.act(Act::Disc(DiscAct::QueueAll))),
         KeyCode::Char('S') if playable(&gui.app, tab) => return Some(gui.act(Act::Disc(DiscAct::Shuffle))),
+        KeyCode::Char('s') if saveable(&gui.app, tab) => return Some(gui.act(Act::Disc(DiscAct::SavePlaylist))),
         _ => return None,
     }
     Some(false)
@@ -2452,10 +2483,23 @@ pub(crate) fn tips(gui: &Gui) -> String {
         // song verb (clause 62).
         Some(Line::Album(_)) => t!("gui.tips.discover_album").to_string(),
         Some(Line::Song(_) | Line::Peer { .. }) => t!("gui.tips.discover_row").to_string(),
-        None if gui.app.taste.no_history => t!("gui.tips.discover_fallback").to_string(),
-        // At rest over a strip, ↓ lands on its albums, not a row.
-        None if !strip_tiles(gui).is_empty() => t!("gui.tips.discover_strip").to_string(),
-        None => t!("gui.tips.discover").to_string(),
+        // At rest: the fallback card's own tip, or over a strip ↓ lands on
+        // its albums, not a row; `s` is named wherever the tab's songs can
+        // be saved, the fallback card's included (clause 64).
+        None => {
+            let rest = if gui.app.taste.no_history {
+                t!("gui.tips.discover_fallback")
+            } else if strip_tiles(gui).is_empty() {
+                t!("gui.tips.discover")
+            } else {
+                t!("gui.tips.discover_strip")
+            };
+            if saveable(&gui.app, gui.app.taste.tab) {
+                format!("{rest} · {}", t!("gui.tips.discover_save"))
+            } else {
+                rest.to_string()
+            }
+        }
     }
 }
 
@@ -2854,20 +2898,23 @@ mod tests {
         // cards), four skeleton rows under the rule, and no "asking…" line.
         assert_eq!(rows[8].matches('╭').count(), 4, "four empty cover frames:\n{all}");
         assert!(rows[13].contains("░░░") && rows[14].contains("░░░"), "title and artist runs:\n{all}");
-        for y in 18..22 {
+        for y in 19..23 {
             assert!(rows[y].contains("░░░"), "a skeleton row at {y}:\n{all}");
         }
-        assert!(!rows[22].contains('░'), "four of them:\n{all}");
+        assert!(!rows[23].contains('░'), "four of them:\n{all}");
         assert_eq!(all.matches("asking").count(), 1, "the state word alone says it:\n{all}");
         assert_no_counts(&rows);
         key(&mut gui, KeyCode::Right);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[18].contains("░░░") && rows[16].contains(" ON "), "the Connected servers skeleton:\n{all}");
+        assert!(rows[19].contains("░░░") && rows[17].contains(" ON "), "the Connected servers skeleton:\n{all}");
         assert_eq!(all.matches("asking").count(), 1, "{all}");
         // At the floor the strip gives way: the rows stand under the tabs.
         let rows = draw_sized(&mut gui, 100, 24);
-        assert!(rows[10].contains("░░░") && rows[8].contains(" ON ") && !rows[8].contains('╭'), "{}", rows.join("\n"));
+        assert!(rows[11].contains("░░░") && rows[9].contains(" ON ") && !rows[9].contains('╭'), "{}", rows.join("\n"));
+        // Nothing to play yet: the verbs line is hidden, never grey, and
+        // keeps its row.
+        assert!(rows[8].chars().skip(17).all(|c| c == ' '), "{}", rows.join("\n"));
     }
 
     #[test]
@@ -2889,21 +2936,26 @@ mod tests {
         assert!(rows[10].contains("│    ♪     │"), "the note in it:\n{all}");
         assert_eq!(at(&rows, "Night Album"), Position { x: 17, y: 13 }, "the title under the cover:\n{all}");
         assert_eq!(at(&rows, "Moon"), Position { x: 17, y: 14 }, "the artist under it:\n{all}");
+        // The verbs line under the strip, right over the table (clause 64,
+        // the webapp's verbs under its songs' header): play the accent,
+        // save as playlist on the Library tab.
+        assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: 16 }, "{all}");
         for head in ["TRACK", "ARTIST", "ALBUM", "LENGTH"] {
-            assert!(rows[16].contains(head), "{head} in the header:\n{}", rows[16]);
+            assert!(rows[17].contains(head), "{head} in the header:\n{}", rows[17]);
         }
-        assert!(!rows[16].contains("MATCH") && !rows[16].contains("LAST PLAYED"), "no meter, no last played:\n{}", rows[16]);
+        assert!(!rows[17].contains("MATCH") && !rows[17].contains("LAST PLAYED"), "no meter, no last played:\n{}", rows[17]);
         // The album left the table for the strip; the songs: title, artist,
         // album, length (clauses 50–51).
         assert!(!all.contains("Night Album album"), "no album row where the strip stands:\n{all}");
         for cell in ["Aurora", "Ray", "Dawn", "4:11"] {
-            assert!(rows[18].contains(cell), "{cell} on the song row:\n{}", rows[18]);
+            assert!(rows[19].contains(cell), "{cell} on the song row:\n{}", rows[19]);
         }
         assert_eq!(at(&rows, "Ray").x, at(&rows, "ARTIST").x, "ARTIST over its words");
         assert_eq!(at(&rows, "Dawn").x, at(&rows, "ALBUM").x, "ALBUM over its words");
-        assert!(rows[20].contains("Cirrus") && rows[20].contains("—"), "a missing artist is the dash:\n{}", rows[20]);
-        // The bottom row: the whole-list verbs alone, no checkbox.
-        assert!(rows[24].contains("play · + queue all · ⇄ shuffle"), "bottom:\n{}", rows[24]);
+        assert!(rows[21].contains("Cirrus") && rows[21].contains("—"), "a missing artist is the dash:\n{}", rows[21]);
+        // No bottom row: the verbs left it for the verbs line, and the
+        // checkbox left the page.
+        assert_eq!(all.matches("queue all").count(), 1, "the verbs stand once:\n{all}");
         assert!(!all.contains("Include songs") && !all.contains("[ ]"), "the filter left the page:\n{all}");
         assert!(!all.contains("asking"), "nothing asking once both halves landed:\n{all}");
         assert_no_counts(&rows);
@@ -2915,20 +2967,23 @@ mod tests {
         let mut gui = answered_gui();
         gui.queue_open = true;
         let rows = draw(&mut gui);
-        assert!(rows[16].contains("TRACK") && rows[16].contains("ARTIST") && rows[16].contains("LENGTH"), "{}", rows[16]);
-        assert!(!rows[16].contains("ALBUM"), "47 cells: ALBUM goes first:\n{}", rows[16]);
+        assert!(rows[17].contains("TRACK") && rows[17].contains("ARTIST") && rows[17].contains("LENGTH"), "{}", rows[17]);
+        assert!(!rows[17].contains("ALBUM"), "47 cells: ALBUM goes first:\n{}", rows[17]);
         assert!(rows[2].contains("Last 30 days ▾"), "the window control keeps its home:\n{}", rows[2]);
-        assert!(rows[24].contains("play"), "the verbs keep their home:\n{}", rows[24]);
+        // 47 cells: the verbs line drops save as playlist from its tail and
+        // keeps its home over the table.
+        assert!(rows[16].contains("▸ play · + queue all · ⇄ shuffle"), "the verbs keep their home:\n{}", rows[16]);
+        assert!(!rows[16].contains("save as"), "save drops first:\n{}", rows[16]);
         assert_no_counts(&rows);
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         let rows = draw(&mut gui);
-        assert!(rows[16].contains("TRACK") && rows[16].contains("ARTIST") && rows[16].contains("LENGTH"), "{}", rows[16]);
-        assert!(!rows[16].contains("ALBUM") && !rows[16].contains(" ON "), "then ON:\n{}", rows[16]);
+        assert!(rows[17].contains("TRACK") && rows[17].contains("ARTIST") && rows[17].contains("LENGTH"), "{}", rows[17]);
+        assert!(!rows[17].contains("ALBUM") && !rows[17].contains(" ON "), "then ON:\n{}", rows[17]);
         // With the room's 80 cells, all five stand.
         gui.queue_open = false;
         let rows = draw(&mut gui);
         for head in ["TRACK", "ARTIST", "ALBUM", "ON", "LENGTH"] {
-            assert!(rows[16].contains(head), "{head} at 80 cells:\n{}", rows[16]);
+            assert!(rows[17].contains(head), "{head} at 80 cells:\n{}", rows[17]);
         }
     }
 
@@ -2944,10 +2999,14 @@ mod tests {
         // The strip: the one album-tagged row's album, from Sam's server.
         assert_eq!(at(&rows, "Theirs"), Position { x: 17, y: 13 }, "the album's tile:\n{all}");
         assert!(rows[14].contains("Pia"), "{}", rows[14]);
+        // The verbs line: play, queue all and shuffle — no save, a
+        // connected server's songs are not this server's.
+        assert!(rows[16].contains("▸ play · + queue all · ⇄ shuffle"), "{all}");
+        assert!(!all.contains("save as playlist"), "no save on this tab:\n{all}");
         // No group lines: the rows start under the rule.
-        assert!(rows[18].contains("Peer One") && rows[18].contains("Pia") && rows[18].contains("Theirs"), "{}", rows[18]);
-        assert!(rows[18].contains("Sam's server") && rows[18].contains("3:20"), "ON and LENGTH:\n{}", rows[18]);
-        assert!(rows[19].contains("Peer Two"), "{}", rows[19]);
+        assert!(rows[19].contains("Peer One") && rows[19].contains("Pia") && rows[19].contains("Theirs"), "{}", rows[19]);
+        assert!(rows[19].contains("Sam's server") && rows[19].contains("3:20"), "ON and LENGTH:\n{}", rows[19]);
+        assert!(rows[20].contains("Peer Two"), "{}", rows[20]);
         for gone in ["Far box", "Odd model", "Elsewhere", "online", "not answering", "last seen", "sonic model"] {
             assert!(!all.contains(gone), "{gone:?} is not drawn:\n{all}");
         }
@@ -2984,12 +3043,12 @@ mod tests {
         let mut gui = answered_gui();
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
         draw(&mut gui);
-        gui.ui.pointer = Some(Position { x: 30, y: 19 });
+        gui.ui.pointer = Some(Position { x: 30, y: 20 });
         let rows = draw(&mut gui);
-        assert!(rows[19].contains("[▸] [»] [+] [⋯]"), "the song verbs, [⋯] among them:\n{}", rows[19]);
-        let dots = Position { x: rows[19].find("[⋯]").map(|i| rows[19][..i].chars().count()).unwrap() as u16, y: 19 };
+        assert!(rows[20].contains("[▸] [»] [+] [⋯]"), "the song verbs, [⋯] among them:\n{}", rows[20]);
+        let dots = Position { x: rows[20].find("[⋯]").map(|i| rows[20][..i].chars().count()).unwrap() as u16, y: 20 };
         assert_eq!(gui.ui.hit(dots), Some(Act::Disc(DiscAct::More(1))));
-        assert_eq!(gui.ui.hit_context(Position { x: 30, y: 18 }), Some(Act::Disc(DiscAct::More(0))), "a right click too");
+        assert_eq!(gui.ui.hit_context(Position { x: 30, y: 19 }), Some(Act::Disc(DiscAct::More(0))), "a right click too");
         gui.act(Act::Disc(DiscAct::More(1)));
         let sheet = gui.actions.sheet.as_ref().expect("the sheet opens");
         assert_eq!((sheet.origin.server.as_str(), sheet.origin.peer), (HOST, Some(7)), "the peer's origin");
@@ -3011,10 +3070,10 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         // At the floor, where the album stays a row (clause 49).
-        gui.ui.pointer = Some(Position { x: 30, y: 10 });
+        gui.ui.pointer = Some(Position { x: 30, y: 11 });
         let rows = draw_sized(&mut gui, 100, 24);
-        assert!(rows[10].contains("[+]") && !rows[10].contains("[»]") && !rows[10].contains("[⋯]"), "one control:\n{}", rows[10]);
-        let plus = Position { x: rows[10].find("[+]").map(|i| rows[10][..i].chars().count()).unwrap() as u16, y: 10 };
+        assert!(rows[11].contains("[+]") && !rows[11].contains("[»]") && !rows[11].contains("[⋯]"), "one control:\n{}", rows[11]);
+        let plus = Position { x: rows[11].find("[+]").map(|i| rows[11][..i].chars().count()).unwrap() as u16, y: 11 };
         assert_eq!(gui.ui.hit(plus), Some(Act::Disc(DiscAct::Row(0, RowVerb::Queue))));
         gui.pending.clear();
         gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Queue)));
@@ -3065,18 +3124,18 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let rows = draw(&mut gui);
-        gui.ui.pointer = Some(Position { x: 30, y: 18 });
+        gui.ui.pointer = Some(Position { x: 30, y: 19 });
         let rows_hover = draw(&mut gui);
-        assert!(rows_hover[18].contains("[▸] [»] [+] [⋯]"), "the hover verbs:\n{}", rows_hover[18]);
-        assert!(rows_hover[18].contains("Aurora") && rows_hover[18].contains("Ray"), "TRACK and ARTIST stay:\n{}", rows_hover[18]);
+        assert!(rows_hover[19].contains("[▸] [»] [+] [⋯]"), "the hover verbs:\n{}", rows_hover[19]);
+        assert!(rows_hover[19].contains("Aurora") && rows_hover[19].contains("Ray"), "TRACK and ARTIST stay:\n{}", rows_hover[19]);
         assert!(!rows_hover[13].contains("[▸]"), "an album has no play-now:\n{}", rows_hover[13]);
         assert_eq!(gui.discover.cursor, None, "hover never selects");
-        let plus = Position { x: rows_hover[18].find("[+]").map(|i| rows_hover[18][..i].chars().count()).unwrap() as u16, y: 18 };
+        let plus = Position { x: rows_hover[19].find("[+]").map(|i| rows_hover[19][..i].chars().count()).unwrap() as u16, y: 19 };
         assert_eq!(gui.ui.hit(plus), Some(Act::Disc(DiscAct::Row(0, RowVerb::Queue))));
         gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Queue)));
         let item = &gui.app.queue.items[0];
         assert_eq!((item.filepath.as_str(), item.origin.server.as_str(), item.origin.peer), ("music/a.mp3", HOST, None));
-        assert!(rows[18].contains("4:11"), "at rest the row keeps its columns");
+        assert!(rows[19].contains("4:11"), "at rest the row keeps its columns");
     }
 
     #[test]
@@ -3084,7 +3143,7 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let buffer = draw_buffer(&mut gui);
-        assert!((8..24).all(|y| (17..97).all(|x| buffer[(x, y)].bg != th().accent)), "nothing lit on arrival");
+        assert!((8..25).all(|y| (17..97).all(|x| buffer[(x, y)].bg != th().accent)), "nothing lit on arrival");
         // Stowed, Enter and `a` do nothing (clause 57).
         key(&mut gui, KeyCode::Enter);
         key(&mut gui, KeyCode::Char('a'));
@@ -3092,10 +3151,10 @@ mod tests {
         key(&mut gui, KeyCode::Down);
         let buffer = draw_buffer(&mut gui);
         assert_eq!(buffer[(20, 13)].bg, th().accent, "↓ lights the top: the strip's first tile");
-        assert_ne!(buffer[(40, 18)].bg, th().accent, "one thing lit");
+        assert_ne!(buffer[(40, 19)].bg, th().accent, "one thing lit");
         key(&mut gui, KeyCode::Down);
         let buffer = draw_buffer(&mut gui);
-        assert_eq!(buffer[(40, 18)].bg, th().accent, "↓ again lights the first song");
+        assert_eq!(buffer[(40, 19)].bg, th().accent, "↓ again lights the first song");
         assert_ne!(buffer[(20, 13)].bg, th().accent, "and the tile goes dark");
         key(&mut gui, KeyCode::Enter);
         assert_eq!(gui.app.queue.items.len(), 4, "Enter plays from here: the tab's songs");
@@ -3331,9 +3390,9 @@ mod tests {
     fn an_album_row_opens_in_the_albums_room() {
         let _en = english();
         let mut gui = answered_gui();
-        gui.ui.pointer = Some(Position { x: 30, y: 10 });
+        gui.ui.pointer = Some(Position { x: 30, y: 11 });
         draw_sized(&mut gui, 100, 24);
-        assert_eq!(gui.ui.hit(Position { x: 30, y: 10 }), Some(Act::Disc(DiscAct::Row(0, RowVerb::Open))));
+        assert_eq!(gui.ui.hit(Position { x: 30, y: 11 }), Some(Act::Disc(DiscAct::Row(0, RowVerb::Open))));
         gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Open)));
         assert_eq!(gui.active, super::super::ALBUMS_NAV);
         assert!(matches!(
@@ -3374,31 +3433,37 @@ mod tests {
     fn the_strip_stands_from_twenty_content_rows_and_the_floor_keeps_the_album_rows() {
         let _en = english();
         // The layout math (clause 49): the strip's seven rows and its gap
-        // stand where the table keeps three rows under them.
+        // stand where the table keeps three rows under them — the verbs
+        // line, the table's header and rule between, no bottom row.
         let content = |height: u16| Rect { x: 17, y: 2, width: 80, height };
         assert_eq!(layout(content(19), false, true).strip_y, None, "19 rows: the table would keep two");
         let twenty = layout(content(20), false, true);
-        assert_eq!((twenty.strip_y, twenty.table_y), (Some(8), 16), "{twenty:?}");
-        assert_eq!(twenty.bottom_y - (twenty.table_y + 2), 3, "three rows under the strip");
+        assert_eq!((twenty.strip_y, twenty.verbs_y, twenty.table_y), (Some(8), 16, 17), "{twenty:?}");
+        assert_eq!(content(20).bottom() - (twenty.table_y + 2), 3, "three rows under the strip");
         assert_eq!(layout(content(20), false, false).strip_y, None, "no albums, no strip");
         // The card comes first: its whole height and the strip want 28.
         assert_eq!(layout(content(27), true, true).strip_y, None);
         assert!(layout(content(28), true, true).strip_y.is_some());
-        // 100×30 with the footer on (22 rows): the strip, five rows under it.
+        // 100×30 with the footer on (22 rows): the strip, the verbs line
+        // under it, five rows under the table's header and rule — the
+        // room's last row is a row (no bottom row).
         let mut gui = answered_gui();
         gui.config.gui.key_hints = true;
         gui.ui.key_hints = true;
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(room(&rows, 8).starts_with("╭──────────╮") && room(&rows, 13).starts_with("Night Album"), "{all}");
-        assert!(rows[18].contains("Aurora") && rows[23].contains("play"), "{all}");
+        assert!(room(&rows, 16).starts_with("▸ play · + queue all"), "{all}");
+        assert!(rows[17].contains("TRACK") && rows[19].contains("Aurora"), "{all}");
+        assert!(!rows[23].contains("play"), "no bottom row:\n{all}");
         // The floor, footer on and off: the album stays a row, no strip.
         for footer in [false, true] {
             gui.config.gui.key_hints = footer;
             gui.ui.key_hints = footer;
             let rows = draw_sized(&mut gui, 100, 24);
             let all = rows.join("\n");
-            assert!(rows[10].contains("Night Album album") && rows[11].contains("Aurora"), "{footer}:\n{all}");
+            assert!(room(&rows, 8).starts_with("▸ play · + queue all"), "{footer}: the verbs line over the table:\n{all}");
+            assert!(rows[11].contains("Night Album album") && rows[12].contains("Aurora"), "{footer}:\n{all}");
             let room_rows: String = (2..18).map(|y| room(&rows, y)).collect();
             assert!(!room_rows.contains('♪') && !room_rows.contains('╭'), "{footer}: no tile at the floor:\n{all}");
         }
@@ -3884,6 +3949,271 @@ mod tests {
         assert!(all.contains(":Similar") && !all.contains(":Discover"), "the per-song lens is Similar now:\n{all}");
     }
 
+    // ── The verbs line ──────────────────────────────────────────────────
+
+    /// Click the verb whose label starts with `label` on the frame `rows`,
+    /// the way the room's other click tests do: what the pointer would hit
+    /// there, acted.
+    fn click_verb(gui: &mut Gui, rows: &[String], label: &str) -> DiscAct {
+        let Some(Act::Disc(act)) = gui.ui.hit(at(rows, label)) else {
+            panic!("{label:?} is no button:\n{}", rows.join("\n"));
+        };
+        gui.act(Act::Disc(act.clone()));
+        act
+    }
+
+    fn queued_paths(gui: &Gui) -> Vec<&str> {
+        gui.app.queue.items.iter().map(|q| q.filepath.as_str()).collect()
+    }
+
+    #[test]
+    fn the_verbs_line_stands_under_the_strip_and_over_the_table_with_no_bottom_row() {
+        let _en = english();
+        for footer in [false, true] {
+            let mut gui = answered_gui();
+            gui.config.gui.key_hints = footer;
+            gui.ui.key_hints = footer;
+            // 100×30: the tabs, the seeds line, the strip, then the verbs
+            // line right over the table's header (clause 64), and the
+            // table down to the room's last row.
+            let rows = draw(&mut gui);
+            let all = rows.join("\n");
+            let last = if footer { 23 } else { 24 };
+            assert!(room(&rows, 5).contains(" Library ") && room(&rows, 6).starts_with("seeds"), "{footer}:\n{all}");
+            assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: 16 }, "{footer}:\n{all}");
+            assert!(room(&rows, 17).contains("TRACK"), "{footer}: the header right under it:\n{all}");
+            assert_eq!(all.matches("queue all").count(), 1, "{footer}: no bottom row:\n{all}");
+            // Four songs under the strip — five or six rows of room for
+            // them, the room's last row among them.
+            let table = || (19..=last).map(|y| room(&rows, y)).collect::<Vec<_>>();
+            assert!(table()[3].contains("Delta"), "{footer}:\n{all}");
+            // 100×24: no strip; the verbs line under the seeds line's blank,
+            // the album row and the songs under the header, seven rows with
+            // the footer on and eight off, the last on the room's last row.
+            let rows = draw_sized(&mut gui, 100, 24);
+            let all = rows.join("\n");
+            assert_eq!(at(&rows, "▸ play · + queue all · ⇄ shuffle · save as playlist…"), Position { x: 17, y: 8 }, "{footer}:\n{all}");
+            assert!(room(&rows, 9).contains("TRACK") && room(&rows, 11).contains("Night Album album"), "{footer}:\n{all}");
+            assert_eq!(all.matches("queue all").count(), 1, "{footer}: no bottom row:\n{all}");
+            let room_rows: String = (2..18).map(|y| room(&rows, y)).collect();
+            assert!(!room_rows.contains('╭'), "{footer}: no strip at the floor:\n{all}");
+        }
+    }
+
+    #[test]
+    fn the_table_runs_to_the_rooms_last_row_where_the_bottom_row_was() {
+        // Twelve songs overflow every size: the last song row drawn sits on
+        // the room's last row, and nothing is drawn under it (clause 64).
+        let _en = english();
+        let mut answer = main_answer();
+        let tracks: Vec<serde_json::Value> = (1..=12)
+            .map(|i| json!({ "filepath": format!("music/s{i:02}.mp3"), "similarity": 0.9 - f64::from(i) * 0.01,
+                             "metadata": { "title": format!("Song {i:02}"), "artist": "Ray" } }))
+            .collect();
+        answer.library.as_mut().unwrap().tracks = serde_json::from_value(json!(tracks)).unwrap();
+        // (height, footer, the room's last row, the last song shown):
+        // 100×30 under the strip — rows 19..23 (5) with the footer, 19..24
+        // (6) without; 100×24, no strip — the album row then songs on rows
+        // 11..17 (7) with the footer, 11..18 (8) without.
+        for (height, footer, last, song) in [(30u16, true, 23usize, 5usize), (30, false, 24, 6), (24, true, 17, 6), (24, false, 18, 7)] {
+            let mut gui = session_gui();
+            gui.config.gui.key_hints = footer;
+            gui.ui.key_hints = footer;
+            key(&mut gui, KeyCode::Char('G'));
+            land(&mut gui, TastePart::Main, answer.clone());
+            land(&mut gui, TastePart::Peers, peers_answer());
+            let rows = draw_sized(&mut gui, 100, height);
+            let all = rows.join("
+");
+            let first = if height == 30 { 19 } else { 11 };
+            assert_eq!(last - first + 1, if height == 30 { song } else { song + 1 }, "{height}/{footer}: the row count");
+            assert!(room(&rows, last).contains(&format!("Song {song:02}")), "{height}/{footer}: song {song} on row {last}:\n{all}");
+            assert!(!all.contains(&format!("Song {:02}", song + 1)), "{height}/{footer}: nothing past the last row:\n{all}");
+            assert_eq!(all.matches("queue all").count(), 1, "{height}/{footer}: no bottom row:\n{all}");
+        }
+    }
+
+    #[test]
+    fn the_verbs_line_wears_one_accent_and_hover_brightens() {
+        let _en = english();
+        let mut gui = answered_gui();
+        let rows = draw(&mut gui);
+        let play = at(&rows, "▸ play");
+        let save = at(&rows, "save as playlist…");
+        let buffer = draw_buffer(&mut gui);
+        assert_eq!(buffer[(play.x + 2, play.y)].fg, th().accent, "play is the one primary");
+        assert_ne!(buffer[(save.x, save.y)].fg, th().accent, "the rest are text buttons");
+        assert!(!buffer[(save.x, save.y)].modifier.contains(ratatui::style::Modifier::BOLD));
+        gui.ui.pointer = Some(Position { x: save.x + 2, y: save.y });
+        let buffer = draw_buffer(&mut gui);
+        assert!(buffer[(save.x, save.y)].modifier.contains(ratatui::style::Modifier::BOLD), "hover brightens");
+        assert_eq!(gui.discover.cursor, None, "and selects nothing");
+    }
+
+    #[test]
+    fn each_verb_acts_by_click_and_by_key_on_the_library_tab() {
+        let _en = english();
+        let songs = vec!["music/a.mp3", "music/b.mp3", "music/c.mp3", "music/d.mp3"];
+        // play: the tab's songs replace the queue and play from the first.
+        for by_key in [false, true] {
+            let mut gui = answered_gui();
+            let rows = draw(&mut gui);
+            if by_key {
+                key(&mut gui, KeyCode::Char('p'));
+            } else {
+                assert_eq!(click_verb(&mut gui, &rows, "▸ play"), DiscAct::PlayAll);
+            }
+            assert_eq!(queued_paths(&gui), songs, "{by_key}: play");
+            assert_eq!(gui.app.queue.current, Some(0));
+            // queue all: appended after what stands.
+            let rows = draw(&mut gui);
+            if by_key {
+                key(&mut gui, KeyCode::Char('A'));
+            } else {
+                assert_eq!(click_verb(&mut gui, &rows, "+ queue all"), DiscAct::QueueAll);
+            }
+            assert_eq!(gui.app.queue.items.len(), 8, "{by_key}: queue all appends");
+            // shuffle: the same songs, replacing the queue.
+            let rows = draw(&mut gui);
+            if by_key {
+                key(&mut gui, KeyCode::Char('S'));
+            } else {
+                assert_eq!(click_verb(&mut gui, &rows, "⇄ shuffle"), DiscAct::Shuffle);
+            }
+            let mut shuffled = queued_paths(&gui);
+            shuffled.sort_unstable();
+            assert_eq!(shuffled, songs, "{by_key}: shuffle plays the tab's songs");
+            assert!(!gui.app.queue.shuffle, "{by_key}: and leaves the shuffle mode alone");
+            // save as playlist: the house prompt opens.
+            let rows = draw(&mut gui);
+            if by_key {
+                key(&mut gui, KeyCode::Char('s'));
+            } else {
+                assert_eq!(click_verb(&mut gui, &rows, "save as playlist"), DiscAct::SavePlaylist);
+            }
+            assert_eq!(gui.app.sonic_playlist_name.as_deref(), Some(""), "{by_key}: the prompt, empty as the webapp's");
+            assert_eq!(gui.app.playlist_save_files.as_deref(), Some(&songs.iter().map(|s| s.to_string()).collect::<Vec<_>>()[..]));
+        }
+    }
+
+    #[test]
+    fn save_as_playlist_opens_the_house_prompt_and_saves_the_listed_songs() {
+        let _en = english();
+        // The album carries songs of its own: they stay out of the save.
+        let mut answer = main_answer();
+        answer.library.as_mut().unwrap().albums[0].tracks = vec!["music/n1.mp3".into(), "music/n2.mp3".into()];
+        let mut gui = session_gui();
+        key(&mut gui, KeyCode::Char('G'));
+        land(&mut gui, TastePart::Main, answer);
+        land(&mut gui, TastePart::Peers, peers_answer());
+        let rows = draw(&mut gui);
+        assert!(super::tips(&gui).ends_with("G ask again · s save as playlist"), "{}", super::tips(&gui));
+        click_verb(&mut gui, &rows, "save as playlist");
+        // The sonic room's prompt, over the Discover room.
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("Save as playlist") && all.contains("enter saves · esc cancels"), "the house prompt:\n{all}");
+        assert_eq!(gui.active, DISCOVER_NAV, "the room stays under it");
+        gui.config.gui.key_hints = true;
+        gui.ui.key_hints = true;
+        let rows = draw(&mut gui);
+        assert!(rows[29].contains("type a name · Enter saves · Esc cancels"), "its tips:\n{}", rows[29]);
+        // Typed into — `s`, `p` and `A` are letters now, not verbs.
+        gui.pending.clear();
+        for c in "Sap mix".chars() {
+            key(&mut gui, KeyCode::Char(c));
+        }
+        assert_eq!(gui.app.sonic_playlist_name.as_deref(), Some("Sap mix"));
+        assert!(gui.app.queue.items.is_empty(), "no verb ran while typing");
+        key(&mut gui, KeyCode::Enter);
+        let saved = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::SavePlaylist { name, files }) => Some((name.clone(), files.clone())),
+            _ => None,
+        });
+        let songs: Vec<String> = ["music/a.mp3", "music/b.mp3", "music/c.mp3", "music/d.mp3"].map(String::from).to_vec();
+        assert_eq!(saved, Some(("Sap mix".to_string(), songs)), "the listed songs, in order, albums left out");
+        assert!(gui.app.sonic_playlist_name.is_none() && gui.app.playlist_save_files.is_none(), "the prompt closes");
+        // Esc cancels and forgets the songs: the sonic room's save saves its
+        // own stops again.
+        let rows = draw(&mut gui);
+        click_verb(&mut gui, &rows, "save as playlist");
+        key(&mut gui, KeyCode::Esc);
+        assert!(gui.app.sonic_playlist_name.is_none() && gui.app.playlist_save_files.is_none(), "Esc cancels");
+        assert_eq!(gui.active, DISCOVER_NAV);
+    }
+
+    #[test]
+    fn the_rest_tips_with_save_fit_the_footer_in_every_locale() {
+        // The footer has 99 cells at the 100-column floor; the save words
+        // ride after either rest tip (clause 64).
+        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+            let _guard = locale(code);
+            for strip in [false, true] {
+                let mut gui = if strip { strip_gui() } else { answered_gui() };
+                draw_sized(&mut gui, 100, if strip { 30 } else { 24 });
+                let tips = super::tips(&gui);
+                assert!(tips.ends_with(&*rust_i18n::t!("gui.tips.discover_save")), "{code}: {tips}");
+                assert!(crate::kit::width(&tips) <= 99, "{code} ({strip}): {} cells: {tips}", crate::kit::width(&tips));
+            }
+            // The fallback card's tip names `s` too: its Library tab saves.
+            let mut gui = session_gui();
+            key(&mut gui, KeyCode::Char('G'));
+            land_main(&mut gui, fallback_answer());
+            draw_sized(&mut gui, 100, 24);
+            let tips = super::tips(&gui);
+            let want = format!("{} · {}", rust_i18n::t!("gui.tips.discover_fallback"), rust_i18n::t!("gui.tips.discover_save"));
+            assert_eq!(tips, want, "{code}: the fallback tip");
+            assert!(crate::kit::width(&tips) <= 99, "{code} (fallback): {} cells: {tips}", crate::kit::width(&tips));
+            key(&mut gui, KeyCode::Char('s'));
+            assert_eq!(gui.app.sonic_playlist_name.as_deref(), Some(""), "{code}: and `s` saves there");
+        }
+    }
+
+    #[test]
+    fn the_connected_servers_tab_has_play_queue_all_and_shuffle_and_no_save() {
+        let _en = english();
+        let peers = vec!["Music/p1.mp3", "Music/p2.mp3"];
+        for by_key in [false, true] {
+            let mut gui = answered_gui();
+            gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+            let rows = draw(&mut gui);
+            let all = rows.join("\n");
+            assert!(room(&rows, 16).starts_with("▸ play · + queue all · ⇄ shuffle"), "{all}");
+            assert!(!all.contains("save as"), "no save on this tab:\n{all}");
+            if by_key {
+                key(&mut gui, KeyCode::Char('p'));
+            } else {
+                assert_eq!(click_verb(&mut gui, &rows, "▸ play"), DiscAct::PlayAll);
+            }
+            assert_eq!(queued_paths(&gui), peers, "{by_key}: play");
+            assert!(gui.app.queue.items.iter().all(|q| q.origin.peer == Some(7)), "through the peer");
+            let rows = draw(&mut gui);
+            if by_key {
+                key(&mut gui, KeyCode::Char('A'));
+            } else {
+                assert_eq!(click_verb(&mut gui, &rows, "+ queue all"), DiscAct::QueueAll);
+            }
+            assert_eq!(gui.app.queue.items.len(), 4, "{by_key}: queue all");
+            let rows = draw(&mut gui);
+            if by_key {
+                key(&mut gui, KeyCode::Char('S'));
+            } else {
+                assert_eq!(click_verb(&mut gui, &rows, "⇄ shuffle"), DiscAct::Shuffle);
+            }
+            let mut shuffled = queued_paths(&gui);
+            shuffled.sort_unstable();
+            assert_eq!(shuffled, peers, "{by_key}: shuffle");
+            // `s` keeps its global meaning here: the shuffle mode toggles,
+            // and no prompt opens.
+            let mode = gui.app.queue.shuffle;
+            key(&mut gui, KeyCode::Char('s'));
+            assert_eq!(gui.app.queue.shuffle, !mode, "{by_key}: `s` is the shuffle mode's toggle off the Library tab");
+            assert!(gui.app.sonic_playlist_name.is_none() && gui.app.playlist_save_files.is_none(), "no save from this tab");
+            gui.act(Act::Disc(DiscAct::SavePlaylist));
+            assert!(gui.app.sonic_playlist_name.is_none(), "nor by its act");
+        }
+    }
+
     /// Frames for eyeballing: `cargo test dump_discover_frames -- --ignored
     /// --nocapture` (the shell's dump_* habit).
     #[test]
@@ -3891,7 +4221,7 @@ mod tests {
     fn dump_discover_frames() {
         let _en = english();
         let mut gui = answered_gui();
-        gui.ui.pointer = Some(Position { x: 30, y: 18 });
+        gui.ui.pointer = Some(Position { x: 30, y: 19 });
         println!("{}", draw(&mut gui).join("\n"));
         gui.ui.pointer = None;
         gui.queue_open = true;
@@ -3947,11 +4277,14 @@ mod tests {
         // 100×24 with the footer on: 16 content rows.
         let content = Rect { x: 17, y: 2, width: 80, height: 16 };
         let plain = layout(content, false, false);
-        assert_eq!((plain.tabs_y, plain.seeds_y, plain.table_y, plain.bottom_y), (5, 6, 8, 17));
-        assert_eq!(plain.bottom_y - (plain.table_y + 2), 7, "seven rows with the footer on (clause 90)");
+        assert_eq!((plain.tabs_y, plain.seeds_y, plain.verbs_y, plain.table_y), (5, 6, 8, 9));
+        assert_eq!(content.bottom() - (plain.table_y + 2), 7, "seven rows with the footer on (clause 90)");
         let card = layout(content, true, false);
         assert_eq!(card.card.map(|(r, compact)| (r.height, compact)), Some((5, true)), "the card gives up its body");
-        assert!(card.bottom_y > card.table_y + 2, "the table keeps a row: {card:?}");
+        assert!(content.bottom() > card.table_y + 2, "the table keeps a row: {card:?}");
+        // The card stands whole from 18 rows, as it did with the bottom row.
+        let whole = |height: u16| layout(Rect { height, ..content }, true, false).card.is_some_and(|(_, compact)| !compact);
+        assert!(!whole(17) && whole(18));
         let tall = layout(Rect { height: 23, ..content }, true, false);
         assert_eq!(tall.card.map(|(r, compact)| (r.height, compact)), Some((7, false)));
     }
@@ -4030,13 +4363,13 @@ mod tests {
         let _fr = locale("fr");
         let mut gui = answered_gui();
         let rows = draw(&mut gui);
-        let header = &rows[16];
+        let header = &rows[17];
         for head in ["TITRE", "ARTISTE", "ALBUM", "DURÉE"] {
             assert!(header.contains(head), "{head}:\n{header}");
         }
         assert_eq!(at(&rows, "Aurora").x, at(&rows, "TITRE").x, "the title under its heading:\n{}", rows.join("\n"));
         assert_eq!(at(&rows, "Ray").x, at(&rows, "ARTISTE").x, "the artist under its heading");
-        assert!(rows[24].contains("lire · + tout en file · ⇄ aléatoire"), "the bottom row's verbs:\n{}", rows[24]);
+        assert!(rows[16].contains("▸ lire · + tout en file · ⇄ aléatoire · enregistrer comme playlist…"), "the verbs line:\n{}", rows[16]);
     }
 
     #[test]
@@ -4048,9 +4381,9 @@ mod tests {
         // cells. The artist's first letter stands under the heading's first
         // cell, and the album's under アルバム's, whatever the glyph widths.
         let find = |y: u16, symbol: &str| (17..100).find(|x| buffer[(*x, y)].symbol() == symbol).expect(symbol);
-        assert_eq!(find(18, "R"), find(16, "ア"), "ARTIST in cells, not chars");
-        let album = (find(16, "ア") + 1..100).find(|x| buffer[(*x, 16)].symbol() == "ア").expect("アルバム");
-        assert_eq!(find(18, "D"), album, "ALBUM in cells, not chars");
+        assert_eq!(find(19, "R"), find(17, "ア"), "ARTIST in cells, not chars");
+        let album = (find(17, "ア") + 1..100).find(|x| buffer[(*x, 17)].symbol() == "ア").expect("アルバム");
+        assert_eq!(find(19, "D"), album, "ALBUM in cells, not chars");
     }
 
     #[test]
@@ -4090,12 +4423,13 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         let _legacy = crate::kit::theme::legacy_glyphs_here();
-        gui.ui.pointer = Some(Position { x: 30, y: 18 });
+        gui.ui.pointer = Some(Position { x: 30, y: 19 });
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(rows[2].trim_end().ends_with("Last 30 days v"), "the dropdown's caret:\n{}", rows[2]);
-        assert!(rows[18].contains("[>] [^] [+] [.]"), "the hover verbs:\n{}", rows[18]);
-        assert!(rows[20].contains(" - "), "the missing artist:\n{}", rows[20]);
+        assert!(rows[19].contains("[>] [^] [+] [.]"), "the hover verbs:\n{}", rows[19]);
+        assert!(rows[16].contains("> play · + queue all · shuffle · save as playlist"), "the verbs line's glyphs:\n{}", rows[16]);
+        assert!(rows[21].contains(" - "), "the missing artist:\n{}", rows[21]);
         gui.act(Act::Disc(DiscAct::Seeds));
         let modal = draw(&mut gui).join("\n");
         assert!(modal.contains("[x] Manor"), "the checkmark's stand-in:\n{modal}");
@@ -4131,11 +4465,15 @@ mod tests {
         let _en = english();
         let mut gui = answered_gui();
         assert!(!super::tips(&gui).contains("played lately"), "no checkbox, no key: {}", super::tips(&gui));
+        // At rest the Library tab names its save (clause 64) after the rest
+        // words (no frame drawn yet: no strip).
+        assert_eq!(super::tips(&gui), "↓ pick a row · ← → tabs · w window · e seeds · G ask again · s save as playlist");
         key(&mut gui, KeyCode::Down);
         assert_eq!(super::tips(&gui), "Enter open the album · a queue · ← → tabs · Esc done", "an album row");
         key(&mut gui, KeyCode::Down);
         assert!(super::tips(&gui).contains("m actions"), "a song row");
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        assert!(!super::tips(&gui).contains("save"), "no save on the Connected servers tab: {}", super::tips(&gui));
         key(&mut gui, KeyCode::Down);
         let tips = super::tips(&gui);
         assert!(tips.contains("P play now") && tips.contains("m actions"), "a connected server's row has the sheet: {tips}");

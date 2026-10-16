@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "Album von %{server} abspielen — Enter"
     seed_tip: "klingt wie %{track}"
     listen_tip: "Über deinen Server hören — P"
+    save_playlist: "als Playlist speichern…"
     empty_library: "Nichts Neues in deiner Bibliothek klingt wie diese Songs."
     empty_servers: "Gerade nichts von deinen verbundenen Servern."
     album_failed: "Album ließ sich nicht laden"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r anderer Zufallstreffer · e Seeds · ← → Tabs"
     discover_seeds: "↑ ↓ Zeilen · Space behalten oder verwerfen · x lösen · Esc übernehmen"
     discover_menu: "↑ ↓ Zeilen · Enter wählen · Esc schließen"
+    discover_save: "s als Playlist speichern"
     discover_pick: "↑ ↓ Zeilen · Enter wählt den Startsong · Esc bricht die Auswahl ab"
 
 # Die Flash-Seite des MP3-Players und die `device`-Befehle (src/device).

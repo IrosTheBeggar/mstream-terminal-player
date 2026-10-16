@@ -90,6 +90,7 @@ impl App {
         self.sonic = SonicPath::default();
         self.capture = None;
         self.sonic_playlist_name = None;
+        self.playlist_save_files = None;
         self.sonic_stack.restart();
         self.refresh_sonic_rows();
     }
@@ -408,6 +409,7 @@ impl App {
                 // Offered pre-filled with where it goes and where it ends
                 // up, because that is the name people would type anyway.
                 self.sonic_playlist_name = Some(self.suggested_playlist_name());
+                self.playlist_save_files = None;
                 Vec::new()
             }
             SonicRow::StartOver => {
@@ -687,16 +689,21 @@ impl App {
             }
             Action::Cancel => {
                 self.sonic_playlist_name = None;
+                self.playlist_save_files = None;
                 return Some(Vec::new());
             }
             Action::Submit => {
                 self.sonic_playlist_name = None;
+                // Another room's songs when it opened the prompt (the
+                // Discover room's), else the path's stops.
+                let given = self.playlist_save_files.take();
                 let name = name.trim().to_string();
                 if name.is_empty() {
                     return Some(Vec::new());
                 }
-                let files: Vec<String> =
-                    self.sonic.stops.iter().map(|stop| stop.filepath.clone()).collect();
+                let files: Vec<String> = given.unwrap_or_else(|| {
+                    self.sonic.stops.iter().map(|stop| stop.filepath.clone()).collect()
+                });
                 if files.is_empty() {
                     return Some(Vec::new());
                 }

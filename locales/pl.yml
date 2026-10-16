@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "Odtwórz album z %{server} — Enter"
     seed_tip: "brzmi jak %{track}"
     listen_tip: "Słuchaj przez swój serwer — P"
+    save_playlist: "zapisz jako playlistę…"
     empty_library: "Nic nowego w twojej bibliotece nie brzmi jak te utwory."
     empty_servers: "Na razie nic z twoich połączonych serwerów."
     album_failed: "nie udało się wczytać albumu"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r inny losowy · e ziarna · ← → karty"
     discover_seeds: "↑ ↓ wiersze · Space zachowaj lub odrzuć · x odepnij · Esc zastosuj"
     discover_menu: "↑ ↓ wiersze · Enter wybierz · Esc zamknij"
+    discover_save: "s zapisz jako playlistę"
     discover_pick: "↑ ↓ wiersze · Enter wybiera utwór startowy · Esc anuluje wybór"
 
 # Strona wgrywania odtwarzacza MP3 i polecenia `device` (src/device).

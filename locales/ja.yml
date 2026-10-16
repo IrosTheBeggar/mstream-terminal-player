@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "%{server} のアルバムを再生 — Enter"
     seed_tip: "%{track} に似ています"
     listen_tip: "あなたのサーバー経由で聴く — P"
+    save_playlist: "プレイリストとして保存…"
     empty_library: "ライブラリに、これらの曲に似た新しい曲はありません。"
     empty_servers: "今は接続済みサーバーからの曲はありません。"
     album_failed: "アルバムを読み込めません"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r 別の曲 · e シード · ← → タブ"
     discover_seeds: "↑ ↓ 行 · Space 残す/外す · x ピン解除 · Esc 適用"
     discover_menu: "↑ ↓ 行 · Enter 選択 · Esc 閉じる"
+    discover_save: "s プレイリストとして保存"
     discover_pick: "↑ ↓ 行 · Enter で出発点の曲を選択 · Esc で選択を取消"
 
 # MP3プレイヤーの書き込みページと `device` コマンド (src/device)。

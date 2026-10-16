@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "Reproducir el álbum de %{server} — Enter"
     seed_tip: "suena como %{track}"
     listen_tip: "Escuchar a través de tu servidor — P"
+    save_playlist: "guardar como lista…"
     empty_library: "Nada nuevo en tu biblioteca suena como estas canciones."
     empty_servers: "Nada de tus servidores conectados por ahora."
     album_failed: "no se pudo cargar el álbum"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r otra al azar · e semillas · ← → pestañas"
     discover_seeds: "↑ ↓ filas · Space conservar o descartar · x soltar · Esc aplicar"
     discover_menu: "↑ ↓ filas · Enter elegir · Esc cerrar"
+    discover_save: "s guardar como lista"
     discover_pick: "↑ ↓ filas · Enter elige la canción de partida · Esc cancela la elección"
 
 # La página de grabación del reproductor MP3 y los comandos `device` (src/device).

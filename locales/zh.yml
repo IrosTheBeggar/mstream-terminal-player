@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "播放来自 %{server} 的专辑 — Enter"
     seed_tip: "听起来像 %{track}"
     listen_tip: "通过你的服务器收听 — P"
+    save_playlist: "保存为播放列表…"
     empty_library: "你的音乐库里没有听起来像这些歌的新歌。"
     empty_servers: "你已连接的服务器目前没有内容。"
     album_failed: "无法加载专辑"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r 换一首 · e 种子 · ← → 标签"
     discover_seeds: "↑ ↓ 行 · Space 保留或排除 · x 取消固定 · Esc 应用"
     discover_menu: "↑ ↓ 行 · Enter 选择 · Esc 关闭"
+    discover_save: "s 保存为播放列表"
     discover_pick: "↑ ↓ 行 · Enter 选定起点歌曲 · Esc 取消选择"
 
 # MP3 播放器的烧录页面和 `device` 命令 (src/device)。

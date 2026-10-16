@@ -6,7 +6,7 @@
 | **Server API** | **`POST /api/v1/discovery/taste`** (§3.1), stateless since 2026-10-14 — nothing is stored or cached between calls — `{window? (7 \| 30 \| 90 \| 0, default 30), pin? (≤ 12 — `PIN_CAP`, the seed cap, since 2026-10-14 — seed first), exclude? (seed hashes left out of THIS call only, ≤ 200), sources?, limit?, newArtistsOnly?, ignoreVPaths?}` (`remember`, `filter` and `staleDays` are a 400) → `{window, widenedFrom, seedSource, fallback, seeds: [{hash, filepath, metadata, outcome, lastPlayed, plays, pinned, analyzed}], excluded: [{hash, filepath, metadata}] (this call's `exclude` hashes that resolve), dropped, notAnalyzed, model, library: {tracks: [{filepath, similarity, seedHash, metadata, genreTags, playCount, lastPlayed}], albums: [{…Album, similarity, scopedTracks, playedTracks, lastPlayed, tracks: [path]}], capped}, network: {results: [p2p row + {source: 'p2p', seedHash}], searched: {peers, tracks}} \| null, peers: {peers: [{id, name, reachable, mismatched, lastSeen, results: [federation row + {source: 'federation', seedHash: null}]}], searched: {peers, unreachable, mismatched}} \| null}` — an account only (403 for a federation key or a guest), 403 `Discovery is disabled` when discovery is off or the index is unavailable; `network`/`peers` are `null` when the source is not advertised for the caller or a random seed is in use. The seeds are the pins, then a **random batch** of the account's finished songs in the window — a different batch on every call — widening window → all time → counters → one random library song (drawn afresh on every call, 2026-10-14; never one in `exclude`). The library half is the fixed rule "songs you haven't played lately" (never, or more than 90 days ago). *(`GET` / `PUT …/taste/prefs` are gone since 2026-10-14 — a 404.)* **`POST /api/v1/discovery/plugin-jobs/lookup/batch`** (§3.3) — phase B; **v1 calls only the taste route** (the `links` plug-in's resolve left with the Network tab on 2026-10-11 — the later Explore room's), plus routes the player already speaks: the federation byte proxy `GET /api/v1/federation/peers/{id}/stream/…` and `POST /api/v1/stats/plays` with `peerId`, both through the queue as it is. **Gate**: the ping's `discovery === true && discoveryTaste >= 1` (§2.10) — here `capabilities.discovery && capabilities.discovery_taste >= 1`; the Connected servers source rides `federationDiscovery`; `discoveryP2p` (the Network source) and `discoveryPlugins` are parsed but read by nothing here since 2026-10-11 — the later Explore room's. |
 | **Already in this repo** | The App/worker pair every room rides: `Effect::Api(ApiCmd::…)` drained onto the api thread, answered by `worker::answer` (and `src/web/api_worker.rs` in the browser build) as an `Event` that `App::apply_event` folds in, stale replies dropped by seq / node / session-generation guards. The **Sonic room's own row model** — `List::Sonic` maps to no App pane (`List::tab()` → `None`), its rows live in App state and its verbs call App methods that build the queue rows themselves (`src/gui/sonic.rs`), with `sonic::meter_glyph` for the one-cell match meter. The kit's **Tabs** (first consumer: the admin Discovery room), **Dropdown** (the header's server switcher, the stats page's period), **Table** (`table_view`, `scroll_list`, `ListView`), a list hung from a control (`frame_at` + `Surface::overlay`, the dropdown's own grammar) and **modals** (`modal_frame_on`). `Client::stats_history_async` (the one outcome-bearing history read — named so nobody reaches for it: the server picks the seeds, clause 10). `Client::random_song_async`; `gui::opener::open_target` (honours `MSTREAM_NO_OPEN`); `kit::clipboard::copy`; the track-actions sheet (`actions::Sheet { origin, track }`); the capture banner (`Capture`); `App::origin()` and `App::reach(&Origin)` for a peer origin (multi-server clauses 27, 30); `ApiCmd::DiscoveryProbe`; `GuiPrefs` (`[gui]`, unknown keys kept). **Missing**: `Ping.discovery_taste` / `discovery_plugins` and their `Capabilities` mirrors, the taste types and client calls, `ApiCmd::Taste` / `Event::Taste`, the App's taste state, `NavId::Discover`, `src/gui/discover.rs`, a capture for a seed pick, the `gui.discover.*` strings. |
 | **Target surface** | the GUI player (`mstream-player gui`, both flavours — the window host draws the same `render`) as a **TOOLS nav room**. **The TUI changes nothing**: its Discover tab (`Tab::Discover`, the explicit-seed lookup), the Now Playing panel's neighbours (`App.now_discover`) and `Capture::Discover` stay exactly as they are. The one shared change is a title: the Now Playing view's Discover tab becomes **Similar** (plan §2.12; docs/ux-contracts/now-playing.md) |
-| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11 (the log) |
+| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11; the verbs line over the table and save as playlist 2026-10-16 (the log) |
 
 ## Intent
 
@@ -55,8 +55,9 @@ line come from one batch.
   the **seeds line** (`seeds  Title · Artist … and more  edit`) whose
   `edit` opens the **seeds modal**; the tab's **album strip** — a row of
   album tiles with their covers that scrolls sideways — where the room is
-  20 rows tall or more (clauses 45–49); the tab's table; the bottom row with
-  the whole-list verbs.
+  20 rows tall or more (clauses 45–49); the **verbs line** with the tab's
+  whole-list verbs, right over its table (clause 64); the tab's table, down
+  to the room's last row — there is no bottom row (2026-10-16).
 - **Nothing finished yet** (`fallback: true`, the server's random seed) —
   the fallback card above the tabs: what the room needs, the random
   pick it started from, **another pick** and **choose a song…**; the
@@ -384,8 +385,10 @@ answer and the visit (the session generation, clause 31).
 49. **The height gate.** The strip's seven rows and the gap under them
     stand only where the table keeps **at least three rows** under the
     strip: the room's six rows above it (header, state, blank, tabs,
-    seeds, blank), the table's header and rule and the bottom row mean a
-    content area of **20 rows** with no card. The installer's default
+    seeds, blank), and the verbs line and the table's header and rule
+    under it (no bottom row since 2026-10-16: the verbs line took its row
+    and its place moved above the table), mean a content area of **20
+    rows** with no card — 6 + 8 + 3 + 3. The installer's default
     100×30 window qualifies (22 rows with the footer on, 23 off: five or
     six rows under the strip); the **100×24 floor** (16 or 17) does not
     and keeps today's album container rows in the table, so the floor
@@ -482,18 +485,42 @@ answer and the visit (the session generation, clause 31).
     `links` plug-ins, THIS LEAD's copy — left the room on 2026-10-11: they
     cannot play now. The later Explore room takes them; git history keeps
     the code.)*
-64. **The whole-list verbs** stand at the right of the room's bottom row
-    — **play · queue all · shuffle**, the browse bar's three with its
-    meanings (browser-top-bar clauses 10–12: replace and play, append and
-    say how many, shuffle the order once) — on the Library tab (its
-    songs; albums are containers) and the Connected servers tab (its rows
-    in order), only while the tab has rows (the bar's law: verbs appear
-    only when they would do something). Keys `p`, `A`, `S`, as in the
-    browse rooms.
+64. **The whole-list verbs** stand on the **verbs line**, from the room's
+    left edge, right over the tab's table — under the album strip where it
+    stands, under the seeds line's blank where it does not — the webapp's
+    verbs under its songs' header, ahead of the rows (mStream `141e1a9c`,
+    the 2026-10-16 log). **Library**: **▸ play · + queue all · ⇄ shuffle ·
+    save as playlist…**; **Connected servers**: **▸ play · + queue all ·
+    ⇄ shuffle** (the webapp's servers column offers Queue all alone; play
+    and shuffle stay, built here before it, and there is no save: a
+    connected server's songs are not this server's). Play, queue all and
+    shuffle are the browse bar's three with its meanings (browser-top-bar
+    clauses 10–12: replace and play, append and say how many, shuffle the
+    order once) over the tab's songs (albums are containers) or its rows
+    in order; **save as playlist** opens the house name prompt — the
+    sonic room's (`App.sonic_playlist_name`, drawn by `sonic::draw_modals`,
+    typed through the App's line editor), empty as the webapp's modal
+    opens — and Enter saves the Library tab's songs, in the server's
+    order, as a playlist on this server (`ApiCmd::SavePlaylist`, the
+    sonic path's save; the files ride `App.playlist_save_files`); Esc
+    cancels; an empty name saves nothing. The line wears the bar's
+    grammar: **play the one accent**, the rest DIM text buttons, each
+    BRIGHT + BOLD under the pointer and acting on a click, `⇄` gated on
+    the legacy console, the key in each tooltip; squeezed, it drops verbs
+    from the tail (save first, play last). Verbs appear only while the tab
+    has rows (the bar's law); the line keeps its row while they are
+    hidden, so nothing moves. Keys `p`, `A`, `S`, as in the browse rooms,
+    and **`s`** for save as playlist — the sonic room's save key — only
+    where the tab's songs can be saved; elsewhere `s` keeps its global
+    meaning (shuffle mode). The line stands under the strip, not over it,
+    as the webapp's does: its album strips draw first and its songs block
+    — label, verbs, rows — after them (`m.js` `discoveryLibrarySongsHtml`),
+    so the verbs sit with the songs they act on.
 65. *(The library filter's checkbox, "Include songs I've played lately",
     and its `f` left on 2026-10-14: the library half is the server's fixed
     rule — songs you haven't played lately, never or more than 90 days
-    ago — and the bottom row keeps the whole-list verbs alone.)*
+    ago — and the bottom row kept the whole-list verbs alone, until they
+    moved to the verbs line on 2026-10-16 and the bottom row went.)*
 66. **Plays started here are ordinary plays** — `manual`, `shuffle` or
     `autodj` as the play-reporting contract decides; there is no
     `discovery` source in v1 (plan §6, question 8).
@@ -544,8 +571,9 @@ answer and the visit (the session generation, clause 31).
 
 90. **At 100×24**, footer on or off, the nav column holds every row
     (clause 2) and the room holds, top to bottom: the header, the state
-    line, a blank, the tabs, the seeds line, a blank, the table's header
-    and rule, the rows (seven with the footer on), the bottom row. The
+    line, a blank, the tabs, the seeds line, a blank, the verbs line, the
+    table's header and rule, the rows (seven with the footer on, eight
+    off) down to the room's last row — no bottom row (2026-10-16). The
     card (clause 20) pushes the table down; when the room is short the
     card gives up its blank line and its body sentence first (the title,
     the pick and its two actions stay), so the table keeps at least its
@@ -554,7 +582,8 @@ answer and the visit (the session generation, clause 31).
 91. **With the queue panel open** (47 cells at 100 columns) the header's
     "based on…" clips before the window control, the tab row
     has none to drop (clause 42), the table narrows by clause 54, and the
-    bottom row drops the verbs from the tail by the bar's rules — no
+    verbs line drops its verbs from the tail by the bar's rules (save as
+    playlist first: English keeps play · queue all · shuffle there) — no
     control moves for the width.
 
 ## Wording
@@ -574,6 +603,7 @@ itself shows no count.
 | base tips: … · D Auto DJ · **G discover** · T stats · … | `gui.tips.base` (amended) |
 | ↓ pick a row · ← → tabs · w window · e seeds · G ask again | `gui.tips.discover` |
 | ↓ pick an album · ← → tabs · w window · e seeds · G ask again (at rest where the album strip stands) | `gui.tips.discover_strip` |
+| s save as playlist (appended to every rest tip — `discover`, `discover_strip` and the fallback card's `discover_fallback` — after ` · `, while the Library tab has songs; 2026-10-16) | `gui.tips.discover_save` |
 | Enter play from here · a queue · N next · P play now · m actions · ← → tabs · Esc done (a library song's row and a connected server's) | `gui.tips.discover_row` (one key since 2026-10-11) |
 | Enter open the album · a queue · ← → tabs · Esc done | `gui.tips.discover_album` |
 | ← → albums · Enter open the album · + a queue · ↓ songs · Esc done (the hand on a library album's tile) | `gui.tips.discover_tile` |
@@ -622,7 +652,9 @@ itself shows no count.
 | sounds like %{track} | `gui.discover.seed_tip` |
 | Listen through your server — P | `gui.discover.listen_tip` |
 | Add next — N · Add to the queue — a · Play now — P · More actions | reused: `gui.files.next_tip` · `gui.files.queue_tip` · `gui.files.now_tip` · `gui.act.more_tip` |
-| play · queue all · shuffle (the bottom row) | reused: `gui.bar.play` · `gui.bar.queue` · `gui.shuffle_word` |
+| play · queue all · shuffle (the verbs line) | reused: `gui.bar.play` · `gui.bar.queue` · `gui.shuffle_word` |
+| save as playlist… (the verbs line, Library tab) | `gui.discover.save_playlist` |
+| Save as playlist · enter saves · esc cancels · Save (the name prompt) · type a name · Enter saves · Esc cancels (its tips) | reused: the sonic room's `gui.sonic.save_title` · `save_hint` · `save_ok` · `gui.tips.sonic_save` |
 | Nothing new in your library sounds like these songs. | `gui.discover.empty_library` |
 | Nothing from your connected servers right now. | `gui.discover.empty_servers` |
 | couldn't reach this source · Try again | `gui.discover.failed` · `gui.discover.retry` |
@@ -642,8 +674,8 @@ Data is never translated: titles, artists, album and server names.
   the room has no way into a peer's library, so that album's tile plays
   it instead (clause 48). The strips' section labels ("Albums from your
   library", "Albums from {server}") are the tab's name here.
-- **"Save as playlist"** under the library's songs (the webapp's third
-  footer verb): the bottom row keeps the browse bar's three.
+- *(**"Save as playlist"** was out of scope here until 2026-10-16; it is
+  clause 64's now — the log.)*
 - **Phase B** (plan §4.3): the 30 s **preview**, **Get it** (the YouTube
   job), **Keep a copy** (the federation-copy job), lookups, and every
   job's progress — the canvas's "getting it · 64%", "copying", the STATE
@@ -681,6 +713,7 @@ Data is never translated: titles, artists, album and server names.
 | The webapp's re-ping on 403 | `ApiCmd::DiscoveryProbe`, reading `discovery && discovery_taste >= 1` for this room (the sonic room's probe reads its own flag) |
 | Segmented switch (the play-now page's two sources) | The kit's Tabs, Library · Connected servers, names only; `[gui] discover_tab` in `GuiPrefs` |
 | "Based on the last [window]" | The kit's Dropdown at the header's right (`Last 30 days ▾`), remembered in `[gui] discover_window` (the webapp's localStorage) |
+| The songs' whole-list verbs under each column's header, ahead of the rows (mStream `141e1a9c`) | The verbs line over the tab's table (clause 64): the Library's four, the Connected servers' three; the bottom row is gone |
 | Album cards (the strips' scrollers), the two song columns | The album strip over each tab's table — 12 × 5 covers through `cover::Slot`, real pixels or the mosaic — where the room has 20 rows; album rows ahead of the songs below that (clauses 45–49, the log); the songs in one table per tab |
 | A row's art tile, title and "Artist · Album" | TRACK · ARTIST · ALBUM (· ON) · LENGTH columns: a terminal has no art tile in chrome, and columns read faster than a joined line at 80 cells |
 | The seeds sheet (PhoneSeeds) | A kit modal (`modal_frame_on`) with `[✓]` / `[ ]` rows and a modal primary Done; the window stays the header's dropdown, not repeated in the modal |
@@ -756,7 +789,20 @@ lines; the Connected servers rows with an offline and a mismatched
 server's left out, Enter playing through the federation proxy, and `[⋯]`,
 `m` and a right click opening the sheet with the peer's origin; the
 list-cursor law (nothing lit on arrival, a click stows, verbs need the
-cursor up); the wheel; the glyph fallbacks; cells in French and Japanese.
+cursor up); the wheel; the glyph fallbacks; cells in French and Japanese;
+**the verbs line** (2026-10-16) at 100×30 under the strip and over the
+table's header, and at 100×24 under the seeds line's blank, footer on and
+off, with no bottom row and the table reaching the room's last row; the
+layout's numbers (the strip from 20 content rows with three rows under
+it, the card whole from 18, seven rows at the floor with the footer on);
+play the one accent, hover brightening; each verb by click and by key on
+both tabs (`p` `A` `S`, and `s` on the Library tab only — the Connected
+servers tab has no save, by click, key or act); save as playlist opening
+the sonic room's prompt empty, typed letters staying letters, Enter
+sending `SavePlaylist` with the Library's songs in order and no album,
+Esc forgetting them; save dropping first with the queue open; the rest
+tips naming `s` on the Library tab only; the e2e leg gating on the verbs
+line's "playlist" between the strip and the rows.
 App tests: the two asks and their bodies (`library` alone, never
 `network`; the window always, 30 by default; nothing but the taste asks
 — no prefs); the peers ask following the Main answer, pinned to its
@@ -1046,3 +1092,48 @@ wasm32-unknown-unknown`.
     one with no seed. The user still picks at most 8 songs (clause 14);
     `TasteRequest` gains `limit` (`TasteLimit { seeds }`), sent only on
     the peers ask.
+- **2026-10-16 — The verbs line; save as playlist.** The user's ask, in
+  their words: "make the terminal app reflect the webapp". The webapp
+  (mStream `141e1a9c`, "Discover's whole-list verbs sit under the column
+  headers") moved "Queue all · Shuffle · Save as playlist" under "Songs
+  from your library" and "Queue all" under "Songs from {server}" —
+  directly under each songs column's header, ahead of its rows, "so the
+  actions are where the eye lands first" — and (`c01a8327`) keeps its
+  configuration bar fixed while the page scrolls. Here:
+  - **The verbs line** (clause 64) takes the bottom row's verbs to a line
+    of their own right over the tab's table: under the album strip where
+    it stands — the webapp's songs header follows its album strips, so the
+    verbs sit with the songs they act on, not with the seeds line's
+    configuration — and under the seeds line's blank at the floor. It
+    starts at the room's left edge, as the webapp's do, so no control
+    moves for the width. **The bottom row goes**; the table runs to the
+    room's last row. The arithmetic keeps every number the room had: the
+    verbs line costs the row the bottom row gave back, so the strip still
+    stands from a 20-row content area with at least three rows under it
+    (100×30: five rows with the footer on, six off), the card stands whole
+    from 18 rows and with the strip from 28, and the floor keeps seven
+    rows with the footer on (clauses 49, 90).
+  - **Save as playlist is ported** on the Library tab (clause 64; it was
+    out of scope since 2026-10-05): the house's name prompt — the sonic
+    room's save (`App.sonic_playlist_name`, its modal and its keys), not a
+    new one; the Playlists room's `PlNew` dialog creates an empty
+    playlist and is not a save — opened empty as the webapp's
+    `openSavePlaylistModal` opens, saving the tab's listed songs in the
+    server's order (the webapp's `allTracks`; the album rows are
+    containers and are not saved). The App's prompt learned whose songs
+    it saves: `App.playlist_save_files`, set by `taste_save_playlist`,
+    taken on Enter, dropped on Esc and whenever the sonic path opens the
+    prompt, so the sonic save still saves its stops. Key **`s`**, the
+    sonic room's save key, only where the Library tab has songs (the
+    room's `p` / `A` / `S` shadow the transport the same way); every rest
+    tip gains "s save as playlist" there, the fallback card's included
+    (its Library tab saves too).
+  - **The Connected servers tab keeps play · queue all · shuffle**, though
+    the webapp's servers column offers Queue all alone: they stood here
+    first and do what they say through the federation proxy. It has **no
+    save**: the webapp's servers column has none, and a connected server's
+    songs are not this server's to save.
+  - **The configuration bar** needed nothing: the header, the state line,
+    the tabs and the seeds line have always stood fixed above the table,
+    which scrolls alone — the webapp's sticky bar is this room's shape
+    already.

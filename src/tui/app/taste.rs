@@ -748,7 +748,7 @@ impl App {
         }
     }
 
-    /// The bottom row's play and shuffle (clause 64, browser-top-bar clauses
+    /// The verbs line's play and shuffle (clause 64, browser-top-bar clauses
     /// 10 and 12): the tab's rows replace the queue; `shuffle` reorders them
     /// once.
     pub(crate) fn taste_play_all(&mut self, shuffle: bool) -> Vec<Effect> {
@@ -763,11 +763,30 @@ impl App {
         self.play_index(0)
     }
 
-    /// The bottom row's queue all (clause 64, browser-top-bar clause 11):
+    /// The verbs line's queue all (clause 64, browser-top-bar clause 11):
     /// append, say how many, and start an empty idle queue.
     pub(crate) fn taste_queue_all(&mut self) -> Vec<Effect> {
         let items = self.taste_tab_items();
         self.taste_append(items)
+    }
+
+    /// The verbs line's save as playlist (clause 64, the webapp's "Save as
+    /// playlist"): the house name prompt — the sonic room's, empty as the
+    /// webapp's modal opens — over the Library tab's songs in the server's
+    /// order; albums are containers. The Connected servers tab saves
+    /// nothing: its songs are not this server's. False when nothing opened.
+    pub(crate) fn taste_save_playlist(&mut self) -> bool {
+        if self.taste.tab != TasteTab::Library {
+            return false;
+        }
+        let files: Vec<String> =
+            self.taste.library.data.iter().flat_map(|l| &l.tracks).map(|t| t.filepath.clone()).collect();
+        if files.is_empty() {
+            return false;
+        }
+        self.playlist_save_files = Some(files);
+        self.sonic_playlist_name = Some(String::new());
+        true
     }
 
     /// Append rows the way queue all does: say how many, and start an

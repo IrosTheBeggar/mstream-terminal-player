@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "Tocar o álbum de %{server} — Enter"
     seed_tip: "soa como %{track}"
     listen_tip: "Ouvir pelo seu servidor — P"
+    save_playlist: "salvar como playlist…"
     empty_library: "Nada novo na sua biblioteca soa como estas músicas."
     empty_servers: "Nada dos seus servidores conectados agora."
     album_failed: "não foi possível carregar o álbum"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r outra aleatória · e sementes · ← → abas"
     discover_seeds: "↑ ↓ linhas · Space manter ou descartar · x desafixar · Esc aplicar"
     discover_menu: "↑ ↓ linhas · Enter escolher · Esc fechar"
+    discover_save: "s salvar como playlist"
     discover_pick: "↑ ↓ linhas · Enter escolhe a música de partida · Esc cancela a escolha"
 
 # A página de gravação do leitor MP3 e os comandos `device` (src/device).

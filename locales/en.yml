@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "Play the album from %{server} — Enter"
     seed_tip: "sounds like %{track}"
     listen_tip: "Listen through your server — P"
+    save_playlist: "save as playlist…"
     empty_library: "Nothing new in your library sounds like these songs."
     empty_servers: "Nothing from your connected servers right now."
     album_failed: "couldn't load the album"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r another pick · e seeds · ← → tabs"
     discover_seeds: "↑ ↓ rows · Space keep or drop · x unpin · Esc apply"
     discover_menu: "↑ ↓ rows · Enter pick · Esc close"
+    discover_save: "s save as playlist"
     discover_pick: "↑ ↓ rows · Enter picks the song to start from · Esc cancels the pick"
 
 # The MP3 player's flash page and `device` commands (src/device).

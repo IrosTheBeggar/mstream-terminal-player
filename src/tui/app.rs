@@ -1715,6 +1715,10 @@ pub struct App {
     pub capture: Option<Capture>,
     /// The playlist name being typed, when the save prompt is up.
     pub sonic_playlist_name: Option<String>,
+    /// The songs the save prompt writes when a room other than the sonic
+    /// path opened it — the GUI Discover room's library songs (discovery-
+    /// page clause 64); `None` saves the sonic path's stops.
+    pub playlist_save_files: Option<Vec<String>>,
     /// The GUI's Discover room: its own row model (docs/ux-contracts/
     /// discovery-page.md), apart from the TUI's Discover tab above.
     pub taste: taste::TasteState,
@@ -1961,6 +1965,7 @@ impl App {
             capture: None,
             taste: taste::TasteState::default(),
             sonic_playlist_name: None,
+            playlist_save_files: None,
             autodj_recent: Vec::new(),
             status: PlayerStatus::default(),
             starting: None,

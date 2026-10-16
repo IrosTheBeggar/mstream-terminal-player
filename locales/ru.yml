@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "Слушать альбом с %{server} — Enter"
     seed_tip: "похоже на %{track}"
     listen_tip: "Слушать через ваш сервер — P"
+    save_playlist: "сохранить как плейлист…"
     empty_library: "Ничего нового в вашей библиотеке не звучит как эти треки."
     empty_servers: "Сейчас ничего с ваших подключённых серверов."
     album_failed: "не удалось загрузить альбом"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r другой случайный · e зёрна · ← → вкладки"
     discover_seeds: "↑ ↓ строки · Space оставить или исключить · x открепить · Esc применить"
     discover_menu: "↑ ↓ строки · Enter выбрать · Esc закрыть"
+    discover_save: "s сохранить как плейлист"
     discover_pick: "↑ ↓ строки · Enter выбирает стартовый трек · Esc отменяет выбор"
 
 # Страница прошивки MP3-плеера и команды `device` (src/device).

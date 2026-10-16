@@ -1740,6 +1740,7 @@ gui:
     peer_album_tip: "Lire l'album depuis %{server} — Entrée"
     seed_tip: "ressemble à %{track}"
     listen_tip: "Écouter via ton serveur — P"
+    save_playlist: "enregistrer comme playlist…"
     empty_library: "Rien de neuf dans ta bibliothèque ne sonne comme ces morceaux."
     empty_servers: "Rien de tes serveurs connectés pour l'instant."
     album_failed: "impossible de charger l'album"
@@ -1958,6 +1959,7 @@ gui:
     discover_fallback: "r autre tirage · e graines · ← → onglets"
     discover_seeds: "↑ ↓ lignes · Espace garder ou écarter · x désépingler · Échap appliquer"
     discover_menu: "↑ ↓ lignes · Entrée choisir · Échap fermer"
+    discover_save: "s sauver en playlist"
     discover_pick: "↑ ↓ lignes · Entrée choisit le morceau de départ · Échap annule le choix"
 
 # La page de flashage du lecteur MP3 et les commandes `device` (src/device).
