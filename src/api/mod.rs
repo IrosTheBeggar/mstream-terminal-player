@@ -1399,12 +1399,7 @@ impl Client {
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
     pub async fn album_art_async(&self, file: &str) -> Result<Vec<u8>, ApiError> {
-        let url = match self.peer {
-            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
-            None => urls::album_art_url(&self.server(), file),
-        }
-        .map_err(ApiError::Config)?;
-        let url = urls::with_local_token(url, self.local_token.as_deref());
+        let url = self.art_url(file)?;
         let mut req = self.http.get(&url);
         if let Some(token) = &self.token {
             req = req.header("x-access-token", token);
@@ -1423,6 +1418,18 @@ impl Client {
             }),
             _ => Ok(bytes.to_vec()),
         }
+    }
+
+    /// Where [`Client::album_art_async`] asks for `file`: the server's own
+    /// `/album-art/<file>`, or — aimed at a federated peer — the parent's
+    /// art proxy, `/api/v1/federation/peers/{id}/art/<file>`.
+    pub fn art_url(&self, file: &str) -> Result<String, ApiError> {
+        let url = match self.peer {
+            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
+            None => urls::album_art_url(&self.server(), file),
+        }
+        .map_err(ApiError::Config)?;
+        Ok(urls::with_local_token(url, self.local_token.as_deref()))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

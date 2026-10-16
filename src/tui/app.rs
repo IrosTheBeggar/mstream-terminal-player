@@ -55,6 +55,13 @@ const PAGE_STEP: isize = 10;
 /// every frame.
 const ART_CACHE_CAP: usize = 256;
 
+/// How long a cover whose fetch went unanswered (a dropped connection, or
+/// a federation art proxy's 502/504/401) waits before it is asked again.
+/// The slot is given back so the cover is not lost for the session, but
+/// the GUI claims covers on every draw (ten a second), and without a pause
+/// a failing hop was asked again on every frame for every visible tile.
+pub(crate) const ART_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// A side effect for the run loop to dispatch to a worker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -1819,6 +1826,9 @@ pub struct App {
     pub art: HashMap<String, Option<Art>>,
     /// The cache's insertion order, oldest first: what goes when it fills.
     art_order: VecDeque<String>,
+    /// Covers whose last fetch went unanswered, and when: not asked again
+    /// until [`ART_RETRY`] has passed.
+    pub(crate) art_retry: HashMap<String, crate::clock::Instant>,
     /// Track shapes fetched this session, keyed by filepath. `None` records
     /// both "asked, nothing there" and "asked, still waiting" — the bar draws
     /// the same either way, and the entry is what stops a second request.
@@ -1992,6 +2002,7 @@ impl App {
             now_playing: None,
             art: HashMap::new(),
             art_order: VecDeque::new(),
+            art_retry: HashMap::new(),
             waveforms: HashMap::new(),
             waveform_order: VecDeque::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
@@ -5041,6 +5052,12 @@ impl App {
         if self.art.contains_key(file) {
             return None;
         }
+        if let Some(failed) = self.art_retry.get(file) {
+            if failed.elapsed() < ART_RETRY {
+                return None;
+            }
+            self.art_retry.remove(file);
+        }
         if self.art.len() >= ART_CACHE_CAP {
             // The oldest cover nothing on screen needs goes — never the
             // playing track's or a queued row's; the wall's page is the
@@ -5621,10 +5638,19 @@ impl App {
                 // instead — the waveform's rule, learned here the hard
                 // way: a fetch that died with the wifi used to leave the
                 // album coverless for the rest of the session.
+                // Given back, but not at once: the GUI claims covers every
+                // frame, so a hop that keeps failing (a peer gone behind
+                // the federation proxy) would otherwise be asked again ten
+                // times a second for every tile in view.
                 if settled {
+                    self.art_retry.remove(&file);
                     self.art.insert(file, art);
                 } else {
                     self.art.remove(&file);
+                    if self.art_retry.len() >= ART_CACHE_CAP {
+                        self.art_retry.retain(|_, failed| failed.elapsed() < ART_RETRY);
+                    }
+                    self.art_retry.insert(file, crate::clock::Instant::now());
                 }
                 Vec::new()
             }

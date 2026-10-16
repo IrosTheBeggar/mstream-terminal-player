@@ -1468,8 +1468,33 @@ pub struct TasteLead {
     /// A federation row's path ON THE PEER — what the parent's stream proxy
     /// plays. A p2p lead has none.
     pub filepath: Option<String>,
+    /// A connected server's row's cover, ON THE PEER: the file name its own
+    /// browse rows' `album-art` and `/album-art/<file>` use, which the
+    /// parent's federation art proxy fetches
+    /// (`/api/v1/federation/peers/{id}/art/<file>`). mStream's `albumArt`
+    /// (2026-10-16); `None` when the track has no cover, the row comes from
+    /// an older server, or the name is not one plain file name
+    /// ([`peer_art_name`]).
+    pub album_art: Option<String>,
     pub peer: LeadPeer,
     pub raw: serde_json::Value,
+}
+
+/// A peer's cover file name as the client takes it: the server's own
+/// `peerArtName` rule (mStream's discovery-federation.js `ART_NAME`,
+/// `^[a-zA-Z0-9_-]{1,100}\.[a-zA-Z0-9]{1,7}$`, which the webapp and the
+/// phone copy too) — one stem of letters, digits, `_` or `-`, one dot, one
+/// short alphanumeric extension. The parent filters peers' rows by it
+/// already; held to it here as well, a row a server let through odd never
+/// names a nested path, a query or an encoded byte to the proxy. Anything
+/// else is no cover.
+pub fn peer_art_name(value: &serde_json::Value) -> Option<String> {
+    let name = value.as_str()?;
+    let (stem, ext) = name.rsplit_once('.')?;
+    let stem_ok = (1..=100).contains(&stem.len())
+        && stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    let ext_ok = (1..=7).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric());
+    (stem_ok && ext_ok).then(|| name.to_string())
 }
 
 impl TasteLead {
@@ -1500,6 +1525,12 @@ impl TasteLead {
             seed_hash: text("seedHash"),
             source: text("source"),
             filepath: text("filepath"),
+            // `albumArt` is the contract's spelling; the older spellings a
+            // client once guessed at (the webapp's `peerArtOf`) are still
+            // read, under the same rule, and harm nothing when absent.
+            album_art: ["albumArt", "art", "album-art", "album_art_file"]
+                .iter()
+                .find_map(|key| raw.get(*key).and_then(peer_art_name)),
             peer,
             raw,
         }
@@ -1518,6 +1549,10 @@ impl TasteLead {
                 album: self.album.clone(),
                 year: self.year,
                 duration: self.duration,
+                // Queued, the row's cover comes from its own server the way
+                // a peer's browse row's does (the queue panel, Now Playing),
+                // and is the play report's `artFile`.
+                album_art: self.album_art.clone(),
                 ..TrackMetadata::default()
             },
         })
@@ -2214,6 +2249,64 @@ mod tests {
         let track = fed.to_track().unwrap();
         assert_eq!(track.filepath, "music/s.mp3");
         assert_eq!(track.metadata.duration, Some(180.0));
+    }
+
+    #[test]
+    fn a_connected_servers_taste_row_reads_its_album_art() {
+        let row = |extra: serde_json::Value| {
+            let mut raw = serde_json::json!({
+                "artist": "Xan", "title": "Red", "album": "Xan's", "similarity": 0.9,
+                "filepath": "music/r.mp3", "peer": { "id": 1, "name": "B" }, "source": "federation"
+            });
+            raw.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            TasteLead::from_raw(raw)
+        };
+        // The contract's `albumArt` (mStream 2026-10-16): read, kept in
+        // `raw` as it came, and carried to the queued track — the queue
+        // panel's and Now Playing's cover, the play report's `artFile`.
+        let lead = row(serde_json::json!({ "albumArt": "a1b2c3.jpeg" }));
+        assert_eq!(lead.album_art.as_deref(), Some("a1b2c3.jpeg"));
+        assert_eq!(lead.raw["albumArt"], "a1b2c3.jpeg");
+        assert_eq!(lead.to_track().unwrap().metadata.album_art.as_deref(), Some("a1b2c3.jpeg"));
+        // No cover (`null`), a peer on an older server (no key): none, and
+        // the queued track names none either.
+        for extra in [serde_json::json!({ "albumArt": null }), serde_json::json!({})] {
+            let lead = row(extra);
+            assert_eq!(lead.album_art, None);
+            assert_eq!(lead.to_track().unwrap().metadata.album_art, None);
+        }
+        // Only one plain file name, the server's own rule.
+        let long = format!("{}.jpg", "x".repeat(101));
+        for odd in [
+            serde_json::json!("a/b.jpg"),
+            serde_json::json!(".."),
+            serde_json::json!("."),
+            serde_json::json!("a\\b.jpg"),
+            serde_json::json!("a\u{1}.jpg"),
+            serde_json::json!(""),
+            serde_json::json!(7),
+            serde_json::json!(long),
+            serde_json::json!("noext"),
+            serde_json::json!("a b.jpg"),
+            serde_json::json!("a%2F.jpg"),
+            serde_json::json!("a.b.jpg"),
+            serde_json::json!("a.jpg?x"),
+            serde_json::json!("a.toolongext"),
+            serde_json::json!("caf\u{e9}.jpg"),
+        ] {
+            assert_eq!(row(serde_json::json!({ "albumArt": odd.clone() })).album_art, None, "{odd}");
+        }
+        let widest = format!("{}.abcdefg", "x".repeat(100));
+        assert_eq!(row(serde_json::json!({ "albumArt": widest.clone() })).album_art, Some(widest));
+        assert_eq!(row(serde_json::json!({ "albumArt": "a_B-9.png" })).album_art.as_deref(), Some("a_B-9.png"));
+        // The older guessed spellings are harmless: still read when
+        // `albumArt` is not there, under the same rule; `albumArt` first.
+        assert_eq!(row(serde_json::json!({ "art": "old.jpg" })).album_art.as_deref(), Some("old.jpg"));
+        assert_eq!(
+            row(serde_json::json!({ "art": "old.jpg", "albumArt": "new.jpg" })).album_art.as_deref(),
+            Some("new.jpg")
+        );
+        assert_eq!(row(serde_json::json!({ "album_art_file": "../x.jpg" })).album_art, None);
     }
 
     #[test]

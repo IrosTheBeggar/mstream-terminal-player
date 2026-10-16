@@ -174,7 +174,9 @@ leg gui-discover gui-discover.exp "$WORK/h11" "$WORK/gui-discover.out"
 # The gate open (the ping advertises discoveryTaste): the nav grows its
 # row, G opens the room on the answer's header and rows, and Now Playing's
 # per-song tab reads Similar (docs/ux-contracts/discovery-page.md). The
-# fake counts the asks: the room must have asked the route itself.
+# fake counts the asks: the room must have asked the route itself — and
+# its peers half, whose Connected servers tile fetches its cover from the
+# peer through the federation art proxy by the row's `albumArt`.
 PORT="$(FAKE_TASTE=1 start_fake T)"
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-room gui-discover-room.exp "$WORK/h12" "$WORK/gui-discover-room.out"
@@ -195,6 +197,13 @@ assert "the strip fetched its album's cover" "
 import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert s['art_gets'] >= 1, s
+"
+assert "the peers half was asked and its tile fetched the peer's cover through the art proxy" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['peer_asks'] >= 1, s
+assert s['peer_art_gets'] == 1, s  # claimed once
+assert all(p.split('?')[0] == '/api/v1/federation/peers/7/art/attic-lanterns.png' for p in s['peer_art_paths']), s
 "
 stop_fake
 

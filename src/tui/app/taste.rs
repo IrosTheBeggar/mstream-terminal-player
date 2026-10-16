@@ -63,10 +63,6 @@ pub fn taste_window(days: u32) -> Option<u32> {
 /// `limit` is asked, so the library's strip never drops one.
 pub const TASTE_STRIP_MAX: usize = 12;
 
-/// The longest art file name a connected server's row may carry — the
-/// webapp's `PIN_PATH_MAX`, read the same way (`peerArtOf`).
-const PEER_ART_MAX: usize = 4096;
-
 /// One album on the Connected servers tab's strip: the playable rows of one
 /// server that share an album and an artist (the webapp's `peerAlbums`).
 #[derive(Debug, Clone, PartialEq)]
@@ -77,25 +73,12 @@ pub struct TastePeerAlbum {
     pub server: String,
     pub album: String,
     pub artist: Option<String>,
-    /// The first art file one of its rows names, through the federation
-    /// art proxy; `None` draws the note tile.
+    /// The first cover one of its rows names (the row's `albumArt`), fetched
+    /// through the federation art proxy; `None` draws the note tile.
     pub art: Option<String>,
     /// Its rows as (group, row), best match first — what `[+]` queues when
     /// the server will not list the album.
     pub rows: Vec<(usize, usize)>,
-}
-
-/// A connected server's row's art file, when the row carries one — the
-/// webapp's `peerArtOf`: the taste route's rows carry none today, and a
-/// responder that adds one is picked up without a client change.
-fn peer_art(lead: &TasteLead) -> Option<String> {
-    ["art", "albumArt", "album-art", "album_art_file"].iter().find_map(|key| {
-        lead.raw
-            .get(*key)
-            .and_then(serde_json::Value::as_str)
-            .filter(|v| !v.is_empty() && v.len() <= PEER_ART_MAX)
-            .map(str::to_string)
-    })
 }
 
 /// The room's two tabs (clause 40), and what `[gui] discover_tab` stores.
@@ -434,7 +417,7 @@ impl TasteState {
             };
             let card = &mut out[at];
             if card.art.is_none() {
-                card.art = peer_art(lead);
+                card.art = lead.album_art.clone();
             }
             card.rows.push((group, row));
         }

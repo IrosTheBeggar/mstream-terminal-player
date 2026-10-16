@@ -4045,10 +4045,13 @@ mod tests {
         gui.pending.clear();
         draw(&mut gui);
         assert!(claims(&gui).is_empty(), "claimed once");
-        // A connected server's album with art: through the parent's proxy.
+        // A connected server's album whose row names its cover (`albumArt`,
+        // mStream 2026-10-16): through the parent's proxy, once.
         let mut gui = answered_gui();
         let mut answer = peers_answer();
-        answer.peers.as_mut().unwrap().peers[0].results[0].raw["art"] = json!("pc.jpg");
+        let lead = &mut answer.peers.as_mut().unwrap().peers[0].results[0];
+        lead.raw["albumArt"] = json!("pc.jpg");
+        *lead = crate::api::types::TasteLead::from_raw(lead.raw.clone());
         gui.act(Act::Disc(DiscAct::Again));
         land_main(&mut gui, main_answer());
         land(&mut gui, TastePart::Peers, answer);
@@ -4056,6 +4059,98 @@ mod tests {
         gui.pending.clear();
         draw(&mut gui);
         assert_eq!(claims(&gui), vec![("pc.jpg".to_string(), Some(7))]);
+        // The URL the worker asks: the session server's federation art
+        // proxy for peer 7 (the worker's `client_for` aims the same way).
+        let reach = gui
+            .pending
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::AlbumArt { reach: Some(reach), .. }) => Some(reach.clone()),
+                _ => None,
+            })
+            .expect("a reach");
+        let client = crate::api::Client::new(&reach.base).unwrap().with_peer(reach.peer);
+        assert_eq!(client.art_url("pc.jpg").unwrap(), "http://host:3000/api/v1/federation/peers/7/art/pc.jpg");
+        gui.pending.clear();
+        draw(&mut gui);
+        assert!(claims(&gui).is_empty(), "claimed once");
+        // The proxy fails (the peer dropped: 502): the slot is given back,
+        // but the next frames do not ask again — the GUI draws ten times a
+        // second, and every visible tile used to re-ask on each one.
+        gui.app.apply_event(Event::AlbumArt { file: "pc.jpg".into(), art: None, settled: false });
+        for _ in 0..3 {
+            gui.pending.clear();
+            draw(&mut gui);
+            assert!(claims(&gui).is_empty(), "a failed cover waits out its pause");
+        }
+        // Once the pause has passed, one more ask, through the same proxy.
+        let backdated = crate::clock::Instant::now().checked_sub(crate::tui::app::ART_RETRY).expect("a clock that far back");
+        gui.app.art_retry.insert("pc.jpg".into(), backdated);
+        gui.pending.clear();
+        draw(&mut gui);
+        assert_eq!(claims(&gui), vec![("pc.jpg".to_string(), Some(7))]);
+    }
+
+    /// A connected server's song played from the room carries its row's
+    /// `albumArt` into the queue: Now Playing's cover comes from THAT
+    /// server through the parent's art proxy, as a peer browse row's does.
+    #[test]
+    fn a_played_connected_servers_row_shows_its_cover_from_its_server() {
+        let _en = english();
+        let mut gui = answered_gui();
+        let mut answer = peers_answer();
+        let lead = &mut answer.peers.as_mut().unwrap().peers[0].results[0];
+        lead.raw["albumArt"] = json!("p1.jpeg");
+        *lead = crate::api::types::TasteLead::from_raw(lead.raw.clone());
+        gui.act(Act::Disc(DiscAct::Again));
+        land_main(&mut gui, main_answer());
+        land(&mut gui, TastePart::Peers, answer);
+        gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        gui.app.art.clear();
+        gui.pending.clear();
+        gui.act(Act::Disc(DiscAct::Row(0, RowVerb::Open)));
+        assert_eq!(gui.app.queue.items[0].metadata.album_art.as_deref(), Some("p1.jpeg"));
+        assert_eq!(gui.app.queue.items[1].metadata.album_art, None, "a row with no cover names none");
+        let asked: Vec<_> = gui
+            .pending
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::AlbumArt { file, reach }) => Some((file.clone(), reach.as_ref().and_then(|r| r.peer))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, vec![("p1.jpeg".to_string(), Some(7))]);
+    }
+
+    /// A connected server's album none of whose rows names a cover — a row
+    /// from a server older than `albumArt`, or a track with none (`null`):
+    /// the note tile, and no ask anywhere.
+    #[test]
+    fn a_peer_album_with_no_cover_is_the_note_tile_and_asks_nothing() {
+        let _en = english();
+        for art in [None, Some(json!(null)), Some(json!("../escape.jpg"))] {
+            let mut gui = answered_gui();
+            let mut answer = peers_answer();
+            if let Some(art) = art {
+                let lead = &mut answer.peers.as_mut().unwrap().peers[0].results[0];
+                lead.raw["albumArt"] = art;
+                *lead = crate::api::types::TasteLead::from_raw(lead.raw.clone());
+            }
+            gui.act(Act::Disc(DiscAct::Again));
+            land_main(&mut gui, main_answer());
+            land(&mut gui, TastePart::Peers, answer);
+            gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+            gui.pending.clear();
+            let rows = draw(&mut gui);
+            let all = rows.join("\n");
+            assert!(
+                !gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AlbumArt { .. }))),
+                "no cover asked: {:?}",
+                gui.pending
+            );
+            assert_eq!(gui.app.taste.peer_albums()[0].art, None);
+            assert!(all.contains("│    ♪     │"), "the note tile:\n{all}");
+        }
     }
 
     #[test]

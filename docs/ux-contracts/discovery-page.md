@@ -383,9 +383,14 @@ answer and the visit (the session generation, clause 31).
     encode budget, the slots refreshed on a resize): the same claim and
     cache as the Now Playing cover (`App::fetch_art_file` — a library
     album's `album_art_file` from `/album-art/<file>`; a connected
-    server's album only when one of its rows names art (`art`,
-    `albumArt`, `album-art` or `album_art_file`, the webapp's
-    `peerArtOf`) and then through the parent's federation art proxy,
+    server's album only when one of its rows names art — the row's
+    **`albumArt`** (mStream 2026-10-16: the peer's own `album-art` file
+    name, `null` for a track with none, absent from an older server; the
+    older guessed spellings `art`, `album-art` and `album_art_file` are
+    still read after it, harmlessly), taken only as one plain file name
+    (`TasteLead::album_art`, the server's `peerArtName` rule) — the
+    first row best match first that names one, and then through the
+    parent's federation art proxy,
     `/api/v1/federation/peers/{id}/art/<file>`, the queue panel's peer
     reach — else no art). Where pixels are not drawn the cover is the
     same **▀-mosaic** the Now Playing cover falls back to; an album with
@@ -1325,3 +1330,40 @@ wasm32-unknown-unknown`.
     tips so every rest tip with the save words fits the 99-cell footer;
     French says "autres graines" ("other seeds") on the button and in the
     tips for the same reason.
+- **2026-10-16 — Connected servers' covers.** The user's ask, in their
+  words: "add the album art from federated servers for all apps".
+  mStream's federation discovery responder now names each row's cover as
+  `albumArt` (the peer's own `album-art` file name; `null` without one),
+  the parent passes it through, and the taste route's peers rows carry
+  it (mStream's plan §3.1 "Peer covers", §2.13's 2026-10-16 note). Here:
+  - `TasteLead` reads it as `album_art` under the server's own
+    `peerArtName` rule (`^[a-zA-Z0-9_-]{1,100}\.[a-zA-Z0-9]{1,7}$`, as the
+    webapp and the phone hold it; anything else is no cover), the older
+    spellings after it; the strip's peer
+    tile takes its album's first row that names one (clause 46) and
+    claims it once through the federation art proxy; no name keeps the
+    note tile and asks nothing.
+  - A connected server's row queued from the room carries the name as
+    its track's `album-art`, so the queue panel and Now Playing draw its
+    cover from that server the way a peer browse row's is drawn, and the
+    play report's snapshot names it (`artFile`).
+  - **Full size, no `?compress=s`.** The webapp asks the proxy's small
+    (92 px) rendition only for its 40 px song rows; its album cards ask
+    full size, or `l` (256 px) with compressed album art on. The player
+    caches a cover once per file name and shares it with Now Playing and
+    the queue panel, and scales it to terminal cells itself, so it asks
+    the one full-size file.
+  - **A failed cover waits before it is asked again.** An unanswered
+    fetch (a dropped connection, the proxy's 502/504 when the peer went
+    away after the taste answer, a 401) gives its cache slot back, as
+    before, but the file is not asked again for 15 s (`ART_RETRY`): the
+    GUI claims covers on every draw, ten a second, and without the pause
+    every visible Connected-servers tile re-asked the failing hop on
+    each frame. A 404 or undecodable bytes still settle as no cover.
+  - e2e: the fake advertises `federationDiscovery`, answers the peers
+    ask with one server's row carrying `albumArt` and serves the proxy
+    route; the leg switches to Connected servers and run.sh asserts one
+    proxied fetch of exactly that file. The leg's answer words are gated
+    in order (header, strip, verbs line, rows) with the refresh's "new
+    seeds" allowed anywhere among them — the peers half lands after Main,
+    so "new seeds" may paint after Main's rows.

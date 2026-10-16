@@ -5447,7 +5447,13 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
     // remembered, and the next play asks again.
     app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false });
     assert!(!app.art.contains_key("aa.jpeg"), "an unanswered ask gives the slot back");
-    assert!(app.play_index(0).contains(&asked), "and playing it again asks again");
+    // Not at once: the GUI claims covers every frame, and a hop that keeps
+    // failing was asked again ten times a second (the review's finding).
+    assert!(!app.play_index(0).contains(&asked), "not again inside the pause");
+    let backdated = crate::clock::Instant::now().checked_sub(super::ART_RETRY).expect("a clock that far back");
+    app.art_retry.insert("aa.jpeg".into(), backdated);
+    assert!(app.play_index(0).contains(&asked), "and after it, playing it again asks again");
+    assert!(!app.art_retry.contains_key("aa.jpeg"), "the pause is spent by the ask");
 
     // The server's own "there is no art" still settles it — the two must
     // not have been collapsed the other way round either.

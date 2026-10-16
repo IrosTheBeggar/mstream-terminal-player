@@ -14,7 +14,12 @@
 # draws since 2026-10-16) — then the verbs line over the table, whose "save as playlist…"
 # paints between the strip and the rows (clause 64, the 2026-10-16 log:
 # the webapp's whole-list verbs ahead of its songs; no bottom row) — and
-# its rows (clauses 3, 30, 40). The header's controls paint with the
+# its rows (clauses 3, 30, 40). → then switches to the Connected servers
+# tab (the ping advertises `federationDiscovery`, so the room asked the
+# peers half once Main landed): its strip's one album, "Lanterns", a tile
+# whose cover the room fetches from the peer through the parent's
+# federation art proxy by the row's `albumArt` (mStream 2026-10-16; run.sh
+# asserts the fetch's path). The header's controls paint with the
 # room's first frame, before the answer, so they are gated first, each on
 # one word (the terminal is sent only what changed, word by word with the
 # cursor moved over the spaces): the window dropdown, "Last 30 days"
@@ -58,30 +63,47 @@ expect {
     eof { puts "DIED-ON-OPTIONS"; exit 17 }
     timeout { fail "NO-MORE-OPTIONS" 18 }
 }
-expect {
-    "new seeds" {}
-    eof { puts "DIED-ON-REFRESH"; exit 19 }
-    timeout { fail "NO-NEW-SEEDS" 20 }
+# The answer's words IN ORDER — the room header, the strip's "Nightfall",
+# the verbs line's "playlist" (clause 64: between the strip and the rows,
+# so the footer tip's "save as playlist" painted before the strip is
+# consumed by the "Nightfall" gate and cannot satisfy it), the rows'
+# "Aurora" — with the refresh's "new seeds" allowed ANYWHERE among them:
+# the peers half lands after Main, so it may paint in a later frame than
+# Main's rows (or in the same frame, top row first). Each step's regex
+# alternation consumes only through the EARLIEST of its words in the
+# buffer, so a "new seeds" that painted first is not skipped past.
+set seeds 0
+foreach {word died died_code missing missing_code} {
+    "based on songs you finished" DIED-ON-G 7 NO-ROOM-HEADER 3
+    "Nightfall" DIED-ON-STRIP 13 NO-ALBUM-STRIP 14
+    "playlist" DIED-ON-VERBS 15 NO-VERBS-LINE 16
+    "Aurora" DIED-ON-ROWS 8 NO-ROOM-ROWS 4
+} {
+    set found 0
+    while {!$found} {
+        set alts [expr {$seeds ? $word : "new seeds|$word"}]
+        expect {
+            -re "($alts)" {
+                if {$expect_out(1,string) eq "new seeds"} { set seeds 1 } else { set found 1 }
+            }
+            eof { puts $died; exit $died_code }
+            timeout { fail $missing $missing_code }
+        }
+    }
 }
-expect {
-    "based on songs you finished" {}
-    eof { puts "DIED-ON-G"; exit 7 }
-    timeout { fail "NO-ROOM-HEADER" 3 }
+if {!$seeds} {
+    expect {
+        "new seeds" {}
+        eof { puts "DIED-ON-REFRESH"; exit 19 }
+        timeout { fail "NO-NEW-SEEDS" 20 }
+    }
 }
+drain 1
+send "\x1b\[C"
 expect {
-    "Nightfall" {}
-    eof { puts "DIED-ON-STRIP"; exit 13 }
-    timeout { fail "NO-ALBUM-STRIP" 14 }
-}
-expect {
-    "playlist" {}
-    eof { puts "DIED-ON-VERBS"; exit 15 }
-    timeout { fail "NO-VERBS-LINE" 16 }
-}
-expect {
-    "Aurora" {}
-    eof { puts "DIED-ON-ROWS"; exit 8 }
-    timeout { fail "NO-ROOM-ROWS" 4 }
+    "Lanterns" {}
+    eof { puts "DIED-ON-SERVERS"; exit 21 }
+    timeout { fail "NO-PEER-ALBUM" 22 }
 }
 drain 1
 send "0"

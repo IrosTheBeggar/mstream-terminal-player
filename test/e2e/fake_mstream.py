@@ -23,7 +23,13 @@ server, and no audio files:
     `filter` and `staleDays` answer 400 and the old …/taste/prefs route
     404 (docs/ux-contracts/discovery-page.md; mStream's
     docs/discovery-page-plan.md §3.1). /_state counts the asks, keeps the
-    last body, and counts any prefs call.
+    last body, and counts any prefs call. The ping also advertises
+    `federationDiscovery`, so the room asks its peers half (`sources:
+    ["peers"]`) once Main lands: one connected server (id 7, "Attic")
+    with one playable row whose `albumArt` names its cover on the peer
+    (mStream 2026-10-16), served through the federation art proxy
+    GET /api/v1/federation/peers/7/art/<file> — /_state counts those
+    gets (`peer_art_gets`) and keeps their paths.
 
 Usage: fake_mstream.py PORT
 """
@@ -72,6 +78,21 @@ TASTE_ANSWER = {
     "peers": None,
 }
 
+# The peers half's answer (plan §3.1): library and network not asked, so
+# null; one connected server whose row names its cover as the peer's own
+# browse rows do (`albumArt`), fetched through the parent's art proxy.
+PEER_ART = "attic-lanterns.png"
+TASTE_PEERS_ANSWER = dict(TASTE_ANSWER, library=None, peers={
+    "peers": [
+        {"id": 7, "name": "Attic", "reachable": True, "mismatched": False, "results": [
+            {"artist": "Attic Band", "title": "Ember", "album": "Lanterns", "duration": 199,
+             "similarity": 0.81, "filepath": "Music/ember.mp3", "albumArt": PEER_ART,
+             "peer": {"id": 7, "name": "Attic"}, "source": "federation"},
+        ]},
+    ],
+    "searched": {"peers": 1, "unreachable": 0, "mismatched": 0},
+})
+
 STEPS = [
     [{"vpath": "media", "pct": 4, "scanned": 118}],
     [{"vpath": "media", "pct": 33, "scanned": 982}, {"vpath": "audiobooks", "pct": None, "scanned": 0}],
@@ -97,7 +118,8 @@ STATUS_STEPS = [
 ]
 
 calls = {"n": 0, "s": 0}
-state = {"directories": {}, "users": [], "taste_asks": 0, "taste_body": None, "prefs_calls": 0, "art_gets": 0}
+state = {"directories": {}, "users": [], "taste_asks": 0, "taste_body": None, "prefs_calls": 0, "art_gets": 0,
+         "peer_asks": 0, "peer_art_gets": 0, "peer_art_paths": []}
 
 # Keys the stateless taste route refuses (mStream 8dcfad0e): a 400.
 TASTE_GONE = ("remember", "filter", "staleDays")
@@ -114,6 +136,7 @@ def _png(w=4, h=4, rgb=(200, 120, 40)):
 
 
 COVER = _png()
+PEER_COVER = _png(rgb=(40, 120, 200))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -177,7 +200,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/v1/ping":
             ping = {"vpaths": sorted(state["directories"]), "noFileModify": False, "noUpload": False}
             if TASTE:
-                ping.update({"discovery": True, "discoveryTaste": 1})
+                ping.update({"discovery": True, "discoveryTaste": 1, "federationDiscovery": True})
             return self._json(ping)
         if TASTE and self.path == "/api/v1/discovery/taste/prefs":
             state["prefs_calls"] += 1
@@ -196,6 +219,15 @@ class Handler(BaseHTTPRequestHandler):
                     "qr": "mstr1:FAKE-TICKET-0123456789abcdef-for-widget-smoke-testing-only",
                 }
             )
+        if TASTE and self.path.split("?")[0].startswith("/api/v1/federation/peers/7/art/"):
+            state["peer_art_gets"] += 1
+            state["peer_art_paths"].append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(PEER_COVER)))
+            self.end_headers()
+            self.wfile.write(PEER_COVER)
+            return
         if TASTE and self.path.split("?")[0].startswith("/album-art/"):
             state["art_gets"] += 1
             self.send_response(200)
@@ -222,6 +254,9 @@ class Handler(BaseHTTPRequestHandler):
             gone = [k for k in TASTE_GONE if k in body]
             if gone:
                 return self._status(400, {"error": f'"{gone[0]}" is not allowed'})
+            if "peers" in (body.get("sources") or []):
+                state["peer_asks"] += 1
+                return self._json(TASTE_PEERS_ANSWER)
             return self._json(TASTE_ANSWER)
         return self._json({})
 
