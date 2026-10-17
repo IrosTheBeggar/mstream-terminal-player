@@ -389,10 +389,12 @@ answer and the visit (the session generation, clause 31).
     older guessed spellings `art`, `album-art` and `album_art_file` are
     still read after it, harmlessly), taken only as one plain file name
     (`TasteLead::album_art`, the server's `peerArtName` rule) — the
-    first row best match first that names one, and then through the
-    parent's federation art proxy,
-    `/api/v1/federation/peers/{id}/art/<file>`, the queue panel's peer
-    reach — else no art). Where pixels are not drawn the cover is the
+    first row best match first that names one, and then from that server
+    by the queue panel's peer reach: the parent's federation art proxy,
+    `/api/v1/federation/peers/{id}/art/<file>?compress=l`, or, while the
+    peer's own tunnel is up, the peer's `/album-art/<file>?compress=l` —
+    the peer's 256 px rendition either way, the original from a peer
+    without one — else no art). Where pixels are not drawn the cover is the
     same **▀-mosaic** the Now Playing cover falls back to; an album with
     no art (or none decoded yet) is the **note tile**: the empty cover
     slot's DIM rounded frame with `♪` at its centre (the frame alone on
@@ -1347,7 +1349,8 @@ wasm32-unknown-unknown`.
     its track's `album-art`, so the queue panel and Now Playing draw its
     cover from that server the way a peer browse row's is drawn, and the
     play report's snapshot names it (`artFile`).
-  - **Full size, no `?compress=s`.** The webapp asks the proxy's small
+  - **Full size, no `?compress=s`** (superseded 2026-10-17, below: the
+    player asks `l`). The webapp asks the proxy's small
     (92 px) rendition only for its 40 px song rows; its album cards ask
     full size, or `l` (256 px) with compressed album art on. The player
     caches a cover once per file name and shares it with Now Playing and
@@ -1367,3 +1370,50 @@ wasm32-unknown-unknown`.
     in order (header, strip, verbs line, rows) with the refresh's "new
     seeds" allowed anywhere among them — the peers half lands after Main,
     so "new seeds" may paint after Main's rows.
+- **2026-10-17 — Connected servers' covers ask the compressed rendition.**
+  The user's ask, in their words: "Use the compressed covers for the
+  album cards and terminal". Every cover of a federated peer now asks
+  `?compress=l` — the peer's `zl-` file, at most 256 px a side, the one
+  the webapp's album cards ask for (`urls::PEER_ART_COMPRESS`) —
+  however the peer is reached:
+  - **Through the parent's art proxy** (`urls::peer_art_url`). The
+    proxy forwards exactly the `compress` query (mStream's
+    federation-browse.js `FORWARD_QUERY_ART`).
+  - **Over the peer's own tunnel** (multi-server clause 27), its own
+    `/album-art/<file>?compress=l` (`urls::direct_peer_art_url`): a
+    reach for a peer origin carries `Reach::compressed_art`, and a peer
+    session's client is marked by its peer identity (the direct Connect
+    and Retarget carry no `peer`). Without it the same peer's covers grew
+    to full size the moment its tunnel came up — right after queueing an
+    album from the strip, since tunnels follow the queue (clause 38).
+  - The peer's `/album-art` route serves the original when it holds no
+    `zl-` file, so an older or uncompressed peer still answers with a
+    cover. Through a tunnel bridge the loopback token joins the query
+    after it (`…?compress=l&__lt=…`).
+  - **Scope.** Every cover a peer serves: the Connected-servers strip,
+    the queue panel and Now Playing for a peer's track, and — when the
+    browsed server is itself a peer (multi-server clauses 26–27) — that
+    session's whole Library, album wall, queue and Now Playing. Only a
+    server of the user's own (a saved server, a Quick Connect, the
+    bundled server) still serves its `/album-art/<file>` full size.
+  - **The accepted trade-off.** The strip (12x5 cells), the album wall's
+    12-cell tiles and the queue panel's 6x3 thumbnail fit within 256 px,
+    and the ▀-mosaic (and the cover visualizer's grid) is drawn from the
+    128 px thumbnail anyway. The larger pixel surfaces are not: a peer
+    track's Now Playing cover and the mini player's, drawn in pixels,
+    re-decode the kept source (`Art::source`: `tui::graphics` on kitty,
+    sixel and iTerm2, the window GUI's textures) and now scale a 256 px
+    rendition up where they drew the original before; a peer's cover
+    there can look softer on a HiDPI screen.
+  - **One cache slot per file name.** mStream names a cover by its
+    content hash, so federated servers holding the same rips share
+    names, and the cache (keyed by name alone) holds whichever copy was
+    asked first: the session's own Now Playing can show a peer's 256 px
+    rendition for the rest of the session when the peer's was fetched
+    first, and a peer's tile the session's original the other way
+    round. Kept, not keyed by (file, rendition): same name, same
+    picture, one fetch.
+  - e2e: run.sh also asserts that every proxied fetch the fake recorded
+    carries `compress=l`. The direct-tunnel URL is pinned by unit tests
+    (`a_direct_peers_strip_cover_is_the_compressed_rendition_too`, the
+    worker's `a_peer_sessions_covers_ask_the_compressed_rendition_over_either_transport`).

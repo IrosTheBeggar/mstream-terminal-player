@@ -205,6 +205,12 @@ assert s['peer_asks'] >= 1, s
 assert s['peer_art_gets'] == 1, s  # claimed once
 assert all(p.split('?')[0] == '/api/v1/federation/peers/7/art/attic-lanterns.png' for p in s['peer_art_paths']), s
 "
+assert "the peer's cover was asked as its compressed rendition (compress=l)" "
+import json,urllib.request,urllib.parse
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['peer_art_paths'], s
+assert all(urllib.parse.parse_qs(urllib.parse.urlsplit(p).query).get('compress') == ['l'] for p in s['peer_art_paths']), s
+"
 stop_fake
 
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──

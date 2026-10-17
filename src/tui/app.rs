@@ -691,6 +691,24 @@ pub struct Reach {
     /// Over a tunnel bridge: the loopback token every request there must
     /// carry as `__lt=…` (the shared tunnel client's gate).
     pub local_token: Option<String>,
+    /// A federated peer's, however it is reached — through the parent
+    /// (`peer`) or over its own tunnel (`peer` is `None` then): its covers
+    /// ask the peer's compressed rendition, so they do not change size
+    /// when the peer's tunnel comes up (`Client::with_compressed_art`).
+    pub compressed_art: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Reach {
+    /// The client this reach aims: the worker's `client_for` builds every
+    /// row's client through here.
+    pub fn client(&self) -> Result<crate::api::Client, crate::api::ApiError> {
+        Ok(crate::api::Client::new_with(&self.base, self.self_signed)?
+            .with_token(self.token.clone())
+            .with_peer(self.peer)
+            .with_local_token(self.local_token.clone())
+            .with_compressed_art(self.compressed_art))
+    }
 }
 
 /// A tunnel as the api worker last reported it — the registry the queue's
@@ -4119,6 +4137,7 @@ impl App {
                 self_signed: if direct { false } else { self.session.self_signed },
                 peer: if direct { None } else { origin.peer },
                 local_token: self.session_local_token(),
+                compressed_art: origin.peer.is_some(),
             });
         }
         if let Some(id) = origin.peer {
@@ -4134,12 +4153,13 @@ impl App {
                     self_signed: false,
                     peer: None,
                     local_token: Some(local_token.clone()),
+                    compressed_art: true,
                 });
             }
             // …and rides its parent's proxies otherwise, however the parent
             // is reached.
             let parent = self.reach(&Origin { server: origin.server.clone(), peer: None })?;
-            return Ok(Reach { peer: Some(id), ..parent });
+            return Ok(Reach { peer: Some(id), compressed_art: true, ..parent });
         }
         let shown = crate::quickconnect::display_server(&origin.server);
         let known = self
@@ -4155,6 +4175,7 @@ impl App {
                     self_signed: false,
                     peer: None,
                     local_token: Some(local_token.clone()),
+                    compressed_art: false,
                 }),
                 Some(TunnelState::Dialling) => {
                     Err(format!("{shown} is still connecting — its tunnel is being dialled"))
@@ -4171,6 +4192,7 @@ impl App {
             self_signed: known.self_signed,
             peer: None,
             local_token: None,
+            compressed_art: false,
         })
     }
 

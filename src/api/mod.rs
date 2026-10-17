@@ -396,6 +396,11 @@ pub struct Client {
     /// parent's browse proxy, art onto its art proxy (contract clause 27).
     /// `base` and `token` are then the parent's.
     peer: Option<i64>,
+    /// A federated peer's client however the peer is reached: its covers
+    /// ask the peer's `l` rendition ([`urls::PEER_ART_COMPRESS`]). Implied
+    /// by `peer`; set on its own for a peer over its own tunnel, whose
+    /// `/album-art` is asked directly.
+    compressed_art: bool,
     /// Aimed at a tunnel's loopback bridge: the token every request must
     /// carry as `__lt=…`, or the shared tunnel client drops the connection.
     local_token: Option<String>,
@@ -454,6 +459,7 @@ impl Client {
             base,
             token: None,
             peer: None,
+            compressed_art: false,
             local_token: None,
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
@@ -475,6 +481,14 @@ impl Client {
 
     pub fn peer(&self) -> Option<i64> {
         self.peer
+    }
+
+    /// Mark this client as a federated peer's even when it is not aimed
+    /// through the parent — a peer over its own tunnel — so its covers ask
+    /// the same compressed rendition the parent's art proxy is asked for.
+    pub fn with_compressed_art(mut self, on: bool) -> Self {
+        self.compressed_art = on;
+        self
     }
 
     /// Every request to a tunnel bridge carries its loopback token as
@@ -1421,11 +1435,15 @@ impl Client {
     }
 
     /// Where [`Client::album_art_async`] asks for `file`: the server's own
-    /// `/album-art/<file>`, or — aimed at a federated peer — the parent's
-    /// art proxy, `/api/v1/federation/peers/{id}/art/<file>`.
+    /// `/album-art/<file>`; aimed at a federated peer, the parent's art
+    /// proxy, `/api/v1/federation/peers/{id}/art/<file>?compress=l`
+    /// ([`urls::peer_art_url`]); a peer over its own tunnel, its own
+    /// `/album-art/<file>?compress=l` ([`urls::direct_peer_art_url`]). A
+    /// peer's cover is its 256 px rendition either way.
     pub fn art_url(&self, file: &str) -> Result<String, ApiError> {
         let url = match self.peer {
             Some(peer) => urls::peer_art_url(&self.server(), peer, file),
+            None if self.compressed_art => urls::direct_peer_art_url(&self.server(), file),
             None => urls::album_art_url(&self.server(), file),
         }
         .map_err(ApiError::Config)?;

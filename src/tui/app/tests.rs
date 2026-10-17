@@ -1788,10 +1788,13 @@ fn a_granted_ticket_dials_the_peer_and_its_rows_play_from_its_own_tunnel() {
     app.apply_event(Event::TunnelUp { id: nas(), local_url: "http://127.0.0.1:5000".into(), local_token: "lt".into() });
     let effects = app.play_index(0);
     assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T1&__lt=lt");
-    // Its cover too, from the peer itself.
+    // Its cover too, from the peer itself — the compressed rendition the
+    // proxy was asked for, not the original.
     assert!(
         matches!(app.reach(&Origin { server: ATTIC.into(), peer: Some(3) }), Ok(Reach { base, peer: None, .. }) if base == "http://127.0.0.1:5000")
     );
+    let reach = app.reach(&Origin { server: ATTIC.into(), peer: Some(3) }).unwrap();
+    assert_eq!(reach.client().unwrap().art_url("y.jpeg").unwrap(), "http://127.0.0.1:5000/album-art/y.jpeg?compress=l&__lt=lt");
 }
 
 #[test]

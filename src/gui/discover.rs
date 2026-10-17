@@ -4069,8 +4069,11 @@ mod tests {
                 _ => None,
             })
             .expect("a reach");
-        let client = crate::api::Client::new(&reach.base).unwrap().with_peer(reach.peer);
-        assert_eq!(client.art_url("pc.jpg").unwrap(), "http://host:3000/api/v1/federation/peers/7/art/pc.jpg");
+        assert_eq!(
+            reach.client().unwrap().art_url("pc.jpg").unwrap(),
+            "http://host:3000/api/v1/federation/peers/7/art/pc.jpg?compress=l",
+            "the peer's 256 px rendition, as the webapp's album cards ask"
+        );
         gui.pending.clear();
         draw(&mut gui);
         assert!(claims(&gui).is_empty(), "claimed once");
@@ -4089,6 +4092,56 @@ mod tests {
         gui.pending.clear();
         draw(&mut gui);
         assert_eq!(claims(&gui), vec![("pc.jpg".to_string(), Some(7))]);
+    }
+
+    /// A connected server whose own tunnel is up (the parent granted a
+    /// direct ticket, multi-server clause 27): its strip cover is asked of
+    /// the peer itself, and still as the compressed rendition — the same
+    /// peer's covers do not grow to full size when its tunnel comes up.
+    #[test]
+    fn a_direct_peers_strip_cover_is_the_compressed_rendition_too() {
+        let _en = english();
+        let mut gui = answered_gui();
+        let mut answer = peers_answer();
+        let lead = &mut answer.peers.as_mut().unwrap().peers[0].results[0];
+        lead.raw["albumArt"] = json!("pc.jpg");
+        *lead = crate::api::types::TasteLead::from_raw(lead.raw.clone());
+        gui.act(Act::Disc(DiscAct::Again));
+        land_main(&mut gui, main_answer());
+        land(&mut gui, TastePart::Peers, answer);
+        gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        let pid = crate::config::peer_identity(&gui.app.session.server_id, 7);
+        gui.app.direct.insert(
+            pid.clone(),
+            crate::tui::app::DirectState {
+                ticket: Some(crate::api::types::DirectTicket {
+                    ticket: "mstrfedg1:T".into(),
+                    guest_token: "guest-T".into(),
+                    endpoint_id: None,
+                    issued_at: None,
+                    expires_at: None,
+                }),
+                ..Default::default()
+            },
+        );
+        gui.app.apply_event(Event::TunnelUp { id: pid, local_url: "http://127.0.0.1:5000".into(), local_token: "lt".into() });
+        gui.app.art.clear();
+        gui.pending.clear();
+        draw(&mut gui);
+        let reach = gui
+            .pending
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::AlbumArt { file, reach: Some(reach) }) if file == "pc.jpg" => Some(reach.clone()),
+                _ => None,
+            })
+            .expect("the strip claims the peer's cover");
+        assert_eq!((reach.base.as_str(), reach.peer), ("http://127.0.0.1:5000", None), "from the peer's own tunnel");
+        assert_eq!(
+            reach.client().unwrap().art_url("pc.jpg").unwrap(),
+            "http://127.0.0.1:5000/album-art/pc.jpg?compress=l&__lt=lt",
+            "the peer's own 256 px rendition, the bridge's token after it"
+        );
     }
 
     /// A connected server's song played from the room carries its row's

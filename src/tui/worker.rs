@@ -1184,10 +1184,7 @@ fn client_for(reach: &crate::tui::app::Reach) -> Option<Arc<Client>> {
     if let Some((_, client)) = kept.iter().find(|(known, _)| known == reach) {
         return Some(client.clone());
     }
-    let client = Client::new_with(&reach.base, reach.self_signed)
-        .ok()
-        .map(|c| c.with_token(reach.token.clone()).with_peer(reach.peer).with_local_token(reach.local_token.clone()))
-        .map(Arc::new)?;
+    let client = reach.client().ok().map(Arc::new)?;
     if kept.len() >= SHELF {
         kept.remove(0);
     }
@@ -1533,6 +1530,16 @@ fn establish(
     Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
 }
 
+/// The session's client aimed at what `identity` names: through the
+/// parent's proxies for `peer`, and — for a peer session, the one over the
+/// peer's own tunnel included, whose Connect carries no `peer` — asking the
+/// peer's compressed covers, as [`client_for`] does for a peer's row.
+#[cfg(not(target_arch = "wasm32"))]
+fn aim_session(c: Client, identity: &str, peer: Option<i64>) -> Client {
+    let is_peer = peer.is_some() || crate::config::peer_identity_parts(identity).is_some();
+    c.with_peer(peer).with_compressed_art(is_peer)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn connect(
     client: &mut Option<Arc<Client>>,
@@ -1544,7 +1551,7 @@ fn connect(
     local_token: Option<String>,
 ) -> Option<Event> {
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Ok(c) => aim_session(c.with_token(token.clone()), id, peer).with_local_token(local_token),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     // Taken before the client moves; it is the address that was reached,
@@ -1585,7 +1592,7 @@ fn login(
     // the peer through the parent's proxies, exactly as before the token
     // expired — a plain client here listed the parent's library under the
     // peer's name (the review's finding).
-    let c = c.with_peer(peer);
+    let c = aim_session(c, id, peer);
     match establish(client, c, id, Some(username.to_string()), Some(token)) {
         Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),
@@ -1607,7 +1614,7 @@ fn retarget(
 ) -> Event {
     let failed = |why: String| Event::RetargetFailed { identity: identity.to_string(), why };
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Ok(c) => aim_session(c.with_token(token.clone()), identity, peer).with_local_token(local_token),
         Err(e) => return failed(e.to_string()),
     };
     if let Err(e) = c.ping_via_info() {
@@ -2362,6 +2369,23 @@ mod tests {
         assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: false }));
     }
 
+    /// A peer session's covers are the peer's compressed rendition over
+    /// either transport: the direct Connect names the peer only by its
+    /// identity, so that is what marks it (the review's direct-tunnel gap).
+    #[test]
+    fn a_peer_sessions_covers_ask_the_compressed_rendition_over_either_transport() {
+        let pid = crate::config::peer_identity("http://parent:3000", 7);
+        // Through the parent's proxies.
+        let proxied = aim_session(Client::new("http://parent:3000").unwrap(), &pid, Some(7));
+        assert_eq!(proxied.art_url("c.jpg").unwrap(), "http://parent:3000/api/v1/federation/peers/7/art/c.jpg?compress=l");
+        // Over the peer's own tunnel: no `peer`, the bridge's token after.
+        let direct = aim_session(Client::new("http://127.0.0.1:5000").unwrap(), &pid, None).with_local_token(Some("lt".into()));
+        assert_eq!(direct.art_url("c.jpg").unwrap(), "http://127.0.0.1:5000/album-art/c.jpg?compress=l&__lt=lt");
+        // A server of the user's own keeps its full-size cover.
+        let own = aim_session(Client::new("http://parent:3000").unwrap(), "http://parent:3000", None);
+        assert_eq!(own.art_url("c.jpg").unwrap(), "http://parent:3000/album-art/c.jpg");
+    }
+
     fn play(url: &str) -> AudioCmd {
         AudioCmd::Play { url: url.to_string(), duration_hint: None }
     }
@@ -2745,6 +2769,7 @@ mod tests {
             self_signed: false,
             peer: None,
             local_token: None,
+            compressed_art: false,
         };
         api.send(ApiCmd::DirectAccess { parent: parent.clone(), id: peer.id, reach, refresh: false }).unwrap();
         let answer = wait("DirectAccess", &|e| matches!(e, Event::DirectAccess { .. }));
