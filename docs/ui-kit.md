@@ -481,8 +481,8 @@ choice. A gate may name its safe choice for what it keeps rather than
 still the modal primary.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
-**Over pixels**: on a screen that draws real pixels (the queue's and the
-wall's covers), every overlay — a modal frame (`modal_frame_on`), the
+**Over pixels**: on a screen that draws real pixels (the queue's, the
+wall's and the Discover strip's covers), every overlay — a modal frame (`modal_frame_on`), the
 header dropdown, the tooltip — registers its footprint with the surface
 (`Surface::overlay`), and a cover the footprint touched LAST frame draws
 as the ▀-mosaic for that frame. The terminal writer skips a picture's
@@ -556,9 +556,11 @@ writes, the strip is inert: no tab lights or answers a click. The
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
 Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok
-colour while the DJ is armed, and the capability-gated Sonic path),
-Settings on the column's last row; fourteen rows, the 24-row minimum's
-worth with the footer on. Now Playing is the TUI's full-screen view,
+colour while the DJ is armed, the capability-gated Sonic path, and
+Discover on row 16, gated by the server's `discoveryTaste` —
+docs/ux-contracts/discovery-page.md), Settings on the column's last row;
+fifteen rows, the 24-row minimum's worth with the footer on, Discover and
+Settings never on one row. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);

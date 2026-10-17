@@ -19,8 +19,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults, SimilarArtist,
-    Track,
+    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
+    SimilarArtist, TasteRequest, TasteResponse, Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -194,6 +194,27 @@ pub enum ApiCmd {
     DiscoveryProbe,
     /// Fill a Discover view. `seed` is the track it all hangs off.
     Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
+    /// Ask the GUI's Discover room for one part of its answer
+    /// (discovery-page contract, clause 30) — a destination on the command,
+    /// not a second command (the D7 habit). `seq` and `generation` come
+    /// back on [`Event::Taste`]: last ask wins, and a reply from a server
+    /// the session has left fills nothing (clause 31). The session's own
+    /// server always: the room is hidden in a peer session (clause 1).
+    Taste { seq: u64, generation: u64, part: TastePart, body: Box<TasteRequest> },
+    /// An album row's `[+]` (clause 61): the album's songs by its name — the
+    /// Albums room's ask — for the App to append to the queue. A connected
+    /// server's album on the strip (the 2026-10-11 strip log) names its
+    /// `peer`, its track `artist`, and the `reach` through the parent's
+    /// federation proxy; `play` replaces the queue and plays instead of
+    /// appending.
+    TasteAlbum {
+        name: String,
+        artist: Option<String>,
+        generation: u64,
+        peer: Option<i64>,
+        reach: Option<crate::tui::app::Reach>,
+        play: bool,
+    },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -243,7 +264,9 @@ impl ApiCmd {
             | ApiCmd::AddToPlaylist { reach, .. }
             | ApiCmd::TrackInfo { reach, .. }
             | ApiCmd::Genres { reach }
-            | ApiCmd::PlaylistNames { reach } => reach.as_ref(),
+            | ApiCmd::PlaylistNames { reach }
+            // A connected server's album asks THAT server, through the proxy.
+            | ApiCmd::TasteAlbum { reach, .. } => reach.as_ref(),
             // The DJ's turns go to ITS server (auto-dj contract, clause 19).
             ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
             // A play goes to its row's server, a peer's to the parent.
@@ -264,6 +287,7 @@ impl ApiCmd {
             | ApiCmd::SonicRandom { .. }
             | ApiCmd::DiscoveryProbe
             | ApiCmd::Discover { .. }
+            | ApiCmd::Taste { .. }
             | ApiCmd::SavePlaylist { .. }
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
@@ -376,6 +400,31 @@ pub enum DiscoverDest {
     Browser,
     /// The Discover tab of the full-screen view.
     NowPlaying,
+}
+
+/// Which part of the Discover room's answer an ask fills (discovery-page
+/// contract, clauses 30 and 65). The App keeps a seq per slot, so a part
+/// says which slots its reply may fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TastePart {
+    /// Ask A: `library` — the seeds, the header facts and the library's
+    /// lists. Never `network`: the play-now room shows only what plays.
+    Main,
+    /// Ask B: the connected (federated) servers, only while
+    /// `federationDiscovery` is advertised.
+    Peers,
+}
+
+/// Why a taste ask has no answer. A 401 is not here: it is the session's
+/// problem and goes out as [`Event::Unauthorized`] like any read's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TasteFailure {
+    /// 403: switched off, or the index is not there yet — the route says
+    /// both the same way, so the App re-pings before naming one (clause
+    /// 82).
+    Forbidden,
+    /// Transport or server failure, in the server's words (clause 83).
+    Failed(String),
 }
 
 /// A position in the tag-based library hierarchy. Doubles as the request (what
@@ -523,8 +572,10 @@ pub enum Event {
     /// The random pick for one Sonic Path end — `None` when the library
     /// answered empty.
     SonicRandom { side: crate::tui::app::SonicSide, track: Option<Box<Track>> },
-    /// The ping's discovery-path flag, fetched to explain a 403.
-    DiscoveryProbe { available: bool },
+    /// The ping's discovery flags, fetched to explain a 403: `available`
+    /// is the sonic path's (`discoveryPath`), `taste` the Discover room's
+    /// gate (`discovery && discoveryTaste >= 1`, discovery-page clause 82).
+    DiscoveryProbe { available: bool, taste: bool },
     /// A Discover view's contents, tagged with the node they belong to.
     /// `seed` is the filepath it was asked about. The browser tab tells a
     /// stale reply by its node; the now-playing panel follows the speakers,
@@ -535,6 +586,21 @@ pub enum Event {
         note: Option<String>,
         dest: DiscoverDest,
         seed: String,
+    },
+    /// One part of the Discover room's answer, or why there is none —
+    /// never an [`Event::Error`], which would clear every other wait: the
+    /// failed half says so in its own panes and the other stands (clause
+    /// 83).
+    Taste { seq: u64, generation: u64, part: TastePart, answer: Result<Box<TasteResponse>, TasteFailure> },
+    /// An album row's songs to queue: `None` when the ask failed.
+    /// `name`, `artist`, `peer` and `play` as the ask carried them.
+    TasteAlbum {
+        generation: u64,
+        tracks: Option<Vec<Track>>,
+        name: String,
+        artist: Option<String>,
+        peer: Option<i64>,
+        play: bool,
     },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
@@ -1118,10 +1184,7 @@ fn client_for(reach: &crate::tui::app::Reach) -> Option<Arc<Client>> {
     if let Some((_, client)) = kept.iter().find(|(known, _)| known == reach) {
         return Some(client.clone());
     }
-    let client = Client::new_with(&reach.base, reach.self_signed)
-        .ok()
-        .map(|c| c.with_token(reach.token.clone()).with_peer(reach.peer).with_local_token(reach.local_token.clone()))
-        .map(Arc::new)?;
+    let client = reach.client().ok().map(Arc::new)?;
     if kept.len() >= SHELF {
         kept.remove(0);
     }
@@ -1225,8 +1288,12 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::SonicRandom { side } => c
             .random_song(&crate::api::types::RandomSongRequest::default())
             .map(|r| Event::SonicRandom { side, track: r.songs.into_iter().next().map(Box::new) }),
-        ApiCmd::DiscoveryProbe => {
-            c.ping().map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+        ApiCmd::DiscoveryProbe => c.ping().map(|ping| probe_event(&ping)),
+        ApiCmd::Taste { seq, generation, part, body } => {
+            crate::api::wait(taste(c, seq, generation, part, &body))
+        }
+        ApiCmd::TasteAlbum { name, artist, generation, peer, play, .. } => {
+            crate::api::wait(taste_album(c, TasteAlbumAsk { name, artist, peer, play }, generation))
         }
         // A failed ask is `None`: nothing about the saved peers changes.
         ApiCmd::FederationPeers { parent } => {
@@ -1463,6 +1530,16 @@ fn establish(
     Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
 }
 
+/// The session's client aimed at what `identity` names: through the
+/// parent's proxies for `peer`, and — for a peer session, the one over the
+/// peer's own tunnel included, whose Connect carries no `peer` — asking the
+/// peer's compressed covers, as [`client_for`] does for a peer's row.
+#[cfg(not(target_arch = "wasm32"))]
+fn aim_session(c: Client, identity: &str, peer: Option<i64>) -> Client {
+    let is_peer = peer.is_some() || crate::config::peer_identity_parts(identity).is_some();
+    c.with_peer(peer).with_compressed_art(is_peer)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn connect(
     client: &mut Option<Arc<Client>>,
@@ -1474,7 +1551,7 @@ fn connect(
     local_token: Option<String>,
 ) -> Option<Event> {
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Ok(c) => aim_session(c.with_token(token.clone()), id, peer).with_local_token(local_token),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     // Taken before the client moves; it is the address that was reached,
@@ -1515,7 +1592,7 @@ fn login(
     // the peer through the parent's proxies, exactly as before the token
     // expired — a plain client here listed the parent's library under the
     // peer's name (the review's finding).
-    let c = c.with_peer(peer);
+    let c = aim_session(c, id, peer);
     match establish(client, c, id, Some(username.to_string()), Some(token)) {
         Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),
@@ -1537,7 +1614,7 @@ fn retarget(
 ) -> Event {
     let failed = |why: String| Event::RetargetFailed { identity: identity.to_string(), why };
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Ok(c) => aim_session(c.with_token(token.clone()), identity, peer).with_local_token(local_token),
         Err(e) => return failed(e.to_string()),
     };
     if let Err(e) = c.ping_via_info() {
@@ -2071,6 +2148,59 @@ pub(crate) async fn dj_probe(client: &Client) -> Option<DjServerInfo> {
     }
 }
 
+// ── The Discover room (discovery-page contract) ─────────────────────────────
+
+/// The probe's reading of a ping: the sonic path's flag and the Discover
+/// room's gate, both from one GET.
+pub(crate) fn probe_event(ping: &Ping) -> Event {
+    let caps = crate::api::types::Capabilities::from(ping);
+    Event::DiscoveryProbe { available: ping.discovery_path, taste: caps.taste() }
+}
+
+/// One part of the room's answer. Only a 401 fails as an error (the
+/// session is no good); a 403 and every other failure are the answer's.
+pub(crate) async fn taste(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    part: TastePart,
+    body: &TasteRequest,
+) -> Result<Event, ApiError> {
+    let answer = match client.taste_async(body).await {
+        Ok(response) => Ok(Box::new(response)),
+        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+        Err(ApiError::Forbidden(_)) => Err(TasteFailure::Forbidden),
+        Err(e) => Err(TasteFailure::Failed(e.to_string())),
+    };
+    Ok(Event::Taste { seq, generation, part, answer })
+}
+
+/// What a [`ApiCmd::TasteAlbum`] asks, carried back on its event.
+pub(crate) struct TasteAlbumAsk {
+    pub name: String,
+    pub artist: Option<String>,
+    pub peer: Option<i64>,
+    pub play: bool,
+}
+
+/// An album row's `[+]` (clause 61): its songs, asked by name alone as the
+/// Albums room asks (the 2026-10-05 log). A connected server's album asks
+/// by name and its track artist through a client aimed at that server, and
+/// any failure there — a 401 among them, which is the peer's word and not
+/// the session's — is `None`: the App queues the rows that matched.
+pub(crate) async fn taste_album(client: &Client, ask: TasteAlbumAsk, generation: u64) -> Result<Event, ApiError> {
+    let TasteAlbumAsk { name, artist, peer, play } = ask;
+    let asked = if peer.is_some() { artist.clone() } else { None };
+    let node = LibraryNode::Album { name: name.clone(), artist: asked };
+    let tracks = match load_library(client, &node).await {
+        Ok(LibraryData::Tracks(tracks)) => Some(tracks),
+        Ok(_) => None,
+        Err(ApiError::Unauthorized) if peer.is_none() => return Err(ApiError::Unauthorized),
+        Err(_) => None,
+    };
+    Ok(Event::TasteAlbum { generation, tracks, name, artist, peer, play })
+}
+
 /// How many neighbours a Discover view asks for. Deep enough to browse,
 /// short enough that the tail is still relevant rather than noise.
 const DISCOVER_LIMIT: u32 = 40;
@@ -2230,6 +2360,31 @@ pub(crate) fn journey_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_probe_reads_both_rooms_flags_off_one_ping() {
+        let ping = Ping { discovery: true, discovery_path: true, discovery_taste: 1, ..Ping::default() };
+        assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: true }));
+        let ping = Ping { discovery: true, discovery_path: true, ..Ping::default() };
+        assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: false }));
+    }
+
+    /// A peer session's covers are the peer's compressed rendition over
+    /// either transport: the direct Connect names the peer only by its
+    /// identity, so that is what marks it (the review's direct-tunnel gap).
+    #[test]
+    fn a_peer_sessions_covers_ask_the_compressed_rendition_over_either_transport() {
+        let pid = crate::config::peer_identity("http://parent:3000", 7);
+        // Through the parent's proxies.
+        let proxied = aim_session(Client::new("http://parent:3000").unwrap(), &pid, Some(7));
+        assert_eq!(proxied.art_url("c.jpg").unwrap(), "http://parent:3000/api/v1/federation/peers/7/art/c.jpg?compress=l");
+        // Over the peer's own tunnel: no `peer`, the bridge's token after.
+        let direct = aim_session(Client::new("http://127.0.0.1:5000").unwrap(), &pid, None).with_local_token(Some("lt".into()));
+        assert_eq!(direct.art_url("c.jpg").unwrap(), "http://127.0.0.1:5000/album-art/c.jpg?compress=l&__lt=lt");
+        // A server of the user's own keeps its full-size cover.
+        let own = aim_session(Client::new("http://parent:3000").unwrap(), "http://parent:3000", None);
+        assert_eq!(own.art_url("c.jpg").unwrap(), "http://parent:3000/album-art/c.jpg");
+    }
 
     fn play(url: &str) -> AudioCmd {
         AudioCmd::Play { url: url.to_string(), duration_hint: None }
@@ -2614,6 +2769,7 @@ mod tests {
             self_signed: false,
             peer: None,
             local_token: None,
+            compressed_art: false,
         };
         api.send(ApiCmd::DirectAccess { parent: parent.clone(), id: peer.id, reach, refresh: false }).unwrap();
         let answer = wait("DirectAccess", &|e| matches!(e, Event::DirectAccess { .. }));

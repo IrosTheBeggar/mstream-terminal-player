@@ -193,7 +193,10 @@ parent changes a peer's label only.
     grants a direct guest ticket, the peer gets a tunnel of its own and
     serves `/media` itself with the guest token; the proxy stays the
     fallback (an older peer, a refused mint, a failed dial), and a 401 on
-    the direct path refreshes the ticket once through the parent.
+    the direct path refreshes the ticket once through the parent. A
+    peer's covers are asked as its `l` (256 px) rendition on either path
+    — `?compress=l` on the art proxy and on the peer's own `/album-art`
+    (discovery-page contract, 2026-10-17 entry).
 28. **Removing a parent removes its peers** in the same sweep, queued
     tracks included (clause 35). Editing a parent's URL needs no
     propagation — a peer resolves its parent live.

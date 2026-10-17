@@ -70,6 +70,8 @@ fn connected_app() -> App {
         federation_browse: false,
         federation_direct: false,
         stats: true,
+        discovery_taste: 0,
+        discovery_plugins: false,
     };
     // What a real ping does on the way in: the Auto-DJ rows depend on it.
     app.dj_panel.rebuild(&app.dj, None, false);
@@ -1786,10 +1788,13 @@ fn a_granted_ticket_dials_the_peer_and_its_rows_play_from_its_own_tunnel() {
     app.apply_event(Event::TunnelUp { id: nas(), local_url: "http://127.0.0.1:5000".into(), local_token: "lt".into() });
     let effects = app.play_index(0);
     assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T1&__lt=lt");
-    // Its cover too, from the peer itself.
+    // Its cover too, from the peer itself — the compressed rendition the
+    // proxy was asked for, not the original.
     assert!(
         matches!(app.reach(&Origin { server: ATTIC.into(), peer: Some(3) }), Ok(Reach { base, peer: None, .. }) if base == "http://127.0.0.1:5000")
     );
+    let reach = app.reach(&Origin { server: ATTIC.into(), peer: Some(3) }).unwrap();
+    assert_eq!(reach.client().unwrap().art_url("y.jpeg").unwrap(), "http://127.0.0.1:5000/album-art/y.jpeg?compress=l&__lt=lt");
 }
 
 #[test]
@@ -4301,7 +4306,7 @@ fn a_disabled_journey_probes_before_naming_a_reason() {
     );
 
     // The flag still on: the scan simply hasn't run — worth retrying.
-    app.apply_event(Event::DiscoveryProbe { available: true });
+    app.apply_event(Event::DiscoveryProbe { available: true, taste: false });
     assert!(!app.sonic.probe);
     assert_eq!(app.sonic.empty, SonicEmpty::ScanPending);
     assert!(
@@ -4312,7 +4317,7 @@ fn a_disabled_journey_probes_before_naming_a_reason() {
 
     // And the flag gone: the feature was switched off under us.
     app.sonic.probe = true;
-    app.apply_event(Event::DiscoveryProbe { available: false });
+    app.apply_event(Event::DiscoveryProbe { available: false, taste: false });
     assert_eq!(app.sonic.empty, SonicEmpty::TurnedOff);
     assert!(
         app.sonic.note.as_deref().unwrap_or("").contains("switched off"),
@@ -4322,7 +4327,7 @@ fn a_disabled_journey_probes_before_naming_a_reason() {
 
     // A probe nobody is waiting for changes nothing.
     let note = app.sonic.note.clone();
-    app.apply_event(Event::DiscoveryProbe { available: true });
+    app.apply_event(Event::DiscoveryProbe { available: true, taste: false });
     assert_eq!(app.sonic.note, note, "an unasked probe is ignored");
 }
 
@@ -5445,7 +5450,13 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
     // remembered, and the next play asks again.
     app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false });
     assert!(!app.art.contains_key("aa.jpeg"), "an unanswered ask gives the slot back");
-    assert!(app.play_index(0).contains(&asked), "and playing it again asks again");
+    // Not at once: the GUI claims covers every frame, and a hop that keeps
+    // failing was asked again ten times a second (the review's finding).
+    assert!(!app.play_index(0).contains(&asked), "not again inside the pause");
+    let backdated = crate::clock::Instant::now().checked_sub(super::ART_RETRY).expect("a clock that far back");
+    app.art_retry.insert("aa.jpeg".into(), backdated);
+    assert!(app.play_index(0).contains(&asked), "and after it, playing it again asks again");
+    assert!(!app.art_retry.contains_key("aa.jpeg"), "the pause is spent by the ask");
 
     // The server's own "there is no art" still settles it — the two must
     // not have been collapsed the other way round either.
@@ -7213,4 +7224,937 @@ fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
     app.art.remove("wall1.jpeg");
     app.fetch_art_from("newer.jpeg", None);
     assert!(app.art.contains_key("wall2.jpeg") && app.art.contains_key("newer.jpeg"), "nothing else went for a gap");
+}
+
+// ── The GUI's Discover room (docs/ux-contracts/discovery-page.md) ──────────
+
+use crate::api::types::{TasteRequest, TasteResponse};
+use crate::tui::worker::{TasteFailure, TastePart};
+
+/// A session on a server with the whole page: the taste route and federated
+/// peers (discovery-page clause 1) — and p2p leads advertised, which the
+/// play-now room never asks for.
+fn taste_app() -> App {
+    let mut app = stats_app();
+    app.capabilities.discovery_taste = 1;
+    app.capabilities.discovery_p2p = true;
+    app.capabilities.federation_discovery = true;
+    app
+}
+
+/// The taste asks a set of effects carries, by part.
+fn taste_asks(effects: &[Effect]) -> Vec<(u64, u64, TastePart, TasteRequest)> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Api(ApiCmd::Taste { seq, generation, part, body }) => Some((*seq, *generation, *part, (**body).clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn taste_ask(effects: &[Effect], part: TastePart) -> (u64, u64, TasteRequest) {
+    taste_asks(effects)
+        .into_iter()
+        .find(|(_, _, p, _)| *p == part)
+        .map(|(seq, generation, _, body)| (seq, generation, body))
+        .unwrap_or_else(|| panic!("no {part:?} ask in {effects:?}"))
+}
+
+/// A Main answer as the server words it (plan §3.1): two history seeds,
+/// an album and two songs, one lead.
+fn taste_main() -> TasteResponse {
+    serde_json::from_value(serde_json::json!({
+        "window": 30, "widenedFrom": null, "seedSource": "history", "fallback": false,
+        "seeds": [
+            { "hash": "h1", "filepath": "music/seed1.mp3", "metadata": { "title": "Seed one", "artist": "A" },
+              "outcome": "completed", "lastPlayed": "2026-10-04T21:10:00.000Z", "plays": 3, "pinned": false, "analyzed": true },
+            { "hash": "h2", "filepath": "music/seed2.mp3", "metadata": { "title": "Seed two" },
+              "outcome": "stopped", "plays": 1 }
+        ],
+        "excluded": [{ "hash": "old", "filepath": "music/old.mp3", "metadata": {} }],
+        "dropped": 0, "notAnalyzed": false,
+        "model": { "id": "effnet-discogs", "version": "1" },
+        "library": {
+            "filter": "fresh",
+            "tracks": [
+                { "filepath": "music/a.mp3", "similarity": 0.83, "seedHash": "h1",
+                  "metadata": { "title": "Song A", "artist": "X", "duration": 200 }, "playCount": 0, "lastPlayed": null },
+                { "filepath": "music/b.mp3", "similarity": 0.8, "seedHash": "h2",
+                  "metadata": { "title": "Song B" }, "playCount": 4, "lastPlayed": "2026-01-01T00:00:00.000Z" }
+            ],
+            "albums": [{ "name": "Album", "year": 2001, "album_art_file": "c.jpg", "album_artist": "X",
+                         "artists": ["X"], "track_count": 12, "similarity": 0.84, "scopedTracks": 11,
+                         "playedTracks": 0, "lastPlayed": null, "tracks": ["music/c1.mp3"] }],
+            "capped": false
+        },
+        "network": { "results": [{ "artist": "Lead", "title": "Far", "recordingMbid": "MB-1", "similarity": 0.7,
+                                    "peer": { "endpointId": "e1", "name": "Sam's" }, "source": "p2p", "seedHash": "h1" }],
+                     "searched": { "peers": 3, "tracks": 7421 } },
+        "peers": null
+    }))
+    .unwrap()
+}
+
+fn taste_peers() -> TasteResponse {
+    serde_json::from_value(serde_json::json!({
+        "window": 30, "seedSource": "history", "fallback": false, "seeds": [],
+        "library": null, "network": null,
+        "peers": {
+            "peers": [
+                { "id": 3, "name": "Attic", "reachable": true, "mismatched": false, "lastSeen": "2026-10-05T10:00:00.000Z",
+                  "results": [
+                      { "artist": "Them", "title": "Peer song", "album": "Theirs", "duration": 180, "similarity": 0.9,
+                        "filepath": "music/peer.mp3", "peer": { "id": 3, "name": "Attic" }, "source": "federation", "seedHash": null },
+                      { "artist": "Them", "title": "Second", "duration": 120, "similarity": 0.8,
+                        "filepath": "music/peer2.mp3", "peer": { "id": 3, "name": "Attic" }, "source": "federation" }
+                  ] },
+                { "id": 5, "name": "Gone", "reachable": false, "mismatched": false, "lastSeen": null, "results": [] },
+                { "id": 6, "name": "Odd", "reachable": true, "mismatched": true, "results": [
+                      { "artist": "Zed", "title": "Other model", "filepath": "music/z.mp3", "similarity": 0.5,
+                        "peer": { "id": 6, "name": "Odd" }, "source": "federation" }
+                  ] }
+            ],
+            "searched": { "peers": 3, "unreachable": 1, "mismatched": 1 }
+        }
+    }))
+    .unwrap()
+}
+
+/// Land a Main answer for the Main ask `effects` carry; what the App
+/// does next — the peers ask that follows it (clause 30).
+fn land_main(app: &mut App, effects: &[Effect], answer: TasteResponse) -> Vec<Effect> {
+    let (seq, generation, _) = taste_ask(effects, TastePart::Main);
+    app.apply_event(Event::Taste { seq, generation, part: TastePart::Main, answer: Ok(Box::new(answer)) })
+}
+
+/// Open the room and land both parts: Main, then the peers ask its answer
+/// sends.
+fn answered_taste() -> App {
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let next = land_main(&mut app, &effects, taste_main());
+    let (peers, generation, _) = taste_ask(&next, TastePart::Peers);
+    app.apply_event(Event::Taste { seq: peers, generation, part: TastePart::Peers, answer: Ok(Box::new(taste_peers())) });
+    app
+}
+
+#[test]
+fn the_discover_room_asks_main_then_the_peers_pinned_to_its_batch() {
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let asks = taste_asks(&effects);
+    assert_eq!(asks.len(), 1, "Main alone goes first — each call draws its own batch: {asks:?}");
+    let (main_seq, generation, main) = taste_ask(&effects, TastePart::Main);
+    assert_eq!(generation, app.session_gen());
+    assert_eq!(main.sources, vec!["library"], "never the p2p network, even advertised");
+    // The window always (the default 30 when none was chosen — the server
+    // keeps nothing, clause 15); no limits (clause 30); nothing else.
+    assert_eq!(main.window, Some(30));
+    assert_eq!(main.new_artists_only, Some(false));
+    let wire = serde_json::to_value(&main).unwrap();
+    assert_eq!(wire, serde_json::json!({ "window": 30, "sources": ["library"], "newArtistsOnly": false }));
+    assert!(
+        effects.iter().all(|e| matches!(e, Effect::Api(ApiCmd::Taste { .. }))),
+        "the taste asks and nothing else — no prefs: {effects:?}"
+    );
+    // The peers half waits on Main, and says so (clause 32).
+    assert!(app.taste.library.first_wait() && app.taste.peers.first_wait() && app.taste.asking());
+
+    // Main lands: the peers ask follows, pinned to its whole batch with a
+    // seed limit of its size, so the server adds no seed of its own.
+    let next = land_main(&mut app, &effects, taste_main());
+    let asks = taste_asks(&next);
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let (peers_seq, _, peers) = taste_ask(&next, TastePart::Peers);
+    assert_ne!(main_seq, peers_seq, "each part takes its own seq");
+    assert_eq!(peers.sources, vec!["peers"]);
+    assert_eq!(peers.pin, vec!["music/seed1.mp3".to_string(), "music/seed2.mp3".to_string()]);
+    assert_eq!(peers.limit, Some(crate::api::types::TasteLimit { seeds: Some(2) }));
+    assert_eq!((peers.window, peers.exclude.clone()), (Some(30), Vec::new()));
+    assert!(!app.taste.library.pending && app.taste.peers.pending);
+    app.apply_event(Event::Taste {
+        seq: peers_seq,
+        generation,
+        part: TastePart::Peers,
+        answer: Ok(Box::new(taste_peers())),
+    });
+    assert!(!app.taste.asking() && app.taste.peers.data.is_some());
+    let seeds: Vec<&str> = app.taste.head.as_ref().unwrap().seeds.iter().map(|s| s.hash.as_str()).collect();
+    assert_eq!(seeds, ["h1", "h2"], "the seeds modal keeps Main's batch — the one the peers were built from");
+
+    // The batch is the answer's seeds alone — a resolved pin is among them
+    // (first, as the server leads with it), an unresolved one is not sent,
+    // so it cannot push a seed out at the cap and let the server add its
+    // own; the server's PIN_CAP (12) caps it.
+    let mut app = taste_app();
+    app.taste_open();
+    app.taste_add_pin(track("music/gone.mp3")).unwrap();
+    app.taste_add_pin(track("music/mine.mp3")).unwrap();
+    let effects = app.taste_ask_again();
+    let mut big = taste_main();
+    let template = big.seeds[0].clone();
+    big.seeds = (0..14)
+        .map(|i| {
+            let mut seed = template.clone();
+            seed.hash = format!("s{i}");
+            seed.filepath = if i == 0 { "music/mine.mp3".into() } else { format!("music/s{i}.mp3") };
+            seed.pinned = i == 0;
+            seed
+        })
+        .collect();
+    let next = land_main(&mut app, &effects, big);
+    let (_, _, peers) = taste_ask(&next, TastePart::Peers);
+    assert_eq!(peers.pin.len(), crate::tui::app::taste::TASTE_PIN_CAP);
+    assert_eq!(peers.pin[0], "music/mine.mp3", "the pin once, where the answer put it");
+    assert!(!peers.pin.contains(&"music/gone.mp3".to_string()), "an unresolved pin is no seed: {:?}", peers.pin);
+    assert_eq!(peers.pin[11], "music/s11.mp3", "the twelfth seed is not pushed out");
+    assert_eq!(peers.limit.and_then(|l| l.seeds), Some(12));
+
+    // A remembered window rides every ask.
+    let mut app = taste_app();
+    app.taste.window = Some(90);
+    let effects = app.taste_open();
+    assert_eq!(taste_ask(&effects, TastePart::Main).2.window, Some(90));
+    let next = land_main(&mut app, &effects, taste_main());
+    assert_eq!(taste_ask(&next, TastePart::Peers).2.window, Some(90));
+
+    // The connected servers ride federationDiscovery (clause 30).
+    let mut app = taste_app();
+    app.capabilities.federation_discovery = false;
+    let effects = app.taste_open();
+    let asks = taste_asks(&effects);
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].3.sources, vec!["library"]);
+    assert!(!app.taste.peers.asked);
+
+    // No gate, no ask; nor in a peer session (clause 1).
+    let mut app = taste_app();
+    app.capabilities.discovery_taste = 0;
+    assert!(app.taste_open().is_empty());
+    let mut app = taste_app();
+    app.session.peer = Some(("http://host:3000".into(), 3));
+    assert!(app.taste_open().is_empty());
+}
+
+/// The Discover room's album strips (the 2026-10-11 strip log): the
+/// library's albums best match first, and the connected servers' playable
+/// rows grouped by server + album + artist the webapp's `peerAlbums` way.
+#[test]
+fn the_album_strips_rank_and_group_as_the_webapp_does() {
+    let mut app = taste_app();
+    let peers: TasteResponse = serde_json::from_value(serde_json::json!({
+        "peers": { "peers": [
+            { "id": 3, "name": "Attic", "reachable": true, "results": [
+                { "artist": "Them", "title": "One", "album": "Theirs", "similarity": 0.7, "filepath": "a/1.mp3" },
+                { "artist": "them ", "title": "Two", "album": " THEIRS", "similarity": 0.9, "filepath": "a/2.mp3", "art": "t.jpg" },
+                { "artist": "Other", "title": "Three", "album": "Theirs", "similarity": 0.8, "filepath": "a/3.mp3", "albumArt": "o.jpg" },
+                { "artist": "Them", "title": "Loose", "similarity": 0.95, "filepath": "a/4.mp3" },
+                { "artist": "Them", "title": "No file", "album": "Ghost", "similarity": 0.99 }
+            ] },
+            { "id": 5, "name": "Den", "reachable": true, "results": [
+                { "artist": "Them", "title": "Elsewhere", "album": "Theirs", "similarity": 0.85, "filepath": "d/1.mp3" }
+            ] },
+            { "id": 6, "name": "Odd", "reachable": true, "mismatched": true, "results": [
+                { "artist": "Zed", "title": "Z", "album": "Zeds", "similarity": 0.99, "filepath": "z.mp3" }
+            ] },
+            { "id": 9, "name": "Gone", "reachable": false, "results": [] }
+        ], "searched": { "peers": 4 } }
+    }))
+    .unwrap();
+    app.taste.peers.data = peers.peers;
+    let albums = app.taste.peer_albums();
+    let seen: Vec<_> = albums
+        .iter()
+        .map(|a| (a.peer, a.server.as_str(), a.album.as_str(), a.artist.as_deref(), a.art.as_deref(), a.rows.clone()))
+        .collect();
+    // By its best row; one server's case and blanks folded together, the
+    // best row's spelling kept; another server's same album apart; a row
+    // with no album, no file, or from a server that did not answer on this
+    // model joins nothing.
+    assert_eq!(
+        seen,
+        vec![
+            (3, "Attic", "THEIRS", Some("them"), Some("t.jpg"), vec![(0, 1), (0, 0)]),
+            (5, "Den", "Theirs", Some("Them"), None, vec![(1, 0)]),
+            (3, "Attic", "Theirs", Some("Other"), Some("o.jpg"), vec![(0, 2)]),
+        ]
+    );
+    // Twelve at most, as the webapp caps its strip.
+    let many: Vec<serde_json::Value> = (0..15)
+        .map(|i| serde_json::json!({ "artist": "A", "title": "T", "album": format!("Album {i}"), "similarity": 0.5, "filepath": format!("m/{i}.mp3") }))
+        .collect();
+    let peers: TasteResponse = serde_json::from_value(serde_json::json!({
+        "peers": { "peers": [ { "id": 3, "name": "Attic", "reachable": true, "results": many } ], "searched": { "peers": 1 } }
+    }))
+    .unwrap();
+    app.taste.peers.data = peers.peers;
+    let albums = app.taste.peer_albums();
+    assert_eq!(albums.len(), 12);
+    assert_eq!(albums[0].album, "Album 0", "ties keep the server's order");
+    // The library's strip: best match first, ties in the server's order,
+    // capped the same.
+    let mut main = taste_main();
+    let library = main.library.as_mut().unwrap();
+    library.albums = (0..14)
+        .map(|i| crate::api::types::TasteAlbum {
+            name: Some(format!("L{i}")),
+            similarity: if i == 5 { 0.99 } else { 0.5 },
+            ..Default::default()
+        })
+        .collect();
+    app.taste.library.data = main.library;
+    let strip = app.taste.library_strip();
+    assert_eq!(strip.len(), 12);
+    assert_eq!(strip[..3], [5, 0, 1]);
+}
+
+/// A connected server's album on the strip plays or queues through its
+/// server; unreachable, it queues the rows that matched at once.
+#[test]
+fn a_connected_servers_album_is_asked_of_its_server_with_its_origin() {
+    let mut app = answered_taste();
+    let effects = app.taste_peer_album(0, false);
+    let ask = effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::TasteAlbum { name, artist, peer, reach, play, .. }) => {
+            Some((name.clone(), artist.clone(), *peer, reach.as_ref().map(|r| (r.base.clone(), r.peer)), *play))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        ask,
+        Some(("Theirs".into(), Some("Them".into()), Some(3), Some((app.session.server.clone(), Some(3))), false)),
+        "{effects:?}"
+    );
+    // The reach is the command's: the worker builds a client for the peer.
+    assert!(effects.iter().all(|e| match e {
+        Effect::Api(cmd) => cmd.reach().is_some_and(|r| r.peer == Some(3)),
+        _ => false,
+    }));
+    // Landed with nothing listed: the matched rows, the peer's origin.
+    let generation = app.session_gen();
+    app.apply_event(Event::TasteAlbum {
+        generation,
+        tracks: None,
+        name: "Theirs".into(),
+        artist: Some("Them".into()),
+        peer: Some(3),
+        play: false,
+    });
+    let queued: Vec<_> = app.queue.items.iter().map(|q| (q.filepath.as_str(), q.origin.peer)).collect();
+    assert_eq!(queued, vec![("music/peer.mp3", Some(3))]);
+    // An index past the strip asks nothing.
+    assert!(app.taste_peer_album(5, true).is_empty());
+}
+
+#[test]
+fn a_taste_answer_lands_its_parts_and_every_visit_asks_again() {
+    let mut app = answered_taste();
+    let t = &app.taste;
+    assert_eq!(t.library.data.as_ref().unwrap().tracks.len(), 2);
+    assert_eq!(t.library.data.as_ref().unwrap().albums[0].scoped_tracks, 11);
+    assert_eq!(app.taste.peer_lines(), vec![(0, 0), (0, 1)], "no rows from an unreachable or mismatched server");
+    assert_eq!(t.head.as_ref().unwrap().seeds.len(), 2);
+    assert!(t.head.as_ref().unwrap().library.is_none(), "the lists live in the slots");
+    assert!(!t.asking() && t.library.failed.is_none());
+    assert_eq!(t.shown_window(), Some(30));
+    // By name alone: the credit is an album artist, `album-songs`' `artist` a
+    // track-artist filter.
+    assert_eq!(app.taste_album_node(0), Some(LibraryNode::Album { name: "Album".into(), artist: None }));
+
+    // Clause 3: no answer is reused — a visit right after one asks again,
+    // and the old rows stand until the new land (clause 32).
+    let effects = app.taste_open();
+    assert_eq!(taste_asks(&effects).len(), 1, "Main; the peers follow its answer");
+    assert!(app.taste.library.data.is_some(), "a re-ask keeps the rows standing (clause 32)");
+    assert!(app.taste.head.is_some(), "and the seeds modal its seeds");
+    assert!(app.taste.library.pending && !app.taste.library.first_wait());
+    // G while the room is up asks at once.
+    let mut app = answered_taste();
+    assert_eq!(taste_asks(&app.taste_ask_again()).len(), 1);
+    assert!(app.taste.peers.pending && app.taste.peers.data.is_some(), "the peers' rows stand while they wait");
+}
+
+/// Pins and drops are the visit's (clause 13, 14): `G` keeps them, a fresh
+/// visit lets them go — and the window stays, the room's own memory.
+#[test]
+fn a_fresh_visit_lets_the_pins_and_drops_go_and_g_keeps_them() {
+    let mut app = answered_taste();
+    app.taste_add_pin(track("music/p.mp3")).unwrap();
+    app.taste_seeds_closed(&["h1".into()], &[], true);
+    app.taste.window = Some(7);
+    let again = app.taste_ask_again();
+    let (_, _, body) = taste_ask(&again, TastePart::Main);
+    assert_eq!((body.pin.clone(), body.exclude.clone(), body.window), (vec!["music/p.mp3".to_string()], vec!["h1".to_string()], Some(7)));
+    let mut answer = taste_main();
+    answer.seeds[0].filepath = "music/p.mp3".into();
+    answer.seeds[0].pinned = true;
+    let (_, _, peers) = taste_ask(&land_main(&mut app, &again, answer), TastePart::Peers);
+    assert_eq!(peers.pin, vec!["music/p.mp3".to_string(), "music/seed2.mp3".to_string()], "the pin and the batch");
+    assert_eq!((peers.exclude, peers.window), (body.exclude, Some(7)), "both parts carry the drops and the window");
+
+    let fresh = app.taste_open();
+    let (_, _, body) = taste_ask(&fresh, TastePart::Main);
+    assert!(body.pin.is_empty() && body.exclude.is_empty(), "{body:?}");
+    assert_eq!(body.window, Some(7), "the window is not the visit's");
+    assert!(app.taste.pins.is_empty() && app.taste.dropped.is_empty());
+}
+
+#[test]
+fn a_stale_taste_reply_or_one_from_another_generation_fills_nothing() {
+    let mut app = taste_app();
+    let first = app.taste_open();
+    let (old, generation, _) = taste_ask(&first, TastePart::Main);
+    let second = app.taste_ask_again();
+    let (new, _, _) = taste_ask(&second, TastePart::Main);
+    app.apply_event(Event::Taste { seq: old, generation, part: TastePart::Main, answer: Ok(Box::new(taste_main())) });
+    assert!(app.taste.library.data.is_none() && app.taste.head.is_none(), "last ask wins (clause 31)");
+    assert!(app.taste.library.pending, "still waiting for the newer ask");
+
+    // The right seq from a session the App has since left.
+    app.apply_event(Event::Taste {
+        seq: new,
+        generation: generation.wrapping_add(1),
+        part: TastePart::Main,
+        answer: Ok(Box::new(taste_main())),
+    });
+    assert!(app.taste.library.data.is_none(), "another generation fills nothing");
+    app.apply_event(Event::Taste { seq: new, generation, part: TastePart::Main, answer: Ok(Box::new(taste_main())) });
+    assert!(app.taste.library.data.is_some());
+
+    // A server switch drops the answer and the pins, keeps the tab and the
+    // window.
+    app.taste.tab = crate::tui::app::TasteTab::Servers;
+    app.taste.window = Some(90);
+    app.taste.pins.push(crate::tui::app::taste::TastePin { track: track("music/p.mp3") });
+    app.shed_server_state();
+    assert!(app.taste.library.data.is_none() && app.taste.pins.is_empty() && app.taste.head.is_none());
+    assert_eq!((app.taste.tab, app.taste.window), (crate::tui::app::TasteTab::Servers, Some(90)));
+}
+
+#[test]
+fn a_library_row_queues_with_the_sessions_origin() {
+    let mut app = answered_taste();
+    let origin = app.origin();
+    app.activate_taste_row(TasteRow::Song(1), TasteVerb::Queue);
+    let queued = app.queue.items.last().unwrap();
+    assert_eq!(queued.filepath, "music/b.mp3");
+    assert_eq!(queued.origin, origin);
+    assert_eq!(queued.origin.peer, None);
+
+    // Play from here: the tab's songs replace the queue, the row plays.
+    let effects = app.activate_taste_row(TasteRow::Song(1), TasteVerb::PlayFrom);
+    let paths: Vec<&str> = app.queue.items.iter().map(|q| q.filepath.as_str()).collect();
+    assert_eq!(paths, ["music/a.mp3", "music/b.mp3"], "albums are containers, not songs");
+    assert_eq!(app.queue.current, Some(1));
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/b.mp3?token=tok");
+}
+
+#[test]
+fn a_peers_row_queues_with_the_peer_origin_streams_through_the_proxy_and_reports_its_peer() {
+    let mut app = answered_taste();
+    let effects = app.activate_taste_row(TasteRow::Peer { group: 0, row: 0 }, TasteVerb::PlayFrom);
+    assert_eq!(
+        app.queue.items.iter().map(|q| q.origin.clone()).collect::<Vec<_>>(),
+        vec![Origin { server: "http://host:3000".into(), peer: Some(3) }; 2],
+        "the tab's playable rows, each the parent's with its peer (clause 62)"
+    );
+    let url = played_url(&effects);
+    assert_eq!(url, "http://host:3000/api/v1/federation/peers/3/stream/music/peer.mp3?token=tok");
+
+    // Its play goes to the parent with the peer's id and the row's
+    // snapshot (play-reporting clause 7).
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    app.skip(true);
+    let (body, reach, _) = reported(&app.tick()).expect("posted to the parent");
+    assert_eq!(reach.base, "http://host:3000");
+    assert_eq!(reach.peer, None, "never through the peer proxy");
+    let play = &body["plays"][0];
+    assert_eq!(play["peerId"], 3);
+    assert_eq!(play["filePath"], "music/peer.mp3");
+    assert_eq!(play["track"]["title"], "Peer song");
+    assert_eq!(play["track"]["artist"], "Them");
+
+    // Add next keeps the peer origin too.
+    app.activate_taste_row(TasteRow::Peer { group: 0, row: 1 }, TasteVerb::Next);
+    let next = &app.queue.items[app.queue.current.unwrap() + 1];
+    assert_eq!((next.filepath.as_str(), next.origin.peer), ("music/peer2.mp3", Some(3)));
+    // A row that is not there does nothing, nor one the room does not show:
+    // a server on another sonic model.
+    assert!(app.activate_taste_row(TasteRow::Peer { group: 1, row: 0 }, TasteVerb::Now).is_empty());
+    assert!(app.activate_taste_row(TasteRow::Peer { group: 2, row: 0 }, TasteVerb::Now).is_empty());
+}
+
+#[test]
+fn the_whole_list_verbs_act_on_the_tab_in_front() {
+    let mut app = answered_taste();
+    app.taste.tab = crate::tui::app::TasteTab::Servers;
+    app.taste_queue_all();
+    assert_eq!(app.queue.items.len(), 2);
+    assert!(app.queue.items.iter().all(|q| q.origin.peer == Some(3)));
+
+    app.taste.tab = crate::tui::app::TasteTab::Library;
+    let effects = app.taste_play_all(true);
+    assert_eq!(app.queue.items.len(), 2, "replaced, not appended");
+    assert!(app.queue.items.iter().all(|q| q.origin.peer.is_none()));
+    assert!(matches!(effects.iter().find(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), Some(_)));
+}
+
+#[test]
+fn the_rooms_verbs_leave_the_tuis_discover_state_untouched() {
+    let mut app = answered_taste();
+    app.discover_seed = Some(track("music/tui-seed.mp3"));
+    app.discover.set(vec![Entry::Parent]);
+    let before = format!(
+        "{:?}",
+        (&app.discover.entries, &app.discover_stack, &app.discover_seed, &app.discover_artists, &app.now_discover, app.capture)
+    );
+    app.activate_taste_row(TasteRow::Song(0), TasteVerb::PlayFrom);
+    app.activate_taste_row(TasteRow::Song(1), TasteVerb::Now);
+    app.activate_taste_row(TasteRow::Peer { group: 0, row: 0 }, TasteVerb::Queue);
+    app.taste_queue_all();
+    app.set_taste_window(7);
+    app.taste_seeds_closed(&["h1".into()], &[], false);
+    let after = format!(
+        "{:?}",
+        (&app.discover.entries, &app.discover_stack, &app.discover_seed, &app.discover_artists, &app.now_discover, app.capture)
+    );
+    assert_eq!(before, after, "clause 67");
+}
+
+#[test]
+fn a_forbidden_answer_reprobes_once_and_latches_off_or_scan_pending() {
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+    let effects = app.apply_event(Event::Taste { seq: main, generation, part: TastePart::Main, answer: Err(TasteFailure::Forbidden) });
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::DiscoveryProbe))), "{effects:?}");
+    assert!(taste_asks(&effects).is_empty(), "a refused Main asks no peers");
+    assert!(!app.taste.peers.pending, "the half that waited on it waits no more");
+    assert_eq!(app.taste.latch, TasteLatch::Probing);
+
+    // Re-entered while the probe is out: a fresh visit that waits for the
+    // verdict instead of asking over it.
+    assert!(app.taste_open().is_empty());
+    assert_eq!(app.taste.latch, TasteLatch::Probing);
+
+    // The gate gone: switched off, nothing asked again on re-entry.
+    app.apply_event(Event::DiscoveryProbe { available: true, taste: false });
+    assert_eq!(app.taste.latch, TasteLatch::Off);
+    assert!(!app.taste.asking());
+    assert!(app.taste_open().is_empty());
+    // The next ping is the word on the gate: a flag that came back asks.
+    app.apply_event(Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: None,
+        token: Some("tok".into()),
+        ping: Box::new(crate::api::types::Ping {
+            discovery: true,
+            discovery_taste: 1,
+            federation_discovery: true,
+            ..Default::default()
+        }),
+    });
+    assert_eq!(app.taste.latch, TasteLatch::Clear);
+    assert!(app.capabilities.taste());
+    assert!(!taste_asks(&app.taste_open()).is_empty());
+
+    // The gate still on: the scan has not run; Check again asks.
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+    app.apply_event(Event::Taste { seq: main, generation, part: TastePart::Main, answer: Err(TasteFailure::Forbidden) });
+    app.apply_event(Event::DiscoveryProbe { available: true, taste: true });
+    assert_eq!(app.taste.latch, TasteLatch::ScanPending);
+    assert!(app.taste.scan_pending());
+    assert!(!taste_asks(&app.taste_ask_again()).is_empty());
+    assert_eq!(app.taste.latch, TasteLatch::Clear);
+
+    // A failed probe leaves no "asking…" standing.
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+    app.apply_event(Event::Taste { seq: main, generation, part: TastePart::Main, answer: Err(TasteFailure::Forbidden) });
+    app.apply_event(Event::Error("could not reach server".into()));
+    assert_eq!(app.taste.latch, TasteLatch::Clear);
+
+    // The sonic room's probe is its own: an unasked one moves nothing here.
+    let mut app = answered_taste();
+    app.apply_event(Event::DiscoveryProbe { available: true, taste: false });
+    assert_eq!(app.taste.latch, TasteLatch::Clear);
+}
+
+#[test]
+fn a_failed_part_says_so_and_the_other_stands() {
+    let mut app = answered_taste();
+    let effects = app.taste_ask_again();
+    let next = land_main(&mut app, &effects, taste_main());
+    let (peers, generation, _) = taste_ask(&next, TastePart::Peers);
+    app.apply_event(Event::Taste {
+        seq: peers,
+        generation,
+        part: TastePart::Peers,
+        answer: Err(TasteFailure::Failed("server error 500: boom".into())),
+    });
+    assert_eq!(app.taste.peers.failed.as_deref(), Some("server error 500: boom"));
+    assert!(app.taste.peers.data.is_some(), "the failed half's old rows stand (clause 83)");
+    assert!(app.taste.library.failed.is_none() && !app.taste.library.pending, "the library stands");
+    assert!(app.message.is_none() || app.message.as_ref().is_some_and(|m| m.kind != MessageKind::Error));
+
+    // A failed Main fails the half that waited on it too, and asks no
+    // peers: Try again asks both (clause 83).
+    let effects = app.taste_ask_again();
+    let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+    let next = app.apply_event(Event::Taste {
+        seq: main,
+        generation,
+        part: TastePart::Main,
+        answer: Err(TasteFailure::Failed("server error 500: boom".into())),
+    });
+    assert!(taste_asks(&next).is_empty(), "{next:?}");
+    assert!(!app.taste.asking());
+    assert_eq!(app.taste.library.failed.as_deref(), Some("server error 500: boom"));
+    assert_eq!(app.taste.peers.failed.as_deref(), Some("server error 500: boom"));
+    assert!(app.taste.library.data.is_some() && app.taste.peers.data.is_some(), "the old rows stand");
+}
+
+/// Each call draws its own batch, so the peers ask follows the Main answer
+/// it is built from (clause 30): never a stale Main's, never a random
+/// seed's, never with federation discovery gone.
+#[test]
+fn the_taste_peers_ask_follows_only_the_latest_main_and_never_a_random_one() {
+    // A stale Main asks no peers; the latest one does, pinned to its batch.
+    let mut app = taste_app();
+    let first = app.taste_open();
+    let second = app.taste_ask_again();
+    let mut old = taste_main();
+    old.seeds.truncate(1);
+    assert!(taste_asks(&land_main(&mut app, &first, old)).is_empty(), "a stale Main triggers nothing");
+    assert!(app.taste.peers.pending, "the peers still wait on the newer Main");
+    let next = land_main(&mut app, &second, taste_main());
+    assert_eq!(taste_ask(&next, TastePart::Peers).2.pin.len(), 2);
+    // A Main landing twice (a retried delivery) asks the peers once.
+    assert!(taste_asks(&land_main(&mut app, &second, taste_main())).is_empty());
+
+    // A random Main asks no peers: the DIM line instead (clause 22).
+    let mut app = answered_taste();
+    let effects = app.taste_ask_again();
+    let mut random = taste_main();
+    random.seed_source = crate::api::types::SeedSource::Random;
+    random.fallback = true;
+    random.seeds.truncate(1);
+    let next = land_main(&mut app, &effects, random);
+    assert!(taste_asks(&next).is_empty(), "{next:?}");
+    let peers = &app.taste.peers;
+    assert!(!peers.pending && peers.not_asked_random && !peers.absent && peers.data.is_none());
+
+    // Federation discovery gone by the time Main lands: no peers ask.
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    app.capabilities.federation_discovery = false;
+    assert!(taste_asks(&land_main(&mut app, &effects, taste_main())).is_empty());
+    assert!(!app.taste.peers.pending && !app.taste.asking());
+
+    // An answer with no seed at all asks none either.
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let mut bare = taste_main();
+    bare.seeds.clear();
+    bare.not_analyzed = true;
+    assert!(taste_asks(&land_main(&mut app, &effects, bare)).is_empty());
+    assert!(!app.taste.peers.pending);
+}
+
+#[test]
+fn a_window_change_asks_both_parts_with_it_and_nothing_to_remember() {
+    let mut app = answered_taste();
+    let effects = app.set_taste_window(7);
+    let (_, _, main) = taste_ask(&effects, TastePart::Main);
+    let (_, _, peers) = taste_ask(&land_main(&mut app, &effects, taste_main()), TastePart::Peers);
+    assert_eq!((main.window, peers.window), (Some(7), Some(7)));
+    assert_eq!(app.taste.window, Some(7));
+    for body in [&main, &peers] {
+        let wire = serde_json::to_value(body).unwrap();
+        for gone in ["remember", "filter", "staleDays"] {
+            assert!(wire.get(gone).is_none(), "{gone} is a 400 now: {wire}");
+        }
+    }
+}
+
+/// The seeds modal's drops are the visit's (clause 13): sent as `exclude`
+/// on every ask until "use again" or a fresh visit — never stored.
+#[test]
+fn closing_the_seeds_modal_sends_the_visits_drops_and_use_again_takes_one_back() {
+    let mut app = answered_taste();
+    assert!(app.taste_seeds_closed(&[], &[], false).is_empty(), "nothing changed, nothing asked");
+
+    let effects = app.taste_seeds_closed(&["h2".into()], &[], false);
+    let (_, _, main) = taste_ask(&effects, TastePart::Main);
+    assert!(effects.iter().all(|e| matches!(e, Effect::Api(ApiCmd::Taste { .. }))), "no prefs: {effects:?}");
+    let effects = land_main(&mut app, &effects, taste_main());
+    let (_, _, peers) = taste_ask(&effects, TastePart::Peers);
+    assert_eq!(main.exclude, vec!["h2".to_string()]);
+    assert_eq!(peers.exclude, vec!["h2".to_string()], "both parts carry the drops");
+    assert!(effects.iter().all(|e| matches!(e, Effect::Api(ApiCmd::Taste { .. }))), "no prefs: {effects:?}");
+    // Closing again with the same drop asks nothing new.
+    assert!(app.taste_seeds_closed(&["h2".into()], &[], false).is_empty());
+    // A later ask in the visit still carries it.
+    assert_eq!(taste_ask(&app.taste_ask_again(), TastePart::Main).2.exclude, vec!["h2".to_string()]);
+
+    // The answer's `excluded` rows are the DROPPED section — this visit's
+    // drops only.
+    let mut answer = taste_main();
+    answer.excluded = serde_json::from_value(serde_json::json!([
+        { "hash": "h2", "filepath": "music/seed2.mp3", "metadata": {} },
+        { "hash": "stranger", "filepath": "music/x.mp3", "metadata": {} }
+    ]))
+    .unwrap();
+    app.taste.head = Some(answer);
+    let shown: Vec<&str> = app.taste.dropped_seeds().iter().map(|e| e.hash.as_str()).collect();
+    assert_eq!(shown, ["h2"]);
+
+    // Use again: out of the list, and asked at once.
+    let effects = app.taste_seeds_closed(&[], &["h2".into()], false);
+    assert!(taste_ask(&effects, TastePart::Main).2.exclude.is_empty());
+    assert!(app.taste.dropped.is_empty());
+    // A restore of something never dropped changes nothing.
+    assert!(app.taste_seeds_closed(&[], &["old".into()], false).is_empty());
+
+    // A pin changed in the modal asks with it.
+    assert!(app.taste_add_pin(track("music/pin.mp3")).is_ok());
+    let effects = app.taste_seeds_closed(&[], &[], true);
+    assert_eq!(taste_ask(&effects, TastePart::Main).2.pin, vec!["music/pin.mp3".to_string()]);
+}
+
+/// The server refuses an `exclude` past 200: a long visit sends the newest.
+#[test]
+fn the_exclusions_keep_to_the_servers_cap_newest_kept() {
+    let mut app = answered_taste();
+    let cap = crate::tui::app::taste::TASTE_EXCLUDE_CAP;
+    let drops: Vec<String> = (0..cap + 3).map(|i| format!("x{i}")).collect();
+    let effects = app.taste_seeds_closed(&drops, &[], false);
+    let exclude = taste_ask(&effects, TastePart::Main).2.exclude;
+    assert_eq!(exclude.len(), cap);
+    assert_eq!(exclude.first().map(String::as_str), Some("x3"), "the oldest trimmed");
+    assert_eq!(exclude.last().map(String::as_str), Some(format!("x{}", cap + 2).as_str()));
+}
+
+#[test]
+fn taste_pins_are_explicit_capped_at_eight_and_another_pick_passes_the_shown_picks_over() {
+    let mut app = answered_taste();
+    assert_eq!(app.taste_add_pin(track("music/seed1.mp3")), Err(TastePinRefusal::AlreadyThere), "a seed already");
+    for i in 0..TASTE_MAX_PINS {
+        assert!(app.taste_add_pin(track(&format!("music/p{i}.mp3"))).is_ok());
+    }
+    assert_eq!(app.taste_add_pin(track("music/nine.mp3")), Err(TastePinRefusal::Full));
+    assert!(app.taste_unpin("music/p0.mp3"));
+
+    // Another pick (clause 21): the plain ask again with every random pick
+    // shown this visit passed over (the server draws afresh per call; the
+    // exclusions keep it off the ones already shown) — never a pin, never
+    // drawn as a dropped seed.
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+    let mut random = taste_main();
+    random.seed_source = crate::api::types::SeedSource::Random;
+    random.fallback = true;
+    random.seeds.truncate(1);
+    app.apply_event(Event::Taste { seq: main, generation, part: TastePart::Main, answer: Ok(Box::new(random.clone())) });
+    let effects = app.taste_another_pick();
+    let (seq, _, body) = taste_ask(&effects, TastePart::Main);
+    assert_eq!((body.exclude, body.pin.len()), (vec!["h1".to_string()], 0));
+    assert!(effects.iter().all(|e| matches!(e, Effect::Api(ApiCmd::Taste { .. }))), "{effects:?}");
+    let mut next = random.clone();
+    next.seeds[0].hash = "h9".into();
+    next.excluded = serde_json::from_value(serde_json::json!([{ "hash": "h1", "filepath": "music/seed1.mp3" }])).unwrap();
+    app.apply_event(Event::Taste { seq, generation, part: TastePart::Main, answer: Ok(Box::new(next)) });
+    assert!(app.taste.dropped_seeds().is_empty(), "a passed-over pick is not a dropped seed");
+    let effects = app.taste_another_pick();
+    let (seq, _, body) = taste_ask(&effects, TastePart::Main);
+    assert_eq!(body.exclude, vec!["h1".to_string(), "h9".to_string()]);
+    // No pick left — every song the server could draw was shown: the list
+    // starts over and the room asks once more, without the passed-over
+    // picks, instead of landing a false scan-pending card.
+    let mut none_left = random.clone();
+    none_left.seeds.clear();
+    none_left.not_analyzed = true;
+    let effects =
+        app.apply_event(Event::Taste { seq, generation, part: TastePart::Main, answer: Ok(Box::new(none_left.clone())) });
+    let (seq, _, body) = taste_ask(&effects, TastePart::Main);
+    assert!(body.exclude.is_empty() && app.taste.skipped.is_empty() && app.taste.shown_random.is_empty(), "{body:?}");
+    assert!(!app.taste.scan_pending(), "the card's last answer stands while it asks again");
+    assert_eq!(app.taste.head.as_ref().unwrap().seeds[0].hash, "h9");
+    assert!(app.taste.library.pending);
+    // Once only: with nothing passed over, an empty answer is the truth.
+    let effects = app.apply_event(Event::Taste { seq, generation, part: TastePart::Main, answer: Ok(Box::new(none_left)) });
+    assert!(taste_asks(&effects).is_empty(), "{effects:?}");
+    assert!(app.taste.scan_pending());
+    // Around a chosen song, another pick lets that pick go.
+    app.taste_add_pin(track("music/chosen.mp3")).unwrap();
+    let effects = app.taste_another_pick();
+    assert!(taste_ask(&effects, TastePart::Main).2.pin.is_empty());
+    // A fresh visit forgets the passed-over picks.
+    assert!(taste_ask(&app.taste_open(), TastePart::Main).2.exclude.is_empty());
+
+    // Every random pick shown this visit is passed over, whatever ask drew
+    // it — `G` draws afresh too — so an earlier pick never comes back; `G`
+    // itself passes nothing over (RULE 1).
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    land_main(&mut app, &effects, random.clone());
+    let effects = app.taste_ask_again();
+    assert!(taste_ask(&effects, TastePart::Main).2.exclude.is_empty(), "G is a plain re-ask");
+    let mut other = random.clone();
+    other.seeds[0].hash = "h5".into();
+    land_main(&mut app, &effects, other);
+    let effects = app.taste_another_pick();
+    assert_eq!(taste_ask(&effects, TastePart::Main).2.exclude, vec!["h1".to_string(), "h5".to_string()]);
+    // A chosen song the server cannot resolve falls back to the random draw
+    // as well: no pick left there starts the list over too, the pin kept,
+    // never a false scan-pending card (the webapp's noPickLeft).
+    let mut none_left = random.clone();
+    none_left.seeds.clear();
+    none_left.not_analyzed = true;
+    land_main(&mut app, &effects, random.clone());
+    let effects = app.taste_picked(track("music/gone.mp3")).unwrap();
+    let body = taste_ask(&effects, TastePart::Main).2;
+    assert_eq!((body.pin.len(), body.exclude.len()), (1, 2), "{body:?}");
+    let effects = land_main(&mut app, &effects, none_left);
+    let body = taste_ask(&effects, TastePart::Main).2;
+    assert_eq!((body.pin, body.exclude), (vec!["music/gone.mp3".to_string()], Vec::new()));
+    assert!(!app.taste.scan_pending());
+
+    // Around a song chosen on the card, another pick lets the pin go AND
+    // passes over the random pick the card showed before it — never back
+    // to that earlier pick.
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+    app.apply_event(Event::Taste { seq: main, generation, part: TastePart::Main, answer: Ok(Box::new(random.clone())) });
+    app.taste_choose_song();
+    let effects = app.answer_capture(Capture::TasteSeed, track("music/chosen.mp3"));
+    let (seq, _, body) = taste_ask(&effects, TastePart::Main);
+    assert_eq!(body.pin, vec!["music/chosen.mp3".to_string()]);
+    let mut pinned = random.clone();
+    pinned.seed_source = crate::api::types::SeedSource::Pinned;
+    pinned.seeds[0].hash = "hp".into();
+    pinned.seeds[0].pinned = true;
+    app.apply_event(Event::Taste { seq, generation, part: TastePart::Main, answer: Ok(Box::new(pinned)) });
+    assert!(app.taste.no_history, "the card stands around the pick");
+    let (_, _, body) = taste_ask(&app.taste_another_pick(), TastePart::Main);
+    assert_eq!((body.exclude, body.pin.len()), (vec!["h1".to_string()], 0));
+
+    // The capture pick pins and asks; a peer session refuses it.
+    let mut app = answered_taste();
+    app.taste_choose_song();
+    assert_eq!(app.capture, Some(Capture::TasteSeed));
+    let effects = app.answer_capture(Capture::TasteSeed, track("music/picked.mp3"));
+    assert_eq!(taste_ask(&effects, TastePart::Main).2.pin, vec!["music/picked.mp3".to_string()]);
+
+    // Pin the playing song: only the session's own row.
+    let mut app = answered_taste();
+    assert!(!app.taste_can_pin_playing(), "nothing plays");
+    app.activate_taste_row(TasteRow::Peer { group: 0, row: 0 }, TasteVerb::Now);
+    assert!(!app.taste_can_pin_playing(), "a peer's row is not a seed here");
+    app.activate_taste_row(TasteRow::Song(0), TasteVerb::Now);
+    assert!(app.taste_can_pin_playing());
+    assert!(app.taste_pin_playing());
+    assert!(!app.taste_can_pin_playing(), "already pinned");
+}
+
+#[test]
+fn the_fallback_card_is_learned_from_a_pinless_random_answer_and_kept_until_history() {
+    let mut app = taste_app();
+    let effects = app.taste_open();
+    let mut random = taste_main();
+    random.seed_source = crate::api::types::SeedSource::Random;
+    random.fallback = true;
+    assert!(taste_asks(&land_main(&mut app, &effects, random.clone())).is_empty(), "no peers for a random seed");
+    assert!(app.taste.no_history);
+    assert!(app.taste.library.data.is_some(), "the library still answers around the random pick");
+    assert!(app.taste.peers.not_asked_random && !app.taste.peers.absent, "the DIM line (clause 22)");
+
+    // A pinned answer keeps the card; one with history seeds lets it go.
+    app.taste_add_pin(track("music/pin.mp3")).unwrap();
+    let effects = app.taste_ask();
+    let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+    let mut pinned = taste_main();
+    pinned.seed_source = crate::api::types::SeedSource::Pinned;
+    for seed in &mut pinned.seeds {
+        seed.pinned = true;
+    }
+    app.apply_event(Event::Taste { seq: main, generation, part: TastePart::Main, answer: Ok(Box::new(pinned)) });
+    assert!(app.taste.no_history, "kept while only pins seed");
+    let effects = app.taste_ask();
+    let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+    app.apply_event(Event::Taste { seq: main, generation, part: TastePart::Main, answer: Ok(Box::new(taste_main())) });
+    assert!(!app.taste.no_history);
+
+    // A null source for a seed that is not random hides its tab (clause 40).
+    let effects = app.taste_ask();
+    let effects = land_main(&mut app, &effects, taste_main());
+    let (peers, generation, _) = taste_ask(&effects, TastePart::Peers);
+    let mut no_peers = taste_peers();
+    no_peers.peers = None;
+    app.apply_event(Event::Taste { seq: peers, generation, part: TastePart::Peers, answer: Ok(Box::new(no_peers)) });
+    assert!(app.taste.peers.absent && !app.taste.peers.not_asked_random);
+}
+
+#[test]
+fn the_remembered_tab_reads_its_two_words_and_nothing_else() {
+    use crate::tui::app::TasteTab;
+    for tab in [TasteTab::Library, TasteTab::Servers] {
+        assert_eq!(TasteTab::parse(tab.as_str()), Some(tab));
+    }
+    assert_eq!(TasteTab::parse("peers"), Some(TasteTab::Servers), "the tab's name before the play-now page");
+    assert_eq!(TasteTab::parse("network"), None, "a tab that left the room");
+    assert_eq!(TasteTab::parse("stats"), None);
+}
+
+#[test]
+fn an_error_ends_every_taste_wait_so_the_room_asks_again() {
+    for event in [Event::Unauthorized, Event::Error("not connected to a server".into())] {
+        let mut app = taste_app();
+        let effects = app.taste_open();
+        let (main, generation, _) = taste_ask(&effects, TastePart::Main);
+        app.apply_event(event);
+        assert!(!app.taste.asking(), "no part left saying asking…");
+        assert!(app.taste.library.failed.is_some() && app.taste.peers.failed.is_some(), "Try again is offered (clause 83)");
+        // A re-login to the same server resets nothing (session.rs: not a
+        // fresh server); the next visit asks.
+        app.connected = true;
+        assert_eq!(taste_asks(&app.taste_open()).len(), 1, "the room asks again on its own");
+        // An old reply that lands after all is dropped by its seq, not
+        // mistaken for the new ask's.
+        app.apply_event(Event::Taste { seq: main, generation, part: TastePart::Main, answer: Ok(Box::new(taste_main())) });
+        assert!(app.taste.library.pending, "the newer ask still waits");
+    }
+}
+
+#[test]
+fn the_window_shown_is_the_one_asked_while_it_is_out() {
+    let mut app = answered_taste();
+    assert_eq!(app.taste.shown_window(), Some(30));
+    let (_, _, main) = taste_ask(&app.set_taste_window(7), TastePart::Main);
+    assert_eq!(main.window, Some(7));
+    assert_eq!(app.taste.shown_window(), Some(7), "the dropdown marks the pick, not the old answer's");
+    // Back to 30 before 7 lands: a real change, asked.
+    let (_, _, main) = taste_ask(&app.set_taste_window(30), TastePart::Main);
+    assert_eq!(main.window, Some(30));
+    assert!(app.set_taste_window(30).is_empty(), "the window shown again changes nothing");
+
+    // An error ends the wait with 7 still asked and 30 still drawn: picking
+    // 30 is asked, so the room, the ask and `[gui]` cannot part ways.
+    let mut app = answered_taste();
+    taste_ask(&app.set_taste_window(7), TastePart::Main);
+    app.apply_event(Event::Error("could not reach server".into()));
+    app.connected = true;
+    assert_eq!(app.taste.shown_window(), Some(30));
+    let (_, _, main) = taste_ask(&app.set_taste_window(30), TastePart::Main);
+    assert_eq!(main.window, Some(30));
+    assert_eq!(app.taste.window, Some(30));
 }

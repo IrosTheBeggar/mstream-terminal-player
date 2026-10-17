@@ -177,7 +177,7 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 | Record | Here |
 |---|---|
 | The drawer's Library entries | The nav rows Artists · Genres · Recent; each `Act::Nav` opens the root node fresh (`open_library_node(node, true)`) and points the App's tab at Library, the wall's way |
-| The webapp's side-nav entries Recently Played / Most Played | Two more rows at the LIBRARY group's end, Last played · Most played (2026-09-23), hidden for a peer like Playlists; no digit, so the pointer's; the heading is the nav label; the "Get last [n]" box is not ported — a fixed hundred, as Recent. The column grew to fourteen rows, so Files and Search now stand together at its top |
+| The webapp's side-nav entries Recently Played / Most Played | Two more rows at the LIBRARY group's end, Last played · Most played (2026-09-23), hidden for a peer like Playlists; no digit, so the pointer's; the heading is the nav label; the "Get last [n]" box is not ported — a fixed hundred, as Recent. The column grew to fourteen rows, so Files and Search now stand together at its top — fifteen since 2026-10-05, the Discover room (the log) |
 | A list of DisplayItems | The App's Library pane drawn by `draw_pane_rows` (rows, the cursor while the keyboard holds it, hover verbs, kit scrollbar), under `draw_bar_controls` — the Files room's grammar with the pane swapped |
 | The album grid for an artist | `albums.rs` generalized: the wall draws whichever album list the App holds for the view on screen — `App.albums` for the root wall as today, and the artist's albums kept beside it for the `Artist` node — with the cells, pages, cover slots and keys shared |
 | The vertical letter strip | A one-line `# A B … Z` row under the bar's controls (a 22-row pane cannot stand 27 letters), a kit widget: each letter a click target, dim when absent, the row's tip "Jump to X"; a jump sets the list's first visible row (the pane's scroll) or the wall's page |
@@ -250,3 +250,13 @@ and no strip, and hide for a peer.
   wanted either. The art cache lets go of its oldest cover that neither
   the playing track nor a queued row needs (clause 6), instead of clearing
   the lot at the cap.
+- **2026-10-05 — Fifteen rows: the Discover room joins TOOLS**
+  (docs/ux-contracts/discovery-page.md, clause 2). The column's map is now
+  Files 2 · Search 3 · LIBRARY 5 · Albums 6 · Artists 7 · Genres 8 · Recent
+  9 · Playlists 10 · Last played 11 · Most played 12 · TOOLS 13 · Auto DJ
+  14 · Sonic path 15 · Discover 16 · Settings on the content's last row (17
+  at 100×24 with the footer on, 18 with it off). The TOOLS group moved up a
+  row into the old gap at 13, so the floor still fits the column with
+  nothing shared. Discover hides for a peer as the play lists do (clause
+  23's reason: a guest has no history there), and is the thirteenth room —
+  last in `NAV`, no digit, `G`.

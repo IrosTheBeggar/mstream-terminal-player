@@ -197,11 +197,25 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         ApiCmd::DiscoveryProbe => {
+            with_session(session, async |s| s.client.ping_async().await.map(|ping| worker::probe_event(&ping)))
+                .await
+        }
+
+        // The Discover room: the native worker's shapers, so both builds
+        // land the same events with the same words.
+        ApiCmd::Taste { seq, generation, part, body } => {
+            with_session(session, async |s| worker::taste(&s.client, seq, generation, part, &body).await).await
+        }
+        // The browser build has one client, the session's: a connected
+        // server's album is not asked of its server here, and the App
+        // queues the rows that matched instead.
+        ApiCmd::TasteAlbum { name, artist, generation, peer: Some(peer), play, .. } => {
+            Some(Event::TasteAlbum { generation, tracks: None, name, artist, peer: Some(peer), play })
+        }
+        ApiCmd::TasteAlbum { name, artist, generation, play, .. } => {
             with_session(session, async |s| {
-                s.client
-                    .ping_async()
-                    .await
-                    .map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+                let ask = worker::TasteAlbumAsk { name: name.clone(), artist: artist.clone(), peer: None, play };
+                worker::taste_album(&s.client, ask, generation).await
             })
             .await
         }

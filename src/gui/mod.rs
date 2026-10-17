@@ -25,6 +25,7 @@ mod actions;
 mod admin;
 mod cover;
 mod device;
+mod discover;
 mod dj;
 mod library;
 mod log_file;
@@ -315,6 +316,10 @@ pub(crate) enum Act {
     TorChooseHandOff,
     TorChooseAsk,
     TorChooseClose,
+    // ── Discover (see gui::discover) ────────────────────────────────────
+    /// The Discover room's own pointer ways: its tabs, rows and their
+    /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
+    Disc(discover::DiscAct),
     /// A modal's whole-screen backdrop: swallow the click.
     Guard,
 }
@@ -334,6 +339,8 @@ pub(crate) enum List {
     Sonic,
     DjRoom,
     DjGenres,
+    /// The Discover room's table: its rows live on the App (`App.taste`).
+    Discover,
 }
 
 impl List {
@@ -344,7 +351,7 @@ impl List {
             List::Files => Some(Tab::Files),
             List::Search => Some(Tab::Search),
             List::Library | List::AlbumTracks | List::Playlists | List::PlaylistTracks => Some(Tab::Library),
-            List::Queue | List::Sonic | List::DjRoom | List::DjGenres => None,
+            List::Queue | List::Sonic | List::DjRoom | List::DjGenres | List::Discover => None,
         }
     }
 }
@@ -413,9 +420,12 @@ enum NavId {
     /// are the pointer's.
     LastPlayed,
     MostPlayed,
+    /// The history-seeded Discover room (discovery-page contract, clause
+    /// 2): drawn third in TOOLS, last in the array — no digit, `G`.
+    Discover,
 }
 
-const NAV: [NavId; 12] = [
+const NAV: [NavId; 13] = [
     NavId::Files,
     NavId::Albums,
     NavId::Artists,
@@ -428,6 +438,7 @@ const NAV: [NavId; 12] = [
     NavId::Dj,
     NavId::LastPlayed,
     NavId::MostPlayed,
+    NavId::Discover,
 ];
 
 impl NavId {
@@ -445,6 +456,7 @@ impl NavId {
             NavId::Dj => t!("gui.nav.dj").to_string(),
             NavId::LastPlayed => t!("gui.nav.last_played").to_string(),
             NavId::MostPlayed => t!("gui.nav.most_played").to_string(),
+            NavId::Discover => t!("gui.nav.discover").to_string(),
         }
     }
 }
@@ -461,6 +473,7 @@ const SONIC_NAV: usize = 8;
 const DJ_NAV: usize = 9;
 const LAST_PLAYED_NAV: usize = 10;
 const MOST_PLAYED_NAV: usize = 11;
+const DISCOVER_NAV: usize = 12;
 
 /// A class's slot in [`SEARCH_CLASSES`] — the chip order.
 fn class_idx(class: SearchClass) -> usize {
@@ -583,6 +596,8 @@ pub(crate) struct Gui {
     library: library::LibraryUi,
     /// Track actions: the sheet, its picker and info, a grip drag.
     actions: actions::ActionsUi,
+    /// The Discover room: its cursor, wheel, hanging lists and seeds modal.
+    discover: discover::DiscoverUi,
     /// The queue's highlighted row last drawn, so a new one is revealed.
     last_qsel: Option<usize>,
     /// The last frame left paced work unfinished (covers still waiting to
@@ -601,6 +616,13 @@ impl Gui {
         app.connect_screen = false;
         let mut ui = Surface::new();
         ui.key_hints = config.gui.key_hints;
+        // The Discover room's memories of its own (discovery-page clauses
+        // 15 and 40): the window and the tab in front, seeded before the
+        // first frame.
+        if let Some(tab) = config.gui.discover_tab.as_deref().and_then(crate::tui::app::TasteTab::parse) {
+            app.taste.tab = tab;
+        }
+        app.taste.window = config.gui.discover_window.and_then(crate::tui::app::taste::taste_window);
         Gui {
             app,
             pending: Vec::new(),
@@ -637,6 +659,7 @@ impl Gui {
             dj: dj::DjUi::new(),
             library: library::LibraryUi::new(),
             actions: actions::ActionsUi::new(),
+            discover: discover::DiscoverUi::new(),
             last_qsel: None,
             hot: false,
         }
@@ -673,15 +696,22 @@ impl Gui {
         }
     }
 
-    /// Forward an Activate that may answer an armed sonic pick — and when
-    /// it does, follow the answer home to the room that asked (clause 12;
-    /// the record re-pushes its screen the same way).
+    /// Forward an Activate that may answer an armed pick — and when it
+    /// does, follow the answer home to the room that asked (sonic-path
+    /// clause 12; discovery-page clause 14, the same grammar; the record
+    /// re-pushes its screen the same way).
     fn forward_capturing(&mut self, action: Action) {
-        let was_armed = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
+        let armed = self.app.capture;
         self.forward(action);
-        if was_armed && self.app.capture.is_none() {
-            self.active = SONIC_NAV;
-            self.app.tab = Tab::SonicPath;
+        if self.app.capture.is_none() {
+            match armed {
+                Some(crate::tui::app::Capture::Sonic(_)) => {
+                    self.active = SONIC_NAV;
+                    self.app.tab = Tab::SonicPath;
+                }
+                Some(crate::tui::app::Capture::TasteSeed) => discover::returned(self),
+                _ => {}
+            }
         }
     }
 
@@ -704,6 +734,8 @@ impl Gui {
         };
         config.player.adopt(self.app.prefs());
         config.gui.key_hints = self.config.gui.key_hints;
+        config.gui.discover_tab = self.config.gui.discover_tab.clone();
+        config.gui.discover_window = self.config.gui.discover_window;
         match config::save(&config) {
             Ok(()) => self.config = config,
             Err(e) => {
@@ -805,6 +837,9 @@ impl Gui {
         if sonic::act(self, &act) {
             return false;
         }
+        if discover::act(self, &act) {
+            return false;
+        }
         if playlists::act(self, &act) {
             return false;
         }
@@ -819,6 +854,7 @@ impl Gui {
                 // The banner's [X] is Esc: a sonic pick let go goes home to
                 // the room that asked (sonic-path contract, clause 12).
                 let sonic = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
+                let taste = self.app.capture == Some(crate::tui::app::Capture::TasteSeed);
                 self.forward(Action::Cancel);
                 if sonic {
                     // Home to the Library leaves the MP3 Player tab too, and
@@ -827,6 +863,11 @@ impl Gui {
                     self.screen = Screen::Library;
                     self.active = SONIC_NAV;
                     self.app.tab = Tab::SonicPath;
+                }
+                // The Discover room's pick goes home the same way
+                // (discovery-page clause 14).
+                if taste {
+                    discover::returned(self);
                 }
             }
             Act::Screen(screen) => {
@@ -866,6 +907,9 @@ impl Gui {
             }
             Act::VizWindow => vizwin::toggle(self),
             Act::Nav(i) => {
+                // The room the row was asked from: the Discover room asks
+                // again when its own row (or `G`) is pressed while it is up.
+                let was = (self.screen == Screen::Library).then_some(self.active);
                 // A nav row is the Library's: it brings that screen back.
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
@@ -875,6 +919,12 @@ impl Gui {
                 // The gated room: with the flag gone the row isn't drawn,
                 // and its digit must be as dead as the row (contract §1).
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
+                    return false;
+                }
+                // The Discover room rides its own gate, and hides for a peer
+                // as the play lists do: a guest has no history there
+                // (discovery-page clause 1). `G` is as dead as the row.
+                if i == DISCOVER_NAV && !discover::gate(&self.app) {
                     return false;
                 }
                 // A peer has no playlists to offer (contract clause 26), and
@@ -909,6 +959,12 @@ impl Gui {
                 self.queue_view.stow();
                 if i == FILES_NAV {
                     self.app.tab = Tab::Files;
+                }
+                // Leaving the Discover room lets its hanging list and its
+                // modal go: they would hold the keys of a room off screen.
+                if i != DISCOVER_NAV {
+                    self.discover.menu = None;
+                    self.discover.seeds = None;
                 }
                 // Leaving for a section stows every servers surface; the
                 // room is a Settings sub-view, not a place to come back to.
@@ -972,6 +1028,19 @@ impl Gui {
                         self.forward(Action::Cancel);
                     }
                     self.app.tab = Tab::SonicPath;
+                }
+                // The Discover room: every visit asks; a fresh one lets the
+                // last visit's pins and drops go, while the row or `G` with
+                // the room up asks again keeping them (discovery-page clause
+                // 3). Re-entering disarms its pick left standing, as the
+                // sonic room's (clause 14) — a way back from the pick, not a
+                // new visit.
+                if i == DISCOVER_NAV {
+                    let picking = self.app.capture == Some(crate::tui::app::Capture::TasteSeed);
+                    if picking {
+                        self.forward(Action::Cancel);
+                    }
+                    discover::enter(self, was == Some(DISCOVER_NAV) || picking);
                 }
                 // Playlists: a fresh visit fetches the list; a return finds
                 // it (or a drilled playlist) standing — the albums pattern.
@@ -1375,9 +1444,11 @@ fn angle_glyphs() -> (&'static str, &'static str) {
 }
 
 /// A 1-row text button: dim at rest, bright under the pointer; the
-/// accent when it is the row's one way forward. Returns its width.
+/// accent when it is the row's one way forward. Returns its width in
+/// CELLS (ui-kit: widths are cells, not characters): a CJK label is two a
+/// character, and a char count would put the next button on top of it.
 fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
-    let rect = Rect { x, y, width: label.chars().count() as u16, height: 1 };
+    let rect = Rect { x, y, width: crate::kit::width(label) as u16, height: 1 };
     let hover = gui.ui.hovers(rect);
     let style = match (hover, lead) {
         (true, _) => bright_bold(),
@@ -1497,6 +1568,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
                 NavId::Sonic => sonic::draw(frame, gui, content),
                 NavId::Playlists => playlists::draw(frame, gui, content),
                 NavId::Dj => dj::draw_room(frame, gui, content),
+                NavId::Discover => discover::draw(frame, gui, content),
             }
         }
         Screen::NowPlaying => {
@@ -1574,10 +1646,14 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(torrent::tips(gui))
     } else if sonic::modal_open(gui) {
         std::borrow::Cow::from(sonic::tips(gui))
+    } else if discover::modal_open(gui) && gui.screen == Screen::Library {
+        std::borrow::Cow::from(discover::tips(gui))
     } else if playlists::modal_open(gui) {
         std::borrow::Cow::from(playlists::tips(gui))
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
+    } else if gui.app.capture == Some(crate::tui::app::Capture::TasteSeed) {
+        t!("gui.tips.discover_pick")
     } else if gui.screen == Screen::NowPlaying {
         t!("gui.tips.now")
     } else if gui.screen == Screen::Stats {
@@ -1623,6 +1699,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             SEARCH_NAV if gui.search_view.held => t!("gui.tips.search"),
             SEARCH_NAV => t!("gui.tips.search_stowed"),
             SONIC_NAV => std::borrow::Cow::from(sonic::tips(gui)),
+            DISCOVER_NAV if gui.app.connected => std::borrow::Cow::from(discover::tips(gui)),
             PLAYLISTS_NAV if gui.app.connected => {
                 std::borrow::Cow::from(playlists::tips(gui))
             }
@@ -1668,6 +1745,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // Overlays draw (and register) last, so their rects win the pointer.
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
+    discover::draw_modals(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
@@ -1732,6 +1810,7 @@ fn capture_banner(gui: &Gui) -> Option<String> {
         Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::End)) => {
             t!("gui.sonic.pick_banner_end").to_string()
         }
+        Some(crate::tui::app::Capture::TasteSeed) => discover::banner(gui)?,
         _ => dj::banner(gui)?,
     };
     if gui.config.gui.key_hints && gui.screen != Screen::Device {
@@ -1754,11 +1833,13 @@ fn draw_capture_banner(frame: &mut Frame, gui: &mut Gui, at: Rect, text: &str) {
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // Files and Search at the top; the LIBRARY group's seven rooms; then
-    // the tools, the record's desktop-rail group: Auto DJ, then the
-    // capability-gated sonic room. Fourteen rows, so the column fits the
-    // 24-row minimum with the footer on and Settings on the last row.
+    // the tools, the record's desktop-rail group: Auto DJ, the
+    // capability-gated sonic room, the Discover room. Fifteen rows — the
+    // TOOLS group took the old gap at 13 — so the column fits the 24-row
+    // minimum with the footer on and Settings alone on the last row
+    // (discovery-page clause 2).
     put(frame, 1, 5, &t!("gui.nav.library"), dim());
-    put(frame, 1, 14, &t!("gui.nav.tools"), dim());
+    put(frame, 1, 13, &t!("gui.nav.tools"), dim());
     let forward = forward_glyph();
     // The Settings row sits on the content's last row, above the bar.
     let set_y = content_rect(area.width, area.height, gui.queue_open, gui.footer()).bottom() - 1;
@@ -1766,6 +1847,11 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // The sonic room rides the ping's flag: absent is absent — no
         // placeholder row, and digit 9 goes dead with it (contract §1).
         if i == SONIC_NAV && !gui.app.capabilities.discovery_path {
+            continue;
+        }
+        // The Discover room likewise, and not for a peer's guest, who has
+        // no history there (discovery-page clause 1).
+        if i == DISCOVER_NAV && !discover::gate(&gui.app) {
             continue;
         }
         // A peer has no playlists, and no play counts for its guest
@@ -1779,8 +1865,9 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             1..=5 => 5 + i as u16,
             LAST_PLAYED_NAV => 11,
             MOST_PLAYED_NAV => 12,
-            DJ_NAV => 15,
-            SONIC_NAV => 16,
+            DJ_NAV => 14,
+            SONIC_NAV => 15,
+            DISCOVER_NAV => 16,
             _ => set_y,
         };
         let label = id.label();
@@ -2538,6 +2625,13 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         gui.app.tab = Tab::SonicPath;
         return false;
     }
+    // The Discover room's pick likewise goes home (discovery-page clause
+    // 14).
+    if key.code == KeyCode::Esc && gui.app.capture == Some(crate::tui::app::Capture::TasteSeed) {
+        gui.forward(Action::Cancel);
+        discover::returned(gui);
+        return false;
+    }
     if gui.active == ALBUMS_NAV
         && gui.app.connected
         && let Some(quit) = albums::handle_key(gui, key)
@@ -2548,6 +2642,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         return quit;
     }
     if let Some(quit) = sonic::handle_key(gui, key) {
+        return quit;
+    }
+    if let Some(quit) = discover::handle_key(gui, key) {
         return quit;
     }
     if let Some(quit) = playlists::handle_key(gui, key) {
@@ -2594,6 +2691,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The tenth room has no digit; `D` is the capital beside `A`'s toggle.
         KeyCode::Char('D') => return gui.act(Act::Nav(DJ_NAV)),
+        // Nor the Discover room: `G` opens it, and asks again while it is
+        // up (discovery-page clause 3); dead while the row is absent.
+        KeyCode::Char('G') => return gui.act(Act::Nav(DISCOVER_NAV)),
         // `/` is the search key everywhere, the TUI's own habit: land on
         // Search with the query box open.
         KeyCode::Char('/') => {
@@ -3031,13 +3131,14 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             }
         }
         // A resized window changes the cell-to-pixel mapping the
-        // cover encodes against — the card's, every album slot's
-        // and every queue row's alike.
+        // cover encodes against — the card's, every album slot's, every
+        // queue row's and the Discover strip's alike.
         TermEvent::Resize(..) => {
             gui.app.graphics.refresh();
             gui.albums.on_resize();
             gui.queue.on_resize();
             gui.actions.on_resize();
+            gui.discover.on_resize();
         }
         _ => {}
     }
@@ -3091,6 +3192,7 @@ impl Gui {
             List::Sonic => &mut self.sonic.results,
             List::DjRoom => &mut self.dj.body,
             List::DjGenres => &mut self.dj.genres,
+            List::Discover => &mut self.discover.view,
         }
     }
 
@@ -3122,6 +3224,7 @@ impl Gui {
             List::Sonic => &self.sonic.results,
             List::DjRoom => &self.dj.body,
             List::DjGenres => &self.dj.genres,
+            List::Discover => &self.discover.view,
         }
     }
 
@@ -3219,6 +3322,13 @@ impl Gui {
             self.act(Act::Nav(FILES_NAV));
             return;
         }
+        // The Discover room asks the new server — or yields to Files when
+        // the row went with the ping or the session is a peer's
+        // (discovery-page clause 1).
+        if self.active == DISCOVER_NAV {
+            discover::reopen(self);
+            return;
+        }
         if let Some(root) = library::root_of(self.active) {
             library::open(self, root);
         } else if self.active == ALBUMS_NAV {
@@ -3252,6 +3362,7 @@ impl Gui {
         actions::modal_open(self)
             || dj::modal_open(self)
             || sonic::modal_open(self)
+            || discover::modal_open(self)
             || playlists::modal_open(self)
             || self.servers.modal_open()
             || self.torrent.modal_open()
@@ -3291,6 +3402,12 @@ impl Gui {
             if !self.modal_open() {
                 admin::wheel(self, at, delta);
             }
+            return;
+        }
+        // The Discover room's modal and lists scroll their own rows under
+        // the wheel (discovery-page clause 58).
+        if self.screen == Screen::Library && self.active == DISCOVER_NAV && discover::modal_open(self) {
+            discover::wheel(self, delta);
             return;
         }
         // A modal owns the pointer whole; the Now Playing screen scrolls
@@ -3336,6 +3453,7 @@ impl Gui {
             NavId::Artists | NavId::Genres | NavId::Recent | NavId::LastPlayed | NavId::MostPlayed => {
                 library::wheel(self, delta)
             }
+            NavId::Discover => discover::wheel(self, delta),
         }
     }
 }

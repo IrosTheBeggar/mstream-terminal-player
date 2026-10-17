@@ -262,3 +262,14 @@ Gaps in the shared App that this contract adds (verify at implementation):
   A failed probe of why the path is off no longer leaves "asking the
   server why…" standing. The pick's Esc outranks the rooms' own Esc, and
   re-entering the room disarms a stale pick (clause 13).
+- **2026-10-05 — The TOOLS group grows, the room moves up a row**: the
+  Discover room joins TOOLS under this one (docs/ux-contracts/
+  discovery-page.md, clause 2) — TOOLS label 13, Auto DJ 14, **Sonic path
+  15**, Discover 16, Settings on the content's last row. Digit 9 and the
+  `discoveryPathAvailable` gate are unchanged. The "Revisit when a Discover
+  room lands" of the 2026-08-31 entry and the third Out-of-scope bullet:
+  the room that landed is the history-seeded page, not the record's
+  per-song Discover screen that carries "Play a path to…", so entry point
+  2 stays unported and the search-pick decision stands. That room borrows
+  this contract's capture grammar (clauses 10–13) and its 403 probe
+  (clause 40) for its own seed pick and failure taxonomy.

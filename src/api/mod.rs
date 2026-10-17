@@ -396,6 +396,11 @@ pub struct Client {
     /// parent's browse proxy, art onto its art proxy (contract clause 27).
     /// `base` and `token` are then the parent's.
     peer: Option<i64>,
+    /// A federated peer's client however the peer is reached: its covers
+    /// ask the peer's `l` rendition ([`urls::PEER_ART_COMPRESS`]). Implied
+    /// by `peer`; set on its own for a peer over its own tunnel, whose
+    /// `/album-art` is asked directly.
+    compressed_art: bool,
     /// Aimed at a tunnel's loopback bridge: the token every request must
     /// carry as `__lt=…`, or the shared tunnel client drops the connection.
     local_token: Option<String>,
@@ -454,6 +459,7 @@ impl Client {
             base,
             token: None,
             peer: None,
+            compressed_art: false,
             local_token: None,
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
@@ -475,6 +481,14 @@ impl Client {
 
     pub fn peer(&self) -> Option<i64> {
         self.peer
+    }
+
+    /// Mark this client as a federated peer's even when it is not aimed
+    /// through the parent — a peer over its own tunnel — so its covers ask
+    /// the same compressed rendition the parent's art proxy is asked for.
+    pub fn with_compressed_art(mut self, on: bool) -> Self {
+        self.compressed_art = on;
+        self
     }
 
     /// Every request to a tunnel bridge carries its loopback token as
@@ -1008,6 +1022,22 @@ impl Client {
     // No sync twin: its only callers (worker::discover) drive the async
     // version through `wait` themselves. Same for `journey_async` below.
 
+    // ── The Discover page (discovery-page contract) ─────────────────────────
+    //
+    // No sync twins: the worker's shared shapers drive these through `wait`.
+    // Unlike the similar routes above, a 403 is NOT folded into `Ok(None)`:
+    // the room has to tell "switched off" and "scan pending" apart, and it
+    // does so by re-pinging after an `ApiError::Forbidden` (clause 82).
+
+    /// `POST /api/v1/discovery/taste` — one half of the room's answer (plan
+    /// §3.1; the App asks the library and the peers apart, clause 30). The
+    /// route is stateless: nothing is stored between calls.
+    pub async fn taste_async(&self, body: &TasteRequest) -> Result<TasteResponse, ApiError> {
+        let body = serde_json::to_value(body)
+            .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
+        self.post("api/v1/discovery/taste", body).await
+    }
+
     /// A journey from one track to another through the embedding space.
     ///
     /// `length` counts the total rows including both seeds, so the answer is
@@ -1383,12 +1413,7 @@ impl Client {
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
     pub async fn album_art_async(&self, file: &str) -> Result<Vec<u8>, ApiError> {
-        let url = match self.peer {
-            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
-            None => urls::album_art_url(&self.server(), file),
-        }
-        .map_err(ApiError::Config)?;
-        let url = urls::with_local_token(url, self.local_token.as_deref());
+        let url = self.art_url(file)?;
         let mut req = self.http.get(&url);
         if let Some(token) = &self.token {
             req = req.header("x-access-token", token);
@@ -1407,6 +1432,22 @@ impl Client {
             }),
             _ => Ok(bytes.to_vec()),
         }
+    }
+
+    /// Where [`Client::album_art_async`] asks for `file`: the server's own
+    /// `/album-art/<file>`; aimed at a federated peer, the parent's art
+    /// proxy, `/api/v1/federation/peers/{id}/art/<file>?compress=l`
+    /// ([`urls::peer_art_url`]); a peer over its own tunnel, its own
+    /// `/album-art/<file>?compress=l` ([`urls::direct_peer_art_url`]). A
+    /// peer's cover is its 256 px rendition either way.
+    pub fn art_url(&self, file: &str) -> Result<String, ApiError> {
+        let url = match self.peer {
+            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
+            None if self.compressed_art => urls::direct_peer_art_url(&self.server(), file),
+            None => urls::album_art_url(&self.server(), file),
+        }
+        .map_err(ApiError::Config)?;
+        Ok(urls::with_local_token(url, self.local_token.as_deref()))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -16,12 +16,28 @@ server, and no audio files:
     one), then everything idles. FAKE_LOOP=1 loops both forever for
     interactive viewing.
   - /_state: the test oracle — directories and users as JSON.
+  - FAKE_TASTE=1: the GUI's Discover room's server half — the ping
+    advertises `discovery` + `discoveryTaste`, POST /discovery/taste
+    answers one fixed history-seeded answer (two seeds, two songs). The
+    route is stateless, as the real one since 2026-10-14: `remember`,
+    `filter` and `staleDays` answer 400 and the old …/taste/prefs route
+    404 (docs/ux-contracts/discovery-page.md; mStream's
+    docs/discovery-page-plan.md §3.1). /_state counts the asks, keeps the
+    last body, and counts any prefs call. The ping also advertises
+    `federationDiscovery`, so the room asks its peers half (`sources:
+    ["peers"]`) once Main lands: one connected server (id 7, "Attic")
+    with one playable row whose `albumArt` names its cover on the peer
+    (mStream 2026-10-16), served through the federation art proxy
+    GET /api/v1/federation/peers/7/art/<file> — /_state counts those
+    gets (`peer_art_gets`) and keeps their paths.
 
 Usage: fake_mstream.py PORT
 """
 import json
 import os
+import struct
 import sys
+import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT = int(sys.argv[1])
@@ -31,6 +47,51 @@ LOOP = os.environ.get("FAKE_LOOP", "") not in ("", "0")
 # and /auth/login only knows the users PUT there. Off by default: the
 # wizard legs run on the zero-account window this would close.
 AUTH = os.environ.get("FAKE_AUTH", "") not in ("", "0")
+TASTE = os.environ.get("FAKE_TASTE", "") not in ("", "0")
+
+# The room's answer, as the server words it (plan §3.1). The sources it was
+# not asked for come back null, as the real route's do.
+TASTE_ANSWER = {
+    "window": 30, "widenedFrom": None, "seedSource": "history", "fallback": False,
+    "seeds": [
+        {"hash": "h1", "filepath": "music/manor.mp3", "metadata": {"title": "Manor", "artist": "ALM"},
+         "outcome": "completed", "lastPlayed": "2026-10-01T10:00:00.000Z", "plays": 4, "pinned": False, "analyzed": True},
+        {"hash": "h2", "filepath": "music/kite.mp3", "metadata": {"title": "Kite", "artist": "Boukmanflow"},
+         "outcome": "completed", "plays": 1, "pinned": False, "analyzed": True},
+    ],
+    "excluded": [], "dropped": 0, "notAnalyzed": False,
+    "library": {
+        # One album with a cover: the room's strip draws its tile (the
+        # 2026-10-11 strip log) and fetches the cover from /album-art/.
+        "capped": False,
+        "albums": [{"name": "Nightfall", "album_artist": "Moon", "album_art_file": "nightfall.png",
+                    "similarity": 0.86, "scopedTracks": 3, "playedTracks": 0}],
+        "tracks": [
+            {"filepath": "music/aurora.mp3", "similarity": 0.83, "seedHash": "h1",
+             "metadata": {"title": "Aurora", "artist": "Ray", "duration": 251}, "playCount": 0, "lastPlayed": None},
+            {"filepath": "music/borealis.mp3", "similarity": 0.8, "seedHash": "h2",
+             "metadata": {"title": "Borealis", "artist": "Ray", "duration": 200}, "playCount": 2,
+             "lastPlayed": "2024-01-01T00:00:00.000Z"},
+        ],
+    },
+    "network": None,
+    "peers": None,
+}
+
+# The peers half's answer (plan §3.1): library and network not asked, so
+# null; one connected server whose row names its cover as the peer's own
+# browse rows do (`albumArt`), fetched through the parent's art proxy.
+PEER_ART = "attic-lanterns.png"
+TASTE_PEERS_ANSWER = dict(TASTE_ANSWER, library=None, peers={
+    "peers": [
+        {"id": 7, "name": "Attic", "reachable": True, "mismatched": False, "results": [
+            {"artist": "Attic Band", "title": "Ember", "album": "Lanterns", "duration": 199,
+             "similarity": 0.81, "filepath": "Music/ember.mp3", "albumArt": PEER_ART,
+             "peer": {"id": 7, "name": "Attic"}, "source": "federation"},
+        ]},
+    ],
+    "searched": {"peers": 1, "unreachable": 0, "mismatched": 0},
+})
 
 STEPS = [
     [{"vpath": "media", "pct": 4, "scanned": 118}],
@@ -57,13 +118,39 @@ STATUS_STEPS = [
 ]
 
 calls = {"n": 0, "s": 0}
-state = {"directories": {}, "users": []}
+state = {"directories": {}, "users": [], "taste_asks": 0, "taste_body": None, "prefs_calls": 0, "art_gets": 0,
+         "peer_asks": 0, "peer_art_gets": 0, "peer_art_paths": []}
+
+# Keys the stateless taste route refuses (mStream 8dcfad0e): a 400.
+TASTE_GONE = ("remember", "filter", "staleDays")
+
+
+def _png(w=4, h=4, rgb=(200, 120, 40)):
+    """A small solid PNG: a cover the player decodes the way it decodes any."""
+    def chunk(kind, data):
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + bytes(rgb) * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+COVER = _png()
+PEER_COVER = _png(rgb=(40, 120, 200))
 
 
 class Handler(BaseHTTPRequestHandler):
     def _json(self, payload):
         body = json.dumps(payload).encode()
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _status(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -111,9 +198,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._json({"enrichment": step})
         if self.path == "/api/v1/ping":
-            return self._json(
-                {"vpaths": sorted(state["directories"]), "noFileModify": False, "noUpload": False}
-            )
+            ping = {"vpaths": sorted(state["directories"]), "noFileModify": False, "noUpload": False}
+            if TASTE:
+                ping.update({"discovery": True, "discoveryTaste": 1, "federationDiscovery": True})
+            return self._json(ping)
+        if TASTE and self.path == "/api/v1/discovery/taste/prefs":
+            state["prefs_calls"] += 1
+            return self._status(404, {"error": "Not Found"})
         if self.path == "/api/v1/admin/directories":
             return self._json(
                 {name: {"root": root} for name, root in state["directories"].items()}
@@ -128,6 +219,23 @@ class Handler(BaseHTTPRequestHandler):
                     "qr": "mstr1:FAKE-TICKET-0123456789abcdef-for-widget-smoke-testing-only",
                 }
             )
+        if TASTE and self.path.split("?")[0].startswith("/api/v1/federation/peers/7/art/"):
+            state["peer_art_gets"] += 1
+            state["peer_art_paths"].append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(PEER_COVER)))
+            self.end_headers()
+            self.wfile.write(PEER_COVER)
+            return
+        if TASTE and self.path.split("?")[0].startswith("/album-art/"):
+            state["art_gets"] += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(COVER)))
+            self.end_headers()
+            self.wfile.write(COVER)
+            return
         if self.path == "/_state":
             return self._json(state)
         return self._json({})
@@ -140,9 +248,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(
                 {"token": "fake-token", "vpaths": sorted(state["directories"])}
             )
+        if TASTE and self.path == "/api/v1/discovery/taste":
+            state["taste_asks"] += 1
+            state["taste_body"] = body
+            gone = [k for k in TASTE_GONE if k in body]
+            if gone:
+                return self._status(400, {"error": f'"{gone[0]}" is not allowed'})
+            if "peers" in (body.get("sources") or []):
+                state["peer_asks"] += 1
+                return self._json(TASTE_PEERS_ANSWER)
+            return self._json(TASTE_ANSWER)
         return self._json({})
 
     def do_PUT(self):
+        if TASTE and self.path == "/api/v1/discovery/taste/prefs":
+            state["prefs_calls"] += 1
+            return self._status(404, {"error": "Not Found"})
         if self._walled():
             return self._deny()
         body = self._body()
