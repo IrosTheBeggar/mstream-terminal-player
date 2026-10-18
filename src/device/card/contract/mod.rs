@@ -63,6 +63,8 @@ pub(crate) const MAX_FILE: usize = 64 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Why {
     Ok,
+    // The player's word for a read that failed, kept with its list.
+    #[allow(dead_code)]
     Io,
     Short,
     Magic,

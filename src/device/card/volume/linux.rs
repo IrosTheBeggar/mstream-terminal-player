@@ -55,6 +55,7 @@ pub(crate) trait Host {
 }
 
 /// What lsblk is asked: one flat JSON list, sizes in bytes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const LSBLK: &[&str] =
     &["-J", "-l", "-b", "-o", "KNAME,PKNAME,TYPE,FSTYPE,PTTYPE,PARTTYPE,UUID,LABEL"];
 

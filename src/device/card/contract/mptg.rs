@@ -60,6 +60,8 @@ pub(crate) const NO_TAGS: u16 = 1 << 5;
 pub(crate) const UNREADABLE: u16 = 1 << 6;
 pub(crate) const TRUNCATED: u16 = 1 << 7;
 pub(crate) const BPM_ANALYSED: u16 = 1 << 8;
+// The API fallback's flag (2.7): no sync writes such a record yet.
+#[allow(dead_code)]
 pub(crate) const FROM_API: u16 = 1 << 9;
 /// The RECS flag bits v1 defines: 0-9 (10-15 are reserved).
 pub(crate) const FLAGS_V1: u16 = 0x03FF;
@@ -213,6 +215,8 @@ impl Record {
     // An unknown enum value as 2.4.5's table reads it.
 
     /// The container, 4-254 (reserved) read as 0, unknown.
+    // These three wait for a reader of records: the Card view's.
+    #[allow(dead_code)]
     pub(crate) fn container_kind(&self) -> u8 {
         if (4..=254).contains(&self.container) { CONTAINER_UNKNOWN } else { self.container }
     }
@@ -223,11 +227,13 @@ impl Record {
     }
 
     /// The picture's MIME, above 3 read as 3, other.
+    #[allow(dead_code)]
     pub(crate) fn pic_mime_kind(&self) -> u8 {
         self.pic_mime.min(3)
     }
 
     /// An embedded picture is anchored: a known coding and an offset.
+    #[allow(dead_code)]
     pub(crate) fn has_picture(&self) -> bool {
         self.pic_coding <= 3 && self.pic_offset != 0
     }

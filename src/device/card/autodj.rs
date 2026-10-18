@@ -566,6 +566,8 @@ impl std::error::Error for BuildError {}
 
 impl Prepared {
     /// The rows the file has.
+    // For the sync's progress (B1).
+    #[allow(dead_code)]
     pub(crate) fn row_count(&self) -> usize {
         self.rows.len()
     }

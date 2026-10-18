@@ -235,8 +235,13 @@ pub(crate) struct Table<'a> {
     pub(crate) path_count: u32,
     pub(crate) k: u32,
     pub(crate) slot_bytes: u32,
+    // The selection as the header has it: for diagnostics, which nothing
+    // prints yet.
+    #[allow(dead_code)]
     pub(crate) sel_kind: u8,
+    #[allow(dead_code)]
     pub(crate) sel_head: u8,
+    #[allow(dead_code)]
     pub(crate) sel_floor: u8,
     pub(crate) built_time: u32,
     pub(crate) tags_generation: u32,

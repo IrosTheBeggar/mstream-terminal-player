@@ -15,17 +15,19 @@
 //! [`autodj`] is the Auto DJ index's writer: the neighbour lists from
 //! mStream's embeddings, and whether a run writes a new index at all.
 //! [`volume`] is the cards in this computer's readers: the drive-safety rule
-//! that says which volumes the transfer may write, and a card read as the
-//! device reads it; it writes nothing.
+//! that says which volumes the transfer may write, a card read as the
+//! device reads it, and the write half a run drives. [`engine`] is the run:
+//! every write a sync makes, in the contract's order (2.12), bound to one
+//! card, and planned against what the card and its ledger hold.
 
-// The kit and the pieces built on it wait for their caller, the engine;
-// until it lands only the tests call them. The volume layer's probes for
-// the other OSes are compiled everywhere, so their rules run on fakes in
-// every OS's tests.
-#![allow(dead_code)]
+// The kit and the engine built on it wait for their callers (the sync of
+// the user's server, the Card view): until they land only the tests call
+// them, so the tests' build is the one that holds every item to a caller.
+#![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod autodj;
 pub(crate) mod contract;
+pub(crate) mod engine;
 pub(crate) mod names;
 pub(crate) mod tags;
 pub(crate) mod volume;

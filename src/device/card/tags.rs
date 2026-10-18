@@ -897,6 +897,8 @@ pub(crate) fn restore<F: FileLike>(file: &mut F, ext: &str, what: &Restore<'_>) 
 }
 
 /// [`restore`] on a file by its path, its extension saying which format.
+// For a conversion on the local disk (B1, B9).
+#[allow(dead_code)]
 pub(crate) fn restore_path(path: &Path, what: &Restore<'_>) -> Result<(), String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let opened = std::fs::OpenOptions::new().read(true).write(true).open(path);
