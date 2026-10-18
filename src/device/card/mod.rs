@@ -8,10 +8,16 @@
 //!
 //! [`contract`] is the kit: the files themselves, byte for byte, pure code
 //! with no I/O. The rest of the transfer — the names, the tag reader, the
-//! Auto DJ index, the volumes, the engine — is built on it.
+//! Auto DJ index, the volumes, the engine — is built on it. [`volume`] is
+//! the cards in this computer's readers: the drive-safety rule that says
+//! which volumes the transfer may write, and a card read as the device
+//! reads it; it writes nothing.
 
 // The kit's callers are the transfer's next pieces (the names, the tag
-// reader, the engine); until they land only the tests call it.
+// reader, the engine); until they land only the tests call it. The volume
+// layer's probes for the other OSes are compiled everywhere, so their rules
+// run on fakes in every OS's tests.
 #![allow(dead_code)]
 
 pub(crate) mod contract;
+pub(crate) mod volume;

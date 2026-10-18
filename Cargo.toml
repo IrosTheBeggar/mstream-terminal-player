@@ -166,6 +166,10 @@ sha2 = "0.11"
 # add no package.
 crc32fast = "1.5"
 md-5 = "0.11"
+# A card's names as it stores them (docs/METADATA.md 2.8.5): macOS lists a
+# FAT name decomposed, and the transfer brings it back to NFC; the names it
+# creates are NFC too (2.8.3). Pure Rust tables.
+unicode-normalization = "0.1.24"
 stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
@@ -319,10 +323,22 @@ rfd = { version = "0.15", default-features = false }
 # probe too, so the crate is not optional, and the desktop flavour's calls
 # are gated on its feature where they are made. windows-sys is bindings
 # alone, so the terminal binary links nothing it does not call.
+#
+# The SD card transfer's volume probe (src/device/card/volume/windows.rs):
+# Storage_FileSystem lists the volumes and their filesystems, serials and
+# free space, and reads a card's stamps back with the current bias;
+# System_IO's DeviceIoControl asks System_Ioctl's queries (a volume's disk,
+# the disk's bus and removable flag, its partition style); System_Registry
+# reads where Windows itself lives (the system partition, the page files),
+# whose disks are never a card's.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Registry",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -352,6 +368,14 @@ objc2-foundation = { version = "0.3.2", optional = true, default-features = fals
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+
+# The SD card transfer's volume probe (src/device/card/volume): statvfs on
+# Linux and statfs on macOS for a card's size, free space and cluster; the
+# kernel's FAT time zone (the raw gettimeofday) on Linux, localtime_r on
+# macOS. Already in both trees (mio, socket2 and others bring it), so
+# this adds no package.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ratzilla = "0.3.1"
