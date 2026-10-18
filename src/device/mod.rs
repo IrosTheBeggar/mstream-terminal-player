@@ -23,7 +23,8 @@
 //!
 //! [`card`] is the board's SD card, written with the card in a PC's reader,
 //! never over the cable: so far its contract kit, the files the firmware
-//! reads from a card byte for byte.
+//! reads from a card byte for byte, and the cards in this computer's
+//! readers, found and held to the drive-safety rule.
 
 mod board;
 mod card;
@@ -77,6 +78,12 @@ enum DeviceCmd {
     /// List the firmware's releases on GitHub (one request): each one's date, its builds, and
     /// the ones already on this computer
     Releases(ReleasesArgs),
+    // The cards in this computer's readers as JSON, each volume with its
+    // verdict and an accepted card with what it holds; read only. For the
+    // real-card checks: the listener's `device cards` waits for its UX
+    // contract (docs/ux-contracts/mp3-player-screen.md, the command line).
+    #[command(hide = true)]
+    CardProbe,
 }
 
 #[derive(Args, Clone)]
@@ -181,6 +188,7 @@ pub fn run(args: DeviceArgs) -> i32 {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             releases_on(&*firmware::net(), args.pre, &mut out, &mut err)
         }
+        DeviceCmd::CardProbe => card::volume::probe(&mut std::io::stdout(), &mut std::io::stderr()),
         DeviceCmd::Flash(args) => {
             if let Some(refused) = args.mode_refused() {
                 eprintln!("mstream-player: {}", refused.text());
@@ -845,6 +853,17 @@ mod tests {
         assert!(matches!(parse(&["releases", "--pre"]), Ok(DeviceCmd::Releases(ReleasesArgs { pre: true }))));
         assert!(matches!(parse(&["list"]), Ok(DeviceCmd::List(ListArgs { ports: false }))));
         assert!(matches!(parse(&["list", "--ports"]), Ok(DeviceCmd::List(ListArgs { ports: true }))));
+    }
+
+    /// The card probe answers to its name and stays out of the help: the
+    /// command line is the UX contract's, and `device cards` isn't in it yet.
+    #[test]
+    fn the_card_probe_parses_and_stays_out_of_the_help() {
+        use clap::CommandFactory;
+        let parsed = Line::try_parse_from(["mstream-player", "card-probe"]).map(|l| l.what);
+        assert!(matches!(parsed, Ok(DeviceCmd::CardProbe)));
+        let help = Line::command().render_help().to_string();
+        assert!(help.contains("releases") && !help.contains("card-probe"), "{help}");
     }
 
     /// `device list` on the fake, measured against this build's pin as
