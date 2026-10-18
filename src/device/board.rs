@@ -46,6 +46,9 @@ pub(crate) struct Status {
     /// The battery, 0–100.
     pub bat: Option<u8>,
     pub state: PlayState,
+    /// The card's root as the firmware loaded it (`cid=`): which card the
+    /// board holds, by the transfer's name for it, and the commit it read.
+    pub cid: CardRoot,
     /// The paired headphones' name, decoded; none with nothing paired.
     pub bt: Option<String>,
 }
@@ -89,6 +92,50 @@ impl CardKind {
     /// The player plays from it.
     pub fn readable(&self) -> bool {
         matches!(self, CardKind::Fat32 | CardKind::Fat16)
+    }
+}
+
+/// A card as the transfer names it: its root's cardId, a random u64 made at
+/// the card's first commit and kept from then on, and the root's
+/// generation, which counts the commits on the card (the firmware repo's
+/// docs/METADATA.md, 2.5.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CardRef {
+    pub card_id: u64,
+    pub generation: u32,
+}
+
+/// What `cid=` says of the card's root: the one the firmware loaded when
+/// it read the card (at its start), never read from the card for the
+/// question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CardRoot {
+    /// `cid=<cardId>.<generation>`, in 16 and 8 hex digits.
+    Loaded(CardRef),
+    /// `cid=-`: no root loaded — a card no transfer has written, one whose
+    /// roots are not valid (docs/METADATA.md 2.5.4), or no card it reads.
+    None,
+    /// No `cid=`: firmware from before the key, or a line that gave it up
+    /// to stay within its 255 bytes — or a value this player cannot read.
+    Unknown,
+}
+
+impl CardRoot {
+    /// `cid=`'s value: `-`, or exactly 16 hex digits, a dot and 8 more.
+    /// Anything else is unknown, never a guess.
+    pub fn parse(value: &str) -> CardRoot {
+        if value == "-" {
+            return CardRoot::None;
+        }
+        let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit());
+        let Some((id, generation)) = value.split_once('.') else { return CardRoot::Unknown };
+        if !(digits(id, 16) && digits(generation, 8)) {
+            return CardRoot::Unknown;
+        }
+        match (u64::from_str_radix(id, 16), u32::from_str_radix(generation, 16)) {
+            (Ok(card_id), Ok(generation)) => CardRoot::Loaded(CardRef { card_id, generation }),
+            _ => CardRoot::Unknown,
+        }
     }
 }
 
@@ -783,6 +830,7 @@ pub(crate) mod tests {
             music: None,
             bat: Some(87),
             state: PlayState::Paused,
+            cid: CardRoot::Unknown,
             bt: None,
         }
     }
