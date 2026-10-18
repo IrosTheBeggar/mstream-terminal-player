@@ -549,18 +549,23 @@ impl<'c> Session<'c> {
         if let Some(stale) = stale {
             events(Event::TookOver(stale));
         }
-        let settled = match settle::settle(card, &mut bound, answers, hooks) {
-            Ok(settled) => settled,
+        let mut look = || -> Result<_, Stop> {
+            let settled = settle::settle(card, &mut bound, answers, hooks)?;
+            let music = Music::list(card).map_err(|e| bound.failed(e))?;
+            let survey = survey::survey(card, &music, &settled, &knobs).map_err(|e| bound.failed(e))?;
+            Ok((settled, music, survey))
+        };
+        let (settled, music, survey) = match look() {
+            Ok(looked) => looked,
+            // A card still the bound one is let go; a pulled or different
+            // one is never written again, run.lock included.
+            Err(stop @ (Stop::Pulled | Stop::DifferentCard)) => return Err(stop),
             Err(stop) => {
-                if matches!(stop, Stop::Guard(_)) {
-                    bound.release();
-                }
+                bound.release();
                 return Err(stop);
             }
         };
         let device = settle::device_txt(card);
-        let music = Music::list(card).map_err(|e| bound.failed(e))?;
-        let survey = survey::survey(card, &music, &settled, &knobs).map_err(|e| bound.failed(e))?;
         Ok(Session { card, bound, env, knobs, token, run_id, settled, device, music, survey })
     }
 

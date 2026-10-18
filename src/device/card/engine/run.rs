@@ -555,7 +555,16 @@ impl<'r, 'c> Runner<'r, 'c> {
             self.s.bound.alive()?.delete(&target).map_err(|e| self.failed(e))?;
         }
         self.may(&w.path)?;
-        self.s.bound.alive()?.rename(&stage, &target).map_err(|e| self.failed(e))?;
+        if let Err(e) = self.s.bound.alive()?.rename(&stage, &target) {
+            // A name the card says is taken, where the listing showed none
+            // (2.8.3, step 6: a collision): this file waits for the next
+            // run, which names it around what is there.
+            if e.kind() != io::ErrorKind::AlreadyExists {
+                return Err(self.failed(e));
+            }
+            self.drop_stage(&stage)?;
+            return self.skip(file, "the card has a file of that name".into(), events);
+        }
 
         // 8.4: read back, and the record read from the card's bytes.
         let (rel, item) = self.read_back(&w.path)?;
@@ -605,7 +614,12 @@ impl<'r, 'c> Runner<'r, 'c> {
         self.may(from)?;
         self.may(&w.path)?;
         let source = self.s.music.card_path(from);
-        self.s.bound.alive()?.rename(&source, &target).map_err(|e| self.failed(e))?;
+        if let Err(e) = self.s.bound.alive()?.rename(&source, &target) {
+            if e.kind() != io::ErrorKind::AlreadyExists {
+                return Err(self.failed(e));
+            }
+            return self.skip(file, "the card has a file of that name".into(), events);
+        }
         self.ledger.remove(from);
         let (rel, item) = self.read_back(&w.path)?;
         let l = &file.ledger;
