@@ -1,0 +1,1067 @@
+[
+ {
+  "file": "mptg-fold-root-parent.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "foldRoot",
+  "check": "FOLD: folder 0's parent isn't 0xFFFFFFFF"
+ },
+ {
+  "file": "mptg-fold-root-name.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "foldRoot",
+  "check": "FOLD: folder 0's name isn't offset 0"
+ },
+ {
+  "file": "mptg-fold-self-parent.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "foldParent",
+  "check": "FOLD: a folder that is its own parent"
+ },
+ {
+  "file": "mptg-fold-not-preorder.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "foldParent",
+  "check": "FOLD: a parent that isn't on the pre-order stack"
+ },
+ {
+  "file": "mptg-fold-sibling-order.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "foldOrder",
+  "check": "FOLD: siblings' names not strictly increasing"
+ },
+ {
+  "file": "mptg-first-record.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "firstRecord",
+  "check": "FOLD: a wrong firstRecord"
+ },
+ {
+  "file": "mptg-recs-folder-range.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "recsFolder",
+  "check": "RECS: a folder index not below folderCount"
+ },
+ {
+  "file": "mptg-recs-path-string-order.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "firstRecord",
+  "check": "RECS: records in path-string order (A B/y.mp3 before A/x.mp3; the first check it breaks is firstRecord)"
+ },
+ {
+  "file": "mptg-recs-duplicate-name.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "recsOrder",
+  "check": "RECS: two records of one folder with one name"
+ },
+ {
+  "file": "mptg-name-empty.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "name",
+  "check": "RECS: a record named by offset 0 (the empty string)"
+ },
+ {
+  "file": "mptg-name-slash.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "name",
+  "check": "RECS: a name with a '/'"
+ },
+ {
+  "file": "mptg-name-dot.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "name",
+  "check": "FOLD: a folder named '.'"
+ },
+ {
+  "file": "mptg-name-dotdot.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "name",
+  "check": "FOLD: a folder named '..'"
+ },
+ {
+  "file": "mptg-string-out-of-range.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "string",
+  "check": "RECS: a run's offset at STRS's end"
+ },
+ {
+  "file": "mptg-string-no-nul.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "string",
+  "check": "STRS: the last string has no NUL"
+ },
+ {
+  "file": "mptg-string-order.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "stringOrder",
+  "check": "STRS: two records' runs swapped (each string still valid)"
+ },
+ {
+  "file": "mptg-counts.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "counts",
+  "check": "header: recordCount isn't RECS's count"
+ },
+ {
+  "file": "mptg-source-0.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "enum",
+  "check": "header: source 0"
+ },
+ {
+  "file": "mptg-source-4.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "enum",
+  "check": "header: source 4"
+ },
+ {
+  "file": "mptg-hidx-unsorted.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "hidx",
+  "check": "HIDX: two entries swapped"
+ },
+ {
+  "file": "mptg-hidx-wrong-hash.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "hidx",
+  "check": "HIDX: a hash that isn't its record's"
+ },
+ {
+  "file": "mptg-hidx-record-twice.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "hidx",
+  "check": "HIDX: a record twice (and one missing)"
+ },
+ {
+  "file": "mptg-hidx-count.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "hidx",
+  "check": "HIDX: one entry fewer than recordCount"
+ },
+ {
+  "file": "mptg-hidx-ignored.bin",
+  "format": "MPTG",
+  "uses": "device",
+  "expect": "present",
+  "why": "ok",
+  "check": "HIDX broken, read by a reader that doesn't use it (the device's builder)"
+ },
+ {
+  "file": "mptg-orig-count.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "orig",
+  "check": "ORIG: its count isn't recordCount"
+ },
+ {
+  "file": "mptg-orig-ignored.bin",
+  "format": "MPTG",
+  "uses": "device",
+  "expect": "present",
+  "why": "ok",
+  "check": "ORIG broken, read by the device (which ignores the ledger)"
+ },
+ {
+  "file": "mptg-unknown-required.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "unknownRequired",
+  "check": "a REQUIRED section this reader doesn't know"
+ },
+ {
+  "file": "mptg-unknown-optional.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "an unknown section without REQUIRED: skipped",
+  "same": "tags-0000002a.bin"
+ },
+ {
+  "file": "mptg-major-2.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "major",
+  "check": "a newer major"
+ },
+ {
+  "file": "mptg-layout-gap.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "layout",
+  "check": "the directory: a gap of 8 bytes before a section"
+ },
+ {
+  "file": "mptg-shape.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "shape",
+  "check": "RECS: a stride below v1's 72"
+ },
+ {
+  "file": "mptg-no-folders.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "foldRoot",
+  "check": "FOLD empty: folder 0 is always there"
+ },
+ {
+  "file": "mptg-path-too-long.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "pathLength",
+  "check": "a record whose path makes '/music/' + path 256 bytes"
+ },
+ {
+  "file": "mptg-path-longest.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "a record whose path makes '/music/' + path exactly 255 bytes"
+ },
+ {
+  "file": "mptg-minor-1.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "a newer minor: 8 more header bytes, RECS rows of 80 bytes, a 13th run field, an unknown section",
+  "same": "tags-0000002a.bin"
+ },
+ {
+  "file": "mptg-header-bytes-odd.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "headerBytes",
+  "check": "header: headerBytes 76, not a multiple of 8"
+ },
+ {
+  "file": "mptg-header-bytes-short.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "headerBytes",
+  "check": "header: headerBytes 64, below MPTG v1's 72"
+ },
+ {
+  "file": "mptg-section-count.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "sectionCount",
+  "check": "header: 65 sections (at most 64)"
+ },
+ {
+  "file": "mptg-file-bytes.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "fileBytes",
+  "check": "header: fileBytes 8 bytes short of the file's length"
+ },
+ {
+  "file": "mptg-layout-misaligned.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "layout",
+  "check": "the directory: a section at an offset not a multiple of 8"
+ },
+ {
+  "file": "mptg-layout-overlap.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "layout",
+  "check": "the directory: a section that starts inside the one before it"
+ },
+ {
+  "file": "mptg-layout-end.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "layout",
+  "check": "the directory: the last section ends 8 bytes before fileBytes"
+ },
+ {
+  "file": "mptg-layout-type-twice.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "layout",
+  "check": "the directory: OSTR twice"
+ },
+ {
+  "file": "mptg-missing-strs.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "missing",
+  "check": "the directory: no STRS (a REQUIRED section)"
+ },
+ {
+  "file": "mptg-hidx-absent.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "missing",
+  "check": "HIDX absent while recordCount > 0 (2.6.2)"
+ },
+ {
+  "file": "mptg-hidx-absent-device.bin",
+  "format": "MPTG",
+  "uses": "device",
+  "expect": "present",
+  "why": "ok",
+  "check": "HIDX absent, read by a reader that doesn't use it (the device's builder)"
+ },
+ {
+  "file": "mptg-blob-count.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "shape",
+  "check": "STRS (a blob) with a count of 1"
+ },
+ {
+  "file": "mptg-array-bytes.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "shape",
+  "check": "HIDX: bytes 4 more than count x stride"
+ },
+ {
+  "file": "mptg-folder-count.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "counts",
+  "check": "header: folderCount isn't FOLD's count"
+ },
+ {
+  "file": "mptg-strs-first-byte.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "string",
+  "check": "STRS: byte 0 isn't NUL (offset 0 must be the empty string)"
+ },
+ {
+  "file": "mptg-recs-descending.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "absent",
+  "why": "recsOrder",
+  "check": "RECS: two records of one folder with their names decreasing"
+ },
+ {
+  "file": "msmf-comp-order.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "comp",
+  "check": "COMP: the MPDJ before the MPTG"
+ },
+ {
+  "file": "msmf-comp-two-mptg.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "comp",
+  "check": "COMP: two MPTG"
+ },
+ {
+  "file": "msmf-comp-no-mptg.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "comp",
+  "check": "COMP: no MPTG"
+ },
+ {
+  "file": "msmf-comp-name-upper.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "comp",
+  "check": "COMP: tags-0000002A.bin (uppercase hex)"
+ },
+ {
+  "file": "msmf-comp-name-generation.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "comp",
+  "check": "COMP: a name whose digits aren't the entry's generation"
+ },
+ {
+  "file": "msmf-comp-unknown-kind.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "COMP: an unknown kind between them, ignored"
+ },
+ {
+  "file": "msmf-libr-unsorted.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "libr",
+  "check": "LIBR: roots not in byte order"
+ },
+ {
+  "file": "msmf-libr-absolute.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "libr",
+  "check": "LIBR: an absolute root"
+ },
+ {
+  "file": "msmf-libr-dot.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "libr",
+  "check": "LIBR: a root through '.'"
+ },
+ {
+  "file": "msmf-libr-dotdot.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "libr",
+  "check": "LIBR: a root through '..'"
+ },
+ {
+  "file": "msmf-libr-empty-name.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "libr",
+  "check": "LIBR: a root with an empty name ('Lib A//Inner')"
+ },
+ {
+  "file": "msmf-libr-too-long.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "libr",
+  "check": "LIBR: a root that makes '/music/' + root 256 bytes"
+ },
+ {
+  "file": "msmf-libr-longest.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "LIBR: a root that makes '/music/' + root exactly 255 bytes"
+ },
+ {
+  "file": "msmf-major-2.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "absent",
+  "why": "major",
+  "check": "a newer major"
+ },
+ {
+  "file": "mptg-orig-server.bin",
+  "format": "MPTG",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "ORIG: rows naming servers 1, 2 and 65,535 (2.6.6): the same records; a server no SRVS entry names is the guard's unknown (2.11), not damage",
+  "same": "tags-0000002a.bin"
+ },
+ {
+  "file": "msmf-srvs-ignored.bin",
+  "format": "MSMF",
+  "uses": "device",
+  "expect": "present",
+  "why": "ok",
+  "check": "SRVS broken (rows of 32 bytes, below v1's 40), read by the device, which never reads SRVS (to a reader that uses it, the root is absent: 2.4.3)"
+ },
+ {
+  "file": "msmf-minor-1.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "a newer minor: SRVS rows of 48 bytes, read by their 40-byte prefix (the servers of manifest-servers.bin), and an unknown section"
+ },
+ {
+  "file": "msmf-srvs-rules.bin",
+  "format": "MSMF",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "SRVS: entries that break 2.5.5's writer rules (the root's own URL key, one instance twice, a peer with no peerId): not damage, the root reads; their rows' servers are unknown (2.11)"
+ },
+ {
+  "file": "mspd-order.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "absent",
+  "why": "pendOrder",
+  "check": "PEND: a write before a delete"
+ },
+ {
+  "file": "mspd-group-order.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "absent",
+  "why": "pendOrder",
+  "check": "PEND: two deletes out of canonical order"
+ },
+ {
+  "file": "mspd-absolute.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "absent",
+  "why": "pendPath",
+  "check": "PEND: an absolute path"
+ },
+ {
+  "file": "mspd-dotdot.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "absent",
+  "why": "pendPath",
+  "check": "PEND: a path through '..'"
+ },
+ {
+  "file": "mspd-op-0.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "absent",
+  "why": "pendOp",
+  "check": "PEND: an op of 0"
+ },
+ {
+  "file": "mspd-path-empty.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "absent",
+  "why": "pendPath",
+  "check": "PEND: a path at offset 0 (the empty string)"
+ },
+ {
+  "file": "mspd-path-too-long.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "absent",
+  "why": "pathLength",
+  "check": "PEND: a path that makes '/music/' + path 256 bytes"
+ },
+ {
+  "file": "mspd-path-longest.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "PEND: a path that makes '/music/' + path exactly 255 bytes"
+ },
+ {
+  "file": "mspd-op-9.bin",
+  "format": "MSPD",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "PEND: an op above 3: the plan reads, and stops the software"
+ },
+ {
+  "file": "mpdj-major-1.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "major",
+  "check": "major 1: the retired v1 draft, an older major (unknownMajor false)"
+ },
+ {
+  "file": "mpdj-major-3.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "major",
+  "check": "major 3: a newer major"
+ },
+ {
+  "file": "mpdj-header-bytes-short.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "headerBytes",
+  "check": "headerBytes 96, below minor 0's 104"
+ },
+ {
+  "file": "mpdj-misaligned.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djLayout",
+  "check": "headerBytes 136: DJSL at 264, not on a slot boundary"
+ },
+ {
+  "file": "mpdj-djsl-not-first.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djLayout",
+  "check": "DJRF before DJSL: DJSL isn't the first directory entry"
+ },
+ {
+  "file": "mpdj-section-order.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djLayout",
+  "check": "STRS before DJPH"
+ },
+ {
+  "file": "mpdj-rows-zero.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "enum",
+  "check": "rowCount 0"
+ },
+ {
+  "file": "mpdj-k-one.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "enum",
+  "check": "k 1 (2-169)"
+ },
+ {
+  "file": "mpdj-k-170.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "enum",
+  "check": "k 170 (2-169)"
+ },
+ {
+  "file": "mpdj-slot-bytes.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "enum",
+  "check": "slotBytes 512 with k 4 (k 2-84 takes 256)"
+ },
+ {
+  "file": "mpdj-index-bytes.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "enum",
+  "check": "indexBytes 4"
+ },
+ {
+  "file": "mpdj-score-kind.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "enum",
+  "check": "scoreKind 2"
+ },
+ {
+  "file": "mpdj-sel-kind0-head.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSelection",
+  "check": "selKind 0 with selHead 3, not k"
+ },
+ {
+  "file": "mpdj-sel-kind0-floor.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSelection",
+  "check": "selKind 0 with selFloor 140, not 0"
+ },
+ {
+  "file": "mpdj-sel-head-zero.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSelection",
+  "check": "selKind 1 with selHead 0"
+ },
+ {
+  "file": "mpdj-sel-head-big.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSelection",
+  "check": "selKind 1 with selHead 3 = k - 1"
+ },
+ {
+  "file": "mpdj-sel-floor-zero.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSelection",
+  "check": "selKind 1 with selFloor 0"
+ },
+ {
+  "file": "mpdj-sel-unknown-head.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSelection",
+  "check": "an unknown selKind 7 with selHead 5, above k"
+ },
+ {
+  "file": "mpdj-row-count.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "counts",
+  "check": "rowCount 7, DJSL and DJRF hold 6"
+ },
+ {
+  "file": "mpdj-path-count.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "counts",
+  "check": "pathCount 8, DJPH holds 7"
+ },
+ {
+  "file": "mpdj-djrf-count.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "counts",
+  "check": "DJRF of 5 records for 6 rows"
+ },
+ {
+  "file": "mpdj-slot-stride.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "shape",
+  "check": "DJSL's stride 512, slotBytes 256"
+ },
+ {
+  "file": "mpdj-missing-djrf.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "missing",
+  "check": "no DJRF (a REQUIRED section)"
+ },
+ {
+  "file": "mpdj-unknown-required.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "unknownRequired",
+  "check": "an unknown REQUIRED section DJZZ before STRS"
+ },
+ {
+  "file": "mpdj-paths-empty-stride-zero.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "shape",
+  "check": "pathCount 0 with DJPH's stride 0: an empty array keeps its stride (10)"
+ },
+ {
+  "file": "mpdj-header-bytes-wrap.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "short",
+  "check": "headerBytes 0xFFFFFFF8: headerBytes + 32 x sectionCount is past the file (wrapped to 32 bits it is 120, and the header CRC is right for that)"
+ },
+ {
+  "file": "mpdj-section-end-wrap.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "layout",
+  "check": "an optional section of 0xFFFFFFF8 bytes before STRS: its end is past the file (wrapped to 32 bits it is the start of STRS, placed there)"
+ },
+ {
+  "file": "mpdj-array-bytes-wrap.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "shape",
+  "check": "DJPH's count and pathCount 7 + 2^31: count x stride isn't its 70 bytes (wrapped to 32 bits it is)"
+ },
+ {
+  "file": "mpdj-strs-first-byte.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "string",
+  "check": "STRS: byte 0 isn't NUL"
+ },
+ {
+  "file": "mpdj-string-no-nul.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "string",
+  "check": "STRS: the last string has no NUL"
+ },
+ {
+  "file": "mpdj-string-out-of-range.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "string",
+  "check": "attribution's offset at STRS's end"
+ },
+ {
+  "file": "mpdj-string-order.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "stringOrder",
+  "check": "modelId's and modelVersion's offsets swapped (each string valid)"
+ },
+ {
+  "file": "mpdj-paths-unsorted.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djPaths",
+  "check": "DJPH: two entries swapped"
+ },
+ {
+  "file": "mpdj-paths-equal.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djPaths",
+  "check": "DJPH: two equal hashes"
+ },
+ {
+  "file": "mpdj-paths-row-range.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djPaths",
+  "check": "DJPH: a row of 6 (rowCount 6)"
+ },
+ {
+  "file": "mpdj-slot-crc.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSlotCrc",
+  "check": "slot 2's CRC wrong",
+  "slot": {
+   "row": 2,
+   "read": "damaged"
+  }
+ },
+ {
+  "file": "mpdj-slot-wrong-row.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSlotCrc",
+  "check": "slots 1 and 2 swapped, each CRC right for its own row",
+  "slot": {
+   "row": 1,
+   "read": "damaged"
+  }
+ },
+ {
+  "file": "mpdj-slot-unused.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSlotUnused",
+  "check": "slot 3: an unused entry (0xFFFF) before a used one",
+  "slot": {
+   "row": 3,
+   "read": "broken"
+  }
+ },
+ {
+  "file": "mpdj-slot-index-range.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSlotIndex",
+  "check": "slot 0: entry 3's index 6 = rowCount",
+  "slot": {
+   "row": 0,
+   "read": "broken"
+  }
+ },
+ {
+  "file": "mpdj-slot-self.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSlotIndex",
+  "check": "slot 0: entry 3's index 0, the row itself",
+  "slot": {
+   "row": 0,
+   "read": "broken"
+  }
+ },
+ {
+  "file": "mpdj-slot-level-rises.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSlotOrder",
+  "check": "slot 0: entry 1's level 201 after entry 0's 200",
+  "slot": {
+   "row": 0,
+   "read": "broken"
+  }
+ },
+ {
+  "file": "mpdj-slot-tie-order.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "absent",
+  "why": "djSlotOrder",
+  "check": "slot 2: entry 2's level 171, so rows 5 then 4 tie with the index falling",
+  "slot": {
+   "row": 2,
+   "read": "broken"
+  }
+ },
+ {
+  "file": "mpdj-minor-1.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "minor 1: a 112-byte header (a field at 104, a string offset at 108 after attribution), DJRF and DJPH strides 12 with non-zero tails, an unknown optional section before STRS",
+  "same": "autodj-00000029.bin"
+ },
+ {
+  "file": "mpdj-unknown-optional.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "an unknown optional section DJZZ before STRS",
+  "same": "autodj-00000029.bin"
+ },
+ {
+  "file": "mpdj-header-bigger.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "headerBytes 384 on 256-byte slots (not the smallest; still aligned)",
+  "same": "autodj-00000029.bin"
+ },
+ {
+  "file": "mpdj-paths-empty.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "pathCount 0 (every card file's hash in a collision, 4.5): DJPH empty, count 0 and stride 10; the rows and their lists stay"
+ },
+ {
+  "file": "mpdj-sel-unknown-kind.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "an unknown selKind 7 (selHead 2, selFloor 9): readers use only selHead and selFloor",
+  "same": "autodj-00000029.bin"
+ },
+ {
+  "file": "mpdj-slot-unused-level.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "slot 3: the unused entry's level byte 7 (not checked; CRC made right)",
+  "same": "autodj-00000029.bin"
+ },
+ {
+  "file": "mpdj-slot-padding.bin",
+  "format": "MPDJ",
+  "uses": "all",
+  "expect": "present",
+  "why": "ok",
+  "check": "autodj-small-default's slot 0: padding byte 507 set (not checked; CRC made right)",
+  "same": "autodj-small-default.bin"
+ },
+ {
+  "file": "mpdj-uses-device-slot-crc.bin",
+  "format": "MPDJ",
+  "uses": "device",
+  "expect": "present",
+  "why": "ok",
+  "check": "mpdj-slot-crc read by the device: the join's sections are good; the slot fails when read",
+  "slot": {
+   "row": 2,
+   "read": "damaged"
+  }
+ }
+]
