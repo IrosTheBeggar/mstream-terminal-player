@@ -78,7 +78,8 @@ pub(crate) enum Reached {
     Elsewhere,
 }
 
-/// Why every file goes over the network.
+/// Why every file goes over the network. What it carries is for the debug
+/// listing and the tests ([`Mode`]).
 #[derive(Debug)]
 pub(crate) enum Why {
     /// `/api/` sent no admin block: not an admin, or the admin API locked.
@@ -133,6 +134,10 @@ pub(crate) fn folders(
 // ── The mode ────────────────────────────────────────────────────────────────
 
 /// Where a run's files come from: what the Details log's one line names.
+/// Its paths (a [`Folder`]'s, and [`Why`]'s platform and error) are for the
+/// debug listing and the tests: a server's folder names this computer's
+/// user. The line a listener reads, or a log they may share, is made of the
+/// `code()`s and the counts, never a `{:?}` of it.
 #[derive(Debug)]
 pub(crate) enum Mode {
     /// Every file over the network.
@@ -159,7 +164,8 @@ pub(crate) struct Library {
     pub(crate) folder: Folder,
 }
 
-/// What a library's folder came to.
+/// What a library's folder came to. Its paths are this computer's, kept out
+/// of what a listener reads ([`Mode`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Folder {
     /// Read from here: `matched` of the `sampled` entries were the
@@ -377,8 +383,12 @@ impl<F: Fetcher> Local<F> {
         if size > MAX_FILE as u64 {
             return None;
         }
-        let bytes = fs::read(dir.join(&name)).ok()?;
-        Some(FolderImage { name, bytes })
+        // The listing's size may be stale by now (a cover replaced since):
+        // never more than MAX_FILE of it read into memory.
+        let mut bytes = Vec::new();
+        let file = File::open(dir.join(&name)).ok()?;
+        file.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes).ok()?;
+        (bytes.len() <= MAX_FILE).then_some(FolderImage { name, bytes })
     }
 }
 
@@ -414,6 +424,7 @@ impl<F: Fetcher> Fetcher for Local<F> {
 }
 
 /// Why a copy from disk ended early.
+#[derive(Debug)]
 enum Cut {
     /// Before a byte of it was written: the network can still have it.
     Unread,
@@ -426,11 +437,24 @@ enum Cut {
 fn copy(path: &Path, l: &Ledger, into: &mut dyn Write) -> Result<(), Cut> {
     // A byte past the manifest's size is enough to know it grew.
     let mut f = File::open(path).map_err(|_| Cut::Unread)?.take(l.server_size.saturating_add(1));
+    let copied = pour(&mut f, into)?;
+    if copied == l.server_size && same(path, l.server_size, l.server_modified) {
+        return Ok(());
+    }
+    // Emptied since its check: nothing reached the card.
+    if copied == 0 {
+        return Err(Cut::Unread);
+    }
+    Err(Cut::Partway("it changed on disk while it was read".into()))
+}
+
+/// All of `from` into `into`: how many bytes.
+fn pour(from: &mut dyn Read, into: &mut dyn Write) -> Result<u64, Cut> {
     let mut buf = vec![0u8; CHUNK];
     let mut copied = 0u64;
     loop {
-        let n = match f.read(&mut buf) {
-            Ok(0) => break,
+        let n = match from.read(&mut buf) {
+            Ok(0) => return Ok(copied),
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) if copied == 0 => return Err(Cut::Unread),
@@ -439,10 +463,6 @@ fn copy(path: &Path, l: &Ledger, into: &mut dyn Write) -> Result<(), Cut> {
         into.write_all(&buf[..n]).map_err(|e| Cut::Partway(e.to_string()))?;
         copied += n as u64;
     }
-    if copied != l.server_size || !same(path, l.server_size, l.server_modified) {
-        return Err(Cut::Partway("it changed on disk while it was read".into()));
-    }
-    Ok(())
 }
 
 /// `len` bytes from `start` of the file at `path`, fewer at its end.
@@ -799,6 +819,141 @@ mod tests {
         assert_eq!(fetched(&mut source, &near), OVER_THE_NETWORK);
     }
 
+    /// A card's side of a copy, as a test makes it: `room` bytes, then a
+    /// refusal. `first` runs as the first bytes come, to change the file on
+    /// disk while it is read.
+    struct Card<'a> {
+        got: Vec<u8>,
+        room: usize,
+        first: Option<Box<dyn FnOnce() + 'a>>,
+    }
+
+    impl<'a> Card<'a> {
+        fn new(room: usize, first: impl FnOnce() + 'a) -> Card<'a> {
+            Card { got: Vec::new(), room, first: Some(Box::new(first)) }
+        }
+    }
+
+    impl Write for Card<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if let Some(first) = self.first.take() {
+                first();
+            }
+            let n = buf.len().min(self.room - self.got.len());
+            if n == 0 {
+                return Err(io::Error::other("the card is full"));
+            }
+            self.got.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_file_that_changes_as_it_is_read_is_skipped_never_taken() {
+        let scratch = Scratch::new("cut");
+        let root = scratch.0.join("Music");
+        let mut manifest = library(&root, "lib");
+        put(&root, "Artist C/04.mp3", &track(4), SCANNED);
+        manifest.extend(entries(&[("lib/Artist C/04.mp3".into(), 10_000)]));
+        let mut source = lib_at(&root, &manifest);
+        assert_eq!(source.mode().code(), "disk");
+
+        // Each changed as its first bytes reach the card (the reader's own
+        // handle still open): it grew, it shrank, it was rewritten at its own
+        // size (past 25 MiB no hash of the whole would catch that); and a
+        // card that refuses a write, which the network can't mend.
+        let file = |n: usize| root.join(manifest[n].filepath.split_once('/').unwrap().1);
+        let open = |n: usize| File::options().write(true).open(file(n)).unwrap();
+        let append = |n: usize| File::options().append(true).open(file(n)).unwrap();
+        let at = UNIX_EPOCH + Duration::from_millis(SCANNED + 60_000);
+        let cases: Vec<(usize, usize, Box<dyn FnOnce() + '_>, &str)> = vec![
+            (0, usize::MAX, Box::new(|| append(0).write_all(b"x").unwrap()), "changed on disk"),
+            (1, usize::MAX, Box::new(|| open(1).set_len(5_000).unwrap()), "changed on disk"),
+            (2, usize::MAX, Box::new(|| open(2).set_modified(at).unwrap()), "changed on disk"),
+            (3, 4_000, Box::new(|| ()), "the card is full"),
+        ];
+        for (n, room, change, why) in cases {
+            let mut card = Card::new(room, change);
+            let failed = source.fetch(&wanted(&manifest[n]), &mut card).unwrap_err();
+            assert!(!failed.stop && failed.why.contains(why), "{n}: {failed:?}");
+        }
+        let grew = fs::metadata(file(0)).unwrap().len();
+        assert_eq!(grew, 10_001, "the change was made while the file was read");
+        assert!(source.network.fetched.is_empty(), "never again over the network");
+        assert_eq!(source.tally(), Tally::default(), "neither from disk nor the network");
+
+        // The next run: the changed files over the network, the one the card
+        // refused from disk.
+        let got: Vec<Vec<u8>> = manifest.iter().map(|e| fetched(&mut source, &wanted(e))).collect();
+        let over = OVER_THE_NETWORK.to_vec();
+        assert_eq!(got, [over.clone(), over.clone(), over, track(4)]);
+        assert_eq!(source.tally(), Tally { disk: 1, network: 3 });
+    }
+
+    /// A disk whose read fails once `ok` bytes have come, after an
+    /// interruption first if `interrupted`.
+    struct Disk {
+        ok: usize,
+        interrupted: bool,
+    }
+
+    impl Read for Disk {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if std::mem::take(&mut self.interrupted) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            if self.ok == 0 {
+                return Err(io::Error::other("a bad sector"));
+            }
+            let n = buf.len().min(self.ok);
+            buf[..n].fill(b'a');
+            self.ok -= n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_copy_cut_before_its_first_byte_can_still_come_over_the_network() {
+        let scratch = Scratch::new("pour");
+        let path = scratch.0.join("01.flac");
+        let l = Ledger { server_size: 10_000, server_modified: SCANNED, ..Ledger::default() };
+        let mut into = Vec::new();
+
+        // Gone, emptied or unreadable since its check: nothing on the card.
+        assert!(matches!(copy(&path, &l, &mut into), Err(Cut::Unread)));
+        put(&scratch.0, "01.flac", b"", SCANNED);
+        assert!(matches!(copy(&path, &l, &mut into), Err(Cut::Unread)));
+        let unread = pour(&mut Disk { ok: 0, interrupted: true }, &mut into);
+        assert!(matches!(unread, Err(Cut::Unread)), "{unread:?}");
+        assert!(into.is_empty());
+
+        // Some of it on the card: shorter or longer than the manifest says,
+        // or a read that fails partway.
+        put(&scratch.0, "01.flac", &track(1)[..4_000], SCANNED);
+        assert!(matches!(copy(&path, &l, &mut into), Err(Cut::Partway(_))));
+        assert_eq!(into.len(), 4_000);
+        into.clear();
+        let mut longer = track(1);
+        longer.extend(track(2));
+        put(&scratch.0, "01.flac", &longer, SCANNED);
+        assert!(matches!(copy(&path, &l, &mut into), Err(Cut::Partway(_))));
+        assert_eq!(into, longer[..10_001], "one byte past its size, and no more");
+        into.clear();
+        let partway = pour(&mut Disk { ok: 3_000, interrupted: false }, &mut into);
+        assert!(matches!(&partway, Err(Cut::Partway(why)) if why.contains("a bad sector")));
+        assert_eq!(into.len(), 3_000);
+
+        // An empty file the manifest says is empty: taken.
+        let empty = Ledger { server_size: 0, ..l };
+        put(&scratch.0, "01.flac", b"", SCANNED);
+        into.clear();
+        assert!(copy(&path, &empty, &mut into).is_ok() && into.is_empty());
+    }
+
     #[test]
     fn conversions_and_other_servers_files_are_never_read_from_disk() {
         let scratch = Scratch::new("convert");
@@ -871,6 +1026,34 @@ mod tests {
         out
     }
 
+    /// Files made read-only for as long as it lives, writable again when it
+    /// drops (a failed assertion included), so their scratch folder can go.
+    /// Held after the [`Scratch`], it drops first.
+    struct ReadOnly(Vec<PathBuf>);
+
+    impl ReadOnly {
+        fn new(files: Vec<PathBuf>) -> ReadOnly {
+            for path in &files {
+                read_only(path, true).expect("a file made read-only");
+            }
+            ReadOnly(files)
+        }
+    }
+
+    impl Drop for ReadOnly {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = read_only(path, false);
+            }
+        }
+    }
+
+    fn read_only(path: &Path, yes: bool) -> io::Result<()> {
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_readonly(yes);
+        fs::set_permissions(path, perms)
+    }
+
     #[test]
     fn the_source_is_only_read() {
         let scratch = Scratch::new("only-read");
@@ -880,14 +1063,7 @@ mod tests {
         // Its files read-only, as a server's library may be to this user:
         // an open for writing would fail.
         let files: Vec<PathBuf> = tree(&root).into_keys().filter(|p| p.is_file()).collect();
-        let read_only = |yes: bool| {
-            for path in &files {
-                let mut perms = fs::metadata(path).unwrap().permissions();
-                perms.set_readonly(yes);
-                fs::set_permissions(path, perms).unwrap();
-            }
-        };
-        read_only(true);
+        let _held = ReadOnly::new(files);
         let before = tree(&root);
 
         let mut source = lib_at(&root, &manifest);
@@ -896,8 +1072,6 @@ mod tests {
         let heads: Vec<_> = asked.iter().map(|w| source.read_range(w, 0, 16).unwrap()).collect();
         let cover = source.folder_image("lib/Artist A/Album B").map(|c| c.bytes);
         let after = tree(&root);
-        // Writable again before anything can fail, so the scratch folder goes.
-        read_only(false);
 
         assert_eq!(copies, [track(1), track(2), track(3)]);
         let head = |n: u8| track(n)[..16].to_vec();
