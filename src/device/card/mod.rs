@@ -12,11 +12,14 @@
 //! the server's files their paths on the card (2.8.3-2.8.6), pure code too.
 //! [`tags`] is the tag reader: a file's record read from its bytes on the
 //! card, the way mStream's scanner and the device's own scan read them.
+//! [`autodj`] is the Auto DJ index's writer: the neighbour lists from
+//! mStream's embeddings, and whether a run writes a new index at all.
 
 // The kit and the pieces built on it wait for their caller, the engine;
 // until it lands only the tests call them.
 #![allow(dead_code)]
 
+pub(crate) mod autodj;
 pub(crate) mod contract;
 pub(crate) mod names;
 pub(crate) mod tags;
