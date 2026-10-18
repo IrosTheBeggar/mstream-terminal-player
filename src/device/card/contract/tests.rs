@@ -1,17 +1,30 @@
 //! The kit against the contract's shared fixtures, test/fixtures/card (made
 //! by the firmware repo's tools/card_fixtures.py and copied from there; the
-//! folder's README names the commit): so far the vectors of 2.18 that its
-//! primitives bind.
+//! folder's README names the commit): every vector of 2.18, every golden
+//! written byte for byte from its description, every hardening file read as
+//! absent or present for the player's own reason, every golden truncated at
+//! every byte and every bit of it flipped, and round trips of generated
+//! libraries in any input order.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
 
+use super::container::{self, MPDJ, MPTG, MSMF, MSPD, unknown_major};
+use super::device_txt::{DeviceTxt, Format};
 use super::fat::{fat_from_wall, fat_time, fat_valid, fat_wall, skew, time_matches};
+use super::mpdj::{self, Table};
+use super::mptg::{self, FolderIn, Ledger, Meta, Record, RecordIn, Tags};
+use super::msmf::{self, Candidate, Comp, Manifest, ManifestIn, Pick, elect};
+use super::mspd::{self, Op, Plan, PlanIn};
+use super::mpth;
 use super::numbers;
-use super::order::{album_folder, compare_file_paths, compare_names};
-use super::prim::{self, crc32, crc32_after, fnv1a64, hex, md5, path_hash, qfp_of};
+use super::order::{album_folder, compare_file_paths, compare_names, thumb_path};
+use super::prim::{self, crc32, crc32_after, fnv1a64, hex, hex16, md5, path_hash, qfp_of};
+use super::server::{PEER, Server, Servers, Talk, TalkPeer, Verdict, normalise_url, server_url_key};
 use super::text::{FIELD_NAMES, RUN_FIELDS, Run, build_field, is_list};
+use super::{MAX_FILE, Why};
 
 // ── The fixtures ────────────────────────────────────────────────────────────
 
@@ -25,6 +38,10 @@ fn bytes(rel: &str) -> Vec<u8> {
 
 fn json(rel: &str) -> Value {
     serde_json::from_slice(&bytes(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+}
+
+fn golden(name: &str) -> Vec<u8> {
+    bytes(&format!("golden/{name}"))
 }
 
 fn library(name: &str) -> Value {
@@ -57,9 +74,24 @@ fn text(v: &Value) -> &str {
     v.as_str().unwrap_or("")
 }
 
+/// Space-separated hex bytes, `4D 50 54 47`.
+fn spaced(s: &str) -> Vec<u8> {
+    s.split_whitespace().map(|b| u8::from_str_radix(b, 16).expect("a hex byte")).collect()
+}
+
 fn spaced_of(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
 }
+
+fn uuid(v: &Value) -> [u8; 16] {
+    v.as_str().map_or([0; 16], |s| hex16(s).expect("a UUID"))
+}
+
+fn url_key(v: &Value) -> u64 {
+    v.as_str().map_or(0, server_url_key)
+}
+
+// ── Descriptions into the writers' inputs ──────────────────────────────────
 
 fn raw_tags(tags: &Value) -> [Vec<String>; RUN_FIELDS] {
     let mut raw: [Vec<String>; RUN_FIELDS] = Default::default();
@@ -71,7 +103,269 @@ fn raw_tags(tags: &Value) -> [Vec<String>; RUN_FIELDS] {
     raw
 }
 
+fn ledger_of(l: &Value) -> Ledger {
+    Ledger {
+        server_path: text(&l["serverPath"]).to_owned(),
+        mstream_id: num(&l["mstreamId"]) as u32,
+        album_id: num(&l["albumId"]) as u32,
+        artist_id: num(&l["artistId"]) as u32,
+        audio_hash: l["audioHash"].as_str().map_or([0; 16], |h| hex16(h).expect("a digest")),
+        file_hash: l["fileHash"].as_str().map_or([0; 16], |h| hex16(h).expect("a digest")),
+        server_modified: num(&l["serverModified"]),
+        server_size: num(&l["serverSize"]),
+        created_at: num(&l["createdAt"]) as u32,
+        hash_v: num(&l["hashV"]) as u16,
+        origin_flags: num(&l["originFlags"]) as u8,
+        converted_to: num(&l["convertedTo"]) as u8,
+        convert_kbps: num(&l["convertKbps"]) as u16,
+        server: num(&l["server"]) as u16,
+    }
+}
+
+/// A tags description (raw tag values: the writer's caller applies 2.3.6
+/// and sets TRUNCATED, as the tag reader will).
+fn tags_input(d: &Value) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
+    let source = num(&d["source"]) as u8;
+    let meta = Meta {
+        source,
+        parser_version: num(&d["parserVersion"]) as u16,
+        read_rules: d.get("readRules").map_or(1, num) as u16,
+        generation: num(&d["generation"]) as u32,
+        card_id: num(&d["cardId"]),
+        minor: num(&d["minor"]) as u16,
+        producer: text(&d["producer"]).to_owned(),
+    };
+    let mut records = Vec::new();
+    for r in d["records"].as_array().into_iter().flatten() {
+        let (run, truncated) = Run::build(&raw_tags(&r["tags"]));
+        let pic = &r["picture"];
+        let rec = Record {
+            size: num(&r["size"]) as u32,
+            fat_time: num(&r["fatTime"]) as u32,
+            duration_ms: num(&r["durationMs"]) as u32,
+            qfp: num(&r["qfp"]),
+            known: num(&r["known"]) as u32,
+            flags: num(&r["flags"]) as u16 | if truncated { mptg::TRUNCATED } else { 0 },
+            year: num(&r["year"]) as u16,
+            track: num(&r["track"]) as u16,
+            track_total: num(&r["trackTotal"]) as u16,
+            disc: num(&r["disc"]) as u16,
+            disc_total: num(&r["discTotal"]) as u16,
+            bpm10: num(&r["bpm10"]) as u16,
+            rg_track_gain: int(&r["rgTrackGain"]) as i16,
+            rg_album_gain: int(&r["rgAlbumGain"]) as i16,
+            rg_track_peak: num(&r["rgTrackPeak"]) as u16,
+            rg_album_peak: num(&r["rgAlbumPeak"]) as u16,
+            container: num(&r["container"]) as u8,
+            camelot: num(&r["camelot"]) as u8,
+            pic_offset: num(&pic["offset"]) as u32,
+            pic_length: num(&pic["length"]) as u32,
+            pic_type: num(&pic["type"]) as u8,
+            pic_mime: num(&pic["mime"]) as u8,
+            pic_coding: num(&pic["coding"]) as u8,
+        };
+        let ledger = (source != mptg::SOURCE_DEVICE).then(|| ledger_of(&r["ledger"]));
+        records.push(RecordIn { path: text(&r["path"]).to_owned(), rec, run, ledger });
+    }
+    let folders = d["folders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|f| FolderIn { path: text(&f["path"]).to_owned(), flags: num(&f["flags"]) as u32 })
+        .collect();
+    (meta, records, folders)
+}
+
+fn server_entry(s: &Value) -> Server {
+    Server {
+        instance: uuid(&s["serverInstance"]),
+        url_key: url_key(&s["serverUrl"]),
+        parent_key: url_key(&s["parentUrl"]),
+        peer_id: num(&s["peerId"]) as u32,
+        flags: num(&s["flags"]) as u32,
+    }
+}
+
+/// A root description's servers: server 0 from its header fields, then
+/// its SRVS entries, each key from the URL given (2.5.1).
+fn servers_of(card: &Value) -> Servers {
+    let key = match card["serverUrl"].is_string() {
+        true => url_key(&card["serverUrl"]),
+        false => num(&card["serverUrlKey"]),
+    };
+    Servers {
+        root: Server::root(uuid(&card["serverInstance"]), key),
+        entries: card["servers"].as_array().into_iter().flatten().map(server_entry).collect(),
+    }
+}
+
+fn manifest_input(d: &Value) -> ManifestIn {
+    let servers = servers_of(d);
+    ManifestIn {
+        generation: num(&d["generation"]) as u32,
+        card_id: num(&d["cardId"]),
+        minor: num(&d["minor"]) as u16,
+        commit_time: num(&d["commitTime"]) as u32,
+        flags: num(&d["flags"]) as u32,
+        commit_id: num(&d["commitId"]),
+        server_instance: servers.root.instance,
+        server_url_key: servers.root.url_key,
+        producer: text(&d["producer"]).to_owned(),
+        server_revision: text(&d["serverRevision"]).to_owned(),
+        base_generation: num(&d["baseGeneration"]) as u32,
+        comps: d["companions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| Comp::of(&golden(text(&c["file"]))).expect("a companion"))
+            .collect(),
+        roots: d["roots"].as_array().into_iter().flatten().map(|r| text(r).to_owned()).collect(),
+        servers: servers.entries,
+    }
+}
+
+fn plan_input(d: &Value) -> PlanIn {
+    let op = |name: &str| match name {
+        "write" => mspd::OP_WRITE,
+        "delete" => mspd::OP_DELETE,
+        "folder" => mspd::OP_FOLDER,
+        other => panic!("an op: {other}"),
+    };
+    PlanIn {
+        generation: num(&d["generation"]) as u32,
+        card_id: num(&d["cardId"]),
+        minor: 0,
+        run_id: num(&d["runId"]),
+        base_generation: num(&d["baseGeneration"]) as u32,
+        ops: d["ops"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|o| Op {
+                op: op(text(&o["op"])),
+                path: text(&o["path"]).to_owned(),
+                expected_size: num(&o["expectedSize"]) as u32,
+            })
+            .collect(),
+    }
+}
+
+/// 2.17's synthetic picture: pixel (x, y) of an n × n slot is RGB
+/// (x·255/(n−1), y·255/(n−1), (x+y)·255/(2n−2)), integer division.
+fn thumb_pixels(n: usize) -> Vec<u16> {
+    let mut out = Vec::with_capacity(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            let (r, g, b) = (x * 255 / (n - 1), y * 255 / (n - 1), (x + y) * 255 / (2 * n - 2));
+            out.push(mpth::rgb565(r as u8, g as u8, b as u8));
+        }
+    }
+    out
+}
+
+fn device_input(d: &Value) -> DeviceTxt {
+    // The majors as the parser reads a list.
+    let majors = |k: &str| {
+        let line = format!("contract=1\nread.mpdj={}\n", text(&d[k]));
+        DeviceTxt::read(Some(line.as_bytes())).read_mpdj
+    };
+    DeviceTxt {
+        present: true,
+        contract: num(&d["contract"]) as u16,
+        firmware: text(&d["firmware"]).to_owned(),
+        read_msmf: majors("read.msmf"),
+        read_mptg: majors("read.mptg"),
+        read_mpdj: majors("read.mpdj"),
+        read_mpth: majors("read.mpth"),
+        codecs: text(&d["codecs"]).to_owned(),
+        extensions: text(&d["extensions"]).to_owned(),
+        max_rate: num(&d["max_rate"]) as u32,
+        max_channels: num(&d["max_channels"]) as u32,
+    }
+}
+
+/// A file read by its format's reader with the uses a hardening entry
+/// names: Ok, or why it is absent.
+fn read_as(format: &str, file: &[u8], device: bool) -> Why {
+    let r = match format {
+        "MPTG" => mptg::read(file, if device { mptg::Uses::DEVICE } else { mptg::Uses::ALL }).map(drop),
+        "MSMF" => Manifest::read(file, if device { msmf::Uses::DEVICE } else { msmf::Uses::ALL }).map(drop),
+        "MSPD" => Plan::read(file).map(drop),
+        "MPDJ" => {
+            let uses = if device { mpdj::Uses::DEVICE } else { mpdj::Uses::ALL };
+            Table::open(file).and_then(|t| t.check(uses))
+        }
+        other => panic!("a format: {other}"),
+    };
+    r.err().unwrap_or(Why::Ok)
+}
+
+/// A section's bytes, found by its type in the directory.
+fn section_of(file: &[u8], kind: u32) -> &[u8] {
+    let h = container::Header::parse(file).expect("a frame");
+    for i in 0..h.section_count as usize {
+        let e = &file[h.header_bytes as usize + 32 * i..];
+        if prim::u32_at(e, 0) == kind {
+            let (off, len) = (prim::u32_at(e, 8) as usize, prim::u32_at(e, 12) as usize);
+            return &file[off..off + len];
+        }
+    }
+    panic!("no such section")
+}
+
+fn format_of(file: &[u8]) -> &'static str {
+    match container::Header::parse(file).map(|h| h.magic) {
+        Some(MPTG) => "MPTG",
+        Some(MSMF) => "MSMF",
+        Some(MSPD) => "MSPD",
+        Some(MPDJ) => "MPDJ",
+        _ => "?",
+    }
+}
+
 // ── The vectors (2.18) ──────────────────────────────────────────────────────
+
+/// Every group of vectors.json is one this file checks, or one that binds
+/// another part: a group added to the fixtures fails here until it is
+/// placed.
+#[test]
+fn every_vector_group_is_placed() {
+    let v = vectors();
+    let ours: BTreeSet<&str> = [
+        "note",
+        "crc32",
+        "fnv1a64",
+        "pathHash",
+        "serverUrlKey",
+        "qfp",
+        "qfpNote",
+        "fatTime",
+        "fatTimeInvalid",
+        "wallDelta",
+        "skew",
+        "skewNote",
+        "bytes",
+        "canonicalOrder",
+        "stringRuns",
+        "fieldRules",
+        "numbers",
+        "hashSampled",
+        "rootElection",
+        "albumFolder",
+        "servers",
+        "deviceTxt",
+        "mpdj",
+        "softwareMatching",
+    ]
+    .into();
+    // The device's builder (2.9), milestone N2 of the player: never the
+    // software's.
+    let theirs: BTreeSet<&str> = ["builderPrecedence"].into();
+    assert_eq!(v["builderPrecedence"]["who"], "builder");
+    let groups: BTreeSet<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
+    let placed: BTreeSet<&str> = ours.union(&theirs).copied().collect();
+    assert_eq!(groups, placed);
+}
 
 #[test]
 fn vectors_checksums_and_hashes() {
@@ -87,6 +381,14 @@ fn vectors_checksums_and_hashes() {
     for e in v["pathHash"].as_array().expect("pathHash") {
         assert_eq!(path_hash(text(&e["rel"])), num(&e["hash"]), "{}", e["rel"]);
     }
+    for e in v["serverUrlKey"].as_array().expect("serverUrlKey") {
+        assert_eq!(normalise_url(text(&e["url"])).as_deref(), Some(text(&e["normalised"])));
+        assert_eq!(server_url_key(text(&e["url"])), num(&e["key"]));
+    }
+    // A URL with no host has no key: 0, unknown.
+    assert_eq!(server_url_key("music.example"), 0);
+    assert_eq!(server_url_key("http://"), 0);
+    assert_eq!(server_url_key("http://host:3a/"), 0);
     for e in v["qfp"].as_array().expect("qfp") {
         let data: Vec<u8> = (0..num(&e["size"]) as usize).map(|i| (i & 0xFF) as u8).collect();
         assert_eq!(qfp_of(&data), num(&e["qfp"]), "qfp of {}", e["size"]);
@@ -181,6 +483,33 @@ fn vectors_skew() {
 }
 
 #[test]
+fn vectors_bytes() {
+    let v = vectors();
+    let b = &v["bytes"];
+    assert_eq!(spaced_of(&MPTG.to_le_bytes()), text(&b["MPTG"]));
+    assert_eq!(MPTG as u64, num(&b["MPTGu32"]));
+    assert_eq!(container::MPTH as u64, num(&b["MPTHu32"]));
+    let t = &b["thumbPath"];
+    let h = path_hash(text(&t["folder"]));
+    assert_eq!(format!("/.mstream/{}", thumb_path(h)), text(&t["path"]));
+    let px = mpth::Pixels { small: thumb_pixels(mpth::SMALL), large: thumb_pixels(mpth::LARGE) };
+    let file = mpth::write(h, 0, &px).expect("a thumbnail");
+    assert_eq!(file.len() as u64, num(&t["bytes"]));
+    assert_eq!(spaced_of(&file[..16]), text(&t["head0to15"]));
+    assert_eq!(spaced_of(&file[20..24]), text(&t["head20to23"]));
+    let si = &b["serverInstance"];
+    assert_eq!(spaced_of(&hex16(text(&si["uuid"])).expect("a UUID")), text(&si["stored"]));
+    let ah = &b["audioHash"];
+    assert_eq!(spaced_of(&hex16(text(&ah["audioHash"])).expect("a digest")), text(&ah["stored"]));
+    let dj = golden("autodj-00000029.bin");
+    let table = Table::open(&dj).expect("the golden index");
+    assert_eq!(spaced_of(&table.sig), text(&b["selectionSigStored"]));
+    assert_eq!(hex(&hex16(&hex(&table.sig)).expect("hex")), hex(&table.sig));
+    assert_eq!(hex16("0123"), None);
+    assert_eq!(hex16("zz23456789abcdef0123456789abcdef"), None);
+}
+
+#[test]
 fn vectors_canonical_order() {
     let v = vectors();
     let o = &v["canonicalOrder"];
@@ -243,6 +572,35 @@ fn vectors_numbers() {
 }
 
 #[test]
+fn vectors_root_election() {
+    for e in vectors()["rootElection"].as_array().expect("rootElection") {
+        let cand = |c: &Value| {
+            c["valid"].as_bool().expect("valid").then(|| Candidate {
+                generation: num(&c["generation"]) as u32,
+                id: num(&c["commitId"]),
+                header_crc: num(&c["headerCrc"]) as u32,
+            })
+        };
+        let got = elect(cand(&e["bin"]), cand(&e["tmp"]));
+        let want = match text(&e["pick"]) {
+            "bin" => Pick::Bin,
+            "tmp" => Pick::Tmp,
+            _ => Pick::None,
+        };
+        assert_eq!(got.pick, want, "{e}");
+        assert_eq!(got.same_commit, e["sameCommit"].as_bool().expect("a bool"), "{e}");
+        // A file of a newer major: absent to a v1 reader, and the software
+        // refuses to write (2.4.5), checked on its first 6 bytes alone.
+        if e["softwareRefuses"].as_bool() == Some(true) {
+            let mut head = golden("manifest.bin");
+            head[4..6].copy_from_slice(&(num(&e["tmp"]["major"]) as u16).to_le_bytes());
+            assert!(unknown_major(&head[..6]));
+            assert_eq!(Manifest::read(&head, msmf::Uses::ALL).err(), Some(Why::Major));
+        }
+    }
+}
+
+#[test]
 fn vectors_album_folder() {
     for e in vectors()["albumFolder"].as_array().expect("albumFolder") {
         let roots: Vec<&str> = e["roots"].as_array().into_iter().flatten().map(text).collect();
@@ -262,4 +620,888 @@ fn vectors_software_matching() {
     assert_eq!(v["softwareMatching"]["cases"].as_array().map(Vec::len), Some(4));
     assert_eq!(path_hash("Caf\u{e9}/Album/01 - Title.mp3"), 0xF1B2_4FC7_5749_4F2B);
     assert_eq!(path_hash("Cafe\u{301}/Album/01 - Title.mp3"), 0x5701_7C0C_C011_BB1B);
+}
+
+fn talk_of(t: &Value) -> Talk {
+    Talk {
+        url_key: url_key(&t["url"]),
+        instance: uuid(&t["serverInstance"]),
+        confirmed: t["confirmed"].as_array().into_iter().flatten().map(num).collect(),
+        peer: t.get("peerId").map(|id| TalkPeer { id: num(id) as u32, instance: uuid(&t["peerInstance"]) }),
+    }
+}
+
+fn verdict(v: &Value) -> Verdict {
+    match text(v) {
+        "same" => Verdict::Same,
+        "different" => Verdict::Different,
+        "unknown" => Verdict::Unknown,
+        other => panic!("a verdict: {other}"),
+    }
+}
+
+#[test]
+fn vectors_servers() {
+    let v = vectors();
+    let s = &v["servers"];
+    for e in s["origServer"].as_array().expect("origServer") {
+        let row = Ledger { server: num(&e["server"]) as u16, ..Ledger::default() };
+        let (meta, mut records, _) = tags_input(&library("tags-00000007"));
+        records.truncate(1);
+        records[0].ledger = Some(row);
+        let file = mptg::write(&meta, &records, &[]).expect("a tags file");
+        let tags = mptg::read(&file, mptg::Uses::ALL).expect("read back");
+        assert_eq!(tags.records[0].ledger.as_ref().map(|l| l.server), Some(num(&e["server"]) as u16));
+        // Bytes 74-79 of the row, read straight from the file.
+        assert_eq!(spaced_of(&section_of(&file, mptg::ORIG)[74..80]), text(&e["bytes74to79"]));
+    }
+
+    let rows = &s["rows"];
+    let tags = mptg::read(&golden(text(&rows["file"])), mptg::Uses::ALL).expect("the golden tags file");
+    let got: Vec<(String, u16)> =
+        tags.records.iter().map(|e| (e.path.clone(), e.ledger.as_ref().expect("a ledger").server)).collect();
+    let want: Vec<(String, u16)> = rows["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| (text(&r["path"]).to_owned(), num(&r["server"]) as u16))
+        .collect();
+    assert_eq!(got, want);
+
+    let srvs = &s["srvs"];
+    let m = Manifest::read(&golden(text(&srvs["file"])), msmf::Uses::ALL).expect("the golden root");
+    let stored: Vec<String> = m.servers.iter().map(|e| spaced_of(&e.encode())).collect();
+    let entries = srvs["entries"].as_array().expect("entries");
+    let want: Vec<String> = entries.iter().map(|e| text(&e["stored"]).to_owned()).collect();
+    assert_eq!(stored, want);
+    assert_eq!(num(&srvs["stride"]), 40);
+    // The root and its tags file agree: SRVS lists exactly the servers the
+    // rows name besides the root's.
+    assert!(msmf::servers_match_rows(m.servers.len(), got.iter().map(|(_, s)| *s)));
+    assert!(!msmf::servers_match_rows(2, got.iter().map(|(_, s)| *s)));
+    assert!(!msmf::servers_match_rows(4, got.iter().map(|(_, s)| *s)));
+
+    let same = &s["sameServer"];
+    let card = library(text(&same["card"]).trim_end_matches(".json"));
+    let servers = servers_of(&card);
+    assert_eq!(servers, m.server_table(), "the golden root is its description's");
+    for e in same["cases"].as_array().expect("cases") {
+        let index = num(&e["index"]) as usize;
+        assert_eq!(servers.same_server(index, &talk_of(&e["talk"])), verdict(&e["verdict"]), "{e}");
+    }
+    for e in s["brokenEntries"]["cases"].as_array().expect("brokenEntries") {
+        let servers = servers_of(&e["card"]);
+        let index = num(&e["index"]) as usize;
+        assert_eq!(servers.same_server(index, &talk_of(&e["talk"])), verdict(&e["verdict"]), "{}", e["note"]);
+    }
+}
+
+#[test]
+fn vectors_device_txt() {
+    let v = vectors();
+    let d = &v["deviceTxt"];
+    let file = DeviceTxt::read(Some(text(&d["text"]).as_bytes()));
+    assert!(file.present);
+    assert_eq!(file.to_text(), text(&d["text"]));
+    assert!(file.decodes("OPUS") && file.lists("opus") && file.writes_mpdj());
+    assert!(file.reads(Format::Msmf, 1) && !file.reads(Format::Mpdj, 1) && file.reads(Format::Mpdj, 2));
+    // No file: the defaults, which noFile lists key by key.
+    let none = DeviceTxt::read(None);
+    let text_of = none.to_text();
+    let keys: BTreeMap<&str, &str> = text_of.lines().filter_map(|l| l.split_once('=')).collect();
+    for (k, want) in d["noFile"].as_object().expect("noFile") {
+        assert_eq!(keys.get(k.as_str()).copied(), Some(text(want)), "{k}");
+    }
+    assert!(!none.present && !none.writes_mpdj() && !none.decodes("opus"));
+    // A file with no contract line isn't one; a key missing keeps its
+    // default; an empty value says none; CRLF is read.
+    assert_eq!(DeviceTxt::read(Some(b"read.mpdj=2\n")), DeviceTxt::defaults());
+    let t = DeviceTxt::read(Some(b"contract=1\r\ncodecs=mp3,flac,opus\r\nread.mpth=\r\n"));
+    assert!(t.present && t.decodes("opus") && !t.reads(Format::Mpth, 1) && t.reads(Format::Mptg, 1));
+    assert_eq!(t.max_rate, 48_000);
+    assert!(DeviceTxt::read(Some(b"contract=1\nread.mpdj= 1 , 2\n")).writes_mpdj());
+    assert!(!DeviceTxt::read(Some(b"contract=1\nread.mpdj=x2\n")).writes_mpdj());
+}
+
+#[test]
+fn vectors_mpdj() {
+    let v = vectors();
+    let m = &v["mpdj"];
+    for e in m["levels"].as_array().expect("levels") {
+        assert_eq!(mpdj::level(e["cos"].as_f64().expect("a cosine")) as u64, num(&e["level"]), "{e}");
+    }
+    for e in m["floors"]["cases"].as_array().expect("floors") {
+        assert_eq!(mpdj::floor_level(num(&e["percent"]) as u32) as u64, num(&e["level"]));
+    }
+    for e in m["slotBytes"].as_array().expect("slotBytes") {
+        assert_eq!(mpdj::slot_bytes_for(num(&e["k"]) as u32) as u64, num(&e["slotBytes"]), "{e}");
+    }
+    for e in m["headerBytes"].as_array().expect("headerBytes") {
+        let field = |k: &str| num(&e[k]) as u32;
+        let hb = mpdj::header_bytes_for(field("sectionCount"), field("slotBytes"), field("minimum"));
+        assert_eq!(hb as u64, num(&e["headerBytes"]), "{e}");
+    }
+    for e in m["stridedRanks"].as_array().expect("stridedRanks") {
+        let (k, head, mm) = (num(&e["k"]) as u32, num(&e["head"]) as u32, num(&e["m"]) as u32);
+        let ranks: Vec<u64> = (0..k).map(|j| mpdj::strided_rank(j, k, head, mm) as u64).collect();
+        if let Some(want) = e["ranks"].as_array() {
+            assert_eq!(ranks, want.iter().map(num).collect::<Vec<_>>(), "{k} {head} {mm}");
+        } else {
+            for p in e["pairs"].as_array().expect("pairs") {
+                assert_eq!(ranks[num(&p["j"]) as usize], num(&p["rank"]), "{p}");
+            }
+        }
+    }
+    let sc = &m["slotCrc"];
+    let file = golden(text(&sc["file"]));
+    let table = Table::open(&file).expect("the golden index");
+    let raw = table.slot_raw(num(&sc["row"]) as u32).expect("the slot");
+    assert_eq!(mpdj::slot_crc(raw, num(&sc["row"]) as u32) as u64, num(&sc["crc"]));
+    assert_eq!(crc32(&raw[..raw.len() - 4]) as u64, num(&sc["unseeded"]));
+
+    let sig = &m["signature"];
+    assert_eq!(hex(&mpdj::signature(text(&sig["text"]))), text(&sig["sig"]));
+    let signed_file = golden(text(&sig["file"]));
+    let signed = Table::open(&signed_file).expect("the golden index");
+    assert_eq!(hex(&signed.sig), text(&sig["sig"]));
+
+    // The vectors of the index's rows, in row order: by their hash's bytes.
+    let vec = &m["vec"];
+    let d = library(text(&vec["file"]).trim_end_matches(".bin"));
+    let mut described: Vec<&Value> = d["rows"].as_array().expect("rows").iter().collect();
+    described.sort_by_key(|r| hex16(text(&r["hash"])).expect("a hash"));
+    let embedding = |r: &Value| -> Vec<f32> {
+        let values = r["embedding"].as_array().expect("an embedding");
+        values.iter().map(|x| x.as_f64().expect("a float") as f32).collect()
+    };
+    let rows: Vec<Vec<f32>> = described.into_iter().map(embedding).collect();
+    assert!(rows.iter().all(|r| r.len() as u64 == num(&vec["dim"])));
+    assert_eq!(hex(&mpdj::vec_digest(rows.iter().map(Vec::as_slice))), text(&vec["sha256"]));
+
+    for e in m["deviceTxt"]["cases"].as_array().expect("deviceTxt") {
+        let t = if e["noFile"].as_bool() == Some(true) {
+            DeviceTxt::read(None)
+        } else if e["keyMissing"].as_bool() == Some(true) {
+            DeviceTxt::read(Some(b"contract=1\nfirmware=0.11.0\n"))
+        } else {
+            DeviceTxt::read(Some(format!("contract=1\nread.mpdj={}\n", text(&e["readMpdj"])).as_bytes()))
+        };
+        assert_eq!(t.writes_mpdj(), e["writesV2"].as_bool().expect("a bool"), "{e}");
+    }
+
+    // The float32 trap (13.5): the rule's level of the two rows is 140, a
+    // float32 sum's 139. The sidecar holds the vectors in the description's
+    // order; a row is the index's, the rows sorted by their hash's bytes.
+    let tv = &m["trap"];
+    let d = library(text(&tv["file"]).trim_end_matches(".bin"));
+    let dim = num(&d["dim"]) as usize;
+    let f32s = bytes(&format!("libraries/{}", text(&d["vectors"])));
+    let mut order: Vec<(Vec<u8>, usize)> = d["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (hex16(text(&r["hash"])).expect("a hash").to_vec(), i))
+        .collect();
+    order.sort();
+    let row = |r: u64| -> Vec<f32> {
+        let at = order[r as usize].1 * dim * 4;
+        f32s[at..at + dim * 4].chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    };
+    let (a, b) = (row(num(&tv["rowA"])), row(num(&tv["rowB"])));
+    assert_eq!(mpdj::cosine(&a, &b), tv["cos"].as_f64().expect("a cosine"));
+    assert_eq!(mpdj::level_of(&a, &b) as u64, num(&tv["level"]));
+    let s32 = a.iter().zip(&b).fold(0f32, |s, (x, y)| s + x * y);
+    assert_eq!(s32 as f64, tv["cosF32"].as_f64().expect("a cosine"));
+    assert_eq!(mpdj::level(s32 as f64) as u64, num(&tv["levelF32"]));
+}
+
+// ── The goldens (2.17, item 2) ──────────────────────────────────────────────
+
+/// Every golden is written byte for byte from its description by this
+/// kit's writers — the tags files, the roots, the plan, the thumbnail (from
+/// the synthetic pixels) and device.txt — and every Auto DJ index (whose
+/// builder is the Auto DJ writer's) reads as valid, its frame laid out the
+/// same again by the container writer.
+#[test]
+fn goldens_are_written_byte_for_byte() {
+    let mut seen = BTreeSet::new();
+    let mut names: Vec<String> = std::fs::read_dir(fixture("libraries"))
+        .expect("libraries")
+        .map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".json"))
+        .collect();
+    names.sort();
+    for name in &names {
+        let d = library(name.trim_end_matches(".json"));
+        let file = text(&d["file"]).to_owned();
+        let want = golden(&file);
+        let got = match text(&d["format"]) {
+            "MPTG" => {
+                let (meta, records, folders) = tags_input(&d);
+                mptg::write(&meta, &records, &folders).expect("a tags file")
+            }
+            "MSMF" => msmf::write(&manifest_input(&d)).expect("a root"),
+            "MSPD" => mspd::write(&plan_input(&d)).expect("a plan"),
+            "MPTH" => {
+                let px = mpth::Pixels { small: thumb_pixels(mpth::SMALL), large: thumb_pixels(mpth::LARGE) };
+                let h = path_hash(text(&d["folder"]));
+                assert_eq!(file, thumb_path(h).rsplit('/').next().expect("a name"));
+                mpth::write(h, num(&d["sourceBytes"]) as u32, &px).expect("a thumbnail")
+            }
+            "device.txt" => device_input(&d).to_text().into_bytes(),
+            "MPDJ" => relaid_index(&want),
+            other => panic!("a format: {other}"),
+        };
+        assert!(got == want, "{file}: the writer's bytes differ from the golden's");
+        seen.insert(file);
+    }
+    let goldens: BTreeSet<String> = std::fs::read_dir(fixture("golden"))
+        .expect("golden")
+        .map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(seen, goldens, "a golden with no description, or the other way");
+    assert_eq!(goldens.len(), 17);
+}
+
+/// An Auto DJ golden read and checked whole, then laid out again from its
+/// own header and sections: the alignment rule's headerBytes, the
+/// directory, the gaps, every CRC.
+fn relaid_index(file: &[u8]) -> Vec<u8> {
+    let t = Table::open(file).expect("the golden index");
+    t.check(mpdj::Uses::ALL).expect("a whole index");
+    let h = *t.header();
+    let sections = t.sections();
+    let hb = mpdj::header_bytes_for(sections.len() as u32, t.slot_bytes, mpdj::MIN_HEADER_BYTES);
+    assert_eq!(hb, h.header_bytes, "the smallest headerBytes");
+    let out: Vec<container::SectionOut> = sections
+        .iter()
+        .map(|&(kind, flags, count, stride, data)| container::SectionOut { kind, flags, count, stride, data })
+        .collect();
+    let (major, minor, generation, card_id) = (h.major, h.minor, h.generation, h.card_id);
+    let meta = container::FileMeta { magic: MPDJ, major, minor, generation, card_id };
+    container::write(&meta, &file[40..mpdj::MIN_HEADER_BYTES as usize], hb, &out).expect("the frame")
+}
+
+#[test]
+fn goldens_read_back() {
+    // The fixture card's root names its tags file and its index, each valid
+    // as its companion (2.5.3).
+    let root = Manifest::read(&golden("manifest.bin"), msmf::Uses::ALL).expect("the root");
+    assert!(root.is_final());
+    assert_eq!(root.roots, ["Lib A", "Lib B"]);
+    assert_eq!(root.server_url_key, server_url_key("HTTP://Music.Example:3000/"));
+    assert_eq!(root.producer, "mstream-terminal 0.13.0");
+    let tags_file = golden(&root.tags.name());
+    let tags = mptg::read(&tags_file, mptg::Uses::ALL).expect("its tags file");
+    assert!(msmf::companion_matches(&root.tags, &tags.header, tags.source, None));
+    let dj = root.autodj.clone().expect("an index");
+    assert_eq!(dj.name(), "autodj-00000029.bin");
+    let dj_file = golden(&dj.name());
+    let table = Table::open(&dj_file).expect("its index");
+    assert!(msmf::companion_matches(&dj, table.header(), 0, Some(&table.sig)));
+    // Not with another key, nor a device's records.
+    assert!(!msmf::companion_matches(&dj, table.header(), 0, Some(&[0; 16])));
+    assert!(!msmf::companion_matches(&root.tags, &tags.header, 1, None));
+    let min = Manifest::read(&golden("manifest-min.bin"), msmf::Uses::ALL).expect("the first commit");
+    assert!(!min.is_final() && min.autodj.is_none() && min.server_url_key == 0);
+    let first = mptg::read(&golden("tags-00000001.bin"), mptg::Uses::ALL).expect("its tags file");
+    assert!(first.records.is_empty() && !first.has_ledger);
+    let folders: Vec<(&str, u32)> = first.folders.iter().map(|f| (f.path.as_str(), f.flags)).collect();
+    assert_eq!(folders, [("", 0), ("Owned Empty", 1)]);
+    // The election between the two roots: the higher generation.
+    assert_eq!(elect(Some(min.candidate()), Some(root.candidate())).pick, Pick::Tmp);
+    assert!(elect(Some(root.candidate()), Some(root.candidate())).same_commit);
+
+    // What a record holds, read back: the fixture's every-field record, the
+    // folder flags, the hashes, the ledger.
+    let e = &tags.records.iter().find(|e| e.path == "Artist/Album/01 - Title.mp3").expect("the record");
+    assert_eq!(e.hash, 0xDA70_B312_7601_88D8);
+    let artists: Vec<&[u8]> = e.run.values(super::text::ARTIST).collect();
+    assert_eq!(artists, [&b"Lantern Choir"[..], &b"Guest Voice"[..]]);
+    let r = &e.rec;
+    assert_eq!((r.bpm10, r.camelot_key(), r.rg_track_gain, r.compilation()), (1210, 8, -679, 2));
+    let l = e.ledger.as_ref().expect("a ledger");
+    let row = (l.server_path.as_str(), l.mstream_id, l.server);
+    assert_eq!(row, ("Music/Artist/Album/01 - Title.mp3", 100, 0));
+    assert_eq!(l.canonical_hash(), Some(l.audio_hash));
+    let album = tags.folders.iter().find(|f| f.path == "Artist/Album").expect("the album");
+    assert_eq!((album.flags, album.hash), (mptg::FOLDER_THUMB, 0xB1F7_E69F_BD46_6B59));
+    let truncated: Vec<&str> =
+        tags.records.iter().filter(|e| e.rec.flags & mptg::TRUNCATED != 0).map(|e| e.path.as_str()).collect();
+    assert_eq!(truncated, ["A-/z.flac", "B/w.opus", "a/v.mp3"]);
+    // The canonical order: `A` and its files before `A B`.
+    let order: Vec<&str> = tags.records.iter().map(|e| e.path.as_str()).take(4).collect();
+    assert_eq!(order, ["Loose Intro.mp3", "A/x.mp3", "A B/y.mp3", "A-/z.flac"]);
+    // A device's tags file: no ledger.
+    let device = mptg::read(&golden("tags-device.bin"), mptg::Uses::ALL).expect("a device's records");
+    assert!(device.source == mptg::SOURCE_DEVICE && !device.has_ledger && device.records.len() == 4);
+
+    // The plan, in 2.12.5's order.
+    let plan = Plan::read(&golden("pending.bin")).expect("the plan");
+    let ops: Vec<(u8, &str)> = plan.ops.iter().map(|o| (o.op, o.path.as_str())).collect();
+    assert_eq!(ops, [
+        (2, "A/x.mp3"),
+        (2, "Artist/x.mp3"),
+        (3, "A B/Sub"),
+        (3, "New Artist"),
+        (3, "New Artist/New Album"),
+        (1, "Loose New.mp3"),
+        (1, "A/z.mp3"),
+        (1, "A B/y.mp3"),
+        (1, "New Artist/New Album/01 - New.mp3"),
+    ]);
+    assert!(!plan.stops_software() && plan.run_id == 0x00C0_FFEE_00C0_FFEE && plan.base_generation == 42);
+    // A pending.tmp of a higher generation wins.
+    let tmp = Candidate { generation: plan.header.generation + 1, ..plan.candidate() };
+    assert_eq!(elect(Some(plan.candidate()), Some(tmp)).pick, Pick::Tmp);
+
+    // The thumbnail is its folder's, and no other's.
+    let thumb = golden("B1F7E69F.565");
+    assert!(mpth::check(&thumb, path_hash("Artist/Album")));
+    assert!(!mpth::check(&thumb, path_hash("Artist/Album/CD1")));
+    assert!(!mpth::check(&thumb[..thumb.len() - 1], path_hash("Artist/Album")));
+
+    // The device reads the roots and the tags files without the sections it
+    // ignores.
+    for name in ["manifest.bin", "manifest-servers.bin", "manifest-min.bin"] {
+        let m = Manifest::read(&golden(name), msmf::Uses::DEVICE).expect("a root");
+        assert!(m.servers.is_empty());
+    }
+    let t = mptg::read(&tags_file, mptg::Uses::DEVICE).expect("the tags");
+    assert!(!t.has_ledger && t.records.iter().all(|e| e.ledger.is_none()));
+
+    // No contract file of the fixtures has an unknown major.
+    for name in ["manifest.bin", "tags-0000002a.bin", "pending.bin", "autodj-00000029.bin"] {
+        assert!(!unknown_major(&golden(name)), "{name}");
+    }
+    assert!(MAX_FILE >= 34 * 1024 * 1024);
+}
+
+// ── Hardening (2.17, item 4) ────────────────────────────────────────────────
+
+/// Two tags files read the same: the same folders and records, offsets
+/// aside, and the same ledger but for each row's server (the guard's, not
+/// the record's).
+fn assert_same_tags(want: &Tags, got: &Tags, what: &str) {
+    assert_eq!(want.folders, got.folders, "{what}");
+    assert_eq!(want.records.len(), got.records.len(), "{what}");
+    for (a, b) in want.records.iter().zip(&got.records) {
+        let record = |e: &mptg::Entry| (e.path.clone(), e.hash, e.folder, e.rec, e.run.clone());
+        assert_eq!(record(a), record(b), "{what}");
+        let strip = |l: &Option<Ledger>| l.clone().map(|l| Ledger { server: 0, ..l });
+        assert_eq!(strip(&a.ledger), strip(&b.ledger), "{what}: {}", a.path);
+    }
+}
+
+/// Two Auto DJ indexes read the same (the hardening's `same`): every row's
+/// filter record and slot entries, every DJPH hash's row, the five strings.
+fn assert_same_index(want: &[u8], got: &[u8], what: &str) {
+    let (w, g) = (Table::open(want).expect("the golden"), Table::open(got).expect(what));
+    assert_eq!((w.row_count, w.k), (g.row_count, g.k), "{what}");
+    for r in 0..w.row_count {
+        assert_eq!(w.filter(r), g.filter(r), "{what}: row {r}");
+        assert_eq!(w.slot(r), g.slot(r), "{what}: row {r}");
+    }
+    assert_eq!(w.paths(), g.paths(), "{what}");
+    assert_eq!(w.strings(), g.strings(), "{what}");
+}
+
+#[test]
+fn hardening_files_read_as_listed() {
+    let index = json("hardening/index.json");
+    let entries = index.as_array().expect("the index");
+    assert_eq!(entries.len(), 128);
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for e in entries {
+        let file = text(&e["file"]);
+        let b = bytes(&format!("hardening/{file}"));
+        let format = text(&e["format"]);
+        let device = text(&e["uses"]) == "device";
+        let what = format!("{file}: {}", text(&e["check"]));
+        assert_eq!(read_as(format, &b, device).name(), text(&e["why"]), "{what}");
+        assert_eq!(text(&e["expect"]) == "present", text(&e["why"]) == "ok", "{what}");
+        *counts.entry(format.to_owned()).or_default() += 1;
+        if let Some(same) = e.get("same").and_then(Value::as_str) {
+            if format == "MPDJ" {
+                assert_same_index(&golden(same), &b, &what);
+            } else {
+                let want = mptg::read(&golden(same), mptg::Uses::ALL).expect("the golden");
+                let got = mptg::read(&b, mptg::Uses::ALL).expect(&what);
+                assert_same_tags(&want, &got, &what);
+            }
+        }
+        if let Some(slot) = e.get("slot") {
+            // One slot as the device reads it, the join's sections good:
+            // damaged (its CRC) or broken (its list, under a good CRC).
+            let t = Table::open(&b).expect(&what);
+            t.check(mpdj::Uses::DEVICE).expect(&what);
+            let want = match text(&slot["read"]) {
+                "damaged" => mpdj::SlotRead::Damaged,
+                "broken" => mpdj::SlotRead::Broken,
+                other => panic!("a read: {other}"),
+            };
+            let (read, why) = t.slot(num(&slot["row"]) as u32).expect_err(&what);
+            assert_eq!(read, want, "{what}");
+            if text(&e["why"]) != "ok" {
+                assert_eq!(why.name(), text(&e["why"]), "{what}");
+            }
+        }
+        // The writer's guard reads the magic and the major alone.
+        let major = text(&e["why"]) == "major";
+        assert_eq!(unknown_major(&b), major && file != "mpdj-major-1.bin", "{what}");
+    }
+    assert_eq!(counts.into_iter().collect::<Vec<_>>(), [
+        ("MPDJ".to_owned(), 50),
+        ("MPTG".to_owned(), 52),
+        ("MSMF".to_owned(), 17),
+        ("MSPD".to_owned(), 9),
+    ]);
+
+    // The files a present verdict says more about.
+    let plan = Plan::read(&bytes("hardening/mspd-op-9.bin")).expect("a newer writer's plan");
+    assert!(plan.stops_software());
+    let m = Manifest::read(&bytes("hardening/msmf-comp-unknown-kind.bin"), msmf::Uses::ALL).expect("a root");
+    assert_eq!(m.tags.name(), "tags-0000002a.bin");
+    assert_eq!(m.autodj.map(|c| c.name()).as_deref(), Some("autodj-00000029.bin"));
+    let m = Manifest::read(&bytes("hardening/msmf-minor-1.bin"), msmf::Uses::ALL).expect("a newer minor");
+    let golden_root = Manifest::read(&golden("manifest-servers.bin"), msmf::Uses::ALL).expect("the golden");
+    assert_eq!(m.servers, golden_root.servers, "rows of 48 bytes read by their 40-byte prefix");
+    // Entries that break 2.5.5's writer rules: the root reads, their
+    // servers are unknown.
+    let m = Manifest::read(&bytes("hardening/msmf-srvs-rules.bin"), msmf::Uses::ALL).expect("the root reads");
+    let table = m.server_table();
+    assert!((1..=3).all(|i| table.get(i).is_none()));
+    let talk = Talk { url_key: server_url_key("http://music.example:3000"), ..Talk::default() };
+    assert_eq!(table.same_server(1, &talk), Verdict::Unknown);
+    assert_eq!(table.same_root(&talk), Verdict::Same);
+    // The device reads past a broken SRVS; the software doesn't.
+    assert_eq!(read_as("MSMF", &bytes("hardening/msmf-srvs-ignored.bin"), false), Why::Shape);
+    // Rows naming servers no SRVS entry names: the same records, their
+    // servers unknown to the guard.
+    let t = mptg::read(&bytes("hardening/mptg-orig-server.bin"), mptg::Uses::ALL).expect("the records");
+    let servers: Vec<u16> = t.records.iter().map(|e| e.ledger.as_ref().expect("a ledger").server).collect();
+    let n = servers.len();
+    assert_eq!((servers[1], servers[3], servers[n - 1]), (1, 2, 0xFFFF));
+    let root = Manifest::read(&golden("manifest.bin"), msmf::Uses::ALL).expect("the root").server_table();
+    assert_eq!(root.same_server(0xFFFF, &talk), Verdict::Unknown);
+    // A newer minor's longer rows and header are read by their prefix: the
+    // 13th run field is past the twelve readRules 1 knows. Carried forward,
+    // it is this writer's file again: what the minor added is dropped
+    // (2.4.5), byte for byte the file it was made from.
+    let minor = mptg::read(&bytes("hardening/mptg-minor-1.bin"), mptg::Uses::ALL).expect("a newer minor");
+    assert_eq!(minor.header.minor, 1);
+    let (meta, records, folders) = minor.to_input();
+    let carried = mptg::write(&meta, &records, &folders).expect("carried forward");
+    assert!(carried == golden("tags-0000002a.bin"));
+}
+
+/// The byte ranges no reader checks: the zero gaps between sections.
+fn gaps(file: &[u8]) -> Vec<bool> {
+    let h = container::Header::parse(file).expect("a frame");
+    let mut skip = vec![false; file.len()];
+    let mut end = (h.header_bytes + 32 * h.section_count) as usize;
+    for i in 0..h.section_count as usize {
+        let e = &file[h.header_bytes as usize + 32 * i..];
+        let (off, len) = (prim::u32_at(e, 8) as usize, prim::u32_at(e, 12) as usize);
+        skip[end..off].iter_mut().for_each(|s| *s = true);
+        end = off + len;
+    }
+    skip
+}
+
+/// Every golden but the two large indexes, cut at every byte and with every
+/// bit flipped in turn: never a panic, always absent — but where the bit is
+/// in a gap no CRC covers, where the file reads as it did.
+#[test]
+fn goldens_truncated_or_flipped_are_absent() {
+    let names = [
+        "tags-0000002a.bin",
+        "tags-device.bin",
+        "tags-00000001.bin",
+        "tags-00000007.bin",
+        "manifest.bin",
+        "manifest-min.bin",
+        "manifest-servers.bin",
+        "pending.bin",
+        "autodj-00000029.bin",
+        "autodj-small-top.bin",
+        "autodj-small-default.bin",
+        "autodj-tiny.bin",
+        "autodj-pair.bin",
+    ];
+    for name in names {
+        let file = golden(name);
+        let format = format_of(&file);
+        assert_eq!(read_as(format, &file, false), Why::Ok, "{name}");
+        for n in 0..file.len() {
+            assert_ne!(read_as(format, &file[..n], false), Why::Ok, "{name} cut at {n}");
+        }
+        let skip = gaps(&file);
+        let mut b = file.clone();
+        for at in 0..b.len() {
+            for bit in 0..8 {
+                b[at] ^= 1 << bit;
+                let why = read_as(format, &b, false);
+                if skip[at] {
+                    assert_eq!(why, Why::Ok, "{name}: a gap's byte {at}");
+                } else {
+                    assert_ne!(why, Why::Ok, "{name}: byte {at} bit {bit}");
+                }
+                b[at] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+/// Every section's CRC and the header's made right again after an edit of
+/// a file's bytes (where its directory entry lies inside the file), so the
+/// edit reaches the structural checks.
+fn reseal(b: &mut [u8]) {
+    let Some(h) = container::Header::parse(b) else { return };
+    let dir = h.header_bytes as u64 + 32 * h.section_count as u64;
+    if h.section_count > 64 || dir > b.len() as u64 {
+        return;
+    }
+    for i in 0..h.section_count as usize {
+        let at = h.header_bytes as usize + 32 * i;
+        let (off, len) = (prim::u32_at(b, at + 8) as u64, prim::u32_at(b, at + 12) as u64);
+        if off + len <= b.len() as u64 {
+            let crc = crc32(&b[off as usize..(off + len) as usize]);
+            b[at + 24..at + 28].copy_from_slice(&crc.to_le_bytes());
+        }
+    }
+    b[32..36].fill(0);
+    let crc = crc32(&b[..dir as usize]);
+    b[32..36].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// Hostile input: random edits of every golden, resealed so their CRCs
+/// pass, and random bytes behind a valid-looking frame. Whatever a reader
+/// makes of them, it returns: no panic, no endless loop.
+#[test]
+fn mutated_files_never_panic() {
+    let mut rng = fastrand::Rng::with_seed(0x5EED_C0DE);
+    let names = [
+        "tags-0000002a.bin",
+        "tags-00000007.bin",
+        "tags-device.bin",
+        "manifest.bin",
+        "manifest-servers.bin",
+        "pending.bin",
+        "autodj-00000029.bin",
+        "autodj-small-default.bin",
+    ];
+    for name in names {
+        let file = golden(name);
+        let format = format_of(&file);
+        for _ in 0..3000 {
+            let mut b = file.clone();
+            for _ in 0..rng.usize(1..5) {
+                let at = rng.usize(..b.len());
+                b[at] = match rng.u8(..4) {
+                    0 => 0,
+                    1 => 0xFF,
+                    2 => b[at] ^ (1 << rng.u8(..8)),
+                    _ => rng.u8(..),
+                };
+            }
+            if rng.bool() {
+                b.truncate(rng.usize(..=b.len()));
+            }
+            reseal(&mut b);
+            for device in [false, true] {
+                let _ = read_as(format, &b, device);
+            }
+            if format == "MPDJ"
+                && let Ok(t) = Table::open(&b)
+            {
+                for r in 0..t.row_count.min(16) {
+                    let _ = t.slot(r);
+                }
+                let _ = (t.strings(), t.paths(), t.filter(0));
+            }
+        }
+    }
+    for _ in 0..2000 {
+        let mut b: Vec<u8> = (0..rng.usize(40..600)).map(|_| rng.u8(..)).collect();
+        let magic = [MPTG, MSMF, MSPD, MPDJ][rng.usize(..4)];
+        b[..4].copy_from_slice(&magic.to_le_bytes());
+        b[4..6].copy_from_slice(&(if magic == MPDJ { 2u16 } else { 1 }).to_le_bytes());
+        let hb = [56u32, 72, 96, 104, 128][rng.usize(..5)];
+        b[8..12].copy_from_slice(&hb.to_le_bytes());
+        b[12..16].copy_from_slice(&rng.u32(..8).to_le_bytes());
+        let len = b.len() as u32;
+        b[16..20].copy_from_slice(&len.to_le_bytes());
+        reseal(&mut b);
+        for format in ["MPTG", "MSMF", "MSPD", "MPDJ"] {
+            let _ = read_as(format, &b, false);
+        }
+    }
+}
+
+// ── Round trips and the canonical order ─────────────────────────────────────
+
+/// A made-up library: folders from a small alphabet that holds the order's
+/// traps (`A`, `A B`, `A-`, `a`, `É`, NFC and NFD), records with tag values
+/// that need 2.3.6 (control characters, repeats, long values), ledger rows
+/// and OWNED folders.
+fn made_up_library(rng: &mut fastrand::Rng, records: usize) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
+    const NAMES: [&str; 9] = ["A", "A B", "A-", "B", "a", "\u{c9}", "Caf\u{e9}", "Cafe\u{301}", "Disc 1"];
+    let source = [mptg::SOURCE_DEVICE, mptg::SOURCE_SOFTWARE, mptg::SOURCE_SYNC_AGENT][rng.usize(..3)];
+    let meta = Meta {
+        source,
+        parser_version: rng.u16(..),
+        read_rules: 1,
+        generation: rng.u32(..),
+        card_id: rng.u64(..),
+        minor: 0,
+        producer: if rng.bool() { "mstream-terminal 0.13.0".into() } else { String::new() },
+    };
+    let mut paths = BTreeSet::new();
+    let mut out = Vec::new();
+    while out.len() < records {
+        let depth = rng.usize(0..4);
+        let mut parts: Vec<String> = (0..depth).map(|_| NAMES[rng.usize(..NAMES.len())].to_owned()).collect();
+        parts.push(format!("{:02} - {}.mp3", rng.u8(..20), NAMES[rng.usize(..NAMES.len())]));
+        let path = parts.join("/");
+        if !paths.insert(path.clone()) {
+            continue;
+        }
+        let mut raw: [Vec<String>; RUN_FIELDS] = Default::default();
+        for values in raw.iter_mut() {
+            for _ in 0..rng.usize(0..4) {
+                values.push(match rng.u8(..6) {
+                    0 => String::new(),
+                    1 => "tab\there".into(),
+                    2 => "x".repeat(rng.usize(200..300)),
+                    3 => "same".into(),
+                    _ => NAMES[rng.usize(..NAMES.len())].into(),
+                });
+            }
+        }
+        let (run, truncated) = Run::build(&raw);
+        let rec = Record {
+            size: rng.u32(..),
+            fat_time: rng.u32(..),
+            duration_ms: rng.u32(..),
+            qfp: rng.u64(..),
+            known: mptg::KNOWN_RULES1,
+            flags: rng.u16(..) & !mptg::TRUNCATED | if truncated { mptg::TRUNCATED } else { 0 },
+            year: rng.u16(..),
+            track: rng.u16(..),
+            rg_track_gain: rng.i16(..),
+            container: rng.u8(..),
+            camelot: rng.u8(..),
+            pic_offset: rng.u32(..),
+            pic_coding: rng.u8(..),
+            ..Record::default()
+        };
+        let ledger = (source != mptg::SOURCE_DEVICE && rng.bool()).then(|| Ledger {
+            server_path: if rng.bool() { format!("Music/{path}") } else { String::new() },
+            mstream_id: rng.u32(..),
+            audio_hash: md5(path.as_bytes()),
+            server_size: rng.u64(..),
+            hash_v: 2,
+            server: rng.u16(..4),
+            ..Ledger::default()
+        });
+        out.push(RecordIn { path, rec, run, ledger });
+    }
+    let folders = (0..rng.usize(0..4))
+        .map(|i| {
+            let path = format!("Owned {i}/{}", NAMES[rng.usize(..NAMES.len())]);
+            FolderIn { path, flags: mptg::FOLDER_OWNED }
+        })
+        .collect();
+    (meta, out, folders)
+}
+
+#[test]
+fn tags_round_trip_in_any_order() {
+    let mut rng = fastrand::Rng::with_seed(20_261_018);
+    for round in 0..60 {
+        let n = rng.usize(0..40);
+        let (meta, mut records, mut folders) = made_up_library(&mut rng, n);
+        let file = mptg::write(&meta, &records, &folders).expect("a tags file");
+        let tags = mptg::read(&file, mptg::Uses::ALL).unwrap_or_else(|w| panic!("round {round}: {w}"));
+        assert!(mptg::read(&file, mptg::Uses::DEVICE).is_ok());
+        // Read back as written: each record by its path, its hash the path's.
+        assert_eq!(tags.records.len(), records.len());
+        for e in &tags.records {
+            let r = records.iter().find(|r| r.path == e.path).expect("a record written");
+            assert_eq!((e.hash, &e.rec, &e.run), (path_hash(&r.path), &r.rec, &r.run), "{}", e.path);
+            // A software file has a row a record, a zeroed one where none
+            // was given.
+            let device = meta.source == mptg::SOURCE_DEVICE;
+            let want = (!device).then(|| r.ledger.clone().unwrap_or_default());
+            assert_eq!(e.ledger, want);
+        }
+        // The canonical order: records by folder, then name; the folders in
+        // pre-order.
+        for w in tags.records.windows(2) {
+            assert!(compare_file_paths(&w[0].path, &w[1].path).is_lt(), "{} {}", w[0].path, w[1].path);
+        }
+        for w in tags.folders.windows(2) {
+            assert!(super::order::compare_folder_paths(&w[0].path, &w[1].path).is_lt());
+        }
+        // Any input order, the same bytes; read and written again, the same.
+        rng.shuffle(&mut records);
+        rng.shuffle(&mut folders);
+        assert!(mptg::write(&meta, &records, &folders).expect("again") == file, "round {round}: order");
+        let (m2, r2, f2) = tags.to_input();
+        assert!(mptg::write(&m2, &r2, &f2).expect("again") == file, "round {round}: read and written again");
+    }
+}
+
+#[test]
+fn tags_writer_refuses_what_its_reader_would() {
+    let meta = Meta { source: mptg::SOURCE_SOFTWARE, read_rules: 1, generation: 2, ..Meta::default() };
+    let rec = |path: &str| RecordIn { path: path.into(), ..RecordIn::default() };
+    let long = format!("{}/{}.mp3", "L".repeat(120), "M".repeat(124));
+    for bad in ["", "/x.mp3", "a//b.mp3", "a/./b.mp3", "../b.mp3", "a/", long.as_str()] {
+        assert!(mptg::write(&meta, &[rec(bad)], &[]).is_err(), "{bad:?}");
+    }
+    assert!(mptg::write(&meta, &[rec("a.mp3"), rec("a.mp3")], &[]).is_err());
+    assert!(mptg::write(&meta, &[rec("a"), rec("a/b.mp3")], &[]).is_err(), "a file and a folder");
+    let unowned = FolderIn { path: "Empty".into(), flags: mptg::FOLDER_THUMB };
+    assert!(mptg::write(&meta, &[], &[unowned]).is_err());
+    let mut bad_run = rec("a.mp3");
+    bad_run.run.fields[0] = b"tab\there".to_vec();
+    assert!(mptg::write(&meta, &[bad_run], &[]).is_err());
+    let device = Meta { source: mptg::SOURCE_DEVICE, ..meta.clone() };
+    let with_ledger = RecordIn { ledger: Some(Ledger::default()), ..rec("a.mp3") };
+    assert!(mptg::write(&device, &[with_ledger], &[]).is_err());
+    let nul = Meta { producer: "a\0b".into(), ..meta.clone() };
+    assert!(mptg::write(&nul, &[rec("a.mp3")], &[]).is_err());
+    assert!(mptg::write(&Meta { source: 0, ..meta.clone() }, &[], &[]).is_err());
+    // The longest path the device sees is written and read.
+    let longest = format!("{}/{}.mp3", "L".repeat(120), "M".repeat(123));
+    let file = mptg::write(&meta, &[rec(&longest)], &[]).expect("255 bytes with /music/");
+    assert_eq!(mptg::read(&file, mptg::Uses::ALL).expect("read").records[0].path, longest);
+}
+
+#[test]
+fn roots_and_plans_round_trip() {
+    let mut rng = fastrand::Rng::with_seed(7);
+    let tags = Comp::of(&golden("tags-0000002a.bin")).expect("a companion");
+    let dj = Comp::of(&golden("autodj-00000029.bin")).expect("a companion");
+    for _ in 0..40 {
+        let lib = |i: usize, rng: &mut fastrand::Rng| format!("Lib {i}/{}", ["A", "A B", "a"][rng.usize(..3)]);
+        let mut roots: Vec<String> = (0..rng.usize(0..5)).map(|i| lib(i, &mut rng)).collect();
+        roots.sort();
+        roots.dedup();
+        let servers: Vec<Server> = (0..rng.usize(0..4))
+            .map(|i| match rng.bool() {
+                true => Server::direct([i as u8 + 1; 16], 0x1000 + i as u64),
+                false => Server::peer([0; 16], 0x2000 + i as u64, 1 + i as u32),
+            })
+            .collect();
+        let mut m = ManifestIn {
+            generation: rng.u32(1..),
+            card_id: rng.u64(..),
+            commit_time: rng.u32(..),
+            flags: rng.u32(..2),
+            commit_id: rng.u64(..),
+            server_instance: [0xEE; 16],
+            server_url_key: 0xED90_1EA3_EE76_3AC7,
+            producer: "mstream-terminal 0.13.0".into(),
+            server_revision: "\"r-1-2-3-4\"".into(),
+            base_generation: rng.u32(..),
+            comps: if rng.bool() { vec![tags.clone(), dj.clone()] } else { vec![tags.clone()] },
+            roots: roots.clone(),
+            servers: servers.clone(),
+            ..ManifestIn::default()
+        };
+        let file = msmf::write(&m).expect("a root");
+        let back = Manifest::read(&file, msmf::Uses::ALL).expect("read back");
+        assert_eq!((back.roots, back.servers), (roots, servers));
+        assert_eq!((back.commit_id, back.tags), (m.commit_id, tags.clone()));
+        rng.shuffle(&mut m.roots);
+        assert!(msmf::write(&m).expect("again") == file);
+    }
+    // Refused: COMP out of its order, a root twice, an entry for the root's
+    // own server, a flag bit v1 doesn't define.
+    let comps = vec![tags.clone()];
+    let base = ManifestIn { generation: 1, comps, server_url_key: 5, ..ManifestIn::default() };
+    assert!(msmf::write(&ManifestIn { comps: vec![dj.clone(), tags.clone()], ..base.clone() }).is_err());
+    assert!(msmf::write(&ManifestIn { comps: vec![], ..base.clone() }).is_err());
+    assert!(msmf::write(&ManifestIn { roots: vec!["A".into(), "A".into()], ..base.clone() }).is_err());
+    assert!(msmf::write(&ManifestIn { roots: vec!["/A".into()], ..base.clone() }).is_err());
+    assert!(msmf::write(&ManifestIn { servers: vec![Server::direct([0; 16], 5)], ..base.clone() }).is_err());
+    let flagged = Server { flags: 2, ..Server::direct([0; 16], 6) };
+    assert!(msmf::write(&ManifestIn { servers: vec![flagged], ..base.clone() }).is_err());
+    assert!(msmf::write(&ManifestIn { servers: vec![Server::peer([0; 16], 7, 1)], ..base.clone() }).is_ok());
+    assert_eq!(PEER, 1);
+
+    for _ in 0..40 {
+        let mut ops: Vec<Op> = Vec::new();
+        for i in 0..rng.usize(0..12) {
+            let op = [mspd::OP_WRITE, mspd::OP_DELETE, mspd::OP_FOLDER][rng.usize(..3)];
+            let ext = if op == mspd::OP_FOLDER { "" } else { ".mp3" };
+            let path = format!("{}/{i}{ext}", ["A", "A B", "a", "A/B"][rng.usize(..4)]);
+            ops.push(Op { op, path, expected_size: if op == mspd::OP_WRITE { rng.u32(..) } else { 0 } });
+        }
+        let run_id = rng.u64(..);
+        let p = PlanIn { generation: 3, card_id: 9, run_id, base_generation: 2, ops: ops.clone(), ..PlanIn::default() };
+        let file = mspd::write(&p).expect("a plan");
+        let back = Plan::read(&file).expect("read back");
+        assert_eq!(back.ops.len(), ops.len());
+        let mut shuffled = p.clone();
+        rng.shuffle(&mut shuffled.ops);
+        assert!(mspd::write(&shuffled).expect("again") == file);
+        let again = PlanIn { ops: back.ops.clone(), ..p.clone() };
+        assert!(mspd::write(&again).expect("again") == file);
+    }
+    let op = |op, path: &str| Op { op, path: path.into(), expected_size: 0 };
+    assert!(mspd::write(&PlanIn { ops: vec![op(4, "a")], ..PlanIn::default() }).is_err());
+    assert!(mspd::write(&PlanIn { ops: vec![op(2, "../a")], ..PlanIn::default() }).is_err());
+    assert!(mspd::write(&PlanIn { ops: vec![op(2, "a"), op(2, "a")], ..PlanIn::default() }).is_err());
+}
+
+// ── Thumbnails from images ──────────────────────────────────────────────────
+
+fn png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(width, height, |x, y| image::Rgb(pixel(x, y)));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).expect("a PNG");
+    out.into_inner()
+}
+
+#[test]
+fn thumbnails_from_images() {
+    // One colour stays that colour, at both sizes.
+    let px = mpth::from_image(&png(300, 200, |_, _| [200, 100, 50])).expect("a thumbnail");
+    let want = mpth::rgb565(200, 100, 50);
+    assert!(px.small.iter().chain(&px.large).all(|&v| v == want));
+    assert_eq!((px.small.len(), px.large.len()), (40 * 40, 96 * 96));
+    // A wide image is cropped to its centre: its red edges never show.
+    let banded = png(300, 100, |x, _| if (100..200).contains(&x) { [0, 255, 0] } else { [255, 0, 0] });
+    let px = mpth::from_image(&banded).expect("a thumbnail");
+    assert!(px.large.iter().all(|&v| v == mpth::rgb565(0, 255, 0)));
+    // A box filter: grown, each pixel takes the one it lies in; shrunk, the
+    // mean of what it covers (a fine checker of black and white is grey).
+    let checker = mpth::from_rgb(&[0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0], 2, 2).expect("pixels");
+    assert_eq!(checker.small[0], mpth::rgb565(0, 0, 0));
+    let cell = |i: usize| if (i % 80 + i / 80) % 2 == 0 { [0u8; 3] } else { [255u8; 3] };
+    let fine: Vec<u8> = (0..80 * 80).flat_map(cell).collect();
+    let down = mpth::from_rgb(&fine, 80, 80).expect("pixels");
+    assert!(down.small.iter().all(|&v| v == mpth::rgb565(128, 128, 128)));
+    // A thumbnail from them is its folder's.
+    let h = path_hash("Artist/Album");
+    let file = mpth::write(h, 1234, &px).expect("a thumbnail");
+    assert!(mpth::check(&file, h) && file.len() == mpth::BYTES);
+    // Not an image, or too large an image, makes no thumbnail.
+    assert!(matches!(mpth::from_image(b"not an image"), Err(mpth::ImageError::Decode(_))));
+    assert!(matches!(mpth::from_image(&png(13_000, 1, |_, _| [0, 0, 0])), Err(mpth::ImageError::TooLarge)));
+    assert!(mpth::from_rgb(&[], 0, 0).is_none());
+    assert!(mpth::write(h, 0, &mpth::Pixels { small: vec![], large: vec![] }).is_err());
+    // A JPEG too: the decoder the player's art already uses.
+    let img = image::RgbImage::from_fn(64, 48, |_, _| image::Rgb([16, 160, 240]));
+    let mut jpeg = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut jpeg, image::ImageFormat::Jpeg).expect("a JPEG");
+    let px = mpth::from_image(jpeg.get_ref()).expect("a thumbnail");
+    let (r, g, b) = (px.large[0] >> 11, px.large[0] >> 5 & 63, px.large[0] & 31);
+    let near = r.abs_diff(16 >> 3) <= 1 && g.abs_diff(160 >> 2) <= 2 && b.abs_diff(240 >> 3) <= 1;
+    assert!(near, "{r} {g} {b}");
 }
