@@ -166,6 +166,10 @@ sha2 = "0.11"
 # add no package.
 crc32fast = "1.5"
 md-5 = "0.11"
+# The names the transfer gives files on the card (src/device/card/names.rs,
+# the firmware's docs/METADATA.md 2.8.3) are NFC, and a Mac's listing of
+# them is brought back to NFC (2.8.5).
+unicode-normalization = "0.1"
 stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
