@@ -20,8 +20,13 @@
 //! page, with no flags, as its MP3 Player tab (src/gui/device.rs,
 //! docs/ux-contracts/mp3-player-screen.md). `--yes` prints the steps as
 //! lines instead.
+//!
+//! [`card`] is the board's SD card, written with the card in a PC's reader,
+//! never over the cable: so far its contract kit, the files the firmware
+//! reads from a card byte for byte.
 
 mod board;
+mod card;
 mod desk;
 mod engine;
 mod firmware;

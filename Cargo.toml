@@ -158,6 +158,14 @@ espflash = { version = "4.6", default-features = false, features = ["serialport"
 serialport = { version = "4.10", default-features = false }
 # The firmware's checksum, checked before anything is written to a board.
 sha2 = "0.11"
+# The SD card's files (src/device/card/contract, the firmware repo's
+# docs/METADATA.md part 2): every one is checked with CRC-32/ISO-HDLC,
+# zlib's CRC, which crc32fast computes; a download is checked against
+# mStream's `hash`, an MD5. Both were in the tree already (flate2 and png
+# bring crc32fast, espflash this md-5, on sha2's digest 0.11), so they
+# add no package.
+crc32fast = "1.5"
+md-5 = "0.11"
 stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
