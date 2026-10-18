@@ -182,9 +182,9 @@ fn utf16_len(name: &str) -> usize {
 }
 
 /// A cut name's mark (2.8.3, step 5): `~` and the low 16 bits of the
-/// FNV-1a 64 of the uncut component's bytes, as 4 uppercase hex digits.
-/// The component is the one steps 2-4 give, a file's card extension with
-/// it: a joined folder has no other.
+/// FNV-1a 64 of the name's bytes as steps 2-4 left it, uncut, as 4
+/// uppercase hex digits: a folder's whole name (a joined one too), a file's
+/// stem without its extension.
 fn cut_mark(original: &str) -> String {
     format!("~{:04X}", fnv1a64(original.as_bytes()) & 0xFFFF)
 }
@@ -360,7 +360,7 @@ struct Part {
     ext: String,
     /// The bytes of `body` kept, once it is cut.
     kept: Option<usize>,
-    /// The cut's mark: of the uncut name, the file's extension with it.
+    /// The cut's mark: of the uncut name, the file's stem alone.
     mark: String,
     /// The collision's number: ` (n)` from 2, before the extension.
     n: u32,
@@ -368,7 +368,7 @@ struct Part {
 
 impl Part {
     fn new(body: String, ext: String) -> Part {
-        let mark = cut_mark(&format!("{body}{ext}"));
+        let mark = cut_mark(&body);
         Part { body, ext, kept: None, mark, n: 0 }
     }
 
@@ -807,10 +807,90 @@ mod tests {
         format!("~{:04X}", fnv1a64(original.as_bytes()) & 0xFFFF)
     }
 
+    /// A vector run's file, as `Wanted` borrows it.
+    fn wanted(f: &Value) -> Wanted<'_> {
+        let bytes = match f["bytes"].as_str().unwrap_or("original") {
+            "original" => Bytes::Original { ogg_opus: false },
+            "oggOpus" => Bytes::Original { ogg_opus: true },
+            "notAudio" => Bytes::NotAudio,
+            "mp3" => Bytes::Converted(CONTAINER_MP3),
+            "flac" => Bytes::Converted(CONTAINER_FLAC),
+            "opus" => Bytes::Converted(CONTAINER_OPUS),
+            other => panic!("bytes: {other}"),
+        };
+        Wanted {
+            server: f["server"].as_u64().expect("a server") as u16,
+            id: f["id"].as_u64().expect("an id") as u32,
+            server_path: f["serverPath"].as_str().expect("a server path"),
+            size: f["size"].as_u64().unwrap_or(4_000_000),
+            bytes,
+        }
+    }
+
+    fn refusal(code: &str) -> Refused {
+        match code {
+            "noName" => Refused::NoName,
+            "noRoot" => Refused::NoRoot,
+            "unlisted" => Refused::Unlisted,
+            "tooBig" => Refused::TooBig,
+            "tooLong" => Refused::TooLong,
+            "folderFull" => Refused::FolderFull,
+            other => panic!("a refusal: {other}"),
+        }
+    }
+
     /// The 16-digit hex token in a vector's prose, as an integer.
     fn hash_in(prose: &str) -> u64 {
         let token = prose.split(|c: char| !c.is_ascii_hexdigit()).find(|t| t.len() == 16).expect("a hash");
         u64::from_str_radix(token, 16).expect("hex")
+    }
+
+    /// The fixtures' `names` vectors, made by the firmware repo's
+    /// tools/cardnames.py: each run on its card names its files as there.
+    #[test]
+    fn the_fixtures_name_vectors() {
+        let v = json("vectors.json");
+        let names = &v["names"];
+        assert_eq!(names["who"], "software");
+        for m in names["marks"].as_array().expect("marks") {
+            let component = m["component"].as_str().expect("a component");
+            assert_eq!(cut_mark(component), m["mark"].as_str().expect("a mark"), "{}", m["name"]);
+            let name = m["name"].as_str().expect("a name");
+            let part = Part::new(component.to_owned(), name[component.len()..].to_owned());
+            assert_eq!(part.mark, cut_mark(component), "a file's mark is its stem's");
+        }
+        let runs = names["runs"].as_array().expect("runs");
+        assert_eq!(runs.len(), 12);
+        for run in runs {
+            let note = run["note"].as_str().expect("a note");
+            let layout = match &run["layout"] {
+                Value::String(s) if s == "default" => Layout::Default,
+                l => {
+                    let lib = |lib: &Value| {
+                        let server = lib["server"].as_u64().expect("a server") as u16;
+                        (server, lib["vpath"].as_str().expect("a vpath").to_owned())
+                    };
+                    Layout::Vpath(l["vpath"].as_array().expect("libraries").iter().map(lib).collect())
+                }
+            };
+            let extensions = run["extensions"].as_str().expect("extensions");
+            let device = DeviceTxt::read(Some(format!("contract=1\nextensions={extensions}\n").as_bytes()));
+            let mut n = Namer::new(layout, &device).expect(note);
+            for e in run["card"].as_array().into_iter().flatten() {
+                n.seed(e["path"].as_str().expect("a path"), e["folder"].as_bool().unwrap_or(false));
+            }
+            let files: Vec<Wanted<'_>> = run["files"].as_array().expect("files").iter().map(wanted).collect();
+            let want: Vec<Result<String, Refused>> = run["names"]
+                .as_array()
+                .expect("names")
+                .iter()
+                .map(|w| match w.as_str() {
+                    Some(path) => Ok(path.to_owned()),
+                    None => Err(refusal(w["refused"].as_str().expect("a refusal"))),
+                })
+                .collect();
+            assert_eq!(n.place(&files), want, "{note}");
+        }
     }
 
     #[test]
@@ -1005,17 +1085,17 @@ mod tests {
         // 255 bytes with /music/.
         let stem = "a".repeat(300);
         let got = one(&mut namer(), track(0, 1, &format!("V/Artist/Album/{stem}.mp3"))).expect("a name");
-        let cut = format!("Artist/Album/{}{}.mp3", "a".repeat(226), mark(&format!("{stem}.mp3")));
+        let cut = format!("Artist/Album/{}{}.mp3", "a".repeat(226), mark(&stem));
         assert_eq!((got.as_str(), MUSIC + got.len()), (cut.as_str(), 255));
         // At a code point boundary: 3-byte characters, one byte short.
         let euros = "\u{20AC}".repeat(100);
         let got = one(&mut namer(), track(0, 1, &format!("V/Artist/Album/{euros}.mp3"))).expect("a name");
-        let cut = format!("Artist/Album/{}{}.mp3", "\u{20AC}".repeat(75), mark(&format!("{euros}.mp3")));
+        let cut = format!("Artist/Album/{}{}.mp3", "\u{20AC}".repeat(75), mark(&euros));
         assert_eq!((got.as_str(), MUSIC + got.len()), (cut.as_str(), 254));
         // Ties go to the deepest: the file.
         let (folder, stem) = ("B".repeat(200), "c".repeat(200));
         let got = one(&mut namer(), track(0, 1, &format!("V/{folder}/{stem}.mp3"))).expect("a name");
-        assert_eq!(got, format!("{folder}/{}{}.mp3", "c".repeat(38), mark(&format!("{stem}.mp3"))));
+        assert_eq!(got, format!("{folder}/{}{}.mp3", "c".repeat(38), mark(&stem)));
     }
 
     #[test]
@@ -1032,7 +1112,7 @@ mod tests {
         assert_eq!(one(&mut n, track(0, 2, &format!("V/A/{album}/{fits}"))), Ok(format!("A/{cut}/{fits}")));
         let long = "t".repeat(100);
         let got = one(&mut n, track(0, 3, &format!("V/A/{album}/{long}.mp3"))).expect("a name");
-        assert_eq!(got, format!("A/{cut}/{}{}.mp3", "t".repeat(54), mark(&format!("{long}.mp3"))));
+        assert_eq!(got, format!("A/{cut}/{}{}.mp3", "t".repeat(54), mark(&long)));
         assert_eq!(MUSIC + got.len(), 255);
         // A folder the card has that leaves no room: refused, not misnamed.
         let mut n = namer();
@@ -1049,7 +1129,7 @@ mod tests {
         let album = "F".repeat(250);
         let cut = format!("{}{}", "F".repeat(177), mark(&album));
         let long = "t".repeat(200);
-        let long_cut = format!("{}{}.mp3", "t".repeat(54), mark(&format!("{long}.mp3")));
+        let long_cut = format!("{}{}.mp3", "t".repeat(54), mark(&long));
         let firsts = [
             ("x.mp3".to_owned(), "x.mp3".to_owned()),
             (format!("{}.mp3", "s".repeat(59)), format!("{}.mp3", "s".repeat(59))),
