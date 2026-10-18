@@ -9,10 +9,11 @@ U18, proposed). The player's code stays GPL-3.0-or-later.
 
 This copy is mstream-terminal's, taken from the player's repo
 (IrosTheBeggar/mstream-mp3-player, `test/fixtures/card` at commit
-cf02af9): every file but this paragraph is byte for byte the player's.
+8db6c24): every file but this paragraph is byte for byte the player's.
 Copy them again from there when the contract changes (docs/METADATA.md
 2.17 there says how they may); never edit them here. The terminal's
-tests are `src/device/card/contract/tests.rs`.
+tests are `src/device/card/contract/tests.rs` (the kit), and those of
+`names.rs` (the `names` vectors), `autodj` and `volume` beside it.
 
 The shared fixtures of docs/METADATA.md 2.17, made by
 `tools/card_fixtures.py` (a second implementation of the contract, apart
@@ -60,8 +61,28 @@ card_fixtures.py imports. `libraries/autodj-mid.f32` holds the vectors
 that `autodj-mid.json` and `autodj-mid-default.json` name (raw
 little-endian f32, 16 a row, in the descriptions' row order).
 
+The play log (docs/METADATA.md 2.20) has its fixtures in `plays/`, made
+with `tools/playlog.py`, its reference reader and writer, which
+card_fixtures.py imports. `plays/log.json` is one device's script on the
+fixture card (every value a writer would otherwise choose given; a cap of
+4 slots a file, so the rotation shows). `plays/golden/<snapshot>/` holds
+the log's files at each of its snapshots: what a writer MUST make of the
+script, byte for byte. `plays/index.json` lists the reader's cases, each
+a card's log files (a golden one by its path, a case's own in
+`plays/read/<case>/`) with what a reader takes from them: the plays' ids
+in order, the counts of what it skipped, and where given the plays'
+starts and what their enums read as. `golden/manifest-acks.bin` is a root
+with ACKS (2.5.6); the `msmf-acks-*` hardening files are roots that
+read, whatever their ACKS holds (`vectors.json`'s `plays.acks` says what
+a reader that uses ACKS takes from each). So a reader takes ACKS outside
+its container's check of known sections, whose stride and length rules
+would make the root absent: it finds ACKS by its type in the directory
+and checks it on its own.
+
 The player's tests: `test/test_card_contract` (the vectors),
 `test/test_card_files` (the goldens, round trips, the hardening files,
 truncation at every byte and every flipped bit), `test/test_card_autodj`
 (the AutoDJ index's own rules) and `test/test_name_key` (the keys the
-AutoDJ descriptions give).
+AutoDJ descriptions give). The play log's fixtures are for the
+firmware's log and the transfer software's reader, neither built yet;
+`tools/test_playlog.py` reads them today.

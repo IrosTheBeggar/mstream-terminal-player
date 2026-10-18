@@ -144,18 +144,7 @@ impl<'a> Container<'a> {
         let mut types: Vec<u32> = Vec::with_capacity(header.section_count as usize);
         let mut end = dir_end as u64;
         for i in 0..header.section_count {
-            let at = header.header_bytes as usize + (DIR_ENTRY * i) as usize;
-            let e = &bytes[at..at + DIR_ENTRY as usize];
-            let s = Section {
-                kind: u32_at(e, 0),
-                flags: u32_at(e, 4),
-                offset: u32_at(e, 8),
-                bytes: u32_at(e, 12),
-                count: u32_at(e, 16),
-                stride: u32_at(e, 20),
-                crc: u32_at(e, 24),
-                index: i,
-            };
+            let s = dir_entry(bytes, &header, i);
             let offset = s.offset as u64;
             if offset % 8 != 0 || offset < end || offset - end >= 8 {
                 return Err(Why::Layout);
@@ -208,6 +197,16 @@ impl<'a> Container<'a> {
         self.known.get(k).copied().flatten()
     }
 
+    /// A section found by its type in the directory, known to the format or
+    /// not: one a reader checks on its own, outside the format's rules for
+    /// the sections it knows, so that a bad one never changes the file's
+    /// verdict (MSMF's ACKS: 2.5.6). Where it lies passed the directory's
+    /// checks; its shape and its CRC are the caller's to check.
+    pub(crate) fn find(&self, kind: u32) -> Option<Section> {
+        let entry = |i| dir_entry(self.bytes, &self.header, i);
+        (0..self.header.section_count).map(entry).find(|s| s.kind == kind)
+    }
+
     /// A section's bytes.
     pub(crate) fn data(&self, s: &Section) -> &'a [u8] {
         &self.bytes[s.offset as usize..(s.offset + s.bytes) as usize]
@@ -226,6 +225,22 @@ impl<'a> Container<'a> {
 
     pub(crate) fn bytes(&self) -> &'a [u8] {
         self.bytes
+    }
+}
+
+/// Directory entry `i` of a file whose directory is inside it (2.4.2).
+fn dir_entry(bytes: &[u8], header: &Header, i: u32) -> Section {
+    let at = header.header_bytes as usize + (DIR_ENTRY * i) as usize;
+    let e = &bytes[at..at + DIR_ENTRY as usize];
+    Section {
+        kind: u32_at(e, 0),
+        flags: u32_at(e, 4),
+        offset: u32_at(e, 8),
+        bytes: u32_at(e, 12),
+        count: u32_at(e, 16),
+        stride: u32_at(e, 20),
+        crc: u32_at(e, 24),
+        index: i,
     }
 }
 

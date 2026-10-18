@@ -16,7 +16,7 @@ use super::device_txt::{DeviceTxt, Format};
 use super::fat::{fat_from_wall, fat_time, fat_valid, fat_wall, skew, time_matches};
 use super::mpdj::{self, Table};
 use super::mptg::{self, FolderIn, Ledger, Meta, Record, RecordIn, Tags};
-use super::msmf::{self, Candidate, Comp, Manifest, ManifestIn, Pick, elect};
+use super::msmf::{self, Ack, Candidate, Comp, Manifest, ManifestIn, Pick, elect};
 use super::mspd::{self, Op, Plan, PlanIn};
 use super::mpth;
 use super::numbers;
@@ -89,6 +89,25 @@ fn uuid(v: &Value) -> [u8; 16] {
 
 fn url_key(v: &Value) -> u64 {
     v.as_str().map_or(0, server_url_key)
+}
+
+/// A device id as the fixtures give one: 12 hex digits, with or without
+/// colons (`00:00:5e:00:53:01`).
+fn device_id(v: &Value) -> [u8; 6] {
+    let digits: String = text(v).chars().filter(|&c| c != ':').collect();
+    let mut id = [0; 6];
+    for (i, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).expect("a hex byte");
+    }
+    id
+}
+
+/// ACKS entries as the fixtures list them: deviceId, epoch, seq.
+fn acks_of(v: &Value) -> Vec<Ack> {
+    let ack = |e: &Value| {
+        Ack { device_id: device_id(&e["deviceId"]), epoch: num(&e["epoch"]), seq: num(&e["seq"]) as u32 }
+    };
+    v.as_array().into_iter().flatten().map(ack).collect()
 }
 
 // ── Descriptions into the writers' inputs ──────────────────────────────────
@@ -221,6 +240,7 @@ fn manifest_input(d: &Value) -> ManifestIn {
             .collect(),
         roots: d["roots"].as_array().into_iter().flatten().map(|r| text(r).to_owned()).collect(),
         servers: servers.entries,
+        acks: acks_of(&d["acks"]),
     }
 }
 
@@ -281,6 +301,7 @@ fn device_input(d: &Value) -> DeviceTxt {
         extensions: text(&d["extensions"]).to_owned(),
         max_rate: num(&d["max_rate"]) as u32,
         max_channels: num(&d["max_channels"]) as u32,
+        history: majors("history"),
     }
 }
 
@@ -362,14 +383,25 @@ fn every_vector_group_is_placed() {
         "deviceTxt",
         "mpdj",
         "softwareMatching",
+        // Of the play log's group, ACKS and device.txt's history key: the
+        // rest (the slots, the ids, the reader's cases, where a play goes)
+        // is the play-history sync's (2.20.6; B15, not built yet).
+        "plays",
     ]
     .into();
+    // Groups the pieces beside the kit check: names.rs the card paths
+    // (2.8.3-2.8.6); the volume layer the private files' read, the group's
+    // `settle` cases (2.12.7). The rest of that group (the names a private
+    // file may have, step 4's clean-up, a partial's fetch: 2.12.7, 2.12.8)
+    // is the engine's and set-up's (A8, A12, B2), not built yet.
+    let beside: BTreeSet<&str> = ["names", "privateFiles"].into();
+    assert!(beside.iter().all(|g| v[*g]["who"] == "software"));
     // The device's builder (2.9), milestone N2 of the player: never the
     // software's.
     let theirs: BTreeSet<&str> = ["builderPrecedence"].into();
     assert_eq!(v["builderPrecedence"]["who"], "builder");
     let groups: BTreeSet<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
-    let placed: BTreeSet<&str> = ours.union(&theirs).copied().collect();
+    let placed: BTreeSet<&str> = [ours, beside, theirs].iter().flatten().copied().collect();
     assert_eq!(groups, placed);
 }
 
@@ -729,6 +761,90 @@ fn vectors_device_txt() {
     assert!(!DeviceTxt::read(Some(b"contract=1\nread.mpdj=x2\n")).writes_mpdj());
 }
 
+/// The play log's parts the kit reads: MSMF's ACKS (2.5.6) and device.txt's
+/// `history` key (2.15).
+#[test]
+fn vectors_plays_acks_and_history() {
+    let v = vectors();
+    let a = &v["plays"]["acks"];
+    // One entry's bytes.
+    let e = &a["entry"];
+    let ack = acks_of(&Value::Array(vec![e.clone()]))[0];
+    assert_eq!(spaced_of(&ack.encode()), text(&e["stored"]));
+    assert_eq!(Ack::decode(&spaced(text(&e["stored"]))), ack);
+    // The golden root's entries in ACKS's order, unsigned epochs (its top
+    // bit set, EPOCH_2 sorts after EPOCH_1); the description gives them out
+    // of order. The device before its play log skips the section.
+    let g = &a["golden"];
+    let file = golden(text(&g["file"]));
+    let m = Manifest::read(&file, msmf::Uses::ALL).expect("the golden root");
+    assert_eq!(m.acks, acks_of(&g["entries"]));
+    assert_eq!((num(&g["stride"]), section_of(&file, msmf::ACKS).len()), (24, 24 * m.acks.len()));
+    assert!(Manifest::read(&file, msmf::Uses::DEVICE).expect("the root").acks.is_empty());
+    // Each commit carries the root before's entries forward (2.5.6), in any
+    // order given; a device and epoch twice is refused.
+    assert!(msmf::write(&m.to_input()).expect("carried forward") == file);
+    let mut reversed = m.to_input();
+    reversed.acks.reverse();
+    assert!(msmf::write(&reversed).expect("sorted") == file);
+    let mut twice = m.to_input();
+    twice.acks.push(Ack { seq: 9, ..twice.acks[0] });
+    assert!(msmf::write(&twice).is_err());
+    // The hardening files: the root reads, its ACKS taken or ignored.
+    for h in a["hardening"].as_array().expect("hardening") {
+        let name = text(&h["file"]);
+        assert_eq!(h["root"], "present", "{name}");
+        let m = Manifest::read(&bytes(&format!("hardening/{name}")), msmf::Uses::ALL).expect(name);
+        assert_eq!(m.acks, acks_of(&h["acks"]), "{name}: {}", h["note"]);
+    }
+    // Rows of a newer minor, carried forward: this writer's 24-byte rows.
+    let minor = bytes("hardening/msmf-acks-minor-1.bin");
+    let minor = Manifest::read(&minor, msmf::Uses::ALL).expect("a newer minor");
+    assert!(msmf::write(&minor.to_input()).expect("carried forward") == file);
+
+    for c in v["plays"]["deviceTxt"].as_array().expect("deviceTxt") {
+        let t = DeviceTxt::read(c["text"].as_str().map(str::as_bytes));
+        let want = c["history"].as_array().expect("majors").iter().fold(0, |m, h| m | 1 << (num(h) - 1));
+        assert_eq!((t.history, t.logs_plays()), (want, want != 0), "{}", c["text"]);
+        if t.present {
+            assert_eq!(DeviceTxt::read(Some(t.to_text().as_bytes())), t, "{}", c["text"]);
+        }
+    }
+}
+
+/// A root's ACKS damaged anywhere in its rows: the root still reads, the
+/// same but for its acknowledgements, which are ignored (2.5.6). Anywhere
+/// else a flipped bit makes the root absent, but in a gap no CRC covers.
+#[test]
+fn a_damaged_acks_never_makes_the_root_absent() {
+    let file = golden("manifest-acks.bin");
+    let whole = Manifest::read(&file, msmf::Uses::ALL).expect("the golden root");
+    let (off, len) = section_span(&file, msmf::ACKS);
+    let skip = gaps(&file);
+    let mut b = file.clone();
+    for at in 0..b.len() {
+        for bit in 0..8 {
+            b[at] ^= 1 << bit;
+            let read = Manifest::read(&b, msmf::Uses::ALL);
+            if (off..off + len).contains(&at) {
+                let m = read.expect("the root reads");
+                assert!(m.acks.is_empty(), "byte {at} bit {bit}");
+                assert_eq!(Manifest { acks: whole.acks.clone(), ..m }, whole);
+            } else if skip[at] {
+                assert_eq!(read.ok().as_ref(), Some(&whole), "a gap's byte {at}");
+            } else {
+                assert!(read.is_err(), "byte {at} bit {bit}");
+            }
+            b[at] ^= 1 << bit;
+        }
+    }
+    // Resealed, so its CRC passes: two entries swapped are out of order.
+    let mut swapped = file.clone();
+    swapped[off..off + 48].copy_from_slice(&[&file[off + 24..off + 48], &file[off..off + 24]].concat());
+    reseal(&mut swapped);
+    assert!(Manifest::read(&swapped, msmf::Uses::ALL).expect("the root reads").acks.is_empty());
+}
+
 #[test]
 fn vectors_mpdj() {
     let v = vectors();
@@ -867,7 +983,7 @@ fn goldens_are_written_byte_for_byte() {
         .map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(seen, goldens, "a golden with no description, or the other way");
-    assert_eq!(goldens.len(), 17);
+    assert_eq!(goldens.len(), 18);
 }
 
 /// An Auto DJ golden read and checked whole, then laid out again from its
@@ -970,9 +1086,9 @@ fn goldens_read_back() {
 
     // The device reads the roots and the tags files without the sections it
     // ignores.
-    for name in ["manifest.bin", "manifest-servers.bin", "manifest-min.bin"] {
+    for name in ["manifest.bin", "manifest-servers.bin", "manifest-min.bin", "manifest-acks.bin"] {
         let m = Manifest::read(&golden(name), msmf::Uses::DEVICE).expect("a root");
-        assert!(m.servers.is_empty());
+        assert!(m.servers.is_empty() && m.acks.is_empty());
     }
     let t = mptg::read(&tags_file, mptg::Uses::DEVICE).expect("the tags");
     assert!(!t.has_ledger && t.records.iter().all(|e| e.ledger.is_none()));
@@ -1017,7 +1133,7 @@ fn assert_same_index(want: &[u8], got: &[u8], what: &str) {
 fn hardening_files_read_as_listed() {
     let index = json("hardening/index.json");
     let entries = index.as_array().expect("the index");
-    assert_eq!(entries.len(), 128);
+    assert_eq!(entries.len(), 132);
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for e in entries {
         let file = text(&e["file"]);
@@ -1060,7 +1176,7 @@ fn hardening_files_read_as_listed() {
     assert_eq!(counts.into_iter().collect::<Vec<_>>(), [
         ("MPDJ".to_owned(), 50),
         ("MPTG".to_owned(), 52),
-        ("MSMF".to_owned(), 17),
+        ("MSMF".to_owned(), 21),
         ("MSPD".to_owned(), 9),
     ]);
 
@@ -1165,7 +1281,7 @@ fn newer_flag_bits_are_dropped_when_carried() {
     assert!(msmf::write(&ManifestIn { servers: root.servers.clone(), ..root.to_input() }).is_err());
     assert!(msmf::write(&ManifestIn { flags: root.flags, ..root.to_input() }).is_err());
     // The goldens' roots, carried forward unchanged.
-    for name in ["manifest.bin", "manifest-min.bin", "manifest-servers.bin"] {
+    for name in ["manifest.bin", "manifest-min.bin", "manifest-servers.bin", "manifest-acks.bin"] {
         let m = Manifest::read(&golden(name), msmf::Uses::ALL).expect("a root");
         assert!(msmf::write(&m.to_input()).expect("carried forward") == golden(name), "{name}");
     }
@@ -1263,6 +1379,7 @@ fn mutated_files_never_panic() {
         "tags-device.bin",
         "manifest.bin",
         "manifest-servers.bin",
+        "manifest-acks.bin",
         "pending.bin",
         "autodj-00000029.bin",
         "autodj-small-default.bin",

@@ -7,7 +7,8 @@
 //! ASCII, LF line ends (CRLF tolerated), one `key=value` a line; unknown
 //! keys are ignored. A key missing reads as its no-file value, a key with
 //! an empty value (`read.mpdj=`) says none, and the `contract` line is what
-//! makes a file a `device.txt` at all.
+//! makes a file a `device.txt` at all. `history` (the play log's majors)
+//! comes with the firmware that keeps the log (2.20); none writes it yet.
 
 use super::mpdj;
 
@@ -38,6 +39,10 @@ pub(crate) struct DeviceTxt {
     pub(crate) extensions: String,
     pub(crate) max_rate: u32,
     pub(crate) max_channels: u32,
+    /// The majors of the play log (2.20) the firmware writes: it keeps one,
+    /// so its clock is worth setting. 0 (no key, or none listed): it keeps
+    /// none. The software reads the log files whatever this says (2.15).
+    pub(crate) history: u32,
 }
 
 /// The longest value kept: a list of every codec there is fits many times.
@@ -46,8 +51,9 @@ const VALUE_MAX: usize = 1024;
 impl DeviceTxt {
     /// A card with no device.txt (a new card, or firmware before this
     /// design): every format's major 1 except MPDJ, which is none; mp3 and
-    /// flac; 48 kHz; two channels. Firmware 0.7.0 plays Opus but can't say
-    /// so; the software MAY ask the listener rather than convert.
+    /// flac; 48 kHz; two channels; no play log. Firmware 0.7.0 plays Opus
+    /// but can't say so; the software MAY ask the listener rather than
+    /// convert.
     pub(crate) fn defaults() -> DeviceTxt {
         DeviceTxt {
             present: false,
@@ -61,6 +67,7 @@ impl DeviceTxt {
             extensions: "mp3,flac".into(),
             max_rate: 48_000,
             max_channels: 2,
+            history: 0,
         }
     }
 
@@ -89,6 +96,7 @@ impl DeviceTxt {
                 b"extensions" => out.extensions = text_value(value),
                 b"max_rate" => out.max_rate = number(value).unwrap_or(out.max_rate),
                 b"max_channels" => out.max_channels = number(value).unwrap_or(out.max_channels),
+                b"history" => out.history = majors(value),
                 _ => {}
             }
         }
@@ -110,6 +118,11 @@ impl DeviceTxt {
         (1..=32).contains(&major) && mask >> (major - 1) & 1 != 0
     }
 
+    /// The firmware keeps a play log (2.20): `history` lists a major.
+    pub(crate) fn logs_plays(&self) -> bool {
+        self.history != 0
+    }
+
     /// The software writes MPDJ v2 only when `read.mpdj` lists 2, and no
     /// MPDJ otherwise (AUTODJ-INDEX.md 7.4): no reader of v1 exists, and
     /// firmware 0.8.0-0.10.0 lists 1 without reading it.
@@ -128,13 +141,18 @@ impl DeviceTxt {
     }
 
     /// The text the firmware writes for these values, keys in 2.15's order
-    /// (the software never writes `/.player`; this is for tests and fakes).
+    /// (the software never writes `/.player`; this is for tests and fakes),
+    /// `history` last and only when the firmware keeps a play log.
     pub(crate) fn to_text(&self) -> String {
         let majors = |mask: u32| (1..=32u32).filter(move |m| mask >> (m - 1) & 1 != 0).map(|m| m.to_string());
         let list = |mask: u32| majors(mask).collect::<Vec<_>>().join(",");
+        let history = match self.logs_plays() {
+            true => format!("history={}\n", list(self.history)),
+            false => String::new(),
+        };
         format!(
             "contract={}\nfirmware={}\nread.msmf={}\nread.mptg={}\nread.mpdj={}\nread.mpth={}\ncodecs={}\n\
-             extensions={}\nmax_rate={}\nmax_channels={}\n",
+             extensions={}\nmax_rate={}\nmax_channels={}\n{}",
             self.contract,
             self.firmware,
             list(self.read_msmf),
@@ -144,7 +162,8 @@ impl DeviceTxt {
             self.codecs,
             self.extensions,
             self.max_rate,
-            self.max_channels
+            self.max_channels,
+            history
         )
     }
 }

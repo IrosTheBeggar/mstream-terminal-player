@@ -4,9 +4,10 @@
 //! — exactly one tags file, then at most one Auto DJ index — each by its
 //! generation, length and header CRC. Writing it, through `manifest.tmp`, is
 //! the moment a run's work becomes visible. Its header describes server 0,
-//! the root's own server; `SRVS` lists the others (2.5.5). [`elect`] is
-//! which of `manifest.bin` and `manifest.tmp` counts (2.5.4); the same rule
-//! picks between `pending.bin` and `pending.tmp`.
+//! the root's own server; `SRVS` lists the others (2.5.5), and `ACKS` the
+//! plays of the device's log the software has (2.5.6). [`elect`] is which
+//! of `manifest.bin` and `manifest.tmp` counts (2.5.4); the same rule picks
+//! between `pending.bin` and `pending.tmp`.
 
 use super::container::{self, Container, FileMeta, FormatSpec, Header, SectionOut, SectionSpec};
 use super::container::{MPDJ, MPTG, MSMF, REQUIRED, STRS, StrCursor, Strs};
@@ -18,11 +19,13 @@ use super::{WriteError, Why};
 pub(crate) const COMP: u32 = fourcc(b"COMP");
 pub(crate) const LIBR: u32 = fourcc(b"LIBR");
 pub(crate) const SRVS: u32 = fourcc(b"SRVS");
+pub(crate) const ACKS: u32 = fourcc(b"ACKS");
 
 pub(crate) const MAJOR: u16 = 1;
 pub(crate) const HEADER_BYTES: u32 = 96;
 pub(crate) const COMP_STRIDE: u32 = 40;
 pub(crate) const LIBR_STRIDE: u32 = 4;
+pub(crate) const ACK_STRIDE: u32 = 24;
 /// Header flag bit 0: this commit ended a run (clear: a checkpoint).
 pub(crate) const FINAL: u32 = 1;
 
@@ -32,7 +35,8 @@ const SEC_STRS: usize = 2;
 const SEC_SRVS: usize = 3;
 
 /// MSMF as the software reads it: the device's three sections, and SRVS,
-/// which the device never reads (an optional section it skips).
+/// which the device never reads (an optional section it skips). ACKS is
+/// not among them: a reader takes it apart from these rules (2.5.6).
 const SPEC: FormatSpec = FormatSpec {
     magic: MSMF,
     major: MAJOR,
@@ -58,15 +62,53 @@ const DEVICE_SPEC: FormatSpec = FormatSpec {
     ],
 };
 
-/// Which sections a reader uses: the software reads SRVS, the device not.
+/// Which sections a reader uses: the software reads SRVS and ACKS; the
+/// device never reads SRVS, and before its play log (not built yet) skips
+/// ACKS too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Uses {
     pub(crate) servers: bool,
+    pub(crate) acks: bool,
 }
 
 impl Uses {
-    pub(crate) const ALL: Uses = Uses { servers: true };
-    pub(crate) const DEVICE: Uses = Uses { servers: false };
+    pub(crate) const ALL: Uses = Uses { servers: true, acks: true };
+    pub(crate) const DEVICE: Uses = Uses { servers: false, acks: false };
+}
+
+/// An ACKS entry (2.5.6): every play slot of this device and epoch with a
+/// seq up to `seq` is settled (2.20.6), so the device may trim it. Ordered
+/// as ACKS lists them: by the device id's bytes, then the epoch unsigned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Ack {
+    /// The device's id as its play slots give it (2.20.4).
+    pub(crate) device_id: [u8; 6],
+    pub(crate) epoch: u64,
+    pub(crate) seq: u32,
+}
+
+impl Ack {
+    /// The entry's 24 bytes; its reserved bytes 0.
+    pub(crate) fn encode(&self) -> [u8; ACK_STRIDE as usize] {
+        let mut row = [0; ACK_STRIDE as usize];
+        row[..6].copy_from_slice(&self.device_id);
+        row[8..16].copy_from_slice(&self.epoch.to_le_bytes());
+        row[16..20].copy_from_slice(&self.seq.to_le_bytes());
+        row
+    }
+
+    /// An entry from the first 24 bytes of its row (a newer minor's longer
+    /// row is read by its prefix); the reserved bytes aren't read.
+    pub(crate) fn decode(row: &[u8]) -> Ack {
+        let mut device_id = [0; 6];
+        device_id.copy_from_slice(&row[..6]);
+        Ack { device_id, epoch: u64_at(row, 8), seq: u32_at(row, 16) }
+    }
+
+    /// The device and epoch the entry is for: each once in an ACKS.
+    pub(crate) fn key(&self) -> ([u8; 6], u64) {
+        (self.device_id, self.epoch)
+    }
 }
 
 /// A companion the root names (2.5.3).
@@ -138,6 +180,11 @@ pub(crate) struct Manifest {
     /// SRVS's entries, server i being entry i − 1 (empty when SRVS is
     /// absent, or not read: [`Uses::DEVICE`]).
     pub(crate) servers: Vec<Server>,
+    /// ACKS's entries, in its order: empty when the root has none, when it
+    /// isn't read ([`Uses::DEVICE`]), and when it breaks one of 2.5.6's
+    /// checks (the root stays valid; the software writes it again from its
+    /// marks).
+    pub(crate) acks: Vec<Ack>,
 }
 
 impl Manifest {
@@ -159,12 +206,14 @@ impl Manifest {
 
     /// What [`write`] makes this root from again, and so the base of the
     /// next commit's, which sets its own generation, commit and companions:
-    /// the same header values, companions, roots and servers (SRVS's when
-    /// the root was read with [`Uses::ALL`]). The minor is this writer's, 0:
-    /// a newer minor's additions are dropped (2.4.5). That is its longer
-    /// header and rows, its sections, a COMP entry of a kind v1 doesn't
-    /// know, and every flag bit v1 doesn't define (a writer sets only the
-    /// bits it defines): the header's past FINAL, an SRVS entry's past PEER.
+    /// the same header values, companions, roots, servers and ACKS entries
+    /// (SRVS's and ACKS's when the root was read with [`Uses::ALL`]: each
+    /// commit carries the root before's acknowledgements forward, 2.5.6).
+    /// The minor is this writer's, 0: a newer minor's additions are dropped
+    /// (2.4.5). That is its longer header and rows, its sections, a COMP
+    /// entry of a kind v1 doesn't know, and every flag bit v1 doesn't define
+    /// (a writer sets only the bits it defines): the header's past FINAL,
+    /// an SRVS entry's past PEER.
     /// An entry that breaks a writer rule of 2.5.5 is kept as it is, and
     /// [`write`] refuses it: what becomes of its rows is the run's to say.
     pub(crate) fn to_input(&self) -> ManifestIn {
@@ -183,6 +232,7 @@ impl Manifest {
             comps: std::iter::once(self.tags.clone()).chain(self.autodj.clone()).collect(),
             roots: self.roots.clone(),
             servers: self.servers.iter().map(|s| Server { flags: s.flags & PEER, ..*s }).collect(),
+            acks: self.acks.clone(),
         }
     }
 
@@ -193,7 +243,9 @@ impl Manifest {
     /// (a relative path of names, the roots strictly increasing); then the
     /// sections' CRCs. With [`Uses::ALL`] SRVS too: rows of at least 40
     /// bytes, and its CRC. An entry that breaks a writer rule is not damage
-    /// (its rows' server is unknown: [`Servers::get`]).
+    /// (its rows' server is unknown: [`Servers::get`]). And ACKS, found by
+    /// its type and checked on its own ([`read_acks`]): it never makes the
+    /// root absent.
     pub(crate) fn read(bytes: &[u8], uses: Uses) -> Result<Manifest, Why> {
         let c = Container::open(bytes, if uses.servers { &SPEC } else { &DEVICE_SPEC })?;
         let th = c.type_header();
@@ -275,6 +327,7 @@ impl Manifest {
             let row = |i| Server::decode(c.row(&srvs, i, SRVS_STRIDE as usize));
             servers = (0..srvs.count).map(row).collect();
         }
+        let acks = if uses.acks { read_acks(&c) } else { Vec::new() };
         Ok(Manifest {
             header: *c.header(),
             commit_time,
@@ -289,8 +342,29 @@ impl Manifest {
             autodj,
             roots,
             servers,
+            acks,
         })
     }
+}
+
+/// ACKS as a reader that uses it takes it (2.5.6): found by its type in the
+/// directory and checked apart from the container's rules for the sections
+/// MSMF knows, whose stride and length checks would make the root absent.
+/// Rows of at least 24 bytes (a longer one read by its prefix), bytes =
+/// count × stride, its CRC, and the entries in order, each device and
+/// epoch once. One that fails any of these is ignored: ACKS only lets the
+/// device trim its log, so losing it only keeps more plays.
+fn read_acks(c: &Container<'_>) -> Vec<Ack> {
+    let Some(s) = c.find(ACKS) else { return Vec::new() };
+    let shaped = s.stride >= ACK_STRIDE && s.count as u64 * s.stride as u64 == s.bytes as u64;
+    if !shaped || !c.crc_ok(&s) {
+        return Vec::new();
+    }
+    let acks: Vec<Ack> = (0..s.count).map(|i| Ack::decode(c.row(&s, i, ACK_STRIDE as usize))).collect();
+    if acks.windows(2).any(|w| w[0].key() >= w[1].key()) {
+        return Vec::new();
+    }
+    acks
 }
 
 /// What a root's writer is given: every value a writer would otherwise
@@ -316,15 +390,21 @@ pub(crate) struct ManifestIn {
     /// order is the caller's, which keeps each server's index from the
     /// commit before while it can (2.5.5).
     pub(crate) servers: Vec<Server>,
+    /// The plays acknowledged, in any order: the writer sorts them. Only a
+    /// commit a run makes anyway carries new ones (2.5.6); the caller
+    /// raises each to its mark, never lowers one.
+    pub(crate) acks: Vec<Ack>,
 }
 
 /// Writes a root (2.5): COMP; LIBR when a root other than `/music` is
 /// given; STRS (the producer, the revision, the companions' names, the
-/// roots); SRVS when other servers are. Refused: COMP that isn't one MPTG
+/// roots); SRVS when other servers are; ACKS, after it, when plays are
+/// acknowledged, by device id then epoch. Refused: COMP that isn't one MPTG
 /// then at most one MPDJ; a root that isn't a relative path of names, or
 /// twice; an SRVS entry that breaks a writer rule of 2.5.5; a header or SRVS
-/// flag bit v1 doesn't define (2.4.5). That SRVS lists exactly the servers
-/// the tags file's rows name is the caller's to keep ([`servers_match_rows`]).
+/// flag bit v1 doesn't define (2.4.5); a device and epoch acknowledged
+/// twice. That SRVS lists exactly the servers the tags file's rows name is
+/// the caller's to keep ([`servers_match_rows`]).
 pub(crate) fn write(m: &ManifestIn) -> Result<Vec<u8>, WriteError> {
     let comps_ok = match m.comps.as_slice() {
         [t] => t.kind == MPTG,
@@ -352,6 +432,11 @@ pub(crate) fn write(m: &ManifestIn) -> Result<Vec<u8>, WriteError> {
     if m.flags & !FINAL != 0 || m.servers.iter().any(|s| s.flags & !PEER != 0) {
         return Err(WriteError("a flag bit v1 doesn't define"));
     }
+    let mut acks = m.acks.clone();
+    acks.sort();
+    if acks.windows(2).any(|w| w[0].key() == w[1].key()) {
+        return Err(WriteError("ACKS: a device and epoch twice"));
+    }
 
     let mut strs = Strs::new();
     let producer = strs.add(m.producer.as_bytes());
@@ -369,6 +454,7 @@ pub(crate) fn write(m: &ManifestIn) -> Result<Vec<u8>, WriteError> {
     }
     let libr: Vec<u8> = roots.iter().flat_map(|r| strs.add(r.as_bytes()).to_le_bytes()).collect();
     let srvs: Vec<u8> = m.servers.iter().flat_map(|s| s.encode()).collect();
+    let ack_rows: Vec<u8> = acks.iter().flat_map(Ack::encode).collect();
 
     let mut th = Vec::with_capacity((HEADER_BYTES - 40) as usize);
     th.extend_from_slice(&m.commit_time.to_le_bytes());
@@ -392,6 +478,12 @@ pub(crate) fn write(m: &ManifestIn) -> Result<Vec<u8>, WriteError> {
         // Optional, never REQUIRED: the device doesn't know it (2.5.5).
         let count = m.servers.len() as u32;
         sections.push(SectionOut { kind: SRVS, flags: 0, count, stride: SRVS_STRIDE, data: &srvs });
+    }
+    if !acks.is_empty() {
+        // Optional, never REQUIRED, no strings: the device before its play
+        // log doesn't know it (2.5.6).
+        let count = acks.len() as u32;
+        sections.push(SectionOut { kind: ACKS, flags: 0, count, stride: ACK_STRIDE, data: &ack_rows });
     }
     let (minor, generation, card_id) = (m.minor, m.generation, m.card_id);
     let meta = FileMeta { magic: MSMF, major: MAJOR, minor, generation, card_id };
