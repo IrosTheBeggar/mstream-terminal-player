@@ -200,8 +200,9 @@ fn opus(at: &dyn At) -> Result<Heard, String> {
     if last.granule < 0 {
         return Err("its last page ends no packet".into());
     }
+    // 48 samples a millisecond: no product to overflow, whatever the page.
     let samples = (last.granule - pre_skip).max(0) as u64;
-    Ok(Heard { ms: samples * 1000 / 48_000, channels, ended: last.flags & 0x04 != 0 })
+    Ok(Heard { ms: samples / 48, channels, ended: last.flags & 0x04 != 0 })
 }
 
 // ── MP3 ─────────────────────────────────────────────────────────────────────
@@ -288,6 +289,10 @@ fn mp3(at: &dyn At) -> Result<Heard, String> {
         if pos < block_at || pos + 4 > block_at + block.len() as u64 {
             block = read(pos, BLOCK)?;
             block_at = pos;
+            if block.len() < 4 {
+                // Shorter than its size said: the frames so far.
+                break;
+            }
         }
         let at_block = (pos - block_at) as usize;
         let head = [block[at_block], block[at_block + 1], block[at_block + 2], block[at_block + 3]];
@@ -430,6 +435,38 @@ pub(crate) mod tests {
         assert!(opus(&Mem(torn)).is_err());
         let mp3 = Mem(mp3_bytes(10, false));
         assert!(opus(&mp3).unwrap_err().contains("Ogg"), "not Ogg at all");
+
+        // A whole last page whose granule is as large as one can be: a
+        // length no track has, never an overflow.
+        let mut huge = opus_bytes(1_000, 2, false);
+        huge.extend(ogg_page(0x04, i64::MAX, 9, &[&[0xF8, 0xFF, 0xFE]]));
+        let got = opus(&Mem(huge)).unwrap();
+        assert_eq!(got.ms, (i64::MAX as u64 - 312) / 48);
+        assert!(check(&got, Some(181_500), 2).is_err());
+    }
+
+    /// Bytes that are fewer than the size first said: a file cut since.
+    struct Shrunk(Vec<u8>, u64);
+
+    impl At for Shrunk {
+        fn size(&self) -> u64 {
+            self.1
+        }
+
+        fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            Mem(self.0.clone()).read_at(offset, len)
+        }
+    }
+
+    #[test]
+    fn a_file_shorter_than_its_size_said_ends_the_walk() {
+        let bytes = mp3_bytes(100, false);
+        let size = bytes.len() as u64 + 1_000;
+        assert_eq!(mp3(&Shrunk(bytes, size)).unwrap().ms, 2_612);
+        let stream = opus_bytes(2_000, 2, true);
+        let size = stream.len() as u64 + 1_000;
+        assert_eq!(opus(&Shrunk(stream, size)).unwrap().ms, 2_000, "its tail as it is");
+        assert!(opus(&Shrunk(Vec::new(), 1 << 20)).is_err());
     }
 
     #[test]

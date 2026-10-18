@@ -70,7 +70,9 @@ impl Session<'_> {
     /// Runs a plan made in this session, its guards all answered. The card
     /// is let go at the end (run.lock deleted), and when the run stops on a
     /// card that is still the bound one; a pulled or different card is
-    /// never written again.
+    /// never written again. A run that ends writes the card's settings
+    /// first, when [`Hooks::state`] gives them: in this session, so no
+    /// second one lists the card again for one private file.
     pub(crate) fn run(
         mut self,
         plan: Plan,
@@ -90,8 +92,19 @@ impl Session<'_> {
             return Err(stop);
         }
         let result = Runner::new(&mut self, &plan).and_then(|mut r| r.go(fetcher, hooks, events));
+        let mut gone = false;
+        let result = result.map(|mut outcome| {
+            let seq = self.settled.state.seq + 1;
+            if let Some(bytes) = hooks.state(&outcome, seq) {
+                let wrote = self.write_state(&bytes);
+                gone = matches!(wrote, Err(Stop::DifferentCard | Stop::Pulled));
+                outcome.stored = wrote.map_err(|stop| stop.to_string());
+            }
+            outcome
+        });
         match result {
             Err(stop @ (Stop::DifferentCard | Stop::Pulled)) => Err(stop),
+            Ok(outcome) if gone => Ok(outcome),
             other => {
                 self.bound.release();
                 other
@@ -324,6 +337,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             parked,
             report: self.report.clone(),
             verified,
+            stored: Ok(()),
         }
     }
 

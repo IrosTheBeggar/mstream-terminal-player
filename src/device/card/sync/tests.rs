@@ -7,9 +7,11 @@
 //! the embeddings are made-up vectors (no real index: AUTODJ-INDEX.md 12.5).
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, UNIX_EPOCH};
 
 use base64::Engine;
 use serde_json::{Value, json};
@@ -17,14 +19,16 @@ use serde_json::{Value, json};
 use super::*;
 use crate::api::transfer::stub::{Asked, chunked, json as json_reply, reply, routed};
 use crate::device::card::cards::Cards;
-use crate::device::card::contract::mptg::{BPM_ANALYSED, CONTAINER_OPUS};
+use crate::device::card::contract::mptg::{BPM_ANALYSED, CONTAINER_MP3, CONTAINER_OPUS};
 use crate::device::card::contract::mpth;
 use crate::device::card::contract::order::thumb_path_of;
 use crate::device::card::contract::prim::{hex, md5};
+use crate::device::card::covers::PROBES;
 use crate::device::card::covers::tests::picture;
+use crate::device::card::engine::Removal;
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::setup;
-use crate::device::card::source::length::tests::opus_bytes;
+use crate::device::card::source::length::tests::{mp3_bytes, opus_bytes};
 use crate::device::card::volume::Inspection;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -79,6 +83,11 @@ struct Library {
     converted: HashMap<String, Vec<u8>>,
     /// Conversions that end short once, as a dying ffmpeg leaves them.
     short_once: HashSet<String>,
+    /// Files whose `/media` GET answers 401: the sign-in revoked mid-run.
+    refused: HashSet<String>,
+    /// Rock's folder on this computer: the session is an admin's, which
+    /// may ask `admin/directories`.
+    disk: Option<PathBuf>,
     /// Every request, as "METHOD path".
     asked: Vec<String>,
 }
@@ -137,14 +146,25 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
     let not_found = || json_reply("404 Not Found", r#"{"error":"Not Found"}"#);
     match (asked.method.as_str(), path.as_str()) {
         ("GET", "/api/") => {
-            let body = json!({
+            let mut body = json!({
                 "server": "6.31.1",
                 "features": {"sync": true, "transcode": {"defaultCodec": "opus", "defaultBitrate": "96k"},
                              "discovery": true},
                 "user": {"vpaths": lib.vpaths, "admin": false},
             });
+            if lib.disk.is_some() {
+                body["user"]["admin"] = json!(true);
+                body["admin"] = json!({"platform": if cfg!(windows) { "win32" } else { "linux" }});
+            }
             json_reply("200 OK", &body.to_string())
         }
+        ("GET", "/api/v1/admin/directories") => match &lib.disk {
+            Some(dir) => {
+                let body = json!({"Rock": {"id": 1, "root": dir.to_string_lossy(), "followSymlinks": false}});
+                json_reply("200 OK", &body.to_string())
+            }
+            None => json_reply("403 Forbidden", r#"{"error":"Access Denied"}"#),
+        },
         ("POST", "/api/v1/sync/manifest") => {
             let body = asked.json();
             let quoted = format!("\"{}\"", lib.revision);
@@ -192,6 +212,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
         }
         ("GET" | "HEAD", p) if p.starts_with("/media/") => {
             let rel = &p["/media/".len()..];
+            if asked.method == "GET" && lib.refused.contains(rel) {
+                return json_reply("401 Unauthorized", r#"{"error":"Authentication Error"}"#);
+            }
             let bytes = lib.tracks.iter().find(|t| t.path == rel).map(|t| t.bytes.clone());
             match bytes.or_else(|| lib.images.get(rel).cloned()) {
                 Some(bytes) => media(asked, &bytes),
@@ -290,10 +313,21 @@ fn space(free: u64) -> Option<Space> {
 
 /// One sync of `card` from the server at `base`, as the command makes one.
 fn sync_now(card: &FatSim, base: &str, ask: &Ask, envs: &mut dyn FnMut() -> Env) -> (Synced, Vec<Event>) {
+    sync_via(card, base, ask, envs, Reached::Elsewhere)
+}
+
+/// [`sync_now`], the server reached as `reached` says.
+fn sync_via(
+    card: &FatSim,
+    base: &str,
+    ask: &Ask,
+    envs: &mut dyn FnMut() -> Env,
+    reached: Reached,
+) -> (Synced, Vec<Event>) {
     let client = Arc::new(Client::new(base).unwrap().with_token(Some("tok".into())));
     let mut events = Vec::new();
     let mut cards = Cards::default();
-    let synced = sync(card, space(32 << 30), client, Reached::Elsewhere, ask, &mut cards, envs, &mut |e| {
+    let synced = sync(card, space(32 << 30), client, reached, ask, &mut cards, envs, &mut |e| {
         if !matches!(e, Event::Progress { .. }) {
             events.push(e);
         }
@@ -333,9 +367,15 @@ fn a_first_sync_fills_the_card_as_the_kit_and_the_player_read_it() {
     let (base, fake) = server();
     fake.lock().unwrap().short_once.insert("Rock/Artist C/Album D/01.wav".into());
     let mut envs = envs();
+    let set_up = sim.log().len();
     let (synced, events) = sync_now(&sim, &base, &rock(), &mut envs);
     let outcome = ran(&synced);
     assert_eq!(outcome.verified, Ok(()), "{:?}", synced.notes);
+    assert_eq!(outcome.stored, Ok(()));
+    // One session, its settings stored before it let the card go: run.lock
+    // taken once.
+    let locks = sim.log()[set_up..].iter().filter(|op| op.starts_with("lock ")).count();
+    assert_eq!(locks, 1);
     assert_eq!((outcome.written, outcome.records, outcome.deleted), (4, 4, 0), "{:?}", outcome.report);
     let summary = synced.summary.as_ref().unwrap();
     assert_eq!((summary.listed, summary.fetches, summary.conversions), (Listed::Whole, 4, 1));
@@ -521,4 +561,243 @@ fn a_card_not_set_up_or_a_server_with_no_manifest_is_refused() {
     });
     let synced = sync_now(&set_up, &old, &rock(), &mut envs()).0;
     assert!(matches!(synced.end, End::Halted(Halt::Server(_))), "{:?}", synced.end);
+}
+
+#[test]
+fn a_lost_thumbnail_is_made_again_and_an_album_with_nothing_is_looked_at_once() {
+    let scratch = Scratch::new("thumbs");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    {
+        // Album B: its folder's cover.jpg, and no art mStream names. Album
+        // H: neither.
+        let mut lib = fake.lock().unwrap();
+        for t in lib.tracks.iter_mut().filter(|t| t.path.contains("/Album B/")) {
+            t.art = None;
+        }
+        let mut bare = lib.tracks[4].clone();
+        (bare.path, bare.id) = ("Rock/Artist G/Album H/01.mp3".into(), 6);
+        lib.tracks.push(bare);
+        lib.revision = "1:6:1790000000006:5".into();
+    }
+    let (b, d, h) = ("Artist A/Album B", "Artist C/Album D", "Artist G/Album H");
+    let thumb = |album: &str| scratch.0.join("card/.mstream").join(thumb_path_of(album));
+    let made = |album: &str| std::fs::read(thumb(album)).is_ok_and(|t| mpth::check(&t, path_hash(album)));
+    let art = |sim: &FatSim| State::of(&look(sim).state).unwrap().settings.art;
+    let probes = |album: &str| {
+        let head = format!("HEAD /media/Rock/{album}/");
+        fake.lock().unwrap().asked.iter().filter(|a| a.starts_with(&head)).count()
+    };
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    assert!(made(b) && made(d) && !made(h));
+    let first = art(&sim);
+    assert_eq!(first.get(&path_hash(b)), Some(&FOLDER_IMAGE));
+    assert_eq!(first.get(&path_hash(d)), Some(&art_key(["d.png"])));
+    assert_eq!(first.get(&path_hash(h)), Some(&NO_ART));
+    assert_eq!(probes(h), PROBES.len());
+
+    // Both lost: a 304's run makes them again, from the folder's image and
+    // from the art the files' metadata names now (step 10's check).
+    std::fs::remove_file(thumb(b)).unwrap();
+    std::fs::remove_file(thumb(d)).unwrap();
+    let mended = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(mended.summary.as_ref().unwrap().listed, Listed::NotModified);
+    assert_eq!(ran(&mended).verified, Ok(()));
+    assert!(made(b) && made(d));
+    assert_eq!(art(&sim), first);
+
+    // Lost again, and the manifest read whole: made again.
+    std::fs::remove_file(thumb(b)).unwrap();
+    let whole = sync_now(&sim, &base, &Ask { whole: true, ..Ask::default() }, &mut envs).0;
+    assert_eq!(whole.summary.as_ref().unwrap().listed, Listed::Whole);
+    assert_eq!(ran(&whole).verified, Ok(()));
+    assert!(made(b));
+    assert_eq!(art(&sim), first);
+    // The album with nothing to make one from was looked at once.
+    assert_eq!(probes(h), PROBES.len());
+}
+
+#[test]
+fn another_address_confirmed_as_the_same_server_is_one_source_from_then_on() {
+    let scratch = Scratch::new("same");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let served = fake.clone();
+    let other = routed(move |asked| answer(&served, asked));
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+
+    // Another address: a server of its own, or this one? Asked (U7).
+    let asked = sync_now(&sim, &other, &Ask::default(), &mut envs).0;
+    let End::Halted(Halt::Card(Stop::Unanswered(guards))) = &asked.end else { panic!("{:?}", asked.end) };
+    assert!(matches!(guards[..], [Guard::Server { .. }]), "{guards:?}");
+    let same = Ask { same_server: true, ..Ask::default() };
+    let synced = sync_now(&sim, &other, &same, &mut envs).0;
+    let outcome = ran(&synced);
+    assert_eq!((outcome.written, outcome.deleted, outcome.records), (0, 0, 4));
+
+    // Either address from now on, with no question: one source, which
+    // answers both.
+    for address in [&base, &other, &base] {
+        let synced = sync_now(&sim, address, &Ask::default(), &mut envs).0;
+        let outcome = ran(&synced);
+        assert_eq!((outcome.written, outcome.deleted, outcome.records), (0, 0, 4));
+    }
+    let s = State::of(&look(&sim).state).unwrap().settings;
+    assert_eq!(s.sources.len(), 1, "{:?}", s.sources);
+    let source = &s.sources[0];
+    let keys = (server_url_key(&base), server_url_key(&other));
+    assert_eq!((source.url_key, source.confirmed.clone()), (keys.0, vec![keys.1]));
+    assert_eq!((source.nickname.as_str(), source.libraries.clone()), ("Home", vec!["Rock".to_string()]));
+}
+
+#[test]
+fn a_card_that_never_removes_keeps_what_the_server_dropped() {
+    let scratch = Scratch::new("never");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    let never = Ask { change: Change { removal: Some(Removal::Never), ..rock().change }, ..rock() };
+    ran(&sync_now(&sim, &base, &never, &mut envs).0);
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks.retain(|t| !t.path.ends_with("02.opus"));
+        lib.revision = "1:4:1790000000005:3".into();
+    }
+    let synced = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let summary = synced.summary.as_ref().unwrap();
+    assert_eq!(summary.listed, Listed::Whole);
+    assert!(summary.removals.is_empty() && summary.guards.is_empty(), "{summary:?}");
+    assert_eq!(summary.report.kept.len(), 1, "{:?}", summary.report);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.deleted, outcome.records, outcome.verified.clone()), (0, 4, Ok(())));
+    assert!(scratch.0.join("card/music/Artist C/Album D/02.opus").exists());
+    assert_eq!(State::of(&look(&sim).state).unwrap().settings.removal, Removal::Never);
+}
+
+#[test]
+fn a_state_file_of_another_identity_is_refused() {
+    let scratch = Scratch::new("identity");
+    let sim = card(&scratch);
+    let (base, _fake) = server();
+    let mut state = State::of(&volume::inspect(&sim).unwrap().state).unwrap();
+    state.card_id ^= 1;
+    std::fs::write(scratch.0.join("card/.mstream/state.json"), state.text(state.seq + 1)).unwrap();
+    let image = sim.image();
+    let synced = sync_now(&sim, &base, &rock(), &mut envs()).0;
+    let refused = matches!(&synced.end, End::Halted(Halt::Refused(why)) if why.contains("another identity"));
+    assert!(refused, "{:?}", synced.end);
+    assert_eq!(sim.image(), image, "nothing written");
+}
+
+#[test]
+fn a_run_the_server_stops_parks_and_the_next_takes_it_up() {
+    let scratch = Scratch::new("parked");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    fake.lock().unwrap().refused.insert("Rock/Artist C/Album D/02.opus".into());
+    let mut envs = envs();
+    let parked = sync_now(&sim, &base, &rock(), &mut envs).0;
+    let outcome = ran(&parked);
+    let why = outcome.parked.as_deref().expect("parked");
+    assert!(why.contains("sign-in"), "{why}");
+    assert_eq!(outcome.stored, Ok(()));
+    let seen = volume::inspect(&sim).unwrap();
+    assert!(seen.pending.is_some(), "the plan stays on the card");
+    // What the run was asked is stored; the schedule waits for a run that
+    // ends.
+    let s = State::of(&seen.state).unwrap().settings;
+    assert_eq!(s.sources[0].libraries, ["Rock"]);
+    assert_eq!((s.sources[0].full_read, s.sources[0].plan_key), (0, 0));
+
+    fake.lock().unwrap().refused.clear();
+    let again = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let outcome = ran(&again);
+    assert_eq!((outcome.parked.clone(), outcome.verified.clone(), outcome.records), (None, Ok(()), 4));
+    let seen = look(&sim);
+    assert!(seen.pending.is_none());
+    assert_eq!(State::of(&seen.state).unwrap().settings.sources[0].full_read, 1_791_900_000);
+}
+
+#[test]
+fn converting_everything_to_mp3_converts_each_file_and_puts_back_what_it_dropped() {
+    let scratch = Scratch::new("mp3");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    {
+        // Ten seconds each; 383 frames of 1152 samples at 44.1 kHz: 10.005 s.
+        let mut lib = fake.lock().unwrap();
+        let rock = lib.tracks.iter().map(|t| t.path.clone()).filter(|p| p.starts_with("Rock/"));
+        let rock: Vec<String> = rock.collect();
+        for t in lib.tracks.iter_mut() {
+            t.seconds = 10.0;
+        }
+        for path in rock {
+            lib.converted.insert(path, mp3_bytes(383, false));
+        }
+    }
+    let change = Change {
+        convert: Some(Convert::Everything),
+        codec: Some(TransferCodec::Mp3),
+        bitrate: Some(TransferBitrate::K128),
+        ..rock().change
+    };
+    let synced = sync_now(&sim, &base, &Ask { change, ..rock() }, &mut envs()).0;
+    let outcome = ran(&synced);
+    assert_eq!(outcome.verified, Ok(()), "{:?} {:?}", synced.notes, outcome.report);
+    assert_eq!((outcome.written, synced.summary.as_ref().unwrap().conversions), (4, 4));
+    let seen = look(&sim);
+    let records = &seen.root.as_ref().unwrap().tags.as_ref().unwrap().records;
+    let paths: Vec<&str> = records.iter().map(|e| e.path.as_str()).collect();
+    let b = ["Artist A/Album B/01.mp3", "Artist A/Album B/02.mp3"];
+    let d = ["Artist C/Album D/01.mp3", "Artist C/Album D/02.mp3"];
+    assert_eq!(paths, [b, d].concat());
+    for e in records {
+        let ledger = e.ledger.as_ref().unwrap();
+        assert_eq!((ledger.converted_to, ledger.convert_kbps), (CONTAINER_MP3, 128), "{}", e.path);
+        let bytes = std::fs::read(scratch.0.join("card/music").join(&e.path)).unwrap();
+        let cover = crate::device::card::tags::read_bytes(&bytes, "mp3").picture;
+        assert_eq!(cover.map(|c| (c.pic_type, c.mime)), Some((3, 1)), "{}: a JPEG front cover", e.path);
+    }
+    // The WAV's own BPM and key, as tags; mStream's analysis for the MP3
+    // whose BPM was mStream's.
+    assert_eq!((records[2].rec.bpm10, records[2].rec.camelot), (1280, 8));
+    assert_eq!(records[2].rec.flags & BPM_ANALYSED, 0);
+    assert_ne!(records[0].rec.flags & BPM_ANALYSED, 0);
+}
+
+#[test]
+fn beside_its_server_a_sync_reads_the_files_from_the_servers_own_folder() {
+    let scratch = Scratch::new("disk");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let folder = scratch.0.join("server/Rock");
+    {
+        let mut lib = fake.lock().unwrap();
+        for t in lib.tracks.iter().filter(|t| t.path.starts_with("Rock/")) {
+            let path = folder.join(&t.path["Rock/".len()..]);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &t.bytes).unwrap();
+            let at = UNIX_EPOCH + Duration::from_millis(1_790_000_000_000 + t.id as u64);
+            File::options().write(true).open(&path).unwrap().set_modified(at).unwrap();
+        }
+        let cover = lib.images["Rock/Artist A/Album B/cover.jpg"].clone();
+        std::fs::write(folder.join("Artist A/Album B/cover.jpg"), cover).unwrap();
+        lib.disk = Some(folder.clone());
+    }
+    let synced = sync_via(&sim, &base, &rock(), &mut envs(), Reached::Loopback).0;
+    let outcome = ran(&synced);
+    assert_eq!(outcome.verified, Ok(()), "{:?}", synced.notes);
+    assert_eq!((synced.summary.as_ref().unwrap().source, outcome.written), ("disk", 4));
+    // The originals and the folder's cover from disk, nothing probed; the
+    // conversion is the server's to make.
+    let asked = fake.lock().unwrap().asked.clone();
+    let media: Vec<&String> = asked.iter().filter(|a| a.contains(" /media/")).collect();
+    assert!(media.is_empty(), "{media:?}");
+    assert!(asked.contains(&"GET /transcode/Rock/Artist C/Album D/01.wav".to_string()), "{asked:?}");
+    for album in ["Artist A/Album B", "Artist C/Album D"] {
+        let thumb = std::fs::read(scratch.0.join("card/.mstream").join(thumb_path_of(album))).unwrap();
+        assert!(mpth::check(&thumb, path_hash(album)), "{album}");
+    }
 }

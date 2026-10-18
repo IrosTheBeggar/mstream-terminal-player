@@ -29,9 +29,10 @@
 //!    each album's thumbnail ([`covers`](super::covers)), and the Auto DJ
 //!    index from mStream's embeddings when the card's player reads MPDJ v2
 //!    and the card isn't made for someone else.
-//! 6. The settings, stored in a session of their own bound to the run's
-//!    commit: the selection, the conversion, the source's nickname and key,
-//!    the manifest's schedule, which art each thumbnail was made from.
+//! 6. The settings, stored at the run's end before it lets the card go
+//!    ([`Hooks::state`]): the selection, the conversion, the source's
+//!    nickname and keys, the manifest's schedule, which art each thumbnail
+//!    was made from.
 //!
 //! The listener's way in is the Card view and `device card <drive> sync`,
 //! which wait for their UX contract; until then the hidden `device
@@ -68,7 +69,9 @@ use super::plan::{
 use super::source::http::{Finish, Http};
 use super::source::length::{self, CardAt};
 use super::source::local::{self, Local, Reached};
-use super::state::{self, Convert, Layout, Settings, State, art_key, hex as id_hex};
+use super::state::{
+    self, Convert, FOLDER_IMAGE, Layout, NO_ART, Settings, State, art_key, hex as id_hex,
+};
 use super::tags::{self, Restore};
 use super::volume::{self, CardFs, CardWrite, Mounted, Private, STATE_VERSION, Space};
 use crate::api::transfer::{MANIFEST_PAGE_MAX, Manifest, ManifestEntry, Metadata};
@@ -292,7 +295,7 @@ fn run(
     ask.change.apply(&mut state.settings);
     state.settings.stored = true;
     let serial = card.serial().map_err(|_| (None, Halt::Card(Stop::Pulled)))?;
-    let expect = Expect { serial: serial.clone(), ..Expect::default() };
+    let expect = Expect { serial, ..Expect::default() };
     let knobs = knobs_of(&state.settings);
     let opened = Session::open(card, &expect, knobs, &ask.answers, envs(), &mut NoHooks, events);
     let mut session = opened.map_err(|stop| (None, Halt::Card(stop)))?;
@@ -312,51 +315,33 @@ fn run(
         return Ok((p.summary, End::Dry));
     }
 
-    // 5. The run.
+    // 5. The run, and 6. the settings at its end ([`SyncHooks::state`]).
+    let label = state.label.clone();
     let mut hooks = p.hooks.take().expect("hooks for a run");
+    let revision = (p.ours != Some(0)).then(|| p.revision.clone());
+    let (url_key, listed, plan_key) = (p.url_key, p.listed, p.plan_key);
+    hooks.store = Some(Store { state, url_key, listed, now, plan_key, revision });
     let ran = session.run(p.plan, &mut p.fetcher, &mut hooks, events);
     notes.append(&mut hooks.notes);
     let outcome = ran.map_err(|stop| (Some(p.summary.clone()), Halt::Card(stop)))?;
-
-    // 6. The settings, and what the run learned.
-    let label = state.label.clone();
-    let source = state.settings.source(p.url_key);
-    if outcome.parked.is_none() {
-        if p.listed == Listed::Whole {
-            (source.full_read, source.runs, source.plan_key) = (now, 0, p.plan_key);
-            if p.ours != Some(0) {
-                source.revision = p.revision.clone();
-            }
-        } else {
-            source.runs = source.runs.saturating_add(1);
-        }
-        state.settings.art = hooks.art;
-    }
-    let stored = store(card, &serial, &outcome, &state, envs, events);
-    if let Err(stop) = stored {
-        notes.push(format!("the card's settings weren't stored: {stop}"));
+    if let Err(why) = &outcome.stored {
+        notes.push(format!("the card's settings weren't stored: {why}"));
     }
     cards.saw(outcome.card_id, &label, now, outcome.generation, outcome.commit_id);
     Ok((p.summary, End::Ran(outcome)))
 }
 
-/// The settings in a session of their own, bound to the run's commit.
-fn store(
-    card: &dyn CardWrite,
-    serial: &Option<volume::Serial>,
-    outcome: &Outcome,
-    state: &State,
-    envs: &mut dyn FnMut() -> Env,
-    events: &mut dyn FnMut(Event),
-) -> Result<(), Stop> {
-    let (card_id, commit_id) = (Some(outcome.card_id), Some(outcome.commit_id));
-    let expect = Expect { serial: serial.clone(), card_id, commit_id };
-    let (knobs, answers) = (Knobs::default(), Answers::default());
-    let mut session = Session::open(card, &expect, knobs, &answers, envs(), &mut NoHooks, events)?;
-    let bytes = state.text(session.state().seq + 1);
-    let wrote = session.write_state(&bytes);
-    session.close();
-    wrote
+/// The card's settings as a run stores them at its end: what it was asked
+/// (in `state`), and what it learned of the server.
+struct Store {
+    state: State,
+    url_key: u64,
+    listed: Listed,
+    now: u64,
+    plan_key: u64,
+    /// The manifest's revision as the run read it, for a server that isn't
+    /// the card's server 0 (whose revision is the root's).
+    revision: Option<String>,
 }
 
 /// What a plan made ready for its run.
@@ -418,23 +403,26 @@ fn prepare(
         notes.push(why.into());
     }
 
-    // This server, and the card's servers.
+    // This server, and the card's servers: one source answers every address
+    // the listener called this server, and each of its other keys is one a
+    // card's server may have (2.11's key rule; a run rewrites server 0's key
+    // to the address it read).
     let url_key = server_url_key(&client.server());
     let settings = &mut state.settings;
-    let source = settings.source(url_key);
-    if let Some(nickname) = &ask.change.nickname {
-        source.nickname = nickname.trim().to_string();
-    }
-    let confirmed = source.confirmed.clone();
+    let confirmed = settings.keys(url_key);
     let mut talk = Talk { url_key, instance: NO_INSTANCE, confirmed, peer: None };
     let mut ours = ours_on(Some(root), &talk);
     if ours.is_none() && ask.same_server {
         let zero = root.manifest.server_table().root;
         if zero.url_key != 0 && !zero.is_peer() && !talk.confirmed.contains(&zero.url_key) {
-            talk.confirmed.push(zero.url_key);
-            source.confirmed.push(zero.url_key);
+            settings.confirm(url_key, zero.url_key);
+            talk.confirmed = settings.keys(url_key);
             ours = ours_on(Some(root), &talk);
         }
+    }
+    let source = settings.source(url_key);
+    if let Some(nickname) = &ask.change.nickname {
+        source.nickname = nickname.trim().to_string();
     }
 
     // The selection.
@@ -631,6 +619,7 @@ fn prepare(
         },
         old_fingerprint,
         refresh: listed == Listed::Whole,
+        store: None,
         notes: Vec::new(),
     };
     let hooks = Some(hooks);
@@ -759,7 +748,38 @@ struct SyncHooks {
     /// A whole read: the embeddings are read again even when the files
     /// are the same, the server's analysis having moved on.
     refresh: bool,
+    /// The settings the run's end stores; set for a run, not for a plan.
+    store: Option<Store>,
     notes: Vec<String>,
+}
+
+impl SyncHooks {
+    /// The album's `album-art` names as this run's listing gives them; None
+    /// when it gave none of its files (a 304, another server's rows).
+    fn listed_art(&self, album: &Album<'_>) -> Option<Vec<String>> {
+        let extras = self.extras.borrow();
+        let listed = |l: &Ledger| extras.get(&l.server_path).filter(|e| e.listed);
+        if !album.files.iter().any(|(_, l)| listed(l).is_some()) {
+            return None;
+        }
+        Some(album.files.iter().filter_map(|(_, l)| listed(l)?.album_art.clone()).collect())
+    }
+
+    /// The album's `album-art` names as the server's metadata gives them
+    /// now, for its files of this run's server; None when it has none of
+    /// them, or the server doesn't answer.
+    fn art_now(&self, album: &Album<'_>) -> Option<Vec<String>> {
+        let extras = self.extras.borrow();
+        let paths = album.files.iter().map(|(_, l)| &l.server_path);
+        let paths: Vec<String> = paths.filter(|p| extras.contains_key(*p)).cloned().collect();
+        drop(extras);
+        if paths.is_empty() {
+            return None;
+        }
+        let found = self.client.metadata_batch(&paths).ok()?;
+        let art = |p: &String| found.get(p)?.as_ref()?.album_art.clone().filter(|a| !a.is_empty());
+        Some(paths.iter().filter_map(art).collect())
+    }
 }
 
 impl Hooks for SyncHooks {
@@ -790,39 +810,52 @@ impl Hooks for SyncHooks {
             return Cover::Gone;
         }
         let hash = path_hash(album.folder);
-        let extras = self.extras.borrow();
-        let listed = |l: &Ledger| extras.get(&l.server_path).is_some_and(|e| e.listed);
-        let known = album.files.iter().any(|(_, l)| listed(l));
-        if !known {
-            // Files whose art this run didn't read (a 304, another server's
-            // rows): as they were.
-            if let (true, Some(&key)) = (album.on_card, self.old_art.get(&hash)) {
-                self.art.insert(hash, key);
-            }
+        let old = self.old_art.get(&hash).copied();
+        // The art the album's files name: as this run's listing says. Files
+        // whose art it didn't read (a 304, another server's rows) stay as
+        // they were, unless a thumbnail made before is lost: then as their
+        // metadata says now (step 10 rewrites any that isn't there).
+        let lost = !album.on_card && old.is_some_and(|key| key != NO_ART);
+        let names = match self.listed_art(album) {
+            Some(names) => names,
+            None => match lost.then(|| self.art_now(album)).flatten() {
+                Some(names) => names,
+                None => {
+                    if let Some(key) = old {
+                        self.art.insert(hash, key);
+                    }
+                    return Cover::Keep;
+                }
+            },
+        };
+        let key = art_key(names.iter().map(String::as_str));
+        // Made before from this art, or from the folder's image while no art
+        // is named, and there: kept.
+        if let Some(was) = old.filter(|&was| was == key || (key, was) == (NO_ART, FOLDER_IMAGE))
+            && album.on_card
+        {
+            self.art.insert(hash, was);
             return Cover::Keep;
         }
-        let art_of = |l: &Ledger| extras.get(&l.server_path)?.album_art.as_deref();
-        let names: Vec<&str> = album.files.iter().filter_map(|(_, l)| art_of(l)).collect();
-        let key = art_key(names.iter().copied());
-        // Looked at before, for this art: kept; or, for no art at all, the
-        // device's own cover order, which finds any folder image.
-        if self.old_art.get(&hash) == Some(&key) && (album.on_card || key == 0) {
-            self.art.insert(hash, key);
-            return if album.on_card { Cover::Keep } else { Cover::Gone };
+        // Looked at before with no art named and no folder image found: the
+        // device's own cover order (its files' pictures), not probed again.
+        if (key, old) == (NO_ART, Some(NO_ART)) {
+            self.art.insert(hash, NO_ART);
+            return Cover::Gone;
         }
         let first = album.files.iter().min_by(|a, b| compare_file_paths(a.0, b.0));
         let Some(&(card_path, ledger)) = first else { return Cover::Gone };
         let folders = folders(card_path, &ledger.server_path, &self.roots);
-        let art = most_common(names.iter().copied()).map(str::to_string);
-        drop(extras);
+        let art = most_common(names.iter().map(String::as_str)).map(str::to_string);
         let image = self.covers.borrow_mut().image(&folders, art.as_deref());
         match image.as_deref().and_then(covers::thumbnail) {
             Some((pixels, source_bytes)) => {
-                self.art.insert(hash, key);
+                // With no art named, the image is the folder's.
+                self.art.insert(hash, if key == NO_ART { FOLDER_IMAGE } else { key });
                 Cover::New { pixels, source_bytes }
             }
-            None if key == 0 => {
-                self.art.insert(hash, 0);
+            None if key == NO_ART => {
+                self.art.insert(hash, NO_ART);
                 Cover::Gone
             }
             // mStream names art that didn't come: the one there stays, and
@@ -909,6 +942,27 @@ impl Hooks for SyncHooks {
                 AutoDj::None
             }
         }
+    }
+
+    /// The settings as asked, and what a run that ended learned: the
+    /// manifest's schedule, and which art each thumbnail was made from. A
+    /// parked run's thumbnails weren't looked at: their art stays.
+    fn state(&mut self, outcome: &Outcome, seq: u64) -> Option<Vec<u8>> {
+        let store = self.store.as_mut()?;
+        let settings = &mut store.state.settings;
+        if outcome.parked.is_none() {
+            let source = settings.source(store.url_key);
+            if store.listed == Listed::Whole {
+                (source.full_read, source.runs, source.plan_key) = (store.now, 0, store.plan_key);
+                if let Some(revision) = &store.revision {
+                    source.revision = revision.clone();
+                }
+            } else {
+                source.runs = source.runs.saturating_add(1);
+            }
+            settings.art = std::mem::take(&mut self.art);
+        }
+        Some(store.state.text(seq))
     }
 }
 

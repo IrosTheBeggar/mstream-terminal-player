@@ -1465,6 +1465,54 @@ fn a_failed_file_is_reported_and_a_stopped_source_parks_the_run() {
     assert_eq!((done.written, done.records, done.verified), (1, 7, Ok(())));
 }
 
+/// Hooks that give a run's end the card's settings (B1's): a state file
+/// labelled `label`; the card pulled as it is written when `pull`.
+struct Stores<'a> {
+    card: &'a FatSim,
+    label: &'static str,
+    pull: bool,
+    seq: Option<u64>,
+}
+
+impl Hooks for Stores<'_> {
+    fn state(&mut self, _outcome: &Outcome, seq: u64) -> Option<Vec<u8>> {
+        self.seq = Some(seq);
+        if self.pull {
+            self.card.cut_at(1, Cut::Fail);
+        }
+        let (head, label) = (r#""format": "mstream-card-state", "version": 1"#, self.label);
+        Some(format!(r#"{{{head}, "seq": {seq}, "label": "{label}"}}"#).into_bytes())
+    }
+}
+
+#[test]
+fn a_runs_end_stores_the_settings_it_is_given_before_it_lets_the_card_go() {
+    let dir = Scratch::new("settings");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    let mut hooks = Stores { card: &card, label: "Car", pull: false, seq: None };
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut hooks, knobs(), Answers::default(), 1);
+    let outcome = ran.unwrap();
+    assert_eq!((outcome.verified, outcome.stored), (Ok(()), Ok(())));
+    let seen = look(&card);
+    let label = seen.state.value.as_ref().and_then(|v| v["label"].as_str().map(str::to_string));
+    assert_eq!((label.as_deref(), Some(seen.state.seq)), (Some("Car"), hooks.seq));
+    assert!(card.stat("/.mstream/run.lock").unwrap().is_none(), "let go");
+
+    // Pulled as they are written: the run's outcome stands, with why they
+    // weren't stored, and the card is never written again (run.lock stays).
+    let mut hooks = Stores { card: &card, label: "Van", pull: true, seq: None };
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut hooks, knobs(), Answers::default(), 2);
+    let outcome = ran.unwrap();
+    assert!(outcome.stored.is_err(), "{:?}", outcome.stored);
+    card.replug();
+    assert!(card.stat("/.mstream/run.lock").unwrap().is_some(), "not let go");
+    let seen = look(&card);
+    assert_eq!(seen.state.value.as_ref().unwrap()["label"].as_str(), Some("Car"));
+}
+
 #[test]
 fn a_session_says_what_the_card_holds_and_covers_follow_the_hook() {
     let dir = Scratch::new("session");

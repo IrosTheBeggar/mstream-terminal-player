@@ -12,9 +12,9 @@
 //! **Over HTTP** mStream lists no images, so the named files are probed
 //! with HEAD on `/media`, at most [`PROBES`] a folder, in rank order, the
 //! first that answers taken; a folder the server's own folders on this
-//! computer hold is listed instead ([`Images`]). A cover is fetched once
-//! for the few albums a run is on ([`Covers`] keeps the last ones), so an
-//! album's converted files share it.
+//! computer hold is listed instead, and never probed ([`Images`]). A cover
+//! is fetched once for the few albums a run is on ([`Covers`] keeps the
+//! last ones), so an album's converted files share it.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
@@ -51,6 +51,11 @@ const KEPT: usize = 8;
 /// The longest side of a cover put into a converted file: the player's
 /// screen is 320 × 240, and its decoder scales by halves.
 const EMBED_SIDE: u32 = 600;
+/// The largest cover put into a converted file as it is: a 600-pixel JPEG
+/// is a few hundred kilobytes at most, and past that the bytes are not
+/// the picture's (metadata segments, bytes after its end), which every
+/// converted file of the album would carry.
+const EMBED_BYTES: usize = 512 * 1024;
 
 /// An image a cover is made from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +134,9 @@ impl Covers {
             if let Some(local) = self.images.as_ref().and_then(|i| i.folder_image(folder)) {
                 return Some(Image { from: format!("{folder}/{}", local.name), bytes: local.bytes });
             }
+            if self.images.as_ref().is_some_and(|i| i.lists(folder)) {
+                continue;
+            }
             for name in PROBES {
                 let path = format!("{folder}/{name}");
                 let Ok(Some(probed)) = self.client.probe(&path, ProbeBy::Head) else { continue };
@@ -188,11 +196,12 @@ fn jpeg_frame(bytes: &[u8]) -> Option<(bool, u32, u32)> {
 
 /// A cover to put into a converted file: a baseline JPEG of at most
 /// [`EMBED_SIDE`] a side. A baseline JPEG that size already goes as it
-/// is; any other image is decoded, scaled down when larger, and encoded
-/// again. None: an image the PC can't decode.
+/// is, up to [`EMBED_BYTES`]; any other image is decoded, scaled down when
+/// larger, and encoded again. None: an image the PC can't decode.
 pub(crate) fn baseline_jpeg(image: &Image) -> Option<Vec<u8>> {
     if let Some((true, w, h)) = jpeg_frame(&image.bytes)
         && w.max(h) <= EMBED_SIDE
+        && image.bytes.len() <= EMBED_BYTES
     {
         return Some(image.bytes.clone());
     }
@@ -260,6 +269,20 @@ pub(crate) mod tests {
         let png = Image { from: "f".into(), bytes: picture(100, 100, false) };
         assert_eq!(jpeg_frame(&baseline_jpeg(&png).unwrap()), Some((true, 100, 100)));
         assert_eq!(baseline_jpeg(&Image { from: "f".into(), bytes: b"no image".to_vec() }), None);
+        // A small picture padded past the cap (a large metadata segment
+        // after its start): made again, to the picture alone.
+        let mut padded = small.bytes[..2].to_vec();
+        for _ in 0..12 {
+            padded.extend_from_slice(&[0xFF, 0xE1, 0xFF, 0xFF]);
+            padded.resize(padded.len() + 0xFFFD, 0);
+        }
+        padded.extend_from_slice(&small.bytes[2..]);
+        let padded = Image { from: "f".into(), bytes: padded };
+        assert!(padded.bytes.len() > EMBED_BYTES);
+        assert_eq!(jpeg_frame(&padded.bytes), Some((true, 300, 300)));
+        let made = baseline_jpeg(&padded).unwrap();
+        assert!(made.len() < 64 * 1024, "{} bytes", made.len());
+        assert_eq!(jpeg_frame(&made), Some((true, 300, 300)));
         let (pixels, n) = thumbnail(&png).unwrap();
         assert_eq!((pixels.small.len(), n as usize), (40 * 40, png.bytes.len()));
     }

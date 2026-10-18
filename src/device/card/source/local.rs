@@ -373,8 +373,8 @@ impl<F: Fetcher> Local<F> {
     /// else the largest other `.jpg` ([`image_rank`]). `folder` is a folder
     /// of this server's (`vpath/rel`: a ledger path's folder, or a library's
     /// own). None: not a library read from here, no such image, or one past
-    /// [`MAX_FILE`]; the caller then probes over HTTP, or takes mStream's
-    /// album art.
+    /// [`MAX_FILE`]; the caller then probes over HTTP a folder that isn't
+    /// read from here ([`Images::lists`]), or takes mStream's album art.
     pub(crate) fn folder_image(&self, folder: &str) -> Option<FolderImage> {
         image_in(&self.roots, folder)
     }
@@ -389,6 +389,12 @@ impl Images {
     /// [`Local::folder_image`].
     pub(crate) fn folder_image(&self, folder: &str) -> Option<FolderImage> {
         image_in(&self.0, folder)
+    }
+
+    /// `folder` (`vpath/rel`) is in a library read from here: its listing
+    /// says what images it has, and nothing need be probed for.
+    pub(crate) fn lists(&self, folder: &str) -> bool {
+        self.0.contains_key(folder.split_once('/').map_or(folder, |(vpath, _)| vpath))
     }
 }
 

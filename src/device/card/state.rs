@@ -285,7 +285,9 @@ pub(crate) struct Settings {
     pub(crate) for_someone_else: bool,
     pub(crate) removal: Removal,
     /// Each album folder's art as its thumbnail was made from it: the
-    /// folder's path hash → the art's key (2.12.1, step 10; [`art_key`]).
+    /// folder's path hash → the art's key (2.12.1, step 10; [`art_key`]),
+    /// [`FOLDER_IMAGE`] for a folder's image with no art named, or
+    /// [`NO_ART`] for an album looked at with nothing to make one from.
     pub(crate) art: BTreeMap<u64, u64>,
     /// The members are written: the file had them, or a sync stored them.
     /// A set-up's state file has none.
@@ -398,12 +400,54 @@ impl Settings {
 
     /// The source of a server, by its URL's key; made when there is none.
     pub(crate) fn source(&mut self, url_key: u64) -> &mut Source {
-        let of = |s: &Source| s.url_key == url_key || s.confirmed.contains(&url_key);
-        match self.sources.iter().position(of) {
+        match self.sources.iter().position(answers(url_key)) {
             Some(at) => &mut self.sources[at],
             None => {
                 self.sources.push(Source { url_key, ..Source::default() });
                 self.sources.last_mut().expect("just pushed")
+            }
+        }
+    }
+
+    /// The server at `url_key`'s other keys: its source's own and those
+    /// confirmed as it, the ones a card's server may have for it (2.11's
+    /// key rule).
+    pub(crate) fn keys(&self, url_key: u64) -> Vec<u64> {
+        let Some(source) = self.sources.iter().find(|s| answers(url_key)(s)) else {
+            return Vec::new();
+        };
+        let mut keys = Vec::new();
+        for key in std::iter::once(source.url_key).chain(source.confirmed.iter().copied()) {
+            if key != 0 && key != url_key && !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+
+    /// The listener says the server at `url_key` is the one at `other`:
+    /// one source answers both from now on, `other`'s when there is one,
+    /// which takes the keys of any source `url_key` had of its own (its
+    /// selection and schedule give way to `other`'s).
+    pub(crate) fn confirm(&mut self, url_key: u64, other: u64) {
+        if self.sources.iter().all(|s| !answers(other)(s)) {
+            let source = self.source(url_key);
+            if !source.confirmed.contains(&other) {
+                source.confirmed.push(other);
+            }
+            return;
+        }
+        let mut keys = vec![url_key];
+        let mine = self.sources.iter().position(|s| answers(url_key)(s) && !answers(other)(s));
+        if let Some(mine) = mine {
+            let gone = self.sources.remove(mine);
+            keys.push(gone.url_key);
+            keys.extend(gone.confirmed);
+        }
+        let source = self.source(other);
+        for key in keys {
+            if key != 0 && key != source.url_key && !source.confirmed.contains(&key) {
+                source.confirmed.push(key);
             }
         }
     }
@@ -498,17 +542,28 @@ impl Source {
     }
 }
 
+/// A source answers a key: its own, or one confirmed as it.
+fn answers(key: u64) -> impl Fn(&Source) -> bool {
+    move |s| s.url_key == key || s.confirmed.contains(&key)
+}
+
+/// [`art_key`] of an album whose tracks name no art.
+pub(crate) const NO_ART: u64 = 0;
+/// Not a key [`art_key`] gives: the `art` entry of an album whose thumbnail
+/// was made from its folder's image while mStream named no art.
+pub(crate) const FOLDER_IMAGE: u64 = 1;
+
 /// An album's art as the server names it: the key of its tracks' distinct
 /// `album-art` names (mStream's cache names, which change with the image),
-/// or 0 for an album with none. The thumbnail is made again when it
-/// changes (2.12.1, step 10).
+/// or [`NO_ART`]. The thumbnail is made again when it changes (2.12.1,
+/// step 10).
 pub(crate) fn art_key<'a>(names: impl IntoIterator<Item = &'a str>) -> u64 {
     let mut names: Vec<&str> = names.into_iter().filter(|n| !n.is_empty()).collect();
     names.sort_unstable();
     names.dedup();
     match names.is_empty() {
-        true => 0,
-        false => super::contract::prim::fnv1a64(names.join("\n").as_bytes()),
+        true => NO_ART,
+        false => super::contract::prim::fnv1a64(names.join("\n").as_bytes()).max(FOLDER_IMAGE + 1),
     }
 }
 
@@ -759,7 +814,31 @@ mod tests {
 
         assert_eq!(art_key(["b.jpg", "a.jpg", "b.jpg", ""]), art_key(["a.jpg", "b.jpg"]));
         assert_ne!(art_key(["a.jpg"]), art_key(["b.jpg"]));
-        assert_eq!(art_key(Vec::<&str>::new()), 0);
+        assert_eq!(art_key(Vec::<&str>::new()), NO_ART);
+        assert!(art_key(["a.jpg"]) > FOLDER_IMAGE);
+    }
+
+    #[test]
+    fn a_server_confirmed_at_another_address_is_one_source() {
+        let mut s = Settings::defaults();
+        s.source(0xA).libraries = vec!["Rock".into()];
+        assert_eq!(s.keys(0xA), Vec::<u64>::new());
+        // A second address, said to be the first's server: each answers
+        // for the other.
+        s.confirm(0xB, 0xA);
+        assert_eq!((s.sources.len(), s.keys(0xB), s.keys(0xA)), (1, vec![0xA], vec![0xB]));
+        assert_eq!(s.source(0xB).libraries, ["Rock"]);
+        // A third that had a source of its own: its keys join the first's.
+        s.source(0xC).libraries = vec!["Jazz".into()];
+        s.sources[1].confirmed.push(0xD);
+        s.confirm(0xC, 0xB);
+        assert_eq!((s.sources.len(), s.keys(0xD)), (1, vec![0xA, 0xB, 0xC]));
+        assert_eq!(s.source(0xC).libraries, ["Rock"]);
+        // A card's server with no source on it: this address's source
+        // takes its key.
+        let mut fresh = Settings::defaults();
+        fresh.confirm(0xE, 0xF);
+        assert_eq!((fresh.sources[0].url_key, fresh.keys(0xE)), (0xE, vec![0xF]));
     }
 
     #[test]

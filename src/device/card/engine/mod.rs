@@ -364,6 +364,9 @@ pub(crate) struct Outcome {
     pub(crate) report: Report,
     /// The card read back as the device reads it (2.3, step 16).
     pub(crate) verified: Result<(), String>,
+    /// The `state.json` [`Hooks::state`] gave, written, or why not; Ok when
+    /// it gave none.
+    pub(crate) stored: Result<(), String>,
 }
 
 // ── Where the bytes come from, and what other parts add ─────────────────────
@@ -480,6 +483,12 @@ pub(crate) trait Hooks {
     /// each raised to the software's mark, never lowered.
     fn acks(&mut self, carried: &[Ack]) -> Vec<Ack> {
         carried.to_vec()
+    }
+    /// The run's end, before the card is let go: the card's `state.json` as
+    /// the run leaves it (2.12.7; `seq`, the one the file must have),
+    /// written under the run's own lock and binding. None: as it is.
+    fn state(&mut self, _outcome: &Outcome, _seq: u64) -> Option<Vec<u8>> {
+        None
     }
 }
 
