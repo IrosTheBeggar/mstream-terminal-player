@@ -44,6 +44,8 @@ pub const BATCH_BODY_BUDGET: usize = 512 * 1024;
 pub const BATCH_MAX_PATHS: usize = 2000;
 /// `discovery/local/embeddings` takes 1-8 paths (mStream's `discovery.js`).
 pub const EMBEDDINGS_PER_CALL: usize = 8;
+/// Its 404 for a path it cannot resolve or this user cannot see.
+const TRACK_NOT_FOUND: &str = "Track not found";
 /// `stats/plays` takes 1-200 plays a call (its `MAX_BATCH`).
 pub const PLAYS_PER_CALL: usize = 200;
 /// A listing call's ceiling. A manifest page of 5,000 entries is a few MB,
@@ -145,7 +147,9 @@ fn decode<T: DeserializeOwned>(reply: &Reply, path: &str) -> Result<T, ApiError>
 // One odd value must not fail a page of 5,000 entries, and with it a sync
 // that has run for an hour. SQLite keeps whatever was written (a REAL
 // `modified` survives from before mStream's V24), so the numbers are read
-// whole however they came, and anything else is `None`.
+// whole however they came, and anything else is `None`. Two fields of an
+// entry are required, and an entry without one fails its page: the path
+// and the row id ([`ManifestEntry`]).
 
 /// An integer, a float rounded, or a numeric string; else `None`.
 fn whole<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
@@ -161,6 +165,20 @@ where
         _ => None,
     };
     Ok(n.and_then(|n| T::try_from(n).ok()))
+}
+
+/// A row id however it came, an integer, a whole float or a numeric
+/// string; anything else fails the entry. Never rounded: a fractional id
+/// read as its neighbour would take that row's place in a name collision.
+fn row_id<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let id = match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_f64().filter(|f| f.fract() == 0.0 && f.abs() < 9.0e18).map(|f| f as i64)),
+        serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    };
+    id.ok_or_else(|| serde::de::Error::custom("an entry's id is not a whole number"))
 }
 
 /// A number or a numeric string, as a float; else `None`.
@@ -306,7 +324,10 @@ pub struct ManifestEntry {
     /// deletion, so a page that has one fails instead.
     pub filepath: String,
     /// The track's row id: the order pages walk in, and on a name collision
-    /// the lower one keeps the name (the card contract's 2.8.3).
+    /// the lower one keeps the name (the card contract's 2.8.3). Required
+    /// too: read however it came ([`row_id`]), but an entry without one
+    /// fails its page, as one without a path does.
+    #[serde(deserialize_with = "row_id")]
     pub id: i64,
     #[serde(default, deserialize_with = "null_or_default")]
     pub metadata: Metadata,
@@ -473,7 +494,8 @@ pub struct Embedding {
 /// One batch's answer, as [`Client::embeddings_async`] sorts it.
 enum EmbeddingsBatch {
     Answer(EmbeddingsReply),
-    /// A 404 the server spoke: one of the paths did not resolve.
+    /// A 404 in the route's own words ([`TRACK_NOT_FOUND`]): one of the
+    /// paths did not resolve.
     BadPath,
     /// A 403: discovery is off, or its index is missing.
     Off,
@@ -845,8 +867,9 @@ impl Client {
     /// paths: every split costs calls.
     ///
     /// `None` means discovery is off on this server (a 403), as for
-    /// [`Client::similar_tracks`]. A 404 that is not the server's own words
-    /// is a server without the route, and an error.
+    /// [`Client::similar_tracks`]. A 404 in other words than a bad path's
+    /// is an error: a server without the route, or a parent's proxy with
+    /// no such peer.
     pub async fn embeddings_async(&self, paths: &[String]) -> Result<Option<Embeddings>, ApiError> {
         let mut out = Embeddings::default();
         let mut model: Option<(EmbeddingModel, u32)> = None;
@@ -906,14 +929,21 @@ impl Client {
         match reply.status {
             StatusCode::FORBIDDEN => Ok(EmbeddingsBatch::Off),
             StatusCode::NOT_FOUND => {
-                // The route's own 404 is `{"error": "Track not found"}`; a
-                // server without the route answers with its framework's page.
-                let spoken = serde_json::from_slice::<serde_json::Value>(&reply.body)
-                    .is_ok_and(|v| v.get("error").is_some());
-                if spoken {
-                    Ok(EmbeddingsBatch::BadPath)
-                } else {
-                    Err(ApiError::NotFound(PATH.to_string()))
+                // A bad path is the route's own words (mStream's
+                // `discovery.js`, `resolveSeedTrack`). Every refusal is
+                // `{error}`, so the words decide: a parent's proxy with no
+                // such peer says "Peer not found" (`federation-browse.js`),
+                // and a server without the route answers with its
+                // framework's page.
+                let words = serde_json::from_slice::<serde_json::Value>(&reply.body)
+                    .ok()
+                    .and_then(|v| v.get("error")?.as_str().map(str::to_string));
+                match words {
+                    Some(words) if words.trim().eq_ignore_ascii_case(TRACK_NOT_FOUND) => {
+                        Ok(EmbeddingsBatch::BadPath)
+                    }
+                    Some(words) => Err(ApiError::NotFound(format!("{PATH} ({words})"))),
+                    None => Err(ApiError::NotFound(PATH.to_string())),
                 }
             }
             _ => decode(&reply, PATH).map(EmbeddingsBatch::Answer),
@@ -1231,12 +1261,13 @@ mod tests {
         let page: ManifestPage = serde_json::from_str(
             r#"{"revision":"r","scanning":0,"next":"12","entries":[{"filepath":"lib/a.mp3","id":3,
             "metadata":null,"file-size":"2048","modified":1700000000123.6,"hash-v":true},
-            {"filepath":"lib/b.mp3","id":4,"metadata":{"track":"7","year":1999.0,"genres":["A",3,null],
-            "artists":null,"bpm":"121.5","has-lyrics":1,"composer":12}}]}"#,
+            {"filepath":"lib/b.mp3","id":"4","metadata":{"track":"7","year":1999.0,"genres":["A",3,null],
+            "artists":null,"bpm":"121.5","has-lyrics":1,"composer":12}},{"filepath":"lib/c.mp3","id":5.0}]}"#,
         )
         .unwrap();
         assert!(!page.scanning, "only a real true says scanning");
         assert_eq!(page.next, Some(12));
+        assert_eq!(page.entries.iter().map(|e| e.id).collect::<Vec<_>>(), [3, 4, 5], "an id however it came");
         let a = &page.entries[0];
         assert_eq!(a.metadata, Metadata::default());
         assert_eq!((a.file_size, a.modified, a.hash_v), (Some(2048), Some(1_700_000_000_124), None));
@@ -1246,9 +1277,15 @@ mod tests {
         assert!(b.artists.is_empty() && !b.has_lyrics);
         assert_eq!(b.composer.as_deref(), Some("12"));
 
-        // But a row with no path is never read as anything.
+        // But a row with no path, or no id to place it by, is never read as
+        // anything.
         let broken = serde_json::from_str::<ManifestPage>(r#"{"revision":"r","entries":[{"id":3}]}"#);
         assert!(broken.is_err(), "an entry without its path fails the page");
+        for id in ["", r#","id":null"#, r#","id":"x""#, r#","id":3.5"#] {
+            let page = format!(r#"{{"revision":"r","entries":[{{"filepath":"lib/a.mp3"{id}}}]}}"#);
+            let broken = serde_json::from_str::<ManifestPage>(&page);
+            assert!(broken.is_err(), "an entry without a whole id fails the page: {page}");
+        }
     }
 
     #[test]
@@ -1356,15 +1393,33 @@ mod tests {
 
     #[test]
     fn embeddings_say_none_when_discovery_is_off_and_fail_where_the_route_is_missing() {
-        let (base, _seen) = canned(vec![
+        let (base, seen) = canned(vec![
             json("403 Forbidden", r#"{"error":"Discovery is disabled"}"#),
             reply("404 Not Found", &[("Content-Type", "text/html")], b"<pre>Cannot POST</pre>"),
+            json("404 Not Found", r#"{"error":"Peer not found"}"#),
         ]);
         let client = Client::new(&base).unwrap();
         let paths = vec!["lib/a.mp3".to_string()];
         assert_eq!(client.embeddings(&paths).unwrap(), None);
         let older = client.embeddings(&paths);
         assert!(matches!(older, Err(ApiError::NotFound(_))), "an older server, not a bad path: {older:?}");
+
+        // The parent's proxy speaks `{error}` too: a peer it does not have
+        // is an error at the first call, never every path split off as
+        // missing. (A split would have met the stub's closed door, not
+        // these words.)
+        let gone = Client::new(&base).unwrap().with_peer(Some(9));
+        let several: Vec<String> = (0..4).map(|i| format!("lib/{i}.mp3")).collect();
+        match gone.embeddings(&several) {
+            Err(ApiError::NotFound(what)) => assert!(what.contains("Peer not found"), "{what}"),
+            other => panic!("no such peer, not four missing paths: {other:?}"),
+        }
+        recv(&seen);
+        recv(&seen);
+        let req = recv(&seen);
+        let line = "POST /api/v1/federation/peers/9/api/api/v1/discovery/local/embeddings HTTP/1.1\r\n";
+        assert!(req.starts_with(line), "{req}");
+        assert_eq!(body_of(&req)["filePaths"].as_array().map(Vec::len), Some(4), "all four, in one call");
 
         // A vector of the wrong length is no vector; nor is bad base64.
         assert_eq!(floats(&vector_b64(&[1.0, 0.0, 0.0]), 2), None);
