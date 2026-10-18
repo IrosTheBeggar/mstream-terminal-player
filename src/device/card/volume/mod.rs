@@ -54,13 +54,19 @@ pub(crate) enum Fs {
 }
 
 impl Fs {
-    /// A FAT volume of `clusters` clusters is FAT12, FAT16 or FAT32 by that
-    /// count alone, which is how every FAT driver, FatFs included, tells
-    /// them apart: under 4,085 FAT12, under 65,525 FAT16.
+    /// A FAT volume of `clusters` clusters, as the player's FatFs reads it:
+    /// by that count alone, up to 4,085 FAT12 and up to 65,525 FAT16 (ff.c's
+    /// MAX_FAT12 and MAX_FAT16, which it gives as DOS's and Windows's).
+    /// Microsoft's spec and Linux's vfat put each boundary one lower, so at
+    /// those two counts the PC reads another width: 4,085 is FAT12 here and
+    /// refused either way; at 65,525 Linux mounts only a FAT32 volume, which
+    /// FatFs then finds no filesystem in, so that count is no width the
+    /// player reads (2.2).
     pub(crate) fn fat_of_clusters(clusters: u64) -> Fs {
         match clusters {
-            0..4085 => Fs::Fat12,
-            4085..65525 => Fs::Fat16,
+            0..=4085 => Fs::Fat12,
+            4086..65525 => Fs::Fat16,
+            65525 => Fs::Other("FAT, 65,525 clusters".into()),
             _ => Fs::Fat32,
         }
     }
@@ -400,17 +406,21 @@ impl Mounted {
         found.accepted().then_some(Mounted { root, clock })
     }
 
-    /// A card path's place on this computer. Names only: an empty, `.` or
-    /// `..` component is refused, so no card path leaves the volume.
+    /// A card path's place on this computer: names only, each one that means
+    /// itself here ([`plain_name`]). The paths come from the card's own files
+    /// (a ledger, a plan), so none of them, however made, leaves the volume
+    /// or opens another file on it.
     fn host(&self, card: &str) -> io::Result<PathBuf> {
+        let refused = || io::Error::new(io::ErrorKind::InvalidInput, "not a card path");
         let mut path = self.root.clone();
         for name in card.split('/').filter(|n| !n.is_empty()) {
-            if name == "." || name == ".." {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a card path"));
+            if !plain_name(name) {
+                return Err(refused());
             }
             path.push(name);
         }
-        Ok(path)
+        // The same said of the whole: the path is still under the root.
+        if path.starts_with(&self.root) { Ok(path) } else { Err(refused()) }
     }
 
     fn item(&self, name: String, meta: &std::fs::Metadata) -> Item {
@@ -462,6 +472,32 @@ impl CardFs for Mounted {
         file.take(len as u64).read_to_end(&mut bytes)?;
         Ok(bytes)
     }
+}
+
+/// A card path's component that [`Mounted::host`] may join: not `.` or `..`,
+/// and no `\`, `:` or NUL. No FAT name holds those (2.8.3), and Windows reads
+/// them as a separator, a drive, a share or a device (`C:`, `\\host`,
+/// `\\.\PhysicalDrive0`), which a push puts in place of the volume's root.
+/// On Windows also no name it opens as another: one ending in a dot or a
+/// space opens the name without them, and a DOS device's name, alone or with
+/// an extension (`CON`, `aux.mp3`; 2.8.3 step 6), opens the device on
+/// Windows 10. Elsewhere those are names like any other.
+fn plain_name(name: &str) -> bool {
+    let plain = name != "." && name != ".." && !name.contains(['\\', ':', '\0']);
+    plain && !(cfg!(windows) && win32_alias(name))
+}
+
+/// A name Windows opens as another: see [`plain_name`].
+fn win32_alias(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
+    let numbered = |port: &str| {
+        let mut digit = stem.strip_prefix(port).unwrap_or_default().chars();
+        matches!((digit.next(), digit.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
+    };
+    name.ends_with(['.', ' '])
+        || ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+        || numbered("COM")
+        || numbered("LPT")
 }
 
 /// A name as the OS listed it, brought back to the card's spelling (2.8.5):
@@ -1023,10 +1059,15 @@ mod tests {
 
     #[test]
     fn fat_widths_serials_and_clocks() {
-        assert_eq!(Fs::fat_of_clusters(4084), Fs::Fat12);
-        assert_eq!(Fs::fat_of_clusters(4085), Fs::Fat16);
+        // FatFs's boundaries, each one past the spec's: the player's reading
+        // is the one that counts.
+        assert_eq!(Fs::fat_of_clusters(4085), Fs::Fat12);
+        assert_eq!(Fs::fat_of_clusters(4086), Fs::Fat16);
         assert_eq!(Fs::fat_of_clusters(65_524), Fs::Fat16);
-        assert_eq!(Fs::fat_of_clusters(65_525), Fs::Fat32);
+        let volume = card_volume(Path::new("/c"));
+        let width = |clusters| Volume { fs: Fs::fat_of_clusters(clusters), ..volume.clone() };
+        assert_eq!(codes(&card_disk(), &width(65_525)), ["filesystem"], "no width the player reads");
+        assert_eq!(Fs::fat_of_clusters(65_526), Fs::Fat32);
         assert_eq!(Serial::parse("1A2B-3C4D"), Serial::Fat(0x1A2B_3C4D));
         assert_eq!(Serial::Fat(0x0001_00AB).to_string(), "0001-00AB");
         assert_eq!(Serial::parse("0f1e2d3c-aaaa"), Serial::Uuid("0f1e2d3c-aaaa".into()));
@@ -1190,6 +1231,43 @@ mod tests {
         let v0 = br#"{"format":"mstream-card-state","version":0,"seq":1}"#;
         for bad in [bom.as_slice(), resume, zero, v0, b"[1]", b"{"] {
             assert_eq!(pick(Some(bad), None), (None, 0, None, false), "{}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    #[test]
+    fn a_card_path_is_names_under_the_volume_and_nothing_else() {
+        let root = std::env::temp_dir().join("mstream-card-root");
+        let card = Mounted { root: root.clone(), clock: Clock::Offset(0) };
+        let path = card.host("/music/A B/01 - Title.mp3").unwrap();
+        assert_eq!(path, root.join("music").join("A B").join("01 - Title.mp3"));
+        assert_eq!(card.host("/").unwrap(), root);
+        assert_eq!(card.host("/music/...x").unwrap(), root.join("music").join("...x"));
+        // A name a card can't hold: Windows would push a drive, a share or a
+        // device in place of the root, or climb out by a backslash.
+        let escapes = [
+            "/music/../escape",
+            "/./music",
+            "/C:/Windows/x",
+            "/C:",
+            r"/\\host/share/x",
+            r"/\\?\C:\x",
+            r"/\\.\PhysicalDrive0",
+            r"/music/a\..\..\b",
+            "/music/a.mp3:stream",
+            "/music/a\0b",
+        ];
+        for path in escapes {
+            assert!(card.host(path).is_err(), "{path:?}");
+        }
+        // What Windows opens as another name or as a device; elsewhere a
+        // name like any other.
+        let devices = ["CON", "aux.mp3", "Com1.flac", "lpt¹", "nul .txt"];
+        for name in devices.into_iter().chain(["x.", "x ", "dir./x.mp3"]) {
+            let path = format!("/music/{name}");
+            assert_eq!(card.host(&path).is_err(), cfg!(windows), "{path:?}");
+        }
+        for path in ["/music/CONCERT.mp3", "/music/COM10.mp3", "/music/Auxiliary/x.mp3", "/music/.x"] {
+            assert!(card.host(path).is_ok(), "{path:?}");
         }
     }
 
