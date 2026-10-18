@@ -2,7 +2,8 @@
 //! part A6): the paged sync manifest with its ETag, full metadata in chunks
 //! under the server's body cap, embeddings eight paths at a time, the
 //! recursive listing a peer offers where it serves no manifest, covers in
-//! their three sizes, and backdated plays from a card's log.
+//! their three sizes, and backdated plays from a card's log. The files'
+//! bytes are [`fetch`]'s.
 //!
 //! Every call here reads its answer through `exchange`, which adds the body
 //! to the client's meter and carries the copy purpose when the client was
@@ -14,6 +15,8 @@
 // The sync engine (the plan's A8 and B1) is this module's caller and lands
 // after it; until then only the tests call in.
 #![cfg_attr(not(test), allow(dead_code))]
+
+pub mod fetch;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -990,18 +993,25 @@ impl Client {
 pub(crate) mod stub {
     //! A loopback server for the transfer's tests: `canned_server`'s shape
     //! (one answer per connection, in turn, each request handed back), but
-    //! it reads a request's body to its length too.
+    //! it reads a request's body to its length too, and an answer can be a
+    //! script — bytes, then silence, then more bytes.
 
     use std::io::{Read, Write};
+    use std::time::Duration;
 
-    /// Serves `replies` one connection each, in order. The base URL, and
+    pub(crate) enum Step {
+        Send(Vec<u8>),
+        Wait(Duration),
+    }
+
+    /// Serves `scripts` one connection each, in order. The base URL, and
     /// every request whole (head and body) as it came.
-    pub(crate) fn canned(replies: Vec<Vec<u8>>) -> (String, std::sync::mpsc::Receiver<String>) {
+    pub(crate) fn scripted(scripts: Vec<Vec<Step>>) -> (String, std::sync::mpsc::Receiver<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
         let (seen_tx, seen_rx) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
-            for reply in replies {
+            for script in scripts {
                 let Ok((mut sock, _)) = listener.accept() else { return };
                 let mut request = Vec::new();
                 let mut buf = [0u8; 4096];
@@ -1027,10 +1037,23 @@ pub(crate) mod stub {
                     }
                 }
                 let _ = seen_tx.send(String::from_utf8_lossy(&request).to_string());
-                let _ = sock.write_all(&reply);
+                for step in script {
+                    match step {
+                        Step::Send(bytes) => {
+                            let _ = sock.write_all(&bytes);
+                            let _ = sock.flush();
+                        }
+                        Step::Wait(pause) => std::thread::sleep(pause),
+                    }
+                }
             }
         });
         (format!("http://127.0.0.1:{port}"), seen_rx)
+    }
+
+    /// One plain answer per connection.
+    pub(crate) fn canned(replies: Vec<Vec<u8>>) -> (String, std::sync::mpsc::Receiver<String>) {
+        scripted(replies.into_iter().map(|r| vec![Step::Send(r)]).collect())
     }
 
     /// An answer with a length and `Connection: close`, and `headers`.
@@ -1050,7 +1073,24 @@ pub(crate) mod stub {
         reply(status, &[("Content-Type", "application/json")], body.as_bytes())
     }
 
-    /// The JSON body of a request `canned` handed back.
+    /// A chunked answer with no length, as `/transcode` streams one.
+    pub(crate) fn chunked(status: &str, headers: &[(&str, &str)], pieces: &[&[u8]]) -> Vec<u8> {
+        let mut out = format!("HTTP/1.1 {status}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n");
+        for (name, value) in headers {
+            out.push_str(&format!("{name}: {value}\r\n"));
+        }
+        out.push_str("\r\n");
+        let mut out = out.into_bytes();
+        for piece in pieces {
+            out.extend_from_slice(format!("{:x}\r\n", piece.len()).as_bytes());
+            out.extend_from_slice(piece);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    /// The JSON body of a request `scripted` handed back.
     pub(crate) fn body_of(request: &str) -> serde_json::Value {
         let body = request.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
         serde_json::from_str(body).unwrap_or(serde_json::Value::Null)

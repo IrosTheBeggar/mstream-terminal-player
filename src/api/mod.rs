@@ -10,8 +10,8 @@
 //! request, so a token-less client is valid and supported.
 
 pub mod server_url;
-/// The SD-card transfer's routes. Native only, as the `device` module that
-/// drives it is (src/main.rs).
+/// The SD-card transfer's routes and its downloads to a file. Native only,
+/// as the `device` module that drives it is (src/main.rs).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod transfer;
 pub mod types;
