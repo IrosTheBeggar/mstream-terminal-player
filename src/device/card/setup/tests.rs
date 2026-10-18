@@ -121,6 +121,17 @@ fn bytes(card: &FatSim, name: &str) -> Vec<u8> {
     card.read(&format!("/.mstream/{name}"), MAX_FILE).unwrap().unwrap_or_else(|| panic!("{name}"))
 }
 
+/// A card copied out for the firmware repo's reference readers
+/// (tools/synthtransfer.py --check), when `MSTREAM_CARD_DUMP=<folder>` asks,
+/// as the engine's tests do.
+fn dump(name: &str, card: &FatSim) {
+    if let Some(dir) = std::env::var_os("MSTREAM_CARD_DUMP") {
+        let to = Path::new(&dir).join(name);
+        let _ = std::fs::remove_dir_all(&to);
+        copy_tree(&card.root(), &to);
+    }
+}
+
 /// The card's files under a folder, each with its size, stamp and bytes'
 /// hash.
 fn under(card: &FatSim, prefix: &str) -> BTreeMap<String, (u64, u32, u64)> {
@@ -197,6 +208,7 @@ fn a_new_card_is_set_up_as_the_kit_and_the_device_read_it() {
     assert_eq!(state, State { seq: 1, ..State::new(done.card_id, "Car", Some(&Serial::Fat(SERIAL)), NOW) });
     let text = String::from_utf8(bytes(&card, "state.json")).unwrap();
     assert!(!text.contains("://") && !text.contains("example"), "no address: {text}");
+    dump("setup-new", &card);
     // And this computer's cache.
     let seen = &cards.cards[&done.card_id];
     let cached = (seen.label.as_str(), seen.last_seen, seen.generation, seen.commit_id);
@@ -271,6 +283,7 @@ fn the_listeners_music_and_the_players_files_stay_as_they_are() {
     }
     assert!(after.keys().filter(|p| !before.contains_key(*p)).all(|p| p.starts_with("/.mstream/")));
     assert!(card.log().iter().all(|w| w.contains(" /.mstream")), "{:?}", card.log());
+    dump("setup-music", &card);
     // The music is the listener's: no ledger lists it.
     let seen = look(&card);
     assert_eq!((seen.music.audio, seen.music.unlisted), (1, 1));
@@ -334,6 +347,7 @@ fn a_copied_card_is_said_to_be_one_and_takes_a_new_identity_when_asked() {
     assert_eq!(id, (done.card_id, 2, "Car", Some(OTHER), NOW));
     assert_eq!(under(&card_b, "/music/"), music, "the music as it was");
     assert!(!under(&card_b, "/.mstream/").contains_key("/.mstream/tags-00000001.bin"), "collected");
+    dump("setup-new-identity", &card_b);
     // No longer a copy: looked at, nothing to say.
     let writes = card_b.log().len();
     let again = run(&card_b, &ask(""), &mut elsewhere, 4).unwrap();
