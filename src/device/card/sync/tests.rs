@@ -95,6 +95,8 @@ struct Library {
     /// The plays posted to `stats/plays`, as they came, and the ids it has.
     plays: Vec<Value>,
     has: HashSet<String>,
+    /// `stats/plays` answers 500: a post that fails.
+    stats_down: bool,
 }
 
 type Fake = Arc<Mutex<Library>>;
@@ -236,6 +238,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
                 return chunked("200 OK", &[("Content-Type", kind)], &[&bytes[..bytes.len() / 3]]);
             }
             chunked("200 OK", &[("Content-Type", kind)], &[&bytes])
+        }
+        ("POST", "/api/v1/stats/plays") if lib.stats_down => {
+            json_reply("500 Internal Server Error", r#"{"error":"Server Error"}"#)
         }
         ("POST", "/api/v1/stats/plays") => {
             let plays = asked.json()["plays"].as_array().cloned().unwrap_or_default();
@@ -590,6 +595,69 @@ fn a_syncs_commit_acknowledges_the_plays_it_posted_and_makes_none_for_them() {
     assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(4), "the ACKS wait for a commit");
     assert_eq!(State::of(&seen.state).unwrap().plays, mark(5));
     assert_eq!(fake.lock().unwrap().has.len(), 3, "each play credited once");
+}
+
+/// A run's plays to send that no outbox holds (its saves fail) and the
+/// server doesn't settle (its post fails): the sync stops before it plans,
+/// the card as it was, since its checkpoint would replace the rows they map
+/// through. Once the outbox takes them the sync runs, and they wait there
+/// for the server.
+#[test]
+fn a_sync_whose_plays_no_outbox_holds_stops_before_it_plans() {
+    let scratch = Scratch::new("unstored");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    let store = Rc::new(MemStore::default());
+    let mut again = |ask: &Ask| {
+        sync_plays(&sim, &base, ask, &mut envs, Reached::Elsewhere, store.clone()).0
+    };
+    ran(&again(&rock()));
+
+    let (device_id, epoch) = ([0x00, 0x00, 0x5E, 0x00, 0x53, 0x01], 0x1122_3344_5566_7788);
+    let seen = look(&sim);
+    let records = &seen.root.as_ref().unwrap().tags.as_ref().unwrap().records;
+    let row = records.iter().find(|e| e.path == "Artist A/Album B/01.mp3").unwrap();
+    let play = Slot {
+        kind: KIND_PLAY,
+        outcome: 1,
+        source: 1,
+        seq: 1,
+        epoch,
+        device_id,
+        started_at: 1_791_950_000_000,
+        boot_seq: 1,
+        uptime_ms: 1000,
+        played_ms: 181_000,
+        path_hash: crate::device::card::contract::prim::path_hash(&row.path),
+        size: row.rec.size,
+        fat_time: row.rec.fat_time,
+        ..Slot::default()
+    };
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play.encode()).unwrap();
+    fake.lock().unwrap().stats_down = true;
+    store.saves_left.set(Some(0));
+    let without_lock = |mut image: BTreeMap<String, (u64, u32, u64)>| {
+        image.retain(|p, _| !p.ends_with("run.lock"));
+        image
+    };
+    let image = without_lock(sim.image());
+    let stopped = again(&Ask::default());
+    let End::Halted(Halt::Refused(why)) = &stopped.end else { panic!("{:?}", stopped.end) };
+    assert!(why.contains("1 of the card's plays to send aren't in the plays' outbox"), "{why}");
+    assert_eq!(without_lock(sim.image()), image, "stopped before a write");
+    assert_eq!(stopped.plays.as_ref().map(|t| (t.owed, t.failed)), Some((1, true)));
+
+    // The outbox takes them: the run goes on, and they wait for the server.
+    store.saves_left.set(None);
+    let waited = again(&Ask::default());
+    ran(&waited);
+    assert_eq!(store.outbox().cards.values().map(|o| o.plays.len()).sum::<usize>(), 1);
+    assert_eq!(State::of(&look(&sim).state).unwrap().plays, []);
+    fake.lock().unwrap().stats_down = false;
+    let posted = again(&Ask::default());
+    assert_eq!(posted.plays.as_ref().unwrap().accepted, 1);
+    assert_eq!(State::of(&look(&sim).state).unwrap().plays, [Ack { device_id, epoch, seq: 1 }]);
 }
 
 #[test]

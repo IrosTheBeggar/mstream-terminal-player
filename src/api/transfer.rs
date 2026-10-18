@@ -641,6 +641,31 @@ impl PlayTrack {
     }
 }
 
+/// The `client` block's version as the server takes it: at most 32
+/// characters. None for an empty one, and for a longer one, left out (a cut
+/// one would name another).
+pub fn play_version(version: &str) -> Option<String> {
+    (!version.is_empty() && js_len(version) <= 32).then(|| version.to_string())
+}
+
+/// What the server's schema refuses in `play`, which fails the whole batch
+/// it rides in with a 400, every time; None for a play it takes.
+pub fn play_fault(play: &CardPlay) -> Option<String> {
+    if play.id.is_empty() || js_len(&play.id) > 128 {
+        return Some(format!("an id of {} characters (1-128)", js_len(&play.id)));
+    }
+    if play.file_path.is_empty() || js_len(&play.file_path) > 2048 {
+        return Some(format!("play {}: a path of 1-2048 characters", play.id));
+    }
+    if play.session_id.as_deref().is_some_and(|s| js_len(s) > 128) {
+        return Some(format!("play {}: a session id over 128 characters", play.id));
+    }
+    if play.peer_id.is_some_and(|p| p < 1) {
+        return Some(format!("play {}: a peer id below 1", play.id));
+    }
+    None
+}
+
 /// The body of one `stats/plays` call, checked against the server's schema
 /// first: one field it refuses fails the whole batch with a 400, so the
 /// fault is named here instead.
@@ -660,17 +685,8 @@ pub fn plays_body(client: &PlayClient, plays: &[CardPlay]) -> Result<serde_json:
     }
     let mut checked = Vec::with_capacity(plays.len());
     for play in plays {
-        if play.id.is_empty() || js_len(&play.id) > 128 {
-            return wrong(format!("an id of {} characters (1-128)", js_len(&play.id)));
-        }
-        if play.file_path.is_empty() || js_len(&play.file_path) > 2048 {
-            return wrong(format!("play {}: a path of 1-2048 characters", play.id));
-        }
-        if play.session_id.as_deref().is_some_and(|s| js_len(s) > 128) {
-            return wrong(format!("play {}: a session id over 128 characters", play.id));
-        }
-        if play.peer_id.is_some_and(|p| p < 1) {
-            return wrong(format!("play {}: a peer id below 1", play.id));
+        if let Some(fault) = play_fault(play) {
+            return wrong(fault);
         }
         let mut play = play.clone();
         play.track = play.track.as_ref().map(PlayTrack::within_caps);
@@ -1648,6 +1664,20 @@ mod tests {
         let nameless = PlayClient { name: String::new(), ..client_block.clone() };
         assert!(matches!(plays_body(&nameless, std::slice::from_ref(&play)), Err(ApiError::Config(_))));
         assert_eq!(clip("aé😀b", 3), "aé", "a character never splits");
+
+        // One play at a time, and the version a card's device.txt gives.
+        assert_eq!(play_fault(&play), None);
+        let pathless = CardPlay { file_path: String::new(), ..play.clone() };
+        let far = CardPlay { file_path: "é".repeat(2049), ..play.clone() };
+        let peerless = CardPlay { peer_id: Some(0), ..play.clone() };
+        for refused in [pathless, far, peerless] {
+            assert!(play_fault(&refused).is_some(), "{refused:?}");
+            let body = plays_body(&client_block, &[play.clone(), refused]);
+            assert!(matches!(body, Err(ApiError::Config(_))), "it fails the batch whole");
+        }
+        assert_eq!(play_version("0.12.0").as_deref(), Some("0.12.0"));
+        assert_eq!(play_version(&"😀".repeat(16)).map(|v| v.chars().count()), Some(16), "32 units");
+        assert_eq!((play_version(&"😀".repeat(17)), play_version("")), (None, None));
     }
 
     #[test]

@@ -22,15 +22,20 @@ use crate::device::card::engine::fatsim::FatSim;
 // ── The outbox's store ──────────────────────────────────────────────────────
 
 /// The outbox in memory. With `saves_left`, that many saves, then each one
-/// refused: what a crash leaves on disk is the last save it took.
+/// refused: what a crash leaves on disk is the last save it took. With
+/// `unreadable`, each load fails (a file the OS won't let it read).
 #[derive(Default)]
 pub(crate) struct MemStore {
     pub(crate) text: RefCell<Option<String>>,
     pub(crate) saves_left: Cell<Option<usize>>,
+    pub(crate) unreadable: Cell<bool>,
 }
 
 impl Store for MemStore {
     fn load(&self) -> Result<Option<String>, String> {
+        if self.unreadable.get() {
+            return Err("access denied".into());
+        }
         Ok(self.text.borrow().clone())
     }
 
@@ -261,6 +266,15 @@ fn server(m: Mstream) -> (Client, Fake) {
     let served = fake.clone();
     let base = routed(move |asked| answer(&served, asked));
     (Client::new(&base).unwrap().with_token(Some("tok".into())), fake)
+}
+
+/// A server out of reach: a loopback port nothing listens on any more.
+fn offline() -> Client {
+    let gone = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    };
+    Client::new(&gone).unwrap().with_token(Some("tok".into()))
 }
 
 /// The ids of each post, in order.
@@ -513,14 +527,9 @@ fn a_post_that_fails_keeps_every_play_and_a_rejected_one_settles() {
     let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
     let root = root_of(&sim);
     let store = Rc::new(MemStore::default());
-    let gone = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        format!("http://{}", listener.local_addr().unwrap())
-    };
-    let offline = Client::new(&gone).unwrap().with_token(Some("tok".into()));
     let mut history = History::new(store.clone(), false, none());
     history.look(&sim, Some(&root), 0);
-    history.post(&offline, &talk(HOME), true, true);
+    history.post(&offline(), &talk(HOME), true, true);
     let t = &history.tally;
     assert!(t.failed && t.notes.iter().any(|n| n.contains("weren't posted")), "{t:?}");
     assert_eq!((t.due, t.waiting), (5, 5));
@@ -724,6 +733,195 @@ fn a_card_copied_with_its_id_never_takes_the_others_plays_for_settled() {
     assert_eq!(fake.lock().unwrap().has.len(), 4);
 }
 
+/// A card whose `device.txt` names a firmware longer than the server takes
+/// (32 characters), and a row with no server path (an owned file with no
+/// server track, 2.6.6): the version is left out of the `client` block, the
+/// row's play is the listener's (the reference's resolve), and the other
+/// plays go; the mark rises past them all.
+#[test]
+fn a_long_firmware_name_or_a_row_with_no_server_path_holds_nothing_back() {
+    let scratch = Scratch::new("caps");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let long = format!("firmware={}", "0.12.0-".repeat(6));
+    let device = String::from_utf8(fixture("golden/device.txt")).unwrap();
+    let lines = device.lines().map(|l| if l.starts_with("firmware=") { long.as_str() } else { l });
+    let device: Vec<&str> = lines.collect();
+    std::fs::write(scratch.0.join("card/.player/device.txt"), device.join("\n")).unwrap();
+    let mut root = root_of(&sim);
+    let rows = root.tags.as_mut().unwrap().records.iter_mut().filter_map(|e| e.ledger.as_mut());
+    let first = "Music/Artist/Album/01 - Title.mp3";
+    rows.filter(|l| l.server_path == first).for_each(|l| l.server_path.clear());
+    let store = Rc::new(MemStore::default());
+    let (client, fake) = server(Mstream::default());
+    let mut history = History::new(store.clone(), false, none());
+    history.look(&sim, Some(&root), 0);
+    let t = &history.tally;
+    assert_eq!((t.new, t.owed, t.own, t.changed), (7, 4, 2, 1), "{t:?}");
+    assert_eq!(store.outbox().cards[&CARD_ID].firmware, long["firmware=".len()..]);
+    history.post(&client, &talk(HOME), true, true);
+    let t = &history.tally;
+    assert_eq!((t.accepted, t.refused, t.waiting, t.failed), (4, 0, 0, false), "{t:?}");
+    let body = fake.lock().unwrap().posts[0].clone();
+    assert_eq!(body["client"], json!({"name": "mstream-core2", "instanceId": "5eedc0de0a1b2c3d"}));
+    assert!(!posted_ids(&fake)[0].contains(&id(ONE, EPOCH_1, 1)), "the listener's file now");
+    assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 7)]);
+}
+
+/// A play the server's schema refuses (a path past its 2,048 characters,
+/// from a hand-edited outbox, say) would fail its batch whole at every run:
+/// it isn't sent and settles as a play not sent does, and the rest of its
+/// batch goes.
+#[test]
+fn a_play_the_server_would_refuse_settles_unsent_and_the_rest_go() {
+    let scratch = Scratch::new("refused");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let root = root_of(&sim);
+    let store = Rc::new(MemStore::default());
+    let mut history = History::new(store.clone(), false, none());
+    history.look(&sim, Some(&root), 0);
+    let far = history.owing.plays[1].id.clone();
+    history.owing.plays[1].file_path = format!("Music/{}", "é".repeat(2048));
+    let (client, fake) = server(Mstream::default());
+    history.post(&client, &talk(HOME), true, true);
+    let t = &history.tally;
+    assert_eq!((t.accepted, t.refused, t.due, t.waiting, t.failed), (4, 1, 0, 0, false), "{t:?}");
+    assert!(t.notes.iter().any(|n| n.contains("would refuse")), "{t:?}");
+    assert_eq!(t.json()["refused"], 1);
+    let ids = posted_ids(&fake);
+    assert_eq!((ids.len(), ids[0].len(), ids[0].contains(&far)), (1, 4, false));
+    assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 7)]);
+    assert!(store.outbox().cards[&CARD_ID].done.contains(&far), "settled, on disk");
+}
+
+/// Plays an earlier look mapped wait in the outbox, and go once their
+/// server is reached, though the card maps none now: no log (the listener
+/// cleared `/.player`), or no ledger. The marks stay as the card's state
+/// file has them, and the ACKS as the root carried them.
+#[test]
+fn plays_mapped_before_go_though_the_card_maps_none_now() {
+    for cleared in [true, false] {
+        let scratch = Scratch::new("cleared");
+        let logs = golden_log("plays/golden/sync-1");
+        let sim = card(&scratch, Golden::One, &logs);
+        let mut root = root_of(&sim);
+        let store = Rc::new(MemStore::default());
+        let mut first = History::new(store.clone(), false, none());
+        first.look(&sim, Some(&root), 0);
+        first.post(&offline(), &talk(HOME), true, true);
+        assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 5);
+        if cleared {
+            for (name, _) in &logs {
+                std::fs::remove_file(scratch.0.join("card/.player").join(name)).unwrap();
+            }
+        } else {
+            root.tags.as_mut().unwrap().has_ledger = false;
+        }
+
+        let (client, fake) = server(Mstream::default());
+        let mut later = History::new(store.clone(), false, none());
+        later.look(&sim, Some(&root), 0);
+        let t = &later.tally;
+        assert_eq!((t.new, t.waiting, later.due(&talk(HOME)), later.log.is_none()), (0, 5, 5, true));
+        later.post(&client, &talk(HOME), true, true);
+        assert_eq!((later.tally.accepted, posted_ids(&fake)[0].len()), (5, 5), "cleared: {cleared}");
+        assert_eq!(later.marks(), [], "no log read: the state file's marks");
+        assert_eq!(later.acks(&[ack(ONE, EPOCH_1, 3)]), [ack(ONE, EPOCH_1, 3)]);
+        let owing = &store.outbox().cards[&CARD_ID];
+        assert_eq!((owing.plays.len(), owing.done.len(), later.unstored()), (0, 5, None));
+    }
+}
+
+/// Plays to send that only the run holds (the outbox's save failed; it is
+/// a newer player's or doesn't read, so it is never written; or it can't be
+/// read at all, so this card's part is never saved over the one on disk):
+/// [`History::unstored`] says so, which stops a sync before it plans, until
+/// they settle or a save takes them. Plays the outbox held already stop
+/// nothing, and a dry run stops nothing.
+#[test]
+fn plays_no_outbox_holds_are_unstored_until_they_settle_or_a_save_takes_them() {
+    let scratch = Scratch::new("unstored");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let root = root_of(&sim);
+    let store = Rc::new(MemStore { saves_left: Cell::new(Some(0)), ..MemStore::default() });
+    let mut history = History::new(store.clone(), false, none());
+    history.look(&sim, Some(&root), 0);
+    history.post(&offline(), &talk(HOME), true, true);
+    let why = history.unstored().expect("held by the run alone");
+    assert!(why.starts_with("5 of") && why.contains("the process died"), "{why}");
+    let (client, _fake) = server(Mstream::default());
+    history.post(&client, &talk(HOME), true, true);
+    assert_eq!((history.tally.accepted, history.unstored()), (5, None), "settled: none at risk");
+
+    // Saved by an earlier look, then a save that fails: on disk already,
+    // all but a play the log gained since.
+    let store = Rc::new(MemStore::default());
+    History::new(store.clone(), false, none()).look(&sim, Some(&root), 0);
+    store.saves_left.set(Some(0));
+    let mut again = History::new(store.clone(), false, none());
+    again.look(&sim, Some(&root), 0);
+    assert_eq!((again.tally.failed, again.unstored()), (true, None), "the outbox on disk holds them");
+    let more = play_of(&root, "A/x.mp3", ONE, EPOCH_1, 8);
+    std::fs::write(scratch.0.join("card/.player/plays.2.jnl"), log_bytes(&[more])).unwrap();
+    let mut gained = History::new(store.clone(), false, none());
+    gained.look(&sim, Some(&root), 0);
+    assert!(gained.unstored().is_some_and(|why| why.starts_with("1 of")), "{:?}", gained.unstored());
+    std::fs::remove_file(scratch.0.join("card/.player/plays.2.jnl")).unwrap();
+
+    // An outbox never written: a newer player's, one that doesn't read, one
+    // the OS won't let it read (its part on disk never replaced by this
+    // run's, though a later load would read it). A dry run risks nothing.
+    let (newer, other) = (r#"{"version": 2, "cards": {}}"#, r#"{"version": 1, "cards": {}}"#);
+    for (text, unreadable) in [(newer, false), ("{", false), (other, true)] {
+        let store = Rc::new(MemStore { unreadable: Cell::new(unreadable), ..MemStore::default() });
+        *store.text.borrow_mut() = Some(text.into());
+        let mut history = History::new(store.clone(), false, none());
+        history.look(&sim, Some(&root), 0);
+        assert_eq!(history.tally.owed, 5, "mapped all the same: {text}");
+        assert!(history.unstored().is_some_and(|why| why.starts_with("5 of")), "{text}");
+        store.unreadable.set(false);
+        let (client, _fake) = server(Mstream::default());
+        history.post(&client, &talk(HOME), true, true);
+        assert_eq!((history.tally.accepted, history.unstored()), (5, None), "{text}");
+        assert_eq!(store.text.borrow().as_deref(), Some(text), "never written over");
+        let mut dry = History::new(store.clone(), true, none());
+        dry.look(&sim, Some(&root), 0);
+        assert_eq!((dry.tally.owed, dry.unstored()), (5, None), "{text}");
+    }
+}
+
+/// The settled ids of plays the card's log holds no more (the device's
+/// rotation dropped them, or its trim) go from the outbox: none is read
+/// again, and a seq the card doesn't hold holds no mark back.
+#[test]
+fn settled_ids_the_log_holds_no_more_are_forgotten() {
+    let scratch = Scratch::new("pruned");
+    let logs = golden_log("plays/golden/sync-1");
+    let sim = card(&scratch, Golden::One, &logs);
+    let root = root_of(&sim);
+    let store = Rc::new(MemStore::default());
+    let (client, _fake) = server(Mstream::default());
+    let mut history = History::new(store.clone(), false, none());
+    history.look(&sim, Some(&root), 0);
+    history.post(&client, &talk(HOME), true, true);
+    let settled = store.outbox().cards[&CARD_ID].done.clone();
+    assert_eq!(settled.len(), 5);
+
+    // The log keeps its last plays only.
+    let kept: Vec<Slot> = log_of(&logs).plays.into_iter().filter(|p| p.seq >= 5).collect();
+    for (name, _) in &logs {
+        std::fs::remove_file(scratch.0.join("card/.player").join(name)).unwrap();
+    }
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), log_bytes(&kept)).unwrap();
+    let mut later = History::new(store.clone(), false, none());
+    later.look(&sim, Some(&root), 0);
+    let held: BTreeSet<String> =
+        kept.iter().map(Slot::id).filter(|id| settled.contains(id)).collect();
+    assert!(held.len() < settled.len(), "{held:?}");
+    assert_eq!(store.outbox().cards[&CARD_ID].done, held);
+    assert_eq!((later.tally.new, later.due(&talk(HOME))), (kept.len(), 0));
+    assert_eq!(later.marks(), [ack(ONE, EPOCH_1, 7)]);
+}
+
 /// A play whose source the device didn't say goes as `device` to a server
 /// of the card transfer's batch; an older one refuses the batch whole, and
 /// it goes again as `other`.
@@ -812,8 +1010,35 @@ fn a_path_the_server_moved_is_found_again_by_its_audio_hash() {
     assert_eq!(other.tally.remapped, 0);
 }
 
+/// A card whose play log reads shorter than it lists (it changed under the
+/// reader, or the card was pulled).
+struct Short<'a>(&'a FatSim);
+
+impl CardFs for Short<'_> {
+    fn list(&self, dir: &str) -> io::Result<Vec<volume::Item>> {
+        self.0.list(dir)
+    }
+
+    fn stat(&self, path: &str) -> io::Result<Option<volume::Item>> {
+        self.0.stat(path)
+    }
+
+    fn read(&self, path: &str, max: usize) -> io::Result<Option<Vec<u8>>> {
+        self.0.read(path, max)
+    }
+
+    fn read_at(&self, path: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let mut bytes = self.0.read_at(path, offset, len)?;
+        if path.ends_with("/plays.jnl") {
+            bytes.truncate(bytes.len().saturating_sub(mppl::SLOT));
+        }
+        Ok(bytes)
+    }
+}
+
 /// A dry run maps and counts, and saves and posts nothing; a card with no
-/// log, or with a log it can't read whole, has nothing mapped.
+/// log, or with a log it can't read whole, has nothing mapped: a short read
+/// fails the look, no play is passed over, and the ACKS stay as they were.
 #[test]
 fn a_dry_run_saves_nothing_and_a_short_read_maps_nothing() {
     let scratch = Scratch::new("dry");
@@ -834,6 +1059,16 @@ fn a_dry_run_saves_nothing_and_a_short_read_maps_nothing() {
     assert_eq!((history.tally.new, history.log.is_none()), (0, true));
     assert_eq!(history.acks(&[ack(ONE, EPOCH_1, 3)]), [ack(ONE, EPOCH_1, 3)], "carried as they are");
     assert!(store.text.borrow().is_none());
+
+    let posted = (CARD_ID, vec![ack(ONE, EPOCH_1, 2)]);
+    let mut short = History::new(store.clone(), false, posted);
+    short.look(&Short(&sim), Some(&root), 0);
+    let t = &short.tally;
+    assert!(t.failed && t.notes.iter().any(|n| n.contains("the play log can't be read")), "{t:?}");
+    assert_eq!((t.new, t.owed, short.log.is_none()), (0, 0, true));
+    assert_eq!(short.marks(), [ack(ONE, EPOCH_1, 2)], "the state file's, as they were");
+    assert_eq!(short.acks(&[ack(ONE, EPOCH_1, 2)]), [ack(ONE, EPOCH_1, 2)]);
+    assert_eq!((short.unstored(), store.text.borrow().is_none()), (None, true), "nothing saved");
 }
 
 /// The outbox reads back what it wrote, keeps what a newer player wrote
@@ -872,6 +1107,30 @@ fn the_outbox_reads_back_and_keeps_what_it_doesnt_know() {
     history.look(&sim, Some(&root), 0);
     assert!(history.tally.failed && history.tally.notes.iter().any(|n| n.contains("newer")));
     assert_eq!(store.text.borrow().as_deref(), Some(newer), "never written over");
+
+    // One that doesn't read as this player's: never written over either,
+    // its plays mapped all the same. A blank one is none.
+    let (versionless, a_string, a_list) =
+        (r#"{"cards": {}}"#, r#"{"version": "1"}"#, r#"{"version": 1, "cards": []}"#);
+    for damaged in ["{", "[1]", versionless, a_string, a_list] {
+        *store.text.borrow_mut() = Some(damaged.into());
+        let mut history = History::new(store.clone(), false, none());
+        history.look(&sim, Some(&root), 0);
+        assert_eq!(history.tally.owed, 1, "{damaged}");
+        assert!(history.tally.notes.iter().any(|n| n.contains("doesn't read")), "{damaged}");
+        assert_eq!(store.text.borrow().as_deref(), Some(damaged), "never written over");
+    }
+    *store.text.borrow_mut() = Some(" \n".into());
+    History::new(store.clone(), false, none()).look(&sim, Some(&root), 0);
+    assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 1, "a blank file is none");
+    // A card key that isn't a card id: kept as it is.
+    let mut v: Value = serde_json::from_str(store.text.borrow().as_deref().unwrap()).unwrap();
+    v["cards"]["not a card"] = json!({"x": 1});
+    *store.text.borrow_mut() = Some(v.to_string());
+    History::new(store.clone(), false, none()).look(&sim, Some(&root), 0);
+    let again: Value = serde_json::from_str(store.text.borrow().as_deref().unwrap()).unwrap();
+    let cards = again["cards"].as_object().unwrap();
+    assert_eq!((&cards["not a card"], cards.len()), (&json!({"x": 1}), 2));
     assert_eq!(key_of_id("core2-00005e005301-1122334455667788-7"), Some((ONE, EPOCH_1, 7)));
     for bad in ["core2-00005E005301-1122334455667788-7", "core2-00005e005301-1122334455667788-07", "x-1"] {
         assert_eq!(key_of_id(bad), None, "{bad}");

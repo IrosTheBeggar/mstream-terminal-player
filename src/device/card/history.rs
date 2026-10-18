@@ -9,6 +9,8 @@
 //! **A look** ([`History::look`]: the engine's plays hook, step 5 of a run,
 //! once the card is listed; or the hidden `device card-plays`, which only
 //! reads the card):
+//! - the card's part of the outbox taken, whatever the card holds now: the
+//!   plays mapped before wait there for their server;
 //! - the log's files read, each slot judged by the kit; a card that fails a
 //!   read is looked at no further, so no play is ever passed over;
 //! - the new plays: above the posted mark of their device and epoch in the
@@ -21,7 +23,9 @@
 //!   can't tell);
 //! - the plays to send saved in the outbox ([`Outbox`], `card-plays.json`
 //!   in the config folder, written whole) before the run writes anything:
-//!   a checkpoint deletes the tags file they map through.
+//!   a checkpoint deletes the tags file they map through. A sync whose
+//!   plays to send are in no outbox after its post, since a save failed,
+//!   stops before it plans ([`History::unstored`]).
 //!
 //! **The post** ([`History::post`]): a path the server moved since the
 //! ledger was written is found again by its audio hash in the server's
@@ -29,8 +33,10 @@
 //! is the one read now (2.11's test; a peer's go to its parent, with the
 //! peer's id and a snapshot of the track) go in batches of 200, each answer
 //! saved as it comes: accepted, duplicates and rejected alike are settled.
-//! Plays of another server, and those of a post that failed, wait in the
-//! outbox for a run that reads their server.
+//! A play the server's schema refuses is never sent and settles as one not
+//! sent: it would fail every batch it rode in. Plays of another server, and
+//! those of a post that failed, wait in the outbox for a run that reads
+//! their server.
 //!
 //! **The marks** ([`History::marks`]): each device and epoch's rises over
 //! the plays settled or not sent, to the first that waits. A sync stores
@@ -63,7 +69,7 @@ use super::state::{State, device_of, from_hex, hex as id_hex, marks_value};
 use super::volume::{self, CardFs, Mounted, Root};
 use crate::api::transfer::{
     CardPlay, MANIFEST_PAGE_MAX, Manifest, ManifestEntry, PLAYS_PER_CALL, PlayClient, PlayOutcome,
-    PlaySource, PlayTrack,
+    PlaySource, PlayTrack, play_fault, play_version,
 };
 use crate::api::{ApiError, Client, wait};
 
@@ -183,7 +189,9 @@ impl Owed {
     }
 
     /// The play as `stats/plays` takes it. A source the device didn't say
-    /// is `device` where the server takes it, else `other`.
+    /// is `device` where the server takes it, else `other`: 2.20.6's table,
+    /// proposed before mStream had a `device` source, says `other`; the
+    /// plan's mStream batch (B11) added `device` for these plays.
     fn play(&self, device: bool) -> CardPlay {
         let outcome = match self.outcome {
             1 => PlayOutcome::Completed,
@@ -335,9 +343,11 @@ pub(crate) fn resolve(
     skew: i32,
     marks: &[Ack],
 ) -> Vec<(Slot, Result<Owed, Unsent>)> {
+    // A row with no server path (an owned file with no server track, 2.6.6)
+    // is none: its plays are the listener's, as the reference has them.
     let mut rows: HashMap<u64, Vec<(&Entry, &Ledger)>> = HashMap::new();
     for e in &tags.records {
-        if let Some(ledger) = &e.ledger {
+        if let Some(ledger) = e.ledger.as_ref().filter(|l| !l.server_path.is_empty()) {
             rows.entry(e.hash).or_default().push((e, ledger));
         }
     }
@@ -397,8 +407,9 @@ pub(crate) struct Owing {
     /// The firmware that keeps the card's log, as its `device.txt` says:
     /// the `client` block's version.
     pub(crate) firmware: String,
-    /// The plays the server settled above the card's marks: until a sync
-    /// stores marks past them on the card.
+    /// The plays the server settled above the card's marks, and those its
+    /// schema refuses (never sent): until a sync stores marks past them on
+    /// the card, or the card's log holds them no more.
     pub(crate) done: BTreeSet<String>,
     /// The plays waiting to be posted.
     pub(crate) plays: Vec<Owed>,
@@ -444,40 +455,56 @@ impl Owing {
 
 /// `card-plays.json`: the plays read from cards that wait for their
 /// server, and those the server settled that no card's marks pass yet, by
-/// card id. A newer player's file is read as none and never written over;
-/// every member this player doesn't know is kept.
+/// card id. A newer player's file is read as none and never written over,
+/// and so is one that doesn't read as this player's (not JSON, no version,
+/// cards that aren't an object): the plays it holds can't be mapped again
+/// once a sync has replaced their ledger. Every member this player doesn't
+/// know is kept, a card key that isn't a card id among them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Outbox {
     pub(crate) cards: BTreeMap<u64, Owing>,
+    others: Map<String, Value>,
     keep: Map<String, Value>,
     newer: bool,
+    damaged: bool,
 }
 
 impl Outbox {
     pub(crate) fn parse(text: &str) -> Outbox {
-        let Ok(Value::Object(top)) = serde_json::from_str::<Value>(text) else {
+        let damaged = || Outbox { damaged: true, ..Outbox::default() };
+        if text.trim().is_empty() {
             return Outbox::default();
-        };
+        }
+        let Ok(Value::Object(top)) = serde_json::from_str::<Value>(text) else { return damaged() };
         match top.get("version").and_then(Value::as_u64) {
             Some(OUTBOX_VERSION) => {}
             Some(v) if v > OUTBOX_VERSION => return Outbox { newer: true, ..Outbox::default() },
-            _ => return Outbox::default(),
+            _ => return damaged(),
         }
-        let mut cards = BTreeMap::new();
-        for (id, card) in top.get("cards").and_then(Value::as_object).into_iter().flatten() {
-            if let Some(id) = from_hex(id) {
+        let listed = match top.get("cards") {
+            None => None,
+            Some(Value::Object(listed)) => Some(listed),
+            Some(_) => return damaged(),
+        };
+        let (mut cards, mut others) = (BTreeMap::new(), Map::new());
+        for (key, card) in listed.into_iter().flatten() {
+            if let Some(id) = from_hex(key) {
                 cards.insert(id, Owing::read(card));
+            } else {
+                others.insert(key.clone(), card.clone());
             }
         }
         let keep = top.iter().filter(|(k, _)| !matches!(k.as_str(), "version" | "cards"));
-        Outbox { cards, keep: keep.map(|(k, v)| (k.clone(), v.clone())).collect(), newer: false }
+        let keep = keep.map(|(k, v)| (k.clone(), v.clone())).collect();
+        Outbox { cards, others, keep, newer: false, damaged: false }
     }
 
     pub(crate) fn text(&self) -> String {
         let mut top = self.keep.clone();
         top.insert("version".into(), OUTBOX_VERSION.into());
-        let cards = self.cards.iter().map(|(id, owing)| (id_hex(*id), owing.json()));
-        top.insert("cards".into(), Value::Object(cards.collect()));
+        let mut cards = self.others.clone();
+        cards.extend(self.cards.iter().map(|(id, owing)| (id_hex(*id), owing.json())));
+        top.insert("cards".into(), Value::Object(cards));
         serde_json::to_string_pretty(&Value::Object(top)).unwrap_or_default() + "\n"
     }
 
@@ -492,6 +519,9 @@ fn save_card(store: &dyn Store, card_id: u64, owing: &Owing) -> Result<(), Strin
     let mut outbox = Outbox::load(store)?;
     if outbox.newer {
         return Err("card-plays.json is a newer player's".into());
+    }
+    if outbox.damaged {
+        return Err("card-plays.json doesn't read as this player's, and isn't written over".into());
     }
     // A card with nothing waiting or settled past its marks has no part.
     let idle = owing.plays.is_empty() && owing.done.is_empty() && owing.kept.is_empty();
@@ -526,6 +556,9 @@ pub(crate) struct Tally {
     pub(crate) accepted: usize,
     pub(crate) duplicates: usize,
     pub(crate) rejected: usize,
+    /// Plays the server's schema refuses (a path too long, say): never
+    /// sent, they settle as the plays not sent do.
+    pub(crate) refused: usize,
     /// For the server read now and not posted: a dry run's, or after a post
     /// that failed.
     pub(crate) due: usize,
@@ -551,6 +584,7 @@ impl Tally {
             "remapped": self.remapped,
             "posted": {"accepted": self.accepted, "duplicates": self.duplicates,
                        "rejected": self.rejected},
+            "refused": self.refused,
             "due": self.due,
             "waiting": self.waiting,
             "failed": self.failed,
@@ -572,7 +606,16 @@ pub(crate) struct History {
     card_id: u64,
     /// The log as the look read it; None until a look read one whole.
     log: Option<Log>,
+    /// The card's part of the outbox, taken by a look of a card with a root
+    /// (`loaded`); `unread` when the outbox couldn't be read, so this part
+    /// is never saved over the one on disk.
     owing: Owing,
+    loaded: bool,
+    unread: bool,
+    /// The plays the outbox on disk holds, as this run knows (those it
+    /// read, then those of its last save), and why the last save failed.
+    stored: HashSet<String>,
+    unsaved: Option<String>,
     /// The new plays not sent, by id: they settle as they are.
     unsent: HashSet<String>,
     pub(crate) tally: Tally,
@@ -591,6 +634,10 @@ impl History {
             card_id: 0,
             log: None,
             owing: Owing::default(),
+            loaded: false,
+            unread: false,
+            stored: HashSet::new(),
+            unsaved: None,
             unsent: HashSet::new(),
             tally: Tally::default(),
         }
@@ -602,20 +649,52 @@ impl History {
     }
 
     fn save(&mut self) {
-        if self.dry {
+        if self.dry || !self.loaded {
             return;
         }
         self.tally.waiting = self.owing.plays.len();
-        if let Err(e) = save_card(&*self.store, self.card_id, &self.owing) {
-            self.note(true, format!("the plays' outbox wasn't saved: {e}"));
+        let saved = match self.unread {
+            true => Err("it can't be read, so it isn't written over".to_string()),
+            false => save_card(&*self.store, self.card_id, &self.owing),
+        };
+        match saved {
+            Ok(()) => {
+                self.stored = self.owing.plays.iter().map(|o| o.id.clone()).collect();
+                self.unsaved = None;
+            }
+            Err(e) => {
+                self.note(true, format!("the plays' outbox wasn't saved: {e}"));
+                self.unsaved = Some(e);
+            }
         }
     }
 
+    /// Why plays to send are held by nothing but this run, when some are:
+    /// mapped and not in the outbox on disk, since its save failed. A run
+    /// that went on would replace the rows they map through, and the next
+    /// look would take them for the listener's files (2.20.6, item 5: the
+    /// store comes before any checkpoint). None in a dry run, which writes
+    /// nothing to the card.
+    pub(crate) fn unstored(&self) -> Option<String> {
+        let held = self.owing.plays.iter().filter(|o| !self.stored.contains(&o.id)).count();
+        if self.dry || held == 0 {
+            return None;
+        }
+        let why = self.unsaved.as_deref().unwrap_or("not saved");
+        Some(format!("{held} of the card's plays to send aren't in the plays' outbox ({why})"))
+    }
+
     /// Reads the card's log and maps its new plays through the root's tags
-    /// file, `skew` its listing's (the engine's plays hook). A card with no
-    /// root, no ledger or no log has nothing to map; one that fails a read
-    /// is left for the next look.
+    /// file, `skew` its listing's (the engine's plays hook). The card's part
+    /// of the outbox is taken first, whenever the root names the card: the
+    /// plays mapped before go to their server even when the card has no
+    /// log, tags file or ledger now to map new ones through. A card with no
+    /// root, ledger or log has nothing to map; one that fails a read is left
+    /// for the next look.
     pub(crate) fn look(&mut self, card: &dyn CardFs, root: Option<&Root>, skew: i32) {
+        if let Some(root) = root {
+            self.load(card, root.manifest.header.card_id);
+        }
         let files = match read_files(card) {
             Ok(files) if files.is_empty() => return,
             Ok(files) => files,
@@ -633,33 +712,14 @@ impl History {
             self.note(false, "the card has no ledger yet: its plays wait for a sync".into());
             return;
         }
-        let card_id = root.manifest.header.card_id;
-        let mut outbox = match Outbox::load(&*self.store) {
-            Ok(outbox) => outbox,
-            Err(e) => {
-                self.note(true, format!("the plays' outbox can't be read: {e}"));
-                return;
-            }
-        };
-        let device = card.read("/.player/device.txt", 64 * 1024).ok().flatten();
-        let device = DeviceTxt::read(device.as_deref());
         let named: Vec<LogFile<'_>> =
             files.iter().map(|(name, bytes, size)| LogFile { name, bytes, size: *size }).collect();
         let log = mppl::read_log(&named);
-        let mut owing = outbox.cards.remove(&card_id).unwrap_or_default();
-        // A state file of another identity says nothing of this card's log.
-        if self.posted_for != card_id {
-            self.posted.clear();
-        }
-        // Settled as the card's marks say (by a run of this computer's, or
-        // another's): forgotten.
-        let posted = &self.posted;
-        let above = |d: [u8; 6], e: u64, s: u32| s > mark_of(posted, d, e);
-        owing.plays.retain(|o| above(o.device_id, o.epoch, o.seq));
-        owing.done.retain(|id| key_of_id(id).is_some_and(|(d, e, s)| above(d, e, s)));
-        if !device.firmware.is_empty() {
-            owing.firmware = device.firmware.clone();
-        }
+        let mut owing = std::mem::take(&mut self.owing);
+        // A settled id the log holds no more goes: its play is never read
+        // again, and a seq the card doesn't hold holds no mark back.
+        let held: HashSet<String> = log.plays.iter().map(Slot::id).collect();
+        owing.done.retain(|id| held.contains(id));
 
         self.tally.read = log.counts;
         let servers = root.manifest.server_table();
@@ -685,8 +745,41 @@ impl History {
                 owing.plays.push(owed);
             }
         }
-        (self.card_id, self.log, self.owing) = (card_id, Some(log), owing);
+        (self.log, self.owing) = (Some(log), owing);
         self.save();
+    }
+
+    /// The card's part of the outbox, less what the card's marks pass, and
+    /// the firmware its `device.txt` names now. An outbox that can't be
+    /// read gives an empty part, which is never saved: it would take the
+    /// place of the part on disk.
+    fn load(&mut self, card: &dyn CardFs, card_id: u64) {
+        let mut owing = match Outbox::load(&*self.store) {
+            Ok(mut outbox) => outbox.cards.remove(&card_id).unwrap_or_default(),
+            Err(e) => {
+                self.note(true, format!("the plays' outbox can't be read: {e}"));
+                self.unread = true;
+                Owing::default()
+            }
+        };
+        // A state file of another identity says nothing of this card's log.
+        if self.posted_for != card_id {
+            self.posted.clear();
+        }
+        // Settled as the card's marks say (by a run of this computer's, or
+        // another's): forgotten.
+        let posted = &self.posted;
+        let above = |d: [u8; 6], e: u64, s: u32| s > mark_of(posted, d, e);
+        owing.plays.retain(|o| above(o.device_id, o.epoch, o.seq));
+        owing.done.retain(|id| key_of_id(id).is_some_and(|(d, e, s)| above(d, e, s)));
+        let device = card.read("/.player/device.txt", 64 * 1024).ok().flatten();
+        let device = DeviceTxt::read(device.as_deref());
+        if !device.firmware.is_empty() {
+            owing.firmware = device.firmware;
+        }
+        self.stored = owing.plays.iter().map(|o| o.id.clone()).collect();
+        self.tally.waiting = owing.plays.len();
+        (self.card_id, self.owing, self.loaded) = (card_id, owing, true);
     }
 
     /// The plays for the server `talk` reads now whose paths that server
@@ -735,20 +828,39 @@ impl History {
     /// the server takes plays (its Stats API); `device`: it takes the
     /// `device` source. A post that fails leaves the rest waiting.
     pub(crate) fn post(&mut self, client: &Client, talk: &Talk, stats: bool, device: bool) {
-        let due: Vec<String> =
+        let mut due: Vec<String> =
             self.owing.plays.iter().filter(|o| o.to.reached(talk)).map(|o| o.id.clone()).collect();
         self.tally.due = due.len();
-        if due.is_empty() || self.dry || self.log.is_none() {
+        if due.is_empty() || self.dry || !self.loaded {
             return;
         }
         if !stats {
             self.note(false, "the server takes no plays (it has no Stats API): they wait".into());
             return;
         }
-        let firmware = Some(self.owing.firmware.clone()).filter(|f| !f.is_empty());
+        // A play the server's schema refuses would fail each batch it rode
+        // in, at every run, and hold its device's mark for good: it isn't
+        // sent, and settles as a play not sent does.
+        let mut refused = HashSet::new();
+        for o in self.owing.plays.iter().filter(|o| o.to.reached(talk)) {
+            if let Some(fault) = play_fault(&o.play(false)) {
+                let note = format!("a play the server would refuse isn't sent: {fault}");
+                self.tally.notes.push(note);
+                refused.insert(o.id.clone());
+            }
+        }
+        if !refused.is_empty() {
+            self.tally.refused += refused.len();
+            due.retain(|id| !refused.contains(id));
+            self.owing.plays.retain(|o| !refused.contains(&o.id));
+            self.owing.done.extend(refused);
+            self.tally.due = due.len();
+            self.save();
+        }
+        // A version longer than the server takes is left out, not the plays.
         let block = PlayClient {
             name: CLIENT.into(),
-            version: firmware,
+            version: play_version(&self.owing.firmware),
             instance_id: Some(format!("{:016x}", self.card_id)),
         };
         let mut device = device;
@@ -932,7 +1044,7 @@ pub(crate) fn plays_of(
     let url_key = server_url_key(&client.server());
     let confirmed = state.as_ref().map_or_else(Vec::new, |s| s.settings.keys(url_key));
     let talk = Talk { url_key, instance: NO_INSTANCE, confirmed, peer: None };
-    if dry_run || history.log.is_none() || history.due(&talk) == 0 {
+    if dry_run || history.due(&talk) == 0 {
         history.tally.due = history.due(&talk);
         return (history.tally.clone(), history.marks());
     }

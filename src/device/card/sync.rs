@@ -21,7 +21,8 @@
 //!    `metadata/batch` for the files a decision needs it for, and each
 //!    `.ogg`'s first bytes (Opus is copied as it is). The plays waiting for
 //!    this server are posted then, a path it moved found again in a whole
-//!    listing: a sync that stops later has posted them all the same.
+//!    listing: a sync that stops later has posted them all the same. Plays
+//!    to send that the outbox couldn't take stop the run here.
 //! 4. The wanted card ([`plan`](super::plan)), the engine's plan of it, the
 //!    fit and the track cap, the guards. A dry run stops here: on a card
 //!    whose writes go to memory ([`DryCard`]), so nothing reaches the card.
@@ -554,6 +555,11 @@ fn prepare(
     let revision = wanted.card.origins[0].revision.clone();
     // The card's plays for this server, their paths as it has them now.
     history.post(client, &reads, info.features.stats.is_some(), info.instance_id.is_some());
+    // Plays to send that no outbox holds would be lost with the rows this
+    // run replaces (2.20.6, item 5): no run until one does.
+    if let Some(why) = history.unstored() {
+        return Err(refused(format!("{why}: the run would replace the rows they map through")));
+    }
 
     // 4. The plan.
     let http = Http::new(client.clone(), 0, device.max_channels);
