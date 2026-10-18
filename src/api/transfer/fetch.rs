@@ -226,7 +226,8 @@ pub fn limit_of(message: &str, retry_after: Option<Duration>) -> Limited {
 #[derive(Debug)]
 pub enum FetchError {
     /// Refused, or not reached: 401, 403 (a key that forbids copies too,
-    /// [`FetchError::copies_refused`]), 404, 5xx, a dropped connection.
+    /// [`FetchError::copies_refused`]), 404, 5xx, a dropped connection, or
+    /// one that never came ([`ApiError::Network`]).
     Api(ApiError),
     /// A 429: a peer's stream cap or its daily quota.
     Limited(Limited),
@@ -371,9 +372,13 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 }
 
 /// A transport failure: the request's ceiling, or anything else that kept
-/// the answer from arriving.
+/// the answer from arriving. A connection that never came is a server not
+/// reached, its timeout too: reqwest raises the client's connect timeout
+/// as a timeout, but a server asleep or behind a firewall that drops the
+/// packets is no body coming slowly, and the plan's 2.16 retries the two
+/// differently.
 fn transport(e: reqwest::Error, ceiling: Duration) -> FetchError {
-    if e.is_timeout() {
+    if e.is_timeout() && !e.is_connect() {
         FetchError::TooSlow(ceiling)
     } else {
         FetchError::Api(ApiError::Network(e.to_string()))
@@ -1034,5 +1039,43 @@ mod tests {
         let four_gb = ceiling_for(Some(FAT32_MAX));
         let hours = four_gb.as_secs() / 3600;
         assert!((36..40).contains(&hours), "FAT32's largest file at the floor rate: {four_gb:?}");
+    }
+
+    /// A name that never resolves: no connection ever comes, as from a
+    /// server asleep or behind a firewall that drops the packets, and only
+    /// the client's connect timeout ends the wait. Nothing leaves the
+    /// machine.
+    struct NoAnswer;
+
+    impl reqwest::dns::Resolve for NoAnswer {
+        fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[test]
+    fn a_connection_that_never_comes_is_a_server_not_reached_not_a_slow_body() {
+        let scratch = Scratch::new("unreached");
+        let dest = scratch.file("0006.tmp", None);
+        let mut client = Client::new("http://asleep.invalid/").unwrap();
+        // The client's own, with a connect timeout short enough for a test.
+        client.http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(200))
+            .dns_resolver(NoAnswer)
+            .build()
+            .unwrap();
+        let unreached = |e: &FetchError| matches!(e, FetchError::Api(ApiError::Network(_)));
+
+        let t0 = std::time::Instant::now();
+        let failed = client.download(&Fetch::file("lib/a.flac").expecting(10), &dest, &mut |_, _| {}).unwrap_err();
+        assert!(unreached(&failed.error), "not still downloading: {:?}", failed.error);
+        assert!(t0.elapsed() < Duration::from_secs(5), "the connect timeout, not the stall's 30 s");
+        assert_eq!(failed.partial, Partial::default());
+        assert!(!dest.exists(), "nothing was asked, nothing written");
+
+        let probed = client.probe("lib/cover.jpg", ProbeBy::Head).unwrap_err();
+        assert!(unreached(&probed), "{probed:?}");
+        let read = client.read_range("lib/a.flac", 0, 4096).unwrap_err();
+        assert!(unreached(&read), "{read:?}");
     }
 }
