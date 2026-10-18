@@ -48,6 +48,8 @@ pub(crate) const READ_RULES: u16 = 1;
 /// `/.mstream/thumbs` has the album folder's thumbnail (2.14.1).
 pub(crate) const FOLDER_OWNED: u32 = 1;
 pub(crate) const FOLDER_THUMB: u32 = 2;
+/// The FOLD flag bits v1 defines.
+pub(crate) const FOLDER_FLAGS_V1: u32 = FOLDER_OWNED | FOLDER_THUMB;
 
 /// RECS `flags` (2.6.4).
 pub(crate) const COMPILATION_MASK: u16 = 3;
@@ -59,7 +61,10 @@ pub(crate) const UNREADABLE: u16 = 1 << 6;
 pub(crate) const TRUNCATED: u16 = 1 << 7;
 pub(crate) const BPM_ANALYSED: u16 = 1 << 8;
 pub(crate) const FROM_API: u16 = 1 << 9;
-/// `known` for a readable audio file under readRules 1: bits 0-16.
+/// The RECS flag bits v1 defines: 0-9 (10-15 are reserved).
+pub(crate) const FLAGS_V1: u16 = 0x03FF;
+/// `known` for a readable audio file under readRules 1: bits 0-16, every
+/// bit readRules 1 defines (17-31 are reserved).
 pub(crate) const KNOWN_RULES1: u32 = 0x1FFFF;
 
 /// RECS `container`.
@@ -73,6 +78,8 @@ pub(crate) const CONTAINER_NOT_AUDIO: u8 = 255;
 pub(crate) const HASH_SAMPLED: u8 = 1;
 pub(crate) const VERIFIED: u8 = 2;
 pub(crate) const ADOPTED: u8 = 4;
+/// The `originFlags` bits v1 defines.
+pub(crate) const ORIGIN_FLAGS_V1: u8 = HASH_SAMPLED | VERIFIED | ADOPTED;
 
 /// How deep a folder stack the reader keeps: a path of at most 248 bytes
 /// has at most 124 names.
@@ -361,7 +368,13 @@ impl Tags {
     /// the records, and the folders whose flags say more than that they are
     /// a record's ancestor (OWNED, THUMB). The minor is this writer's, 0: a
     /// newer minor's additions are dropped, and its next run derives them
-    /// again (2.4.5).
+    /// again (2.4.5). That is its longer header and rows, its run fields
+    /// past the twelve, its sections, and every flag bit v1 doesn't define
+    /// (a writer sets only the bits it defines): in FOLD's and RECS's
+    /// `flags`, in `known` past readRules 1's and in ORIG's `originFlags`.
+    /// An unknown enum value is kept, since every reader reads it as 2.4.5's
+    /// table says. Records read under another parserVersion or readRules are
+    /// read again from the card file instead (2.6.1).
     pub(crate) fn to_input(&self) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
         let meta = Meta {
             source: self.source,
@@ -375,18 +388,20 @@ impl Tags {
         let records = self
             .records
             .iter()
-            .map(|e| RecordIn {
-                path: e.path.clone(),
-                rec: e.rec,
-                run: e.run.clone(),
-                ledger: e.ledger.clone(),
+            .map(|e| {
+                let rec = Record { flags: e.rec.flags & FLAGS_V1, known: e.rec.known & KNOWN_RULES1, ..e.rec };
+                let mut ledger = e.ledger.clone();
+                if let Some(l) = &mut ledger {
+                    l.origin_flags &= ORIGIN_FLAGS_V1;
+                }
+                RecordIn { path: e.path.clone(), rec, run: e.run.clone(), ledger }
             })
             .collect();
         let folders = self
             .folders
             .iter()
+            .map(|f| FolderIn { path: f.path.clone(), flags: f.flags & FOLDER_FLAGS_V1 })
             .filter(|f| f.flags != 0)
-            .map(|f| FolderIn { path: f.path.clone(), flags: f.flags })
             .collect();
         (meta, records, folders)
     }
@@ -776,7 +791,9 @@ pub(crate) struct RecordIn {
 /// path of names within 255 bytes with `/music/`, or one given twice, or a
 /// path both a file and a folder; a folder that is neither OWNED nor a
 /// record's ancestor; a run that breaks 2.3.6; a ledger row in a source 1
-/// file; a producer or a server path with a NUL in it.
+/// file; a producer or a server path with a NUL in it; a flag bit v1
+/// doesn't define (FOLD's or RECS's `flags`, `known` past readRules 1's,
+/// `originFlags`: 2.4.5).
 pub(crate) fn write(meta: &Meta, records: &[RecordIn], folders: &[FolderIn]) -> Result<Vec<u8>, WriteError> {
     if !(SOURCE_DEVICE..=SOURCE_SYNC_AGENT).contains(&meta.source) {
         return Err(WriteError("source"));
@@ -820,6 +837,14 @@ pub(crate) fn write(meta: &Meta, records: &[RecordIn], folders: &[FolderIn]) -> 
     }
     if records.iter().any(|r| !r.run.conforms()) {
         return Err(WriteError("a run that breaks 2.3.6"));
+    }
+    let undefined = |r: &RecordIn| {
+        r.rec.flags & !FLAGS_V1 != 0
+            || r.rec.known & !KNOWN_RULES1 != 0
+            || r.ledger.as_ref().is_some_and(|l| l.origin_flags & !ORIGIN_FLAGS_V1 != 0)
+    };
+    if folders.iter().any(|f| f.flags & !FOLDER_FLAGS_V1 != 0) || records.iter().any(undefined) {
+        return Err(WriteError("a flag bit v1 doesn't define"));
     }
     if meta.source == SOURCE_DEVICE && records.iter().any(|r| r.ledger.is_some()) {
         return Err(WriteError("a ledger row in a source 1 file"));

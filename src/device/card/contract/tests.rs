@@ -300,17 +300,23 @@ fn read_as(format: &str, file: &[u8], device: bool) -> Why {
     r.err().unwrap_or(Why::Ok)
 }
 
-/// A section's bytes, found by its type in the directory.
-fn section_of(file: &[u8], kind: u32) -> &[u8] {
+/// Where a section lies, found by its type in the directory: its offset and
+/// its length.
+fn section_span(file: &[u8], kind: u32) -> (usize, usize) {
     let h = container::Header::parse(file).expect("a frame");
     for i in 0..h.section_count as usize {
         let e = &file[h.header_bytes as usize + 32 * i..];
         if prim::u32_at(e, 0) == kind {
-            let (off, len) = (prim::u32_at(e, 8) as usize, prim::u32_at(e, 12) as usize);
-            return &file[off..off + len];
+            return (prim::u32_at(e, 8) as usize, prim::u32_at(e, 12) as usize);
         }
     }
     panic!("no such section")
+}
+
+/// A section's bytes.
+fn section_of(file: &[u8], kind: u32) -> &[u8] {
+    let (off, len) = section_span(file, kind);
+    &file[off..off + len]
 }
 
 fn format_of(file: &[u8]) -> &'static str {
@@ -1088,12 +1094,81 @@ fn hardening_files_read_as_listed() {
     // A newer minor's longer rows and header are read by their prefix: the
     // 13th run field is past the twelve readRules 1 knows. Carried forward,
     // it is this writer's file again: what the minor added is dropped
-    // (2.4.5), byte for byte the file it was made from.
+    // (2.4.5), byte for byte the file it was made from. So is a newer
+    // minor's root, its SRVS rows of 48 bytes.
     let minor = mptg::read(&bytes("hardening/mptg-minor-1.bin"), mptg::Uses::ALL).expect("a newer minor");
     assert_eq!(minor.header.minor, 1);
     let (meta, records, folders) = minor.to_input();
     let carried = mptg::write(&meta, &records, &folders).expect("carried forward");
     assert!(carried == golden("tags-0000002a.bin"));
+    let m = Manifest::read(&bytes("hardening/msmf-minor-1.bin"), msmf::Uses::ALL).expect("a newer minor");
+    let carried = msmf::write(&m.to_input()).expect("carried forward");
+    assert!(carried == golden("manifest-servers.bin"));
+}
+
+/// ORs `bits` into every row of a section, at `at` in the row.
+fn or_rows(file: &mut [u8], kind: u32, stride: usize, at: usize, bits: &[u8]) {
+    let (off, len) = section_span(file, kind);
+    for row in (off..off + len).step_by(stride) {
+        for (b, x) in file[row + at..].iter_mut().zip(bits) {
+            *b |= x;
+        }
+    }
+}
+
+/// A newer minor's flag bits (2.4.5), set in every flag word of the
+/// fixture's tags file and of its root of several servers: older readers
+/// ignore them, so both read; carried forward they go, since a writer sets
+/// only the bits it defines, and each is its golden again. Given as read,
+/// with the bits, the writers refuse them.
+#[test]
+fn newer_flag_bits_are_dropped_when_carried() {
+    // Minor 1; FOLD's flags, RECS's known and flags, ORIG's originFlags.
+    let want = golden("tags-0000002a.bin");
+    let mut b = want.clone();
+    b[6..8].copy_from_slice(&1u16.to_le_bytes());
+    or_rows(&mut b, mptg::FOLD, 16, 8, &[0xFC, 0, 0, 0x80]);
+    or_rows(&mut b, mptg::RECS, 72, 32, &[0, 0, 0xFE, 0xFF, 0, 0xFC]);
+    or_rows(&mut b, mptg::ORIG, 80, 70, &[0xF8]);
+    reseal(&mut b);
+    assert!(mptg::read(&b, mptg::Uses::DEVICE).is_ok());
+    let tags = mptg::read(&b, mptg::Uses::ALL).expect("a newer minor's bits are ignored");
+    assert!(tags.folders.iter().all(|f| f.flags & 0x8000_00FC == 0x8000_00FC));
+    for e in &tags.records {
+        let origin = e.ledger.as_ref().map_or(0, |l| l.origin_flags);
+        assert_eq!((e.rec.flags >> 10, e.rec.known >> 17, origin >> 3), (0x3F, 0x7FFF, 0x1F), "{}", e.path);
+    }
+    let (meta, records, folders) = tags.to_input();
+    assert!(mptg::write(&meta, &records, &folders).expect("carried forward") == want);
+    let mut as_read = records.clone();
+    for (r, e) in as_read.iter_mut().zip(&tags.records) {
+        (r.rec, r.ledger) = (e.rec, e.ledger.clone());
+    }
+    assert!(mptg::write(&meta, &as_read, &folders).is_err());
+
+    // Minor 1; the header's flags, SRVS's.
+    let want = golden("manifest-servers.bin");
+    let mut b = want.clone();
+    b[6..8].copy_from_slice(&1u16.to_le_bytes());
+    b[44] |= 0xFE;
+    or_rows(&mut b, msmf::SRVS, 40, 36, &[0xFE, 0, 0, 0x80]);
+    reseal(&mut b);
+    let root = Manifest::read(&b, msmf::Uses::ALL).expect("a newer minor's bits are ignored");
+    assert!(root.is_final() && root.servers.iter().all(|s| s.flags & !PEER == 0x8000_00FE));
+    // A reserved bit is not a broken writer rule: every server reads.
+    let table = root.server_table();
+    assert!((1..=root.servers.len()).all(|i| table.get(i).is_some()));
+    let golden_root = Manifest::read(&want, msmf::Uses::ALL).expect("the golden");
+    let peers = |m: &Manifest| m.servers.iter().map(Server::is_peer).collect::<Vec<_>>();
+    assert_eq!(peers(&root), peers(&golden_root));
+    assert!(msmf::write(&root.to_input()).expect("carried forward") == want);
+    assert!(msmf::write(&ManifestIn { servers: root.servers.clone(), ..root.to_input() }).is_err());
+    assert!(msmf::write(&ManifestIn { flags: root.flags, ..root.to_input() }).is_err());
+    // The goldens' roots, carried forward unchanged.
+    for name in ["manifest.bin", "manifest-min.bin", "manifest-servers.bin"] {
+        let m = Manifest::read(&golden(name), msmf::Uses::ALL).expect("a root");
+        assert!(msmf::write(&m.to_input()).expect("carried forward") == golden(name), "{name}");
+    }
 }
 
 /// The byte ranges no reader checks: the zero gaps between sections.
@@ -1287,7 +1362,8 @@ fn made_up_library(rng: &mut fastrand::Rng, records: usize) -> (Meta, Vec<Record
             duration_ms: rng.u32(..),
             qfp: rng.u64(..),
             known: mptg::KNOWN_RULES1,
-            flags: rng.u16(..) & !mptg::TRUNCATED | if truncated { mptg::TRUNCATED } else { 0 },
+            flags: rng.u16(..) & mptg::FLAGS_V1 & !mptg::TRUNCATED
+                | if truncated { mptg::TRUNCATED } else { 0 },
             year: rng.u16(..),
             track: rng.u16(..),
             rg_track_gain: rng.i16(..),
@@ -1375,6 +1451,23 @@ fn tags_writer_refuses_what_its_reader_would() {
     let nul = Meta { producer: "a\0b".into(), ..meta.clone() };
     assert!(mptg::write(&nul, &[rec("a.mp3")], &[]).is_err());
     assert!(mptg::write(&Meta { source: 0, ..meta.clone() }, &[], &[]).is_err());
+    // A flag bit v1 doesn't define, in any of the four words (2.4.5).
+    let with = |r: Record, origin: u8| {
+        let ledger = Some(Ledger { origin_flags: origin, ..Ledger::default() });
+        RecordIn { rec: r, ledger, ..rec("a.mp3") }
+    };
+    let all = Record { flags: mptg::FLAGS_V1, known: mptg::KNOWN_RULES1, ..Record::default() };
+    assert!(mptg::write(&meta, &[with(all, mptg::ORIGIN_FLAGS_V1)], &[]).is_ok());
+    for (r, origin) in [
+        (Record { flags: 1 << 10, ..Record::default() }, 0),
+        (Record { known: mptg::KNOWN_RULES1 + 1, ..Record::default() }, 0),
+        (Record::default(), 1 << 3),
+    ] {
+        assert!(mptg::write(&meta, &[with(r, origin)], &[]).is_err(), "{r:?} {origin}");
+    }
+    let owned = |flags| FolderIn { path: "Owned".into(), flags };
+    assert!(mptg::write(&meta, &[], &[owned(mptg::FOLDER_FLAGS_V1)]).is_ok());
+    assert!(mptg::write(&meta, &[], &[owned(mptg::FOLDER_OWNED | 4)]).is_err());
     // The longest path the device sees is written and read.
     let longest = format!("{}/{}.mp3", "L".repeat(120), "M".repeat(123));
     let file = mptg::write(&meta, &[rec(&longest)], &[]).expect("255 bytes with /music/");
@@ -1494,6 +1587,17 @@ fn thumbnails_from_images() {
     // Not an image, or too large an image, makes no thumbnail.
     assert!(matches!(mpth::from_image(b"not an image"), Err(mpth::ImageError::Decode(_))));
     assert!(matches!(mpth::from_image(&png(13_000, 1, |_, _| [0, 0, 0])), Err(mpth::ImageError::TooLarge)));
+    // The cap holds for the RGB image made from the decoded one too: a grey
+    // image decodes to a third of its RGB bytes, an RGB one to all of them.
+    let img = image::GrayImage::from_fn(400, 400, |x, y| image::Luma([(x ^ y) as u8]));
+    let mut grey = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut grey, image::ImageFormat::Png).expect("a PNG");
+    let too_large = |r: Result<_, mpth::ImageError>| matches!(r, Err(mpth::ImageError::TooLarge));
+    assert!(too_large(mpth::decode_within(grey.get_ref(), 400 * 400 * 3 - 1)));
+    assert!(mpth::decode_within(grey.get_ref(), 400 * 400 * 3).is_ok());
+    let rgb = png(400, 400, |x, y| [x as u8, y as u8, 0]);
+    assert!(too_large(mpth::decode_within(&rgb, 400 * 400 * 3 - 1)));
+    assert!(mpth::decode_within(&rgb, 400 * 400 * 3).is_ok());
     assert!(mpth::from_rgb(&[], 0, 0).is_none());
     assert!(mpth::write(h, 0, &mpth::Pixels { small: vec![], large: vec![] }).is_err());
     // A JPEG too: the decoder the player's art already uses.

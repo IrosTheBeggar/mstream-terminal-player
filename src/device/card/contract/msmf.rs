@@ -157,6 +157,35 @@ impl Manifest {
         Servers { root, entries: self.servers.clone() }
     }
 
+    /// What [`write`] makes this root from again, and so the base of the
+    /// next commit's, which sets its own generation, commit and companions:
+    /// the same header values, companions, roots and servers (SRVS's when
+    /// the root was read with [`Uses::ALL`]). The minor is this writer's, 0:
+    /// a newer minor's additions are dropped (2.4.5). That is its longer
+    /// header and rows, its sections, a COMP entry of a kind v1 doesn't
+    /// know, and every flag bit v1 doesn't define (a writer sets only the
+    /// bits it defines): the header's past FINAL, an SRVS entry's past PEER.
+    /// An entry that breaks a writer rule of 2.5.5 is kept as it is, and
+    /// [`write`] refuses it: what becomes of its rows is the run's to say.
+    pub(crate) fn to_input(&self) -> ManifestIn {
+        ManifestIn {
+            generation: self.header.generation,
+            card_id: self.header.card_id,
+            minor: 0,
+            commit_time: self.commit_time,
+            flags: self.flags & FINAL,
+            commit_id: self.commit_id,
+            server_instance: self.server_instance,
+            server_url_key: self.server_url_key,
+            producer: self.producer.clone(),
+            server_revision: self.server_revision.clone(),
+            base_generation: self.base_generation,
+            comps: std::iter::once(self.tags.clone()).chain(self.autodj.clone()).collect(),
+            roots: self.roots.clone(),
+            servers: self.servers.iter().map(|s| Server { flags: s.flags & PEER, ..*s }).collect(),
+        }
+    }
+
     /// Reads a root, in the player's order of checks: the frame (2.4.3);
     /// STRS's first byte and the header's two strings; each COMP entry
     /// (exactly one MPTG, then at most one MPDJ, each named for its
@@ -293,9 +322,9 @@ pub(crate) struct ManifestIn {
 /// given; STRS (the producer, the revision, the companions' names, the
 /// roots); SRVS when other servers are. Refused: COMP that isn't one MPTG
 /// then at most one MPDJ; a root that isn't a relative path of names, or
-/// twice; an SRVS entry that breaks a writer rule of 2.5.5 or sets a flag
-/// bit v1 doesn't define. That SRVS lists exactly the servers the tags
-/// file's rows name is the caller's to keep ([`servers_match_rows`]).
+/// twice; an SRVS entry that breaks a writer rule of 2.5.5; a header or SRVS
+/// flag bit v1 doesn't define (2.4.5). That SRVS lists exactly the servers
+/// the tags file's rows name is the caller's to keep ([`servers_match_rows`]).
 pub(crate) fn write(m: &ManifestIn) -> Result<Vec<u8>, WriteError> {
     let comps_ok = match m.comps.as_slice() {
         [t] => t.kind == MPTG,
@@ -317,8 +346,11 @@ pub(crate) fn write(m: &ManifestIn) -> Result<Vec<u8>, WriteError> {
         return Err(WriteError("a string with a NUL"));
     }
     let root = Server::root(m.server_instance, m.server_url_key);
-    if !srvs_breaks(&root, &m.servers).is_empty() || m.servers.iter().any(|s| s.flags & !PEER != 0) {
+    if !srvs_breaks(&root, &m.servers).is_empty() {
         return Err(WriteError("SRVS: an entry that breaks 2.5.5's writer rules"));
+    }
+    if m.flags & !FINAL != 0 || m.servers.iter().any(|s| s.flags & !PEER != 0) {
+        return Err(WriteError("a flag bit v1 doesn't define"));
     }
 
     let mut strs = Strs::new();

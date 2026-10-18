@@ -29,9 +29,11 @@ pub(crate) const BYTES: usize = HEADER_BYTES + 2 * (SMALL * SMALL + LARGE * LARG
 const SIZES: u32 = SMALL as u32 | (LARGE as u32) << 16;
 
 /// The most an image may hold for [`from_image`] to decode it: a cover is a
-/// few megapixels; past this it is not one, or meant to exhaust memory (the
-/// decoder's buffers stay under the cap, the RGB copy under three quarters
-/// of it).
+/// few megapixels; past this it is not one, or meant to exhaust memory. The
+/// decoder's buffers stay under the cap, and so does the RGB image made from
+/// them (none is made from an RGB source; one from a grey source, three
+/// times its bytes, is refused past the cap), so a decode holds less than
+/// twice the cap at once.
 const MAX_SIDE: u32 = 10_000;
 const MAX_DECODE_BYTES: u64 = 96 * 1024 * 1024;
 
@@ -158,18 +160,27 @@ impl std::error::Error for ImageError {}
 /// or PNG; its alpha dropped), then [`from_rgb`]. The decoder's memory is
 /// bounded, so a hostile file can't exhaust it.
 pub(crate) fn from_image(bytes: &[u8]) -> Result<Pixels, ImageError> {
+    decode_within(bytes, MAX_DECODE_BYTES)
+}
+
+/// [`from_image`] with a cap of `max_bytes` on the decoded image, and on
+/// the RGB one made from it.
+pub(super) fn decode_within(bytes: &[u8], max_bytes: u64) -> Result<Pixels, ImageError> {
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format();
     let mut reader = reader.map_err(|e| ImageError::Decode(e.into()))?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_SIDE);
     limits.max_image_height = Some(MAX_SIDE);
-    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits.max_alloc = Some(max_bytes);
     reader.limits(limits);
     let img = reader.decode().map_err(|e| match e {
         image::ImageError::Limits(_) => ImageError::TooLarge,
         e => ImageError::Decode(e),
     })?;
-    let rgb = img.to_rgb8();
+    if img.width() as u64 * img.height() as u64 * 3 > max_bytes {
+        return Err(ImageError::TooLarge);
+    }
+    let rgb = img.into_rgb8();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     from_rgb(rgb.as_raw(), w, h).ok_or(ImageError::TooLarge)
 }
