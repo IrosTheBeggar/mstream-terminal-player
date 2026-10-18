@@ -290,7 +290,9 @@ pub(crate) struct Settings {
     /// The members are written: the file had them, or a sync stored them.
     /// A set-up's state file has none.
     pub(crate) stored: bool,
-    /// `conversion` and `autoDj` as read, their unknown members kept.
+    /// `conversion` and `autoDj` as read, their unknown members kept; and
+    /// under `sources` the entries this software can't read (no key it
+    /// knows), kept whole.
     raw: Kept,
 }
 
@@ -355,7 +357,8 @@ impl Settings {
         };
         let auto_dj = sub("autoDj");
         let flag = |key: &str| auto_dj.get(key).and_then(Value::as_bool);
-        (s.auto_dj, s.for_someone_else) = (flag("on").unwrap_or(true), flag("forSomeoneElse") == Some(true));
+        s.auto_dj = flag("on").unwrap_or(true);
+        s.for_someone_else = flag("forSomeoneElse") == Some(true);
         s.raw.0.insert("conversion".into(), Value::Object(conversion));
         s.raw.0.insert("autoDj".into(), Value::Object(auto_dj));
         for (folder, key) in object.get("art").and_then(Value::as_object).into_iter().flatten() {
@@ -364,9 +367,14 @@ impl Settings {
             }
         }
         let sources = object.get("sources").and_then(Value::as_array).into_iter().flatten();
-        for raw in sources.filter_map(Value::as_object) {
+        let mut others = Vec::new();
+        for item in sources {
+            let key = item.get("serverUrlKey").and_then(Value::as_str).and_then(from_hex);
+            let (Some(raw), Some(url_key)) = (item.as_object(), key) else {
+                others.push(item.clone());
+                continue;
+            };
             let text = |key: &str| raw.get(key).and_then(Value::as_str);
-            let Some(url_key) = text("serverUrlKey").and_then(from_hex) else { continue };
             let strings = |key: &str| -> Vec<String> {
                 let items = raw.get(key).and_then(Value::as_array).into_iter().flatten();
                 items.filter_map(Value::as_str).map(str::to_string).collect()
@@ -384,6 +392,7 @@ impl Settings {
                 raw: Kept(raw.clone()),
             });
         }
+        s.raw.0.insert("sources".into(), Value::Array(others));
         s
     }
 
@@ -435,7 +444,10 @@ impl Settings {
             }
             Value::Object(object)
         };
-        let sources: Vec<Value> = self.sources.iter().map(Source::object).collect();
+        let mut sources: Vec<Value> = self.sources.iter().map(Source::object).collect();
+        if let Some(Value::Array(others)) = self.raw.0.get("sources") {
+            sources.extend(others.iter().cloned());
+        }
         let c = self.conversion;
         let conversion = merged(
             "conversion",
@@ -727,6 +739,7 @@ mod tests {
         let v: Value = serde_json::from_str(&text).unwrap();
         let kept = (&v["conversion"]["dither"], &v["autoDj"]["seed"], &v["sources"][0]["peers"], &v["zz"]);
         assert_eq!(kept, (&"tpdf".into(), &7.into(), &serde_json::json!([3]), &1.into()), "{text}");
+        assert_eq!(v["sources"][1]["nickname"], "no key: no source", "an entry it can't read, kept");
         assert!(!text.contains("music.example") && !text.contains("alex-box"), "{text}");
         assert_eq!(read(text.as_bytes()).unwrap().settings.conversion.bitrate, TransferBitrate::K64);
 
