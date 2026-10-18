@@ -200,5 +200,41 @@ out = subprocess.run(['$BIN', 'device', 'flash', '--yes', '--firmware', '$WORK/f
 assert out.returncode == 1 and 'in use' in out.stderr, (out.returncode, out.stdout, out.stderr)
 "
 
+# ── Scenario J: the SD-card transfer's routes, and its hidden command ────
+# The fake's made-up library (FAKE_LIBRARY=1) answers the routes a card sync
+# reads. The sync itself needs a card in a reader, which CI has none of, so
+# `device card-sync` is held only to refusing a volume that isn't one: it
+# lists the volumes and opens nothing.
+PORT="$(FAKE_LIBRARY=1 start_fake J)"
+assert "the fake serves a card sync's routes" "
+import json, urllib.request, urllib.error
+base = 'http://127.0.0.1:$PORT'
+def ask(path, body=None, headers={}):
+    data = json.dumps(body).encode() if body is not None else None
+    kind = {'Content-Type': 'application/json'} if data else {}
+    r = urllib.request.Request(base + path, data=data, headers=dict(headers, **kind))
+    try:
+        with urllib.request.urlopen(r) as resp:
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+st, h, b = ask('/api/v1/sync/manifest', {'limit': 5000})
+page = json.loads(b)
+assert st == 200 and len(page['entries']) == 4, page
+st, _, _ = ask('/api/v1/sync/manifest', {'limit': 5000}, {'If-None-Match': '\"%s\"' % page['revision']})
+assert st == 304, st
+st, h, b = ask('/media/Rock/Artist%20A/Album%20B/01.mp3', headers={'Range': 'bytes=0-3'})
+assert st == 206 and b == bytes([0xff, 0xfb, 0x90, 0x40]), (st, b)
+st, h, b = ask('/transcode/Rock/Artist%20C/Album%20D/01.wav?codec=opus&bitrate=192k')
+assert h['Content-Type'] == 'audio/ogg' and b[:4] == b'OggS', h
+"
+stop_fake
+assert "device card-sync refuses a volume that isn't one" "
+import os, subprocess
+env = dict(os.environ, HOME='$WORK/h11')
+out = subprocess.run(['$BIN', 'device', 'card-sync', '$WORK/no-such-card', '--dry-run'], capture_output=True, text=True, env=env)
+assert out.returncode == 2 and 'volume' in out.stderr, (out.returncode, out.stdout, out.stderr)
+"
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "e2e: ALL PASS"; else echo "e2e: $FAILS FAILURE(S)"; exit 1; fi
