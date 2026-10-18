@@ -10,13 +10,18 @@
 //! request, so a token-less client is valid and supported.
 
 pub mod server_url;
+/// The SD-card transfer's routes. Native only, as the `device` module that
+/// drives it is (src/main.rs).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod transfer;
 pub mod types;
 pub mod urls;
 
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -408,6 +413,17 @@ pub struct Client {
     /// no flag, no probe — has nothing to read. This is the next best thing:
     /// probe once, believe the answer, and stop asking for the session.
     no_waveforms: AtomicBool,
+    /// Where the card transfer's calls add every body byte they read: a
+    /// federated peer's daily quota counts JSON, art and probes as well as
+    /// files. `None` counts nothing. Set by [`transfer`]'s `with_meter`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    meter: Option<Arc<AtomicU64>>,
+    /// The card transfer's requests say `X-mStream-Purpose: copy`, which a
+    /// peer whose key forbids copies refuses (mStream's
+    /// `federation-limits.js`). Only a peer reached directly sees it: the
+    /// parent's stream proxy does not forward the header.
+    #[cfg_attr(not(test), allow(dead_code))]
+    copying: bool,
 }
 
 impl Client {
@@ -457,6 +473,8 @@ impl Client {
             local_token: None,
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
+            meter: None,
+            copying: false,
         })
     }
 
@@ -660,14 +678,8 @@ impl Client {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
 
-        match status {
-            StatusCode::UNAUTHORIZED => return Err(ApiError::Unauthorized),
-            StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(extract_error(&text))),
-            StatusCode::NOT_FOUND => return Err(ApiError::NotFound(path.to_string())),
-            s if !s.is_success() => {
-                return Err(ApiError::Server { status: s.as_u16(), message: extract_error(&text) });
-            }
-            _ => {}
+        if let Some(refusal) = refused(status, &text, path) {
+            return Err(refusal);
         }
 
         serde_json::from_str(&text).map_err(|e| ApiError::Decode {
@@ -2780,6 +2792,18 @@ impl Multipart {
     pub(crate) fn finish(mut self) -> (String, Vec<u8>) {
         self.body.extend(format!("--{}--\r\n", self.boundary).into_bytes());
         (format!("multipart/form-data; boundary={}", self.boundary), self.body)
+    }
+}
+
+/// What a status that is not a 2xx means, with the server's words where it
+/// sent any: only 401 is a session problem. `None` for a success.
+fn refused(status: StatusCode, body: &str, path: &str) -> Option<ApiError> {
+    match status {
+        StatusCode::UNAUTHORIZED => Some(ApiError::Unauthorized),
+        StatusCode::FORBIDDEN => Some(ApiError::Forbidden(extract_error(body))),
+        StatusCode::NOT_FOUND => Some(ApiError::NotFound(path.to_string())),
+        s if !s.is_success() => Some(ApiError::Server { status: s.as_u16(), message: extract_error(body) }),
+        _ => None,
     }
 }
 
