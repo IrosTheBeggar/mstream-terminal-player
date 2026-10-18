@@ -8,10 +8,13 @@
 //!
 //! [`contract`] is the kit: the files themselves, byte for byte, pure code
 //! with no I/O. The rest of the transfer — the names, the tag reader, the
-//! Auto DJ index, the volumes, the engine — is built on it.
+//! Auto DJ index, the volumes, the engine — is built on it. [`autodj`] is
+//! the Auto DJ index's writer: the neighbour lists from mStream's
+//! embeddings, and whether a run writes a new index at all.
 
 // The kit's callers are the transfer's next pieces (the names, the tag
 // reader, the engine); until they land only the tests call it.
 #![allow(dead_code)]
 
+pub(crate) mod autodj;
 pub(crate) mod contract;
