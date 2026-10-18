@@ -27,7 +27,11 @@
 //! [`index`] is a run's whole step (7.3, 7.4): no index unless the card's
 //! device.txt reads major 2; the file the root names now named again when
 //! nothing in it would change; its slots carried into a new file when only
-//! the filters, the paths or the strings would; else the lists computed.
+//! the filters, the paths, the strings or the card id would; else the
+//! lists computed. The card id is this writer's addition to 7.3's table,
+//! which names only the sections: every file carries its card's id
+//! (M 2.5.2), so a copied card given a new one doesn't keep an index
+//! stamped with the old.
 //! The model's licence travels in the file (mStream's default model is CC
 //! BY-NC-SA, 12.5): whether a card may carry an index at all — none for a
 //! card made for someone else — is the caller's.
@@ -738,10 +742,11 @@ impl Prepared {
     }
 
     /// What 7.3's table makes of the file the current root names: the
-    /// same signature and the same DJRF, DJPH and STRS (and card) — name it
-    /// again; the same signature only — its slots carry, since they depend
-    /// on nothing else and their CRCs on the row; anything else, or a file
-    /// that reads as absent — compute.
+    /// same signature and the same DJRF, DJPH, STRS and card id (the last
+    /// not in the table: see the module's notes) — name it again; the same
+    /// signature only — its slots carry, since they depend on nothing else
+    /// and their CRCs on the row; anything else, or a file that reads as
+    /// absent — compute.
     fn against<'o>(&self, old: Option<&'o [u8]>) -> Against<'o> {
         let Some(t) = old.and_then(|b| Table::open(b).ok()) else { return Against::Compute };
         if t.check(Uses::ALL).is_err() || t.sig != self.sig {

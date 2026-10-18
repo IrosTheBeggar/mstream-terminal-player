@@ -71,7 +71,12 @@ fn described(d: &Value, dir: &str) -> (IndexIn, Vec<Given>) {
         let hash = hex16(text(&r["hash"])).expect("a hash");
         let vector: Vec<f32> = match &sidecar {
             Some(all) => all[i * dim..(i + 1) * dim].to_vec(),
-            None => r["embedding"].as_array().expect("an embedding").iter().map(|x| x.as_f64().expect("a number") as f32).collect(),
+            None => r["embedding"]
+                .as_array()
+                .expect("an embedding")
+                .iter()
+                .map(|x| x.as_f64().expect("a number") as f32)
+                .collect(),
         };
         vectors.insert(hash, vector);
         for f in r["files"].as_array().expect("files") {
@@ -79,7 +84,12 @@ fn described(d: &Value, dir: &str) -> (IndexIn, Vec<Given>) {
                 path: text(&f["path"]).to_owned(),
                 hash,
                 title: text(&f["title"]).to_owned(),
-                artists: f["artists"].as_array().expect("artists").iter().map(|a| text(a).to_owned()).collect(),
+                artists: f["artists"]
+                    .as_array()
+                    .expect("artists")
+                    .iter()
+                    .map(|a| text(a).to_owned())
+                    .collect(),
                 bpm10: f.get("bpm10").map_or(0, num) as u16,
                 camelot: f.get("camelot").map_or(0, num) as u8,
                 analysed: f["bpmAnalysed"].as_bool().unwrap_or(false),
@@ -194,7 +204,8 @@ fn the_hand_checkable_file() {
     ];
     let crcs = [0xE487_C86F, 0x993E_690F, 0x8273_6E17, 0x7907_48C6, 0x9D3D_DF4D, 0x8ABB_6A85];
     for (r, (list, crc)) in lists.iter().zip(crcs).enumerate() {
-        let entries: Vec<(u16, u8)> = t.slot(r as u32).expect("a slot").iter().map(|e| (e.row, e.level)).collect();
+        let entries: Vec<(u16, u8)> =
+            t.slot(r as u32).expect("a slot").iter().map(|e| (e.row, e.level)).collect();
         assert_eq!(entries, *list, "row {r}");
         let raw = t.slot_raw(r as u32).expect("a slot");
         assert_eq!(u32::from_le_bytes(raw[252..].try_into().expect("4 bytes")), crc, "row {r}");
@@ -239,7 +250,8 @@ fn a_wider_library_is_the_references() {
         assert_eq!(crcs.len(), t.row_count as usize, "{what}");
         for (r, want) in crcs.iter().enumerate() {
             let raw = t.slot_raw(r as u32).expect("a slot");
-            let got = format!("{:08x}", u32::from_le_bytes(raw[raw.len() - 4..].try_into().expect("4 bytes")));
+            let got =
+                format!("{:08x}", u32::from_le_bytes(raw[raw.len() - 4..].try_into().expect("4 bytes")));
             assert_eq!(got, *want, "{what}: row {r}'s slot isn't the reference's");
         }
         assert_eq!(file.len() as u64, num(&b["bytes"]), "{what}");
@@ -253,7 +265,10 @@ fn a_wider_library_is_the_references() {
 
 #[test]
 fn keys_as_the_index_gives_them() {
-    assert_eq!(name_key("  The Band\u{2019}s  \u{201C}Best\u{201D} \u{2013} Live "), "the band's \"best\" - live");
+    assert_eq!(
+        name_key("  The Band\u{2019}s  \u{201C}Best\u{201D} \u{2013} Live "),
+        "the band's \"best\" - live"
+    );
     assert_eq!(name_key("ΣΟΦΙΑΣ"), "σοφιας");
     assert_eq!(name_key("\u{2018}\u{2019}\u{201A}\u{201B}\u{2032}"), "'''''");
     assert_eq!(name_key("\u{201C}\u{201D}\u{201E}\u{201F}\u{2033}"), "\"\"\"\"\"");
@@ -273,7 +288,10 @@ fn keys_as_the_index_gives_them() {
     assert_eq!(artist_display(&["A\u{a0}", "B"]), "A, B");
     assert_eq!(artist_display(&["  ", " Solo\u{a0}"]), "Solo");
     assert_eq!(artist_display::<&str>(&[]), "");
-    assert_eq!(song_key(&["Generated Artist 01"], "Sample Title 01").as_deref(), Some("generated artist 01|sample title 01"));
+    assert_eq!(
+        song_key(&["Generated Artist 01"], "Sample Title 01").as_deref(),
+        Some("generated artist 01|sample title 01")
+    );
     assert_eq!(song_key::<&str>(&[], "Sample Café").as_deref(), Some("|sample café"));
     assert_eq!(song_key(&["A\u{a0}", "B"], "T").as_deref(), Some("a, b|t"));
     assert_eq!(song_key(&["Generated Artist 01"], "   "), None);
@@ -306,7 +324,9 @@ fn selected(c: &[(u16, u8)], sel: &Selection) -> Vec<(u16, u8)> {
         let m = c.iter().take_while(|e| e.1 as u32 >= sel.floor).count() as u32;
         if m > sel.k {
             let (k, h) = (sel.k, sel.head);
-            return (0..k).map(|j| c[(if j < h { j } else { h + (j - h) * (m - 1 - h) / (k - 1 - h) }) as usize]).collect();
+            return (0..k)
+                .map(|j| c[(if j < h { j } else { h + (j - h) * (m - 1 - h) / (k - 1 - h) }) as usize])
+                .collect();
         }
     }
     c[..c.len().min(sel.k as usize)].to_vec()
@@ -409,7 +429,8 @@ fn the_lists_are_the_rule() {
         let keys: Vec<Option<String>> = p.rows.iter().map(|r| r.song_key.clone()).collect();
         for a in 0..p.rows.len() {
             let want = selected(&candidates(&emb, &keys, a), &sel);
-            let got: Vec<(u16, u8)> = t.slot(a as u32).expect("a slot").iter().map(|e| (e.row, e.level)).collect();
+            let got: Vec<(u16, u8)> =
+                t.slot(a as u32).expect("a slot").iter().map(|e| (e.row, e.level)).collect();
             assert_eq!(got, want, "round {round}, {n} rows, {sel:?}: row {a}");
         }
     }
@@ -457,10 +478,12 @@ fn a_run_writes_an_index_only_when_it_must() {
     let later = IndexIn { generation: 42, tags_generation: 42, built_time: 1_800_000_000, ..input.clone() };
     assert_eq!(run(&device, &later, old), Index::Same);
 
-    // A retag, a moved file, another card: the old slots carried into a new
+    // A retag, a moved file, another card id (a copied card's new one, this
+    // writer's addition to the table): the old slots carried into a new
     // file, with their builtTime; the same file a full build makes then.
     let mut retag = later.clone();
-    retag.files.iter_mut().find(|f| f.path.starts_with("Generated Artist 01/")).expect("row 0's file").bpm10 = 1250;
+    retag.files.iter_mut().find(|f| f.path.starts_with("Generated Artist 01/"))
+        .expect("row 0's file").bpm10 = 1250;
     let mut moved = later.clone();
     moved.files.iter_mut().find(|f| f.path.contains("SAMPLE TITLE 03")).expect("row 4's file").path =
         "Generated Artist 03/Moved/07 - SAMPLE TITLE 03.flac".into();
@@ -525,7 +548,11 @@ fn the_writer_refuses_what_no_reader_would_take() {
     assert!(prepare(&IndexIn { selection: Selection::top(2), ..input.clone() }).is_ok());
     let long = Model { attribution: "x".repeat(256), ..input.model.clone() };
     assert!(refused(&IndexIn { model: long, ..input.clone() }).is_some());
-    assert!(prepare(&IndexIn { model: Model { attribution: "x".repeat(255), ..input.model.clone() }, ..input.clone() }).is_ok());
+    assert!(prepare(&IndexIn {
+        model: Model { attribution: "x".repeat(255), ..input.model.clone() },
+        ..input.clone()
+    })
+    .is_ok());
     let nul = Model { license: "CC0\0".into(), ..input.model.clone() };
     assert!(refused(&IndexIn { model: nul, ..input.clone() }).is_some());
     for path in ["", "/Generated Artist 01/x.mp3", "A//x.mp3", "A/./x.mp3", "A/x.mp3/"] {
@@ -569,8 +596,14 @@ fn a_build_stops_when_asked_and_counts_its_rows() {
 #[test]
 fn the_default_models_strings() {
     let m = Model::known("effnet-discogs", "1").expect("the default model");
-    assert_eq!((m.metric.as_str(), m.license.as_str(), m.attribution.len()), ("cosine", "CC-BY-NC-SA-4.0", 92));
-    assert!(m.attribution.starts_with("Discogs-EffNet by Music") && m.attribution.ends_with("Fabra (essentia.upf.edu/models)"));
+    assert_eq!(
+        (m.metric.as_str(), m.license.as_str(), m.attribution.len()),
+        ("cosine", "CC-BY-NC-SA-4.0", 92)
+    );
+    assert!(
+        m.attribution.starts_with("Discogs-EffNet by Music")
+            && m.attribution.ends_with("Fabra (essentia.upf.edu/models)")
+    );
     assert_eq!(Model::known("effnet-discogs", "2"), None);
     assert_eq!(Model::known("another-model", "1"), None);
     // With them STRS is 134 bytes (4.1), and the file's size is 10.2's.
@@ -595,7 +628,10 @@ fn a_tags_records_file() {
     let ledger = Ledger { file_hash: [0xAB; 16], ..Ledger::default() };
     let f = FileIn::of("Generated Artist 01/01.mp3", &rec, &run, Some(&ledger)).expect("a file with a row");
     assert_eq!(f.hash, [0xAB; 16]);
-    assert_eq!((f.title.as_str(), f.artists.len(), f.bpm10, f.camelot, f.analysed), (" Sample Title 01", 2, 1210, 27, true));
+    assert_eq!(
+        (f.title.as_str(), f.artists.len(), f.bpm10, f.camelot, f.analysed),
+        (" Sample Title 01", 2, 1210, 27, true)
+    );
     let audio = Ledger { audio_hash: [0xCD; 16], ..ledger.clone() };
     assert_eq!(FileIn::of("x.mp3", &rec, &run, Some(&audio)).expect("a row").hash, [0xCD; 16]);
     assert_eq!(FileIn::of("x.mp3", &rec, &run, Some(&Ledger::default())), None);
