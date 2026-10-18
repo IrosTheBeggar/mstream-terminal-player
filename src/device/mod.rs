@@ -100,6 +100,15 @@ enum DeviceCmd {
     // contract too.
     #[command(hide = true)]
     CardSync(CardSyncArgs),
+    // Reads the play log of a set-up card at a volume the drive-safety rule
+    // accepts, maps each new play through the card's ledger and posts it to
+    // the server of the saved session, and prints what came of it as JSON.
+    // It only reads the card: the plays it settles are acknowledged there
+    // (ACKS, the state file's marks) by the next sync's commit. `--dry-run`
+    // maps them and saves and posts nothing. For the real-card checks: the
+    // listener's `device card <drive> plays` waits for its UX contract too.
+    #[command(hide = true)]
+    CardPlays(CardPlaysArgs),
 }
 
 #[derive(Args, Clone)]
@@ -114,6 +123,15 @@ pub struct CardSetupArgs {
     // A copied card's answer: an identity of its own.
     #[arg(long)]
     new_identity: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct CardPlaysArgs {
+    // Where the card is mounted, or the OS's name for the volume.
+    volume: String,
+    // Map the plays and print, and save and post nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 // The settings flags change the card's settings, stored after a run; the
@@ -332,6 +350,10 @@ pub fn run(args: DeviceArgs) -> i32 {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             let label = args.label.as_deref();
             card::setup::command(&args.volume, label, args.new_identity, &mut out, &mut err)
+        }
+        DeviceCmd::CardPlays(args) => {
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            card::history::command(&args.volume, args.dry_run, &mut out, &mut err)
         }
         DeviceCmd::CardSync(args) => match args.ask() {
             Ok(ask) => {
@@ -1047,6 +1069,13 @@ mod tests {
         assert!(bad.ask().is_err());
         assert!(parse(&["card-sync"]).is_err(), "a volume, always");
         assert!(!help.contains("card-sync"), "{help}");
+        // And the plays': a volume, and a dry run.
+        let Ok(DeviceCmd::CardPlays(args)) = parse(&["card-plays", "E:", "--dry-run"]) else { panic!() };
+        assert_eq!((args.volume.as_str(), args.dry_run), ("E:", true));
+        let Ok(DeviceCmd::CardPlays(args)) = parse(&["card-plays", "/media/card"]) else { panic!() };
+        assert!(!args.dry_run);
+        assert!(parse(&["card-plays"]).is_err(), "a volume, always");
+        assert!(!help.contains("card-plays"), "{help}");
     }
 
     /// `device list` on the fake, measured against this build's pin as

@@ -18,9 +18,9 @@
 //! - [`Session::open`]: 2.4.5's check (a newer major stops it before any
 //!   write); the card bound — its identity triple and its locks
 //!   ([`bind`]); steps 1-4 ([`settle`]): the root and the plan settled,
-//!   the private files read, the plays hook, the cut-rename check (a stop
-//!   for a disk check), the clean-up; then the card listed and every ledger
-//!   row matched against it ([`survey`]).
+//!   the private files read, the cut-rename check (a stop for a disk
+//!   check), the clean-up; then the card listed and every ledger row
+//!   matched against it ([`survey`]), and the plays hook (step 5).
 //! - [`Session::plan`]: the server's side paired with the ledger, the plan
 //!   table, the names, the guards ([`plan`]).
 //! - [`Session::run`]: `pending.bin`, the deletes, each file staged,
@@ -445,10 +445,12 @@ pub(crate) enum AutoDj {
 /// What other parts add to a run, each a no-op here ([`NoHooks`]): B15's
 /// plays, B1's conversion checks, retags, covers and Auto DJ index.
 pub(crate) trait Hooks {
-    /// Step 2: the new plays of the card's log, mapped through the tags file
-    /// of the root that counts before a checkpoint deletes it (2.12.1,
-    /// step 5; 2.20.6).
-    fn plays(&mut self, _card: &dyn CardFs, _root: Option<&Root>) {}
+    /// Step 5, once the card is listed: the new plays of the card's log,
+    /// mapped through the tags file of the root that counts before a
+    /// checkpoint deletes it (2.12.1; 2.20.6), its stamps held to `skew`,
+    /// the uniform skew of this listing (2.3.4). Before anything is planned
+    /// or written to `/music`.
+    fn plays(&mut self, _card: &dyn CardFs, _root: Option<&Root>, _skew: i32) {}
     /// Step 8: a conversion's bytes are the ones asked for (the type, the
     /// length within 1 s of the manifest's). Err: the file is skipped.
     fn conversion(
@@ -480,7 +482,9 @@ pub(crate) trait Hooks {
         AutoDj::None
     }
     /// The plays a commit acknowledges (2.5.6), from the root's before:
-    /// each raised to the software's mark, never lowered.
+    /// each raised to the software's mark, never lowered. Only a commit the
+    /// run makes anyway carries them: a run that changes nothing else makes
+    /// none for them.
     fn acks(&mut self, carried: &[Ack]) -> Vec<Ack> {
         carried.to_vec()
     }
@@ -574,7 +578,7 @@ impl<'c> Session<'c> {
             events(Event::TookOver(stale));
         }
         let mut look = || -> Result<_, Stop> {
-            let settled = settle::settle(card, &mut bound, answers, hooks)?;
+            let settled = settle::settle(card, &mut bound, answers)?;
             let music = Music::list(card).map_err(|e| bound.failed(e))?;
             let survey = survey::survey(card, &music, &settled, &knobs).map_err(|e| bound.failed(e))?;
             Ok((settled, music, survey))
@@ -584,6 +588,7 @@ impl<'c> Session<'c> {
                 if let Some(card_id) = looked.0.foreign {
                     events(Event::ForeignPlan(card_id));
                 }
+                hooks.plays(card, looked.0.root.as_ref(), looked.2.skew);
                 looked
             }
             // A card still the bound one is let go; a pulled or different

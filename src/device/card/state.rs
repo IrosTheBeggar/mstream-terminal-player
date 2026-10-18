@@ -9,6 +9,8 @@
 //!   Linux read it (`1A2B-3C4D`), and `volumeUuid`, the stand-in a Mac reads
 //!   instead (the two can't be compared, so each is kept beside the other);
 //! - `created`: when this identity was set up, in Unix seconds;
+//! - `plays`: the play log's posted mark of each device and epoch (2.20.6),
+//!   once a run has settled any of the card's plays;
 //!
 //! and the sync's settings ([`Settings`]), written once a sync has stored
 //! them: `sources` (each server the card is filled from, by its URL's key
@@ -35,6 +37,8 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use serde_json::{Map, Value};
 
 use super::contract::device_txt::DeviceTxt;
+use super::contract::msmf::Ack;
+use super::contract::prim::hex as hex_bytes;
 use super::engine::Removal;
 use super::volume::{Private, STATE_VERSION, Serial};
 use crate::api::urls::{TransferBitrate, TransferCodec};
@@ -43,8 +47,8 @@ use crate::api::urls::{TransferBitrate, TransferCodec};
 pub(crate) const FORMAT: &str = "mstream-card-state";
 
 /// The members schema 1 reads and writes; every other member is kept.
-const KNOWN: [&str; 8] =
-    ["format", "version", "seq", "cardId", "label", "volumeSerial", "volumeUuid", "created"];
+const KNOWN: [&str; 9] =
+    ["format", "version", "seq", "cardId", "label", "volumeSerial", "volumeUuid", "created", "plays"];
 
 /// The settings' members ([`Settings`]).
 const SETTINGS: [&str; 7] =
@@ -67,6 +71,10 @@ pub(crate) struct State {
     pub(crate) uuid: Option<String>,
     /// Unix seconds.
     pub(crate) created: u64,
+    /// The play log's posted mark of each device and epoch (2.20.6): its
+    /// plays up to the seq are settled, or weren't to be sent. The next
+    /// commit's ACKS follow them (2.5.6).
+    pub(crate) plays: Vec<Ack>,
     pub(crate) settings: Settings,
     /// Every member this software doesn't know, by name.
     pub(crate) keep: BTreeMap<String, Value>,
@@ -98,6 +106,7 @@ impl State {
             fat_serial,
             uuid: text("volumeUuid").map(str::to_string),
             created: object.get("created").and_then(Value::as_u64).unwrap_or(0),
+            plays: object.get("plays").map_or_else(Vec::new, marks_of),
             settings: Settings::read(object),
             keep: keep.map(|(name, value)| (name.clone(), value.clone())).collect(),
         })
@@ -139,6 +148,9 @@ impl State {
             members.push(("volumeUuid", uuid.as_str().into()));
         }
         members.push(("created", self.created.into()));
+        if !self.plays.is_empty() {
+            members.push(("plays", marks_value(&self.plays)));
+        }
         members.extend(self.settings.members());
         members.extend(self.keep.iter().map(|(name, value)| (name.as_str(), value.clone())));
         let json = |v: &Value| serde_json::to_string(v).unwrap_or_default();
@@ -161,6 +173,49 @@ pub(crate) fn from_hex(text: &str) -> Option<u64> {
     let digits = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))?;
     let hex = (1..=16).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_hexdigit());
     if hex { u64::from_str_radix(digits, 16).ok() } else { None }
+}
+
+/// A device id as a play's id spells it: 12 hex digits, in either case.
+pub(crate) fn device_of(text: &str) -> Option<[u8; 6]> {
+    if text.len() != 12 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut id = [0u8; 6];
+    for (i, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(id)
+}
+
+/// Posted marks as the private files hold them: `[{"deviceId":
+/// "00005e005301", "epoch": "0x1122334455667788", "seq": 7}, …]`, in ACKS's
+/// order. An entry that isn't one is left out, and of a device and epoch
+/// named twice the higher seq is taken.
+pub(crate) fn marks_of(value: &Value) -> Vec<Ack> {
+    let mut marks: BTreeMap<([u8; 6], u64), u32> = BTreeMap::new();
+    for item in value.as_array().into_iter().flatten() {
+        let device_id = item.get("deviceId").and_then(Value::as_str).and_then(device_of);
+        let epoch = item.get("epoch").and_then(Value::as_str).and_then(from_hex);
+        let seq = item.get("seq").and_then(Value::as_u64).and_then(|s| u32::try_from(s).ok());
+        let (Some(device_id), Some(epoch), Some(seq)) = (device_id, epoch, seq) else { continue };
+        let mark = marks.entry((device_id, epoch)).or_insert(0);
+        *mark = (*mark).max(seq);
+    }
+    marks.into_iter().map(|((device_id, epoch), seq)| Ack { device_id, epoch, seq }).collect()
+}
+
+/// [`marks_of`]'s form of `marks`.
+pub(crate) fn marks_value(marks: &[Ack]) -> Value {
+    let mut marks = marks.to_vec();
+    marks.sort();
+    let mark = |a: &Ack| {
+        let mut object = Map::new();
+        object.insert("deviceId".into(), hex_bytes(&a.device_id).into());
+        object.insert("epoch".into(), hex(a.epoch).into());
+        object.insert("seq".into(), a.seq.into());
+        Value::Object(object)
+    };
+    Value::Array(marks.iter().map(mark).collect())
 }
 
 // ── The sync's settings ─────────────────────────────────────────────────────
@@ -731,6 +786,34 @@ mod tests {
         assert!(read(br#"{"format": "mstream-card-state", "version": 1}"#).is_none(), "no seq: invalid");
         let hexes = ["0x00", "0Xff", "12", "0x", "0x1FFFFFFFFFFFFFFFF", "0x-1"].map(from_hex);
         assert_eq!(hexes, [Some(0), Some(255), None, None, None, None]);
+    }
+
+    #[test]
+    fn the_posted_marks_read_back_in_acks_order() {
+        let fat = Serial::Fat(0x1A2B_3C4D);
+        let mut state = State::new(9, "Car", Some(&fat), 1);
+        let one = [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01];
+        let two = [0x00, 0x00, 0x5E, 0x00, 0x53, 0x02];
+        let ack = |device_id, epoch, seq| Ack { device_id, epoch, seq };
+        let (first, second) = (0x1122_3344_5566_7788, 0xF0E1_D2C3_B4A5_9687);
+        state.plays = vec![ack(two, 1, 3), ack(one, second, 9), ack(one, first, 7)];
+        let text = String::from_utf8(state.text(2)).unwrap();
+        let line = r#"  "plays": [{"deviceId":"00005e005301","epoch":"0x1122334455667788","seq":7},"#;
+        assert!(text.contains(line), "{text}");
+        let back = read(text.as_bytes()).unwrap();
+        state.plays.sort();
+        assert_eq!(back.plays, state.plays);
+        assert!(back.keep.is_empty());
+        // None: no member. An entry that isn't one is left out; one device
+        // and epoch twice, the higher seq.
+        assert!(!String::from_utf8(State::new(9, "Car", None, 1).text(1)).unwrap().contains("plays"));
+        let odd = r#"{"format": "mstream-card-state", "version": 1, "seq": 3, "plays": [
+            {"deviceId": "00005E005301", "epoch": "0x07", "seq": 2},
+            {"deviceId": "00005e005301", "epoch": "0x07", "seq": 5},
+            {"deviceId": "00:00:5e:00:53:01", "epoch": "0x07", "seq": 1},
+            {"deviceId": "00005e005301", "epoch": 7, "seq": 1},
+            {"deviceId": "00005e005301", "epoch": "0x08", "seq": -1}]}"#;
+        assert_eq!(read(odd.as_bytes()).unwrap().plays, [ack(one, 7, 5)]);
     }
 
     #[test]

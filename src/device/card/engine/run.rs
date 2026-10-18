@@ -919,9 +919,10 @@ impl<'r, 'c> Runner<'r, 'c> {
         let acks = hooks.acks(&self.acks);
 
         // A run that changed nothing makes no commit: a new one would have
-        // the device build its library again (3.2.2).
-        let same =
-            self.unchanged(&records, &folders, &autodj, &servers, &roots, &revision, &acks, server0);
+        // the device build its library again (3.2.2), which acknowledging
+        // plays isn't worth (2.5.6): the plays' marks wait for a commit made
+        // anyway.
+        let same = self.unchanged(&records, &folders, &autodj, &servers, &roots, &revision, server0);
         if last && same {
             return Ok(());
         }
@@ -992,8 +993,9 @@ impl<'r, 'c> Runner<'r, 'c> {
     }
 
     /// The final commit would say what the root says already: the same
-    /// records, folders, servers, roots, revision, acknowledgements and Auto
-    /// DJ index, and the root a final one.
+    /// records, folders, servers, roots, revision and Auto DJ index, and the
+    /// root a final one. Its acknowledgements aside: they ride on a commit,
+    /// never make one.
     #[allow(clippy::too_many_arguments)]
     fn unchanged(
         &self,
@@ -1003,7 +1005,6 @@ impl<'r, 'c> Runner<'r, 'c> {
         servers: &[Server],
         roots: &[String],
         revision: &str,
-        acks: &[Ack],
         server0: Server,
     ) -> bool {
         let Some(root) = self.s.settled.root.as_ref() else { return false };
@@ -1029,7 +1030,6 @@ impl<'r, 'c> Runner<'r, 'c> {
             && servers == m.servers.as_slice()
             && roots == old_roots.as_slice()
             && revision == m.server_revision
-            && acks == m.acks.as_slice()
             && (server0.instance, server0.url_key) == (m.server_instance, m.server_url_key)
     }
 

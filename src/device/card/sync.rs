@@ -8,17 +8,20 @@
 //!    converts, and the user's libraries (an admin's block too, for the
 //!    local-disk source).
 //! 2. The card's settings (`state.json`: [`Settings`]), the run's changes to
-//!    them, and the session that binds the card (the engine's steps 1-4). A
-//!    card with no state file isn't one the transfer set up: `card-setup`
-//!    first; a card that is a copy of another stops until it has an
-//!    identity of its own (2.10).
+//!    them, and the session that binds the card (the engine's steps 1-4),
+//!    whose listing maps the new plays of the card's log through its ledger
+//!    into this computer's outbox ([`History`]). A card with no state file
+//!    isn't one the transfer set up: `card-setup` first; a card that is a
+//!    copy of another stops until it has an identity of its own (2.10).
 //! 3. The selection, through `ignoreVPaths`: the paged manifest, sent the
 //!    revision the last whole read ended with (If-None-Match). A 304 means
 //!    "probably unchanged", so the card's ledger stands for the listing
 //!    ([`wanted_of_ledger`]); the manifest is read whole every 7 days, every
 //!    10th run, and whenever the plan's settings changed (2.10.2). Then
 //!    `metadata/batch` for the files a decision needs it for, and each
-//!    `.ogg`'s first bytes (Opus is copied as it is).
+//!    `.ogg`'s first bytes (Opus is copied as it is). The plays waiting for
+//!    this server are posted then, a path it moved found again in a whole
+//!    listing: a sync that stops later has posted them all the same.
 //! 4. The wanted card ([`plan`](super::plan)), the engine's plan of it, the
 //!    fit and the track cap, the guards. A dry run stops here: on a card
 //!    whose writes go to memory ([`DryCard`]), so nothing reaches the card.
@@ -32,7 +35,8 @@
 //! 6. The settings, stored at the run's end before it lets the card go
 //!    ([`Hooks::state`]): the selection, the conversion, the source's
 //!    nickname and keys, the manifest's schedule, which art each thumbnail
-//!    was made from.
+//!    was made from, the plays' posted marks. The run's commits carry them
+//!    as ACKS ([`Hooks::acks`]), a commit made for nothing else never.
 //!
 //! The listener's way in is the Card view and `device card <drive> sync`,
 //! which wait for their UX contract; until then the hidden `device
@@ -52,6 +56,7 @@ use super::cards::Cards;
 use super::contract::MAX_FILE;
 use super::contract::device_txt::DeviceTxt;
 use super::contract::mptg::{Entry, Ledger, RecordIn};
+use super::contract::msmf::Ack;
 use super::contract::order::{compare_file_paths, split_last};
 use super::contract::prim::{fnv1a64, hex, hex16, path_hash};
 use super::contract::server::{NO_INSTANCE, Server, Talk, Verdict, server_url_key};
@@ -59,8 +64,9 @@ use super::covers::{self, Covers, folders, most_common};
 use super::dry::DryCard;
 use super::engine::{
     Album, Answers, AutoDj, Commit, Cover, Env, Event, Expect, Fetched, Guard, Hooks, Knobs,
-    NoHooks, Origin, Outcome, Plan, Report, Session, Stop, WantedFile,
+    Origin, Outcome, Plan, Report, Session, Stop, WantedFile,
 };
+use super::history::{self, History, Tally};
 use super::names::{self, Bytes};
 use super::plan::{
     self, Extra, Fit, Kept, Skip, Wanted, codec_of, needing_metadata, ogg_is_opus, oggs_to_sniff,
@@ -214,6 +220,8 @@ pub(crate) struct Synced {
     /// What the run passed by without stopping: no Auto DJ index and why,
     /// settings not stored, a card with no `device.txt`.
     pub(crate) notes: Vec<String>,
+    /// What became of the card's plays, once the card's settings were read.
+    pub(crate) plays: Option<Tally>,
 }
 
 // ── One run ─────────────────────────────────────────────────────────────────
@@ -224,8 +232,8 @@ type Halted = (Option<Summary>, Halt);
 /// and the listener named; `space` its size and free space, when the OS
 /// gives them (no fit without); `reached` how the client reaches its server
 /// (the local-disk source's condition); `cards` this computer's cache of
-/// cards, brought up to date (the caller saves it); `envs` each session's
-/// clock and ids.
+/// cards, brought up to date (the caller saves it); `plays` the outbox of
+/// the card's plays; `envs` each session's clock and ids.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sync(
     card: &dyn CardWrite,
@@ -234,18 +242,29 @@ pub(crate) fn sync(
     reached: Reached,
     ask: &Ask,
     cards: &mut Cards,
+    plays: Rc<dyn history::Store>,
     envs: &mut dyn FnMut() -> Env,
     events: &mut dyn FnMut(Event),
 ) -> Synced {
     let mut notes = Vec::new();
     let dry = DryCard::new(card);
     let target: &dyn CardWrite = if ask.dry_run { &dry } else { card };
-    let ran = run(target, space, &client, reached, ask, cards, envs, events, &mut notes);
+    let mut history = None;
+    let mut had = Had { notes: &mut notes, plays, history: &mut history };
+    let ran = run(target, space, &client, reached, ask, cards, envs, events, &mut had);
     let (summary, end) = match ran {
         Ok((summary, end)) => (Some(summary), end),
         Err((summary, halt)) => (summary, End::Halted(halt)),
     };
-    Synced { summary, end, notes }
+    Synced { summary, end, notes, plays: history.map(|h| h.tally) }
+}
+
+/// What a run gives back besides its end: its notes, and the card's plays
+/// (their outbox, and what the run's look and post made of them).
+struct Had<'a> {
+    notes: &'a mut Vec<String>,
+    plays: Rc<dyn history::Store>,
+    history: &'a mut Option<History>,
 }
 
 fn server_halt(e: impl std::fmt::Display) -> Halted {
@@ -278,7 +297,7 @@ fn run(
     cards: &mut Cards,
     envs: &mut dyn FnMut() -> Env,
     events: &mut dyn FnMut(Event),
-    notes: &mut Vec<String>,
+    had: &mut Had<'_>,
 ) -> Result<(Summary, End), Halted> {
     // 1. The server.
     let info: LayeredInfo = wait(client.layered_info_async()).map_err(server_halt)?;
@@ -297,12 +316,18 @@ fn run(
     let serial = card.serial().map_err(|_| (None, Halt::Card(Stop::Pulled)))?;
     let expect = Expect { serial, ..Expect::default() };
     let knobs = knobs_of(&state.settings);
-    let opened = Session::open(card, &expect, knobs, &ask.answers, envs(), &mut NoHooks, events);
+    // The card's plays, mapped once the session has listed the card.
+    let posted = (state.card_id, state.plays.clone());
+    let history = History::new(had.plays.clone(), ask.dry_run, posted);
+    let history = had.history.insert(history);
+    let opened = Session::open(card, &expect, knobs, &ask.answers, envs(), history, events);
     let mut session = opened.map_err(|stop| (None, Halt::Card(stop)))?;
     let mut clock = envs();
     let now = (clock.now)();
-    let prepared =
-        prepare(&mut session, &mut state, space, client, reached, ask, &info, cards, now, notes);
+    let notes = &mut *had.notes;
+    let prepared = prepare(
+        &mut session, &mut state, space, client, reached, ask, &info, cards, now, history, notes,
+    );
     let mut p = match prepared {
         Ok(p) => p,
         Err(halted) => {
@@ -321,11 +346,13 @@ fn run(
     let revision = (p.ours != Some(0)).then(|| p.revision.clone());
     let (url_key, listed, plan_key) = (p.url_key, p.listed, p.plan_key);
     hooks.store = Some(Store { state, url_key, listed, now, plan_key, revision });
+    hooks.history = had.history.take();
     let ran = session.run(p.plan, &mut p.fetcher, &mut hooks, events);
-    notes.append(&mut hooks.notes);
+    *had.history = hooks.history.take();
+    had.notes.append(&mut hooks.notes);
     let outcome = ran.map_err(|stop| (Some(p.summary.clone()), Halt::Card(stop)))?;
     if let Err(why) = &outcome.stored {
-        notes.push(format!("the card's settings weren't stored: {why}"));
+        had.notes.push(format!("the card's settings weren't stored: {why}"));
     }
     cards.saw(outcome.card_id, &label, now, outcome.generation, outcome.commit_id);
     Ok((p.summary, End::Ran(outcome)))
@@ -377,6 +404,7 @@ fn prepare(
     info: &LayeredInfo,
     cards: &Cards,
     now: u64,
+    history: &mut History,
     notes: &mut Vec<String>,
 ) -> Result<Prepared, Halted> {
     let refused = |why: String| (None, Halt::Refused(why));
@@ -467,6 +495,7 @@ fn prepare(
         || source.runs.saturating_add(1) >= WHOLE_EVERY_RUNS;
 
     // 3. The server's side.
+    let reads = talk.clone();
     let mut origin = Origin {
         talk,
         server: Server::direct(NO_INSTANCE, url_key),
@@ -493,6 +522,7 @@ fn prepare(
                 let hashes = listing.entries.iter().filter_map(audio);
                 origin.whole = Some(hashes.collect::<HashSet<_>>());
             }
+            history.remap(&reads, &listing.entries, Some(&libraries));
             let kept: HashMap<String, Kept> =
                 rows.iter().map(|k| (k.ledger.server_path.clone(), k.clone())).collect();
             let same_plan = source.plan_key == plan_key;
@@ -522,6 +552,8 @@ fn prepare(
         }
     };
     let revision = wanted.card.origins[0].revision.clone();
+    // The card's plays for this server, their paths as it has them now.
+    history.post(client, &reads, info.features.stats.is_some(), info.instance_id.is_some());
 
     // 4. The plan.
     let http = Http::new(client.clone(), 0, device.max_channels);
@@ -620,6 +652,7 @@ fn prepare(
         old_fingerprint,
         refresh: listed == Listed::Whole,
         store: None,
+        history: None,
         notes: Vec::new(),
     };
     let hooks = Some(hooks);
@@ -750,6 +783,9 @@ struct SyncHooks {
     refresh: bool,
     /// The settings the run's end stores; set for a run, not for a plan.
     store: Option<Store>,
+    /// The card's plays: their marks go into the commits' ACKS and the
+    /// settings stored. Set for a run.
+    history: Option<History>,
     notes: Vec<String>,
 }
 
@@ -944,11 +980,23 @@ impl Hooks for SyncHooks {
         }
     }
 
+    /// The plays the run settled, acknowledged in each commit it makes.
+    fn acks(&mut self, carried: &[Ack]) -> Vec<Ack> {
+        match &self.history {
+            Some(history) => history.acks(carried),
+            None => carried.to_vec(),
+        }
+    }
+
     /// The settings as asked, and what a run that ended learned: the
-    /// manifest's schedule, and which art each thumbnail was made from. A
-    /// parked run's thumbnails weren't looked at: their art stays.
+    /// manifest's schedule, which art each thumbnail was made from, and the
+    /// plays' posted marks. A parked run's thumbnails weren't looked at:
+    /// their art stays.
     fn state(&mut self, outcome: &Outcome, seq: u64) -> Option<Vec<u8>> {
         let store = self.store.as_mut()?;
+        if let Some(history) = &self.history {
+            store.state.plays = history.marks();
+        }
         let settings = &mut store.state.settings;
         if outcome.parked.is_none() {
             let source = settings.source(store.url_key);
@@ -1043,7 +1091,8 @@ fn on(
             }
         };
         let (space, client) = (found.volume.space, Arc::new(client));
-        sync(&card, space, client, reached, ask, &mut cards, &mut Env::system, &mut say)
+        let plays: Rc<dyn history::Store> = Rc::new(history::ConfigStore);
+        sync(&card, space, client, reached, ask, &mut cards, plays, &mut Env::system, &mut say)
     };
     let printed = serde_json::to_string_pretty(&synced_json(&synced, ask.dry_run));
     let _ = writeln!(out, "{}", printed.unwrap_or_default());
@@ -1143,7 +1192,7 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
     };
     json!({
         "dryRun": dry_run, "plan": summary, "outcome": outcome, "stopped": stopped,
-        "notes": s.notes,
+        "notes": s.notes, "plays": s.plays.as_ref().map(Tally::json),
     })
 }
 

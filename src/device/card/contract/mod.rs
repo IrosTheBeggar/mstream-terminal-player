@@ -23,8 +23,9 @@
 //!   which root counts), [`mptg`] (`tags-<gen>.bin`, the records and the
 //!   ledger), [`mspd`] (`pending.bin`, a run's plan), [`mpdj`]
 //!   (`autodj-<gen>.bin` read and checked; its builder is the Auto DJ
-//!   writer's), [`mpth`] (the album thumbnails, from pixels or an image) and
-//!   [`device_txt`] (`/.player/device.txt`, what the firmware reads).
+//!   writer's), [`mpth`] (the album thumbnails, from pixels or an image),
+//!   [`device_txt`] (`/.player/device.txt`, what the firmware reads) and
+//!   [`mppl`] (`/.player/plays.jnl`, the device's play log, read only).
 //!
 //! **Absent, not an error.** A reader treats a file that fails any of
 //! 2.4.3's checks as absent: it says why with a [`Why`], the player's own
@@ -38,6 +39,7 @@ pub(crate) mod container;
 pub(crate) mod device_txt;
 pub(crate) mod fat;
 pub(crate) mod mpdj;
+pub(crate) mod mppl;
 pub(crate) mod mptg;
 pub(crate) mod mpth;
 pub(crate) mod msmf;

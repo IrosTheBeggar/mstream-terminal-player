@@ -24,9 +24,11 @@ use crate::device::card::contract::mpth;
 use crate::device::card::contract::order::thumb_path_of;
 use crate::device::card::contract::prim::{hex, md5};
 use crate::device::card::covers::PROBES;
+use crate::device::card::contract::mppl::{KIND_PLAY, Slot};
 use crate::device::card::covers::tests::picture;
 use crate::device::card::engine::Removal;
 use crate::device::card::engine::fatsim::FatSim;
+use crate::device::card::history::tests::MemStore;
 use crate::device::card::setup;
 use crate::device::card::source::length::tests::{mp3_bytes, opus_bytes};
 use crate::device::card::volume::Inspection;
@@ -90,6 +92,9 @@ struct Library {
     disk: Option<PathBuf>,
     /// Every request, as "METHOD path".
     asked: Vec<String>,
+    /// The plays posted to `stats/plays`, as they came, and the ids it has.
+    plays: Vec<Value>,
+    has: HashSet<String>,
 }
 
 type Fake = Arc<Mutex<Library>>;
@@ -148,8 +153,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
         ("GET", "/api/") => {
             let mut body = json!({
                 "server": "6.31.1",
+                "instanceId": "3f2b8c1e-6a4d-4e0f-9b7a-2c5d8e1f0a93",
                 "features": {"sync": true, "transcode": {"defaultCodec": "opus", "defaultBitrate": "96k"},
-                             "discovery": true},
+                             "discovery": true, "stats": 2},
                 "user": {"vpaths": lib.vpaths, "admin": false},
             });
             if lib.disk.is_some() {
@@ -230,6 +236,17 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
                 return chunked("200 OK", &[("Content-Type", kind)], &[&bytes[..bytes.len() / 3]]);
             }
             chunked("200 OK", &[("Content-Type", kind)], &[&bytes])
+        }
+        ("POST", "/api/v1/stats/plays") => {
+            let plays = asked.json()["plays"].as_array().cloned().unwrap_or_default();
+            let (mut accepted, mut duplicates) = (Vec::new(), Vec::new());
+            for play in plays {
+                let id = play["id"].as_str().unwrap_or_default().to_string();
+                if lib.has.insert(id.clone()) { accepted.push(id) } else { duplicates.push(id) }
+                lib.plays.push(play);
+            }
+            let body = json!({"accepted": accepted, "duplicates": duplicates, "rejected": []});
+            json_reply("200 OK", &body.to_string())
         }
         ("GET", p) if p.starts_with("/album-art/") => match lib.art.get(&p["/album-art/".len()..]) {
             Some(bytes) => reply("200 OK", &[("Content-Type", "image/png")], bytes),
@@ -324,14 +341,27 @@ fn sync_via(
     envs: &mut dyn FnMut() -> Env,
     reached: Reached,
 ) -> (Synced, Vec<Event>) {
+    sync_plays(card, base, ask, envs, reached, Rc::new(MemStore::default()))
+}
+
+/// [`sync_via`], the card's plays in `plays`.
+fn sync_plays(
+    card: &FatSim,
+    base: &str,
+    ask: &Ask,
+    envs: &mut dyn FnMut() -> Env,
+    reached: Reached,
+    plays: Rc<MemStore>,
+) -> (Synced, Vec<Event>) {
     let client = Arc::new(Client::new(base).unwrap().with_token(Some("tok".into())));
     let mut events = Vec::new();
     let mut cards = Cards::default();
-    let synced = sync(card, space(32 << 30), client, reached, ask, &mut cards, envs, &mut |e| {
+    let mut said = |e| {
         if !matches!(e, Event::Progress { .. }) {
             events.push(e);
         }
-    });
+    };
+    let synced = sync(card, space(32 << 30), client, reached, ask, &mut cards, plays, envs, &mut said);
     (synced, events)
 }
 
@@ -480,6 +510,88 @@ fn an_unchanged_server_answers_304_and_the_card_stays_as_it_is() {
     assert_eq!((outcome.deleted, outcome.records, outcome.verified.clone()), (1, 3, Ok(())));
 }
 
+/// The player's plays of the card's files (2.20): the next sync posts them
+/// to the server their rows came from and acknowledges them in the commit
+/// it makes anyway, and its state file holds the mark; the listener's own
+/// file and a play from before the clock was set are counted, not sent. A
+/// sync with more plays and nothing else to do posts them and stores the
+/// mark, and makes no commit for them: the ACKS wait for one made anyway.
+#[test]
+fn a_syncs_commit_acknowledges_the_plays_it_posted_and_makes_none_for_them() {
+    let scratch = Scratch::new("plays");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    let store = Rc::new(MemStore::default());
+    let mut again = |ask: &Ask| sync_plays(&sim, &base, ask, &mut envs, Reached::Elsewhere, store.clone()).0;
+    ran(&again(&rock()));
+
+    let device_id = [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01];
+    let epoch = 0x1122_3344_5566_7788;
+    let seen = look(&sim);
+    let records = seen.root.as_ref().unwrap().tags.as_ref().unwrap().records.clone();
+    let play = |path: &str, seq: u32, boot_seq: u32, started_at: u64| {
+        let row = records.iter().find(|e| e.path == path);
+        Slot {
+            kind: KIND_PLAY,
+            outcome: 1,
+            source: 2,
+            seq,
+            epoch,
+            device_id,
+            started_at,
+            boot_seq,
+            uptime_ms: seq * 1000,
+            played_ms: 181_000,
+            path_hash: crate::device::card::contract::prim::path_hash(path),
+            size: row.map_or(1234, |r| r.rec.size),
+            fat_time: row.map_or(0x5D47_73D5, |r| r.rec.fat_time),
+            ..Slot::default()
+        }
+        .encode()
+    };
+    let at = 1_791_950_000_000;
+    let log = [
+        play("Artist A/Album B/01.mp3", 1, 1, at),
+        play("Artist C/Album D/01.opus", 2, 1, at + 200_000),
+        play("Mine/song.mp3", 3, 1, at + 400_000),
+        play("Artist A/Album B/02.flac", 4, 2, 0),
+    ]
+    .concat();
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), &log).unwrap();
+    {
+        let mut lib = fake.lock().unwrap();
+        let mut more = lib.tracks[0].clone();
+        (more.path, more.id) = ("Rock/Artist A/Album B/03.mp3".into(), 6);
+        lib.tracks.push(more);
+        lib.revision = "1:6:1790000000006:5".into();
+    }
+    let second = again(&Ask::default());
+    assert_eq!(ran(&second).written, 1, "{:?}", second.notes);
+    let t = second.plays.as_ref().unwrap();
+    assert_eq!((t.new, t.owed, t.own, t.clock, t.accepted, t.waiting), (4, 2, 1, 1, 2, 0), "{t:?}");
+    let posted: Vec<Value> = fake.lock().unwrap().plays.clone();
+    let paths: Vec<&str> = posted.iter().map(|p| p["filePath"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["Rock/Artist A/Album B/01.mp3", "Rock/Artist C/Album D/01.wav"]);
+    assert_eq!(posted[0]["source"], "shuffle");
+    let mark = |seq: u32| vec![Ack { device_id, epoch, seq }];
+    let seen = look(&sim);
+    let generation = seen.root.as_ref().unwrap().manifest.header.generation;
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(4), "the commit made anyway takes them");
+    assert_eq!(State::of(&seen.state).unwrap().plays, mark(4));
+
+    // One more play, and nothing else: posted, the mark stored, no commit.
+    let more = [log.clone(), play("Artist A/Album B/01.mp3", 5, 3, at + 900_000).to_vec()].concat();
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), &more).unwrap();
+    let third = again(&Ask::default());
+    assert_eq!(ran(&third).generation, generation, "no commit for the plays alone");
+    assert_eq!(third.plays.as_ref().unwrap().accepted, 1);
+    let seen = look(&sim);
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(4), "the ACKS wait for a commit");
+    assert_eq!(State::of(&seen.state).unwrap().plays, mark(5));
+    assert_eq!(fake.lock().unwrap().has.len(), 3, "each play credited once");
+}
+
 #[test]
 fn a_dry_run_plans_and_writes_nothing() {
     let scratch = Scratch::new("dry");
@@ -510,7 +622,8 @@ fn a_plan_that_doesnt_fit_or_removes_most_of_the_card_stops_before_any_write() {
     let mut envs = envs();
     let client = || Arc::new(Client::new(&base).unwrap());
     let tight = |c: &FatSim, envs: &mut dyn FnMut() -> Env| {
-        sync(c, space(1 << 20), client(), Reached::Elsewhere, &rock(), &mut Cards::default(), envs, &mut |_| {})
+        let (cards, plays) = (&mut Cards::default(), Rc::new(MemStore::default()));
+        sync(c, space(1 << 20), client(), Reached::Elsewhere, &rock(), cards, plays, envs, &mut |_| {})
     };
     let image = sim.image();
     let synced = tight(&sim, &mut envs);

@@ -227,7 +227,7 @@ impl Servers {
 
     /// A peer's parent on the card: the server reached by its own URL (the
     /// root's, or an entry without PEER) whose key is `key`.
-    fn parent(&self, key: u64) -> Option<usize> {
+    pub(crate) fn parent(&self, key: u64) -> Option<usize> {
         if key == 0 {
             return None;
         }

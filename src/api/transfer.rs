@@ -533,8 +533,10 @@ pub enum PlayOutcome {
 }
 
 /// The sources the server takes from a client (`SOURCES` without its own
-/// `legacy`). It has no `device` or offline one: a card's plays carry the
-/// mode the player was in, or `Other`.
+/// `legacy`). A card's plays carry the mode the player was in; one it
+/// didn't say is `Device` on a server that takes it (the same batch of
+/// mStream changes as its `instanceId`: an older server answers `device`
+/// with a 400), else `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PlaySource {
@@ -546,6 +548,7 @@ pub enum PlaySource {
     Auto,
     Carplay,
     Cast,
+    Device,
     Other,
 }
 
@@ -1664,11 +1667,13 @@ mod tests {
             PlaySource::Auto,
             PlaySource::Carplay,
             PlaySource::Cast,
+            PlaySource::Device,
             PlaySource::Other,
         ];
         let names: Vec<String> = sources.iter().map(|s| spelled(serde_json::to_value(s).unwrap())).collect();
-        let wanted =
-            ["manual", "shuffle", "autodj", "playlist", "smart-playlist", "auto", "carplay", "cast", "other"];
+        let wanted = [
+            "manual", "shuffle", "autodj", "playlist", "smart-playlist", "auto", "carplay", "cast", "device", "other",
+        ];
         assert_eq!(names, wanted);
     }
 }

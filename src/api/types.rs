@@ -136,6 +136,12 @@ pub struct LayeredInfo {
     /// The server's own version, e.g. `"6.28.0"` — what the version floors
     /// of the auto-dj contract (clause 50) are judged against.
     pub server: Option<String>,
+    /// The server's stable id (a UUID it keeps across restarts, addresses
+    /// and renames). Absent on a server older than the card transfer's
+    /// batch of mStream changes, whose other additions (the `device` play
+    /// source among them) it so lacks too.
+    #[serde(rename = "instanceId", deserialize_with = "soft")]
+    pub instance_id: Option<String>,
     pub features: LayeredFeatures,
     pub user: LayeredUser,
     /// Sent to an admin only, and only while the admin API answers (not

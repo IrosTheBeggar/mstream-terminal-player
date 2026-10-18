@@ -24,7 +24,7 @@ use super::super::contract::prim::{qfp, qfp_ranges};
 use super::super::volume::{self, CardFs, CardWrite, Item, Private, RESUME_VERSION, Root, STATE_VERSION};
 use super::bind::Bound;
 use super::survey::key_path;
-use super::{Answers, Guard, Hooks, Stop};
+use super::{Answers, Guard, Stop};
 
 /// What steps 1 and 2 settled.
 pub(super) struct Settled {
@@ -151,12 +151,7 @@ fn delete(bound: &mut Bound, path: &str) -> Result<(), Stop> {
 
 /// Steps 1-4. A cut rename found stops with [`Guard::DiskCheck`] before
 /// anything is deleted, unless the listener has run the disk check since.
-pub(super) fn settle(
-    card: &dyn CardWrite,
-    bound: &mut Bound,
-    answers: &Answers,
-    hooks: &mut dyn Hooks,
-) -> Result<Settled, Stop> {
+pub(super) fn settle(card: &dyn CardWrite, bound: &mut Bound, answers: &Answers) -> Result<Settled, Stop> {
     let reads = Reads { card, error: RefCell::new(None) };
     let mut pairs: Vec<(String, String)> = Vec::new();
 
@@ -227,10 +222,6 @@ pub(super) fn settle(
     };
     let state = private("state", STATE_VERSION, &mut pairs)?;
     let resume = private("resume", RESUME_VERSION, &mut pairs)?;
-
-    // The plays of the card's log, mapped through the root's tags file
-    // before any checkpoint deletes it (2.12.1, step 5).
-    hooks.plays(card, root.as_ref());
 
     // Step 3: the cut renames.
     let tags = root.as_ref().and_then(|r| r.tags.as_ref().ok());

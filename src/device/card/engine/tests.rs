@@ -202,7 +202,7 @@ struct Extras {
 }
 
 impl Hooks for Extras {
-    fn plays(&mut self, _card: &dyn CardFs, _root: Option<&Root>) {
+    fn plays(&mut self, _card: &dyn CardFs, _root: Option<&Root>, _skew: i32) {
         self.plays += 1;
     }
 
@@ -689,7 +689,7 @@ fn a_first_sync_fills_a_set_up_card() {
     assert_eq!(outcome.verified, Ok(()));
     assert_eq!((outcome.written, outcome.renamed, outcome.deleted, outcome.records), (6, 0, 0, 6));
     assert_eq!(outcome.card_id, CARD_ID, "the card's id, from its set-up");
-    assert_eq!(extras.plays, 1, "the plays hook, once, before anything is written");
+    assert_eq!(extras.plays, 1, "the plays hook, once, before anything is planned");
     let commits: Vec<(u32, bool)> = events
         .iter()
         .filter_map(|e| match e {
@@ -1483,6 +1483,71 @@ impl Hooks for Stores<'_> {
         let (head, label) = (r#""format": "mstream-card-state", "version": 1"#, self.label);
         Some(format!(r#"{{{head}, "seq": {seq}, "label": "{label}"}}"#).into_bytes())
     }
+}
+
+/// The tests' hooks, which acknowledge plays too: each ACKS entry raised to
+/// the marks.
+struct Acking(Vec<Ack>, Extras);
+
+impl Hooks for Acking {
+    fn cover(&mut self, album: &Album<'_>) -> Cover {
+        self.1.cover(album)
+    }
+
+    fn autodj(&mut self, commit: &Commit<'_>) -> AutoDj {
+        self.1.autodj(commit)
+    }
+
+    fn acks(&mut self, carried: &[Ack]) -> Vec<Ack> {
+        let mut out = carried.to_vec();
+        for mark in &self.0 {
+            match out.iter_mut().find(|a| a.key() == mark.key()) {
+                Some(a) => a.seq = a.seq.max(mark.seq),
+                None => out.push(*mark),
+            }
+        }
+        out
+    }
+}
+
+/// ACKS ride on a commit a run makes anyway (2.5.6): plays to acknowledge
+/// alone make no commit, since every commit has the device build its
+/// library again; the next commit takes them, and the one after carries
+/// them forward.
+#[test]
+fn acknowledged_plays_ride_on_a_commit_and_never_make_one() {
+    let dir = Scratch::new("acks");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    let root = |card: &FatSim| card.image()["/.mstream/manifest.bin"];
+    let before = root(&card);
+    let ack = Ack { device_id: [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01], epoch: 0x1122_3344_5566_7788, seq: 3 };
+    let mut acking = Acking(vec![ack], Extras::default());
+    let (ran, events) = sync_with(&card, &wanted, &mut server, &mut acking, knobs(), Answers::default(), 5);
+    assert_eq!(ran.expect("a run").written, 0);
+    assert!(!events.iter().any(|e| matches!(e, Event::Committed { .. })), "{events:?}");
+    assert_eq!(root(&card), before, "no commit for the acknowledgements alone");
+    assert!(look(&card).root.expect("a root").manifest.acks.is_empty());
+
+    let six = corpus("trck_0.mp3");
+    server.add("Lib/Casey Choir/Hymns/01 - Six.mp3", six.clone());
+    wanted.files.push(track("Lib/Casey Choir/Hymns/01 - Six.mp3", &six, 401));
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut acking, knobs(), Answers::default(), 6);
+    assert_eq!(ran.expect("a run").written, 1);
+    let root = look(&card).root.expect("a root");
+    assert_eq!(root.manifest.acks, [ack], "the commit made anyway takes them");
+
+    // A run that reads no log carries them unchanged; a hook never lowers
+    // one.
+    let seven = corpus("v23_utf16.mp3");
+    server.add("Lib/Casey Choir/Hymns/02 - Seven.mp3", seven.clone());
+    wanted.files.push(track("Lib/Casey Choir/Hymns/02 - Seven.mp3", &seven, 402));
+    assert_eq!(sync(&card, &wanted, &mut server, 7).expect("a run").written, 1);
+    assert_eq!(look(&card).root.expect("a root").manifest.acks, [ack]);
+    let mut lower = Acking(vec![Ack { seq: 1, ..ack }], Extras::default());
+    wanted.files.pop();
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut lower, knobs(), Answers::default(), 8);
+    assert_eq!(ran.expect("a run").deleted, 1);
+    assert_eq!(look(&card).root.expect("a root").manifest.acks, [ack]);
 }
 
 #[test]

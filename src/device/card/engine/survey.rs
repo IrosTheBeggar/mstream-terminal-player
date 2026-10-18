@@ -165,6 +165,8 @@ pub(super) struct Survey {
     pub(super) owned: BTreeSet<String>,
     /// The album folders with a thumbnail (THUMB), as listed.
     pub(super) thumbs: BTreeSet<String>,
+    /// The tags file's skew over this listing (2.3.4), in seconds; 0 none.
+    pub(super) skew: i32,
 }
 
 pub(super) fn survey(
@@ -266,5 +268,5 @@ pub(super) fn survey(
         }
     }
     let reread = tags.is_some_and(|t| t.parser_version != PARSER_VERSION || t.read_rules != READ_RULES);
-    Ok(Survey { rows, reread, unclaimed, recover, owned, thumbs })
+    Ok(Survey { rows, reread, unclaimed, recover, owned, thumbs, skew })
 }

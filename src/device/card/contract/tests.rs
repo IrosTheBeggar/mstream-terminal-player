@@ -15,6 +15,7 @@ use super::container::{self, MPDJ, MPTG, MSMF, MSPD, unknown_major};
 use super::device_txt::{DeviceTxt, Format};
 use super::fat::{fat_from_wall, fat_time, fat_valid, fat_wall, skew, time_matches};
 use super::mpdj::{self, Table};
+use super::mppl;
 use super::mptg::{self, FolderIn, Ledger, Meta, Record, RecordIn, Tags};
 use super::msmf::{self, Ack, Candidate, Comp, Manifest, ManifestIn, Pick, elect};
 use super::mspd::{self, Op, Plan, PlanIn};
@@ -383,9 +384,12 @@ fn every_vector_group_is_placed() {
         "deviceTxt",
         "mpdj",
         "softwareMatching",
-        // Of the play log's group, ACKS and device.txt's history key: the
-        // rest (the slots, the ids, the reader's cases, where a play goes)
-        // is the play-history sync's (2.20.6; B15, not built yet).
+        // Of the play log's group: ACKS, device.txt's history key, the
+        // slots, the ids and the reader's cases. A play resolved through a
+        // tags file and where it goes are the play-history sync's
+        // (history.rs: `resolve`, `resolveCases`, `peers`); the seq and
+        // bootSeq at boot and the device's model of log.json are the
+        // device's (`atBoot`, `deviceOps`).
         "plays",
     ]
     .into();
@@ -846,6 +850,185 @@ fn a_damaged_acks_never_makes_the_root_absent() {
     swapped[off..off + 48].copy_from_slice(&[&file[off + 24..off + 48], &file[off..off + 24]].concat());
     reseal(&mut swapped);
     assert!(Manifest::read(&swapped, msmf::Uses::ALL).expect("the root reads").acks.is_empty());
+}
+
+/// A play slot's fields as the fixtures describe them.
+fn slot_of(f: &Value) -> mppl::Slot {
+    mppl::Slot {
+        kind: num(&f["kind"]) as u8,
+        outcome: num(&f["outcome"]) as u8,
+        source: num(&f["source"]) as u8,
+        seq: num(&f["seq"]) as u32,
+        pause_count: num(&f["pauseCount"]) as u16,
+        clock: num(&f["clock"]) as u8,
+        epoch: num(&f["epoch"]),
+        device_id: device_id(&f["deviceId"]),
+        started_at: num(&f["startedAt"]),
+        boot_seq: num(&f["bootSeq"]) as u32,
+        uptime_ms: num(&f["uptimeMs"]) as u32,
+        played_ms: num(if f["kind"] == 2 { &f["dropped"] } else { &f["playedMs"] }) as u32,
+        duration_ms: num(&f["durationMs"]) as u32,
+        path_hash: num(&f["pathHash"]),
+        size: num(&f["size"]) as u32,
+        fat_time: num(&f["fatTime"]) as u32,
+        generation: num(&f["generation"]) as u32,
+    }
+}
+
+/// A case's files of plays/index.json, by name.
+fn play_files(case: &Value) -> Vec<(String, Vec<u8>)> {
+    let files = case["files"].as_object().expect("files");
+    files.iter().map(|(name, at)| (name.clone(), bytes(&format!("plays/{}", text(at))))).collect()
+}
+
+fn read_plays(files: &[(String, Vec<u8>)]) -> mppl::Log {
+    let files: Vec<mppl::LogFile<'_>> = files.iter().map(|(n, b)| mppl::LogFile::whole(n, b)).collect();
+    mppl::read_log(&files)
+}
+
+/// The play log's slot, a drop note, the ids and the enums' names (2.20.3,
+/// 2.20.4): each slot written from its fields is the fixtures' bytes, and
+/// read back is its fields.
+#[test]
+fn vectors_plays_slots_and_ids() {
+    let v = vectors();
+    let p = &v["plays"];
+    let s = &p["slot"];
+    let slot = slot_of(&s["fields"]);
+    let bytes = slot.encode();
+    assert_eq!(spaced_of(&bytes), text(&s["bytes"]));
+    assert_eq!(crc32(&bytes[..76]) as u64, num(&s["crc"]));
+    assert_eq!(mppl::decode(&bytes), mppl::Verdict::Ok(slot));
+    assert_eq!(slot.id(), text(&s["id"]));
+    let note = slot_of(&p["dropNote"]["fields"]);
+    assert_eq!(spaced_of(&note.encode()), text(&p["dropNote"]["bytes"]));
+    assert_eq!(mppl::decode(&note.encode()), mppl::Verdict::Ok(note));
+    for c in p["ids"].as_array().expect("ids") {
+        let slot = mppl::Slot {
+            device_id: device_id(&c["deviceId"]),
+            epoch: num(&c["epoch"]),
+            seq: num(&c["seq"]) as u32,
+            ..mppl::Slot::default()
+        };
+        assert_eq!(slot.id(), text(&c["id"]));
+        assert!(slot.id().len() <= 46);
+    }
+    for (value, name) in p["names"]["outcome"].as_object().expect("outcomes") {
+        assert_eq!(mppl::outcome_name(value.parse().unwrap()), text(name));
+    }
+    for (value, name) in p["names"]["source"].as_object().expect("sources") {
+        assert_eq!(mppl::source_name(value.parse().unwrap()), text(name));
+    }
+    // The reader's verdicts in its order: a tail, another magic, a newer
+    // major (its CRC unchecked), a bad CRC, an unknown kind.
+    assert_eq!(mppl::decode(&bytes[..79]), mppl::Verdict::Short);
+    let with = |at: usize, value: u8| {
+        let mut b = bytes;
+        b[at] = value;
+        b
+    };
+    assert_eq!(mppl::decode(&with(0, b'X')), mppl::Verdict::Damaged);
+    assert_eq!(mppl::decode(&with(4, 2)), mppl::Verdict::Newer(2));
+    assert_eq!(mppl::decode(&with(40, 9)), mppl::Verdict::Damaged);
+    let mut kind = with(5, 9);
+    let crc = crc32(&kind[..76]);
+    kind[76..].copy_from_slice(&crc.to_le_bytes());
+    assert_eq!(mppl::decode(&kind), mppl::Verdict::Kind(9));
+}
+
+/// plays/index.json's cases through the reader: the plays each once, by
+/// their ids in order, what it skipped counted as tools/playlog.py counts
+/// it, the enums' names and the dates; and every valid slot of every file
+/// of the fixtures written again from its fields is its own bytes.
+#[test]
+fn the_play_logs_goldens_read_as_the_reference_reads_them() {
+    let cases = json("plays/index.json");
+    for case in cases.as_array().expect("cases") {
+        let name = text(&case["case"]);
+        let log = read_plays(&play_files(case));
+        let ids: Vec<String> = log.plays.iter().map(mppl::Slot::id).collect();
+        let want: Vec<&str> = case["ids"].as_array().expect("ids").iter().map(text).collect();
+        assert_eq!(ids, want, "{name}");
+        let c = &case["counts"];
+        let counts = mppl::Counts {
+            slots: num(&c["slots"]),
+            damaged: num(&c["damaged"]),
+            tail: num(&c["tail"]),
+            newer: num(&c["newer"]),
+            unknown_kinds: num(&c["unknownKinds"]),
+            unusable: num(&c["unusable"]),
+            twins: num(&c["twins"]),
+            conflicts: num(&c["conflicts"]),
+            dropped: num(&c["dropped"]),
+        };
+        assert_eq!(log.counts, counts, "{name}: {}", case["note"]);
+        for (id, names) in case["names"].as_object().into_iter().flatten() {
+            let play = log.plays.iter().find(|p| p.id() == *id).expect("the play");
+            let got = [mppl::outcome_name(play.outcome), mppl::source_name(play.source)];
+            let want: Vec<&str> = names.as_array().expect("two names").iter().map(text).collect();
+            assert_eq!(got.as_slice(), want.as_slice(), "{name}: {id}");
+        }
+        let dates = mppl::dates(&log.plays);
+        for (id, when) in case["dates"].as_object().into_iter().flatten() {
+            let play = log.plays.iter().find(|p| p.id() == *id).expect("the play");
+            assert_eq!(dates[&play.key()], when.as_u64(), "{name}: {id}");
+        }
+        // The order of the files changes nothing.
+        let mut files = play_files(case);
+        files.reverse();
+        assert_eq!(read_plays(&files), log, "{name}");
+        for (file, data) in play_files(case) {
+            for raw in data.chunks(mppl::SLOT) {
+                if let mppl::Verdict::Ok(slot) = mppl::decode(raw) {
+                    assert_eq!(slot.encode().as_slice(), raw, "{name}: {file}");
+                }
+            }
+        }
+    }
+    // A name a reader doesn't read (a twin's) is left out.
+    let golden = bytes("plays/golden/sync-1/plays.jnl");
+    let twin = mppl::read_log(&[mppl::LogFile::whole("plays.xl1", &golden)]);
+    assert_eq!(twin, mppl::Log::default());
+}
+
+/// A file longer than the cap: what is past it is counted as damaged slots,
+/// one for each 80 bytes or part of them, and never read, whether the
+/// reader was given those bytes or only the file's length (2.20.6, item 1).
+#[test]
+fn a_play_log_past_its_cap_is_read_to_the_cap() {
+    let golden = bytes("plays/golden/sync-1/plays.jnl");
+    let mut long = vec![0u8; mppl::FILE_BYTES - golden.len()];
+    long.extend_from_slice(&golden);
+    let played = read_plays(&[("plays.jnl".into(), long.clone())]);
+    assert_eq!(played.plays.len(), 3, "the golden's three plays, at the cap's end");
+    long.extend_from_slice(&golden[..81]);
+    let past = read_plays(&[("plays.jnl".into(), long.clone())]);
+    let cap = mppl::FILE_SLOTS as u64;
+    assert_eq!((past.counts.slots, past.counts.damaged), (cap + 2, cap - 3 + 2));
+    assert_eq!(past.plays, played.plays, "the slot past the cap isn't read");
+    let head = &long[..mppl::FILE_BYTES];
+    let given = mppl::LogFile { name: "plays.jnl", bytes: head, size: long.len() as u64 };
+    assert_eq!(mppl::read_log(&[given]), past);
+}
+
+/// The posted mark of each device and epoch rises over the plays settled
+/// or not sent, and stops at the first that waits; a seq the log doesn't
+/// hold doesn't hold it back, and a mark is never lowered (2.20.6, item 10).
+#[test]
+fn a_posted_mark_rises_to_the_first_play_still_waiting() {
+    let one = [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01];
+    let two = [0x00, 0x00, 0x5E, 0x00, 0x53, 0x02];
+    let play = |device_id, epoch, seq| mppl::Slot { kind: 1, device_id, epoch, seq, ..mppl::Slot::default() };
+    let plays = [play(one, 7, 1), play(one, 7, 2), play(one, 7, 4), play(one, 7, 5), play(two, 9, 1)];
+    let ack = |device_id, epoch, seq| Ack { device_id, epoch, seq };
+    let every = mppl::next_marks(&plays, &[], &|_| true);
+    assert_eq!(every, [ack(one, 7, 5), ack(two, 9, 1)], "seq 3 lost: no hold");
+    let waits = mppl::next_marks(&plays, &[], &|p| p.seq != 4);
+    assert_eq!(waits, [ack(one, 7, 2), ack(two, 9, 1)]);
+    let posted = [ack(one, 7, 4), ack(one, 3, 8)];
+    let kept = mppl::next_marks(&plays, &posted, &|p| p.seq != 5);
+    assert_eq!(kept, [ack(one, 3, 8), ack(one, 7, 4), ack(two, 9, 1)], "never lowered, another epoch's kept");
+    assert_eq!(mppl::next_marks(&plays, &[], &|_| false), []);
 }
 
 #[test]
