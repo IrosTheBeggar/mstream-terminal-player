@@ -18,7 +18,9 @@
 //! that says which volumes the transfer may write, a card read as the
 //! device reads it, and the write half a run drives. [`engine`] is the run:
 //! every write a sync makes, in the contract's order (2.12), bound to one
-//! card, and planned against what the card and its ledger hold.
+//! card, and planned against what the card and its ledger hold. [`source`]
+//! is where a run's bytes come from: the server's own folders on this
+//! computer's disk when it runs beside the server, else the network.
 
 // The kit and the engine built on it wait for their callers (the sync of
 // the user's server, the Card view): until they land only the tests call
@@ -29,5 +31,6 @@ pub(crate) mod autodj;
 pub(crate) mod contract;
 pub(crate) mod engine;
 pub(crate) mod names;
+pub(crate) mod source;
 pub(crate) mod tags;
 pub(crate) mod volume;
