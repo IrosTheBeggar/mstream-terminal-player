@@ -178,7 +178,11 @@ pub(crate) fn set_up(
         (session, done.made_music) = step(session, Session::music_folder)?;
         let outcome = session.run(plan, &mut NoBytes, &mut NoHooks, events)?;
         if let Err(why) = outcome.verified {
-            return Err(Stop::Refused(format!("the card doesn't read back: {why}")));
+            // The commit is made, the state file not (the next set-up writes
+            // it): what the card was given is said all the same.
+            let (id, commit) = (hex(outcome.card_id), hex(outcome.commit_id));
+            let made = format!("card {id} committed generation {} as {commit}", outcome.generation);
+            return Err(Stop::Refused(format!("{made}, but the card doesn't read back: {why}")));
         }
         done.was = root.map(|_| card_id).filter(|&was| was != outcome.card_id);
         done.committed = outcome.commit_id != commit_id;
@@ -193,7 +197,9 @@ pub(crate) fn set_up(
     if restate {
         // The card's own settings are kept under its new identity, the
         // serials it was written on not (they were the other card's); a card
-        // with none gets the listener's label.
+        // with none gets the listener's label, and so does one whose label
+        // this software may not write (an address put there by hand or by
+        // another tool: 2.10).
         let mut state = match old {
             Some(old) => {
                 let (fat_serial, uuid) = (None, None);
@@ -201,7 +207,7 @@ pub(crate) fn set_up(
             }
             None => State::new(done.card_id, label, serial.as_ref(), now),
         };
-        if state.label.is_empty() {
+        if state.label.is_empty() || state::label_fault(&state.label).is_some() {
             state.label = label.to_string();
         }
         state.saw(serial.as_ref());
@@ -220,7 +226,9 @@ pub(crate) fn set_up(
 /// `volume` (where it is mounted, `E:` or `/media/card`, or the OS's name
 /// for it, `sdb1`), which must be one the volume layer accepts — a refused
 /// volume, or one that isn't a card at all, is never opened. Prints what
-/// the set-up found and did as JSON; `cards.json` is brought up to date.
+/// the set-up found and did as JSON, the engine's events with it (on
+/// stderr, before the reason, when it stopped); `cards.json` is brought up
+/// to date.
 /// For the real-card checks: the listener's `device card <drive> setup`
 /// waits for its UX contract. Exit 0; 1 when the set-up stopped; 2 when the
 /// volume isn't one it may write, or the volumes can't be listed.
@@ -272,13 +280,21 @@ fn on(
     // The volume's own label, when none is given.
     let label = label.map_or_else(|| found.volume.label.trim().to_string(), str::to_string);
     let ask = Ask { label, new_identity };
-    match set_up(&card, &ask, envs, cards, &mut |_| {}) {
+    // What the engine says beside the three steps (a stale run.lock taken
+    // over, another card's plan deleted) is said too: in the JSON, or before
+    // the stop.
+    let mut said = Vec::new();
+    match set_up(&card, &ask, envs, cards, &mut |e| said.push(event_json(&e))) {
         Ok(done) => {
-            let said = serde_json::to_string_pretty(&done_json(&done)).unwrap_or_default();
-            let _ = writeln!(out, "{said}");
+            let mut json = done_json(&done);
+            json["events"] = Value::Array(said);
+            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&json).unwrap_or_default());
             0
         }
         Err(stop) => {
+            for event in &said {
+                let _ = writeln!(err, "mstream-player: {event}");
+            }
             let _ = writeln!(err, "mstream-player: the set-up stopped: {stop}");
             1
         }
@@ -325,4 +341,17 @@ fn done_json(done: &SetUp) -> Value {
         "was": done.was.map(hex),
         "copied": copied,
     })
+}
+
+/// An engine event, as the command says it. A set-up's plan fetches,
+/// writes and deletes nothing in `/music`, so the rest are only named.
+fn event_json(event: &Event) -> Value {
+    match event {
+        Event::TookOver(note) => json!({ "event": "tookOver", "note": note }),
+        Event::ForeignPlan(card_id) => json!({ "event": "foreignPlan", "cardId": hex(*card_id) }),
+        Event::Committed { generation, last } => {
+            json!({ "event": "committed", "generation": generation, "last": last })
+        }
+        other => json!({ "event": format!("{other:?}") }),
+    }
 }

@@ -119,13 +119,20 @@ impl Cards {
         other.then_some(Copied::Diverged { generation, seen: seen.commit_id, now: commit_id })
     }
 
-    /// The card as it is now: its label, the time, its root's revision.
+    /// The card as it is now: its label, the time, its root's revision —
+    /// unless that revision [`diverged`](Cards::diverged) from the one kept:
+    /// the card seen first keeps its revision here, so the other one is the
+    /// copy at every look (and the first is not), until one of them takes an
+    /// identity of its own.
     pub(crate) fn saw(&mut self, id: u64, label: &str, now: u64, generation: u32, commit: u64) {
+        let diverged = self.diverged(id, generation, commit).is_some();
         let seen = self.cards.entry(id).or_default();
         seen.label = label.to_string();
         seen.last_seen = now;
-        seen.generation = generation;
-        seen.commit_id = commit;
+        if !diverged {
+            seen.generation = generation;
+            seen.commit_id = commit;
+        }
     }
 }
 
@@ -175,7 +182,19 @@ mod tests {
         assert_eq!(cards.diverged(9, 1, 100), None, "the commit seen");
         assert_eq!(cards.diverged(9, 2, 200), None, "a later commit: a sync since");
         let sign = Copied::Diverged { generation: 1, seen: 100, now: 101 };
-        assert_eq!(cards.diverged(9, 1, 101), Some(sign));
+        assert_eq!(cards.diverged(9, 1, 101), Some(sign.clone()));
         assert_eq!(cards.diverged(8, 1, 101), None, "another card");
+
+        // The copy seen keeps the revision seen first: the copy is the one
+        // said to be a copy at every look, and the first card never is.
+        cards.saw(9, "Car copy", 2, 1, 101);
+        let seen = &cards.cards[&9];
+        let fields = (seen.label.as_str(), seen.last_seen, seen.generation, seen.commit_id);
+        assert_eq!(fields, ("Car copy", 2, 1, 100));
+        assert_eq!(cards.diverged(9, 1, 100), None);
+        assert_eq!(cards.diverged(9, 1, 101), Some(sign));
+        // A sync since, of either: its next generation is the one kept.
+        cards.saw(9, "Car", 3, 2, 200);
+        assert_eq!((cards.cards[&9].generation, cards.cards[&9].commit_id), (2, 200));
     }
 }

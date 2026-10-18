@@ -132,6 +132,23 @@ fn dump(name: &str, card: &FatSim) {
     }
 }
 
+/// A cut first sync's plan on a card with no root, whose target is a file
+/// of `/music` there: what a set-up must leave as it is.
+fn cut_sync(dir: &Path) {
+    put(dir, "/music/Alex Artist/x.mp3", &[1; 500], LATER);
+    let op = Op { op: OP_WRITE, path: "Alex Artist/x.mp3".into(), expected_size: 500 };
+    let (generation, card_id, run_id) = (1, 0x5EED, 1);
+    let plan = PlanIn { generation, card_id, minor: 0, run_id, base_generation: 0, ops: vec![op] };
+    put(dir, "/.mstream/pending.bin", &mspd::write(&plan).unwrap(), LATER);
+}
+
+/// How many writes a card's log holds up to and including `write`: where a
+/// test swaps the card in the reader.
+fn through(log: &[String], write: &str) -> u64 {
+    let at = log.iter().position(|w| w == write).unwrap_or_else(|| panic!("{write}: {log:?}"));
+    at as u64 + 1
+}
+
 /// The card's files under a folder, each with its size, stamp and bytes'
 /// hash.
 fn under(card: &FatSim, prefix: &str) -> BTreeMap<String, (u64, u32, u64)> {
@@ -262,6 +279,15 @@ fn a_set_up_card_is_only_looked_at() {
     assert!(done.wrote_state && !done.committed);
     let state = State::of(&look(&card).state).unwrap();
     assert_eq!((state.card_id, state.seq, state.label.as_str()), (0x5EED_C0DE_0A1B_2C3D, 5, "Gym"));
+
+    // A label this software may not write (an address, put there by hand)
+    // isn't written again: the listener's is.
+    let by_hand = State::new(0x0BAD, "alex@music.example", Some(&Serial::Fat(SERIAL)), 3);
+    put(&other.0, "/.mstream/state.json", &by_hand.text(6), LATER);
+    let done = run(&card, &ask("Gym"), &mut cards, 7).unwrap();
+    assert_eq!((done.wrote_state, done.label.as_str()), (true, "Gym"));
+    let text = String::from_utf8(bytes(&card, "state.json")).unwrap();
+    assert!(!text.contains("example") && text.contains("\"label\": \"Gym\""), "{text}");
 }
 
 #[test]
@@ -293,11 +319,7 @@ fn the_listeners_music_and_the_players_files_stay_as_they_are() {
     // finish it (that would delete a file of `/music`), and writes nothing
     // there.
     let cut = Scratch::new("cut");
-    put(&cut.0, "/music/Alex Artist/x.mp3", &[1; 500], LATER);
-    let op = Op { op: OP_WRITE, path: "Alex Artist/x.mp3".into(), expected_size: 500 };
-    let (generation, card_id, run_id) = (1, 0x5EED, 1);
-    let plan = PlanIn { generation, card_id, minor: 0, run_id, base_generation: 0, ops: vec![op] };
-    put(&cut.0, "/.mstream/pending.bin", &mspd::write(&plan).unwrap(), LATER);
+    cut_sync(&cut.0);
     let card = FatSim::new(&cut.0, SERIAL);
     let before = under(&card, "/music/");
     let stop = run(&card, &ask("Car"), &mut Cards::default(), 2).unwrap_err();
@@ -367,8 +389,89 @@ fn a_copied_card_is_said_to_be_one_and_takes_a_new_identity_when_asked() {
     let clone = FatSim::new(&c.0, SERIAL);
     let seen = run(&clone, &ask(""), &mut cards, 6).unwrap();
     let sign = Copied::Diverged { generation: 1, seen: first.commit_id, now: first.commit_id ^ 0xFFFF };
-    assert_eq!(seen.copied, [sign]);
+    assert_eq!(seen.copied, [sign.clone()]);
     assert!(!seen.committed && !seen.wrote_state);
+    // The cache keeps the commit it saw first, at every look: the card the
+    // clone was made from is its own, and the clone is still the copy.
+    for seed in [7, 8] {
+        assert!(run(&card_a, &ask(""), &mut cards, seed).unwrap().copied.is_empty());
+        assert_eq!(run(&clone, &ask(""), &mut cards, seed).unwrap().copied, [sign.clone()]);
+    }
+    assert_eq!(cards.cards[&first.card_id].commit_id, first.commit_id);
+}
+
+#[test]
+fn a_card_swapped_in_the_reader_mid_set_up_is_never_written() {
+    // A new card's set-up, as the cards below make it: the commit's session
+    // lets the card go, then a session of its own opens for the state file.
+    let reference = Scratch::new("reference");
+    let card = FatSim::new(&reference.0, SERIAL);
+    run(&card, &ask("Car"), &mut Cards::default(), 1).unwrap();
+    let log = card.log();
+    let released = through(&log, "delete /.mstream/run.lock");
+    assert_eq!(log[released as usize], "lock /.mstream/run.lock", "{log:?}");
+
+    // Swapped there for a card of the same serial — an empty one (what the
+    // card was before its commit) or another set-up card: the second
+    // session is bound to the commit just made, and stops before it writes.
+    let theirs = Scratch::new("theirs");
+    run(&FatSim::new(&theirs.0, SERIAL), &ask("Gym"), &mut Cards::default(), 2).unwrap();
+    let empty = Scratch::new("empty");
+    for other in [&empty, &theirs] {
+        let before = FatSim::new(&other.0, SERIAL).image();
+        let dir = Scratch::new("first");
+        let card = FatSim::new(&dir.0, SERIAL);
+        card.swap_after(released, &other.0, SERIAL);
+        let mut cards = Cards::default();
+        let stop = run(&card, &ask("Car"), &mut cards, 1).unwrap_err();
+        assert!(matches!(stop, Stop::DifferentCard), "{stop}");
+        assert_eq!(card.log().len() as u64, released, "not a write after the swap");
+        assert_eq!(FatSim::new(&other.0, SERIAL).image(), before);
+        assert!(std::fs::read_dir(&empty.0).unwrap().next().is_none(), "not even /.mstream");
+        assert!(cards.cards.is_empty(), "nothing cached of a set-up that stopped");
+        // The first card has its commit and no state file: the next set-up
+        // writes it, the commit kept.
+        let first = FatSim::new(&dir.0, SERIAL);
+        let seen = look(&first);
+        let m = seen.root.expect("its commit").manifest;
+        assert!(m.is_final() && seen.state.value.is_none());
+        let done = run(&first, &ask("Car"), &mut cards, 3).unwrap();
+        assert!(!done.committed && done.wrote_state);
+        assert_eq!((done.card_id, done.commit_id), (m.header.card_id, m.commit_id));
+    }
+
+    // A new identity's commit, the card swapped before it is read back:
+    // after the run's last write, the collection of a thumbnail no album
+    // names. The set-up stops, and says the id the card was given.
+    let a = Scratch::new("a");
+    run(&FatSim::new(&a.0, SERIAL), &ask("Car"), &mut Cards::default(), 4).unwrap();
+    put(&a.0, "/.mstream/thumbs/A/A1B2C3D4.565", &[0; 64], LATER);
+    let new = Ask { label: String::new(), new_identity: true };
+    let reference = Scratch::new("reference-copy");
+    copy_tree(&a.0, &reference.0);
+    let card = FatSim::new(&reference.0, OTHER);
+    run(&card, &new, &mut Cards::default(), 5).unwrap();
+    let collected = through(&card.log(), "delete /.mstream/thumbs/A/A1B2C3D4.565");
+    assert_eq!(card.log()[collected as usize], "delete /.mstream/run.lock", "then the read back");
+    let (b, c) = (Scratch::new("b"), Scratch::new("c"));
+    copy_tree(&a.0, &b.0);
+    copy_tree(&a.0, &c.0);
+    let before = FatSim::new(&c.0, OTHER).image();
+    let card = FatSim::new(&b.0, OTHER);
+    card.swap_after(collected, &c.0, OTHER);
+    let stop = run(&card, &new, &mut Cards::default(), 5).unwrap_err();
+    assert_eq!(card.log().len() as u64, collected, "not a write after the swap");
+    assert_eq!(FatSim::new(&c.0, OTHER).image(), before);
+    let card = FatSim::new(&b.0, OTHER);
+    let m = look(&card).root.expect("the new identity's commit").manifest;
+    let Stop::Refused(why) = stop else { panic!("{stop}") };
+    assert!(why.contains(&hex(m.header.card_id)) && why.contains(&hex(m.commit_id)), "{why}");
+    assert!(why.contains("doesn't read back"), "{why}");
+    // Nothing is lost: the next look writes the state file of the id the
+    // card was given, its label kept.
+    let done = run(&card, &ask(""), &mut Cards::default(), 6).unwrap();
+    assert!(!done.committed && done.wrote_state);
+    assert_eq!((done.card_id, done.generation, done.label.as_str()), (m.header.card_id, 2, "Car"));
 }
 
 #[test]
@@ -464,11 +567,14 @@ fn card_disk() -> Disk {
 
 #[test]
 fn the_hidden_command_sets_up_only_a_volume_the_rule_accepts() {
-    let (good, bad) = (Scratch::new("good"), Scratch::new("exfat"));
+    let (good, bad, cut) = (Scratch::new("good"), Scratch::new("exfat"), Scratch::new("cut"));
     let found = [
         Found::new(volume_at(&bad.0, "sdy1", Fs::ExFat), card_disk()),
         Found::new(volume_at(&good.0, "sdz1", Fs::Fat32), card_disk()),
+        Found::new(volume_at(&cut.0, "sdx1", Fs::Fat32), card_disk()),
     ];
+    // What a run that crashed leaves: run.lock with no lock behind it.
+    let stale = br#"{"format": "mstream-card-run", "runId": "0x0000000000000001", "started": 1}"#;
     let mut cards = Cards::default();
     let mut call = |named: &str, label: Option<&str>| {
         let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -489,7 +595,9 @@ fn the_hidden_command_sets_up_only_a_volume_the_rule_accepts() {
     assert!(err.contains("label-address"), "{err}");
     assert!(none(&good.0), "a label that names an address writes nothing");
 
-    // By where it is mounted, with a separator after it; its own label.
+    // By where it is mounted, with a separator after it; its own label. The
+    // stale run.lock is taken over, and the JSON says so.
+    put(&good.0, "/.mstream/run.lock", stale, LATER);
     let named = format!("{}{}", good.0.display(), std::path::MAIN_SEPARATOR);
     let (code, out, err) = call(&named, None);
     assert_eq!((code, err.as_str()), (0, ""));
@@ -497,11 +605,24 @@ fn the_hidden_command_sets_up_only_a_volume_the_rule_accepts() {
     let fields = (said["committed"].as_bool(), said["label"].as_str(), said["generation"].as_u64());
     assert_eq!(fields, (Some(true), Some("CARD"), Some(1)));
     assert!(good.0.join(".mstream").join("manifest.bin").is_file() && good.0.join("music").is_dir());
+    let events = said["events"].as_array().expect("the events");
+    assert_eq!(events[0], json!({ "event": "tookOver", "note": String::from_utf8_lossy(stale) }));
+    assert_eq!(events.last().unwrap()["event"], "committed", "{events:?}");
     // Again, by the OS's name for it: looked at.
     let (code, out, _) = call("sdz1", Some("Car"));
     let again: Value = serde_json::from_str(&out).unwrap();
     let fields = (code, again["committed"].as_bool(), again["label"].as_str());
     assert_eq!(fields, (0, Some(false), Some("CARD")));
     assert_eq!(again["cardId"], said["cardId"]);
-    assert_eq!(cards.cards.len(), 1);
+    assert_eq!(again["events"], json!([]));
+
+    // A set-up that stops says the engine's events before why.
+    cut_sync(&cut.0);
+    put(&cut.0, "/.mstream/run.lock", stale, LATER);
+    let (code, out, err) = call("sdx1", None);
+    assert_eq!((code, out.as_str()), (1, ""));
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 2, "{err}");
+    assert!(lines[0].contains("\"tookOver\"") && lines[1].contains("the set-up stopped"), "{err}");
+    assert_eq!(cards.cards.len(), 1, "the one set up");
 }
