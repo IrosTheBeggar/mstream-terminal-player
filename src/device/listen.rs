@@ -672,7 +672,7 @@ fn field<'a>(fields: &'a str, key: &str) -> Option<&'a str> {
     fields.split_whitespace().find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
 }
 
-/// `Paul%27s%20headphones` → `Paul's headphones`: RFC 3986's encoding of
+/// `Alex%27s%20headphones` → `Alex's headphones`: RFC 3986's encoding of
 /// the name's UTF-8, read back byte for byte. A broken escape stays as it
 /// was written.
 pub(crate) fn percent_decode(text: &str) -> String {
@@ -702,8 +702,9 @@ pub(crate) mod tests {
     use super::*;
     use crate::device::board::CardRef;
 
-    /// The real Core2's answer of 2026-10-10 (a 1 TB card).
-    const REAL: &str = "@status fw=v0.8.0-5-g4e94418 elf=be894f89 card=fat32 size=1023871549440 free=1022132355072 tracks=113 music=? bat=100 state=paused bt=SPYDRONE";
+    /// The real Core2's answer of 2026-10-10 (a 1 TB card), but for the
+    /// headphones' name: a made-up one, percent-encoded as the board sends it.
+    const REAL: &str = "@status fw=v0.8.0-5-g4e94418 elf=be894f89 card=fat32 size=1023871549440 free=1022132355072 tracks=113 music=? bat=100 state=paused bt=Alex%27s%20headphones";
 
     /// A wire that answers from a script: what the board sends back after
     /// each thing the host writes, in chunks as a port delivers them.
@@ -786,19 +787,19 @@ pub(crate) mod tests {
         assert_eq!(status.music, None, "music=? is unknown");
         assert_eq!(status.bat, Some(100));
         assert_eq!(status.state, PlayState::Paused);
-        assert_eq!(status.bt.as_deref(), Some("SPYDRONE"));
+        assert_eq!(status.bt.as_deref(), Some("Alex's headphones"));
     }
 
     #[test]
     fn a_status_line_passes_over_what_it_does_not_know_and_never_guesses() {
-        let line = "@status fw=v0.9.0 elf=63ee7a2b card=exfat size=63864569856 free=? tracks=building music=? bat=- state=host shiny=new bt=Paul%27s%20headphones";
+        let line = "@status fw=v0.9.0 elf=63ee7a2b card=exfat size=63864569856 free=? tracks=building music=? bat=- state=host shiny=new bt=Alex%27s%20headphones";
         let status = parse_status(line).unwrap();
         assert_eq!(status.card, CardKind::ExFat);
         assert_eq!(status.free, Free::NotCounted, "free=? is not counted, never 0");
         assert_eq!(status.tracks, Tracks::Building);
         assert_eq!(status.bat, None);
         assert_eq!(status.state, PlayState::Host);
-        assert_eq!(status.bt.as_deref(), Some("Paul's headphones"));
+        assert_eq!(status.bt.as_deref(), Some("Alex's headphones"));
         let none = parse_status("@status fw=v0.9.0 card=none size=- free=? tracks=- bt=-").unwrap();
         assert_eq!((none.card, none.size, none.tracks, none.bt), (CardKind::None, None, Tracks::NoCard, None));
         assert_eq!(parse_status("@status fw=v0.9.0 free=counting card=fat16").unwrap().free, Free::Counting { pct: None });
