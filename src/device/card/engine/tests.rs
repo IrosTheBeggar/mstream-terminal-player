@@ -291,6 +291,59 @@ fn sync(card: &FatSim, wanted: &WantedCard, server: &mut Canned, seed: u64) -> R
     sync_with(card, wanted, server, &mut Extras::default(), knobs(), Answers::default(), seed).0
 }
 
+/// The run after a cut, as the listener makes it: a stop for a disk check
+/// answered once the check has run.
+struct Recovered {
+    ran: Result<Outcome, Stop>,
+    /// It stopped for a disk check first.
+    asked: bool,
+    /// Its writes, from its first; and which of them its open made:
+    /// run.lock's note, then steps 1-4's own, what settles the card.
+    writes: Vec<String>,
+    opened: std::ops::Range<usize>,
+}
+
+fn recover(card: &FatSim, wanted: &WantedCard, server: &mut Canned, seed: u64) -> Recovered {
+    let start = card.log().len();
+    let mut answers = Answers::default();
+    loop {
+        let before = card.log().len() - start;
+        let (hooks, expect) = (&mut Extras::default(), Expect::default());
+        let opened = Session::open(card, &expect, knobs(), &answers, env(seed), hooks, &mut |_| {});
+        let (ran, opened) = match opened {
+            Err(Stop::Guard(Guard::DiskCheck(_))) if !answers.disk_checked => {
+                answers.disk_checked = true;
+                continue;
+            }
+            Err(stop) => (Err(stop), before..card.log().len() - start),
+            Ok(mut session) => {
+                let opened = before..card.log().len() - start;
+                let plan = session.plan(wanted, &answers, server);
+                (plan.and_then(|plan| session.run(plan, server, hooks, &mut |_| {})), opened)
+            }
+        };
+        let writes = card.log()[start..].to_vec();
+        return Recovered { ran, asked: answers.disk_checked, writes, opened };
+    }
+}
+
+/// A write as the log says it, the 8 hex digits of a generation or a stage
+/// file's number left out: what kind of write it is.
+fn kind(write: &str) -> String {
+    let (mut out, mut hex) = (String::new(), String::new());
+    for c in write.chars().chain(['\n']) {
+        if c.is_ascii_hexdigit() {
+            hex.push(c);
+            continue;
+        }
+        out.push_str(if hex.len() == 8 { "#" } else { &hex });
+        out.push(c);
+        hex.clear();
+    }
+    out.pop();
+    out
+}
+
 /// A session as the tests open one: no hooks, the default knobs.
 fn open<'c>(
     card: &'c FatSim,
@@ -764,18 +817,11 @@ fn every_cut_leaves_a_card_the_kit_reads_and_the_next_run_finishes() {
 
     // Each write cut in turn; each rename also between its two directory
     // writes.
-    let mut cuts: Vec<(u64, Cut)> = (1..=writes.len() as u64).map(|n| (n, Cut::Fail)).collect();
-    let renames = writes.iter().enumerate().filter(|(_, w)| w.starts_with("rename"));
-    cuts.extend(renames.map(|(i, _)| (i as u64 + 1, Cut::Between)));
     let mut disk_checks = 0;
-    for (n, how) in cuts {
+    let mut settled: BTreeSet<(String, bool)> = BTreeSet::new();
+    for (n, how) in cuts_of(&writes, writes.len()) {
         let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
-        let dir = Scratch::new("cut");
-        copy_tree(&base.0, &dir.0);
-        let card = FatSim::new(&dir.0, SERIAL);
-        card.cut_at(n, how);
-        let _ = sync(&card, &wanted, &mut server, 2);
-        card.replug();
+        let (_dir, card) = cut_card(&base.0, n, how, &wanted, &mut server);
         // What the card holds is a commit: the one before, a checkpoint, or
         // the last.
         let seen = look(&card);
@@ -783,19 +829,105 @@ fn every_cut_leaves_a_card_the_kit_reads_and_the_next_run_finishes() {
         dump(&format!("cut-{n:03}-{how:?}"), &card);
 
         // The next run brings it to where the uncut run did.
-        let mut again = sync(&card, &wanted, &mut server, 3);
-        if let Err(Stop::Guard(Guard::DiskCheck(_))) = &again {
+        let again = recover(&card, &wanted, &mut server, 3);
+        if again.asked {
             assert_eq!(how, Cut::Between, "{what}: only a cut rename asks for a disk check");
             disk_checks += 1;
-            let answers = Answers { disk_checked: true, ..Answers::default() };
-            let extras = &mut Extras::default();
-            again = sync_with(&card, &wanted, &mut server, extras, knobs(), answers, 3).0;
         }
-        let outcome = again.unwrap_or_else(|e| panic!("{what}: {e}"));
+        let outcome = again.ran.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), want, "{what}");
+
+        // That run cut in its turn at a write of its own settling — a
+        // rename finished, a leftover deleted (2.12.1, steps 1-4; 2.12.2) —
+        // each kind of write once, wherever it first comes (the same cut
+        // card made again): the run after still finishes.
+        let own = |c: &(u64, Cut)| c.0 > again.opened.start as u64 + 1;
+        for (m, then) in cuts_of(&again.writes, again.opened.end).filter(own) {
+            let at = &again.writes[m as usize - 1];
+            if !settled.insert((kind(at), then == Cut::Between)) {
+                continue;
+            }
+            let what = format!("{what}, then at write {m} of the next run ({then:?}, {at})");
+            let (_dir, card) = cut_card(&base.0, n, how, &wanted, &mut server);
+            card.cut_at(m, then);
+            let _ = recover(&card, &wanted, &mut server, 3);
+            card.replug();
+            assert!(look(&card).root.is_some(), "{what}: a root");
+            let outcome = recover(&card, &wanted, &mut server, 4).ran;
+            let outcome = outcome.unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(outcome.verified, Ok(()), "{what}");
+            assert_eq!(finished(&card), want, "{what}");
+        }
+    }
+    assert!(disk_checks > 0, "a rename cut between its directory writes stops for a disk check");
+    for rename in ["manifest", "pending"] {
+        let at = format!("rename /.mstream/{rename}.tmp -> /.mstream/{rename}.bin");
+        assert!(settled.contains(&(at, true)), "a settling's own rename, cut: {settled:?}");
+    }
+    assert!(settled.contains(&("delete /.mstream/stage/#.tmp".into(), false)), "{settled:?}");
+}
+
+/// A copy of the card in `base` that a sync left cut at its `n`th write, as
+/// `how` says, back in the reader: the same card each time.
+fn cut_card(
+    base: &Path,
+    n: u64,
+    how: Cut,
+    wanted: &WantedCard,
+    server: &mut Canned,
+) -> (Scratch, FatSim) {
+    let dir = Scratch::new("cut");
+    copy_tree(base, &dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    card.cut_at(n, how);
+    let _ = sync(&card, wanted, server, 2);
+    card.replug();
+    (dir, card)
+}
+
+/// The cuts of a run's first `upto` writes: each write, and each rename
+/// also between its two directory writes.
+fn cuts_of(writes: &[String], upto: usize) -> impl Iterator<Item = (u64, Cut)> + '_ {
+    let fail = (1..=upto as u64).map(|n| (n, Cut::Fail));
+    let renames = writes[..upto].iter().enumerate().filter(|(_, w)| w.starts_with("rename"));
+    fail.chain(renames.map(|(i, _)| (i as u64 + 1, Cut::Between)))
+}
+
+/// 2.12.1 on a card with no root at all: the run mints the card's id, and
+/// numbers its first commit past every name on the card. Each write up to
+/// that first checkpoint and the plan written after it, cut: the card
+/// reads as before or as that commit, and the next run finishes.
+#[test]
+fn every_cut_of_a_first_sync_on_a_card_with_no_root_is_finished() {
+    let base = Scratch::new("rootless-base");
+    put(&base.0, "/.player/device.txt", &fixture("card/golden/device.txt"), 0x5D47_73D5);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+
+    let whole = Scratch::new("rootless-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    let outcome = sync(&card, &wanted, &mut server, 2).expect("uncut");
+    assert_eq!((outcome.written, outcome.verified), (6, Ok(())));
+    let writes = card.log();
+    let want = finished(&card);
+    let committed = writes.iter().position(|w| w.starts_with("rename /.mstream/manifest.tmp"));
+    let committed = committed.expect("a commit");
+    let rest = |w: &String| w.starts_with("rename /.mstream/pending.tmp");
+    let upto = committed + writes[committed..].iter().position(rest).expect("the plan's rest") + 1;
+
+    let mut roots = 0;
+    for (n, how) in cuts_of(&writes, upto) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let (_dir, card) = cut_card(&base.0, n, how, &wanted, &mut server);
+        roots += usize::from(look(&card).root.is_some());
+        let outcome = recover(&card, &wanted, &mut server, 3).ran;
+        let outcome = outcome.unwrap_or_else(|e| panic!("{what}: {e}"));
         assert_eq!(outcome.verified, Ok(()), "{what}");
         assert_eq!(finished(&card), want, "{what}");
     }
-    assert!(disk_checks > 0, "a rename cut between its directory writes stops for a disk check");
+    assert!(roots > 0, "the later cuts leave the first commit");
 }
 
 #[test]
