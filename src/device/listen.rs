@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::DeviceError;
-use super::board::{CardKind, CountWhy, Free, Heard, PlayState, Status, Tracks};
+use super::board::{CardKind, CardRoot, CountWhy, Free, Heard, PlayState, Status, Tracks};
 use super::firmware::Version;
 
 /// An open port to a running firmware: bytes both ways, a read that gives
@@ -589,6 +589,7 @@ pub(crate) fn parse_status(line: &str) -> Option<Status> {
         music: None,
         bat: None,
         state: PlayState::Unknown(String::new()),
+        cid: CardRoot::Unknown,
         bt: None,
     };
     let mut fw = None;
@@ -616,6 +617,7 @@ pub(crate) fn parse_status(line: &str) -> Option<Status> {
             "music" => status.music = value.parse().ok(),
             "bat" => status.bat = value.parse::<u8>().ok().filter(|b| *b <= 100),
             "state" => status.state = PlayState::parse(value),
+            "cid" => status.cid = CardRoot::parse(value),
             "bt" => status.bt = known(value).map(|v| percent_decode(&v)),
             _ => {}
         }
@@ -698,6 +700,7 @@ pub(crate) mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::device::board::CardRef;
 
     /// The real Core2's answer of 2026-10-10 (a 1 TB card).
     const REAL: &str = "@status fw=v0.8.0-5-g4e94418 elf=be894f89 card=fat32 size=1023871549440 free=1022132355072 tracks=113 music=? bat=100 state=paused bt=SPYDRONE";
@@ -804,6 +807,36 @@ pub(crate) mod tests {
         assert!(parse_status("@statusfw=v1").is_none());
         assert!(parse_status("[stats] fw=v0.9.0").is_none());
         assert_eq!(parse_status("@status fw=v0.9.0 bat=250").unwrap().bat, None, "a battery past 100 is no reading");
+    }
+
+    #[test]
+    fn a_status_line_names_the_root_its_card_was_loaded_with_or_says_it_had_none() {
+        // `cid=<cardId>.<generation>` goes before `bt=`, which still reads.
+        let line = "@status fw=v0.12.0 card=fat32 tracks=1284 state=idle cid=0123456789abcdef.0000002a bt=Synth%20Cans";
+        let status = parse_status(line).unwrap();
+        let loaded = CardRoot::Loaded(CardRef { card_id: 0x0123_4567_89ab_cdef, generation: 42 });
+        assert_eq!(status.cid, loaded);
+        assert_eq!((status.tracks, status.bt.as_deref()), (Tracks::Count(1284), Some("Synth Cans")));
+        let cid = |value: &str| parse_status(&format!("@status fw=v0.12.0 cid={value}")).unwrap().cid;
+        assert_eq!(cid("0123456789ABCDEF.0000002A"), loaded, "either case");
+        let top = CardRef { card_id: u64::MAX, generation: u32::MAX };
+        assert_eq!(cid("ffffffffffffffff.ffffffff"), CardRoot::Loaded(top));
+        let first = CardRef { card_id: 0x00c0_ffee_0000_0001, generation: 1 };
+        assert_eq!(cid("00c0ffee00000001.00000001"), CardRoot::Loaded(first), "leading zeros are digits");
+        // `-`: the firmware loaded no root (none on the card, or no card).
+        assert_eq!(cid("-"), CardRoot::None);
+        assert_eq!(parse_status("@status fw=v0.12.0 card=none cid=-").unwrap().cid, CardRoot::None);
+        // No key — every firmware so far, or a long line that gave it up —
+        // and a value not in its exact shape are unknown, never a guess.
+        assert_eq!(parse_status(REAL).unwrap().cid, CardRoot::Unknown);
+        for bad in [
+            "?", "", "0123456789abcdef", "0123456789abcdef.", ".0000002a", "0123456789abcdef-0000002a",
+            "123456789abcdef.0000002a", "0123456789abcdef0.0000002a", "0123456789abcdef.2a",
+            "0123456789abcdef.000000002a", "0123456789abcdef.0000002a.1", "0123456789abcdeg.0000002a",
+            "+123456789abcdef.0000002a", "0123456789abcdef.+000002a", "0x23456789abcdef.0000002a",
+        ] {
+            assert_eq!(cid(bad), CardRoot::Unknown, "cid={bad}");
+        }
     }
 
     #[test]

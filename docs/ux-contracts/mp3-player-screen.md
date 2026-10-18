@@ -356,7 +356,7 @@ comes from the cache, or a download, beside them.
       again"); firmware too old to report it ("? v0.7.0 can't report the
       card." — and "Updating shows it." only when the pinned release
       answers the status query, which the pin says beside its checksum:
-      v0.10.0 does, as every release from v0.9.0 on; v0.8.0, the pin the
+      v0.11.0 does, as every release from v0.9.0 on; v0.8.0, the pin the
       examples here were drawn with, did not); a board that is not
       mStream firmware ("? Only mStream firmware can read the card"); a
       port in use ("? unknown until the port is free").
@@ -628,7 +628,7 @@ comes from the cache, or a download, beside them.
     its own bootloader header (byte 3's low nibble: `F` the QIO build, `0`
     the DIO build), never from its name; a board's from the ELF id it
     reports, against every release's QIO/DIO pair the player carries
-    (v0.5.0–v0.10.0, bumped with the pin) and the images it has had in hand
+    (v0.5.0–v0.11.0, bumped with the pin) and the images it has had in hand
     this run. A board whose ELF says its DIO was chosen (a release that had
     both builds) says so under its chip, once, dim: "In DIO (runs on every
     Core2): updates keep it." — and its Update ▸ and Update all write the
@@ -1141,3 +1141,18 @@ line: they are lines a script reads.
   (clause 35) now leaves out, and marks newer than, the pin the page was
   told, as the line under a picked release always did, rather than the
   build's constant; in a real run the two are the same release.
+- **2026-10-18 — The pin moves to v0.11.0, which asks the transfer for an
+  Auto DJ index.** Firmware v0.11.0 (17 Oct) is the pin; both checksums
+  are its SHA256SUMS's and GitHub's digests of the assets, and the ELF
+  table (clause 37) gains its pair (QIO `1b1b71a1`, DIO `0d07e24d`), from
+  its notes and both images' own app descriptions. It answers the status
+  query as v0.10.0 does (its HostStatus and docs/HOST-STATUS.md are
+  unchanged), so `PINNED_ANSWERS_STATUS` stays true and no clause is
+  rewritten; what changes is where boards fall (clause 19): a board on
+  v0.10.0 is now *Update available · v0.10.0 → v0.11.0* with *Update ▸*,
+  and one on v0.11.0 is up to date with no "Ahead of" line. The reason is
+  the card transfer: v0.10.0 writes `read.mpdj=1` in the card's
+  `/.player/device.txt` and v0.11.0 `read.mpdj=2`, the sign the transfer
+  waits for before it writes an Auto DJ index, so a board written at the
+  old pin would never be given one. The clauses' examples keep v0.8.0 as
+  the pin, as the 2026-10-12 entry says.

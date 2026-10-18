@@ -2994,12 +2994,12 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
 > (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
 > left, what to do next, the port watch, and the log behind `l`. The pin in
-> `src/device/firmware.rs` is firmware v0.10.0 (13 Oct 2026; before it v0.9.0 from 11 Oct,
-> v0.8.0 from 10 Oct, v0.7.0 from 7 Oct, v0.6.0 from 4 Oct, and the first release, v0.5.0) —
-> `device flash` with no flags writes it; `--firmware` / `--release` still override. v0.10.0
-> answers the running firmware's `@status` (v0.9.0 and later do; v0.8.0 and older say their
-> version only), which the pin says beside its checksums (`PINNED_ANSWERS_STATUS`, true since
-> the bump to v0.10.0 below).
+> `src/device/firmware.rs` is firmware v0.11.0 (17 Oct 2026; before it v0.10.0 from 13 Oct,
+> v0.9.0 from 11 Oct, v0.8.0 from 10 Oct, v0.7.0 from 7 Oct, v0.6.0 from 4 Oct, and the first
+> release, v0.5.0) — `device flash` with no flags writes it; `--firmware` / `--release` still
+> override. v0.11.0 answers the running firmware's `@status` (v0.9.0 and later do; v0.8.0 and
+> older say their version only), which the pin says beside its checksums
+> (`PINNED_ANSWERS_STATUS`, true since the bump to v0.10.0 below).
 > **2026-10-10:** the backend of the MP3 Player tab's redesign (mStream
 > `docs/designs/mp3-tab`, alternate A, "One card"): `src/device/listen.rs` asks the running
 > firmware with no reset, `board.rs` is one board's verdict and card, `desk.rs` the worker that
@@ -3051,6 +3051,16 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > pin on firmware v0.10.0, which reports its card (#55). The published Windows binaries said
 > 0.13.0, and `device list` read the real Core2 with no reset ("v0.10.0, up to date · card
 > 1022.1 GB free of 1023.9 GB, 113 tracks"). The pin PR opened itself: mStream #1070.
+> **2026-10-18, the pin moves to v0.11.0** (the firmware's v0.11.0 came out 17 Oct and ran on a
+> Core2 before and after its release; both checksums checked against its SHA256SUMS and GitHub's
+> digests, the ELF table given its pair from its notes and both images' app descriptions). It
+> answers `@status` as v0.10.0 does, so `PINNED_ANSWERS_STATUS` stays true and nothing but the
+> constants moves: a board on v0.10.0 is now offered the update, and one on v0.11.0 is up to
+> date rather than ahead of this player. The reason is the card transfer: v0.10.0 says
+> `read.mpdj=1` in the card's `/.player/device.txt` and v0.11.0 `read.mpdj=2`, which the
+> transfer waits for before it writes an Auto DJ index (the firmware's docs/AUTODJ-INDEX.md), so
+> a board written at the old pin would never be given one. No test changed: the device tests
+> take the pin from the constants, as the bump to v0.10.0 meant them to.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
