@@ -28,6 +28,11 @@
 //!   the Auto DJ index, the final commit, the collection, and a last read of
 //!   the card as the device reads it ([`run`]).
 //!
+//! A file whose source says a later run may take up its bytes (a peer's,
+//! under its daily quota: [`Fetcher::resumable`]) goes into a partial of
+//! `/.mstream/resume/` instead of a stage file, kept across runs and listed
+//! in `resume.json` as it grows (2.12.8, [`resume`]).
+//!
 //! Beside a run, a session writes what a card's set-up needs (B2): `/music`
 //! ([`Session::music_folder`]) and the card's settings, `state.json`, by
 //! 2.12.7's rule ([`private`]). A set-up's first commit is a run of an empty
@@ -39,6 +44,7 @@
 mod bind;
 mod plan;
 mod private;
+mod resume;
 mod run;
 mod settle;
 mod survey;
@@ -184,6 +190,11 @@ pub(crate) struct Knobs {
     /// seconds.
     pub(crate) checkpoint_files: usize,
     pub(crate) checkpoint_secs: u64,
+    /// A partial download (2.12.8) is flushed and listed in `resume.json`
+    /// again once this many more of its bytes came, or this many seconds
+    /// after its last listing: what a pulled card or a crash costs of it.
+    pub(crate) part_bytes: u64,
+    pub(crate) part_secs: u64,
     /// The final check reads every owned file's fingerprint too.
     pub(crate) deep_check: bool,
 }
@@ -199,6 +210,8 @@ impl Default for Knobs {
             gate: 50,
             checkpoint_files: 500,
             checkpoint_secs: 300,
+            part_bytes: 8 * 1024 * 1024,
+            part_secs: 30,
             deep_check: false,
         }
     }
@@ -387,6 +400,26 @@ pub(crate) struct Failed {
     pub(crate) stop: bool,
 }
 
+/// A partial a fetch takes up (2.12.8): the first `bytes` of the file are
+/// on the card already, fetched under `validator` — their ETag, else the
+/// HTTP date of the server's `modified` — which the rest is asked for under
+/// (If-Range).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Have {
+    pub(crate) bytes: u64,
+    pub(crate) validator: String,
+}
+
+/// Where a resumable fetch's bytes go: the card's partial (2.12.8).
+pub(crate) trait Part: Write {
+    /// The answer is good, and its bytes go from `from` on: the partial's
+    /// before it kept ([`Have::bytes`]), or at 0 the partial started over —
+    /// the server's file changed. `validator` is the answer's (its ETag,
+    /// else its Last-Modified). Before the answer's first byte; not at all
+    /// when the partial holds the whole file already.
+    fn answered(&mut self, from: u64, validator: Option<&str>) -> io::Result<()>;
+}
+
 /// The source of a file's bytes: the server over HTTP, the local disk, a
 /// peer, a local ffmpeg (the transfer plan's 2.4, 2.5).
 pub(crate) trait Fetcher {
@@ -395,6 +428,27 @@ pub(crate) trait Fetcher {
     /// `len` bytes from `start` of the source's file (fewer at its end):
     /// the server's side of a fingerprint, for U6's adoption.
     fn read_range(&mut self, file: &WantedFile, start: u64, len: usize) -> Result<Vec<u8>, Failed>;
+    /// A later run may take up the file's bytes where this one leaves them
+    /// (2.12.8): a peer's, whose daily quota a second fetch would spend
+    /// again. Only the server's own bytes can be (a conversion streams with
+    /// no ranges); their fetches go through [`Fetcher::fetch_part`].
+    fn resumable(&self, _file: &WantedFile) -> bool {
+        false
+    }
+    /// [`Fetcher::fetch`] into a partial that holds `have`'s bytes of the
+    /// file already, when there is one: the rest, asked for under its
+    /// validator, or the whole file when the server's changed, the partial
+    /// told which ([`Part::answered`]). This one starts it over.
+    fn fetch_part(
+        &mut self,
+        file: &WantedFile,
+        _have: Option<&Have>,
+        into: &mut dyn Part,
+    ) -> Result<Fetched, Failed> {
+        let started = into.answered(0, None);
+        started.map_err(|e| Failed { why: e.to_string(), stop: false })?;
+        self.fetch(file, into)
+    }
 }
 
 /// An album folder as the thumbnail step sees it (2.14).

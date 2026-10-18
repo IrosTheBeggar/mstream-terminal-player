@@ -25,7 +25,7 @@ use crate::device::card::contract::mptg::{
     self, ADOPTED, BPM_ANALYSED, CONTAINER_OPUS, FOLDER_OWNED, FOLDER_THUMB, VERIFIED,
 };
 use crate::device::card::contract::mspd::{self, OP_FOLDER, OP_WRITE, Op, PlanIn};
-use crate::device::card::contract::prim::{md5, path_hash};
+use crate::device::card::contract::prim::{fnv1a64, md5, path_hash};
 use crate::device::card::contract::server::{NO_INSTANCE, server_url_key};
 use crate::device::card::volume::{self, Inspection, Serial};
 
@@ -150,6 +150,21 @@ struct Canned {
     /// Files whose fetch fails, and one that stops the run.
     failing: BTreeSet<String>,
     stop_at: Option<String>,
+    /// A later run takes up what a run leaves of its files (2.12.8): each
+    /// answered under its bytes' ETag, as `/media` is.
+    resumable: bool,
+    /// The fetch of this file into a partial stops once this many of its
+    /// bytes came (once): the run parks when true, else the file is
+    /// skipped.
+    cut_after: Option<(String, usize, bool)>,
+    /// Each fetch into a partial: the file, the byte it asked from, and the
+    /// byte the answer went on from.
+    asked: Vec<(String, u64, u64)>,
+}
+
+/// The ETag the canned server gives a file's bytes.
+fn etag_of(bytes: &[u8]) -> String {
+    format!("W/\"{:x}\"", fnv1a64(bytes))
 }
 
 impl Canned {
@@ -187,6 +202,49 @@ impl Fetcher for Canned {
         let bytes = self.bytes(file);
         let start = (start as usize).min(bytes.len());
         Ok(bytes[start..(start + len).min(bytes.len())].to_vec())
+    }
+
+    fn resumable(&self, _file: &WantedFile) -> bool {
+        self.resumable
+    }
+
+    /// If-Range as `/media` answers it: the rest when the partial's
+    /// validator is the file's ETag now, else the whole file; nothing when
+    /// it holds the whole file already (a 416).
+    fn fetch_part(
+        &mut self,
+        file: &WantedFile,
+        have: Option<&Have>,
+        into: &mut dyn Part,
+    ) -> Result<Fetched, Failed> {
+        let path = file.ledger.server_path.clone();
+        self.fetched.push(path.clone());
+        if self.stop_at.as_ref() == Some(&path) {
+            return Err(Failed { why: "the day's quota is spent".into(), stop: true });
+        }
+        if self.failing.contains(&path) {
+            return Err(Failed { why: "the server said 500".into(), stop: false });
+        }
+        let bytes = self.bytes(file);
+        let etag = etag_of(&bytes);
+        let fresh = have.filter(|h| h.validator == etag);
+        let from = fresh.map_or(0, |h| h.bytes as usize).min(bytes.len());
+        self.asked.push((path.clone(), have.map_or(0, |h| h.bytes), from as u64));
+        let failed = |e: io::Error| Failed { why: e.to_string(), stop: false };
+        if from > 0 && from == bytes.len() {
+            return Ok(Fetched::default());
+        }
+        into.answered(from as u64, Some(&etag)).map_err(failed)?;
+        let cut = self.cut_after.take_if(|(p, _, _)| *p == path);
+        for (k, piece) in bytes[from..].chunks(1000).enumerate() {
+            if let Some((_, n, stop)) = &cut
+                && k * 1000 >= *n
+            {
+                return Err(Failed { why: "the day's quota is spent".into(), stop: *stop });
+            }
+            into.write_all(piece).map_err(failed)?;
+        }
+        Ok(Fetched::default())
     }
 }
 
@@ -257,9 +315,10 @@ fn env(seed: u64) -> Env {
     Env { now: Box::new(|| 1_791_900_000), id: Box::new(id), producer: "mstream-terminal test".into() }
 }
 
-/// Small checkpoints, so a run of a few files makes several.
+/// Small checkpoints, so a run of a few files makes several; a partial
+/// listed again every 4 KiB.
 fn knobs() -> Knobs {
-    Knobs { checkpoint_files: 2, deep_check: true, ..Knobs::default() }
+    Knobs { checkpoint_files: 2, part_bytes: 4096, deep_check: true, ..Knobs::default() }
 }
 
 /// Opens, plans and runs, as a caller would: the result, and what was said.
@@ -510,6 +569,7 @@ fn finished(card: &FatSim) -> Finished {
         .keys()
         .filter(|p| p.starts_with("/.mstream/"))
         .filter(|p| p.contains("/stage/") || p.ends_with(".tmp") || p.contains("pending."))
+        .chain(image.keys().filter(|p| p.contains("/resume/") || p.ends_with("resume.new")))
         .chain(image.keys().filter(|p| p.ends_with("run.lock")))
         .collect();
     assert!(leftovers.is_empty(), "leftovers after a finished run: {leftovers:?}");
@@ -1650,4 +1710,304 @@ fn a_new_card_id_commits_the_same_files_and_is_a_run_of_its_own() {
     let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
     let again = session.run(plan, &mut server, &mut Extras::default(), &mut |_| {}).unwrap();
     assert_eq!((again.card_id, again.commit_id), (done.card_id, done.commit_id));
+}
+
+// ── Partials a later run takes up (2.12.8) ──────────────────────────────────
+
+const BIG: &str = "Lib/Peer/Album/01 - Big.mp3";
+const SMALL: &str = "Lib/Peer/Album/02 - Small.mp3";
+
+/// Two files of a server whose bytes a later run takes up where a run left
+/// them: an MP3 of 20 KB with its picture, and one of 6 KB.
+fn taken_up(server: &mut Canned) -> WantedCard {
+    server.resumable = true;
+    let mut files = Vec::new();
+    for (path, name, id) in [(BIG, "picture_first.mp3", 601), (SMALL, "cbr.mp3", 602)] {
+        let bytes = corpus(name);
+        server.add(path, bytes.clone());
+        files.push(track(path, &bytes, id));
+    }
+    WantedCard { origins: vec![home()], files }
+}
+
+/// The card's `resume.json`, read as the volume layer settles it.
+fn resume_of(card: &FatSim) -> serde_json::Value {
+    look(card).resume.value.unwrap_or(serde_json::Value::Null)
+}
+
+/// The partials on the card, name to bytes.
+fn partials(card: &FatSim) -> BTreeMap<String, Vec<u8>> {
+    let items = card.list("/.mstream/resume").unwrap_or_default();
+    let read = |name: &str| {
+        card.read(&format!("/.mstream/resume/{name}"), 1 << 20).unwrap().expect("a partial")
+    };
+    items.into_iter().filter(|i| !i.dir).map(|i| (i.name.clone(), read(&i.name))).collect()
+}
+
+fn on_card(card: &FatSim, rel: &str) -> Vec<u8> {
+    card.read(&format!("/music/{rel}"), 1 << 20).unwrap().expect("the file is on the card")
+}
+
+/// A run parked by the source's quota keeps what came of the file in its
+/// partial, flushed and listed, and leaves its plan; the next run takes it
+/// up where it stopped (a 206 under its ETag), or, when the server's file
+/// changed, starts it over: without asking when the manifest says so, and
+/// from the whole file the server answers when only If-Range does.
+#[test]
+fn a_parked_download_is_taken_up_and_a_changed_file_starts_over() {
+    let dir = Scratch::new("part-park");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = taken_up(&mut server);
+    server.cut_after = Some((BIG.into(), 8000, true));
+    let parked = sync(&card, &wanted, &mut server, 1).unwrap();
+    assert_eq!(parked.parked.as_deref(), Some("the day's quota is spent"));
+    let big = corpus("picture_first.mp3");
+    let listed = resume_of(&card);
+    let parts = listed["parts"].as_array().expect("partials listed");
+    assert_eq!(parts.len(), 1, "{listed}");
+    let p = &parts[0];
+    let said = (p["serverPath"].as_str(), p["size"].as_u64(), p["have"].as_u64());
+    assert_eq!(said, (Some(BIG), Some(20_579), Some(8000)));
+    assert_eq!(p["etag"].as_str(), Some(etag_of(&big).as_str()));
+    assert_eq!(p["modified"].as_u64(), Some(wanted.files[0].ledger.server_modified));
+    let name = p["name"].as_str().unwrap().to_string();
+    assert_eq!(partials(&card), BTreeMap::from([(name.clone(), big[..8000].to_vec())]));
+    assert!(look(&card).pending.is_some(), "the plan waits on the card");
+    assert!(!card.log().iter().any(|w| w.contains("/stage/")), "never through stage/");
+
+    let parked_card = Scratch::new("part-park-base");
+    copy_tree(&dir.0, &parked_card.0);
+
+    // The server's file as it was: on from byte 8000, the rest only.
+    let done = sync(&card, &wanted, &mut server, 2).unwrap();
+    assert_eq!((done.written, done.verified, done.parked), (2, Ok(()), None));
+    assert_eq!(server.asked[1], (BIG.to_string(), 8000, 8000), "{:?}", server.asked);
+    assert_eq!(on_card(&card, "Peer/Album/01 - Big.mp3"), big);
+    let rec = records(&card).into_iter().find(|e| e.path == "Peer/Album/01 - Big.mp3").unwrap();
+    assert_eq!(rec.ledger.unwrap().origin_flags, VERIFIED, "the MD5 of the whole file, read back");
+    let _ = finished(&card);
+    assert_eq!(resume_of(&card)["parts"], serde_json::json!([]), "its entry gone");
+
+    // Changed on the server, as its manifest says: started over without
+    // asking, the old partial gone.
+    let changed = Scratch::new("part-park-changed");
+    copy_tree(&parked_card.0, &changed.0);
+    let card = FatSim::new(&changed.0, SERIAL);
+    let mut server = Canned::default();
+    let mut wanted = taken_up(&mut server);
+    let new = corpus("many_txxx.mp3");
+    server.add(BIG, new.clone());
+    wanted.files[0] = track(BIG, &new, 601);
+    let done = sync(&card, &wanted, &mut server, 3).unwrap();
+    assert_eq!((done.written, done.verified), (2, Ok(())));
+    assert_eq!(server.asked[0], (BIG.to_string(), 0, 0));
+    let gone = format!("delete /.mstream/resume/{name}");
+    assert!(card.log().contains(&gone), "the old partial");
+    assert_eq!(on_card(&card, "Peer/Album/01 - Big.mp3"), new);
+    let _ = finished(&card);
+
+    // Changed with the manifest the same (one not scanned again yet): asked
+    // from byte 8000, answered whole, the listing cut back before the
+    // partial is — never the old part stitched to the new.
+    let stale = Scratch::new("part-park-stale");
+    copy_tree(&parked_card.0, &stale.0);
+    let card = FatSim::new(&stale.0, SERIAL);
+    let mut server = Canned::default();
+    let mut wanted = taken_up(&mut server);
+    let mut new = big.clone();
+    new[100] ^= 0xFF;
+    server.add(BIG, new.clone());
+    wanted.files[0].ledger.file_hash = md5(&new);
+    let done = sync(&card, &wanted, &mut server, 4).unwrap();
+    assert_eq!((done.written, done.verified), (2, Ok(())));
+    assert_eq!(server.asked[0], (BIG.to_string(), 8000, 0));
+    assert_eq!(on_card(&card, "Peer/Album/01 - Big.mp3"), new);
+    let log = card.log();
+    let truncated = log.iter().position(|w| *w == format!("truncate /.mstream/resume/{name}"));
+    let truncated = truncated.expect("the partial cut back to 0");
+    let listing = "rename /.mstream/resume.new";
+    let relisted = log[..truncated].iter().rposition(|w| w.starts_with(listing));
+    let opened = log.iter().position(|w| w.starts_with("lock")).unwrap();
+    assert!(relisted.is_some_and(|r| r > opened), "listed at 0 first: {log:#?}");
+    let _ = finished(&card);
+}
+
+/// A card pulled mid-download keeps the bytes its last listing names; the
+/// next run cuts off what came after them and asks for the rest.
+#[test]
+fn a_run_cut_mid_download_takes_up_what_was_listed() {
+    let base = Scratch::new("part-cut-base");
+    set_up(&base.0);
+    let mut server = Canned::default();
+    let wanted = taken_up(&mut server);
+    let whole = Scratch::new("part-cut-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    sync(&card, &wanted, &mut server, 2).expect("uncut");
+    let want = finished(&card);
+    let writes = card.log();
+    // The first write of the big file's bytes after its first listing.
+    let listed = writes.iter().position(|w| w.starts_with("rename /.mstream/resume.new")).unwrap();
+    let bytes = |w: &String| w.starts_with("write /.mstream/resume/");
+    let after = writes[listed..].iter().position(bytes).unwrap();
+    let n = (listed + after + 1) as u64;
+
+    let (_dir, card) = cut_card(&base.0, n, Cut::Fail, &wanted, &mut server);
+    let have = resume_of(&card)["parts"][0]["have"].as_u64().expect("a listed partial");
+    assert!(have >= 4096, "{have}");
+    let (name, bytes) = partials(&card).into_iter().next().unwrap();
+    assert!(bytes.len() as u64 > have, "the torn write's bytes past have: {name}");
+    let asked = server.asked.len();
+    let again = recover(&card, &wanted, &mut server, 3);
+    assert_eq!(again.ran.expect("the next run").verified, Ok(()));
+    assert_eq!(server.asked[asked], (BIG.to_string(), have, have));
+    assert_eq!(finished(&card), want);
+}
+
+/// Every write of a run into a partial cut in turn, each rename also
+/// between its two directory writes: the card reads as a commit, and the
+/// next run finishes it as the uncut run did, taking up what was listed.
+/// One file, listed once, has every kind of write the path makes.
+#[test]
+fn every_cut_of_a_run_into_partials_is_finished() {
+    let base = Scratch::new("part-cuts-base");
+    set_up(&base.0);
+    let mut server = Canned::default();
+    let mut wanted = taken_up(&mut server);
+    wanted.files.remove(0);
+    let whole = Scratch::new("part-cuts-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    sync(&card, &wanted, &mut server, 2).expect("uncut");
+    let want = finished(&card);
+    let writes = card.log();
+    assert!(writes.iter().any(|w| w.starts_with("rename /.mstream/resume.new")), "{writes:#?}");
+
+    let (mut taken, mut disk_checks) = (0, 0);
+    for (n, how) in cuts_of(&writes, writes.len()) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let (_dir, card) = cut_card(&base.0, n, how, &wanted, &mut server);
+        assert!(look(&card).root.is_some(), "{what}: a root");
+        let asked = server.asked.len();
+        let again = recover(&card, &wanted, &mut server, 3);
+        disk_checks += usize::from(again.asked);
+        let outcome = again.ran.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), want, "{what}");
+        taken += usize::from(server.asked[asked..].iter().any(|a| a.2 > 0));
+    }
+    assert!(taken > 0, "a cut after a listing is taken up from it");
+    assert!(disk_checks > 0, "a partial's rename cut between its directory writes asks for one");
+}
+
+/// A partial longer than its listing: past `have`, the bytes no listing
+/// vouched for are cut off and the rest asked for; past `size`, step 4
+/// deletes it, and the file starts over.
+#[test]
+fn a_partial_longer_than_listed_is_cut_back_or_started_over() {
+    let dir = Scratch::new("part-long");
+    set_up(&dir.0);
+    let mut server = Canned::default();
+    let wanted = taken_up(&mut server);
+    let (big, small) = (corpus("picture_first.mp3"), corpus("cbr.mp3"));
+    let entry = |name: &str, file: &WantedFile, have: u64| {
+        let l = &file.ledger;
+        let key = home().server.url_key;
+        format!(
+            r#"{{"name": "{name}", "server": {{"serverInstance": "", "serverUrlKey": "0x{key:016X}",
+            "parentKey": "0x0", "peerId": 0}}, "serverPath": "{}", "size": {}, "etag": {},
+            "modified": {}, "have": {have}}}"#,
+            l.server_path,
+            l.server_size,
+            serde_json::to_string(&etag_of(&server.files[&l.server_path])).unwrap(),
+            l.server_modified,
+        )
+    };
+    let text = format!(
+        r#"{{"format": "mstream-card-resume", "version": 1, "seq": 2, "parts": [{}, {}]}}"#,
+        entry("0000000a.part", &wanted.files[0], 6000),
+        entry("0000000b.part", &wanted.files[1], 2000),
+    );
+    put(&dir.0, "/.mstream/resume.json", text.as_bytes(), LATER);
+    let mut past_have = big[..6000].to_vec();
+    past_have.extend_from_slice(&[0xEE; 3000]);
+    put(&dir.0, "/.mstream/resume/0000000a.part", &past_have, LATER);
+    let mut past_size = small.clone();
+    past_size.extend_from_slice(b"0123456789");
+    put(&dir.0, "/.mstream/resume/0000000b.part", &past_size, LATER);
+
+    let card = FatSim::new(&dir.0, SERIAL);
+    let done = sync(&card, &wanted, &mut server, 1).unwrap();
+    assert_eq!((done.written, done.verified), (2, Ok(())));
+    assert_eq!(server.asked, [(BIG.to_string(), 6000, 6000), (SMALL.to_string(), 0, 0)]);
+    assert!(card.log().contains(&"delete /.mstream/resume/0000000b.part".to_string()), "step 4's");
+    assert_eq!(on_card(&card, "Peer/Album/01 - Big.mp3"), big);
+    assert_eq!(on_card(&card, "Peer/Album/02 - Small.mp3"), small);
+    let _ = finished(&card);
+}
+
+/// A `resume.json` that no longer says what the card and the server hold:
+/// an entry whose partial is gone is dropped, a partial of a file that left
+/// the selection is collected, one whose file changed on the server or
+/// whose entry isn't sound starts over, one of a server the run doesn't
+/// read stays as it is, and no new partial takes a name the card showed.
+#[test]
+fn a_stale_resume_json_is_set_right_by_the_next_run() {
+    let dir = Scratch::new("part-stale");
+    set_up(&dir.0);
+    let mut server = Canned::default();
+    let wanted = taken_up(&mut server);
+    let home_key = home().server.url_key;
+    let other_key = server_url_key("https://other.example");
+    let entry = |name: &str, key: u64, path: &str, size: u64, modified: u64, have: &str| {
+        format!(
+            r#"{{"name": "{name}", "server": {{"serverInstance": "", "serverUrlKey": "0x{key:016X}",
+            "parentKey": "0x0", "peerId": 0}}, "serverPath": "{path}", "size": {size}, "etag": "",
+            "modified": {modified}, "have": {have}, "kept": "a newer software's"}}"#
+        )
+    };
+    let (b, s) = (&wanted.files[0].ledger, &wanted.files[1].ledger);
+    let parts = [
+        entry("00000001.part", home_key, BIG, b.server_size, b.server_modified - 1, "100"),
+        entry("00000002.part", home_key, "Lib/Peer/Album/03 - Gone.mp3", 900, 1, "100"),
+        entry("00000003.part", other_key, "Lib/Theirs/01.mp3", 900, 1, "100"),
+        entry("00000004.part", home_key, SMALL, s.server_size, s.server_modified, "100"),
+        entry("00000005.part", home_key, SMALL, s.server_size, s.server_modified, "-5"),
+    ];
+    let head = r#""format": "mstream-card-resume", "version": 1, "seq": 4"#;
+    let text = format!(r#"{{{head}, "parts": [{}], "note": "kept"}}"#, parts.join(", "));
+    put(&dir.0, "/.mstream/resume.json", text.as_bytes(), LATER);
+    let older = r#"{"format": "mstream-card-resume", "version": 1, "seq": 3, "parts": []}"#;
+    put(&dir.0, "/.mstream/resume.new", older.as_bytes(), LATER);
+    for (name, fill) in [("00000001", b'x'), ("00000002", 2), ("00000003", 3)] {
+        put(&dir.0, &format!("/.mstream/resume/{name}.part"), &[fill; 100], LATER);
+    }
+    put(&dir.0, "/.mstream/resume/00000005.part", &corpus("cbr.mp3")[..100], LATER);
+    put(&dir.0, "/.mstream/resume/00000006.part", b"listed nowhere", LATER);
+
+    let card = FatSim::new(&dir.0, SERIAL);
+    let done = sync(&card, &wanted, &mut server, 1).unwrap();
+    assert_eq!((done.written, done.verified), (2, Ok(())));
+    let over = [(BIG.to_string(), 0, 0), (SMALL.to_string(), 0, 0)];
+    assert_eq!(server.asked, over, "both start over");
+    assert_eq!(on_card(&card, "Peer/Album/01 - Big.mp3"), corpus("picture_first.mp3"));
+    assert_eq!(on_card(&card, "Peer/Album/02 - Small.mp3"), corpus("cbr.mp3"));
+
+    let left = partials(&card);
+    assert_eq!(left.keys().collect::<Vec<_>>(), ["00000003.part"], "another server's stays");
+    let listed = resume_of(&card);
+    assert!(listed["seq"].as_u64().unwrap() > 4);
+    assert_eq!(listed["note"], "kept", "a newer software's member, kept");
+    let entries = listed["parts"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{listed}");
+    let theirs: serde_json::Value = serde_json::from_str(&parts[2]).unwrap();
+    assert_eq!(entries[0], theirs, "as it was");
+    // Named none of the names the card's resume.json listed.
+    let made = card.log().into_iter().filter(|w| w.starts_with("create /.mstream/resume/"));
+    let made: Vec<String> = made.collect();
+    let listed_names = |w: &String| (1..=5).any(|n| w.ends_with(&format!("{n:08x}.part")));
+    assert!(made.len() == 2 && !made.iter().any(listed_names), "{made:?}");
+    assert!(!card.image().contains_key("/.mstream/resume.new"));
 }

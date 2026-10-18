@@ -5,11 +5,12 @@
 //! recovery rule (2.12.7), the cut renames looked for, and the leftovers
 //! cleaned up — every stage file, every `*.tmp`, every companion the root
 //! doesn't name, every partial `resume.json` doesn't keep (2.12.8). The
-//! private files stay. [`newer`] is 2.4.5's check, made before the run
-//! writes anything at all.
+//! private files stay, and the partials kept are the run's to take up
+//! ([`Parts`]). [`newer`] is 2.4.5's check, made before the run writes
+//! anything at all.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 
 use serde_json::Value;
@@ -23,6 +24,7 @@ use super::super::contract::mspd::{self, OP_WRITE};
 use super::super::contract::prim::{qfp, qfp_ranges};
 use super::super::volume::{self, CardFs, CardWrite, Item, Private, RESUME_VERSION, Root, STATE_VERSION};
 use super::bind::Bound;
+use super::resume::Parts;
 use super::survey::key_path;
 use super::{Answers, Guard, Stop};
 
@@ -42,6 +44,8 @@ pub(super) struct Settled {
     pub(super) foreign: Option<u64>,
     /// `state.json` (2.12.7): the card's settings, for the caller.
     pub(super) state: Private,
+    /// `resume.json` over the partials step 4 kept (2.12.8).
+    pub(super) parts: Parts,
 }
 
 /// A path inside `/.mstream`.
@@ -241,7 +245,16 @@ pub(super) fn settle(card: &dyn CardWrite, bound: &mut Bound, answers: &Answers)
     if foreign.is_some() && card.stat(&ms("pending.bin")).map_err(|e| bound.failed(e))?.is_some() {
         delete(bound, &ms("pending.bin"))?;
     }
-    Ok(Settled { root, autodj, top: highest, pending, foreign, state })
+    let left = entries(card, "/.mstream/resume").map_err(|e| bound.failed(e))?;
+    let left: BTreeMap<String, u64> =
+        left.into_iter().filter(|i| !i.dir).map(|i| (i.name, i.size)).collect();
+    let mut parts = Parts::read(resume.value.as_ref(), resume.seq, &left);
+    // One write seen twice, past the disk check: the run's next write of
+    // the file replaces the leftover, which would stop every later run.
+    if resume.twice {
+        parts.rewrite();
+    }
+    Ok(Settled { root, autodj, top: highest, pending, foreign, state, parts })
 }
 
 /// Two files a cut rename may have left on one cluster chain: both there,

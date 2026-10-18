@@ -8,6 +8,13 @@
 //! with Range under the ETag the first answer gave (If-Range), three tries
 //! in all; a file changed meanwhile, or gone, is skipped for this run.
 //!
+//! **A server whose files a later run takes up** ([`Http::resuming`]: a
+//! peer's, under its daily quota) has them streamed into the card's partial
+//! instead (2.12.8, A6's [`Client::stream_part`]): a listed one taken up
+//! under the validator its bytes came with, a changed file started over in
+//! the same answer, and what came kept for the next run when the fetch
+//! stops short. The server's own files simply start over.
+//!
 //! **A conversion** comes from `/transcode`, into a file on this computer
 //! first: it streams with no length and no ranges, and a 200 that ends early
 //! (the server's ffmpeg died) looks like any other, so it is held to its
@@ -37,11 +44,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use super::super::engine::{Failed, Fetched, Fetcher, WantedFile};
+use super::super::engine::{Failed, Fetched, Fetcher, Have, Part, WantedFile};
 use super::super::names::Bytes;
 use super::super::plan::codec_of;
 use super::length::{self, FileAt};
-use crate::api::transfer::fetch::{FAT32_MAX, Fetch, FetchError};
+use crate::api::transfer::fetch::{FAT32_MAX, Fetch, FetchError, Rewind};
 use crate::api::urls::{TransferBitrate, TransferCodec};
 use crate::api::{ApiError, Client};
 
@@ -389,6 +396,8 @@ pub(crate) struct Http {
     scratch: Scratch,
     /// Conversions made here and not ahead.
     made: u64,
+    /// A later run takes up what a run leaves of a file (2.12.8).
+    resumable: bool,
 }
 
 impl Http {
@@ -403,7 +412,15 @@ impl Http {
             pipeline: None,
             scratch: Scratch::new()?,
             made: 0,
+            resumable: false,
         })
+    }
+
+    /// A later run takes up the bytes a run leaves of this server's files
+    /// (2.12.8): a peer's (B9), whose daily quota a second fetch would spend
+    /// again. Off for the user's own server, whose files simply start over.
+    pub(crate) fn resuming(&mut self, on: bool) {
+        self.resumable = on;
     }
 
     /// What a conversion dropped, put back before the card takes it.
@@ -473,6 +490,42 @@ impl Http {
         unreachable!("the last try returns")
     }
 
+    /// The server's bytes into the card's partial, which holds `have`'s of
+    /// them already when there is one: the rest under its validator, a file
+    /// changed since started over in the same answer. Three tries, each
+    /// from where the partial is then; one with no validator to go on by
+    /// starts over, which a partial can.
+    fn part(
+        &mut self,
+        file: &WantedFile,
+        have: Option<&Have>,
+        into: &mut dyn Part,
+    ) -> Result<Fetched, Failed> {
+        let l = &file.ledger;
+        let (mut held, mut validator) = match have {
+            Some(h) => (h.bytes, Some(h.validator.clone())),
+            None => (0, None),
+        };
+        let mut part = AsRewind(into);
+        for attempt in 1..=TRIES {
+            if attempt > 1 {
+                pause(attempt as u64 - 1, &self.stop);
+            }
+            let fetch = Fetch::file(&l.server_path).expecting(l.server_size);
+            let fetch = fetch.resuming(validator.as_deref());
+            match self.client.stream_part(&fetch, &mut part, held, &mut |_, _| {}) {
+                Ok(got) => return Ok(Fetched { content_type: got.content_type }),
+                Err(f) => {
+                    (held, validator) = (f.partial.len, f.partial.validator.clone());
+                    if !passing(&f.error) || attempt == TRIES {
+                        return Err(failed(f.error));
+                    }
+                }
+            }
+        }
+        unreachable!("the last try returns")
+    }
+
     fn converted(
         &mut self,
         file: &WantedFile,
@@ -497,6 +550,25 @@ impl Http {
         });
         let _ = fs::remove_file(&made.dest);
         poured.map(|()| Fetched { content_type: made.content_type })
+    }
+}
+
+/// The engine's partial as the client's [`Rewind`].
+struct AsRewind<'a>(&'a mut dyn Part);
+
+impl Write for AsRewind<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl Rewind for AsRewind<'_> {
+    fn start_at(&mut self, start: u64, validator: Option<&str>) -> io::Result<()> {
+        self.0.answered(start, validator)
     }
 }
 
@@ -533,6 +605,23 @@ impl Fetcher for Http {
         }
         let read = self.client.read_range(&file.ledger.server_path, start, len as u64);
         read.map(|r| r.bytes).map_err(failed)
+    }
+
+    fn resumable(&self, file: &WantedFile) -> bool {
+        self.resumable && file.origin == self.origin && file.original()
+    }
+
+    fn fetch_part(
+        &mut self,
+        file: &WantedFile,
+        have: Option<&Have>,
+        into: &mut dyn Part,
+    ) -> Result<Fetched, Failed> {
+        if !Fetcher::resumable(self, file) {
+            into.answered(0, None).map_err(|e| skip(e.to_string()))?;
+            return self.fetch(file, into);
+        }
+        self.part(file, have, into)
     }
 }
 
@@ -584,6 +673,98 @@ mod tests {
         assert!(signed_out.unwrap_err().stop, "lost sign-in stops the run");
         let other = WantedFile { origin: 1, ..wanted("lib/A/04.flac", Bytes::Original { ogg_opus: false }, 10) };
         assert!(http.fetch(&other, &mut Vec::new()).is_err(), "another server's file isn't this one's");
+    }
+
+    /// A card's partial in memory, as the engine's is: its bytes, and each
+    /// answer it was told of.
+    #[derive(Default)]
+    struct Partial {
+        bytes: Vec<u8>,
+        answers: Vec<(u64, Option<String>)>,
+    }
+
+    impl Write for Partial {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Part for Partial {
+        fn answered(&mut self, from: u64, validator: Option<&str>) -> io::Result<()> {
+            self.bytes.truncate(from as usize);
+            self.answers.push((from, validator.map(String::from)));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_peers_partial_is_taken_up_under_its_validator_and_a_changed_file_starts_over() {
+        let (etag, date) = ("W/\"a-18f\"", "Mon, 21 Sep 2026 14:13:20 GMT");
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: {etag}\r\n");
+        let rest = [("Content-Range", "bytes 4-9/10"), ("ETag", etag)];
+        let (base, seen) = canned(vec![
+            reply("206 Partial Content", &rest, b"456789"),
+            // Changed since: the whole new file, in that same answer.
+            reply("200 OK", &[("ETag", "W/\"a-190\"")], b"abcdefghij"),
+            // A new partial cut after four bytes, then taken up in the run.
+            format!("{head}Connection: close\r\n\r\n0123").into_bytes(),
+            reply("206 Partial Content", &rest, b"456789"),
+            // By the date of a file that had no ETag.
+            reply("206 Partial Content", &[("Content-Range", "bytes 4-9/10")], b"456789"),
+            // The user's own server: from the first byte, no range.
+            reply("200 OK", &[("ETag", etag)], b"0123456789"),
+        ]);
+        let next = || seen.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
+        let client = Arc::new(Client::new(&base).unwrap());
+        let mut http = Http::new(client, 0, 2).unwrap();
+        http.resuming(true);
+        let file = wanted("lib/A/01.flac", Bytes::Original { ogg_opus: false }, 10);
+        assert!(http.resumable(&file));
+        assert!(!http.resumable(&wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 10)));
+        let take = |validator: &str| Have { bytes: 4, validator: validator.to_string() };
+        let held = || Partial { bytes: b"0123".to_vec(), ..Partial::default() };
+        let asked_from_4 = |req: &str| {
+            req.contains("range: bytes=4-\r\n") && req.contains("if-range: w/\"a-18f\"\r\n")
+        };
+
+        let mut part = held();
+        http.fetch_part(&file, Some(&take(etag)), &mut part).unwrap();
+        let req = next();
+        assert!(asked_from_4(&req), "{req}");
+        assert_eq!(part.bytes, b"0123456789");
+        assert_eq!(part.answers, [(4, Some(etag.to_string()))]);
+
+        let mut part = held();
+        http.fetch_part(&file, Some(&take(etag)), &mut part).unwrap();
+        assert_eq!(part.bytes, b"abcdefghij", "the old part is gone, not stitched");
+        assert_eq!(part.answers, [(0, Some("W/\"a-190\"".to_string()))]);
+        let _ = next();
+
+        let mut part = Partial::default();
+        http.fetch_part(&file, None, &mut part).unwrap();
+        assert_eq!(part.bytes, b"0123456789");
+        let (_, again) = (next(), next());
+        assert!(asked_from_4(&again), "the cut taken up from the partial: {again}");
+
+        let mut part = held();
+        http.fetch_part(&file, Some(&take(date)), &mut part).unwrap();
+        let req = next();
+        assert!(req.contains("if-range: mon, 21 sep 2026 14:13:20 gmt\r\n"), "{req}");
+        assert_eq!(part.bytes, b"0123456789");
+
+        // Not resuming: started over, as the engine's default fetch does.
+        http.resuming(false);
+        let mut part = held();
+        http.fetch_part(&file, Some(&take(etag)), &mut part).unwrap();
+        assert_eq!(part.bytes, b"0123456789");
+        assert_eq!(part.answers, [(0, None)]);
+        let req = next();
+        assert!(!req.contains("\r\nrange:"), "{req}");
     }
 
     #[test]

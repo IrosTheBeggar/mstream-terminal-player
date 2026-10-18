@@ -8,6 +8,12 @@
 //! index and the final commit, the leftovers collected, and the card read
 //! back as the device will read it.
 //!
+//! A file a later run may take up (2.12.8) is fetched into its partial in
+//! `resume/` instead — its own listed one taken up, or a new one — flushed
+//! and listed in `resume.json` as it grows and when its fetch stops short,
+//! and renamed, finished and checked, straight into `/music`; the
+//! partials no plan wants any more are collected at the end.
+//!
 //! Every write is preceded by the binding's cheap check, and every delete
 //! batch, rename into `/music` and commit by its whole one; and every path
 //! of `/music` the run deletes or replaces is one its plan owns (2.11): a
@@ -16,7 +22,7 @@
 //! file found there is a collision, and that one file waits.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::{self, Write as _};
+use std::io::{self, Seek as _, SeekFrom, Write as _};
 use std::time::Instant;
 
 use super::super::contract::container::MPTG;
@@ -39,12 +45,14 @@ use super::super::contract::server::Server;
 use super::super::contract::text::Run;
 use super::super::names::match_key;
 use super::super::tags::{self, PARSER_VERSION};
-use super::super::volume::{CardFile, Item};
+use super::super::volume::{CardFile, CardFs, Item};
 use super::plan::{Plan, Replaced, Write, origin_flags};
+use super::resume::{Entry, same_server, take_up};
 use super::settle::{card_qfp, companion_generation, entries, ms};
 use super::survey::{Music, join, key_path};
 use super::{
-    Album, AutoDj, Commit, Cover, Event, Fetcher, Hooks, Outcome, Report, Session, Stop, WantedFile,
+    Album, AutoDj, Commit, Cover, Event, Fetcher, Have, Hooks, Outcome, Part, Report, Session, Stop,
+    WantedFile,
 };
 
 /// A record of the next commit, by its path.
@@ -141,6 +149,10 @@ struct Runner<'r, 'c> {
     index: HashMap<String, u32>,
     /// The writes and folder ops done.
     done: HashSet<usize>,
+    /// The writes a later run may take up (2.12.8), and the writes put in
+    /// place, by index.
+    resumable: HashSet<usize>,
+    placed: HashSet<usize>,
     made: BTreeSet<String>,
     /// Files since the last commit, and when it was.
     since: usize,
@@ -205,6 +217,8 @@ impl<'r, 'c> Runner<'r, 'c> {
             spared: HashSet::new(),
             index: HashMap::new(),
             done: HashSet::new(),
+            resumable: HashSet::new(),
+            placed: HashSet::new(),
             made: BTreeSet::new(),
             since: 0,
             last: Instant::now(),
@@ -278,9 +292,15 @@ impl<'r, 'c> Runner<'r, 'c> {
             events(Event::Deleted(d.path.clone()));
         }
 
-        // Step 8: each file, in the plan's order.
+        // Step 8: each file, in the plan's order; the server's own bytes of
+        // a file its source says a later run may take up, into a partial.
         let mut order: Vec<usize> = (0..plan.writes.len()).collect();
         order.sort_by(|&a, &b| compare_file_paths(&plan.writes[a].path, &plan.writes[b].path));
+        let resumable = |w: &Write| {
+            let file = &plan.wanted.files[w.file];
+            w.from.is_none() && file.original() && fetcher.resumable(file)
+        };
+        self.resumable = (0..plan.writes.len()).filter(|&k| resumable(&plan.writes[k])).collect();
         for k in order {
             if self.due() {
                 self.commit(false, hooks, events)?;
@@ -288,6 +308,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             let w = &plan.writes[k];
             let step = match &w.from {
                 Some(from) => self.rename(w, from, events)?,
+                None if self.resumable.contains(&k) => self.fetch_part(w, fetcher, hooks, events)?,
                 None => self.fetch(w, fetcher, hooks, events)?,
             };
             // A parked write stays in the plan the checkpoint leaves on the
@@ -295,6 +316,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             match step {
                 Step::Done => {
                     self.done.insert(k);
+                    self.placed.insert(k);
                     self.since += 1;
                 }
                 Step::Skipped => {
@@ -588,23 +610,45 @@ impl<'r, 'c> Runner<'r, 'c> {
             return self.skip(file, why, events);
         }
 
+        // 8.3 and 8.4: into place, and read back.
+        match self.place(w, file, &stage, verified, events)? {
+            Some(step) => {
+                self.drop_stage(&stage)?;
+                Ok(step)
+            }
+            None => Ok(Step::Done),
+        }
+    }
+
+    /// Steps 8.3 and 8.4 for bytes fetched to `from` (a stage file, or a
+    /// partial): renamed into the write's `/music` path, the file it
+    /// replaces deleted first, then read back and recorded. Some: they
+    /// weren't put there — the file it was to replace changed since the
+    /// listing, or the name is taken — and the step that comes of it; what
+    /// becomes of `from` then is the caller's.
+    fn place(
+        &mut self,
+        w: &Write,
+        file: &WantedFile,
+        from: &str,
+        verified: bool,
+        events: &mut dyn FnMut(Event),
+    ) -> Result<Option<Step>, Stop> {
         // 8.3: into place, the file it replaces deleted first.
         self.s.bound.check(false)?;
         self.make_folders(&w.path)?;
         let target = self.s.music.card_path(&w.path);
         if let Some(step) = self.clear(w, file, events)? {
-            self.drop_stage(&stage)?;
-            return Ok(step);
+            return Ok(Some(step));
         }
-        if let Err(e) = self.s.bound.alive()?.rename(&stage, &target) {
+        if let Err(e) = self.s.bound.alive()?.rename(from, &target) {
             // A name the card says is taken, where the listing showed none
             // (2.8.3, step 6: a collision): this file waits for the next
             // run, which names it around what is there.
             if e.kind() != io::ErrorKind::AlreadyExists {
                 return Err(self.failed(e));
             }
-            self.drop_stage(&stage)?;
-            return self.skip(file, "the card has a file of that name".into(), events);
+            return self.skip(file, "the card has a file of that name".into(), events).map(Some);
         }
 
         // 8.4: read back, and the record read from the card's bytes.
@@ -613,7 +657,175 @@ impl<'r, 'c> Runner<'r, 'c> {
         self.take(&w.path, rel.clone(), owned);
         self.written += 1;
         events(Event::Wrote { path: rel, bytes: item.size });
-        Ok(Step::Done)
+        Ok(None)
+    }
+
+    /// Step 8 for a file a later run may take up (2.12.8): the server's
+    /// bytes into a partial of `resume/` — the file's own listed one, cut
+    /// back to what was flushed and taken up under its validator, else a new
+    /// one — flushed and listed as it grows and when the fetch stops short
+    /// (a park keeps it for the next run); then checked as a stage file is,
+    /// and renamed straight into `/music`. Never through `stage/`.
+    fn fetch_part(
+        &mut self,
+        w: &Write,
+        fetcher: &mut dyn Fetcher,
+        hooks: &mut dyn Hooks,
+        events: &mut dyn FnMut(Event),
+    ) -> Result<Step, Stop> {
+        let plan = self.plan;
+        let file = &plan.wanted.files[w.file];
+        if self.spared.contains(&key_path(&w.path)) {
+            return self.skip(file, "a file the listener changed is where it goes".into(), events);
+        }
+        let (name, have) = self.take_part(file)?;
+        let part = ms(&format!("resume/{name}"));
+        let held = have.as_ref().map_or(0, |h| h.bytes);
+        let card = self.s.bound.alive()?;
+        let opened = if have.is_some() { card.open(&part) } else { card.create(&part) };
+        let mut f = opened.map_err(|e| self.failed(e))?;
+        // 8.1: its bytes past what was flushed are never trusted.
+        if have.is_some() {
+            let cut = f.seek(SeekFrom::End(0)).and_then(|len| match len > held {
+                true => f.set_len(held),
+                false => Ok(()),
+            });
+            cut.and_then(|()| f.seek(SeekFrom::Start(held))).map_err(|e| self.failed(e))?;
+        }
+        let etag = self.s.settled.parts.get(&name).and_then(|e| e.etag.clone()).unwrap_or_default();
+        let path = w.path.clone();
+        let mut progress = |bytes: u64| events(Event::Progress { path: path.clone(), bytes });
+        let mut sink = PartSink {
+            run: &mut *self,
+            file: f,
+            name: name.clone(),
+            len: held,
+            etag,
+            since: Instant::now(),
+            stop: None,
+            progress: &mut progress,
+        };
+        let fetched = fetcher.fetch_part(file, have.as_ref(), &mut sink);
+        let len = sink.finish()?;
+        if let Err(failed) = fetched {
+            // What came stays for a later run, listed; a partial that holds
+            // nothing goes.
+            match len > 0 {
+                true => self.list_parts()?,
+                false => self.drop_part(&name)?,
+            }
+            if failed.stop {
+                return Ok(Step::Park(failed.why));
+            }
+            self.drop_ours(w, events)?;
+            return self.skip(file, failed.why, events);
+        }
+
+        // 8.2: what came is what was asked for, the whole file read back from
+        // the card, the kept bytes too; the MD5 when the server's hash is
+        // one of the whole file (as for a stage file).
+        let l = &file.ledger;
+        let full =
+            l.hash_v >= 2 && !hash_sampled(l.hash_v, l.server_size) && l.file_hash != [0; 16];
+        let mut verified = false;
+        let checked = if len != l.server_size {
+            Err(format!("{len} bytes, where the server's file has {}", l.server_size))
+        } else if full {
+            let sum = card_md5(self.s.card, &part, len).map_err(|e| self.failed(e))?;
+            verified = sum == l.file_hash;
+            if verified { Ok(()) } else { Err("its MD5 isn't the server's".to_string()) }
+        } else {
+            Ok(())
+        };
+        let checked = checked.and_then(|()| hooks.before_record(file, self.s.card, &part));
+        if let Err(why) = checked {
+            self.drop_part(&name)?;
+            self.drop_ours(w, events)?;
+            return self.skip(file, why, events);
+        }
+
+        // 8.3 and 8.4: renamed straight into place, its entry gone at the
+        // next write of resume.json. One that can't be put there goes too:
+        // the hook may have changed its bytes.
+        match self.place(w, file, &part, verified, events)? {
+            Some(step) => {
+                self.drop_part(&name)?;
+                Ok(step)
+            }
+            None => {
+                self.s.settled.parts.remove(&name);
+                Ok(Step::Done)
+            }
+        }
+    }
+
+    /// The partial a file's bytes go into (2.12.8): its own listed one — of
+    /// the same server by 2.11's test, at the same server path — when the
+    /// server's entry still names the file it was listed for, cut back to
+    /// what was flushed ([`Have`]); else a new one, its entry claiming no
+    /// byte yet. Any other partial of the file goes.
+    fn take_part(&mut self, file: &WantedFile) -> Result<(String, Option<Have>), Stop> {
+        let plan = self.plan;
+        let origin = &plan.wanted.origins[file.origin];
+        let l = &file.ledger;
+        let theirs: Vec<Entry> = self
+            .s
+            .settled
+            .parts
+            .entries()
+            .iter()
+            .filter(|e| e.server_path.as_deref() == Some(l.server_path.as_str()))
+            .filter(|e| e.server.is_some_and(|s| same_server(&s, &origin.talk)))
+            .cloned()
+            .collect();
+        let mut best: Option<(String, Have)> = None;
+        let mut gone = Vec::new();
+        for e in theirs {
+            let path = ms(&format!("resume/{}", e.name));
+            let on_card = self.s.card.stat(&path).map_err(|err| self.failed(err))?;
+            let size = on_card.filter(|i| !i.dir).map(|i| i.size);
+            let taken = size.and_then(|size| take_up(&e, size, l.server_size, l.server_modified));
+            match taken {
+                Some((bytes, validator)) if best.as_ref().is_none_or(|(_, h)| bytes > h.bytes) => {
+                    let had = best.replace((e.name, Have { bytes, validator }));
+                    gone.extend(had.map(|(name, _)| name));
+                }
+                _ => gone.push(e.name),
+            }
+        }
+        for name in gone {
+            self.drop_part(&name)?;
+        }
+        if self.s.card.stat(&ms("resume")).map_err(|e| self.failed(e))?.is_none() {
+            self.s.bound.alive()?.mkdir(&ms("resume")).map_err(|e| self.failed(e))?;
+        }
+        if let Some((name, have)) = best {
+            return Ok((name, Some(have)));
+        }
+        let parts = &mut self.s.settled.parts;
+        let name = parts.fresh_name();
+        let (size, modified) = (l.server_size, l.server_modified);
+        parts.add(Entry::new(&name, origin.server, &l.server_path, size, modified));
+        Ok((name, None))
+    }
+
+    /// A partial and its entry gone: one that can't be taken up, or whose
+    /// bytes came out wrong.
+    fn drop_part(&mut self, name: &str) -> Result<(), Stop> {
+        let path = ms(&format!("resume/{name}"));
+        if self.s.card.stat(&path).map_err(|e| self.failed(e))?.is_some() {
+            self.s.bound.alive()?.delete(&path).map_err(|e| self.failed(e))?;
+        }
+        self.s.settled.parts.remove(name);
+        Ok(())
+    }
+
+    /// `resume.json` written when the run's table of partials moved.
+    fn list_parts(&mut self) -> Result<(), Stop> {
+        match self.s.settled.parts.dirty() {
+            true => self.s.write_resume(),
+            false => Ok(()),
+        }
     }
 
     fn drop_stage(&mut self, stage: &str) -> Result<(), Stop> {
@@ -1082,7 +1294,51 @@ impl<'r, 'c> Runner<'r, 'c> {
                 }
             }
         }
-        Ok(())
+        self.collect_parts()
+    }
+
+    /// Step 13's partials (2.12.8): one no plan wants any more — its file
+    /// written, gone from the selection, changed on the server — deleted and
+    /// its entry dropped. One of a server this run doesn't read stays, as
+    /// that server's rows do; one whose server can't be told goes.
+    /// `resume.json` is written when its list moved.
+    fn collect_parts(&mut self) -> Result<(), Stop> {
+        let plan = self.plan;
+        let origins = &plan.wanted.origins;
+        let waiting: Vec<&WantedFile> = (self.resumable.iter())
+            .filter(|k| !self.placed.contains(*k))
+            .map(|&k| &plan.wanted.files[plan.writes[k].file])
+            .collect();
+        let wanted = |e: &Entry| {
+            let Some(server) = e.server else { return false };
+            if !origins.iter().any(|o| same_server(&server, &o.talk)) {
+                return true;
+            }
+            waiting.iter().any(|f| {
+                let l = &f.ledger;
+                same_server(&server, &origins[f.origin].talk)
+                    && e.server_path.as_deref() == Some(l.server_path.as_str())
+                    && (e.size, e.modified) == (l.server_size, Some(l.server_modified))
+            })
+        };
+        let files = entries(self.s.card, &ms("resume")).map_err(|e| self.failed(e))?;
+        let (mut kept, mut gone) = (HashSet::new(), Vec::new());
+        for item in files.into_iter().filter(|i| !i.dir) {
+            if self.s.settled.parts.get(&item.name).is_some_and(wanted) {
+                kept.insert(item.name);
+            } else {
+                gone.push(item.name);
+            }
+        }
+        for name in gone {
+            self.drop_part(&name)?;
+        }
+        let names = self.s.settled.parts.entries().iter().map(|e| e.name.clone());
+        let names: Vec<String> = names.filter(|n| !kept.contains(n)).collect();
+        for name in &names {
+            self.s.settled.parts.remove(name);
+        }
+        self.list_parts()
     }
 
     /// The card read back as the device reads it (the transfer plan's 2.3,
@@ -1197,4 +1453,136 @@ impl io::Write for Sink<'_> {
     fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
     }
+}
+
+/// The partial a fetch writes into (2.12.8): its bytes counted, flushed and
+/// listed in `resume.json` as they grow ([`Knobs`]'s `part_bytes` and
+/// `part_secs`), and cut back — the listing first, so it never claims bytes
+/// that are gone — when the answer starts it over. A write the card refused,
+/// or a listing that failed, stops the run: the stop is kept for it, the
+/// fetch hearing only an error.
+///
+/// [`Knobs`]: super::Knobs
+struct PartSink<'x, 'r, 'c> {
+    run: &'x mut Runner<'r, 'c>,
+    file: Box<dyn CardFile + 'c>,
+    name: String,
+    /// The partial's length now.
+    len: u64,
+    /// The ETag the bytes it holds came under (`""`: none).
+    etag: String,
+    /// Its last listing.
+    since: Instant,
+    stop: Option<Stop>,
+    progress: &'x mut dyn FnMut(u64),
+}
+
+impl PartSink<'_, '_, '_> {
+    /// The stop kept, as the fetch hears it.
+    fn hold(&mut self, stop: Stop) -> io::Error {
+        let e = io::Error::other(stop.to_string());
+        self.stop = Some(stop);
+        e
+    }
+
+    /// Flushed, and listed with what it holds.
+    fn list(&mut self) -> Result<(), Stop> {
+        self.file.sync().map_err(|e| self.run.failed(e))?;
+        self.run.s.settled.parts.set(&self.name, self.len, &self.etag);
+        self.run.s.write_resume()?;
+        self.since = Instant::now();
+        Ok(())
+    }
+
+    /// The fetch over: the partial flushed and closed, and the run's table
+    /// told what it holds (a later write of `resume.json` lists it so). Its
+    /// length; the run's stop instead, when the card stopped it.
+    fn finish(mut self) -> Result<u64, Stop> {
+        if let Some(stop) = self.stop.take() {
+            return Err(stop);
+        }
+        self.file.sync().map_err(|e| self.run.failed(e))?;
+        self.run.s.settled.parts.set(&self.name, self.len, &self.etag);
+        Ok(self.len)
+    }
+}
+
+impl io::Write for PartSink<'_, '_, '_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.stop.is_some() {
+            return Err(io::Error::other("the run stopped"));
+        }
+        let n = match self.file.write(buf) {
+            Ok(n) => n,
+            Err(e) => {
+                let stop = self.run.failed(e);
+                return Err(self.hold(stop));
+            }
+        };
+        self.len += n as u64;
+        (self.progress)(self.len);
+        let (bytes, secs) = (self.run.s.knobs.part_bytes, self.run.s.knobs.part_secs);
+        let listed = self.run.s.settled.parts.have(&self.name);
+        let late = self.since.elapsed().as_secs() >= secs;
+        let due = self.len >= listed.saturating_add(bytes) || late;
+        if self.len > listed
+            && due
+            && let Err(stop) = self.list()
+        {
+            return Err(self.hold(stop));
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl Part for PartSink<'_, '_, '_> {
+    fn answered(&mut self, from: u64, validator: Option<&str>) -> io::Result<()> {
+        if self.stop.is_some() {
+            return Err(io::Error::other("the run stopped"));
+        }
+        if from > self.len {
+            let past = format!("an answer from byte {from}, past the {} held", self.len);
+            return Err(io::Error::other(past));
+        }
+        // An ETag only: a listing with none asks by the date of `modified`.
+        let etag = validator.filter(|v| v.contains('"')).unwrap_or_default().to_string();
+        if from < self.len {
+            // The bytes from `from` on go, the listing first claiming no
+            // more than what stays.
+            if self.run.s.settled.parts.have(&self.name) > from {
+                self.run.s.settled.parts.set(&self.name, from, &etag);
+                if let Err(stop) = self.run.s.write_resume() {
+                    return Err(self.hold(stop));
+                }
+            }
+            let cut = self.file.set_len(from).and_then(|()| self.file.seek(SeekFrom::Start(from)));
+            if let Err(e) = cut {
+                let stop = self.run.failed(e);
+                return Err(self.hold(stop));
+            }
+            self.len = from;
+        }
+        self.etag = etag;
+        Ok(())
+    }
+}
+
+/// The MD5 of a card file's first `len` bytes, read back in pieces.
+fn card_md5(card: &dyn CardFs, path: &str, len: u64) -> io::Result<[u8; 16]> {
+    let mut md5 = Md5Sum::new();
+    let mut at = 0;
+    while at < len {
+        let piece = card.read_at(path, at, (len - at).min(1 << 20) as usize)?;
+        if piece.is_empty() {
+            let short = "the file is shorter than read";
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, short));
+        }
+        md5.update(&piece);
+        at += piece.len() as u64;
+    }
+    Ok(md5.finish())
 }
