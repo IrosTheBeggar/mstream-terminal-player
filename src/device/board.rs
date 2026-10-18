@@ -99,7 +99,7 @@ impl CardKind {
 /// the card's first commit and kept from then on, and the root's
 /// generation, which counts the commits on the card (the firmware repo's
 /// docs/METADATA.md, 2.5.2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CardRef {
     pub card_id: u64,
     pub generation: u32,
