@@ -23,7 +23,8 @@
 //!
 //! [`card`] is the board's SD card, written with the card in a PC's reader,
 //! never over the cable: so far its contract kit, the files the firmware
-//! reads from a card byte for byte, and the cards in this computer's
+//! reads from a card byte for byte; the names, tag records and Auto DJ
+//! index the transfer puts there by it; and the cards in this computer's
 //! readers, found and held to the drive-safety rule.
 
 mod board;
