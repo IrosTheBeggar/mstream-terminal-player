@@ -246,7 +246,17 @@ impl Servers {
     /// nor reading a peer its parent's. Different or unknown: the software
     /// MUST NOT delete or replace that row's file without asking.
     pub(crate) fn same_server(&self, index: usize, talk: &Talk) -> Verdict {
-        let Some(srv) = self.get(index) else { return Verdict::Unknown };
+        match self.get(index) {
+            Some(srv) => self.same_as(srv, talk),
+            None => Verdict::Unknown,
+        }
+    }
+
+    /// The same test of a server named by its fields rather than by an
+    /// index of this table (a partial's, 2.12.8): a peer's parent is still
+    /// the card's server of its parentKey, tested by its instance when
+    /// known, and parentKey by the key rule alone when the card has none.
+    pub(crate) fn same_as(&self, srv: &Server, talk: &Talk) -> Verdict {
         let theirs = match &talk.peer {
             Some(p) => p.instance,
             None => talk.instance,

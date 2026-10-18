@@ -21,6 +21,7 @@ use serde_json::{Map, Value};
 use super::super::contract::prim::hex16;
 use super::super::contract::server::{NO_INSTANCE, PEER, Server, Servers, Talk, Verdict};
 use super::super::state::from_hex;
+use super::super::volume;
 use crate::admin::tz::{civil_from_days, weekday};
 
 /// An entry's members this software reads and writes, in the order it
@@ -150,10 +151,13 @@ fn uuid_text(id: &[u8; 16]) -> String {
     format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
-/// 2.11's test of a partial's server against a server the run reads: the
-/// same, by the instances when both are known, else by the key rule.
-pub(super) fn same_server(server: &Server, talk: &Talk) -> bool {
-    Servers { root: *server, entries: Vec::new() }.same_root(talk) == Verdict::Same
+/// 2.11's test of a partial's server against a server the run reads, with
+/// `card` the card's servers as the run found them: the same, by the
+/// instances when both are known, else by the key rule; a peer's parent
+/// the card's server of its parentKey (known by its instance, it passes at
+/// a new URL, and with another it fails), else parentKey by the key rule.
+pub(super) fn same_server(card: &Servers, server: &Server, talk: &Talk) -> bool {
+    card.same_as(server, talk) == Verdict::Same
 }
 
 /// Where a listed partial goes on from at fetch time (2.12.8), once its
@@ -298,7 +302,7 @@ impl Parts {
 
     /// The seq the next write gives the file.
     pub(super) fn next_seq(&self) -> u64 {
-        self.seq + 1
+        volume::next_seq(self.seq)
     }
 
     /// The text of the next `resume.json` (2.12.7's form, 2.12.8's members):
@@ -326,13 +330,14 @@ impl Parts {
 
     /// The file on the card says what the table does, at the next seq.
     pub(super) fn written(&mut self) {
-        self.seq += 1;
+        self.seq = self.next_seq();
         self.dirty = false;
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::contract::server::TalkPeer;
     use super::super::super::volume::{RESUME_VERSION, settle_private};
     use super::*;
 
@@ -437,5 +442,48 @@ mod tests {
         let read = Entry::read(written).unwrap();
         let read = (read.server, read.have, read.etag.as_deref());
         assert_eq!(read, (Some(server), Some(0), Some("")));
+    }
+
+    /// 2.11's test of a partial's server against the card's servers: a
+    /// peer's parent is the card's server of its parentKey, known by its
+    /// instance at a new URL and failing with another instance whatever the
+    /// key; with no such server on the card, parentKey by the key rule
+    /// alone. A server reached by its own URL is tested as before.
+    #[test]
+    fn a_peer_partials_parent_is_the_cards_server_of_its_key() {
+        let (old, new, instance) = (0x0A0A, 0x0B0B, [0x11; 16]);
+        let card = Servers { root: Server::root(instance, old), entries: Vec::new() };
+        let partial = Server::peer(NO_INSTANCE, old, 3);
+        let talk = |url_key: u64, instance: [u8; 16], id: u32| Talk {
+            url_key,
+            instance,
+            confirmed: Vec::new(),
+            peer: Some(TalkPeer { id, instance: NO_INSTANCE }),
+        };
+        assert!(same_server(&card, &partial, &talk(new, instance, 3)), "its parent at a new URL");
+        assert!(!same_server(&card, &partial, &talk(old, [0x22; 16], 3)), "another at its URL");
+        assert!(!same_server(&card, &partial, &talk(old, instance, 4)), "another peer of it");
+        let bare = Servers::default();
+        assert!(same_server(&bare, &partial, &talk(old, [0x22; 16], 3)), "the key rule alone");
+        assert!(!same_server(&bare, &partial, &talk(new, instance, 3)));
+        let own = Talk { peer: None, ..talk(old, NO_INSTANCE, 0) };
+        assert!(same_server(&card, &Server::direct(NO_INSTANCE, old), &own));
+        assert!(!same_server(&card, &partial, &own), "reading a server isn't reading its peer");
+    }
+
+    /// A table read at the last seq (2^53 − 1) writes its next file at 1,
+    /// valid, and goes on from there.
+    #[test]
+    fn the_write_after_the_last_seq_is_at_one() {
+        let last = (1u64 << 53) - 1;
+        assert_eq!((volume::next_seq(0), volume::next_seq(last - 1)), (1, last));
+        let value = serde_json::json!({
+            "format": "mstream-card-resume", "version": 1, "seq": last, "parts": [],
+        });
+        let mut parts = Parts::read(Some(&value), last, &BTreeMap::new());
+        let settled = settle_private(Some(&parts.text()), None, "resume", RESUME_VERSION);
+        assert_eq!((settled.value.is_some(), settled.seq), (true, 1));
+        parts.written();
+        assert_eq!(parts.next_seq(), 2);
     }
 }

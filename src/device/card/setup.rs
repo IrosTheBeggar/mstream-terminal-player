@@ -211,7 +211,7 @@ pub(crate) fn set_up(
             state.label = label.to_string();
         }
         state.saw(serial.as_ref());
-        let bytes = state.text(session.state().seq + 1);
+        let bytes = state.text(volume::next_seq(session.state().seq));
         (session, _) = step(session, |s| s.write_state(&bytes))?;
         (done.label, done.wrote_state) = (state.label, true);
     }

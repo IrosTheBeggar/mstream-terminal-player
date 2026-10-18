@@ -916,6 +916,15 @@ fn private_value(bytes: &[u8], format: &str, known: u64) -> Option<(Value, u64, 
     Some((value, seq, version))
 }
 
+/// The `seq` of a private file's next write (2.12.7): one more than `seq`,
+/// or 1 again past 2^53 − 1, so a file at the last one (a copied file, or a
+/// hostile one) is still replaced. The read then takes the file before
+/// over the new one only while the write is cut before its delete: that
+/// file stays, as it does at any such cut.
+pub(crate) fn next_seq(seq: u64) -> u64 {
+    if seq < (1 << 53) - 1 { seq + 1 } else { 1 }
+}
+
 /// JSON as serde_json reads it into a [`Value`], but for an object with a
 /// member named twice, which is an error here: serde_json keeps the last
 /// one, and 2.12.7 makes such a file invalid.

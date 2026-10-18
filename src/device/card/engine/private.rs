@@ -21,7 +21,7 @@ impl Session<'_> {
     /// first: a private file is the card's own, never another's.
     pub(crate) fn write_state(&mut self, bytes: &[u8]) -> Result<(), Stop> {
         let new = volume::settle_private(Some(bytes), None, "state", STATE_VERSION);
-        let next = self.settled.state.seq + 1;
+        let next = volume::next_seq(self.settled.state.seq);
         if new.value.is_none() || new.seq != next {
             return Err(Stop::Refused(format!("state.json must be a valid file of seq {next}")));
         }

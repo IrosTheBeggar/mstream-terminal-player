@@ -41,11 +41,11 @@ use super::super::contract::order::{
 };
 use super::super::contract::prim::{Md5Sum, hash_sampled, path_hash};
 use super::super::contract::MAX_FILE;
-use super::super::contract::server::Server;
+use super::super::contract::server::{Server, Servers};
 use super::super::contract::text::Run;
 use super::super::names::match_key;
 use super::super::tags::{self, PARSER_VERSION};
-use super::super::volume::{CardFile, CardFs, Item};
+use super::super::volume::{CardFile, CardFs, Item, next_seq};
 use super::plan::{Plan, Replaced, Write, origin_flags};
 use super::resume::{Entry, same_server, take_up};
 use super::settle::{card_qfp, companion_generation, entries, ms};
@@ -102,7 +102,7 @@ impl Session<'_> {
         let result = Runner::new(&mut self, &plan).and_then(|mut r| r.go(fetcher, hooks, events));
         let mut gone = false;
         let result = result.map(|mut outcome| {
-            let seq = self.settled.state.seq + 1;
+            let seq = next_seq(self.settled.state.seq);
             if let Some(bytes) = hooks.state(&outcome, seq) {
                 let wrote = self.write_state(&bytes);
                 gone = matches!(wrote, Err(Stop::DifferentCard | Stop::Pulled));
@@ -149,10 +149,9 @@ struct Runner<'r, 'c> {
     index: HashMap<String, u32>,
     /// The writes and folder ops done.
     done: HashSet<usize>,
-    /// The writes a later run may take up (2.12.8), and the writes put in
-    /// place, by index.
-    resumable: HashSet<usize>,
-    placed: HashSet<usize>,
+    /// The card's servers as the run found them: what a partial's server
+    /// is tested against (2.11), its peer's parent among them.
+    servers: Servers,
     made: BTreeSet<String>,
     /// Files since the last commit, and when it was.
     since: usize,
@@ -183,6 +182,7 @@ impl<'r, 'c> Runner<'r, 'c> {
         let valid = s.settled.autodj.is_some() && card_id == old_id;
         let autodj = root.and_then(|r| r.manifest.autodj.clone()).filter(|_| valid);
         let acks = root.map(|r| r.manifest.acks.clone()).unwrap_or_default();
+        let servers = root.map(|r| r.manifest.server_table()).unwrap_or_default();
         let mut owns: HashSet<Vec<String>> = HashSet::new();
         owns.extend(plan.deletes.iter().map(|d| key_path(&d.path)));
         for w in &plan.writes {
@@ -217,8 +217,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             spared: HashSet::new(),
             index: HashMap::new(),
             done: HashSet::new(),
-            resumable: HashSet::new(),
-            placed: HashSet::new(),
+            servers,
             made: BTreeSet::new(),
             since: 0,
             last: Instant::now(),
@@ -300,7 +299,8 @@ impl<'r, 'c> Runner<'r, 'c> {
             let file = &plan.wanted.files[w.file];
             w.from.is_none() && file.original() && fetcher.resumable(file)
         };
-        self.resumable = (0..plan.writes.len()).filter(|&k| resumable(&plan.writes[k])).collect();
+        let resumable: HashSet<usize> =
+            (0..plan.writes.len()).filter(|&k| resumable(&plan.writes[k])).collect();
         for k in order {
             if self.due() {
                 self.commit(false, hooks, events)?;
@@ -308,7 +308,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             let w = &plan.writes[k];
             let step = match &w.from {
                 Some(from) => self.rename(w, from, events)?,
-                None if self.resumable.contains(&k) => self.fetch_part(w, fetcher, hooks, events)?,
+                None if resumable.contains(&k) => self.fetch_part(w, fetcher, hooks, events)?,
                 None => self.fetch(w, fetcher, hooks, events)?,
             };
             // A parked write stays in the plan the checkpoint leaves on the
@@ -316,7 +316,6 @@ impl<'r, 'c> Runner<'r, 'c> {
             match step {
                 Step::Done => {
                     self.done.insert(k);
-                    self.placed.insert(k);
                     self.since += 1;
                 }
                 Step::Skipped => {
@@ -693,6 +692,13 @@ impl<'r, 'c> Runner<'r, 'c> {
             cut.and_then(|()| f.seek(SeekFrom::Start(held))).map_err(|e| self.failed(e))?;
         }
         let etag = self.s.settled.parts.get(&name).and_then(|e| e.etag.clone()).unwrap_or_default();
+        // One shorter than its listing (a disk check's cut of it, say) is
+        // listed with what it holds before a byte lands past that: never a
+        // listing that vouches for bytes not yet flushed.
+        if have.is_some() && self.s.settled.parts.have(&name) > held {
+            self.s.settled.parts.set(&name, held, &etag);
+            self.s.write_resume()?;
+        }
         let path = w.path.clone();
         let mut progress = |bytes: u64| events(Event::Progress { path: path.clone(), bytes });
         let mut sink = PartSink {
@@ -775,7 +781,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             .entries()
             .iter()
             .filter(|e| e.server_path.as_deref() == Some(l.server_path.as_str()))
-            .filter(|e| e.server.is_some_and(|s| same_server(&s, &origin.talk)))
+            .filter(|e| e.server.is_some_and(|s| same_server(&self.servers, &s, &origin.talk)))
             .cloned()
             .collect();
         let mut best: Option<(String, Have)> = None;
@@ -1299,29 +1305,45 @@ impl<'r, 'c> Runner<'r, 'c> {
 
     /// Step 13's partials (2.12.8): one no plan wants any more — its file
     /// written, gone from the selection, changed on the server — deleted and
-    /// its entry dropped. One of a server this run doesn't read stays, as
-    /// that server's rows do; one whose server can't be told goes.
-    /// `resume.json` is written when its list moved.
+    /// its entry dropped. One whose file the selection still has, unchanged
+    /// and not on the card, stays whether this run's plan wrote it or not (a
+    /// file skipped, or one a later run is left to fetch); so does one of a
+    /// server this run doesn't read, as that server's rows do. One whose
+    /// server can't be told goes. `resume.json` is written when its list
+    /// moved.
     fn collect_parts(&mut self) -> Result<(), Stop> {
+        let files = entries(self.s.card, &ms("resume")).map_err(|e| self.failed(e))?;
         let plan = self.plan;
         let origins = &plan.wanted.origins;
-        let waiting: Vec<&WantedFile> = (self.resumable.iter())
-            .filter(|k| !self.placed.contains(*k))
-            .map(|&k| &plan.wanted.files[plan.writes[k].file])
+        // The server's own bytes the card holds now: each record's server
+        // (the run's numbering), server path, size and modified.
+        let held: HashSet<(usize, &str, u64, u64)> = (self.ledger.values())
+            .filter(|o| o.ledger.converted_to == 0)
+            .map(|o| {
+                let l = &o.ledger;
+                (o.server, l.server_path.as_str(), l.server_size, l.server_modified)
+            })
             .collect();
+        let waiting: Vec<&WantedFile> = (plan.wanted.files.iter())
+            .filter(|f| f.original())
+            .filter(|f| {
+                let (l, at) = (&f.ledger, plan.origin_at[f.origin]);
+                !held.contains(&(at, l.server_path.as_str(), l.server_size, l.server_modified))
+            })
+            .collect();
+        let servers = &self.servers;
         let wanted = |e: &Entry| {
             let Some(server) = e.server else { return false };
-            if !origins.iter().any(|o| same_server(&server, &o.talk)) {
+            if !origins.iter().any(|o| same_server(servers, &server, &o.talk)) {
                 return true;
             }
             waiting.iter().any(|f| {
                 let l = &f.ledger;
-                same_server(&server, &origins[f.origin].talk)
+                same_server(servers, &server, &origins[f.origin].talk)
                     && e.server_path.as_deref() == Some(l.server_path.as_str())
                     && (e.size, e.modified) == (l.server_size, Some(l.server_modified))
             })
         };
-        let files = entries(self.s.card, &ms("resume")).map_err(|e| self.failed(e))?;
         let (mut kept, mut gone) = (HashSet::new(), Vec::new());
         for item in files.into_iter().filter(|i| !i.dir) {
             if self.s.settled.parts.get(&item.name).is_some_and(wanted) {

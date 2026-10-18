@@ -26,7 +26,7 @@ use crate::device::card::contract::mptg::{
 };
 use crate::device::card::contract::mspd::{self, OP_FOLDER, OP_WRITE, Op, PlanIn};
 use crate::device::card::contract::prim::{fnv1a64, md5, path_hash};
-use crate::device::card::contract::server::{NO_INSTANCE, server_url_key};
+use crate::device::card::contract::server::{NO_INSTANCE, TalkPeer, server_url_key};
 use crate::device::card::volume::{self, Inspection, Serial};
 
 // ── The scene ───────────────────────────────────────────────────────────────
@@ -2010,4 +2010,165 @@ fn a_stale_resume_json_is_set_right_by_the_next_run() {
     let listed_names = |w: &String| (1..=5).any(|n| w.ends_with(&format!("{n:08x}.part")));
     assert!(made.len() == 2 && !made.iter().any(listed_names), "{made:?}");
     assert!(!card.image().contains_key("/.mstream/resume.new"));
+}
+
+/// A partial shorter than its listing (one a disk check cut, say) is taken
+/// up from what it holds, and listed so before a byte lands past that: a
+/// cut anywhere before its next flush leaves no listing that vouches for a
+/// byte the card wasn't given and flushed.
+#[test]
+fn a_partial_shorter_than_listed_is_listed_with_what_it_holds_first() {
+    let base = Scratch::new("part-short-base");
+    set_up(&base.0);
+    let mut server = Canned::default();
+    let mut wanted = taken_up(&mut server);
+    wanted.files.truncate(1);
+    let (big, l) = (corpus("picture_first.mp3"), &wanted.files[0].ledger);
+    let key = home().server.url_key;
+    let etag = serde_json::to_string(&etag_of(&big)).unwrap();
+    let text = format!(
+        r#"{{"format": "mstream-card-resume", "version": 1, "seq": 2, "parts": [{{
+        "name": "0000000a.part", "server": {{"serverInstance": "", "serverUrlKey": "0x{key:016X}",
+        "parentKey": "0x0", "peerId": 0}}, "serverPath": "{BIG}", "size": {}, "etag": {etag},
+        "modified": {}, "have": 6000}}]}}"#,
+        l.server_size, l.server_modified,
+    );
+    put(&base.0, "/.mstream/resume.json", text.as_bytes(), LATER);
+    let (name, part) = ("0000000a.part", "/.mstream/resume/0000000a.part");
+    put(&base.0, part, &big[..3000], LATER);
+
+    let whole = Scratch::new("part-short-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    let done = sync(&card, &wanted, &mut server, 2).expect("uncut");
+    assert_eq!((done.written, done.verified), (1, Ok(())));
+    assert_eq!(server.asked, [(BIG.to_string(), 3000, 3000)]);
+    let want = finished(&card);
+    let writes = card.log();
+    let first = writes.iter().position(|w| *w == format!("write {part}")).expect("its bytes");
+    let listing = |w: &String| w.starts_with("rename /.mstream/resume.new");
+    assert!(writes[..first].iter().any(listing), "listed at 3000 first: {writes:#?}");
+    let flushed = writes[first..].iter().position(|w| *w == format!("sync {part}")).unwrap();
+
+    // Every cut up to its first flush: what the next run trusts of it (the
+    // smaller of its listing's have and its size) is what was flushed.
+    for (n, how) in cuts_of(&writes, first + flushed + 1) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let (_dir, card) = cut_card(&base.0, n, how, &wanted, &mut server);
+        let listed = resume_of(&card);
+        let entry = listed["parts"].as_array().and_then(|p| p.iter().find(|e| e["name"] == name));
+        let have = entry.and_then(|e| e["have"].as_u64()).unwrap_or(0);
+        let size = partials(&card).get(name).map_or(0, |b| b.len() as u64);
+        assert!(have.min(size) <= 3000, "{what}: have {have} of {size} bytes");
+        let again = recover(&card, &wanted, &mut server, 3);
+        assert_eq!(again.ran.unwrap_or_else(|e| panic!("{what}: {e}")).verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), want, "{what}");
+    }
+}
+
+/// A peer's partial is held to 2.11's test as its rows are, its parent the
+/// card's server of its parentKey: one whose parent moved to a new URL,
+/// known there by its instance, is taken up there, not left behind as a
+/// stranger's while the file starts over.
+#[test]
+fn a_peers_partial_is_taken_up_when_its_parent_moved() {
+    let dir = Scratch::new("part-peer");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let instance = [0x42; 16];
+    let at = |url: &str| {
+        let key = server_url_key(url);
+        let talk = Talk { url_key: key, instance, ..Talk::default() };
+        let server = Server::direct(instance, key);
+        let own = Origin { talk: talk.clone(), server, ..origin(url) };
+        let peer = Some(TalkPeer { id: 3, instance: NO_INSTANCE });
+        let server = Server::peer(NO_INSTANCE, key, 3);
+        vec![own, Origin { talk: Talk { peer, ..talk }, server, ..origin(url) }]
+    };
+    let mut server = Canned::default();
+    let mut wanted = taken_up(&mut server);
+    wanted.files.truncate(1);
+    wanted.files[0].origin = 1;
+    wanted.origins = at("http://music.example:3000");
+    server.cut_after = Some((BIG.into(), 8000, true));
+    let parked = sync(&card, &wanted, &mut server, 1).unwrap();
+    assert_eq!(parked.parked.as_deref(), Some("the day's quota is spent"));
+    let listed = resume_of(&card);
+    let parent = format!("0x{:016X}", server_url_key("http://music.example:3000"));
+    assert_eq!(listed["parts"][0]["server"]["parentKey"].as_str(), Some(parent.as_str()));
+
+    // The server at a new URL, the same by its instance; its peer through it.
+    wanted.origins = at("http://music.example:4000");
+    let done = sync(&card, &wanted, &mut server, 2).unwrap();
+    assert_eq!((done.written, done.verified), (1, Ok(())));
+    assert_eq!(server.asked[1], (BIG.to_string(), 8000, 8000), "{:?}", server.asked);
+    assert_eq!(on_card(&card, "Peer/Album/01 - Big.mp3"), corpus("picture_first.mp3"));
+    let _ = finished(&card);
+}
+
+/// A partial whose file the selection still has, unchanged and not on the
+/// card, outlives a run that didn't take it up (its source couldn't, and
+/// the file was skipped), and the next run goes on from it. Once its file
+/// is on the card, it goes.
+#[test]
+fn a_partial_the_selection_still_wants_outlives_a_run_that_skips_it() {
+    let dir = Scratch::new("part-wanted");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = taken_up(&mut server);
+    server.cut_after = Some((BIG.into(), 8000, true));
+    sync(&card, &wanted, &mut server, 1).unwrap();
+    let name = resume_of(&card)["parts"][0]["name"].as_str().unwrap().to_string();
+    let parked = Scratch::new("part-wanted-base");
+    copy_tree(&dir.0, &parked.0);
+
+    (server.resumable, server.failing) = (false, BTreeSet::from([BIG.to_string()]));
+    let done = sync(&card, &wanted, &mut server, 2).unwrap();
+    assert_eq!((done.written, done.verified, done.parked), (1, Ok(()), None));
+    assert_eq!(partials(&card).keys().collect::<Vec<_>>(), [&name], "it stays");
+    assert_eq!(resume_of(&card)["parts"][0]["have"].as_u64(), Some(8000));
+
+    (server.resumable, server.failing) = (true, BTreeSet::new());
+    let asked = server.asked.len();
+    let done = sync(&card, &wanted, &mut server, 3).unwrap();
+    assert_eq!((done.written, done.verified), (1, Ok(())));
+    assert_eq!(server.asked[asked..], [(BIG.to_string(), 8000, 8000)]);
+    let _ = finished(&card);
+
+    // Fetched whole by a run whose source can't take it up: on the card,
+    // its partial goes.
+    let card = FatSim::new(&parked.0, SERIAL);
+    server.resumable = false;
+    let done = sync(&card, &wanted, &mut server, 4).unwrap();
+    assert_eq!((done.written, done.verified), (2, Ok(())));
+    let _ = finished(&card);
+    assert_eq!(resume_of(&card)["parts"], serde_json::json!([]));
+}
+
+/// A private file at its last seq (2^53 − 1: a copied file, or a hostile
+/// one) is still replaced, its next write at seq 1.
+#[test]
+fn a_private_file_at_its_last_seq_is_written_again_from_one() {
+    let dir = Scratch::new("last-seq");
+    set_up(&dir.0);
+    let last = (1u64 << 53) - 1;
+    let head = |x: &str| format!(r#""format": "mstream-card-{x}", "version": 1, "seq": {last}"#);
+    let state = format!(r#"{{{}, "label": "Car"}}"#, head("state"));
+    put(&dir.0, "/.mstream/state.json", state.as_bytes(), LATER);
+    // An entry whose partial is gone: the run's end writes the file again.
+    let gone = r#"[{"name": "00000001.part", "size": 9}]"#;
+    let resume = format!(r#"{{{}, "parts": {gone}}}"#, head("resume"));
+    put(&dir.0, "/.mstream/resume.json", resume.as_bytes(), LATER);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    let mut hooks = Stores { card: &card, label: "Van", pull: false, seq: None };
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut hooks, knobs(), Answers::default(), 1);
+    let outcome = ran.unwrap();
+    assert_eq!((outcome.verified, outcome.stored, hooks.seq), (Ok(()), Ok(()), Some(1)));
+    let seen = look(&card);
+    assert_eq!((seen.state.seq, seen.resume.seq), (1, 1));
+    assert_eq!(seen.state.value.unwrap()["label"], "Van");
+    assert_eq!(seen.resume.value.unwrap()["parts"], serde_json::json!([]));
 }

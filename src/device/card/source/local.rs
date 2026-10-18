@@ -46,7 +46,7 @@ use std::time::UNIX_EPOCH;
 
 use super::super::contract::MAX_FILE;
 use super::super::contract::mptg::Ledger;
-use super::super::engine::{Failed, Fetched, Fetcher, WantedFile};
+use super::super::engine::{Failed, Fetched, Fetcher, Have, Part, WantedFile};
 use crate::api::ApiError;
 use crate::api::transfer::ManifestEntry;
 use crate::api::types::{AdminDirEntry, LayeredAdmin};
@@ -455,6 +455,35 @@ impl<F: Fetcher> Fetcher for Local<F> {
             None => self.network.read_range(file, start, len),
         }
     }
+
+    /// The network's say (a peer's file is never read from here).
+    fn resumable(&self, file: &WantedFile) -> bool {
+        self.network.resumable(file)
+    }
+
+    /// A copy from disk is whole: the partial starts over, and the file is
+    /// copied as [`Fetcher::fetch`] copies it. Anything else is the
+    /// network's to take up.
+    fn fetch_part(
+        &mut self,
+        file: &WantedFile,
+        have: Option<&Have>,
+        into: &mut dyn Part,
+    ) -> Result<Fetched, Failed> {
+        let l = &file.ledger;
+        match self.path_of(file) {
+            Some(path) if same(&path, l.server_size, l.server_modified) => {
+                let started = into.answered(0, None);
+                started.map_err(|e| Failed { why: e.to_string(), stop: false })?;
+                self.fetch(file, into)
+            }
+            Some(_) => {
+                self.tally.network += 1;
+                self.network.fetch_part(file, have, into)
+            }
+            None => self.network.fetch_part(file, have, into),
+        }
+    }
 }
 
 /// Why a copy from disk ended early.
@@ -635,11 +664,15 @@ mod tests {
         Local::new(here(&[("lib", root.to_path_buf())]), 0, manifest, Network::default())
     }
 
-    /// The network's side: what it was asked for, its own bytes.
+    /// The network's side: what it was asked for, its own bytes; when
+    /// `resuming`, a partial taken up from what it holds, each fetch into
+    /// one kept with the bytes it held.
     #[derive(Default)]
     struct Network {
         fetched: Vec<String>,
         ranged: Vec<String>,
+        resuming: bool,
+        parts: Vec<(String, Option<u64>)>,
     }
 
     const OVER_THE_NETWORK: &[u8] = b"over the network";
@@ -655,6 +688,51 @@ mod tests {
         fn read_range(&mut self, file: &WantedFile, _: u64, _: usize) -> Result<Vec<u8>, Failed> {
             self.ranged.push(file.ledger.server_path.clone());
             Ok(OVER_THE_NETWORK.to_vec())
+        }
+
+        fn resumable(&self, _file: &WantedFile) -> bool {
+            self.resuming
+        }
+
+        fn fetch_part(
+            &mut self,
+            file: &WantedFile,
+            have: Option<&Have>,
+            into: &mut dyn Part,
+        ) -> Result<Fetched, Failed> {
+            self.parts.push((file.ledger.server_path.clone(), have.map(|h| h.bytes)));
+            let failed = |e: io::Error| Failed { why: e.to_string(), stop: false };
+            let from = have.map_or(0, |h| h.bytes);
+            into.answered(from, Some("\"e\"")).map_err(failed)?;
+            into.write_all(&OVER_THE_NETWORK[from as usize..]).map_err(failed)?;
+            Ok(Fetched::default())
+        }
+    }
+
+    /// A card's partial in memory: its bytes, and where each answer went on
+    /// from.
+    #[derive(Default)]
+    struct Partial {
+        bytes: Vec<u8>,
+        answers: Vec<u64>,
+    }
+
+    impl Write for Partial {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Part for Partial {
+        fn answered(&mut self, from: u64, _validator: Option<&str>) -> io::Result<()> {
+            self.bytes.truncate(from as usize);
+            self.answers.push(from);
+            Ok(())
         }
     }
 
@@ -926,6 +1004,41 @@ mod tests {
         let over = OVER_THE_NETWORK.to_vec();
         assert_eq!(got, [over.clone(), over.clone(), over, track(4)]);
         assert_eq!(source.tally(), Tally { disk: 1, network: 3 });
+    }
+
+    /// A file a later run may take up (a peer's: another origin's, never
+    /// read from here) is the network's to say so and to take up, from the
+    /// bytes its partial holds; one read from disk starts its partial over,
+    /// copied whole.
+    #[test]
+    fn a_partial_is_the_networks_to_take_up_and_a_disk_copy_starts_it_over() {
+        let scratch = Scratch::new("part");
+        let root = scratch.0.join("Music");
+        let manifest = library(&root, "lib");
+        let mut source = lib_at(&root, &manifest);
+        let theirs = WantedFile { origin: 1, ..wanted(&manifest[0]) };
+        assert!(!source.resumable(&theirs));
+        source.network.resuming = true;
+        assert!(source.resumable(&theirs), "the network's say");
+        let have = Have { bytes: 4, validator: "\"e\"".into() };
+        let mut part = Partial { bytes: OVER_THE_NETWORK[..4].to_vec(), ..Partial::default() };
+        source.fetch_part(&theirs, Some(&have), &mut part).expect("taken up");
+        assert_eq!(source.network.parts, [(theirs.ledger.server_path.clone(), Some(4))]);
+        assert_eq!((part.bytes.as_slice(), part.answers.as_slice()), (OVER_THE_NETWORK, &[4][..]));
+
+        // The server's own file, as the disk has it: whole, from byte 0.
+        let mut part = Partial { bytes: b"stale".to_vec(), ..Partial::default() };
+        source.fetch_part(&wanted(&manifest[0]), Some(&have), &mut part).expect("copied");
+        assert_eq!((part.bytes, part.answers), (track(1), vec![0]));
+        assert_eq!(source.network.parts.len(), 1, "the network isn't asked");
+        assert_eq!(source.tally(), Tally { disk: 1, network: 0 });
+
+        // Changed since the scan: the network's again, counted so.
+        fs::remove_file(root.join("Artist C/03.mp3")).unwrap();
+        let gone = wanted(&manifest[2]);
+        source.fetch_part(&gone, None, &mut Partial::default()).expect("over the network");
+        assert_eq!(source.network.parts[1], (gone.ledger.server_path.clone(), None));
+        assert_eq!(source.tally(), Tally { disk: 1, network: 1 });
     }
 
     /// A disk whose read fails once `ok` bytes have come, after an
