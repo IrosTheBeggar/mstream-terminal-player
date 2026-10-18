@@ -3,10 +3,12 @@
 //! conversion from `/transcode`, its type checked; and the small reads a
 //! cover search and a quick fingerprint make. The model is the flasher's
 //! `fetch_within` (src/device/firmware.rs): chunks as they land, a stall
-//! timeout, a progress hook. Here into a file instead of memory, or into a
+//! timeout, a progress hook. Here into a file instead of memory, into a
 //! writer that is only ever written on (a card's stage file, which so takes
-//! a file's bytes once), with a ceiling of the request's own for bodies of
-//! gigabytes, and the client's meter counting every byte.
+//! a file's bytes once), or into one that can be cut back ([`Rewind`]: a
+//! card's partial download, kept across runs), with a ceiling of the
+//! request's own for bodies of gigabytes, and the client's meter counting
+//! every byte.
 //!
 //! A peer's 429s are sorted by their words ([`Limited`]): the parent's
 //! stream proxy passes the peer's status and body on, but not its
@@ -399,16 +401,29 @@ fn open_at(dest: &Path, start: u64) -> std::io::Result<File> {
     Ok(file)
 }
 
-/// Where a fetch's bytes go: [`Client::download_async`]'s file, or
-/// [`Client::stream_async`]'s writer.
+/// A writer that holds the first bytes of the file already and can be cut
+/// back: a card's partial download (the card contract's 2.12.8), which a
+/// later run takes up where an earlier one left it.
+pub trait Rewind: Write {
+    /// The answer is good, and its bytes are written from `start` on: the
+    /// ones held before it kept, everything past it gone (0: the file starts
+    /// over, it changed). `validator` is the answer's (its ETag, else its
+    /// Last-Modified), which the bytes from `start` on come under. Called
+    /// before the first of them; not at all when nothing is left to come.
+    fn start_at(&mut self, start: u64, validator: Option<&str>) -> std::io::Result<()>;
+}
+
+/// Where a fetch's bytes go: [`Client::download_async`]'s file,
+/// [`Client::stream_async`]'s writer, or [`Client::stream_part_async`]'s.
 trait Dest {
     /// The bytes of the file there already.
     fn held(&self) -> u64;
     /// Whether the bytes there can be cut back, so that an answer from an
     /// earlier byte than the ones held can be taken.
     fn rewinds(&self) -> bool;
-    /// Ready to write from `start`: everything past it gone.
-    fn start_at(&mut self, start: u64) -> std::io::Result<()>;
+    /// Ready to write from `start`, under `validator`: everything past it
+    /// gone.
+    fn start_at(&mut self, start: u64, validator: Option<&str>) -> std::io::Result<()>;
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()>;
     /// The length after a write failed with `done` bytes counted.
     fn len_after(&self, done: u64) -> u64;
@@ -431,7 +446,7 @@ impl Dest for ToFile<'_> {
         true
     }
 
-    fn start_at(&mut self, start: u64) -> std::io::Result<()> {
+    fn start_at(&mut self, start: u64, _validator: Option<&str>) -> std::io::Result<()> {
         self.file = Some(open_at(self.path, start)?);
         Ok(())
     }
@@ -471,11 +486,43 @@ impl Dest for ToStream<'_> {
         false
     }
 
-    fn start_at(&mut self, start: u64) -> std::io::Result<()> {
+    fn start_at(&mut self, start: u64, _validator: Option<&str>) -> std::io::Result<()> {
         match start == self.held {
             true => Ok(()),
             false => Err(std::io::Error::other("a stream is never cut back")),
         }
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.into.write_all(bytes)
+    }
+
+    fn len_after(&self, done: u64) -> u64 {
+        done
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.into.flush()
+    }
+}
+
+/// A [`Rewind`] that holds `held` bytes of the file already.
+struct ToPart<'d> {
+    into: &'d mut dyn Rewind,
+    held: u64,
+}
+
+impl Dest for ToPart<'_> {
+    fn held(&self) -> u64 {
+        self.held
+    }
+
+    fn rewinds(&self) -> bool {
+        true
+    }
+
+    fn start_at(&mut self, start: u64, validator: Option<&str>) -> std::io::Result<()> {
+        self.into.start_at(start, validator)
     }
 
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -588,6 +635,38 @@ impl Client {
         progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
     ) -> Result<Fetched, Failed> {
         let streamed = crate::runtime::block_on(self.stream_async(fetch, into, held, progress));
+        streamed.unwrap_or_else(|e| {
+            let partial = Partial { len: held, validator: None };
+            Err(Failed { error: FetchError::Api(ApiError::Network(e)), partial })
+        })
+    }
+
+    /// [`Client::stream_async`] into a writer that can be cut back: a card's
+    /// partial download, which holds `held` bytes of the file from a run
+    /// before. They are kept, and the rest fetched with Range under
+    /// [`Fetch::resuming`]'s validator (If-Range); an answer that starts the
+    /// file over (it changed since, or there is no validator) is taken in
+    /// the same request, the writer told first ([`Rewind::start_at`]), so a
+    /// changed file costs no second ask. Nothing is flushed past
+    /// `into.flush()`: syncing it is its owner's.
+    pub async fn stream_part_async(
+        &self,
+        fetch: &Fetch<'_>,
+        into: &mut dyn Rewind,
+        held: u64,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<Fetched, Failed> {
+        self.fetch_into(fetch, &mut ToPart { into, held }, progress).await
+    }
+
+    pub fn stream_part(
+        &self,
+        fetch: &Fetch<'_>,
+        into: &mut dyn Rewind,
+        held: u64,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<Fetched, Failed> {
+        let streamed = crate::runtime::block_on(self.stream_part_async(fetch, into, held, progress));
         streamed.unwrap_or_else(|e| {
             let partial = Partial { len: held, validator: None };
             Err(Failed { error: FetchError::Api(ApiError::Network(e)), partial })
@@ -711,7 +790,8 @@ impl Client {
             ));
             return Err(failed(error, &kept));
         }
-        dest.start_at(start).map_err(|e| failed(FetchError::Disk(e.to_string()), &kept))?;
+        let starting = dest.start_at(start, written_under.as_deref());
+        starting.map_err(|e| failed(FetchError::Disk(e.to_string()), &kept))?;
         let total = total.or(fetch.expected);
         let mut done = start;
         loop {
@@ -1052,6 +1132,74 @@ mod tests {
         let mut into = Vec::new();
         let got = client.stream(&fetch, &mut into, 0, &mut |_, _| {}).unwrap();
         assert_eq!((into.as_slice(), got.resumed_from), (b"0123456789".as_slice(), 0));
+    }
+
+    /// A card's partial, in memory: its bytes, and each start it was told.
+    #[derive(Default)]
+    struct Part {
+        bytes: Vec<u8>,
+        starts: Vec<(u64, Option<String>)>,
+    }
+
+    impl Write for Part {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Rewind for Part {
+        fn start_at(&mut self, start: u64, validator: Option<&str>) -> std::io::Result<()> {
+            self.bytes.truncate(start as usize);
+            self.starts.push((start, validator.map(String::from)));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_partial_is_taken_up_and_a_changed_file_starts_it_over_in_one_answer() {
+        let (etag, date) = ("W/\"a-18f\"", "Mon, 21 Sep 2026 14:13:20 GMT");
+        let (base, seen) = canned(vec![
+            reply("206 Partial Content", &[("Content-Range", "bytes 4-9/10"), ("ETag", etag)], b"456789"),
+            // The file changed: the whole new one, in the same answer.
+            reply("200 OK", &[("ETag", "W/\"a-190\"")], b"abcdefghij"),
+            // All of it there: nothing to start.
+            reply("416 Range Not Satisfiable", &[("Content-Range", "bytes */10")], b""),
+            // Taken up by the date of a file that had no ETag.
+            reply("206 Partial Content", &[("Content-Range", "bytes 4-9/10")], b"456789"),
+        ]);
+        let client = Client::new(&base).unwrap();
+        let fetch = Fetch::file("lib/Album B/01.flac").expecting(10).resuming(Some(etag));
+        let mut part = Part { bytes: b"0123".to_vec(), ..Part::default() };
+        let got = client.stream_part(&fetch, &mut part, 4, &mut |_, _| {}).unwrap();
+        let req = recv(&seen);
+        assert!(req.contains("range: bytes=4-\r\n") && req.contains("if-range: w/\"a-18f\"\r\n"), "{req}");
+        assert_eq!((part.bytes.as_slice(), got.resumed_from), (b"0123456789".as_slice(), 4));
+        assert_eq!(part.starts, [(4, Some(etag.to_string()))]);
+
+        let mut part = Part { bytes: b"0123".to_vec(), ..Part::default() };
+        let got = client.stream_part(&fetch, &mut part, 4, &mut |_, _| {}).unwrap();
+        assert_eq!(part.bytes, b"abcdefghij", "the old part is gone, not stitched");
+        assert_eq!(part.starts, [(0, Some("W/\"a-190\"".to_string()))], "told before the new bytes");
+        assert_eq!((got.resumed_from, got.validator.as_deref()), (0, Some("W/\"a-190\"")));
+        let _ = recv(&seen);
+
+        let mut part = Part { bytes: b"0123456789".to_vec(), ..Part::default() };
+        let got = client.stream_part(&fetch, &mut part, 10, &mut |_, _| {}).unwrap();
+        assert_eq!((got.len, got.resumed_from, part.starts.len()), (10, 10, 0), "whole already");
+        assert!(recv(&seen).contains("range: bytes=10-\r\n"));
+
+        let by_date = Fetch::file("lib/Album B/01.flac").expecting(10).resuming(Some(date));
+        let mut part = Part { bytes: b"0123".to_vec(), ..Part::default() };
+        client.stream_part(&by_date, &mut part, 4, &mut |_, _| {}).unwrap();
+        let req = recv(&seen);
+        assert!(req.contains("if-range: mon, 21 sep 2026 14:13:20 gmt\r\n"), "{req}");
+        assert_eq!(part.starts, [(4, Some(date.to_string()))], "no ETag: the date it was asked by");
+        assert_eq!(part.bytes, b"0123456789");
     }
 
     #[test]
