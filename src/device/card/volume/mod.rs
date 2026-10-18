@@ -40,6 +40,7 @@ use super::contract::fat::fat_from_wall;
 use super::contract::msmf::{self, Election, Manifest, Pick};
 use super::contract::mptg::{self, Tags};
 use super::contract::{MAX_FILE, Why, container, mpdj, mspd};
+use super::names::{self, Listing};
 
 /// A volume's filesystem, as the OS names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -500,18 +501,12 @@ fn win32_alias(name: &str) -> bool {
         || numbered("LPT")
 }
 
-/// A name as the OS listed it, brought back to the card's spelling (2.8.5):
-/// Windows and a utf8 Linux mount list the stored long name unchanged; macOS
-/// lists names decomposed, so they go back to NFC.
+/// A name as the OS listed it, brought back to the card's spelling (2.8.5)
+/// by the path rules' one place for it ([`names::stored_name`], this OS's
+/// [`Listing`]): Windows and a utf8 Linux mount list the stored long name
+/// unchanged; macOS lists names decomposed, so they go back to NFC.
 fn stored_name(listed: &std::ffi::OsStr) -> String {
-    let name = listed.to_string_lossy();
-    if cfg!(target_os = "macos") { nfc(&name) } else { name.into_owned() }
-}
-
-/// Unicode NFC: what macOS's listing of a FAT name is brought back to.
-fn nfc(name: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    name.nfc().collect()
+    names::stored_name(&listed.to_string_lossy(), Listing::here()).into_owned()
 }
 
 /// Seconds since 1970 of a time the OS reported (negative before).
@@ -578,11 +573,13 @@ pub(crate) struct Root {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Private {
     /// The file that counts: `X.json`, or `X.new` when it wins; None when
-    /// neither is valid.
+    /// neither is valid. Or the file of a `version` this software doesn't
+    /// know, which stops it: then nothing of either is read.
     pub(crate) file: Option<String>,
     /// The winner, a JSON object of its own `format`.
     pub(crate) value: Option<Value>,
     pub(crate) seq: u64,
+    /// That file's version.
     pub(crate) version: u64,
     /// Both files there and byte-equal: one write seen twice; a run stops
     /// for a disk check.
@@ -636,14 +633,14 @@ pub(crate) fn inspect(card: &dyn CardFs) -> io::Result<Inspection> {
     if pending.as_ref().is_some_and(|p| p.stops_software()) {
         newer.push("pending.bin".into());
     }
-    let private = |x: &str| {
-        settle_private(read(&format!("{x}.json")).as_deref(), read(&format!("{x}.new")).as_deref(), x)
+    let private = |x: &str, known: u64| {
+        let (json, new) = (read(&format!("{x}.json")), read(&format!("{x}.new")));
+        settle_private(json.as_deref(), new.as_deref(), x, known)
     };
-    let (state, resume) = (private("state"), private("resume"));
-    let versions = [(&state, STATE_VERSION, "state.json"), (&resume, RESUME_VERSION, "resume.json")];
-    for (private, known, name) in versions {
-        if private.value.is_some() && private.version != known {
-            newer.push(name.into());
+    let (state, resume) = (private("state", STATE_VERSION), private("resume", RESUME_VERSION));
+    for (private, known) in [(&state, STATE_VERSION), (&resume, RESUME_VERSION)] {
+        if let Some(file) = private.file.as_ref().filter(|_| private.version != known) {
+            newer.push(file.clone());
         }
     }
     let device = DeviceTxt::read(card.read("/.player/device.txt", 64 * 1024).ok().flatten().as_deref());
@@ -712,11 +709,19 @@ fn settle_pending(read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<mspd::Plan> 
 
 /// 2.12.7's read, for `X` = `state` or `resume`: the valid file, or of two
 /// different valid ones the higher `seq` (equal: `X.json`); two byte-equal
-/// files are one write seen twice. Nothing is finished or deleted here.
-fn settle_private(json: Option<&[u8]>, new: Option<&[u8]>, x: &str) -> Private {
+/// files are one write seen twice. A file of a `version` other than `known`
+/// stops the software, whichever of the two it is: it reads none of it, and
+/// that file is the one named, with its version. Nothing is finished or
+/// deleted here.
+fn settle_private(json: Option<&[u8]>, new: Option<&[u8]>, x: &str, known: u64) -> Private {
     let format = format!("mstream-card-{x}");
-    let valid = |bytes: Option<&[u8]>| bytes.and_then(|b| private_value(b, &format));
+    let valid = |bytes: Option<&[u8]>| bytes.and_then(|b| private_value(b, &format, known));
     let twice = matches!((json, new), (Some(a), Some(b)) if a == b);
+    for (file, form) in [(format!("{x}.json"), valid(json)), (format!("{x}.new"), valid(new))] {
+        if let Some((_, _, version)) = form.filter(|f| f.2 != known) {
+            return Private { file: Some(file), version, twice, ..Private::default() };
+        }
+    }
     let pick = match (valid(json), valid(new)) {
         (Some(j), Some(n)) if n.1 > j.1 => Some((format!("{x}.new"), n)),
         (Some(j), _) => Some((format!("{x}.json"), j)),
@@ -732,16 +737,89 @@ fn settle_private(json: Option<&[u8]>, new: Option<&[u8]>, x: &str) -> Private {
 }
 
 /// A private file is valid when it is UTF-8 with no byte-order mark that
-/// parses whole as one object with its own `format`, an integer `version`
-/// from 1 and an integer `seq` from 1 to 2^53 − 1 (2.12.7): the object, its
-/// seq and its version.
-fn private_value(bytes: &[u8], format: &str) -> Option<(Value, u64, u64)> {
+/// parses whole as one object with its own `format`, no member named twice
+/// in any object, an integer `version` from 1 and an integer `seq` from 1 to
+/// 2^53 − 1 (2.12.7): the object, its seq and its version. A version other
+/// than `known` is a newer software's, whose members, `seq` among them,
+/// this one doesn't read: seq 0 then.
+fn private_value(bytes: &[u8], format: &str, known: u64) -> Option<(Value, u64, u64)> {
     let text = std::str::from_utf8(bytes).ok().filter(|t| !t.starts_with('\u{FEFF}'))?;
-    let value: Value = serde_json::from_str(text).ok()?;
+    let value = serde_json::from_str::<Unique>(text).ok()?.0;
     let object = value.as_object()?;
-    let seq = object.get("seq")?.as_u64().filter(|s| (1..1u64 << 53).contains(s))?;
+    if object.get("format")?.as_str()? != format {
+        return None;
+    }
     let version = object.get("version")?.as_u64().filter(|v| *v >= 1)?;
-    (object.get("format")?.as_str()? == format).then_some((value, seq, version))
+    if version != known {
+        return Some((value, 0, version));
+    }
+    let seq = object.get("seq")?.as_u64().filter(|s| (1..1u64 << 53).contains(s))?;
+    Some((value, seq, version))
+}
+
+/// JSON as serde_json reads it into a [`Value`], but for an object with a
+/// member named twice, which is an error here: serde_json keeps the last
+/// one, and 2.12.7 makes such a file invalid.
+struct Unique(Value);
+
+impl<'de> serde::Deserialize<'de> for Unique {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Unique, D::Error> {
+        d.deserialize_any(UniqueVisitor)
+    }
+}
+
+struct UniqueVisitor;
+
+impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
+    type Value = Unique;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("JSON with each object's members named once")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Unique, E> {
+        Ok(Unique(Value::Bool(v)))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Unique, E> {
+        Ok(Unique(v.into()))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Unique, E> {
+        Ok(Unique(v.into()))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Unique, E> {
+        Ok(Unique(v.into()))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Unique, E> {
+        Ok(Unique(v.into()))
+    }
+
+    fn visit_unit<E>(self) -> Result<Unique, E> {
+        Ok(Unique(Value::Null))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut items: A) -> Result<Unique, A::Error> {
+        let mut out = Vec::new();
+        while let Some(Unique(v)) = items.next_element()? {
+            out.push(v);
+        }
+        Ok(Unique(Value::Array(out)))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut members: A) -> Result<Unique, A::Error> {
+        let mut out = serde_json::Map::new();
+        while let Some(name) = members.next_key::<String>()? {
+            if out.contains_key(&name) {
+                return Err(serde::de::Error::custom("a member named twice"));
+            }
+            let Unique(v) = members.next_value()?;
+            out.insert(name, v);
+        }
+        Ok(Unique(Value::Object(out)))
+    }
 }
 
 /// Walks `/music` as the device's walk would list it, dot names left out
@@ -1091,8 +1169,10 @@ mod tests {
             assert_eq!((wall - at) % 900, 0, "{clock:?}");
             assert!((wall - at).abs() <= 86_400, "{clock:?}");
         }
-        assert_eq!(nfc("Cafe\u{301}"), "Caf\u{E9}");
-        assert_eq!(nfc("Caf\u{E9}"), "Caf\u{E9}");
+        // A listed name as stored: NFC again on a Mac, as listed elsewhere.
+        let nfd = std::ffi::OsStr::new("Cafe\u{301}");
+        assert_eq!(stored_name(nfd), if cfg!(target_os = "macos") { "Caf\u{E9}" } else { "Cafe\u{301}" });
+        assert_eq!(stored_name(std::ffi::OsStr::new("Caf\u{E9}")), "Caf\u{E9}");
     }
 
     fn music(card: &mut Card) {
@@ -1209,7 +1289,7 @@ mod tests {
             text.into_bytes()
         };
         let pick = |json: Option<&[u8]>, new: Option<&[u8]>| {
-            let p = settle_private(json, new, "state");
+            let p = settle_private(json, new, "state", STATE_VERSION);
             let label = p.value.as_ref().and_then(|v| v["label"].as_str().map(String::from));
             (p.file, p.seq, label, p.twice)
         };
@@ -1231,6 +1311,39 @@ mod tests {
         let v0 = br#"{"format":"mstream-card-state","version":0,"seq":1}"#;
         for bad in [bom.as_slice(), resume, zero, v0, b"[1]", b"{"] {
             assert_eq!(pick(Some(bad), None), (None, 0, None, false), "{}", String::from_utf8_lossy(bad));
+        }
+        // A member named twice, at any depth, is invalid too: serde_json
+        // alone would keep the last.
+        let nested = br#"{"format":"mstream-card-state","version":1,"seq":2,"x":{"a":1,"a":2}}"#;
+        assert_eq!(pick(Some(nested), None), (None, 0, None, false));
+        // A newer version stops the software from either file, even the one
+        // a lower seq would leave aside.
+        let v2 = br#"{"format":"mstream-card-state","version":2,"seq":1}"#;
+        let p = settle_private(Some(&b), Some(v2), "state", STATE_VERSION);
+        assert_eq!((p.file.as_deref(), p.version, p.value), (Some("state.new"), 2, None));
+    }
+
+    /// vectors.json's privateFiles.settle (2.12.7), as a look that only reads
+    /// takes it: which file counts, its seq, one write seen twice, a version
+    /// that stops the software. The deletes, the rename and the next seq are
+    /// a run's (the engine's, not built yet).
+    #[test]
+    fn private_files_settle_as_the_vectors_say() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures/card/vectors.json");
+        let v: Value = serde_json::from_slice(&std::fs::read(path).expect("vectors.json")).expect("JSON");
+        let cases = v["privateFiles"]["settle"].as_array().expect("settle");
+        assert_eq!(cases.len(), 20);
+        for c in cases {
+            let (stem, note) = (c["stem"].as_str().expect("a stem"), c["note"].as_str().expect("a note"));
+            let file = |key: &str| c[key].as_str().map(str::as_bytes);
+            let p = settle_private(file("json"), file("new"), stem, STATE_VERSION);
+            if c["stops"].as_bool().expect("stops") {
+                assert!(p.file.is_some() && p.version != STATE_VERSION && p.value.is_none(), "{note}");
+                continue;
+            }
+            assert_eq!(p.file.as_deref().unwrap_or("none"), c["pick"].as_str().expect("a pick"), "{note}");
+            assert_eq!(p.seq, c["seq"].as_u64().unwrap_or(0), "{note}");
+            assert_eq!(p.twice, c["diskCheck"].as_bool().expect("diskCheck"), "{note}");
         }
     }
 
