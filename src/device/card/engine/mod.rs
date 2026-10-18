@@ -231,9 +231,11 @@ pub(crate) enum Guard {
     /// size and fingerprint: [`Answers::adopt`].
     Adopt(Vec<String>),
     /// Q1: the files that left the selection, more than the gate allows
-    /// ([`Answers::removals`]), or `strong`: more than half the ledger, or
-    /// most of a server's files gone from its whole manifest
-    /// ([`Answers::mass_removals`]).
+    /// ([`Answers::removals`]); or `strong` ([`Answers::mass_removals`]):
+    /// more than half the ledger left it, or most of a server's files are
+    /// gone from its whole manifest while the run would delete or replace
+    /// any (2.10.2, step 5), and the paths are every file the run would
+    /// delete or replace.
     Removals { paths: Vec<String>, strong: bool },
     /// U7: a server none of the card's servers is known to be, while files
     /// on the card came from a server that can't be told apart from it:
@@ -292,6 +294,9 @@ pub(crate) enum Event {
     /// A run.lock with no live lock behind it was taken over (2.12.7): what
     /// it held, informational.
     TookOver(String),
+    /// A plan of another card (its card id, not the root's) was found and
+    /// deleted: none of its targets is this card's work (2.11).
+    ForeignPlan(u64),
     /// A file left the card.
     Deleted(String),
     /// Bytes of a file arriving, so far.
@@ -326,8 +331,8 @@ pub(crate) struct Report {
     pub(crate) big_folders: Vec<(String, usize)>,
     /// Files that failed in the run: the server path and why.
     pub(crate) failed: Vec<(String, String)>,
-    /// Deletes not made: the file changed between the listing and its
-    /// delete.
+    /// Deletes, replacements and moves not made: the file changed between
+    /// the listing and its turn, and is the listener's now (2.11).
     pub(crate) spared: Vec<String>,
 }
 
@@ -556,7 +561,12 @@ impl<'c> Session<'c> {
             Ok((settled, music, survey))
         };
         let (settled, music, survey) = match look() {
-            Ok(looked) => looked,
+            Ok(looked) => {
+                if let Some(card_id) = looked.0.foreign {
+                    events(Event::ForeignPlan(card_id));
+                }
+                looked
+            }
             // A card still the bound one is let go; a pulled or different
             // one is never written again, run.lock included.
             Err(stop @ (Stop::Pulled | Stop::DifferentCard)) => return Err(stop),

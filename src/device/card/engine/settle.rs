@@ -1,10 +1,11 @@
 //! Steps 1-4 of a run (docs/METADATA.md 2.12.1), before it plans anything:
 //! the root that counts settled (a `manifest.tmp` that won renamed into
-//! place), the plan of a cut run settled and read, the private files read
-//! by their recovery rule (2.12.7), the cut renames looked for, and the
-//! leftovers cleaned up — every stage file, every `*.tmp`, every companion
-//! the root doesn't name, every partial `resume.json` doesn't keep (2.12.8).
-//! The private files stay. [`newer`] is 2.4.5's check, made before the run
+//! place), the plan of a cut run settled and read (one of another card's
+//! id dropped: it owns nothing here), the private files read by their
+//! recovery rule (2.12.7), the cut renames looked for, and the leftovers
+//! cleaned up — every stage file, every `*.tmp`, every companion the root
+//! doesn't name, every partial `resume.json` doesn't keep (2.12.8). The
+//! private files stay. [`newer`] is 2.4.5's check, made before the run
 //! writes anything at all.
 
 use std::cell::RefCell;
@@ -37,6 +38,8 @@ pub(super) struct Settled {
     pub(super) top: u32,
     /// A cut run's plan (2.12.5).
     pub(super) pending: Option<mspd::Plan>,
+    /// The card id of a plan of another card, deleted at step 4.
+    pub(super) foreign: Option<u64>,
     /// `state.json` (2.12.7): the card's settings, for the caller.
     pub(super) state: Private,
 }
@@ -199,6 +202,14 @@ pub(super) fn settle(
             Pick::None => None,
         }
     };
+    // A plan of another card (a copied `/.mstream`, a restored image): no
+    // target of it is this card's half-finished work (2.11), so it is no
+    // plan here, and goes at step 4. One of a card with no root yet can't
+    // be told apart, and is taken as this card's.
+    let root_id = root.as_ref().map_or(0, |r| r.manifest.header.card_id);
+    let other = |id: u64| id != 0 && root_id != 0 && id != root_id;
+    let foreign = pending.as_ref().map(|p| p.header.card_id).filter(|&id| other(id));
+    let pending = pending.filter(|_| foreign.is_none());
     let mut private = |x: &str, known: u64, pairs: &mut Vec<_>| -> Result<Private, Stop> {
         let (json_name, new_name) = (format!("{x}.json"), format!("{x}.new"));
         let (json, new) = (reads.read(&json_name), reads.read(&new_name));
@@ -236,7 +247,10 @@ pub(super) fn settle(
     // Listed again: steps 1 and 2 may have renamed a .tmp into place.
     let top = entries(card, "/.mstream").map_err(|e| bound.failed(e))?;
     clean(card, bound, &top, &named, &resume_parts(resume.value.as_ref()))?;
-    Ok(Settled { root, autodj, top: highest, pending, state })
+    if foreign.is_some() && card.stat(&ms("pending.bin")).map_err(|e| bound.failed(e))?.is_some() {
+        delete(bound, &ms("pending.bin"))?;
+    }
+    Ok(Settled { root, autodj, top: highest, pending, foreign, state })
 }
 
 /// Two files a cut rename may have left on one cluster chain: both there,

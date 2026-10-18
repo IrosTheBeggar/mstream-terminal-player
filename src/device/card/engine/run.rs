@@ -11,7 +11,9 @@
 //! Every write is preceded by the binding's cheap check, and every delete
 //! batch, rename into `/music` and commit by its whole one; and every path
 //! of `/music` the run deletes or replaces is one its plan owns (2.11): a
-//! ledger file it matched, or one of its own targets.
+//! ledger file it matched, or a cut run's target — and goes only while it
+//! is still the file the listing showed. A new name is never a delete: any
+//! file found there is a collision, and that one file waits.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{self, Write as _};
@@ -38,7 +40,7 @@ use super::super::contract::text::Run;
 use super::super::names::match_key;
 use super::super::tags::{self, PARSER_VERSION};
 use super::super::volume::{CardFile, Item};
-use super::plan::{Plan, Write, origin_flags};
+use super::plan::{Plan, Replaced, Write, origin_flags};
 use super::settle::{card_qfp, companion_generation, entries, ms};
 use super::survey::{Music, join, key_path};
 use super::{
@@ -116,8 +118,10 @@ struct Runner<'r, 'c> {
     /// The next commit's generation.
     next: u32,
     card_id: u64,
-    /// The paths of `/music` the run may delete or replace (2.11), by key;
-    /// and those of them it spared at step 7, the listener's files now.
+    /// The paths of `/music` the run may delete or replace (2.11), by key:
+    /// its deletes, the files its writes replace in place, the files it
+    /// renames; and those of them it spared (step 7, step 8.3), the
+    /// listener's files now.
     owns: HashSet<Vec<String>>,
     spared: HashSet<Vec<String>>,
     /// Each write's index in the plan on the card now (2.12.1, step 8.1).
@@ -151,7 +155,9 @@ impl<'r, 'c> Runner<'r, 'c> {
         let mut owns: HashSet<Vec<String>> = HashSet::new();
         owns.extend(plan.deletes.iter().map(|d| key_path(&d.path)));
         for w in &plan.writes {
-            owns.insert(key_path(&w.path));
+            if w.replaces.is_some() {
+                owns.insert(key_path(&w.path));
+            }
             if let Some(from) = &w.from {
                 owns.insert(key_path(from));
             }
@@ -202,11 +208,7 @@ impl<'r, 'c> Runner<'r, 'c> {
                 let old = self.ledger[&path].clone();
                 let (size, fat_time) = (old.rec.size as u64, old.rec.fat_time);
                 let item = Item { name: String::new(), dir: false, size, fat_time };
-                let (mut rec, run) = self.read_record(&path, &item)?;
-                if rec.bpm10 == 0 && rec.camelot == 0 && old.rec.flags & BPM_ANALYSED != 0 {
-                    (rec.bpm10, rec.camelot) = (old.rec.bpm10, old.rec.camelot);
-                    rec.flags |= BPM_ANALYSED;
-                }
+                let (rec, run) = self.read_again(&path, &item, &old.rec)?;
                 self.ledger.insert(path, Owned { rec, run, ..old });
             }
         }
@@ -269,10 +271,16 @@ impl<'r, 'c> Runner<'r, 'c> {
                 Some(from) => self.rename(w, from, events)?,
                 None => self.fetch(w, fetcher, hooks, events)?,
             };
-            self.done.insert(k);
+            // A parked write stays in the plan the checkpoint leaves on the
+            // card (2.12.8): its target, if a cut run's, the software's.
             match step {
-                Step::Done => self.since += 1,
-                Step::Skipped => {}
+                Step::Done => {
+                    self.done.insert(k);
+                    self.since += 1;
+                }
+                Step::Skipped => {
+                    self.done.insert(k);
+                }
                 Step::Park(why) => {
                     self.commit(false, hooks, events)?;
                     return Ok(self.outcome(Some(why), Ok(())));
@@ -438,6 +446,22 @@ impl<'r, 'c> Runner<'r, 'c> {
         Ok((rec, reading.run))
     }
 
+    /// A carried record read again from its card file, mStream's analysis
+    /// kept where the tags still have neither a BPM nor a key.
+    fn read_again(
+        &mut self,
+        rel: &str,
+        item: &Item,
+        old: &mptg::Record,
+    ) -> Result<(mptg::Record, Run), Stop> {
+        let (mut rec, run) = self.read_record(rel, item)?;
+        if rec.bpm10 == 0 && rec.camelot == 0 && old.flags & BPM_ANALYSED != 0 {
+            (rec.bpm10, rec.camelot) = (old.bpm10, old.camelot);
+            rec.flags |= BPM_ANALYSED;
+        }
+        Ok((rec, run))
+    }
+
     /// A file of the selection's record and ledger row: the card's reading,
     /// mStream's analysis where the tags have neither a BPM nor a key
     /// (BPM_ANALYSED; none for an UNREADABLE file, whose fields are all
@@ -521,6 +545,7 @@ impl<'r, 'c> Runner<'r, 'c> {
                 if failed.stop {
                     return Ok(Step::Park(failed.why));
                 }
+                self.drop_ours(w, events)?;
                 return self.skip(file, failed.why, events);
             }
         };
@@ -543,18 +568,18 @@ impl<'r, 'c> Runner<'r, 'c> {
         let checked = checked.and_then(|()| hooks.before_record(file, self.s.card, &stage));
         if let Err(why) = checked {
             self.drop_stage(&stage)?;
+            self.drop_ours(w, events)?;
             return self.skip(file, why, events);
         }
 
-        // 8.3: into place, the file there deleted first.
+        // 8.3: into place, the file it replaces deleted first.
         self.s.bound.check(false)?;
         self.make_folders(&w.path)?;
         let target = self.s.music.card_path(&w.path);
-        if self.s.card.stat(&target).map_err(|e| self.failed(e))?.is_some() {
-            self.may(&w.path)?;
-            self.s.bound.alive()?.delete(&target).map_err(|e| self.failed(e))?;
+        if let Some(step) = self.clear(w, file, events)? {
+            self.drop_stage(&stage)?;
+            return Ok(step);
         }
-        self.may(&w.path)?;
         if let Err(e) = self.s.bound.alive()?.rename(&stage, &target) {
             // A name the card says is taken, where the listing showed none
             // (2.8.3, step 6: a collision): this file waits for the next
@@ -583,6 +608,63 @@ impl<'r, 'c> Runner<'r, 'c> {
         }
     }
 
+    /// A write's target made ready for the rename into it (step 8.3): the
+    /// file it replaces deleted, while it is still the one listed (a FAT
+    /// rename never replaces). Some: the write doesn't happen — the file it
+    /// was to replace changed since the listing (the listener's now), or a
+    /// new name is taken (2.8.3, step 6: a collision — the listener's file,
+    /// copied there since the listing, or another file's name to the OS,
+    /// such as its 8.3 alias), which the next run names around.
+    fn clear(
+        &mut self,
+        w: &Write,
+        file: &WantedFile,
+        events: &mut dyn FnMut(Event),
+    ) -> Result<Option<Step>, Stop> {
+        let target = self.s.music.card_path(&w.path);
+        let Some(there) = self.s.card.stat(&target).map_err(|e| self.failed(e))? else {
+            return Ok(None);
+        };
+        match w.replaces {
+            Some(r) if listed(&there, r) => {
+                self.may(&w.path)?;
+                self.s.bound.alive()?.delete(&target).map_err(|e| self.failed(e))?;
+                self.ledger.remove(&w.path);
+                Ok(None)
+            }
+            Some(_) => Ok(Some(self.spare(&w.path))),
+            None => self.skip(file, "the card has a file of that name".into(), events).map(Some),
+        }
+    }
+
+    /// A ledger file a write was to replace or move that changed since the
+    /// listing: kept as it is, its row dropped (2.11: the listener's now),
+    /// and reported.
+    fn spare(&mut self, path: &str) -> Step {
+        self.report.spared.push(path.to_string());
+        self.spared.insert(key_path(path));
+        self.ledger.remove(path);
+        Step::Skipped
+    }
+
+    /// A write that won't happen in this run, whose target is a cut run's
+    /// half-finished work (2.12.3): deleted while it is still as listed.
+    /// Once the final commit deletes `pending.bin` no plan names it, and a
+    /// later run would take it for the listener's.
+    fn drop_ours(&mut self, w: &Write, events: &mut dyn FnMut(Event)) -> Result<(), Stop> {
+        let Some(r) = w.replaces.filter(|r| r.ours) else { return Ok(()) };
+        let target = self.s.music.card_path(&w.path);
+        let there = self.s.card.stat(&target).map_err(|e| self.failed(e))?;
+        if there.is_some_and(|i| listed(&i, r)) {
+            self.s.bound.check(false)?;
+            self.may(&w.path)?;
+            self.s.bound.alive()?.delete(&target).map_err(|e| self.failed(e))?;
+            self.deleted += 1;
+            events(Event::Deleted(w.path.clone()));
+        }
+        Ok(())
+    }
+
     fn skip(
         &mut self,
         file: &WantedFile,
@@ -604,16 +686,29 @@ impl<'r, 'c> Runner<'r, 'c> {
             return self.skip(file, "a file the listener changed is where it goes".into(), events);
         }
         let Some(old) = self.ledger.get(from).cloned() else { return Ok(Step::Skipped) };
+        // The file it moves, still the one listed; else the listener's now
+        // (2.11), left where it is.
+        let source = self.s.music.card_path(from);
+        let size = old.rec.size as u64;
+        match self.s.card.stat(&source).map_err(|e| self.failed(e))? {
+            Some(i) if listed(&i, Replaced { size, fat_time: old.rec.fat_time, ours: false }) => {}
+            there => {
+                self.drop_ours(w, events)?;
+                if there.is_some() {
+                    return Ok(self.spare(from));
+                }
+                self.ledger.remove(from);
+                self.report.gone.push(from.to_string());
+                return Ok(Step::Skipped);
+            }
+        }
         self.s.bound.check(false)?;
         self.make_folders(&w.path)?;
         let target = self.s.music.card_path(&w.path);
-        if self.s.card.stat(&target).map_err(|e| self.failed(e))?.is_some() {
-            self.may(&w.path)?;
-            self.s.bound.alive()?.delete(&target).map_err(|e| self.failed(e))?;
+        if let Some(step) = self.clear(w, file, events)? {
+            return Ok(step);
         }
         self.may(from)?;
-        self.may(&w.path)?;
-        let source = self.s.music.card_path(from);
         if let Err(e) = self.s.bound.alive()?.rename(&source, &target) {
             if e.kind() != io::ErrorKind::AlreadyExists {
                 return Err(self.failed(e));
@@ -631,8 +726,13 @@ impl<'r, 'c> Runner<'r, 'c> {
             created_at: l.created_at,
             ..old.ledger.clone()
         };
-        let rec = mptg::Record { fat_time: item.fat_time, ..old.rec };
-        self.take(&w.path, rel.clone(), Owned { rec, ledger, ..old });
+        // The record carried, its stamp the card's; read again from the
+        // bytes should its size have moved since the check above.
+        let (rec, run) = match item.size == size {
+            true => (mptg::Record { fat_time: item.fat_time, ..old.rec }, old.run.clone()),
+            false => self.read_again(&rel, &item, &old.rec)?,
+        };
+        self.take(&w.path, rel.clone(), Owned { rec, run, ledger, ..old });
         self.renamed += 1;
         events(Event::Renamed { from: from.to_string(), to: rel });
         Ok(Step::Done)
@@ -1022,6 +1122,11 @@ impl<'r, 'c> Runner<'r, 'c> {
         }
         Ok(())
     }
+}
+
+/// A file as the plan's listing had it: its size and stamp.
+fn listed(item: &Item, r: Replaced) -> bool {
+    !item.dir && item.size == r.size && item.fat_time == r.fat_time
 }
 
 /// The ops of a plan in `pending.bin`'s order (2.12.5): the deletes, then

@@ -956,6 +956,38 @@ fn removals_ask_past_their_gates() {
     assert_eq!((outcome.deleted, outcome.records), (0, 6));
 }
 
+/// 2.10.2, step 5: the server's library replaced under the same paths
+/// (other audio, so every row pairs and is replaced in place) is a mass
+/// deletion too when its whole manifest says so: asked before anything
+/// goes, with nothing left the selection.
+#[test]
+fn a_library_replaced_at_the_same_paths_asks_before_anything_goes() {
+    let dir = Scratch::new("replaced");
+    let (card, wanted, mut server) = first(&dir.0);
+    let mut other = wanted.clone();
+    for f in &mut other.files {
+        f.ledger.audio_hash[0] ^= 0xFF;
+        f.ledger.server_modified += 1;
+    }
+    // Not read whole: changed files, replaced, as any run does.
+    let (session, plan) = plan_of(&card, &other, &mut server, Answers::default(), knobs());
+    assert!(plan.guards.is_empty() && plan.removals().is_empty(), "{:?}", plan.guards);
+    assert_eq!(plan.fetches().0, 6);
+    session.close();
+
+    other.origins[0].whole = Some(other.files.iter().map(|f| f.ledger.audio_hash).collect());
+    let (session, plan) = plan_of(&card, &other, &mut server, Answers::default(), knobs());
+    let mut paths: Vec<String> = records(&card).into_iter().map(|e| e.path).collect();
+    paths.sort();
+    assert_eq!(plan.guards, [Guard::Removals { paths, strong: true }]);
+    assert!(plan.removals().is_empty(), "none left the selection");
+    session.close();
+    let all = Answers { mass_removals: true, ..Answers::default() };
+    let (session, plan) = plan_of(&card, &other, &mut server, all, knobs());
+    assert!(plan.guards.is_empty());
+    session.close();
+}
+
 #[test]
 fn a_server_that_may_be_the_cards_own_is_asked_about() {
     let dir = Scratch::new("servers");
@@ -1067,6 +1099,161 @@ fn a_cut_runs_targets_are_replaced_in_place_and_its_folders_owned() {
     let folders = look(&card).root.unwrap().tags.unwrap().folders;
     let owned = |p: &str| folders.iter().any(|f| f.path == p && f.flags & FOLDER_OWNED != 0);
     assert!(owned("Casey Choir") && owned("Casey Choir/Hymns"));
+}
+
+/// 2.12.3 when the fresh copy doesn't come: a cut run's half-finished
+/// target is never left on the card unclaimed, which the run after would
+/// take for the listener's file and write ` (2)` beside. A run that parks
+/// leaves it in the plan on the card; one whose fetch fails deletes it.
+#[test]
+fn a_cut_runs_target_is_never_left_for_the_listeners() {
+    let dir = Scratch::new("recover-fails");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    let six = corpus("trck_0.mp3");
+    let (from, to) = ("Lib/Casey Choir/Hymns/01 - Six.mp3", "Casey Choir/Hymns/01 - Six.mp3");
+    server.add(from, six.clone());
+    wanted.files.push(track(from, &six, 401));
+    let root = look(&card).root.unwrap().manifest;
+    let ops = vec![
+        Op { op: OP_FOLDER, path: "Casey Choir".into(), expected_size: 0 },
+        Op { op: OP_FOLDER, path: "Casey Choir/Hymns".into(), expected_size: 0 },
+        Op { op: OP_WRITE, path: to.into(), expected_size: 560 },
+    ];
+    let pending = mspd::write(&PlanIn {
+        generation: root.header.generation + 1,
+        card_id: CARD_ID,
+        minor: 0,
+        run_id: 77,
+        base_generation: root.header.generation,
+        ops,
+    })
+    .unwrap();
+    put(&dir.0, "/.mstream/pending.bin", &pending, LATER);
+    put(&dir.0, &format!("/music/{to}"), b"half of it", LATER);
+
+    server.stop_at = Some(from.into());
+    let parked = sync(&card, &wanted, &mut server, 8).unwrap();
+    assert!(parked.parked.is_some());
+    let plan = look(&card).pending.expect("the plan left on the card");
+    assert!(plan.ops.iter().any(|o| o.op == OP_WRITE && o.path == to), "{:?}", plan.ops);
+    assert!(card.stat(&format!("/music/{to}")).unwrap().is_some(), "still the software's");
+
+    server.stop_at = None;
+    server.failing.insert(from.into());
+    let failed = sync(&card, &wanted, &mut server, 9).unwrap();
+    assert_eq!((failed.verified, failed.deleted, failed.report.failed.len()), (Ok(()), 1, 1));
+    assert!(card.stat(&format!("/music/{to}")).unwrap().is_none(), "the half-finished work, gone");
+    assert!(look(&card).pending.is_none());
+
+    server.failing.clear();
+    let done = sync(&card, &wanted, &mut server, 10).unwrap();
+    assert_eq!((done.written, done.verified), (1, Ok(())));
+    assert!(records(&card).iter().any(|e| e.path == to));
+    assert!(!card.image().keys().any(|p| p.contains("Six (2)")));
+}
+
+/// 2.8.3, step 6 at step 8.3: a file found at a new name's place since the
+/// listing — the listener's, copied in under another case here; to a PC,
+/// another file's 8.3 alias — is a collision. It stays as it is, and the
+/// file waits for the next run, which names it around it.
+#[test]
+fn a_file_found_at_a_new_name_is_never_deleted() {
+    let dir = Scratch::new("collision");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    let six = corpus("trck_0.mp3");
+    let from = "Lib/Alex Artist/First Album/03 - Six.mp3";
+    server.add(from, six.clone());
+    wanted.files.push(track(from, &six, 401));
+    let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
+    assert_eq!(plan.fetches().0, 1);
+    let theirs = corpus("latin1.mp3");
+    let path = "/music/Alex Artist/First Album/03 - SIX.MP3";
+    put(&dir.0, path, &theirs, LATER);
+    let outcome = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    assert_eq!((outcome.verified, outcome.written, outcome.deleted), (Ok(()), 0, 0));
+    let failed: Vec<&str> = outcome.report.failed.iter().map(|f| f.0.as_str()).collect();
+    assert_eq!(failed, [from]);
+    assert_eq!(card.read(path, 1 << 20).unwrap(), Some(theirs.clone()), "the listener's, as it was");
+
+    sync(&card, &wanted, &mut server, 5).unwrap();
+    assert!(records(&card).iter().any(|e| e.path == "Alex Artist/First Album/03 - Six (2).mp3"));
+    assert_eq!(card.read(path, 1 << 20).unwrap(), Some(theirs));
+}
+
+/// 2.11: a ledger file is the software's only while it is the one listed.
+/// One the listener changes after the listing, before the run replaces or
+/// moves it, is theirs: left as it is, out of the ledger, reported; one
+/// they delete is gone from the ledger.
+#[test]
+fn a_file_changed_since_the_listing_is_neither_replaced_nor_moved() {
+    let two = "Alex Artist/First Album/02 - Two.mp3";
+    let three = "Alex Artist/Second Album/01 - Three.flac";
+    for (step, deleted) in [("replace", false), ("move", false), ("move", true)] {
+        let what = format!("{step}, deleted: {deleted}");
+        let dir = Scratch::new("changed-since");
+        let (card, mut wanted, mut server) = first(&dir.0);
+        let rel = if step == "replace" {
+            let bytes = corpus("v23_utf16.mp3");
+            server.add("Lib/Alex Artist/First Album/02 - Two.mp3", bytes.clone());
+            wanted.files[1] = track("Lib/Alex Artist/First Album/02 - Two.mp3", &bytes, 102);
+            two
+        } else {
+            server.add(MOVED, server.files["Lib/Alex Artist/Second Album/01 - Three.flac"].clone());
+            wanted.files[2].ledger.server_path = MOVED.into();
+            three
+        };
+        let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
+        let planned = (plan.fetches().0, plan.renames());
+        assert_eq!(planned, if step == "replace" { (1, 0) } else { (0, 1) }, "{what}");
+        let path = format!("/music/{rel}");
+        let mut edited = card.read(&path, 1 << 20).unwrap().unwrap();
+        edited.extend_from_slice(b"TAG edited by the listener");
+        match deleted {
+            true => std::fs::remove_file(dir.0.join(&path[1..])).unwrap(),
+            false => put(&dir.0, &path, &edited, LATER),
+        }
+        let outcome = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!((outcome.written, outcome.renamed), (0, 0), "{what}");
+        let report = if deleted { &outcome.report.gone } else { &outcome.report.spared };
+        assert_eq!(report, &[rel], "{what}");
+        let kept = card.read(&path, 1 << 20).unwrap();
+        assert_eq!(kept, (!deleted).then_some(edited), "{what}: as the listener left it");
+        let paths: Vec<String> = records(&card).into_iter().map(|e| e.path).collect();
+        assert_eq!(paths.len(), 5, "{what}: {paths:?}");
+        let name = rel.rsplit('/').next().unwrap();
+        assert!(!paths.iter().any(|p| p.ends_with(name)), "{what}: {paths:?}");
+    }
+}
+
+/// A plan of another card (a `/.mstream` copied from one) makes none of
+/// this card's files the software's: the listener's file at one of its
+/// targets stays, and the plan goes.
+#[test]
+fn a_plan_of_another_card_owns_nothing_here() {
+    let dir = Scratch::new("foreign");
+    let (card, wanted, mut server) = first(&dir.0);
+    let root = look(&card).root.unwrap().manifest;
+    let other = 0x0123_4567_89AB_CDEF;
+    let ops = vec![Op { op: OP_WRITE, path: "Mine/song.mp3".into(), expected_size: 540 }];
+    let pending = mspd::write(&PlanIn {
+        generation: root.header.generation + 1,
+        card_id: other,
+        minor: 0,
+        run_id: 78,
+        base_generation: root.header.generation,
+        ops,
+    })
+    .unwrap();
+    put(&dir.0, "/.mstream/pending.bin", &pending, LATER);
+    let mine = corpus("latin1.mp3");
+    put(&dir.0, "/music/Mine/song.mp3", &mine, LATER);
+    let extras = &mut Extras::default();
+    let (ran, events) = sync_with(&card, &wanted, &mut server, extras, knobs(), Answers::default(), 6);
+    assert_eq!(ran.unwrap().verified, Ok(()));
+    assert!(events.contains(&Event::ForeignPlan(other)), "{events:?}");
+    assert_eq!(card.read("/music/Mine/song.mp3", 1 << 20).unwrap(), Some(mine), "the listener's");
+    assert!(look(&card).pending.is_none(), "the plan gone");
 }
 
 /// 2.3.4's skew: the PC lists every stamp an hour off (a time zone change);

@@ -34,6 +34,7 @@ use super::super::contract::mptg::{ADOPTED, HASH_SAMPLED, Ledger, VERIFIED};
 use super::super::contract::prim::{hash_sampled, qfp, qfp_ranges};
 use super::super::contract::server::{NO_INSTANCE, Server, Verdict, srvs_breaks};
 use super::super::names::{Bytes, Layout, Namer, Wanted};
+use super::super::volume::Item;
 use super::settle::card_qfp;
 use super::survey::{Side, join, key_path};
 use super::{Answers, Fetcher, Guard, Removal, Report, Session, Stop, WantedCard, WantedFile};
@@ -87,6 +88,28 @@ pub(super) struct Write {
     /// A rename of a file already on the card (a move on the server), from
     /// this path; None: the bytes are fetched.
     pub(super) from: Option<String>,
+    /// The file it replaces in place, as listed; None: a new name, where
+    /// any file at all is a collision (2.8.3, step 6), never deleted.
+    pub(super) replaces: Option<Replaced>,
+}
+
+/// A file a write replaces in place (2.11): a ledger file, or a cut run's
+/// half-finished work. It goes at step 8.3 only while it is still what the
+/// listing said, as a delete of step 7 does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Replaced {
+    pub(super) size: u64,
+    pub(super) fat_time: u32,
+    /// A cut run's half-finished work (2.12.3): no ledger file, and one a
+    /// run that can't replace it deletes, or a later run takes it for the
+    /// listener's.
+    pub(super) ours: bool,
+}
+
+impl Replaced {
+    fn of(item: &Item, ours: bool) -> Replaced {
+        Replaced { size: item.size, fat_time: item.fat_time, ours }
+    }
 }
 
 /// What a run will do, and what it needs answered first.
@@ -352,7 +375,8 @@ pub(super) fn plan(
             },
             Side::Changed { path } => match paired {
                 Some(f) if s.knobs.replace_edits && card_extension(&files[f]) == ext_of(path) => {
-                    writes.push(Write { path: path.clone(), file: f, from: None });
+                    let replaces = item_of(path).map(|i| Replaced::of(&i, false));
+                    writes.push(Write { path: path.clone(), file: f, from: None, replaces });
                     seeds.kept.push((path.clone(), srv as u16, files[f].ledger.server_path.clone()));
                 }
                 // The listener's now (U5); a file of the selection still,
@@ -366,7 +390,8 @@ pub(super) fn plan(
             },
             Side::Ours { path } => match paired {
                 Some(f) if card_extension(&files[f]) == ext_of(path) => {
-                    writes.push(Write { path: path.clone(), file: f, from: None });
+                    let replaces = item_of(path).map(|i| Replaced::of(&i, true));
+                    writes.push(Write { path: path.clone(), file: f, from: None, replaces });
                     seeds.kept.push((path.clone(), srv as u16, files[f].ledger.server_path.clone()));
                 }
                 Some(f) => {
@@ -400,7 +425,8 @@ pub(super) fn plan(
                         // extension stays, else deleted and written anew.
                         if card_extension(&files[f]) == ext_of(&path) {
                             keeps.push(keep(row.ledger.clone()));
-                            writes.push(Write { path: path.clone(), file: f, from: None });
+                            let replaces = Some(Replaced { size, fat_time, ours: false });
+                            writes.push(Write { path: path.clone(), file: f, from: None, replaces });
                             seeds.kept.push((path, srv as u16, files[f].ledger.server_path.clone()));
                         } else {
                             deletes.push(Delete { path, size, fat_time, removal: false, ours: false });
@@ -510,10 +536,15 @@ pub(super) fn plan(
     named.extend(to_name.iter().filter(|t| !adopted.contains(&t.0)).map(|t| (t.0, None)));
     let these: Vec<Wanted> = named.iter().map(|&(f, _)| wanted(files, &at, f)).collect();
     // A move the names refuse stays where it is, under its old row; a file
-    // they refuse is reported.
+    // they refuse is reported. A cut run's target at the name a file takes
+    // is its half-finished work, replaced in place (2.12.3).
+    let recovering: HashMap<Vec<String>, &String> =
+        recover_free.iter().map(|p| (key_path(p), p)).collect();
     for ((f, from), placed) in named.into_iter().zip(second.place(&these)) {
         if let Ok(path) = placed {
-            writes.push(Write { path, file: f, from });
+            let cut = recovering.get(&key_path(&path)).and_then(|p| item_of(p));
+            let replaces = cut.map(|i| Replaced::of(&i, true));
+            writes.push(Write { path, file: f, from, replaces });
         }
     }
     let names_report = second.report();
@@ -543,20 +574,31 @@ pub(super) fn plan(
     }
 
     // ── Q1's gates, and 2.10.2's mass-deletion guard ──
+    // The strong gate lists every file the run would take off the card,
+    // its own leftovers aside: each delete, and each file replaced in place
+    // (deleted at step 8.3 before its new bytes go there).
     let removals: Vec<String> =
         deletes.iter().filter(|d| d.removal).map(|d| d.path.clone()).collect();
-    let ledger_files = rows.len();
-    let mut strong = !removals.is_empty() && removals.len() * 2 > ledger_files;
+    let mut lost: Vec<String> =
+        deletes.iter().filter(|d| !d.ours).map(|d| d.path.clone()).collect();
+    let replaced = writes.iter().filter(|w| w.replaces.is_some_and(|r| !r.ours));
+    lost.extend(replaced.map(|w| w.path.clone()));
+    lost.sort();
+    lost.dedup();
+    let mut strong = !removals.is_empty() && removals.len() * 2 > rows.len();
+    // Most of a server's rows gone from its whole manifest (a rebuilt or
+    // emptied library, another server at its address): asked before the
+    // run deletes or replaces anything, whether or not a file left the
+    // selection — the same paths with new audio pair and are replaced.
     for (o, origin) in origins.iter().enumerate() {
         let Some(whole) = &origin.whole else { continue };
         let theirs = rows.iter().map(|r| &r.ledger).filter(|l| l.server as usize == at[o]);
         let hashed: Vec<&Ledger> = theirs.filter(|l| l.audio_hash != [0; 16]).collect();
         let gone = hashed.iter().filter(|l| !whole.contains(&l.audio_hash)).count();
-        strong |= !hashed.is_empty() && gone * 2 > hashed.len();
+        strong |= !lost.is_empty() && !hashed.is_empty() && gone * 2 > hashed.len();
     }
-    strong &= !removals.is_empty();
     if strong && !answers.mass_removals {
-        guards.push(Guard::Removals { paths: removals, strong: true });
+        guards.push(Guard::Removals { paths: lost, strong: true });
     } else if removals.len() > s.knobs.gate && !answers.removals && !answers.mass_removals {
         guards.push(Guard::Removals { paths: removals, strong: false });
     }
