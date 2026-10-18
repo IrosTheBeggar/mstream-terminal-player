@@ -9,7 +9,7 @@ U18, proposed). The player's code stays GPL-3.0-or-later.
 
 This copy is mstream-terminal's, taken from the player's repo
 (IrosTheBeggar/mstream-mp3-player, `test/fixtures/card` at commit
-8db6c24): every file but this paragraph is byte for byte the player's.
+d8e797b): every file but this paragraph is byte for byte the player's.
 Copy them again from there when the contract changes (docs/METADATA.md
 2.17 there says how they may); never edit them here. The terminal's
 tests are `src/device/card/contract/tests.rs` (the kit), and those of

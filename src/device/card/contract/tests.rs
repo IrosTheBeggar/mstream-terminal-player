@@ -743,14 +743,17 @@ fn vectors_device_txt() {
     assert_eq!(file.to_text(), text(&d["text"]));
     assert!(file.decodes("OPUS") && file.lists("opus") && file.writes_mpdj());
     assert!(file.reads(Format::Msmf, 1) && !file.reads(Format::Mpdj, 1) && file.reads(Format::Mpdj, 2));
-    // No file: the defaults, which noFile lists key by key.
+    // 0.12.0 keeps a play log: `history` lists major 1 (2.15).
+    assert!(file.logs_plays() && file.history == 1);
+    // No file: the defaults, which noFile lists key by key; no play log.
     let none = DeviceTxt::read(None);
     let text_of = none.to_text();
     let keys: BTreeMap<&str, &str> = text_of.lines().filter_map(|l| l.split_once('=')).collect();
     for (k, want) in d["noFile"].as_object().expect("noFile") {
         assert_eq!(keys.get(k.as_str()).copied(), Some(text(want)), "{k}");
     }
-    assert!(!none.present && !none.writes_mpdj() && !none.decodes("opus"));
+    assert!(!none.present && !none.writes_mpdj() && !none.decodes("opus") && !none.logs_plays());
+    assert!(!keys.contains_key("history"));
     // A file with no contract line isn't one; a key missing keeps its
     // default; an empty value says none; CRLF is read.
     assert_eq!(DeviceTxt::read(Some(b"read.mpdj=2\n")), DeviceTxt::defaults());
