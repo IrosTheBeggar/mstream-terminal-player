@@ -267,6 +267,14 @@ pub(crate) fn find() -> std::io::Result<Vec<Found>> {
     Ok(judge_all(&volumes, &system))
 }
 
+/// The FAT serial of the volume at `root` (`E:\`), as GetVolumeInformationW
+/// gives it now: what a run reads again to be sure the card is still the
+/// one it was bound to. None when the drive has no volume now (pulled).
+#[cfg(windows)]
+pub(crate) fn serial(root: &std::path::Path) -> Option<Serial> {
+    sys::serial(root).map(Serial::Fat)
+}
+
 /// The card's wall-clock time of a file Windows dates `utc` (Unix seconds):
 /// FileTimeToLocalFileTime, which converts with the bias in force now, as
 /// the FAT driver did (2.3.4). Elsewhere, unchanged.
@@ -397,6 +405,32 @@ mod sys {
             pages: pages.iter().filter_map(|p| volume_of(&mount_point(p.trim_start_matches(r"\??\"))?)).collect(),
         };
         Ok((volumes, system))
+    }
+
+    /// The serial of the volume at a root path (`E:\`, or a folder it is
+    /// mounted on), with no dialog for an empty reader.
+    pub(super) fn serial(root: &std::path::Path) -> Option<u32> {
+        let _quiet = Quiet::new();
+        let mut path = root.to_string_lossy().into_owned();
+        if !path.ends_with('\\') {
+            path.push('\\');
+        }
+        let mut serial = 0u32;
+        // SAFETY: a NUL-terminated root path and one out-parameter; the
+        // buffers not asked for are null with a length of 0.
+        let read = unsafe {
+            GetVolumeInformationW(
+                wide(&path).as_ptr(),
+                null_mut(),
+                0,
+                &mut serial,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                0,
+            )
+        } != 0;
+        read.then_some(serial)
     }
 
     /// What Windows says of one volume, by its `\\?\Volume{…}\` name.

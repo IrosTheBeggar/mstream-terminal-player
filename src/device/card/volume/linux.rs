@@ -464,10 +464,27 @@ pub(crate) fn found(host: &dyn Host) -> Option<Vec<Found>> {
     Some(out)
 }
 
+/// The serial of the filesystem mounted whole at `point` (the last mount
+/// there, the one on top), as /dev/disk/by-uuid names it: what a run reads
+/// again to be sure the card is still the one it was bound to. A few small
+/// reads, no lsblk. None when nothing is mounted there.
+pub(crate) fn serial_at(host: &dyn Host, point: &str) -> Option<Serial> {
+    let all = mounts(&host.read("/proc/self/mountinfo")?);
+    let m = all.iter().rev().find(|m| m.point == point && m.root == "/")?;
+    let b = block_of_mount(host, m)?;
+    named(host, "/dev/disk/by-uuid", &b.name).map(|uuid| Serial::parse(&uuid))
+}
+
 /// This machine's volumes, judged.
 #[cfg(target_os = "linux")]
 pub(crate) fn find() -> std::io::Result<Vec<Found>> {
     found(&sys::Machine).ok_or_else(|| std::io::Error::other("/proc/self/mountinfo can't be read"))
+}
+
+/// [`serial_at`] on this machine.
+#[cfg(target_os = "linux")]
+pub(crate) fn serial(point: &str) -> Option<Serial> {
+    serial_at(&sys::Machine, point)
 }
 
 #[cfg(target_os = "linux")]
@@ -757,6 +774,13 @@ mod tests {
         assert_eq!(card.volume.utf8, Some(true));
         assert_eq!(card.volume.space, Some(CARD));
         assert_eq!(card.volume.clock, Clock::Offset(0));
+
+        // What a run reads again before it writes: the same serial, by the
+        // mount point alone; nothing at a folder that isn't one.
+        let pi = pi();
+        assert_eq!(serial_at(&pi, "/media/user/CARD ONE"), Some(Serial::Fat(0x1A2B_3C4D)));
+        assert_eq!(serial_at(&pi, "/boot/firmware"), Some(Serial::Fat(0x5E6F_7081)));
+        assert_eq!(serial_at(&pi, "/media/user"), None);
     }
 
     #[test]

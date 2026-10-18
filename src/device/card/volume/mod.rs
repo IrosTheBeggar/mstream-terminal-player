@@ -3,9 +3,11 @@
 //! only in a PC's reader (the Core2's USB is a serial bridge), so this is
 //! where the transfer meets the OS: [`find`] asks it about its volumes and
 //! holds each to the drive-safety rule, [`inspect`] reads what an accepted
-//! card holds, and [`CardFs`] is a card as the device lists it. Nothing here
-//! writes to any volume; the run that writes (the engine) takes only a card
-//! [`find`] accepted and the listener picked.
+//! card holds, and [`CardFs`] is a card as the device lists it. Nothing
+//! here decides to write: [`CardWrite`] is the write half the engine's runs
+//! drive, on a card [`find`] accepted and the listener picked, inside its
+//! volume only ([`Mounted::host`]); which paths a run may touch is the
+//! engine's to hold (2.11).
 //!
 //! **The rule** ([`judge`]) is one for every OS, once each OS has said what
 //! it knows of a volume and its disk ([`linux`], [`windows`], [`macos`]):
@@ -378,7 +380,7 @@ pub(crate) struct Item {
 /// A card, read as the device reads it: paths are card paths (`/music/…`,
 /// `/.mstream/manifest.bin`; `/` the volume's root), every name is listed as
 /// the card stores it (2.8.5), every stamp as its raw FAT fields (2.3.4).
-/// The read half; the engine's runs add the writes.
+/// The read half; [`CardWrite`] is the write half a run drives.
 pub(crate) trait CardFs {
     /// The entries of a folder, in no particular order.
     fn list(&self, dir: &str) -> io::Result<Vec<Item>>;
@@ -473,6 +475,163 @@ impl CardFs for Mounted {
         file.take(len as u64).read_to_end(&mut bytes)?;
         Ok(bytes)
     }
+}
+
+// ── The write half (docs/METADATA.md 2.12) ──────────────────────────────────
+
+/// A file on the card open to write, and to read back what was written.
+pub(crate) trait CardFile: Read + Write + Seek {
+    /// Its bytes flushed to the card (fsync): every file of 2.12 is whole on
+    /// the card before anything names it or a rename moves it.
+    fn sync(&mut self) -> io::Result<()>;
+    fn set_len(&mut self, len: u64) -> io::Result<()>;
+}
+
+impl CardFile for std::fs::File {
+    fn sync(&mut self) -> io::Result<()> {
+        self.sync_all()
+    }
+
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        std::fs::File::set_len(self, len)
+    }
+}
+
+/// `/.mstream/run.lock`, held open for a whole run (2.12.7): the OS's
+/// advisory lock on its handle keeps a second run on this computer off the
+/// card, and a pulled card shows up as a failed operation on it.
+pub(crate) trait LockFile {
+    /// The lock taken without waiting: false when another holds it.
+    fn try_lock(&mut self) -> io::Result<bool>;
+    /// What the file holds: a stale run's note, never trusted.
+    fn read_all(&mut self) -> io::Result<Vec<u8>>;
+    /// Its content replaced, and flushed to the card.
+    fn replace(&mut self, bytes: &[u8]) -> io::Result<()>;
+    /// The handle still reaches the card.
+    fn alive(&mut self) -> bool;
+}
+
+/// A card a run writes: the read half, and every write 2.12 makes, each on
+/// a card path (`/music/…`, `/.mstream/…`). Names match as FAT matches
+/// them, case-insensitively: a rename never replaces another file (the
+/// software deletes first, then renames: 2.12.1), while a rename that only
+/// changes a name's case is one file keeping its place.
+pub(crate) trait CardWrite: CardFs {
+    /// One text per volume: two runs on one card in this process share it.
+    fn key(&self) -> String;
+    /// The volume serial as the OS reports it now (2.10).
+    fn serial(&self) -> io::Result<Option<Serial>>;
+    /// A file there already, to read (and write) in place.
+    fn open(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>>;
+    /// A new file, or one there emptied.
+    fn create(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>>;
+    fn delete(&self, path: &str) -> io::Result<()>;
+    /// A file to a name no other entry of its folder has (AlreadyExists
+    /// otherwise), or to its own name in another case.
+    fn rename(&self, from: &str, to: &str) -> io::Result<()>;
+    /// A folder in a folder that is there.
+    fn mkdir(&self, path: &str) -> io::Result<()>;
+    /// An empty folder.
+    fn rmdir(&self, path: &str) -> io::Result<()>;
+    /// The lock file, opened or made, with nothing in it changed.
+    fn lock_file(&self, path: &str) -> io::Result<Box<dyn LockFile + '_>>;
+}
+
+/// [`LockFile`] on a mounted card: std's own advisory lock, `LockFileEx` on
+/// Windows and `flock` elsewhere.
+struct MountedLock(std::fs::File);
+
+impl LockFile for MountedLock {
+    fn try_lock(&mut self) -> io::Result<bool> {
+        match self.0.try_lock() {
+            Ok(()) => Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.0.seek(SeekFrom::Start(0))?;
+        (&mut self.0).take(64 * 1024).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn replace(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.set_len(0)?;
+        self.0.seek(SeekFrom::Start(0))?;
+        self.0.write_all(bytes)?;
+        self.0.sync_all()
+    }
+
+    fn alive(&mut self) -> bool {
+        self.0.metadata().is_ok()
+    }
+}
+
+impl CardWrite for Mounted {
+    fn key(&self) -> String {
+        self.root.display().to_string()
+    }
+
+    fn serial(&self) -> io::Result<Option<Serial>> {
+        #[cfg(windows)]
+        return Ok(windows::serial(&self.root));
+        #[cfg(target_os = "linux")]
+        return Ok(linux::serial(&self.root.to_string_lossy()));
+        #[cfg(target_os = "macos")]
+        return Ok(macos::serial(&self.root.to_string_lossy()));
+        #[allow(unreachable_code)]
+        Ok(None)
+    }
+
+    fn open(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>> {
+        Ok(Box::new(std::fs::File::options().read(true).write(true).open(self.host(path)?)?))
+    }
+
+    fn create(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>> {
+        let mut options = std::fs::File::options();
+        options.read(true).write(true).create(true).truncate(true);
+        Ok(Box::new(options.open(self.host(path)?)?))
+    }
+
+    fn delete(&self, path: &str) -> io::Result<()> {
+        std::fs::remove_file(self.host(path)?)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        let (a, b) = (self.host(from)?, self.host(to)?);
+        // The OS's own rename replaces a file there (MoveFileExW with
+        // REPLACE_EXISTING; rename(2)), which on FAT isn't atomic: 2.12.1's
+        // order is the engine's, and this refuses to replace anything.
+        if !same_entry(from, to) && std::fs::symlink_metadata(&b).is_ok() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a file of that name is there"));
+        }
+        std::fs::rename(a, b)
+    }
+
+    fn mkdir(&self, path: &str) -> io::Result<()> {
+        std::fs::create_dir(self.host(path)?)
+    }
+
+    fn rmdir(&self, path: &str) -> io::Result<()> {
+        std::fs::remove_dir(self.host(path)?)
+    }
+
+    fn lock_file(&self, path: &str) -> io::Result<Box<dyn LockFile + '_>> {
+        let mut options = std::fs::File::options();
+        options.read(true).write(true).create(true).truncate(false);
+        Ok(Box::new(MountedLock(options.open(self.host(path)?)?)))
+    }
+}
+
+/// Two card paths name one entry to FAT: every component alike by its
+/// match key (2.8.3, step 6), so `ACME/x.mp3` is `Acme/x.mp3`.
+pub(crate) fn same_entry(a: &str, b: &str) -> bool {
+    let key = |p: &str| {
+        p.split('/').filter(|n| !n.is_empty()).map(names::match_key).collect::<Vec<_>>()
+    };
+    key(a) == key(b)
 }
 
 /// A card path's component that [`Mounted::host`] may join: not `.` or `..`,
@@ -603,8 +762,8 @@ pub(crate) struct Music {
 }
 
 /// The schema majors of the private files this software reads (2.12.7).
-const STATE_VERSION: u64 = 1;
-const RESUME_VERSION: u64 = 1;
+pub(crate) const STATE_VERSION: u64 = 1;
+pub(crate) const RESUME_VERSION: u64 = 1;
 
 /// The deepest folder the music summary walks into: the device lists 8
 /// levels, so this only bounds a card made strangely.
@@ -656,14 +815,14 @@ pub(crate) fn inspect(card: &dyn CardFs) -> io::Result<Inspection> {
 
 /// The names 2.4.5's check reads: `manifest.*` and `pending.*` (`.bin`,
 /// `.tmp`), `tags-*.bin`, `autodj-*.bin`.
-fn contract_named(name: &str) -> bool {
+pub(crate) fn contract_named(name: &str) -> bool {
     matches!(name, "manifest.bin" | "manifest.tmp" | "pending.bin" | "pending.tmp")
         || (name.starts_with("tags-") || name.starts_with("autodj-")) && name.ends_with(".bin")
 }
 
 /// 2.5.4: both roots validated, the election, then the companions the
 /// winner names, each valid only when it validates and matches its entry.
-fn settle_root(read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<Root> {
+pub(crate) fn settle_root(read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<Root> {
     let valid = |name| read(name).and_then(|b| Manifest::read(&b, msmf::Uses::ALL).ok());
     let (bin, tmp) = (valid("manifest.bin"), valid("manifest.tmp"));
     let Election { pick, same_commit } = msmf::elect(
@@ -713,7 +872,7 @@ fn settle_pending(read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<mspd::Plan> 
 /// stops the software, whichever of the two it is: it reads none of it, and
 /// that file is the one named, with its version. Nothing is finished or
 /// deleted here.
-fn settle_private(json: Option<&[u8]>, new: Option<&[u8]>, x: &str, known: u64) -> Private {
+pub(crate) fn settle_private(json: Option<&[u8]>, new: Option<&[u8]>, x: &str, known: u64) -> Private {
     let format = format!("mstream-card-{x}");
     let valid = |bytes: Option<&[u8]>| bytes.and_then(|b| private_value(b, &format, known));
     let twice = matches!((json, new), (Some(a), Some(b)) if a == b);
@@ -1414,6 +1573,57 @@ mod tests {
         let seen = inspect(&card).unwrap();
         assert!(seen.root.is_none());
         assert_eq!((seen.music.audio, seen.music.unlisted), (1, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mounted_card_writes_as_a_run_needs() {
+        let dir = std::env::temp_dir().join(format!("mstream-card-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let found = Found::new(card_volume(&dir), card_disk());
+        let card = Mounted::of(&found).unwrap();
+        assert_eq!(card.key(), dir.display().to_string());
+        card.mkdir("/.mstream").unwrap();
+        let mut f = card.create("/.mstream/a.tmp").unwrap();
+        f.write_all(b"bytes and more").unwrap();
+        f.set_len(5).unwrap();
+        f.sync().unwrap();
+        drop(f);
+        let mut g = card.create("/.mstream/b.bin").unwrap();
+        g.write_all(b"other").unwrap();
+        drop(g);
+        // A rename never replaces a file: a run deletes it first (2.12.1).
+        let taken = card.rename("/.mstream/a.tmp", "/.mstream/b.bin").unwrap_err();
+        assert_eq!(taken.kind(), io::ErrorKind::AlreadyExists);
+        card.delete("/.mstream/b.bin").unwrap();
+        card.rename("/.mstream/a.tmp", "/.mstream/b.bin").unwrap();
+        assert_eq!(card.read("/.mstream/b.bin", 99).unwrap(), Some(b"bytes".to_vec()));
+        // One that changes a name's case alone keeps the file in its place.
+        card.rename("/.mstream/b.bin", "/.mstream/B.bin").unwrap();
+        assert_eq!(card.list("/.mstream").unwrap()[0].name, "B.bin");
+        let mut h = card.open("/.mstream/B.bin").unwrap();
+        let mut back = String::new();
+        h.read_to_string(&mut back).unwrap();
+        assert_eq!(back, "bytes");
+        drop(h);
+        card.mkdir("/.mstream/stage").unwrap();
+        card.rmdir("/.mstream/stage").unwrap();
+        // run.lock: a second handle can't take its lock while the first
+        // holds it (Windows keeps it from reading the file meanwhile too).
+        let mut lock = card.lock_file("/.mstream/run.lock").unwrap();
+        assert!(lock.try_lock().unwrap());
+        lock.replace(b"{}").unwrap();
+        let mut other = card.lock_file("/.mstream/run.lock").unwrap();
+        assert!(!other.try_lock().unwrap(), "held");
+        assert!(lock.alive());
+        drop(lock);
+        assert!(other.try_lock().unwrap(), "let go");
+        assert_eq!(other.read_all().unwrap(), b"{}");
+        drop(other);
+        // Nothing leaves the volume.
+        assert!(card.create("/../escape").is_err());
+        assert!(card.rename("/.mstream/B.bin", "/../B.bin").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
