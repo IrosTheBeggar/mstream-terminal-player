@@ -25,8 +25,9 @@
 //! never over the cable: so far its contract kit, the files the firmware
 //! reads from a card byte for byte; the names, tag records and Auto DJ
 //! index the transfer puts there by it; the cards in this computer's
-//! readers, found and held to the drive-safety rule; and the engine that
-//! writes a sync onto one of them.
+//! readers, found and held to the drive-safety rule; the engine that
+//! writes a sync onto one of them; and the set-up that makes a card one it
+//! syncs, with the card's identity and settings file.
 
 mod board;
 mod card;
@@ -86,6 +87,26 @@ enum DeviceCmd {
     // contract (docs/ux-contracts/mp3-player-screen.md, the command line).
     #[command(hide = true)]
     CardProbe,
+    // Sets up the card at a volume the drive-safety rule accepts (`/music`,
+    // the empty first commit, its state file) and prints what it found and
+    // did as JSON. For the real-card checks: the listener's `device card
+    // <drive> setup` waits for its UX contract too.
+    #[command(hide = true)]
+    CardSetup(CardSetupArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct CardSetupArgs {
+    // Where the card is mounted (`E:`, `/media/card`), or the OS's name for
+    // the volume.
+    volume: String,
+    // The card's label, for a card with no state file yet; the volume's own
+    // without it.
+    #[arg(long)]
+    label: Option<String>,
+    // A copied card's answer: an identity of its own.
+    #[arg(long)]
+    new_identity: bool,
 }
 
 #[derive(Args, Clone)]
@@ -191,6 +212,11 @@ pub fn run(args: DeviceArgs) -> i32 {
             releases_on(&*firmware::net(), args.pre, &mut out, &mut err)
         }
         DeviceCmd::CardProbe => card::volume::probe(&mut std::io::stdout(), &mut std::io::stderr()),
+        DeviceCmd::CardSetup(args) => {
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            let label = args.label.as_deref();
+            card::setup::command(&args.volume, label, args.new_identity, &mut out, &mut err)
+        }
         DeviceCmd::Flash(args) => {
             if let Some(refused) = args.mode_refused() {
                 eprintln!("mstream-player: {}", refused.text());
@@ -866,6 +892,14 @@ mod tests {
         assert!(matches!(parsed, Ok(DeviceCmd::CardProbe)));
         let help = Line::command().render_help().to_string();
         assert!(help.contains("releases") && !help.contains("card-probe"), "{help}");
+        // So does the set-up's, which needs a volume.
+        let parse = |args: &[&str]| Line::try_parse_from(["mstream-player"].iter().chain(args)).map(|l| l.what);
+        let setup = parse(&["card-setup", "E:", "--label", "Car", "--new-identity"]);
+        let Ok(DeviceCmd::CardSetup(args)) = setup else { panic!("card-setup") };
+        assert_eq!((args.volume.as_str(), args.label.as_deref(), args.new_identity), ("E:", Some("Car"), true));
+        assert!(matches!(parse(&["card-setup", "E:"]), Ok(DeviceCmd::CardSetup(CardSetupArgs { label: None, .. }))));
+        assert!(parse(&["card-setup"]).is_err(), "a volume, always");
+        assert!(!help.contains("card-setup"), "{help}");
     }
 
     /// `device list` on the fake, measured against this build's pin as

@@ -1493,3 +1493,48 @@ fn a_session_says_what_the_card_holds_and_covers_follow_the_hook() {
     assert!(system.id() != 0 && system.now() > 1_790_000_000);
     assert_eq!(system.producer, format!("mstream-terminal {}", env!("CARGO_PKG_VERSION")));
 }
+
+#[test]
+fn a_new_card_id_commits_the_same_files_and_is_a_run_of_its_own() {
+    let dir = Scratch::new("new-id");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    let before = look(&card).root.unwrap();
+    let (old_id, old) = (before.manifest.header.card_id, finished(&card));
+    assert!(old.autodj, "the first sync's index");
+    let answers = Answers { new_card_id: true, ..Answers::default() };
+
+    // Beside a file to write, refused before anything is written: a cut
+    // would leave the plan under one id and the root under another.
+    let six = corpus("trck_0.mp3");
+    server.add("Lib/Casey Choir/Hymns/01 - Six.mp3", six.clone());
+    wanted.files.push(track("Lib/Casey Choir/Hymns/01 - Six.mp3", &six, 401));
+    let (session, plan) = plan_of(&card, &wanted, &mut server, answers, knobs());
+    let image = card.image();
+    let stop = session.run(plan, &mut server, &mut Extras::default(), &mut |_| {}).unwrap_err();
+    assert!(matches!(stop, Stop::Refused(_)), "{stop}");
+    let image_now = card.image();
+    let kept = |(p, f): (&String, &(u64, u32, u64))| p.ends_with("run.lock") || image_now.get(p) == Some(f);
+    assert!(image.iter().all(kept) && !image_now.contains_key("/.mstream/run.lock"));
+
+    // Alone: the same files under a new id. The index the old id's was is
+    // named no more; the hook builds one for the new id.
+    wanted.files.pop();
+    let (session, plan) = plan_of(&card, &wanted, &mut server, answers, knobs());
+    let mut events = Vec::new();
+    let mut extras = Extras::default();
+    let done = session.run(plan, &mut server, &mut extras, &mut |e| events.push(e)).unwrap();
+    assert_eq!((done.written, done.deleted, done.renamed, done.verified), (0, 0, 0, Ok(())));
+    assert!(done.card_id != old_id && done.card_id != 0);
+    let generation = before.manifest.header.generation + 1;
+    assert_eq!(events, [Event::Committed { generation, last: true }]);
+    let root = look(&card).root.unwrap();
+    let ids = (root.manifest.header.card_id, root.tags.as_ref().unwrap().header.card_id);
+    assert_eq!(ids, (done.card_id, done.card_id), "the root and its tags file carry it");
+    let index = |r: &Root| r.manifest.autodj.as_ref().map(|c| c.name());
+    assert!(index(&root).is_some() && index(&root) != index(&before), "an index of its own");
+    assert_eq!(finished(&card), old, "the same music, records, folders and an index");
+    // And a plain run after it changes nothing more.
+    let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
+    let again = session.run(plan, &mut server, &mut Extras::default(), &mut |_| {}).unwrap();
+    assert_eq!((again.card_id, again.commit_id), (done.card_id, done.commit_id));
+}

@@ -25,7 +25,7 @@ const FAT_EPOCH: i64 = 315_532_800;
 
 /// How a cut write fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Cut {
+pub(crate) enum Cut {
     /// The write doesn't happen (a write of bytes: half of them land).
     Fail,
     /// A rename stops between its two directory writes: the new name is
@@ -52,7 +52,7 @@ struct State {
     skew: i64,
 }
 
-pub(super) struct FatSim {
+pub(crate) struct FatSim {
     key: String,
     state: RefCell<State>,
     /// The writes a test may count on: (op, what).
@@ -67,7 +67,7 @@ fn pulled() -> io::Error {
 impl FatSim {
     /// A card in `dir` (made if it isn't there) with this serial; its clock
     /// starts at 2026-10-07 14:30:42.
-    pub(super) fn new(dir: &Path, serial: u32) -> FatSim {
+    pub(crate) fn new(dir: &Path, serial: u32) -> FatSim {
         std::fs::create_dir_all(dir).expect("a card folder");
         let clock = fat_wall(0x5D47_73D5).expect("a stamp");
         let state = State {
@@ -89,36 +89,36 @@ impl FatSim {
         }
     }
 
-    pub(super) fn root(&self) -> PathBuf {
+    pub(crate) fn root(&self) -> PathBuf {
         self.state.borrow().root.clone()
     }
 
     /// The `n`th write from now on fails, as `how` says, and the card is
     /// pulled with it.
-    pub(super) fn cut_at(&self, n: u64, how: Cut) {
+    pub(crate) fn cut_at(&self, n: u64, how: Cut) {
         let mut s = self.state.borrow_mut();
         s.cut = Some((s.ops + n, how));
     }
 
     /// The card back in the reader, uncut: handles from before stay dead.
-    pub(super) fn replug(&self) {
+    pub(crate) fn replug(&self) {
         let mut s = self.state.borrow_mut();
         (s.pulled, s.cut) = (false, None);
     }
 
     /// After the `n`th write from now on, `dir` is the card in the reader.
-    pub(super) fn swap_after(&self, n: u64, dir: &Path, serial: u32) {
+    pub(crate) fn swap_after(&self, n: u64, dir: &Path, serial: u32) {
         let mut s = self.state.borrow_mut();
         s.swap = Some((s.ops + n, dir.to_path_buf(), serial));
     }
 
     /// The PC lists every stamp `seconds` off (a time zone, 2.3.4).
-    pub(super) fn set_skew(&self, seconds: i64) {
+    pub(crate) fn set_skew(&self, seconds: i64) {
         self.state.borrow_mut().skew = seconds;
     }
 
     /// The writes so far, each as "op path".
-    pub(super) fn log(&self) -> Vec<String> {
+    pub(crate) fn log(&self) -> Vec<String> {
         self.log.borrow().clone()
     }
 
@@ -205,7 +205,7 @@ impl FatSim {
 
     /// Every file on the card: its card path, size, stamp and the FNV-1a 64
     /// of its bytes, by path. A card in a folder, read as it stands.
-    pub(super) fn image(&self) -> BTreeMap<String, (u64, u32, u64)> {
+    pub(crate) fn image(&self) -> BTreeMap<String, (u64, u32, u64)> {
         self.quiet.set(true);
         let mut out = BTreeMap::new();
         let mut stack = vec![String::new()];

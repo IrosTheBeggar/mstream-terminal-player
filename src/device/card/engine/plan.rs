@@ -133,9 +133,18 @@ pub(crate) struct Plan {
     /// The decisions still to answer; the run refuses while any is left.
     pub(crate) guards: Vec<Guard>,
     pub(crate) report: Report,
+    /// The commit mints a new card id ([`Answers::new_card_id`]).
+    pub(super) new_card_id: bool,
 }
 
 impl Plan {
+    /// The run would delete, write, rename or adopt a file of `/music`: a
+    /// card's set-up, which never touches the listener's music, refuses
+    /// such a plan.
+    pub(crate) fn touches_music(&self) -> bool {
+        !self.deletes.is_empty() || !self.writes.is_empty() || !self.adopts.is_empty()
+    }
+
     /// The files that leave the card because they left the selection: the
     /// list shown before a sync (Q1).
     pub(crate) fn removals(&self) -> Vec<&str> {
@@ -631,6 +640,7 @@ pub(super) fn plan(
         roots: roots.into_iter().collect(),
         guards,
         report,
+        new_card_id: answers.new_card_id,
     })
 }
 

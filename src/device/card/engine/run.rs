@@ -144,12 +144,18 @@ impl<'r, 'c> Runner<'r, 'c> {
         let root = s.settled.root.as_ref();
         let generation = root.map_or(0, |r| r.manifest.header.generation);
         let next = if root.is_some() { generation + 1 } else { s.settled.top + 1 };
-        let card_id = match root.map_or(0, |r| r.manifest.header.card_id) {
-            0 => s.env.id(),
-            id => id,
-        };
+        // A card's first commit mints its id; so does a copied card's new
+        // identity, a run of its own: a plan of the new id cut before its
+        // first commit would be another card's to the next run (2.11).
+        if plan.new_card_id && plan.touches_music() {
+            return Err(Stop::Refused("a new card id is a run of its own".into()));
+        }
+        let old_id = root.map_or(0, |r| r.manifest.header.card_id);
+        let card_id = if old_id == 0 || plan.new_card_id { s.env.id() } else { old_id };
         let tags_name = root.map(|r| r.manifest.tags.name());
-        let valid = s.settled.autodj.is_some();
+        // An Auto DJ index carries the card id it was built for: under a new
+        // one no commit names the old index again (AUTODJ-INDEX.md 7.3).
+        let valid = s.settled.autodj.is_some() && card_id == old_id;
         let autodj = root.and_then(|r| r.manifest.autodj.clone()).filter(|_| valid);
         let acks = root.map(|r| r.manifest.acks.clone()).unwrap_or_default();
         let mut owns: HashSet<Vec<String>> = HashSet::new();
@@ -396,11 +402,7 @@ impl<'r, 'c> Runner<'r, 'c> {
     /// `/music` and every folder of `rel` that isn't there, made (2.8.1;
     /// OWNED from the next commit on).
     fn make_folders(&mut self, rel: &str) -> Result<(), Stop> {
-        if self.s.music.top.is_none() {
-            self.s.bound.alive()?.mkdir("/music").map_err(|e| self.failed(e))?;
-            self.s.music.top = Some("music".into());
-            self.s.music.dirs.insert(String::new(), Vec::new());
-        }
+        self.s.music_folder()?;
         let names: Vec<&str> = rel.split('/').collect();
         let mut dir = String::new();
         for name in &names[..names.len() - 1] {
@@ -993,7 +995,8 @@ impl<'r, 'c> Runner<'r, 'c> {
         let Some(root) = self.s.settled.root.as_ref() else { return false };
         let Ok(tags) = root.tags.as_ref() else { return false };
         let m = &root.manifest;
-        if self.pending || !m.is_final() || self.s.survey.reread || !tags.has_ledger {
+        let new_id = m.header.card_id != self.card_id;
+        if self.pending || !m.is_final() || self.s.survey.reread || !tags.has_ledger || new_id {
             return false;
         }
         let (_, old_records, old_folders) = tags.to_input();

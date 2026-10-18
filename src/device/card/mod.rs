@@ -21,6 +21,11 @@
 //! card, and planned against what the card and its ledger hold. [`source`]
 //! is where a run's bytes come from: the server's own folders on this
 //! computer's disk when it runs beside the server, else the network.
+//! [`setup`] makes a FAT card one the transfer syncs — `/music`, the empty
+//! first commit that mints the card's id, and its state file ([`state`]:
+//! the card's identity and settings) — and says when a card is a copy of
+//! another, with this computer's cache of the cards it has seen
+//! ([`cards`]).
 
 // The kit and the engine built on it wait for their callers (the sync of
 // the user's server, the Card view): until they land only the tests call
@@ -28,9 +33,12 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod autodj;
+pub(crate) mod cards;
 pub(crate) mod contract;
 pub(crate) mod engine;
 pub(crate) mod names;
+pub(crate) mod setup;
 pub(crate) mod source;
+pub(crate) mod state;
 pub(crate) mod tags;
 pub(crate) mod volume;

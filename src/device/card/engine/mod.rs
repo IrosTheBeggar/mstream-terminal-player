@@ -28,17 +28,23 @@
 //!   the Auto DJ index, the final commit, the collection, and a last read of
 //!   the card as the device reads it ([`run`]).
 //!
+//! Beside a run, a session writes what a card's set-up needs (B2): `/music`
+//! ([`Session::music_folder`]) and the card's settings, `state.json`, by
+//! 2.12.7's rule ([`private`]). A set-up's first commit is a run of an empty
+//! plan, which mints the card id.
+//!
 //! The card is the reference for every name and stamp (2.8.5, 2.3.4): what
 //! the engine records is what it reads back, never what it meant to write.
 
 mod bind;
 mod plan;
+mod private;
 mod run;
 mod settle;
 mod survey;
 
 #[cfg(test)]
-mod fatsim;
+pub(crate) mod fatsim;
 #[cfg(test)]
 mod tests;
 
@@ -213,6 +219,10 @@ pub(crate) struct Answers {
     /// U7: a server that may be one the card's files came from under
     /// another address is a server of its own.
     pub(crate) new_servers: bool,
+    /// A copied card (2.10: B2's checks) takes an identity of its own: the
+    /// commit mints a new card id, which every file it writes carries. A
+    /// run of its own, whose plan writes, deletes and adopts nothing.
+    pub(crate) new_card_id: bool,
 }
 
 /// A decision a plan needs before its run, or a refusal (the transfer
@@ -594,6 +604,18 @@ impl<'c> Session<'c> {
     pub(crate) fn identity(&self) -> (Option<super::volume::Serial>, u64, u64) {
         let Identity { serial, card_id, commit_id } = self.bound.id.clone();
         (serial, card_id, commit_id)
+    }
+
+    /// `/music`, made when the card has none (2.8.1: the software creates
+    /// it if missing, and never deletes it). True when this made it.
+    pub(crate) fn music_folder(&mut self) -> Result<bool, Stop> {
+        if self.music.top.is_some() {
+            return Ok(false);
+        }
+        self.bound.alive()?.mkdir("/music").map_err(|e| self.bound.failed(e))?;
+        self.music.top = Some("music".into());
+        self.music.dirs.insert(String::new(), Vec::new());
+        Ok(true)
     }
 
     /// A plan for this card: the selection paired with the ledger, the
