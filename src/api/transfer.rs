@@ -1125,6 +1125,112 @@ pub(crate) mod stub {
         let body = request.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
         serde_json::from_str(body).unwrap_or(serde_json::Value::Null)
     }
+
+    /// A request as [`routed`] hands it to its handler.
+    #[derive(Clone, Debug)]
+    pub(crate) struct Asked {
+        pub(crate) method: String,
+        /// The path and query, as sent (percent-encoded).
+        pub(crate) target: String,
+        /// Each header, its name lowercase.
+        pub(crate) headers: Vec<(String, String)>,
+        pub(crate) body: Vec<u8>,
+    }
+
+    impl Asked {
+        pub(crate) fn header(&self, name: &str) -> Option<&str> {
+            self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        }
+
+        /// The path, percent-decoded, without its query.
+        pub(crate) fn path(&self) -> String {
+            let raw = self.target.split('?').next().unwrap_or_default().as_bytes();
+            let mut out = Vec::with_capacity(raw.len());
+            let mut i = 0;
+            while i < raw.len() {
+                let hex = raw.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok());
+                match (raw[i], hex.and_then(|h| u8::from_str_radix(h, 16).ok())) {
+                    (b'%', Some(b)) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    (c, _) => {
+                        out.push(c);
+                        i += 1;
+                    }
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        }
+
+        /// The query's value of `key`, as sent.
+        pub(crate) fn query(&self, key: &str) -> Option<&str> {
+            let query = self.target.split_once('?')?.1;
+            let pairs = query.split('&').filter_map(|p| p.split_once('='));
+            pairs.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+        }
+
+        pub(crate) fn json(&self) -> serde_json::Value {
+            serde_json::from_slice(&self.body).unwrap_or(serde_json::Value::Null)
+        }
+    }
+
+    /// A server whose answers depend on the request, not its turn: every
+    /// connection on a thread of its own, its one request handed to
+    /// `answer`, whose bytes go back before the connection closes. For
+    /// requests that come in no set order (a run's, made on several
+    /// threads). It serves until the test process ends.
+    pub(crate) fn routed(answer: impl Fn(&Asked) -> Vec<u8> + Send + Sync + 'static) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let answer = std::sync::Arc::new(answer);
+        std::thread::spawn(move || {
+            for sock in listener.incoming() {
+                let Ok(mut sock) = sock else { continue };
+                let answer = answer.clone();
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    let head_end = loop {
+                        if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break at + 4;
+                        }
+                        match sock.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&request[..head_end]).to_string();
+                    let mut lines = head.lines();
+                    let first: Vec<&str> = lines.next().unwrap_or_default().split(' ').collect();
+                    let headers: Vec<(String, String)> = lines
+                        .filter_map(|l| l.split_once(':'))
+                        .map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string()))
+                        .collect();
+                    let length = headers
+                        .iter()
+                        .find(|(n, _)| n == "content-length")
+                        .and_then(|(_, v)| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while request.len() < head_end + length {
+                        match sock.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let asked = Asked {
+                        method: first.first().copied().unwrap_or_default().to_string(),
+                        target: first.get(1).copied().unwrap_or_default().to_string(),
+                        headers,
+                        body: request[head_end..].to_vec(),
+                    };
+                    let _ = sock.write_all(&answer(&asked));
+                    let _ = sock.flush();
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
 }
 
 #[cfg(test)]

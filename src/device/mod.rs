@@ -93,6 +93,13 @@ enum DeviceCmd {
     // <drive> setup` waits for its UX contract too.
     #[command(hide = true)]
     CardSetup(CardSetupArgs),
+    // Syncs a set-up card at a volume the drive-safety rule accepts from the
+    // server of the saved session, and prints the plan and what came of it
+    // as JSON; `--dry-run` plans and writes nothing. For the real-card
+    // checks: the listener's `device card <drive> sync` waits for its UX
+    // contract too.
+    #[command(hide = true)]
+    CardSync(CardSyncArgs),
 }
 
 #[derive(Args, Clone)]
@@ -107,6 +114,115 @@ pub struct CardSetupArgs {
     // A copied card's answer: an identity of its own.
     #[arg(long)]
     new_identity: bool,
+}
+
+// The settings flags change the card's settings, stored after a run; the
+// answers are this run's alone.
+#[derive(Args, Clone)]
+pub struct CardSyncArgs {
+    // Where the card is mounted, or the OS's name for the volume.
+    volume: String,
+    // Plan and print, and write nothing to the card.
+    #[arg(long)]
+    dry_run: bool,
+    // A library to sync, by its name on the server; again for several. The
+    // card's own selection without, else every library the account sees.
+    #[arg(long = "library", value_name = "VPATH")]
+    libraries: Vec<String>,
+    // unplayable | everything
+    #[arg(long)]
+    convert: Option<String>,
+    // opus | mp3
+    #[arg(long)]
+    codec: Option<String>,
+    // 64 | 96 | 128 | 192
+    #[arg(long)]
+    kbps: Option<u32>,
+    // auto | plain | vpath
+    #[arg(long)]
+    layout: Option<String>,
+    // mirror | never
+    #[arg(long)]
+    removal: Option<String>,
+    #[arg(long, value_name = "BOOL")]
+    covers: Option<bool>,
+    #[arg(long, value_name = "BOOL")]
+    auto_dj: Option<bool>,
+    #[arg(long, value_name = "BOOL")]
+    for_someone_else: Option<bool>,
+    // The server's name on this card ("Home"); never an address.
+    #[arg(long)]
+    nickname: Option<String>,
+    #[arg(long)]
+    allow_removals: bool,
+    #[arg(long)]
+    allow_mass_removals: bool,
+    #[arg(long, value_name = "BOOL")]
+    adopt: Option<bool>,
+    #[arg(long)]
+    new_server: bool,
+    #[arg(long)]
+    same_server: bool,
+    #[arg(long)]
+    disk_checked: bool,
+    // Read the server's manifest whole, whatever the schedule says.
+    #[arg(long)]
+    whole: bool,
+}
+
+impl CardSyncArgs {
+    /// The sync these flags ask for, or the flag a word of which isn't one.
+    fn ask(&self) -> Result<card::sync::Ask, String> {
+        use card::engine::{Answers, Removal};
+        use card::state::{Convert, Layout};
+        type Word<T> = Result<Option<T>, String>;
+        fn word<T>(flag: &str, value: &Option<String>, of: impl Fn(&str) -> Option<T>) -> Word<T> {
+            let refused = |v: &str| format!("--{flag} {v} isn't one it takes");
+            match value {
+                None => Ok(None),
+                Some(v) => of(v).map(Some).ok_or_else(|| refused(v)),
+            }
+        }
+        let removal = |w: &str| match w {
+            "mirror" => Some(Removal::Mirror),
+            "never" => Some(Removal::Never),
+            _ => None,
+        };
+        let bitrate = match self.kbps {
+            None => None,
+            Some(k) => {
+                let bitrate = crate::api::urls::TransferBitrate::from_kbps(k);
+                Some(bitrate.ok_or_else(|| format!("--kbps {k} isn't one it takes"))?)
+            }
+        };
+        let change = card::sync::Change {
+            layout: word("layout", &self.layout, Layout::of_word)?,
+            convert: word("convert", &self.convert, Convert::of_word)?,
+            codec: word("codec", &self.codec, |c| c.parse().ok())?,
+            bitrate,
+            covers: self.covers,
+            auto_dj: self.auto_dj,
+            for_someone_else: self.for_someone_else,
+            removal: word("removal", &self.removal, removal)?,
+            nickname: self.nickname.clone(),
+        };
+        let answers = Answers {
+            disk_checked: self.disk_checked,
+            removals: self.allow_removals,
+            mass_removals: self.allow_mass_removals,
+            adopt: self.adopt,
+            new_servers: self.new_server,
+            new_card_id: false,
+        };
+        Ok(card::sync::Ask {
+            libraries: (!self.libraries.is_empty()).then(|| self.libraries.clone()),
+            change,
+            answers,
+            same_server: self.same_server,
+            whole: self.whole,
+            dry_run: self.dry_run,
+        })
+    }
 }
 
 #[derive(Args, Clone)]
@@ -217,6 +333,16 @@ pub fn run(args: DeviceArgs) -> i32 {
             let label = args.label.as_deref();
             card::setup::command(&args.volume, label, args.new_identity, &mut out, &mut err)
         }
+        DeviceCmd::CardSync(args) => match args.ask() {
+            Ok(ask) => {
+                let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+                card::sync::command(&args.volume, &ask, &mut out, &mut err)
+            }
+            Err(why) => {
+                eprintln!("mstream-player: {why}");
+                2
+            }
+        },
         DeviceCmd::Flash(args) => {
             if let Some(refused) = args.mode_refused() {
                 eprintln!("mstream-player: {}", refused.text());
@@ -900,6 +1026,27 @@ mod tests {
         assert!(matches!(parse(&["card-setup", "E:"]), Ok(DeviceCmd::CardSetup(CardSetupArgs { label: None, .. }))));
         assert!(parse(&["card-setup"]).is_err(), "a volume, always");
         assert!(!help.contains("card-setup"), "{help}");
+        // And the sync's: its flags are the card's settings and the run's
+        // answers.
+        let sync = parse(&[
+            "card-sync", "E:", "--dry-run", "--library", "Rock", "--library", "Jazz", "--convert", "everything",
+            "--codec", "mp3", "--kbps", "128", "--removal", "never", "--auto-dj", "false", "--allow-removals",
+        ]);
+        let Ok(DeviceCmd::CardSync(args)) = sync else { panic!("card-sync") };
+        let ask = args.ask().expect("words it takes");
+        assert!(ask.dry_run && ask.answers.removals && !ask.answers.mass_removals);
+        assert_eq!(ask.libraries.as_deref(), Some(["Rock".to_string(), "Jazz".to_string()].as_slice()));
+        let c = &ask.change;
+        assert_eq!(c.convert, Some(card::state::Convert::Everything));
+        use crate::api::urls::{TransferBitrate, TransferCodec};
+        assert_eq!((c.codec, c.bitrate), (Some(TransferCodec::Mp3), Some(TransferBitrate::K128)));
+        assert_eq!((c.removal, c.auto_dj), (Some(card::engine::Removal::Never), Some(false)));
+        let Ok(DeviceCmd::CardSync(bad)) = parse(&["card-sync", "E:", "--kbps", "320"]) else { panic!() };
+        assert!(bad.ask().unwrap_err().contains("320"), "MP3 at 320k needs the server's B11");
+        let Ok(DeviceCmd::CardSync(bad)) = parse(&["card-sync", "E:", "--layout", "spiral"]) else { panic!() };
+        assert!(bad.ask().is_err());
+        assert!(parse(&["card-sync"]).is_err(), "a volume, always");
+        assert!(!help.contains("card-sync"), "{help}");
     }
 
     /// `device list` on the fake, measured against this build's pin as

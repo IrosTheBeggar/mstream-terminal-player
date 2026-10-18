@@ -345,6 +345,17 @@ impl<F: Fetcher> Local<F> {
         self.tally
     }
 
+    /// The fetcher everything else goes to.
+    pub(crate) fn network(&mut self) -> &mut F {
+        &mut self.network
+    }
+
+    /// The covers of the libraries read from here, apart from the source:
+    /// what a run's cover step reads while the engine holds the source.
+    pub(crate) fn images(&self) -> Images {
+        Images(self.roots.clone())
+    }
+
     /// Where `file` would be on disk: the server's bytes (a conversion is
     /// the server's to make), of the server whose folders these are, in a
     /// library read from here. Whether it is the manifest's file is
@@ -365,31 +376,48 @@ impl<F: Fetcher> Local<F> {
     /// [`MAX_FILE`]; the caller then probes over HTTP, or takes mStream's
     /// album art.
     pub(crate) fn folder_image(&self, folder: &str) -> Option<FolderImage> {
-        let (vpath, rel) = folder.split_once('/').unwrap_or((folder, ""));
-        let root = self.roots.get(vpath)?;
-        let dir = if rel.is_empty() { root.clone() } else { join(root, rel)? };
-        let mut images = Vec::new();
-        for entry in fs::read_dir(&dir).ok()?.flatten() {
-            let Ok(name) = entry.file_name().into_string() else { continue };
-            // A hidden name is never a cover: the device's walk skips it
-            // (macOS's `._cover.jpg` beside `cover.jpg`).
-            let Some(rank) = image_rank(&name).filter(|_| !name.starts_with('.')) else { continue };
-            let Ok(meta) = fs::metadata(entry.path()) else { continue };
-            if meta.is_file() {
-                images.push((rank, name, meta.len()));
-            }
-        }
-        let (_, name, size) = elect(images)?;
-        if size > MAX_FILE as u64 {
-            return None;
-        }
-        // The listing's size may be stale by now (a cover replaced since):
-        // never more than MAX_FILE of it read into memory.
-        let mut bytes = Vec::new();
-        let file = File::open(dir.join(&name)).ok()?;
-        file.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes).ok()?;
-        (bytes.len() <= MAX_FILE).then_some(FolderImage { name, bytes })
+        image_in(&self.roots, folder)
     }
+}
+
+/// The covers of the libraries a [`Local`] reads from this computer's disk
+/// ([`Local::images`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Images(BTreeMap<String, PathBuf>);
+
+impl Images {
+    /// [`Local::folder_image`].
+    pub(crate) fn folder_image(&self, folder: &str) -> Option<FolderImage> {
+        image_in(&self.0, folder)
+    }
+}
+
+/// [`Local::folder_image`], in the libraries of `roots`.
+fn image_in(roots: &BTreeMap<String, PathBuf>, folder: &str) -> Option<FolderImage> {
+    let (vpath, rel) = folder.split_once('/').unwrap_or((folder, ""));
+    let root = roots.get(vpath)?;
+    let dir = if rel.is_empty() { root.clone() } else { join(root, rel)? };
+    let mut images = Vec::new();
+    for entry in fs::read_dir(&dir).ok()?.flatten() {
+        let Ok(name) = entry.file_name().into_string() else { continue };
+        // A hidden name is never a cover: the device's walk skips it
+        // (macOS's `._cover.jpg` beside `cover.jpg`).
+        let Some(rank) = image_rank(&name).filter(|_| !name.starts_with('.')) else { continue };
+        let Ok(meta) = fs::metadata(entry.path()) else { continue };
+        if meta.is_file() {
+            images.push((rank, name, meta.len()));
+        }
+    }
+    let (_, name, size) = elect(images)?;
+    if size > MAX_FILE as u64 {
+        return None;
+    }
+    // The listing's size may be stale by now (a cover replaced since):
+    // never more than MAX_FILE of it read into memory.
+    let mut bytes = Vec::new();
+    let file = File::open(dir.join(&name)).ok()?;
+    file.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= MAX_FILE).then_some(FolderImage { name, bytes })
 }
 
 impl<F: Fetcher> Fetcher for Local<F> {

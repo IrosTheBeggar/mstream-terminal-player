@@ -303,7 +303,7 @@ fn on(
 
 /// The volume a command line names: by where it is mounted (`E:`, `E:\`,
 /// `/media/card/`; any case on Windows), or by the OS's name for it.
-fn pick<'f>(found: &'f [Found], named: &str) -> Option<&'f Found> {
+pub(super) fn pick<'f>(found: &'f [Found], named: &str) -> Option<&'f Found> {
     let plain = |path: &str| {
         let path = path.trim_end_matches(['/', '\\']);
         if cfg!(windows) { path.to_ascii_lowercase() } else { path.to_string() }

@@ -52,7 +52,7 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 pub(crate) use self::bind::Expect;
-pub(crate) use self::plan::Plan;
+pub(crate) use self::plan::{Footprint, Plan};
 
 use self::bind::{Bound, Identity};
 use self::settle::Settled;
@@ -598,6 +598,12 @@ impl<'c> Session<'c> {
     /// The card's `/.player/device.txt`, or its no-file values (2.15).
     pub(crate) fn device(&self) -> &DeviceTxt {
         &self.device
+    }
+
+    /// The root that counts, as step 1 settled it (2.5.4), and the tags file
+    /// it names: the committed ledger a plan is made against.
+    pub(crate) fn root(&self) -> Option<&Root> {
+        self.settled.root.as_ref()
     }
 
     /// The identity the run is bound to.

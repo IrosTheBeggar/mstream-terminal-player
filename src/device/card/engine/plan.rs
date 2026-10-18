@@ -31,6 +31,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::super::contract::mptg::{ADOPTED, HASH_SAMPLED, Ledger, VERIFIED};
+use super::super::contract::order::compare_file_paths;
 use super::super::contract::prim::{hash_sampled, qfp, qfp_ranges};
 use super::super::contract::server::{NO_INSTANCE, Server, Verdict, srvs_breaks};
 use super::super::names::{Bytes, Layout, Namer, Wanted};
@@ -135,6 +136,8 @@ pub(crate) struct Plan {
     pub(crate) report: Report,
     /// The commit mints a new card id ([`Answers::new_card_id`]).
     pub(super) new_card_id: bool,
+    /// The rows of the card's ledger the plan was made against.
+    pub(super) rows: usize,
 }
 
 impl Plan {
@@ -166,6 +169,62 @@ impl Plan {
     pub(crate) fn kept(&self) -> (usize, usize) {
         (self.keeps.len(), self.adopts.len())
     }
+
+    /// The wanted files the run fetches, by their index in the wanted card,
+    /// in the order it fetches them: their card paths' canonical order
+    /// (2.12.1, step 8), as [`Session::run`] takes the writes.
+    pub(crate) fn fetch_order(&self) -> Vec<usize> {
+        let mut fetched: Vec<&Write> = self.writes.iter().filter(|w| w.from.is_none()).collect();
+        fetched.sort_by(|a, b| compare_file_paths(&a.path, &b.path));
+        fetched.into_iter().map(|w| w.file).collect()
+    }
+
+    /// The vpath layout's library roots (LIBR), relative to `/music`: what
+    /// an album folder is counted from (2.14.1).
+    pub(crate) fn roots(&self) -> &[String] {
+        &self.roots
+    }
+
+    /// The card path each fetched file is named, relative to `/music`, by
+    /// its index in the wanted card.
+    pub(crate) fn fetched_paths(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.writes.iter().filter(|w| w.from.is_none()).map(|w| (w.file, w.path.as_str()))
+    }
+
+    /// What the run adds to the card and takes off it, for the fit (the
+    /// transfer plan's 2.9).
+    pub(crate) fn footprint(&self) -> Footprint {
+        let fetched = self.writes.iter().filter(|w| w.from.is_none());
+        let writes = fetched.map(|w| (w.path.clone(), self.wanted.files[w.file].size)).collect();
+        let mut freed: Vec<u64> = self.deletes.iter().filter(|d| !d.ours).map(|d| d.size).collect();
+        freed.extend(self.writes.iter().filter_map(|w| w.replaces).map(|r| r.size));
+        // A write in place of a kept row's file is that row's record still.
+        let new = |w: &&Write| w.from.is_none() && w.replaces.is_none_or(|r| r.ours);
+        let new = self.writes.iter().filter(new);
+        Footprint {
+            writes,
+            folders: self.folders.clone(),
+            freed,
+            records_before: self.rows,
+            records: self.keeps.len() + self.adopts.len() + new.count(),
+        }
+    }
+}
+
+/// What a run adds to a card and takes off it ([`Plan::footprint`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Footprint {
+    /// Each file it fetches: its path relative to `/music`, and its bytes
+    /// (an estimate for a conversion).
+    pub(crate) writes: Vec<(String, u64)>,
+    /// The folders it makes, relative to `/music`.
+    pub(crate) folders: Vec<String>,
+    /// The bytes of each file it deletes or replaces.
+    pub(crate) freed: Vec<u64>,
+    /// The tracks of the card's ledger before the run, and after it if
+    /// every file lands.
+    pub(crate) records_before: usize,
+    pub(crate) records: usize,
 }
 
 /// The extension a file takes on the card (2.8.3, step 3), lowercase.
@@ -641,6 +700,7 @@ pub(super) fn plan(
         guards,
         report,
         new_card_id: answers.new_card_id,
+        rows: rows.len(),
     })
 }
 

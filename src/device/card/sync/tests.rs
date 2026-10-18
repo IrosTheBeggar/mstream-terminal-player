@@ -1,0 +1,524 @@
+//! A whole sync, end to end: a loopback mStream of made-up libraries
+//! ([`Fake`]: the paged manifest with its ETag and 304, `metadata/batch`,
+//! `/media` with Range and HEAD, `/transcode`, album art and embeddings),
+//! a host folder as the card ([`FatSim`]), set up by B2's set-up, and the
+//! card read back by the kit's reader. The audio is the tag reader's parity
+//! corpus and made-up Ogg Opus streams; the covers are made-up pictures;
+//! the embeddings are made-up vectors (no real index: AUTODJ-INDEX.md 12.5).
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use base64::Engine;
+use serde_json::{Value, json};
+
+use super::*;
+use crate::api::transfer::stub::{Asked, chunked, json as json_reply, reply, routed};
+use crate::device::card::cards::Cards;
+use crate::device::card::contract::mptg::{BPM_ANALYSED, CONTAINER_OPUS};
+use crate::device::card::contract::mpth;
+use crate::device::card::contract::order::thumb_path_of;
+use crate::device::card::contract::prim::{hex, md5};
+use crate::device::card::covers::tests::picture;
+use crate::device::card::engine::fatsim::FatSim;
+use crate::device::card::setup;
+use crate::device::card::source::length::tests::opus_bytes;
+use crate::device::card::volume::Inspection;
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// A folder of its own under the system's temp folder, gone when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Scratch {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("mstream-sync-{}-{name}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn corpus(name: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures/tags").join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+// ── The server ──────────────────────────────────────────────────────────────
+
+/// A track of the fake server.
+#[derive(Clone)]
+struct Track {
+    path: String,
+    id: i64,
+    bytes: Vec<u8>,
+    seconds: f64,
+    art: Option<String>,
+    /// The full metadata's own fields: sample rate, channels, BPM.
+    full: Value,
+}
+
+#[derive(Default)]
+struct Library {
+    vpaths: Vec<String>,
+    tracks: Vec<Track>,
+    revision: String,
+    /// Folder images, by path: served, never listed.
+    images: HashMap<String, Vec<u8>>,
+    art: HashMap<String, Vec<u8>>,
+    /// A conversion's bytes, by its source's path.
+    converted: HashMap<String, Vec<u8>>,
+    /// Conversions that end short once, as a dying ffmpeg leaves them.
+    short_once: HashSet<String>,
+    /// Every request, as "METHOD path".
+    asked: Vec<String>,
+}
+
+type Fake = Arc<Mutex<Library>>;
+
+fn etag(bytes: &[u8]) -> String {
+    format!("W/\"{:x}-{:08x}\"", bytes.len(), crate::device::card::contract::prim::crc32(bytes))
+}
+
+fn entry_json(t: &Track) -> Value {
+    json!({
+        "filepath": t.path, "id": t.id, "file-size": t.bytes.len(), "modified": 1_790_000_000_000i64 + t.id,
+        "hash": hex(&md5(&t.bytes)), "audio-hash": hex(&md5(&[b"audio:".as_slice(), &t.bytes].concat())),
+        "hash-v": 2, "format": t.path.rsplit_once('.').map(|(_, e)| e).unwrap_or(""),
+        "album-id": 1, "artist-id": 1, "created-at": "2026-10-01 12:00:00",
+        "metadata": {"title": t.path, "duration": t.seconds, "album-art": t.art, "bpm": null},
+    })
+}
+
+/// A made-up embedding: 8 floats from the path.
+fn vector(path: &str) -> String {
+    let h = crate::device::card::contract::prim::fnv1a64(path.as_bytes());
+    let floats: Vec<u8> =
+        (0..8).flat_map(|i| (((h >> (i * 8)) & 0xFF) as f32 / 255.0 - 0.5).to_le_bytes()).collect();
+    base64::engine::general_purpose::STANDARD.encode(floats)
+}
+
+/// The bytes of `bytes` a Range header asks for, as `/media` answers it.
+fn media(asked: &Asked, bytes: &[u8]) -> Vec<u8> {
+    let tag = etag(bytes);
+    if asked.method == "HEAD" {
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: {tag}\r\n", bytes.len());
+        return format!("{head}Connection: close\r\n\r\n").into_bytes();
+    }
+    let range = asked.header("range").and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.split_once('-'));
+    match range {
+        Some((a, b)) => {
+            let start: usize = a.parse().unwrap_or(0);
+            let end = b.parse::<usize>().map_or(bytes.len(), |e| (e + 1).min(bytes.len()));
+            if start >= bytes.len() {
+                let total = format!("bytes */{}", bytes.len());
+                return reply("416 Range Not Satisfiable", &[("Content-Range", &total)], b"");
+            }
+            let span = format!("bytes {start}-{}/{}", end - 1, bytes.len());
+            reply("206 Partial Content", &[("Content-Range", &span), ("ETag", &tag)], &bytes[start..end])
+        }
+        None => reply("200 OK", &[("ETag", &tag), ("Content-Type", "audio/mpeg")], bytes),
+    }
+}
+
+fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
+    let mut lib = fake.lock().unwrap();
+    let path = asked.path();
+    lib.asked.push(format!("{} {path}", asked.method));
+    let not_found = || json_reply("404 Not Found", r#"{"error":"Not Found"}"#);
+    match (asked.method.as_str(), path.as_str()) {
+        ("GET", "/api/") => {
+            let body = json!({
+                "server": "6.31.1",
+                "features": {"sync": true, "transcode": {"defaultCodec": "opus", "defaultBitrate": "96k"},
+                             "discovery": true},
+                "user": {"vpaths": lib.vpaths, "admin": false},
+            });
+            json_reply("200 OK", &body.to_string())
+        }
+        ("POST", "/api/v1/sync/manifest") => {
+            let body = asked.json();
+            let quoted = format!("\"{}\"", lib.revision);
+            if body.get("cursor").is_none() && asked.header("if-none-match") == Some(quoted.as_str()) {
+                return reply("304 Not Modified", &[], b"");
+            }
+            let ignore: Vec<String> = serde_json::from_value(body["ignoreVPaths"].clone()).unwrap_or_default();
+            let cursor = body["cursor"].as_i64().unwrap_or(0);
+            let limit = body["limit"].as_u64().unwrap_or(2000) as usize;
+            let mut tracks: Vec<&Track> = lib
+                .tracks
+                .iter()
+                .filter(|t| !ignore.iter().any(|v| t.path.starts_with(&format!("{v}/"))) && t.id > cursor)
+                .collect();
+            tracks.sort_by_key(|t| t.id);
+            let page: Vec<&Track> = tracks.iter().take(limit).copied().collect();
+            let next = (tracks.len() > limit).then(|| page.last().map(|t| t.id)).flatten();
+            let body = json!({"revision": lib.revision, "scanning": false, "next": next,
+                              "entries": page.iter().map(|t| entry_json(t)).collect::<Vec<_>>()});
+            let headers = [("Content-Type", "application/json"), ("ETag", quoted.as_str())];
+            reply("200 OK", &headers, body.to_string().as_bytes())
+        }
+        ("POST", "/api/v1/db/metadata/batch") => {
+            let paths: Vec<String> = serde_json::from_value(asked.json()).unwrap_or_default();
+            let mut out = serde_json::Map::new();
+            for p in paths {
+                let row = lib.tracks.iter().find(|t| t.path == p).map(|t| {
+                    let mut m = t.full.clone();
+                    m["duration"] = json!(t.seconds);
+                    m["album-art"] = json!(t.art);
+                    json!({"filepath": p, "metadata": m})
+                });
+                out.insert(p, row.unwrap_or(Value::Null));
+            }
+            json_reply("200 OK", &Value::Object(out).to_string())
+        }
+        ("POST", "/api/v1/discovery/local/embeddings") => {
+            let paths: Vec<String> = serde_json::from_value(asked.json()["filePaths"].clone()).unwrap_or_default();
+            let tracks: Vec<Value> = paths
+                .iter()
+                .map(|p| json!({"filePath": p, "audioHash": null, "notAnalyzed": false, "embedding": vector(p)}))
+                .collect();
+            let body = json!({"model": {"id": "effnet-discogs", "version": "1"}, "dim": 8, "tracks": tracks});
+            json_reply("200 OK", &body.to_string())
+        }
+        ("GET" | "HEAD", p) if p.starts_with("/media/") => {
+            let rel = &p["/media/".len()..];
+            let bytes = lib.tracks.iter().find(|t| t.path == rel).map(|t| t.bytes.clone());
+            match bytes.or_else(|| lib.images.get(rel).cloned()) {
+                Some(bytes) => media(asked, &bytes),
+                None => not_found(),
+            }
+        }
+        ("GET", p) if p.starts_with("/transcode/") => {
+            let rel = p["/transcode/".len()..].to_string();
+            let Some(bytes) = lib.converted.get(&rel).cloned() else { return not_found() };
+            let codec = asked.query("codec").unwrap_or("");
+            let kind = if codec == "opus" { "audio/ogg" } else { "audio/mpeg" };
+            if lib.short_once.remove(&rel) {
+                return chunked("200 OK", &[("Content-Type", kind)], &[&bytes[..bytes.len() / 3]]);
+            }
+            chunked("200 OK", &[("Content-Type", kind)], &[&bytes])
+        }
+        ("GET", p) if p.starts_with("/album-art/") => match lib.art.get(&p["/album-art/".len()..]) {
+            Some(bytes) => reply("200 OK", &[("Content-Type", "image/png")], bytes),
+            None => not_found(),
+        },
+        _ => not_found(),
+    }
+}
+
+/// A server of two libraries; Rock holds an album with a folder cover and
+/// an album with mStream's art whose WAV must be converted, Jazz one file.
+fn server() -> (String, Fake) {
+    let full = |source: &str| json!({"sample-rate": 44100, "channels": 2, "bitrate": 320000,
+                                     "bpm": 124, "musical-key": "C major", "bpm-source": source});
+    let track = |path: &str, id: i64, bytes: Vec<u8>, art: Option<&str>, full: Value| Track {
+        path: path.into(),
+        id,
+        bytes,
+        seconds: 181.5,
+        art: art.map(str::to_string),
+        full,
+    };
+    let wave = b"RIFF a made-up wave".to_vec();
+    let mut wav = track("Rock/Artist C/Album D/01.wav", 3, wave, Some("d.png"), full("tag"));
+    wav.full["bpm"] = json!(128);
+    wav.full["musical-key"] = json!("A minor");
+    let lib = Library {
+        vpaths: vec!["Rock".into(), "Jazz".into()],
+        tracks: vec![
+            track("Rock/Artist A/Album B/01.mp3", 1, corpus("v24_full.mp3"), Some("b.jpg"), full("essentia")),
+            track("Rock/Artist A/Album B/02.flac", 2, corpus("flac_full.flac"), Some("b.jpg"), full("tag")),
+            wav,
+            track("Rock/Artist C/Album D/02.opus", 4, corpus("opus_basic.opus"), Some("d.png"), full("tag")),
+            track("Jazz/Artist E/Album F/01.mp3", 5, corpus("cbr.mp3"), None, full("tag")),
+        ],
+        revision: "1:5:1790000000005:4".into(),
+        images: HashMap::from([("Rock/Artist A/Album B/cover.jpg".to_string(), picture(64, 64, true))]),
+        art: HashMap::from([("d.png".to_string(), picture(120, 90, false))]),
+        converted: HashMap::from([("Rock/Artist C/Album D/01.wav".to_string(), opus_bytes(181_500, 2, true))]),
+        ..Library::default()
+    };
+    let fake = Arc::new(Mutex::new(lib));
+    let served = fake.clone();
+    let base = routed(move |asked| answer(&served, asked));
+    (base, fake)
+}
+
+// ── The card ────────────────────────────────────────────────────────────────
+
+const SERIAL: u32 = 0x1A2B_3C4D;
+
+/// Each session's clock and ids: a fixed time, ids that never repeat.
+fn envs() -> impl FnMut() -> Env {
+    let mut seed = 0x5EED_u64;
+    move || {
+        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut n = seed;
+        let id = move || {
+            n = n.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            n
+        };
+        Env { now: Box::new(|| 1_791_900_000), id: Box::new(id), producer: "mstream-terminal test".into() }
+    }
+}
+
+/// A card set up by the transfer, in a player that reads Opus and Auto DJ.
+fn card(scratch: &Scratch) -> FatSim {
+    let root = scratch.0.join("card");
+    let sim = FatSim::new(&root, SERIAL);
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures/card/golden/device.txt");
+    std::fs::create_dir_all(root.join(".player")).unwrap();
+    std::fs::copy(golden, root.join(".player/device.txt")).unwrap();
+    let ask = setup::Ask { label: "Car".into(), new_identity: false };
+    setup::set_up(&sim, &ask, &mut envs(), &mut Cards::default(), &mut |_| {}).expect("a set-up card");
+    sim
+}
+
+fn space(free: u64) -> Option<Space> {
+    Some(Space { size: 64 << 30, free, cluster: 32 * 1024, clusters: 0 })
+}
+
+/// One sync of `card` from the server at `base`, as the command makes one.
+fn sync_now(card: &FatSim, base: &str, ask: &Ask, envs: &mut dyn FnMut() -> Env) -> (Synced, Vec<Event>) {
+    let client = Arc::new(Client::new(base).unwrap().with_token(Some("tok".into())));
+    let mut events = Vec::new();
+    let mut cards = Cards::default();
+    let synced = sync(card, space(32 << 30), client, Reached::Elsewhere, ask, &mut cards, envs, &mut |e| {
+        if !matches!(e, Event::Progress { .. }) {
+            events.push(e);
+        }
+    });
+    (synced, events)
+}
+
+fn look(card: &FatSim) -> Inspection {
+    let seen = volume::inspect(card).expect("the card lists");
+    let root = seen.root.as_ref().expect("a root");
+    assert!(root.tags.is_ok(), "the tags file: {:?}", root.tags.as_ref().err());
+    assert!(root.autodj.as_ref().is_none_or(|v| v.is_ok()), "the Auto DJ index: {:?}", root.autodj);
+    seen
+}
+
+fn ran(synced: &Synced) -> &Outcome {
+    match &synced.end {
+        End::Ran(outcome) => outcome,
+        other => panic!("{other:?}\nnotes: {:?}", synced.notes),
+    }
+}
+
+fn rock() -> Ask {
+    Ask {
+        libraries: Some(vec!["Rock".into()]),
+        change: Change { nickname: Some("Home".into()), ..Change::default() },
+        ..Ask::default()
+    }
+}
+
+// ── The tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn a_first_sync_fills_the_card_as_the_kit_and_the_player_read_it() {
+    let scratch = Scratch::new("first");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    fake.lock().unwrap().short_once.insert("Rock/Artist C/Album D/01.wav".into());
+    let mut envs = envs();
+    let (synced, events) = sync_now(&sim, &base, &rock(), &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!(outcome.verified, Ok(()), "{:?}", synced.notes);
+    assert_eq!((outcome.written, outcome.records, outcome.deleted), (4, 4, 0), "{:?}", outcome.report);
+    let summary = synced.summary.as_ref().unwrap();
+    assert_eq!((summary.listed, summary.fetches, summary.conversions), (Listed::Whole, 4, 1));
+    assert_eq!(summary.libraries, ["Rock"]);
+    assert!(events.iter().any(|e| matches!(e, Event::Committed { last: true, .. })));
+
+    // The kit reads it: the selection's files, the deselected library's not.
+    let seen = look(&sim);
+    let root = seen.root.as_ref().unwrap();
+    let records = &root.tags.as_ref().unwrap().records;
+    let paths: Vec<&str> = records.iter().map(|e| e.path.as_str()).collect();
+    let b = ["Artist A/Album B/01.mp3", "Artist A/Album B/02.flac"];
+    let d = ["Artist C/Album D/01.opus", "Artist C/Album D/02.opus"];
+    assert_eq!(paths, [b, d].concat());
+    assert!(root.manifest.autodj.is_some(), "the player reads MPDJ v2: an index, {:?}", synced.notes);
+    assert_eq!(root.manifest.server_revision, "1:5:1790000000005:4");
+
+    // The conversion: the ledger says so, and its own BPM, key and the
+    // album's cover were put back before the card took it.
+    let converted = &records[2];
+    let ledger = converted.ledger.as_ref().unwrap();
+    assert_eq!((ledger.converted_to, ledger.convert_kbps), (CONTAINER_OPUS, 192));
+    assert_eq!(ledger.server_path, "Rock/Artist C/Album D/01.wav");
+    assert_eq!((converted.rec.bpm10, converted.rec.camelot), (1280, 8), "the file's own, as tags");
+    assert_eq!(converted.rec.flags & BPM_ANALYSED, 0);
+    let opus = std::fs::read(scratch.0.join("card/music/Artist C/Album D/01.opus")).unwrap();
+    let reading = crate::device::card::tags::read_bytes(&opus, "opus");
+    let cover = reading.picture.expect("the album's cover, embedded");
+    assert_eq!((cover.pic_type, cover.mime), (3, 1), "a front cover, JPEG");
+    assert_eq!(converted.rec.duration_ms / 1000, 181);
+    // The short conversion was made again.
+    let transcodes = fake.lock().unwrap().asked.iter().filter(|a| a.starts_with("GET /transcode/")).count();
+    assert_eq!(transcodes, 2);
+    // mStream's analysis for a file whose tags have none.
+    let mp3 = &records[0];
+    assert!(mp3.rec.bpm10 != 0, "a BPM, its own or mStream's");
+
+    // A thumbnail each album: Album B's from its folder's cover.jpg, Album
+    // D's from mStream's art.
+    for album in ["Artist A/Album B", "Artist C/Album D"] {
+        let thumb = std::fs::read(scratch.0.join("card/.mstream").join(thumb_path_of(album))).unwrap();
+        assert!(mpth::check(&thumb, crate::device::card::contract::prim::path_hash(album)), "{album}");
+    }
+    let asked = fake.lock().unwrap().asked.clone();
+    assert!(asked.contains(&"HEAD /media/Rock/Artist A/Album B/cover.jpg".to_string()), "{asked:?}");
+    assert!(asked.contains(&"GET /album-art/d.png".to_string()), "{asked:?}");
+    assert!(!asked.iter().any(|a| a.contains("Jazz/")), "the deselected library is never read");
+
+    // The settings, stored: no address anywhere.
+    let state = State::of(&seen.state).expect("a state file");
+    let s = &state.settings;
+    assert!(s.stored);
+    assert_eq!((s.sources.len(), s.sources[0].nickname.as_str()), (1, "Home"));
+    assert_eq!(s.sources[0].libraries, ["Rock"]);
+    assert_eq!((s.sources[0].full_read, s.sources[0].runs), (1_791_900_000, 0));
+    assert_eq!(s.art.len(), 2);
+    let text = std::fs::read_to_string(scratch.0.join("card/.mstream/state.json")).unwrap();
+    assert!(!text.contains("127.0.0.1") && !text.contains("http"), "{text}");
+}
+
+#[test]
+fn an_unchanged_server_answers_304_and_the_card_stays_as_it_is() {
+    let scratch = Scratch::new("again");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    let first = sync_now(&sim, &base, &rock(), &mut envs).0;
+    let generation = ran(&first).generation;
+    let image = sim.image();
+
+    // The same selection: a 304, the ledger stands for the listing, and a
+    // run that changes nothing makes no commit.
+    let again = sync_now(&sim, &base, &Ask { libraries: None, ..Ask::default() }, &mut envs).0;
+    assert_eq!(again.summary.as_ref().unwrap().listed, Listed::NotModified);
+    let outcome = ran(&again);
+    assert_eq!((outcome.generation, outcome.written, outcome.deleted), (generation, 0, 0));
+    let mut now = sim.image();
+    now.retain(|p, _| !p.ends_with("state.json"));
+    let mut before = image.clone();
+    before.retain(|p, _| !p.ends_with("state.json"));
+    assert_eq!(now, before, "only the settings' run count changed");
+    let state = State::of(&look(&sim).state).unwrap();
+    assert_eq!(state.settings.sources[0].runs, 1);
+
+    // A file the listener deleted is written again from the ledger alone.
+    std::fs::remove_file(scratch.0.join("card/music/Artist A/Album B/02.flac")).unwrap();
+    let mended = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(mended.summary.as_ref().unwrap().listed, Listed::NotModified);
+    assert_eq!(ran(&mended).written, 1);
+
+    // The server drops a file: a whole read, and the card mirrors it.
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks.retain(|t| !t.path.ends_with("02.opus"));
+        lib.revision = "1:4:1790000000005:3".into();
+    }
+    let mirrored = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let summary = mirrored.summary.as_ref().unwrap();
+    assert_eq!(summary.listed, Listed::Whole);
+    assert_eq!(summary.removals, ["Artist C/Album D/02.opus"]);
+    let outcome = ran(&mirrored);
+    assert_eq!((outcome.deleted, outcome.records, outcome.verified.clone()), (1, 3, Ok(())));
+}
+
+#[test]
+fn a_dry_run_plans_and_writes_nothing() {
+    let scratch = Scratch::new("dry");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let before = sim.image();
+    let writes = sim.log().len();
+    let ask = Ask { dry_run: true, ..rock() };
+    let synced = sync_now(&sim, &base, &ask, &mut envs()).0;
+    assert!(matches!(synced.end, End::Dry), "{:?}", synced.end);
+    let summary = synced.summary.as_ref().unwrap();
+    assert_eq!((summary.fetches, summary.conversions, summary.files), (4, 1, 4));
+    assert!(summary.fit.is_some_and(|f| f.fits()));
+    assert_eq!(sim.image(), before, "nothing reached the card");
+    assert_eq!(sim.log().len(), writes);
+    let asked = fake.lock().unwrap().asked.clone();
+    assert!(!asked.iter().any(|a| a.starts_with("GET /transcode/") || a.starts_with("GET /media/")), "{asked:?}");
+    let printed = synced_json(&synced, true);
+    assert_eq!(printed["plan"]["fetch"]["files"], 4);
+    assert_eq!(printed["dryRun"], true);
+}
+
+#[test]
+fn a_plan_that_doesnt_fit_or_removes_most_of_the_card_stops_before_any_write() {
+    let scratch = Scratch::new("guards");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    let client = || Arc::new(Client::new(&base).unwrap());
+    let tight = |c: &FatSim, envs: &mut dyn FnMut() -> Env| {
+        sync(c, space(1 << 20), client(), Reached::Elsewhere, &rock(), &mut Cards::default(), envs, &mut |_| {})
+    };
+    let image = sim.image();
+    let synced = tight(&sim, &mut envs);
+    let End::Halted(Halt::Fit(fit)) = synced.end else { panic!("{:?}", synced.end) };
+    assert!(!fit.fits() && fit.short() > 0);
+    assert_eq!(sim.image(), image, "refused before a write");
+
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    // The server loses most of the library: the stronger gate asks first.
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks.retain(|t| t.path.ends_with("01.mp3"));
+        lib.revision = "1:2:1790000000001:1".into();
+    }
+    let image = sim.image();
+    let asked = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let End::Halted(Halt::Card(Stop::Unanswered(guards))) = &asked.end else { panic!("{:?}", asked.end) };
+    assert!(matches!(&guards[..], [Guard::Removals { strong: true, paths }] if paths.len() == 3), "{guards:?}");
+    let mut now = sim.image();
+    now.retain(|p, _| !p.ends_with("run.lock"));
+    assert_eq!(now, image);
+    // Answered: the card mirrors the server.
+    let yes = Ask { answers: Answers { mass_removals: true, ..Answers::default() }, ..Ask::default() };
+    let outcome = sync_now(&sim, &base, &yes, &mut envs).0;
+    assert_eq!(ran(&outcome).records, 1);
+}
+
+#[test]
+fn a_card_not_set_up_or_a_server_with_no_manifest_is_refused() {
+    let scratch = Scratch::new("refused");
+    let sim = FatSim::new(&scratch.0.join("bare"), SERIAL);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &rock(), &mut envs()).0;
+    let refused = matches!(&synced.end, End::Halted(Halt::Refused(why)) if why.contains("card-setup"));
+    assert!(refused, "{:?}", synced.end);
+
+    let set_up = card(&scratch);
+    let unknown = Ask { libraries: Some(vec!["Blues".into()]), ..Ask::default() };
+    let synced = sync_now(&set_up, &base, &unknown, &mut envs()).0;
+    assert!(matches!(&synced.end, End::Halted(Halt::Refused(why)) if why.contains("Blues")), "{:?}", synced.end);
+    drop(fake);
+
+    let old = routed(|asked| {
+        if asked.path() == "/api/" {
+            return json_reply("200 OK", r#"{"server":"6.0.0","features":{},"user":{"vpaths":["Rock"]}}"#);
+        }
+        json_reply("404 Not Found", "{}")
+    });
+    let synced = sync_now(&set_up, &old, &rock(), &mut envs()).0;
+    assert!(matches!(synced.end, End::Halted(Halt::Server(_))), "{:?}", synced.end);
+}

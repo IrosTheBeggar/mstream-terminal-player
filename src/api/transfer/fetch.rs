@@ -3,9 +3,10 @@
 //! conversion from `/transcode`, its type checked; and the small reads a
 //! cover search and a quick fingerprint make. The model is the flasher's
 //! `fetch_within` (src/device/firmware.rs): chunks as they land, a stall
-//! timeout, a progress hook. Here into a file instead of memory, with a
-//! ceiling of the request's own for bodies of gigabytes, and the client's
-//! meter counting every byte.
+//! timeout, a progress hook. Here into a file instead of memory, or into a
+//! writer that is only ever written on (a card's stage file, which so takes
+//! a file's bytes once), with a ceiling of the request's own for bodies of
+//! gigabytes, and the client's meter counting every byte.
 //!
 //! A peer's 429s are sorted by their words ([`Limited`]): the parent's
 //! stream proxy passes the peer's status and body on, but not its
@@ -398,6 +399,98 @@ fn open_at(dest: &Path, start: u64) -> std::io::Result<File> {
     Ok(file)
 }
 
+/// Where a fetch's bytes go: [`Client::download_async`]'s file, or
+/// [`Client::stream_async`]'s writer.
+trait Dest {
+    /// The bytes of the file there already.
+    fn held(&self) -> u64;
+    /// Whether the bytes there can be cut back, so that an answer from an
+    /// earlier byte than the ones held can be taken.
+    fn rewinds(&self) -> bool;
+    /// Ready to write from `start`: everything past it gone.
+    fn start_at(&mut self, start: u64) -> std::io::Result<()>;
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()>;
+    /// The length after a write failed with `done` bytes counted.
+    fn len_after(&self, done: u64) -> u64;
+    /// The whole file landed.
+    fn finish(&mut self) -> std::io::Result<()>;
+}
+
+/// A file on this computer, opened once the answer is known good.
+struct ToFile<'d> {
+    path: &'d Path,
+    file: Option<File>,
+}
+
+impl Dest for ToFile<'_> {
+    fn held(&self) -> u64 {
+        std::fs::metadata(self.path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    fn rewinds(&self) -> bool {
+        true
+    }
+
+    fn start_at(&mut self, start: u64) -> std::io::Result<()> {
+        self.file = Some(open_at(self.path, start)?);
+        Ok(())
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match &mut self.file {
+            Some(file) => file.write_all(bytes),
+            None => Err(std::io::Error::other("not opened")),
+        }
+    }
+
+    fn len_after(&self, done: u64) -> u64 {
+        self.file.as_ref().and_then(|f| f.metadata().ok()).map_or(done, |m| m.len())
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        match &self.file {
+            Some(file) => file.sync_data(),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A writer that holds `held` bytes of the file already and is only ever
+/// written on: a card's stage file, which takes the bytes once, as they come.
+struct ToStream<'d> {
+    into: &'d mut dyn Write,
+    held: u64,
+}
+
+impl Dest for ToStream<'_> {
+    fn held(&self) -> u64 {
+        self.held
+    }
+
+    fn rewinds(&self) -> bool {
+        false
+    }
+
+    fn start_at(&mut self, start: u64) -> std::io::Result<()> {
+        match start == self.held {
+            true => Ok(()),
+            false => Err(std::io::Error::other("a stream is never cut back")),
+        }
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.into.write_all(bytes)
+    }
+
+    fn len_after(&self, done: u64) -> u64 {
+        done
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.into.flush()
+    }
+}
+
 // ── Fetching ────────────────────────────────────────────────────────────────
 
 impl Client {
@@ -465,7 +558,49 @@ impl Client {
         dest: &Path,
         progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
     ) -> Result<Fetched, Failed> {
-        let on_disk = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        self.fetch_into(fetch, &mut ToFile { path: dest, file: None }, progress).await
+    }
+
+    /// [`Client::download_async`] into a writer instead of a file: the bytes
+    /// go into `into` as they come — a card's stage file, which so takes
+    /// them once — after the `held` bytes of the file it holds already, from
+    /// a try that was cut. Those are kept, and the rest fetched from there
+    /// with Range, only under [`Fetch::resuming`]'s validator (If-Range). A
+    /// writer is never cut back: an answer that would start the file over
+    /// (it changed since, or a resume with no validator) fails with nothing
+    /// written, and the caller starts again into a new writer. Nothing is
+    /// flushed past `into.flush()`: syncing it is its owner's.
+    pub async fn stream_async(
+        &self,
+        fetch: &Fetch<'_>,
+        into: &mut dyn Write,
+        held: u64,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<Fetched, Failed> {
+        self.fetch_into(fetch, &mut ToStream { into, held }, progress).await
+    }
+
+    pub fn stream(
+        &self,
+        fetch: &Fetch<'_>,
+        into: &mut dyn Write,
+        held: u64,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<Fetched, Failed> {
+        let streamed = crate::runtime::block_on(self.stream_async(fetch, into, held, progress));
+        streamed.unwrap_or_else(|e| {
+            let partial = Partial { len: held, validator: None };
+            Err(Failed { error: FetchError::Api(ApiError::Network(e)), partial })
+        })
+    }
+
+    async fn fetch_into<D: Dest>(
+        &self,
+        fetch: &Fetch<'_>,
+        dest: &mut D,
+        progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> Result<Fetched, Failed> {
+        let on_disk = dest.held();
         // A partial is resumed only under the validator it was fetched with
         // (else a file changed since would be stitched from two), never past
         // the length the file should have, and never for a conversion.
@@ -569,7 +704,14 @@ impl Client {
             validator(&headers)
         };
         let at = |len: u64| Partial { len, validator: written_under.clone().filter(|_| len > 0) };
-        let mut file = open_at(dest, start).map_err(|e| failed(FetchError::Disk(e.to_string()), &kept))?;
+        if start < on_disk && !dest.rewinds() {
+            let error = FetchError::Range(format!(
+                "asked from byte {from}, answered from {start}: the file changed since its first \
+                 {on_disk} bytes came"
+            ));
+            return Err(failed(error, &kept));
+        }
+        dest.start_at(start).map_err(|e| failed(FetchError::Disk(e.to_string()), &kept))?;
         let total = total.or(fetch.expected);
         let mut done = start;
         loop {
@@ -585,8 +727,8 @@ impl Client {
             if done + chunk.len() as u64 > limit {
                 return Err(Failed { error: FetchError::TooLong { cap: limit }, partial: at(done) });
             }
-            if let Err(e) = file.write_all(&chunk) {
-                let len = file.metadata().map(|m| m.len()).unwrap_or(done);
+            if let Err(e) = dest.write_all(&chunk) {
+                let len = dest.len_after(done);
                 return Err(Failed { error: FetchError::Disk(e.to_string()), partial: at(len) });
             }
             done += chunk.len() as u64;
@@ -597,7 +739,7 @@ impl Client {
         {
             return Err(Failed { error: FetchError::Short { expected, got: done }, partial: at(done) });
         }
-        if let Err(e) = file.sync_data() {
+        if let Err(e) = dest.finish() {
             return Err(Failed { error: FetchError::Disk(e.to_string()), partial: at(done) });
         }
         Ok(Fetched { len: done, resumed_from: start, validator: written_under, content_type })
@@ -867,6 +1009,49 @@ mod tests {
         assert!(matches!(failed.error, FetchError::WrongSize { expected: 10, got: 12 }), "{:?}", failed.error);
         assert_eq!(failed.partial, Partial { len: 4, validator: None }, "a part of a file that is gone");
         assert_eq!(std::fs::read(&dest).unwrap(), b"0123", "and still untouched");
+    }
+
+    #[test]
+    fn a_stream_takes_the_bytes_once_and_resumes_only_where_it_stopped() {
+        let etag = "W/\"a-18f\"";
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: {etag}\r\n");
+        let cut = format!("{head}Connection: close\r\n\r\n0123");
+        let (base, seen) = canned(vec![
+            // Cut after four bytes: what came is in the stream, and says so.
+            cut.into_bytes(),
+            reply("206 Partial Content", &[("Content-Range", "bytes 4-9/10"), ("ETag", etag)], b"456789"),
+            // The file changed since: the whole new one, which the stream
+            // can't take on top of the old part.
+            reply("200 OK", &[("ETag", "W/\"a-190\"")], b"abcdefghij"),
+            reply("200 OK", &[("ETag", etag)], b"0123456789"),
+        ]);
+        let client = Client::new(&base).unwrap();
+        let mut into: Vec<u8> = Vec::new();
+        let fetch = Fetch::file("lib/Album B/01.flac").expecting(10);
+        let failed = client.stream(&fetch, &mut into, 0, &mut |_, _| {}).unwrap_err();
+        assert_eq!(failed.partial, Partial { len: 4, validator: Some(etag.into()) }, "{}", failed.error);
+        assert_eq!(into, b"0123");
+        let _ = recv(&seen);
+
+        let resume = Fetch::file("lib/Album B/01.flac").expecting(10).resuming(Some(etag));
+        let mut heard = Vec::new();
+        let got = client.stream(&resume, &mut into, 4, &mut |done, total| heard.push((done, total))).unwrap();
+        let req = recv(&seen);
+        assert!(req.contains("range: bytes=4-\r\n") && req.contains("if-range: w/\"a-18f\"\r\n"), "{req}");
+        assert_eq!(into, b"0123456789", "written on, never over");
+        assert_eq!((got.len, got.resumed_from, got.validator.as_deref()), (10, 4, Some(etag)));
+        assert_eq!(heard.last(), Some(&(10, Some(10))));
+
+        let mut into = b"0123".to_vec();
+        let failed = client.stream(&resume, &mut into, 4, &mut |_, _| {}).unwrap_err();
+        assert!(matches!(&failed.error, FetchError::Range(why) if why.contains("changed")), "{:?}", failed.error);
+        assert_eq!(into, b"0123", "nothing written over the old part");
+        let _ = recv(&seen);
+
+        // A fresh stream takes the whole file.
+        let mut into = Vec::new();
+        let got = client.stream(&fetch, &mut into, 0, &mut |_, _| {}).unwrap();
+        assert_eq!((into.as_slice(), got.resumed_from), (b"0123456789".as_slice(), 0));
     }
 
     #[test]

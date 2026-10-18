@@ -25,20 +25,28 @@
 //! first commit that mints the card's id, and its state file ([`state`]:
 //! the card's identity and settings) — and says when a card is a copy of
 //! another, with this computer's cache of the cards it has seen
-//! ([`cards`]).
+//! ([`cards`]). [`sync`] fills a set-up card from the user's own server:
+//! the wanted card of its selection, its conversions and its fit
+//! ([`plan`]), the albums' covers ([`covers`]), and a dry run that writes
+//! nothing ([`dry`]).
 
-// The kit and the engine built on it wait for their callers (the sync of
-// the user's server, the Card view): until they land only the tests call
-// them, so the tests' build is the one that holds every item to a caller.
+// The kit and the engine built on it wait for their callers (the Card view,
+// the public command line): until they land only the tests and a hidden
+// command call them, so the tests' build is the one that holds every item
+// to a caller.
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod autodj;
 pub(crate) mod cards;
 pub(crate) mod contract;
+pub(crate) mod covers;
+pub(crate) mod dry;
 pub(crate) mod engine;
 pub(crate) mod names;
+pub(crate) mod plan;
 pub(crate) mod setup;
 pub(crate) mod source;
 pub(crate) mod state;
+pub(crate) mod sync;
 pub(crate) mod tags;
 pub(crate) mod volume;
