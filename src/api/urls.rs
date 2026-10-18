@@ -43,6 +43,136 @@ impl std::str::FromStr for TranscodeCodec {
     }
 }
 
+// The card transfer (src/api/transfer.rs, and the sync engine after it) is
+// the only caller of the items below that carry this allow; until the
+// engine lands, only the tests use them.
+/// What an SD-card transfer asks `/transcode` for. The card's player decodes
+/// it, not this one: the Core2 plays mStream's Opus sample-exact and
+/// gapless, so Opus is allowed here, and only here. Kept apart from
+/// [`TranscodeCodec`] so that type's rule stands where it matters: no URL
+/// built from this one is ever handed to the playback engine.
+///
+/// mStream's third codec, ADTS AAC, is left out: the card's player reads
+/// `.mp3`, `.flac` and `.opus` only.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransferCodec {
+    Opus,
+    Mp3,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl TransferCodec {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransferCodec::Opus => "opus",
+            TransferCodec::Mp3 => "mp3",
+        }
+    }
+
+    /// The Content-Type mStream answers this codec with (its `codecMap`).
+    /// An unknown codec silently becomes the server's default, so this is
+    /// the only way to know the bytes are the ones asked for.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            TransferCodec::Opus => "audio/ogg",
+            TransferCodec::Mp3 => "audio/mpeg",
+        }
+    }
+
+    /// Whether a response's `Content-Type` is this codec's: the media type
+    /// alone, any parameters and case ignored.
+    pub fn answers(self, content_type: &str) -> bool {
+        let media = content_type.split(';').next().unwrap_or_default().trim();
+        media.eq_ignore_ascii_case(self.content_type())
+    }
+
+    /// The extension a converted file takes on the card. Ogg Opus is
+    /// `.opus` there, whatever the server's container calls itself.
+    pub fn extension(self) -> &'static str {
+        match self {
+            TransferCodec::Opus => "opus",
+            TransferCodec::Mp3 => "mp3",
+        }
+    }
+}
+
+impl std::str::FromStr for TransferCodec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "opus" => Ok(TransferCodec::Opus),
+            "mp3" => Ok(TransferCodec::Mp3),
+            other => Err(format!("unknown codec '{other}' — use opus or mp3")),
+        }
+    }
+}
+
+/// The bitrates `/transcode` takes. Any other value silently becomes the
+/// server's default (96k), so a transfer always names one of these.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransferBitrate {
+    K64,
+    K96,
+    K128,
+    K192,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl TransferBitrate {
+    pub const ALL: [TransferBitrate; 4] =
+        [TransferBitrate::K64, TransferBitrate::K96, TransferBitrate::K128, TransferBitrate::K192];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransferBitrate::K64 => "64k",
+            TransferBitrate::K96 => "96k",
+            TransferBitrate::K128 => "128k",
+            TransferBitrate::K192 => "192k",
+        }
+    }
+
+    pub fn kbps(self) -> u32 {
+        match self {
+            TransferBitrate::K64 => 64,
+            TransferBitrate::K96 => 96,
+            TransferBitrate::K128 => 128,
+            TransferBitrate::K192 => 192,
+        }
+    }
+
+    /// The one with exactly this rate, if the server offers it.
+    pub fn from_kbps(kbps: u32) -> Option<TransferBitrate> {
+        TransferBitrate::ALL.into_iter().find(|b| b.kbps() == kbps)
+    }
+}
+
+/// Which copy of a cover `/album-art` serves: the image the scanner kept,
+/// or one of the two copies it makes beside it (`scanOptions.compressImage`,
+/// on by default). A copy that was never made is answered with the
+/// original, so asking for one is always safe.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArtSize {
+    Full,
+    /// `?compress=l`: at most 256 px on a side.
+    Large,
+    /// `?compress=s`: at most 92 px.
+    Small,
+}
+
+impl ArtSize {
+    fn compress(self) -> Option<&'static str> {
+        match self {
+            ArtSize::Full => None,
+            ArtSize::Large => Some("l"),
+            ArtSize::Small => Some("s"),
+        }
+    }
+}
+
 /// Join `prefix` + a library-relative path onto a server base URL, encoding
 /// each path segment. Handles bases that live under a subpath (reverse
 /// proxies) and bases with or without a trailing slash.
@@ -142,6 +272,48 @@ pub fn transcode_url(
     Ok(url.to_string())
 }
 
+/// `{server}/transcode/{vpath}?codec=...&bitrate=...&token=...` for a card
+/// transfer: codec and bitrate both pinned, as the server would otherwise
+/// put its own defaults in their place without saying so.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn transfer_transcode_url(
+    server: &str,
+    vpath: &str,
+    codec: TransferCodec,
+    bitrate: TransferBitrate,
+    token: Option<&str>,
+) -> Result<String, String> {
+    let mut url = build(server, "transcode", vpath)?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("codec", codec.as_str());
+        q.append_pair("bitrate", bitrate.as_str());
+        if let Some(token) = token {
+            q.append_pair("token", token);
+        }
+    }
+    Ok(url.to_string())
+}
+
+/// [`album_art_url`] or [`peer_art_url`] for one [`ArtSize`]. The parent's
+/// art proxy forwards `compress` to the peer, and nothing else.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn album_art_sized_url(
+    server: &str,
+    peer: Option<i64>,
+    file: &str,
+    size: ArtSize,
+) -> Result<String, String> {
+    let mut url = match peer {
+        Some(peer) => build(server, &format!("api/v1/federation/peers/{peer}/art"), file)?,
+        None => build(server, "album-art", file)?,
+    };
+    if let Some(compress) = size.compress() {
+        url.query_pairs_mut().append_pair("compress", compress);
+    }
+    Ok(url.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +394,49 @@ mod tests {
     #[test]
     fn rejects_bad_server_url() {
         assert!(media_url("not a url", "a.mp3", None).is_err());
+    }
+
+    #[test]
+    fn a_transfer_may_ask_for_opus_and_always_pins_both_settings() {
+        let u = transfer_transcode_url(
+            "http://host/mstream",
+            "lib/Artist A/b.flac",
+            TransferCodec::Opus,
+            TransferBitrate::K192,
+            None,
+        )
+        .unwrap();
+        assert_eq!(u, "http://host/mstream/transcode/lib/Artist%20A/b.flac?codec=opus&bitrate=192k");
+        let (mp3, low) = (TransferCodec::Mp3, TransferBitrate::K64);
+        let u = transfer_transcode_url("http://host", "lib/b.flac", mp3, low, Some("t")).unwrap();
+        assert_eq!(u, "http://host/transcode/lib/b.flac?codec=mp3&bitrate=64k&token=t");
+
+        // The transfer's codec parses Opus; the player's still refuses it.
+        assert_eq!("OPUS".parse::<TransferCodec>().unwrap(), TransferCodec::Opus);
+        assert!("aac".parse::<TransferCodec>().is_err(), "the card's player reads no ADTS");
+        assert!("opus".parse::<TranscodeCodec>().is_err());
+
+        // The answer's type is the check the server's silent fallback needs.
+        assert!(TransferCodec::Opus.answers("audio/ogg"));
+        assert!(TransferCodec::Opus.answers("Audio/OGG; codecs=opus"));
+        assert!(!TransferCodec::Opus.answers("audio/mpeg"), "the server's default came back instead");
+        assert!(TransferCodec::Mp3.answers("audio/mpeg"));
+        assert_eq!(TransferCodec::Opus.extension(), "opus");
+
+        assert_eq!(TransferBitrate::from_kbps(128), Some(TransferBitrate::K128));
+        assert_eq!(TransferBitrate::from_kbps(320), None, "the server has no 320k");
+        let rates: Vec<&str> = TransferBitrate::ALL.iter().map(|b| b.as_str()).collect();
+        assert_eq!(rates, ["64k", "96k", "128k", "192k"]);
+    }
+
+    #[test]
+    fn art_comes_in_three_sizes_from_the_server_or_a_peers_proxy() {
+        let full = album_art_sized_url("http://host", None, "ab12.jpeg", ArtSize::Full).unwrap();
+        assert_eq!(full, album_art_url("http://host", "ab12.jpeg").unwrap(), "the full image is the plain URL");
+        let large = album_art_sized_url("http://host/m/", None, "ab12.jpeg", ArtSize::Large).unwrap();
+        assert_eq!(large, "http://host/m/album-art/ab12.jpeg?compress=l");
+        let small = album_art_sized_url("http://parent:3000", Some(3), "ab12.png", ArtSize::Small).unwrap();
+        assert_eq!(small, "http://parent:3000/api/v1/federation/peers/3/art/ab12.png?compress=s");
     }
 
     #[test]
