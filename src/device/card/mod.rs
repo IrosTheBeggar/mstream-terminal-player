@@ -8,10 +8,13 @@
 //!
 //! [`contract`] is the kit: the files themselves, byte for byte, pure code
 //! with no I/O. The rest of the transfer — the names, the tag reader, the
-//! Auto DJ index, the volumes, the engine — is built on it.
+//! Auto DJ index, the volumes, the engine — is built on it. [`tags`] is the
+//! tag reader: a file's record read from its bytes on the card, the way
+//! mStream's scanner and the device's own scan read them.
 
 // The kit's callers are the transfer's next pieces (the names, the tag
 // reader, the engine); until they land only the tests call it.
 #![allow(dead_code)]
 
 pub(crate) mod contract;
+pub(crate) mod tags;

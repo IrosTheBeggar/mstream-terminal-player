@@ -166,6 +166,16 @@ sha2 = "0.11"
 # add no package.
 crc32fast = "1.5"
 md-5 = "0.11"
+# The SD card's tag reader (src/device/card/tags.rs): the record of a file
+# the transfer puts on a card is read from the card's bytes the way
+# mStream's default scanner reads them, and that scanner is lofty 0.25 (the
+# firmware repo's docs/METADATA.md part 5, whose reference reader pins
+# =0.25.1). Pinned exactly for the same reason: a release that reads one
+# frame differently changes records the device's own scan must equal field
+# for field. The default feature is part of that: it inflates a compressed
+# ID3v2 frame, as the reference does. lofty, lofty_attr and ogg_pager are
+# new to the tree; flate2, byteorder, data-encoding and paste were in it.
+lofty = "=0.25.1"
 stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
