@@ -801,3 +801,66 @@ fn beside_its_server_a_sync_reads_the_files_from_the_servers_own_folder() {
         assert!(mpth::check(&thumb, path_hash(album)), "{album}");
     }
 }
+
+// ── The hidden command ──────────────────────────────────────────────────────
+
+#[test]
+fn the_hidden_command_syncs_only_a_volume_the_rule_accepts() {
+    use crate::device::card::volume::{Bus, Clock, Disk, Found, Fs, Serial, Table, Volume};
+    let scratch = Scratch::new("command");
+    let sim = card(&scratch);
+    let image = sim.image();
+    let at = |device: &str, fs: Fs| {
+        let volume = Volume {
+            path: scratch.0.join("card"),
+            device: device.into(),
+            fs,
+            table: Table::Mbr,
+            label: "CARD".into(),
+            serial: Some(Serial::Fat(SERIAL)),
+            space: space(32 << 30),
+            read_only: false,
+            utf8: Some(true),
+            clock: Clock::Offset(0),
+        };
+        let disk = Disk {
+            id: "sdz".into(),
+            removable: true,
+            bus: Bus::Usb,
+            read_only: false,
+            system: Vec::new(),
+            others: Vec::new(),
+        };
+        Found::new(volume, disk)
+    };
+    // The card's own folder, once as an exFAT volume the rule refuses and
+    // once as a FAT32 one it takes.
+    let found = [at("sdy1", Fs::ExFat), at("sdz1", Fs::Fat32)];
+    let mut asked = 0;
+    let mut call = |named: &str, dry_run: bool| {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let ask = Ask { dry_run, ..rock() };
+        let mut saved = || {
+            asked += 1;
+            Err("none here".to_string())
+        };
+        let code = on(&found, named, &ask, &mut saved, &mut out, &mut err);
+        (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+    };
+
+    for dry_run in [true, false] {
+        let (code, out, err) = call("not-a-volume", dry_run);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains("isn't a volume"), "{err}");
+        let (code, out, err) = call("sdy1", dry_run);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert!(err.contains("is refused: exfat"), "{err}");
+    }
+    // A volume it takes asks for the saved session; the refused ones never
+    // got that far.
+    let (code, _, err) = call("sdz1", true);
+    assert_eq!(code, 2);
+    assert!(err.contains("no saved session: none here"), "{err}");
+    assert_eq!(asked, 1);
+    assert_eq!(sim.image(), image, "nothing reached the card");
+}

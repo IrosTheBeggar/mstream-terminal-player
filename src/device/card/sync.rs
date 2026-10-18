@@ -1004,7 +1004,21 @@ pub(crate) fn command(volume: &str, ask: &Ask, out: &mut dyn Write, err: &mut dy
             return 2;
         }
     };
-    let Some(found) = super::setup::pick(&found, volume) else {
+    let mut saved = || Client::resolve(None, None).map_err(|e| e.to_string());
+    on(&found, volume, ask, &mut saved, out, err)
+}
+
+/// [`command`] on the volumes found; `saved` the saved session's client,
+/// asked for only once the volume is one it may write.
+fn on(
+    found: &[volume::Found],
+    volume: &str,
+    ask: &Ask,
+    saved: &mut dyn FnMut() -> Result<Client, String>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let Some(found) = super::setup::pick(found, volume) else {
         let _ = writeln!(err, "mstream-player: {volume} isn't a volume this computer lists");
         return 2;
     };
@@ -1013,7 +1027,7 @@ pub(crate) fn command(volume: &str, ask: &Ask, out: &mut dyn Write, err: &mut dy
         let _ = writeln!(err, "mstream-player: {volume} is refused: {}", codes.join(", "));
         return 2;
     };
-    let client = match Client::resolve(None, None) {
+    let client = match saved() {
         Ok(client) => client,
         Err(e) => {
             let _ = writeln!(err, "mstream-player: no saved session: {e}");
