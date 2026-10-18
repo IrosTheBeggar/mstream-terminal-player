@@ -14,9 +14,10 @@
 //!   Management key's ExistingPageFiles, and a `pagefile.sys` or
 //!   `swapfile.sys` at a volume's root), and of any EFI system partition.
 //! - **A card:** RemovableMedia, or a disk on the USB, SD or MMC bus.
-//! - **A disk of its own:** no other volume on the disk that isn't FAT,
-//!   including one with no letter and one Windows can't read (a Linux
-//!   partition beside a card's FAT one reads as RAW).
+//! - **A disk of its own:** no other volume on the disk with a letter, FAT
+//!   or not (as Linux and macOS count any other mounted filesystem), and
+//!   none without one that isn't FAT, including one Windows can't read (a
+//!   Linux partition beside a card's FAT one reads as RAW).
 //! - **The candidates** are the drive letters (GetLogicalDrives) of
 //!   removable and fixed drives with their medium in; their size, free space
 //!   and cluster from GetDiskFreeSpaceExW and GetDiskFreeSpaceW.
@@ -196,7 +197,9 @@ pub(crate) fn judge_all(volumes: &[WinVolume], system: &WinSystem) -> Vec<Found>
         let beside = |u: &&WinVolume| u.guid != v.guid && u.disks.iter().any(|d| v.disks.contains(d));
         for u in volumes.iter().filter(beside) {
             match &u.fs {
-                Ok(_) if u.fat() => {}
+                // A FAT one with no letter is the unmounted FAT partition
+                // Linux and macOS pass too.
+                Ok(_) if u.fat() && u.letters.is_empty() => {}
                 Err(Unread::NoMedia) => {}
                 Ok(fs) => others.push(format!("{fs} {}", u.name())),
                 Err(Unread::Raw) => others.push(format!("RAW {}", u.name())),
@@ -720,6 +723,25 @@ mod tests {
         let e = at(&found, "E:\\");
         assert_eq!(e.disk.others, ["RAW \\Device\\HarddiskVolume10"]);
         assert_eq!(codes(e), ["shared-disk"]);
+    }
+
+    #[test]
+    fn a_second_fat_partition_shares_the_card_when_it_has_a_letter() {
+        // As on Linux and macOS, where another mounted FAT filesystem on the
+        // card's disk refuses it and an unmounted one doesn't.
+        let (mut volumes, system) = pc();
+        let mut second = v("s1", "12", Some("K:\\"), Ok("FAT32"), 1);
+        (second.drive_type, second.removable, second.bus, second.style) =
+            (DRIVE_REMOVABLE, true, Some(7), Some(0));
+        volumes.push(second);
+        let found = judge_all(&volumes, &system);
+        assert_eq!(at(&found, "E:\\").disk.others, ["FAT32 K:\\"]);
+        assert_eq!(codes(at(&found, "E:\\")), ["shared-disk"]);
+        assert_eq!(codes(at(&found, "K:\\")), ["shared-disk"]);
+
+        volumes.last_mut().unwrap().letters.clear();
+        let found = judge_all(&volumes, &system);
+        assert!(at(&found, "E:\\").accepted(), "{found:#?}");
     }
 
     #[test]
