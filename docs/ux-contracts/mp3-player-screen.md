@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Design of record** | mStream `docs/designs/mp3-tab`, alternate **A · One card** (card 02) and its several-boards frames (card 05), with the grafts the set's README recommends — chosen by Paul on 2026-10-09 ("Go with alternate A, build it"); and for the Advanced options, alternate **A · An options sheet** (card 07) with the grafts of cards 08 and 09 the set's README recommends — chosen by Paul on 2026-10-10 ("Go with alternate A, build it"). This repo's page draws it: `src/device/page.rs` over the desk worker (`src/device/desk.rs`, `board.rs`, `listen.rs`), the same page `mstream-player device flash` opens and the GUI's MP3 Player tab hosts whole. The GUI adds only the tab, the way back, and the rules that keep a write from being left and a board from being left in its bootloader. |
-| **Design of record, the SD card transfer** | **The card-transfer design set (twelfth set), alternates per the user's picks of 2026-10-19.** It is in no repo yet: it will live in mStream `docs/designs/card-transfer`. It draws the placement chosen on 2026-10-18 (Q2, one tab row per subject) whole in its card 02, with the Card view's states (card 03), the sync (card 04), the card's Settings (card 05, alternate **A**, two tabs), the gates and formatting in the Core2 (card 06, the player's second step as alternate **B**, the hold), and play history, sets and the command line (card 07, whose section 7 holds the twelve choices and the picks). This repo's page is to draw it beside the board card (`src/device/page/card.rs`), over a transfer worker that lives at the GUI level (`src/device/card/worker.rs`; part B4). |
+| **Design of record, the SD card transfer** | **The card-transfer design set (twelfth set), alternates per the user's picks of 2026-10-19.** **Provisional, with no commit pinned:** it is in no repo yet and will live in mStream `docs/designs/card-transfer`; its commit is pinned here once it lands there, in a commit of its own touching this header (the README's re-extraction rule). Until then the citations below ("card 07 §7, choice 6" and the like) can't be followed from a repo. It draws the placement chosen on 2026-10-18 (Q2, one tab row per subject) whole in its card 02, with the Card view's states (card 03), the sync (card 04), the card's Settings (card 05, alternate **A**, two tabs), the gates and formatting in the Core2 (card 06, the player's second step as alternate **B**, the hold), and play history, sets and the command line (card 07, whose section 7 holds the twelve choices and the picks). This repo's page is to draw it beside the board card (`src/device/page/card.rs`), over a transfer worker that lives at the GUI level (`src/device/card/worker.rs`; part B4). |
 | **Server API** | **For a board, none.** No mStream session is involved: each board is a USB serial port, asked over it with no reset (the firmware repo's `docs/HOST-STATUS.md`: `@status` with `cid=` and `clock=`, `@count`, `@identify`, `@time`, `@format`, and the console's `L` for firmware older than them), and the firmware written is the release this player pins — or, for one write, what the Advanced options sheet chose: the pin's other build, another release (GitHub's releases API, asked only when the sheet lists them), or a local build. **For a card in a reader, its own server**: the one the card names (its URL key and nickname in `/.mstream/state.json`), reached through this computer's saved sign-in for it, never necessarily the GUI's session; a peer's library through its parent (the multi-server contract). The calls: `GET /api/` (the server's `instanceId`, mStream B11); `POST /api/v1/sync/manifest` (paged, ETag/304) and `POST /api/v1/db/metadata/batch`; `GET /media/…` with Range, and `GET /transcode/…`; `/album-art/…` and `discovery/local/embeddings`; `POST /api/v1/stats/plays`; for peers, `federation/peers`, `…/peers/:id/access` and `file-explorer/recursive`, and the key's limits where the server offers them (mStream B10); beside the server on this computer, `admin/directories` and `admin/transcode`, to read its folders from disk (part A9). |
 | **Already in this repo** | The page, live as its own command on the admin hub's terminal session; the GUI's Stats tab, which showed how a hub page lives under the top bar (the stats-screen contract), and the hub's `HostedRoom`, whose per-frame call this screen uses. The kit's gold warning modal (the libraries room's remove gate), its tab row (the Discovery room), its scan widget and its tall buttons. For the SD card transfer: the card contract's kit, names, tag reader and Auto DJ writer (`src/device/card/{contract,names.rs,tags.rs,autodj.rs}`); cards in readers held to the drive-safety rule (`card/volume/`); set-up, the card's state file and this computer's `cards.json` (`setup.rs`, `state.rs`, `cards.rs`); the sync engine with its plan, covers, dry run, the peers' budget and sets (`engine/`, `sync.rs`, `plan.rs`, `covers.rs`, `dry.rs`, `budget.rs`, `span.rs`); the play log read and posted (`history.rs`); the transfer client (`src/api/transfer.rs`); `cid=`, `clock=` and `@time` in `listen.rs`; the hidden commands that drive them for the real-card and board checks (`device card-probe`, `card-setup`, `card-sync`, `card-set`, `card-plays`, `time`). The play outbox and `report_plays_async` (the play-reporting contract), and `session_reach`/`reach_client` (`src/gui/stats.rs`). |
 | **Status** | Implemented 2026-10-04 (the tenth set's alternate A: the step line, the question, the erase box); **redrawn as alternate A of the eleventh set 2026-10-10** — this document first, then the page, the tab and the command line (Deviations log); **Advanced options (card 07) 2026-10-10** — the worker and the command line first, then this document's clauses 33–43, then the sheet; **the SD card transfer (the twelfth set) 2026-10-19** — this document's clauses 3a, 20a, 25a and 44–67 with the user's picks (Deviations log); the card's engine, set-up, sync, sets, peers and plays are built behind hidden commands (parts A2–A9, A12, A13, B1, B2, B7, B9, B15); the transfer worker, the Card view and the public commands (B4), the Format route (B6) and the tab's half of the clock (clause 5) come next. |
@@ -256,10 +256,11 @@ comes from the cache, or a download, beside them.
 9. **The write cannot be left.** From a gate's yes until the board's write
    has ended — written and restarted, or failed — and for Update all until
    the last board's has, the tab holds the GUI:
-   - every key is the page's, and only `d` and `l` (Details) and `←` `→`
-     (look at another board, clause 26) do anything: `q`, `K`, `T`, `M`,
-     `0`, the digits, `D`, `V`, Tab, Esc, Enter and the transport letters
-     do nothing;
+   - every key is the page's, and only `d` and `l` (Details), `←` `→`
+     (look at another board or card, clause 26) and `x` on a card whose
+     sync runs (below; clause 57) do anything: `q`, `K`, `T`, `M`, `0`,
+     the digits, `D`, `V`, Tab, Esc, Enter and the transport letters do
+     nothing;
    - the top bar's clicks do nothing — the tabs, the Visualizer item, the
      server label and `[+]` — and its tabs do not light under the pointer;
      below the floor the mini player's buttons answer nothing either;
@@ -327,7 +328,9 @@ comes from the cache, or a download, beside them.
     With cards (clause 25) the page's keys are those of the subject in view
     (the user's pick of 2026-10-19, the set's card 07 §7, choice 6):
     - **on a board**, the keys above, plus `f` (Format as FAT32…, clause
-      59);
+      59) where the format is offered: for a card the player can't read
+      whatever Details shows, for one it reads only with Details open, as
+      `w`;
     - **on a card**, Enter (the primary), `d` and `l` (Details), `o`
       (Settings…), `e` (Eject), `p` (Send the plays), `x` (Stop at the next
       save) and `h` (Not a card? Hide it, clause 63);
@@ -365,9 +368,11 @@ comes from the cache, or a download, beside them.
     goes. The hint names the keys that do something on the board in view —
     the primary's verb first after the switch keys — and never runs past 99
     cells: in a long locale the lesser keys give way before the primary,
-    Details and Esc — `s`, `a` and `o` first, then `c`, `w`, `r` and `x`.
-    With the sheet up the hint is the sheet's (clause 34), its Esc and
-    Enter never giving way. It outranks the queue panel's
+    Details and Esc — `s`, `a`, `o` and `f` first, then `c`, `w`, `r` and
+    `x`. Where *Format as FAT32 ▸* is the primary its verb is Enter's
+    (`Enter format`) and `f` is not named again. With the sheet up the
+    hint is the sheet's (clause 34), its Esc and Enter never giving way. It
+    outranks the queue panel's
     and an armed pick's tips; only a GUI modal's own come first, and none
     during a write. While a visit waits for the last page to let its ports
     go, the footer is empty.
@@ -446,9 +451,13 @@ comes from the cache, or a download, beside them.
     With cards the board card's rows are unchanged but for two things: the
     card line under the SD card row (clause 20a), and one more primary. For
     a card the player can't read (clause 59), *Format as FAT32 ▸* is the
-    primary when the verdict has none (✓ Up to date, or ahead of the pin). A
-    verdict with a primary keeps it (*Update ▸*, *Install ▸*, …, and a next
-    write's direction): that primary wins, and the format waits for it.
+    primary when the verdict has none and the board reports its card: ✓ Up
+    to date, ahead of the pin, or ? Version not recognised (a board's
+    status keys say whether it can format, never its version: clause 59).
+    The other verdicts with no primary, Starting up and Not a Core2, have
+    no card to format. A verdict with a primary keeps it (*Update ▸*,
+    *Install ▸*, …, and a next write's direction): that primary wins, and
+    the format waits for it.
     Meanwhile the format is the dim text button *Format as FAT32…* under the
     SD card row, behind the format's gate (clause 59), its key `f`. For a
     card the player reads, *Format as FAT32…* is in Details only. A damaged
@@ -500,9 +509,10 @@ comes from the cache, or a download, beside them.
       it was."
     - During its write the row is the write itself (clause 23).
 
-    Where a verdict above says it has no primary, a board whose card the
-    player can't read wears *Format as FAT32 ▸* (clause 18); the verdict's
-    own words are unchanged.
+    Where a verdict above has no primary and its board reports its card —
+    Up to date, ahead of the pin, Version not recognised — a board whose
+    card the player can't read wears *Format as FAT32 ▸* (clause 18); the
+    verdict's own words are unchanged.
 20. **The SD card row** shows only what the running firmware just reported
     — never a number from before a reset, never a guess — in decimal GB
     with one decimal, as the Core2's About shows them:
@@ -532,9 +542,21 @@ comes from the cache, or a download, beside them.
     With formatting in the player (clause 59), the fix lines for an exFAT,
     NTFS or GPT card name the player as the formatter
     (`dev.card_fix_format`, `dev.card_fix_mbr`: "Fix: format it as FAT32 in
-    the player (below). That erases the whole card."), and the line that
-    says where music goes under a card with no tracks gives way to clause
-    20a's *not filled yet* line on a card whose `cid=` is `-`.
+    the player (below). That erases the whole card.") on a board that can
+    format: its status carries `cid=` and `clock=`. On one that can't, no
+    line points below at a format that isn't there:
+    - while the pinned release formats, clause 59's line takes the fix
+      line's place, "v0.11.0 can't format a card. Updating lets it.", with
+      the verdict's *Update ▸* (the set's card 06 §4);
+    - while it doesn't (the pin v0.11.0), the fix lines keep today's words
+      ("Fix: format it FAT32 (MBR) on a computer. That erases it." and its
+      MBR twin), moved with their ten locales to `dev.card_fix_format_pc`
+      and `dev.card_fix_mbr_pc`, and clause 59's line, "v0.11.0 can't
+      format a card.", follows them.
+
+    The line that says where music goes under a card with no tracks gives
+    way to clause 20a's *not filled yet* line on a card whose `cid=` is
+    `-`.
 
 20a. **The board names its card.** Once the firmware reports `cid=`
    (0.12.0: `@status`'s card id and commit), the SD card row adds one dim
@@ -1244,36 +1266,48 @@ comes from the cache, or a download, beside them.
 
 59. **Formatting is the player's (Q3).** The PC never writes a card's file
     system: the tab asks, and the player confirms on its own screen and
-    formats (the firmware repo's `docs/HOST-STATUS.md`, "@format").
+    formats (the firmware repo's `docs/HOST-STATUS.md`, "@format", as at
+    its commit 76a10dc).
     - **Where it is offered:** for a card the player can't read
       (`card=exfat`, `ntfs`, `gpt`), the board's SD row offers *Format as
       FAT32 ▸*: the primary when the verdict has none (clause 18), else the
       dim *Format as FAT32…* (`f`) under the row. For
       a card the player reads, *Format as FAT32…* is in Details only:
       `@format` may bring up the erase question for any card, the player's
-      own music card included (the user's pick of 2026-10-19, which
-      withdrew the firmware's refusal of a card it reads).
+      own music card included (the user's pick of 2026-10-19; the
+      firmware's refusal of a card it reads, its commit d8e797b, was
+      reverted by 93f84fc).
     - **Only where the firmware can:** `@format` came in 0.12.0 with
       `@status`'s `cid=` and `clock=`, and is offered only on a board whose
       status carries them: their presence is how the page tells, never the
       version (clause 5's rule). A board whose status has neither says,
-      under the row, "v0.11.0 can't format a card: update it first.", and
-      so does an `@err 7 format` answer.
+      in the SD row where Format would be offered, "v0.11.0 can't format a
+      card." (`fmt_old`), and so does an `@err 7 format` answer. "Updating
+      lets it." (`fmt_old_update`) follows only when the pinned release
+      answers `@format`, which the pin says beside its checksum as it says
+      `PINNED_ANSWERS_STATUS` (a `PINNED_ANSWERS_FORMAT`, part B6), the
+      rule of clause 20's "Updating shows it.". The pin v0.11.0 does not
+      answer it, so today the line ends at "can't format a card." under
+      today's fix line (clause 20): a v0.11.0 board is up to date with no
+      Update (clause 19), and an update to the pin would not let it format.
     - **The tab's gate:** "Format the card in COM3 as FAT32?" — the player
       erases the whole card, every part of it, even parts it can't read,
       and makes one FAT32 volume with an empty `/music`; about how long,
-      from the card's size; that the player confirms in two steps, the
-      second a 2 s hold; what is lost, in gold, named from `@status` — the
+      from the card's size; that the player confirms on its own screen in
+      two steps (`gate_fmt_confirm`; the hold is named once the player
+      asks, below); what is lost, in gold, named from `@status` — the
       card's kind (`card=`) and size, and on a card the player reads its
       music ("your music, 1,284 tracks, on one FAT32 volume"); and that the
       player writes its `device.txt` at once. *◂ Keep the card as it is*
       and *Ask the player*.
     - **On the yes** the tab sends `@format`. At `@format ok` the question
       is on the player's screen, and the SD row says "waiting for you to
-      confirm on the player" and "Nothing is erased until you hold Erase
-      there." The firmware has no verb that takes the question back, so the
+      confirm on the player" and "Nothing is erased until you hold the red
+      button there." (`fmt_waiting_2`, in the words of the player's own
+      hint). The firmware has no verb that takes the question back, so the
       tab offers no Cancel: the player's own *Cancel*, a tap on its tab bar
-      or a minute with no answer ends it (`@format no`). At `@format 0` the
+      or a minute with no answer ends it (`@format no`). The wait ends on
+      `@format no`, `@format 0` or `@err 4 format`. At `@format 0` the
       board restarts to format (its boot lines pass by); then the progress
       ("formatting the card… 41%", from `@format <percent>`), then
       `@format done size=… free=… cluster=…`, and the row is the empty card
@@ -1282,23 +1316,39 @@ comes from the cache, or a download, beside them.
     - **Other outcomes**, on the busy line: `@format no` within the
       firmware's minute, "Not formatted: it was cancelled on COM3's
       screen."; past it, "Not formatted: nobody confirmed on the player
-      within a minute." A refusal at once (`@err 4 format <why>`: the
-      player starting up, another screen up, a computer driving the dancer,
-      a restart under way, no card) says why; a failure after the restart
-      (`@err 4 format card|size|write|mkfs|check|files`) says so in gold,
-      the row shows the card as the board then reports it, and Details' log
-      has the reason. Their words are new with part B6 (`fmt_refused_*`,
-      `fmt_failed_*`): the set drew neither. Leaving the tab doesn't stop a
-      format: the player formats on its own, and coming back asks the board
-      again (clause 5).
-    - **On the player** (part B5): step 1, the firmware's question, its
-      words by the card, with *Cancel* and *Format…*; step 2, **the hold**
-      (the user's pick of 2026-10-19, card 06 alternate B): its red button
-      fills while it is held for 2 s, and letting go cancels, so no double
-      tap passes both steps. Then the boot's "Formatting the card" over a
-      bar, and "Card formatted: ready for your music". A tap on the tab bar
-      is Cancel. The words are the firmware's own (its repo's UiStrings,
-      ten languages).
+      within a minute." Three answers are not the player's no, and are told
+      apart by what came before them:
+      - a refusal at once, in place of `@format ok` (`@err 4 format
+        ui|screen|viz|busy|card`: the player starting up, another screen
+        up, a computer driving the dancer, a restart under way, no card),
+        says why;
+      - a refusal at the player's second answer, after `@format ok` and
+        with no restart (`@err 4 format card|size|busy`: another card in
+        the slot since the board started or none answering, a card FAT32
+        can't take, a restart under way), says why and that nothing was
+        formatted, and the row is the card as the board reports it;
+      - a failure after the restart (`@err 4 format
+        card|size|write|mkfs|check|files`) says so in gold, the row shows
+        the card as the board then reports it, and Details' log has the
+        reason.
+
+      Their words are new with part B6 (`fmt_refused_*`, the second
+      answer's three among them, and `fmt_failed_*`): the set drew none.
+      Leaving the tab doesn't stop a format: the player formats on its own,
+      and coming back asks the board again (clause 5).
+    - **On the player** (part B5, as built at 76a10dc): step 1, the
+      firmware's question, its words by the card, with *Cancel* and
+      *Format…*; step 2, "Erase the whole card?", **the hold** (the user's
+      pick of 2026-10-19, card 06 alternate B): its red *Format* answers
+      only to a finger kept on it 2 s, filling meanwhile. Lifted sooner or
+      slid off, it empties and nothing happens but the hint "Hold the red
+      button for 2 seconds"; the question stays up, and no tap, double tap
+      or run of taps passes both steps. *Cancel* stays the default: its
+      button, a tap on the tab bar or each step's minute ends the question.
+      Then the boot's "Formatting the card" over a bar, and "Card
+      formatted: ready for your music". The words are the firmware's own
+      (its repo's UiStrings, ten languages). Whether a 2 s hold reads well
+      on the Core2's touch panel is the firmware's device check to say.
     - **Never during** a write, a read or a count of that board, and never
       twice at once.
 60. **Damaged cards** (`card=other` — blank, another system's, or a FAT
@@ -1381,7 +1431,8 @@ comes from the cache, or a download, beside them.
     player and prints the card as the board reports it (its kind, size and
     tracks: what is lost), the player's answer, the progress and the
     result. It has no `--yes`: the player confirms. Exit 0 formatted; 1
-    declined, timed out or refused (older firmware too), and with several
+    declined, timed out, refused (older firmware too) or failed (clause
+    59's three answers that are not the player's no), and with several
     boards and no `--port`, a refusal naming them as `device flash --yes`'s
     does; 2 no board.
 67. **The command line keeps parity** (clause 43's rule for cards): every
@@ -1482,15 +1533,20 @@ The cards' strings (clauses 3a, 20a, 25a and 44–67) are `dev.card.*`:
   `btn_cancel`, `btn_do_setup`, `spread_*`).
 
 Five `dev.*` keys change their words: `card_fix_format`, `card_fix_mbr`,
-`none_title`, `none_body` and `none_watching`. With the 341 new
-`dev.card.*` keys that is 346 keys in all, two of them added by the picks
-of 2026-10-19 (`gate_fmt_music`, `log_kept_yours`), and the frames reuse
-42 existing `dev.*` keys unchanged. The set's card 07 §5 has every one
-with its English, and a German draft wherever a floor frame shows it (160
-of them). Three wait for firmware that part B5 did not build, and are not
-added until it is (`fmt_cancel_note`, `hint_fmt_cancel`, `gate_fmt_part`:
-clause 59, Deviations log), and part B6 adds the format's refusals and
-failures (`fmt_refused_*`, `fmt_failed_*`), which the set did not draw.
+`none_title`, `none_body` and `none_watching`. With the 342 new
+`dev.card.*` keys that is 347 keys drawn in the set, three of them added
+since the picks of 2026-10-19 (`gate_fmt_music`, `log_kept_yours` and
+`fmt_old_update`), and the frames reuse 42 existing `dev.*` keys
+unchanged. The set's card 07 §5 has every one with its English, and a
+German draft wherever a floor frame shows it (160 of them). Three of the
+347 wait for firmware that part B5 did not build, and are not added until
+it is (`fmt_cancel_note`, `hint_fmt_cancel`, `gate_fmt_part`: clause 59,
+Deviations log), so **the build adds 344 keys now** (339 new, 5
+changed), in all ten locales. Two more keep today's fix words for a
+board that can't format while the pin can't either (`card_fix_format_pc`,
+`card_fix_mbr_pc`, clause 20): moved, their ten locales as they are, not
+new. Part B6 adds the format's refusals and failures beside them
+(`fmt_refused_*`, `fmt_failed_*`), which the set did not draw.
 Not keys: the invented names, paths, sizes and versions; the command
 line's lines (plain English, like `device list`'s); the firmware's own
 strings for its dialogs (its repo's lib/core UiStrings, ten languages).
@@ -1512,6 +1568,8 @@ and the caret.
 | `dev.card.gate_fmt_title` | Format the card in %{port} as FAT32? |
 | `dev.card.gate_fmt_music` | your music, %{n} tracks, on one %{fs} volume |
 | `dev.card.fmt_waiting` | waiting for you to confirm on the player |
+| `dev.card.fmt_waiting_2` | Nothing is erased until you hold the red button there. |
+| `dev.card.fmt_old` · `fmt_old_update` | %{version} can't format a card. · Updating lets it. |
 | `dev.card.quit_title` | Stop syncing %{card} and quit? |
 | `dev.card.mini` | syncing %{card} %{pct}% · it goes on while you listen |
 | `dev.card_fix_format` (changed) | Fix: format it as FAT32 in the player (below). That erases the whole card. |
@@ -1939,9 +1997,9 @@ The cards' command-line lines are plain English, like the `plan:` line.
     the build raised: a computer's `@format` may bring up the two-step
     erase question for any card, the player's own music card included —
     the firmware's refusal of a card it reads (its commit d8e797b) is
-    withdrawn (clause 59); and a file the listener changed on the card is
-    kept, the server's copy written beside it as "… (2)", as part A8 built
-    it (clause 51).
+    withdrawn, as its 93f84fc reverted it (clause 59); and a file the
+    listener changed on the card is kept, the server's copy written beside
+    it as "… (2)", as part A8 built it (clause 51).
   - **This supersedes the 2026-10-09/10 decision's "no Format card"** and
     the out-of-scope "Formatting a card". A card the player can't read is
     offered Format on the board's SD row, and one it reads in Details,
@@ -1984,18 +2042,49 @@ The cards' command-line lines are plain English, like the `plan:` line.
     and timed out are told apart by the firmware's minute, since both
     answer `@format no`. Should the firmware gain those verbs, the frames
     come back as drawn. The player's dialogs say *Cancel* and *Format…*
-    in the firmware's own words where the frames say *Keep it*, so the
-    busy line's declined words name no button (`fmt_declined`, reworded in
+    in the firmware's own words where the frames say *Keep it*, and its
+    step 2's red button is *Format*, held, where the picked frame says
+    *Hold to erase*; so the busy line's declined words and the SD row's
+    waiting line name no button (`fmt_declined`, and `fmt_waiting_2`'s
+    "hold the red button", the player's own hint's words, both reworded in
     the set). The firmware's refusals and failures get words of their own
-    with part B6 (clause 59). And this computer's clock outside the
+    with part B6 (clause 59), its refusal at the second answer among them,
+    which the set did not foresee. And this computer's clock outside the
     board's range sends no `@time` at all, where the set's notes had the
     board refuse it. What else the build finds is recorded here.
-  - **Still the firmware's to follow:** as built, B5's second step is a
-    second tap behind a 0.6 s settle guard, and it refuses a card the
-    player reads (d8e797b). The hold (pick 2) and the withdrawn refusal
-    (the `@format` pick) are part B5's to redo; until then the tab's
-    *Format as FAT32…* in Details meets `@err 4 format card`, said on the
-    busy line.
-  - **Words.** 346 keys: the set's 344 and the two the picks add. The
-    German drafts (160) and the machine translations of the other eight
-    locales wait for a native review.
+  - **The firmware followed both picks** on its branch, after B5's first
+    build (a second tap behind a 0.6 s settle guard, and a refusal of a
+    card the player reads, d8e797b): 93f84fc reverted the refusal, and
+    76a10dc made step 2 the hold (HOST-STATUS, "@format": *Format* held 2
+    s; a lift sooner empties it and shows "Hold the red button for 2
+    seconds"; the settle guard kept). Clause 59 follows HOST-STATUS as at
+    76a10dc. Not yet tried on a board: the hold on the Core2's touch panel
+    (the firmware's device check 11).
+  - **The pin can't format** (v0.11.0 has no `@format`), so the line a
+    board with no `cid=` and no `clock=` gets is "v0.11.0 can't format a
+    card." alone, and "Updating lets it." (`fmt_old_update`, split from the
+    set's `fmt_old`, whose frame drew a pin of v0.12.0) follows only while
+    the pin answers `@format` (`PINNED_ANSWERS_FORMAT`, part B6), as the
+    2026-10-12 entry did for "Updating shows it.": at today's pin an up to
+    date board would otherwise be told to update with no Update to give.
+    For the same reason, while the pin can't format, a board that can't
+    keeps today's fix lines (format it on a computer, under the `_pc`
+    keys), where the set's new ones would point below at a Format that
+    isn't there; once the pin can, clause 59's line takes the fix line's
+    place, as the set draws it (clause 20).
+  - **Settled in review** (2026-10-19): during a write `x` on a syncing
+    card is one of the keys that work (clause 9, as clause 57 says);
+    *Format as FAT32 ▸* is the primary on every verdict with none whose
+    board reports its card, *Version not recognised* included, its status
+    keys deciding and never its version (clauses 18, 19); `f` gives way
+    with `o` on the footer, is not named when Format is Enter's, and works
+    on a card the player reads only with Details open, as `w` does
+    (clauses 12, 15); `@err 4 format card|size|busy` after `@format ok` is
+    a refusal at the player's second answer, ending the wait (clause 59);
+    `device format` exits 1 on a failed format too (clause 66); and the
+    design of record's header row is provisional until the set is
+    committed in mStream.
+  - **Words.** 347 keys drawn: the set's 344, the two the picks add and
+    `fmt_old_update`; the build adds 344 now, three waiting for firmware
+    verbs (Wording). The German drafts (160) and the machine translations
+    of the other eight locales wait for a native review.
