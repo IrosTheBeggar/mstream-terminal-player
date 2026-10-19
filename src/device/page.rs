@@ -48,9 +48,10 @@ use self::card::CardUi;
 pub(crate) use self::card::{Transfer, Wants};
 use self::sheet::{Dialogs, Listing, Sheet, mode_words, next_what};
 use super::FlashArgs;
-use super::board::{Board, By, Card, CardKind, CardUnknown, Count, CountWhy, Free, Heard, Next, NextState};
-use super::board::{Primary, Probe, Tracks, Verdict, Work, Written, gb};
-use super::desk::{self, All, Cmd, Event, LogKind, Refusal};
+use super::board::{Board, By, Card, CardKind, CardRoot, CardUnknown, Count, CountWhy, Format, FormatOffer};
+use super::board::{FormatWhy, Free, Heard, Next, NextState, Primary, Probe, Status, Tracks, Verdict, Work};
+use super::board::{Written, format_secs, gb};
+use super::desk::{self, All, Cmd, Event, LogKind, Refusal, format_end, took_text};
 use super::firmware::{Check, Image, Mode, Origin, Place, Target, place};
 use super::flow::Phase;
 use super::listen::{self, IdentifyWhy};
@@ -116,6 +117,9 @@ pub(crate) enum Act {
     Advanced,
     /// Reset: the board's next write back to the defaults (clause 38).
     Reset,
+    /// Format as FAT32 ▸, Format as FAT32… or Format as FAT32 anyway…: the
+    /// format's gate for the board in view (clause 59).
+    Format,
     /// The sheet's `[X]`.
     SheetClose,
     /// The sheet's firmware choice, by its place.
@@ -183,6 +187,9 @@ enum Kind {
     Mode,
     /// A local build over our firmware: never called an update.
     Local,
+    /// Not a write: the player asked to format its card, which it confirms
+    /// on its own screen (clause 59).
+    Format,
 }
 
 /// How a gate's line is meant: plain, or gold for what may go wrong.
@@ -223,6 +230,16 @@ struct Gate {
     /// What this gate names, for one board: its yes asks the worker for this
     /// image and no other (desk::Cmd::Write).
     image: Option<Image>,
+    /// The format's gate: the card as the board reported it.
+    format: Option<FormatAsk>,
+}
+
+/// What the format's gate says of the card (clause 59), from the board's
+/// status: its size, and what is lost.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FormatAsk {
+    size: Option<u64>,
+    lost: String,
 }
 
 /// One board in Update all's gate.
@@ -323,6 +340,11 @@ pub(crate) struct Page {
     lock: Option<Lock>,
     rate: Option<Rate>,
     time_left: Option<u64>,
+    /// A format's: when the board restarted to format, its rate once its
+    /// percent moves, and the time left that says (clause 59).
+    fmt_zero: Option<(String, Instant)>,
+    fmt_rate: Option<Rate>,
+    fmt_left: Option<u64>,
     /// The boards Details asked `L` of, once each.
     facts_asked: HashSet<String>,
     note: Option<Note>,
@@ -438,6 +460,9 @@ impl Page {
             lock: None,
             rate: None,
             time_left: None,
+            fmt_zero: None,
+            fmt_rate: None,
+            fmt_left: None,
             facts_asked: HashSet::new(),
             note: None,
             quitting: false,
@@ -538,6 +563,10 @@ impl Page {
     fn board(&mut self, board: Board, now: Instant) {
         self.touched = true;
         let port = board.port().to_string();
+        let was = self.boards.iter().find(|b| b.port() == port).map(|b| b.format.clone());
+        if was.unwrap_or(Format::Idle) != board.format {
+            self.formatting(&board, now);
+        }
         match self.boards.iter_mut().find(|b| b.port() == port) {
             Some(known) => *known = board.clone(),
             None => {
@@ -763,6 +792,67 @@ impl Page {
         }
     }
 
+    /// A board's format moved on (clause 59): the busy line says the
+    /// question is up and how it ended, and the time left is worked out
+    /// from the restart and the percent.
+    fn formatting(&mut self, board: &Board, now: Instant) {
+        let port = short(board.port());
+        match &board.format {
+            Format::Idle | Format::Asking => {}
+            Format::Waiting => self.say(t!("dev.card.fmt_asked", port = port), false, None),
+            Format::Restarting => {
+                self.note = None;
+                self.fmt_zero = Some((board.port().to_string(), now));
+                self.fmt_rate = None;
+                self.fmt_left = None;
+            }
+            Format::Running { pct } => {
+                let pct = *pct;
+                match &self.fmt_rate {
+                    Some(rate) if rate.port == board.port() && pct > rate.from => {
+                        let gone = now.saturating_duration_since(rate.since);
+                        if gone >= ESTIMATE_AFTER {
+                            let speed = f64::from(pct - rate.from) / gone.as_secs_f64();
+                            let left = f64::from(100 - pct.min(100)) / speed;
+                            self.fmt_left = Some(((left / 5.0).round() * 5.0) as u64);
+                        }
+                    }
+                    Some(rate) if rate.port == board.port() => {}
+                    _ => self.fmt_rate = Some(Rate { port: board.port().to_string(), since: now, from: pct }),
+                }
+            }
+            Format::Done(done) => {
+                self.say(t!("dev.card.fmt_note", port = port, t = took_text(done.took)), false, None);
+            }
+            // Firmware with no format: the SD card row says it.
+            Format::Ended(FormatWhy::Old) => {}
+            Format::Ended(why) => {
+                if let Some(text) = format_end(why, &port, board.version()) {
+                    // A refusal at once passes; what the listener or the
+                    // format came to stays until something replaces it.
+                    let passing = matches!(why, FormatWhy::NotAsked(_) | FormatWhy::NoAnswer);
+                    self.say(text, true, passing.then(|| now + NOTE_FOR));
+                }
+            }
+        }
+    }
+
+    /// About how long `board`'s format has left, in seconds: from its
+    /// percent's rate once that is known, else from the card's size less
+    /// the time since its restart (never under five).
+    fn format_left(&self, board: &Board) -> u64 {
+        let mine = |port: &str| port == board.port();
+        if let (Some(left), Some(rate)) = (self.fmt_left, &self.fmt_rate)
+            && mine(&rate.port)
+        {
+            return left.max(5);
+        }
+        let size = board.status().and_then(|s| s.size).unwrap_or(0);
+        let zero = self.fmt_zero.as_ref().filter(|(port, _)| mine(port));
+        let gone = zero.map_or(0, |(_, at)| at.elapsed().as_secs());
+        format_secs(size).saturating_sub(gone).max(5)
+    }
+
     // ── What the page asks ──────────────────────────────────────────────────
 
     fn send(&mut self, cmd: Cmd) -> bool {
@@ -845,6 +935,40 @@ impl Page {
 
     fn can_show(&self, board: &Board) -> bool {
         self.boards.len() >= 2 && self.lock.is_none() && board.work == Work::Idle && board.answers_status()
+    }
+
+    /// The format's gate can open for `board` (clauses 12, 59): a card it
+    /// offers to format, nothing under way on it, no write on the desk —
+    /// and a card the player reads only with Details open, as `w`.
+    fn can_format(&self, board: &Board) -> bool {
+        let Some(offer) = board.format_offer() else { return false };
+        self.lock.is_none() && board.work == Work::Idle && (offer != FormatOffer::Readable || self.details)
+    }
+
+    /// The format's gate for `board` (clause 59): the card as its status
+    /// says it, what is lost, how long.
+    fn gate_format(&self, board: &Board) -> Option<Gate> {
+        if !self.can_format(board) {
+            return None;
+        }
+        let status = board.status()?;
+        Some(Gate {
+            kind: Kind::Format,
+            port: Some(board.port().to_string()),
+            from: None,
+            to: String::new(),
+            name: None,
+            erase: false,
+            rows: Vec::new(),
+            title_mode: None,
+            lines: Vec::new(),
+            after: Vec::new(),
+            erase_any: false,
+            chosen: false,
+            left_out: Vec::new(),
+            image: None,
+            format: Some(FormatAsk { size: status.size, lost: format_lost(status) }),
+        })
     }
 
     /// Ask again, named on the card where a board could not be asked.
@@ -952,6 +1076,7 @@ impl Page {
             chosen: chosen.is_some(),
             left_out: Vec::new(),
             image: Some(board.write_image()),
+            format: None,
         };
         self.gate_words(&mut gate, board);
         Some(gate)
@@ -1054,6 +1179,7 @@ impl Page {
             chosen: false,
             left_out,
             image: None,
+            format: None,
         };
         (gate.rows.len() >= 2).then_some(gate)
     }
@@ -1071,8 +1197,16 @@ impl Page {
                     Some(Primary::Read) => {
                         self.send(Cmd::Read { port: board.port().to_string() });
                     }
+                    Some(Primary::Format) => self.gate = self.gate_format(&board),
                     Some(_) => self.gate = self.gate_for(&board, false),
                     None => {}
+                }
+            }
+            Act::Format => {
+                if let Some(board) = self.shown().cloned()
+                    && let Some(gate) = self.gate_format(&board)
+                {
+                    self.gate = Some(gate);
                 }
             }
             Act::Details => {
@@ -1162,10 +1296,18 @@ impl Page {
         None
     }
 
-    /// The gate's yes: the write sent, the page locked from now on.
+    /// The gate's yes: the write sent, the page locked from now on — or the
+    /// format asked of the player, which locks nothing: the player
+    /// confirms on its own screen, and leaving the tab never stops it.
     fn gate_yes(&mut self) {
         let Some(gate) = self.gate.take() else { return };
         self.note = None;
+        if gate.kind == Kind::Format {
+            if let Some(port) = gate.port {
+                self.send(Cmd::Format { port });
+            }
+            return;
+        }
         self.rate = None;
         self.time_left = None;
         if gate.kind == Kind::All {
@@ -1349,6 +1491,12 @@ impl Page {
         {
             return self.card_hint_parts(&card, hosted);
         }
+        // The format's gate asks the player; its keys say so (clause 59).
+        if self.gate.as_ref().is_some_and(|g| g.kind == Kind::Format) {
+            parts.push((t!("dev.card.hint_gate_fmt").to_string(), 0));
+            parts.push((t!("dev.card.hint_gate_fmt_keep").to_string(), 0));
+            return parts;
+        }
         if let Some(gate) = &self.gate {
             let yes = match gate.kind {
                 Kind::Update | Kind::Replace if gate.erase_any => "dev.hint_gate_erase_update",
@@ -1359,6 +1507,7 @@ impl Page {
                 Kind::Back => "dev.hint_gate_back",
                 Kind::All => "dev.hint_gate_all",
                 Kind::Mode | Kind::Local => "dev.hint_gate_write",
+                Kind::Format => "dev.card.hint_gate_fmt",
             };
             parts.push((t!(yes).to_string(), 0));
             if gate.kind == Kind::Install {
@@ -1398,6 +1547,7 @@ impl Page {
             Some(Primary::Write) => Some("dev.hint_enter_write"),
             Some(Primary::Back) => Some("dev.hint_enter_back"),
             Some(Primary::Dio) => Some("dev.hint_enter_dio"),
+            Some(Primary::Format) => Some("dev.card.hint_enter_format"),
             None => None,
         };
         if let Some(key) = enter {
@@ -1420,6 +1570,10 @@ impl Page {
         }
         if self.can_advance(board) {
             parts.push((t!("dev.hint_advanced").to_string(), 2));
+        }
+        // `f`, where Format is not Enter's already (clause 15).
+        if self.can_format(board) && self.primary_of(board) != Some(Primary::Format) {
+            parts.push((t!("dev.card.hint_format").to_string(), 2));
         }
         if self.offers_reset(board) {
             parts.push((t!("dev.hint_reset").to_string(), 1));
@@ -1460,16 +1614,6 @@ impl Page {
 /// `about 20 s left`, or `a few seconds left` under five.
 fn time_left_text(secs: u64) -> String {
     if secs < 5 { t!("dev.time_left_few").to_string() } else { t!("dev.time_left", secs = secs).to_string() }
-}
-
-/// `1 min 31 s`, or `47 s`.
-fn took_text(took: Duration) -> String {
-    let secs = took.as_secs();
-    if secs < 60 {
-        t!("dev.dur_s", s = secs).to_string()
-    } else {
-        t!("dev.dur_min", m = secs / 60, s = secs % 60).to_string()
-    }
 }
 
 /// A port's short name — `COM5`, `ttyACM0`, `cu.usbmodem14101` — where
@@ -1595,6 +1739,7 @@ impl Screen for Page {
             KeyCode::Char('r') => Some(Act::Ask),
             KeyCode::Char('o') => Some(Act::Advanced),
             KeyCode::Char('x') => Some(Act::Reset),
+            KeyCode::Char('f') => Some(Act::Format),
             KeyCode::Left => {
                 self.switch(-1);
                 None
@@ -2405,6 +2550,38 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
         rows
     };
     let unknown = |words: String| -> Vec<Row> { dim_rows(label.clone(), &format!("{} {words}", g.unknown), w) };
+    // The format under way is the row (clause 59): the question on the
+    // player's screen, then its restart and its percent.
+    match board.format {
+        Format::Asking => return value_rows(label, &scan(None, &t!("dev.fw_asking")), w),
+        Format::Waiting => {
+            let mut rows = value_rows(label, &scan(None, &t!("dev.card.fmt_waiting")), w);
+            rows.extend(dim_rows(None, &t!("dev.card.fmt_waiting_2"), w));
+            return rows;
+        }
+        Format::Restarting | Format::Running { .. } => {
+            let pct = match board.format {
+                Format::Running { pct } => Some(pct),
+                _ => None,
+            };
+            let mut rows = value_rows(label, &scan(pct, &t!("dev.card.fmt_running")), w);
+            let left = card::span(page.format_left(board));
+            rows.extend(dim_rows(None, &t!("dev.card.fmt_left", t = left), w));
+            return rows;
+        }
+        _ => {}
+    }
+    // Firmware that can't format, said where the format would be offered:
+    // "Updating lets it." only while the pin can (firmware.rs,
+    // PINNED_ANSWERS_FORMAT), as "Updating shows it." above.
+    let cant_format = || {
+        let mut words = t!("dev.card.fmt_old", version = board.version().unwrap_or("?")).to_string();
+        if page.target.as_ref().is_some_and(|t| t.answers_format) {
+            words.push(' ');
+            words.push_str(&t!("dev.card.fmt_old_update"));
+        }
+        words
+    };
     // Nothing can read the card while its board is written.
     let card = if page.written_now(board) { Card::Unknown(CardUnknown::Writing) } else { board.card() };
     match card {
@@ -2434,16 +2611,48 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             CardUnknown::Unreadable => unknown(t!("dev.card_unreadable_board").to_string()),
         },
         Card::Empty => problem(t!("dev.card_none").to_string(), None, t!("dev.card_put_in").to_string()),
-        // Until the tab can format (part B6), the fix lines keep today's
-        // words, on a computer (clause 20: the `_pc` keys).
+        // A card the player can't read (clauses 20, 59, 60). On a board that
+        // can format it, the fix is the player's: Format as FAT32 ▸ when
+        // nothing else is to be done, else its dim link here; a damaged card
+        // goes to a computer's disk check first, the format its dim second
+        // step. On one that can't, today's words, on a computer (the `_pc`
+        // keys), and that it can't — or, while the pin can, that updating
+        // lets it, in the fix line's place.
         Card::Foreign { kind, .. } => {
-            let (words, why, fix) = match kind {
-                CardKind::ExFat => ("dev.card_exfat", Some("dev.card_fat32_only"), "dev.card_fix_format_pc"),
-                CardKind::Ntfs => ("dev.card_ntfs", Some("dev.card_fat32_only"), "dev.card_fix_format_pc"),
-                CardKind::Gpt => ("dev.card_gpt", Some("dev.card_mbr_only"), "dev.card_fix_mbr_pc"),
-                _ => ("dev.card_unreadable", None, "dev.card_try_computer"),
+            let damaged = !matches!(kind, CardKind::ExFat | CardKind::Ntfs | CardKind::Gpt);
+            let (words, why) = match kind {
+                CardKind::ExFat | CardKind::Ntfs => {
+                    let fs = if kind == CardKind::ExFat { "dev.card_exfat" } else { "dev.card_ntfs" };
+                    (t!(fs), Some(t!("dev.card_fat32_only")))
+                }
+                CardKind::Gpt => (t!("dev.card_gpt"), Some(t!("dev.card_mbr_only"))),
+                _ => (t!("dev.card_unreadable"), None),
             };
-            problem(t!(words).to_string(), why.map(|k| t!(k).to_string()), t!(fix).to_string())
+            let (gpt, offered) = (kind == CardKind::Gpt, board.format_offer().is_some());
+            let pin_formats = page.target.as_ref().is_some_and(|t| t.answers_format);
+            let fix = match (damaged, offered, gpt) {
+                (true, true, _) => t!("dev.card.board_unreadable_2").to_string(),
+                (true, false, _) => t!("dev.card_try_computer").to_string(),
+                (false, true, false) => t!("dev.card_fix_format").to_string(),
+                (false, true, true) => t!("dev.card_fix_mbr").to_string(),
+                (false, false, _) if pin_formats && !board.can_format() => cant_format(),
+                (false, false, false) => t!("dev.card_fix_format_pc").to_string(),
+                (false, false, true) => t!("dev.card_fix_mbr_pc").to_string(),
+            };
+            let mut rows = problem(words.to_string(), why.map(|w| w.to_string()), fix);
+            if !board.can_format() && (damaged || !pin_formats) {
+                rows.extend(dim_rows(None, &cant_format(), w));
+            }
+            if page.can_format(board) && page.primary_of(board) != Some(Primary::Format) {
+                let (text, note) = if damaged {
+                    let note = t!("dev.card.link_format_anyway_note").to_string();
+                    (t!("dev.card.link_format_anyway"), Some(note))
+                } else {
+                    (t!("dev.card.link_format"), None)
+                };
+                rows.push(Row::Link { wide: false, text: text.to_string(), act: Act::Format, note });
+            }
+            rows
         }
         Card::Fat { size, free, tracks, .. } => {
             let tracks_text = tracks_words(&tracks);
@@ -2511,8 +2720,13 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             }
             // The card it holds, by its `cid=` (clause 20a): its line gives
             // way to nothing but the floor. A card not filled yet says so in
-            // place of where the music goes.
-            let named = card::board_lines(page, board);
+            // place of where the music goes — one the player just formatted,
+            // that it was (clause 59).
+            let fresh = matches!(board.format, Format::Done(_))
+                && matches!(tracks, Tracks::Count(0))
+                && board.status().is_some_and(|s| !matches!(s.cid, CardRoot::Loaded(_)));
+            let named =
+                if fresh { vec![t!("dev.card.fmt_done").to_string()] } else { card::board_lines(page, board) };
             if matches!(tracks, Tracks::Count(0)) && named.is_empty() {
                 rows.extend(dim_rows(None, &t!("dev.card_music_hint"), w));
             }
@@ -2626,11 +2840,21 @@ fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
         }
     }
     rows.push(Row::Log);
-    if page.can_write_again(board) {
+    let again = page.can_write_again(board);
+    if again {
         let to = page.target.as_ref().map_or("?", |t| t.version.as_str());
         rows.push(Row::Blank);
         let text = t!("dev.link_write", version = to).to_string();
         rows.push(Row::Link { wide: true, text, act: Act::WriteAgain, note: None });
+    }
+    // A card the player reads is offered the format here only (clause 59).
+    if page.can_format(board) && board.format_offer() == Some(FormatOffer::Readable) {
+        if !again {
+            rows.push(Row::Blank);
+        }
+        let text = t!("dev.card.link_format").to_string();
+        let note = Some(t!("dev.card.link_format_anyway_note").to_string());
+        rows.push(Row::Link { wide: true, text, act: Act::Format, note });
     }
     rows
 }
@@ -2672,6 +2896,7 @@ fn card_layout(page: &Page, board: &Board, content_w: u16) -> Vec<Row> {
             Primary::Write => "dev.btn_write",
             Primary::Back => "dev.btn_back",
             Primary::Dio => "dev.btn_dio",
+            Primary::Format => "dev.card.btn_format",
         });
         match page.writing_port() {
             // The kit's disabled frame: dim, no ▸, why in its tooltip.
@@ -3042,6 +3267,7 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
         Kind::All => t!("dev.gate_title_all", n = gate.rows.len(), to = to),
         Kind::Mode => t!("dev.gate_title_mode", to = to),
         Kind::Local => t!("dev.gate_title_local", from = from),
+        Kind::Format => t!("dev.card.gate_fmt_title", port = short(gate.port.as_deref().unwrap_or("?"))),
     };
     text(&mut lines, title.to_string(), gold.add_modifier(Modifier::BOLD));
     lines.push(GateLine::Blank);
@@ -3056,6 +3282,21 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
     }
     let old = gate.name.clone().unwrap_or_else(|| t!("dev.gate_old_firmware").to_string());
     match gate.kind {
+        // What the player erases and how long it takes, that it asks on its
+        // own screen first, what is lost in gold, and its device.txt
+        // (clause 59).
+        Kind::Format => {
+            let ask = gate.format.clone().unwrap_or(FormatAsk { size: None, lost: String::new() });
+            let size = ask.size.map_or_else(|| "?".to_string(), gb);
+            let took = card::span(format_secs(ask.size.unwrap_or(0)));
+            text(&mut lines, t!("dev.card.gate_fmt_body", size = size, t = took).to_string(), Style::default());
+            lines.push(GateLine::Blank);
+            text(&mut lines, t!("dev.card.gate_fmt_confirm").to_string(), Style::default());
+            lines.push(GateLine::Blank);
+            text(&mut lines, t!("dev.card.gate_fmt_lost", what = ask.lost).to_string(), gold);
+            lines.push(GateLine::Blank);
+            text(&mut lines, t!("dev.card.gate_fmt_txt").to_string(), Style::default());
+        }
         Kind::All => {
             text(&mut lines, t!("dev.gate_all_time").to_string(), Style::default());
             lines.push(GateLine::Blank);
@@ -3128,12 +3369,32 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
     lines
 }
 
+/// What the format's gate says is lost (clause 59), as `@status` said
+/// the card: the music on a card the player reads, else its one volume, or
+/// what the player can't read.
+fn format_lost(status: &Status) -> String {
+    let fs = match status.card {
+        CardKind::Fat32 => "FAT32",
+        CardKind::Fat16 => "FAT16",
+        CardKind::ExFat => "exFAT",
+        CardKind::Ntfs => "NTFS",
+        _ => return t!("dev.card.gate_fmt_unread").to_string(),
+    };
+    match status.tracks {
+        Tracks::Count(n) if n > 0 && status.card.readable() => {
+            t!("dev.card.gate_fmt_music", n = fmt_count(n), fs = fs).to_string()
+        }
+        _ => t!("dev.card.gate_fmt_one", fs = fs).to_string(),
+    }
+}
+
 /// The gate's two buttons: the safe choice, named for what stays, then
 /// the write.
 fn gate_buttons(gate: &Gate) -> (String, String) {
     let back = glyphs().back;
     let keep = match gate.kind {
         Kind::All => t!("dev.gate_keep_all").to_string(),
+        Kind::Format => t!("dev.card.gate_fmt_keep").to_string(),
         Kind::Install | Kind::Mode => t!("dev.gate_keep_as_is").to_string(),
         _ => match &gate.from {
             Some(from) => t!("dev.gate_keep", version = from).to_string(),
@@ -3152,6 +3413,7 @@ fn gate_buttons(gate: &Gate) -> (String, String) {
             Kind::Back => "dev.gate_do_back",
             Kind::All => "dev.gate_do_all",
             Kind::Mode | Kind::Local => "dev.gate_do_local",
+            Kind::Format => "dev.card.gate_fmt_do",
         }),
     };
     (format!("{back} {keep}"), write.to_string())
@@ -3258,7 +3520,7 @@ pub(crate) mod fixtures {
     /// that runs the real worker (the_page_over_the_real_worker_…) meets
     /// the real pin instead.
     pub(crate) fn pin() -> Target {
-        Target { version: "v0.8.0".into(), answers_status: false }
+        Target { version: "v0.8.0".into(), answers_status: false, answers_format: false }
     }
 
     /// The board's verdict again, against the pin.
@@ -3715,7 +3977,8 @@ mod tests {
         let _en = english();
         let (mut page, ends) = page_with(Ends::update_available);
         assert!(!window(&mut page).contains("Updating shows it"), "v0.8.0 does not answer @status");
-        ends.tell([Event::Target(Target { version: "v0.9.0".into(), answers_status: true })]);
+        let answering = Target { version: "v0.9.0".into(), answers_status: true, answers_format: false };
+        ends.tell([Event::Target(answering)]);
         page.pump();
         assert!(window(&mut page).contains("? v0.7.0 can't report the card. Updating shows it."));
     }
@@ -4128,6 +4391,218 @@ mod tests {
             Screen::wheel(&mut page, false, inside);
         }
         assert_eq!(page.log_scroll, 0, "back at the newest, and no further");
+    }
+
+    // ── Formatting (clause 59) ──────────────────────────────────────────────
+
+    /// A board whose firmware formats: 0.12.0's `cid=` and `clock=` in its
+    /// status, its status changed first.
+    fn formats(port: &str, fw: &str, change: impl FnOnce(&mut Status)) -> Board {
+        answering_with(port, fw, |s| {
+            (s.cid, s.clock) = (CardRoot::None, crate::device::board::Clock::Ok);
+            change(s);
+        })
+    }
+
+    /// `board` with its format at `state`, under way while it is.
+    fn at(mut board: Board, state: Format) -> Board {
+        let going = matches!(state, Format::Asking | Format::Waiting | Format::Restarting | Format::Running { .. });
+        board.work = if going { Work::Formatting } else { Work::Idle };
+        board.format = state;
+        board
+    }
+
+    fn exfat() -> Board {
+        formats("COM3", "v0.8.0", |s| s.card = CardKind::ExFat)
+    }
+
+    #[test]
+    fn a_card_the_player_cant_read_is_offered_its_format_as_the_primary_and_the_gate_asks_the_player() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![exfat()]));
+        let frame = window(&mut page);
+        let card = [
+            "           ╭────────────────────────────────────────────────────────────────────────────╮",
+            "           │                                                                            │",
+            "           │  M5Stack Core2                                                       COM3  │",
+            "           │                                                                            │",
+            "           │  Firmware      ✓ Up to date · v0.8.0                                       │",
+            "           │                                                                            │",
+            "           │  SD card       ! exFAT card · the player reads FAT32 only                  │",
+            "           │                Fix: format it as FAT32 in the player (below). That erases  │",
+            "           │                the whole card.                                             │",
+            "           │                                                                            │",
+            "           │                                                   ╭─────────────────────╮  │",
+            "           │  ▸ Details   Advanced…                            │  Format as FAT32 ▸  │  │",
+            "           │                                                   ╰─────────────────────╯  │",
+            "           │                                                                            │",
+            "           ╰────────────────────────────────────────────────────────────────────────────╯",
+        ];
+        assert_eq!(rows(&frame, 2, 15), card, "card 06 §4's frame, character for character:\n{frame}");
+        assert_eq!(page.hint(), "Enter format · o advanced · d details · Esc library", "f not named again");
+        press(&mut page, KeyCode::Enter);
+        assert!(ends.sent().is_empty(), "the gate first: nothing asked yet");
+        let frame = window(&mut page);
+        for words in [
+            "Format the card in COM3 as FAT32?",
+            "The player erases the whole card, 59.6 GB, every part of it, even",
+            "About 33 s for this card.",
+            "You confirm on the player's screen, in two steps; nothing is erased",
+            "Everything on the card is lost: today it holds one exFAT volume.",
+            "The player writes its device.txt at once: the first sync can use Opus",
+            "◂ Keep the card as it is",
+            "Ask the player",
+        ] {
+            assert!(frame.contains(words), "{words:?}:\n{frame}");
+        }
+        assert_eq!(page.hint(), "y ask the player · Enter or Esc keep the card as it is");
+        press(&mut page, KeyCode::Char('n'));
+        assert!(page.gate.is_none() && ends.sent().is_empty(), "kept as it is");
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [Cmd::Format { port: "COM3".into() }]);
+        assert!(page.gate.is_none() && !page.writing(), "nothing locked: the player confirms, the tab can be left");
+    }
+
+    #[test]
+    fn the_sd_row_follows_the_players_answer_its_restart_its_percent_and_its_end() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![exfat()]));
+        ends.tell([Event::Board(at(exfat(), Format::Waiting))]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("SD card       ▱▱▱▱▱▱▱▱▱▱ waiting for you to confirm on the player"), "{frame}");
+        assert!(frame.contains("Nothing is erased until you hold the red button there."), "{frame}");
+        assert!(frame.contains("COM3 asked to format its card: confirm on the player's screen."), "{frame}");
+        assert!(!frame.contains("Format as FAT32") && !frame.contains("Advanced…"), "nothing to start:\n{frame}");
+        assert_eq!(page.hint(), "d details · Esc library", "no Cancel: the player's own ends it");
+        press(&mut page, KeyCode::Char('f'));
+        assert!(page.gate.is_none(), "never twice at once");
+        let running = at(exfat(), Format::Running { pct: 41 });
+        ends.tell([Event::Board(at(exfat(), Format::Restarting)), Event::Board(running)]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("SD card       ▰▰▰▰▱▱▱▱▱▱ 41% formatting the card…"), "{frame}");
+        assert!(frame.contains("about 33 s left · leaving the tab doesn't stop it: the"), "{frame}");
+        assert!(!frame.contains("asked to format"), "the question's note went with it:\n{frame}");
+        // Done: the empty card as the board reports it, and where to fill it.
+        let empty = formats("COM3", "v0.8.0", |s| {
+            s.free = Free::Bytes(59_517_918_976);
+            s.tracks = Tracks::Count(0);
+        });
+        let took = Duration::from_secs(134);
+        let done = crate::device::board::Formatted { size: 59_617_918_976, free: 59_517_918_976, cluster: 32_768, took };
+        ends.tell([Event::Board(at(empty, Format::Done(done)))]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("0.1 of 59.6 GB used · no tracks"), "{frame}");
+        assert!(frame.contains("Formatted just now: put it in this computer's card reader"), "{frame}");
+        assert!(!frame.contains("Nothing from mStream on it yet"), "said once:\n{frame}");
+        assert!(frame.contains("COM3 formatted its card as FAT32 in 2 min 14 s."), "{frame}");
+        assert!(!frame.contains("Format as FAT32"), "the player's own card: Details only:\n{frame}");
+    }
+
+    #[test]
+    fn every_end_that_is_not_the_format_says_why_on_the_busy_line() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![exfat()]));
+        let said = |page: &mut Page, ends: &Ends, why: FormatWhy| {
+            ends.tell([Event::Board(at(exfat(), Format::Waiting)), Event::Board(at(exfat(), Format::Ended(why)))]);
+            page.pump();
+            let note = page.note.clone().expect("a note");
+            assert!(note.gold, "{}", note.text);
+            note.text
+        };
+        assert_eq!(said(&mut page, &ends, FormatWhy::Declined), "Not formatted: it was cancelled on COM3's screen.");
+        let timeout = said(&mut page, &ends, FormatWhy::TimedOut);
+        assert_eq!(timeout, "Not formatted: nobody confirmed on the player within a minute.");
+        let viz = said(&mut page, &ends, FormatWhy::NotAsked("viz".into()));
+        assert_eq!(viz, "Not asked: a computer drives COM3's dancer; end that first.");
+        assert!(page.note.as_ref().is_some_and(|n| n.until.is_some()), "a refusal at once passes");
+        let size = said(&mut page, &ends, FormatWhy::Refused("size".into()));
+        assert_eq!(size, "Not formatted: FAT32 can't take the card in COM3 (under 42 MB or 2 TB+).");
+        let write = said(&mut page, &ends, FormatWhy::Failed("write".into()));
+        assert_eq!(write, "Couldn't format the card in COM3: it refused a write. Try another card.");
+        let odd = said(&mut page, &ends, FormatWhy::Failed("brownout".into()));
+        assert_eq!(odd, "Couldn't format the card in COM3: brownout.", "a word this player doesn't know");
+        let lost = said(&mut page, &ends, FormatWhy::Lost);
+        assert!(lost.starts_with("Lost touch with COM3 during the format"), "{lost}");
+        // Declined, the card is offered its format again.
+        ends.tell([Event::Board(at(exfat(), Format::Ended(FormatWhy::Declined)))]);
+        page.pump();
+        assert!(window(&mut page).contains("Format as FAT32 ▸"));
+        // `@err 7 format`: the row says it can't, as for a board with no keys.
+        ends.tell([Event::Board(at(exfat(), Format::Ended(FormatWhy::Old)))]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("Fix: format it FAT32 (MBR) on a computer. That erases it."), "{frame}");
+        assert!(frame.contains("v0.8.0 can't format a card.") && !frame.contains("Format as FAT32 ▸"), "{frame}");
+    }
+
+    #[test]
+    fn firmware_that_cant_format_says_so_where_the_format_would_be_and_updating_lets_it_only_when_the_pin_can() {
+        let _en = english();
+        let (_, _, frame) = card_row(|s| s.card = CardKind::ExFat);
+        assert!(frame.contains("Fix: format it FAT32 (MBR) on a computer. That erases it."), "today's words:\n{frame}");
+        assert!(frame.contains("v0.8.0 can't format a card."), "{frame}");
+        assert!(!frame.contains("Updating lets it.") && !frame.contains("Format as FAT32"), "{frame}");
+        let (_, _, frame) = card_row(|s| s.card = CardKind::Other);
+        assert!(frame.contains("! Can't read this card") && frame.contains("Try it in a computer."), "{frame}");
+        assert!(frame.contains("v0.8.0 can't format a card."), "{frame}");
+        // A pin that formats: updating lets it, in the fix line's place.
+        let gpt = answering_with("COM3", "v0.7.0", |s| s.card = CardKind::Gpt);
+        let (mut page, ends) = page_with(|e| e.boards(vec![gpt.clone()]));
+        let formats_pin = Target { version: "v0.8.0".into(), answers_status: true, answers_format: true };
+        ends.tell([Event::Target(formats_pin)]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("v0.7.0 can't format a card. Updating lets it."), "{frame}");
+        assert!(!frame.contains("on a computer") && frame.contains("Update ▸"), "{frame}");
+    }
+
+    #[test]
+    fn behind_the_pin_damaged_or_the_players_own_card_the_format_is_a_dim_link_and_f() {
+        let _en = english();
+        // An update to make first: Update ▸ wins, the format is f and a link.
+        let behind = formats("COM3", "v0.7.0", |s| s.card = CardKind::Ntfs);
+        let (mut page, ends) = page_with(|e| e.boards(vec![behind.clone()]));
+        let frame = window(&mut page);
+        assert!(frame.contains("Fix: format it as FAT32 in the player (below)."), "{frame}");
+        assert!(frame.contains("               Format as FAT32…") && frame.contains("Update ▸"), "{frame}");
+        assert_eq!(page.hint(), "Enter update · o advanced · f format · d details · Esc library");
+        press(&mut page, KeyCode::Char('f'));
+        assert!(window(&mut page).contains("today it holds one NTFS volume."));
+        press(&mut page, KeyCode::Esc);
+        assert!(page.gate.is_none() && ends.sent().is_empty());
+        // A damaged card: a computer's disk check first, the format anyway.
+        let damaged = formats("COM3", "v0.8.0", |s| s.card = CardKind::Unreadable);
+        let (mut page, ends) = page_with(|e| e.boards(vec![damaged.clone()]));
+        let frame = window(&mut page);
+        assert!(frame.contains("SD card       ! Can't read this card"), "{frame}");
+        assert!(frame.contains("Try it in this computer's card reader first: a disk check"), "{frame}");
+        assert!(frame.contains("Format as FAT32 anyway…   erases the whole card"), "{frame}");
+        assert!(!frame.contains("Format as FAT32 ▸"), "never the primary:\n{frame}");
+        assert_eq!(page.hint(), "o advanced · f format · d details · Esc library");
+        press(&mut page, KeyCode::Enter);
+        assert!(page.gate.is_none(), "Enter has nothing to do");
+        press(&mut page, KeyCode::Char('f'));
+        assert!(window(&mut page).contains("today it holds what the player"));
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [Cmd::Format { port: "COM3".into() }]);
+        // The player's own card: in Details only.
+        let own = formats("COM3", "v0.8.0", |_| {});
+        let (mut page, ends) = page_with(|e| e.boards(vec![own.clone()]));
+        assert!(!window(&mut page).contains("Format as FAT32"));
+        press(&mut page, KeyCode::Char('f'));
+        assert!(page.gate.is_none(), "f only with Details open, as w");
+        press(&mut page, KeyCode::Char('d'));
+        let frame = window(&mut page);
+        assert!(frame.contains("Format as FAT32…   erases the whole card"), "{frame}");
+        assert!(page.hint().contains("f format"), "{}", page.hint());
+        press(&mut page, KeyCode::Char('f'));
+        let frame = window(&mut page);
+        assert!(frame.contains("today it holds your music, 1,284"), "{frame}");
+        let _ = ends.sent();
     }
 
     // ── Several boards ──────────────────────────────────────────────────────
@@ -4837,7 +5312,8 @@ mod tests {
         // first choice) and marks v0.8.0 as newer than this player, by the
         // target alone — whatever release this build pins.
         let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::old("COM3", "v0.6.0")]));
-        ends.tell([Event::Target(Target { version: "v0.7.0".into(), answers_status: false })]);
+        let older = Target { version: "v0.7.0".into(), answers_status: false, answers_format: false };
+        ends.tell([Event::Target(older)]);
         page.pump();
         press(&mut page, KeyCode::Char('o'));
         press(&mut page, KeyCode::Down);
@@ -5334,6 +5810,42 @@ mod tests {
         let mut refused = uncounted.clone();
         refused.count = Count::Refused { why: CountWhy::Playing, part_way: false };
         add("count refused", &|e| e.boards(vec![refused.clone()]), &[]);
+        // Formatting in the player (clause 59): its offers, its gates, the
+        // player's answer, the format and its ends.
+        let foreign = formats("COM3", "v0.8.0", |s| s.card = CardKind::ExFat);
+        add("format", &|e| e.boards(vec![foreign.clone()]), &[]);
+        add("format, the gate", &|e| e.boards(vec![foreign.clone()]), &[KeyCode::Enter]);
+        add("format, waiting", &|e| e.boards(vec![at(foreign.clone(), Format::Waiting)]), &[]);
+        add("format, restarting", &|e| e.boards(vec![at(foreign.clone(), Format::Restarting)]), &[]);
+        add("format, running", &|e| e.boards(vec![at(foreign.clone(), Format::Running { pct: 41 })]), &[]);
+        let took = Duration::from_secs(134);
+        let made = crate::device::board::Formatted { size: 59_617_918_976, free: 59_517_918_976, cluster: 32_768, took };
+        let empty = formats("COM3", "v0.8.0", |s| {
+            s.free = Free::Bytes(59_517_918_976);
+            s.tracks = Tracks::Count(0);
+        });
+        add("format, done", &|e| e.boards(vec![at(empty.clone(), Format::Done(made))]), &[]);
+        let ended = |why: FormatWhy| {
+            let (asked, ended) = (at(foreign.clone(), Format::Waiting), at(foreign.clone(), Format::Ended(why)));
+            move |e: &Ends| {
+                e.boards(vec![asked.clone()]);
+                e.tell([Event::Board(ended.clone())]);
+            }
+        };
+        add("format, failed", &ended(FormatWhy::Failed("check".into())), &[]);
+        add("format, refused at the second answer", &ended(FormatWhy::Refused("card".into())), &[]);
+        let behind = formats("COM3", "v0.7.0", |s| s.card = CardKind::Gpt);
+        add("format, behind the pin", &|e| e.boards(vec![behind.clone()]), &[]);
+        add("format, behind the pin, the gate", &|e| e.boards(vec![behind.clone()]), &[KeyCode::Char('f')]);
+        let damaged = formats("COM3", "v0.8.0", |s| s.card = CardKind::Other);
+        add("format, damaged", &|e| e.boards(vec![damaged.clone()]), &[]);
+        add("format, damaged, the gate", &|e| e.boards(vec![damaged.clone()]), &[KeyCode::Char('f')]);
+        let own = formats("COM3", "v0.8.0", |_| {});
+        add("format, the player's card", &|e| e.boards(vec![own.clone()]), &[KeyCode::Char('d')]);
+        let own_gate: &[KeyCode] = &[KeyCode::Char('d'), KeyCode::Char('f')];
+        add("format, the player's card, the gate", &|e| e.boards(vec![own.clone()]), own_gate);
+        let cant = answering_with("COM3", "v0.8.0", |s| s.card = CardKind::Ntfs);
+        add("format, firmware that can't", &|e| e.boards(vec![cant.clone()]), &[]);
         add("two", &Ends::two, &[]);
         add("two, the other", &Ends::two, &[KeyCode::Right]);
         let in_use = heard("COM5", Heard::InUse { detail: "busy".into() });
@@ -5583,6 +6095,7 @@ mod tests {
             Primary::Write => "dev.btn_write",
             Primary::Back => "dev.btn_back",
             Primary::Dio => "dev.btn_dio",
+            Primary::Format => "dev.card.btn_format",
         });
         vec![if page.writing() { word.to_string() } else { format!("{word} ▸") }]
     }
@@ -5614,6 +6127,9 @@ mod tests {
         }
     }
 
+    /// The hosted busy line's cells: the page's area less two each side.
+    const BUSY_W: usize = 96;
+
     /// The test below, by its full name, and the environment variable
     /// naming its locale.
     const FLOOR_TEST: &str = "device::page::tests::the_floor_in_this_processs_locale";
@@ -5632,6 +6148,39 @@ mod tests {
         let Ok(code) = std::env::var(FLOOR_LOCALE) else { return };
         rust_i18n::set_locale(&code);
         crate::kit::theme::pin_modern_terminal();
+        // Every end of a format the busy line can say, whole (clause 59).
+        let words = |word: &str| word.to_string();
+        let ends = [
+            FormatWhy::Declined,
+            FormatWhy::TimedOut,
+            FormatWhy::Old,
+            FormatWhy::NotAsked(words("ui")),
+            FormatWhy::NotAsked(words("screen")),
+            FormatWhy::NotAsked(words("viz")),
+            FormatWhy::NotAsked(words("busy")),
+            FormatWhy::NotAsked(words("card")),
+            FormatWhy::NotAsked(words("brownout")),
+            FormatWhy::Refused(words("card")),
+            FormatWhy::Refused(words("size")),
+            FormatWhy::Refused(words("busy")),
+            FormatWhy::Failed(words("card")),
+            FormatWhy::Failed(words("size")),
+            FormatWhy::Failed(words("write")),
+            FormatWhy::Failed(words("mkfs")),
+            FormatWhy::Failed(words("check")),
+            FormatWhy::Failed(words("files")),
+            FormatWhy::Failed(words("brownout")),
+            FormatWhy::NoAnswer,
+            FormatWhy::Lost,
+        ];
+        let mut said: Vec<String> = ends.iter().filter_map(|why| format_end(why, "COM3", Some("v0.12.0"))).collect();
+        said.push(t!("dev.card.fmt_asked", port = "COM3").to_string());
+        said.push(t!("dev.card.fmt_note", port = "COM3", t = took_text(Duration::from_secs(134))).to_string());
+        for text in said {
+            assert!(!text.contains("dev."), "{code}: a key with no words: {text}");
+            let cells = kit::width(&text);
+            assert!(cells <= BUSY_W, "{code}: the busy line is {cells} cells: {text}");
+        }
         let banner = Rect { x: 0, y: 2, width: 100, height: 21 };
         for (name, mut page, _ends) in every_state() {
             for area in [FLOOR, banner] {
@@ -5654,6 +6203,10 @@ mod tests {
             }
             let hint = page.hint();
             assert!(kit::width(&hint) <= HINT_W, "{code}, {name}: the hint is {} cells: {hint}", kit::width(&hint));
+            if let Some(note) = &page.note {
+                let cells = kit::width(&note.text);
+                assert!(cells <= BUSY_W, "{code}, {name}: the busy line is {cells} cells: {}", note.text);
+            }
             assert!(!hint.contains("dev."), "{code}, {name}: a key with no words: {hint}");
             let all = alone(&mut page, 72, 24);
             assert!(!all.contains("dev."), "{code}, {name}: a key with no words:\n{all}");

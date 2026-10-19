@@ -568,6 +568,9 @@ pub(crate) mod fake {
         /// Its clock chip takes no time: `@time <ms>` answers `@err 4 time
         /// rtc`.
         rtc_dead: bool,
+        /// How its listener answers `@format`'s question (0.12.0's), and how
+        /// the format goes (`/format=`): none formats.
+        format: Option<String>,
         /// The free bytes a count found, said by `@status` from then on.
         counted: Option<u64>,
         /// The ELF id its firmware reports — in `@status`, `L`, its app
@@ -616,6 +619,7 @@ pub(crate) mod fake {
                 identify: None,
                 clock: Some(0),
                 rtc_dead: false,
+                format: None,
                 counted: None,
                 elf: None,
                 qio_loops: false,
@@ -666,6 +670,7 @@ pub(crate) mod fake {
                         }
                     }
                     "rtc" => board.rtc_dead = value == "dead",
+                    "format" => board.format = Some(value.to_string()),
                     "talk" => {
                         board.talk = match value {
                             "status" => Talk::Status,
@@ -777,6 +782,14 @@ pub(crate) mod fake {
             }
         }
 
+        /// `@status` says `value` for `key` from now on.
+        fn set_field(&mut self, key: &str, value: String) {
+            match self.fields.iter_mut().find(|(k, _)| k == key) {
+                Some((_, v)) => *v = value,
+                None => self.fields.push((key.to_string(), value)),
+            }
+        }
+
         /// The keys in the firmware's order. `cid=` and `clock=` came in
         /// 0.12.0, after `state=` and before `bt=`: an older board's line
         /// has neither, but a `cid=` its script names.
@@ -818,7 +831,15 @@ pub(crate) mod fake {
     /// `/identify=<why>` `@identify` refused (ui, screen, viz), the clock
     /// of a board from 0.12.0 on `/clock=unset|ok|<ms>` (unset; in step,
     /// as without; or off from this computer's by that many ms, `-5000`
-    /// behind), `/rtc=dead` (it takes no `@time <ms>`),
+    /// behind), `/rtc=dead` (it takes no `@time <ms>`), and how its
+    /// listener answers `@format` (0.12.0's too; without the option the
+    /// card is formatted, the question up at once, confirmed a tenth of the
+    /// pace on, the format across the pace): `/format=no` (Cancel at once),
+    /// `late` (Cancel a pace on: a test's minute is shorter), `silent` (the
+    /// question up, then nothing), `ui|screen|viz|busy|card` (refused at
+    /// once), `second-card|size|busy` (refused at the second answer, no
+    /// restart), `fail-<why>` (the restart, then a failure at 40 %: write,
+    /// mkfs, check, files, card, size),
     /// `/talk=status|old|silent`, `/serial=<s>`, `/fail=write` (its write
     /// dies halfway), `/flash=other|blank|<version>` (what its bootloader
     /// reads, whatever it says), and any of `@status`'s fields
@@ -1248,6 +1269,7 @@ pub(crate) mod fake {
                     "status" => self.answer(&board.status_line()),
                     "count" => self.count(&board),
                     "time" if board.clocked() => self.time(&board, arg.trim()),
+                    "format" if board.clocked() => self.format(&board),
                     "identify" => {
                         let label = arg.trim();
                         if label.is_empty() {
@@ -1314,6 +1336,91 @@ pub(crate) mod fake {
                 lock(&self.fake.boards)[i].clock = Some(ms as i64 - now_ms());
             }
             self.answer("@time ok");
+        }
+
+        /// `@format`: refused as the firmware refuses (no card in the slot, a
+        /// computer driving the dancer, or as scripted), else the question up
+        /// at once and the listener's answer a tenth of the pace on; then
+        /// the restart — the ROM's lines and the boot line — the percent
+        /// across the pace and the end. Its card is from then on what the
+        /// format left: an empty FAT32 card; or, cut short, one no FAT
+        /// mounts. Its main loop runs again once the format ends: a host
+        /// line meanwhile waits in its port.
+        fn format(&mut self, board: &FakeBoard) {
+            let script = board.format.clone().unwrap_or_default();
+            let refused = match script.as_str() {
+                why @ ("ui" | "screen" | "viz" | "busy" | "card") => Some(why.to_string()),
+                _ if board.field("card") == "none" => Some("card".to_string()),
+                _ if board.field("state") == "host" => Some("viz".to_string()),
+                _ => None,
+            };
+            if let Some(why) = refused {
+                return self.answer(&format!("@err 4 format {why}"));
+            }
+            Fake::note(&self.fake.trace, format!("format {}", board.port));
+            self.answer("@format ok");
+            let (now, pace) = (Instant::now(), self.fake.pace);
+            let answered = now + pace / 10;
+            match script.as_str() {
+                "no" => return self.say(now, "@format no"),
+                "late" => return self.say(now + pace, "@format no"),
+                "silent" => return,
+                second if second.starts_with("second-") => {
+                    let why = &second["second-".len()..];
+                    return self.say(answered, &format!("@err 4 format {why}"));
+                }
+                _ => {}
+            }
+            self.say(answered, "@format 0");
+            self.say(answered, "[format] confirmed twice (a computer's @format): restarting to format");
+            self.say(answered, "ets Jul 29 2019 12:21:46");
+            self.say(answered, "rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)");
+            let version = board.version().unwrap_or("v0.12.0").to_string();
+            let elf = board.elf_or("63ee7a2b");
+            let boot = format!("mstream-mp3-player {version} (commit fake000, 2026-10-01), ELF {elf}");
+            self.say(answered, &boot);
+            let fail = script.strip_prefix("fail-");
+            let steps: u32 = if fail.is_some() { 4 } else { 10 };
+            for step in 1..=steps {
+                self.say(answered + pace * step / 10, &format!("@format {}", step * 10));
+            }
+            let end = answered + pace;
+            let size: u64 = board.field("size").parse().unwrap_or(0);
+            // Both FATs, the gap, and the clusters /music, /.player and
+            // device.txt take.
+            let cluster = 32_768u64;
+            let free = size.saturating_sub(size / 4096 + (4 << 20) + 3 * cluster) / cluster * cluster;
+            let card = match fail {
+                Some(why) => {
+                    self.say(end, &format!("@err 4 format {why}"));
+                    matches!(why, "write" | "mkfs" | "check").then_some("other")
+                }
+                None => {
+                    self.say(end, &format!("@format done size={size} free={free} cluster={cluster}"));
+                    Some("fat32")
+                }
+            };
+            let Some(i) = self.index else { return };
+            let loop_at = self.fake.age() + pace / 10 + pace;
+            let mut boards = lock(&self.fake.boards);
+            let board = &mut boards[i];
+            board.loop_at = loop_at;
+            board.counted = None;
+            match card {
+                Some("fat32") => {
+                    board.set_field("card", "fat32".into());
+                    board.set_field("free", free.to_string());
+                    board.set_field("tracks", "0".into());
+                    board.set_field("cid", "-".into());
+                }
+                Some(other) => {
+                    board.set_field("card", other.into());
+                    board.set_field("free", "?".into());
+                    board.set_field("tracks", "-".into());
+                    board.set_field("cid", "-".into());
+                }
+                None => {}
+            }
         }
 
         /// The console's `L`: the partition table's head, the running app.

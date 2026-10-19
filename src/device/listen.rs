@@ -15,7 +15,12 @@
 //!   for five seconds, `@identify ok`;
 //! - `@time` → the board's clock, `@time <unix-ms>` or `@time unset`, and
 //!   `@time <unix-ms>` sets it, `@time ok` (0.12.0's: older firmware
-//!   answers `@err 7 time`).
+//!   answers `@err 7 time`);
+//! - `@format` → the question "Format this card?" on the board's screen,
+//!   `@format ok`, nothing more: the listener answers there, `@format no`,
+//!   or `@format 0` and the board restarts to format the card itself,
+//!   `@format <pct>` as it goes and `@format done size=… free=… cluster=…`
+//!   (0.12.0's too: older firmware answers `@err 7 format`).
 //!
 //! The board talks all the time — `[stats]` every few seconds, the boot
 //! log after a restart, the console's own replies — and a host line can
@@ -37,7 +42,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::DeviceError;
-use super::board::{CardKind, CardRoot, Clock, CountWhy, Free, Heard, PlayState, Status, Tracks};
+use super::board::{CardKind, CardRoot, Clock, CountWhy, Format, FormatWhy, Formatted, Free, Heard, PlayState};
+use super::board::{Status, Tracks};
 use super::firmware::Version;
 
 /// An open port to a running firmware: bytes both ways, a read that gives
@@ -90,6 +96,13 @@ pub(crate) struct Waits {
     pub again: Duration,
     /// …and given this long to answer ([`STARTING_UP`]).
     pub up: Duration,
+    /// `@format`'s question up, the listener's answer on the board: two
+    /// dialogs of a minute each at most ([`Waits::minute`]), and a margin.
+    pub answer: Duration,
+    /// The firmware's minute (its `formatask::kAskMs`): an `@format no`
+    /// that came this long after `@format ok` is the question running
+    /// out, not a Cancel — the two answer alike.
+    pub minute: Duration,
 }
 
 impl Waits {
@@ -100,6 +113,8 @@ impl Waits {
         count_idle: Duration::from_secs(60),
         again: Duration::from_secs(30),
         up: STARTING_UP,
+        answer: Duration::from_secs(150),
+        minute: Duration::from_secs(60),
     };
 }
 
@@ -742,6 +757,129 @@ pub(crate) fn clock(
     Ok(clocked)
 }
 
+// ── The card formatted in the player ────────────────────────────────────────
+
+/// One of the format's lines: the question's answer, the listener's, a
+/// percent, the end, a refusal.
+#[derive(Debug, PartialEq, Eq)]
+enum FormatLine {
+    Ok,
+    No,
+    Pct(u8),
+    Done { size: u64, free: u64, cluster: u64 },
+    Err { code: u8, why: String },
+}
+
+/// `@format ok|no|<pct>|done size=… free=… cluster=…`, or `@err <code>
+/// format [<why>]`. A field of done's this player can't read is 0: the
+/// listen after it says the card as it is.
+fn format_line(line: &str) -> Option<FormatLine> {
+    if let Some(rest) = line.trim().strip_prefix("@format ") {
+        let rest = rest.trim();
+        if let Some(fields) = rest.strip_prefix("done") {
+            let num = |key: &str| field(fields, key).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            return Some(FormatLine::Done { size: num("size"), free: num("free"), cluster: num("cluster") });
+        }
+        return match rest {
+            "ok" => Some(FormatLine::Ok),
+            "no" => Some(FormatLine::No),
+            pct => pct.parse::<u8>().ok().map(|p| FormatLine::Pct(p.min(100))),
+        };
+    }
+    let err = parse_err(line).filter(|e| e.verb == "format")?;
+    Some(FormatLine::Err { code: err.code, why: err.why.unwrap_or_default() })
+}
+
+/// Where a format stands: what a silence means, and how long one lasts.
+#[derive(Clone, Copy)]
+enum Stage {
+    /// `@format` sent, its answer not in.
+    Asking,
+    /// The question up since then: the listener answers on the board.
+    Waiting(Instant),
+    /// `@format 0` since then: the board restarts and formats.
+    Formatting(Instant),
+}
+
+/// An `@format no` that came `waited` after the question went up: its
+/// minute ran out, a whole one less a sixtieth for the lines' way
+/// (`minute`, the firmware's). A Cancel just before the minute is told as
+/// the minute: the two answer alike, and only the time tells them apart.
+fn timed_out(waited: Duration, minute: Duration) -> bool {
+    waited >= minute.saturating_sub(minute / 60)
+}
+
+/// The card formatted in the player (`@format`; contract clause 59): only
+/// the question goes on the board's screen, and the listener answers it
+/// there, a tap and then a 2 s hold; the board then restarts and formats
+/// the card itself, before anything mounts it. Nothing on this side
+/// writes the card. `told` hears each step as it comes: the question up
+/// ([`Format::Waiting`]), the restart ([`Format::Restarting`]), each
+/// percent ([`Format::Running`]). The card as the firmware made it, or why
+/// it wasn't formatted — an `@err 4 format` told apart by when it came:
+/// before the question was up, at the listener's second answer, after the
+/// restart.
+pub(crate) fn format(
+    wire: &mut dyn Wire,
+    port: &str,
+    waits: Waits,
+    stop: &AtomicBool,
+    told: &mut dyn FnMut(Format),
+    note: Note,
+) -> Result<Formatted, FormatWhy> {
+    let mut console = Console::new(wire, port, stop);
+    note("@format".to_string());
+    console.send(b"@format\n").map_err(FormatWhy::Port)?;
+    let mut stage = Stage::Asking;
+    loop {
+        let wait = match stage {
+            Stage::Asking => waits.reply,
+            Stage::Waiting(_) => waits.answer,
+            Stage::Formatting(_) => waits.count_idle,
+        };
+        let line = console.reply(Instant::now() + wait, waits.boot, &mut *note, format_line);
+        let line = line.map_err(FormatWhy::Port)?;
+        match (line, stage) {
+            (None, _) if console.stopped() => return Err(FormatWhy::Abandoned),
+            (None, Stage::Asking) => return Err(FormatWhy::NoAnswer),
+            (None, _) => return Err(FormatWhy::Lost),
+            (Some(FormatLine::Ok), Stage::Asking) => {
+                stage = Stage::Waiting(Instant::now());
+                told(Format::Waiting);
+            }
+            // Asked again while it is up: the answer comes once.
+            (Some(FormatLine::Ok), _) => {}
+            (Some(FormatLine::No), Stage::Waiting(asked)) if timed_out(asked.elapsed(), waits.minute) => {
+                return Err(FormatWhy::TimedOut);
+            }
+            (Some(FormatLine::No), Stage::Asking | Stage::Waiting(_)) => return Err(FormatWhy::Declined),
+            (Some(FormatLine::No), Stage::Formatting(_)) => {}
+            (Some(FormatLine::Pct(pct)), _) => {
+                // The restart's `0`; a later percent with no `0` before it
+                // is the format under way all the same.
+                if !matches!(stage, Stage::Formatting(_)) {
+                    stage = Stage::Formatting(Instant::now());
+                    told(Format::Restarting);
+                }
+                if pct > 0 {
+                    told(Format::Running { pct });
+                }
+            }
+            (Some(FormatLine::Done { size, free, cluster }), _) => {
+                let took = match stage {
+                    Stage::Formatting(at) => at.elapsed(),
+                    _ => Duration::ZERO,
+                };
+                return Ok(Formatted { size, free, cluster, took });
+            }
+            (Some(FormatLine::Err { code: 7, .. }), _) => return Err(FormatWhy::Old),
+            (Some(FormatLine::Err { why, .. }), Stage::Asking) => return Err(FormatWhy::NotAsked(why)),
+            (Some(FormatLine::Err { why, .. }), Stage::Waiting(_)) => return Err(FormatWhy::Refused(why)),
+            (Some(FormatLine::Err { why, .. }), Stage::Formatting(_)) => return Err(FormatWhy::Failed(why)),
+        }
+    }
+}
+
 // ── The lines ───────────────────────────────────────────────────────────────
 
 /// `@status`'s fields, in any order; a key this player does not know is
@@ -942,6 +1080,10 @@ pub(crate) mod tests {
         count_idle: Duration::from_millis(1500),
         again: Duration::from_millis(200),
         up: Duration::from_millis(2500),
+        // The fake's listener answers at once, or (`late`) a pace later:
+        // 1.2 s by default, past this minute and within this wait.
+        answer: Duration::from_millis(2500),
+        minute: Duration::from_millis(500),
     };
 
     fn asked(script: &mut Script) -> Asked {
@@ -1373,5 +1515,92 @@ pub(crate) mod tests {
         assert_eq!(clock("unset"), Clock::Unset);
         assert_eq!(clock("drifting"), Clock::Unset, "any other value is unset, as the firmware says");
         assert_eq!(parse_status(REAL).unwrap().clock, Clock::Unknown, "no key: firmware from before it");
+    }
+
+    /// `format` on `wire`: what it ended with, and the steps it told.
+    fn formatted(wire: &mut dyn Wire, waits: Waits) -> (Result<Formatted, FormatWhy>, Vec<Format>) {
+        let stop = AtomicBool::new(false);
+        let mut told = Vec::new();
+        let got = format(wire, "COM3", waits, &stop, &mut |f| told.push(f), &mut |_| {});
+        (got, told)
+    }
+
+    /// HOST-STATUS's own example, the board's restart and a log line among
+    /// its lines.
+    const FORMATTED: &str = "@format 0\r\n[format] confirmed twice (a computer's @format)\r\n\
+        ets Jul 29 2019 12:21:46\r\nrst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\r\n\
+        mstream-mp3-player v0.12.0 (commit 1234567, 2026-10-19), ELF 63ee7a2b\r\n\
+        @format 10\r\n@format 50\r\n@format 100\r\n\
+        @format done size=63864569856 free=63843467264 cluster=32768\r\n";
+
+    #[test]
+    fn the_format_is_asked_and_the_player_answers_formats_and_says_its_card() {
+        // The question up at once; the listener's two answers on the board;
+        // the restart, the percent and the end.
+        let script = Script::new(&[("@format\n", "[stats] bat=87\r\n@format ok\r\n")]);
+        let sent = script.sent.clone();
+        let late = FORMATTED.as_bytes().to_vec();
+        let mut wire = Delayed { inner: script, late, after: Instant::now() + Duration::from_millis(100) };
+        let (got, told) = formatted(&mut wire, QUICK);
+        let done = got.expect("formatted");
+        assert_eq!((done.size, done.free, done.cluster), (63_864_569_856, 63_843_467_264, 32_768));
+        let steps = [Format::Waiting, Format::Restarting, Format::Running { pct: 10 }, Format::Running { pct: 50 }];
+        assert_eq!(told, [&steps[..], &[Format::Running { pct: 100 }]].concat());
+        assert_eq!(*sent.lock().unwrap(), ["@format\n"], "one question, nothing else written");
+    }
+
+    #[test]
+    fn a_no_is_a_cancel_within_the_firmwares_minute_and_its_minute_past_it() {
+        let declined = &[("@format\n", "@format ok\r\n@format no\r\n")];
+        assert_eq!(formatted(&mut Script::new(declined), QUICK).0, Err(FormatWhy::Declined));
+        // The same answer a minute on: the question ran out (a minute of
+        // nothing here, the firmware's own a whole one).
+        let waits = Waits { minute: Duration::ZERO, ..QUICK };
+        assert_eq!(formatted(&mut Script::new(declined), waits).0, Err(FormatWhy::TimedOut));
+        let ok = Script::new(&[("@format\n", "@format ok\r\n")]);
+        let late = b"@format no\r\n".to_vec();
+        let mut wire = Delayed { inner: ok, late, after: Instant::now() + Duration::from_millis(600) };
+        let (got, told) = formatted(&mut wire, QUICK);
+        assert_eq!((got, told), (Err(FormatWhy::TimedOut), vec![Format::Waiting]), "past QUICK's minute");
+        assert!(timed_out(Duration::from_millis(59_100), Duration::from_secs(60)), "the minute, less its way");
+        assert!(!timed_out(Duration::from_millis(58_000), Duration::from_secs(60)), "a Cancel");
+    }
+
+    #[test]
+    fn a_refusal_is_told_apart_by_when_it_came() {
+        let run = |reply: &'static str| formatted(&mut Script::new(&[("@format\n", reply)]), QUICK).0;
+        // At once: the question never shown.
+        assert_eq!(run("@err 4 format viz\r\n"), Err(FormatWhy::NotAsked("viz".into())));
+        assert_eq!(run("@err 4 format card\r\n"), Err(FormatWhy::NotAsked("card".into())));
+        // At the listener's second answer, before any restart.
+        assert_eq!(run("@format ok\r\n@err 4 format size\r\n"), Err(FormatWhy::Refused("size".into())));
+        // After the restart: the format itself failed.
+        let failed = "@format ok\r\n@format 0\r\n@format 30\r\n@err 4 format mkfs\r\n";
+        assert_eq!(run(failed), Err(FormatWhy::Failed("mkfs".into())));
+        // Firmware from before the verb.
+        assert_eq!(run("@err 7 format\r\n"), Err(FormatWhy::Old));
+        // Nothing at all; the question up and then nothing more.
+        assert_eq!(formatted(&mut Script::new(&[]), QUICK).0, Err(FormatWhy::NoAnswer));
+        let quick = Waits { answer: Duration::from_millis(200), count_idle: Duration::from_millis(200), ..QUICK };
+        let up = &[("@format\n", "@format ok\r\n")];
+        assert_eq!(formatted(&mut Script::new(up), quick).0, Err(FormatWhy::Lost));
+        let restarted = &[("@format\n", "@format ok\r\n@format 0\r\n@format 20\r\n")];
+        assert_eq!(formatted(&mut Script::new(restarted), quick).0, Err(FormatWhy::Lost));
+        // Told to stop: let go, the board goes on by itself.
+        let stop = AtomicBool::new(true);
+        let mut script = Script::new(up);
+        let got = format(&mut script, "COM3", QUICK, &stop, &mut |_| {}, &mut |_| {});
+        assert_eq!(got, Err(FormatWhy::Abandoned));
+    }
+
+    #[test]
+    fn the_formats_lines_are_read_whatever_comes_between_and_a_done_this_player_cant_read_is_zeros() {
+        assert_eq!(format_line("@format 41"), Some(FormatLine::Pct(41)));
+        assert_eq!(format_line("@format 250"), Some(FormatLine::Pct(100)));
+        assert_eq!(format_line("@format ok\r"), Some(FormatLine::Ok));
+        assert_eq!(format_line("@format done"), Some(FormatLine::Done { size: 0, free: 0, cluster: 0 }));
+        assert_eq!(format_line("@formatted"), None);
+        assert_eq!(format_line("@err 4 count card"), None, "another verb's refusal");
+        assert_eq!(format_line("@err 4 format"), Some(FormatLine::Err { code: 4, why: String::new() }));
     }
 }

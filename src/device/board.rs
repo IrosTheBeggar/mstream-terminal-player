@@ -311,6 +311,11 @@ pub(crate) enum Primary {
     /// The board keeps restarting after a write, and the page filled in its
     /// cure: Write the DIO image ▸, through the gate like every write.
     Dio,
+    /// A card the player can't read (exFAT, NTFS, GPT) on a board that can
+    /// format it, and nothing else to do: Format as FAT32 ▸, through the
+    /// format's gate, the player confirming on its own screen (contract
+    /// clauses 18 and 59).
+    Format,
 }
 
 /// What the worker is doing with the board now. One thing at a time per
@@ -328,6 +333,9 @@ pub(crate) enum Work {
     Counting,
     /// `@identify` sent: "This one" on its screen for five seconds.
     Identifying,
+    /// `@format` sent: the question on its screen, then its format (its
+    /// state is in [`Format`]).
+    Formatting,
     /// A write asked for, waiting its turn: the firmware still coming, or
     /// another board in its bootloader, or a listen letting the port go.
     Queued,
@@ -378,6 +386,91 @@ pub(crate) enum Count {
     Done { free: u64 },
     /// Refused at once, or stopped `part_way` (nothing changed either way).
     Refused { why: CountWhy, part_way: bool },
+}
+
+/// The card formatted in the player, as this player asked it (`@format`:
+/// the firmware repo's docs/HOST-STATUS.md; contract clause 59). The
+/// computer only asks: the listener answers on the board's screen, twice,
+/// and the board restarts and formats the card itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Format {
+    Idle,
+    /// `@format` sent, its answer not in yet.
+    Asking,
+    /// `@format ok`: the question is on the board's screen.
+    Waiting,
+    /// `@format 0`: confirmed twice, the board restarts to format.
+    Restarting,
+    /// `@format <percent>`.
+    Running { pct: u8 },
+    /// `@format done …`: an empty FAT32 card.
+    Done(Formatted),
+    /// It ended with nothing formatted, or with the format's end unknown.
+    Ended(FormatWhy),
+}
+
+/// `@format done size=… free=… cluster=…`, and how long the format took
+/// from `@format 0`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Formatted {
+    pub size: u64,
+    pub free: u64,
+    pub cluster: u64,
+    pub took: Duration,
+}
+
+/// Why a format asked for didn't end in `@format done`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FormatWhy {
+    /// `@format no` within the firmware's minute: Cancel on the board.
+    Declined,
+    /// `@format no` past it: nobody answered on the board.
+    TimedOut,
+    /// `@err 7 format`: firmware older than 0.12.0, which has no format.
+    Old,
+    /// Refused at once, the question never shown (`@err 4 format <why>`):
+    /// `ui`, `screen`, `viz`, `busy`, `card`.
+    NotAsked(String),
+    /// Refused at the listener's second answer, after `@format ok` and
+    /// with no restart: `card`, `size`, `busy`. Nothing was formatted.
+    Refused(String),
+    /// After the restart: `card`, `size`, `write`, `mkfs`, `check`,
+    /// `files`.
+    Failed(String),
+    /// Nothing answered `@format`.
+    NoAnswer,
+    /// The board went quiet after its question was up: whatever it does,
+    /// it does on its own.
+    Lost,
+    /// The page let the board go first; the board goes on by itself.
+    Abandoned,
+    Port(DeviceError),
+}
+
+/// Where the format is offered for a board's card (contract clauses 18, 59
+/// and 60).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FormatOffer {
+    /// exFAT, NTFS or GPT: Format as FAT32 ▸ when the verdict has no
+    /// primary, else the dim Format as FAT32… under the SD card row.
+    Foreign,
+    /// A card that answered and that nothing recognised (blank, another
+    /// system's, a FAT that didn't mount), or whose first sector couldn't
+    /// be read: the computer's disk check first, Format as FAT32 anyway…
+    /// the dim second step, never the primary.
+    Damaged,
+    /// A card the player reads, its music too: in Details only.
+    Readable,
+}
+
+/// About how long the player takes to format a card of `size` bytes, in
+/// seconds: its restart and boot, then about 4 MB and both FATs written at
+/// the slow end of the card's SPI, 1 MB/s (HOST-STATUS, "@format": 32 KB
+/// clusters, 4 bytes each, twice; ESTIMATED until the device check).
+pub(crate) fn format_secs(size: u64) -> u64 {
+    const RESTART: u64 = 15;
+    const GAP: u64 = 4 << 20;
+    (GAP + size / 4096) / 1_000_000 + RESTART
 }
 
 /// How the last write went.
@@ -480,6 +573,8 @@ pub(crate) struct Board {
     pub verdict: Verdict,
     pub work: Work,
     pub count: Count,
+    /// The format this player asked of it this visit, as it goes.
+    pub format: Format,
     pub written: Option<Written>,
     /// Its next write, when something chose it ([`Board::pending`] says
     /// whether it differs from the default).
@@ -496,6 +591,7 @@ impl Board {
             verdict: Verdict::Asking,
             work: Work::Idle,
             count: Count::Idle,
+            format: Format::Idle,
             written: None,
             next: None,
         }
@@ -550,6 +646,31 @@ impl Board {
     /// asked to show itself.
     pub fn answers_status(&self) -> bool {
         self.status().is_some()
+    }
+
+    /// Its firmware formats a card at a computer's ask (`@format`, 0.12.0):
+    /// its status carries `cid=` or `clock=`, which came with it — their
+    /// presence is how a sender tells, never the version — and it hasn't
+    /// answered `@err 7 format` since.
+    pub fn can_format(&self) -> bool {
+        let Some(status) = self.status() else { return false };
+        let new_keys = status.cid != CardRoot::Unknown || status.clock != Clock::Unknown;
+        new_keys && self.format != Format::Ended(FormatWhy::Old)
+    }
+
+    /// Where its card is offered the format, on a board that can format
+    /// it: none with no card in the slot, or a kind this player doesn't
+    /// know.
+    pub fn format_offer(&self) -> Option<FormatOffer> {
+        if !self.can_format() {
+            return None;
+        }
+        match self.status()?.card {
+            CardKind::ExFat | CardKind::Ntfs | CardKind::Gpt => Some(FormatOffer::Foreign),
+            CardKind::Other | CardKind::Unreadable => Some(FormatOffer::Damaged),
+            CardKind::Fat32 | CardKind::Fat16 => Some(FormatOffer::Readable),
+            CardKind::None | CardKind::Unknown(_) => None,
+        }
     }
 
     /// It runs our firmware, by its own word or its bootloader's: "your MP3
@@ -654,6 +775,9 @@ impl Board {
     /// that failed, whatever the board said before it; or, with a next
     /// write chosen, that write's direction. A board that keeps restarting
     /// has none of its own: its cure is a next write the page fills in.
+    /// Where the verdict leaves none — up to date, ahead of the pin, a
+    /// version the order cannot place — a card the player can't read on a
+    /// board that can format it is the one thing to do (clause 18).
     pub fn primary(&self) -> Option<Primary> {
         if let Some(Written::Failed { .. }) = self.written {
             return Some(Primary::TryAgain);
@@ -668,6 +792,11 @@ impl Board {
             Verdict::Update | Verdict::DevUpdate => Some(Primary::Update),
             Verdict::Other { .. } | Verdict::Blank => Some(Primary::Install),
             Verdict::Silent => Some(Primary::Read),
+            Verdict::UpToDate | Verdict::Newer | Verdict::Unplaced
+                if self.format_offer() == Some(FormatOffer::Foreign) =>
+            {
+                Some(Primary::Format)
+            }
             _ => None,
         }
     }
@@ -869,7 +998,7 @@ pub(crate) mod tests {
     /// whatever release this build pins; a target that answers is told
     /// where the verdict differs.
     fn pin() -> Target {
-        Target { version: "v0.8.0".into(), answers_status: false }
+        Target { version: "v0.8.0".into(), answers_status: false, answers_format: false }
     }
 
     fn heard(heard: Heard) -> Board {
@@ -908,7 +1037,7 @@ pub(crate) mod tests {
         assert_eq!(heard(Heard::Status(status("garbage"))).verdict, Verdict::Unplaced);
         assert_eq!(heard(Heard::Old { version: None, elf: None }).verdict, Verdict::Unplaced, "a pin without @status cannot say older");
         let mut board = heard(Heard::Old { version: None, elf: None });
-        let answering = Target { version: "v0.9.0".into(), answers_status: true };
+        let answering = Target { version: "v0.9.0".into(), answers_status: true, answers_format: false };
         assert_eq!(board.judge(Some(&answering)), Verdict::Update, "too old for @status is older than a pin that has it");
         assert_eq!(heard(Heard::Silent).verdict, Verdict::Silent);
         assert_eq!(heard(Heard::Nothing).verdict, Verdict::Asking);
@@ -1083,7 +1212,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_verdict_orders_a_two_digit_minor_by_number() {
-        let target = Target { version: "v0.10.0".into(), answers_status: true };
+        let target = Target { version: "v0.10.0".into(), answers_status: true, answers_format: false };
         let judged = |heard: Heard| {
             let mut board = Board::new(candidate("COM3", "5B1F007751"));
             board.heard = heard;
@@ -1095,7 +1224,7 @@ pub(crate) mod tests {
         assert_eq!(judged(Heard::Status(status("v0.10.0"))), Verdict::UpToDate);
         assert_eq!(judged(Heard::Status(status("v0.10.0-2-gabc1234"))), Verdict::Newer, "a build past v0.10.0");
         assert_eq!(judged(Heard::Status(status("v0.11.0"))), Verdict::Newer);
-        let behind = Target { version: "v0.9.0".into(), answers_status: true };
+        let behind = Target { version: "v0.9.0".into(), answers_status: true, answers_format: false };
         let mut ahead = Board::new(candidate("COM3", "5B1F007751"));
         ahead.heard = Heard::Status(status("v0.10.0"));
         assert_eq!(ahead.judge(Some(&behind)), Verdict::Newer, "never offered v0.9.0 as an update");
@@ -1135,5 +1264,57 @@ pub(crate) mod tests {
         assert_eq!(released.write_image(), Image::release("v0.7.0", Mode::Qio), "its own tab writes its own");
         let current = heard(Heard::Status(status("v0.8.0")));
         assert!(!current.in_update_all() && !current.left_out(), "up to date: neither");
+    }
+
+    /// A board whose status says `card`, from firmware with (`new`) or
+    /// without `cid=` and `clock=`.
+    fn carded(fw: &str, card: CardKind, new: bool) -> Board {
+        let mut status = status(fw);
+        status.card = card;
+        if new {
+            (status.cid, status.clock) = (CardRoot::None, Clock::Ok);
+        }
+        heard(Heard::Status(status))
+    }
+
+    #[test]
+    fn the_format_is_offered_by_the_status_keys_never_the_version_and_is_the_primary_only_with_none_other() {
+        // 0.12.0's keys say the board formats; their absence says it can't.
+        assert!(carded("v0.8.0", CardKind::ExFat, true).can_format());
+        assert!(!carded("v0.12.0", CardKind::ExFat, false).can_format(), "never the version");
+        let mut one = status("v0.8.0");
+        one.clock = Clock::Unset;
+        assert!(heard(Heard::Status(one)).can_format(), "one key is enough: the other gave way to the budget");
+        assert!(!heard(Heard::Old { version: Some("v0.7.0".into()), elf: None }).can_format());
+        // Where it is offered: by the card.
+        let offer = |card: CardKind| carded("v0.8.0", card, true).format_offer();
+        assert_eq!(offer(CardKind::ExFat), Some(FormatOffer::Foreign));
+        assert_eq!(offer(CardKind::Ntfs), Some(FormatOffer::Foreign));
+        assert_eq!(offer(CardKind::Gpt), Some(FormatOffer::Foreign));
+        assert_eq!(offer(CardKind::Other), Some(FormatOffer::Damaged));
+        assert_eq!(offer(CardKind::Unreadable), Some(FormatOffer::Damaged));
+        assert_eq!(offer(CardKind::Fat32), Some(FormatOffer::Readable));
+        assert_eq!(offer(CardKind::None), None, "no card to format");
+        assert_eq!(offer(CardKind::Unknown("zfs".into())), None, "a kind this player doesn't know");
+        // The primary: up to date, ahead, unplaced — and a foreign card only.
+        assert_eq!(carded("v0.8.0", CardKind::ExFat, true).primary(), Some(Primary::Format));
+        assert_eq!(carded("v0.9.0", CardKind::Gpt, true).primary(), Some(Primary::Format), "ahead of the pin");
+        assert_eq!(carded("v0.8.0", CardKind::Other, true).primary(), None, "a damaged card: never the primary");
+        assert_eq!(carded("v0.8.0", CardKind::Fat32, true).primary(), None, "the player's own card: Details only");
+        assert_eq!(carded("v0.7.0", CardKind::ExFat, true).primary(), Some(Primary::Update), "the update wins");
+        assert_eq!(carded("v0.8.0", CardKind::ExFat, false).primary(), None, "firmware that can't format");
+        // An `@err 7 format` since: it can't, whatever its keys say.
+        let mut refused = carded("v0.8.0", CardKind::ExFat, true);
+        refused.format = Format::Ended(FormatWhy::Old);
+        assert!(!refused.can_format() && refused.format_offer().is_none() && refused.primary().is_none());
+    }
+
+    #[test]
+    fn a_formats_time_is_its_restart_and_the_fats_at_a_megabyte_a_second() {
+        // HOST-STATUS's layouts: a "64 GB" card writes about 20 MB, "1 TB"
+        // about 250 MB.
+        assert_eq!(format_secs(63_864_569_856), 34);
+        assert_eq!(format_secs(1_000_204_886_016), 263);
+        assert_eq!(format_secs(0), 19, "the restart and the gap, whatever the card");
     }
 }

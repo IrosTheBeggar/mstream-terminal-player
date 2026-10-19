@@ -61,6 +61,13 @@ pub(crate) const PINNED_DIO_SHA256: Option<&str> =
 /// v0.11.0 answers (its HostStatus and HOST-STATUS.md are the ones the
 /// player was built against, unchanged since they were merged).
 pub(crate) const PINNED_ANSWERS_STATUS: bool = true;
+/// Whether a board running the pinned release formats a card at a
+/// computer's ask (`@format`, the firmware repo's docs/HOST-STATUS.md, from
+/// 0.12.0 on): only then does the MP3 Player tab say "Updating lets it."
+/// under a board that can't (contract clauses 20 and 59), and only then do
+/// the fix lines of a board that can't point at the player. v0.11.0 does
+/// not: it answers `@err 7 format`.
+pub(crate) const PINNED_ANSWERS_FORMAT: bool = false;
 
 /// Where the merged image expects the app: ota_0 in the firmware's
 /// partition table, and where the bootloader at 0x1000 sits inside it.
@@ -245,11 +252,17 @@ impl Image {
 pub(crate) struct Target {
     pub version: String,
     pub answers_status: bool,
+    /// A board running it formats its card (`@format`).
+    pub answers_format: bool,
 }
 
 /// The pin as a target, or none in a build of the player with no pin.
 pub(crate) fn pin_target() -> Option<Target> {
-    PINNED_TAG.map(|tag| Target { version: tag.to_string(), answers_status: PINNED_ANSWERS_STATUS })
+    PINNED_TAG.map(|tag| Target {
+        version: tag.to_string(),
+        answers_status: PINNED_ANSWERS_STATUS,
+        answers_format: PINNED_ANSWERS_FORMAT,
+    })
 }
 
 /// A piece of the image and where it goes.
@@ -1798,7 +1811,16 @@ pub(crate) mod tests {
         // the card after an update only when it is true.
         let answers = place(pin(), "v0.9.0") != Place::Older;
         assert_eq!(PINNED_ANSWERS_STATUS, answers, "{} and the status query", pin());
-        assert_eq!(pin_target(), Some(Target { version: pin().into(), answers_status: PINNED_ANSWERS_STATUS }));
+        // `@format` is 0.12.0's: the page says "Updating lets it." only
+        // while this is true.
+        let formats = place(pin(), "v0.12.0") != Place::Older;
+        assert_eq!(PINNED_ANSWERS_FORMAT, formats, "{} and the format", pin());
+        let target = Target {
+            version: pin().into(),
+            answers_status: PINNED_ANSWERS_STATUS,
+            answers_format: PINNED_ANSWERS_FORMAT,
+        };
+        assert_eq!(pin_target(), Some(target));
     }
 
     #[test]

@@ -48,7 +48,8 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use rust_i18n::t;
 
-use self::board::{Board, Card, CardKind, CardUnknown, Free, Heard, Tracks, Verdict, Work, Written, gb};
+use self::board::{Board, Card, CardKind, CardUnknown, Format, FormatWhy, Free, Heard, Tracks, Verdict, Work};
+use self::board::{Written, gb};
 use self::desk::{All, Cmd, Event, ImageState, LogKind, Refusal};
 use self::engine::Engine;
 use self::firmware::{Cached, Image, Images, Release, Supply, Target};
@@ -92,6 +93,10 @@ enum DeviceCmd {
     /// plan and stop without --yes; `eject` lets it go. Each gate is a flag naming what it lets
     /// through
     Card(CardArgs),
+    /// Ask the Core2 on USB to format its SD card as FAT32, which erases all of it: the player
+    /// asks on its own screen (Format..., then its red button held 2 s) and formats the card
+    /// itself. Prints the card, the player's answer, the progress and the result
+    Format(FormatArgs),
     // The hidden card commands below stay, as JSON, for the real-card checks
     // and scripts that read every field: `device cards` and `device card`
     // are the listener's, in plain lines, on the GUI's transfer worker
@@ -528,6 +533,13 @@ impl CardSyncArgs {
 }
 
 #[derive(Args, Clone)]
+pub struct FormatArgs {
+    /// The serial port the Core2 is on (default: the one Core2-shaped port)
+    #[arg(long, value_name = "PORT")]
+    port: Option<String>,
+}
+
+#[derive(Args, Clone)]
 pub struct ReleasesArgs {
     /// Pre-releases too: hidden otherwise
     #[arg(long = "pre-releases", visible_alias = "pre")]
@@ -652,6 +664,11 @@ pub fn run(args: DeviceArgs) -> i32 {
             let mut io = card::lines::Io { out: &mut out, err: &mut err, ask: &mut ask, ctrl_c };
             let setup = card::worker::Setup::system();
             card::lines::card(setup, saved_servers(), &args.drive, &what, &flags, &mut io)
+        }
+        DeviceCmd::Format(args) => {
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            let engine = engine::from_env();
+            format_on(&*engine, args.port.as_deref(), desk::Timing::REAL, &mut out, &mut err)
         }
         DeviceCmd::CardProbe => card::volume::probe(&mut std::io::stdout(), &mut std::io::stderr()),
         DeviceCmd::CardSetup(args) => {
@@ -877,6 +894,155 @@ fn time_on(
     };
     let _ = writeln!(out, "{}", serde_json::to_string_pretty(&printed).unwrap_or_default());
     code
+}
+
+/// `device format [--port P]` (contract clause 66): the board's player is
+/// asked to format its card, over USB with no reset as `device list` asks
+/// it, and what comes of it is said in plain lines — the card as the board
+/// reports it (what is lost), the player's answer, the progress and the
+/// result. There is no `--yes`: the player confirms on its own screen,
+/// twice, and nothing on this side writes the card. Exit 0 formatted; 1
+/// declined, timed out, refused (older firmware too) or failed, and with
+/// several boards and no `--port`; 2 no board, ports that can't be listed,
+/// or a `--port` this computer doesn't list.
+fn format_on(
+    engine: &dyn Engine,
+    port: Option<&str>,
+    timing: desk::Timing,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let found = match engine.candidates() {
+        Ok(found) => found,
+        Err(e) => {
+            let _ = writeln!(err, "mstream-player: {}", e.text());
+            return 2;
+        }
+    };
+    let found: Vec<ports::Candidate> = match port {
+        Some(port) => match found.into_iter().find(|c| c.port.eq_ignore_ascii_case(port)) {
+            Some(candidate) => vec![candidate],
+            None => {
+                let _ = writeln!(err, "mstream-player: {port} isn't a board's port this computer lists");
+                return 2;
+            }
+        },
+        None => found,
+    };
+    if found.is_empty() {
+        let _ = writeln!(out, "{}", t!("dev.no_device_title"));
+        return 2;
+    }
+    let target = firmware::pin_target();
+    let mut boards = desk::listen_all(engine, &found, timing.at_rest, timing.waits);
+    for board in &mut boards {
+        board.verdict = board.judge(target.as_ref());
+    }
+    if boards.len() > 1 {
+        let _ = writeln!(out, "{}", t!("dev.several_title"));
+        for board in &boards {
+            let _ = writeln!(out, "  {}", board_line(board, target.as_ref()));
+        }
+        let _ = writeln!(out, "Pass --port with one of them.");
+        return 1;
+    }
+    let (board, candidate) = (&boards[0], &found[0]);
+    let name = board.port().to_string();
+    if board.status().is_none() {
+        let words = verdict_words(board, target.as_ref());
+        let only = "Only a player that answers over USB formats its card.";
+        let _ = writeln!(err, "mstream-player: {name}: {words}. {only}");
+        return 1;
+    }
+    let card = card_words(board).unwrap_or_else(|| "a card".to_string());
+    let _ = writeln!(out, "{name}: {card}. Formatting erases all of it, even what the player can't read.");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let result = match engine.listen(candidate) {
+        Ok(mut wire) => {
+            let mut last = None;
+            let mut told = |state: Format| match state {
+                Format::Waiting => {
+                    let how = "Format... then its red button held 2 s";
+                    let _ = writeln!(out, "Asked: confirm on {name}'s screen, {how}. Nothing is erased until you do.");
+                }
+                Format::Restarting => {
+                    let _ = writeln!(out, "Confirmed: {name} restarts and formats the card.");
+                }
+                Format::Running { pct } if last != Some(pct) => {
+                    last = Some(pct);
+                    let _ = writeln!(out, "  {pct}%");
+                }
+                _ => {}
+            };
+            listen::format(&mut *wire, &name, timing.waits, &stop, &mut told, &mut |_| {})
+        }
+        Err(e) => Err(FormatWhy::Port(e)),
+    };
+    match result {
+        Ok(done) => {
+            let took = desk::took_text(done.took);
+            let (size, free, kb) = (gb(done.size), gb(done.free), done.cluster / 1024);
+            let card = format!("{size} GB, {free} GB free, {kb} KB clusters");
+            let _ = writeln!(out, "Formatted {name}'s card as FAT32 in {took}: {card}.");
+            let _ = writeln!(out, "Next: put it in this computer's card reader to fill it (device cards).");
+            0
+        }
+        Err(why @ (FormatWhy::Declined | FormatWhy::TimedOut)) => {
+            let _ = writeln!(out, "{}", format_line(&why, &name));
+            1
+        }
+        Err(why) => {
+            let _ = writeln!(err, "mstream-player: {}", format_line(&why, &name));
+            1
+        }
+    }
+}
+
+/// A format's end in `device format`'s plain words: what the tab's busy line
+/// says (clause 59), as a script reads it.
+fn format_line(why: &FormatWhy, port: &str) -> String {
+    let word = |why: &str, words: &[(&str, &str)]| {
+        let known = words.iter().find(|(w, _)| *w == why).map(|(_, said)| said.to_string());
+        known.unwrap_or_else(|| format!("it answered {why}"))
+    };
+    match why {
+        FormatWhy::Declined => format!("Not formatted: it was cancelled on {port}'s screen."),
+        FormatWhy::TimedOut => "Not formatted: nobody confirmed on the player within a minute.".to_string(),
+        FormatWhy::Old => format!("{port} can't format a card: its firmware is older than 0.12.0."),
+        FormatWhy::NotAsked(why) => {
+            let words = [
+                ("ui", "the player is still starting up; try again in a few seconds"),
+                ("screen", "another screen has its display; try again once it is closed"),
+                ("viz", "a computer drives its dancer; end that first"),
+                ("busy", "it is restarting; try again once it is back"),
+                ("card", "no card answers in its slot"),
+            ];
+            format!("Not asked: {port}: {}.", word(why, &words))
+        }
+        FormatWhy::Refused(why) => {
+            let words = [
+                ("card", "another card is in its slot since it started, or none answers"),
+                ("size", "FAT32 can't take the card (under 42 MB, or 2 TB and more)"),
+                ("busy", "it was restarting already"),
+            ];
+            format!("Not formatted: {port}: {}. Nothing was erased.", word(why, &words))
+        }
+        FormatWhy::Failed(why) => {
+            let words = [
+                ("card", "after its restart another card answered, or none; nothing was written"),
+                ("size", "FAT32 can't take its size; nothing was written"),
+                ("write", "the card refused a write"),
+                ("mkfs", "its file system couldn't be made"),
+                ("check", "it didn't read back what was written"),
+                ("files", "it is FAT32 now, but /music or device.txt couldn't be written: format it again"),
+            ];
+            format!("Couldn't format the card in {port}: {}.", word(why, &words))
+        }
+        FormatWhy::NoAnswer => format!("{port} didn't answer @format: nothing was asked."),
+        FormatWhy::Lost | FormatWhy::Port(_) | FormatWhy::Abandoned => {
+            format!("Lost touch with {port} during the format: it goes on by itself.")
+        }
+    }
 }
 
 /// `device list`: one line per board, exit 1 when there is none — a script
@@ -1809,6 +1975,90 @@ mod tests {
         let help = Line::command().render_help().to_string();
         assert!(help.contains("releases"), "{help}");
         assert!(!help.lines().any(|l| l.trim_start().starts_with("time")), "{help}");
+    }
+
+    /// `device format` (clause 66): the board asked over USB with no reset,
+    /// its card said first — what is lost — then the player's answer, the
+    /// progress and the card it made. Exit 0 formatted; 1 declined, timed
+    /// out, refused or failed, or several boards and no `--port`; 2 no
+    /// board.
+    #[test]
+    fn device_format_asks_the_player_and_says_its_answer_the_progress_and_the_card_it_made() {
+        let _en = crate::setup::tests::in_locale("en");
+        let run = |fake: &Fake, port: Option<&str>| {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = format_on(fake, port, QUICK, &mut out, &mut err);
+            (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+        };
+        let fake = Fake::new("status:v0.12.0/card=exfat/free=?/tracks=-").with_pace(Duration::from_millis(300));
+        let (code, out, err) = run(&fake, None);
+        assert_eq!(code, 0, "{out}{err}");
+        let lines: Vec<&str> = out.lines().collect();
+        let lost = "FAKE0: an exFAT card — the player reads FAT32 only (63.9 GB). Formatting erases all of it, \
+                    even what the player can't read.";
+        assert_eq!(lines[0], lost);
+        let asked = "Asked: confirm on FAKE0's screen, Format... then its red button held 2 s. Nothing is erased \
+                     until you do.";
+        assert_eq!(lines[1], asked);
+        assert_eq!(lines[2], "Confirmed: FAKE0 restarts and formats the card.");
+        assert!(lines.contains(&"  50%") && lines.contains(&"  100%"), "{out}");
+        let done = lines.iter().find(|l| l.starts_with("Formatted FAKE0's card as FAT32 in ")).expect(&out);
+        assert!(done.ends_with(": 63.9 GB, 63.8 GB free, 32 KB clusters."), "{done}");
+        assert!(err.is_empty(), "{err}");
+        let trace = fake.trace().lock().unwrap().clone();
+        assert!(trace.iter().all(|t| t.starts_with("listen ") || t == "format FAKE0"), "never a reset: {trace:?}");
+        // What the board says of its card since: an empty FAT32 card.
+        let (_, lines) = listed(&fake, false);
+        assert!(lines[0].ends_with("· card 63.8 GB free of 63.9 GB, no tracks"), "{lines:?}");
+
+        // The player's no, and its minute: said, and exit 1.
+        let declined = run(&Fake::new("status:v0.12.0/format=no"), None);
+        assert_eq!(declined.0, 1);
+        assert!(declined.1.ends_with("Not formatted: it was cancelled on FAKE0's screen.\n"), "{declined:?}");
+        let late = run(&Fake::new("status:v0.12.0/format=late"), None);
+        assert!(late.1.ends_with("Not formatted: nobody confirmed on the player within a minute.\n"), "{late:?}");
+        // Refused at once, at the second answer, and after the restart.
+        let refused = |spec: &str| {
+            let (code, _, err) = run(&Fake::new(spec).with_pace(Duration::from_millis(200)), None);
+            assert_eq!(code, 1, "{spec}: {err}");
+            err.trim_end().trim_start_matches("mstream-player: ").to_string()
+        };
+        assert_eq!(refused("status:v0.12.0/card=none"), "Not asked: FAKE0: no card answers in its slot.");
+        let viz = "Not asked: FAKE0: a computer drives its dancer; end that first.";
+        assert_eq!(refused("status:v0.12.0/state=host"), viz);
+        let size = "Not formatted: FAKE0: FAT32 can't take the card (under 42 MB, or 2 TB and more). Nothing was erased.";
+        assert_eq!(refused("status:v0.12.0/format=second-size"), size);
+        let write = "Couldn't format the card in FAKE0: the card refused a write.";
+        assert_eq!(refused("status:v0.12.0/card=gpt/format=fail-write"), write);
+        // Older firmware: the pin has no format; one that can't say its card.
+        let pin = "FAKE0 can't format a card: its firmware is older than 0.12.0.";
+        assert_eq!(refused("status:v0.11.0/card=exfat"), pin);
+        let old = refused("old:v0.8.0");
+        assert!(old.starts_with("FAKE0: v0.8.0, update to") && old.ends_with("formats its card."), "{old}");
+
+        // Several boards and no --port: named, as flash --yes names them.
+        let two = Fake::new("status:v0.12.0/format=no,status:v0.12.0/card=ntfs");
+        let (code, out, _) = run(&two, None);
+        assert_eq!(code, 1);
+        assert!(out.starts_with("Several boards look like a Core2") && out.contains("Pass --port"), "{out}");
+        assert!(!two.trace().lock().unwrap().iter().any(|t| t.starts_with("format")), "neither asked");
+        let (code, out, _) = run(&two, Some("fake1"));
+        assert_eq!(code, 0, "{out}");
+        assert!(out.starts_with("FAKE1: an NTFS card"), "{out}");
+        // No board; a port no board is on.
+        let (code, out, _) = run(&Fake::new("nodevice"), None);
+        assert_eq!((code, out.trim()), (2, "No Core2 found"));
+        let (code, _, err) = run(&two, Some("COM9"));
+        assert!(code == 2 && err.contains("isn't a board's port"), "{err}");
+
+        // In the help, with --port and no --yes.
+        let parsed = Line::try_parse_from(["mstream-player", "format", "--port", "COM3"]).map(|l| l.what);
+        let Ok(DeviceCmd::Format(args)) = parsed else { panic!("device format") };
+        assert_eq!(args.port.as_deref(), Some("COM3"));
+        assert!(Line::try_parse_from(["mstream-player", "format", "--yes"]).is_err(), "the player confirms");
+        use clap::CommandFactory;
+        let help = Line::command().render_help().to_string();
+        assert!(help.lines().any(|l| l.trim_start().starts_with("format ")), "{help}");
     }
 
     #[test]
