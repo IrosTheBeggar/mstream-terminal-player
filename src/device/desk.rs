@@ -7,9 +7,10 @@
 //! again on the same port until it answers; a board that leaves is
 //! dropped. Everything else waits for the page to ask: ask again, read the
 //! board's bootloader (a reset, said out loud), count the card's free
-//! space, show "This one" on its screen, and the write — today's flow.rs
-//! pieces, the baud ladder and the write with its retry — for one board,
-//! or for every board that needs it, one after another.
+//! space, show "This one" on its screen, put the format's question on it
+//! (the player confirms and formats its card itself), and the write —
+//! today's flow.rs pieces, the baud ladder and the write with its retry —
+//! for one board, or for every board that needs it, one after another.
 //!
 //! The worker runs each conversation as a job on a thread of its own, so
 //! a slow board never stalls the others, and keeps the rules: one job a
@@ -1594,7 +1595,9 @@ pub(crate) fn format_end(why: &FormatWhy, port: &str, version: Option<&str>) -> 
                 .unwrap_or_else(|| t!("dev.card.fmt_failed_other", port = port, why = word).to_string())
         }
         FormatWhy::NoAnswer => t!("dev.card.fmt_no_answer", port = port).to_string(),
-        FormatWhy::Lost | FormatWhy::Port(_) => t!("dev.card.fmt_lost", port = port).to_string(),
+        FormatWhy::Lost => t!("dev.card.fmt_lost", port = port).to_string(),
+        // The port itself: in use by another program, or gone.
+        FormatWhy::Port(e) => e.text(),
         FormatWhy::Abandoned => return None,
     };
     Some(text)

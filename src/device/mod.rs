@@ -2,7 +2,9 @@
 //! over its USB cable. `mstream-player device list` names the boards that
 //! look like one, each with what it runs and its card; `mstream-player
 //! device flash` installs or updates the firmware; `mstream-player device
-//! releases` lists the firmware's releases as GitHub has them. No mStream
+//! releases` lists the firmware's releases as GitHub has them;
+//! `mstream-player device format` asks the board's player to format its
+//! card, which it confirms on its own screen and does itself. No mStream
 //! session is involved: the board is a USB serial port, and the firmware is
 //! a file — a release of IrosTheBeggar/mstream-mp3-player, in its QIO or
 //! its DIO build, or a build of it.
@@ -1039,7 +1041,8 @@ fn format_line(why: &FormatWhy, port: &str) -> String {
             format!("Couldn't format the card in {port}: {}.", word(why, &words))
         }
         FormatWhy::NoAnswer => format!("{port} didn't answer @format: nothing was asked."),
-        FormatWhy::Lost | FormatWhy::Port(_) | FormatWhy::Abandoned => {
+        FormatWhy::Port(e) => e.text(),
+        FormatWhy::Lost | FormatWhy::Abandoned => {
             format!("Lost touch with {port} during the format: it goes on by itself.")
         }
     }

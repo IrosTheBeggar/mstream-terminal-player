@@ -4527,6 +4527,9 @@ mod tests {
         assert_eq!(odd, "Couldn't format the card in COM3: brownout.", "a word this player doesn't know");
         let lost = said(&mut page, &ends, FormatWhy::Lost);
         assert!(lost.starts_with("Lost touch with COM3 during the format"), "{lost}");
+        let held = DeviceError::Busy { port: "COM3".into(), detail: "held".into() };
+        let busy = said(&mut page, &ends, FormatWhy::Port(held));
+        assert_eq!(busy, "COM3 is in use by another program (held)", "the port's own words");
         // Declined, the card is offered its format again.
         ends.tell([Event::Board(at(exfat(), Format::Ended(FormatWhy::Declined)))]);
         page.pump();
