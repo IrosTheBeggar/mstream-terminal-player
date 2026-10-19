@@ -31,7 +31,9 @@
 //! queue ([`Http::bulk`]) is asked `?bulk=1` (out of its cache, behind its
 //! cap), at most as many at once as it runs; a full queue's 503 is waited
 //! out for as long as it says, as often as it says it, and never fails the
-//! file.
+//! file. Only the queue's, in its words: the server restarting answers 503
+//! with a Retry-After too, as a proxy in front of it may, and fails the file
+//! as any refusal does.
 //!
 //! Whether a failure stops the run or skips one file ([`Failed::stop`]):
 //! lost sign-in, a server out of reach after three tries, and a 429 stop it
@@ -235,8 +237,9 @@ fn make_once(client: &Client, job: &Job, pace: Pace, stop: &AtomicBool) -> Resul
         let fetch = if job.bulk { fetch.bulk() } else { fetch };
         let fetched = loop {
             let fetched = until(client.download_async(&fetch, &job.dest, &mut |_, _| {}), stop);
-            // The server's bulk queue is full: asked again when it says, for
-            // as long as it says so, and no try is spent.
+            // The server's bulk queue is full (its words, not any 503's):
+            // asked again when it says, for as long as it says so, and no
+            // try is spent.
             match &fetched {
                 Some(Err(f)) if job.bulk && !stop.load(Ordering::Relaxed) => match f.error {
                     FetchError::Busy(wait) => pause(busy_wait(wait), stop),
@@ -687,6 +690,8 @@ impl Drop for Http {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::super::length::tests::opus_bytes;
     use super::*;
     use crate::api::transfer::stub::{canned, chunked, reply, routed};
@@ -856,18 +861,19 @@ mod tests {
     }
 
     #[test]
-    fn a_bulk_queue_is_asked_no_more_than_it_runs_and_a_full_one_is_waited_out() {
+    fn a_full_bulk_queue_is_waited_out_and_a_restarting_server_is_not() {
         let whole = opus_bytes(30_000, 2, true);
         let words: &[u8] = br#"{"error":"too many bulk transcodes queued - retry later"}"#;
         let full = || reply("503 Service Unavailable", &[("Retry-After", "1")], words);
         // More full answers than a file has tries: none of them is one.
         let ogg = chunked("200 OK", &[("Content-Type", "audio/ogg")], &[&whole]);
-        let (base, seen) = canned(vec![full(), full(), full(), ogg]);
+        // A restart's 503 says when as well, in no queue's words.
+        let restarting = b"mStream is restarting";
+        let restart = reply("503 Service Unavailable", &[("Retry-After", "1")], restarting);
+        let (base, seen) = canned(vec![full(), full(), full(), ogg, restart]);
         let client = Arc::new(Client::new(&base).unwrap());
         let mut http = Http::new(client, 0, 2).unwrap();
-        assert_eq!(http.pace().limit, TRANSCODES, "no queue: the transfer's own two");
         http.bulk(Some(1));
-        assert_eq!(http.pace().limit, 1, "the server's one");
         let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
         http.lengths(HashMap::from([("lib/A/01.wav".to_string(), 30_000)]));
         let mut into = Vec::new();
@@ -877,8 +883,61 @@ mod tests {
             let req = seen.recv_timeout(Duration::from_secs(5)).unwrap();
             assert!(req.starts_with("GET /transcode/lib/A/01.wav?codec=opus&bitrate=192k&bulk=1 "), "{req}");
         }
+        let failed = http.fetch(&file, &mut Vec::new()).unwrap_err();
+        assert!(!failed.stop && failed.why.contains("503"), "the file fails, the run not: {failed:?}");
+        assert!(seen.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert!(seen.recv_timeout(Duration::from_millis(300)).is_err(), "asked once, not waited out");
+    }
+
+    /// A server of conversions whose first request, whichever it is, gets
+    /// no answer until `open` is set; any other is answered at once. Each
+    /// request's target is handed back as it comes.
+    fn held_first(open: Arc<AtomicBool>, stream: Vec<u8>) -> (String, mpsc::Receiver<String>) {
+        let (tx, seen) = mpsc::channel::<String>();
+        let (tx, count) = (Mutex::new(tx), AtomicU64::new(0));
+        let base = routed(move |asked| {
+            let _ = tx.lock().unwrap().send(asked.target.clone());
+            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                while !open.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            chunked("200 OK", &[("Content-Type", "audio/ogg")], &[&stream])
+        });
+        (base, seen)
+    }
+
+    #[test]
+    fn a_bulk_queue_is_asked_no_more_than_it_runs() {
+        let stream = opus_bytes(10_000, 2, true);
+        let open = Arc::new(AtomicBool::new(false));
+        let (base, seen) = held_first(open.clone(), stream.clone());
+        let client = Arc::new(Client::new(&base).unwrap());
+        let mut http = Http::new(client, 0, 2).unwrap();
+        assert_eq!(http.pace().limit, TRANSCODES, "no queue: the transfer's own two");
         http.bulk(Some(8));
         assert_eq!(http.pace().limit, TRANSCODES, "never more than the transfer's own");
+        http.bulk(Some(1));
+        assert_eq!(http.pace().limit, 1, "the server's one");
+        let files: Vec<WantedFile> =
+            (1..=2).map(|n| wanted(&format!("lib/A/0{n}.wav"), Bytes::Converted(CONTAINER_OPUS), 1)).collect();
+        http.lengths((1..=2).map(|n| (format!("lib/A/0{n}.wav"), 10_000)).collect());
+        // Made ahead on two threads: the second isn't asked for while the
+        // first holds the server's one slot. (Other tests' conversions take
+        // this process's turns too: they can only hold the second back.)
+        http.ahead(&files.iter().collect::<Vec<_>>());
+        let first = seen.recv_timeout(Duration::from_secs(10)).expect("the first conversion asked");
+        assert!(first.contains("&bulk=1"), "{first}");
+        let early = seen.recv_timeout(Duration::from_millis(600));
+        assert!(early.is_err(), "a second while the first runs: {early:?}");
+        open.store(true, Ordering::SeqCst);
+        let second = seen.recv_timeout(Duration::from_secs(10)).expect("the second, after the first");
+        assert!(second.contains("&bulk=1") && second != first, "{second}");
+        for file in &files {
+            let mut into = Vec::new();
+            http.fetch(file, &mut into).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(into, stream);
+        }
     }
 
     /// Puts a mark at the end of each conversion it finishes.

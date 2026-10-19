@@ -13,8 +13,9 @@
 //! A peer's 429s are sorted by their words ([`Limited`]): the parent's
 //! stream proxy passes the peer's status and body on, but not its
 //! Retry-After (mStream's `federation-stream.js` copies six headers back).
-//! A 503 with a Retry-After is a server's queue that is full
-//! ([`FetchError::Busy`]): a bulk conversion's, which says when to ask again.
+//! A 503 with a Retry-After, in the words of mStream's bulk queue, is that
+//! queue full ([`FetchError::Busy`]), which says when to ask again. Any other
+//! 503 (the server restarting, a proxy in front of it) is a failure.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -53,6 +54,10 @@ const PROBE_CEILING: Duration = Duration::from_secs(60);
 pub const QUEUED: Duration = Duration::from_secs(75);
 /// How much of a refusal's body is read for its words.
 const WORDS_MAX: usize = 16 * 1024;
+/// A full bulk queue says so in these words, with a 503 and a Retry-After
+/// (both of mStream's refusals, `transcode.js`): its restart's 503 and a
+/// proxy's carry a Retry-After too.
+const BULK_FULL: &str = "bulk transcode";
 /// A key that forbids copies says so in these words, with a 403 (mStream's
 /// `federation-limits.js`, `COPIES_OFF_MESSAGE`).
 const COPIES_OFF: &str = "copies are not allowed with this key";
@@ -258,8 +263,8 @@ pub enum FetchError {
     Api(ApiError),
     /// A 429: a peer's stream cap or its daily quota.
     Limited(Limited),
-    /// A 503 with a Retry-After, in seconds: a queue of the server's that is
-    /// full (a bulk conversion's), not a failure. Ask again after it.
+    /// A 503 with a Retry-After, in seconds, in the words of the server's
+    /// bulk queue: the queue is full, which is no failure. Ask again after it.
     Busy(Duration),
     /// No byte came for this long.
     Stalled(Duration),
@@ -594,8 +599,8 @@ impl Client {
     }
 
     /// A refusal's body, read to [`WORDS_MAX`] and counted, as the client's
-    /// error: a 429 sorted into a [`Limited`], a 503 that says when to ask
-    /// again [`FetchError::Busy`].
+    /// error: a 429 sorted into a [`Limited`], a full bulk queue's 503, which
+    /// says when to ask again, [`FetchError::Busy`].
     async fn refusal(&self, mut resp: Response, path: &str, stall: Duration) -> FetchError {
         let status = resp.status();
         let wait = retry_after(resp.headers());
@@ -613,7 +618,9 @@ impl Client {
         if status == StatusCode::TOO_MANY_REQUESTS {
             return FetchError::Limited(limit_of(&extract_error(&text), wait));
         }
-        if let (StatusCode::SERVICE_UNAVAILABLE, Some(wait)) = (status, wait) {
+        if let (StatusCode::SERVICE_UNAVAILABLE, Some(wait)) = (status, wait)
+            && extract_error(&text).to_ascii_lowercase().contains(BULK_FULL)
+        {
             return FetchError::Busy(wait);
         }
         FetchError::Api(refused(status, &text, path).unwrap_or_else(|| ApiError::Server {
@@ -1068,6 +1075,7 @@ mod tests {
         let dest = scratch.file("0001.tmp", None);
         let mp3 = chunked("200 OK", &[("Content-Type", "audio/mpeg")], &[b"ID3", b"frames"]);
         let refused = br#"{"error":"no bulk transcode slot came free in time - retry later"}"#;
+        let restarting = b"mStream is restarting";
         let (base, seen) = scripted(vec![
             // Queued behind the server's cap: nothing at all for longer
             // than the stall, then the answer.
@@ -1075,6 +1083,9 @@ mod tests {
             vec![Step::Send(reply("503 Service Unavailable", &[("Retry-After", "10")], refused))],
             // A 503 that says nothing of when: a failure, as before.
             vec![Step::Send(json("503 Service Unavailable", r#"{"error":"down"}"#))],
+            // The server restarting, which says when, but in no queue's
+            // words: a failure too, never waited out as one.
+            vec![Step::Send(reply("503 Service Unavailable", &[("Retry-After", "1")], restarting))],
             // The same wait for a conversion asked as a listener's: a stall.
             vec![Step::Wait(Duration::from_millis(1500)), Step::Send(mp3)],
         ]);
@@ -1093,12 +1104,15 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"ID3frames", "nothing written");
         let Err(down) = client.download(&bulk, &dest, &mut |_, _| {}) else { panic!("a server down") };
         assert!(matches!(down.error, FetchError::Api(ApiError::Server { status: 503, .. })), "{down}");
+        let Err(restart) = client.download(&bulk, &dest, &mut |_, _| {}) else { panic!("a restart") };
+        let failed = matches!(restart.error, FetchError::Api(ApiError::Server { status: 503, .. }));
+        assert!(failed, "not the queue: {restart}");
 
         let Err(stalled) = client.download(&fetch, &dest, &mut |_, _| {}) else { panic!("no queue") };
         assert!(matches!(stalled.error, FetchError::Stalled(_)), "{stalled}");
-        let asked: Vec<String> = (0..3).map(|_| recv(&seen)).collect();
+        let asked: Vec<String> = (0..4).map(|_| recv(&seen)).collect();
         let plain = "get /transcode/lib/a.flac?codec=mp3&bitrate=320k http/1.1\r\n";
-        assert!(asked[2].starts_with(plain), "{asked:?}");
+        assert!(asked[3].starts_with(plain), "{asked:?}");
         let file = Fetch::file("lib/a.flac").bulk();
         assert_eq!((file.wanted, file.queue), (Wanted::File("lib/a.flac"), Duration::ZERO), "never a file");
     }
