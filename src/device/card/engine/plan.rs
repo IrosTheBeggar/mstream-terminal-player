@@ -7,6 +7,12 @@
 //! server path, else with the one unpaired entry of its audio hash (else
 //! its file hash): a move on the server, carried out as a rename on the
 //! card. A row of a server the run doesn't read is carried as it is.
+//! Another of the card's servers the test calls the same as one read is
+//! that server under a key of its own: its rows join the server's, after
+//! the server's own (one of its files a joined row holds too is a copy,
+//! which goes as a file that left the selection), and the commit renumbers
+//! them. So the caller's listing of that server must be its whole
+//! selection: a 304 stands for the rows it had alone.
 //!
 //! **The table** (2.10.2, step 4), with the card's settings:
 //!
@@ -330,11 +336,23 @@ pub(super) fn plan(
     let mut report = Report::default();
 
     // ── Each origin is one of the card's servers, or a new one (2.11) ──
-    let mut at: Vec<Option<usize>> = origins
-        .iter()
-        .map(|o| (0..table.len()).find(|&i| old.same_server(i, &o.talk) == Verdict::Same))
-        .collect();
-    let read: HashSet<usize> = at.iter().flatten().copied().collect();
+    let same: Vec<Vec<usize>> = origins.iter().map(|o| old.all_same(&o.talk)).collect();
+    let mut at: Vec<Option<usize>> = same.iter().map(|s| s.first().copied()).collect();
+    // Another of the card's servers the same as one read (an entry with no
+    // id at the address the server is read at, set beside the root before
+    // the server gave one, while the root has it): that server, its rows
+    // joined to the server's, the commit renumbering them (2.5.5).
+    let firsts: HashSet<usize> = at.iter().flatten().copied().collect();
+    let mut joined: Vec<usize> = (0..table.len()).collect();
+    for s in &same {
+        for &j in s.iter().skip(1).filter(|&&j| !firsts.contains(&j)) {
+            if joined[j] == j {
+                joined[j] = s[0];
+            }
+        }
+    }
+    let server_of = |l: &Ledger| *joined.get(l.server as usize).unwrap_or(&(l.server as usize));
+    let read: HashSet<usize> = (0..table.len()).filter(|&i| firsts.contains(&joined[i])).collect();
     let mut zero_free = rows_of(0) == 0 && !read.contains(&0);
     for (o, origin) in origins.iter().enumerate() {
         let srv = origin.server;
@@ -372,9 +390,13 @@ pub(super) fn plan(
     // Two of the card's servers under one key, which no commit may name
     // (2.5.5): a server with an id of its own at an address the card has
     // for another (one set up again, say), or the card's server read at an
-    // address another of its servers had. Refused before anything is
-    // written, as the commit would refuse it after.
-    if srvs_breaks(&table[0], &table[1..]).iter().any(|i| !broken.contains(i)) {
+    // address another server had (by its own id). Refused before anything
+    // is written, as the commit would refuse it after. A joined server's
+    // entry goes with this commit.
+    let stays: Vec<usize> =
+        (1..table.len()).filter(|&i| joined.get(i).is_none_or(|&j| j == i)).collect();
+    let entries: Vec<Server> = stays.iter().map(|&i| table[i]).collect();
+    if srvs_breaks(&table[0], &entries).iter().any(|&k| !broken.contains(&stays[k - 1])) {
         let why = "another server answers at the address of one of the card's servers: the \
                    card can't hold both under one address";
         return Err(Stop::Refused(why.into()));
@@ -386,8 +408,11 @@ pub(super) fn plan(
     let mut row_file: Vec<Option<usize>> = vec![None; rows.len()];
     let mut file_row: Vec<Option<usize>> = vec![None; files.len()];
     for (o, &i) in at.iter().enumerate() {
-        let of_it = |&r: &usize| rows[r].ledger.server as usize == i;
-        let mine: Vec<usize> = (0..rows.len()).filter(of_it).collect();
+        let of_it = |&r: &usize| server_of(&rows[r].ledger) == i;
+        let mut mine: Vec<usize> = (0..rows.len()).filter(of_it).collect();
+        // The server's own rows first: a file a joined server's row holds
+        // too stays under the row it had.
+        mine.sort_by_key(|&r| rows[r].ledger.server as usize != i);
         let theirs: Vec<usize> = (0..files.len()).filter(|&f| files[f].origin == o).collect();
         let mut by_path: HashMap<&str, usize> = HashMap::new();
         for &f in &theirs {
@@ -431,7 +456,7 @@ pub(super) fn plan(
     let mut writes: Vec<Write> = Vec::new();
     let item_of = |path: &str| s.music.find(path, false).map(|(_, i)| i);
     for (r, row) in rows.iter().enumerate() {
-        let srv = row.ledger.server as usize;
+        let srv = server_of(&row.ledger);
         if srv >= table.len() || broken.contains(&srv) {
             // A server that can't be told: the file is the listener's.
             match &row.side {
@@ -553,7 +578,7 @@ pub(super) fn plan(
     // before it leaves the file the software's).
     let mut renames: Vec<(usize, usize, String)> = Vec::new();
     for (r, f, path, fat_time) in moves {
-        let server = rows[r].ledger.server as usize;
+        let server = server_of(&rows[r].ledger);
         if natural.get(&f).is_some_and(|p| key_path(p) == key_path(&path)) {
             let ledger = refreshed(&rows[r].ledger, &files[f]);
             keeps.push(Keep { row: r, path: path.clone(), fat_time, server, ledger });
@@ -671,7 +696,7 @@ pub(super) fn plan(
     // selection — the same paths with new audio pair and are replaced.
     for (o, origin) in origins.iter().enumerate() {
         let Some(whole) = &origin.whole else { continue };
-        let theirs = rows.iter().map(|r| &r.ledger).filter(|l| l.server as usize == at[o]);
+        let theirs = rows.iter().map(|r| &r.ledger).filter(|l| server_of(l) == at[o]);
         let hashed: Vec<&Ledger> = theirs.filter(|l| l.audio_hash != [0; 16]).collect();
         let gone = hashed.iter().filter(|l| !whole.contains(&l.audio_hash)).count();
         strong |= !lost.is_empty() && !hashed.is_empty() && gone * 2 > hashed.len();

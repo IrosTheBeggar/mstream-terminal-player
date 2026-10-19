@@ -454,12 +454,25 @@ fn prepare(
     // The card's server by its own id, at an address the card had another
     // key for: one source answers both from now on, as the listener's own
     // answer makes it, so its selection and schedule carry over.
-    let theirs = ours.and_then(|i| root.manifest.server_table().get(i).copied());
+    let table = root.manifest.server_table();
+    let theirs = ours.and_then(|i| table.get(i).copied());
     if let Some(srv) = theirs.filter(|s| !s.is_peer() && s.url_key != 0 && s.url_key != url_key)
         && !talk.confirmed.contains(&srv.url_key)
     {
         settings.confirm(url_key, srv.url_key);
         talk.confirmed = settings.keys(url_key);
+        let (here, there) = (id_hex(url_key), id_hex(srv.url_key));
+        notes.push(format!("the card's server by its id: one source answers {here} and {there}"));
+    }
+    // Another of the card's servers this one is too (an entry with no id at
+    // this address, set beside the root before the server gave one): its
+    // files join this server's in the plan, paired with its listing, so the
+    // listing is read whole (a 304 stands for this server's rows alone).
+    let same = table.all_same(&talk);
+    let joined: Vec<Server> = same.iter().skip(1).filter_map(|&i| table.get(i).copied()).collect();
+    for srv in &joined {
+        let key = id_hex(srv.url_key);
+        notes.push(format!("the card's server at {key} is this server: its files join this one's"));
     }
     let source = settings.source(url_key);
     if let Some(nickname) = &ask.change.nickname {
@@ -506,6 +519,7 @@ fn prepare(
     });
     let whole = ask.whole
         || known.is_empty()
+        || !joined.is_empty()
         || source.plan_key != plan_key
         || now.saturating_sub(source.full_read) >= WHOLE_EVERY_SECS
         || source.runs.saturating_add(1) >= WHOLE_EVERY_RUNS;

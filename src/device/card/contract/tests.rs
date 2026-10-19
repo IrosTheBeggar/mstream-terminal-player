@@ -1403,6 +1403,7 @@ fn hardening_files_read_as_listed() {
     let talk = Talk { url_key: server_url_key("http://music.example:3000"), ..Talk::default() };
     assert_eq!(table.same_server(1, &talk), Verdict::Unknown);
     assert_eq!(table.same_root(&talk), Verdict::Same);
+    assert_eq!(table.all_same(&talk), [0], "a broken entry is never the server read");
     // The device reads past a broken SRVS; the software doesn't.
     assert_eq!(read_as("MSMF", &bytes("hardening/msmf-srvs-ignored.bin"), false), Why::Shape);
     // Rows naming servers no SRVS entry names: the same records, their

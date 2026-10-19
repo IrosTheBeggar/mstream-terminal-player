@@ -902,6 +902,61 @@ fn a_server_is_known_by_its_own_id_at_any_address() {
     assert_eq!(guards[..], [Guard::Server { origin: 0, rows: 4 }]);
 }
 
+/// A server the listener called a server of its own at another address
+/// before it gave its id, which then gives it: read at the card's address
+/// the root takes the id, and read at the other the card's two servers are
+/// one. Its files join the root's, read whole (a 304 stands for the root's
+/// rows alone), its copies go, the two sources become one, and the run's
+/// notes say both.
+#[test]
+fn a_server_set_beside_the_cards_own_is_joined_to_it_once_its_id_says_so() {
+    let scratch = Scratch::new("joined");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    fake.lock().unwrap().old = true;
+    let served = fake.clone();
+    let other = routed(move |asked| answer(&served, asked));
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    let own = Ask { answers: Answers { new_servers: true, ..Answers::default() }, ..rock() };
+    let beside = sync_now(&sim, &other, &own, &mut envs).0;
+    assert_eq!(ran(&beside).records, 8, "{:?}", beside.notes);
+
+    // The server gives its id: at the card's address, the root takes it.
+    fake.lock().unwrap().old = false;
+    let at_home = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(ran(&at_home).records, 8);
+    let table = look(&sim).root.unwrap().manifest.server_table();
+    assert_eq!((table.root.instance, table.entries.len()), (instance_of(Some(ID)), 1));
+
+    // At the other address: one server, its copies gone, read whole.
+    let joined = sync_now(&sim, &other, &Ask::default(), &mut envs).0;
+    let outcome = ran(&joined);
+    assert_eq!((outcome.written, outcome.deleted, outcome.records), (0, 4, 4), "{:?}", joined.notes);
+    assert_eq!(joined.summary.as_ref().unwrap().listed, Listed::Whole);
+    let (here, there) = (id_hex(server_url_key(&other)), id_hex(server_url_key(&base)));
+    let notes = joined.notes.join("\n");
+    assert!(notes.contains(&format!("answers {here} and {there}")), "{notes}");
+    assert!(notes.contains(&format!("server at {here} is this server")), "{notes}");
+    let seen = look(&sim);
+    let root = seen.root.as_ref().unwrap();
+    let table = root.manifest.server_table();
+    assert_eq!((table.root.url_key, table.entries.len()), (server_url_key(&other), 0));
+    let paths: Vec<&str> = root.tags.as_ref().unwrap().records.iter().map(|e| e.path.as_str()).collect();
+    let b = ["Artist A/Album B/01.mp3", "Artist A/Album B/02.flac"];
+    let d = ["Artist C/Album D/01.opus", "Artist C/Album D/02.opus"];
+    assert_eq!(paths, [b, d].concat(), "the root's own files stay");
+    let s = State::of(&seen.state).unwrap().settings;
+    assert_eq!(s.sources.len(), 1, "{:?}", s.sources);
+
+    // Either address from then on, nothing to do.
+    for address in [&base, &other] {
+        let again = sync_now(&sim, address, &Ask::default(), &mut envs).0;
+        let outcome = ran(&again);
+        assert_eq!((outcome.written, outcome.deleted, outcome.records), (0, 0, 4), "{:?}", again.notes);
+    }
+}
+
 #[test]
 fn a_card_that_never_removes_keeps_what_the_server_dropped() {
     let scratch = Scratch::new("never");

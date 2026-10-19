@@ -1274,6 +1274,63 @@ fn a_server_is_known_by_its_own_id_at_any_address_and_never_by_another_one() {
     assert_eq!(table.entries, [Server::direct(b, server_url_key("https://third.example"))]);
 }
 
+/// The server set beside the root at its tunnel before it gave an id (the
+/// listener's "a server of its own"), read at home once it gives one, then
+/// at the tunnel: the root by its id there, the entry by its key, so one
+/// server. The entry's rows join the root's: a file both hold stays under
+/// the root's row and its copy goes, and SRVS loses the entry in that
+/// commit (2.5.5) — never a refusal for two servers under one key.
+#[test]
+fn two_of_the_cards_servers_one_by_its_id_are_one_from_then_on() {
+    let dir = Scratch::new("joined");
+    let (card, wanted, mut server) = first(&dir.0);
+    let a = [0xA1; 16];
+    let with = |url: &str, instance: [u8; 16]| {
+        let mut o = origin(url);
+        (o.talk.instance, o.server.instance) = (instance, instance);
+        WantedCard { origins: vec![o], files: wanted.files.clone() }
+    };
+    let root = |card: &FatSim| look(card).root.unwrap().manifest.server_table();
+    let of = |card: &FatSim, server: u16| -> Vec<String> {
+        let rows = records(card).into_iter().filter(|e| e.ledger.as_ref().unwrap().server == server);
+        rows.map(|e| e.path).collect()
+    };
+    let (home, tunnel) = ("http://music.example:3000", "https://tunnel.example");
+    let new = Answers { new_servers: true, ..Answers::default() };
+    let (session, plan) = plan_of(&card, &with(tunnel, NO_INSTANCE), &mut server, new, knobs());
+    session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    let (ours, copies) = (of(&card, 0), of(&card, 1));
+    assert_eq!((ours.len(), copies.len()), (6, 6));
+
+    // At home with its id: the root takes it, and the tunnel's entry, which
+    // the id can't tell there, is carried.
+    let outcome = sync(&card, &with(home, a), &mut server, 7).unwrap();
+    assert_eq!((outcome.written, outcome.deleted, outcome.records), (0, 0, 12));
+    let table = root(&card);
+    assert_eq!(table.root, Server::root(a, server_url_key(home)));
+    assert_eq!(table.entries, [Server::direct(NO_INSTANCE, server_url_key(tunnel))]);
+
+    // At the tunnel: one server, nothing asked.
+    let (session, plan) = plan_of(&card, &with(tunnel, a), &mut server, Answers::default(), knobs());
+    assert!(plan.guards.is_empty(), "{:?}", plan.guards);
+    assert_eq!((plan.fetches().0, plan.kept().0), (0, 6));
+    let mut removed: Vec<String> = plan.removals().into_iter().map(String::from).collect();
+    removed.sort();
+    let mut copied = copies.clone();
+    copied.sort();
+    assert_eq!(removed, copied, "the copies go, the root's rows stay");
+    session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    let table = root(&card);
+    assert_eq!((table.root, table.entries.len()), (Server::root(a, server_url_key(tunnel)), 0));
+    assert_eq!((of(&card, 0), of(&card, 1).len()), (ours, 0));
+
+    // Either address from then on: the root's server alone.
+    for (url, seed) in [(home, 8), (tunnel, 9)] {
+        let outcome = sync(&card, &with(url, a), &mut server, seed).unwrap();
+        assert_eq!((outcome.written, outcome.deleted, outcome.records), (0, 0, 6));
+    }
+}
+
 #[test]
 fn music_without_a_ledger_is_adopted_only_when_the_listener_says() {
     let dir = Scratch::new("adopt");

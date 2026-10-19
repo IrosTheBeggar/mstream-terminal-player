@@ -300,6 +300,17 @@ impl Servers {
     pub(crate) fn same_root(&self, talk: &Talk) -> Verdict {
         self.same_server(0, talk)
     }
+
+    /// Every server of the card the test calls the same as what the
+    /// software reads, in index order. The first is the one a run reads;
+    /// any other is that server too, under a key of its own (an entry with
+    /// no id at an address of the server's, set beside the root before the
+    /// server gave one, while the root has it): no two of the card's
+    /// servers share a key or an id (2.5.5), so the test passes them by
+    /// different rules.
+    pub(crate) fn all_same(&self, talk: &Talk) -> Vec<usize> {
+        (0..=self.entries.len()).filter(|&i| self.same_server(i, talk) == Verdict::Same).collect()
+    }
 }
 
 /// The key rule: `key` (non-zero) is the key of the URL read, or one the
