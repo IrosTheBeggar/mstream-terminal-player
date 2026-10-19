@@ -241,6 +241,10 @@ impl<'r, 'c> Runner<'r, 'c> {
             let paths: Vec<String> = self.ledger.keys().cloned().collect();
             for path in paths {
                 let old = self.ledger[&path].clone();
+                // A file that isn't audio has no tags to read (2.6.4).
+                if old.rec.container == CONTAINER_NOT_AUDIO {
+                    continue;
+                }
                 let (size, fat_time) = (old.rec.size as u64, old.rec.fat_time);
                 let item = Item { name: String::new(), dir: false, size, fat_time };
                 let (rec, run) = self.read_again(&path, &item, &old.rec)?;

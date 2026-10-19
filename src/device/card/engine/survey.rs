@@ -14,6 +14,7 @@ use std::io;
 use super::super::contract::fat::{skew, time_matches};
 use super::super::contract::mptg::{
     FLAGS_V1, FOLDER_OWNED, FOLDER_THUMB, KNOWN_RULES1, Ledger, ORIGIN_FLAGS_V1, READ_RULES, Record,
+    SOURCE_SOFTWARE,
 };
 use super::super::contract::mspd::{OP_FOLDER, OP_WRITE};
 use super::super::contract::text::Run;
@@ -152,8 +153,10 @@ pub(super) struct Row {
 /// What the listing and the matching found.
 pub(super) struct Survey {
     pub(super) rows: Vec<Row>,
-    /// The tags file was read under another parserVersion or readRules:
-    /// every carried record is read again from its card file (2.6.1).
+    /// The tags file's records aren't this reader's: another parserVersion
+    /// or readRules, or the device's reader (the sync agent's file, source
+    /// 3, whatever version it calls its own). Every carried record is read
+    /// again from its card file (2.6.1).
     pub(super) reread: bool,
     /// Files no row claims: the listener's, each with its listed path.
     pub(super) unclaimed: Vec<(String, Item)>,
@@ -267,6 +270,9 @@ pub(super) fn survey(
             owned.insert(path);
         }
     }
-    let reread = tags.is_some_and(|t| t.parser_version != PARSER_VERSION || t.read_rules != READ_RULES);
+    let reread = tags.is_some_and(|t| {
+        let reader = (t.source, t.parser_version, t.read_rules);
+        reader != (SOURCE_SOFTWARE, PARSER_VERSION, READ_RULES)
+    });
     Ok(Survey { rows, reread, unclaimed, recover, owned, thumbs, skew })
 }

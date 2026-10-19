@@ -22,11 +22,14 @@ use super::*;
 use crate::device::card::autodj::{self, FileIn, Index, IndexIn, Model, Selection, Work};
 use crate::device::card::contract::fat::fat_wall;
 use crate::device::card::contract::mptg::{
-    self, ADOPTED, BPM_ANALYSED, CONTAINER_OPUS, FOLDER_OWNED, FOLDER_THUMB, VERIFIED,
+    self, ADOPTED, BPM_ANALYSED, CONTAINER_NOT_AUDIO, CONTAINER_OPUS, FOLDER_OWNED, FOLDER_THUMB,
+    Meta, Record, RecordIn, SOURCE_SOFTWARE, SOURCE_SYNC_AGENT, VERIFIED,
 };
+use crate::device::card::contract::msmf::{self, Comp};
 use crate::device::card::contract::mspd::{self, OP_FOLDER, OP_WRITE, Op, PlanIn};
-use crate::device::card::contract::prim::{fnv1a64, md5, path_hash};
+use crate::device::card::contract::prim::{fnv1a64, md5, path_hash, qfp_of};
 use crate::device::card::contract::server::{NO_INSTANCE, TalkPeer, server_url_key};
+use crate::device::card::tags::PARSER_VERSION;
 use crate::device::card::volume::{self, Inspection, Serial};
 
 // ── The scene ───────────────────────────────────────────────────────────────
@@ -1837,6 +1840,97 @@ fn a_new_card_id_commits_the_same_files_and_is_a_run_of_its_own() {
     let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
     let again = session.run(plan, &mut server, &mut Extras::default(), &mut |_| {}).unwrap();
     assert_eq!((again.card_id, again.commit_id), (done.card_id, done.commit_id));
+}
+
+// ── Records another reader made (2.6.1) ─────────────────────────────────────
+
+/// The card's root as another reader would have left it: its tags file
+/// under `source` and `parser_version`, its records through `edit`, and
+/// the root naming that file again.
+fn left_by(
+    dir: &Path,
+    card: &FatSim,
+    source: u8,
+    parser_version: u16,
+    edit: impl FnOnce(&mut Vec<RecordIn>),
+) {
+    let root = look(card).root.expect("a root");
+    let (meta, mut records, folders) = root.tags.expect("its tags file").to_input();
+    edit(&mut records);
+    let meta = Meta { source, parser_version, ..meta };
+    let tags = mptg::write(&meta, &records, &folders).expect("a tags file");
+    let mut m = root.manifest.to_input();
+    m.comps[0] = Comp::of(&tags).expect("its entry");
+    put(dir, &format!("/.mstream/{}", m.comps[0].name()), &tags, LATER);
+    put(dir, &format!("/.mstream/{}", root.file), &msmf::write(&m).expect("a root"), LATER);
+}
+
+/// Every record with its picture written as absent, as parser 1 wrote it.
+fn unanchored(records: &mut Vec<RecordIn>) {
+    for r in records {
+        let rec = &mut r.rec;
+        (rec.pic_offset, rec.pic_length, rec.pic_coding) = (0, 0, 0);
+        (rec.pic_type, rec.pic_mime) = (0, 0);
+    }
+}
+
+/// A tags file this reader didn't make, an older version's or the
+/// device's as the sync agent (2.12.4), has every record it carries read
+/// again from its card file before the next commit (2.6.1): a picture the
+/// older reader wrote as absent is anchored, mStream's analysed BPM stays
+/// where the tags have none, a file that isn't audio is left as it is, and
+/// the header is this reader's. A file of this reader's version is carried
+/// as it stands, and a run then has nothing to commit.
+#[test]
+fn records_another_reader_made_are_read_again_before_the_next_commit() {
+    let dir = Scratch::new("reread");
+    let (card, wanted, mut server) = first(&dir.0);
+    let ours = records(&card);
+    let anchored = |records: &[mptg::Entry]| {
+        records.iter().filter(|e| e.rec.pic_offset != 0).count()
+    };
+    assert_eq!(anchored(&ours), 2, "Two's and Three's pictures");
+    let analysed = ours.iter().filter(|e| e.rec.flags & BPM_ANALYSED != 0).count();
+    assert!(analysed > 0, "mStream's BPM where the tags have none");
+
+    // The older reader's: no anchors, and a cover the software owns.
+    let cover = b"\xFF\xD8\xFF, a cover as far as the records go";
+    let (size, qfp) = (cover.len() as u32, qfp_of(cover));
+    let container = CONTAINER_NOT_AUDIO;
+    let jpg = Record { size, fat_time: LATER, qfp, container, ..Record::default() };
+    put(&dir.0, "/music/Alex Artist/First Album/cover.jpg", cover, LATER);
+    left_by(&dir.0, &card, SOURCE_SOFTWARE, 1, |records| {
+        unanchored(records);
+        let (path, ledger) = ("Alex Artist/First Album/cover.jpg".into(), Some(Ledger::default()));
+        records.push(RecordIn { path, rec: jpg, run: Default::default(), ledger });
+    });
+    let generation = look(&card).root.unwrap().manifest.header.generation;
+    let done = sync(&card, &wanted, &mut server, 2).expect("a run");
+    assert_eq!((done.written, done.deleted, done.verified), (0, 0, Ok(())));
+    assert_eq!(done.generation, generation + 1, "a commit for the records alone");
+    let tags = look(&card).root.unwrap().tags.unwrap();
+    assert_eq!((tags.source, tags.parser_version), (SOURCE_SOFTWARE, PARSER_VERSION));
+    assert_eq!(tags.records.len(), ours.len() + 1);
+    for e in &tags.records {
+        let Some(o) = ours.iter().find(|o| o.path == e.path) else {
+            assert_eq!((e.path.as_str(), e.rec), ("Alex Artist/First Album/cover.jpg", jpg));
+            continue;
+        };
+        assert_eq!((&e.rec, &e.run), (&o.rec, &o.run), "{}", e.path);
+    }
+    // Nothing more to do: no commit.
+    assert_eq!(sync(&card, &wanted, &mut server, 3).expect("a run").generation, generation + 1);
+
+    // This reader's version, its records as they stand (the anchors gone
+    // here): carried, nothing to commit.
+    left_by(&dir.0, &card, SOURCE_SOFTWARE, PARSER_VERSION, unanchored);
+    assert_eq!(sync(&card, &wanted, &mut server, 4).expect("a run").generation, generation + 1);
+    assert_eq!(anchored(&records(&card)), 0);
+    // The device's reader, whatever version it calls its own: read again.
+    left_by(&dir.0, &card, SOURCE_SYNC_AGENT, PARSER_VERSION, unanchored);
+    assert_eq!(sync(&card, &wanted, &mut server, 5).expect("a run").generation, generation + 2);
+    let tags = look(&card).root.unwrap().tags.unwrap();
+    assert_eq!((tags.source, anchored(&tags.records)), (SOURCE_SOFTWARE, 2));
 }
 
 // ── Partials a later run takes up (2.12.8) ──────────────────────────────────
