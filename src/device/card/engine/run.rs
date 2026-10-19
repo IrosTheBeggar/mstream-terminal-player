@@ -519,7 +519,8 @@ impl<'r, 'c> Runner<'r, 'c> {
     }
 
     /// A carried record read again from its card file, mStream's analysis
-    /// kept where the tags still have neither a BPM nor a key.
+    /// kept where the tags still have neither a BPM nor a key (none for a
+    /// file that reads UNREADABLE now, whose fields are all absent: 2.6.4).
     fn read_again(
         &mut self,
         rel: &str,
@@ -527,7 +528,8 @@ impl<'r, 'c> Runner<'r, 'c> {
         old: &mptg::Record,
     ) -> Result<(mptg::Record, Run), Stop> {
         let (mut rec, run) = self.read_record(rel, item)?;
-        if rec.bpm10 == 0 && rec.camelot == 0 && old.flags & BPM_ANALYSED != 0 {
+        let readable = rec.flags & UNREADABLE == 0;
+        if readable && rec.bpm10 == 0 && rec.camelot == 0 && old.flags & BPM_ANALYSED != 0 {
             (rec.bpm10, rec.camelot) = (old.bpm10, old.camelot);
             rec.flags |= BPM_ANALYSED;
         }

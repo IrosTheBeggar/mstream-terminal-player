@@ -112,26 +112,43 @@ pub(crate) fn read_bytes(bytes: &[u8], ext: &str) -> Reading {
 /// Reads a file from where it lies: only the parts lofty seeks to are read
 /// (an MP3's head and tail, a FLAC's metadata blocks, an Opus stream's first
 /// and last pages, and the tag at the head whole for the repair pass), never
-/// the whole file. Err when the reader itself fails, which says nothing
-/// about the file's tags.
-pub(crate) fn read_from<R: Read + Seek>(mut r: R, ext: &str) -> io::Result<Reading> {
+/// the whole file of a well-formed stream. Err when the reader itself
+/// fails, which says nothing about the file's tags.
+pub(crate) fn read_from<R: Read + Seek>(r: R, ext: &str) -> io::Result<Reading> {
+    read_keeping(r, ext, MAX_KEPT).map(|(reading, _)| reading)
+}
+
+/// The most the reader keeps of what lofty reads past the stored head tag,
+/// for the anchor's walk. A file whose body isn't the stream its extension
+/// says (zeros, another format, cut or corrupt after its headers) has lofty
+/// read it through, an MP3's search for its first frame or an Opus stream's
+/// for its last page; what the walk needs past this it reads from the card.
+/// 16 MiB, a FLAC block's largest.
+const MAX_KEPT: usize = 16 * 1024 * 1024;
+
+/// [`read_from`], keeping at most `room` bytes of lofty's reads past the
+/// stored head tag; with how many it kept.
+fn read_keeping<R: Read + Seek>(mut r: R, ext: &str, room: usize) -> io::Result<(Reading, usize)> {
     let ext = ext.to_ascii_lowercase();
     let container = container_of(&ext);
     let len = r.seek(SeekFrom::End(0))?;
     let (stored, head) = head_tag(&mut r, len)?;
-    let mut src =
-        Spliced { head, inner: r, inner_at: None, pos: 0, len, failed: None, seen: Vec::new() };
+    let past = stored.len() as u64;
+    let (inner_at, failed, seen) = (None, None, Vec::new());
+    let mut src = Spliced { head, inner: r, inner_at, pos: 0, len, failed, past, room, seen };
     let probed = probe(&mut src, &ext);
+    let kept = src.seen.iter().map(|(_, run)| run.len()).sum();
     if let Some(e) = src.failed.take() {
         return Err(e);
     }
     let p = match probed {
         Ok(p) => p,
-        Err(e) => return Ok(unreadable(container, e)),
+        Err(e) => return Ok((unreadable(container, e), kept)),
     };
     let mut reading = reading(&p, &ext, container);
     // The elected picture's anchor, from the bytes as they lie (2.6.4): the
-    // tag at the head as stored, and what lofty read past it, are at hand.
+    // tag at the head as stored, and what was kept of lofty's reads past
+    // it, are at hand.
     let kind = chosen(&p.file).map(Tag::tag_type);
     let Spliced { inner, seen, .. } = &mut src;
     let at_hand = seen.iter().map(|(at, b)| (*at, b.as_slice()));
@@ -143,7 +160,7 @@ pub(crate) fn read_from<R: Read + Seek>(mut r: R, ext: &str) -> io::Result<Readi
         (rec.pic_offset, rec.pic_length, rec.pic_coding) = (a.offset, a.length, a.coding);
         (rec.pic_type, rec.pic_mime) = (pic.pic_type, pic.mime);
     }
-    Ok(reading)
+    Ok((reading, kept))
 }
 
 fn container_of(ext: &str) -> u8 {
@@ -438,9 +455,14 @@ struct Spliced<R> {
     pos: u64,
     len: u64,
     failed: Option<io::Error>,
-    /// What lofty read from where it lies, in runs (where each starts, its
-    /// bytes): the picture's anchor is looked for in them, not on the card
-    /// again.
+    /// Where the head tag the reader holds as stored ends: what lofty reads
+    /// before it isn't kept again.
+    past: u64,
+    /// How many more bytes of lofty's reads it keeps.
+    room: usize,
+    /// What lofty read from where it lies past the stored head tag, in runs
+    /// (where each starts, its bytes), as far as `room` went: the picture's
+    /// anchor is looked for in them, not on the card again.
     seen: Vec<(u64, Vec<u8>)>,
 }
 
@@ -452,9 +474,16 @@ impl<R> Spliced<R> {
         told
     }
 
-    /// Keeps bytes read at `at`: a read that goes on from the last one
-    /// extends its run.
+    /// Keeps bytes read at `at`, those past the stored head tag while there
+    /// is room: a read that goes on from the last one extends its run.
     fn keep(&mut self, at: u64, bytes: &[u8]) {
+        let skip = self.past.saturating_sub(at).min(bytes.len() as u64) as usize;
+        let (at, bytes) = (at + skip as u64, &bytes[skip..]);
+        let bytes = &bytes[..bytes.len().min(self.room)];
+        if bytes.is_empty() {
+            return;
+        }
+        self.room -= bytes.len();
         match self.seen.last_mut() {
             Some((start, run)) if *start + run.len() as u64 == at => run.extend_from_slice(bytes),
             _ => self.seen.push((at, bytes.to_vec())),

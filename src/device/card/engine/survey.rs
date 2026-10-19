@@ -156,7 +156,11 @@ pub(super) struct Survey {
     /// The tags file's records aren't this reader's: another parserVersion
     /// or readRules, or the device's reader (the sync agent's file, source
     /// 3, whatever version it calls its own). Every carried record is read
-    /// again from its card file (2.6.1).
+    /// again from its card file (2.6.1). The device's records are no
+    /// stand-in for this reader's under the same readRules: its MP3 lengths
+    /// are trimmed, it reads the files lofty fails on, and it has known
+    /// differences besides (2.17, item 3), so the device's turn costs the
+    /// next run a reading of every file.
     pub(super) reread: bool,
     /// Files no row claims: the listener's, each with its listed path.
     pub(super) unclaimed: Vec<(String, Item)>,

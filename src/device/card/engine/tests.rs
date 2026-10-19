@@ -22,8 +22,8 @@ use super::*;
 use crate::device::card::autodj::{self, FileIn, Index, IndexIn, Model, Selection, Work};
 use crate::device::card::contract::fat::fat_wall;
 use crate::device::card::contract::mptg::{
-    self, ADOPTED, BPM_ANALYSED, CONTAINER_NOT_AUDIO, CONTAINER_OPUS, FOLDER_OWNED, FOLDER_THUMB,
-    Meta, Record, RecordIn, SOURCE_SOFTWARE, SOURCE_SYNC_AGENT, VERIFIED,
+    self, ADOPTED, BPM_ANALYSED, CONTAINER_MP3, CONTAINER_NOT_AUDIO, CONTAINER_OPUS, FOLDER_OWNED,
+    FOLDER_THUMB, Meta, Record, RecordIn, SOURCE_SOFTWARE, SOURCE_SYNC_AGENT, UNREADABLE, VERIFIED,
 };
 use crate::device::card::contract::msmf::{self, Comp};
 use crate::device::card::contract::mspd::{self, OP_FOLDER, OP_WRITE, Op, PlanIn};
@@ -1931,6 +1931,42 @@ fn records_another_reader_made_are_read_again_before_the_next_commit() {
     assert_eq!(sync(&card, &wanted, &mut server, 5).expect("a run").generation, generation + 2);
     let tags = look(&card).root.unwrap().tags.unwrap();
     assert_eq!((tags.source, anchored(&tags.records)), (SOURCE_SOFTWARE, 2));
+}
+
+/// A carried record whose card file reads UNREADABLE when it is read
+/// again (its bytes gone bad under the same size and stamp) keeps none of
+/// mStream's analysis: an UNREADABLE record's fields are all absent
+/// (2.6.4), as for a file read the first time.
+#[test]
+fn a_file_read_again_as_unreadable_keeps_no_analysed_bpm() {
+    let dir = Scratch::new("reread-bad");
+    let (card, wanted, mut server) = first(&dir.0);
+    let ours = records(&card);
+    let analysed = |e: &&mptg::Entry| e.rec.flags & BPM_ANALYSED != 0;
+    let bad = ours.iter().filter(analysed).find(|e| e.rec.container == CONTAINER_MP3);
+    let bad = bad.expect("an MP3 with mStream's BPM");
+    let path = dir.0.join("music").join(&bad.path);
+    let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let zeros = vec![0u8; bad.rec.size as usize];
+    std::fs::write(&path, &zeros).unwrap();
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(stamp).unwrap();
+    left_by(&dir.0, &card, SOURCE_SOFTWARE, 1, |_| {});
+    let generation = look(&card).root.unwrap().manifest.header.generation;
+    let done = sync(&card, &wanted, &mut server, 2).expect("a run");
+    assert_eq!((done.written, done.generation), (0, generation + 1));
+    let tags = records(&card);
+    assert_eq!(tags.len(), ours.len());
+    for e in &tags {
+        let o = ours.iter().find(|o| o.path == e.path).expect("a record carried");
+        if e.path != bad.path {
+            assert_eq!((&e.rec, &e.run), (&o.rec, &o.run), "{}", e.path);
+            continue;
+        }
+        let (size, fat_time, qfp) = (o.rec.size, o.rec.fat_time, qfp_of(&zeros));
+        let (container, flags) = (CONTAINER_MP3, UNREADABLE);
+        let unreadable = Record { size, fat_time, qfp, container, flags, ..Record::default() };
+        assert_eq!(e.rec, unreadable, "{}", e.path);
+    }
 }
 
 // ── Partials a later run takes up (2.12.8) ──────────────────────────────────

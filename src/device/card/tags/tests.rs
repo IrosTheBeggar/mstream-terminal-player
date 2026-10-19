@@ -3,7 +3,8 @@
 //! copied from there): every file's record field for field, the picture's
 //! anchor included, and each anchor read back as the device reads it to
 //! the image the corpus put there; the anchor locator on cut and mutated
-//! copies, across Ogg pages, and in what lofty read; then the reader's own
+//! copies, across Ogg pages, in what lofty read (as much as the reader
+//! keeps), and on a file that shrinks under it; then the reader's own
 //! seams (a path and its bytes alike, a card that fails mid-read, the key
 //! table) and the writer that puts back what a conversion dropped.
 
@@ -26,8 +27,8 @@ use super::super::contract::mptg::{CODING_APE, CODING_OGG_BASE64, CODING_RAW, CO
 use super::super::contract::mptg::{KNOWN_RULES1, SOURCE_SOFTWARE, UNREADABLE, Uses};
 use super::super::contract::prim::{fnv1a64, qfp_of};
 use super::super::contract::text::{ALBUM, RUN_FIELDS, TITLE};
-use super::{PARSER_VERSION, Reading, Restore, anchors};
-use super::{camelot, read_bytes, read_from, read_path, restore};
+use super::{MAX_KEPT, PARSER_VERSION, Reading, Restore, anchors};
+use super::{camelot, read_bytes, read_from, read_keeping, read_path, restore};
 
 fn corpus(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/fixtures/tags").join(rel)
@@ -328,6 +329,15 @@ fn anchor_holds(file: &[u8], r: &Reading, ogg: bool) -> Result<(), String> {
     }
 }
 
+/// The kinds of tag a picture of a file of `ext` may come from.
+fn kinds(ext: &str) -> &'static [TagType] {
+    match ext {
+        "mp3" => &[TagType::Id3v2, TagType::Ape],
+        "flac" => &[TagType::Id3v2, TagType::VorbisComments],
+        _ => &[TagType::VorbisComments],
+    }
+}
+
 #[test]
 fn cut_and_mutated_files_anchor_only_their_elected_picture() {
     // Each file with a picture, cut at a stride and mutated: the reader
@@ -340,11 +350,6 @@ fn cut_and_mutated_files_anchor_only_their_elected_picture() {
         let full = bytes(&name);
         let (ext, ogg) = (ext(&name), ext(&name) == "opus");
         let Some(original) = read_bytes(&full, ext).picture else { continue };
-        let kinds: &[TagType] = match ext {
-            "mp3" => &[TagType::Id3v2, TagType::Ape],
-            "flac" => &[TagType::Id3v2, TagType::VorbisComments],
-            _ => &[TagType::VorbisComments],
-        };
         let cuts = (0..full.len()).step_by(full.len() / 150 + 1);
         let mut cases: Vec<Vec<u8>> = cuts.map(|n| full[..n].to_vec()).collect();
         cases.extend((0..60).map(|_| mutate(&full, &mut rng)));
@@ -355,7 +360,7 @@ fn cut_and_mutated_files_anchor_only_their_elected_picture() {
             if let Err(e) = anchor_holds(case, &r, ogg) {
                 wrong.push(format!("{name}, case {i}: {e}"));
             }
-            for &kind in kinds {
+            for &kind in kinds(ext) {
                 let mut file = Cursor::new(case.as_slice());
                 let found = anchors::locate(&mut file, &[], ext, kind, &original);
                 let Some(a) = found.expect("a slice reads") else { continue };
@@ -575,6 +580,112 @@ fn the_anchor_is_found_in_what_lofty_read() {
         pictures += 1;
     }
     assert!(pictures >= 10, "{pictures} files with a picture");
+}
+
+#[test]
+fn what_lofty_reads_through_is_kept_no_further_than_the_room() {
+    // An MP3 of zeros (lofty steps over them a byte at a time, looking for
+    // its first frame), and an Opus stream with zeros after its last page
+    // (lofty looks back through them for that page): lofty reads them
+    // whole, the reader keeps the room's worth, and the reading is the one
+    // a reader keeping all of it makes.
+    let zeros = vec![0u8; MAX_KEPT + (1 << 20)];
+    let (r, kept) = read_keeping(Cursor::new(&zeros), "mp3", MAX_KEPT).expect("a slice reads");
+    assert_eq!((r.rec.flags, kept), (UNREADABLE, MAX_KEPT));
+    let data = [bytes("opus_picture.opus"), zeros].concat();
+    let (r, kept) = read_keeping(Cursor::new(&data), "opus", MAX_KEPT).expect("a slice reads");
+    assert_eq!(kept, MAX_KEPT);
+    let (all, read) = read_keeping(Cursor::new(&data), "opus", usize::MAX).expect("a slice reads");
+    assert!(read > MAX_KEPT, "lofty read {read} bytes");
+    assert_eq!(r, all);
+    assert_eq!(r.rec.pic_coding, CODING_OGG_BASE64);
+    anchor_holds(&data, &r, true).expect("its picture anchored");
+
+    // The head tag the reader holds as stored isn't kept again: an MP3
+    // whose ID3v2 carries a cover of 64 KB keeps less than the cover.
+    let cover = [jpeg(), vec![0x5A; 64 * 1024]].concat();
+    let mut file = Cursor::new(bytes("no_tags.mp3"));
+    let what = Restore { cover: Some(&cover), ..Restore::default() };
+    restore(&mut file, "mp3", &what).expect("a cover put in");
+    let data = file.into_inner();
+    let (r, kept) = read_keeping(Cursor::new(&data), "mp3", usize::MAX).expect("a slice reads");
+    assert!(kept < 64 * 1024, "{kept} kept");
+    assert_eq!(r.picture.map(|p| p.fnv), Some(fnv1a64(&cover)));
+    anchor_holds(&data, &r, false).expect("its picture anchored");
+}
+
+#[test]
+fn with_little_or_no_room_the_walk_reads_the_card() {
+    // The reader keeping none of lofty's reads past the head tag, or runs
+    // of them cut short: every file reads as it does with all of them kept,
+    // the walk taking from the card what isn't kept.
+    for name in audio_files() {
+        let data = bytes(&name);
+        let whole = read_bytes(&data, ext(&name));
+        for room in [0, 1, 100, 4096] {
+            let read = read_keeping(Cursor::new(&data), ext(&name), room);
+            let (r, kept) = read.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(kept <= room, "{name}, room {room}: {kept} kept");
+            assert_eq!(r, whole, "{name}, room {room}");
+        }
+    }
+}
+
+/// A file that shrank after it was measured: its length as it was, its
+/// bytes as they are now.
+struct Shrunk {
+    data: Cursor<Vec<u8>>,
+    len: u64,
+}
+
+impl Read for Shrunk {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.data.read(buf)
+    }
+}
+
+impl Seek for Shrunk {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let at = match to {
+            SeekFrom::Start(n) => Some(n),
+            SeekFrom::End(d) => self.len.checked_add_signed(d),
+            SeekFrom::Current(d) => self.data.position().checked_add_signed(d),
+        };
+        self.data.seek(SeekFrom::Start(at.ok_or(io::ErrorKind::InvalidInput)?))
+    }
+}
+
+#[test]
+fn a_file_that_shrinks_under_the_walk_anchors_nothing_in_what_is_gone() {
+    // Each file with a picture, measured whole and then cut at a stride,
+    // under every kind of tag its format has, with none, a header's worth
+    // or half of it held as lofty read it: a read the cut makes short is no
+    // picture (an ID3v2 tag past its header, an APE footer), and whatever
+    // is anchored reads back to the picture.
+    let mut wrong = Vec::new();
+    for name in audio_files() {
+        let full = bytes(&name);
+        let (ext, ogg) = (ext(&name), ext(&name) == "opus");
+        let Some(original) = read_bytes(&full, ext).picture else { continue };
+        for cut in (0..full.len()).step_by(full.len() / 40 + 1) {
+            for held_to in [0, 10, full.len() / 2] {
+                let held = [(0, &full[..held_to.min(full.len())])];
+                for &kind in kinds(ext) {
+                    let len = full.len() as u64;
+                    let mut file = Shrunk { data: Cursor::new(full[..cut].to_vec()), len };
+                    let found = anchors::locate(&mut file, &held, ext, kind, &original);
+                    let Some(a) = found.expect("a slice reads") else { continue };
+                    let (pic_offset, pic_length, pic_coding) = (a.offset, a.length, a.coding);
+                    let rec = Record { pic_offset, pic_length, pic_coding, ..Record::default() };
+                    let image = read_anchor(&full, &rec, ogg).map(|image| fnv1a64(&image));
+                    if image != Some(original.fnv) {
+                        wrong.push(format!("{name}, cut {cut}, held {held_to}, {kind:?}: {a:?}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
 }
 
 #[test]

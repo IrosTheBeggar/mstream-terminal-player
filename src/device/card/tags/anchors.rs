@@ -19,7 +19,11 @@
 //! The walk reads where lofty read for the tags (an MP3's head and tail, a
 //! FLAC's metadata blocks, an Opus stream's comment pages), never through
 //! the audio, and takes those bytes from what the reader kept of lofty's
-//! reads: the card isn't read again for them.
+//! reads: the card isn't read again for them, but for what the reader
+//! didn't keep of a file lofty read through.
+//!
+//! A file can shrink while it is read (the listener's edit on a mounted
+//! card): a read it cuts short finds no picture in what is gone.
 
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -315,7 +319,9 @@ impl In for Limit<'_> {
 /// lands on a frame (rule 6), and the walk's end at a frame past the
 /// tag's (rule 4).
 fn id3v2(t: &[u8], at: u64, mut repairs: bool, out: &mut Vec<Found>) {
-    let (ver, flags, size) = (t[3], t[5], syncsafe(&t[6..10]));
+    // Its header read before, but cut short now: the file shrank.
+    let Some(h) = t.get(..10) else { return };
+    let (ver, flags, size) = (h[3], h[5], syncsafe(&h[6..10]));
     if size == 0 {
         return;
     }
@@ -684,7 +690,8 @@ fn ape<R: Read + Seek>(f: &mut File<'_, R>) -> io::Result<Vec<Found>> {
     // The footer's magic, version, size and item count.
     let footer_at = len - used - 32;
     let footer = f.read(footer_at, 20)?;
-    if &footer[..8] != b"APETAGEX" {
+    // Short only when the file shrank since it was measured.
+    if footer.len() < 20 || &footer[..8] != b"APETAGEX" {
         return Ok(out);
     }
     let (size, count) = (le32(&footer[12..16]) as u64, le32(&footer[16..20]));
