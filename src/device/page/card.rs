@@ -684,6 +684,11 @@ fn log_words(item: &LogItem, drive: &str) -> String {
 
 // ── The Card view ───────────────────────────────────────────────────────────
 
+/// A card's or a library's size in the locale's unit: `127.9 GB`, `127.9 Go`.
+fn size_words(bytes: u64) -> String {
+    t!("dev.card_size", size = gb(bytes)).to_string()
+}
+
 /// The head's right edge: `E: · FAT32`, `G: · FAT32 on GPT`, `E: · FAT32
 /// · read only`, `G: · exFAT · 127.9 GB`, or `not in a reader`.
 fn head_right(card: &CardView) -> String {
@@ -698,7 +703,7 @@ fn head_right(card: &CardView) -> String {
     let mut parts = vec![card.drive(), fs];
     let unusable = matches!(v.fs, Fs::ExFat | Fs::Ntfs | Fs::Fat12 | Fs::Other(_));
     if let Some(space) = v.space.filter(|_| unusable) {
-        parts.push(format!("{} GB", gb(space.size)));
+        parts.push(size_words(space.size));
     }
     if v.read_only || card.found.disk.read_only {
         parts.push(t!("dev.card.head_read_only").to_string());
@@ -1277,10 +1282,10 @@ fn details_rows(card: &CardView) -> Vec<Row> {
     // In the locale's words, a piece at a time: a card may lack its size,
     // its clusters or its serial.
     let table = v.table.name().to_uppercase();
-    let fs = t!("dev.card.fact_drive_fs", fs = v.fs.name(), table = table).to_string();
+    let fs = t!("dev.card.head_on", fs = v.fs.name(), table = table).to_string();
     let mut drive = vec![card.drive(), fs];
     if let Some(space) = v.space {
-        drive.push(t!("dev.card_size", size = gb(space.size)).to_string());
+        drive.push(size_words(space.size));
         if space.cluster > 0 {
             drive.push(t!("dev.card.fact_drive_kb", kb = space.cluster / 1024).to_string());
         }
@@ -2305,7 +2310,10 @@ pub(super) fn draw_card_sheet(frame: &mut Frame, page: &mut Page, area: Rect) {
                 let size = sheet.offered.iter().find(|(l, _)| l == lib).and_then(|(_, s)| *s);
                 let left = format!("  {} {lib}", tick(ticked));
                 let right = size
-                    .map(|(n, b)| format!("{} GB · {}", gb(b), t!("dev.card_tracks", n = fmt_count(n as u64))))
+                    .map(|(n, b)| {
+                        let tracks = t!("dev.card_tracks", n = fmt_count(n as u64));
+                        format!("{} · {tracks}", size_words(b))
+                    })
                     .unwrap_or_default();
                 let pad = tw.saturating_sub(kit::width(&left) + kit::width(&right));
                 Line::from(vec![Span::styled(left, style), Span::raw(" ".repeat(pad)), Span::styled(right, dim())])
@@ -2461,7 +2469,7 @@ pub(super) fn draw_card_sheet(frame: &mut Frame, page: &mut Page, area: Rect) {
                     x += w + 2;
                 }
                 if let Some(space) = card.found.volume.space {
-                    let right = format!("{} · {} GB", card.drive(), gb(space.size));
+                    let right = format!("{} · {}", card.drive(), size_words(space.size));
                     let w = kit::width(&right) as u16;
                     if x + 2 + w <= row.right() {
                         let at = Rect { x: row.right() - w, y, width: w, height: 1 };

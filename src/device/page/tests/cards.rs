@@ -103,13 +103,21 @@ fn a_card_alone_is_its_view_card_03s_rows_with_no_tab_row() {
 
 #[test]
 fn details_drive_row_is_in_the_locales_words() {
-    // Its file system, table and clusters were English in every locale.
-    let _de = crate::setup::tests::in_locale("de");
-    let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
-    press(&mut page, KeyCode::Char('d'));
-    let frame = window(&mut page);
-    let drive = "Laufwerk      E: · FAT32 auf MBR · 63.8 GB · 32-KB-Cluster · 1A2B-3C4D";
-    assert!(frame.contains(drive), "{frame}");
+    // Its file system, table, size and clusters were English in every
+    // locale; a size is in the locale's unit (Go in French, whose row is
+    // cut at its serial).
+    let rows = [
+        ("de", "Laufwerk      E: · FAT32 auf MBR · 63.8 GB · 32-KB-Cluster · 1A2B-3C4D"),
+        ("fr", "Lecteur       E: · FAT32 sur MBR · 63.8 Go · clusters de 32 Ko · "),
+    ];
+    for (code, drive) in rows {
+        let _in = crate::setup::tests::in_locale(code);
+        let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+        press(&mut page, KeyCode::Char('d'));
+        let frame = window(&mut page);
+        assert!(frame.contains(drive), "{code}:
+{frame}");
+    }
 }
 
 #[test]

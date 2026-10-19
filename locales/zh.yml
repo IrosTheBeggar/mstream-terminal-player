@@ -2486,7 +2486,6 @@ dev:
     plays_to_send: "待发送到 %{server} %{n} 次，最早的在 %{when}"
     fact_drive: "驱动器"
     fact_removes: "移除"
-    fact_drive_fs: "%{fs}，%{table}"
     fact_drive_kb: "%{kb} KB 簇"
     fact_card_v: "id %{id} · 修订 %{rev} · mStream Player %{version}"
     fact_signed_in: "已在这台电脑上登录"

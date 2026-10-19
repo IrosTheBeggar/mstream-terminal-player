@@ -2486,7 +2486,6 @@ dev:
     plays_to_send: "к отправке на %{server}: %{n}, самое старое от %{when}"
     fact_drive: "Диск"
     fact_removes: "Удаляет"
-    fact_drive_fs: "%{fs} на %{table}"
     fact_drive_kb: "кластеры %{kb} КБ"
     fact_card_v: "id %{id} · ревизия %{rev} · mStream Player %{version}"
     fact_signed_in: "вход выполнен на этом компьютере"

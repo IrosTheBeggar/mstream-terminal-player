@@ -2486,7 +2486,6 @@ dev:
     plays_to_send: "%{server} に送る %{n} 件、最古は %{when}"
     fact_drive: "ドライブ"
     fact_removes: "削除"
-    fact_drive_fs: "%{fs} / %{table}"
     fact_drive_kb: "%{kb} KB クラスター"
     fact_card_v: "id %{id} · リビジョン %{rev} · mStream Player %{version}"
     fact_signed_in: "このコンピューターでサインイン済み"

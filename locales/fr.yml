@@ -2486,7 +2486,6 @@ dev:
     plays_to_send: "%{n} à envoyer à %{server}, la plus ancienne de %{when}"
     fact_drive: "Lecteur"
     fact_removes: "Retire"
-    fact_drive_fs: "%{fs} sur %{table}"
     fact_drive_kb: "clusters de %{kb} Ko"
     fact_card_v: "id %{id} · révision %{rev} · mStream Player %{version}"
     fact_signed_in: "connecté sur cet ordinateur"
