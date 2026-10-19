@@ -2409,3 +2409,34 @@ The cards' command-line lines are plain English, like the `plan:` line.
     as before.
   - **`desk::format_end` has its doc comment back:** `clock_line` had
     been put between the two. Code only.
+- **2026-10-19 — The terminal gate of wave 4.** The whole suite, the
+  desktop flavour's check and a debug build, then the tab's states of
+  the SD card transfer drawn whole by the GUI in English and German at
+  100×24 and 100×30, for a look. Fixed:
+  - **Details' *Drive* fact** (clause 44) was English in every language
+    ("FAT32 on MBR · 63.8 GB · 32 KB clusters") while its translation sat
+    unused. It is said a piece at a time in the locale's words, since a
+    card may lack its size, its clusters or its serial: the head's
+    `dev.card.head_on`, a new `dev.card.fact_drive_kb` (each locale's own
+    words from the unused key, which went) and `dev.card_size`.
+  - **Sizes in the locale's unit.** The head of a card the player can't
+    use and the Settings sheet's card and library sizes said "GB" in
+    every language; they are `dev.card_size` now, as the Space row's
+    figures were (Go in French, ГБ in Russian).
+
+  Found, not changed (words for the native review, or a choice):
+  - **The Settings sheet's help line** keeps to two lines and an ellipsis
+    (clause 48). In its 70 cells the help of the focused row runs past
+    two lines in eight of the nine other languages (all but Chinese): of
+    Player in all eight, of Name in six (de, es, fr, ja, pt, ru), of
+    Removals in five (de, es, it, ja, pl), of Into in French. German's
+    Name help, drawn, loses its last word, "Benutzername"; the other
+    languages were measured by a script wrapping by words in cells.
+    Shorter words, or a third line where the area has room, would keep
+    them whole.
+  - **Details' facts are a line each, cut with an ellipsis:** in German
+    the *Card* fact loses its version ("mStream Player 0…"), the *Player*
+    fact "Wiedergabeprotokoll" and *Removes* "weitere"; in French the
+    *Drive* fact loses its serial.
+  - **French names two facts *Lecteur*:** the drive (`fact_drive`) and the
+    player (`row_player`).
