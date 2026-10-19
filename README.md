@@ -667,6 +667,11 @@ mstream-player device flash --flash-mode dio      # this player's release, in DI
 mstream-player device releases --pre-releases     # the firmware's releases on GitHub
 mstream-player device flash --yes --port COM3     # no screen, no questions
 mstream-player device flash --yes --all           # update every board that runs an older release
+mstream-player device cards                       # the SD cards in this computer's card readers
+mstream-player device card E: status              # one card's facts, as key-value lines
+mstream-player device card E: setup --name Car --yes     # make a new card one the player syncs
+mstream-player device card E: sync                # print the plan; --yes runs it
+mstream-player device card E: eject               # let the card go
 ```
 
 The [mStream MP3 player](https://github.com/IrosTheBeggar/mstream-mp3-player) is an M5Stack
@@ -770,6 +775,28 @@ its version. After a write, a board that prints the chip's reset banner again an
 never its firmware's first line is said to keep restarting: the card goes gold, *✗ Keeps
 restarting*, and its button is *Write the DIO image ▸* — through the warning, never written by
 itself.
+
+The board's SD card is filled with the card in **this computer's card reader**, never over the
+cable. A card in a reader is a subject of the MP3 Player tab beside the boards, a tab of its
+own (`E: Car music` on Windows): its **Card view** says what it holds and from which saved
+server, its space, its last sync and what the next one would do (`12 new · 2 to remove · 37
+plays to send`, as that server answered it), and *Sync ▸* fills it — converting what the
+player can't play, writing the covers and the Auto DJ index the firmware reads, and sending
+the player's plays back to the server they came from. A sync saves as it goes: `x` stops it
+at the next save, a card taken out goes on from there in any reader, and it runs on while
+you listen, the MP3 Player tab wearing its percentage. **Settings…** (`o`) holds the card's
+choices on two tabs, Music (its server and libraries) and Writing (what is converted and to
+what, removals, covers, Auto DJ, a card for someone else), with a line that says at every
+change whether it fits. More than 50 removals, half the card gone, music on the card that
+mStream didn't put there, another server, a relay and a peer reached only through its parent
+each ask first, behind the gold warning. Quitting during a sync asks, then stops at the next
+save. `device cards` lists the cards, one line each, and `device card <drive>
+status|setup|sync|plays|eject` does what the Card view does; each warning is a flag that names
+what it lets through (`--allow-removals 214`, `--server Work --take-over`, `--adopt` or
+`--keep-mine`, `--through-parent`), and `setup`'s flags are the Settings' (`--name`,
+`--libraries`, `--convert`, `--to`, `--removals`, `--covers`, `--autodj`, `--for`,
+`--budget`). Exit 3 means paused or stopped: run it again later. Only FAT32 cards on MBR are
+the player's; a card it can't read is listed with why.
 
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported

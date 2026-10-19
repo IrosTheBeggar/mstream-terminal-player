@@ -1716,6 +1716,20 @@ The cards' command-line lines are plain English, like the `plan:` line.
   "Sie"/"Ihre" are third person). Where the `dev` section can, it stays
   impersonal ("Erst in den Einstellungen … wählen"); the drafts do the
   same.
+- **The other eight locales** were written by the build (2026-10-19), in
+  each file's own terms and form of address: French *carte*, *lecteur*,
+  *vous*; Spanish *tarjeta*, *reproductor*, *tú*; Italian *scheda*,
+  *lettore*, *tu*; European Portuguese *cartão*, *leitor*, *você* forms;
+  Polish *karta*, *odtwarzacz*, *ty*; Russian *карта*, *плеер*, *вы*;
+  Japanese *カード*, *プレーヤー*; Chinese *存储卡*, *播放器*, Auto DJ kept
+  in Latin letters as the file keeps it. Where a locale already says the
+  word for a card for a board or a tab too, the tab is named otherwise:
+  Italian *vista* ("nella vista di COM3"), Polish *zakładka*. Counts sit
+  after a colon where a language's plural would bend the noun ("utworów:
+  %{n}", "файлов: %{n}"), so one form serves every number. Japanese and
+  Chinese say "that server" where their sentence would name it a second
+  time, since the completeness test counts every placeholder. They wait
+  for a native review with the German.
 
 ## Deviations log
 
@@ -2088,3 +2102,57 @@ The cards' command-line lines are plain English, like the `plan:` line.
     `fmt_old_update`; the build adds 344 now, three waiting for firmware
     verbs (Wording). The German drafts (160) and the machine translations
     of the other eight locales wait for a native review.
+- **2026-10-19 — Part B4 built: the Card view, the GUI's transfer worker
+  and the cards' command line.** What the build parts from, and why:
+  - **Settled by the build.** The hidden JSON card commands (`card-probe`,
+    `card-setup`, `card-sync`, `card-set`, `card-plays`, `time`) stay
+    hidden, as they are, for the real-card checks and for scripts that
+    read every field; `device cards` and `device card` are the listener's
+    (clauses 64–67), and the help names only them. The tab's gates and the
+    command line's flags ask the worker which gate a plan stops at
+    (`gate_ahead`, `relay_ahead`), so the two never disagree (clause 67).
+  - **Not built yet**, each drawn by the set: the Spread sheet and the
+    set's rows and links (*Set up as card N ▸*, *Move the edge*, *Add
+    card N*; clause 62: the Set row alone is shown), so the command line
+    has no `--set` or `--into-set` either; *Check every file…*; the fit
+    line's offers (*Convert everything*, *Leave out*, *Spread over*);
+    adding a peer in the sheet (its peers are the card's own); the Player
+    row's list (the row says what `device.txt` says, and the command line
+    has no `--player`); the empty readers line (the worker lists volumes,
+    not empty readers, so `device cards` says "No card in a reader."
+    alone); the format's route and its rows (part B6, clause 59: the
+    board's fix lines stay under the `_pc` keys until then); and setting
+    the clock from the tab (`@time`, part B6).
+  - **Drawn otherwise.** *verified* follows a sync of this session only;
+    Next sync's look leaves the peers out, and a listing shows "asking
+    Home what changed…" with no count of libraries; library sizes are the
+    listed libraries'; the codec list always offers MP3 past 192k (a
+    server older than 6.32 gets the highest it takes); a card with no
+    `device.txt` is synced for the player's first defaults
+    (`conv_default`, where the set has `conv_assumed`: the sync reads no
+    board); the sheet's tabs hint has no glyph; `log_asked` is two lines
+    (`log_asked_same` when the list stood); `check_win` names the drive;
+    *Keep* on the another-server gate shows no count of the tracks kept.
+    While the card's gate or sheet is up its primary is not drawn under
+    it, so the frame stays whole at the floor; at the floor a card's
+    dim explanation lines give way first, then Converts.
+  - **Quitting.** `q` and the GUI's quit ask (clause 57) and wait in the
+    loop for the next save, at most 30 s; the window's close button and
+    Cmd-Q quit at once and wait in the teardown; Ctrl+C in the terminal
+    GUI waits after the screen is restored, saying so on stderr. On the
+    command line Ctrl+C is caught only by `sync`.
+  - **The command line's set-up** checks `--adopt` or `--keep-mine` on a
+    card with music mStream didn't put there, and says it; the answer is
+    the first sync's flag (`sync --adopt`), since `state.json` keeps no
+    answer and the sync's adopt gate asks again.
+  - **Words.** 358 keys under `dev.card` and five `dev` keys reworded
+    (`card_fix_format`, `card_fix_mbr`, `none_title`, `none_body`,
+    `none_watching`; today's two fix lines kept as `card_fix_format_pc` and
+    `card_fix_mbr_pc`). Beyond the set: `ago_hours`, `dur_s`, `dur_min`,
+    `dur_h_min`, `btn_new_id`, `hint_enter_new_id`, `copied`, `copied_2`,
+    `conv_default`, `holds_none`, `not_fat_card`, `player_none`, `sync_of`,
+    `help_lib_short`, `help_lib_unknown`, `help_budget`, `help_writing`,
+    `help_from` and `log_asked_same`. German from the set's drafts; the
+    other eight written by the build (Translation notes) — all nine wait
+    for a native review. Not tried on hardware: ejecting a real card (the
+    OS's eject, part V1), and a card's sync under the GUI end to end.
