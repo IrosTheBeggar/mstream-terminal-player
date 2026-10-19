@@ -123,21 +123,35 @@ fn every_key_has_one_card_and_the_split_stays_where_it_was_as_the_library_grows(
     assert_eq!(set.owner(&Key::of("Rock/E/x.mp3")), 2);
     assert_eq!((set.until(0), set.until(2)), (Some(&key("C", "")), None));
     assert_eq!(set.slot_of(33), Some(2));
-    assert!(set.range_text(1).contains("C\u{1f} .. E\u{1f}"), "{}", set.range_text(1));
+    // The ranges' fingerprint: the same ranges give the same; an edge moved,
+    // or a card added, another.
+    assert_eq!(three().ranges_key(), set.ranges_key());
+    let mut moved = set.clone();
+    moved.cards[1].from = key("B", "");
+    let mut added = set.clone();
+    added.cards.push(Slot { from: key("F", ""), ..Slot::default() });
+    let keys = [set.ranges_key(), moved.ranges_key(), added.ranges_key()];
+    assert!(keys[0] != keys[1] && keys[0] != keys[2] && keys[1] != keys[2], "{keys:?}");
 }
 
 #[test]
 fn a_table_reads_back_as_written_and_keeps_what_it_doesnt_know() {
     let mut set = three();
-    let commit_id = 0xC0FF_EE00_0000_0001;
-    set.cards[0].holds = Some(Holds { rev: 1, asks: 2, generation: 7, commit_id });
+    let (commit_id, ranges) = (0xC0FF_EE00_0000_0001, set.ranges_key());
+    set.cards[0].holds = Some(Holds { rev: 1, ranges, asks: 2, generation: 7, commit_id });
     (set.cards[0].others, set.cards[0].others_key, set.cards[0].asked) = (3, 0xABCD, 2);
     set.asks = 2;
     let value = set.value(Some(1));
     assert_eq!(value["index"], 1);
     assert_eq!(value["cards"][1]["cardId"], Value::Null, "a card to come");
     assert_eq!(value["cards"][0]["holds"]["commitId"], "0xC0FFEE0000000001");
+    assert_eq!(value["cards"][0]["holds"]["ranges"], hex(ranges));
     assert_eq!(Set::read(&value), Some(set.clone()));
+    assert!(set.holds(0, 2));
+    // A word that names no ranges counts under none.
+    let mut bare = value.clone();
+    bare["cards"][0]["holds"].as_object_mut().unwrap().remove("ranges");
+    assert!(!Set::read(&bare).unwrap().holds(0, 0));
 
     // A newer player's members, in the table and in a card, stay.
     let mut newer = value.clone();
@@ -160,6 +174,19 @@ fn a_table_reads_back_as_written_and_keeps_what_it_doesnt_know() {
     assert!(broken(&|v| v["cards"][2]["cardId"] = json!("0x000000000000000B")).is_none(), "twice");
     assert!(broken(&|v| v["cards"] = json!([])).is_none());
     assert!(broken(&|v| v["id"] = json!("0x0")).is_none());
+    // Counters past theirs, a broken or hostile table's: counted up, they
+    // would overflow.
+    assert!(broken(&|v| v["rev"] = json!(u32::MAX)).is_none());
+    assert!(broken(&|v| v["asks"] = json!(u64::MAX)).is_none());
+    assert!(broken(&|v| v["cards"][1]["seq"] = json!(u64::MAX)).is_none());
+    assert!(broken(&|v| v["cards"][0]["asked"] = json!(u64::MAX)).is_none());
+    assert!(broken(&|v| v["cards"][0]["holds"]["rev"] = json!(u32::MAX)).is_none());
+    assert!(broken(&|v| v["cards"][0]["holds"]["asks"] = json!(u64::MAX)).is_none());
+    // One at its last count still counts up, and is read no more.
+    let mut last = broken(&|v| v["rev"] = json!(REV_MAX)).expect("at its last count");
+    last.apply(&Offer::AddCard { at: 3, from: key("G", ""), load: Load::default() }, 0);
+    assert_eq!(u64::from(last.rev), REV_MAX + 1);
+    assert_eq!(Set::read(&last.value(None)), None);
 }
 
 #[test]
@@ -169,7 +196,8 @@ fn two_copies_merge_by_the_newer_ranges_and_each_cards_own_newest_facts() {
     // range; card 2 joined; the asks went on.
     let mut mirror = own.clone();
     mirror.cards[2].seq = 2;
-    mirror.cards[2].holds = Some(Holds { rev: 1, asks: 4, generation: 3, commit_id: 9 });
+    let ranges = own.ranges_key();
+    mirror.cards[2].holds = Some(Holds { rev: 1, ranges, asks: 4, generation: 3, commit_id: 9 });
     mirror.cards[1].card_id = Some(22);
     mirror.cards[1].seq = 1;
     mirror.asks = 4;
@@ -187,7 +215,8 @@ fn two_copies_merge_by_the_newer_ranges_and_each_cards_own_newest_facts() {
 
     // Newer ranges win whatever the facts: the old word on a range is void.
     let mut moved = own.clone();
-    let edge = |to: usize, from: Key| Offer::MoveEdge { to, from, load: Load::default(), fits: true };
+    let edge =
+        |to: usize, from: Key| Offer::MoveEdge { to, from, load: Load::default(), fits: true };
     moved.apply(&edge(1, key("B", "")), 0);
     let merged = merge(&mirror, &moved);
     assert_eq!((merged.rev, &merged.cards[1].from), (2, &key("B", "")));
@@ -197,6 +226,53 @@ fn two_copies_merge_by_the_newer_ranges_and_each_cards_own_newest_facts() {
     // Another set's copy changes nothing.
     let other = Set { id: 0x5E8, ..mirror.clone() };
     assert_eq!(merge(&own, &other), own);
+}
+
+/// Two decisions made from one revision, on two computers (or on one that
+/// lost its `cards.json`): two tables of one revision and other ranges.
+/// Merged, each card goes on under its own copy's ranges, and a card's word
+/// given under the other copy's lets no file go.
+#[test]
+fn a_cards_word_counts_only_under_the_very_ranges_it_was_given_under() {
+    let mut base = three();
+    base.cards[1].card_id = Some(22);
+    // Here, card 1 moved its edge: card 2 begins at B. There, card 2 added a
+    // card after it, at D, and said it holds its range there; the asks went
+    // on there as they did here.
+    let mut here = base.clone();
+    let edge = Offer::MoveEdge { to: 1, from: key("B", ""), load: Load::default(), fits: true };
+    here.apply(&edge, ROOM);
+    let mut there = base.clone();
+    there.apply(&Offer::AddCard { at: 2, from: key("D", ""), load: Load::default() }, ROOM);
+    assert_eq!((here.rev, there.rev), (2, 2));
+    assert_ne!(here.ranges_key(), there.ranges_key());
+    let ranges = there.ranges_key();
+    there.cards[1].holds = Some(Holds { rev: 2, ranges, asks: 5, generation: 4, commit_id: 8 });
+    (there.cards[1].seq, there.asks) = (7, 5);
+    assert!(there.holds(1, 5));
+
+    // On card 1, its own copy's ranges: card 2's newer facts come with its
+    // word, which names the other ranges and counts for nothing here.
+    let mut merged = merge(&here, &there);
+    assert_eq!((merged.rev, merged.cards.len(), &merged.cards[1].from), (2, 3, &key("B", "")));
+    assert_eq!((merged.cards[1].seq, merged.asks), (7, 5));
+    assert!(merged.cards[1].holds.is_some() && !merged.holds(1, 0));
+    // Card 1 holds files of B — card 2's range here, card 1's there — and
+    // asked for them at 5: they stay.
+    let id = |path: &str| Some(format!("0\u{1f}{path}"));
+    let files = [(key("A", "1"), id("Rock/A/1/1.mp3")), (key("B", "1"), id("Rock/B/1/1.mp3"))];
+    merged.cards[0].others_key = fingerprint(&mut ["0\u{1f}Rock/B/1/1.mp3"]);
+    merged.cards[0].asked = 5;
+    let (asked, now) = stands(&mut merged, 0, &files);
+    assert_eq!((asked.asked, now), (5, vec![Stand::Mine, Stand::Held(1)]));
+    // On card 2, its own copy's ranges, under which its word counts.
+    assert!(merge(&there, &here).holds(1, 5));
+    // Under the same ranges, the word counts in either copy.
+    let mut same = here.clone();
+    let ranges = here.ranges_key();
+    same.cards[1].holds = Some(Holds { rev: 2, ranges, asks: 5, generation: 4, commit_id: 8 });
+    same.cards[1].seq = 7;
+    assert!(merge(&here, &same).holds(1, 5) && merge(&same, &here).holds(1, 5));
 }
 
 #[test]
@@ -259,12 +335,13 @@ fn a_card_lets_another_ranges_files_go_only_once_that_card_holds_its_range_after
     assert_eq!((me.asked, me.others, me.seq, me.room, me.label.as_str()), (1, 2, 2, 900, "Car"));
 
     // Card 3 holds its range, but said so before the ask: they stay.
-    set.cards[2].holds = Some(Holds { rev: 1, asks: 0, generation: 2, commit_id: 5 });
+    let ranges = set.ranges_key();
+    set.cards[2].holds = Some(Holds { rev: 1, ranges, asks: 0, generation: 2, commit_id: 5 });
     let (again, now) = stands(&mut set, 0, &files);
     assert_eq!(now[1..3], [Stand::Held(2), Stand::Held(2)]);
     assert_eq!((again.asked, set.asks), (1, 1), "the same files: no new ask");
     // Said after it: they go, and the card keeps nothing for others.
-    set.cards[2].holds = Some(Holds { rev: 1, asks: 1, generation: 3, commit_id: 6 });
+    set.cards[2].holds = Some(Holds { rev: 1, ranges, asks: 1, generation: 3, commit_id: 6 });
     let (gone, now) = stands(&mut set, 0, &files);
     assert_eq!(now[1..3], [Stand::Dropped(2), Stand::Dropped(2)]);
     assert_eq!((gone.others, gone.others_key), (0, 0));
@@ -276,7 +353,7 @@ fn a_card_lets_another_ranges_files_go_only_once_that_card_holds_its_range_after
     assert_eq!((anew.seen, anew.asked), (1, 2));
     // Under ranges moved since, the word counts for nothing.
     let mut moved = three();
-    moved.cards[2].holds = Some(Holds { rev: 1, asks: 9, generation: 3, commit_id: 6 });
+    moved.cards[2].holds = Some(Holds { rev: 1, ranges, asks: 9, generation: 3, commit_id: 6 });
     moved.cards[0].asked = 1;
     let held = ["0\u{1f}Rock/E/1/1.mp3", "0\u{1f}Rock/F/1/1.mp3"];
     moved.cards[0].others_key = fingerprint(&mut held.clone());

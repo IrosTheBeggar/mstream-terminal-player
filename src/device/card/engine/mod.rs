@@ -618,6 +618,9 @@ pub(crate) struct Session<'c> {
     device: DeviceTxt,
     music: Music,
     survey: Survey,
+    /// Files that leave the card whatever Q1's setting says
+    /// ([`Session::let_go`]).
+    leaving: HashSet<String>,
 }
 
 impl<'c> Session<'c> {
@@ -669,7 +672,28 @@ impl<'c> Session<'c> {
             }
         };
         let device = settle::device_txt(card);
-        Ok(Session { card, bound, env, knobs, token, run_id, settled, device, music, survey })
+        Ok(Session {
+            card,
+            bound,
+            env,
+            knobs,
+            token,
+            run_id,
+            settled,
+            device,
+            music,
+            survey,
+            leaving: HashSet::new(),
+        })
+    }
+
+    /// The plans made from now on take these files off the card — each by
+    /// its path as the tags file has it — once they are no longer wanted,
+    /// even on a card that never loses a file (Q1's [`Removal::Never`]): a
+    /// multi-card set's files that the card of their range holds now (B7).
+    /// They pass the gates as any removal does.
+    pub(crate) fn let_go(&mut self, paths: HashSet<String>) {
+        self.leaving = paths;
     }
 
     /// The card's settings and state (`state.json`, 2.12.7), as step 2

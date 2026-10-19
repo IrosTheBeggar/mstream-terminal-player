@@ -545,7 +545,10 @@ pub(super) fn plan(
                     }
                     (Some(&o), None) => {
                         let stays = origins[o].scanning || row.ledger.server_path.is_empty();
-                        if stays || s.knobs.removal == Removal::Never {
+                        // Q1's other setting keeps it, but for a file its
+                        // set let go (Session::let_go).
+                        let never = s.knobs.removal == Removal::Never;
+                        if stays || (never && !s.leaving.contains(&row.path)) {
                             if !stays {
                                 report.kept.push(path.clone());
                             }

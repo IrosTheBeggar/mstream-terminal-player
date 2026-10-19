@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{Ask, Halt, Halted, Key as FileKey, Listed};
+use crate::api::transfer::ManifestEntry;
 use crate::device::card::cards::Cards;
 use crate::device::card::contract::mptg::{self, Ledger, RecordIn};
 use crate::device::card::contract::server::Talk;
@@ -78,6 +79,8 @@ pub(super) struct SetRun {
     /// The files of its range, by origin and server path; and their groups.
     in_range: HashSet<FileKey>,
     groups: Vec<Group>,
+    /// The entries of a whole listing it didn't read: other cards' files.
+    cut_away: usize,
     /// The card paths of the files it lets go: removals the set decided.
     dropped_paths: HashSet<String>,
     counts: Counts,
@@ -196,6 +199,7 @@ impl SetRun {
             cluster: CLUSTER,
             in_range: HashSet::new(),
             groups: Vec::new(),
+            cut_away: 0,
             dropped_paths: HashSet::new(),
             counts: Counts::default(),
             offers: Vec::new(),
@@ -235,23 +239,44 @@ impl SetRun {
         self.set.as_ref().map(|s| s.libraries.clone())
     }
 
-    /// A plan of the card depends on its range too: another range, and a
-    /// 304 can't stand for a listing.
-    pub(super) fn plan_key(&self, key: u64) -> u64 {
-        match &self.set {
-            Some(set) => {
-                let text = format!("{key:016x}\n{}", set.range_text(self.slot));
-                crate::device::card::contract::prim::fnv1a64(text.as_bytes())
-            }
-            None => key,
-        }
-    }
-
     /// The manifest is read whole: a set to make, or a card that doesn't
     /// hold its range under the set's last ask (its word is made only of a
-    /// whole listing: a 304 stands for the files the card has).
+    /// whole listing: a 304 stands for the files the card has). Ranges that
+    /// changed since its word are other ranges, of a later revision: read
+    /// whole too, so the plan's key needn't name the range — a file's own
+    /// decision (its conversion) is the same on any card.
     pub(super) fn whole(&self) -> bool {
         self.set.as_ref().is_none_or(|s| !s.holds(self.slot, s.asks))
+    }
+
+    /// The entries of a whole listing the card's plan reads — their full
+    /// metadata, an Ogg's first bytes — when it is a set's: those of its
+    /// range, and those it holds, by server path or by hash (a file the
+    /// server moved, paired as the engine pairs it). The rest are the other
+    /// cards' to read. None for a set still to make, which splits the whole
+    /// selection; the entries cut away are counted with the other cards'.
+    pub(super) fn cut(
+        &mut self,
+        entries: &[ManifestEntry],
+        held: &Rows,
+    ) -> Option<Vec<ManifestEntry>> {
+        let set = self.set.as_ref()?;
+        let ledgers = || held.rows.iter().map(|(_, l)| l);
+        let paths: HashSet<&str> = ledgers().map(|l| l.server_path.as_str()).collect();
+        let hashes: HashSet<[u8; 16]> = ledgers()
+            .flat_map(|l| [l.audio_hash, l.file_hash])
+            .filter(|h| *h != [0; 16])
+            .collect();
+        let read = |e: &&ManifestEntry| {
+            let l = plan::ledger_of(e);
+            set.owner(&Key::of(&e.filepath)) == self.slot
+                || paths.contains(e.filepath.as_str())
+                || hashes.contains(&l.audio_hash)
+                || hashes.contains(&l.file_hash)
+        };
+        let cut: Vec<ManifestEntry> = entries.iter().filter(read).cloned().collect();
+        self.cut_away = entries.len() - cut.len();
+        Some(cut)
     }
 
     /// `wanted`, the run's whole selection, cut to the card's range (see the
@@ -319,7 +344,7 @@ impl SetRun {
         let (asked, stands) = span::stands(set, self.slot, &keyed);
         self.asked = asked;
 
-        let mut counts = Counts::default();
+        let mut counts = Counts { theirs: self.cut_away, ..Counts::default() };
         let (mut in_range, mut dropped_paths) = (HashSet::new(), HashSet::new());
         let mut mine: Vec<(&str, u64)> = Vec::new();
         for (i, stand) in stands.iter().enumerate() {
@@ -461,7 +486,10 @@ impl SetRun {
 
 /// A plan of the run's files. The removals of files the card holds for a
 /// card that holds its range now are the set's (a move the listener chose,
-/// a set made): a gate whose files are all such isn't asked again.
+/// a set made): they go whatever the card's removal setting says — a card
+/// that never loses a file still lets go of what another card of its set
+/// holds, or its moves would never end — and a gate whose files are all
+/// such isn't asked again.
 pub(super) fn plan(
     session: &mut Session<'_>,
     wanted: &Wanted,
@@ -469,6 +497,7 @@ pub(super) fn plan(
     fetcher: &mut dyn Fetcher,
     span: Option<&SetRun>,
 ) -> Result<Plan, Halted> {
+    session.let_go(span.map(|s| s.dropped_paths.clone()).unwrap_or_default());
     let made = session.plan(&wanted.card, answers, fetcher).map_err(|s| (None, Halt::Card(s)))?;
     let Some(span) = span.filter(|s| !s.dropped_paths.is_empty()) else { return Ok(made) };
     let set_s = |paths: &[String]| {
@@ -513,7 +542,7 @@ impl SetEnd {
     ) -> Set {
         let set = &mut self.set;
         set.note(self.slot, &self.label, self.room, &self.asked);
-        let rev = set.rev;
+        let (rev, ranges) = (set.rev, set.ranges_key());
         let s = &mut set.cards[self.slot];
         if let Some(last) = last {
             (s.bytes, s.tracks) = (last.load.bytes, last.load.tracks);
@@ -527,7 +556,8 @@ impl SetEnd {
             let all = last.is_some() && self.in_range.iter().all(landed);
             let all = all && outcome.verified.is_ok();
             let (generation, commit_id) = (outcome.generation, outcome.commit_id);
-            s.holds = all.then_some(Holds { rev, asks: self.asked.seen, generation, commit_id });
+            let asks = self.asked.seen;
+            s.holds = all.then_some(Holds { rev, ranges, asks, generation, commit_id });
         }
         set.clone()
     }

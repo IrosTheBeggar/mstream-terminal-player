@@ -376,7 +376,8 @@ fn a_full_card_moves_its_edge_in_two_phases_and_a_cut_between_loses_no_music() {
     assert!(halted_fit(&full), "{:?}", full.end);
     let offers = &summary_set(&full).offers;
     let moved = w.paths(of(&["Artist C"]));
-    let [Offer::MoveEdge { to: 1, from, fits: true, load }, Offer::AddCard { at: 1, .. }] = &offers[..]
+    let [Offer::MoveEdge { to: 1, from, fits: true, load }, Offer::AddCard { at: 1, .. }] =
+        &offers[..]
     else {
         panic!("{offers:?}")
     };
@@ -567,7 +568,8 @@ fn a_set_made_of_a_card_holding_more_lets_the_rest_go_and_asks_only_of_what_isnt
     let End::Halted(Halt::Card(Stop::Unanswered(guards))) = &asked.end else {
         panic!("{:?}", asked.end)
     };
-    let strong = matches!(&guards[..], [Guard::Removals { strong: true, paths }] if paths.len() == 41);
+    let strong =
+        matches!(&guards[..], [Guard::Removals { strong: true, paths }] if paths.len() == 41);
     assert!(strong, "{guards:?}");
     assert_eq!(without_lock(&one), image);
     // The file back: B goes with no question.
@@ -581,6 +583,192 @@ fn a_set_made_of_a_card_holding_more_lets_the_rest_go_and_asks_only_of_what_isnt
     assert_eq!((outcome.deleted, outcome.records, outcome.verified.clone()), (40, 20, Ok(())));
     assert_eq!(ledger(&one), w.paths(of(&["Artist A"])));
     assert_eq!(ledger(&two), w.paths(of(&["Artist B"])));
+}
+
+/// A card of a set reads of the server what its range needs — the new
+/// files' metadata, their bytes — and nothing of the other cards' files:
+/// once an edge moved, nor as new music lands.
+#[test]
+fn a_card_of_a_set_reads_the_server_for_its_own_range_only() {
+    let (mut w, cards, id) = full_set("reads");
+    let (one, two, three) = (&cards[0], &cards[1], &cards[2]);
+    // The paths whose metadata was asked for, and the files read, since the
+    // last look.
+    let reads = |w: &World| {
+        let mut lib = w.fake.lock().unwrap();
+        let batched: BTreeSet<String> = std::mem::take(&mut lib.batched).into_iter().collect();
+        let asked = std::mem::take(&mut lib.asked).into_iter();
+        (batched, asked.filter(|a| a.contains(" /media/")).collect::<Vec<_>>())
+    };
+    // Card 1 full: its edge moves, C to card 2.
+    w.add(&[("Artist Bb", &[4, 4])], 24);
+    assert!(halted_fit(&w.sync(one, ROOM, &decide(Decision::MoveEdge))));
+    assert_eq!(w.cards.sets[&id].rev, 2);
+    // Card 3, its range as it was: listed whole under the new ranges, its
+    // word given again, and nothing of the server's read for it.
+    reads(&w);
+    let synced = w.sync(three, ROOM, &plain());
+    let listed = synced.summary.as_ref().map(|s| s.listed);
+    assert_eq!((listed, ran(&synced).written), (Some(Listed::Whole), 0), "{:?}", synced.notes);
+    assert_eq!(reads(&w), (BTreeSet::new(), Vec::new()));
+    let set = set_on(three);
+    assert!(set.rev == 2 && set.holds(2, set.asks), "{set:?}");
+    // Card 2 reads C, its range's new files, and nothing else.
+    let synced = w.sync(two, ROOM_TWO, &plain());
+    assert_eq!(ran(&synced).written, 7, "{:?}", synced.notes);
+    let (batched, media) = reads(&w);
+    assert_eq!(batched, w.paths(of(&["Artist C"])));
+    assert!(!media.is_empty() && media.iter().all(|a| a.contains("/Artist C/")), "{media:?}");
+
+    // New music of card 2's range: card 1 lets C go and takes Bb, reading
+    // Bb alone; card 2 reads the new album.
+    w.add(&[("Artist E", &[0, 0, 3])], 24);
+    let synced = w.sync(one, ROOM, &plain());
+    let outcome = ran(&synced);
+    assert_eq!((outcome.deleted, outcome.written), (7, 8), "{:?}", synced.notes);
+    let (batched, media) = reads(&w);
+    assert_eq!(batched, w.paths(of(&["Artist Bb"])));
+    assert!(!media.is_empty() && media.iter().all(|a| a.contains("/Artist Bb/")), "{media:?}");
+    let synced = w.sync(two, ROOM_TWO, &plain());
+    assert_eq!(ran(&synced).written, 3, "{:?}", synced.notes);
+    let (batched, media) = reads(&w);
+    let album = Key { artist: match_key("Artist E"), album: match_key("Album 3") };
+    assert_eq!(batched, w.paths(|k| *k == album));
+    assert!(!media.is_empty() && media.iter().all(|a| a.contains("/Album 3/")), "{media:?}");
+}
+
+/// The server moves an album from card 1's range into card 2's: card 1
+/// keeps its copy, under the server's new path, and asks for it; card 2's
+/// word given before that ask lets nothing go, and once card 2 says it holds
+/// its range after the ask, card 1 lets the album go.
+#[test]
+fn an_album_the_server_moves_across_an_edge_leaves_its_old_card_only_after_the_ask() {
+    let (mut w, cards, _) = full_set("rename");
+    let (one, two, three) = (&cards[0], &cards[1], &cards[2]);
+    {
+        let mut lib = w.fake.lock().unwrap();
+        for t in lib.tracks.iter_mut().filter(|t| t.path.starts_with("Rock/Artist B/")) {
+            t.path = t.path.replace("Rock/Artist B/Album 1/", "Rock/Artist E/Album 9/");
+        }
+        lib.revision = "2:1".into();
+    }
+    let moved = w.paths(|k| k.album == match_key("Album 9"));
+    assert_eq!(moved.len(), 5);
+    // Card 2 first: it takes the album, and says it holds its range.
+    let synced = w.sync(two, ROOM_TWO, &plain());
+    assert_eq!(ran(&synced).written, 5, "{:?}", synced.notes);
+    assert!(ledger(two).is_superset(&moved));
+    let said = set_on(two).cards[1].holds.expect("its word").asks;
+
+    // Card 1 has the album by its audio: kept, under the new paths, and
+    // asked for.
+    let synced = w.sync(one, ROOM, &plain());
+    assert_eq!(ran(&synced).deleted, 0, "{:?}", synced.notes);
+    assert!(ledger(one).is_superset(&moved));
+    assert_eq!(summary_set(&synced).held.get(&1).copied(), Some(5));
+    let me = set_on(one).cards[0].clone();
+    assert!(me.asked > said && me.others == 5, "{me:?}");
+    // Again: card 2's word came before the ask, so nothing goes; the same
+    // files, the same ask.
+    let synced = w.sync(one, ROOM, &plain());
+    assert_eq!(ran(&synced).deleted, 0, "{:?}", synced.notes);
+    assert_eq!(set_on(one).cards[0].asked, me.asked);
+    // Card 2 again: its word after the ask. Card 1 lets the album go.
+    let synced = w.sync(two, ROOM_TWO, &plain());
+    assert_eq!(ran(&synced).written, 0, "{:?}", synced.notes);
+    assert!(set_on(two).cards[1].holds.expect("its word").asks >= me.asked);
+    let synced = w.sync(one, ROOM, &plain());
+    assert_eq!(ran(&synced).deleted, 5, "{:?}", synced.notes);
+    assert_eq!(summary_set(&synced).dropped.get(&1).copied(), Some(5));
+    // Each file on one card of the set, and on one only.
+    let (a, b, c) = (ledger(one), ledger(two), ledger(three));
+    assert!(a.is_disjoint(&b) && b.is_disjoint(&c) && a.is_disjoint(&c));
+    assert_eq!(&(&(&a | &b) | &c), &w.paths(|_| true));
+}
+
+/// A card made of 60 tracks, A (20) its own and B (40) held for card 2,
+/// which has taken B: the set of the two, and card 1 before the sync that
+/// lets B go.
+fn two_of_sixty(name: &str, removal: Removal) -> (World, FatSim, FatSim) {
+    const SMALL: u64 = 150_000;
+    let shelf: &Shelf = &[("Artist A", &[20]), ("Artist B", &[20, 20])];
+    let mut w = World::new(name, shelf, 2);
+    let one = w.card("one", 0x1111_0001);
+    let mut first = plain();
+    first.change.removal = Some(removal);
+    assert_eq!(ran(&w.sync(&one, SMALL, &first)).written, 60);
+    let spread = w.sync(&one, SMALL, &decide(Decision::Spread));
+    assert_eq!(summary_set(&spread).held.get(&1).copied(), Some(40));
+    let id = set_on(&one).id;
+    let two = w.card("two", 0x2222_0002);
+    w.join(&two, SMALL, id, 2);
+    assert_eq!(ran(&w.sync(&two, SMALL, &plain())).written, 40);
+    (w, one, two)
+}
+
+/// A card that never loses a file (Q1's other setting) still lets go of
+/// what the card of its range holds now, or its moves would never end; a
+/// file the server dropped stays on it, as ever.
+#[test]
+fn a_card_that_never_loses_a_file_lets_go_only_of_what_its_sets_other_card_holds() {
+    let (mut w, one, _) = two_of_sixty("never", Removal::Never);
+    let a1 = "Rock/Artist A/Album 1/01.mp3";
+    let kept = w.paths(of(&["Artist A"]));
+    {
+        let mut lib = w.fake.lock().unwrap();
+        lib.tracks.retain(|t| t.path != a1);
+        lib.revision = "2:1".into();
+    }
+    let synced = w.sync(&one, 150_000, &plain());
+    let outcome = ran(&synced);
+    assert_eq!((outcome.deleted, outcome.verified.clone()), (40, Ok(())), "{:?}", synced.notes);
+    assert_eq!(summary_set(&synced).dropped.get(&1).copied(), Some(40));
+    let report = &synced.summary.as_ref().expect("a plan").report;
+    assert_eq!(report.kept.len(), 1, "{report:?}");
+    assert_eq!(ledger(&one), kept, "A, the file the server dropped too");
+    assert_eq!(set_on(&one).cards[0].others, 0);
+}
+
+/// Card 1's sync that lets B go, cut at every write: no file of its own
+/// range is ever lost, card 2 is never touched, and its next sync ends the
+/// drop with nothing held for others.
+#[test]
+fn the_sync_that_lets_another_cards_files_go_cut_at_any_write_loses_none_of_its_own() {
+    let (mut w, one, two) = two_of_sixty("drop-sweep", Removal::Mirror);
+    let theirs = ledger(&two);
+    let mine: Vec<String> = one.image().into_keys().filter(|p| p.contains("/Artist A/")).collect();
+    assert_eq!(mine.len(), 20);
+    let was = w.cards.clone();
+    let at = w.scratch.0.clone();
+    let copy = |name: &str| -> FatSim {
+        copy_dir(&one.root(), &at.join(name));
+        FatSim::new(&at.join(name), 0x1111_0001)
+    };
+    let whole = copy("whole");
+    let before = whole.log().len();
+    assert_eq!(ran(&w.sync(&whole, 150_000, &plain())).deleted, 40);
+    let writes = (whole.log().len() - before) as u64;
+    assert!(writes > 40, "{writes}");
+    let recover = [1, 2, writes / 2, writes - 1, writes];
+    for k in 1..=writes {
+        w.cards = was.clone();
+        let sim = copy(&format!("cut-{k}"));
+        sim.cut_at(k, Cut::Fail);
+        let _ = w.sync(&sim, 150_000, &plain());
+        sim.replug();
+        let image = sim.image();
+        let lost: Vec<&String> = mine.iter().filter(|p| !image.contains_key(*p)).collect();
+        assert!(lost.is_empty(), "cut at {k}: {lost:?}");
+        if recover.contains(&k) {
+            let again = w.sync(&sim, 150_000, &plain());
+            assert_eq!(ran(&again).verified, Ok(()), "cut at {k}: {:?}", again.notes);
+            assert_eq!(ledger(&sim), w.paths(of(&["Artist A"])), "cut at {k}");
+            let me = &set_on(&sim).cards[0];
+            assert_eq!((me.others, me.others_key), (0, 0), "cut at {k}");
+        }
+        let _ = std::fs::remove_dir_all(sim.root());
+    }
+    assert_eq!(ledger(&two), theirs, "card 2 never touched");
 }
 
 /// A folder copied whole: a card in another reader, as it was.

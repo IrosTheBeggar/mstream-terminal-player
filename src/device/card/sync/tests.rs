@@ -94,6 +94,8 @@ struct Library {
     disk: Option<PathBuf>,
     /// Every request, as "METHOD path".
     asked: Vec<String>,
+    /// Each path `metadata/batch` was asked for.
+    batched: Vec<String>,
     /// The plays posted to `stats/plays`, as they came, and the ids it has.
     plays: Vec<Value>,
     has: HashSet<String>,
@@ -217,6 +219,7 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
         }
         ("POST", "/api/v1/db/metadata/batch") => {
             let paths: Vec<String> = serde_json::from_value(asked.json()).unwrap_or_default();
+            lib.batched.extend(paths.iter().cloned());
             let mut out = serde_json::Map::new();
             for p in paths {
                 let row = lib.tracks.iter().find(|t| t.path == p).map(|t| {

@@ -104,10 +104,14 @@ impl Key {
 // ── The table ───────────────────────────────────────────────────────────────
 
 /// A card's word that it held every file of its range: under the ranges of
-/// `rev`, after the asks up to `asks`, at its commit.
+/// `rev`, after the asks up to `asks`, at its commit. `ranges` names the
+/// ranges themselves ([`Set::ranges_key`]): two decisions made from one
+/// revision on two computers give two tables of one `rev`, and a word given
+/// under one of them counts for nothing under the other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Holds {
     pub(crate) rev: u32,
+    pub(crate) ranges: u64,
     pub(crate) asks: u64,
     pub(crate) generation: u32,
     pub(crate) commit_id: u64,
@@ -168,8 +172,23 @@ const SLOT_MEMBERS: [&str; 12] = [
     "asked", "index",
 ];
 
+/// A table's counters — its revision, its asks, each card's seq and ask —
+/// stay under these, or the table is a broken or hostile one's: counted up
+/// from any of them, none ever overflows.
+const REV_MAX: u64 = u32::MAX as u64 / 2;
+const COUNT_MAX: u64 = 1 << 48;
+
 fn number(o: &Map<String, Value>, key: &str) -> u64 {
     o.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// A counter of the table, none when it's past `max`.
+fn count(o: &Map<String, Value>, key: &str, max: u64) -> Option<u64> {
+    Some(number(o, key)).filter(|&n| n <= max)
+}
+
+fn rev_of(o: &Map<String, Value>) -> Option<u32> {
+    count(o, "rev", REV_MAX).and_then(|r| u32::try_from(r).ok())
 }
 
 fn unknown(o: &Map<String, Value>, known: &[&str]) -> Map<String, Value> {
@@ -181,8 +200,10 @@ impl Holds {
     fn read(v: &Value) -> Option<Holds> {
         let o = v.as_object()?;
         Some(Holds {
-            rev: u32::try_from(number(o, "rev")).ok()?,
-            asks: number(o, "asks"),
+            rev: rev_of(o)?,
+            // A word that names no ranges counts under none.
+            ranges: o.get("ranges").and_then(Value::as_str).and_then(from_hex).unwrap_or(0),
+            asks: count(o, "asks", COUNT_MAX)?,
             generation: u32::try_from(number(o, "generation")).ok()?,
             commit_id: o.get("commitId").and_then(Value::as_str).and_then(from_hex)?,
         })
@@ -190,8 +211,8 @@ impl Holds {
 
     fn value(&self) -> Value {
         json!({
-            "rev": self.rev, "asks": self.asks, "generation": self.generation,
-            "commitId": hex(self.commit_id),
+            "rev": self.rev, "ranges": hex(self.ranges), "asks": self.asks,
+            "generation": self.generation, "commitId": hex(self.commit_id),
         })
     }
 }
@@ -214,11 +235,11 @@ impl Slot {
             room: number(o, "room"),
             bytes: number(o, "bytes"),
             tracks: number(o, "tracks"),
-            seq: number(o, "seq"),
+            seq: count(o, "seq", COUNT_MAX)?,
             holds,
             others: number(o, "others"),
             others_key: o.get("othersKey").and_then(Value::as_str).and_then(from_hex).unwrap_or(0),
-            asked: number(o, "asked"),
+            asked: count(o, "asked", COUNT_MAX)?,
             raw: unknown(o, &SLOT_MEMBERS),
         })
     }
@@ -264,8 +285,8 @@ impl Set {
     }
 
     /// A table as a card's state file or `cards.json` holds it; None for one
-    /// this software can't read: of another version, or whose ranges don't
-    /// cover every key once each.
+    /// this software can't read: of another version, whose ranges don't
+    /// cover every key once each, or whose counters are past theirs.
     pub(crate) fn read(v: &Value) -> Option<Set> {
         let o = v.as_object()?;
         if o.get("version").and_then(Value::as_u64) != Some(SET_VERSION) {
@@ -277,8 +298,8 @@ impl Set {
         let cards: Option<Vec<Slot>> = o.get("cards")?.as_array()?.iter().map(Slot::read).collect();
         let set = Set {
             id: o.get("id").and_then(Value::as_str).and_then(from_hex).filter(|&id| id != 0)?,
-            rev: u32::try_from(number(o, "rev")).ok().filter(|&r| r > 0)?,
-            asks: number(o, "asks"),
+            rev: rev_of(o).filter(|&r| r > 0)?,
+            asks: count(o, "asks", COUNT_MAX)?,
             server: o.get("server").and_then(Value::as_str).and_then(from_hex)?,
             libraries: libraries?,
             cards: cards?,
@@ -329,20 +350,22 @@ impl Set {
         self.cards.iter().position(|s| s.card_id == Some(card_id))
     }
 
-    /// Card `i` holds its whole range as the table stands now, after every
-    /// ask up to `asked`.
+    /// Card `i` holds its whole range as the table stands now — its word
+    /// given under these very ranges — after every ask up to `asked`.
     pub(crate) fn holds(&self, i: usize, asked: u64) -> bool {
         let s = &self.cards[i];
-        let now = |h: &Holds| h.rev == self.rev && h.asks >= asked;
+        let ranges = self.ranges_key();
+        let now = |h: &Holds| h.rev == self.rev && h.ranges == ranges && h.asks >= asked;
         s.card_id.is_some() && s.holds.as_ref().is_some_and(now)
     }
 
-    /// Card `i`'s range as text: what a plan of it depends on beside the
-    /// card's settings.
-    pub(crate) fn range_text(&self, i: usize) -> String {
-        let text = |k: &Key| format!("{}\u{1f}{}", k.artist, k.album);
-        let until = self.until(i).map_or_else(String::new, text);
-        format!("set {} rev {}: {} .. {until}", hex(self.id), self.rev, text(&self.cards[i].from))
+    /// The ranges' fingerprint: how many cards, and each one's first key.
+    pub(crate) fn ranges_key(&self) -> u64 {
+        let mut text = self.cards.len().to_string();
+        for s in &self.cards {
+            text.push_str(&format!("\n{}\u{1f}{}", s.from.artist, s.from.album));
+        }
+        fnv1a64(text.as_bytes()).max(1)
     }
 
     /// The listener's answer to an offer ([`offers`]): the ranges change (a
@@ -371,6 +394,13 @@ impl Set {
 /// on a tie; each card's facts from the copy that has them newest (its
 /// seq); a card that joined under the same ranges, named in either; and the
 /// asks, the most either counted. Another set's copy changes nothing.
+///
+/// Two copies of one revision may hold other ranges: two decisions made
+/// from one table on two computers, or on one whose `cards.json` was lost.
+/// Each card then goes on under its own copy's ranges until a later
+/// decision; a card's word taken from the other copy names the other ranges,
+/// and counts for nothing here ([`Set::holds`]), so no card lets a file go
+/// that the card of its range never took.
 pub(crate) fn merge(own: &Set, other: &Set) -> Set {
     if own.id != other.id {
         return own.clone();
@@ -920,4 +950,3 @@ pub(crate) fn set_json(set: &Set, me: Option<usize>) -> Value {
         "index": me.map(|i| i + 1), "count": set.cards.len(), "cards": cards,
     })
 }
-

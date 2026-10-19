@@ -1141,11 +1141,22 @@ fn removals_ask_past_their_gates() {
 
     // Q1's other setting: nothing leaves the card.
     let never = Knobs { removal: Removal::Never, gate: 0, ..knobs() };
-    let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), never);
+    let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), never.clone());
     assert!(plan.guards.is_empty() && plan.removals().is_empty());
     assert_eq!(plan.report.kept, ["Loose.mp3"]);
     let outcome = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
     assert_eq!((outcome.deleted, outcome.records), (0, 6));
+    // But for a file the card's multi-card set lets go (B7): it leaves, past
+    // the gate as any removal.
+    let (mut session, _) = plan_of(&card, &wanted, &mut server, Answers::default(), never);
+    session.let_go(["Loose.mp3".to_string()].into());
+    let plan = session.plan(&wanted, &Answers::default(), &mut server).unwrap();
+    let gate = Guard::Removals { paths: vec!["Loose.mp3".into()], strong: false };
+    assert_eq!((&plan.guards[..], plan.report.kept.len()), (&[gate][..], 0));
+    let plan = session.plan(&wanted, &yes, &mut server).unwrap();
+    assert_eq!(plan.removals(), ["Loose.mp3"]);
+    let outcome = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    assert_eq!((outcome.deleted, outcome.records), (1, 5));
 }
 
 /// 2.10.2, step 5: the server's library replaced under the same paths

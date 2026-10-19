@@ -636,7 +636,6 @@ fn prepare(
     // queue (an older server's: 64k-192k, none).
     let transcode = info.features.transcode.as_ref();
     let plan_key = settings.plan_key(&libraries, &device, transcode);
-    let plan_key = span.as_ref().map_or(plan_key, |s| s.plan_key(plan_key));
     let source = settings.source(url_key).clone();
 
     // The rows of this server on the card, which a listing reuses.
@@ -665,6 +664,8 @@ fn prepare(
         || now.saturating_sub(source.full_read) >= WHOLE_EVERY_SECS
         || source.runs.saturating_add(1) >= WHOLE_EVERY_RUNS
         || span.as_ref().is_some_and(sets::SetRun::whole);
+    // What the card holds, for its set, read while its root is at hand.
+    let held = sets::Rows::of(root, space, span.is_some());
 
     // 3. The server's side.
     let reads = talk.clone();
@@ -701,20 +702,24 @@ fn prepare(
             let kept: HashMap<String, Kept> =
                 rows.iter().map(|k| (k.ledger.server_path.clone(), k.clone())).collect();
             let same_plan = source.plan_key == plan_key;
+            // A card of a set reads its range's files and those it holds,
+            // not the other cards' (B7).
+            let cut = span.as_mut().and_then(|s| s.cut(&listing.entries, &held));
+            let ours = cut.as_deref().unwrap_or(&listing.entries);
             let mut ogg = HashMap::new();
-            for e in oggs_to_sniff(&listing.entries, &kept, same_plan) {
+            for e in oggs_to_sniff(ours, &kept, same_plan) {
                 if let Ok(read) = client.read_range(&e.filepath, 0, OGG_HEAD) {
                     ogg.insert(e.filepath.clone(), ogg_is_opus(&read.bytes));
                 }
             }
-            let need = needing_metadata(&listing.entries, &kept, same_plan);
+            let need = needing_metadata(ours, &kept, same_plan);
             let metadata = match need.is_empty() {
                 true => HashMap::new(),
                 false => client.metadata_batch(&need).map_err(server_halt)?,
             };
             let wanted = wanted_of(
                 origin,
-                &listing.entries,
+                ours,
                 &metadata,
                 &ogg,
                 &kept,
@@ -760,9 +765,6 @@ fn prepare(
         shelves.push(side.covers);
         lists.push((side.list, Some(side.gate)));
     }
-
-    // What the card holds, for its set, read while its root is at hand.
-    let held = sets::Rows::of(root, space, span.is_some());
 
     // 4. The plan.
     let http = Http::new(client.clone(), 0, device.max_channels);
