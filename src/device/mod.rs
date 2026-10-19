@@ -1227,6 +1227,7 @@ fn lines(args: FlashArgs) -> i32 {
         port: args.port.clone(),
         timing: desk::Timing::REAL,
         firmware_first: true,
+        clock: None,
     };
     let (cmds, events) = desk::spawn(engine, setup);
     let mode = Mode { all: args.all, named: args.port.is_some(), erase: args.erase_asked() };
@@ -2111,6 +2112,7 @@ mod tests {
             port: port.map(str::to_string),
             timing: QUICK,
             firmware_first: true,
+            clock: None,
         };
         let (cmds, events) = desk::spawn(Arc::new(fake.clone()), setup);
         let (mut out, mut err) = (Vec::new(), Vec::new());

@@ -47,12 +47,12 @@ use rust_i18n::t;
 
 use super::DeviceError;
 use super::board::{Board, By, CardKind, CardRoot, Count, CountWhy, Format, FormatWhy, Formatted, Free, Heard};
-use super::board::{Looping, Next, NextState, Probe, Tracks, Verdict, Work, Written};
+use super::board::{Clock, Looping, Next, NextState, Probe, Tracks, Verdict, Work, Written};
 use super::engine::{BOOT_LISTEN, DeviceInfo, Engine, restart_loop};
 use super::firmware::{AppDesc, Cached, Firmware, Image, ImageFacts, ListWhy, Mode, Origin, Place, Release, Supply};
 use super::firmware::{Target, header_line, merged_only, pin_target, place};
 use super::flow::{self, Kind, Phase, Plan, Stop};
-use super::listen::{self, Asked, Facts, IdentifyWhy, Waits};
+use super::listen::{self, Asked, Clocked, Facts, IdentifyWhy, TimeWhy, Waits};
 use super::ports::Candidate;
 
 /// The engine the worker and its jobs share.
@@ -118,6 +118,17 @@ pub(crate) struct Setup {
     /// which writes whatever it finds, prints its lines in today's order
     /// and never touches a board for an image it cannot have.
     pub firmware_first: bool,
+    /// This computer's clock, in Unix ms, for the one write a listen makes
+    /// (contract clause 5): a board whose `@status` has `clock=` is asked
+    /// its time with a bare `@time`, and set to this one when it is unset
+    /// or more than 2 s off. The page's ([`wall_ms`]: the tab's and `device
+    /// flash`'s); None, and listens only listen (`--yes`'s lines).
+    pub clock: Option<fn() -> u64>,
+}
+
+/// This computer's clock, in Unix ms (UTC): what a listen sets a board's to.
+pub(crate) fn wall_ms() -> u64 {
+    SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// A next write, as the sheet's Apply sends it.
@@ -353,7 +364,9 @@ enum Note {
 
 /// How a job ended.
 enum End {
-    Heard(Asked),
+    /// A listen: what the board said, and what its clock came to when it
+    /// was asked (clause 5).
+    Heard(Asked, Option<Result<Clocked, TimeWhy>>),
     Facts(Result<Facts, DeviceError>),
     Read(Result<Probe, DeviceError>),
     Count(Result<u64, (CountWhy, bool)>),
@@ -449,6 +462,8 @@ struct Desk {
     page_image: Image,
     scope: Option<String>,
     timing: Timing,
+    /// The listens' clock (clause 5): [`Setup::clock`].
+    clock: Option<fn() -> u64>,
     events: Sender<Event>,
     notes_tx: Sender<Note>,
     notes: Receiver<Note>,
@@ -482,6 +497,7 @@ pub(crate) fn run(engine: Shared, setup: Setup, cmds: &Receiver<Cmd>, events: &S
         page_image,
         scope: setup.port.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
         timing: setup.timing,
+        clock: setup.clock,
         events: events.clone(),
         notes_tx,
         notes,
@@ -1166,7 +1182,13 @@ impl Desk {
     /// Ask board `i` what it runs, giving it `wait` to answer — and while
     /// it is ours and starting up, again and again on the same port until
     /// it answers (listen::ask_till_up), the board told meanwhile. `since`:
-    /// the board is starting up already (the write's boot line).
+    /// the board is starting up already (the write's boot line). Then, on
+    /// the page, the one write a listen makes (clause 5): a board whose
+    /// `@status` has `clock=` is asked its time once, on the same port, and
+    /// set when it is unset or more than 2 s off (listen::clock). One with
+    /// no `clock=` is never asked: the key's absence tells, never the
+    /// version. A listen is a job of its own, so no `@time` goes out during
+    /// the board's write, read, count or format.
     fn listen(&mut self, i: usize, wait: Duration, since: Option<Heard>) {
         let id = self.job(i, JobKind::Listen);
         let stop = self.slots[i].job.as_ref().expect("just made").stop.clone();
@@ -1174,15 +1196,24 @@ impl Desk {
         self.show(i);
         let (engine, notes, waits) = (self.engine.clone(), self.notes_tx.clone(), self.timing.waits);
         let candidate = self.slots[i].board.candidate.clone();
+        let clock = self.clock;
         std::thread::spawn(move || {
             let port = candidate.port.clone();
+            let mut clocked = None;
             let asked = listen_with(&*engine, &candidate, &notes, |wire, note| {
                 let mut told = |heard: &Heard| {
                     let _ = notes.send(Note::Starting { port: port.clone(), id, heard: heard.clone() });
                 };
-                listen::ask_till_up(wire, &port, wait, waits, since, &stop, note, &mut told)
+                let asked = listen::ask_till_up(wire, &port, wait, waits, since, &stop, &mut *note, &mut told)?;
+                let has_clock = matches!(&asked.heard, Heard::Status(s) if s.clock != Clock::Unknown);
+                if let Some(now) = clock.filter(|_| has_clock && !stop.load(Ordering::Relaxed)) {
+                    let found = listen::clock(wire, &port, &now, false, waits, &stop, note);
+                    // Told to stop part way: nothing claimed.
+                    clocked = (!stop.load(Ordering::Relaxed)).then_some(found);
+                }
+                Ok(asked)
             });
-            let _ = notes.send(Note::Ended { port, id, end: End::Heard(asked) });
+            let _ = notes.send(Note::Ended { port, id, end: End::Heard(asked, clocked) });
         });
     }
 
@@ -1319,8 +1350,8 @@ impl Desk {
         match end {
             End::Stopped => {}
             // Stopped part way: nothing learned, nothing claimed.
-            End::Heard(Asked { heard: Heard::Nothing, .. }) => {}
-            End::Heard(asked) => {
+            End::Heard(Asked { heard: Heard::Nothing, .. }, _) => {}
+            End::Heard(asked, clocked) => {
                 let board = &mut self.slots[i].board;
                 if matches!(asked.heard, Heard::Status(_) | Heard::Old { .. } | Heard::Starting { .. }) {
                     runs_again(board);
@@ -1330,6 +1361,14 @@ impl Desk {
                 let failed = matches!(board.heard, Heard::InUse { .. } | Heard::Failed(_));
                 let line = heard_line(board);
                 self.log(Some(&port), line, if failed { LogKind::Fail } else { LogKind::Fact });
+                if let Some(clocked) = clocked {
+                    if let Ok(set @ Clocked { sent: Some(_), .. }) = &clocked {
+                        self.slots[i].board.clock_set = Some(set.clone());
+                    }
+                    if let Some((line, kind)) = clock_line(&clocked) {
+                        self.log(Some(&port), line, kind);
+                    }
+                }
             }
             End::Facts(Ok(facts)) => {
                 let board = &mut self.slots[i].board;
@@ -1580,6 +1619,35 @@ pub(crate) fn took_text(took: Duration) -> String {
 /// line, in gold, and in the board's log (contract clause 59): a refusal
 /// is told apart by when it came. None for a format let go with the page.
 /// `version`: the board's, for firmware with no format.
+/// The log's line for what a listen's clock came to (clause 5), when it
+/// says one: the set, as a fact; a refusal, a time this computer can't
+/// give, a board that didn't answer, in gold, the board's clock as it was.
+/// A clock in step says nothing past the host lines, nor does firmware
+/// that turns out to have no clock verb (`@err 7 time`): it is left as it
+/// is.
+pub(crate) fn clock_line(clocked: &Result<Clocked, TimeWhy>) -> Option<(String, LogKind)> {
+    let fact = |text: std::borrow::Cow<str>| Some((text.to_string(), LogKind::Fact));
+    let fail = |text: std::borrow::Cow<str>| Some((text.to_string(), LogKind::Fail));
+    match clocked {
+        Ok(Clocked { sent: None, .. }) => None,
+        Ok(Clocked { off_ms: None, .. }) => fact(t!("dev.card.log_clock_unset")),
+        Ok(Clocked { off_ms: Some(off), .. }) => fact(t!("dev.card.log_clock_off", s = seconds_off(*off))),
+        Err(TimeWhy::Old) => None,
+        Err(TimeWhy::Range) => fail(t!("dev.card.log_clock_range")),
+        Err(TimeWhy::Rtc) => fail(t!("dev.card.log_clock_rtc")),
+        Err(TimeWhy::OurClock) => fail(t!("dev.card.log_clock_ours")),
+        Err(TimeWhy::NoAnswer) => fail(t!("dev.card.log_clock_silent")),
+        Err(TimeWhy::Syntax) => fail(t!("dev.card.log_clock_failed", why = "@err 1 time")),
+        Err(TimeWhy::Other(line)) => fail(t!("dev.card.log_clock_failed", why = line)),
+        Err(TimeWhy::Port(e)) => fail(t!("dev.card.log_clock_failed", why = e.text())),
+    }
+}
+
+/// How far off a board's clock was, `3.2`, in seconds either way.
+pub(crate) fn seconds_off(off_ms: i64) -> String {
+    format!("{:.1}", off_ms.unsigned_abs() as f64 / 1000.0)
+}
+
 pub(crate) fn format_end(why: &FormatWhy, port: &str, version: Option<&str>) -> Option<String> {
     let known = |prefix: &str, why: &str, words: &[&str]| {
         words.contains(&why).then(|| t!(&format!("dev.card.{prefix}_{why}"), port = port).to_string())
@@ -1947,9 +2015,18 @@ pub(crate) mod tests {
         waits: listen::tests::QUICK,
     };
 
-    /// The worker's start on `supply`: no flag, every board.
+    /// The worker's start on `supply`: no flag, every board, the page's
+    /// clock.
     pub(crate) fn setup(supply: Arc<dyn Supply>) -> Setup {
-        Setup { supply, preset: None, flags_mode: None, port: None, timing: QUICK, firmware_first: false }
+        Setup {
+            supply,
+            preset: None,
+            flags_mode: None,
+            port: None,
+            timing: QUICK,
+            firmware_first: false,
+            clock: Some(wall_ms),
+        }
     }
 
     /// A worker on `fake`, the pin's two builds on the test's shelf in
@@ -1978,6 +2055,7 @@ pub(crate) mod tests {
             port: port.map(str::to_string),
             timing: QUICK,
             firmware_first: first,
+            clock: Some(wall_ms),
         };
         rig_on(fake, setup, shelf, trace)
     }
@@ -1995,6 +2073,7 @@ pub(crate) mod tests {
             port: None,
             timing: QUICK,
             firmware_first: false,
+            clock: Some(wall_ms),
         };
         rig_on(fake, setup, shelf, trace)
     }
@@ -3219,5 +3298,156 @@ pub(crate) mod tests {
         // After the restart an unknown word is a failure, at once a refusal.
         assert!(said(FormatWhy::Failed("brownout".into())).starts_with("Couldn't format the card in COM3"));
         assert_eq!(said(FormatWhy::NotAsked("brownout".into())), "Not asked: COM3 answered brownout.");
+    }
+
+    // ── The clock (clause 5) ────────────────────────────────────────────────
+
+    /// The log lines about `port`, with how each is meant.
+    fn port_logs(r: &Rig, port: &str) -> Vec<(String, LogKind)> {
+        let of = |e: &Event| match e {
+            Event::Log { port: Some(p), text, kind } if p == port => Some((text.clone(), *kind)),
+            _ => None,
+        };
+        r.seen.iter().filter_map(of).collect()
+    }
+
+    /// The clock sets the fake engine traced, by port, in the ports' order
+    /// (each board is listened to on a thread of its own).
+    fn sets(r: &Rig) -> Vec<String> {
+        let set = |t: &String| t.strip_prefix("time ").and_then(|t| t.split(' ').next()).map(str::to_string);
+        let mut sets: Vec<String> = r.trace().iter().filter_map(set).collect();
+        sets.sort();
+        sets
+    }
+
+    /// Clause 5's one write: a listen asks a board whose `@status` has
+    /// `clock=` its time with a bare `@time`, once, and sets it with
+    /// `@time <unix-ms>` only when it is unset or more than 2 s off; the log
+    /// says so and the board keeps when for Details. A clock chip that takes
+    /// nothing is a gold line, the board as it was; a board without the key
+    /// is never asked; nothing is reset. Asked again, a clock in step is
+    /// only read.
+    #[test]
+    fn a_listen_sets_the_players_clock_only_when_unset_or_off_and_never_asks_one_without_the_key() {
+        let _en = crate::setup::tests::in_locale("en");
+        let boards = [
+            "status:v0.12.0/clock=unset",
+            "status:v0.12.0/clock=-90000",
+            "status:v0.12.0",
+            "status:v0.11.0",
+            "status:v0.12.0/clock=unset/rtc=dead",
+        ];
+        let mut r = rig(Fake::new(&boards.join(",")));
+        r.settled(5);
+        assert_eq!(sets(&r), ["FAKE0", "FAKE1"], "{:?}", r.trace());
+        let others = |t: &String| !t.starts_with("listen ") && !t.starts_with("time ");
+        assert!(!r.trace().iter().any(others), "listened to, never reset: {:?}", r.trace());
+
+        // Unset: set, and said.
+        let unset = r.board("FAKE0").clock_set.clone().expect("FAKE0's clock set");
+        assert_eq!((unset.before, unset.off_ms, unset.due), (listen::BoardTime::Unset, None, true));
+        assert!(unset.sent.is_some_and(|ms| listen::CLOCK_RANGE.contains(&ms)), "{unset:?}");
+        assert!(unset.after_ms.is_some_and(|ms| ms.abs() < 2000), "read again, in step: {unset:?}");
+        let logs = port_logs(&r, "FAKE0");
+        let said = ("the player's clock was unset: set it (@time)".to_string(), LogKind::Fact);
+        assert!(logs.contains(&said), "{logs:?}");
+        let host: Vec<&str> = logs.iter().map(|(t, _)| t.as_str()).filter(|t| t.starts_with("@time")).collect();
+        assert_eq!(host.len(), 6, "asked, set, asked again, word for word: {host:?}");
+        assert_eq!((host[0], host[1], host[3], host[4]), ("@time", "@time unset", "@time ok", "@time"));
+        assert!(logs.iter().all(|(t, k)| !t.starts_with("@time") || *k == LogKind::Quiet), "{logs:?}");
+        let at = |start: &str| logs.iter().position(|(t, _)| t.starts_with(start));
+        assert!(at("@status") < at("@time") && at("@time") < at(&said.0), "after its status: {logs:?}");
+
+        // A minute and a half behind: set, and said with how far.
+        let behind = r.board("FAKE1").clock_set.clone().expect("FAKE1's clock set");
+        assert!(behind.off_ms.is_some_and(|ms| (-91_000..-89_000).contains(&ms)), "{behind:?}");
+        let off = port_logs(&r, "FAKE1").into_iter().find(|(t, _)| t.ends_with(" s off: set it (@time)"));
+        let (line, kind) = off.expect("the off line");
+        let secs: f64 = line["the player's clock was ".len()..].split(' ').next().unwrap().parse().unwrap();
+        assert!((89.0..=91.0).contains(&secs) && kind == LogKind::Fact, "{line}");
+
+        // In step: read, never set, nothing said past the host lines.
+        assert_eq!(r.board("FAKE2").clock_set, None);
+        let step = port_logs(&r, "FAKE2");
+        let asked = step.iter().filter(|(t, _)| t.starts_with("@time")).count();
+        assert_eq!(asked, 2, "@time and its answer: {step:?}");
+        assert!(!step.iter().any(|(t, _)| t.contains("player's clock")), "{step:?}");
+
+        // No `clock=`: never asked.
+        let old = port_logs(&r, "FAKE3");
+        assert!(!old.iter().any(|(t, _)| t.contains("@time")), "{old:?}");
+
+        // The clock chip takes nothing: gold, the board as it was.
+        assert_eq!(r.board("FAKE4").clock_set, None);
+        let rtc = "the player's clock wasn't set: its clock chip didn't take the time (@err 4 time rtc)";
+        assert!(port_logs(&r, "FAKE4").contains(&(rtc.to_string(), LogKind::Fail)));
+
+        // Ask again: the clock set is in step now, so it is only read, and
+        // Details keeps when it was set.
+        let listens = |r: &Rig| port_logs(r, "FAKE0").iter().filter(|(_, k)| *k == LogKind::Phase).count();
+        r.send(Cmd::Listen { port: "FAKE0".into() });
+        r.until("asked again", |r| listens(r) == 2 && r.board("FAKE0").work == Work::Idle);
+        assert_eq!(sets(&r), ["FAKE0", "FAKE1"], "set once: {:?}", r.trace());
+        assert_eq!(r.board("FAKE0").clock_set.as_ref(), Some(&unset));
+        r.quit();
+    }
+
+    /// This computer's own clock outside the board's range sends no time:
+    /// a gold line, the board as it was. And `--yes`'s desk, which has no
+    /// clock, only listens.
+    #[test]
+    fn a_computer_clock_the_board_cant_take_sends_nothing_and_a_desk_with_no_clock_never_asks() {
+        let _en = crate::setup::tests::in_locale("en");
+        let fake = Fake::new("status:v0.12.0/clock=unset");
+        let (trace, shelf) = (fake.trace(), Arc::new(Shelf::new()));
+        let unset_here: fn() -> u64 = || 1_000;
+        let start = Setup { clock: Some(unset_here), ..setup(shelf.clone()) };
+        let mut r = rig_on(fake, start, shelf, trace);
+        r.settled(1);
+        let ours = "the player's clock wasn't set: this computer's clock isn't between 2026 and 2099";
+        assert!(port_logs(&r, "FAKE0").contains(&(ours.to_string(), LogKind::Fail)));
+        assert!(sets(&r).is_empty() && r.board("FAKE0").clock_set.is_none(), "{:?}", r.trace());
+        let host: Vec<String> = port_logs(&r, "FAKE0").into_iter().map(|(t, _)| t).collect();
+        let host: Vec<&String> = host.iter().filter(|t| t.starts_with("@time")).collect();
+        assert_eq!(host, ["@time", "@time unset"], "asked, nothing sent");
+        r.quit();
+
+        let fake = Fake::new("status:v0.12.0/clock=unset");
+        let (trace, shelf) = (fake.trace(), Arc::new(Shelf::new()));
+        let start = Setup { clock: None, ..setup(shelf.clone()) };
+        let mut r = rig_on(fake, start, shelf, trace);
+        r.settled(1);
+        assert!(!port_logs(&r, "FAKE0").iter().any(|(t, _)| t.contains("@time")));
+        assert_eq!(r.board("FAKE0").status().map(|s| s.clock), Some(Clock::Unset), "heard, left as it is");
+        r.quit();
+    }
+
+    /// The log's words for every way a clock can end, and none for a board
+    /// in step or one with no clock verb after all.
+    #[test]
+    fn the_clocks_log_line_says_each_end_and_is_gold_where_the_board_was_left_as_it_was() {
+        let _en = crate::setup::tests::in_locale("en");
+        let clocked = |off_ms: Option<i64>, sent: Option<u64>| {
+            let before = if off_ms.is_some() { listen::BoardTime::At(1) } else { listen::BoardTime::Unset };
+            Ok(Clocked { before, off_ms, due: sent.is_some(), sent, after_ms: None })
+        };
+        let line = |c: &Result<Clocked, TimeWhy>| clock_line(c);
+        assert_eq!(line(&clocked(Some(400), None)), None, "in step");
+        assert_eq!(line(&Err(TimeWhy::Old)), None, "no clock verb: left as it is");
+        let set = line(&clocked(Some(-3_240), Some(1_792_332_202_123))).unwrap();
+        assert_eq!(set, ("the player's clock was 3.2 s off: set it (@time)".into(), LogKind::Fact));
+        let gold = |why: TimeWhy| {
+            let (text, kind) = line(&Err(why)).unwrap();
+            assert_eq!(kind, LogKind::Fail, "{text}");
+            text
+        };
+        let range = "the player's clock wasn't set: it refused the time as out of range (@err 5 time)";
+        assert_eq!(gold(TimeWhy::Range), range);
+        assert_eq!(gold(TimeWhy::NoAnswer), "the player didn't answer @time");
+        assert_eq!(gold(TimeWhy::Syntax), "couldn't set the player's clock: @err 1 time");
+        let other = gold(TimeWhy::Other("@err 4 time busy".into()));
+        assert_eq!(other, "couldn't set the player's clock: @err 4 time busy");
+        assert_eq!(seconds_off(90_049), "90.0");
+        assert_eq!(seconds_off(-1_960), "2.0");
     }
 }

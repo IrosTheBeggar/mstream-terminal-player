@@ -23,6 +23,7 @@ use super::DeviceError;
 use super::engine::DeviceInfo;
 use super::firmware::{AppDesc, ElfMode, Image, ImageFacts, Mode, Place, Target, elf_mode, place};
 use super::flow::Phase;
+use super::listen::Clocked;
 use super::ports::Candidate;
 
 /// The running firmware's answer to `@status` (the firmware repo's
@@ -579,6 +580,9 @@ pub(crate) struct Board {
     /// Its next write, when something chose it ([`Board::pending`] says
     /// whether it differs from the default).
     pub next: Option<Next>,
+    /// Its clock as a listen of this visit last set it (contract clause 5):
+    /// what it was, and the time sent. Details' *Clock* fact (clause 61).
+    pub clock_set: Option<Clocked>,
 }
 
 impl Board {
@@ -594,6 +598,7 @@ impl Board {
             format: Format::Idle,
             written: None,
             next: None,
+            clock_set: None,
         }
     }
 

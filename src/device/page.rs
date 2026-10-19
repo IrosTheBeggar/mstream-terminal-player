@@ -52,7 +52,7 @@ use super::board::{Board, By, Card, CardKind, CardRoot, CardUnknown, Count, Coun
 use super::board::{FormatWhy, Free, Heard, Next, NextState, Primary, Probe, Status, Tracks, Verdict, Work};
 use super::board::{Written, format_secs, gb};
 use super::desk::{self, All, Cmd, Event, LogKind, Refusal, format_end, took_text};
-use super::firmware::{Check, Image, Mode, Origin, Place, Target, place};
+use super::firmware::{Check, Image, Mode, Origin, Place, Target, clock_at, place};
 use super::flow::Phase;
 use super::listen::{self, IdentifyWhy};
 use super::{DeviceError, engine};
@@ -386,6 +386,7 @@ pub(crate) fn run(args: FlashArgs) -> i32 {
         port: args.port.clone(),
         timing: desk::Timing::REAL,
         firmware_first: false,
+        clock: Some(desk::wall_ms),
     };
     let (cmds, events) = desk::spawn(engine, setup);
     let mut page = Page::with_channels(cmds, events, args.erase_asked());
@@ -424,6 +425,7 @@ pub(crate) fn hosted(transfer: Option<Transfer>) -> Page {
         port: None,
         timing: desk::Timing::REAL,
         firmware_first: false,
+        clock: Some(desk::wall_ms),
     };
     let (cmds, events) = desk::spawn(engine, setup);
     let mut page = Page::with_channels(cmds, events, None);
@@ -2838,6 +2840,17 @@ fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
             }
             rows.push(fact("dev.label_card_fact", card.join(" · ")));
         }
+        // The clock as a listen of this visit set it (clauses 5 and 61).
+        if let Some(set) = &board.clock_set
+            && let Some(ms) = set.sent
+        {
+            let time = clock_at(ms / 1000);
+            let value = match set.off_ms {
+                None => t!("dev.card.board_clock_set", time = time),
+                Some(off) => t!("dev.card.board_clock_off", time = time, s = desk::seconds_off(off)),
+            };
+            rows.push(fact("dev.card.board_clock", value.to_string()));
+        }
     }
     rows.push(Row::Log);
     let again = page.can_write_again(board);
@@ -4373,6 +4386,63 @@ mod tests {
         assert!(ends.sent().is_empty(), "L asked once per board");
     }
 
+    /// `board` with its clock set by a listen (clause 5) at [`SET_AT`], off
+    /// by `off_ms` before (None: unset).
+    fn clock_set(board: Board, off_ms: Option<i64>) -> Board {
+        let at = |off: i64| listen::BoardTime::At((SET_AT as i64 + off) as u64);
+        let before = off_ms.map_or(listen::BoardTime::Unset, at);
+        let set = listen::Clocked { before, off_ms, due: true, sent: Some(SET_AT), after_ms: Some(12) };
+        Board { clock_set: Some(set), ..board }
+    }
+
+    /// 2026-10-18 14:03:22.123 UTC.
+    const SET_AT: u64 = 1_792_332_202_123;
+
+    /// Details' *Clock* fact says when this computer set the player's clock
+    /// and how it was (clauses 5 and 61); the log says it was set, and a
+    /// clock left as it was in gold. A board whose clock no listen set has
+    /// no Clock fact.
+    #[test]
+    fn details_says_when_this_computer_set_the_players_clock_and_the_log_says_why_not_in_gold() {
+        let _en = english();
+        let own = formats("COM3", "v0.8.0", |_| {});
+        let (mut page, ends) = page_with(|e| e.boards(vec![own.clone()]));
+        press(&mut page, KeyCode::Char('d'));
+        assert!(!window(&mut page).contains("Clock "), "no clock set, no fact");
+
+        let line = |clocked: Result<listen::Clocked, listen::TimeWhy>| {
+            let (text, kind) = desk::clock_line(&clocked).expect("a line");
+            Event::Log { port: Some("COM3".into()), text, kind }
+        };
+        let unset = clock_set(own.clone(), None);
+        ends.tell([Event::Board(unset.clone()), line(Ok(unset.clock_set.clone().unwrap()))]);
+        page.pump();
+        let time = clock_at(SET_AT / 1000);
+        let frame = window(&mut page);
+        let fact = format!("Clock         set by this computer at {time} (it was unset)");
+        assert!(frame.contains(&fact), "{frame}");
+        assert!(frame.contains("00:00  the player's clock was unset: set it (@time)"), "{frame}");
+        let buf = hosted_at(&mut page, 100, 30, WINDOW);
+        let y = (0..30).find(|y| row_of(&buf, *y).contains("clock was unset")).expect("the line");
+        let x = row_of(&buf, y).find("the player's").map(|at| row_of(&buf, y)[..at].chars().count());
+        assert_ne!(buf[(x.unwrap() as u16, y)].fg, th().gold, "a fact");
+
+        // Left as it was: in gold (the log's newest line, cut to its width).
+        ends.tell([line(Err(listen::TimeWhy::Rtc))]);
+        page.pump();
+        let buf = hosted_at(&mut page, 100, 30, WINDOW);
+        let gold = "00:00  the player's clock wasn't set: its clock chip didn't take the";
+        let y = (0..30).find(|y| row_of(&buf, *y).contains(gold));
+        let y = y.unwrap_or_else(|| panic!("{}", text_of(&buf)));
+        let x = row_of(&buf, y).find("the player's").map(|at| row_of(&buf, y)[..at].chars().count());
+        assert_eq!(buf[(x.unwrap() as u16, y)].fg, th().gold, "the clock left as it was, in gold");
+
+        ends.tell([Event::Board(clock_set(own, Some(-3_240)))]);
+        page.pump();
+        let fact = format!("Clock         set by this computer at {time} (it was 3.2 s off)");
+        assert!(window(&mut page).contains(&fact), "{}", window(&mut page));
+    }
+
     #[test]
     fn the_log_scrolls_under_the_wheel_and_follows_the_newest_line_otherwise() {
         let _en = english();
@@ -4893,6 +4963,7 @@ mod tests {
             port: None,
             timing: crate::device::desk::tests::QUICK,
             firmware_first: false,
+            clock: Some(desk::wall_ms),
         };
         let (cmds, events) = desk::spawn(std::sync::Arc::new(fake), setup);
         let mut page = Page::with_channels(cmds, events, None);
@@ -5861,6 +5932,21 @@ mod tests {
         add("format, its card indexing, the gate", &|e| e.boards(vec![indexing.clone()]), own_gate);
         let cant = answering_with("COM3", "v0.8.0", |s| s.card = CardKind::Ntfs);
         add("format, firmware that can't", &|e| e.boards(vec![cant.clone()]), &[]);
+        // The clock a listen set, and each way one is left as it was (clause 5).
+        let clocked = clock_set(formats("COM3", "v0.8.0", |_| {}), Some(-3_240));
+        let set = Ok(clocked.clock_set.clone().expect("set"));
+        let port = DeviceError::Gone { port: "COM3".into() };
+        use listen::TimeWhy::{NoAnswer, OurClock, Port, Range, Rtc, Syntax};
+        let ends = [set, Err(Range), Err(Rtc), Err(OurClock), Err(NoAnswer), Err(Syntax), Err(Port(port))];
+        let lines: Vec<Event> = ends
+            .iter()
+            .filter_map(desk::clock_line)
+            .map(|(text, kind)| Event::Log { port: Some("COM3".into()), text, kind })
+            .collect();
+        add("the clock set, details", &|e| {
+            e.boards(vec![clocked.clone()]);
+            e.tell(lines.clone());
+        }, &[KeyCode::Char('d')]);
         add("two", &Ends::two, &[]);
         add("two, the other", &Ends::two, &[KeyCode::Right]);
         let in_use = heard("COM5", Heard::InUse { detail: "busy".into() });
