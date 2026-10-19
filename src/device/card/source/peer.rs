@@ -15,10 +15,10 @@
 //! copy`, so a key that forbids copies refuses it (403), and the transfer
 //! stops for that peer and says why. Else the parent's stream proxy, which
 //! passes the copy purpose on from the card transfer's batch of mStream
-//! changes (a parent known as one of that batch by its `instanceId`: mStream
-//! says nothing of its proxy); an older parent's can't, so a peer reachable
-//! only through it is the listener's call, asked once, skipped until they
-//! allow it.
+//! changes (as the parent's `/api/` says, `features.federationProxy`, or
+//! its `instanceId` on the batch's own builds from before the key); an
+//! older parent's can't, so a peer reachable only through it is the
+//! listener's call, asked once, skipped until they allow it.
 //!
 //! **What a peer allows** ([`Peer`]): at most two of its files at once in
 //! this process (a key's three streams are shared with playback); a 429
@@ -192,8 +192,8 @@ pub(crate) enum Reach {
     Direct,
     /// The parent's stream proxy, which passes the copy purpose on: a
     /// parent of the card transfer's batch of mStream changes, as its
-    /// `instanceId` tells (an inference: its `/api/` says nothing of the
-    /// proxy).
+    /// `/api/` says (`features.federationProxy`; on the batch's own builds
+    /// from before the key, its `instanceId`).
     Proxy,
     /// An older parent's stream proxy, which can't say the bytes are a
     /// copy: the listener allowed it.

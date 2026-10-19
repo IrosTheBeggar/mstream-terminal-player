@@ -111,6 +111,11 @@ pub(crate) struct Library {
     pub(crate) old: bool,
     /// Its `instanceId`, when not [`ID`].
     pub(crate) instance: Option<&'static str>,
+    /// The version `/api/` says, when not 6.31.1 (the one the card
+    /// transfer's batch was cut from, which its builds say).
+    pub(crate) version: Option<&'static str>,
+    /// `/api/`'s `features.federationProxy`, when it says one.
+    pub(crate) proxy_says: Option<Value>,
     /// Its federation peers (B9).
     peers: Vec<peers::FedPeer>,
 }
@@ -173,7 +178,7 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
     match (asked.method.as_str(), path.as_str()) {
         ("GET", "/api/") => {
             let mut body = json!({
-                "server": "6.31.1",
+                "server": lib.version.unwrap_or("6.31.1"),
                 "features": {"sync": true, "discovery": true, "stats": 2,
                              "transcode": lib.transcode.clone().unwrap_or_else(
                                  || json!({"defaultCodec": "opus", "defaultBitrate": "96k"}))},
@@ -181,6 +186,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             });
             if !lib.old {
                 body["instanceId"] = json!(lib.instance.unwrap_or(ID));
+            }
+            if let Some(proxy) = &lib.proxy_says {
+                body["features"]["federationProxy"] = proxy.clone();
             }
             if lib.disk.is_some() {
                 body["user"]["admin"] = json!(true);

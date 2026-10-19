@@ -14,9 +14,9 @@
 //!    even its listing, which its quota counts.
 //! 3. A way to its bytes the listener allows ([`peer::reach`]): the direct
 //!    guest path, else the parent's proxy when it says the bytes are a
-//!    copy (as its `instanceId` tells: [`proxy_says_copies`]), else only
-//!    once the listener lets an older parent's proxy carry them (stored on
-//!    the card: asked once).
+//!    copy (as its `/api/` says: [`proxy_says_copies`]), else only once
+//!    the listener lets an older parent's proxy carry them (stored on the
+//!    card: asked once).
 //! 4. Its `/api/`: its libraries, its own id, and its key's allowance
 //!    where it shows one (a key that forbids copies is never read). A day
 //!    with nothing left, by the budget or the key's quota, parks it there.
@@ -127,8 +127,8 @@ pub(crate) struct PeerSummary {
     pub(crate) status: Status,
     /// Why, for any status but read.
     pub(crate) why: Option<String>,
-    /// The way its bytes came: `proxy` is a parent taken to pass the copy
-    /// purpose on by its `instanceId` alone ([`proxy_says_copies`]).
+    /// The way its bytes came: `proxy` is a parent that says it passes the
+    /// copy purpose on ([`proxy_says_copies`]).
     pub(crate) reach: Option<Reach>,
     pub(crate) libraries: Vec<String>,
     /// The selection's files, and those the card can't take.
@@ -243,16 +243,26 @@ fn made_here() -> TranscodeInfo {
 
 /// The parent's stream proxy says to the peer that the bytes it carries are
 /// copies (`X-mStream-Purpose`, the card transfer's batch of mStream
-/// changes). mStream says nothing of its proxy in `/api/`, so this is
-/// inferred from the `instanceId` it does say, the same batch's, which came
-/// after the proxy's change in it: a parent of that batch whole has both.
-/// One with the id and not the proxy's change would carry copies its peer
-/// never sees declared; the run still refuses a key that forbids them when
-/// the peer shows its allowance (step 4), never an older peer's. So the
-/// inference is made here alone, until the batch says it in its own words.
-fn proxy_says_copies(info: &LayeredInfo) -> bool {
-    info.instance_id.is_some()
+/// changes), as its `/api/` says in `features.federationProxy.purpose`; a
+/// server whose proxy drops the header leaves the key out. Without the key,
+/// the batch's `instanceId` stands for it only on the batch's own builds
+/// from before the key, which had both changes and still say the version
+/// the batch was cut from ([`PAST_BATCH_BASE`]); on a later server the id
+/// with no key is a proxy that drops the header. The run still refuses a
+/// key that forbids copies when the peer shows its allowance (step 4),
+/// never an older peer's.
+pub(super) fn proxy_says_copies(info: &LayeredInfo) -> bool {
+    if let Some(proxy) = &info.features.federation_proxy {
+        return proxy.purpose;
+    }
+    let server = info.server.as_deref();
+    let base = server.and_then(|v| crate::dj::version_at_least(v, PAST_BATCH_BASE));
+    info.instance_id.is_some() && base == Some(false)
 }
+
+/// The first mStream version after 6.31.1, the one the card transfer's
+/// batch was cut from and its builds say until a release takes it.
+const PAST_BATCH_BASE: (u32, u32, u32) = (6, 31, 2);
 
 /// The peers the run reads: the ones asked for, else the ones the card's
 /// settings name under this parent.

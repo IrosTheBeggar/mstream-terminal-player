@@ -181,6 +181,21 @@ pub struct LayeredFeatures {
     /// older server omits it, and a client never probes for the route.
     #[cfg_attr(not(test), allow(dead_code))]
     pub sync: bool,
+    /// What the server's peer stream proxy passes on to the peer (the card
+    /// transfer's batch of mStream changes). Like `sync`, the key's
+    /// presence is the signal: a server whose proxy drops the copy header
+    /// leaves it out, as an older one does, and never says `purpose: false`.
+    #[serde(rename = "federationProxy", deserialize_with = "soft")]
+    pub federation_proxy: Option<FederationProxy>,
+}
+
+/// `features.federationProxy`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FederationProxy {
+    /// `X-mStream-Purpose` reaches the peer: a copy made through the proxy
+    /// is a declared one, which a key with copies off refuses.
+    pub purpose: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

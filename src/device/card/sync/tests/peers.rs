@@ -14,7 +14,7 @@ use crate::device::card::budget::{Budget, PeerKey, next_midnight};
 use crate::device::card::contract::server::server_url_key;
 use crate::device::card::source::ffmpeg::Convert;
 use crate::device::card::source::peer::{Dial, Reach, Tunnel};
-use crate::device::card::sync::peers::{Ffmpeg, Status};
+use crate::device::card::sync::peers::{Ffmpeg, Status, proxy_says_copies};
 
 // ── A peer ──────────────────────────────────────────────────────────────────
 
@@ -498,7 +498,8 @@ fn a_peer_that_refuses_copies_is_stopped_and_says_why() {
 /// the listener allows it, it is read through the proxies — one-byte probes,
 /// never a HEAD there, the art's 256 px copy — and the card keeps the answer.
 /// A parent of the card transfer's batch passes the copy purpose on, and is
-/// read without asking.
+/// read without asking: here one of the batch's own builds from before
+/// `features.federationProxy`, known by its `instanceId` at 6.31.1.
 #[test]
 fn a_peer_only_the_proxy_reaches_is_asked_about_once() {
     let scratch = Scratch::new("peer-proxy");
@@ -554,6 +555,76 @@ fn a_peer_only_the_proxy_reaches_is_asked_about_once() {
     assert_eq!(ran(&synced).written, 1);
     assert_eq!(synced.peers[0].reach, Some(Reach::Proxy));
     assert_eq!(peer.lock().unwrap().purposes.last().unwrap().as_deref(), Some("copy"));
+}
+
+/// A parent says in its `/api/` that its stream proxy passes the copy
+/// purpose on (`features.federationProxy`): a peer only that proxy reaches
+/// is read through it, each file said to be a copy, with nothing asked of
+/// the listener. A parent past the version the batch was cut from, with
+/// the batch's `instanceId` and no such key, has a proxy that drops the
+/// header: it is asked about, as an older parent is.
+#[test]
+fn a_proxy_that_says_it_declares_copies_is_read_through_and_one_that_doesnt_is_asked_about() {
+    let scratch = Scratch::new("peer-proxy-says");
+    let sim = card(&scratch);
+    let (base, fake, peer, dial) = world(false, false, folk());
+    fake.lock().unwrap().version = Some("6.32.0");
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!(ran(&synced).records, 4, "the server's own go in");
+    assert_eq!(synced.peers[0].status, Status::AskProxy, "the id alone says nothing past the base");
+    assert!(asked_of(&peer).is_empty(), "nothing asked of the peer");
+
+    // It says so: read through the proxy, every file a declared copy.
+    fake.lock().unwrap().proxy_says = Some(json!({"purpose": true}));
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.verified.clone(), outcome.written), (Ok(()), 2), "{:?}", synced.notes);
+    let said = (synced.peers[0].status.clone(), synced.peers[0].reach);
+    assert_eq!(said, (Status::Read, Some(Reach::Proxy)));
+    let asked = asked_of(&peer);
+    let proxied = "parent GET /media/Folk/Dana%20Duo/Album/01.mp3";
+    assert!(asked.iter().any(|a| a == proxied), "{asked:?}");
+    let purposes = peer.lock().unwrap().purposes.clone();
+    let copies = purposes.iter().all(|p| p.as_deref() == Some("copy"));
+    assert!(!purposes.is_empty() && copies, "{purposes:?}");
+    let state = State::of(&look(&sim).state).unwrap();
+    assert!(!state.settings.peers[0].proxy_copies, "the listener was never asked");
+}
+
+/// What says a parent's proxy passes the copy purpose on: `/api/`'s
+/// `features.federationProxy.purpose`, as mStream says it; without the
+/// key, the batch's `instanceId` only on the batch's own builds, which say
+/// 6.31.1, the version it was cut from.
+#[test]
+fn the_proxys_purpose_is_its_apis_and_the_id_stands_for_it_on_the_batchs_own_builds_alone() {
+    let says = |body: Value| proxy_says_copies(&serde_json::from_value(body).unwrap());
+    let api = |server: &str, id: bool, proxy: Option<Value>| {
+        let user = json!({"vpaths": ["Rock"]});
+        let mut body = json!({"server": server, "features": {"sync": true}, "user": user});
+        if id {
+            body["instanceId"] = json!(ID);
+        }
+        if let Some(proxy) = proxy {
+            body["features"]["federationProxy"] = proxy;
+        }
+        body
+    };
+    let declares = || Some(json!({"purpose": true}));
+    assert!(says(api("6.32.0", true, declares())));
+    assert!(says(api("6.32.0", false, declares())), "the key alone");
+    assert!(says(api("6.31.1", true, None)), "the batch's own build, from before the key");
+    assert!(says(api("6.31.1-dev", true, None)), "and a dev build of it");
+    assert!(!says(api("6.32.0", true, None)), "past the base, the id and no key: it drops it");
+    assert!(!says(api("6.31.1", false, None)), "6.31.1 as released: no batch");
+    assert!(!says(api("a fork", true, None)), "a version that doesn't read: no guess");
+    assert!(!says(json!({"instanceId": ID, "features": {}})), "no version");
+    let not = |proxy: Value| api("6.32.0", true, Some(proxy));
+    assert!(!says(not(json!({"purpose": false}))), "as said, though mStream never says it");
+    assert!(!says(not(json!({}))), "a key with no purpose");
+    assert!(!says(not(json!(true))), "a key of another shape costs the key alone");
 }
 
 /// A 429 of the peer's stream cap is waited out and the file asked again;
