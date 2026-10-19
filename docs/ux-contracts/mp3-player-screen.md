@@ -4,9 +4,9 @@
 |---|---|
 | **Design of record** | mStream `docs/designs/mp3-tab`, alternate **A · One card** (card 02) and its several-boards frames (card 05), with the grafts the set's README recommends — chosen by Paul on 2026-10-09 ("Go with alternate A, build it"); and for the Advanced options, alternate **A · An options sheet** (card 07) with the grafts of cards 08 and 09 the set's README recommends — chosen by Paul on 2026-10-10 ("Go with alternate A, build it"). This repo's page draws it: `src/device/page.rs` over the desk worker (`src/device/desk.rs`, `board.rs`, `listen.rs`), the same page `mstream-player device flash` opens and the GUI's MP3 Player tab hosts whole. The GUI adds only the tab, the way back, and the rules that keep a write from being left and a board from being left in its bootloader. |
 | **Design of record, the SD card transfer** | **The card-transfer design set (twelfth set), alternates per the user's picks of 2026-10-19.** **Provisional, with no commit pinned:** it is in no repo yet and will live in mStream `docs/designs/card-transfer`; its commit is pinned here once it lands there, in a commit of its own touching this header (the README's re-extraction rule). Until then the citations below ("card 07 §7, choice 6" and the like) can't be followed from a repo. It draws the placement chosen on 2026-10-18 (Q2, one tab row per subject) whole in its card 02, with the Card view's states (card 03), the sync (card 04), the card's Settings (card 05, alternate **A**, two tabs), the gates and formatting in the Core2 (card 06, the player's second step as alternate **B**, the hold), and play history, sets and the command line (card 07, whose section 7 holds the twelve choices and the picks). This repo's page is to draw it beside the board card (`src/device/page/card.rs`), over a transfer worker that lives at the GUI level (`src/device/card/worker.rs`; part B4). |
-| **Server API** | **For a board, none.** No mStream session is involved: each board is a USB serial port, asked over it with no reset (the firmware repo's `docs/HOST-STATUS.md`: `@status` with `cid=` and `clock=`, `@count`, `@identify`, `@time`, `@format`, and the console's `L` for firmware older than them), and the firmware written is the release this player pins — or, for one write, what the Advanced options sheet chose: the pin's other build, another release (GitHub's releases API, asked only when the sheet lists them), or a local build. **For a card in a reader, its own server**: the one the card names (its URL key and nickname in `/.mstream/state.json`), reached through this computer's saved sign-in for it, never necessarily the GUI's session; a peer's library through its parent (the multi-server contract). The calls: `GET /api/` (the server's `instanceId`, mStream B11); `POST /api/v1/sync/manifest` (paged, ETag/304) and `POST /api/v1/db/metadata/batch`; `GET /media/…` with Range, and `GET /transcode/…`; `/album-art/…` and `discovery/local/embeddings`; `POST /api/v1/stats/plays`; for peers, `federation/peers`, `…/peers/:id/access` and `file-explorer/recursive`, and the key's limits where the server offers them (mStream B10); beside the server on this computer, `admin/directories` and `admin/transcode`, to read its folders from disk (part A9). |
+| **Server API** | **For a board, none.** No mStream session is involved: each board is a USB serial port, asked over it with no reset (the firmware repo's `docs/HOST-STATUS.md`: `@status` with `cid=` and `clock=`, `@count`, `@identify`, `@time`, `@format`, and the console's `L` for firmware older than them), and the firmware written is the release this player pins — or, for one write, what the Advanced options sheet chose: the pin's other build, another release (GitHub's releases API, asked only when the sheet lists them), or a local build. **For a card in a reader, its own server**: the one the card names (its URL key and nickname in `/.mstream/state.json`), reached through this computer's saved sign-in for it, never necessarily the GUI's session; a peer's library through its parent (the multi-server contract). The calls: `GET /api/` (the server's `instanceId`, mStream B11, and `features.federationProxy`, whether its peer stream proxy forwards the copy header); `POST /api/v1/sync/manifest` (paged, ETag/304) and `POST /api/v1/db/metadata/batch`; `GET /media/…` with Range, and `GET /transcode/…`; `/album-art/…` and `discovery/local/embeddings`; `POST /api/v1/stats/plays`; for peers, `federation/peers`, `…/peers/:id/access` and `file-explorer/recursive`, and the key's limits where the server offers them (mStream B10); beside the server on this computer, `admin/directories` and `admin/transcode`, to read its folders from disk (part A9). |
 | **Already in this repo** | The page, live as its own command on the admin hub's terminal session; the GUI's Stats tab, which showed how a hub page lives under the top bar (the stats-screen contract), and the hub's `HostedRoom`, whose per-frame call this screen uses. The kit's gold warning modal (the libraries room's remove gate), its tab row (the Discovery room), its scan widget and its tall buttons. For the SD card transfer: the card contract's kit, names, tag reader and Auto DJ writer (`src/device/card/{contract,names.rs,tags.rs,autodj.rs}`); cards in readers held to the drive-safety rule (`card/volume/`); set-up, the card's state file and this computer's `cards.json` (`setup.rs`, `state.rs`, `cards.rs`); the sync engine with its plan, covers, dry run, the peers' budget and sets (`engine/`, `sync.rs`, `plan.rs`, `covers.rs`, `dry.rs`, `budget.rs`, `span.rs`); the play log read and posted (`history.rs`); the transfer client (`src/api/transfer.rs`); `cid=`, `clock=` and `@time` in `listen.rs`; the hidden commands that drive them for the real-card and board checks (`device card-probe`, `card-setup`, `card-sync`, `card-set`, `card-plays`, `time`). The play outbox and `report_plays_async` (the play-reporting contract), and `session_reach`/`reach_client` (`src/gui/stats.rs`). |
-| **Status** | Implemented 2026-10-04 (the tenth set's alternate A: the step line, the question, the erase box); **redrawn as alternate A of the eleventh set 2026-10-10** — this document first, then the page, the tab and the command line (Deviations log); **Advanced options (card 07) 2026-10-10** — the worker and the command line first, then this document's clauses 33–43, then the sheet; **the SD card transfer (the twelfth set) 2026-10-19** — this document's clauses 3a, 20a, 25a and 44–67 with the user's picks (Deviations log); the card's engine, set-up, sync, sets, peers and plays are built behind hidden commands (parts A2–A9, A12, A13, B1, B2, B7, B9, B15); the transfer worker, the Card view and the public commands (B4), and the Format route with `device format` (B6), are built (Deviations log); the tab's half of the clock (clause 5) comes next. |
+| **Status** | Implemented 2026-10-04 (the tenth set's alternate A: the step line, the question, the erase box); **redrawn as alternate A of the eleventh set 2026-10-10** — this document first, then the page, the tab and the command line (Deviations log); **Advanced options (card 07) 2026-10-10** — the worker and the command line first, then this document's clauses 33–43, then the sheet; **the SD card transfer (the twelfth set) 2026-10-19** — this document's clauses 3a, 20a, 25a and 44–67 with the user's picks (Deviations log); the card's engine, set-up, sync, sets, peers and plays are built behind hidden commands (parts A2–A9, A12, A13, B1, B2, B7, B9, B15); the transfer worker, the Card view and the public commands (B4), the Format route with `device format` (B6), and the tab's half of the clock (clause 5, B13), are built (Deviations log). |
 
 ## Intent
 
@@ -214,7 +214,13 @@ comes from the cache, or a download, beside them.
      takes) sends nothing; `@err 5 time`, and `@err 4 time rtc` (the
      board's clock chip didn't take it), leave the board as it was. The
      log says so once, in gold, and the listen goes on; the next listen
-     tries again.
+     tries again. So does a board that answers no `@time` within the
+     reply's wait ("the player didn't answer @time"), and any other
+     answer, word for word.
+   - The page's listens do this, the tab's and `device flash`'s alike;
+     `device flash --yes`'s lines, `device list` and `device format` only
+     listen. The hidden `device time` reads and sets one board's clock the
+     same way, for the device checks.
    - A board whose `@status` has no `clock=` (before 0.12.0) is never
      asked: absence is how the page tells, never the version. Should one
      answer `@err 7 time` anyway, it is left as it is.
@@ -1259,7 +1265,8 @@ comes from the cache, or a download, beside them.
     - **A relay**, above about 1 GB: "Sync 21.3 GB over a relay?" with the
       time both ways; *◂ Not now* and *Sync over the relay*.
     - **A parent's proxy**, once per peer, only on a parent whose mStream
-      doesn't forward the copy header (before B10): *◂ Leave Lisbon out* and
+      doesn't say it forwards the copy header (`GET /api/`'s
+      `features.federationProxy`; before B10): *◂ Leave Lisbon out* and
       *Copy through Home*.
 
 ### Formatting
@@ -1557,7 +1564,10 @@ new. Part B6 adds the format's refusals and failures beside them
 (`fmt_refused_*`, `fmt_failed_*`, `fmt_no_answer`, `fmt_lost`), which
 the set did not draw, and `gate_fmt_unread`: 19 keys; its review adds
 `fmt_refused_second_other` and `gate_fmt_music_building`, 21 in all
-(Deviations log).
+(Deviations log). Part B13's terminal half adds the clock's other ends,
+which the set did not draw either (clause 5): `log_clock_range`,
+`log_clock_rtc`, `log_clock_ours`, `log_clock_silent` and
+`log_clock_failed`, 5 keys.
 Not keys: the invented names, paths, sizes and versions; the command
 line's lines (plain English, like `device list`'s); the firmware's own
 strings for its dialogs (its repo's lib/core UiStrings, ten languages).
@@ -1574,6 +1584,9 @@ and the caret.
 | `dev.card.link_settings` · `link_stop` | Settings… · Stop at the next save |
 | `dev.card.board_is` | This is %{card} · synced %{when} from %{server} |
 | `dev.card.log_kept_yours` | kept %{file}: it changed on the card since the last sync; %{server}'s copy is beside it as %{copy} |
+| `dev.card.log_clock_unset` · `log_clock_off` | the player's clock was unset: set it (@time) · the player's clock was %{s} s off: set it (@time) |
+| `dev.card.log_clock_rtc` | the player's clock wasn't set: its clock chip didn't take the time (@err 4 time rtc) |
+| `dev.card.log_clock_ours` | the player's clock wasn't set: this computer's clock isn't between 2026 and 2099 |
 | `dev.card.gate_remove_title` | Remove %{n} tracks from %{card}? |
 | `dev.card.gate_half_box` · `hint_gate_box` | %{server} really has dropped them · e tick the box |
 | `dev.card.gate_fmt_title` | Format the card in %{port} as FAT32? |
@@ -1710,7 +1723,7 @@ The cards' command-line lines are plain English, like the `plan:` line.
   lock (`LockFileEx`, `flock`), so a command-line run and the GUI never
   write one card at once. It watches the readers every 2 s with part A7's
   `find()`. The clock of clause 5 is the desk's listen's, over
-  `listen::clock`, which the hidden `device time` drives today.
+  `listen::clock`, which the hidden `device time` drives too.
 - **Under test,** the Card view rides channels the test holds, as the
   board page does (`Page::quiet`), with fake volumes: part A7's fake mount
   tables, a scratch directory standing in for a card, the card contract's
@@ -2325,3 +2338,46 @@ The cards' command-line lines are plain English, like the `plan:` line.
   - **Words.** The two new keys in all ten locales, and the eight
     shortened lines: the nine languages other than English wait for the
     native review with the rest of B6's.
+- **2026-10-19 — Part B13's terminal half built: the clock from the
+  tab; and the proxy's purpose in mStream's own words.** Clause 5's one
+  write, over the firmware's `@time` as built (HOST-STATUS, "@time", at
+  09874f5 and 79a7438). What the build settled, and where it parts:
+  - **Where it is asked.** In the listen job itself, after its status, on
+    the port the listen holds (`desk::Desk::listen`, `listen::clock`): one
+    bare `@time`, one `@time <unix-ms>` when due, and the bare `@time`
+    again to read it back. A listen is a job of its own, so no `@time` goes
+    out during the board's write, read, count or format; a listen told to
+    stop partway (leaving the tab, quitting) claims nothing. The worker
+    takes this computer's clock as `desk::Setup::clock`: the page's
+    (`wall_ms`) for the tab and `device flash`; none for `device flash
+    --yes`, whose printed steps (clause 32) stay as they were, a script's
+    lines.
+  - **Details' *Clock* fact** is the last set of the visit (*set by this
+    computer at 14:03 (it was unset)*, or *(it was 3.2 s off)*), kept for
+    the visit while the board stays plugged in; a clock found in step adds
+    no fact. Its minute is `firmware::clock_at`'s, as the release list's
+    *asked at* is: this computer's zone where it names one, else UTC.
+  - **More gold lines than the clause named.** The clause names `@err 5
+    time`, `@err 4 time rtc` and this computer's clock; a board that
+    doesn't answer `@time` (`log_clock_silent`) and any other answer or a
+    port that fails partway (`log_clock_failed`, the answer word for word)
+    are said in gold too. `@err 7 time` from a board that said `clock=` is
+    left as it is, as the clause has it, with no line past the host lines.
+    5 new keys (Wording); the off is said to a tenth of a second with a
+    point in every language, as the card's rates are.
+  - **The proxy's purpose.** mStream's batch now says in `GET /api/` that
+    its peer stream proxy forwards `X-mStream-Purpose`
+    (`features.federationProxy: { purpose: true }`, the key left out,
+    never `purpose: false`, when it doesn't). The transfer reads that key
+    (`sync::peers::proxy_says_copies`), where wave 3 inferred it from the
+    batch's `instanceId`. The id still stands for it on the batch's own
+    builds from before the key, which say 6.31.1, the version the batch
+    was cut from; on a later server the id with no key is a proxy that
+    drops the header, and a peer only it reaches is asked about (clause
+    58's gate), as behind an older parent.
+  - **Words.** The five keys in all ten locales; the nine languages other
+    than English were written by the build and wait for the native
+    review.
+  - **Not tried on a board:** the set on a 0.12.0 Core2, its log line and
+    the fact (the firmware's device check 10); nor the proxy's key against
+    a running mStream of the batch.
