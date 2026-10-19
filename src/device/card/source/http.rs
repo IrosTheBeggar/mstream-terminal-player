@@ -23,11 +23,15 @@
 //! with the manifest, and it is skipped. Its Content-Type must be the codec
 //! asked for (mStream falls back to its own default silently). Then what
 //! the conversion dropped is put back ([`Finish`], B1's retag) before the
-//! card's one write. The server's `/transcode` has no cap of its own and a
-//! bulk job evicts its listeners' cache, so at most two conversions run at a
-//! time in this process ([`TRANSCODES`]); a run's conversions are made ahead
-//! of the engine, in its order, two at a time ([`Http::ahead`]), so the card
-//! is written while the server encodes.
+//! card's one write. An older server's `/transcode` has no cap of its own
+//! and a bulk job evicts its listeners' cache, so at most two conversions
+//! run at a time in this process ([`TRANSCODES`]); a run's conversions are
+//! made ahead of the engine, in its order, two at a time ([`Http::ahead`]),
+//! so the card is written while the server encodes. A server with a bulk
+//! queue ([`Http::bulk`]) is asked `?bulk=1` (out of its cache, behind its
+//! cap), at most as many at once as it runs; a full queue's 503 is waited
+//! out for as long as it says, as often as it says it, and never fails the
+//! file.
 //!
 //! Whether a failure stops the run or skips one file ([`Failed::stop`]):
 //! lost sign-in, a server out of reach after three tries, and a 429 stop it
@@ -48,6 +52,7 @@ use super::super::engine::{Failed, Fetched, Fetcher, Have, Part, WantedFile};
 use super::super::names::Bytes;
 use super::super::plan::codec_of;
 use super::length::{self, FileAt};
+use crate::api::transfer::CONVERSIONS;
 use crate::api::transfer::fetch::{FAT32_MAX, Fetch, FetchError, Rewind};
 use crate::api::urls::{TransferBitrate, TransferCodec};
 use crate::api::{ApiError, Client};
@@ -55,7 +60,7 @@ use crate::api::{ApiError, Client};
 /// Tries of one file: a first, then two more.
 const TRIES: u32 = 3;
 /// Conversions this process runs at once, every run together.
-const TRANSCODES: usize = 2;
+const TRANSCODES: usize = CONVERSIONS as usize;
 /// How far ahead of the engine a run's conversions are made: the one it is
 /// on, and this many more.
 const AHEAD: usize = 2;
@@ -70,11 +75,12 @@ static RUNNING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
 struct Turn;
 
 impl Turn {
-    /// Waits for a turn; None when `stop` is set first.
-    fn take(stop: &AtomicBool) -> Option<Turn> {
+    /// Waits for a turn, while `limit` or more run (at most
+    /// [`TRANSCODES`]); None when `stop` is set first.
+    fn take(stop: &AtomicBool, limit: usize) -> Option<Turn> {
         let (lock, cv) = &RUNNING;
         let mut running = lock.lock().unwrap_or_else(|e| e.into_inner());
-        while *running >= TRANSCODES {
+        while *running >= limit.clamp(1, TRANSCODES) {
             if stop.load(Ordering::Relaxed) {
                 return None;
             }
@@ -112,12 +118,14 @@ impl Finish for AsMade {
 }
 
 /// A conversion to make: its source, what it is made into, the length it
-/// must come to, and where it goes on this computer.
+/// must come to, and where it goes on this computer; `bulk`, asked as one
+/// file of a long job.
 #[derive(Clone, Debug)]
 struct Job {
     server_path: String,
     codec: TransferCodec,
     bitrate: TransferBitrate,
+    bulk: bool,
     expected_ms: Option<u64>,
     dest: PathBuf,
 }
@@ -161,6 +169,12 @@ fn failed(e: FetchError) -> Failed {
     }
 }
 
+/// A full bulk queue's Retry-After in seconds, held to between a second and
+/// five minutes (mStream says 10).
+fn busy_wait(wait: Duration) -> u64 {
+    wait.as_secs().clamp(1, 300)
+}
+
 /// Waits `n` seconds, or less when `stop` is set.
 fn pause(seconds: u64, stop: &AtomicBool) {
     for _ in 0..seconds * 10 {
@@ -188,18 +202,26 @@ fn until<T>(fut: impl std::future::Future<Output = T>, stop: &AtomicBool) -> Opt
     crate::runtime::block_on(both).ok().flatten()
 }
 
+/// How a run's conversions go: at most `limit` at a time (a bulk queue's
+/// cap, else [`TRANSCODES`]), and what the player plays.
+#[derive(Clone, Copy, Debug)]
+struct Pace {
+    limit: usize,
+    max_channels: u32,
+}
+
 /// Makes one conversion: see the module's note. A conversion that fails
 /// leaves no file.
-fn make(client: &Client, job: &Job, max_channels: u32, stop: &AtomicBool) -> Result<Made, Failed> {
-    let made = make_once(client, job, max_channels, stop);
+fn make(client: &Client, job: &Job, pace: Pace, stop: &AtomicBool) -> Result<Made, Failed> {
+    let made = make_once(client, job, pace, stop);
     if made.is_err() {
         let _ = fs::remove_file(&job.dest);
     }
     made
 }
 
-fn make_once(client: &Client, job: &Job, channels: u32, stop: &AtomicBool) -> Result<Made, Failed> {
-    let Some(_turn) = Turn::take(stop) else { return Err(skip("stopped")) };
+fn make_once(client: &Client, job: &Job, pace: Pace, stop: &AtomicBool) -> Result<Made, Failed> {
+    let Some(_turn) = Turn::take(stop, pace.limit) else { return Err(skip("stopped")) };
     let mut whole_before: Option<u64> = None;
     let mut why = String::new();
     for attempt in 1..=TRIES {
@@ -210,7 +232,19 @@ fn make_once(client: &Client, job: &Job, channels: u32, stop: &AtomicBool) -> Re
             return Err(skip("stopped"));
         }
         let fetch = Fetch::converted(&job.server_path, job.codec, job.bitrate).cap(FAT32_MAX);
-        let fetched = until(client.download_async(&fetch, &job.dest, &mut |_, _| {}), stop);
+        let fetch = if job.bulk { fetch.bulk() } else { fetch };
+        let fetched = loop {
+            let fetched = until(client.download_async(&fetch, &job.dest, &mut |_, _| {}), stop);
+            // The server's bulk queue is full: asked again when it says, for
+            // as long as it says so, and no try is spent.
+            match &fetched {
+                Some(Err(f)) if job.bulk && !stop.load(Ordering::Relaxed) => match f.error {
+                    FetchError::Busy(wait) => pause(busy_wait(wait), stop),
+                    _ => break fetched,
+                },
+                _ => break fetched,
+            }
+        };
         let got = match fetched {
             None => return Err(skip("stopped")),
             Some(Ok(got)) => got,
@@ -223,6 +257,7 @@ fn make_once(client: &Client, job: &Job, channels: u32, stop: &AtomicBool) -> Re
         let heard = FileAt::open(&job.dest)
             .map_err(|e| e.to_string())
             .and_then(|at| length::heard(job.codec, &at));
+        let channels = pace.max_channels;
         let checked = heard.clone().and_then(|h| length::check(&h, job.expected_ms, channels));
         match checked {
             Ok(()) => return Ok(Made { dest: job.dest.clone(), content_type: got.content_type }),
@@ -259,7 +294,7 @@ struct Line {
 struct Shared {
     client: Arc<Client>,
     jobs: Vec<Job>,
-    max_channels: u32,
+    pace: Pace,
     line: Mutex<Line>,
     cv: Condvar,
     stop: Arc<AtomicBool>,
@@ -273,11 +308,11 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn new(client: Arc<Client>, jobs: Vec<Job>, channels: u32, stop: Arc<AtomicBool>) -> Pipeline {
+    fn new(client: Arc<Client>, jobs: Vec<Job>, pace: Pace, stop: Arc<AtomicBool>) -> Pipeline {
         let key = |(i, j): (usize, &Job)| ((j.server_path.clone(), container_of(j.codec)), i);
         let at = jobs.iter().enumerate().map(key).collect();
         let (line, cv) = (Mutex::new(Line::default()), Condvar::new());
-        let shared = Arc::new(Shared { client, jobs, max_channels: channels, line, cv, stop });
+        let shared = Arc::new(Shared { client, jobs, pace, line, cv, stop });
         let workers = (0..TRANSCODES)
             .map(|_| {
                 let shared = shared.clone();
@@ -347,7 +382,7 @@ fn work(s: &Shared) {
             line.next += 1;
             line.next - 1
         };
-        let result = make(&s.client, &s.jobs[i], s.max_channels, &s.stop);
+        let result = make(&s.client, &s.jobs[i], s.pace, &s.stop);
         let mut line = s.line.lock().unwrap_or_else(|e| e.into_inner());
         line.done.insert(i, result);
         s.cv.notify_all();
@@ -398,6 +433,9 @@ pub(crate) struct Http {
     made: u64,
     /// A later run takes up what a run leaves of a file (2.12.8).
     resumable: bool,
+    /// The server's bulk queue, and how many of its conversions it runs at
+    /// once; None: a server without one.
+    bulk: Option<u32>,
 }
 
 impl Http {
@@ -413,7 +451,21 @@ impl Http {
             scratch: Scratch::new()?,
             made: 0,
             resumable: false,
+            bulk: None,
         })
+    }
+
+    /// The server takes conversions as bulk work, `slots` at once (its
+    /// `/api/`'s `features.transcode.bulk`): each is asked `?bulk=1`, out of
+    /// its cache and behind its cap, and no more run at a time than it
+    /// takes. Set before [`Http::ahead`].
+    pub(crate) fn bulk(&mut self, slots: Option<u32>) {
+        self.bulk = slots;
+    }
+
+    fn pace(&self) -> Pace {
+        let limit = self.bulk.map_or(TRANSCODES, |n| (n as usize).clamp(1, TRANSCODES));
+        Pace { limit, max_channels: self.max_channels }
     }
 
     /// A later run takes up the bytes a run leaves of this server's files
@@ -446,7 +498,7 @@ impl Http {
         self.pipeline = None;
         if !jobs.is_empty() {
             let stop = Arc::new(AtomicBool::new(false));
-            self.pipeline = Some(Pipeline::new(self.client.clone(), jobs, self.max_channels, stop));
+            self.pipeline = Some(Pipeline::new(self.client.clone(), jobs, self.pace(), stop));
         }
     }
 
@@ -458,6 +510,7 @@ impl Http {
             server_path: file.ledger.server_path.clone(),
             codec,
             bitrate: TransferBitrate::from_kbps(file.kbps as u32)?,
+            bulk: self.bulk.is_some(),
             expected_ms: self.lengths.get(&file.ledger.server_path).copied(),
             // Named as its codec: the retag reads the format by its name.
             dest: self.scratch.0.join(format!("{name}.{}", codec.extension())),
@@ -541,7 +594,7 @@ impl Http {
                 let job = self.job(file, &format!("now-{}", self.made)).ok_or_else(|| {
                     skip(format!("no conversion to a {}k {container} file", file.kbps))
                 })?;
-                make(&self.client, &job, self.max_channels, &self.stop)?
+                make(&self.client, &job, self.pace(), &self.stop)?
             }
         };
         let poured = self.finish.finish(file, &made.dest).map_err(skip).and_then(|()| {
@@ -800,6 +853,32 @@ mod tests {
         let twice = http.fetch(&file, &mut Vec::new()).unwrap_err();
         assert!(!twice.stop && twice.why.contains("twice"), "{twice:?}");
         assert!(fs::read_dir(&http.scratch.0).unwrap().next().is_none(), "nothing left on this computer");
+    }
+
+    #[test]
+    fn a_bulk_queue_is_asked_no_more_than_it_runs_and_a_full_one_is_waited_out() {
+        let whole = opus_bytes(30_000, 2, true);
+        let words: &[u8] = br#"{"error":"too many bulk transcodes queued - retry later"}"#;
+        let full = || reply("503 Service Unavailable", &[("Retry-After", "1")], words);
+        // More full answers than a file has tries: none of them is one.
+        let ogg = chunked("200 OK", &[("Content-Type", "audio/ogg")], &[&whole]);
+        let (base, seen) = canned(vec![full(), full(), full(), ogg]);
+        let client = Arc::new(Client::new(&base).unwrap());
+        let mut http = Http::new(client, 0, 2).unwrap();
+        assert_eq!(http.pace().limit, TRANSCODES, "no queue: the transfer's own two");
+        http.bulk(Some(1));
+        assert_eq!(http.pace().limit, 1, "the server's one");
+        let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
+        http.lengths(HashMap::from([("lib/A/01.wav".to_string(), 30_000)]));
+        let mut into = Vec::new();
+        http.fetch(&file, &mut into).expect("made once the queue had room");
+        assert_eq!(into, whole);
+        for _ in 0..4 {
+            let req = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(req.starts_with("GET /transcode/lib/A/01.wav?codec=opus&bitrate=192k&bulk=1 "), "{req}");
+        }
+        http.bulk(Some(8));
+        assert_eq!(http.pace().limit, TRANSCODES, "never more than the transfer's own");
     }
 
     /// Puts a mark at the end of each conversion it finishes.

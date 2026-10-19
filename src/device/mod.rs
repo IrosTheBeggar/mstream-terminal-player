@@ -153,7 +153,8 @@ pub struct CardSyncArgs {
     // opus | mp3
     #[arg(long)]
     codec: Option<String>,
-    // 64 | 96 | 128 | 192
+    // 64 | 96 | 128 | 192 | 256 | 320: past 192 MP3 only, on a server that
+    // lists the rate (else the highest below it that the server takes)
     #[arg(long)]
     kbps: Option<u32>,
     // auto | plain | vpath
@@ -1063,8 +1064,11 @@ mod tests {
         use crate::api::urls::{TransferBitrate, TransferCodec};
         assert_eq!((c.codec, c.bitrate), (Some(TransferCodec::Mp3), Some(TransferBitrate::K128)));
         assert_eq!((c.removal, c.auto_dj), (Some(card::engine::Removal::Never), Some(false)));
-        let Ok(DeviceCmd::CardSync(bad)) = parse(&["card-sync", "E:", "--kbps", "320"]) else { panic!() };
-        assert!(bad.ask().unwrap_err().contains("320"), "MP3 at 320k needs the server's B11");
+        let Ok(DeviceCmd::CardSync(high)) = parse(&["card-sync", "E:", "--kbps", "320"]) else { panic!() };
+        let wanted = high.ask().expect("320k: what the server makes of it is the plan's").change.bitrate;
+        assert_eq!(wanted, Some(TransferBitrate::K320));
+        let Ok(DeviceCmd::CardSync(bad)) = parse(&["card-sync", "E:", "--kbps", "160"]) else { panic!() };
+        assert!(bad.ask().unwrap_err().contains("160"), "no rate the server takes");
         let Ok(DeviceCmd::CardSync(bad)) = parse(&["card-sync", "E:", "--layout", "spiral"]) else { panic!() };
         assert!(bad.ask().is_err());
         assert!(parse(&["card-sync"]).is_err(), "a volume, always");

@@ -13,6 +13,8 @@
 //! A peer's 429s are sorted by their words ([`Limited`]): the parent's
 //! stream proxy passes the peer's status and body on, but not its
 //! Retry-After (mStream's `federation-stream.js` copies six headers back).
+//! A 503 with a Retry-After is a server's queue that is full
+//! ([`FetchError::Busy`]): a bulk conversion's, which says when to ask again.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -45,6 +47,10 @@ const CEILING_BASE: Duration = Duration::from_secs(600);
 const UNSIZED_CEILING: Duration = Duration::from_secs(2 * 3600);
 /// A probe's ceiling: a HEAD, or a few KiB.
 const PROBE_CEILING: Duration = Duration::from_secs(60);
+/// How long a bulk conversion may wait in the server's queue before its
+/// answer begins, on top of the stall: mStream holds one up to a minute
+/// for a slot before it answers 503.
+pub const QUEUED: Duration = Duration::from_secs(75);
 /// How much of a refusal's body is read for its words.
 const WORDS_MAX: usize = 16 * 1024;
 /// A key that forbids copies says so in these words, with a 403 (mStream's
@@ -73,8 +79,8 @@ pub enum Wanted<'a> {
     /// ranges, so it always starts from the beginning, and a 200 that ends
     /// early (ffmpeg died) looks like any other: the caller checks the
     /// file's length in time. Never through a peer: keys and guests cannot
-    /// call it.
-    Converted { path: &'a str, codec: TransferCodec, bitrate: TransferBitrate },
+    /// call it. `bulk`: asked as one file of a long job ([`Fetch::bulk`]).
+    Converted { path: &'a str, codec: TransferCodec, bitrate: TransferBitrate, bulk: bool },
 }
 
 impl Wanted<'_> {
@@ -93,6 +99,9 @@ pub struct Fetch<'a> {
     expected: Option<u64>,
     resume: Option<&'a str>,
     stall: Duration,
+    /// How long the server may hold the request before its answer begins,
+    /// on top of the stall: a bulk conversion's queue.
+    queue: Duration,
     ceiling: Option<Duration>,
     cap: u64,
 }
@@ -104,13 +113,28 @@ impl<'a> Fetch<'a> {
             expected: None,
             resume: None,
             stall: STALL,
+            queue: Duration::ZERO,
             ceiling: None,
             cap: FAT32_MAX,
         }
     }
 
     pub fn converted(path: &'a str, codec: TransferCodec, bitrate: TransferBitrate) -> Self {
-        Fetch { wanted: Wanted::Converted { path, codec, bitrate }, ..Fetch::file(path) }
+        let wanted = Wanted::Converted { path, codec, bitrate, bulk: false };
+        Fetch { wanted, ..Fetch::file(path) }
+    }
+
+    /// A conversion asked as one file of a long job (`?bulk=1`), of a
+    /// server whose `/api/` says it takes it: kept out of its cache, and
+    /// queued behind its cap of such jobs, [`QUEUED`] at most before the
+    /// answer begins. A full queue answers [`FetchError::Busy`]. Nothing
+    /// for a file's bytes.
+    pub fn bulk(mut self) -> Self {
+        if let Wanted::Converted { bulk, .. } = &mut self.wanted {
+            *bulk = true;
+            self.queue = QUEUED;
+        }
+        self
     }
 
     /// The file's length, as the listing gave it (`file-size`). The server's
@@ -234,6 +258,9 @@ pub enum FetchError {
     Api(ApiError),
     /// A 429: a peer's stream cap or its daily quota.
     Limited(Limited),
+    /// A 503 with a Retry-After, in seconds: a queue of the server's that is
+    /// full (a bulk conversion's), not a failure. Ask again after it.
+    Busy(Duration),
     /// No byte came for this long.
     Stalled(Duration),
     /// The request's own ceiling passed with the body still coming.
@@ -278,6 +305,9 @@ impl std::fmt::Display for FetchError {
                 }
                 None => write!(f, "limited by the server: {}", l.message),
             },
+            FetchError::Busy(wait) => {
+                write!(f, "the server is busy (try again in {} s)", wait.as_secs())
+            }
             FetchError::Stalled(d) => write!(f, "no data for {} s", d.as_secs()),
             FetchError::TooSlow(d) => write!(f, "still downloading after {} s", d.as_secs()),
             FetchError::WrongType { wanted, got } => {
@@ -555,8 +585,8 @@ impl Client {
                         .to_string(),
                 ));
             }
-            (Wanted::Converted { path, codec, bitrate }, None) => {
-                urls::transfer_transcode_url(&server, path, codec, bitrate, None)
+            (Wanted::Converted { path, codec, bitrate, bulk }, None) => {
+                urls::transfer_transcode_url(&server, path, codec, bitrate, bulk, None)
             }
         }
         .map_err(ApiError::Config)?;
@@ -564,7 +594,8 @@ impl Client {
     }
 
     /// A refusal's body, read to [`WORDS_MAX`] and counted, as the client's
-    /// error: a 429 sorted into a [`Limited`].
+    /// error: a 429 sorted into a [`Limited`], a 503 that says when to ask
+    /// again [`FetchError::Busy`].
     async fn refusal(&self, mut resp: Response, path: &str, stall: Duration) -> FetchError {
         let status = resp.status();
         let wait = retry_after(resp.headers());
@@ -581,6 +612,9 @@ impl Client {
         let text = String::from_utf8_lossy(&body);
         if status == StatusCode::TOO_MANY_REQUESTS {
             return FetchError::Limited(limit_of(&extract_error(&text), wait));
+        }
+        if let (StatusCode::SERVICE_UNAVAILABLE, Some(wait)) = (status, wait) {
+            return FetchError::Busy(wait);
         }
         FetchError::Api(refused(status, &text, path).unwrap_or_else(|| ApiError::Server {
             status: status.as_u16(),
@@ -704,8 +738,9 @@ impl Client {
                     req = req.header(IF_RANGE, validator);
                 }
             }
-            let resp = match tokio::time::timeout(fetch.stall, req.send()).await {
-                Err(_) => return Err(failed(FetchError::Stalled(fetch.stall), &kept)),
+            let first = fetch.stall + fetch.queue;
+            let resp = match tokio::time::timeout(first, req.send()).await {
+                Err(_) => return Err(failed(FetchError::Stalled(first), &kept)),
                 Ok(Err(e)) => return Err(failed(transport(e, ceiling), &kept)),
                 Ok(Ok(resp)) => resp,
             };
@@ -1025,6 +1060,47 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(std::fs::read(&dest).unwrap(), b"OggSpage2end", "untouched until the answer is right");
+    }
+
+    #[test]
+    fn a_bulk_conversion_waits_its_turn_and_a_full_queue_says_when_to_ask_again() {
+        let scratch = Scratch::new("bulk");
+        let dest = scratch.file("0001.tmp", None);
+        let mp3 = chunked("200 OK", &[("Content-Type", "audio/mpeg")], &[b"ID3", b"frames"]);
+        let refused = br#"{"error":"no bulk transcode slot came free in time - retry later"}"#;
+        let (base, seen) = scripted(vec![
+            // Queued behind the server's cap: nothing at all for longer
+            // than the stall, then the answer.
+            vec![Step::Wait(Duration::from_millis(1500)), Step::Send(mp3.clone())],
+            vec![Step::Send(reply("503 Service Unavailable", &[("Retry-After", "10")], refused))],
+            // A 503 that says nothing of when: a failure, as before.
+            vec![Step::Send(json("503 Service Unavailable", r#"{"error":"down"}"#))],
+            // The same wait for a conversion asked as a listener's: a stall.
+            vec![Step::Wait(Duration::from_millis(1500)), Step::Send(mp3)],
+        ]);
+        let client = Client::new(&base).unwrap();
+        let k320 = TransferBitrate::K320;
+        let fetch = Fetch::converted("lib/a.flac", TransferCodec::Mp3, k320).stall(Duration::from_secs(1));
+        let bulk = fetch.clone().bulk();
+        let got = client.download(&bulk, &dest, &mut |_, _| {}).expect("past the queue");
+        assert_eq!(got.len, 9);
+        let req = recv(&seen);
+        let line = "get /transcode/lib/a.flac?codec=mp3&bitrate=320k&bulk=1 http/1.1\r\n";
+        assert!(req.starts_with(line), "{req}");
+
+        let Err(full) = client.download(&bulk, &dest, &mut |_, _| {}) else { panic!("a full queue") };
+        assert!(matches!(full.error, FetchError::Busy(wait) if wait == Duration::from_secs(10)), "{full}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"ID3frames", "nothing written");
+        let Err(down) = client.download(&bulk, &dest, &mut |_, _| {}) else { panic!("a server down") };
+        assert!(matches!(down.error, FetchError::Api(ApiError::Server { status: 503, .. })), "{down}");
+
+        let Err(stalled) = client.download(&fetch, &dest, &mut |_, _| {}) else { panic!("no queue") };
+        assert!(matches!(stalled.error, FetchError::Stalled(_)), "{stalled}");
+        let asked: Vec<String> = (0..3).map(|_| recv(&seen)).collect();
+        let plain = "get /transcode/lib/a.flac?codec=mp3&bitrate=320k http/1.1\r\n";
+        assert!(asked[2].starts_with(plain), "{asked:?}");
+        let file = Fetch::file("lib/a.flac").bulk();
+        assert_eq!((file.wanted, file.queue), (Wanted::File("lib/a.flac"), Duration::ZERO), "never a file");
     }
 
     #[test]
@@ -1360,8 +1436,8 @@ mod tests {
             parent.bytes_url(&Wanted::File("lib/Söng.flac")).unwrap(),
             "http://parent:3000/api/v1/federation/peers/3/stream/lib/S%C3%B6ng.flac"
         );
-        let converted =
-            Wanted::Converted { path: "lib/a.flac", codec: TransferCodec::Opus, bitrate: TransferBitrate::K192 };
+        let (codec, bitrate) = (TransferCodec::Opus, TransferBitrate::K192);
+        let converted = Wanted::Converted { path: "lib/a.flac", codec, bitrate, bulk: true };
         assert!(matches!(parent.bytes_url(&converted), Err(ApiError::Config(_))));
         let bridge = Client::new("http://127.0.0.1:4242").unwrap().with_local_token(Some("lt".into()));
         let url = bridge.bytes_url(&Wanted::File("lib/a.flac")).unwrap();

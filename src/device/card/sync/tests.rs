@@ -97,6 +97,11 @@ struct Library {
     has: HashSet<String>,
     /// `stats/plays` answers 500: a post that fails.
     stats_down: bool,
+    /// `/api/`'s transcode block, when not an older server's (no rates
+    /// listed, no bulk queue).
+    transcode: Option<Value>,
+    /// Each `/transcode` request's query, as it came.
+    transcodes: Vec<String>,
 }
 
 type Fake = Arc<Mutex<Library>>;
@@ -156,8 +161,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             let mut body = json!({
                 "server": "6.31.1",
                 "instanceId": "3f2b8c1e-6a4d-4e0f-9b7a-2c5d8e1f0a93",
-                "features": {"sync": true, "transcode": {"defaultCodec": "opus", "defaultBitrate": "96k"},
-                             "discovery": true, "stats": 2},
+                "features": {"sync": true, "discovery": true, "stats": 2,
+                             "transcode": lib.transcode.clone().unwrap_or_else(
+                                 || json!({"defaultCodec": "opus", "defaultBitrate": "96k"}))},
                 "user": {"vpaths": lib.vpaths, "admin": false},
             });
             if lib.disk.is_some() {
@@ -231,6 +237,7 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
         }
         ("GET", p) if p.starts_with("/transcode/") => {
             let rel = p["/transcode/".len()..].to_string();
+            lib.transcodes.push(asked.target.split_once('?').map_or("", |(_, q)| q).to_string());
             let Some(bytes) = lib.converted.get(&rel).cloned() else { return not_found() };
             let codec = asked.query("codec").unwrap_or("");
             let kind = if codec == "opus" { "audio/ogg" } else { "audio/mpeg" };
@@ -946,6 +953,51 @@ fn converting_everything_to_mp3_converts_each_file_and_puts_back_what_it_dropped
     assert_eq!((records[2].rec.bpm10, records[2].rec.camelot), (1280, 8));
     assert_eq!(records[2].rec.flags & BPM_ANALYSED, 0);
     assert_ne!(records[0].rec.flags & BPM_ANALYSED, 0);
+}
+
+/// MP3 past 192k: asked for only of a server that lists the rate, and in
+/// its bulk queue only where it has one (the card transfer's batch of
+/// mStream changes). An older server's conversions are as they always were.
+#[test]
+fn mp3_at_320k_is_asked_only_of_a_server_that_lists_it_and_in_its_bulk_queue() {
+    let scratch = Scratch::new("320k");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    {
+        let mut lib = fake.lock().unwrap();
+        for t in lib.tracks.iter_mut() {
+            t.seconds = 10.0;
+        }
+        lib.converted.insert("Rock/Artist C/Album D/01.wav".into(), mp3_bytes(383, false));
+    }
+    let kbps = |sim: &FatSim| {
+        let seen = look(sim);
+        let records = seen.root.unwrap().tags.unwrap().records;
+        let converted = records.iter().filter_map(|e| e.ledger.clone()).find(|l| l.converted_to != 0);
+        converted.map(|l| (l.converted_to, l.convert_kbps))
+    };
+    let mp3 = Change { codec: Some(TransferCodec::Mp3), bitrate: Some(TransferBitrate::K320), ..rock().change };
+    let mut envs = envs();
+    let synced = sync_now(&sim, &base, &Ask { change: mp3, ..rock() }, &mut envs).0;
+    assert_eq!(ran(&synced).verified, Ok(()), "{:?}", synced.notes);
+    assert_eq!(kbps(&sim), Some((CONTAINER_MP3, 192)), "the most an older server makes");
+    assert_eq!(std::mem::take(&mut fake.lock().unwrap().transcodes), ["codec=mp3&bitrate=192k"]);
+
+    // The server lists 320k and queues bulk work: the plan is another, read
+    // whole, and the conversion made again at the setting's rate.
+    let rates = json!(["64k", "96k", "128k", "192k", "256k", "320k"]);
+    fake.lock().unwrap().transcode = Some(json!({
+        "defaultCodec": "opus", "defaultBitrate": "96k", "bulk": {"concurrency": 1},
+        "codecs": {"mp3": {"bitrates": rates}, "opus": {"bitrates": ["64k", "96k", "128k", "192k"]}},
+    }));
+    let synced = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let outcome = ran(&synced);
+    assert_eq!((outcome.written, outcome.verified.clone()), (1, Ok(())), "{:?}", outcome.report);
+    assert_eq!(synced.summary.as_ref().map(|s| s.listed), Some(Listed::Whole));
+    assert_eq!(kbps(&sim), Some((CONTAINER_MP3, 320)));
+    assert_eq!(fake.lock().unwrap().transcodes, ["codec=mp3&bitrate=320k&bulk=1"]);
+    let settings = State::of(&look(&sim).state).unwrap().settings;
+    assert_eq!((settings.conversion.codec, settings.conversion.bitrate), (TransferCodec::Mp3, TransferBitrate::K320));
 }
 
 #[test]

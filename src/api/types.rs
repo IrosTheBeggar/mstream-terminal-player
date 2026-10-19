@@ -372,6 +372,35 @@ pub struct TranscodeInfo {
     pub default_codec: Option<String>,
     #[serde(rename = "defaultBitrate")]
     pub default_bitrate: Option<String>,
+    /// What `/transcode` takes of each codec, by mStream's name for it
+    /// (`mp3`, `opus`, `aac`): MP3 reaches 320k there. Absent on a server
+    /// older than the card transfer's batch of mStream changes, which takes
+    /// 64k-192k of each: the key is the fact, never the version.
+    #[serde(deserialize_with = "soft")]
+    pub codecs: Option<std::collections::HashMap<String, CodecInfo>>,
+    /// `/transcode` takes `?bulk=1`, one file of a long job: kept out of
+    /// its cache and queued behind a server-wide cap. Absent on an older
+    /// server, which ignores the flag.
+    #[serde(deserialize_with = "soft")]
+    pub bulk: Option<BulkInfo>,
+}
+
+/// One codec's entry in [`TranscodeInfo::codecs`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CodecInfo {
+    /// `["64k", …, "320k"]`, as `?bitrate=` takes them.
+    pub bitrates: Vec<String>,
+}
+
+/// [`TranscodeInfo::bulk`]: how many bulk conversions the server runs at
+/// once (its `transcode.bulkConcurrency`), the rest waiting in its queue. A
+/// client gains nothing by opening more.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BulkInfo {
+    #[serde(deserialize_with = "soft")]
+    pub concurrency: Option<u32>,
 }
 
 /// Track metadata, as nested under `metadata` on library responses.

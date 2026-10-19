@@ -41,6 +41,7 @@ use super::contract::msmf::Ack;
 use super::contract::prim::hex as hex_bytes;
 use super::engine::Removal;
 use super::volume::{Private, STATE_VERSION, Serial};
+use crate::api::types::TranscodeInfo;
 use crate::api::urls::{TransferBitrate, TransferCodec};
 
 /// The file's own `format` (2.12.7).
@@ -510,11 +511,19 @@ impl Settings {
     /// What a plan depends on beside the server's files, as a key: the
     /// selection, the layout, the conversion, and what the player plays. A
     /// 304 stands for the last whole listing only under the same key.
-    pub(crate) fn plan_key(&self, libraries: &[String], device: &DeviceTxt) -> u64 {
+    /// `transcode`: what the server converts, when it does; a codec it makes
+    /// at a lower bitrate than the setting's (MP3's 320k on a server that
+    /// lists no such rate) is planned otherwise, so it counts too.
+    pub(crate) fn plan_key(
+        &self,
+        libraries: &[String],
+        device: &DeviceTxt,
+        transcode: Option<&TranscodeInfo>,
+    ) -> u64 {
         let c = self.conversion;
         let mut libraries = libraries.to_vec();
         libraries.sort();
-        let text = format!(
+        let mut text = format!(
             "{}\n{} {} {} {}\n{} {} {} {}",
             libraries.join("\u{1f}"),
             self.layout.word(),
@@ -526,6 +535,12 @@ impl Settings {
             device.max_rate,
             device.max_channels,
         );
+        for codec in [TransferCodec::Opus, TransferCodec::Mp3] {
+            let made = transcode.map_or(c.bitrate, |t| t.best(codec, c.bitrate));
+            if made != c.bitrate {
+                text.push_str(&format!("\n{} {}", codec.as_str(), made.as_str()));
+            }
+        }
         super::contract::prim::fnv1a64(text.as_bytes())
     }
 
@@ -885,15 +900,25 @@ mod tests {
         let device = DeviceTxt::defaults();
         let plain = Settings::defaults();
         let rock = vec!["Rock".to_string()];
-        let key = plain.plan_key(&rock, &device);
-        assert_eq!(key, plain.plan_key(&rock, &device));
-        assert_ne!(key, plain.plan_key(&["Jazz".to_string()], &device));
+        let old = TranscodeInfo::default();
+        let key = plain.plan_key(&rock, &device, Some(&old));
+        assert_eq!(key, plain.plan_key(&rock, &device, Some(&old)));
+        assert_eq!(key, plain.plan_key(&rock, &device, None), "192k is every server's");
+        assert_ne!(key, plain.plan_key(&["Jazz".to_string()], &device, Some(&old)));
         let mut opus = device.clone();
         opus.codecs = "mp3,flac,opus".into();
-        assert_ne!(key, plain.plan_key(&rock, &opus));
+        assert_ne!(key, plain.plan_key(&rock, &opus, Some(&old)));
         let mut mp3 = plain.clone();
         mp3.conversion.codec = TransferCodec::Mp3;
-        assert_ne!(key, mp3.plan_key(&rock, &device));
+        assert_ne!(key, mp3.plan_key(&rock, &device, Some(&old)));
+        // MP3 at 320k: made at 192k by a server that lists no such rate, and
+        // planned again once the server makes it.
+        mp3.conversion.bitrate = TransferBitrate::K320;
+        let lists = serde_json::json!({"codecs": {"mp3": {"bitrates": ["192k", "256k", "320k"]}}});
+        let new: TranscodeInfo = serde_json::from_value(lists).unwrap();
+        let at_192 = mp3.plan_key(&rock, &device, Some(&old));
+        assert_ne!(at_192, mp3.plan_key(&rock, &device, Some(&new)));
+        assert_eq!(mp3.plan_key(&rock, &device, Some(&new)), mp3.plan_key(&rock, &device, Some(&new)));
 
         assert_eq!(art_key(["b.jpg", "a.jpg", "b.jpg", ""]), art_key(["a.jpg", "b.jpg"]));
         assert_ne!(art_key(["a.jpg"]), art_key(["b.jpg"]));

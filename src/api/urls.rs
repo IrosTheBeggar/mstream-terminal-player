@@ -109,8 +109,11 @@ impl std::str::FromStr for TransferCodec {
     }
 }
 
-/// The bitrates `/transcode` takes. Any other value silently becomes the
-/// server's default (96k), so a transfer always names one of these.
+/// The bitrates `/transcode` takes: 64k-192k of every codec on every server
+/// that converts, and MP3's 256k and 320k on one whose `/api/` lists them
+/// (the card transfer's batch of mStream changes: `TranscodeInfo::takes`).
+/// Any other value silently becomes the server's default (96k), so a
+/// transfer always names one the server takes.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransferBitrate {
@@ -118,12 +121,20 @@ pub enum TransferBitrate {
     K96,
     K128,
     K192,
+    K256,
+    K320,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl TransferBitrate {
-    pub const ALL: [TransferBitrate; 4] =
-        [TransferBitrate::K64, TransferBitrate::K96, TransferBitrate::K128, TransferBitrate::K192];
+    pub const ALL: [TransferBitrate; 6] = [
+        TransferBitrate::K64,
+        TransferBitrate::K96,
+        TransferBitrate::K128,
+        TransferBitrate::K192,
+        TransferBitrate::K256,
+        TransferBitrate::K320,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -131,6 +142,8 @@ impl TransferBitrate {
             TransferBitrate::K96 => "96k",
             TransferBitrate::K128 => "128k",
             TransferBitrate::K192 => "192k",
+            TransferBitrate::K256 => "256k",
+            TransferBitrate::K320 => "320k",
         }
     }
 
@@ -140,10 +153,19 @@ impl TransferBitrate {
             TransferBitrate::K96 => 96,
             TransferBitrate::K128 => 128,
             TransferBitrate::K192 => 192,
+            TransferBitrate::K256 => 256,
+            TransferBitrate::K320 => 320,
         }
     }
 
-    /// The one with exactly this rate, if the server offers it.
+    /// One of the bitrates every codec takes on every server that converts
+    /// (mStream's shared set), which no server need list.
+    pub fn shared(self) -> bool {
+        self.kbps() <= 192
+    }
+
+    /// The one with exactly this rate, if there is one. Whether a server
+    /// takes it is that server's to say (`TranscodeInfo::takes`).
     pub fn from_kbps(kbps: u32) -> Option<TransferBitrate> {
         TransferBitrate::ALL.into_iter().find(|b| b.kbps() == kbps)
     }
@@ -274,13 +296,17 @@ pub fn transcode_url(
 
 /// `{server}/transcode/{vpath}?codec=...&bitrate=...&token=...` for a card
 /// transfer: codec and bitrate both pinned, as the server would otherwise
-/// put its own defaults in their place without saying so.
+/// put its own defaults in their place without saying so. `bulk` adds
+/// `bulk=1`, one file of a long job, for a server that takes it: kept out
+/// of its cache and queued behind its cap of such jobs. An older server
+/// ignores the flag.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn transfer_transcode_url(
     server: &str,
     vpath: &str,
     codec: TransferCodec,
     bitrate: TransferBitrate,
+    bulk: bool,
     token: Option<&str>,
 ) -> Result<String, String> {
     let mut url = build(server, "transcode", vpath)?;
@@ -288,6 +314,9 @@ pub fn transfer_transcode_url(
         let mut q = url.query_pairs_mut();
         q.append_pair("codec", codec.as_str());
         q.append_pair("bitrate", bitrate.as_str());
+        if bulk {
+            q.append_pair("bulk", "1");
+        }
         if let Some(token) = token {
             q.append_pair("token", token);
         }
@@ -403,13 +432,17 @@ mod tests {
             "lib/Artist A/b.flac",
             TransferCodec::Opus,
             TransferBitrate::K192,
+            false,
             None,
         )
         .unwrap();
         assert_eq!(u, "http://host/mstream/transcode/lib/Artist%20A/b.flac?codec=opus&bitrate=192k");
         let (mp3, low) = (TransferCodec::Mp3, TransferBitrate::K64);
-        let u = transfer_transcode_url("http://host", "lib/b.flac", mp3, low, Some("t")).unwrap();
+        let u = transfer_transcode_url("http://host", "lib/b.flac", mp3, low, false, Some("t")).unwrap();
         assert_eq!(u, "http://host/transcode/lib/b.flac?codec=mp3&bitrate=64k&token=t");
+        // One file of a long job, for a server that queues them.
+        let u = transfer_transcode_url("http://host", "lib/b.flac", mp3, TransferBitrate::K320, true, None);
+        assert_eq!(u.unwrap(), "http://host/transcode/lib/b.flac?codec=mp3&bitrate=320k&bulk=1");
 
         // The transfer's codec parses Opus; the player's still refuses it.
         assert_eq!("OPUS".parse::<TransferCodec>().unwrap(), TransferCodec::Opus);
@@ -424,9 +457,12 @@ mod tests {
         assert_eq!(TransferCodec::Opus.extension(), "opus");
 
         assert_eq!(TransferBitrate::from_kbps(128), Some(TransferBitrate::K128));
-        assert_eq!(TransferBitrate::from_kbps(320), None, "the server has no 320k");
+        assert_eq!(TransferBitrate::from_kbps(320), Some(TransferBitrate::K320));
+        assert_eq!(TransferBitrate::from_kbps(160), None, "no rate the server takes");
         let rates: Vec<&str> = TransferBitrate::ALL.iter().map(|b| b.as_str()).collect();
-        assert_eq!(rates, ["64k", "96k", "128k", "192k"]);
+        assert_eq!(rates, ["64k", "96k", "128k", "192k", "256k", "320k"]);
+        let shared: Vec<u32> = TransferBitrate::ALL.iter().filter(|b| b.shared()).map(|b| b.kbps()).collect();
+        assert_eq!(shared, [64, 96, 128, 192], "every codec's, on every server");
     }
 
     #[test]

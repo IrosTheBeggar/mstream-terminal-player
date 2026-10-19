@@ -5,8 +5,8 @@
 //!
 //! **One run**, [`sync`]:
 //! 1. The server: `GET /api/` says it serves the manifest, whether it
-//!    converts, and the user's libraries (an admin's block too, for the
-//!    local-disk source).
+//!    converts (at which rates, and through a bulk queue or not), and the
+//!    user's libraries (an admin's block too, for the local-disk source).
 //! 2. The card's settings (`state.json`: [`Settings`]), the run's changes to
 //!    them, and the session that binds the card (the engine's steps 1-4),
 //!    whose listing maps the new plays of the card's log through its ledger
@@ -82,7 +82,7 @@ use super::state::{
 use super::tags::{self, Restore};
 use super::volume::{self, CardFs, CardWrite, Mounted, Private, STATE_VERSION, Space};
 use crate::api::transfer::{MANIFEST_PAGE_MAX, Manifest, ManifestEntry, Metadata};
-use crate::api::types::LayeredInfo;
+use crate::api::types::{LayeredInfo, TranscodeInfo};
 use crate::api::urls::{TransferBitrate, TransferCodec};
 use crate::api::{Client, wait};
 
@@ -467,7 +467,10 @@ fn prepare(
         return Err(refused("no library to sync".into()));
     }
     source.libraries = libraries.clone();
-    let plan_key = settings.plan_key(&libraries, &device);
+    // What the server converts, when it does: the rates it lists, its bulk
+    // queue (an older server's: 64k-192k, none).
+    let transcode = info.features.transcode.as_ref();
+    let plan_key = settings.plan_key(&libraries, &device, transcode);
     let source = settings.source(url_key).clone();
 
     // The rows of this server on the card, which a listing reuses.
@@ -508,7 +511,6 @@ fn prepare(
     let known_revision = (!whole).then_some(known.as_str());
     let answer = client.manifest(&ignore, MANIFEST_PAGE_MAX, known_revision, &mut |_| {});
     let answer = answer.map_err(server_halt)?;
-    let transcode = info.features.transcode.is_some();
     let conversion = settings.conversion;
     let (listed, wanted, entries) = match answer {
         Manifest::NotModified => {
@@ -563,7 +565,8 @@ fn prepare(
 
     // 4. The plan.
     let http = Http::new(client.clone(), 0, device.max_channels);
-    let http = http.map_err(|e| refused(e.to_string()))?;
+    let mut http = http.map_err(|e| refused(e.to_string()))?;
+    http.bulk(transcode.and_then(TranscodeInfo::bulk_slots));
     let folders_here = local::folders(info.admin.as_ref(), reached, || client.admin_directories());
     let mut fetcher = Local::new(folders_here, 0, &entries, http);
     let source_mode = fetcher.mode().code();

@@ -46,6 +46,7 @@ use super::state::{Conversion, Convert};
 use super::tags;
 use super::volume::Space;
 use crate::api::transfer::{ManifestEntry, Metadata};
+use crate::api::types::TranscodeInfo;
 use crate::api::urls::{TransferBitrate, TransferCodec};
 
 /// The most tracks a card holds: 19,410 measured working on the player, and
@@ -152,8 +153,16 @@ fn native(f: &Facts) -> Option<(&'static str, &'static str)> {
 }
 
 /// See the module's note: as it is, or converted to what, or not at all.
-/// `transcode`: the server converts (its `/api/` names a transcode block).
-pub(crate) fn decide(f: &Facts, device: &DeviceTxt, c: &Conversion, transcode: bool) -> Decision {
+/// `transcode`: what the server converts, when it does (its `/api/`'s
+/// transcode block): a conversion is made at the setting's bitrate when the
+/// server takes it for that codec, else at the highest below it that it
+/// does (MP3's 320k is 192k on a server that lists no such rate).
+pub(crate) fn decide(
+    f: &Facts,
+    device: &DeviceTxt,
+    c: &Conversion,
+    transcode: Option<&TranscodeInfo>,
+) -> Decision {
     let rate = f.sample_rate.is_none_or(|r| r <= device.max_rate);
     let channels = f.channels.is_none_or(|n| n as u32 <= device.max_channels);
     let codec = native(f).filter(|(codec, ext)| device.decodes(codec) && device.lists(ext));
@@ -180,8 +189,8 @@ pub(crate) fn decide(f: &Facts, device: &DeviceTxt, c: &Conversion, transcode: b
         return Decision::Skip(Skip::NoCodec);
     };
     match transcode {
-        true => Decision::Convert(codec, c.bitrate),
-        false => Decision::Skip(Skip::NoTranscode),
+        Some(server) => Decision::Convert(codec, server.best(codec, c.bitrate)),
+        None => Decision::Skip(Skip::NoTranscode),
     }
 }
 
@@ -404,7 +413,7 @@ pub(crate) fn wanted_of(
     same_plan: bool,
     device: &DeviceTxt,
     conversion: &Conversion,
-    transcode: bool,
+    transcode: Option<&TranscodeInfo>,
 ) -> Wanted {
     let card = WantedCard { origins: vec![origin], files: Vec::new() };
     let mut out = Wanted { card, ..Wanted::default() };
@@ -596,6 +605,9 @@ mod tests {
     fn a_file_goes_as_it_is_only_when_the_player_plays_it() {
         let card = device("mp3,flac,opus");
         let unplayable = Conversion::default();
+        // A server that converts, older than the card transfer's batch of
+        // mStream changes: no list of rates.
+        let old = TranscodeInfo::default();
         let opus192 = Decision::Convert(TransferCodec::Opus, TransferBitrate::K192);
         let original = Decision::Original { ogg_opus: false };
         let cases = [
@@ -610,38 +622,64 @@ mod tests {
             (facts("flac", 48_000, 6, 4000), Decision::Convert(TransferCodec::Mp3, TransferBitrate::K192)),
         ];
         for (f, want) in cases {
-            assert_eq!(decide(&f, &card, &unplayable, true), want, "{f:?}");
+            assert_eq!(decide(&f, &card, &unplayable, Some(&old)), want, "{f:?}");
         }
         // An Ogg whose bytes are Opus: copied, and named .opus.
         let ogg_opus = Facts { ogg_opus: Some(true), ..facts("ogg", 48_000, 2, 128) };
-        assert_eq!(decide(&ogg_opus, &card, &unplayable, true), Decision::Original { ogg_opus: true });
+        assert_eq!(decide(&ogg_opus, &card, &unplayable, Some(&old)), Decision::Original { ogg_opus: true });
         // 4 GiB or more is past FAT32.
         let huge = Facts { size: 1 << 32, ..facts("flac", 44_100, 2, 900) };
-        assert_eq!(decide(&huge, &card, &unplayable, true), opus192);
+        assert_eq!(decide(&huge, &card, &unplayable, Some(&old)), opus192);
         // A player that reads no Opus gets MP3; no server ffmpeg, no
         // conversion; a player of neither, none at all.
         let v1 = device("mp3,flac");
         let mp3 = Decision::Convert(TransferCodec::Mp3, TransferBitrate::K192);
-        assert_eq!(decide(&facts("opus", 48_000, 2, 96), &v1, &unplayable, true), mp3);
+        assert_eq!(decide(&facts("opus", 48_000, 2, 96), &v1, &unplayable, Some(&old)), mp3);
         let wav = facts("wav", 44_100, 2, 1411);
-        assert_eq!(decide(&wav, &card, &unplayable, false), Decision::Skip(Skip::NoTranscode));
-        assert_eq!(decide(&wav, &device("flac"), &unplayable, true), Decision::Skip(Skip::NoCodec));
+        assert_eq!(decide(&wav, &card, &unplayable, None), Decision::Skip(Skip::NoTranscode));
+        assert_eq!(decide(&wav, &device("flac"), &unplayable, Some(&old)), Decision::Skip(Skip::NoCodec));
         // Facts the metadata didn't give stand in the file's favour.
         let bare = Facts { ext: "flac".into(), size: 1 << 20, ..Facts::default() };
-        assert_eq!(decide(&bare, &card, &unplayable, true), original);
+        assert_eq!(decide(&bare, &card, &unplayable, Some(&old)), original);
 
         // Everything, to Opus 128k: but a file already Opus at no more.
         let everything = Conversion { convert: Convert::Everything, bitrate: TransferBitrate::K128, ..unplayable };
         let opus128 = Decision::Convert(TransferCodec::Opus, TransferBitrate::K128);
-        assert_eq!(decide(&facts("flac", 44_100, 2, 900), &card, &everything, true), opus128);
-        assert_eq!(decide(&facts("mp3", 44_100, 2, 128), &card, &everything, true), opus128);
-        assert_eq!(decide(&facts("opus", 48_000, 2, 96), &card, &everything, true), original);
-        assert_eq!(decide(&facts("opus", 48_000, 2, 192), &card, &everything, true), opus128);
+        assert_eq!(decide(&facts("flac", 44_100, 2, 900), &card, &everything, Some(&old)), opus128);
+        assert_eq!(decide(&facts("mp3", 44_100, 2, 128), &card, &everything, Some(&old)), opus128);
+        assert_eq!(decide(&facts("opus", 48_000, 2, 96), &card, &everything, Some(&old)), original);
+        assert_eq!(decide(&facts("opus", 48_000, 2, 192), &card, &everything, Some(&old)), opus128);
         let unknown = Facts { bitrate: None, ..facts("opus", 48_000, 2, 0) };
-        assert_eq!(decide(&unknown, &card, &everything, true), opus128, "no bitrate: not known to be within");
+        assert_eq!(decide(&unknown, &card, &everything, Some(&old)), opus128, "no bitrate: not known to be within");
 
         assert!(ogg_is_opus(&crate::device::card::source::length::tests::opus_bytes(1000, 2, true)));
         assert!(!ogg_is_opus(b"OggS\0\x02 not opus at all, not at all, no"));
+    }
+
+    #[test]
+    fn mp3_goes_past_192k_only_on_a_server_that_lists_the_rate() {
+        use TransferBitrate::{K192, K320};
+        use TransferCodec::{Mp3, Opus};
+        let card = device("mp3,flac,opus");
+        let rates = serde_json::json!(["64k", "96k", "128k", "192k", "256k", "320k"]);
+        let codecs = serde_json::json!({"mp3": {"bitrates": rates}, "opus": {"bitrates": rates}});
+        let new: TranscodeInfo = serde_json::from_value(serde_json::json!({ "codecs": codecs })).unwrap();
+        let old = TranscodeInfo::default();
+        let mp3 = Conversion { convert: Convert::Everything, codec: Mp3, bitrate: K320 };
+        let flac = facts("flac", 44_100, 2, 900);
+        assert_eq!(decide(&flac, &card, &mp3, Some(&new)), Decision::Convert(Mp3, K320));
+        assert_eq!(decide(&flac, &card, &mp3, Some(&old)), Decision::Convert(Mp3, K192), "today's ceiling");
+        // A file in the codec at no more than the setting stays as it is,
+        // whatever the server makes.
+        let original = Decision::Original { ogg_opus: false };
+        assert_eq!(decide(&facts("mp3", 44_100, 2, 256), &card, &mp3, Some(&old)), original);
+        // Opus stops at 192k on any server; six channels go to MP3, at its rate.
+        let opus = Conversion { codec: Opus, ..mp3 };
+        assert_eq!(decide(&flac, &card, &opus, Some(&new)), Decision::Convert(Opus, K192));
+        let six = facts("flac", 48_000, 6, 4000);
+        assert_eq!(decide(&six, &card, &opus, Some(&new)), Decision::Convert(Mp3, K320));
+        // The size is the rate's.
+        assert_eq!(estimate(Some(181_500), &flac, 320), 7_405_200);
     }
 
     #[test]
@@ -721,7 +759,7 @@ mod tests {
             ("Rock/A/03.ogg".to_string(), None),
         ]);
         let ogg = HashMap::from([("Rock/A/03.ogg".to_string(), true)]);
-        let w = wanted_of(origin(), &entries, &metadata, &ogg, &kept, true, &card, &Conversion::default(), true);
+        let w = wanted_of(origin(), &entries, &metadata, &ogg, &kept, true, &card, &Conversion::default(), Some(&TranscodeInfo::default()));
         let files = &w.card.files;
         let kinds: Vec<(Bytes, u16, u64)> = files.iter().map(|f| (f.bytes, f.kbps, f.size)).collect();
         assert_eq!(
@@ -743,7 +781,7 @@ mod tests {
         assert!(w.extras.iter().all(|e| e.listed));
 
         // With no server ffmpeg the WAV can't go; the reused conversion stays.
-        let w = wanted_of(origin(), &entries, &metadata, &ogg, &kept, true, &card, &Conversion::default(), false);
+        let w = wanted_of(origin(), &entries, &metadata, &ogg, &kept, true, &card, &Conversion::default(), None);
         assert_eq!(w.skipped, [("Rock/A/02.wav".to_string(), Skip::NoTranscode)]);
         assert_eq!(w.card.files.len(), 3);
 

@@ -28,8 +28,8 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::types::PlaysAnswer;
-use super::urls::{self, ArtSize};
+use super::types::{PlaysAnswer, TranscodeInfo};
+use super::urls::{self, ArtSize, TransferBitrate, TransferCodec};
 use super::{ApiError, Client, refused, wait};
 
 /// The manifest's page ceiling (`MANIFEST_MAX_LIMIT` in mStream's
@@ -718,6 +718,48 @@ fn chunks(paths: &[String], budget: usize, most: usize) -> Vec<&[String]> {
     out
 }
 
+// ── What the server converts ────────────────────────────────────────────────
+
+/// How many conversions a transfer runs at once on a server with no bulk
+/// queue, and the most on one that has it: two, so a library's conversion
+/// doesn't take the server's CPU from its listeners.
+pub const CONVERSIONS: u32 = 2;
+
+impl TranscodeInfo {
+    /// Whether `/transcode` makes `codec` at `bitrate` as asked: the shared
+    /// 64k-192k always, MP3's 256k and 320k only where the server lists
+    /// them. Nothing past those is asked of a server, which would make its
+    /// default without saying so. Opus stays at 192k whatever is listed:
+    /// libopus refuses more than 256k a channel, and a mono source's 320k
+    /// would fail after the answer began.
+    pub fn takes(&self, codec: TransferCodec, bitrate: TransferBitrate) -> bool {
+        if bitrate.shared() {
+            return true;
+        }
+        let listed = self.codecs.as_ref().and_then(|codecs| codecs.get(codec.as_str()));
+        let listed = listed.is_some_and(|c| c.bitrates.iter().any(|b| b == bitrate.as_str()));
+        codec == TransferCodec::Mp3 && listed
+    }
+
+    /// `wanted` when the server makes `codec` at it ([`TranscodeInfo::takes`]),
+    /// else the highest bitrate below it that it does: MP3 at 320k is 192k on
+    /// a server older than the card transfer's batch of mStream changes.
+    pub fn best(&self, codec: TransferCodec, wanted: TransferBitrate) -> TransferBitrate {
+        let rates = TransferBitrate::ALL.into_iter().rev();
+        let mut below = rates.filter(|b| b.kbps() <= wanted.kbps());
+        below.find(|&b| self.takes(codec, b)).unwrap_or(TransferBitrate::K64)
+    }
+
+    /// The server's bulk queue (`?bulk=1`): how many of a transfer's
+    /// conversions it runs at once, at most [`CONVERSIONS`]; None for a
+    /// server without the queue, where a transfer keeps to [`CONVERSIONS`]
+    /// of its own accord.
+    pub fn bulk_slots(&self) -> Option<u32> {
+        let bulk = self.bulk.as_ref()?;
+        Some(bulk.concurrency.filter(|&n| n >= 1).unwrap_or(CONVERSIONS).min(CONVERSIONS))
+    }
+}
+
 // ── Endpoints ───────────────────────────────────────────────────────────────
 
 impl Client {
@@ -1259,6 +1301,51 @@ mod tests {
 
     fn recv(seen: &std::sync::mpsc::Receiver<String>) -> String {
         seen.recv_timeout(Duration::from_secs(5)).expect("the request reached the stub")
+    }
+
+    /// `/api/`'s transcode block, as a server sends it.
+    fn transcode(block: &str) -> TranscodeInfo {
+        let api = format!(r#"{{"server":"6.32.0","features":{{"sync":true,"transcode":{block}}}}}"#);
+        let info: super::super::types::LayeredInfo = serde_json::from_str(&api).expect("an answer");
+        info.features.transcode.expect("a server that converts")
+    }
+
+    #[test]
+    fn mp3_reaches_320k_and_conversions_queue_only_where_the_server_says_so() {
+        use TransferBitrate::{K64, K128, K192, K256, K320};
+        use TransferCodec::{Mp3, Opus};
+        // The card transfer's batch of mStream changes: each codec's rates,
+        // and the bulk queue. Opus never past 192k, whatever is listed.
+        let new = transcode(
+            r#"{"defaultCodec":"opus","defaultBitrate":"96k","bulk":{"concurrency":1},
+                "codecs":{"mp3":{"bitrates":["64k","96k","128k","192k","256k","320k"],
+                                 "sampleRates":[32000,44100,48000]},
+                          "opus":{"bitrates":["64k","96k","128k","192k","256k","320k"]},
+                          "aac":{"bitrates":["64k","96k","128k","192k"]}}}"#,
+        );
+        assert!(new.takes(Mp3, K320) && new.takes(Mp3, K256) && new.takes(Opus, K192));
+        assert!(!new.takes(Opus, K320) && !new.takes(Opus, K256));
+        assert_eq!((new.best(Mp3, K320), new.best(Opus, K320), new.best(Mp3, K128)), (K320, K192, K128));
+        assert_eq!(new.bulk_slots(), Some(1), "the server's cap, below the transfer's own");
+
+        // An older server: 64k-192k of each, no queue.
+        let old = transcode(r#"{"defaultCodec":"opus","defaultBitrate":"96k"}"#);
+        assert!(!old.takes(Mp3, K256) && !old.takes(Mp3, K320) && old.takes(Mp3, K192));
+        assert_eq!((old.best(Mp3, K320), old.best(Mp3, K256), old.best(Mp3, K64)), (K192, K192, K64));
+        assert_eq!(old.bulk_slots(), None);
+
+        // A list without 256k: 320k as asked, 256k the next one down.
+        let some = r#"{"codecs":{"mp3":{"bitrates":["64k","128k","320k"]}},"bulk":{"concurrency":8}}"#;
+        let some = transcode(some);
+        assert_eq!((some.best(Mp3, K320), some.best(Mp3, K256)), (K320, K192), "the shared set needs no list");
+        assert_eq!(some.bulk_slots(), Some(2), "never more than the transfer's own two");
+
+        // An odd value costs its own field, never the answer.
+        let odd = transcode(r#"{"defaultCodec":"opus","codecs":"lots","bulk":{"concurrency":"two"}}"#);
+        assert_eq!(odd.default_codec.as_deref(), Some("opus"));
+        assert!(odd.codecs.is_none() && !odd.takes(Mp3, K320));
+        assert_eq!(odd.bulk_slots(), Some(2), "a queue all the same, at the transfer's own pace");
+        assert_eq!(transcode(r#"{"bulk":{"concurrency":0}}"#).bulk_slots(), Some(2));
     }
 
     fn entry(id: i64, path: &str) -> String {
