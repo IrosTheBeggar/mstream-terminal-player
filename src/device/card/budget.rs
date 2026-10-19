@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{Map, Value};
 
 use super::state::{from_hex, hex};
+use crate::admin::tz::{civil_from_days, days_from_civil};
 use crate::api::transfer::Allowance;
 
 /// The file's own `format`, and its schema.
@@ -114,23 +115,16 @@ pub(crate) fn days_for(bytes: u64, left: Option<u64>, cap: Option<u64>) -> u64 {
 
 /// A UTC day as the file spells it: `2026-10-18`.
 fn date(day: u64) -> String {
-    // The civil date of a day count (Howard Hinnant's algorithm).
-    let z = day as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (y, m, d) = civil_from_days(day as i64);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// [`date`]'s text back to its day; None for anything else.
 fn day_of(text: &str) -> Option<u64> {
-    let seconds = super::plan::unix_seconds(&format!("{text} 00:00:00"))?;
-    (date(utc_day(seconds as u64)) == text).then(|| utc_day(seconds as u64))
+    let mut parts = text.splitn(3, '-').map(|p| p.parse::<u32>().ok());
+    let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+    let day = u64::try_from(days_from_civil(y.into(), m, d)).ok()?;
+    (date(day) == text).then_some(day)
 }
 
 // ── The file ────────────────────────────────────────────────────────────────
@@ -573,6 +567,13 @@ mod tests {
         assert_eq!(date(utc_day(951_825_600)), "2000-02-29");
         assert_eq!(day_of("2026-10-18"), Some(utc_day(NOW)));
         assert_eq!(day_of("2026-02-30"), None, "no such day");
+        assert_eq!(day_of("2000-02-29"), Some(utc_day(951_825_600)));
+        assert_eq!(day_of("1970-01-01"), Some(0));
+        for text in ["1969-12-31", "2026-10-8", "2026-13-01", "+2026-10-18", "2026-10-18 ", ""] {
+            assert_eq!(day_of(text), None, "{text:?} is no day of the file's");
+        }
+        let days = [0, 59, 60, 365, 10_957, 11_016, utc_day(NOW), 47_482, 2_932_896];
+        assert!(days.iter().all(|&day| day_of(&date(day)) == Some(day)), "each date its day");
         assert_eq!(next_midnight(NOW), 1_792_368_000);
         assert_eq!(resume_after(NOW, None, 300), 1_792_368_300, "the next 00:00 UTC, and 5 minutes");
         assert_eq!(resume_after(NOW, Some(38_400), 120), NOW + 38_520, "the peer's own word");

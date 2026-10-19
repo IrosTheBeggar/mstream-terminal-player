@@ -14,8 +14,9 @@
 //!    even its listing, which its quota counts.
 //! 3. A way to its bytes the listener allows ([`peer::reach`]): the direct
 //!    guest path, else the parent's proxy when it says the bytes are a
-//!    copy, else only once the listener lets an older parent's proxy carry
-//!    them (stored on the card: asked once).
+//!    copy (as its `instanceId` tells: [`proxy_says_copies`]), else only
+//!    once the listener lets an older parent's proxy carry them (stored on
+//!    the card: asked once).
 //! 4. Its `/api/`: its libraries, its own id, and its key's allowance
 //!    where it shows one (a key that forbids copies is never read). A day
 //!    with nothing left, by the budget or the key's quota, parks it there.
@@ -126,6 +127,8 @@ pub(crate) struct PeerSummary {
     pub(crate) status: Status,
     /// Why, for any status but read.
     pub(crate) why: Option<String>,
+    /// The way its bytes came: `proxy` is a parent taken to pass the copy
+    /// purpose on by its `instanceId` alone ([`proxy_says_copies`]).
     pub(crate) reach: Option<Reach>,
     pub(crate) libraries: Vec<String>,
     /// The selection's files, and those the card can't take.
@@ -238,6 +241,19 @@ fn made_here() -> TranscodeInfo {
     serde_json::from_value(codecs).unwrap_or_default()
 }
 
+/// The parent's stream proxy says to the peer that the bytes it carries are
+/// copies (`X-mStream-Purpose`, the card transfer's batch of mStream
+/// changes). mStream says nothing of its proxy in `/api/`, so this is
+/// inferred from the `instanceId` it does say, the same batch's, which came
+/// after the proxy's change in it: a parent of that batch whole has both.
+/// One with the id and not the proxy's change would carry copies its peer
+/// never sees declared; the run still refuses a key that forbids them when
+/// the peer shows its allowance (step 4), never an older peer's. So the
+/// inference is made here alone, until the batch says it in its own words.
+fn proxy_says_copies(info: &LayeredInfo) -> bool {
+    info.instance_id.is_some()
+}
+
 /// The peers the run reads: the ones asked for, else the ones the card's
 /// settings name under this parent.
 fn asked(cx: &Context<'_>, settings: &Settings) -> Vec<PeerAsk> {
@@ -344,7 +360,7 @@ fn side(
     // The way to its bytes: an older parent's proxy only with the
     // listener's say. Its `/api/` and its listing go through the parent's
     // browse proxy, its bytes as reached, every byte counted.
-    let declares = cx.info.instance_id.is_some();
+    let declares = proxy_says_copies(cx.info);
     let dial = (!cx.ask.dry_run).then_some(fed.dial.as_ref());
     let reached = match peer::reach(cx.client, id as i64, declares, source.proxy_copies, dial) {
         Ok(reached) => reached,

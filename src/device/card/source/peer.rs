@@ -15,8 +15,10 @@
 //! copy`, so a key that forbids copies refuses it (403), and the transfer
 //! stops for that peer and says why. Else the parent's stream proxy, which
 //! passes the copy purpose on from the card transfer's batch of mStream
-//! changes; an older parent's can't, so a peer reachable only through it
-//! is the listener's call, asked once, skipped until they allow it.
+//! changes (a parent known as one of that batch by its `instanceId`: mStream
+//! says nothing of its proxy); an older parent's can't, so a peer reachable
+//! only through it is the listener's call, asked once, skipped until they
+//! allow it.
 //!
 //! **What a peer allows** ([`Peer`]): at most two of its files at once in
 //! this process (a key's three streams are shared with playback); a 429
@@ -39,11 +41,13 @@
 //! **Conversions** are made on this computer ([`super::ffmpeg`]): the
 //! peer's bytes fetched whole into a file here, converted, held to their
 //! length, given back what the conversion dropped, then poured onto the
-//! card. A conversion whose source is past what is left of the day waits
-//! for the next one: it can't be taken up partway.
+//! card. A conversion whose source is more than what is left of the day
+//! can't be taken up partway: it alone waits for the next one, the peer's
+//! files that fit fetched meanwhile, and the peer is parked at the run's
+//! end.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -74,6 +78,8 @@ const STREAM_RETRY_MAX: u64 = 60;
 const AT_ONCE: usize = 2;
 /// The files a folder listing may hold beside the audio: never a track.
 const LISTS: [&str; 3] = ["m3u", "m3u8", "pls"];
+/// Why a conversion waits for the next day, and then its peer.
+const LATER: &str = "a file to convert is larger than what is left of the peer's day";
 
 // ── The listing ─────────────────────────────────────────────────────────────
 
@@ -184,7 +190,10 @@ pub(crate) enum Reach {
     /// The peer's own tunnel with a guest token, each request saying it is
     /// a copy.
     Direct,
-    /// The parent's stream proxy, which passes the copy purpose on.
+    /// The parent's stream proxy, which passes the copy purpose on: a
+    /// parent of the card transfer's batch of mStream changes, as its
+    /// `instanceId` tells (an inference: its `/api/` says nothing of the
+    /// proxy).
     Proxy,
     /// An older parent's stream proxy, which can't say the bytes are a
     /// copy: the listener allowed it.
@@ -228,7 +237,8 @@ pub(crate) struct Reached {
 
 /// The way to peer `id`'s bytes (see the module's note): `parent` is the
 /// client of its parent; `declares` says the parent's stream proxy passes
-/// the copy purpose on (the card transfer's batch of mStream changes);
+/// the copy purpose on (the card transfer's batch of mStream changes, as
+/// the caller infers it);
 /// `undeclared` that the listener allows copies through one that can't.
 /// `dial`: None plans only, the guest path's tunnel not dialled (a dry
 /// run). Err: no way the listener allowed, and why.
@@ -490,6 +500,9 @@ pub(crate) struct Peer {
     lengths: HashMap<String, u64>,
     stop: Arc<AtomicBool>,
     made: u64,
+    /// The conversions this run whose source is more than what was left of
+    /// the day, by server path: they wait for the next ([`LATER`]).
+    later: HashSet<String>,
     // Dropped after the client, its last user.
     scratch: Scratch,
     tunnel: Option<Tunnel>,
@@ -502,7 +515,8 @@ impl Peer {
         let cap = s.spend.cap();
         let (finish, lengths) = (Box::new(AsMade), HashMap::new());
         let (stop, scratch) = (Arc::new(AtomicBool::new(false)), Scratch::new()?);
-        Ok(Peer { s, client, cap, finish, lengths, stop, made: 0, scratch, tunnel })
+        let later = HashSet::new();
+        Ok(Peer { s, client, cap, finish, lengths, stop, made: 0, later, scratch, tunnel })
     }
 
     pub(crate) fn origin(&self) -> usize {
@@ -546,12 +560,15 @@ impl Peer {
 
     /// At the run's end: the meter's last bytes into the book, and a day
     /// spent by then (by its covers, its vectors) parks the peer as a file
-    /// cut at the budget does.
+    /// cut at the budget does; so does a conversion that waits for the next
+    /// day, once the files that fit came.
     pub(crate) fn settle(&mut self) {
         if let Err(why) = self.s.spend.sync() {
             self.unkept(why);
         } else if self.s.gate.hold().is_none() && self.s.spend.left() == Some(0) {
             self.spent();
+        } else if self.s.gate.hold().is_none() && !self.later.is_empty() {
+            self.wait(LATER.into(), None);
         }
     }
 
@@ -752,8 +769,10 @@ impl Peer {
         if self.cap.is_some_and(|cap| size > cap) {
             return Err(skip("its source is larger than a day's budget for the peer"));
         }
+        // It alone waits: the day goes on with the peer's files that fit.
         if self.s.spend.left().is_some_and(|left| left < size) {
-            return Err(self.spent());
+            self.later.insert(file.ledger.server_path.clone());
+            return Err(skip(LATER));
         }
         let turn = Turn::take(self.s.spend.key(), &self.stop);
         let Some(_turn) = turn else { return Err(skip("stopped")) };
@@ -821,10 +840,14 @@ impl Fetcher for Peer {
         self.part(file, have, into)
     }
 
-    fn waits(&self, origin: usize) -> Option<String> {
+    fn waits(&self, file: &WantedFile) -> Option<String> {
+        if file.origin != self.s.origin {
+            return None;
+        }
         match self.s.gate.hold() {
-            Some(Hold::Wait { why, .. }) if origin == self.s.origin => Some(why),
-            _ => None,
+            Some(Hold::Wait { why, .. }) => Some(why),
+            Some(Hold::Stop(_)) => None,
+            None => self.later.contains(&file.ledger.server_path).then(|| LATER.to_string()),
         }
     }
 }

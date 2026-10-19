@@ -486,8 +486,8 @@ impl<F: Fetcher> Fetcher for Local<F> {
     }
 
     /// The network's say: a peer's day is never read from here.
-    fn waits(&self, origin: usize) -> Option<String> {
-        self.network.waits(origin)
+    fn waits(&self, file: &WantedFile) -> Option<String> {
+        self.network.waits(file)
     }
 }
 

@@ -450,13 +450,13 @@ pub(crate) trait Fetcher {
         started.map_err(|e| Failed { why: e.to_string(), stop: false })?;
         self.fetch(file, into)
     }
-    /// The run's files of `origin` wait for a later run, and why: a peer
-    /// whose day's quota or budget is spent (2.12.8's parking, of one
-    /// source alone). Asked before each of the origin's fetches and after
-    /// one that failed: a file that waits is neither fetched nor skipped,
-    /// and stays in the plan of the checkpoint the run ends with, the other
-    /// sources' files done first.
-    fn waits(&self, _origin: usize) -> Option<String> {
+    /// `file` waits for a later run, and why: every file of a peer whose
+    /// day's quota or budget is spent (2.12.8's parking, of one source
+    /// alone), or one file its day can't take whole now. Asked before each
+    /// fetch and after one that failed: a file that waits is neither
+    /// fetched nor skipped, and stays in the plan of the checkpoint the run
+    /// ends with, the other files done first.
+    fn waits(&self, _file: &WantedFile) -> Option<String> {
         None
     }
 }

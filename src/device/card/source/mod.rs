@@ -70,7 +70,7 @@ impl Fetcher for Sources {
         self.of(file.origin).ok_or_else(no_source)?.fetch_part(file, have, into)
     }
 
-    fn waits(&self, origin: usize) -> Option<String> {
-        self.of_ref(origin).and_then(|f| f.waits(origin))
+    fn waits(&self, file: &WantedFile) -> Option<String> {
+        self.of_ref(file.origin).and_then(|f| f.waits(file))
     }
 }

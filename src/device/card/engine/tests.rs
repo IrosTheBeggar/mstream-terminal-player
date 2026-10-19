@@ -2433,12 +2433,32 @@ fn a_private_file_at_its_last_seq_is_written_again_from_one() {
 /// A source of two origins whose second's day is spent once `cut` bytes of
 /// its first file came (a peer's budget): that file cut there and kept in
 /// its partial, every later one of it waiting, while the first origin's go.
+/// Or one file of the second its day is too short for (`short`: a peer's
+/// conversion larger than what is left), which waits alone once asked.
 struct Day {
     server: Canned,
     cut: Option<usize>,
     spent: bool,
     /// Each origin-1 file asked for while spent.
     asked_spent: usize,
+    short: Option<&'static str>,
+    /// The times `short` was asked for.
+    asked_short: usize,
+}
+
+impl Day {
+    fn of(server: Canned, cut: Option<usize>, short: Option<&'static str>) -> Day {
+        Day { server, cut, spent: false, asked_spent: 0, short, asked_short: 0 }
+    }
+
+    /// The file is `short`, too large for what is left of its day.
+    fn too_large(&mut self, file: &WantedFile) -> Option<Failed> {
+        let short = file.origin == 1 && self.short == Some(file.ledger.server_path.as_str());
+        short.then(|| {
+            self.asked_short += 1;
+            Failed { why: "too large for what is left of the day".into(), stop: false }
+        })
+    }
 }
 
 impl Fetcher for Day {
@@ -2446,6 +2466,9 @@ impl Fetcher for Day {
         if file.origin == 1 && self.spent {
             self.asked_spent += 1;
             return Err(Failed { why: "the day is spent".into(), stop: false });
+        }
+        if let Some(failed) = self.too_large(file) {
+            return Err(failed);
         }
         self.server.fetch(file, into)
     }
@@ -2469,6 +2492,9 @@ impl Fetcher for Day {
                 self.asked_spent += 1;
                 return Err(Failed { why: "the day is spent".into(), stop: false });
             }
+            if let Some(failed) = self.too_large(file) {
+                return Err(failed);
+            }
             if let Some(n) = self.cut.take() {
                 self.server.cut_after = Some((file.ledger.server_path.clone(), n, false));
                 let got = self.server.fetch_part(file, have, into);
@@ -2479,8 +2505,15 @@ impl Fetcher for Day {
         self.server.fetch_part(file, have, into)
     }
 
-    fn waits(&self, origin: usize) -> Option<String> {
-        (origin == 1 && self.spent).then(|| "the peer's day is spent".to_string())
+    fn waits(&self, file: &WantedFile) -> Option<String> {
+        if file.origin != 1 {
+            return None;
+        }
+        if self.spent {
+            return Some("the peer's day is spent".to_string());
+        }
+        let short = self.asked_short > 0 && self.short == Some(file.ledger.server_path.as_str());
+        short.then(|| "the day is too short for one of its files".to_string())
     }
 }
 
@@ -2527,7 +2560,7 @@ fn a_source_that_waits_parks_the_run_once_the_others_are_in() {
         server.add(path, bytes.clone());
         wanted.files.push(WantedFile { origin: 1, ..track(path, &bytes, id) });
     }
-    let mut day = Day { server, cut: Some(8000), spent: false, asked_spent: 0 };
+    let mut day = Day::of(server, Some(8000), None);
     let parked = run_from(&card, &wanted, &mut day, 1).unwrap();
     assert_eq!(parked.parked.as_deref(), Some("the peer's day is spent"));
     assert_eq!((parked.written, parked.records), (6, 6), "the server's own files, all of them, after it");
@@ -2559,6 +2592,56 @@ fn a_source_that_waits_parks_the_run_once_the_others_are_in() {
     assert_eq!((done.parked, done.written, done.records, done.verified), (None, 2, 8, Ok(())));
     assert_eq!(day.server.asked.last(), Some(&(LATE.to_string(), 0, 0)));
     assert!(day.server.asked.contains(&(EARLY.to_string(), 8000, 8000)), "{:?}", day.server.asked);
+    assert_eq!(on_card(&card, "Folk/Dana Duo/Album/01 - Big.mp3"), corpus("picture_first.mp3"));
+    let _ = finished(&card);
+}
+
+/// One file its source's day is too short for (a peer's conversion larger
+/// than what is left of it): it alone waits, the source's later files and
+/// the other origin's go in, and the run ends at a checkpoint whose plan
+/// keeps it; a run while it still waits doesn't ask it again and, changing
+/// nothing, commits nothing; the next day's takes it, and finishes.
+#[test]
+fn a_file_its_day_is_too_short_for_waits_alone() {
+    let dir = Scratch::new("waits-alone");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned { resumable: true, ..Canned::default() };
+    let mut wanted = library(&mut server);
+    let key = server_url_key("http://music.example:3000");
+    let peer = Some(TalkPeer { id: 3, instance: NO_INSTANCE });
+    wanted.origins.push(Origin {
+        talk: Talk { url_key: key, peer, ..Talk::default() },
+        server: Server::peer(NO_INSTANCE, key, 3),
+        ..Origin::default()
+    });
+    for (path, name, id) in [(EARLY, "picture_first.mp3", 601), (LATE, "cbr.mp3", 602)] {
+        let bytes = corpus(name);
+        server.add(path, bytes.clone());
+        wanted.files.push(WantedFile { origin: 1, ..track(path, &bytes, id) });
+    }
+    let mut day = Day::of(server, None, Some(EARLY));
+    let parked = run_from(&card, &wanted, &mut day, 1).unwrap();
+    let why = "the day is too short for one of its files";
+    assert_eq!(parked.parked.as_deref(), Some(why));
+    assert_eq!((parked.written, parked.records), (7, 7), "all but it: {:?}", parked.report);
+    assert!(parked.report.failed.is_empty(), "it waits: {:?}", parked.report.failed);
+    assert_eq!(day.asked_short, 1);
+    assert!(day.server.asked.iter().any(|a| a.0 == LATE), "its source's next file all the same");
+    let seen = look(&card);
+    assert!(seen.pending.is_some() && !seen.root.as_ref().unwrap().manifest.is_final());
+    let generation = seen.root.unwrap().manifest.header.generation;
+
+    // Still too short: not asked again, and nothing changed.
+    let still = run_from(&card, &wanted, &mut day, 2).unwrap();
+    assert_eq!((still.parked.as_deref(), still.written), (Some(why), 0));
+    assert_eq!(day.asked_short, 1);
+    assert_eq!(look(&card).root.unwrap().manifest.header.generation, generation);
+
+    // The next day: taken, and finished.
+    day.short = None;
+    let done = run_from(&card, &wanted, &mut day, 3).unwrap();
+    assert_eq!((done.parked, done.written, done.records, done.verified), (None, 1, 8, Ok(())));
     assert_eq!(on_card(&card, "Folk/Dana Duo/Album/01 - Big.mp3"), corpus("picture_first.mp3"));
     let _ = finished(&card);
 }

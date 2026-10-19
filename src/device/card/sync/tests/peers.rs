@@ -731,6 +731,60 @@ fn a_peers_file_to_convert_is_skipped_without_ffmpeg_and_made_here_with_one() {
     assert!(cover.is_some(), "its cover, from the peer's art");
 }
 
+/// A peer's file to convert whose source is more than what is left of its
+/// day (it can't be taken up partway): it alone waits, not failed, the
+/// peer's later file that fits comes all the same, and the peer is parked
+/// at the run's end until the next 00:00 UTC; a run the same day asks it
+/// nothing; the next day's makes it, and the transfer is finished.
+#[test]
+fn a_peers_conversion_larger_than_what_is_left_waits_alone() {
+    let scratch = Scratch::new("peer-later");
+    let sim = card(&scratch);
+    let (wav, three) = ("Folk/Dana Duo/Album/02.wav", "Folk/Dana Duo/Album/03.mp3");
+    let mut source = b"RIFF a made-up wave of the peer's".to_vec();
+    source.resize(700 << 10, 0);
+    let tracks = vec![
+        peer_track(ONE, 1, mp3_bytes(1500, true)),
+        peer_track(wav, 2, source),
+        peer_track(three, 3, corpus("cbr.mp3")),
+    ];
+    let (base, _fake, peer, dial) = world(true, false, tracks);
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let made = Arc::new(MadeUp::default());
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(Some(made.clone())));
+    let mut envs = envs();
+    let one_mib = Ask { budget_mb: Some(1), ..rock_and_folk() };
+    let synced = sync_fed(&sim, &base, &one_mib, &fed, &mut envs);
+    let outcome = ran(&synced);
+    let why = "a file to convert is larger than what is left of the peer's day";
+    assert_eq!((outcome.parked.as_deref(), outcome.records), (Some(why), 6), "{:?}", outcome.report);
+    assert!(outcome.report.failed.is_empty(), "it waits: {:?}", outcome.report.failed);
+    assert!(made.0.lock().unwrap().is_empty(), "none of its source asked for");
+    let until = next_midnight(NOW) + JITTER;
+    let waiting = (synced.peers[0].status.clone(), synced.peers[0].why.as_deref());
+    assert_eq!((waiting, synced.resume_at), ((Status::Waiting, Some(why)), Some(until)));
+    let on_card = |rel: &str| scratch.0.join("card/music").join(rel).exists();
+    assert!(on_card(ONE) && on_card(three), "the files that fit");
+    assert!(!on_card("Folk/Dana Duo/Album/02.opus"));
+    assert!(look(&sim).pending.is_some(), "a checkpoint whose plan keeps it");
+
+    // The same day: nothing asked.
+    let before = asked_of(&peer).len();
+    clock.store(NOW + 3600, Ordering::Relaxed);
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!((synced.peers[0].status.clone(), asked_of(&peer).len()), (Status::Waiting, before));
+
+    // The next: its source whole, made here, and the transfer finished.
+    clock.store(until + 60, Ordering::Relaxed);
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.parked.clone(), outcome.written, outcome.verified.clone()), (None, 1, Ok(())));
+    assert_eq!(*made.0.lock().unwrap(), [700 << 10]);
+    assert!(on_card("Folk/Dana Duo/Album/02.opus"));
+    let seen = look(&sim);
+    assert!(seen.pending.is_none() && seen.root.as_ref().unwrap().manifest.is_final());
+}
+
 /// A second tunnel to a peer's own server, for a second dial.
 fn tunnel_of(peer: &PeerFake) -> String {
     let served = peer.clone();

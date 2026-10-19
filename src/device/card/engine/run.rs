@@ -72,8 +72,8 @@ enum Step {
     Skipped,
     /// The source stops the run: it parks.
     Park(String),
-    /// The file's source waits for a later run (a peer's spent day): the
-    /// file stays in the plan, and the run goes on with the others.
+    /// The file waits for a later run (a peer's spent day, or one too short
+    /// for it): it stays in the plan, and the run goes on with the others.
     Wait(String),
 }
 
@@ -314,10 +314,10 @@ impl<'r, 'c> Runner<'r, 'c> {
                 self.commit(false, hooks, events)?;
             }
             let w = &plan.writes[k];
-            // A file of a source that waits isn't asked for: it stays in the
-            // plan (2.12.8). A server move is a rename on the card, and goes.
+            // A file that waits isn't asked for: it stays in the plan
+            // (2.12.8). A server move is a rename on the card, and goes.
             if w.from.is_none()
-                && let Some(why) = fetcher.waits(plan.wanted.files[w.file].origin)
+                && let Some(why) = fetcher.waits(&plan.wanted.files[w.file])
             {
                 waited.get_or_insert(why);
                 continue;
@@ -347,8 +347,8 @@ impl<'r, 'c> Runner<'r, 'c> {
             }
         }
 
-        // A source that waits parks the run once the others' files are in
-        // (2.12.8): their albums' thumbnails, then a checkpoint whose plan
+        // A file that waits parks the run once the others are in (2.12.8):
+        // their albums' thumbnails, then a checkpoint whose plan
         // keeps the waiting files. A run that changed nothing leaves the
         // root as it was, beside the plan its step 6 wrote: no commit has
         // the device build its library again for nothing.
@@ -619,7 +619,7 @@ impl<'r, 'c> Runner<'r, 'c> {
                 if failed.stop {
                     return Ok(Step::Park(failed.why));
                 }
-                if let Some(why) = fetcher.waits(file.origin) {
+                if let Some(why) = fetcher.waits(file) {
                     return Ok(Step::Wait(why));
                 }
                 self.drop_ours(w, events)?;
@@ -763,7 +763,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             if failed.stop {
                 return Ok(Step::Park(failed.why));
             }
-            if let Some(why) = fetcher.waits(file.origin) {
+            if let Some(why) = fetcher.waits(file) {
                 return Ok(Step::Wait(why));
             }
             self.drop_ours(w, events)?;
