@@ -1185,8 +1185,8 @@ impl Desk {
     /// the board is starting up already (the write's boot line). Then, on
     /// the page, the one write a listen makes (clause 5): a board whose
     /// `@status` has `clock=` is asked its time once, on the same port, and
-    /// set when it is unset or more than 2 s off (listen::clock). One with
-    /// no `clock=` is never asked: the key's absence tells, never the
+    /// set when it is unset or more than 2 s off ([`listen_clock`]). One
+    /// with no `clock=` is never asked: the key's absence tells, never the
     /// version. A listen is a job of its own, so no `@time` goes out during
     /// the board's write, read, count or format.
     fn listen(&mut self, i: usize, wait: Duration, since: Option<Heard>) {
@@ -1207,9 +1207,7 @@ impl Desk {
                 let asked = listen::ask_till_up(wire, &port, wait, waits, since, &stop, &mut *note, &mut told)?;
                 let has_clock = matches!(&asked.heard, Heard::Status(s) if s.clock != Clock::Unknown);
                 if let Some(now) = clock.filter(|_| has_clock && !stop.load(Ordering::Relaxed)) {
-                    let found = listen::clock(wire, &port, &now, false, waits, &stop, note);
-                    // Told to stop part way: nothing claimed.
-                    clocked = (!stop.load(Ordering::Relaxed)).then_some(found);
+                    clocked = listen_clock(wire, &port, &now, waits, &stop, note);
                 }
                 Ok(asked)
             });
@@ -1615,10 +1613,6 @@ pub(crate) fn took_text(took: Duration) -> String {
     }
 }
 
-/// What a format that didn't end in `@format done` says, on the page's busy
-/// line, in gold, and in the board's log (contract clause 59): a refusal
-/// is told apart by when it came. None for a format let go with the page.
-/// `version`: the board's, for firmware with no format.
 /// The log's line for what a listen's clock came to (clause 5), when it
 /// says one: the set, as a fact; a refusal, a time this computer can't
 /// give, a board that didn't answer, in gold, the board's clock as it was.
@@ -1648,6 +1642,10 @@ pub(crate) fn seconds_off(off_ms: i64) -> String {
     format!("{:.1}", off_ms.unsigned_abs() as f64 / 1000.0)
 }
 
+/// What a format that didn't end in `@format done` says, on the page's busy
+/// line, in gold, and in the board's log (contract clause 59): a refusal
+/// is told apart by when it came. None for a format let go with the page.
+/// `version`: the board's, for firmware with no format.
 pub(crate) fn format_end(why: &FormatWhy, port: &str, version: Option<&str>) -> Option<String> {
     let known = |prefix: &str, why: &str, words: &[&str]| {
         words.contains(&why).then(|| t!(&format!("dev.card.{prefix}_{why}"), port = port).to_string())
@@ -1797,6 +1795,27 @@ fn listen_one(
 ) -> Asked {
     let port = candidate.port.clone();
     listen_with(engine, candidate, notes, |wire, note| listen::ask(wire, &port, wait, waits, stop, note))
+}
+
+/// The page's listen's clock (clause 5), on the port the listen holds once
+/// its status is in: one bare `@time`, and `@time <unix-ms>` (this
+/// computer's, `now`) when the board's clock is unset or more than 2 s
+/// off; never read back. What it claims: all it came to, but for what a
+/// stop cut short. A listen told to stop (leaving the tab, a write asked
+/// for) sends no time; a silence or a port let go meanwhile is the stop's,
+/// and claimed by none. A set the board took (`@time ok`), or a refusal it
+/// gave, stands whenever the stop came: it happened.
+fn listen_clock(
+    wire: &mut dyn listen::Wire,
+    port: &str,
+    now: &dyn Fn() -> u64,
+    waits: Waits,
+    stop: &AtomicBool,
+    note: listen::Note,
+) -> Option<Result<Clocked, TimeWhy>> {
+    let found = listen::clock(wire, port, now, listen::ClockTo::Set, waits, stop, note);
+    let cut = matches!(found, Err(TimeWhy::NoAnswer | TimeWhy::Port(_)));
+    (!(cut && stop.load(Ordering::Relaxed))).then_some(found)
 }
 
 /// Every board in `found`, asked at once, each on a thread of its own: the
@@ -3347,13 +3366,14 @@ pub(crate) mod tests {
         let unset = r.board("FAKE0").clock_set.clone().expect("FAKE0's clock set");
         assert_eq!((unset.before, unset.off_ms, unset.due), (listen::BoardTime::Unset, None, true));
         assert!(unset.sent.is_some_and(|ms| listen::CLOCK_RANGE.contains(&ms)), "{unset:?}");
-        assert!(unset.after_ms.is_some_and(|ms| ms.abs() < 2000), "read again, in step: {unset:?}");
+        assert_eq!(unset.after_ms, None, "not read back: {unset:?}");
         let logs = port_logs(&r, "FAKE0");
         let said = ("the player's clock was unset: set it (@time)".to_string(), LogKind::Fact);
         assert!(logs.contains(&said), "{logs:?}");
         let host: Vec<&str> = logs.iter().map(|(t, _)| t.as_str()).filter(|t| t.starts_with("@time")).collect();
-        assert_eq!(host.len(), 6, "asked, set, asked again, word for word: {host:?}");
-        assert_eq!((host[0], host[1], host[3], host[4]), ("@time", "@time unset", "@time ok", "@time"));
+        let set_line = format!("@time {}", unset.sent.unwrap());
+        let once = ["@time", "@time unset", set_line.as_str(), "@time ok"];
+        assert_eq!(host, once, "asked once, set, word for word");
         assert!(logs.iter().all(|(t, k)| !t.starts_with("@time") || *k == LogKind::Quiet), "{logs:?}");
         let at = |start: &str| logs.iter().position(|(t, _)| t.starts_with(start));
         assert!(at("@status") < at("@time") && at("@time") < at(&said.0), "after its status: {logs:?}");
@@ -3449,5 +3469,47 @@ pub(crate) mod tests {
         assert_eq!(other, "couldn't set the player's clock: @err 4 time busy");
         assert_eq!(seconds_off(90_049), "90.0");
         assert_eq!(seconds_off(-1_960), "2.0");
+    }
+
+    /// A stop drops only what it cut short: a set the board took just
+    /// before the stop (a write asked for, the tab left) is still said and
+    /// kept for Details; one the stop came before isn't sent; a silence
+    /// once stopped is the stop's, while one with no stop is a gold line.
+    #[test]
+    fn a_listen_stopped_after_the_board_took_its_time_still_claims_the_set() {
+        let _en = crate::setup::tests::in_locale("en");
+        // An unset board, the listen told to stop as `at` goes by (None:
+        // never); a silent one when `answers` is false.
+        let run = |at: Option<&str>, answers: bool| {
+            let stop = AtomicBool::new(false);
+            let unset: &[(&str, &str)] = &[("@time\n", "@time unset\n"), ("@time 1", "@time ok\n")];
+            let mut script = listen::tests::Script::new(if answers { unset } else { &[] });
+            let sent = script.sent.clone();
+            let mut note = |line: String| {
+                if Some(line.as_str()) == at {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            };
+            let now = || 1_792_332_202_123u64;
+            let quick = listen::tests::QUICK;
+            let claimed = listen_clock(&mut script, "COM3", &now, quick, &stop, &mut note);
+            (claimed, sent.lock().unwrap().len())
+        };
+        let (took, sent) = run(Some("@time ok"), true);
+        let set = took.clone().expect("the set claimed").expect("the set");
+        assert_eq!((set.sent, sent), (Some(1_792_332_202_123), 2), "asked, set, not read back");
+        let said = ("the player's clock was unset: set it (@time)".to_string(), LogKind::Fact);
+        assert_eq!(took.as_ref().and_then(clock_line), Some(said));
+
+        // Stopped before the set: no time sent, nothing said.
+        let (read, sent) = run(Some("@time unset"), true);
+        assert_eq!((read.as_ref().and_then(clock_line), sent), (None, 1));
+        assert!(matches!(read, Some(Ok(Clocked { sent: None, .. }))), "{read:?}");
+        // Stopped while the set's answer was awaited: the stop's silence.
+        assert_eq!(run(Some("@time 1792332202123"), true), (None, 2));
+        // Silent with no stop: the gold line.
+        let (silent, _) = run(None, false);
+        let gold = ("the player didn't answer @time".to_string(), LogKind::Fail);
+        assert_eq!(silent.as_ref().and_then(clock_line), Some(gold));
     }
 }

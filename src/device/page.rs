@@ -4391,7 +4391,7 @@ mod tests {
     fn clock_set(board: Board, off_ms: Option<i64>) -> Board {
         let at = |off: i64| listen::BoardTime::At((SET_AT as i64 + off) as u64);
         let before = off_ms.map_or(listen::BoardTime::Unset, at);
-        let set = listen::Clocked { before, off_ms, due: true, sent: Some(SET_AT), after_ms: Some(12) };
+        let set = listen::Clocked { before, off_ms, due: true, sent: Some(SET_AT), after_ms: None };
         Board { clock_set: Some(set), ..board }
     }
 

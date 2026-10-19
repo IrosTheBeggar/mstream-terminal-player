@@ -825,16 +825,17 @@ fn unix_ms(at: std::time::SystemTime) -> u64 {
 
 /// `device time <port> [--dry-run]`, undocumented: the clock of the board
 /// on `port`, one of the boards the engine lists, read and set as
-/// [`listen::clock`] does, through the port opened as every listen opens it
-/// (DTR and RTS held low: no reset, the music plays on). `now`: this
-/// computer's clock in Unix ms. Prints what it found and did as JSON, the
-/// host lines both ways among it. Exit 0 when the clock is in step or was
-/// set (a dry run: read); 1 when the board has no clock verb (`@err 7
-/// time`: firmware older than 0.12.0), refused the time, or didn't answer,
-/// or this computer's clock is out of the board's range; 2 for the port,
-/// not the board: one that isn't a board's this computer lists, ports that
-/// can't be listed, or one that couldn't be opened (another program holds
-/// it) or failed partway.
+/// [`listen::clock`] does, then read again once set (`after`, for the
+/// device checks: the page's listen doesn't), through the port opened as
+/// every listen opens it (DTR and RTS held low: no reset, the music plays
+/// on). `now`: this computer's clock in Unix ms. Prints what it found and
+/// did as JSON, the host lines both ways among it. Exit 0 when the clock
+/// is in step or was set (a dry run: read); 1 when the board has no clock
+/// verb (`@err 7 time`: firmware older than 0.12.0), refused the time, or
+/// didn't answer, or this computer's clock is out of the board's range; 2
+/// for the port, not the board: one that isn't a board's this computer
+/// lists, ports that can't be listed, or one that couldn't be opened
+/// (another program holds it) or failed partway.
 fn time_on(
     engine: &dyn Engine,
     port: &str,
@@ -860,7 +861,8 @@ fn time_on(
     let clocked = match engine.listen(candidate) {
         Ok(mut wire) => {
             let mut note = |line: String| lines.push(line);
-            listen::clock(&mut *wire, &candidate.port, now, dry_run, waits, &stop, &mut note)
+            let to = if dry_run { listen::ClockTo::Read } else { listen::ClockTo::SetAndCheck };
+            listen::clock(&mut *wire, &candidate.port, now, to, waits, &stop, &mut note)
         }
         Err(e) => Err(listen::TimeWhy::Port(e)),
     };

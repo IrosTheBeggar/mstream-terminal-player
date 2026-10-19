@@ -657,8 +657,22 @@ pub(crate) struct Clocked {
     pub due: bool,
     /// The time sent, in Unix ms; None when none was.
     pub sent: Option<u64>,
-    /// The board's clock read again once set: off by this much then.
+    /// The board's clock read again once set ([`ClockTo::SetAndCheck`]):
+    /// off by this much then.
     pub after_ms: Option<i64>,
+}
+
+/// What [`clock`] does once it has read the board's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClockTo {
+    /// Nothing more: `device time --dry-run`.
+    Read,
+    /// Set it when due, and no more: the page's listen asks its bare
+    /// `@time` once (clause 5).
+    Set,
+    /// Set it when due, then read it again: `device time`, whose `after`
+    /// the device checks note.
+    SetAndCheck,
 }
 
 /// An `@err … time` line, as the reason it is.
@@ -721,14 +735,15 @@ fn set_time(console: &mut Console, ms: u64, waits: Waits, note: Note) -> Result<
 
 /// The board's clock, read with `@time` alone, and set to this computer's
 /// (`now`, Unix ms) with `@time <unix-ms>` when it is unset or more than
-/// [`CLOCK_SLACK`] off, then read again — unless `dry_run`, which only
-/// reads it. A board that has no clock verb (older than 0.12.0) answers
-/// `@err 7 time`: [`TimeWhy::Old`].
+/// [`CLOCK_SLACK`] off, as `to` says: only read, set, or set and read
+/// again. Told to stop before the set, it sends none: the clock as read,
+/// nothing sent. A board that has no clock verb (older than 0.12.0)
+/// answers `@err 7 time`: [`TimeWhy::Old`].
 pub(crate) fn clock(
     wire: &mut dyn Wire,
     port: &str,
     now: &dyn Fn() -> u64,
-    dry_run: bool,
+    to: ClockTo,
     waits: Waits,
     stop: &AtomicBool,
     note: Note,
@@ -742,7 +757,7 @@ pub(crate) fn clock(
     let slack = CLOCK_SLACK.as_millis() as u64;
     let due = off_ms.is_none_or(|off| off.unsigned_abs() > slack);
     let mut clocked = Clocked { before, off_ms, due, sent: None, after_ms: None };
-    if !due || dry_run {
+    if !due || to == ClockTo::Read || console.stopped() {
         return Ok(clocked);
     }
     let ms = now();
@@ -751,7 +766,9 @@ pub(crate) fn clock(
     }
     set_time(&mut console, ms, waits, &mut *note)?;
     clocked.sent = Some(ms);
-    if let Ok((BoardTime::At(board), at)) = ask_time(&mut console, now, waits, &mut *note) {
+    if to == ClockTo::SetAndCheck
+        && let Ok((BoardTime::At(board), at)) = ask_time(&mut console, now, waits, &mut *note)
+    {
         clocked.after_ms = Some(board as i64 - at as i64);
     }
     Ok(clocked)
@@ -1411,62 +1428,55 @@ pub(crate) mod tests {
     }
 
     /// The firmware's HOST-STATUS.md, @time: the clock asked with a bare
-    /// `@time`, set when it is unset or more than 2 s off, then asked again.
+    /// `@time`, set when it is unset or more than 2 s off; asked again only
+    /// for `device time` (ClockTo::SetAndCheck), never on the page's listen.
     #[test]
     fn the_clock_is_set_only_when_it_is_unset_or_more_than_two_seconds_off() {
         let stop = AtomicBool::new(false);
         let now = || 1_792_332_202_123u64;
-        let run = |script: &mut Script, dry: bool| clock(script, "COM3", &now, dry, QUICK, &stop, &mut |_| {});
-        let mut unset = Script::new(&[
-            ("@time
-", "[stats] bat=87 state=paused
-@time unset
-"),
-            ("@time 1792332202123
-", "@time ok
-"),
-            ("@time
-", "@time 1792332202150
-"),
-        ]);
-        let sent = unset.sent.clone();
+        let run = |script: &mut Script, to: ClockTo| {
+            clock(script, "COM3", &now, to, QUICK, &stop, &mut |_| {})
+        };
+        let unset = || {
+            Script::new(&[
+                ("@time\n", "[stats] bat=87 state=paused\n@time unset\n"),
+                ("@time 1792332202123\n", "@time ok\n"),
+                ("@time\n", "@time 1792332202150\n"),
+            ])
+        };
+        let mut checked = unset();
+        let sent = checked.sent.clone();
         let (sent_ms, after_ms) = (Some(1_792_332_202_123), Some(27));
         let set = Clocked { before: BoardTime::Unset, off_ms: None, due: true, sent: sent_ms, after_ms };
-        assert_eq!(run(&mut unset, false), Ok(set));
-        assert_eq!(*sent.lock().unwrap(), ["@time
-", "@time 1792332202123
-", "@time
-"]);
+        assert_eq!(run(&mut checked, ClockTo::SetAndCheck), Ok(set.clone()));
+        assert_eq!(*sent.lock().unwrap(), ["@time\n", "@time 1792332202123\n", "@time\n"]);
+        // The page's listen: asked once, set, not asked again.
+        let mut page = unset();
+        let sent = page.sent.clone();
+        assert_eq!(run(&mut page, ClockTo::Set), Ok(Clocked { after_ms: None, ..set }));
+        assert_eq!(*sent.lock().unwrap(), ["@time\n", "@time 1792332202123\n"]);
 
         // Two seconds off either way is in step: only asked.
         for (board, off) in [("1792332200123", -2000), ("1792332204123", 2000)] {
-            let mut close = Script::new(&[("@time
-", &format!("@time {board}
-"))]);
+            let mut close = Script::new(&[("@time\n", &format!("@time {board}\n"))]);
             let sent = close.sent.clone();
-            let got = run(&mut close, false).unwrap();
+            let got = run(&mut close, ClockTo::SetAndCheck).unwrap();
             assert_eq!((got.off_ms, got.due, got.sent), (Some(off), false, None));
             assert_eq!(sent.lock().unwrap().len(), 1);
         }
         // Past that, set: a board ahead as well as one behind.
         for board in ["1792332200122", "1792332209000"] {
-            let reply = format!("@time {board}
-");
-            let again = "@time 1792332202123
-";
-            let mut off = Script::new(&[("@time
-", reply.as_str()), ("@time 1", "@time ok
-"), ("@time
-", again)]);
-            let got = run(&mut off, false).unwrap();
+            let reply = format!("@time {board}\n");
+            let again = "@time 1792332202123\n";
+            let replies = [("@time\n", reply.as_str()), ("@time 1", "@time ok\n"), ("@time\n", again)];
+            let mut off = Script::new(&replies);
+            let got = run(&mut off, ClockTo::SetAndCheck).unwrap();
             assert_eq!((got.due, got.sent, got.after_ms), (true, Some(1_792_332_202_123), Some(0)), "{board}");
         }
         // A dry run only asks.
-        let mut dry = Script::new(&[("@time
-", "@time unset
-")]);
+        let mut dry = Script::new(&[("@time\n", "@time unset\n")]);
         let sent = dry.sent.clone();
-        let got = run(&mut dry, true).unwrap();
+        let got = run(&mut dry, ClockTo::Read).unwrap();
         assert_eq!((got.before, got.due, got.sent), (BoardTime::Unset, true, None));
         assert_eq!(sent.lock().unwrap().len(), 1);
 
@@ -1477,34 +1487,49 @@ pub(crate) mod tests {
             tick.set(tick.get() + 100);
             tick.get()
         };
-        let mut halfway = Script::new(&[("@time
-", "@time 1792332202150
-")]);
-        let got = clock(&mut halfway, "COM3", &ticking, false, QUICK, &stop, &mut |_| {}).unwrap();
-        assert_eq!(got.off_ms, Some(0));
+        let mut halfway = Script::new(&[("@time\n", "@time 1792332202150\n")]);
+        let got = clock(&mut halfway, "COM3", &ticking, ClockTo::Set, QUICK, &stop, &mut |_| {});
+        assert_eq!(got.unwrap().off_ms, Some(0));
 
         // Older firmware has no clock verb; a refusal leaves it as it was.
-        assert_eq!(run(&mut Script::new(&[("@time
-", "@err 7 time
-")]), false), Err(TimeWhy::Old));
-        let rtc = &[("@time
-", "@time unset
-"), ("@time 1", "@err 4 time rtc
-")];
-        assert_eq!(run(&mut Script::new(rtc), false), Err(TimeWhy::Rtc));
-        let range = &[("@time
-", "@time unset
-"), ("@time 1", "@err 5 time
-")];
-        assert_eq!(run(&mut Script::new(range), false), Err(TimeWhy::Range));
-        assert_eq!(run(&mut Script::new(&[]), false), Err(TimeWhy::NoAnswer));
+        let old = &[("@time\n", "@err 7 time\n")];
+        assert_eq!(run(&mut Script::new(old), ClockTo::Set), Err(TimeWhy::Old));
+        let rtc = &[("@time\n", "@time unset\n"), ("@time 1", "@err 4 time rtc\n")];
+        assert_eq!(run(&mut Script::new(rtc), ClockTo::Set), Err(TimeWhy::Rtc));
+        let range = &[("@time\n", "@time unset\n"), ("@time 1", "@err 5 time\n")];
+        assert_eq!(run(&mut Script::new(range), ClockTo::Set), Err(TimeWhy::Range));
+        assert_eq!(run(&mut Script::new(&[]), ClockTo::Set), Err(TimeWhy::NoAnswer));
         // A computer whose own clock was never set sends nothing.
-        let mut ours = Script::new(&[("@time
-", "@time unset
-")]);
+        let mut ours = Script::new(&[("@time\n", "@time unset\n")]);
         let sent = ours.sent.clone();
-        let got = clock(&mut ours, "COM3", &|| 1_000, false, QUICK, &stop, &mut |_| {});
+        let got = clock(&mut ours, "COM3", &|| 1_000, ClockTo::Set, QUICK, &stop, &mut |_| {});
         assert_eq!((got, sent.lock().unwrap().len()), (Err(TimeWhy::OurClock), 1));
+    }
+
+    /// A stop that comes before the set sends none; one that comes once the
+    /// board took it leaves the set as it was done.
+    #[test]
+    fn a_clock_told_to_stop_sends_no_time_but_keeps_one_the_board_took() {
+        let now = || 1_792_332_202_123u64;
+        let stopped_at = |at: &str| {
+            let stop = AtomicBool::new(false);
+            let mut script = Script::new(&[("@time\n", "@time unset\n"), ("@time 1", "@time ok\n")]);
+            let sent = script.sent.clone();
+            let mut note = |line: String| {
+                if line == at {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            };
+            let got = clock(&mut script, "COM3", &now, ClockTo::Set, QUICK, &stop, &mut note);
+            (got, sent.lock().unwrap().clone())
+        };
+        let (got, sent) = stopped_at("@time unset");
+        let unset = BoardTime::Unset;
+        let read = Clocked { before: unset, off_ms: None, due: true, sent: None, after_ms: None };
+        assert_eq!((got, sent), (Ok(read), vec!["@time\n".to_string()]));
+        let (got, sent) = stopped_at("@time ok");
+        assert_eq!(got.map(|c| c.sent), Ok(Some(1_792_332_202_123)));
+        assert_eq!(sent, ["@time\n", "@time 1792332202123\n"]);
     }
 
     #[test]
