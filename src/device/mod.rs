@@ -417,9 +417,11 @@ fn unix_ms(at: std::time::SystemTime) -> u64 {
 /// computer's clock in Unix ms. Prints what it found and did as JSON, the
 /// host lines both ways among it. Exit 0 when the clock is in step or was
 /// set (a dry run: read); 1 when the board has no clock verb (`@err 7
-/// time`: firmware older than 0.12.0), refused the time, or didn't answer;
-/// 2 when the port isn't a board's this computer lists, or the ports can't
-/// be listed.
+/// time`: firmware older than 0.12.0), refused the time, or didn't answer,
+/// or this computer's clock is out of the board's range; 2 for the port,
+/// not the board: one that isn't a board's this computer lists, ports that
+/// can't be listed, or one that couldn't be opened (another program holds
+/// it) or failed partway.
 fn time_on(
     engine: &dyn Engine,
     port: &str,
@@ -476,7 +478,7 @@ fn time_on(
                 listen::TimeWhy::Other(line) => line.clone(),
             };
             let _ = writeln!(err, "mstream-player: {}: {words}", candidate.port);
-            1
+            if matches!(why, listen::TimeWhy::Port(_)) { 2 } else { 1 }
         }
     };
     let _ = writeln!(out, "{}", serde_json::to_string_pretty(&printed).unwrap_or_default());
@@ -1274,9 +1276,12 @@ mod tests {
         assert!(err.contains("older than 0.12.0"), "{err}");
         let (code, dead, _) = timed(&fake, "FAKE4", false);
         assert_eq!((code, dead["error"].as_str()), (1, Some("rtc")));
-        // A port no board is on.
+        // A port no board is on; a board's port another program holds: the
+        // port's failure, not the board's.
         let (code, _, err) = timed(&fake, "COM9", false);
         assert!(code == 2 && err.contains("isn't a board's port"), "{err}");
+        let (code, held, err) = timed(&Fake::new("busy"), "FAKE0", false);
+        assert_eq!((code, held["error"].as_str()), (2, Some("port")), "{err}");
         // Listened to, never reset; set twice.
         let trace = fake.trace().lock().unwrap().clone();
         assert!(trace.iter().all(|t| t.starts_with("listen ") || t.starts_with("time ")), "{trace:?}");
