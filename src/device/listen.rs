@@ -12,7 +12,10 @@
 //! - `@count` → one count of the card's free clusters, `@count <pct>` as it
 //!   goes and `@count done free=<bytes>`;
 //! - `@identify <label>` → "This one" and the label on the board's screen
-//!   for five seconds, `@identify ok`.
+//!   for five seconds, `@identify ok`;
+//! - `@time` → the board's clock, `@time <unix-ms>` or `@time unset`, and
+//!   `@time <unix-ms>` sets it, `@time ok` (0.12.0's: older firmware
+//!   answers `@err 7 time`).
 //!
 //! The board talks all the time — `[stats]` every few seconds, the boot
 //! log after a restart, the console's own replies — and a host line can
@@ -34,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::DeviceError;
-use super::board::{CardKind, CardRoot, CountWhy, Free, Heard, PlayState, Status, Tracks};
+use super::board::{CardKind, CardRoot, Clock, CountWhy, Free, Heard, PlayState, Status, Tracks};
 use super::firmware::Version;
 
 /// An open port to a running firmware: bytes both ways, a read that gives
@@ -570,6 +573,175 @@ pub(crate) fn label_for(port: &str) -> String {
     short[short.len().saturating_sub(16)..].to_string()
 }
 
+// ── The board's clock ───────────────────────────────────────────────────────
+
+/// How far off the board's clock may be before it is set (the firmware
+/// repo's docs/HOST-STATUS.md, @time): a restart alone leaves it within
+/// 1.5 s of the time it was set to, so only a clock that lost its time or
+/// drifted is written.
+pub(crate) const CLOCK_SLACK: Duration = Duration::from_secs(2);
+/// The times the board takes, in Unix ms: 2026-01-01 00:00:00.000 UTC to
+/// 2099-12-31 23:59:59.999 UTC (the firmware's `wallclock::kMinMs` and
+/// `kMaxMs`). Past them it answers `@err 5 time`.
+pub(crate) const CLOCK_RANGE: std::ops::RangeInclusive<u64> = 1_767_225_600_000..=4_102_444_799_999;
+
+/// What `@time` alone says of the board's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoardTime {
+    /// Its time now, in Unix ms.
+    At(u64),
+    /// `@time unset`: no time it believes.
+    Unset,
+}
+
+/// Why the board's clock was not read, or not set. Whatever the reason,
+/// the board's clock is as it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TimeWhy {
+    /// `@err 7 time`: firmware older than 0.12.0, which has no clock verb.
+    Old,
+    /// `@err 5 time`: a time outside the range the board takes.
+    Range,
+    /// `@err 1 time`: not a time the board reads.
+    Syntax,
+    /// `@err 4 time rtc`: the board's clock chip didn't take the time.
+    Rtc,
+    /// This computer's own clock is outside the range the board takes: no
+    /// time was sent.
+    OurClock,
+    NoAnswer,
+    Port(DeviceError),
+    Other(String),
+}
+
+impl TimeWhy {
+    /// The reason as one stable word, for the debug command and the tests.
+    pub fn code(&self) -> &'static str {
+        match self {
+            TimeWhy::Old => "old",
+            TimeWhy::Range => "range",
+            TimeWhy::Syntax => "syntax",
+            TimeWhy::Rtc => "rtc",
+            TimeWhy::OurClock => "our-clock",
+            TimeWhy::NoAnswer => "no-answer",
+            TimeWhy::Port(_) => "port",
+            TimeWhy::Other(_) => "other",
+        }
+    }
+}
+
+/// What [`clock`] found of the board's clock, and what it did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Clocked {
+    pub before: BoardTime,
+    /// The board's time less this computer's, in ms, when it had one: this
+    /// computer's taken halfway between the question and its answer.
+    pub off_ms: Option<i64>,
+    /// Unset, or off by more than [`CLOCK_SLACK`]: set, or in a dry run, to
+    /// be set.
+    pub due: bool,
+    /// The time sent, in Unix ms; None when none was.
+    pub sent: Option<u64>,
+    /// The board's clock read again once set: off by this much then.
+    pub after_ms: Option<i64>,
+}
+
+/// An `@err … time` line, as the reason it is.
+fn time_err<T>(line: &str) -> Option<Result<T, TimeWhy>> {
+    let err = parse_err(line).filter(|e| e.verb == "time")?;
+    Some(Err(match (err.code, err.why.as_deref()) {
+        (7, _) => TimeWhy::Old,
+        (5, _) => TimeWhy::Range,
+        (1, _) => TimeWhy::Syntax,
+        (4, Some("rtc")) => TimeWhy::Rtc,
+        (code, why) => {
+            TimeWhy::Other(format!("@err {code} time {}", why.unwrap_or_default()).trim().to_string())
+        }
+    }))
+}
+
+/// `@time` alone, and the computer's time halfway between the question and
+/// its answer: the board answers in its next loop pass, from the time it
+/// holds, with no read of its chip.
+fn ask_time(
+    console: &mut Console,
+    now: &dyn Fn() -> u64,
+    waits: Waits,
+    note: Note,
+) -> Result<(BoardTime, u64), TimeWhy> {
+    note("@time".to_string());
+    let asked = now();
+    console.send(b"@time\n").map_err(TimeWhy::Port)?;
+    let answer = console
+        .reply(Instant::now() + waits.reply, waits.boot, &mut *note, |line| {
+            match line.trim().strip_prefix("@time ").map(str::trim) {
+                Some("unset") => Some(Ok(BoardTime::Unset)),
+                Some(ms) if !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()) => {
+                    ms.parse().ok().map(|ms| Ok(BoardTime::At(ms)))
+                }
+                _ => time_err(line),
+            }
+        })
+        .map_err(TimeWhy::Port)?;
+    let answered = now();
+    let at = asked + answered.saturating_sub(asked) / 2;
+    answer.unwrap_or(Err(TimeWhy::NoAnswer)).map(|time| (time, at))
+}
+
+/// `@time <unix-ms>`: the board's clock set to `ms`.
+fn set_time(console: &mut Console, ms: u64, waits: Waits, note: Note) -> Result<(), TimeWhy> {
+    let line = format!("@time {ms}");
+    note(line.clone());
+    console.send(format!("{line}\n").as_bytes()).map_err(TimeWhy::Port)?;
+    let answer = console
+        .reply(Instant::now() + waits.reply, waits.boot, &mut *note, |line| {
+            if line.trim() == "@time ok" {
+                return Some(Ok(()));
+            }
+            time_err(line)
+        })
+        .map_err(TimeWhy::Port)?;
+    answer.unwrap_or(Err(TimeWhy::NoAnswer))
+}
+
+/// The board's clock, read with `@time` alone, and set to this computer's
+/// (`now`, Unix ms) with `@time <unix-ms>` when it is unset or more than
+/// [`CLOCK_SLACK`] off, then read again — unless `dry_run`, which only
+/// reads it. A board that has no clock verb (older than 0.12.0) answers
+/// `@err 7 time`: [`TimeWhy::Old`].
+pub(crate) fn clock(
+    wire: &mut dyn Wire,
+    port: &str,
+    now: &dyn Fn() -> u64,
+    dry_run: bool,
+    waits: Waits,
+    stop: &AtomicBool,
+    note: Note,
+) -> Result<Clocked, TimeWhy> {
+    let mut console = Console::new(wire, port, stop);
+    let (before, at) = ask_time(&mut console, now, waits, &mut *note)?;
+    let off_ms = match before {
+        BoardTime::At(ms) => Some(ms as i64 - at as i64),
+        BoardTime::Unset => None,
+    };
+    let slack = CLOCK_SLACK.as_millis() as u64;
+    let due = off_ms.is_none_or(|off| off.unsigned_abs() > slack);
+    let mut clocked = Clocked { before, off_ms, due, sent: None, after_ms: None };
+    if !due || dry_run {
+        return Ok(clocked);
+    }
+    let ms = now();
+    if !CLOCK_RANGE.contains(&ms) {
+        return Err(TimeWhy::OurClock);
+    }
+    set_time(&mut console, ms, waits, &mut *note)?;
+    clocked.sent = Some(ms);
+    if let Ok((BoardTime::At(board), at)) = ask_time(&mut console, now, waits, &mut *note) {
+        clocked.after_ms = Some(board as i64 - at as i64);
+    }
+    Ok(clocked)
+}
+
 // ── The lines ───────────────────────────────────────────────────────────────
 
 /// `@status`'s fields, in any order; a key this player does not know is
@@ -590,6 +762,7 @@ pub(crate) fn parse_status(line: &str) -> Option<Status> {
         bat: None,
         state: PlayState::Unknown(String::new()),
         cid: CardRoot::Unknown,
+        clock: Clock::Unknown,
         bt: None,
     };
     let mut fw = None;
@@ -618,6 +791,7 @@ pub(crate) fn parse_status(line: &str) -> Option<Status> {
             "bat" => status.bat = value.parse::<u8>().ok().filter(|b| *b <= 100),
             "state" => status.state = PlayState::parse(value),
             "cid" => status.cid = CardRoot::parse(value),
+            "clock" => status.clock = Clock::parse(value),
             "bt" => status.bt = known(value).map(|v| percent_decode(&v)),
             _ => {}
         }
@@ -1092,5 +1266,112 @@ pub(crate) mod tests {
         assert_eq!(label_for("/dev/cu.usbmodem14101"), "cu.usbmodem14101");
         assert_eq!(label_for("/dev/cu.usbserial-14130"), "usbserial-14130");
         assert!(label_for("/dev/cu.wchusbserial-5B1F007751").len() <= 16);
+    }
+
+    /// The firmware's HOST-STATUS.md, @time: the clock asked with a bare
+    /// `@time`, set when it is unset or more than 2 s off, then asked again.
+    #[test]
+    fn the_clock_is_set_only_when_it_is_unset_or_more_than_two_seconds_off() {
+        let stop = AtomicBool::new(false);
+        let now = || 1_792_332_202_123u64;
+        let run = |script: &mut Script, dry: bool| clock(script, "COM3", &now, dry, QUICK, &stop, &mut |_| {});
+        let mut unset = Script::new(&[
+            ("@time
+", "[stats] bat=87 state=paused
+@time unset
+"),
+            ("@time 1792332202123
+", "@time ok
+"),
+            ("@time
+", "@time 1792332202150
+"),
+        ]);
+        let sent = unset.sent.clone();
+        let (sent_ms, after_ms) = (Some(1_792_332_202_123), Some(27));
+        let set = Clocked { before: BoardTime::Unset, off_ms: None, due: true, sent: sent_ms, after_ms };
+        assert_eq!(run(&mut unset, false), Ok(set));
+        assert_eq!(*sent.lock().unwrap(), ["@time
+", "@time 1792332202123
+", "@time
+"]);
+
+        // Two seconds off either way is in step: only asked.
+        for (board, off) in [("1792332200123", -2000), ("1792332204123", 2000)] {
+            let mut close = Script::new(&[("@time
+", &format!("@time {board}
+"))]);
+            let sent = close.sent.clone();
+            let got = run(&mut close, false).unwrap();
+            assert_eq!((got.off_ms, got.due, got.sent), (Some(off), false, None));
+            assert_eq!(sent.lock().unwrap().len(), 1);
+        }
+        // Past that, set: a board ahead as well as one behind.
+        for board in ["1792332200122", "1792332209000"] {
+            let reply = format!("@time {board}
+");
+            let again = "@time 1792332202123
+";
+            let mut off = Script::new(&[("@time
+", reply.as_str()), ("@time 1", "@time ok
+"), ("@time
+", again)]);
+            let got = run(&mut off, false).unwrap();
+            assert_eq!((got.due, got.sent, got.after_ms), (true, Some(1_792_332_202_123), Some(0)), "{board}");
+        }
+        // A dry run only asks.
+        let mut dry = Script::new(&[("@time
+", "@time unset
+")]);
+        let sent = dry.sent.clone();
+        let got = run(&mut dry, true).unwrap();
+        assert_eq!((got.before, got.due, got.sent), (BoardTime::Unset, true, None));
+        assert_eq!(sent.lock().unwrap().len(), 1);
+
+        // The computer's time is taken halfway between the question and the
+        // answer.
+        let tick = std::cell::Cell::new(1_792_332_202_000u64);
+        let ticking = || {
+            tick.set(tick.get() + 100);
+            tick.get()
+        };
+        let mut halfway = Script::new(&[("@time
+", "@time 1792332202150
+")]);
+        let got = clock(&mut halfway, "COM3", &ticking, false, QUICK, &stop, &mut |_| {}).unwrap();
+        assert_eq!(got.off_ms, Some(0));
+
+        // Older firmware has no clock verb; a refusal leaves it as it was.
+        assert_eq!(run(&mut Script::new(&[("@time
+", "@err 7 time
+")]), false), Err(TimeWhy::Old));
+        let rtc = &[("@time
+", "@time unset
+"), ("@time 1", "@err 4 time rtc
+")];
+        assert_eq!(run(&mut Script::new(rtc), false), Err(TimeWhy::Rtc));
+        let range = &[("@time
+", "@time unset
+"), ("@time 1", "@err 5 time
+")];
+        assert_eq!(run(&mut Script::new(range), false), Err(TimeWhy::Range));
+        assert_eq!(run(&mut Script::new(&[]), false), Err(TimeWhy::NoAnswer));
+        // A computer whose own clock was never set sends nothing.
+        let mut ours = Script::new(&[("@time
+", "@time unset
+")]);
+        let sent = ours.sent.clone();
+        let got = clock(&mut ours, "COM3", &|| 1_000, false, QUICK, &stop, &mut |_| {});
+        assert_eq!((got, sent.lock().unwrap().len()), (Err(TimeWhy::OurClock), 1));
+    }
+
+    #[test]
+    fn a_status_line_says_whether_the_boards_clock_is_set() {
+        let line = "@status fw=v0.12.0 card=fat32 state=idle cid=- clock=ok bt=-";
+        assert_eq!(parse_status(line).unwrap().clock, Clock::Ok);
+        let clock = |value: &str| parse_status(&format!("@status fw=v0.12.0 cid=- clock={value}")).unwrap().clock;
+        assert_eq!(clock("unset"), Clock::Unset);
+        assert_eq!(clock("drifting"), Clock::Unset, "any other value is unset, as the firmware says");
+        assert_eq!(parse_status(REAL).unwrap().clock, Clock::Unknown, "no key: firmware from before it");
     }
 }

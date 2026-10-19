@@ -109,6 +109,25 @@ enum DeviceCmd {
     // listener's `device card <drive> plays` waits for its UX contract too.
     #[command(hide = true)]
     CardPlays(CardPlaysArgs),
+    // Reads the clock of the board on a port with a bare `@time`, over the
+    // running firmware's host lines and with no reset, and sets it to this
+    // computer's (`@time <unix-ms>`) when it is unset or more than 2 s off;
+    // `--dry-run` reads it and says whether it would. Prints what it found
+    // and did as JSON. For the board checks (the firmware's HOST-STATUS,
+    // step 10): the MP3 Player tab setting the clock when it sees the board
+    // waits for its UX contract.
+    #[command(hide = true)]
+    Time(TimeArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct TimeArgs {
+    // The board's serial port (`COM3`, `/dev/ttyACM0`): one of the ports
+    // `device list` names.
+    port: String,
+    // Read the clock and print, and set nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args, Clone)]
@@ -356,6 +375,12 @@ pub fn run(args: DeviceArgs) -> i32 {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             card::history::command(&args.volume, args.dry_run, &mut out, &mut err)
         }
+        DeviceCmd::Time(args) => {
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            let engine = engine::from_env();
+            let now = || unix_ms(std::time::SystemTime::now());
+            time_on(&*engine, &args.port, args.dry_run, &now, listen::Waits::REAL, &mut out, &mut err)
+        }
         DeviceCmd::CardSync(args) => match args.ask() {
             Ok(ask) => {
                 let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -378,6 +403,84 @@ pub fn run(args: DeviceArgs) -> i32 {
             page::run(args)
         }
     }
+}
+
+/// A time as Unix ms, as `@time` takes it; 0 before 1970.
+fn unix_ms(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// `device time <port> [--dry-run]`, undocumented: the clock of the board
+/// on `port`, one of the boards the engine lists, read and set as
+/// [`listen::clock`] does, through the port opened as every listen opens it
+/// (DTR and RTS held low: no reset, the music plays on). `now`: this
+/// computer's clock in Unix ms. Prints what it found and did as JSON, the
+/// host lines both ways among it. Exit 0 when the clock is in step or was
+/// set (a dry run: read); 1 when the board has no clock verb (`@err 7
+/// time`: firmware older than 0.12.0), refused the time, or didn't answer;
+/// 2 when the port isn't a board's this computer lists, or the ports can't
+/// be listed.
+fn time_on(
+    engine: &dyn Engine,
+    port: &str,
+    dry_run: bool,
+    now: &dyn Fn() -> u64,
+    waits: listen::Waits,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let found = match engine.candidates() {
+        Ok(found) => found,
+        Err(e) => {
+            let _ = writeln!(err, "mstream-player: {}", e.text());
+            return 2;
+        }
+    };
+    let Some(candidate) = found.iter().find(|c| c.port.eq_ignore_ascii_case(port)) else {
+        let _ = writeln!(err, "mstream-player: {port} isn't a board's port this computer lists");
+        return 2;
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut lines = Vec::new();
+    let clocked = match engine.listen(candidate) {
+        Ok(mut wire) => {
+            let mut note = |line: String| lines.push(line);
+            listen::clock(&mut *wire, &candidate.port, now, dry_run, waits, &stop, &mut note)
+        }
+        Err(e) => Err(listen::TimeWhy::Port(e)),
+    };
+    let mut printed = serde_json::json!({ "port": candidate.port, "dryRun": dry_run, "lines": lines });
+    let code = match &clocked {
+        Ok(c) => {
+            let board = match c.before {
+                listen::BoardTime::At(ms) => serde_json::json!(ms),
+                listen::BoardTime::Unset => serde_json::json!("unset"),
+            };
+            printed["board"] = board;
+            printed["offBy"] = serde_json::json!(c.off_ms);
+            printed["due"] = c.due.into();
+            printed["sent"] = serde_json::json!(c.sent);
+            printed["after"] = serde_json::json!(c.after_ms);
+            0
+        }
+        Err(why) => {
+            printed["error"] = why.code().into();
+            let words = match why {
+                listen::TimeWhy::Old => "no clock verb: firmware older than 0.12.0".to_string(),
+                listen::TimeWhy::Range => "the board refused the time as out of range".to_string(),
+                listen::TimeWhy::Syntax => "the board couldn't read the time".to_string(),
+                listen::TimeWhy::Rtc => "the board's clock chip didn't take the time".to_string(),
+                listen::TimeWhy::OurClock => "this computer's clock is outside 2026-2099".to_string(),
+                listen::TimeWhy::NoAnswer => "the board didn't answer".to_string(),
+                listen::TimeWhy::Port(e) => e.text(),
+                listen::TimeWhy::Other(line) => line.clone(),
+            };
+            let _ = writeln!(err, "mstream-player: {}: {words}", candidate.port);
+            1
+        }
+    };
+    let _ = writeln!(out, "{}", serde_json::to_string_pretty(&printed).unwrap_or_default());
+    code
 }
 
 /// `device list`: one line per board, exit 1 when there is none — a script
@@ -1122,6 +1225,85 @@ mod tests {
 
         let (code, lines) = listed(&Fake::new("nodevice"), false);
         assert_eq!((code, lines), (1, vec!["No Core2 found".to_string()]));
+    }
+
+    /// The hidden `device time`: the clock of a board the engine lists, read
+    /// with a bare `@time` and set when it is unset or more than 2 s off,
+    /// on the port as every listen opens it (never a reset). Older
+    /// firmware's `@err 7 time` is no clock verb; a port no board is on is
+    /// refused; it stays out of the help.
+    #[test]
+    fn device_time_reads_a_boards_clock_and_sets_it_only_when_unset_or_off() {
+        let now = || unix_ms(std::time::SystemTime::now());
+        let timed = |fake: &Fake, port: &str, dry_run: bool| {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = time_on(fake, port, dry_run, &now, listen::tests::QUICK, &mut out, &mut err);
+            let printed: serde_json::Value = serde_json::from_slice(&out).unwrap_or_default();
+            (code, printed, String::from_utf8(err).unwrap())
+        };
+        let boards = [
+            "status:v0.12.0/clock=unset",
+            "status:v0.12.0/clock=-90000",
+            "status:v0.12.0",
+            "status:v0.11.0",
+            "status:v0.12.0/clock=unset/rtc=dead",
+        ];
+        let fake = Fake::new(&boards.join(","));
+        // A dry run reads it and says, and sets nothing.
+        let (code, dry, err) = timed(&fake, "FAKE0", true);
+        let said = (dry["board"].as_str(), dry["due"].as_bool());
+        assert_eq!((code, said), (0, (Some("unset"), Some(true))), "{err}");
+        assert!(dry["sent"].is_null(), "{dry}");
+        // Unset: set, read back in step, and in step from then on.
+        let (code, set, err) = timed(&fake, "fake0", false);
+        assert_eq!(code, 0, "{err}");
+        assert!(set["sent"].is_u64() && set["after"].as_i64().is_some_and(|ms| ms.abs() < 2000), "{set}");
+        let words: Vec<&str> = set["lines"].as_array().unwrap().iter().filter_map(|l| l.as_str()).collect();
+        assert_eq!((words[0], words[1], words[3]), ("@time", "@time unset", "@time ok"), "{words:?}");
+        let (_, again, _) = timed(&fake, "FAKE0", false);
+        assert_eq!((again["due"].as_bool(), again["sent"].is_null()), (Some(false), true), "{again}");
+        // 90 s behind: set. In step: only asked.
+        let (_, behind, _) = timed(&fake, "FAKE1", false);
+        assert!(behind["offBy"].as_i64().is_some_and(|ms| ms < -2000) && behind["sent"].is_u64(), "{behind}");
+        let (_, in_step, _) = timed(&fake, "FAKE2", false);
+        let asked = in_step["lines"].as_array().map(Vec::len);
+        assert_eq!((in_step["due"].as_bool(), asked), (Some(false), Some(2)), "{in_step}");
+        // Older firmware has no clock verb; a chip that takes nothing.
+        let (code, old, err) = timed(&fake, "FAKE3", false);
+        assert_eq!((code, old["error"].as_str()), (1, Some("old")));
+        assert!(err.contains("older than 0.12.0"), "{err}");
+        let (code, dead, _) = timed(&fake, "FAKE4", false);
+        assert_eq!((code, dead["error"].as_str()), (1, Some("rtc")));
+        // A port no board is on.
+        let (code, _, err) = timed(&fake, "COM9", false);
+        assert!(code == 2 && err.contains("isn't a board's port"), "{err}");
+        // Listened to, never reset; set twice.
+        let trace = fake.trace().lock().unwrap().clone();
+        assert!(trace.iter().all(|t| t.starts_with("listen ") || t.starts_with("time ")), "{trace:?}");
+        assert_eq!(trace.iter().filter(|t| t.starts_with("time ")).count(), 2, "{trace:?}");
+        // The boards' status lines say so: `cid=` and `clock=` from 0.12.0.
+        let found = fake.candidates().unwrap();
+        let heard = desk::listen_all(&fake, &found, Duration::from_millis(800), listen::tests::QUICK);
+        let clocks: Vec<Option<board::Clock>> = heard
+            .iter()
+            .map(|b| match &b.heard {
+                Heard::Status(s) => Some(s.clock),
+                _ => None,
+            })
+            .collect();
+        use board::Clock::{Ok as Set, Unknown, Unset};
+        assert_eq!(clocks, [Some(Set), Some(Set), Some(Set), Some(Unknown), Some(Unset)]);
+        let Heard::Status(newer) = &heard[2].heard else { panic!("a status") };
+        assert_eq!(newer.cid, board::CardRoot::None, "a card no transfer wrote");
+
+        let parsed = Line::try_parse_from(["mstream-player", "time", "COM3", "--dry-run"]).map(|l| l.what);
+        let Ok(DeviceCmd::Time(args)) = parsed else { panic!("device time") };
+        assert_eq!((args.port.as_str(), args.dry_run), ("COM3", true));
+        assert!(Line::try_parse_from(["mstream-player", "time"]).is_err(), "a port, always");
+        use clap::CommandFactory;
+        let help = Line::command().render_help().to_string();
+        assert!(help.contains("releases"), "{help}");
+        assert!(!help.lines().any(|l| l.trim_start().starts_with("time")), "{help}");
     }
 
     #[test]

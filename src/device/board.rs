@@ -49,6 +49,9 @@ pub(crate) struct Status {
     /// The card's root as the firmware loaded it (`cid=`): which card the
     /// board holds, by the transfer's name for it, and the commit it read.
     pub cid: CardRoot,
+    /// Whether the board's clock has a time it believes (`clock=`), which
+    /// its play log dates the plays by.
+    pub clock: Clock,
     /// The paired headphones' name, decoded; none with nothing paired.
     pub bt: Option<String>,
 }
@@ -135,6 +138,30 @@ impl CardRoot {
         match (u64::from_str_radix(id, 16), u32::from_str_radix(generation, 16)) {
             (Ok(card_id), Ok(generation)) => CardRoot::Loaded(CardRef { card_id, generation }),
             _ => CardRoot::Unknown,
+        }
+    }
+}
+
+/// What `clock=` says of the board's clock (the firmware repo's
+/// docs/HOST-STATUS.md, @time): the time itself is `@time`'s to tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Clock {
+    /// `clock=ok`: the RTC's reading at its start, or a computer's `@time`
+    /// since.
+    Ok,
+    /// `clock=unset`, and any other value (the firmware's own rule): no time
+    /// it believes, so a play is dated 0 until a computer sets it.
+    Unset,
+    /// No `clock=`: firmware from before the key (0.12.0's), or a line that
+    /// gave it up to stay within its 255 bytes.
+    Unknown,
+}
+
+impl Clock {
+    pub fn parse(value: &str) -> Clock {
+        match value {
+            "ok" => Clock::Ok,
+            _ => Clock::Unset,
         }
     }
 }
@@ -831,6 +858,7 @@ pub(crate) mod tests {
             bat: Some(87),
             state: PlayState::Paused,
             cid: CardRoot::Unknown,
+            clock: Clock::Unknown,
             bt: None,
         }
     }
