@@ -40,13 +40,20 @@ pub(super) struct PeerLib {
     /// Every request, as "via METHOD target": `direct`, or `parent` for one
     /// its parent's proxies forwarded.
     asked: Vec<String>,
-    /// Each file GET's X-mStream-Purpose and Range, as they came.
+    /// Each track GET's X-mStream-Purpose and Range, as they came.
     purposes: Vec<Option<String>>,
     ranges: Vec<Option<String>>,
+    /// Each other GET under `/media/` (a cover's probe or read): its Range.
+    probes: Vec<Option<String>>,
     /// The bytes of its files it served.
     served: u64,
     /// Files its folders hold that its database doesn't have yet.
     unscanned: Vec<String>,
+    /// Its folders' images, by path: never listed, served on a GET.
+    images: HashMap<String, Vec<u8>>,
+    /// A folder made here at its first track's GET: `budget.json`'s
+    /// temporary file's place taken, so the book can't be written.
+    poison: Option<PathBuf>,
 }
 
 pub(super) type PeerFake = Arc<Mutex<PeerLib>>;
@@ -143,18 +150,30 @@ fn peer_answer(fake: &PeerFake, asked: &Asked, via: &str) -> Vec<u8> {
             let body = json!({"model": model, "dim": 8, "tracks": tracks});
             json_reply("200 OK", &body.to_string())
         }
-        ("GET" | "HEAD", p) if p.starts_with("/media/") => {
+        // mStream's federation gate (`federation-auth.js`): `/media/` is
+        // for GETs alone, a key's and a guest's alike.
+        ("HEAD", p) if p.starts_with("/media/") => {
+            json_reply("403 Forbidden", r#"{"error":"Forbidden"}"#)
+        }
+        ("GET", p) if p.starts_with("/media/") => {
             let rel = p["/media/".len()..].to_string();
             let purpose = asked.header("x-mstream-purpose").map(str::to_string);
-            if asked.method == "GET" {
-                lib.purposes.push(purpose.clone());
-                lib.ranges.push(asked.header("range").map(str::to_string));
+            let range = asked.header("range").map(str::to_string);
+            let track = lib.tracks.iter().find(|t| t.path == rel).map(|t| t.bytes.clone());
+            match track {
+                Some(_) => {
+                    lib.purposes.push(purpose.clone());
+                    lib.ranges.push(range);
+                    if let Some(dir) = lib.poison.take() {
+                        std::fs::create_dir_all(dir).unwrap();
+                    }
+                }
+                None => lib.probes.push(range),
             }
             if lib.copies_off && purpose.as_deref() == Some("copy") {
                 return json_reply("403 Forbidden", r#"{"error":"copies are not allowed with this key"}"#);
             }
-            if asked.method == "GET"
-                && lib.tracks.iter().any(|t| t.path == rel)
+            if track.is_some()
                 && let Some(limit) = lib.limits.pop_front()
             {
                 let body = json!({"error": limit.words}).to_string();
@@ -163,13 +182,11 @@ fn peer_answer(fake: &PeerFake, asked: &Asked, via: &str) -> Vec<u8> {
                     after.iter().map(|a| ("Retry-After", a.as_str())).collect();
                 return reply("429 Too Many Requests", &headers, body.as_bytes());
             }
-            let Some(bytes) = lib.tracks.iter().find(|t| t.path == rel).map(|t| t.bytes.clone()) else {
+            let Some(bytes) = track.or_else(|| lib.images.get(&rel).cloned()) else {
                 return not_found();
             };
             let out = media(asked, &bytes);
-            if asked.method == "GET" {
-                lib.served += body_len(&out);
-            }
+            lib.served += body_len(&out);
             out
         }
         ("GET", p) if p.starts_with("/album-art/") => match lib.art.get(&p["/album-art/".len()..]) {
@@ -251,6 +268,7 @@ pub(super) fn federation(peers: &[FedPeer], old: bool, asked: &Asked) -> Vec<u8>
 /// 2026-10-18 13:20 UTC: the budget's clock.
 const NOW: u64 = 1_792_281_600 + 13 * 3600 + 1200;
 const JITTER: u64 = 120;
+const ALBUM: &str = "Folk/Dana Duo/Album";
 const ONE: &str = "Folk/Dana Duo/Album/01.mp3";
 const TWO: &str = "Folk/Dana Duo/Album/02.flac";
 
@@ -327,6 +345,7 @@ fn fed(scratch: &Scratch, clock: &Arc<AtomicU64>, dial: TestDial, ffmpeg: Ffmpeg
         budget: Budget::at(scratch.0.join("config")),
         dial: Box::new(dial),
         ffmpeg,
+        cards: Vec::new(),
         clock: Arc::new(move || at.load(Ordering::Relaxed)),
         jitter: Arc::new(|| JITTER),
         stream_wait: Duration::from_millis(20),
@@ -363,15 +382,16 @@ fn asked_of(peer: &PeerFake) -> Vec<String> {
 
 /// A peer read beside the server: its listing through the parent's browse
 /// proxy, its files over its own tunnel each saying it is a copy, its
-/// covers probed there with HEAD and its art the 256 px copy through the
-/// parent's art proxy; its rows on the card name it (an SRVS peer entry,
-/// its own id), every byte read from it is in the budget's book, and the
-/// card's settings know it by its parent's key, its id and its identity.
+/// folder's cover found there with a one-byte GET (its gate refuses a HEAD)
+/// and read; its rows on the card name it (an SRVS peer entry, its own id),
+/// every byte read from it is in the budget's book, and the card's settings
+/// know it by its parent's key, its id and its identity.
 #[test]
 fn a_peers_files_go_on_the_card_beside_the_servers_and_every_byte_is_counted() {
     let scratch = Scratch::new("peer-direct");
     let sim = card(&scratch);
     let (base, _fake, peer, dial) = world(true, false, folk());
+    peer.lock().unwrap().images.insert(format!("{ALBUM}/cover.jpg"), picture(64, 48, true));
     let clock = Arc::new(AtomicU64::new(NOW));
     let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
     let mut envs = envs();
@@ -407,11 +427,15 @@ fn a_peers_files_go_on_the_card_beside_the_servers_and_every_byte_is_counted() {
     assert!(asked.iter().any(|a| a == "direct GET /media/Folk/Dana%20Duo/Album/01.mp3"), "{asked:?}");
     let proxied = asked.iter().any(|a| a.starts_with("parent GET /media/"));
     assert!(!proxied, "no byte through the parent: {asked:?}");
-    let probe = "direct HEAD /media/Folk/Dana%20Duo/Album/cover.jpg".to_string();
-    assert!(asked.contains(&probe), "{asked:?}");
-    assert!(asked.contains(&"parent GET /album-art/f.png?compress=l".to_string()), "{asked:?}");
+    let cover = "direct GET /media/Folk/Dana%20Duo/Album/cover.jpg";
+    assert_eq!(asked.iter().filter(|a| *a == cover).count(), 2, "probed, then read: {asked:?}");
+    assert!(!asked.iter().any(|a| a.starts_with("direct HEAD ")), "{asked:?}");
+    assert!(!asked.iter().any(|a| a.contains("/album-art/")), "its folder's cover first: {asked:?}");
+    let thumb = std::fs::read(scratch.0.join("card/.mstream").join(thumb_path_of(ALBUM)));
+    assert!(thumb.is_ok_and(|t| mpth::check(&t, path_hash(ALBUM))), "its thumbnail");
     let lib = peer.lock().unwrap();
     assert!(lib.purposes.iter().all(|p| p.as_deref() == Some("copy")), "{:?}", lib.purposes);
+    assert_eq!(lib.probes.first().cloned().flatten().as_deref(), Some("bytes=0-0"), "{:?}", lib.probes);
     let served = lib.served;
     drop(lib);
 
@@ -487,7 +511,11 @@ fn a_peer_only_the_proxy_reaches_is_asked_about_once() {
     assert_eq!(ran(&synced).records, 4, "the server's own go in");
     assert_eq!(synced.peers[0].status, Status::AskProxy);
     assert!(asked_of(&peer).is_empty(), "nothing asked of the peer");
+    let endpoint = |sim: &FatSim| endpoint_of(&look(sim).state);
+    assert_eq!(endpoint(&sim), "", "never read: known by no identity yet");
 
+    // Paired again meanwhile: read all the same, by its new identity.
+    fake.lock().unwrap().peers[0].endpoint = "e9";
     let allowed = Ask { proxy_copies: vec![3], ..rock_and_folk() };
     let synced = sync_fed(&sim, &base, &allowed, &fed, &mut envs);
     let outcome = ran(&synced);
@@ -503,12 +531,13 @@ fn a_peer_only_the_proxy_reaches_is_asked_about_once() {
     let head = parent.iter().any(|a| a.starts_with("HEAD /api/v1/federation/"));
     assert!(!head, "no HEAD through a proxy: {parent:?}");
     let lib = peer.lock().unwrap();
-    let probes = lib.ranges.iter().filter(|r| r.as_deref() == Some("bytes=0-0")).count();
-    assert!(probes >= 1, "{:?}", lib.ranges);
+    let probes = lib.probes.iter().filter(|r| r.as_deref() == Some("bytes=0-0")).count();
+    assert!(probes >= 1, "{:?}", lib.probes);
     assert!(lib.purposes.iter().all(Option::is_none), "the older proxy said nothing: {:?}", lib.purposes);
     drop(lib);
     let state = State::of(&look(&sim).state).unwrap();
     assert!(state.settings.peers[0].proxy_copies, "the answer is the card's");
+    assert_eq!(endpoint(&sim), "e9");
 
     // Asked once: the card's own peers, read without the flag.
     let synced = sync_fed(&sim, &base, &rock(), &fed, &mut envs);
@@ -708,6 +737,11 @@ fn tunnel_of(peer: &PeerFake) -> String {
     routed(move |asked| peer_answer(&served, asked, "direct"))
 }
 
+/// The endpoint the card's settings know its first peer by.
+fn endpoint_of(state: &Private) -> String {
+    State::of(state).unwrap().settings.peers[0].endpoint.clone()
+}
+
 fn records_of(card: &FatSim) -> Vec<crate::device::card::contract::mptg::Entry> {
     look(card).root.expect("a root").tags.expect("its tags file").records
 }
@@ -750,4 +784,168 @@ fn a_peer_is_read_only_as_the_card_knows_it() {
     assert_eq!(synced.peers[0].status, Status::OtherPeer);
     assert_eq!(asked_of(&peer).len(), before, "nothing asked of it");
     assert_eq!(ran(&synced).records, 5);
+}
+
+/// A peer read whose files the card holds none of, paired again under its
+/// id (another identity): read by the new one; once the card holds its
+/// files, another identity again isn't read.
+#[test]
+fn a_peer_paired_again_is_read_while_the_card_holds_none_of_its_files() {
+    let scratch = Scratch::new("peer-again");
+    let sim = card(&scratch);
+    let (base, fake, peer, dial) = world(true, false, Vec::new());
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!((synced.peers[0].status.clone(), synced.peers[0].files), (Status::Read, 0));
+    let endpoint = |sim: &FatSim| endpoint_of(&look(sim).state);
+    assert_eq!(endpoint(&sim), "e3");
+
+    fake.lock().unwrap().peers[0].endpoint = "e9";
+    peer.lock().unwrap().tracks = folk();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!((synced.peers[0].status.clone(), ran(&synced).written), (Status::Read, 2));
+    assert_eq!(endpoint(&sim), "e9");
+
+    fake.lock().unwrap().peers[0].endpoint = "e7";
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!(synced.peers[0].status, Status::OtherPeer);
+    assert_eq!(endpoint(&sim), "e9");
+}
+
+/// What is left of a peer's day holds all that is asked of it, not its
+/// files alone: a folder image larger than it is probed and never read
+/// (mStream's small art instead), and a day its covers spent parks the peer
+/// at the run's end, its vectors not asked; a run the same day asks it
+/// nothing.
+#[test]
+fn a_peers_day_holds_its_covers_and_vectors_too() {
+    let scratch = Scratch::new("peer-covers-day");
+    let sim = card(&scratch);
+    let (base, _fake, peer, dial) = world(true, false, folk());
+    {
+        let mut lib = peer.lock().unwrap();
+        lib.images.insert(format!("{ALBUM}/cover.jpg"), vec![0xFF; 1200 << 10]);
+        lib.art.insert("f.png".into(), vec![7; 1100 << 10]);
+    }
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let one_mib = Ask { budget_mb: Some(1), ..rock_and_folk() };
+    let synced = sync_fed(&sim, &base, &one_mib, &fed, &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.parked.clone(), outcome.written), (None, 6), "{:?}", outcome.report);
+    let until = next_midnight(NOW) + JITTER;
+    let said = &synced.peers[0];
+    let waits = (said.status.clone(), said.resume_at, synced.resume_at);
+    assert_eq!(waits, (Status::Waiting, Some(until), Some(until)), "{said:?}");
+    let asked = asked_of(&peer);
+    let cover = "direct GET /media/Folk/Dana%20Duo/Album/cover.jpg";
+    assert_eq!(asked.iter().filter(|a| *a == cover).count(), 1, "probed, never read: {asked:?}");
+    let probes = peer.lock().unwrap().probes.clone();
+    assert!(probes.iter().all(|r| r.as_deref() == Some("bytes=0-0")), "{probes:?}");
+    assert_eq!(asked.iter().filter(|a| a.contains("/album-art/")).count(), 1, "{asked:?}");
+    assert!(!asked.iter().any(|a| a.contains("embeddings")), "no vectors past its day: {asked:?}");
+    let book = Budget::at(scratch.0.join("config")).read().unwrap();
+    assert_eq!(book.waiting(key_of(&base), NOW), Some(until));
+
+    // The same day: nothing asked.
+    let before = asked_of(&peer).len();
+    clock.store(NOW + 3600, Ordering::Relaxed);
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!((synced.peers[0].status.clone(), asked_of(&peer).len()), (Status::Waiting, before));
+}
+
+/// A key with nothing left of its quota today, as the peer says it (its
+/// allowance's `remainingTodayBytes`): the peer waits for the next 00:00
+/// UTC, its `/api/` alone asked (and counted); a run the same day asks it
+/// nothing.
+#[test]
+fn a_peer_whose_key_has_nothing_left_today_isnt_listed() {
+    let scratch = Scratch::new("peer-quota-none");
+    let sim = card(&scratch);
+    let (base, _fake, peer, dial) = world(true, false, folk());
+    let allowance = json!({"dailyMb": 2048, "remainingTodayBytes": 0, "allowCopies": true});
+    peer.lock().unwrap().allowance = Some(allowance);
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!(ran(&synced).records, 4, "the server's own go in");
+    let until = next_midnight(NOW) + JITTER;
+    let said = &synced.peers[0];
+    let waits = (said.status.clone(), said.resume_at, synced.resume_at);
+    assert_eq!(waits, (Status::Waiting, Some(until), Some(until)), "{said:?}");
+    assert_eq!(asked_of(&peer), ["parent GET /api/"], "its /api/ alone");
+    let used = Budget::at(scratch.0.join("config")).read().unwrap().used_today(key_of(&base), NOW);
+    assert!(used > 0, "its /api/, counted");
+
+    clock.store(NOW + 3600, Ordering::Relaxed);
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!((synced.peers[0].status.clone(), asked_of(&peer).len()), (Status::Waiting, 1));
+}
+
+/// One parent the listener reaches at two addresses (the server known by
+/// its own id at both) keeps one budget for its peer: a day spent through
+/// one is spent through the other, and the peer is asked nothing there.
+#[test]
+fn a_peers_day_is_one_at_any_address_of_its_parent() {
+    let scratch = Scratch::new("peer-alias");
+    let sim = card(&scratch);
+    let big = |n: usize| mp3_bytes(1500 + n, true);
+    let tracks = vec![peer_track(ONE, 1, big(0)), peer_track("Folk/Dana Duo/Album/02.mp3", 2, big(1))];
+    let (base, fake, peer, dial) = world(true, false, tracks);
+    let served = fake.clone();
+    let other = routed(move |asked| answer(&served, asked));
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let one_mib = Ask { budget_mb: Some(1), ..rock_and_folk() };
+    let synced = sync_fed(&sim, &base, &one_mib, &fed, &mut envs);
+    let until = next_midnight(NOW) + JITTER;
+    assert_eq!((synced.peers[0].status.clone(), synced.resume_at), (Status::Waiting, Some(until)));
+
+    let before = asked_of(&peer).len();
+    let synced = sync_fed(&sim, &other, &rock_and_folk(), &fed, &mut envs);
+    let said = &synced.peers[0];
+    let waits = (said.status.clone(), said.resume_at);
+    assert_eq!(waits, (Status::Waiting, Some(until)), "{:?}", synced.notes);
+    assert_eq!(asked_of(&peer).len(), before, "nothing asked of it");
+    let book = Budget::at(scratch.0.join("config")).read().unwrap();
+    let there = PeerKey { parent_key: server_url_key(&other), peer_id: 3 };
+    assert_eq!((book.peers.len(), book.waiting(there, NOW)), (1, Some(until)), "one account: {book:?}");
+}
+
+/// A budget the book can't keep (`budget.json` can't be written partway
+/// through a run): the file that came whole stays, the peer is stopped for
+/// the run and says why, and nothing more is asked of it; the next run, the
+/// book whole again, takes up the rest.
+#[test]
+fn a_peer_whose_budget_cant_be_kept_is_stopped() {
+    let scratch = Scratch::new("peer-unkept");
+    let sim = card(&scratch);
+    let (base, _fake, peer, dial) = world(true, false, folk());
+    let blocked = scratch.0.join("config").join("budget.tmp");
+    peer.lock().unwrap().poison = Some(blocked.clone());
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.written, outcome.parked.clone()), (5, None), "{:?}", outcome.report);
+    let said = &synced.peers[0];
+    let why = said.why.clone().unwrap_or_default();
+    assert_eq!(said.status, Status::Refused, "{why}");
+    assert!(why.starts_with("its budget can't be kept"), "{why}");
+    let failed: Vec<&str> = outcome.report.failed.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(failed, [TWO], "{:?}", outcome.report.failed);
+    let lib = peer.lock().unwrap();
+    assert_eq!((lib.purposes.len(), lib.probes.len()), (1, 0), "nothing more asked of it");
+    drop(lib);
+    assert_eq!(synced.resume_at, None);
+
+    std::fs::remove_dir(&blocked).unwrap();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!((synced.peers[0].status.clone(), ran(&synced).written), (Status::Read, 1));
 }

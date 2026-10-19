@@ -149,13 +149,20 @@ impl Client {
                 .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
             req = req.header("Content-Type", "application/json").body(text);
         }
-        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let resp = req.send().await.map_err(unreached)?;
         let status = resp.status();
         let headers = resp.headers().clone();
-        let body = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?.to_vec();
+        let body = resp.bytes().await.map_err(unreached)?.to_vec();
         self.count(body.len());
         Ok(Reply { status, headers, body })
     }
+}
+
+/// A transport failure, in words that leave its URL out: a tunnel's
+/// carries the tunnel's loopback token (`__lt`), and the words go into a
+/// run's report.
+fn unreached(e: reqwest::Error) -> ApiError {
+    ApiError::Network(e.without_url().to_string())
 }
 
 /// A JSON answer read as `T`, a refusal as the client maps one.
@@ -1185,13 +1192,9 @@ impl Client {
         let url =
             urls::album_art_sized_url(&self.server(), self.peer, file, size).map_err(ApiError::Config)?;
         let url = urls::with_local_token(url, self.local_token.as_deref());
-        let resp = self
-            .transfer_request(Method::GET, &url)
-            .send()
-            .await
-            .map_err(|e| ApiError::Network(e.to_string()))?;
+        let resp = self.transfer_request(Method::GET, &url).send().await.map_err(unreached)?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let bytes = resp.bytes().await.map_err(unreached)?;
         self.count(bytes.len());
         match refused(status, &String::from_utf8_lossy(&bytes), &format!("album-art/{file}")) {
             Some(refusal) => Err(refusal),

@@ -1337,6 +1337,7 @@ fn on(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
+    let cards = found.iter().filter(|f| f.accepted()).map(|f| f.volume.path.clone()).collect();
     let Some(found) = super::setup::pick(found, volume) else {
         let _ = writeln!(err, "mstream-player: {volume} isn't a volume this computer lists");
         return 2;
@@ -1354,7 +1355,7 @@ fn on(
         }
     };
     let reached = reached(&client.server());
-    let fed = match Federation::system() {
+    let fed = match Federation::system(cards) {
         Ok(fed) => fed,
         Err(e) => {
             let _ = writeln!(err, "mstream-player: {e}");

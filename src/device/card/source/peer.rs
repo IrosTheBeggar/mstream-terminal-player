@@ -27,7 +27,14 @@
 //! in the card's partial (2.12.8), the run goes on with the other sources'
 //! files and ends at a checkpoint that keeps the peer's in its plan, and
 //! the peer is asked again after the next 00:00 UTC. Every byte its clients
-//! read is counted against its day.
+//! read is counted against its day, and nothing is asked of it once the
+//! day is spent ([`Gate`]): not a file, a cover or a vector. A budget the
+//! book can't keep (`budget.json` unwritable) stops the peer for the run.
+//!
+//! **A probe** of a peer's file is a one-byte GET, whichever way its bytes
+//! come: its federation gate admits only GETs of `/media/` (mStream's
+//! `federation-auth.js` refuses a HEAD with a 403), and a HEAD through an
+//! older parent's stream proxy may pull the whole file.
 //!
 //! **Conversions** are made on this computer ([`super::ffmpeg`]): the
 //! peer's bytes fetched whole into a file here, converted, held to their
@@ -44,16 +51,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use super::super::budget::{self, Clock, PeerKey, Spend};
+use super::super::budget::{self, Clock, Day, PeerKey, Spend};
 use super::super::engine::{Failed, Fetched, Fetcher, Have, Part, WantedFile};
 use super::super::names::Bytes;
 use super::super::plan::{codec_of, extension};
 use super::ffmpeg::Convert;
 use super::http::{AsMade, Finish, Scratch, passing, pause, pour, skip};
 use super::length::{self, FileAt};
-use crate::api::transfer::fetch::{
-    FAT32_MAX, Fetch, FetchError, LimitKind, Limited, ProbeBy, Rewind,
-};
+use crate::api::transfer::fetch::{FAT32_MAX, Fetch, FetchError, LimitKind, Limited, Rewind};
 use crate::api::transfer::{ManifestEntry, Metadata};
 use crate::api::types::DirectAccessResponse;
 use crate::api::urls::TransferBitrate;
@@ -195,16 +200,6 @@ impl Reach {
             Reach::Undeclared => "proxy-undeclared",
         }
     }
-
-    /// The probe a cover search makes: HEAD where it costs no body, a
-    /// one-byte GET through a proxy, which is registered for GET only and
-    /// may fetch a whole file for a HEAD (B10 makes it a one-byte GET).
-    pub(crate) fn probe(self) -> ProbeBy {
-        match self {
-            Reach::Direct => ProbeBy::Head,
-            _ => ProbeBy::FirstByte,
-        }
-    }
 }
 
 /// The parent's word on the direct path: the guest ticket to dial and the
@@ -293,22 +288,39 @@ impl Hold {
 }
 
 /// A peer's hold, shared by its source and what else asks it for bytes in
-/// a run (its covers).
+/// a run (its covers, its vectors), and what is left of its day.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Gate(Arc<Mutex<Option<Hold>>>);
+pub(crate) struct Gate {
+    hold: Arc<Mutex<Option<Hold>>>,
+    day: Option<Day>,
+}
 
 impl Gate {
+    /// The gate of a peer whose day is `day`.
+    pub(crate) fn of(day: Day) -> Gate {
+        Gate { hold: Arc::default(), day: Some(day) }
+    }
+
     pub(crate) fn hold(&self) -> Option<Hold> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.hold.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub(crate) fn set(&self, hold: Hold) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(hold);
+        *self.hold.lock().unwrap_or_else(|e| e.into_inner()) = Some(hold);
     }
 
-    /// Nothing holds it: it may be asked.
+    /// The bytes the peer may still be asked for now: none while something
+    /// holds it or its day is spent; None: no cap.
+    pub(crate) fn room(&self) -> Option<u64> {
+        match self.hold() {
+            Some(_) => Some(0),
+            None => self.day.as_ref().and_then(Day::left),
+        }
+    }
+
+    /// It may be asked.
     pub(crate) fn open(&self) -> bool {
-        self.hold().is_none()
+        self.room() != Some(0)
     }
 }
 
@@ -384,11 +396,14 @@ impl Drop for Turn {
 
 /// A partial that takes bytes while the day's budget lasts: the chunk that
 /// came while some was left is written (the meter counted it as it came),
-/// the next one refused.
+/// the next one refused; and while the book takes them, the first that it
+/// can't refused too.
 struct CapPart<'a> {
     into: &'a mut dyn Part,
     spend: &'a mut Spend,
     spent: bool,
+    /// Why the book couldn't take the meter's bytes.
+    unkept: Option<String>,
 }
 
 impl Write for CapPart<'_> {
@@ -397,7 +412,10 @@ impl Write for CapPart<'_> {
             self.spent = true;
             return Err(io::Error::other("the day's budget for the peer is spent"));
         }
-        let _ = self.spend.tick();
+        if let Err(why) = self.spend.tick() {
+            self.unkept = Some(why);
+            return Err(io::Error::other("the peer's budget can't be kept"));
+        }
         self.into.write(buf)
     }
 
@@ -526,25 +544,47 @@ impl Peer {
         self.cap
     }
 
-    /// The meter's last bytes into the book: at the run's end.
+    /// At the run's end: the meter's last bytes into the book, and a day
+    /// spent by then (by its covers, its vectors) parks the peer as a file
+    /// cut at the budget does.
     pub(crate) fn settle(&mut self) {
-        let _ = self.s.spend.sync();
+        if let Err(why) = self.s.spend.sync() {
+            self.unkept(why);
+        } else if self.s.gate.hold().is_none() && self.s.spend.left() == Some(0) {
+            self.spent();
+        }
     }
 
-    fn held(&self) -> Result<(), Failed> {
-        match self.s.gate.hold() {
-            Some(hold) => Err(skip(hold.why().to_string())),
-            None => Ok(()),
+    /// Nothing more is asked of the peer: something holds it, or its day is
+    /// spent, which parks it.
+    fn held(&mut self) -> Result<(), Failed> {
+        if let Some(hold) = self.s.gate.hold() {
+            return Err(skip(hold.why().to_string()));
         }
+        match self.s.spend.left() {
+            Some(0) => Err(self.spent()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The book can't keep the peer's bytes (`why`): it is stopped for the
+    /// run, as nothing it pulls could be counted.
+    fn unkept(&mut self, why: String) -> Failed {
+        let why = format!("its budget can't be kept: {why}");
+        self.s.gate.set(Hold::Stop(why.clone()));
+        skip(why)
     }
 
     /// The peer's day is spent: it waits, in the book, until `retry_after`
     /// seconds from now (the peer's word) or the next 00:00 UTC, and a few
-    /// minutes.
+    /// minutes. A wait the book can't keep stops it instead: the next run
+    /// would ask it again the same day.
     fn wait(&mut self, why: String, retry_after: Option<u64>) -> Failed {
         let now = (self.s.clock)();
         let until = budget::resume_after(now, retry_after, (self.s.jitter)());
-        let _ = self.s.spend.park(until);
+        if let Err(e) = self.s.spend.park(until) {
+            return self.unkept(e);
+        }
         self.s.gate.set(Hold::Wait { why: why.clone(), until });
         skip(why)
     }
@@ -615,9 +655,6 @@ impl Peer {
         into: &mut dyn Part,
     ) -> Result<Fetched, Failed> {
         self.held()?;
-        if self.s.spend.left() == Some(0) {
-            return Err(self.spent());
-        }
         let turn = Turn::take(self.s.spend.key(), &self.stop);
         let Some(_turn) = turn else { return Err(skip("stopped")) };
         let l = &file.ledger;
@@ -630,15 +667,20 @@ impl Peer {
         loop {
             let fetch = Fetch::file(&l.server_path).expecting(l.server_size);
             let fetch = fetch.resuming(validator.as_deref());
-            let mut capped = CapPart { into: &mut *into, spend: &mut self.s.spend, spent: false };
+            let spend = &mut self.s.spend;
+            let mut capped = CapPart { into: &mut *into, spend, spent: false, unkept: None };
             let got = client.stream_part(&fetch, &mut capped, held, &mut |_, _| {});
-            let spent = capped.spent;
-            let _ = self.s.spend.sync();
+            let (spent, unkept) = (capped.spent, capped.unkept.take());
+            // A file that came whole is the card's, whatever the book says.
+            let unkept = unkept.or_else(|| self.s.spend.sync().err()).map(|e| self.unkept(e));
             let f = match got {
                 Ok(got) => return Ok(Fetched { content_type: got.content_type }),
                 Err(f) => f,
             };
             (held, validator) = (f.partial.len, f.partial.validator.clone());
+            if let Some(unkept) = unkept {
+                return Err(unkept);
+            }
             if spent {
                 return Err(self.spent());
             }
@@ -667,11 +709,14 @@ impl Peer {
             let fetch = Fetch::file(&l.server_path).expecting(l.server_size).cap(FAT32_MAX);
             let fetch = fetch.resuming(validator.as_deref());
             let got = client.download(&fetch, dest, &mut |_, _| {});
-            let _ = self.s.spend.sync();
+            let unkept = self.s.spend.sync().err().map(|e| self.unkept(e));
             let f = match got {
                 Ok(_) => return Ok(()),
                 Err(f) => f,
             };
+            if let Some(unkept) = unkept {
+                return Err(unkept);
+            }
             validator = f.partial.validator.clone();
             match &f.error {
                 FetchError::Limited(l) => match self.limited(l, &mut streams) {
@@ -753,7 +798,9 @@ impl Fetcher for Peer {
         }
         self.held()?;
         let read = self.client.read_range(&file.ledger.server_path, start, len as u64);
-        let _ = self.s.spend.tick();
+        if let Err(why) = self.s.spend.tick() {
+            self.unkept(why);
+        }
         read.map(|r| r.bytes).map_err(|e| skip(e.to_string()))
     }
 
@@ -828,7 +875,22 @@ mod tests {
         assert!(ticket(&half).is_err());
         let pairing = DirectAccessResponse { direct_ticket: Some("mstr1:xyz".into()), ..granted };
         assert!(ticket(&pairing).is_err(), "a pairing code is no guest ticket");
-        assert_eq!((Reach::Direct.probe(), Reach::Proxy.probe()), (ProbeBy::Head, ProbeBy::FirstByte));
+    }
+
+    #[test]
+    fn a_peer_is_asked_nothing_once_held_or_its_day_is_spent() {
+        let (day, meter) = Day::of(Some(100));
+        let gate = Gate::of(day);
+        assert_eq!((gate.room(), gate.open()), (Some(100), true));
+        meter.fetch_add(60, Ordering::Relaxed);
+        assert_eq!(gate.room(), Some(40), "what its covers may still take");
+        meter.fetch_add(60, Ordering::Relaxed);
+        assert_eq!((gate.room(), gate.open()), (Some(0), false), "spent: nothing more");
+        let (free, _) = Day::of(None);
+        let gate = Gate::of(free);
+        assert_eq!((gate.room(), gate.open()), (None, true), "no cap");
+        gate.set(Hold::Stop("refused".into()));
+        assert_eq!((gate.room(), gate.open()), (Some(0), false), "held");
     }
 
     #[test]

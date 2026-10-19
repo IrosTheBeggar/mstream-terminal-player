@@ -345,14 +345,16 @@ pub struct Probed {
 /// How to ask whether a file is there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeBy {
-    /// HEAD: no body at all. The server's own `/media` and a peer reached
-    /// directly answer it from the file's stat; a peer meters only GETs as
-    /// heavy.
+    /// HEAD: no body at all. The user's own server's `/media` answers it
+    /// from the file's stat. Never a peer's: its federation gate admits
+    /// only GETs of `/media/` (mStream's `federation-auth.js`), and refuses
+    /// a HEAD with a 403, for a key and a guest alike.
     Head,
-    /// GET with `Range: bytes=0-0`: one byte. The way through a parent's
-    /// stream proxy, which is registered for GET only: Express answers a
-    /// HEAD there with the GET handler, which pulls the whole file over
-    /// the peer link (ESTIMATED from mStream's `federation-stream.js`).
+    /// GET with `Range: bytes=0-0`: one byte. The way to a peer's files,
+    /// reached directly or through a parent's stream proxy, which is
+    /// registered for GET only: Express answers a HEAD there with the GET
+    /// handler, which pulls the whole file over the peer link (ESTIMATED
+    /// from mStream's `federation-stream.js`).
     FirstByte,
 }
 
@@ -414,12 +416,13 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 /// reached, its timeout too: reqwest raises the client's connect timeout
 /// as a timeout, but a server asleep or behind a firewall that drops the
 /// packets is no body coming slowly, and the plan's 2.16 retries the two
-/// differently.
+/// differently. Its words leave the URL out: a tunnel's carries the
+/// tunnel's loopback token (`__lt`), and the words go into a run's report.
 fn transport(e: reqwest::Error, ceiling: Duration) -> FetchError {
     if e.is_timeout() && !e.is_connect() {
         FetchError::TooSlow(ceiling)
     } else {
-        FetchError::Api(ApiError::Network(e.to_string()))
+        FetchError::Api(ApiError::Network(e.without_url().to_string()))
     }
 }
 
@@ -1500,5 +1503,27 @@ mod tests {
         assert!(unreached(&probed), "{probed:?}");
         let read = client.read_range("lib/a.flac", 0, 4096).unwrap_err();
         assert!(unreached(&read), "{read:?}");
+    }
+
+    /// A transport failure's words leave its URL out: a tunnel's carries the
+    /// tunnel's loopback token (`__lt`), and the words go into a run's report.
+    #[test]
+    fn a_transport_failure_never_says_its_url() {
+        let client = Client::new("http://asleep.invalid/").unwrap();
+        let mut client = client.with_local_token(Some("loopback-secret".into()));
+        client.http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(200))
+            .dns_resolver(NoAnswer)
+            .build()
+            .unwrap();
+        let said = [
+            client.read_range("lib/a.flac", 0, 1).unwrap_err().to_string(),
+            client.probe("lib/cover.jpg", ProbeBy::FirstByte).unwrap_err().to_string(),
+            client.folder("lib").unwrap_err().to_string(),
+            client.album_art_sized("a.png", urls::ArtSize::Large).unwrap_err().to_string(),
+        ];
+        for said in said {
+            assert!(!said.contains("loopback-secret") && !said.contains("asleep.invalid"), "{said}");
+        }
     }
 }

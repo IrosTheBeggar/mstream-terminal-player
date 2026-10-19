@@ -412,6 +412,7 @@ fn no_peers() -> Federation {
         budget: crate::device::card::budget::Budget::at(std::env::temp_dir().join("mstream-sync-never")),
         dial: Box::new(NoDial),
         ffmpeg: super::peers::Ffmpeg::Given(None),
+        cards: Vec::new(),
         clock: Arc::new(|| 1_791_900_000),
         jitter: Arc::new(|| 0),
         stream_wait: Duration::from_millis(10),

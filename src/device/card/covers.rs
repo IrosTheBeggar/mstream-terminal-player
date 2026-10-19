@@ -18,9 +18,11 @@
 //!
 //! **A federation peer's albums** (2.14.2's one deviation, B9): mStream's
 //! art is its `compress=l` copy, at most 256 px, through the parent's art
-//! proxy, to spare the peer's daily quota; a probe through the parent's
-//! stream proxy is a one-byte GET, since a HEAD there may fetch the whole
-//! file; and nothing is asked of a peer whose day is spent ([`Covers::peer`]).
+//! proxy, to spare the peer's daily quota; a probe is a one-byte GET, as a
+//! peer's gate refuses a HEAD (and a HEAD through an older parent's stream
+//! proxy may fetch the whole file); no folder image is read past what is
+//! left of the peer's day, and nothing is asked of it once that is spent
+//! ([`Covers::peer`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
@@ -116,8 +118,9 @@ pub(crate) struct Covers {
     /// its parent's art proxy.
     art: ArtSize,
     art_from: Arc<Client>,
-    /// Whether the server may be asked now.
-    open: Box<dyn Fn() -> bool>,
+    /// The bytes the server may be asked for now: none, `Some(0)`; None:
+    /// no cap.
+    room: Box<dyn Fn() -> Option<u64>>,
     /// The last albums' covers, by the folders they were looked for in and
     /// the art name.
     kept: VecDeque<((Vec<String>, Option<String>), Option<Rc<Image>>)>,
@@ -126,22 +129,21 @@ pub(crate) struct Covers {
 impl Covers {
     pub(crate) fn new(client: Arc<Client>, images: Option<Images>) -> Covers {
         let (probe, art, art_from) = (ProbeBy::Head, ArtSize::Full, client.clone());
-        let (open, kept) = (Box::new(|| true), VecDeque::new());
-        Covers { client, images, probe, art, art_from, open, kept }
+        let (room, kept) = (Box::new(|| None), VecDeque::new());
+        Covers { client, images, probe, art, art_from, room, kept }
     }
 
     /// A federation peer's (see the module's note): `client` reaches its
-    /// files, and `probe` is how its folders' images are probed there;
-    /// `proxy` is a client of its parent aimed at it, whose art proxy its
-    /// art comes through; and `open` says whether it may be asked now.
+    /// files; `proxy` is a client of its parent aimed at it, whose art
+    /// proxy its art comes through; and `room` says what it may still be
+    /// asked for now.
     pub(crate) fn peer(
         client: Arc<Client>,
-        probe: ProbeBy,
         proxy: Arc<Client>,
-        open: Box<dyn Fn() -> bool>,
+        room: Box<dyn Fn() -> Option<u64>>,
     ) -> Covers {
-        let (art, kept) = (ArtSize::Large, VecDeque::new());
-        Covers { client, images: None, probe, art, art_from: proxy, open, kept }
+        let (probe, art, kept) = (ProbeBy::FirstByte, ArtSize::Large, VecDeque::new());
+        Covers { client, images: None, probe, art, art_from: proxy, room, kept }
     }
 
     /// An album's cover: the image of the first of `folders` that has one,
@@ -160,7 +162,8 @@ impl Covers {
     }
 
     fn find(&self, folders: &[String], art: Option<&str>) -> Option<Image> {
-        if !(self.open)() {
+        let shut = || (self.room)() == Some(0);
+        if shut() {
             return None;
         }
         for folder in folders {
@@ -171,12 +174,23 @@ impl Covers {
                 continue;
             }
             for name in PROBES {
+                if shut() {
+                    return None;
+                }
                 let path = format!("{folder}/{name}");
                 let Ok(Some(probed)) = self.client.probe(&path, self.probe) else { continue };
-                if probed.len.is_some_and(|n| n > MAX_IMAGE) {
+                // No more than the image, nor than what is left to ask for:
+                // an image of unknown size is read only where nothing caps it.
+                let room = (self.room)();
+                let most = room.map_or(MAX_IMAGE, |r| r.min(MAX_IMAGE));
+                let fits = match probed.len {
+                    Some(n) => n <= most,
+                    None => room.is_none(),
+                };
+                if !fits {
                     continue;
                 }
-                match self.client.read_range(&path, 0, MAX_IMAGE) {
+                match self.client.read_range(&path, 0, most) {
                     Ok(read) if !read.bytes.is_empty() => {
                         return Some(Image { from: path, bytes: read.bytes });
                     }
@@ -184,7 +198,7 @@ impl Covers {
                 }
             }
         }
-        let art = art.filter(|_| (self.open)())?;
+        let art = art.filter(|_| !shut())?;
         let bytes = self.art_from.album_art_sized(art, self.art).ok().filter(|b| !b.is_empty())?;
         Some(Image { from: format!("album-art/{art}"), bytes })
     }

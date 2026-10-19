@@ -7,7 +7,9 @@
 //! runs beside the server as its admin (`GET /api/v1/admin/transcode`'s
 //! `ffmpegDirectory`, which mStream fills by downloading into it), else the
 //! one on the PATH, else none — and a sync then skips the files that need
-//! converting, and lists them.
+//! converting, and lists them. Never one on a card: no folder of a volume
+//! the drive-safety rule accepts is looked in, whatever the PATH names
+//! (a stale entry of a stick that letter once was).
 //!
 //! **The conversion is mStream's own** (`transcode.js`'s `spawnTranscode`):
 //! the audio alone, in the codec's container (Ogg for Opus), at the
@@ -76,19 +78,37 @@ pub(crate) fn in_folder(folder: &Path) -> Option<PathBuf> {
     bin.is_file().then_some(bin)
 }
 
-/// The first ffmpeg of a `PATH` value's folders.
-pub(crate) fn on_path(path: Option<&OsStr>) -> Option<PathBuf> {
-    std::env::split_paths(path?).filter(|dir| dir.is_absolute()).find_map(|dir| in_folder(&dir))
+/// `dir` is on one of `cards` (their roots), as it is named or as it
+/// resolves (a link to one).
+fn on_a_card(dir: &Path, cards: &[PathBuf]) -> bool {
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    cards.iter().any(|card| {
+        dir.starts_with(card)
+            || real(dir).zip(real(card)).is_some_and(|(dir, card)| dir.starts_with(card))
+    })
+}
+
+/// The first ffmpeg of a `PATH` value's folders, none of them relative or
+/// on one of `cards`.
+pub(crate) fn on_path(path: Option<&OsStr>, cards: &[PathBuf]) -> Option<PathBuf> {
+    let looked = |dir: &PathBuf| dir.is_absolute() && !on_a_card(dir, cards);
+    std::env::split_paths(path?).filter(looked).find_map(|dir| in_folder(&dir))
 }
 
 /// See the module's note: `server_folder` is mStream's `ffmpegDirectory`
 /// when the terminal runs beside the server as its admin, `path` the
-/// `PATH` to look on.
-pub(crate) fn find(server_folder: Option<&Path>, path: Option<&OsStr>) -> Option<Ffmpeg> {
+/// `PATH` to look on, `cards` the roots of the volumes the drive-safety
+/// rule accepts.
+pub(crate) fn find(
+    server_folder: Option<&Path>,
+    path: Option<&OsStr>,
+    cards: &[PathBuf],
+) -> Option<Ffmpeg> {
+    let server_folder = server_folder.filter(|f| !on_a_card(f, cards));
     if let Some(bin) = server_folder.and_then(in_folder) {
         return Some(Ffmpeg { bin, found: "server" });
     }
-    on_path(path).map(|bin| Ffmpeg { bin, found: "path" })
+    on_path(path, cards).map(|bin| Ffmpeg { bin, found: "path" })
 }
 
 /// An ffmpeg found on this computer.
@@ -184,15 +204,30 @@ mod tests {
         std::fs::write(second.join(exe()), b"not really").unwrap();
         let path = std::env::join_paths([&first, &second]).unwrap();
         // Not in mStream's folder: the PATH's, the first folder that has it.
-        let found = find(Some(&server), Some(&path)).expect("on the PATH");
+        let found = find(Some(&server), Some(&path), &[]).expect("on the PATH");
         assert_eq!((found.bin.clone(), found.found()), (second.join(exe()), "path"));
         std::fs::write(server.join(exe()), b"not really").unwrap();
-        let found = find(Some(&server), Some(&path)).expect("mStream's own");
+        let found = find(Some(&server), Some(&path), &[]).expect("mStream's own");
         assert_eq!((found.bin.clone(), found.found()), (server.join(exe()), "server"));
         // A folder named by a relative path is never searched.
         let relative = std::env::join_paths([Path::new("b")]).unwrap();
-        assert!(find(None, Some(&relative)).is_none());
-        assert!(find(None, None).is_none(), "none: the files that need it are skipped");
+        assert!(find(None, Some(&relative), &[]).is_none());
+        assert!(find(None, None, &[]).is_none(), "none: the files that need it are skipped");
+        // Nor one on a card, by its name or another spelling of it, and
+        // mStream's folder no more than the PATH's.
+        let card = root.join("card");
+        let tools = card.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(tools.join(exe()), b"the card's").unwrap();
+        let path = std::env::join_paths([&tools, &second]).unwrap();
+        let cards = [card.clone()];
+        let found = find(None, Some(&path), &cards).expect("past the card's");
+        assert_eq!(found.bin, second.join(exe()));
+        let dotted = first.join("..").join("card").join("tools");
+        assert!(!dotted.starts_with(&card), "named otherwise");
+        let path = std::env::join_paths([&dotted]).unwrap();
+        assert!(find(Some(&tools), Some(&path), &cards).is_none(), "never the card's");
+        assert!(find(Some(&tools), None, &[]).is_some(), "with no card, it would be");
         let missing = Ffmpeg { bin: root.join("gone").join(exe()), found: "path" };
         let stop = AtomicBool::new(false);
         let (opus, k192) = (TransferCodec::Opus, TransferBitrate::K192);
@@ -206,7 +241,7 @@ mod tests {
     #[test]
     #[ignore = "needs an ffmpeg on the PATH"]
     fn a_real_ffmpeg_makes_an_opus_file() {
-        let Some(ffmpeg) = find(None, std::env::var_os("PATH").as_deref()) else { return };
+        let Some(ffmpeg) = find(None, std::env::var_os("PATH").as_deref(), &[]) else { return };
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("mstream-ffmpeg-real-{pid}"));
         std::fs::create_dir_all(&dir).unwrap();

@@ -25,8 +25,10 @@
 //! `flock`), and the file is replaced whole through a temporary one.
 //!
 //! The file names a peer by its parent's URL key (2.5.1: the FNV-1a of the
-//! normalised URL, never the URL) and its id in the parent's peer list.
-//! Every member this player doesn't know is kept. A newer player's file is
+//! normalised URL, never the URL) and its id in the parent's peer list. A
+//! parent the listener reaches at another of its addresses keeps one
+//! account of its peer: the one under its other key is taken in
+//! ([`Book::adopt`]). Every member this player doesn't know is kept. A newer player's file is
 //! never written over, and no peer is read while it is there: its counts
 //! couldn't be kept.
 
@@ -83,10 +85,12 @@ pub(crate) fn next_midnight(now: u64) -> u64 {
 /// When a peer whose day is spent may be asked again: after its own
 /// Retry-After (the seconds to its UTC midnight), else after the next
 /// 00:00 UTC by this computer's clock; and `jitter` seconds more, so the
-/// computers of one parent don't all ask at once.
+/// computers of one parent don't all ask at once. A Retry-After past a day
+/// is no midnight's (mStream's is at most one): read as none, so no answer
+/// parks a peer for longer.
 pub(crate) fn resume_after(now: u64, retry_after: Option<u64>, jitter: u64) -> u64 {
-    match retry_after {
-        Some(secs) => now + secs,
+    match retry_after.filter(|&secs| secs <= DAY) {
+        Some(secs) => now.saturating_add(secs),
         None => next_midnight(now),
     }
     .saturating_add(jitter)
@@ -236,6 +240,30 @@ impl Book {
         self.peers.entry(key).or_default()
     }
 
+    /// The peer's account under `key`, taking in the ones it has under its
+    /// parent's other keys (`aliases`: the listener's other addresses of
+    /// that server): one peer, one day's budget, whatever address its parent
+    /// is reached at. Each is gone once taken in: the same day's bytes are
+    /// added, a later day's are the account's, and the later wait stands.
+    pub(crate) fn adopt(&mut self, key: PeerKey, aliases: &[u64]) {
+        for &alias in aliases.iter().filter(|&&k| k != 0 && k != key.parent_key) {
+            let Some(theirs) = self.peers.remove(&PeerKey { parent_key: alias, ..key }) else {
+                continue;
+            };
+            let ours = self.account(key);
+            match theirs.day.cmp(&ours.day) {
+                std::cmp::Ordering::Greater => (ours.day, ours.used) = (theirs.day, theirs.used),
+                std::cmp::Ordering::Equal => ours.used = ours.used.saturating_add(theirs.used),
+                std::cmp::Ordering::Less => {}
+            }
+            ours.resume_at = ours.resume_at.max(theirs.resume_at);
+            ours.daily_mb = ours.daily_mb.or(theirs.daily_mb);
+            for (name, value) in theirs.keep {
+                ours.keep.entry(name).or_insert(value);
+            }
+        }
+    }
+
     /// The bytes pulled from the peer on `now`'s UTC day.
     pub(crate) fn used_today(&self, key: PeerKey, now: u64) -> u64 {
         self.peers.get(&key).filter(|a| a.day == utc_day(now)).map_or(0, |a| a.used)
@@ -347,12 +375,42 @@ impl Budget {
 
 // ── A run's spending ────────────────────────────────────────────────────────
 
+/// What is left of a peer's day as everything that asks it for bytes in a
+/// run sees it (its covers, its vectors): the meter they share, and the
+/// reading at which the day is spent, which the peer's [`Spend`] moves at
+/// each sync (`u64::MAX`: no cap).
+#[derive(Clone, Debug)]
+pub(crate) struct Day {
+    meter: Arc<AtomicU64>,
+    ends: Arc<AtomicU64>,
+}
+
+impl Day {
+    /// What is left of the day now; None: no cap.
+    pub(crate) fn left(&self) -> Option<u64> {
+        match self.ends.load(Ordering::Relaxed) {
+            u64::MAX => None,
+            ends => Some(ends.saturating_sub(self.meter.load(Ordering::Relaxed))),
+        }
+    }
+
+    /// A day with `left` bytes (None: no cap), and its meter: a test's.
+    #[cfg(test)]
+    pub(crate) fn of(left: Option<u64>) -> (Day, Arc<AtomicU64>) {
+        let meter = Arc::new(AtomicU64::new(0));
+        let ends = Arc::new(AtomicU64::new(left.unwrap_or(u64::MAX)));
+        (Day { meter: meter.clone(), ends }, meter)
+    }
+}
+
 /// One peer's spending in a run: the meter its clients add every byte they
 /// read to, put into the book as it grows, and what is left of the day —
 /// the book's, and the peer's own figure when it gave one.
 pub(crate) struct Spend {
     budget: Budget,
     key: PeerKey,
+    /// The parent's other keys, whose accounts of the peer are its own.
+    aliases: Vec<u64>,
     meter: Arc<AtomicU64>,
     clock: Clock,
     /// The meter's bytes the book has.
@@ -365,28 +423,49 @@ pub(crate) struct Spend {
     /// The key's quota left when the peer said so, and the meter then; for
     /// the day it was read on.
     quota: Option<(u64, u64)>,
+    /// [`Day`]'s end, as the last sync left it.
+    ends: Arc<AtomicU64>,
 }
 
 impl Spend {
-    /// The peer's account, its allowance as the peer showed it (None: an
-    /// older peer), the book read once.
+    /// The peer's account (its parent's other keys' taken in), its
+    /// allowance as the peer showed it (None: an older peer), the book read
+    /// once. The meter is the peer's alone: every byte on it is booked,
+    /// those before this one too (the peer's `/api/`, which told the
+    /// allowance, and which the key's figure doesn't count yet).
     pub(crate) fn new(
         budget: Budget,
         key: PeerKey,
+        aliases: &[u64],
         meter: Arc<AtomicU64>,
         allowance: Option<Allowance>,
         clock: Clock,
     ) -> Result<Spend, String> {
-        let counted = meter.load(Ordering::Relaxed);
-        let quota = allowance.as_ref().and_then(|a| a.remaining_today).map(|r| (r, counted));
-        let mut spend =
-            Spend { budget, key, meter, clock, counted, left: None, day: 0, allowance, quota };
+        let quota = allowance.as_ref().and_then(|a| a.remaining_today).map(|r| (r, 0));
+        let mut spend = Spend {
+            budget,
+            key,
+            aliases: aliases.to_vec(),
+            meter,
+            clock,
+            counted: 0,
+            left: None,
+            day: 0,
+            allowance,
+            quota,
+            ends: Arc::new(AtomicU64::new(u64::MAX)),
+        };
         spend.sync()?;
         Ok(spend)
     }
 
     pub(crate) fn key(&self) -> PeerKey {
         self.key
+    }
+
+    /// What is left of the day, for what else asks the peer for bytes.
+    pub(crate) fn day(&self) -> Day {
+        Day { meter: self.meter.clone(), ends: self.ends.clone() }
     }
 
     /// The meter's bytes since the last write put into the book, and the
@@ -397,7 +476,9 @@ impl Spend {
         let read = self.meter.load(Ordering::Relaxed);
         let delta = read.saturating_sub(self.counted);
         let (key, allowance) = (self.key, self.allowance.clone());
+        let aliases = &self.aliases;
         let left = self.budget.with(|b| {
+            b.adopt(key, aliases);
             b.spend(key, delta, now);
             b.left(key, now, allowance.as_ref())
         })?;
@@ -405,6 +486,9 @@ impl Spend {
             self.quota = None;
         }
         (self.counted, self.left, self.day) = (read, left, utc_day(now));
+        let at = self.meter.load(Ordering::Relaxed);
+        let ends = self.left().map_or(u64::MAX, |l| at.saturating_add(l).min(u64::MAX - 1));
+        self.ends.store(ends, Ordering::Relaxed);
         Ok(())
     }
 
@@ -435,12 +519,12 @@ impl Spend {
 
     /// A whole day's budget; None: no cap.
     pub(crate) fn cap(&self) -> Option<u64> {
-        let book = self.budget.read().ok();
-        let cap = book.as_ref().and_then(|b| b.cap(self.key, self.allowance.as_ref()));
-        match book {
-            Some(_) => cap,
-            None => Some(DEFAULT_MB * MB),
-        }
+        let (key, allowance) = (self.key, self.allowance.as_ref());
+        let cap = self.budget.with(|b| {
+            b.adopt(key, &self.aliases);
+            b.cap(key, allowance)
+        });
+        cap.unwrap_or(Some(DEFAULT_MB * MB))
     }
 
     /// The peer isn't asked before `until`: written to the book, with what
@@ -492,6 +576,12 @@ mod tests {
         assert_eq!(next_midnight(NOW), 1_792_368_000);
         assert_eq!(resume_after(NOW, None, 300), 1_792_368_300, "the next 00:00 UTC, and 5 minutes");
         assert_eq!(resume_after(NOW, Some(38_400), 120), NOW + 38_520, "the peer's own word");
+        // A Retry-After past a day is no midnight's: the next one, never
+        // a peer parked for years, nor a sum past the clock's end.
+        assert_eq!(resume_after(NOW, Some(DAY), 0), NOW + DAY);
+        assert_eq!(resume_after(NOW, Some(4_000_000_000), 300), 1_792_368_300);
+        assert_eq!(resume_after(NOW, Some(u64::MAX), 300), 1_792_368_300);
+        assert_eq!(resume_after(u64::MAX - 10, Some(60), 600), u64::MAX);
         assert!((60..=600).contains(&jitter()));
         let mb = MB;
         assert_eq!(days_for(0, Some(0), Some(mb)), 0);
@@ -592,10 +682,14 @@ mod tests {
         let clock_at = Arc::new(AtomicU64::new(NOW));
         let at = clock_at.clone();
         let clock: Clock = Arc::new(move || at.load(Ordering::Relaxed));
-        let mut spend = Spend::new(budget.clone(), KEY, meter.clone(), None, clock.clone()).unwrap();
+        let spend = Spend::new(budget.clone(), KEY, &[], meter.clone(), None, clock.clone());
+        let mut spend = spend.unwrap();
         assert_eq!(spend.left(), Some(10 * MB));
+        let day = spend.day();
+        assert_eq!(day.left(), Some(10 * MB));
         meter.fetch_add(3 * MB, Ordering::Relaxed);
         assert_eq!(spend.left(), Some(7 * MB), "the meter counts before the book does");
+        assert_eq!(day.left(), Some(7 * MB), "and the day's view of it too");
         assert_eq!(spend.left_before(MB), Some(8 * MB));
         spend.tick().unwrap();
         assert_eq!(budget.read().unwrap().used_today(KEY, NOW), 0, "not yet 4 MiB on");
@@ -605,20 +699,76 @@ mod tests {
         // Another program's spending shows at the next sync.
         budget.with(|b| b.spend(KEY, 5 * MB, NOW)).unwrap();
         spend.sync().unwrap();
-        assert_eq!(spend.left(), Some(MB));
-        // The peer's own figure, lower than the book's.
+        assert_eq!((spend.left(), day.left()), (Some(MB), Some(MB)));
+        meter.fetch_add(2 * MB, Ordering::Relaxed);
+        assert_eq!((spend.left(), day.left()), (Some(0), Some(0)), "spent, for all that asks");
+        // The peer's own figure, lower than the book's. Its meter's bytes
+        // before the spending began (its `/api/`) are booked, and come off
+        // the figure, which they followed.
         let shown = Allowance { daily_mb: Some(2048), remaining_today: Some(2 * MB), ..Default::default() };
         let other = PeerKey { peer_id: 4, ..KEY };
-        let mut theirs = Spend::new(budget.clone(), other, meter.clone(), Some(shown), clock).unwrap();
+        let theirs_meter = Arc::new(AtomicU64::new(1000));
+        let mut theirs =
+            Spend::new(budget.clone(), other, &[], theirs_meter.clone(), Some(shown), clock).unwrap();
+        assert_eq!(budget.read().unwrap().used_today(other, NOW), 1000, "its /api/, booked");
         assert_eq!(theirs.cap(), Some(2048 * MB));
-        assert_eq!(theirs.left(), Some(2 * MB));
-        meter.fetch_add(MB / 2, Ordering::Relaxed);
-        assert_eq!(theirs.left(), Some(3 * MB / 2));
+        assert_eq!(theirs.left(), Some(2 * MB - 1000));
+        theirs_meter.fetch_add(MB / 2, Ordering::Relaxed);
+        assert_eq!(theirs.left(), Some(3 * MB / 2 - 1000));
+        assert_eq!(theirs.day().left(), theirs.left());
         // A new day forgets it (the bytes the sync finds go on the new day).
         clock_at.store(NOW + DAY, Ordering::Relaxed);
         theirs.sync().unwrap();
         assert_eq!(theirs.left(), Some(2048 * MB - MB / 2));
         theirs.park(NOW + DAY + 10).unwrap();
         assert_eq!(budget.read().unwrap().waiting(other, NOW + DAY), Some(NOW + DAY + 10));
+        // No cap: the day never ends.
+        let none = Allowance { daily_mb: Some(0), ..Default::default() };
+        let third = PeerKey { peer_id: 5, ..KEY };
+        let clock: Clock = Arc::new(|| NOW);
+        let free = Spend::new(budget.clone(), third, &[], meter.clone(), Some(none), clock).unwrap();
+        assert_eq!((free.left(), free.day().left()), (None, None));
+    }
+
+    /// One parent at two addresses (the listener confirmed them one server):
+    /// one account of its peer, its other key's taken in, whichever reads.
+    #[test]
+    fn a_parent_at_another_address_keeps_one_account_of_its_peer() {
+        let alias = 0x0011_2233_4455_6677;
+        let there = PeerKey { parent_key: alias, ..KEY };
+        let mut book = Book::default();
+        book.spend(there, 700, NOW);
+        book.park(there, NOW + 60);
+        book.spend(KEY, 300, NOW);
+        book.adopt(KEY, &[KEY.parent_key, alias]);
+        assert_eq!(book.peers.len(), 1, "{book:?}");
+        assert_eq!((book.used_today(KEY, NOW), book.waiting(KEY, NOW)), (1000, Some(NOW + 60)));
+        // A later day's count is the account's; an earlier one's is gone.
+        book.spend(there, 50, NOW + DAY);
+        book.adopt(KEY, &[alias]);
+        assert_eq!((book.used_today(KEY, NOW + DAY), book.used_today(KEY, NOW)), (50, 0));
+        book.spend(there, 9, NOW);
+        book.adopt(KEY, &[alias]);
+        assert_eq!(book.used_today(KEY, NOW + DAY), 50);
+        assert!(!book.peers.contains_key(&there));
+        // Another peer of the alias, and no alias at all: left as they are.
+        let theirs = PeerKey { parent_key: alias, peer_id: 9 };
+        book.spend(theirs, 5, NOW);
+        book.adopt(KEY, &[]);
+        book.adopt(KEY, &[alias]);
+        assert_eq!(book.used_today(theirs, NOW), 5);
+
+        // A run's spending at one address sees the other's wait, and books
+        // under its own key.
+        let dir = Scratch::new("aliases");
+        let budget = Budget::at(&dir.0);
+        budget.with(|b| (b.spend(there, 2 * MB, NOW), b.park(there, NOW + 90))).unwrap();
+        budget.with(|b| b.set_limit(there, Some(3))).unwrap();
+        let meter = Arc::new(AtomicU64::new(0));
+        let clock: Clock = Arc::new(|| NOW);
+        let spend = Spend::new(budget.clone(), KEY, &[alias], meter, None, clock).unwrap();
+        assert_eq!((spend.left(), spend.cap()), (Some(MB), Some(3 * MB)));
+        let book = budget.read().unwrap();
+        assert_eq!((book.waiting(KEY, NOW), book.peers.len()), (Some(NOW + 90), 1));
     }
 }

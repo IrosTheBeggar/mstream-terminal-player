@@ -7,18 +7,22 @@
 //! For each peer, in turn ([`prepare`]):
 //! 1. It is one the parent lists (`federation/peers`), and the one the
 //!    card's files came from: a peer paired again under another's id has
-//!    another iroh identity, and isn't read.
-//! 2. Its day isn't spent (`budget.json`'s `resumeAt`): one that waits
-//!    isn't asked anything, not even its listing, which its quota counts.
+//!    another iroh identity, and isn't read while the card holds files of
+//!    the one before. The card knows a peer by its identity once it is read.
+//! 2. Its day isn't spent (`budget.json`'s `resumeAt`, one account at any
+//!    of its parent's addresses): one that waits isn't asked anything, not
+//!    even its listing, which its quota counts.
 //! 3. A way to its bytes the listener allows ([`peer::reach`]): the direct
 //!    guest path, else the parent's proxy when it says the bytes are a
 //!    copy, else only once the listener lets an older parent's proxy carry
 //!    them (stored on the card: asked once).
 //! 4. Its `/api/`: its libraries, its own id, and its key's allowance
-//!    where it shows one (a key that forbids copies is never read).
+//!    where it shows one (a key that forbids copies is never read). A day
+//!    with nothing left, by the budget or the key's quota, parks it there.
 //! 5. Its listing, and its wanted files: as the user's own server's are
 //!    decided, a conversion made by this computer's ffmpeg where it has one
-//!    and skipped (and listed) where it hasn't.
+//!    and skipped (and listed) where it hasn't. A listing that spends what
+//!    was left parks it too, the card's rows of it as they are.
 //!
 //! Whatever a peer comes to is said in its [`PeerSummary`]: read, or why
 //! not, its way, what is left of its day and the days its files take.
@@ -42,6 +46,9 @@ pub(crate) struct Federation {
     /// The guest path's tunnel.
     pub(crate) dial: Box<dyn Dial>,
     pub(crate) ffmpeg: Ffmpeg,
+    /// The roots of the volumes the drive-safety rule accepts: no ffmpeg is
+    /// run from one.
+    pub(crate) cards: Vec<PathBuf>,
     /// The clock the budget's days are kept by.
     pub(crate) clock: budget::Clock,
     /// A resume's few random minutes.
@@ -60,12 +67,14 @@ pub(crate) enum Ffmpeg {
 
 impl Federation {
     /// This computer's: the budget beside `cards.json`, iroh's dial, the
-    /// ffmpeg found, the system's clock, 5 s for a stream cap.
-    pub(crate) fn system() -> Result<Federation, String> {
+    /// ffmpeg found off `cards` (the accepted volumes' roots), the system's
+    /// clock, 5 s for a stream cap.
+    pub(crate) fn system(cards: Vec<PathBuf>) -> Result<Federation, String> {
         Ok(Federation {
             budget: Budget::system()?,
             dial: Box::new(peer::IrohDial),
             ffmpeg: Ffmpeg::Find,
+            cards,
             clock: budget::system_clock(),
             jitter: Arc::new(budget::jitter),
             stream_wait: std::time::Duration::from_secs(5),
@@ -215,7 +224,7 @@ fn converter(cx: &Context<'_>) -> Option<Arc<dyn Convert>> {
             let folder = beside.then(|| cx.client.admin_ffmpeg_folder().ok().flatten()).flatten();
             let folder = folder.map(PathBuf::from).filter(|f| f.is_absolute());
             let path = std::env::var_os("PATH");
-            let found = ffmpeg::find(folder.as_deref(), path.as_deref())?;
+            let found = ffmpeg::find(folder.as_deref(), path.as_deref(), &cx.fed.cards)?;
             Some(Arc::new(found))
         }
     }
@@ -298,9 +307,12 @@ fn side(
     };
     let fed = cx.fed;
     let now = (fed.clock)();
+    // Its account: one, at whichever of its parent's addresses it is read.
+    let keys = parent_keys(cx.talk);
     let key = PeerKey { parent_key: cx.talk.url_key, peer_id: id };
     let limit = cx.ask.budget_mb;
     let book = fed.budget.with(|b| {
+        b.adopt(key, &keys);
         if limit.is_some() {
             b.set_limit(key, limit);
         }
@@ -315,19 +327,15 @@ fn side(
         Ok(None) => {}
     }
 
-    // The card's peer, by its iroh identity once the card knows it.
-    let keys = parent_keys(cx.talk);
+    // The card's peer, by its iroh identity once the card knows it: one
+    // paired again under its id is another server, while the card holds
+    // files of the one before (a peer never read takes the new one).
     let source = settings.peer_source(&keys, id);
     let endpoint = row.endpoint_id.clone().unwrap_or_default();
-    if !source.endpoint.is_empty() && !endpoint.is_empty() && source.endpoint != endpoint {
+    let another = !source.endpoint.is_empty() && !endpoint.is_empty() && source.endpoint != endpoint;
+    if another && holds_files(cx, id) {
         let why = format!("the server's peer {id} isn't the server this card's files came from");
         return Err(not(Status::OtherPeer, why));
-    }
-    if !endpoint.is_empty() {
-        source.endpoint = endpoint;
-    }
-    if let Some(name) = &row.name {
-        source.nickname = name.trim().to_string();
     }
     if cx.ask.proxy_copies.contains(&id) {
         source.proxy_copies = true;
@@ -368,10 +376,15 @@ fn side(
     if libraries.is_empty() {
         return Err(not(Status::Refused, "the peer grants no library".into()));
     }
-    let allowance = api.allowance.clone();
-    let spend = Spend::new(fed.budget.clone(), key, meter.clone(), allowance, fed.clock.clone());
+    let (allowance, clock) = (api.allowance.clone(), fed.clock.clone());
+    let spend = Spend::new(fed.budget.clone(), key, &keys, meter.clone(), allowance, clock);
     let unkept = |why: String| not(Status::Refused, format!("its budget can't be kept: {why}"));
-    let spend = spend.map_err(unkept)?;
+    let mut spend = spend.map_err(unkept)?;
+    // A day spent (the listener's budget, or the key's quota as the peer
+    // says it) asks nothing more of it, not its listing: it waits.
+    if spend.left() == Some(0) {
+        return Err(spent(fed, &mut spend, id));
+    }
 
     // Its files, decided as the user's own server's are.
     let transcode = convert.as_ref().map(|_| made_here());
@@ -398,9 +411,17 @@ fn side(
     let same_plan = source.plan_key == plan_key;
     let mut ogg = HashMap::new();
     for e in oggs_to_sniff(&listing.entries, &kept, same_plan) {
+        if spend.left() == Some(0) {
+            break;
+        }
         if let Ok(read) = bytes.read_range(&e.filepath, 0, OGG_HEAD) {
             ogg.insert(e.filepath.clone(), ogg_is_opus(&read.bytes));
         }
+    }
+    // The listing spent what was left: it waits, the card's rows of it as
+    // they are.
+    if spend.left() == Some(0) {
+        return Err(spent(fed, &mut spend, id));
     }
     let scanning = listing.unscanned > 0;
     let audio = |e: &ManifestEntry| e.audio_hash.as_deref().and_then(hex16);
@@ -423,10 +444,18 @@ fn side(
         &conversion,
         transcode.as_ref(),
     );
+    // Read: its selection, its plan's settings, and its identity and name
+    // as its parent lists them, the card's from now on.
     let source = settings.peer_source(&keys, id);
     (source.libraries, source.plan_key) = (libraries.clone(), plan_key);
+    if !endpoint.is_empty() {
+        source.endpoint = endpoint;
+    }
+    if let Some(name) = &row.name {
+        source.nickname = name.trim().to_string();
+    }
 
-    let gate = Gate::default();
+    let gate = Gate::of(spend.day());
     let setup = Setup {
         origin,
         reach: reached.reach,
@@ -440,9 +469,8 @@ fn side(
     };
     let peer = Peer::new(setup, bytes.clone(), reached.tunnel);
     let peer = peer.map_err(|e| not(Status::Refused, e.to_string()))?;
-    let open = gate.clone();
-    let open = Box::new(move || open.open());
-    let covers = Covers::peer(bytes, reached.reach.probe(), list.clone(), open);
+    let room = gate.clone();
+    let covers = Covers::peer(bytes, list.clone(), Box::new(move || room.room()));
     let summary = PeerSummary {
         reach: Some(reached.reach),
         libraries,
@@ -455,6 +483,35 @@ fn side(
         ..PeerSummary::of(id, Status::Read, reached.direct_refused.clone())
     };
     Ok(PeerSide { wanted, peer, covers, list, gate, summary })
+}
+
+/// A peer whose day is spent before its files are planned: it waits, in the
+/// book, until the next 00:00 UTC and a few minutes.
+fn spent(fed: &Federation, spend: &mut Spend, id: u32) -> PeerSummary {
+    let until = budget::resume_after((fed.clock)(), None, (fed.jitter)());
+    match spend.park(until) {
+        Ok(()) => {
+            let why = Some("its day is spent".to_string());
+            PeerSummary { resume_at: Some(until), ..PeerSummary::of(id, Status::Waiting, why) }
+        }
+        Err(e) => {
+            let why = Some(format!("its budget can't be kept: {e}"));
+            PeerSummary::of(id, Status::Refused, why)
+        }
+    }
+}
+
+/// The card holds files of its peer `id` of this parent: its rows of the
+/// SRVS entry that is that peer (by its parent and its id, whatever its own
+/// id). A card whose rows can't be read is taken to hold some.
+fn holds_files(cx: &Context<'_>, id: u32) -> bool {
+    let talk = Talk { peer: Some(TalkPeer { id, ..TalkPeer::default() }), ..cx.talk.clone() };
+    let Some(i) = ours_on(Some(cx.root), &talk) else { return false };
+    let of = |e: &Entry| e.ledger.as_ref().is_some_and(|l| l.server as usize == i);
+    match cx.root.tags.as_ref() {
+        Ok(tags) => tags.records.iter().any(of),
+        Err(_) => true,
+    }
 }
 
 /// What the plan fetches of each peer, and the days it takes.
