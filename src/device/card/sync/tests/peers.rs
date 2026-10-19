@@ -709,6 +709,12 @@ fn a_peers_429s_are_waited_out_or_park_it_until_its_day_is_new() {
     assert_eq!(ran(&synced).parked.as_deref(), Some(why));
 }
 
+/// The most bytes one read of the HTTP client hands on: hyper's largest
+/// read buffer (8 KiB, doubled as reads fill it, to 408 KiB). The chunk that
+/// came while some of the day was left is written whole, so a file is cut
+/// at the budget only when more than this of it lies past the budget.
+const READ_MAX: u64 = 8192 + 4096 * 100;
+
 /// This computer's budget for a peer, spent partway through a file: its
 /// bytes so far kept in the card's partial, the server's files in, the peer
 /// waiting for the next 00:00 UTC; a run the same day asks it nothing; the
@@ -717,7 +723,14 @@ fn a_peers_429s_are_waited_out_or_park_it_until_its_day_is_new() {
 fn a_peers_budget_spent_parks_it_and_the_next_day_takes_it_up() {
     let scratch = Scratch::new("peer-budget");
     let sim = card(&scratch);
-    let big = |n: usize| mp3_bytes(1500 + n, true);
+    // Two files of 876 KB on a MiB a day: the first whole, the second past
+    // the budget by some 700 KB, more than any one read, so it is cut
+    // whatever size the reads come in. At 625 KB a file the budget ran out
+    // some 200 KB before the second's end, and a read that long took the
+    // file whole (one run in six).
+    let big = |n: usize| mp3_bytes(2100 + n, true);
+    let size = big(1).len() as u64;
+    assert!(2 * size - (1 << 20) > READ_MAX + (64 << 10) && size < (1 << 20) - (64 << 10));
     let tracks = vec![
         peer_track("Folk/Dana Duo/Album/01.mp3", 1, big(0)),
         peer_track("Folk/Dana Duo/Album/02.mp3", 2, big(1)),
@@ -734,14 +747,15 @@ fn a_peers_budget_spent_parks_it_and_the_next_day_takes_it_up() {
     let until = next_midnight(NOW) + JITTER;
     assert_eq!((synced.peers[0].status.clone(), synced.resume_at), (Status::Waiting, Some(until)));
     assert_eq!(synced.peers[0].cap, Some(1 << 20));
-    assert_eq!(synced.peers[0].days, 2, "two files of 625 KB on a MiB a day");
+    assert_eq!(synced.peers[0].days, 2, "two files of 876 KB on a MiB a day");
     let seen = look(&sim);
     assert!(seen.pending.is_some() && !seen.root.as_ref().unwrap().manifest.is_final());
     let have = seen.resume.value.as_ref().unwrap()["parts"][0]["have"].as_u64().unwrap();
-    assert!(have > 0 && have < 625_520, "a part of it: {have}");
+    assert!(have > 0 && have < size, "a part of it: {have}");
     let book = Budget::at(scratch.0.join("config")).read().unwrap();
     let used = book.used_today(key_of(&base), NOW);
-    assert!((1 << 20..(1 << 20) + (256 << 10)).contains(&used), "the budget, and a chunk or two: {used}");
+    let read_or_two = 1 << 20..(1 << 20) + 2 * READ_MAX;
+    assert!(read_or_two.contains(&used), "the budget, and a read or two: {used}");
 
     // The same day: nothing asked.
     let before = asked_of(&peer).len();
