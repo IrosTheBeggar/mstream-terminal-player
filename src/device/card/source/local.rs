@@ -484,6 +484,11 @@ impl<F: Fetcher> Fetcher for Local<F> {
             None => self.network.fetch_part(file, have, into),
         }
     }
+
+    /// The network's say: a peer's day is never read from here.
+    fn waits(&self, origin: usize) -> Option<String> {
+        self.network.waits(origin)
+    }
 }
 
 /// Why a copy from disk ended early.

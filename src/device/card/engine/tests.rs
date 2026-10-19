@@ -2288,3 +2288,136 @@ fn a_private_file_at_its_last_seq_is_written_again_from_one() {
     assert_eq!(seen.state.value.unwrap()["label"], "Van");
     assert_eq!(seen.resume.value.unwrap()["parts"], serde_json::json!([]));
 }
+
+/// A source of two origins whose second's day is spent once `cut` bytes of
+/// its first file came (a peer's budget): that file cut there and kept in
+/// its partial, every later one of it waiting, while the first origin's go.
+struct Day {
+    server: Canned,
+    cut: Option<usize>,
+    spent: bool,
+    /// Each origin-1 file asked for while spent.
+    asked_spent: usize,
+}
+
+impl Fetcher for Day {
+    fn fetch(&mut self, file: &WantedFile, into: &mut dyn io::Write) -> Result<Fetched, Failed> {
+        if file.origin == 1 && self.spent {
+            self.asked_spent += 1;
+            return Err(Failed { why: "the day is spent".into(), stop: false });
+        }
+        self.server.fetch(file, into)
+    }
+
+    fn read_range(&mut self, file: &WantedFile, start: u64, len: usize) -> Result<Vec<u8>, Failed> {
+        self.server.read_range(file, start, len)
+    }
+
+    fn resumable(&self, file: &WantedFile) -> bool {
+        self.server.resumable(file)
+    }
+
+    fn fetch_part(
+        &mut self,
+        file: &WantedFile,
+        have: Option<&Have>,
+        into: &mut dyn Part,
+    ) -> Result<Fetched, Failed> {
+        if file.origin == 1 {
+            if self.spent {
+                self.asked_spent += 1;
+                return Err(Failed { why: "the day is spent".into(), stop: false });
+            }
+            if let Some(n) = self.cut.take() {
+                self.server.cut_after = Some((file.ledger.server_path.clone(), n, false));
+                let got = self.server.fetch_part(file, have, into);
+                self.spent = got.is_err();
+                return got;
+            }
+        }
+        self.server.fetch_part(file, have, into)
+    }
+
+    fn waits(&self, origin: usize) -> Option<String> {
+        (origin == 1 && self.spent).then(|| "the peer's day is spent".to_string())
+    }
+}
+
+/// Opens, plans and runs with any source.
+fn run_from(
+    card: &FatSim,
+    wanted: &WantedCard,
+    source: &mut dyn Fetcher,
+    seed: u64,
+) -> Result<Outcome, Stop> {
+    let (mut hooks, answers, expect) = (Extras::default(), Answers::default(), Expect::default());
+    let opened = Session::open(card, &expect, knobs(), &answers, env(seed), &mut hooks, &mut |_| {});
+    let mut session = opened?;
+    let plan = session.plan(wanted, &answers, source)?;
+    session.run(plan, source, &mut hooks, &mut |_| {})
+}
+
+/// A peer's files, of a library that sorts before the server's own on the card.
+const EARLY: &str = "Folk/Dana Duo/Album/01 - Big.mp3";
+const LATE: &str = "Folk/Dana Duo/Album/02 - Small.mp3";
+
+/// A source that waits (a peer whose day is spent, 2.12.8's parking of one
+/// source alone): the other origin's files all go in, its albums get their
+/// thumbnails, and the run ends at a checkpoint whose plan keeps the
+/// waiting files and whose partial keeps what came; a run while it still
+/// waits asks it nothing and, changing nothing, commits nothing; the next
+/// day's takes up the partial and finishes.
+#[test]
+fn a_source_that_waits_parks_the_run_once_the_others_are_in() {
+    let dir = Scratch::new("waits");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned { resumable: true, ..Canned::default() };
+    let mut wanted = library(&mut server);
+    let key = server_url_key("http://music.example:3000");
+    let peer = Some(TalkPeer { id: 3, instance: NO_INSTANCE });
+    wanted.origins.push(Origin {
+        talk: Talk { url_key: key, peer, ..Talk::default() },
+        server: Server::peer(NO_INSTANCE, key, 3),
+        ..Origin::default()
+    });
+    for (path, name, id) in [(EARLY, "picture_first.mp3", 601), (LATE, "cbr.mp3", 602)] {
+        let bytes = corpus(name);
+        server.add(path, bytes.clone());
+        wanted.files.push(WantedFile { origin: 1, ..track(path, &bytes, id) });
+    }
+    let mut day = Day { server, cut: Some(8000), spent: false, asked_spent: 0 };
+    let parked = run_from(&card, &wanted, &mut day, 1).unwrap();
+    assert_eq!(parked.parked.as_deref(), Some("the peer's day is spent"));
+    assert_eq!((parked.written, parked.records), (6, 6), "the server's own files, all of them, after it");
+    let at = |path: &str| day.server.asked.iter().position(|a| a.0 == path);
+    let one = "Lib/Alex Artist/First Album/01 - One.mp3";
+    assert!(at(EARLY) < at(one) && at(one).is_some(), "cut before them: {:?}", day.server.asked);
+    assert_eq!(day.asked_spent, 0, "a waiting source's later files aren't asked for");
+    let seen = look(&card);
+    assert!(seen.pending.is_some(), "the device says the last transfer didn't finish");
+    let root = seen.root.as_ref().unwrap();
+    assert!(!root.manifest.is_final(), "a checkpoint");
+    let tags = root.tags.as_ref().unwrap();
+    let thumbed = |f: &&mptg::Folder| f.flags & FOLDER_THUMB != 0;
+    assert!(tags.folders.iter().filter(thumbed).count() >= 3, "the albums in got their thumbnails");
+    assert_eq!(resume_of(&card)["parts"][0]["have"], 8000, "what came is kept");
+    let generation = root.manifest.header.generation;
+
+    // Still the same day: nothing asked of it, and nothing changed.
+    let still = run_from(&card, &wanted, &mut day, 2).unwrap();
+    assert_eq!((still.parked.as_deref(), still.written), (Some("the peer's day is spent"), 0));
+    assert_eq!(day.asked_spent, 0);
+    let seen = look(&card);
+    assert_eq!(seen.root.unwrap().manifest.header.generation, generation, "no commit for nothing");
+    assert!(seen.pending.is_some());
+
+    // The next day: taken up where it stopped, and finished.
+    day.spent = false;
+    let done = run_from(&card, &wanted, &mut day, 3).unwrap();
+    assert_eq!((done.parked, done.written, done.records, done.verified), (None, 2, 8, Ok(())));
+    assert_eq!(day.server.asked.last(), Some(&(LATE.to_string(), 0, 0)));
+    assert!(day.server.asked.contains(&(EARLY.to_string(), 8000, 8000)), "{:?}", day.server.asked);
+    assert_eq!(on_card(&card, "Folk/Dana Duo/Album/01 - Big.mp3"), corpus("picture_first.mp3"));
+    let _ = finished(&card);
+}

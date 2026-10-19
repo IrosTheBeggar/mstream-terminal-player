@@ -72,6 +72,9 @@ enum Step {
     Skipped,
     /// The source stops the run: it parks.
     Park(String),
+    /// The file's source waits for a later run (a peer's spent day): the
+    /// file stays in the plan, and the run goes on with the others.
+    Wait(String),
 }
 
 impl Session<'_> {
@@ -301,11 +304,20 @@ impl<'r, 'c> Runner<'r, 'c> {
         };
         let resumable: HashSet<usize> =
             (0..plan.writes.len()).filter(|&k| resumable(&plan.writes[k])).collect();
+        let mut waited: Option<String> = None;
         for k in order {
             if self.due() {
                 self.commit(false, hooks, events)?;
             }
             let w = &plan.writes[k];
+            // A file of a source that waits isn't asked for: it stays in the
+            // plan (2.12.8). A server move is a rename on the card, and goes.
+            if w.from.is_none()
+                && let Some(why) = fetcher.waits(plan.wanted.files[w.file].origin)
+            {
+                waited.get_or_insert(why);
+                continue;
+            }
             let step = match &w.from {
                 Some(from) => self.rename(w, from, events)?,
                 None if resumable.contains(&k) => self.fetch_part(w, fetcher, hooks, events)?,
@@ -325,7 +337,26 @@ impl<'r, 'c> Runner<'r, 'c> {
                     self.commit(false, hooks, events)?;
                     return Ok(self.outcome(Some(why), Ok(())));
                 }
+                Step::Wait(why) => {
+                    waited.get_or_insert(why);
+                }
             }
+        }
+
+        // A source that waits parks the run once the others' files are in
+        // (2.12.8): their albums' thumbnails, then a checkpoint whose plan
+        // keeps the waiting files. A run that changed nothing leaves the
+        // root as it was, beside the plan its step 6 wrote: no commit has
+        // the device build its library again for nothing.
+        if let Some(why) = waited {
+            let changed = self.written + self.renamed + self.deleted > 0
+                || !plan.adopts.is_empty()
+                || self.s.survey.reread;
+            if changed {
+                self.thumbnails(hooks)?;
+                self.commit(false, hooks, events)?;
+            }
+            return Ok(self.outcome(Some(why), Ok(())));
         }
 
         // Steps 10-12: the thumbnails, the Auto DJ index, the final commit;
@@ -582,6 +613,9 @@ impl<'r, 'c> Runner<'r, 'c> {
                 if failed.stop {
                     return Ok(Step::Park(failed.why));
                 }
+                if let Some(why) = fetcher.waits(file.origin) {
+                    return Ok(Step::Wait(why));
+                }
                 self.drop_ours(w, events)?;
                 return self.skip(file, failed.why, events);
             }
@@ -722,6 +756,9 @@ impl<'r, 'c> Runner<'r, 'c> {
             }
             if failed.stop {
                 return Ok(Step::Park(failed.why));
+            }
+            if let Some(why) = fetcher.waits(file.origin) {
+                return Ok(Step::Wait(why));
             }
             self.drop_ours(w, events)?;
             return self.skip(file, failed.why, events);
@@ -980,7 +1017,7 @@ impl<'r, 'c> Runner<'r, 'c> {
         let mut albums: BTreeMap<String, Vec<(String, Ledger)>> = BTreeMap::new();
         for (path, o) in self.ledger.iter().filter(|(_, o)| o.rec.container != CONTAINER_NOT_AUDIO) {
             let album = albums.entry(album_folder(path, &roots).to_string()).or_default();
-            album.push((path.clone(), o.ledger.clone()));
+            album.push((path.clone(), Ledger { server: o.server as u16, ..o.ledger.clone() }));
         }
         let mut chosen: BTreeMap<u32, (u64, String, Option<(mpth::Pixels, u32)>)> = BTreeMap::new();
         for (folder, files) in &albums {
@@ -1090,6 +1127,10 @@ impl<'r, 'c> Runner<'r, 'c> {
         let mut new_index: Option<Vec<u8>> = None;
         if last {
             let old = self.s.settled.autodj.as_deref().filter(|_| self.autodj.is_some());
+            let origins = plan.origin_at.iter().map(|&i| match i {
+                0 => Some(0),
+                i => used.contains(&i).then_some(remap[i]),
+            });
             let commit = Commit {
                 generation,
                 card_id: self.card_id,
@@ -1097,6 +1138,7 @@ impl<'r, 'c> Runner<'r, 'c> {
                 records: &records,
                 device: &self.s.device,
                 old,
+                origins: origins.collect(),
             };
             autodj = match hooks.autodj(&commit) {
                 AutoDj::None => None,

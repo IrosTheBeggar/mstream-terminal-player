@@ -31,6 +31,9 @@
 //! nothing ([`dry`]). [`history`] is the player's play log the other way:
 //! each play read from the card, mapped through its ledger, and posted to
 //! the server the file came from, which the card's next commit acknowledges.
+//! A sync may read the server's federation peers too, each under a daily
+//! budget this computer keeps ([`budget`]), their files from
+//! [`source::peer`].
 
 // The kit and the engine built on it wait for their callers (the Card view,
 // the public command line): until they land only the tests and a hidden
@@ -39,6 +42,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod autodj;
+pub(crate) mod budget;
 pub(crate) mod cards;
 pub(crate) mod contract;
 pub(crate) mod covers;

@@ -185,6 +185,12 @@ impl Plan {
         fetched.into_iter().map(|w| w.file).collect()
     }
 
+    /// Which of the card's servers, in the run's numbering, each origin is:
+    /// what an album's rows' `server` names ([`super::Album`]).
+    pub(crate) fn origin_at(&self) -> &[usize] {
+        &self.origin_at
+    }
+
     /// The vpath layout's library roots (LIBR), relative to `/music`: what
     /// an album folder is counted from (2.14.1).
     pub(crate) fn roots(&self) -> &[String] {

@@ -139,17 +139,17 @@ struct Made {
     content_type: Option<String>,
 }
 
-fn skip(why: impl Into<String>) -> Failed {
+pub(super) fn skip(why: impl Into<String>) -> Failed {
     Failed { why: why.into(), stop: false }
 }
 
-fn stop(why: impl Into<String>) -> Failed {
+pub(super) fn stop(why: impl Into<String>) -> Failed {
     Failed { why: why.into(), stop: true }
 }
 
 /// A fetch's failure that another try may mend: the connection, not the
 /// file.
-fn passing(e: &FetchError) -> bool {
+pub(super) fn passing(e: &FetchError) -> bool {
     matches!(
         e,
         FetchError::Api(ApiError::Network(_))
@@ -178,7 +178,7 @@ fn busy_wait(wait: Duration) -> u64 {
 }
 
 /// Waits `n` seconds, or less when `stop` is set.
-fn pause(seconds: u64, stop: &AtomicBool) {
+pub(super) fn pause(seconds: u64, stop: &AtomicBool) {
     for _ in 0..seconds * 10 {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -399,10 +399,10 @@ fn container_of(codec: TransferCodec) -> u8 {
 // ── The source ──────────────────────────────────────────────────────────────
 
 /// A folder of this computer's for a run's conversions, gone when dropped.
-struct Scratch(PathBuf);
+pub(super) struct Scratch(pub(super) PathBuf);
 
 impl Scratch {
-    fn new() -> io::Result<Scratch> {
+    pub(super) fn new() -> io::Result<Scratch> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("mstream-card-{}-{n}", std::process::id()));
@@ -456,6 +456,11 @@ impl Http {
             resumable: false,
             bulk: None,
         })
+    }
+
+    /// The origin of the wanted card whose files these are.
+    pub(crate) fn origin(&self) -> usize {
+        self.origin
     }
 
     /// The server takes conversions as bulk work, `slots` at once (its
@@ -629,7 +634,7 @@ impl Rewind for AsRewind<'_> {
 }
 
 /// A file into the card's stage, whole.
-fn pour(from: &mut dyn Read, into: &mut dyn Write) -> Result<(), Failed> {
+pub(super) fn pour(from: &mut dyn Read, into: &mut dyn Write) -> Result<(), Failed> {
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = match from.read(&mut buf) {

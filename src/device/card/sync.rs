@@ -39,6 +39,13 @@
 //!    was made from, the plays' posted marks. The run's commits carry them
 //!    as ACKS ([`Hooks::acks`]), a commit made for nothing else never.
 //!
+//! **The server's federation peers** (B9, [`peers`]) are read in the same
+//! run, each a server of the card's own: listed through the server's browse
+//! proxy, their files fetched under each one's daily budget, a peer whose
+//! day is spent waiting in the plan of the checkpoint the run ends with
+//! while the other sources' files go in. Each file is known by its origin
+//! and its server path ([`Key`]): two servers may hold one path.
+//!
 //! The listener's way in is the Card view and `device card <drive> sync`,
 //! which wait for their UX contract; until then the hidden `device
 //! card-sync` runs it ([`command`]).
@@ -73,11 +80,14 @@ use super::plan::{
     self, Extra, Fit, Kept, Skip, Wanted, codec_of, needing_metadata, ogg_is_opus, oggs_to_sniff,
     wanted_of, wanted_of_ledger,
 };
+use super::source::Sources;
 use super::source::http::{Finish, Http};
 use super::source::length::{self, CardAt};
 use super::source::local::{self, Local, Reached};
+use super::source::peer::Gate;
 use super::state::{
-    self, Convert, FOLDER_IMAGE, Layout, NO_ART, Settings, State, art_key, hex as id_hex,
+    self, Convert, FOLDER_IMAGE, Layout, NO_ART, PeerSource, Settings, State, art_key,
+    hex as id_hex,
 };
 use super::tags::{self, Restore};
 use super::volume::{self, CardFs, CardWrite, Mounted, Private, STATE_VERSION, Space};
@@ -91,6 +101,14 @@ const WHOLE_EVERY_SECS: u64 = 7 * 86_400;
 const WHOLE_EVERY_RUNS: u32 = 10;
 /// The first bytes of an `.ogg` that say whether it is Opus.
 const OGG_HEAD: u64 = 512;
+
+mod peers;
+
+pub(crate) use peers::{Federation, PeerSummary, Status as PeerStatus};
+
+/// A file of a run, as its hooks find it: its origin and its server path,
+/// since two of a run's servers may hold one path.
+type Key = (usize, String);
 
 // ── What a sync is asked, and what it says ──────────────────────────────────
 
@@ -140,6 +158,28 @@ pub(crate) struct Ask {
     pub(crate) whole: bool,
     /// Plan, and write nothing.
     pub(crate) dry_run: bool,
+    /// The server's federation peers to read (B9); None: those the card's
+    /// settings name under this server.
+    pub(crate) peers: Option<Vec<PeerAsk>>,
+    /// None of the server's own libraries is read this run: its files on
+    /// the card stay as they are.
+    pub(crate) peers_only: bool,
+    /// Peers whose files may come through an older server's proxy, which
+    /// can't tell them they are copies: the listener's answer, stored on
+    /// the card.
+    pub(crate) proxy_copies: Vec<u32>,
+    /// The listener's daily budget for the peers read, in MiB, kept in this
+    /// computer's `budget.json`.
+    pub(crate) budget_mb: Option<u64>,
+}
+
+/// A federation peer a sync is asked to read (B9): its id in the server's
+/// peer list, and its libraries (None: the card's selection for it, else
+/// every library it grants).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PeerAsk {
+    pub(crate) id: u32,
+    pub(crate) libraries: Option<Vec<String>>,
 }
 
 /// How the server's side was read.
@@ -149,6 +189,18 @@ pub(crate) enum Listed {
     Whole,
     /// A 304: the card's ledger stands for it.
     NotModified,
+    /// Not read: a run of the server's peers alone.
+    Unread,
+}
+
+impl Listed {
+    fn code(self) -> &'static str {
+        match self {
+            Listed::Whole => "whole",
+            Listed::NotModified => "not-modified",
+            Listed::Unread => "unread",
+        }
+    }
 }
 
 /// The plan, as a sync says it before it runs.
@@ -172,6 +224,8 @@ pub(crate) struct Summary {
     pub(crate) report: Report,
     /// None when the volume's space isn't known.
     pub(crate) fit: Option<Fit>,
+    /// Each federation peer asked for: read, or why not.
+    pub(crate) peers: Vec<PeerSummary>,
 }
 
 /// Why a sync stopped before its run ended.
@@ -223,6 +277,11 @@ pub(crate) struct Synced {
     pub(crate) notes: Vec<String>,
     /// What became of the card's plays, once the card's settings were read.
     pub(crate) plays: Option<Tally>,
+    /// Each federation peer asked for, as the run left it.
+    pub(crate) peers: Vec<PeerSummary>,
+    /// Unix seconds: when a peer whose day is spent may be asked again, the
+    /// earliest of them; the caller's to run again then.
+    pub(crate) resume_at: Option<u64>,
 }
 
 // ── One run ─────────────────────────────────────────────────────────────────
@@ -234,7 +293,8 @@ type Halted = (Option<Summary>, Halt);
 /// gives them (no fit without); `reached` how the client reaches its server
 /// (the local-disk source's condition); `cards` this computer's cache of
 /// cards, brought up to date (the caller saves it); `plays` the outbox of
-/// the card's plays; `envs` each session's clock and ids.
+/// the card's plays; `fed` what the server's peers need of this computer;
+/// `envs` each session's clock and ids.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sync(
     card: &dyn CardWrite,
@@ -244,28 +304,38 @@ pub(crate) fn sync(
     ask: &Ask,
     cards: &mut Cards,
     plays: Rc<dyn history::Store>,
+    fed: &Federation,
     envs: &mut dyn FnMut() -> Env,
     events: &mut dyn FnMut(Event),
 ) -> Synced {
     let mut notes = Vec::new();
     let dry = DryCard::new(card);
     let target: &dyn CardWrite = if ask.dry_run { &dry } else { card };
-    let mut history = None;
-    let mut had = Had { notes: &mut notes, plays, history: &mut history };
-    let ran = run(target, space, &client, reached, ask, cards, envs, events, &mut had);
+    let (mut history, mut peers, mut resume_at) = (None, Vec::new(), None);
+    let mut had = Had {
+        notes: &mut notes,
+        plays,
+        history: &mut history,
+        peers: &mut peers,
+        resume_at: &mut resume_at,
+    };
+    let ran = run(target, space, &client, reached, ask, cards, fed, envs, events, &mut had);
     let (summary, end) = match ran {
         Ok((summary, end)) => (Some(summary), end),
         Err((summary, halt)) => (summary, End::Halted(halt)),
     };
-    Synced { summary, end, notes, plays: history.map(|h| h.tally) }
+    Synced { summary, end, notes, plays: history.map(|h| h.tally), peers, resume_at }
 }
 
-/// What a run gives back besides its end: its notes, and the card's plays
-/// (their outbox, and what the run's look and post made of them).
+/// What a run gives back besides its end: its notes, the card's plays
+/// (their outbox, and what the run's look and post made of them), and what
+/// came of the peers asked for.
 struct Had<'a> {
     notes: &'a mut Vec<String>,
     plays: Rc<dyn history::Store>,
     history: &'a mut Option<History>,
+    peers: &'a mut Vec<PeerSummary>,
+    resume_at: &'a mut Option<u64>,
 }
 
 fn server_halt(e: impl std::fmt::Display) -> Halted {
@@ -296,6 +366,7 @@ fn run(
     reached: Reached,
     ask: &Ask,
     cards: &mut Cards,
+    fed: &Federation,
     envs: &mut dyn FnMut() -> Env,
     events: &mut dyn FnMut(Event),
     had: &mut Had<'_>,
@@ -328,6 +399,7 @@ fn run(
     let notes = &mut *had.notes;
     let prepared = prepare(
         &mut session, &mut state, space, client, reached, ask, &info, cards, now, history, notes,
+        fed,
     );
     let mut p = match prepared {
         Ok(p) => p,
@@ -336,6 +408,8 @@ fn run(
             return Err(halted);
         }
     };
+    *had.peers = p.summary.peers.clone();
+    *had.resume_at = p.summary.peers.iter().filter_map(|s| s.resume_at).min();
     if ask.dry_run {
         session.close();
         return Ok((p.summary, End::Dry));
@@ -351,6 +425,10 @@ fn run(
     let ran = session.run(p.plan, &mut p.fetcher, &mut hooks, events);
     *had.history = hooks.history.take();
     had.notes.append(&mut hooks.notes);
+    *had.resume_at = peers::after(had.peers, &mut p.fetcher.network().peers);
+    for s in had.peers.iter().filter(|s| s.relay && s.fetch_bytes > RELAY_WARN) {
+        had.notes.push(format!("peer {}'s files come through a relay: a long pull", s.id));
+    }
     let outcome = ran.map_err(|stop| (Some(p.summary.clone()), Halt::Card(stop)))?;
     if let Err(why) = &outcome.stored {
         had.notes.push(format!("the card's settings weren't stored: {why}"));
@@ -372,10 +450,14 @@ struct Store {
     revision: Option<String>,
 }
 
+/// A peer's pull past this many bytes through a relay is worth a warning
+/// (the transfer plan's 2.15: warn, don't refuse).
+const RELAY_WARN: u64 = 1 << 30;
+
 /// What a plan made ready for its run.
 struct Prepared {
     plan: Plan,
-    fetcher: Local<Http>,
+    fetcher: Local<Sources>,
     hooks: Option<SyncHooks>,
     summary: Summary,
     listed: Listed,
@@ -407,6 +489,7 @@ fn prepare(
     now: u64,
     history: &mut History,
     notes: &mut Vec<String>,
+    fed: &Federation,
 ) -> Result<Prepared, Halted> {
     let refused = |why: String| (None, Halt::Refused(why));
     let Some(root) = session.root() else {
@@ -479,19 +562,24 @@ fn prepare(
         source.nickname = nickname.trim().to_string();
     }
 
-    // The selection.
+    // The selection. A run of the server's peers alone reads none of its
+    // own libraries: its files stand as the card's ledger has them, as
+    // after a 304, and its selection is left as it is.
     let libraries = match (&ask.libraries, source.libraries.is_empty()) {
         (Some(asked), _) => asked.clone(),
         (None, false) => source.libraries.clone(),
         (None, true) => info.user.vpaths.clone(),
     };
-    if let Some(unknown) = libraries.iter().find(|l| !info.user.vpaths.contains(l)) {
-        return Err(refused(format!("{unknown} isn't a library this account sees on the server")));
+    if !ask.peers_only {
+        if let Some(unknown) = libraries.iter().find(|l| !info.user.vpaths.contains(l)) {
+            let why = format!("{unknown} isn't a library this account sees on the server");
+            return Err(refused(why));
+        }
+        if libraries.is_empty() {
+            return Err(refused("no library to sync".into()));
+        }
+        source.libraries = libraries.clone();
     }
-    if libraries.is_empty() {
-        return Err(refused("no library to sync".into()));
-    }
-    source.libraries = libraries.clone();
     // What the server converts, when it does: the rates it lists, its bulk
     // queue (an older server's: 64k-192k, none).
     let transcode = info.features.transcode.as_ref();
@@ -535,13 +623,17 @@ fn prepare(
     let others = info.user.vpaths.iter().filter(|v| !libraries.contains(v));
     let ignore: Vec<String> = others.cloned().collect();
     let known_revision = (!whole).then_some(known.as_str());
-    let answer = client.manifest(&ignore, MANIFEST_PAGE_MAX, known_revision, &mut |_| {});
+    let answer = match ask.peers_only {
+        false => client.manifest(&ignore, MANIFEST_PAGE_MAX, known_revision, &mut |_| {}),
+        true => Ok(Manifest::NotModified),
+    };
     let answer = answer.map_err(server_halt)?;
     let conversion = settings.conversion;
-    let (listed, wanted, entries) = match answer {
+    let (listed, mut wanted, entries) = match answer {
         Manifest::NotModified => {
             let entries: Vec<ManifestEntry> = rows.iter().map(entry_of).collect();
-            (Listed::NotModified, wanted_of_ledger(origin, &rows), entries)
+            let listed = if ask.peers_only { Listed::Unread } else { Listed::NotModified };
+            (listed, wanted_of_ledger(origin, &rows), entries)
         }
         Manifest::Listed(listing) => {
             origin.revision = listing.revision.clone();
@@ -589,17 +681,44 @@ fn prepare(
         return Err(refused(format!("{why}: the run would replace the rows they map through")));
     }
 
+    // The server's federation peers, each a server of the card's (B9),
+    // their files after the server's own.
+    let cx = peers::Context {
+        client,
+        info,
+        talk: &reads,
+        root,
+        device: &device,
+        ask,
+        fed,
+        reached,
+        first_origin: 1,
+    };
+    let (sides, mut peer_summaries) = peers::prepare(&cx, settings, notes);
+    let mut peer_fetchers = Vec::new();
+    let mut shelves: Vec<Covers> = Vec::new();
+    let mut lists: Vec<(Arc<Client>, Option<Gate>)> = vec![(client.clone(), None)];
+    for side in sides {
+        let at = wanted.card.origins.len();
+        assert_eq!(side.peer.origin(), at, "a peer's origin follows the others'");
+        merge(&mut wanted, side.wanted);
+        peer_fetchers.push(side.peer);
+        shelves.push(side.covers);
+        lists.push((side.list, Some(side.gate)));
+    }
+
     // 4. The plan.
     let http = Http::new(client.clone(), 0, device.max_channels);
     let mut http = http.map_err(|e| refused(e.to_string()))?;
     http.bulk(transcode.and_then(TranscodeInfo::bulk_slots));
+    let sources = Sources { own: Some(http), peers: peer_fetchers };
     let folders_here = local::folders(info.admin.as_ref(), reached, || client.admin_directories());
-    let mut fetcher = Local::new(folders_here, 0, &entries, http);
+    let mut fetcher = Local::new(folders_here, 0, &entries, sources);
     let source_mode = fetcher.mode().code();
     let plan = session.plan(&wanted.card, &ask.answers, &mut fetcher);
     let plan = plan.map_err(|s| (None, Halt::Card(s)))?;
-    let mut wanted = wanted;
     fill_late(client, &plan, &mut wanted);
+    peers::planned(&mut peer_summaries, &fetcher.network().peers, &plan, &wanted);
 
     let dj = settings.auto_dj && !settings.for_someone_else && device.writes_mpdj();
     let fit = space.map(|s| plan::fit(&s, &plan.footprint(), dj));
@@ -623,6 +742,7 @@ fn prepare(
         guards: plan.guards.clone(),
         report: plan.report.clone(),
         fit,
+        peers: peer_summaries,
     };
     if !ask.dry_run {
         if let Some(fit) = fit.filter(|f| !f.fits() || f.over_cap()) {
@@ -633,45 +753,70 @@ fn prepare(
         }
     }
 
-    // The source's conversions, made ahead in the run's order, and the hooks.
-    let by_path: HashMap<String, Extra> = wanted
+    // The sources' conversions (the server's made ahead in the run's order),
+    // and the hooks. Each origin has its covers: the server's own, then each
+    // peer's.
+    let by_key: HashMap<Key, Extra> = wanted
         .card
         .files
         .iter()
         .zip(&wanted.extras)
-        .map(|(f, e)| (f.ledger.server_path.clone(), e.clone()))
+        .map(|(f, e)| ((f.origin, f.ledger.server_path.clone()), e.clone()))
         .collect();
-    let extras = Rc::new(RefCell::new(by_path));
+    let extras = Rc::new(RefCell::new(by_key));
     let images = matches!(fetcher.mode(), local::Mode::Disk(_)).then(|| fetcher.images());
-    let shelf = Rc::new(RefCell::new(Covers::new(client.clone(), images)));
+    shelves.insert(0, Covers::new(client.clone(), images));
+    let shelves: Rc<Vec<RefCell<Covers>>> =
+        Rc::new(shelves.into_iter().map(RefCell::new).collect());
     let roots = plan.roots().to_vec();
-    let card_paths: HashMap<String, String> = plan
+    let card_paths: HashMap<Key, String> = plan
         .fetched_paths()
-        .map(|(i, path)| (wanted.card.files[i].ledger.server_path.clone(), path.to_string()))
+        .map(|(i, path)| {
+            let f = &wanted.card.files[i];
+            ((f.origin, f.ledger.server_path.clone()), path.to_string())
+        })
         .collect();
-    let retag = Retag {
-        covers: shelf.clone(),
+    let card_paths = Rc::new(card_paths);
+    let retag = || Retag {
+        shelves: shelves.clone(),
         extras: extras.clone(),
-        card_paths,
+        card_paths: card_paths.clone(),
         roots: roots.clone(),
         covers_on: settings.covers,
     };
-    let length = |&i: &usize| {
-        let file = &wanted.card.files[i];
-        Some((file.ledger.server_path.clone(), wanted.extras[i].duration_ms?))
+    let lengths = |o: usize| -> HashMap<String, u64> {
+        let length = |&i: &usize| {
+            let file = &wanted.card.files[i];
+            Some((file.ledger.server_path.clone(), wanted.extras[i].duration_ms?))
+        };
+        let of = |i: &&usize| wanted.card.files[**i].origin == o;
+        order.iter().filter(|i| converted(i)).filter(of).filter_map(length).collect()
     };
-    let lengths = order.iter().filter(|i| converted(i)).filter_map(length).collect();
     let network = fetcher.network();
-    network.finish_with(Box::new(retag));
-    network.lengths(lengths);
-    let ahead: Vec<&WantedFile> =
-        order.iter().filter(|i| converted(i)).map(|&i| &wanted.card.files[i]).collect();
-    if !ask.dry_run {
-        network.ahead(&ahead);
+    for peer in network.peers.iter_mut() {
+        peer.finish_with(Box::new(retag()));
+        peer.lengths(lengths(peer.origin()));
     }
+    if let Some(own) = network.own.as_mut() {
+        own.finish_with(Box::new(retag()));
+        own.lengths(lengths(0));
+        let ahead: Vec<&WantedFile> = order
+            .iter()
+            .filter(|i| converted(i))
+            .map(|&i| &wanted.card.files[i])
+            .filter(|f| f.origin == 0)
+            .collect();
+        if !ask.dry_run {
+            own.ahead(&ahead);
+        }
+    }
+    let origin_of: HashMap<usize, usize> =
+        plan.origin_at().iter().enumerate().map(|(o, &i)| (i, o)).collect();
     let hooks = SyncHooks {
         client: client.clone(),
-        covers: shelf,
+        lists,
+        origin_of,
+        shelves,
         extras,
         covers_on: settings.covers,
         max_channels: device.max_channels,
@@ -685,10 +830,11 @@ fn prepare(
             _ => None,
         },
         old_fingerprint,
-        refresh: listed == Listed::Whole,
+        refresh: listed == Listed::Whole || some_peer_read(&summary.peers),
         store: None,
         history: None,
         notes: Vec::new(),
+        looked: false,
     };
     let hooks = Some(hooks);
     Ok(Prepared { plan, fetcher, hooks, summary, listed, revision, ours, url_key, plan_key })
@@ -720,7 +866,8 @@ fn entry_of(k: &Kept) -> ManifestEntry {
 /// as they are: the retag puts back the cover alone.
 fn fill_late(client: &Client, plan: &Plan, wanted: &mut Wanted) {
     let lacks = |&i: &usize| {
-        matches!(wanted.card.files[i].bytes, Bytes::Converted(_)) && !wanted.extras[i].full
+        let file = &wanted.card.files[i];
+        file.origin == 0 && matches!(file.bytes, Bytes::Converted(_)) && !wanted.extras[i].full
     };
     let lacking: Vec<usize> = plan.fetch_order().into_iter().filter(lacks).collect();
     if lacking.is_empty() {
@@ -734,6 +881,23 @@ fn fill_late(client: &Client, plan: &Plan, wanted: &mut Wanted) {
             wanted.extras[i].fill(m);
         }
     }
+}
+
+/// `other`'s wanted card after `into`'s: its origins numbered on from
+/// `into`'s.
+fn merge(into: &mut Wanted, other: Wanted) {
+    let at = into.card.origins.len();
+    into.card.origins.extend(other.card.origins);
+    let files = other.card.files.into_iter().map(|f| WantedFile { origin: f.origin + at, ..f });
+    into.card.files.extend(files);
+    into.extras.extend(other.extras);
+    into.skipped.extend(other.skipped);
+}
+
+/// Some peer is read, whole as a peer always is: the run's Auto DJ vectors
+/// are read again.
+fn some_peer_read(peers: &[PeerSummary]) -> bool {
+    peers.iter().any(|p| p.status == PeerStatus::Read)
 }
 
 // ── What the server's side adds to a run ────────────────────────────────────
@@ -764,10 +928,11 @@ fn fingerprint(files: &[FileIn]) -> u64 {
 /// records (BPM_ANALYSED). Done on this computer's copy, before the card's
 /// one write of the file.
 struct Retag {
-    covers: Rc<RefCell<Covers>>,
-    extras: Rc<RefCell<HashMap<String, Extra>>>,
-    /// Each fetched file's card path, by its server path: its album folder.
-    card_paths: HashMap<String, String>,
+    /// Each origin's covers.
+    shelves: Rc<Vec<RefCell<Covers>>>,
+    extras: Rc<RefCell<HashMap<Key, Extra>>>,
+    /// Each fetched file's card path: its album folder.
+    card_paths: Rc<HashMap<Key, String>>,
     roots: Vec<String>,
     covers_on: bool,
 }
@@ -775,17 +940,19 @@ struct Retag {
 impl Finish for Retag {
     fn finish(&mut self, file: &WantedFile, path: &Path) -> Result<(), String> {
         let server = &file.ledger.server_path;
-        let extra = self.extras.borrow().get(server).cloned().unwrap_or_default();
-        let cover = match self.covers_on {
-            true => {
-                let folders = match self.card_paths.get(server) {
+        let key = (file.origin, server.clone());
+        let extra = self.extras.borrow().get(&key).cloned().unwrap_or_default();
+        let shelf = self.shelves.get(file.origin).filter(|_| self.covers_on);
+        let cover = match shelf {
+            Some(shelf) => {
+                let folders = match self.card_paths.get(&key) {
                     Some(card) => folders(card, server, &self.roots),
                     None => vec![split_last(server).0.to_string()],
                 };
-                let image = self.covers.borrow_mut().image(&folders, extra.album_art.as_deref());
+                let image = shelf.borrow_mut().image(&folders, extra.album_art.as_deref());
                 image.as_deref().and_then(covers::baseline_jpeg)
             }
-            false => None,
+            None => None,
         };
         if cover.is_none() && extra.bpm_tag.is_none() && extra.key_tag.is_none() {
             return Ok(());
@@ -795,11 +962,17 @@ impl Finish for Retag {
     }
 }
 
-/// The engine's hooks for a sync from the user's own server.
+/// The engine's hooks for a sync from the user's own server, and its peers.
 struct SyncHooks {
     client: Arc<Client>,
-    covers: Rc<RefCell<Covers>>,
-    extras: Rc<RefCell<HashMap<String, Extra>>>,
+    /// Each origin's client for its listing's calls (the server's own, a
+    /// peer's browse proxy), and a peer's gate.
+    lists: Vec<(Arc<Client>, Option<Gate>)>,
+    /// Which origin each of the card's servers is, in the run's numbering.
+    origin_of: HashMap<usize, usize>,
+    /// Each origin's covers.
+    shelves: Rc<Vec<RefCell<Covers>>>,
+    extras: Rc<RefCell<HashMap<Key, Extra>>>,
     covers_on: bool,
     max_channels: u32,
     roots: Vec<String>,
@@ -822,14 +995,23 @@ struct SyncHooks {
     /// settings stored. Set for a run.
     history: Option<History>,
     notes: Vec<String>,
+    /// The thumbnail step ran: the art it left is what is stored.
+    looked: bool,
 }
 
 impl SyncHooks {
+    /// A row's file by its origin: its key, when its server is one the run
+    /// reads.
+    fn key_of(&self, l: &Ledger) -> Option<Key> {
+        let origin = *self.origin_of.get(&(l.server as usize))?;
+        Some((origin, l.server_path.clone()))
+    }
+
     /// The album's `album-art` names as this run's listing gives them; None
     /// when it gave none of its files (a 304, another server's rows).
     fn listed_art(&self, album: &Album<'_>) -> Option<Vec<String>> {
         let extras = self.extras.borrow();
-        let listed = |l: &Ledger| extras.get(&l.server_path).filter(|e| e.listed);
+        let listed = |l: &Ledger| extras.get(&self.key_of(l)?).filter(|e| e.listed);
         if !album.files.iter().any(|(_, l)| listed(l).is_some()) {
             return None;
         }
@@ -837,12 +1019,13 @@ impl SyncHooks {
     }
 
     /// The album's `album-art` names as the server's metadata gives them
-    /// now, for its files of this run's server; None when it has none of
-    /// them, or the server doesn't answer.
+    /// now, for its files of the server's own (origin 0); None when it has
+    /// none of them, or the server doesn't answer.
     fn art_now(&self, album: &Album<'_>) -> Option<Vec<String>> {
         let extras = self.extras.borrow();
-        let paths = album.files.iter().map(|(_, l)| &l.server_path);
-        let paths: Vec<String> = paths.filter(|p| extras.contains_key(*p)).cloned().collect();
+        let keys = album.files.iter().filter_map(|(_, l)| self.key_of(l));
+        let keys = keys.filter(|k| k.0 == 0 && extras.contains_key(k));
+        let paths: Vec<String> = keys.map(|(_, p)| p).collect();
         drop(extras);
         if paths.is_empty() {
             return None;
@@ -850,6 +1033,12 @@ impl SyncHooks {
         let found = self.client.metadata_batch(&paths).ok()?;
         let art = |p: &String| found.get(p)?.as_ref()?.album_art.clone().filter(|a| !a.is_empty());
         Some(paths.iter().filter_map(art).collect())
+    }
+
+    /// A peer of the run whose day is spent, or that refused: nothing more
+    /// is asked of it.
+    fn held(&self, origin: usize) -> bool {
+        self.lists.get(origin).and_then(|(_, gate)| gate.as_ref()).is_some_and(|g| !g.open())
     }
 }
 
@@ -872,7 +1061,8 @@ impl Hooks for SyncHooks {
         let size = card.stat(stage).map_err(|e| e.to_string())?.map_or(0, |i| i.size);
         let heard = length::heard(codec, &CardAt { card, path: stage, size })?;
         let extras = self.extras.borrow();
-        let expected = extras.get(&file.ledger.server_path).and_then(|e| e.duration_ms);
+        let key = (file.origin, file.ledger.server_path.clone());
+        let expected = extras.get(&key).and_then(|e| e.duration_ms);
         length::check(&heard, expected, self.max_channels)
     }
 
@@ -880,8 +1070,19 @@ impl Hooks for SyncHooks {
         if !self.covers_on {
             return Cover::Gone;
         }
+        self.looked = true;
         let hash = path_hash(album.folder);
         let old = self.old_art.get(&hash).copied();
+        // The album's origin is its first file's; a peer whose day is spent
+        // isn't asked, and its album stays as it was.
+        let first = album.files.iter().min_by(|a, b| compare_file_paths(a.0, b.0));
+        let origin = first.and_then(|(_, l)| self.key_of(l)).map(|(o, _)| o);
+        if origin.is_some_and(|o| self.held(o)) {
+            if let Some(key) = old {
+                self.art.insert(hash, key);
+            }
+            return Cover::Keep;
+        }
         // The art the album's files name: as this run's listing says. Files
         // whose art it didn't read (a 304, another server's rows) stay as
         // they were, unless a thumbnail made before is lost: then as their
@@ -914,11 +1115,11 @@ impl Hooks for SyncHooks {
             self.art.insert(hash, NO_ART);
             return Cover::Gone;
         }
-        let first = album.files.iter().min_by(|a, b| compare_file_paths(a.0, b.0));
         let Some(&(card_path, ledger)) = first else { return Cover::Gone };
+        let Some(shelf) = origin.and_then(|o| self.shelves.get(o)) else { return Cover::Keep };
         let folders = folders(card_path, &ledger.server_path, &self.roots);
         let art = most_common(names.iter().map(String::as_str)).map(str::to_string);
-        let image = self.covers.borrow_mut().image(&folders, art.as_deref());
+        let image = shelf.borrow_mut().image(&folders, art.as_deref());
         match image.as_deref().and_then(covers::thumbnail) {
             Some((pixels, source_bytes)) => {
                 // With no art named, the image is the folder's.
@@ -949,43 +1150,74 @@ impl Hooks for SyncHooks {
         if commit.old.is_some() && !self.refresh && same_files {
             return AutoDj::Same;
         }
-        let mut hash_of: HashMap<&str, [u8; 16]> = HashMap::new();
-        for r in commit.records {
-            let Some(l) = r.ledger.as_ref().filter(|l| !l.server_path.is_empty()) else { continue };
-            if let Some(h) = l.canonical_hash() {
-                hash_of.insert(&l.server_path, h);
+        // Each origin's rows' vectors from its own server (a peer's through
+        // the browse proxy, its quota counting them), all of one model: the
+        // server's own, else the first peer's. A peer that is held is asked
+        // nothing; its rows have no neighbours until it is.
+        let mut model: Option<Model> = None;
+        let mut vectors = HashMap::new();
+        let mut why_none: Option<String> = None;
+        for (o, server) in commit.origins.iter().enumerate() {
+            let Some(server) = *server else { continue };
+            let Some((client, gate)) = self.lists.get(o).cloned() else { continue };
+            if gate.as_ref().is_some_and(|g| !g.open()) {
+                continue;
+            }
+            let mut hash_of: HashMap<&str, [u8; 16]> = HashMap::new();
+            for r in commit.records {
+                let Some(l) = r.ledger.as_ref().filter(|l| l.server == server) else { continue };
+                if let Some(h) = l.canonical_hash().filter(|_| !l.server_path.is_empty()) {
+                    hash_of.insert(&l.server_path, h);
+                }
+            }
+            if hash_of.is_empty() {
+                continue;
+            }
+            let whose = if o == 0 { "the server".to_string() } else { format!("peer origin {o}") };
+            let paths: Vec<String> = hash_of.keys().map(|p| p.to_string()).collect();
+            let found = match client.embeddings(&paths) {
+                Ok(Some(found)) => found,
+                Ok(None) => {
+                    why_none.get_or_insert(format!("{whose}'s discovery is off"));
+                    continue;
+                }
+                Err(e) => {
+                    why_none.get_or_insert(format!("{whose}'s embeddings didn't come: {e}"));
+                    continue;
+                }
+            };
+            let id = found.model.id.as_deref().unwrap_or("");
+            let version = found.model.version.as_deref().unwrap_or("");
+            let Some(theirs) = Model::known(id, version) else {
+                let why = format!("the model {id} {version} isn't one the index lists");
+                why_none.get_or_insert(why);
+                continue;
+            };
+            match &model {
+                Some(was) if *was != theirs => {
+                    let note = format!("{whose}'s rows have no Auto DJ neighbours: another model");
+                    self.notes.push(note);
+                    continue;
+                }
+                Some(_) => {}
+                None => model = Some(theirs),
+            }
+            // By the path asked for, else by the hash it came keyed by, when
+            // that is a file's of the commit.
+            let hashes: HashSet<[u8; 16]> = hash_of.values().copied().collect();
+            for t in found.tracks {
+                let by_hash = t.audio_hash.as_deref().and_then(hex16).filter(|h| hashes.contains(h));
+                let hash = hash_of.get(t.file_path.as_str()).copied().or(by_hash);
+                if let (Some(v), Some(h)) = (t.vector, hash) {
+                    vectors.insert(h, v);
+                }
             }
         }
-        let paths: Vec<String> = hash_of.keys().map(|p| p.to_string()).collect();
-        let found = match self.client.embeddings(&paths) {
-            Ok(Some(found)) => found,
-            Ok(None) => {
-                self.notes.push("no Auto DJ index: the server's discovery is off".into());
-                return AutoDj::None;
-            }
-            Err(e) => {
-                self.notes.push(format!("no Auto DJ index: the embeddings didn't come: {e}"));
-                return AutoDj::None;
-            }
-        };
-        let id = found.model.id.as_deref().unwrap_or("");
-        let version = found.model.version.as_deref().unwrap_or("");
-        let Some(model) = Model::known(id, version) else {
-            let why = format!("the model {id} {version} isn't one the index lists");
+        let Some(model) = model else {
+            let why = why_none.unwrap_or_else(|| "no file on the card has an embedding yet".into());
             self.notes.push(format!("no Auto DJ index: {why}"));
             return AutoDj::None;
         };
-        // By the path asked for, else by the hash it came keyed by, when
-        // that is a file's of the commit.
-        let hashes: HashSet<[u8; 16]> = hash_of.values().copied().collect();
-        let mut vectors = HashMap::new();
-        for t in found.tracks {
-            let by_hash = t.audio_hash.as_deref().and_then(hex16).filter(|h| hashes.contains(h));
-            let hash = hash_of.get(t.file_path.as_str()).copied().or(by_hash);
-            if let (Some(v), Some(h)) = (t.vector, hash) {
-                vectors.insert(h, v);
-            }
-        }
         let input = IndexIn {
             generation: commit.generation,
             card_id: commit.card_id,
@@ -1033,7 +1265,7 @@ impl Hooks for SyncHooks {
             store.state.plays = history.marks();
         }
         let settings = &mut store.state.settings;
-        if outcome.parked.is_none() {
+        if outcome.parked.is_none() && store.listed != Listed::Unread {
             let source = settings.source(store.url_key);
             if store.listed == Listed::Whole {
                 (source.full_read, source.runs, source.plan_key) = (store.now, 0, store.plan_key);
@@ -1043,6 +1275,10 @@ impl Hooks for SyncHooks {
             } else {
                 source.runs = source.runs.saturating_add(1);
             }
+        }
+        // The art each thumbnail was made from, once the thumbnail step ran:
+        // at the run's end, or before a source's wait parked it.
+        if outcome.parked.is_none() || self.looked {
             settings.art = std::mem::take(&mut self.art);
         }
         Some(store.state.text(seq))
@@ -1118,6 +1354,13 @@ fn on(
         }
     };
     let reached = reached(&client.server());
+    let fed = match Federation::system() {
+        Ok(fed) => fed,
+        Err(e) => {
+            let _ = writeln!(err, "mstream-player: {e}");
+            return 2;
+        }
+    };
     let mut cards = Cards::load();
     let synced = {
         let mut say = |e: Event| {
@@ -1127,7 +1370,8 @@ fn on(
         };
         let (space, client) = (found.volume.space, Arc::new(client));
         let plays: Rc<dyn history::Store> = Rc::new(history::ConfigStore);
-        sync(&card, space, client, reached, ask, &mut cards, plays, &mut Env::system, &mut say)
+        let envs = &mut Env::system;
+        sync(&card, space, client, reached, ask, &mut cards, plays, &fed, envs, &mut say)
     };
     let printed = serde_json::to_string_pretty(&synced_json(&synced, ask.dry_run));
     let _ = writeln!(out, "{}", printed.unwrap_or_default());
@@ -1193,7 +1437,7 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
         let skip = |(path, why): &(String, Skip)| json!({ "path": path, "why": why.code() });
         let skipped: Vec<Value> = p.skipped.iter().map(skip).collect();
         json!({
-            "listing": if p.listed == Listed::Whole { "whole" } else { "not-modified" },
+            "listing": p.listed.code(),
             "source": p.source,
             "libraries": p.libraries,
             "files": p.files,
@@ -1206,6 +1450,7 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
             "guards": p.guards.iter().map(guard_json).collect::<Vec<_>>(),
             "report": report_json(&p.report),
             "fit": fit,
+            "peers": p.peers.iter().map(PeerSummary::json).collect::<Vec<_>>(),
         })
     });
     let (outcome, stopped) = match &s.end {
@@ -1228,6 +1473,7 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
     json!({
         "dryRun": dry_run, "plan": summary, "outcome": outcome, "stopped": stopped,
         "notes": s.notes, "plays": s.plays.as_ref().map(Tally::json),
+        "peers": s.peers.iter().map(PeerSummary::json).collect::<Vec<_>>(), "resumeAt": s.resume_at,
     })
 }
 

@@ -5,6 +5,8 @@
 //! card read back by the kit's reader. The audio is the tag reader's parity
 //! corpus and made-up Ogg Opus streams; the covers are made-up pictures;
 //! the embeddings are made-up vectors (no real index: AUTODJ-INDEX.md 12.5).
+//! The server's federation peers, and their own loopback servers, are
+//! [`peers`]'s.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -107,6 +109,8 @@ struct Library {
     old: bool,
     /// Its `instanceId`, when not [`ID`].
     instance: Option<&'static str>,
+    /// Its federation peers (B9).
+    peers: Vec<peers::FedPeer>,
 }
 
 /// The fake server's own id.
@@ -274,6 +278,11 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             Some(bytes) => reply("200 OK", &[("Content-Type", "image/png")], bytes),
             None => not_found(),
         },
+        (_, p) if p.starts_with("/api/v1/federation/") => {
+            let (fed, old) = (lib.peers.clone(), lib.old);
+            drop(lib);
+            peers::federation(&fed, old, asked)
+        }
         _ => not_found(),
     }
 }
@@ -383,8 +392,30 @@ fn sync_plays(
             events.push(e);
         }
     };
-    let synced = sync(card, space(32 << 30), client, reached, ask, &mut cards, plays, envs, &mut said);
+    let (fed, space) = (no_peers(), space(32 << 30));
+    let synced = sync(card, space, client, reached, ask, &mut cards, plays, &fed, envs, &mut said);
     (synced, events)
+}
+
+/// A dial that never reaches a tunnel.
+struct NoDial;
+
+impl crate::device::card::source::peer::Dial for NoDial {
+    fn dial(&self, _ticket: &str) -> Result<crate::device::card::source::peer::Tunnel, String> {
+        Err("no tunnel in this test".into())
+    }
+}
+
+/// What a sync of no peer needs of this computer: a budget it never opens.
+fn no_peers() -> Federation {
+    Federation {
+        budget: crate::device::card::budget::Budget::at(std::env::temp_dir().join("mstream-sync-never")),
+        dial: Box::new(NoDial),
+        ffmpeg: super::peers::Ffmpeg::Given(None),
+        clock: Arc::new(|| 1_791_900_000),
+        jitter: Arc::new(|| 0),
+        stream_wait: Duration::from_millis(10),
+    }
 }
 
 fn look(card: &FatSim) -> Inspection {
@@ -708,7 +739,8 @@ fn a_plan_that_doesnt_fit_or_removes_most_of_the_card_stops_before_any_write() {
     let client = || Arc::new(Client::new(&base).unwrap());
     let tight = |c: &FatSim, envs: &mut dyn FnMut() -> Env| {
         let (cards, plays) = (&mut Cards::default(), Rc::new(MemStore::default()));
-        sync(c, space(1 << 20), client(), Reached::Elsewhere, &rock(), cards, plays, envs, &mut |_| {})
+        let (fed, space, elsewhere) = (no_peers(), space(1 << 20), Reached::Elsewhere);
+        sync(c, space, client(), elsewhere, &rock(), cards, plays, &fed, envs, &mut |_| {})
     };
     let image = sim.image();
     let synced = tight(&sim, &mut envs);
@@ -1214,3 +1246,5 @@ fn the_hidden_command_syncs_only_a_volume_the_rule_accepts() {
     assert_eq!(asked, 1);
     assert_eq!(sim.image(), image, "nothing reached the card");
 }
+
+mod peers;

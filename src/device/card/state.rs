@@ -15,7 +15,9 @@
 //! and the sync's settings ([`Settings`]), written once a sync has stored
 //! them: `sources` (each server the card is filled from, by its URL's key
 //! and the nickname this computer shows for it, with its libraries and
-//! what the sync keeps of its manifest), `layout`, `conversion`, `covers`,
+//! what the sync keeps of its manifest; and each federation peer, by its
+//! parent's key and its id there, with its iroh identity: [`PeerSource`]),
+//! `layout`, `conversion`, `covers`,
 //! `autoDj`, `removal`, and `art` (which art each album's thumbnail was made
 //! from: 2.12.1, step 10). Every member this software doesn't know is kept,
 //! unchanged, whenever it writes the file again (2.12.7), at the top level
@@ -326,11 +328,81 @@ pub(crate) struct Source {
     raw: Kept,
 }
 
+/// A federation peer the card is filled from (2.5.5; the transfer plan's
+/// 2.15): known by its parent's URL key and its id in the parent's peer
+/// list, and by its iroh identity, which tells a peer paired again under an
+/// id another one had from the one the card's files came from. An older
+/// player keeps the entry whole: it names no `serverUrlKey`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PeerSource {
+    pub(crate) parent_key: u64,
+    pub(crate) peer_id: u32,
+    /// The peer's `endpointId` as its parent lists it (a public key, never
+    /// a credential); "" while unknown.
+    pub(crate) endpoint: String,
+    /// Its name as its parent lists it; "" for one that names a place on a
+    /// network, which is never written.
+    pub(crate) nickname: String,
+    /// The selection: its libraries, by vpath.
+    pub(crate) libraries: Vec<String>,
+    /// The listener lets its files come through a parent's stream proxy
+    /// that can't tell the peer they are copies (an older mStream).
+    pub(crate) proxy_copies: bool,
+    /// The settings its last listing was planned with: another, and the
+    /// rows of the card can't stand for its entries.
+    pub(crate) plan_key: u64,
+    /// The object as read: the members this software doesn't know stay.
+    raw: Kept,
+}
+
+impl PeerSource {
+    fn object(&self) -> Value {
+        let mut object = self.raw.0.clone();
+        let nickname = if looks_like_address(&self.nickname) { "" } else { self.nickname.as_str() };
+        let mut set = |name: &str, value: Value| {
+            object.insert(name.to_string(), value);
+        };
+        set("peerOf", hex(self.parent_key).into());
+        set("peerId", self.peer_id.into());
+        set("endpointId", self.endpoint.as_str().into());
+        set("nickname", nickname.into());
+        set("libraries", self.libraries.clone().into());
+        set("proxyCopies", self.proxy_copies.into());
+        set("planKey", hex(self.plan_key).into());
+        Value::Object(object)
+    }
+
+    /// A `sources` entry that names a peer: `peerOf` and `peerId`, and no
+    /// `serverUrlKey`.
+    fn read(raw: &Map<String, Value>) -> Option<PeerSource> {
+        let parent_key = raw.get("peerOf").and_then(Value::as_str).and_then(from_hex)?;
+        let peer_id = raw.get("peerId").and_then(Value::as_u64);
+        let peer_id = peer_id.and_then(|id| u32::try_from(id).ok())?;
+        if parent_key == 0 || peer_id == 0 {
+            return None;
+        }
+        let text = |key: &str| raw.get(key).and_then(Value::as_str);
+        let libraries = raw.get("libraries").and_then(Value::as_array).into_iter().flatten();
+        Some(PeerSource {
+            parent_key,
+            peer_id,
+            endpoint: text("endpointId").unwrap_or_default().to_string(),
+            nickname: text("nickname").filter(|n| !looks_like_address(n)).unwrap_or("").into(),
+            libraries: libraries.filter_map(Value::as_str).map(str::to_string).collect(),
+            proxy_copies: raw.get("proxyCopies").and_then(Value::as_bool) == Some(true),
+            plan_key: text("planKey").and_then(from_hex).unwrap_or(0),
+            raw: Kept(raw.clone()),
+        })
+    }
+}
+
 /// The sync's settings in a card's state file. A member the file doesn't
 /// have reads as section 6's default.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Settings {
     pub(crate) sources: Vec<Source>,
+    /// The federation peers the card is filled from.
+    pub(crate) peers: Vec<PeerSource>,
     pub(crate) layout: Layout,
     pub(crate) conversion: Conversion,
     /// Album covers: thumbnails, and a converted file's cover put back.
@@ -371,6 +443,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             sources: Vec::new(),
+            peers: Vec::new(),
             layout: Layout::Auto,
             conversion: Conversion::default(),
             covers: true,
@@ -428,6 +501,11 @@ impl Settings {
         let mut others = Vec::new();
         for item in sources {
             let key = item.get("serverUrlKey").and_then(Value::as_str).and_then(from_hex);
+            let peer = item.as_object().filter(|_| key.is_none()).and_then(PeerSource::read);
+            if let Some(peer) = peer {
+                s.peers.push(peer);
+                continue;
+            }
             let (Some(raw), Some(url_key)) = (item.as_object(), key) else {
                 others.push(item.clone());
                 continue;
@@ -463,6 +541,26 @@ impl Settings {
                 self.sources.last_mut().expect("just pushed")
             }
         }
+    }
+
+    /// The source of peer `peer_id` of the server known by any of
+    /// `parent_keys` (its URL's key first, then its other ones); made under
+    /// the first when there is none. Its parent's key is the first from now
+    /// on, as the root's server takes the address it is read at.
+    pub(crate) fn peer_source(&mut self, parent_keys: &[u64], peer_id: u32) -> &mut PeerSource {
+        let first = parent_keys.first().copied().unwrap_or(0);
+        let of = |p: &PeerSource| p.peer_id == peer_id && parent_keys.contains(&p.parent_key);
+        let at = self.peers.iter().position(of);
+        let at = match at {
+            Some(at) => at,
+            None => {
+                self.peers.push(PeerSource { parent_key: first, peer_id, ..PeerSource::default() });
+                self.peers.len() - 1
+            }
+        };
+        let peer = &mut self.peers[at];
+        peer.parent_key = first;
+        peer
     }
 
     /// The server at `url_key`'s other keys: its source's own and those
@@ -559,6 +657,7 @@ impl Settings {
             Value::Object(object)
         };
         let mut sources: Vec<Value> = self.sources.iter().map(Source::object).collect();
+        sources.extend(self.peers.iter().map(PeerSource::object));
         if let Some(Value::Array(others)) = self.raw.0.get("sources") {
             sources.extend(others.iter().cloned());
         }
@@ -860,9 +959,21 @@ mod tests {
         home.nickname = "Home".into();
         home.libraries = vec!["Rock".into(), "Jazz".into()];
         (home.full_read, home.runs, home.plan_key) = (1_791_900_000, 3, 0x42);
+        let peer = s.peer_source(&[0xED90_1EA3_EE76_3AC7], 3);
+        (peer.endpoint, peer.nickname, peer.proxy_copies) = ("ab12".into(), "Attic".into(), true);
+        peer.libraries = vec!["Folk".into()];
         let text = String::from_utf8(state.text(2)).unwrap();
         let again = read(text.as_bytes()).unwrap();
         assert_eq!(again.settings, state.settings, "{text}");
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["sources"][1]["peerOf"], "0xED901EA3EE763AC7", "{text}");
+        assert!(v["sources"][1].get("serverUrlKey").is_none(), "an older player keeps it whole");
+        // The peer's source answers for its parent at another of its keys,
+        // and takes that key from then on.
+        let mut moved = again.settings.clone();
+        assert_eq!(moved.peer_source(&[0x99, 0xED90_1EA3_EE76_3AC7], 3).nickname, "Attic");
+        assert_eq!((moved.peers.len(), moved.peers[0].parent_key), (1, 0x99));
+        assert_eq!(moved.peer_source(&[0x99], 4).libraries.len(), 0, "another peer, a new source");
         assert!(text.contains("\"0xB1F7E69FBD466B59\":\"0x0123456789ABCDEF\""), "{text}");
         // Another address of the same server is the same source once confirmed.
         let mut s = again.settings.clone();

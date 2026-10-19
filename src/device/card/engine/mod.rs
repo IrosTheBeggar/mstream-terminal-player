@@ -450,13 +450,24 @@ pub(crate) trait Fetcher {
         started.map_err(|e| Failed { why: e.to_string(), stop: false })?;
         self.fetch(file, into)
     }
+    /// The run's files of `origin` wait for a later run, and why: a peer
+    /// whose day's quota or budget is spent (2.12.8's parking, of one
+    /// source alone). Asked before each of the origin's fetches and after
+    /// one that failed: a file that waits is neither fetched nor skipped,
+    /// and stays in the plan of the checkpoint the run ends with, the other
+    /// sources' files done first.
+    fn waits(&self, _origin: usize) -> Option<String> {
+        None
+    }
 }
 
 /// An album folder as the thumbnail step sees it (2.14).
 pub(crate) struct Album<'a> {
     /// Relative to `/music` (2.14.1's album folder).
     pub(crate) folder: &'a str,
-    /// Its files: each card path and ledger row.
+    /// Its files: each card path and ledger row, the row's `server` the
+    /// run's numbering of the card's servers ([`Plan::origin_at`] says
+    /// which origin each one read is).
     pub(crate) files: Vec<(&'a str, &'a Ledger)>,
     /// Its thumbnail is on the card and reads as its own (2.12.1, step 10).
     pub(crate) on_card: bool,
@@ -484,6 +495,9 @@ pub(crate) struct Commit<'a> {
     pub(crate) device: &'a DeviceTxt,
     /// The index the current root names, when it is valid.
     pub(crate) old: Option<&'a [u8]>,
+    /// Each origin's server in the records' numbering (their ledger's
+    /// `server`); None for one with no record in the commit.
+    pub(crate) origins: Vec<Option<u16>>,
 }
 
 /// The final commit's Auto DJ index (AUTODJ-INDEX.md 7.3).

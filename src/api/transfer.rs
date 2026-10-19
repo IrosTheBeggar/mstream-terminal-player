@@ -5,6 +5,12 @@
 //! their three sizes, and backdated plays from a card's log. The files'
 //! bytes are [`fetch`]'s.
 //!
+//! For a federation peer (B9): the parent's peers with their iroh
+//! identities ([`TransferPeer`]), a client of the parent aimed at one of
+//! them ([`Client::for_peer`]), the peer's `/api/` with the allowance its
+//! key's holder may read once mStream gives it ([`PeerApi`]), a folder's
+//! own entries, and where mStream keeps its own ffmpeg.
+//!
 //! Every call here reads its answer through `exchange`, which adds the body
 //! to the client's meter and carries the copy purpose when the client was
 //! built with them. The rest is the client's own plumbing: the
@@ -20,7 +26,7 @@ pub mod fetch;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use reqwest::header::HeaderMap;
@@ -28,7 +34,7 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::types::{PlaysAnswer, TranscodeInfo};
+use super::types::{DirListing, LayeredInfo, PlaysAnswer, TranscodeInfo};
 use super::urls::{self, ArtSize, TransferBitrate, TransferCodec};
 use super::{ApiError, Client, refused, wait};
 
@@ -79,6 +85,25 @@ impl Client {
     pub fn copying(mut self, copying: bool) -> Self {
         self.copying = copying;
         self
+    }
+
+    /// A client of this one's server aimed at its federation peer `id`:
+    /// reads through the parent's browse proxy, bytes through its stream
+    /// proxy, art through its art proxy. It shares this one's connections,
+    /// token and loopback token, and has no meter and no copy purpose until
+    /// it is given them.
+    pub fn for_peer(&self, id: i64) -> Client {
+        Client {
+            http: self.http.clone(),
+            base: self.base.clone(),
+            token: self.token.clone(),
+            peer: Some(id),
+            local_token: self.local_token.clone(),
+            plain_listings: AtomicBool::new(false),
+            no_waveforms: AtomicBool::new(false),
+            meter: None,
+            copying: false,
+        }
     }
 
     fn count(&self, bytes: usize) {
@@ -429,6 +454,69 @@ impl Listing {
 #[serde(default)]
 struct BatchRow {
     metadata: Option<Metadata>,
+}
+
+/// One row of `GET /api/v1/federation/peers` as a transfer reads it: the
+/// peer's id in the parent's list, its name there, and its iroh identity (a
+/// public key, never a credential), which tells a peer paired again under
+/// an id another peer had from the one a card's files came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct TransferPeer {
+    #[serde(deserialize_with = "whole_or_zero")]
+    pub id: i64,
+    #[serde(deserialize_with = "textual")]
+    pub name: Option<String>,
+    #[serde(rename = "endpointId", deserialize_with = "textual")]
+    pub endpoint_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct TransferPeers {
+    peers: Vec<TransferPeer>,
+}
+
+fn whole_or_zero<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    whole::<D, i64>(d).map(|n| n.unwrap_or(0))
+}
+
+/// A federation key's allowance on the peer, as its holder reads it (the
+/// card transfer's batch of mStream changes: `user.federationAllowance` in
+/// the peer's `/api/`). The key's every user and device share it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Allowance {
+    /// The key's daily quota in MiB (mStream's MB); 0: none.
+    #[serde(rename = "dailyMb", deserialize_with = "whole")]
+    pub daily_mb: Option<u64>,
+    /// What the key has pulled today, and what is left of the quota: None
+    /// with no quota (mStream's `null`).
+    #[serde(rename = "usedTodayBytes", deserialize_with = "whole")]
+    pub used_today: Option<u64>,
+    #[serde(rename = "remainingTodayBytes", deserialize_with = "whole")]
+    pub remaining_today: Option<u64>,
+    /// Seconds to the quota's reset, the peer's own UTC midnight.
+    #[serde(rename = "resetsInSeconds", deserialize_with = "whole")]
+    pub resets_in: Option<u64>,
+    /// False: the key refuses a request that says it is a copy.
+    #[serde(rename = "allowCopies", deserialize_with = "boolean")]
+    pub allow_copies: Option<bool>,
+    #[serde(rename = "maxStreams", deserialize_with = "whole")]
+    pub max_streams: Option<u32>,
+}
+
+/// A real `true` or `false`; else `None`.
+fn boolean<'de, D: Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool())
+}
+
+/// A peer's `/api/` as a transfer reads it: the layered payload, and the
+/// allowance of the key it is read with, when the peer gives one.
+#[derive(Debug, Clone, Default)]
+pub struct PeerApi {
+    pub info: LayeredInfo,
+    pub allowance: Option<Allowance>,
 }
 
 /// The embedding model an index was built with. Its licence travels with
@@ -1030,6 +1118,64 @@ impl Client {
 
     pub fn recursive_files(&self, directory: &str) -> Result<Vec<String>, ApiError> {
         wait(self.recursive_files_async(directory))
+    }
+
+    /// One folder's own entries (`POST /api/v1/file-explorer`, no metadata):
+    /// its folders, and the files beside them, which a library's top holds
+    /// where [`Client::recursive_files_async`] of its folders doesn't look.
+    pub async fn folder_async(&self, directory: &str) -> Result<DirListing, ApiError> {
+        const PATH: &str = "api/v1/file-explorer";
+        let body = serde_json::json!({ "directory": directory, "pullMetadata": false });
+        let reply = self.exchange(Method::POST, PATH, Some(&body), &[]).await?;
+        decode(&reply, PATH)
+    }
+
+    pub fn folder(&self, directory: &str) -> Result<DirListing, ApiError> {
+        wait(self.folder_async(directory))
+    }
+
+    /// `GET /api/`, counted as the transfer's calls are: for a peer client
+    /// the peer's own, through the parent's browse proxy, with its key's
+    /// allowance when the peer gives one.
+    pub async fn peer_api_async(&self) -> Result<PeerApi, ApiError> {
+        const PATH: &str = "api/";
+        let reply = self.exchange(Method::GET, PATH, None, &[]).await?;
+        let info: LayeredInfo = decode(&reply, PATH)?;
+        let raw: serde_json::Value = serde_json::from_slice(&reply.body).unwrap_or_default();
+        let allowance = raw.get("user").and_then(|u| u.get("federationAllowance")).cloned();
+        let allowance = allowance.and_then(|a| serde_json::from_value::<Allowance>(a).ok());
+        Ok(PeerApi { info, allowance })
+    }
+
+    pub fn peer_api(&self) -> Result<PeerApi, ApiError> {
+        wait(self.peer_api_async())
+    }
+
+    /// The parent's federation peers (`GET /api/v1/federation/peers`), with
+    /// their iroh identities. On the parent's own client.
+    pub async fn transfer_peers_async(&self) -> Result<Vec<TransferPeer>, ApiError> {
+        const PATH: &str = "api/v1/federation/peers";
+        let reply = self.exchange(Method::GET, PATH, None, &[]).await?;
+        decode::<TransferPeers>(&reply, PATH).map(|p| p.peers)
+    }
+
+    pub fn transfer_peers(&self) -> Result<Vec<TransferPeer>, ApiError> {
+        wait(self.transfer_peers_async())
+    }
+
+    /// The folder mStream keeps its own ffmpeg in (`GET
+    /// /api/v1/admin/transcode`, its `ffmpegDirectory`), as the server sees
+    /// it: an admin's, while the admin API answers. None when it names none.
+    pub async fn admin_ffmpeg_folder_async(&self) -> Result<Option<String>, ApiError> {
+        const PATH: &str = "api/v1/admin/transcode";
+        let reply = self.exchange(Method::GET, PATH, None, &[]).await?;
+        let value: serde_json::Value = decode(&reply, PATH)?;
+        let folder = value.get("ffmpegDirectory").and_then(|v| v.as_str());
+        Ok(folder.filter(|f| !f.trim().is_empty()).map(str::to_string))
+    }
+
+    pub fn admin_ffmpeg_folder(&self) -> Result<Option<String>, ApiError> {
+        wait(self.admin_ffmpeg_folder_async())
     }
 
     /// A cover in one of its sizes, raw bytes in whatever format the server

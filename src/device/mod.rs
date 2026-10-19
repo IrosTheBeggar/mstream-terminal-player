@@ -206,6 +206,27 @@ pub struct CardSyncArgs {
     // Read the server's manifest whole, whatever the schedule says.
     #[arg(long)]
     whole: bool,
+    // A federation peer of the server to read too, by its id in the
+    // server's peer list; again for several. The card's own peers without.
+    #[arg(long = "peer", value_name = "ID")]
+    peers: Vec<u32>,
+    // One library of a peer, as ID:VPATH; again for several. Its peer is
+    // read for these alone.
+    #[arg(long = "peer-library", value_name = "ID:VPATH")]
+    peer_libraries: Vec<String>,
+    // Read the peers alone: the server's own files on the card stay as the
+    // card has them.
+    #[arg(long)]
+    peers_only: bool,
+    // A peer whose files may come through an older server's proxy, which
+    // can't tell the peer they are copies; again for several. Stored on the
+    // card.
+    #[arg(long = "proxy-copies", value_name = "ID")]
+    proxy_copies: Vec<u32>,
+    // The daily budget for the peers read, in MiB, kept on this computer;
+    // 0 goes back to the peer's quota, or 1,500.
+    #[arg(long, value_name = "MIB")]
+    budget_mb: Option<u64>,
 }
 
 impl CardSyncArgs {
@@ -244,6 +265,28 @@ impl CardSyncArgs {
             removal: word("removal", &self.removal, removal)?,
             nickname: self.nickname.clone(),
         };
+        let mut peers: Vec<card::sync::PeerAsk> = Vec::new();
+        for &id in &self.peers {
+            if !peers.iter().any(|p| p.id == id) {
+                peers.push(card::sync::PeerAsk { id, libraries: None });
+            }
+        }
+        for one in &self.peer_libraries {
+            let refused = || format!("--peer-library {one} isn't ID:VPATH");
+            let (id, vpath) = one.split_once(':').ok_or_else(refused)?;
+            let id: u32 = id.trim().parse().ok().filter(|&id| id > 0).ok_or_else(refused)?;
+            if vpath.is_empty() {
+                return Err(refused());
+            }
+            let at = match peers.iter().position(|p| p.id == id) {
+                Some(at) => at,
+                None => {
+                    peers.push(card::sync::PeerAsk { id, libraries: None });
+                    peers.len() - 1
+                }
+            };
+            peers[at].libraries.get_or_insert_with(Vec::new).push(vpath.to_string());
+        }
         let answers = Answers {
             disk_checked: self.disk_checked,
             removals: self.allow_removals,
@@ -259,6 +302,10 @@ impl CardSyncArgs {
             same_server: self.same_server,
             whole: self.whole,
             dry_run: self.dry_run,
+            peers: (!peers.is_empty()).then_some(peers),
+            peers_only: self.peers_only,
+            proxy_copies: self.proxy_copies.clone(),
+            budget_mb: self.budget_mb,
         })
     }
 }
@@ -1176,6 +1223,30 @@ mod tests {
         assert!(bad.ask().unwrap_err().contains("160"), "no rate the server takes");
         let Ok(DeviceCmd::CardSync(bad)) = parse(&["card-sync", "E:", "--layout", "spiral"]) else { panic!() };
         assert!(bad.ask().is_err());
+        // A federation peer's: which peers and libraries, the run's say on an
+        // older server's proxy, the day's budget.
+        let peers = parse(&[
+            "card-sync", "E:", "--peer", "3", "--peer-library", "4:Folk", "--peer-library", "4:Jazz Hands",
+            "--peer", "3", "--peers-only", "--proxy-copies", "4", "--budget-mb", "700",
+        ]);
+        let Ok(DeviceCmd::CardSync(args)) = peers else { panic!("card-sync with peers") };
+        let ask = args.ask().expect("peers it takes");
+        let three = card::sync::PeerAsk { id: 3, libraries: None };
+        let four = card::sync::PeerAsk { id: 4, libraries: Some(vec!["Folk".into(), "Jazz Hands".into()]) };
+        assert_eq!(ask.peers, Some(vec![three, four]));
+        assert!(ask.peers_only);
+        assert_eq!((ask.proxy_copies.as_slice(), ask.budget_mb), ([4u32].as_slice(), Some(700)));
+        let no_peers = parse(&["card-sync", "E:"]).map(|l| match l {
+            DeviceCmd::CardSync(args) => args.ask().map(|a| a.peers),
+            _ => Err("card-sync".into()),
+        });
+        assert!(matches!(no_peers, Ok(Ok(None))), "the card's own peers");
+        for bad in ["Folk", "0:Folk", "x:Folk", "4:"] {
+            let Ok(DeviceCmd::CardSync(args)) = parse(&["card-sync", "E:", "--peer-library", bad]) else {
+                panic!("{bad}")
+            };
+            assert!(args.ask().unwrap_err().contains(bad), "{bad}");
+        }
         assert!(parse(&["card-sync"]).is_err(), "a volume, always");
         assert!(!help.contains("card-sync"), "{help}");
         // And the plays': a volume, and a dry run.

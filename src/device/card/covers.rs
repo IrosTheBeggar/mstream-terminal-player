@@ -15,6 +15,12 @@
 //! computer hold is listed instead, and never probed ([`Images`]). A cover
 //! is fetched once for the few albums a run is on ([`Covers`] keeps the
 //! last ones), so an album's converted files share it.
+//!
+//! **A federation peer's albums** (2.14.2's one deviation, B9): mStream's
+//! art is its `compress=l` copy, at most 256 px, through the parent's art
+//! proxy, to spare the peer's daily quota; a probe through the parent's
+//! stream proxy is a one-byte GET, since a HEAD there may fetch the whole
+//! file; and nothing is asked of a peer whose day is spent ([`Covers::peer`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
@@ -104,6 +110,14 @@ pub(crate) struct Covers {
     client: Arc<Client>,
     /// The server's folders on this computer, when a run reads them.
     images: Option<Images>,
+    /// How a folder's named images are probed.
+    probe: ProbeBy,
+    /// The size of mStream's art asked for, and of whom: a peer's through
+    /// its parent's art proxy.
+    art: ArtSize,
+    art_from: Arc<Client>,
+    /// Whether the server may be asked now.
+    open: Box<dyn Fn() -> bool>,
     /// The last albums' covers, by the folders they were looked for in and
     /// the art name.
     kept: VecDeque<((Vec<String>, Option<String>), Option<Rc<Image>>)>,
@@ -111,7 +125,23 @@ pub(crate) struct Covers {
 
 impl Covers {
     pub(crate) fn new(client: Arc<Client>, images: Option<Images>) -> Covers {
-        Covers { client, images, kept: VecDeque::new() }
+        let (probe, art, art_from) = (ProbeBy::Head, ArtSize::Full, client.clone());
+        let (open, kept) = (Box::new(|| true), VecDeque::new());
+        Covers { client, images, probe, art, art_from, open, kept }
+    }
+
+    /// A federation peer's (see the module's note): `client` reaches its
+    /// files, and `probe` is how its folders' images are probed there;
+    /// `proxy` is a client of its parent aimed at it, whose art proxy its
+    /// art comes through; and `open` says whether it may be asked now.
+    pub(crate) fn peer(
+        client: Arc<Client>,
+        probe: ProbeBy,
+        proxy: Arc<Client>,
+        open: Box<dyn Fn() -> bool>,
+    ) -> Covers {
+        let (art, kept) = (ArtSize::Large, VecDeque::new());
+        Covers { client, images: None, probe, art, art_from: proxy, open, kept }
     }
 
     /// An album's cover: the image of the first of `folders` that has one,
@@ -130,6 +160,9 @@ impl Covers {
     }
 
     fn find(&self, folders: &[String], art: Option<&str>) -> Option<Image> {
+        if !(self.open)() {
+            return None;
+        }
         for folder in folders {
             if let Some(local) = self.images.as_ref().and_then(|i| i.folder_image(folder)) {
                 return Some(Image { from: format!("{folder}/{}", local.name), bytes: local.bytes });
@@ -139,7 +172,7 @@ impl Covers {
             }
             for name in PROBES {
                 let path = format!("{folder}/{name}");
-                let Ok(Some(probed)) = self.client.probe(&path, ProbeBy::Head) else { continue };
+                let Ok(Some(probed)) = self.client.probe(&path, self.probe) else { continue };
                 if probed.len.is_some_and(|n| n > MAX_IMAGE) {
                     continue;
                 }
@@ -151,8 +184,8 @@ impl Covers {
                 }
             }
         }
-        let art = art?;
-        let bytes = self.client.album_art_sized(art, ArtSize::Full).ok().filter(|b| !b.is_empty())?;
+        let art = art.filter(|_| (self.open)())?;
+        let bytes = self.art_from.album_art_sized(art, self.art).ok().filter(|b| !b.is_empty())?;
         Some(Image { from: format!("album-art/{art}"), bytes })
     }
 }
