@@ -35,6 +35,7 @@ use std::io::Write;
 use serde_json::{Value, json};
 
 use super::cards::Cards;
+use super::dry::DryCard;
 use super::engine::{
     Answers, Env, Event, Expect, Failed, Fetched, Fetcher, Guard, Knobs, NoHooks, Session, Stop,
     WantedCard, WantedFile,
@@ -222,13 +223,15 @@ pub(crate) fn set_up(
 
 // ── The hidden command ──────────────────────────────────────────────────────
 
-/// `device card-setup <volume>`, undocumented: sets up the card at
-/// `volume` (where it is mounted, `E:` or `/media/card`, or the OS's name
-/// for it, `sdb1`), which must be one the volume layer accepts — a refused
-/// volume, or one that isn't a card at all, is never opened. Prints what
-/// the set-up found and did as JSON, the engine's events with it (on
+/// `device card-setup <volume> [--dry-run]`, undocumented: sets up the
+/// card at `volume` (where it is mounted, `E:` or `/media/card`, or the
+/// OS's name for it, `sdb1`), which must be one the volume layer accepts — a
+/// refused volume, or one that isn't a card at all, is never opened. Prints
+/// what the set-up found and did as JSON, the engine's events with it (on
 /// stderr, before the reason, when it stopped); `cards.json` is brought up
-/// to date.
+/// to date. With `dry_run` the set-up runs on a [`DryCard`] and says what
+/// it would have done: nothing reaches the card, and `cards.json` is left
+/// as it is.
 /// For the real-card checks: the listener's `device card <drive> setup`
 /// waits for its UX contract. Exit 0; 1 when the set-up stopped; 2 when the
 /// volume isn't one it may write, or the volumes can't be listed.
@@ -236,6 +239,7 @@ pub(crate) fn command(
     volume: &str,
     label: Option<&str>,
     new_identity: bool,
+    dry_run: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
@@ -247,8 +251,10 @@ pub(crate) fn command(
         }
     };
     let mut cards = Cards::load();
-    let code = on(&found, volume, label, new_identity, &mut cards, &mut Env::system, out, err);
+    let envs = &mut Env::system;
+    let code = on(&found, volume, label, new_identity, dry_run, &mut cards, envs, out, err);
     if code == 0
+        && !dry_run
         && let Err(e) = cards.save()
     {
         let _ = writeln!(err, "mstream-player: {e}");
@@ -256,13 +262,15 @@ pub(crate) fn command(
     code
 }
 
-/// [`command`] on the volumes found.
+/// [`command`] on the volumes found. A dry run brings a copy of `cards` up
+/// to date, not it.
 #[allow(clippy::too_many_arguments)]
 fn on(
     found: &[Found],
     named: &str,
     label: Option<&str>,
     new_identity: bool,
+    dry_run: bool,
     cards: &mut Cards,
     envs: &mut dyn FnMut() -> Env,
     out: &mut dyn Write,
@@ -280,13 +288,20 @@ fn on(
     // The volume's own label, when none is given.
     let label = label.map_or_else(|| found.volume.label.trim().to_string(), str::to_string);
     let ask = Ask { label, new_identity };
+    // A dry run's writes stay in memory, where its second session reads
+    // them back as the card would.
+    let dry = DryCard::new(&card);
+    let target: &dyn CardWrite = if dry_run { &dry } else { &card };
+    let mut copy = cards.clone();
+    let cards = if dry_run { &mut copy } else { cards };
     // What the engine says beside the three steps (a stale run.lock taken
     // over, another card's plan deleted) is said too: in the JSON, or before
     // the stop.
     let mut said = Vec::new();
-    match set_up(&card, &ask, envs, cards, &mut |e| said.push(event_json(&e))) {
+    match set_up(target, &ask, envs, cards, &mut |e| said.push(event_json(&e))) {
         Ok(done) => {
             let mut json = done_json(&done);
+            json["dryRun"] = dry_run.into();
             json["events"] = Value::Array(said);
             let _ = writeln!(out, "{}", serde_json::to_string_pretty(&json).unwrap_or_default());
             0

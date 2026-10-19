@@ -89,8 +89,9 @@ enum DeviceCmd {
     CardProbe,
     // Sets up the card at a volume the drive-safety rule accepts (`/music`,
     // the empty first commit, its state file) and prints what it found and
-    // did as JSON. For the real-card checks: the listener's `device card
-    // <drive> setup` waits for its UX contract too.
+    // did as JSON; `--dry-run` says what it would do and writes nothing. For
+    // the real-card checks: the listener's `device card <drive> setup` waits
+    // for its UX contract too.
     #[command(hide = true)]
     CardSetup(CardSetupArgs),
     // Syncs a set-up card at a volume the drive-safety rule accepts from the
@@ -149,6 +150,9 @@ pub struct CardSetupArgs {
     // A copied card's answer: an identity of its own.
     #[arg(long)]
     new_identity: bool,
+    // Say what the set-up would do, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args, Clone)]
@@ -456,7 +460,8 @@ pub fn run(args: DeviceArgs) -> i32 {
         DeviceCmd::CardSetup(args) => {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             let label = args.label.as_deref();
-            card::setup::command(&args.volume, label, args.new_identity, &mut out, &mut err)
+            let (new_identity, dry_run) = (args.new_identity, args.dry_run);
+            card::setup::command(&args.volume, label, new_identity, dry_run, &mut out, &mut err)
         }
         DeviceCmd::CardSet(args) => {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -1252,7 +1257,11 @@ mod tests {
         let setup = parse(&["card-setup", "E:", "--label", "Car", "--new-identity"]);
         let Ok(DeviceCmd::CardSetup(args)) = setup else { panic!("card-setup") };
         assert_eq!((args.volume.as_str(), args.label.as_deref(), args.new_identity), ("E:", Some("Car"), true));
+        assert!(!args.dry_run, "a set-up writes unless asked not to");
         assert!(matches!(parse(&["card-setup", "E:"]), Ok(DeviceCmd::CardSetup(CardSetupArgs { label: None, .. }))));
+        let dry = parse(&["card-setup", "E:", "--dry-run"]);
+        let Ok(DeviceCmd::CardSetup(dry)) = dry else { panic!("card-setup --dry-run") };
+        assert!(dry.dry_run && dry.label.is_none());
         assert!(parse(&["card-setup"]).is_err(), "a volume, always");
         assert!(!help.contains("card-setup"), "{help}");
         // And the sync's: its flags are the card's settings and the run's

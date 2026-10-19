@@ -578,7 +578,8 @@ fn the_hidden_command_sets_up_only_a_volume_the_rule_accepts() {
     let mut cards = Cards::default();
     let mut call = |named: &str, label: Option<&str>| {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = on(&found, named, label, false, &mut cards, &mut envs(1), &mut out, &mut err);
+        let envs = &mut envs(1);
+        let code = on(&found, named, label, false, false, &mut cards, envs, &mut out, &mut err);
         (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
     };
     let none = |dir: &Path| std::fs::read_dir(dir).unwrap().next().is_none();
@@ -594,6 +595,28 @@ fn the_hidden_command_sets_up_only_a_volume_the_rule_accepts() {
     assert_eq!(code, 1);
     assert!(err.contains("label-address"), "{err}");
     assert!(none(&good.0), "a label that names an address writes nothing");
+
+    // A dry run says what the set-up would do, the stale run.lock taken over
+    // among it, and writes nothing: not the card, not this computer's cache.
+    put(&good.0, "/.mstream/run.lock", stale, LATER);
+    let (mut untouched, mut out, mut err) = (Cards::default(), Vec::new(), Vec::new());
+    let envs = &mut envs(1);
+    let code = on(&found, "sdz1", None, false, true, &mut untouched, envs, &mut out, &mut err);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let would: Value = serde_json::from_slice(&out).unwrap();
+    let did = |k: &str| would[k].as_bool();
+    let said = [did("dryRun"), did("madeMusic"), did("committed"), did("wroteState")];
+    assert_eq!(said, [Some(true); 4], "{would}");
+    let first = (would["generation"].as_u64(), &would["events"][0]["event"]);
+    assert_eq!(first, (Some(1), &json!("tookOver")), "{would}");
+    assert_eq!(untouched, Cards::default());
+    let names = |dir: &Path| -> Vec<String> {
+        let entries = std::fs::read_dir(dir).unwrap();
+        entries.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
+    };
+    assert_eq!(names(&good.0), [".mstream"], "no /music");
+    assert_eq!(names(&good.0.join(".mstream")), ["run.lock"], "no commit, no state file");
+    assert_eq!(std::fs::read(good.0.join(".mstream/run.lock")).unwrap(), stale);
 
     // By where it is mounted, with a separator after it; its own label. The
     // stale run.lock is taken over, and the JSON says so.
