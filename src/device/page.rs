@@ -3370,8 +3370,8 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
 }
 
 /// What the format's gate says is lost (clause 59), as `@status` said
-/// the card: the music on a card the player reads, else its one volume, or
-/// what the player can't read.
+/// the card: the music on a card the player reads (counted, or still being
+/// indexed), else its one volume, or what the player can't read.
 fn format_lost(status: &Status) -> String {
     let fs = match status.card {
         CardKind::Fat32 => "FAT32",
@@ -3383,6 +3383,9 @@ fn format_lost(status: &Status) -> String {
     match status.tracks {
         Tracks::Count(n) if n > 0 && status.card.readable() => {
             t!("dev.card.gate_fmt_music", n = fmt_count(n), fs = fs).to_string()
+        }
+        Tracks::Building if status.card.readable() => {
+            t!("dev.card.gate_fmt_music_building", fs = fs).to_string()
         }
         _ => t!("dev.card.gate_fmt_one", fs = fs).to_string(),
     }
@@ -4606,6 +4609,13 @@ mod tests {
         let frame = window(&mut page);
         assert!(frame.contains("today it holds your music, 1,284"), "{frame}");
         let _ = ends.sent();
+        // Its library still being indexed: the music is named all the same.
+        let indexing = formats("COM3", "v0.8.0", |s| s.tracks = Tracks::Building);
+        let (mut page, _ends) = page_with(|e| e.boards(vec![indexing.clone()]));
+        press(&mut page, KeyCode::Char('d'));
+        press(&mut page, KeyCode::Char('f'));
+        let lost = page.gate.as_ref().and_then(|g| g.format.as_ref()).map(|f| f.lost.as_str());
+        assert_eq!(lost, Some("your music, still being indexed, on one FAT32 volume"));
     }
 
     // ── Several boards ──────────────────────────────────────────────────────
@@ -5847,6 +5857,8 @@ mod tests {
         add("format, the player's card", &|e| e.boards(vec![own.clone()]), &[KeyCode::Char('d')]);
         let own_gate: &[KeyCode] = &[KeyCode::Char('d'), KeyCode::Char('f')];
         add("format, the player's card, the gate", &|e| e.boards(vec![own.clone()]), own_gate);
+        let indexing = formats("COM3", "v0.8.0", |s| s.tracks = Tracks::Building);
+        add("format, its card indexing, the gate", &|e| e.boards(vec![indexing.clone()]), own_gate);
         let cant = answering_with("COM3", "v0.8.0", |s| s.card = CardKind::Ntfs);
         add("format, firmware that can't", &|e| e.boards(vec![cant.clone()]), &[]);
         add("two", &Ends::two, &[]);
@@ -6166,6 +6178,7 @@ mod tests {
             FormatWhy::Refused(words("card")),
             FormatWhy::Refused(words("size")),
             FormatWhy::Refused(words("busy")),
+            FormatWhy::Refused(words("brownout")),
             FormatWhy::Failed(words("card")),
             FormatWhy::Failed(words("size")),
             FormatWhy::Failed(words("write")),
@@ -6176,9 +6189,13 @@ mod tests {
             FormatWhy::NoAnswer,
             FormatWhy::Lost,
         ];
-        let mut said: Vec<String> = ends.iter().filter_map(|why| format_end(why, "COM3", Some("v0.12.0"))).collect();
-        said.push(t!("dev.card.fmt_asked", port = "COM3").to_string());
-        said.push(t!("dev.card.fmt_note", port = "COM3", t = took_text(Duration::from_secs(134))).to_string());
+        // With the longest port the page names: a Mac's, 16 cells.
+        let port = short("/dev/cu.usbmodem14101");
+        assert_eq!(kit::width(&port), 16);
+        let mut said: Vec<String> = ends.iter().filter_map(|why| format_end(why, &port, Some("v0.12.0"))).collect();
+        let took = took_text(Duration::from_secs(134));
+        said.push(t!("dev.card.fmt_asked", port = port).to_string());
+        said.push(t!("dev.card.fmt_note", port = port, t = took).to_string());
         for text in said {
             assert!(!text.contains("dev."), "{code}: a key with no words: {text}");
             let cells = kit::width(&text);

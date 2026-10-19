@@ -1443,9 +1443,11 @@ impl Desk {
                     let wait = if since.is_some() { self.timing.waits.again } else { self.timing.after_write };
                     let board = &mut self.slots[i].board;
                     // What the board said before is history; until it speaks
-                    // again, the image just written is what it runs.
+                    // again, the image just written is what it runs, and
+                    // whether it formats is the new firmware's to say.
                     board.heard = Heard::Nothing;
                     board.count = Count::Idle;
+                    board.format = Format::Idle;
                     board.flash_mb = done.info.flash_mb.or(board.flash_mb);
                     board.probe = Some(Ok(Probe { info: done.info, on_board: Some(written) }));
                     board.written = Some(Written::Done {
@@ -1472,6 +1474,7 @@ impl Desk {
                     let board = &mut self.slots[i].board;
                     if half {
                         board.heard = Heard::Nothing;
+                        board.format = Format::Idle;
                     }
                     // The choice stays: Try again writes the same image
                     // through the same gate.
@@ -1587,8 +1590,9 @@ pub(crate) fn format_end(why: &FormatWhy, port: &str, version: Option<&str>) -> 
         FormatWhy::Old => t!("dev.card.fmt_old", version = version.unwrap_or("?")).to_string(),
         FormatWhy::NotAsked(word) => known("fmt_refused", word, &["ui", "screen", "viz", "busy", "card"])
             .unwrap_or_else(|| t!("dev.card.fmt_refused_other", port = port, why = word).to_string()),
+        // At the second answer, whatever the word: nothing was formatted.
         FormatWhy::Refused(word) => known("fmt_refused_second", word, &["card", "size", "busy"])
-            .unwrap_or_else(|| t!("dev.card.fmt_failed_other", port = port, why = word).to_string()),
+            .unwrap_or_else(|| t!("dev.card.fmt_refused_second_other", port = port, why = word).to_string()),
         FormatWhy::Failed(word) => {
             let words = ["card", "size", "write", "mkfs", "check", "files"];
             known("fmt_failed", word, &words)
@@ -3180,5 +3184,40 @@ pub(crate) mod tests {
         let r = r.quit();
         assert_eq!(r.board("FAKE0").format, Format::Ended(FormatWhy::Abandoned), "let go, not answered");
         assert!(!r.trace().iter().any(|t| t.starts_with("open")), "nothing written: {:?}", r.trace());
+    }
+
+    #[test]
+    fn a_write_forgets_how_the_last_format_ended_so_firmware_that_formats_is_offered_it() {
+        let _en = crate::setup::tests::in_locale("en");
+        let scratch = crate::device::firmware::tests::Scratch::new("desk-format-write");
+        let desc = desc_with_elf("v0.12.0", AppDesc::OURS, &elf_bytes("be894f8b"));
+        std::fs::write(scratch.0.join("firmware.factory.bin"), merged_in(&desc, Mode::Dio)).unwrap();
+        // v0.11.0 has no format: asked, it says so, and the row keeps it.
+        let mut r = rig(Fake::new("status:v0.11.0/card=exfat").with_pace(Duration::from_millis(60)));
+        r.settled(1);
+        r.send(Cmd::Format { port: "FAKE0".into() });
+        r.until("firmware with no format", |r| r.board("FAKE0").format == Format::Ended(FormatWhy::Old));
+        assert!(!r.board("FAKE0").can_format());
+        // Updated on the same visit to firmware that formats: offered it.
+        r.choose("FAKE0", Some(Image::Local(scratch.0.clone())));
+        r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
+        r.written("FAKE0", "v0.12.0 written and heard");
+        let board = r.board("FAKE0");
+        assert_eq!(board.format, Format::Idle, "the old firmware's answer went with it");
+        let foreign = Some(crate::device::board::FormatOffer::Foreign);
+        assert_eq!(board.format_offer(), foreign, "{:?}", board.heard);
+        r.quit();
+    }
+
+    #[test]
+    fn a_refusal_at_the_second_answer_says_nothing_was_formatted_whatever_its_word() {
+        let _en = crate::setup::tests::in_locale("en");
+        let said = |why: FormatWhy| format_end(&why, "COM3", Some("v0.12.0")).unwrap();
+        let unknown = said(FormatWhy::Refused("brownout".into()));
+        assert_eq!(unknown, "Not formatted: COM3 answered brownout; nothing was erased.");
+        assert!(said(FormatWhy::Refused("size".into())).starts_with("Not formatted: FAT32 can't take"));
+        // After the restart an unknown word is a failure, at once a refusal.
+        assert!(said(FormatWhy::Failed("brownout".into())).starts_with("Couldn't format the card in COM3"));
+        assert_eq!(said(FormatWhy::NotAsked("brownout".into())), "Not asked: COM3 answered brownout.");
     }
 }

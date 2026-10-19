@@ -1557,11 +1557,14 @@ pub(crate) mod tests {
         // nothing here, the firmware's own a whole one).
         let waits = Waits { minute: Duration::ZERO, ..QUICK };
         assert_eq!(formatted(&mut Script::new(declined), waits).0, Err(FormatWhy::TimedOut));
+        // The no a second on, past a minute of a tenth: wide of it, so a
+        // machine busy with the whole suite can't carry it across.
         let ok = Script::new(&[("@format\n", "@format ok\r\n")]);
         let late = b"@format no\r\n".to_vec();
-        let mut wire = Delayed { inner: ok, late, after: Instant::now() + Duration::from_millis(600) };
-        let (got, told) = formatted(&mut wire, QUICK);
-        assert_eq!((got, told), (Err(FormatWhy::TimedOut), vec![Format::Waiting]), "past QUICK's minute");
+        let mut wire = Delayed { inner: ok, late, after: Instant::now() + Duration::from_millis(1000) };
+        let waits = Waits { minute: Duration::from_millis(100), ..QUICK };
+        let (got, told) = formatted(&mut wire, waits);
+        assert_eq!((got, told), (Err(FormatWhy::TimedOut), vec![Format::Waiting]), "past the minute");
         assert!(timed_out(Duration::from_millis(59_100), Duration::from_secs(60)), "the minute, less its way");
         assert!(!timed_out(Duration::from_millis(58_000), Duration::from_secs(60)), "a Cancel");
     }

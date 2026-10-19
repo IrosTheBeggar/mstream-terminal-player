@@ -956,6 +956,13 @@ fn format_on(
         let _ = writeln!(err, "mstream-player: {name}: {words}. {only}");
         return 1;
     }
+    // An empty slot is never asked, as the tab offers it nothing: the board
+    // would refuse it (`@err 4 format card`).
+    if board.card() == Card::Empty {
+        let empty = format_line(&FormatWhy::NotAsked("card".into()), &name);
+        let _ = writeln!(err, "mstream-player: {empty}");
+        return 1;
+    }
     let card = card_words(board).unwrap_or_else(|| "a card".to_string());
     let _ = writeln!(out, "{name}: {card}. Formatting erases all of it, even what the player can't read.");
     let stop = std::sync::atomic::AtomicBool::new(false);
@@ -2026,7 +2033,12 @@ mod tests {
             assert_eq!(code, 1, "{spec}: {err}");
             err.trim_end().trim_start_matches("mstream-player: ").to_string()
         };
-        assert_eq!(refused("status:v0.12.0/card=none"), "Not asked: FAKE0: no card answers in its slot.");
+        // An empty slot is refused here: never asked, and no card said.
+        let empty = Fake::new("status:v0.12.0/card=none");
+        let (code, out, err) = run(&empty, None);
+        assert_eq!((code, out.as_str()), (1, ""), "{err}");
+        assert_eq!(err, "mstream-player: Not asked: FAKE0: no card answers in its slot.\n");
+        assert!(!empty.trace().lock().unwrap().iter().any(|t| t.starts_with("format")), "not asked");
         let viz = "Not asked: FAKE0: a computer drives its dancer; end that first.";
         assert_eq!(refused("status:v0.12.0/state=host"), viz);
         let size = "Not formatted: FAKE0: FAT32 can't take the card (under 42 MB, or 2 TB and more). Nothing was erased.";
