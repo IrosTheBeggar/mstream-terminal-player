@@ -45,6 +45,8 @@ pub(super) struct PeerLib {
     ranges: Vec<Option<String>>,
     /// The bytes of its files it served.
     served: u64,
+    /// Files its folders hold that its database doesn't have yet.
+    unscanned: Vec<String>,
 }
 
 pub(super) type PeerFake = Arc<Mutex<PeerLib>>;
@@ -118,8 +120,8 @@ fn peer_answer(fake: &PeerFake, asked: &Asked, via: &str) -> Vec<u8> {
         }
         ("POST", "/api/v1/file-explorer/recursive") => {
             let prefix = under(asked.json()["directory"].as_str().unwrap_or(""));
-            let paths = lib.tracks.iter().map(|t| &t.path).filter(|p| p.starts_with(&prefix));
-            let paths: Vec<&String> = paths.collect();
+            let paths = lib.tracks.iter().map(|t| &t.path).chain(&lib.unscanned);
+            let paths: Vec<&String> = paths.filter(|p| p.starts_with(&prefix)).collect();
             json_reply("200 OK", &json!(paths).to_string())
         }
         ("POST", "/api/v1/db/metadata/batch") => {
@@ -708,4 +710,44 @@ fn tunnel_of(peer: &PeerFake) -> String {
 
 fn records_of(card: &FatSim) -> Vec<crate::device::card::contract::mptg::Entry> {
     look(card).root.expect("a root").tags.expect("its tags file").records
+}
+
+/// A peer is read as the card knows it: a listing its database is behind
+/// (a file its folders hold that a scan hasn't reached) deletes nothing,
+/// and the next whole one does; a server its parent lists under the card's
+/// peer's id with another iroh identity isn't read at all.
+#[test]
+fn a_peer_is_read_only_as_the_card_knows_it() {
+    let scratch = Scratch::new("peer-known");
+    let sim = card(&scratch);
+    let (base, fake, peer, dial) = world(true, false, folk());
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!(ran(&synced).records, 6);
+
+    // One gone from the peer, while a scan is behind its folders: nothing goes.
+    {
+        let mut lib = peer.lock().unwrap();
+        lib.tracks.retain(|t| t.path != ONE);
+        lib.unscanned.push("Folk/Dana Duo/Album/03.mp3".into());
+    }
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.deleted, outcome.records), (0, 6), "{:?}", outcome.report);
+    // The scan caught up: now it goes.
+    peer.lock().unwrap().unscanned.clear();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.deleted, outcome.records), (1, 5), "{:?}", outcome.report);
+
+    // Its parent's peer 3 is another server now: not read, and the card's
+    // rows of the one before stay.
+    fake.lock().unwrap().peers[0].endpoint = "e9";
+    let before = asked_of(&peer).len();
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!(synced.peers[0].status, Status::OtherPeer);
+    assert_eq!(asked_of(&peer).len(), before, "nothing asked of it");
+    assert_eq!(ran(&synced).records, 5);
 }

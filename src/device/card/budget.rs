@@ -25,9 +25,10 @@
 //! `flock`), and the file is replaced whole through a temporary one.
 //!
 //! The file names a peer by its parent's URL key (2.5.1: the FNV-1a of the
-//! normalised URL, never the URL) and its id in the parent's peer list. One
-//! of a newer player is read as none and never written over; every member
-//! this player doesn't know is kept.
+//! normalised URL, never the URL) and its id in the parent's peer list.
+//! Every member this player doesn't know is kept. A newer player's file is
+//! never written over, and no peer is read while it is there: its counts
+//! couldn't be kept.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -303,7 +304,8 @@ impl Budget {
     }
 
     /// `f` on the book, under the lock: read, changed, and written back
-    /// whole when it changed (a newer player's file never is).
+    /// whole when it changed. Err for a newer player's book, which is left
+    /// as it is.
     pub(crate) fn with<T>(&self, f: impl FnOnce(&mut Book) -> T) -> Result<T, String> {
         let file = self.dir.join(FILE);
         let at = |what: &str, e: io::Error| format!("{what} {}: {e}", file.display());
@@ -318,9 +320,12 @@ impl Budget {
             Err(e) => return Err(at("could not read", e)),
         };
         let mut book = text.as_deref().map(Book::parse).unwrap_or_default();
+        if book.newer {
+            return Err(format!("{} is a newer player's: its counts can't be kept", file.display()));
+        }
         let before = book.clone();
         let out = f(&mut book);
-        if book != before && !book.newer {
+        if book != before {
             let temp = self.dir.join(TEMP);
             let write = || -> io::Result<()> {
                 let mut file = File::create(&temp)?;
@@ -569,10 +574,12 @@ mod tests {
             w.join().unwrap();
         }
         assert_eq!(Budget::at(&dir.0).read().unwrap().used_today(KEY, NOW), 100, "not one lost");
-        // A newer player's file is read as none and left as it is.
+        // A newer player's file is left as it is, and nothing is counted in
+        // it: no peer is read.
         let newer = format!(r#"{{"format":"{FORMAT}","version":9,"peers":{{}}}}"#);
         fs::write(dir.0.join(FILE), &newer).unwrap();
-        Budget::at(&dir.0).with(|b| b.spend(KEY, 5, NOW)).unwrap();
+        let refused = Budget::at(&dir.0).with(|b| b.spend(KEY, 5, NOW));
+        assert!(refused.unwrap_err().contains("newer"));
         assert_eq!(fs::read_to_string(dir.0.join(FILE)).unwrap(), newer);
     }
 
