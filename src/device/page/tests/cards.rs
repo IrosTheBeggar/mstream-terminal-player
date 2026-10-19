@@ -102,6 +102,17 @@ fn a_card_alone_is_its_view_card_03s_rows_with_no_tab_row() {
 }
 
 #[test]
+fn details_drive_row_is_in_the_locales_words() {
+    // Its file system, table and clusters were English in every locale.
+    let _de = crate::setup::tests::in_locale("de");
+    let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+    press(&mut page, KeyCode::Char('d'));
+    let frame = window(&mut page);
+    let drive = "Laufwerk      E: · FAT32 auf MBR · 63.8 GB · 32-KB-Cluster · 1A2B-3C4D";
+    assert!(frame.contains(drive), "{frame}");
+}
+
+#[test]
 fn a_board_and_a_card_share_one_row_and_the_arrows_walk_every_subject() {
     let _en = english();
     let (mut page, _ends, _inbox, _fold) = with_cards(Ends::up_to_date, vec![cards::ready("E:", now())]);

@@ -1274,11 +1274,15 @@ fn details_rows(card: &CardView) -> Vec<Row> {
     let mut rows = vec![Row::Rule];
     let fact = |label: String, value: String| Row::Fact { label, value, style: Style::default() };
     let v = &card.found.volume;
-    let mut drive = vec![card.drive(), format!("{} on {}", v.fs.name(), v.table.name().to_uppercase())];
+    // In the locale's words, a piece at a time: a card may lack its size,
+    // its clusters or its serial.
+    let table = v.table.name().to_uppercase();
+    let fs = t!("dev.card.fact_drive_fs", fs = v.fs.name(), table = table).to_string();
+    let mut drive = vec![card.drive(), fs];
     if let Some(space) = v.space {
-        drive.push(format!("{} GB", gb(space.size)));
+        drive.push(t!("dev.card_size", size = gb(space.size)).to_string());
         if space.cluster > 0 {
-            drive.push(format!("{} KB clusters", space.cluster / 1024));
+            drive.push(t!("dev.card.fact_drive_kb", kb = space.cluster / 1024).to_string());
         }
     }
     if let Some(serial) = &v.serial {
