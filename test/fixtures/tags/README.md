@@ -12,11 +12,10 @@ This copy is mstream-terminal's, taken from the player's repo
 b78002e): every file but this paragraph is byte for byte the player's.
 Copy them again from there when the corpus changes; never edit them
 here. The terminal's test is `src/device/card/tags/tests.rs`, which
-holds its reader to `expected.json` field for field but for the five
-picture fields (picOffset, picLength, picType, picMime, picCoding) of a
-file that has a picture: its reader doesn't locate the anchor yet, so it
-writes them as 0 and the test holds the elected picture's `picFnv`,
-`picType` and `picMime` instead (the test's own module note says so).
+holds its reader to `expected.json` field for field, the picture's anchor
+included (its reader locates it, `src/device/card/tags/anchors.rs`), and
+reads each anchor back, apart from the reader, to the elected picture's
+`picFnv`.
 
 docs/METADATA.md 2.17, item 3: synthetic audio files, each a few of part 5's
 reading rules, and the record each must give.

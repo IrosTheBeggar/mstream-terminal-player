@@ -10,20 +10,19 @@
 //! (test/fixtures/tags, copied from there).
 //!
 //! What a [`Reading`] fills: the twelve fields, the numbers and their
-//! totals, BPM and key, ReplayGain (R128's for Opus), compilation,
-//! container and durationMs, `known`, and the NO_TAGS, UNREADABLE and
-//! TRUNCATED flags. What it leaves to its caller: size, fatTime and qfp
-//! (the card, read back), and the server's analysed BPM and key
-//! (BPM_ANALYSED, 2.7; [`camelot`] reads mStream's `musical-key` too).
+//! totals, BPM and key, ReplayGain (R128's for Opus), compilation, the
+//! elected picture (its anchor, type, MIME and coding), container and
+//! durationMs, `known`, and the NO_TAGS, UNREADABLE and TRUNCATED flags.
+//! What it leaves to its caller: size, fatTime and qfp (the card, read
+//! back), and the server's analysed BPM and key (BPM_ANALYSED, 2.7;
+//! [`camelot`] reads mStream's `musical-key` too).
 //!
-//! **No picture anchors yet.** lofty doesn't say where a picture's bytes
-//! lie, so the elected picture is reported ([`Elected`]) but not anchored:
-//! the record's five picture fields are 0, the picture written as absent,
-//! while `known` is every bit readRules 1 defines, as 2.6.4 has it for any
-//! readable file (so a file with no picture gives the reference's record
-//! exactly). The device draws no embedded cover yet (milestone L6), and its
-//! builder takes none without an anchor. The anchor locator, a port of the
-//! player's own, is a later piece; it bumps [`PARSER_VERSION`].
+//! **The picture's anchor.** lofty elects the picture (5.3) but doesn't say
+//! where its bytes lie: [`anchors`], a port of the device's own walk, finds
+//! the picture in the file that reads back to the elected one's image. A
+//! picture with no such anchor (one the device doesn't read, as COVERART)
+//! is written as absent: the five picture fields 0, while `known` is every
+//! bit readRules 1 defines, as 2.6.4 has it for any readable file.
 //!
 //! [`restore`] is the other direction, for a file the transfer converted:
 //! mStream's `/transcode` runs ffmpeg with `-vn`, which drops the embedded
@@ -57,11 +56,13 @@ use super::contract::text::{
     MB_ALBUM_ID, MB_RECORDING_ID, RUN_FIELDS, Run, TITLE, TITLE_SORT, build_field,
 };
 
+mod anchors;
+
 /// The tags file header's parserVersion for the records this reader makes
 /// (2.6.1). A change that alters a record bumps it, and the transfer then
-/// reads every record it carries forward again from the card file: the
-/// anchor locator, filling the picture's fields, is such a change.
-pub(crate) const PARSER_VERSION: u16 = 1;
+/// reads every record it carries forward again from the card file. 2: the
+/// picture's anchor (1 wrote every picture as absent).
+pub(crate) const PARSER_VERSION: u16 = 2;
 
 /// What the reader made of one file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -78,8 +79,8 @@ pub(crate) struct Reading {
 }
 
 /// The embedded picture 5.3 elects (the first non-empty front cover, else
-/// the first non-empty picture), as lofty read it: what its anchor, once
-/// located, must read back to.
+/// the first non-empty picture), as lofty read it: what its anchor must
+/// read back to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Elected {
     /// The ID3/FLAC picture type, 2.6.4's picType (3 = front cover).
@@ -117,16 +118,32 @@ pub(crate) fn read_from<R: Read + Seek>(mut r: R, ext: &str) -> io::Result<Readi
     let ext = ext.to_ascii_lowercase();
     let container = container_of(&ext);
     let len = r.seek(SeekFrom::End(0))?;
-    let head = repaired_head(&mut r, len)?;
-    let mut src = Spliced { head, inner: r, inner_at: None, pos: 0, len, failed: None };
+    let (stored, head) = head_tag(&mut r, len)?;
+    let mut src =
+        Spliced { head, inner: r, inner_at: None, pos: 0, len, failed: None, seen: Vec::new() };
     let probed = probe(&mut src, &ext);
     if let Some(e) = src.failed.take() {
         return Err(e);
     }
-    Ok(match probed {
-        Ok(p) => reading(&p, &ext, container),
-        Err(e) => unreadable(container, e),
-    })
+    let p = match probed {
+        Ok(p) => p,
+        Err(e) => return Ok(unreadable(container, e)),
+    };
+    let mut reading = reading(&p, &ext, container);
+    // The elected picture's anchor, from the bytes as they lie (2.6.4): the
+    // tag at the head as stored, and what lofty read past it, are at hand.
+    let kind = chosen(&p.file).map(Tag::tag_type);
+    let Spliced { inner, seen, .. } = &mut src;
+    let at_hand = seen.iter().map(|(at, b)| (*at, b.as_slice()));
+    let held: Vec<(u64, &[u8])> = std::iter::once((0, stored.as_slice())).chain(at_hand).collect();
+    if let (Some(pic), Some(kind)) = (reading.picture, kind)
+        && let Some(a) = anchors::locate(inner, &held, &ext, kind, &pic)?
+    {
+        let rec = &mut reading.rec;
+        (rec.pic_offset, rec.pic_length, rec.pic_coding) = (a.offset, a.length, a.coding);
+        (rec.pic_type, rec.pic_mime) = (pic.pic_type, pic.mime);
+    }
+    Ok(reading)
 }
 
 fn container_of(ext: &str) -> u8 {
@@ -383,23 +400,31 @@ fn repaired(tag: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The file's first ID3v2 tag, repaired; empty when the pass leaves it as
-/// it is (no tag, nothing to repair, or larger than [`MAX_REPAIR`]).
-fn repaired_head<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<Vec<u8>> {
+/// The file's first ID3v2 tag as stored (empty when there is none, or
+/// larger than [`MAX_REPAIR`]), and repaired (empty when the pass leaves
+/// it as it is).
+fn head_tag<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<(Vec<u8>, Vec<u8>)> {
     if len < 10 {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     }
+    // "ID3" first: lofty reads no more of a file's start than that when no
+    // tag is there.
     let mut header = [0u8; 10];
     r.seek(SeekFrom::Start(0))?;
-    r.read_exact(&mut header)?;
+    r.read_exact(&mut header[..3])?;
+    if &header[..3] != b"ID3" {
+        return Ok(Default::default());
+    }
+    r.read_exact(&mut header[3..])?;
     let size = syncsafe(&header[6..10]);
-    if &header[..3] != b"ID3" || size == 0 || size > MAX_REPAIR {
-        return Ok(Vec::new());
+    if size == 0 || size > MAX_REPAIR {
+        return Ok(Default::default());
     }
     let mut tag = vec![0u8; len.min(10 + size as u64) as usize];
     r.seek(SeekFrom::Start(0))?;
     r.read_exact(&mut tag)?;
-    Ok(repaired(&tag).unwrap_or_default())
+    let fixed = repaired(&tag).unwrap_or_default();
+    Ok((tag, fixed))
 }
 
 /// The file as lofty is given it: the repaired head from memory, the rest
@@ -413,6 +438,10 @@ struct Spliced<R> {
     pos: u64,
     len: u64,
     failed: Option<io::Error>,
+    /// What lofty read from where it lies, in runs (where each starts, its
+    /// bytes): the picture's anchor is looked for in them, not on the card
+    /// again.
+    seen: Vec<(u64, Vec<u8>)>,
 }
 
 impl<R> Spliced<R> {
@@ -421,6 +450,15 @@ impl<R> Spliced<R> {
         self.inner_at = None;
         self.failed.get_or_insert(e);
         told
+    }
+
+    /// Keeps bytes read at `at`: a read that goes on from the last one
+    /// extends its run.
+    fn keep(&mut self, at: u64, bytes: &[u8]) {
+        match self.seen.last_mut() {
+            Some((start, run)) if *start + run.len() as u64 == at => run.extend_from_slice(bytes),
+            _ => self.seen.push((at, bytes.to_vec())),
+        }
     }
 }
 
@@ -444,6 +482,7 @@ impl<R: Read + Seek> Read for Spliced<R> {
         }
         match self.inner.read(buf) {
             Ok(n) => {
+                self.keep(self.pos, &buf[..n]);
                 self.pos += n as u64;
                 self.inner_at = Some(self.pos);
                 Ok(n)
@@ -646,6 +685,11 @@ fn clamp(v: Option<u32>) -> u16 {
 
 // ── One file's reading ──────────────────────────────────────────────────────
 
+/// The tag mStream reads (5.1): lofty's primary tag, else its first.
+fn chosen(file: &TaggedFile) -> Option<&Tag> {
+    file.primary_tag().or_else(|| file.first_tag())
+}
+
 fn reading(p: &Probed, ext: &str, container: u8) -> Reading {
     let file = &p.file;
     let millis = file.properties().duration().as_millis();
@@ -656,7 +700,7 @@ fn reading(p: &Probed, ext: &str, container: u8) -> Reading {
         duration_ms: u32::try_from(millis).unwrap_or(u32::MAX),
         ..Record::default()
     };
-    let tag = file.primary_tag().or_else(|| file.first_tag());
+    let tag = chosen(file);
     let kind = tag.map(|t| t.tag_type());
     let mut run = Run::default();
     let mut cut = false;

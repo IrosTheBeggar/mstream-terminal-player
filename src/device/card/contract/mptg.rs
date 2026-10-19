@@ -76,6 +76,12 @@ pub(crate) const CONTAINER_FLAC: u8 = 2;
 pub(crate) const CONTAINER_OPUS: u8 = 3;
 pub(crate) const CONTAINER_NOT_AUDIO: u8 = 255;
 
+/// RECS `picCoding`: how the picture's anchor reads (2.6.4).
+pub(crate) const CODING_RAW: u8 = 0;
+pub(crate) const CODING_UNSYNC: u8 = 1;
+pub(crate) const CODING_OGG_BASE64: u8 = 2;
+pub(crate) const CODING_APE: u8 = 3;
+
 /// ORIG `originFlags` (2.6.6).
 pub(crate) const HASH_SAMPLED: u8 = 1;
 pub(crate) const VERIFIED: u8 = 2;

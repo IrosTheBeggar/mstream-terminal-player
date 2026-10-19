@@ -1,27 +1,32 @@
 //! The reader against the parity corpus, test/fixtures/tags (made by the
 //! firmware repo's tools/tag_corpus.py, its records by tools/tagref, and
-//! copied from there): every file's record field for field, but the five
-//! picture fields of a file that has a picture, which wait for its anchor
-//! (the module's note; the elected picture itself is held to the corpus's
-//! FNV, type and MIME); then the reader's own seams (a path and its bytes
-//! alike, a card that fails mid-read, the key table) and the writer that
-//! puts back what a conversion dropped.
+//! copied from there): every file's record field for field, the picture's
+//! anchor included, and each anchor read back as the device reads it to
+//! the image the corpus put there; the anchor locator on cut and mutated
+//! copies, across Ogg pages, and in what lofty read; then the reader's own
+//! seams (a path and its bytes alike, a card that fails mid-read, the key
+//! table) and the writer that puts back what a conversion dropped.
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
-use lofty::config::{ParseOptions, WriteOptions};
+use lofty::config::{ParseOptions, ParsingMode, WriteOptions};
 use lofty::file::AudioFile;
-use lofty::ogg::OpusFile;
-use lofty::tag::TagExt;
+use lofty::flac::FlacFile;
+use lofty::mpeg::MpegFile;
+use lofty::ogg::tag::VorbisComments;
+use lofty::ogg::{OggPictureStorage, OpusFile};
+use lofty::picture::{MimeType, Picture, PictureType};
+use lofty::tag::{TagExt, TagType};
 use serde_json::Value;
 
 use super::super::contract::fat::fat_time;
 use super::super::contract::mptg::{self, Ledger, Meta, NO_TAGS, READ_RULES, Record, RecordIn};
+use super::super::contract::mptg::{CODING_APE, CODING_OGG_BASE64, CODING_RAW, CODING_UNSYNC};
 use super::super::contract::mptg::{KNOWN_RULES1, SOURCE_SOFTWARE, UNREADABLE, Uses};
 use super::super::contract::prim::{fnv1a64, qfp_of};
 use super::super::contract::text::{ALBUM, RUN_FIELDS, TITLE};
-use super::{PARSER_VERSION, Reading, Restore};
+use super::{PARSER_VERSION, Reading, Restore, anchors};
 use super::{camelot, read_bytes, read_from, read_path, restore};
 
 fn corpus(rel: &str) -> PathBuf {
@@ -62,8 +67,9 @@ const KEYS: [&str; 24] = [
     "rgAlbumGain", "rgAlbumPeak", "rgTrackGain", "rgTrackPeak", "track", "trackTotal", "year",
 ];
 
-/// What differs between a reading and its expected record, one line each.
-fn differences(got: &Reading, want: &Value) -> Vec<String> {
+/// What differs between a reading of `file` and its expected record, one
+/// line each.
+fn differences(got: &Reading, want: &Value, file: &[u8], ogg: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut eq = |what: &str, got: i64, want: i64| {
         if got != want {
@@ -88,17 +94,14 @@ fn differences(got: &Reading, want: &Value) -> Vec<String> {
     eq("rgAlbumGain", r.rg_album_gain as i64, n("rgAlbumGain"));
     eq("rgTrackPeak", r.rg_track_peak as i64, n("rgTrackPeak"));
     eq("rgAlbumPeak", r.rg_album_peak as i64, n("rgAlbumPeak"));
-    // No anchor: the record's five picture fields are absent. A file with
-    // no picture is the reference's record exactly; one with a picture
-    // waits for the anchor locator.
+    eq("picOffset", r.pic_offset as i64, n("picOffset"));
+    eq("picLength", r.pic_length as i64, n("picLength"));
+    eq("picType", r.pic_type as i64, n("picType"));
+    eq("picMime", r.pic_mime as i64, n("picMime"));
+    eq("picCoding", r.pic_coding as i64, n("picCoding"));
+    // The elected picture itself, as lofty read it, and the image its
+    // anchor reads back to.
     let fnv = want["picFnv"].as_str().expect("picFnv");
-    let anchor = |key: &str| if fnv.is_empty() { n(key) } else { 0 };
-    eq("picOffset", r.pic_offset as i64, anchor("picOffset"));
-    eq("picLength", r.pic_length as i64, anchor("picLength"));
-    eq("picType", r.pic_type as i64, anchor("picType"));
-    eq("picMime", r.pic_mime as i64, anchor("picMime"));
-    eq("picCoding", r.pic_coding as i64, anchor("picCoding"));
-    // The elected picture itself, as lofty read it.
     match &got.picture {
         None if fnv.is_empty() => {}
         Some(p) if format!("{:016x}", p.fnv) == fnv => {
@@ -106,6 +109,12 @@ fn differences(got: &Reading, want: &Value) -> Vec<String> {
             eq("elected picMime", p.mime as i64, n("picMime"));
         }
         other => out.push(format!("picture: {other:?}, expected picFnv {fnv:?}")),
+    }
+    if !fnv.is_empty() {
+        let read = read_anchor(file, r, ogg).map(|image| format!("{:016x}", fnv1a64(&image)));
+        if read.as_deref() != Some(fnv) {
+            out.push(format!("the anchor reads {read:?}, expected picFnv {fnv:?}"));
+        }
     }
     let fields = want["fields"].as_array().expect("fields");
     assert_eq!(fields.len(), RUN_FIELDS);
@@ -131,7 +140,7 @@ fn every_corpus_file_reads_as_the_reference_reads_it() {
             assert!(KEYS.contains(&key.as_str()), "{name}: a key this test doesn't check, {key}");
         }
         let got = read_path(&corpus(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
-        for d in differences(&got, rec) {
+        for d in differences(&got, rec, &bytes(name), ext(name) == "opus") {
             wrong.push(format!("{name}: {d}"));
         }
     }
@@ -147,10 +156,14 @@ fn the_corpus_covers_the_flags_and_the_known_bits() {
     // The parity test above is only as good as what the corpus exercises.
     let mut seen = 0u16;
     let mut pictures = 0;
+    let mut codings = [0; 4];
     for name in audio_files() {
         let r = read_path(&corpus(&name)).expect("a corpus file");
         seen |= r.rec.flags;
         pictures += r.picture.is_some() as usize;
+        if r.rec.pic_offset != 0 {
+            codings[r.rec.pic_coding as usize] += 1;
+        }
         let readable = r.rec.flags & UNREADABLE == 0;
         // 2.6.4: a readable file says it looked for every field, a picture
         // included; an unreadable one, for none.
@@ -160,6 +173,229 @@ fn the_corpus_covers_the_flags_and_the_known_bits() {
     // TRUNCATED: bits 0-7, all of them.
     assert_eq!(seen & 0xFF, 0xFF);
     assert!(pictures >= 10, "{pictures} files with a picture");
+    // Every picture anchored, under each of the four codings: raw, ID3
+    // unsynchronised, base64 across Ogg pages (and in a FLAC's comments),
+    // APEv2.
+    assert_eq!(codings.iter().sum::<usize>(), pictures);
+    assert!(codings.iter().all(|&n| n > 0), "codings {codings:?}");
+}
+
+// ── The anchors, read back ──────────────────────────────────────────────────
+
+/// The image a record's anchor names, read the way the device reads it
+/// (2.6.4) and apart from the locator (the firmware's TagFixtures reader):
+/// raw bytes, unsynchronised ones, or base64 characters stepping over the
+/// Ogg page headers they meet, decoded, and a FLAC PICTURE's image taken
+/// from them. None when the anchor doesn't read.
+fn read_anchor(file: &[u8], r: &Record, ogg: bool) -> Option<Vec<u8>> {
+    let (at, n) = (r.pic_offset as usize, r.pic_length as usize);
+    match r.pic_coding {
+        CODING_RAW | CODING_APE => file.get(at..at + n).map(<[u8]>::to_vec),
+        CODING_UNSYNC => {
+            let (mut out, mut ff) = (Vec::new(), false);
+            for &c in file.get(at..at + n)? {
+                if ff && c == 0 {
+                    ff = false;
+                    continue;
+                }
+                out.push(c);
+                ff = c == 0xFF;
+            }
+            Some(out)
+        }
+        CODING_OGG_BASE64 => base64_picture(file, at, n, ogg),
+        _ => None,
+    }
+}
+
+/// An Ogg page's body at `at`, its header first: where it starts, how long.
+fn page_body(file: &[u8], at: usize) -> Option<(usize, usize)> {
+    let h = file.get(at..at + 27).filter(|h| h.starts_with(b"OggS"))?;
+    let segs = h[26] as usize;
+    let lacing = file.get(at + 27..at + 27 + segs)?;
+    Some((at + 27 + segs, lacing.iter().map(|&l| l as usize).sum()))
+}
+
+fn base64_picture(file: &[u8], at: usize, n: usize, ogg: bool) -> Option<Vec<u8>> {
+    // Where the anchor's page ends: the characters go on in the next one.
+    let mut end = file.len();
+    if ogg {
+        let mut page = 0;
+        loop {
+            let (start, body) = page_body(file, page)?;
+            if (start..start + body).contains(&at) {
+                end = start + body;
+                break;
+            }
+            page = start + body;
+        }
+    }
+    let (mut chars, mut pos) = (Vec::new(), at);
+    while chars.len() < n {
+        if ogg && pos == end {
+            let (start, body) = page_body(file, pos)?;
+            (pos, end) = (start, start + body);
+            continue;
+        }
+        chars.push(*file.get(pos)?);
+        pos += 1;
+    }
+    let mut block = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in chars.into_iter().take_while(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        (acc, bits) = (acc << 6 | v as u32, bits + 6);
+        if bits >= 8 {
+            bits -= 8;
+            block.push((acc >> bits) as u8);
+        }
+    }
+    let be32 = |at: usize| block.get(at..at + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
+    if block.len() < 32 {
+        return None;
+    }
+    let mut at = 8 + be32(4)? as usize;
+    let described = be32(at)? as usize;
+    // lofty skips the description only when it fits before the rest.
+    let rest = block.len().checked_sub(at + 4)?;
+    at += 4 + if described > 0 && described < rest { described } else { 0 } + 16;
+    let len = be32(at)? as usize;
+    block.get(at + 4..at + 4 + len).map(<[u8]>::to_vec)
+}
+
+/// Where the Ogg pages of `file` have a body starting at `at`.
+fn starts_a_page(file: &[u8], at: usize) -> bool {
+    let mut page = 0;
+    while let Some((start, body)) = page_body(file, page) {
+        if start == at {
+            return true;
+        }
+        page = start + body;
+    }
+    false
+}
+
+/// A file's bytes edited at random, mostly in the tags at its head (the
+/// device's fuzz pass): a bit flipped, a byte set, a size field blown up,
+/// a byte put in or taken out, the file cut.
+fn mutate(full: &[u8], rng: &mut fastrand::Rng) -> Vec<u8> {
+    let mut b = full.to_vec();
+    for _ in 0..rng.usize(1..=8) {
+        if b.is_empty() {
+            break;
+        }
+        let span = if rng.usize(..4) != 0 { b.len().min(2048) } else { b.len() };
+        let at = rng.usize(..span);
+        match rng.u8(..9) {
+            0 => b[at] ^= 1 << rng.u8(..8),
+            1 => b[at] = rng.u8(..),
+            2 => b[at] = 0xFF,
+            3 => b[at] = 0,
+            4 => b[at] = 0x80,
+            5 => (at..b.len().min(at + 4)).for_each(|k| b[k] = rng.u8(..) | 0x40),
+            6 => b.insert(at, rng.u8(..)),
+            7 => drop(b.remove(at)),
+            _ => b.truncate(at),
+        }
+    }
+    b
+}
+
+/// What 2.6.4 holds a reading of `file` to: an anchor reads back to the
+/// picture elected, its type and MIME that picture's; no anchor, none of
+/// the five fields.
+fn anchor_holds(file: &[u8], r: &Reading, ogg: bool) -> Result<(), String> {
+    let rec = &r.rec;
+    if rec.pic_offset == 0 {
+        let rest = (rec.pic_length, rec.pic_type, rec.pic_mime, rec.pic_coding);
+        return if rest == (0, 0, 0, 0) { Ok(()) } else { Err(format!("no anchor, but {rest:?}")) };
+    }
+    let p = r.picture.ok_or("an anchor and no picture elected")?;
+    if (rec.pic_type, rec.pic_mime) != (p.pic_type, p.mime) {
+        return Err(format!("type and MIME {:?}, elected {p:?}", (rec.pic_type, rec.pic_mime)));
+    }
+    match read_anchor(file, rec, ogg) {
+        Some(image) if fnv1a64(&image) == p.fnv => Ok(()),
+        Some(_) => Err("the anchor reads another picture's bytes".into()),
+        None => Err("the anchor doesn't read".into()),
+    }
+}
+
+#[test]
+fn cut_and_mutated_files_anchor_only_their_elected_picture() {
+    // Each file with a picture, cut at a stride and mutated: the reader
+    // holds to 2.6.4 whatever it is given. And the locator alone, under
+    // every kind of tag the file's format has, never anchors the original
+    // picture where its bytes don't read back.
+    let mut rng = fastrand::Rng::with_seed(0x7A6B);
+    let (mut reads, mut anchored, mut wrong) = (0, 0, Vec::new());
+    for name in audio_files() {
+        let full = bytes(&name);
+        let (ext, ogg) = (ext(&name), ext(&name) == "opus");
+        let Some(original) = read_bytes(&full, ext).picture else { continue };
+        let kinds: &[TagType] = match ext {
+            "mp3" => &[TagType::Id3v2, TagType::Ape],
+            "flac" => &[TagType::Id3v2, TagType::VorbisComments],
+            _ => &[TagType::VorbisComments],
+        };
+        let cuts = (0..full.len()).step_by(full.len() / 150 + 1);
+        let mut cases: Vec<Vec<u8>> = cuts.map(|n| full[..n].to_vec()).collect();
+        cases.extend((0..60).map(|_| mutate(&full, &mut rng)));
+        for (i, case) in cases.iter().enumerate() {
+            let r = read_bytes(case, ext);
+            reads += 1;
+            anchored += (r.rec.pic_offset != 0) as usize;
+            if let Err(e) = anchor_holds(case, &r, ogg) {
+                wrong.push(format!("{name}, case {i}: {e}"));
+            }
+            for &kind in kinds {
+                let mut file = Cursor::new(case.as_slice());
+                let found = anchors::locate(&mut file, &[], ext, kind, &original);
+                let Some(a) = found.expect("a slice reads") else { continue };
+                let (pic_offset, pic_length, pic_coding) = (a.offset, a.length, a.coding);
+                let rec = Record { pic_offset, pic_length, pic_coding, ..Record::default() };
+                if read_anchor(case, &rec, ogg).map(|image| fnv1a64(&image)) != Some(original.fnv) {
+                    wrong.push(format!("{name}, case {i}, {kind:?}: {a:?} isn't the picture"));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(reads > 3000 && anchored > reads / 4, "{anchored} of {reads} readings anchored");
+}
+
+#[test]
+fn an_opus_picture_is_anchored_wherever_its_pages_cut_its_comment() {
+    // lofty's writer fills a page with 8,160 bytes of a packet (and keeps
+    // the file's vendor string): a comment before the picture's, of each
+    // length about that, puts the page's end in the picture comment's
+    // key, at its '=', and at each of the value's first characters in turn.
+    let cover = jpeg();
+    let mut at_a_page = 0;
+    for pad in 8085..8115 {
+        let mut file = Cursor::new(bytes("opus_basic.opus"));
+        let mut tag = VorbisComments::default();
+        tag.insert("COMMENT".into(), "c".repeat(pad));
+        let pic = Picture::unchecked(cover.clone()).pic_type(PictureType::CoverFront);
+        tag.insert_picture(pic.mime_type(MimeType::Jpeg).build(), None).expect("a picture");
+        tag.save_to(&mut file, WriteOptions::default()).expect("written");
+        let data = file.into_inner();
+        let r = read_bytes(&data, "opus");
+        assert_eq!(r.rec.pic_coding, CODING_OGG_BASE64, "pad {pad}");
+        anchor_holds(&data, &r, true).unwrap_or_else(|e| panic!("pad {pad}: {e}"));
+        assert_eq!(r.picture.map(|p| p.fnv), Some(fnv1a64(&cover)), "pad {pad}");
+        at_a_page += starts_a_page(&data, r.rec.pic_offset as usize) as usize;
+    }
+    // One value starts a page: its anchor is that page's first body byte,
+    // past the header the packet steps over.
+    assert_eq!(at_a_page, 1);
 }
 
 #[test]
@@ -275,6 +511,72 @@ fn flac_audio(data: &[u8]) -> u64 {
     }
 }
 
+/// A card that keeps the byte ranges read from it, and refuses a read past
+/// those of `only` when given them.
+struct Watched {
+    data: Cursor<Vec<u8>>,
+    read: Vec<(u64, u64)>,
+    only: Option<Vec<(u64, u64)>>,
+}
+
+impl Read for Watched {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let at = self.data.position();
+        let end = (at + buf.len() as u64).min(self.data.get_ref().len() as u64);
+        if let Some(only) = &self.only {
+            // Inside their union: from `at`, range after range, to `end`.
+            let mut reach = at;
+            for &(s, e) in only {
+                if s <= reach && reach < e {
+                    reach = e;
+                }
+            }
+            if reach < end {
+                return Err(io::Error::other(format!("{at}..{end}, read again")));
+            }
+        }
+        let n = self.data.read(buf)?;
+        self.read.push((at, at + n as u64));
+        Ok(n)
+    }
+}
+
+impl Seek for Watched {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        self.data.seek(to)
+    }
+}
+
+#[test]
+fn the_anchor_is_found_in_what_lofty_read() {
+    // Each file with a picture read by lofty alone, the byte ranges it read
+    // kept; then whole, the anchor too, from a card that refuses any other
+    // byte: the walk takes its bytes from what lofty read, and never reads
+    // the card again for them.
+    let mut pictures = 0;
+    for name in audio_files() {
+        let data = bytes(&name);
+        if read_bytes(&data, ext(&name)).rec.pic_offset == 0 {
+            continue;
+        }
+        let mut alone = Watched { data: Cursor::new(data.clone()), read: Vec::new(), only: None };
+        let opts = ParseOptions::new().parsing_mode(ParsingMode::Relaxed);
+        let parsed = match ext(&name) {
+            "mp3" => MpegFile::read_from(&mut alone, opts).map(drop),
+            "flac" => FlacFile::read_from(&mut alone, opts).map(drop),
+            _ => OpusFile::read_from(&mut alone, opts).map(drop),
+        };
+        parsed.unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mut only = alone.read;
+        only.sort();
+        let watched = Watched { data: Cursor::new(data.clone()), read: Vec::new(), only: Some(only) };
+        let reading = read_from(watched, ext(&name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(reading, read_bytes(&data, ext(&name)), "{name}");
+        pictures += 1;
+    }
+    assert!(pictures >= 10, "{pictures} files with a picture");
+}
+
 #[test]
 fn keys_by_the_camelot_rule() {
     let cases = [
@@ -314,12 +616,16 @@ fn jpeg() -> Vec<u8> {
     out.into_inner()
 }
 
-/// `name` with `what` put back, and its readings before and after.
+/// `name` with `what` put back, and its readings before and after; the
+/// picture's anchor after holds to 2.6.4.
 fn restored(name: &str, what: &Restore<'_>) -> (Reading, Reading) {
     let before = read_bytes(&bytes(name), ext(name));
     let mut file = Cursor::new(bytes(name));
     restore(&mut file, ext(name), what).unwrap_or_else(|e| panic!("{name}: {e}"));
-    (before, read_bytes(file.get_ref(), ext(name)))
+    let after = read_bytes(file.get_ref(), ext(name));
+    let ogg = ext(name) == "opus";
+    anchor_holds(file.get_ref(), &after, ogg).unwrap_or_else(|e| panic!("{name}: {e}"));
+    (before, after)
 }
 
 #[test]
@@ -328,12 +634,21 @@ fn a_converted_file_gets_its_cover_bpm_and_key_back() {
     let what = Restore { cover: Some(&cover), bpm: Some("128"), key: Some("C major") };
     // An Opus stream's comments, an MP3 with no ID3v2 yet, and one whose
     // ID3v2 has a cover, a BPM and a key already (each replaced).
-    for name in ["opus_basic.opus", "no_tags.mp3", "v24_full.mp3"] {
+    let files = [
+        ("opus_basic.opus", CODING_OGG_BASE64),
+        ("no_tags.mp3", CODING_RAW),
+        ("v24_full.mp3", CODING_RAW),
+    ];
+    for (name, coding) in files {
         let (before, after) = restored(name, &what);
         assert_eq!((after.rec.bpm10, after.rec.camelot), (1280, 20), "{name}");
         let p = after.picture.expect("the cover");
         let want = (3, 1, fnv1a64(&cover), cover.len());
         assert_eq!((p.pic_type, p.mime, p.fnv, p.bytes), want, "{name}");
+        // Anchored where it was written: the record's picture is the cover.
+        let r = after.rec;
+        assert_eq!((r.pic_type, r.pic_mime, r.pic_coding), (3, 1, coding), "{name}");
+        assert_ne!(r.pic_offset, 0, "{name}");
         // Nothing else moves: the fields, the numbers, the length.
         assert_eq!(after.run, before.run, "{name}");
         let same = |r: &Reading| {
