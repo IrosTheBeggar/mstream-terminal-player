@@ -9,7 +9,11 @@
 //! ([`Cards::diverged`]). It mirrors each multi-card set's table too, the
 //! newest it has seen ([`Cards::mirror`]): a card of a set learns from it what
 //! the set's other cards did while it was out of the reader (the transfer
-//! plan's 2.12). Disposable, as stats.json is: a file that doesn't read is no
+//! plan's 2.12). The Card view (B4) keeps two things of its own beside them:
+//! which server each card was last synced from here, and when, for the
+//! board's card line (the MP3 Player contract's clause 20a); and the
+//! removable volumes the listener hid from the tab's row (clause 63), by
+//! their volume serials. Disposable, as stats.json is: a file that doesn't read is no
 //! cache at all, and the next save writes it over; one of a newer player is
 //! read as none and never written over. Every member this player doesn't
 //! know is kept.
@@ -25,7 +29,8 @@ use super::state::{Copied, from_hex, hex};
 pub(crate) const VERSION: u64 = 1;
 
 /// The members of a card's entry this player reads and writes.
-const KNOWN: [&str; 5] = ["label", "lastSeen", "generation", "commitId", "set"];
+const KNOWN: [&str; 7] =
+    ["label", "lastSeen", "generation", "commitId", "set", "server", "synced"];
 
 /// A card as this computer last saw it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -38,6 +43,10 @@ pub(crate) struct Seen {
     pub(crate) commit_id: u64,
     /// The multi-card set it is a card of, by the set's id.
     pub(crate) set: Option<u64>,
+    /// The server's nickname it was last synced from on this computer, and
+    /// when (Unix seconds; 0: never synced here).
+    pub(crate) server: String,
+    pub(crate) synced: u64,
     /// A newer player's members, by name.
     pub(crate) keep: BTreeMap<String, Value>,
 }
@@ -48,6 +57,9 @@ pub(crate) struct Cards {
     pub(crate) cards: BTreeMap<u64, Seen>,
     /// Each multi-card set's table, by its id: the newest seen.
     pub(crate) sets: BTreeMap<u64, Set>,
+    /// The volumes the listener hid from the MP3 Player tab, by their volume
+    /// serials as [`Serial`](super::volume::Serial) spells them.
+    pub(crate) hidden: Vec<String>,
     keep: BTreeMap<String, Value>,
     /// A newer player's file: read as none, and never written over.
     newer: bool,
@@ -78,6 +90,8 @@ impl Cards {
                 generation: number("generation").and_then(|g| u32::try_from(g).ok()).unwrap_or(0),
                 commit_id: text("commitId").and_then(from_hex).unwrap_or(0),
                 set,
+                server: text("server").unwrap_or_default().to_string(),
+                synced: number("synced").unwrap_or(0),
                 keep: keep.map(|(name, value)| (name.clone(), value.clone())).collect(),
             };
             cards.insert(id, seen);
@@ -95,13 +109,16 @@ impl Cards {
                 }
             }
         }
-        let others = |name: &&String| !matches!(name.as_str(), "version" | "cards" | "sets");
+        let hidden = top.get("hidden").and_then(Value::as_array).into_iter().flatten();
+        let hidden: Vec<String> = hidden.filter_map(Value::as_str).map(str::to_string).collect();
+        let others =
+            |name: &&String| !matches!(name.as_str(), "version" | "cards" | "sets" | "hidden");
         let keep = top.iter().filter(|(name, _)| others(name));
         let mut keep: BTreeMap<String, Value> = keep.map(|(n, v)| (n.clone(), v.clone())).collect();
         if !unread.is_empty() {
             keep.insert("sets".into(), Value::Object(unread));
         }
-        Cards { cards, sets, keep, newer: false }
+        Cards { cards, sets, hidden, keep, newer: false }
     }
 
     /// The file's text.
@@ -116,11 +133,20 @@ impl Cards {
             if let Some(set) = seen.set {
                 entry.insert("set".into(), hex(set).into());
             }
+            if !seen.server.is_empty() {
+                entry.insert("server".into(), seen.server.as_str().into());
+            }
+            if seen.synced != 0 {
+                entry.insert("synced".into(), seen.synced.into());
+            }
             cards.insert(hex(*id), Value::Object(entry));
         }
         let mut top: Map<String, Value> = self.keep.clone().into_iter().collect();
         top.insert("version".into(), json!(VERSION));
         top.insert("cards".into(), Value::Object(cards));
+        if !self.hidden.is_empty() {
+            top.insert("hidden".into(), json!(self.hidden));
+        }
         if !self.sets.is_empty() {
             let mut sets = match top.remove("sets") {
                 Some(Value::Object(unread)) => unread,
@@ -174,6 +200,34 @@ impl Cards {
             seen.generation = generation;
             seen.commit_id = commit;
         }
+    }
+
+    /// A sync of card `id` from the server this computer calls `server`
+    /// ended at `now`: the board's card line says so (clause 20a). A
+    /// nickname that names a place on a network is never kept.
+    pub(crate) fn synced(&mut self, id: u64, server: &str, now: u64) {
+        let seen = self.cards.entry(id).or_default();
+        let address = super::state::looks_like_address(server);
+        seen.server = if address { String::new() } else { server.into() };
+        seen.synced = now;
+    }
+
+    /// The volume of `serial` is hidden from the tab's row (clause 63).
+    pub(crate) fn is_hidden(&self, serial: &str) -> bool {
+        self.hidden.iter().any(|h| h == serial)
+    }
+
+    /// Hides the volume of `serial` from the tab's row, until
+    /// [`Cards::show_hidden`].
+    pub(crate) fn hide(&mut self, serial: &str) {
+        if !serial.is_empty() && !self.is_hidden(serial) {
+            self.hidden.push(serial.to_string());
+        }
+    }
+
+    /// *Not showing up?* shows every hidden volume again.
+    pub(crate) fn show_hidden(&mut self) {
+        self.hidden.clear();
     }
 
     /// A set's table as a card of it left it: merged with the one kept
@@ -238,6 +292,28 @@ mod tests {
         }
         let future = Cards::parse(r#"{"version": 2, "cards": {"0x01": {"label": "x"}}}"#);
         assert!(future.cards.is_empty() && future.newer);
+    }
+
+    #[test]
+    fn a_cards_last_sync_here_and_the_hidden_volumes_read_back() {
+        let mut cards = Cards::default();
+        cards.saw(9, "Gym", 5, 2, 20);
+        cards.synced(9, "Home", 6);
+        cards.synced(8, "http://192.0.2.7:3000", 7);
+        cards.hide("1A2B-3C4D");
+        cards.hide("1A2B-3C4D");
+        cards.hide("");
+        let text = cards.text();
+        assert!(!text.contains("192.0.2.7"), "an address is never kept: {text}");
+        let read = Cards::parse(&text);
+        assert_eq!(read, cards);
+        assert_eq!((read.cards[&9].server.as_str(), read.cards[&9].synced), ("Home", 6));
+        assert_eq!((read.cards[&8].server.as_str(), read.cards[&8].synced), ("", 7));
+        assert_eq!(read.hidden, ["1A2B-3C4D"]);
+        assert!(read.is_hidden("1A2B-3C4D") && !read.is_hidden("FFFF-0000"));
+        let mut shown = read.clone();
+        shown.show_hidden();
+        assert!(!shown.text().contains("hidden"));
     }
 
     #[test]

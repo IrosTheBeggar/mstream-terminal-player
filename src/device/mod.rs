@@ -350,6 +350,7 @@ impl CardSyncArgs {
                 (_, _, true) => Some(card::span::Decision::AddCard),
                 _ => None,
             },
+            stop: None,
         })
     }
 }

@@ -333,6 +333,12 @@ pub(crate) enum Event {
     Failed { server_path: String, why: String },
     /// A commit: its generation, and whether it ended the run.
     Committed { generation: u32, last: bool },
+    /// A sync's server side read (B4's progress): its listing in hand, the
+    /// plan still to make.
+    Listed,
+    /// A sync's plan made, its run about to start: the files it fetches and
+    /// their bytes (B4's progress bar).
+    Planned { files: usize, bytes: u64 },
 }
 
 /// What a plan or a run reports beside its work (2.8.4, 2.10.2, U4-U5).

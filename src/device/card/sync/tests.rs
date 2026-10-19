@@ -38,10 +38,10 @@ use crate::device::card::volume::Inspection;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// A folder of its own under the system's temp folder, gone when dropped.
-struct Scratch(PathBuf);
+pub(crate) struct Scratch(pub(crate) PathBuf);
 
 impl Scratch {
-    fn new(name: &str) -> Scratch {
+    pub(crate) fn new(name: &str) -> Scratch {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("mstream-sync-{}-{name}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -76,7 +76,7 @@ struct Track {
 }
 
 #[derive(Default)]
-struct Library {
+pub(crate) struct Library {
     vpaths: Vec<String>,
     tracks: Vec<Track>,
     revision: String,
@@ -118,7 +118,7 @@ struct Library {
 /// The fake server's own id.
 const ID: &str = "3f2b8c1e-6a4d-4e0f-9b7a-2c5d8e1f0a93";
 
-type Fake = Arc<Mutex<Library>>;
+pub(crate) type Fake = Arc<Mutex<Library>>;
 
 fn etag(bytes: &[u8]) -> String {
     format!("W/\"{:x}-{:08x}\"", bytes.len(), crate::device::card::contract::prim::crc32(bytes))
@@ -292,7 +292,7 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
 
 /// A server of two libraries; Rock holds an album with a folder cover and
 /// an album with mStream's art whose WAV must be converted, Jazz one file.
-fn server() -> (String, Fake) {
+pub(crate) fn server() -> (String, Fake) {
     let full = |source: &str| json!({"sample-rate": 44100, "channels": 2, "bitrate": 320000,
                                      "bpm": 124, "musical-key": "C major", "bpm-source": source});
     let track = |path: &str, id: i64, bytes: Vec<u8>, art: Option<&str>, full: Value| Track {
@@ -330,10 +330,10 @@ fn server() -> (String, Fake) {
 
 // ── The card ────────────────────────────────────────────────────────────────
 
-const SERIAL: u32 = 0x1A2B_3C4D;
+pub(crate) const SERIAL: u32 = 0x1A2B_3C4D;
 
 /// Each session's clock and ids: a fixed time, ids that never repeat.
-fn envs() -> impl FnMut() -> Env {
+pub(crate) fn envs() -> impl FnMut() -> Env {
     let mut seed = 0x5EED_u64;
     move || {
         seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -347,7 +347,7 @@ fn envs() -> impl FnMut() -> Env {
 }
 
 /// A card set up by the transfer, in a player that reads Opus and Auto DJ.
-fn card(scratch: &Scratch) -> FatSim {
+pub(crate) fn card(scratch: &Scratch) -> FatSim {
     let root = scratch.0.join("card");
     let sim = FatSim::new(&root, SERIAL);
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures/card/golden/device.txt");
@@ -358,7 +358,7 @@ fn card(scratch: &Scratch) -> FatSim {
     sim
 }
 
-fn space(free: u64) -> Option<Space> {
+pub(crate) fn space(free: u64) -> Option<Space> {
     Some(Space { size: 64 << 30, free, cluster: 32 * 1024, clusters: 0 })
 }
 
@@ -410,7 +410,7 @@ impl crate::device::card::source::peer::Dial for NoDial {
 }
 
 /// What a sync of no peer needs of this computer: a budget it never opens.
-fn no_peers() -> Federation {
+pub(crate) fn no_peers() -> Federation {
     Federation {
         budget: crate::device::card::budget::Budget::at(std::env::temp_dir().join("mstream-sync-never")),
         dial: Box::new(NoDial),
@@ -437,7 +437,7 @@ fn ran(synced: &Synced) -> &Outcome {
     }
 }
 
-fn rock() -> Ask {
+pub(crate) fn rock() -> Ask {
     Ask {
         libraries: Some(vec!["Rock".into()]),
         change: Change { nickname: Some("Home".into()), ..Change::default() },
@@ -1059,6 +1059,70 @@ fn a_run_the_server_stops_parks_and_the_next_takes_it_up() {
     let seen = look(&sim);
     assert!(seen.pending.is_none());
     assert_eq!(State::of(&seen.state).unwrap().settings.sources[0].full_read, 1_791_900_000);
+}
+
+/// One sync of `card` from `base` whose events go to `said` as they come.
+fn sync_saying(card: &FatSim, base: &str, ask: &Ask, said: &mut dyn FnMut(Event)) -> Synced {
+    let client = Arc::new(Client::new(base).unwrap().with_token(Some("tok".into())));
+    let (fed, space, plays) = (no_peers(), space(32 << 30), Rc::new(MemStore::default()));
+    let mut cards = Cards::default();
+    sync(card, space, client, Reached::Elsewhere, ask, &mut cards, plays, &fed, &mut envs(), said)
+}
+
+#[test]
+fn a_stop_before_the_run_writes_nothing_and_one_under_way_parks_at_a_checkpoint() {
+    let scratch = Scratch::new("stopped");
+    let sim = card(&scratch);
+    let (base, _fake) = server();
+    let mut before = sim.image();
+    before.retain(|p, _| !p.ends_with("run.lock"));
+
+    // Stopped before the run: the plan is made and nothing is written.
+    let stop = Arc::new(AtomicBool::new(true));
+    let ask = Ask { stop: Some(stop.clone()), ..rock() };
+    let halted = sync_saying(&sim, &base, &ask, &mut |_| {});
+    assert!(matches!(halted.end, End::Halted(Halt::Stopped)), "{:?}", halted.end);
+    let fetches = halted.summary.as_ref().map(|s| s.fetches);
+    assert_eq!(fetches, Some(4), "the plan said what it would do");
+    let mut after = sim.image();
+    after.retain(|p, _| !p.ends_with("run.lock"));
+    assert_eq!(after, before, "nothing reached the card");
+
+    // Stopped once the first file is in: it parks at a checkpoint, the
+    // plan on the card, and says so.
+    stop.store(false, Ordering::SeqCst);
+    let mut seen: Vec<Event> = Vec::new();
+    let mut said = |e: Event| {
+        if matches!(e, Event::Wrote { .. }) {
+            stop.store(true, Ordering::SeqCst);
+        }
+        if !matches!(e, Event::Progress { .. }) {
+            seen.push(e);
+        }
+    };
+    let parked = sync_saying(&sim, &base, &ask, &mut said);
+    let outcome = ran(&parked);
+    assert_eq!(outcome.parked.as_deref(), Some(STOPPED));
+    assert_eq!((outcome.written, outcome.records), (1, 1), "the file in flight, and no more");
+    let planned = seen.iter().position(|e| matches!(e, Event::Planned { files: 4, .. }));
+    let listed = seen.iter().position(|e| matches!(e, Event::Listed));
+    let wrote = seen.iter().position(|e| matches!(e, Event::Wrote { .. }));
+    assert!(listed < planned && planned < wrote && listed.is_some(), "{seen:?}");
+    assert!(seen.iter().any(|e| matches!(e, Event::Committed { last: false, .. })), "a checkpoint");
+    assert!(volume::inspect(&sim).unwrap().pending.is_some(), "the plan stays on the card");
+    let summary = parked.summary.as_ref().unwrap();
+    assert_eq!(summary.offered, ["Rock", "Jazz"]);
+    let on_rock: Vec<&(String, usize, u64)> =
+        summary.totals.iter().filter(|t| t.0 == "Rock").collect();
+    assert_eq!(on_rock.len(), 1);
+    assert_eq!(on_rock[0].1, 4, "Rock's four files on the server");
+
+    // The next sync, unstopped, goes on from there and finishes.
+    let again = sync_saying(&sim, &base, &Ask { stop: None, ..rock() }, &mut |_| {});
+    let outcome = ran(&again);
+    let ended = (outcome.parked.clone(), outcome.verified.clone(), outcome.records);
+    assert_eq!(ended, (None, Ok(()), 4));
+    assert!(look(&sim).pending.is_none());
 }
 
 #[test]

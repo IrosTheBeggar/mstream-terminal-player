@@ -26,6 +26,7 @@
 //! then the reasons are codes, and the hidden `device card-probe` prints
 //! them ([`probe`]).
 
+pub(crate) mod eject;
 pub(crate) mod linux;
 pub(crate) mod macos;
 pub(crate) mod windows;

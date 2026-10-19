@@ -63,6 +63,7 @@ use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
@@ -78,8 +79,8 @@ use super::contract::server::{Server, Talk, Verdict, instance_of, server_url_key
 use super::covers::{self, Covers, folders, most_common};
 use super::dry::DryCard;
 use super::engine::{
-    Album, Answers, AutoDj, Commit, Cover, Env, Event, Expect, Fetched, Guard, Hooks, Knobs,
-    Origin, Outcome, Plan, Report, Session, Stop, WantedFile,
+    Album, Answers, AutoDj, Commit, Cover, Env, Event, Expect, Failed, Fetched, Fetcher, Guard,
+    Have, Hooks, Knobs, Origin, Outcome, Plan, Report, Session, Stop, WantedFile,
 };
 use super::history::{self, History, Tally};
 use super::names::{self, Bytes};
@@ -184,7 +185,16 @@ pub(crate) struct Ask {
     /// A multi-card set (B7): the card's selection spread over a new set, or
     /// the answer to a card of a set that can't take its range.
     pub(crate) decide: Option<Decision>,
+    /// The listener's stop (B4, *Stop at the next save*): once set, a sync
+    /// that hasn't written yet stops before it writes ([`Halt::Stopped`]),
+    /// and one under way fetches nothing more: the files in flight finish,
+    /// and the run ends at a checkpoint whose plan the next sync takes up
+    /// (2.12.8's parking, [`STOPPED`]).
+    pub(crate) stop: Option<Arc<AtomicBool>>,
 }
+
+/// Why a run the listener stopped parked ([`Outcome::parked`]).
+pub(crate) const STOPPED: &str = "stopped at the listener's word: the next sync goes on from here";
 
 /// A federation peer a sync is asked to read (B9): its id in the server's
 /// peer list, and its libraries (None: the card's selection for it, else
@@ -244,6 +254,12 @@ pub(crate) struct Summary {
     /// A card of no set that doesn't fit: its selection over the cards a set
     /// of it would take, each of its room.
     pub(crate) spread: Vec<Part>,
+    /// Every library the account sees on the server, by vpath: what a
+    /// card's settings offer (B4).
+    pub(crate) offered: Vec<String>,
+    /// The listed libraries' files and bytes on the server, by vpath, as
+    /// this run read them: the settings' sizes beside each library.
+    pub(crate) totals: Vec<(String, usize, u64)>,
 }
 
 /// Why a sync stopped before its run ended.
@@ -259,6 +275,8 @@ pub(crate) enum Halt {
     /// What a sync won't do: a card not set up, a copied card, a library the
     /// server doesn't have.
     Refused(String),
+    /// The listener stopped it before it wrote anything ([`Ask::stop`]).
+    Stopped,
 }
 
 impl std::fmt::Display for Halt {
@@ -271,6 +289,7 @@ impl std::fmt::Display for Halt {
             }
             Halt::Fit(fit) => write!(f, "it doesn't fit, by {} bytes", fit.short()),
             Halt::Refused(why) => f.write_str(why),
+            Halt::Stopped => f.write_str("stopped before anything was written"),
         }
     }
 }
@@ -419,7 +438,7 @@ fn run(
     let was = Was { state: &was, set_id };
     let prepared = prepare(
         &mut session, &mut state, &was, space, client, reached, ask, &info, cards, now, history,
-        notes, fed,
+        notes, fed, events,
     );
     let mut p = match prepared {
         Ok(p) => p,
@@ -439,6 +458,12 @@ fn run(
         session.close();
         return Ok((p.summary, End::Dry));
     }
+    // The listener's stop before anything is written: the card as it was.
+    if stopped(ask) {
+        session.close();
+        return Err((Some(p.summary), Halt::Stopped));
+    }
+    events(Event::Planned { files: p.summary.fetches, bytes: p.summary.fetch_bytes });
 
     // 5. The run, and 6. the settings at its end ([`SyncHooks::state`]).
     let label = state.label.clone();
@@ -449,7 +474,8 @@ fn run(
     hooks.span_cluster = span.as_ref().map(|s| s.cluster);
     hooks.store = Some(Store { state, url_key, listed, now, plan_key, revision, span });
     hooks.history = had.history.take();
-    let ran = session.run(p.plan, &mut p.fetcher, &mut hooks, events);
+    let mut fetcher = Stopping { inner: &mut p.fetcher, stop: ask.stop.clone() };
+    let ran = session.run(p.plan, &mut fetcher, &mut hooks, events);
     *had.history = hooks.history.take();
     had.notes.append(&mut hooks.notes);
     *had.resume_at = peers::after(had.peers, &mut p.fetcher.network().peers);
@@ -534,6 +560,7 @@ fn prepare(
     history: &mut History,
     notes: &mut Vec<String>,
     fed: &Federation,
+    events: &mut dyn FnMut(Event),
 ) -> Result<Prepared, Halted> {
     let refused = |why: String| (None, Halt::Refused(why));
     let Some(root) = session.root() else {
@@ -732,6 +759,8 @@ fn prepare(
         }
     };
     let revision = wanted.card.origins[0].revision.clone();
+    let totals = totals(&entries);
+    events(Event::Listed);
     // The card's plays for this server, their paths as it has them now.
     history.post(client, &reads, info.features.stats.is_some(), info.instance_id.is_some());
     // Plays to send that no outbox holds would be lost with the rows this
@@ -834,6 +863,8 @@ fn prepare(
         peers: peer_summaries,
         set: span.as_ref().and_then(sets::SetRun::summary),
         spread,
+        offered: info.user.vpaths.clone(),
+        totals,
     };
     if !ask.dry_run {
         if let Some(fit) = fit.filter(|f| !f.fits() || f.over_cap()) {
@@ -932,6 +963,67 @@ fn prepare(
     let hooks = Some(hooks);
     let span = span.as_ref().and_then(sets::SetRun::end);
     Ok(Prepared { plan, fetcher, hooks, summary, listed, revision, ours, url_key, plan_key, span })
+}
+
+/// The listed files and bytes of each library, by the vpath their server
+/// path starts with, in the order the libraries first come.
+fn totals(entries: &[ManifestEntry]) -> Vec<(String, usize, u64)> {
+    let mut totals: Vec<(String, usize, u64)> = Vec::new();
+    for e in entries {
+        let vpath = e.filepath.split('/').next().unwrap_or_default();
+        let size = e.file_size.unwrap_or(0);
+        match totals.iter_mut().find(|(v, ..)| v == vpath) {
+            Some((_, files, bytes)) => {
+                *files += 1;
+                *bytes += size;
+            }
+            None => totals.push((vpath.to_string(), 1, size)),
+        }
+    }
+    totals
+}
+
+/// The listener's stop is set.
+fn stopped(ask: &Ask) -> bool {
+    ask.stop.as_ref().is_some_and(|stop| stop.load(Ordering::SeqCst))
+}
+
+/// A run's source with the listener's stop in front of it: once the stop
+/// is set every file still to fetch waits ([`STOPPED`]), so the run ends
+/// at a checkpoint with its plan on the card, the files in flight done.
+struct Stopping<'f, F: Fetcher> {
+    inner: &'f mut F,
+    stop: Option<Arc<AtomicBool>>,
+}
+
+impl<F: Fetcher> Fetcher for Stopping<'_, F> {
+    fn fetch(&mut self, file: &WantedFile, into: &mut dyn Write) -> Result<Fetched, Failed> {
+        self.inner.fetch(file, into)
+    }
+
+    fn read_range(&mut self, file: &WantedFile, start: u64, len: usize) -> Result<Vec<u8>, Failed> {
+        self.inner.read_range(file, start, len)
+    }
+
+    fn resumable(&self, file: &WantedFile) -> bool {
+        self.inner.resumable(file)
+    }
+
+    fn fetch_part(
+        &mut self,
+        file: &WantedFile,
+        have: Option<&Have>,
+        into: &mut dyn super::engine::Part,
+    ) -> Result<Fetched, Failed> {
+        self.inner.fetch_part(file, have, into)
+    }
+
+    fn waits(&self, file: &WantedFile) -> Option<String> {
+        match self.stop.as_ref().is_some_and(|stop| stop.load(Ordering::SeqCst)) {
+            true => Some(STOPPED.to_string()),
+            false => self.inner.waits(file),
+        }
+    }
 }
 
 /// A ledger row as a manifest entry, for the local-disk source's check of
@@ -1500,7 +1592,8 @@ fn event_line(e: &Event) -> Option<String> {
         Event::TookOver(note) => format!("took over a stale run.lock: {}", note.trim()),
         Event::ForeignPlan(id) => format!("deleted another card's plan ({})", id_hex(*id)),
         Event::Deleted(path) => format!("deleted {path}"),
-        Event::Progress { .. } => return None,
+        Event::Progress { .. } | Event::Listed => return None,
+        Event::Planned { files, bytes } => format!("planned: {files} files ({bytes} bytes)"),
         Event::Wrote { path, bytes } => format!("wrote {path} ({bytes} bytes)"),
         Event::Renamed { from, to } => format!("renamed {from} to {to}"),
         Event::Failed { server_path, why } => format!("skipped {server_path}: {why}"),
@@ -1587,4 +1680,4 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
