@@ -33,7 +33,8 @@
 //! the server the file came from, which the card's next commit acknowledges.
 //! A sync may read the server's federation peers too, each under a daily
 //! budget this computer keeps ([`budget`]), their files from
-//! [`source::peer`].
+//! [`source::peer`]. One selection may span several cards ([`span`]): a set,
+//! split by artist, each card a whole library of its own.
 
 // The kit and the engine built on it wait for their callers (the Card view,
 // the public command line): until they land only the tests and a hidden
@@ -53,6 +54,7 @@ pub(crate) mod names;
 pub(crate) mod plan;
 pub(crate) mod setup;
 pub(crate) mod source;
+pub(crate) mod span;
 pub(crate) mod state;
 pub(crate) mod sync;
 pub(crate) mod tags;

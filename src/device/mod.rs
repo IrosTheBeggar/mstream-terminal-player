@@ -100,6 +100,13 @@ enum DeviceCmd {
     // contract too.
     #[command(hide = true)]
     CardSync(CardSyncArgs),
+    // Prints the multi-card set of a set-up card at a volume the drive-safety
+    // rule accepts, as the card and this computer know it, and the sets this
+    // computer knows that wait for a card; `--join SET --index N` makes the
+    // card that card of the set, `--dry-run` writing nothing. For the
+    // real-card checks: the listener's Card view waits for its UX contract.
+    #[command(hide = true)]
+    CardSet(CardSetArgs),
     // Reads the play log of a set-up card at a volume the drive-safety rule
     // accepts, maps each new play through the card's ledger and posts it to
     // the server of the saved session, and prints what came of it as JSON.
@@ -142,6 +149,21 @@ pub struct CardSetupArgs {
     // A copied card's answer: an identity of its own.
     #[arg(long)]
     new_identity: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct CardSetArgs {
+    // Where the card is mounted, or the OS's name for the volume.
+    volume: String,
+    // The set to join, by its id (`0x…`), as `cards.json` knows it.
+    #[arg(long, value_name = "SET", requires = "index")]
+    join: Option<String>,
+    // The card's place in the set, from 1.
+    #[arg(long, value_name = "N", requires = "join")]
+    index: Option<usize>,
+    // Say what the join would do, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args, Clone)]
@@ -227,6 +249,18 @@ pub struct CardSyncArgs {
     // 0 goes back to the peer's quota, or 1,500.
     #[arg(long, value_name = "MIB")]
     budget_mb: Option<u64>,
+    // Spread the card's selection over a new multi-card set, by artist, this
+    // card its first; the others join it with `device card-set`.
+    #[arg(long, conflicts_with_all = ["move_edge", "add_card"])]
+    spread: bool,
+    // A card of a set that can't take its range: its last artists go to the
+    // next card of the set.
+    #[arg(long, conflicts_with = "add_card")]
+    move_edge: bool,
+    // A card of a set that can't take its range: its last artists go to a
+    // new card after it.
+    #[arg(long)]
+    add_card: bool,
 }
 
 impl CardSyncArgs {
@@ -306,6 +340,12 @@ impl CardSyncArgs {
             peers_only: self.peers_only,
             proxy_copies: self.proxy_copies.clone(),
             budget_mb: self.budget_mb,
+            decide: match (self.spread, self.move_edge, self.add_card) {
+                (true, _, _) => Some(card::span::Decision::Spread),
+                (_, true, _) => Some(card::span::Decision::MoveEdge),
+                (_, _, true) => Some(card::span::Decision::AddCard),
+                _ => None,
+            },
         })
     }
 }
@@ -417,6 +457,20 @@ pub fn run(args: DeviceArgs) -> i32 {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             let label = args.label.as_deref();
             card::setup::command(&args.volume, label, args.new_identity, &mut out, &mut err)
+        }
+        DeviceCmd::CardSet(args) => {
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            let join = match (&args.join, args.index) {
+                (Some(id), Some(index)) => match card::state::from_hex(id).filter(|&id| id != 0) {
+                    Some(id) => Some((id, index)),
+                    None => {
+                        eprintln!("mstream-player: --join {id} isn't a set's id (0x…)");
+                        return 2;
+                    }
+                },
+                _ => None,
+            };
+            card::span::command(&args.volume, join, args.dry_run, &mut out, &mut err)
         }
         DeviceCmd::CardPlays(args) => {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -1256,6 +1310,32 @@ mod tests {
         assert!(!args.dry_run);
         assert!(parse(&["card-plays"]).is_err(), "a volume, always");
         assert!(!help.contains("card-plays"), "{help}");
+        // A multi-card set's: the sync's one answer, of three; the set's
+        // join, its id and the card's place both or neither.
+        use card::span::Decision;
+        let decide = |args: &[&str]| match parse(args) {
+            Ok(DeviceCmd::CardSync(args)) => Ok(args.ask().expect("words it takes").decide),
+            Ok(_) => Err("card-sync".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(decide(&["card-sync", "E:"]), Ok(None));
+        assert_eq!(decide(&["card-sync", "E:", "--spread"]), Ok(Some(Decision::Spread)));
+        assert_eq!(decide(&["card-sync", "E:", "--move-edge"]), Ok(Some(Decision::MoveEdge)));
+        assert_eq!(decide(&["card-sync", "E:", "--add-card"]), Ok(Some(Decision::AddCard)));
+        assert!(decide(&["card-sync", "E:", "--spread", "--add-card"]).is_err(), "one answer");
+        assert!(decide(&["card-sync", "E:", "--move-edge", "--add-card"]).is_err(), "one answer");
+        let joining = parse(&["card-set", "F:", "--join", "0x5E7", "--index", "2"]);
+        let Ok(DeviceCmd::CardSet(args)) = joining else { panic!("card-set") };
+        let flags = (args.join.as_deref(), args.index, args.dry_run);
+        assert_eq!(flags, (Some("0x5E7"), Some(2), false));
+        let Ok(DeviceCmd::CardSet(args)) = parse(&["card-set", "F:", "--dry-run"]) else {
+            panic!("card-set")
+        };
+        assert_eq!((args.join, args.index, args.dry_run), (None, None, true));
+        assert!(parse(&["card-set", "F:", "--join", "0x5E7"]).is_err(), "a place with a set");
+        assert!(parse(&["card-set", "F:", "--index", "2"]).is_err(), "a set with a place");
+        assert!(parse(&["card-set"]).is_err(), "a volume, always");
+        assert!(!help.contains("card-set"), "{help}");
     }
 
     /// `device list` on the fake, measured against this build's pin as

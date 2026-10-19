@@ -39,6 +39,13 @@
 //!    was made from, the plays' posted marks. The run's commits carry them
 //!    as ACKS ([`Hooks::acks`]), a commit made for nothing else never.
 //!
+//! **A card of a multi-card set** (B7, [`sets`]; [`span`](super::span)) takes
+//! the files of its range, keeps those it holds of other cards' ranges until
+//! their cards hold them, and says at its end what it holds; a card that
+//! can't take its range is offered to move its edge or to add a card, and a
+//! card's selection is spread over a new set when the listener asks
+//! ([`Ask::decide`]).
+//!
 //! **The server's federation peers** (B9, [`peers`]) are read in the same
 //! run, each a server of the card's own: listed through the server's browse
 //! proxy, their files fetched under each one's daily budget, a peer whose
@@ -85,6 +92,7 @@ use super::source::http::{Finish, Http};
 use super::source::length::{self, CardAt};
 use super::source::local::{self, Local, Reached};
 use super::source::peer::Gate;
+use super::span::{Decision, Part};
 use super::state::{
     self, Convert, FOLDER_IMAGE, Layout, NO_ART, PeerSource, Settings, State, art_key,
     hex as id_hex,
@@ -103,8 +111,10 @@ const WHOLE_EVERY_RUNS: u32 = 10;
 const OGG_HEAD: u64 = 512;
 
 mod peers;
+mod sets;
 
 pub(crate) use peers::{Federation, PeerSummary, Status as PeerStatus};
+pub(crate) use sets::SetSummary;
 
 /// A file of a run, as its hooks find it: its origin and its server path,
 /// since two of a run's servers may hold one path.
@@ -171,6 +181,9 @@ pub(crate) struct Ask {
     /// The listener's daily budget for the peers read, in MiB, kept in this
     /// computer's `budget.json`.
     pub(crate) budget_mb: Option<u64>,
+    /// A multi-card set (B7): the card's selection spread over a new set, or
+    /// the answer to a card of a set that can't take its range.
+    pub(crate) decide: Option<Decision>,
 }
 
 /// A federation peer a sync is asked to read (B9): its id in the server's
@@ -226,6 +239,11 @@ pub(crate) struct Summary {
     pub(crate) fit: Option<Fit>,
     /// Each federation peer asked for: read, or why not.
     pub(crate) peers: Vec<PeerSummary>,
+    /// The card's multi-card set, as the run leaves it.
+    pub(crate) set: Option<SetSummary>,
+    /// A card of no set that doesn't fit: its selection over the cards a set
+    /// of it would take, each of its room.
+    pub(crate) spread: Vec<Part>,
 }
 
 /// Why a sync stopped before its run ended.
@@ -383,6 +401,7 @@ fn run(
         let why = "the card isn't set up for the transfer: run `device card-setup` on it first";
         return Err((None, Halt::Refused(why.into())));
     };
+    let was = state.clone();
     ask.change.apply(&mut state.settings);
     state.settings.stored = true;
     let serial = card.serial().map_err(|_| (None, Halt::Card(Stop::Pulled)))?;
@@ -395,15 +414,21 @@ fn run(
     let opened = Session::open(card, &expect, knobs, &ask.answers, envs(), history, events);
     let mut session = opened.map_err(|stop| (None, Halt::Card(stop)))?;
     let mut clock = envs();
-    let now = (clock.now)();
+    let (now, set_id) = ((clock.now)(), (clock.id)());
     let notes = &mut *had.notes;
+    let was = Was { state: &was, set_id };
     let prepared = prepare(
-        &mut session, &mut state, space, client, reached, ask, &info, cards, now, history, notes,
-        fed,
+        &mut session, &mut state, &was, space, client, reached, ask, &info, cards, now, history,
+        notes, fed,
     );
     let mut p = match prepared {
         Ok(p) => p,
         Err(halted) => {
+            // A set's answer stored with no run: this computer's mirror too.
+            let set = halted.0.as_ref().and_then(|s| s.set.as_ref());
+            if let Some(set) = set.filter(|s| s.written) {
+                cards.mirror(&set.set);
+            }
             session.close();
             return Err(halted);
         }
@@ -420,7 +445,9 @@ fn run(
     let mut hooks = p.hooks.take().expect("hooks for a run");
     let revision = (p.ours != Some(0)).then(|| p.revision.clone());
     let (url_key, listed, plan_key) = (p.url_key, p.listed, p.plan_key);
-    hooks.store = Some(Store { state, url_key, listed, now, plan_key, revision });
+    let span = p.span.take();
+    hooks.span_cluster = span.as_ref().map(|s| s.cluster);
+    hooks.store = Some(Store { state, url_key, listed, now, plan_key, revision, span });
     hooks.history = had.history.take();
     let ran = session.run(p.plan, &mut p.fetcher, &mut hooks, events);
     *had.history = hooks.history.take();
@@ -434,7 +461,20 @@ fn run(
         had.notes.push(format!("the card's settings weren't stored: {why}"));
     }
     cards.saw(outcome.card_id, &label, now, outcome.generation, outcome.commit_id);
+    // The card's set as its state file now says it: this computer's mirror,
+    // which the set's other cards read.
+    let set = hooks.store.as_ref().and_then(|s| s.state.set.as_ref());
+    if let Some(set) = set.filter(|_| outcome.stored.is_ok()) {
+        cards.mirror(set);
+    }
     Ok((p.summary, End::Ran(outcome)))
+}
+
+/// The card's state file as the sync read it, before the run's changes, and
+/// an id for a set the run makes.
+struct Was<'a> {
+    state: &'a State,
+    set_id: u64,
 }
 
 /// The card's settings as a run stores them at its end: what it was asked
@@ -448,6 +488,8 @@ struct Store {
     /// The manifest's revision as the run read it, for a server that isn't
     /// the card's server 0 (whose revision is the root's).
     revision: Option<String>,
+    /// The card's set: what the card says of itself in it at the end.
+    span: Option<sets::SetEnd>,
 }
 
 /// A peer's pull past this many bytes through a relay is worth a warning
@@ -467,6 +509,7 @@ struct Prepared {
     ours: Option<usize>,
     url_key: u64,
     plan_key: u64,
+    span: Option<sets::SetEnd>,
 }
 
 /// The card's server this one is (2.11), by its key or a key confirmed as
@@ -480,6 +523,7 @@ fn ours_on(root: Option<&volume::Root>, talk: &Talk) -> Option<usize> {
 fn prepare(
     session: &mut Session,
     state: &mut State,
+    was: &Was<'_>,
     space: Option<Space>,
     client: &Arc<Client>,
     reached: Reached,
@@ -522,6 +566,9 @@ fn prepare(
     // (2.11), and goes into the root and SRVS as it is read.
     let url_key = server_url_key(&client.server());
     let instance = instance_of(info.instance_id.as_deref());
+    // The card's multi-card set, as it and this computer know it (B7).
+    let span = sets::SetRun::open(state, cards, card_id, url_key, ask, was.set_id);
+    let mut span = span.map_err(refused)?;
     let settings = &mut state.settings;
     let confirmed = settings.keys(url_key);
     let mut talk = Talk { url_key, instance, confirmed, peer: None };
@@ -565,10 +612,11 @@ fn prepare(
     // The selection. A run of the server's peers alone reads none of its
     // own libraries: its files stand as the card's ledger has them, as
     // after a 304, and its selection is left as it is.
-    let libraries = match (&ask.libraries, source.libraries.is_empty()) {
-        (Some(asked), _) => asked.clone(),
-        (None, false) => source.libraries.clone(),
-        (None, true) => info.user.vpaths.clone(),
+    let libraries = match (span.as_ref().and_then(sets::SetRun::libraries), &ask.libraries) {
+        (Some(set), _) => set,
+        (None, Some(asked)) => asked.clone(),
+        (None, None) if !source.libraries.is_empty() => source.libraries.clone(),
+        (None, None) => info.user.vpaths.clone(),
     };
     if !ask.peers_only {
         if let Some(unknown) = libraries.iter().find(|l| !info.user.vpaths.contains(l)) {
@@ -584,6 +632,7 @@ fn prepare(
     // queue (an older server's: 64k-192k, none).
     let transcode = info.features.transcode.as_ref();
     let plan_key = settings.plan_key(&libraries, &device, transcode);
+    let plan_key = span.as_ref().map_or(plan_key, |s| s.plan_key(plan_key));
     let source = settings.source(url_key).clone();
 
     // The rows of this server on the card, which a listing reuses.
@@ -610,7 +659,8 @@ fn prepare(
         || !joined.is_empty()
         || source.plan_key != plan_key
         || now.saturating_sub(source.full_read) >= WHOLE_EVERY_SECS
-        || source.runs.saturating_add(1) >= WHOLE_EVERY_RUNS;
+        || source.runs.saturating_add(1) >= WHOLE_EVERY_RUNS
+        || span.as_ref().is_some_and(sets::SetRun::whole);
 
     // 3. The server's side.
     let reads = talk.clone();
@@ -707,6 +757,9 @@ fn prepare(
         lists.push((side.list, Some(side.gate)));
     }
 
+    // What the card holds, for its set, read while its root is at hand.
+    let held = sets::Rows::of(root, space, span.is_some());
+
     // 4. The plan.
     let http = Http::new(client.clone(), 0, device.max_channels);
     let mut http = http.map_err(|e| refused(e.to_string()))?;
@@ -715,13 +768,43 @@ fn prepare(
     let folders_here = local::folders(info.admin.as_ref(), reached, || client.admin_directories());
     let mut fetcher = Local::new(folders_here, 0, &entries, sources);
     let source_mode = fetcher.mode().code();
-    let plan = session.plan(&wanted.card, &ask.answers, &mut fetcher);
-    let plan = plan.map_err(|s| (None, Halt::Card(s)))?;
+    // A card of a set takes its range (a set made first when asked); one
+    // that can't is offered to move its edge or to add a card, and the
+    // listener's answer, given, is planned again.
+    let dj = settings.auto_dj && !settings.for_someone_else && device.writes_mpdj();
+    let short = |fit: &Option<Fit>| fit.is_some_and(|f| !f.fits() || f.over_cap());
+    let whole_selection = span.as_ref().map(|_| wanted.clone());
+    if let Some(span) = span.as_mut() {
+        span.take(&mut wanted, &libraries, &held, space).map_err(refused)?;
+    }
+    let mut plan = sets::plan(session, &wanted, &ask.answers, &mut fetcher, span.as_ref())?;
+    let mut fit = space.map(|s| plan::fit(&s, &plan.footprint(), dj));
+    if let (Some(run), Some(selection)) = (span.as_mut(), &whole_selection)
+        && short(&fit)
+        && run.decide(ask.decide, notes)
+    {
+        wanted = selection.clone();
+        run.take(&mut wanted, &libraries, &held, space).map_err(refused)?;
+        plan = sets::plan(session, &wanted, &ask.answers, &mut fetcher, Some(&*run))?;
+        fit = space.map(|s| plan::fit(&s, &plan.footprint(), dj));
+    }
+    if let Some(span) = span.as_ref() {
+        span.unused(ask.decide, notes);
+    }
+    let spread = match span.is_none() && short(&fit) {
+        true => sets::spread(&wanted, &held, space),
+        false => Vec::new(),
+    };
+    // A set made, or an edge moved, that the card can't take yet stays on
+    // it all the same: its files for other cards leave once those sync.
+    if !ask.dry_run
+        && short(&fit)
+        && let Some(span) = span.as_mut().filter(|s| s.decided())
+    {
+        span.keep(session, was.state, notes);
+    }
     fill_late(client, &plan, &mut wanted);
     peers::planned(&mut peer_summaries, &fetcher.network().peers, &plan, &wanted);
-
-    let dj = settings.auto_dj && !settings.for_someone_else && device.writes_mpdj();
-    let fit = space.map(|s| plan::fit(&s, &plan.footprint(), dj));
     let order = plan.fetch_order();
     let converted = |i: &usize| matches!(wanted.card.files[*i].bytes, Bytes::Converted(_));
     let (fetches, fetch_bytes) = plan.fetches();
@@ -743,6 +826,8 @@ fn prepare(
         report: plan.report.clone(),
         fit,
         peers: peer_summaries,
+        set: span.as_ref().and_then(sets::SetRun::summary),
+        spread,
     };
     if !ask.dry_run {
         if let Some(fit) = fit.filter(|f| !f.fits() || f.over_cap()) {
@@ -835,9 +920,12 @@ fn prepare(
         history: None,
         notes: Vec::new(),
         looked: false,
+        span_cluster: None,
+        last: None,
     };
     let hooks = Some(hooks);
-    Ok(Prepared { plan, fetcher, hooks, summary, listed, revision, ours, url_key, plan_key })
+    let span = span.as_ref().and_then(sets::SetRun::end);
+    Ok(Prepared { plan, fetcher, hooks, summary, listed, revision, ours, url_key, plan_key, span })
 }
 
 /// A ledger row as a manifest entry, for the local-disk source's check of
@@ -997,6 +1085,10 @@ struct SyncHooks {
     notes: Vec<String>,
     /// The thumbnail step ran: the art it left is what is stored.
     looked: bool,
+    /// A card of a set: the final commit's ledger is read for its end, its
+    /// files' loads by this cluster.
+    span_cluster: Option<u32>,
+    last: Option<sets::Final>,
 }
 
 impl SyncHooks {
@@ -1138,6 +1230,9 @@ impl Hooks for SyncHooks {
     }
 
     fn autodj(&mut self, commit: &Commit<'_>) -> AutoDj {
+        if let Some(cluster) = self.span_cluster {
+            self.last = Some(sets::Final::of(commit, cluster));
+        }
         if !self.dj {
             if let Some(why) = self.dj_off.take() {
                 self.notes.push(format!("no Auto DJ index: {why}"));
@@ -1281,6 +1376,10 @@ impl Hooks for SyncHooks {
         if outcome.parked.is_none() || self.looked {
             settings.art = std::mem::take(&mut self.art);
         }
+        // What the card now says of itself in its set.
+        if let Some(end) = store.span.as_mut() {
+            store.state.set = Some(end.settle(outcome, self.last.as_ref(), store.listed));
+        }
         Some(store.state.text(seq))
     }
 }
@@ -1376,7 +1475,8 @@ fn on(
     };
     let printed = serde_json::to_string_pretty(&synced_json(&synced, ask.dry_run));
     let _ = writeln!(out, "{}", printed.unwrap_or_default());
-    if let End::Ran(_) = synced.end
+    let kept = synced.summary.as_ref().and_then(|s| s.set.as_ref()).is_some_and(|s| s.written);
+    if (matches!(synced.end, End::Ran(_)) || kept)
         && let Err(e) = cards.save()
     {
         let _ = writeln!(err, "mstream-player: {e}");
@@ -1452,6 +1552,8 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
             "report": report_json(&p.report),
             "fit": fit,
             "peers": p.peers.iter().map(PeerSummary::json).collect::<Vec<_>>(),
+            "set": p.set.as_ref().map(SetSummary::json),
+            "spread": sets::parts_json(&p.spread),
         })
     });
     let (outcome, stopped) = match &s.end {

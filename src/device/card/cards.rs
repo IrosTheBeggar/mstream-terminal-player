@@ -6,22 +6,26 @@
 //! settings taken from here), and it is the second sign of a copied card
 //! (the transfer plan's 2.10): a byte-level clone keeps the volume serial,
 //! so only a card id seen at one generation with another commit shows it
-//! ([`Cards::diverged`]). Disposable, as stats.json is: a file that doesn't
-//! read is no cache at all, and the next save writes it over; one of a newer
-//! player is read as none and never written over. Every member this player
-//! doesn't know is kept.
+//! ([`Cards::diverged`]). It mirrors each multi-card set's table too, the
+//! newest it has seen ([`Cards::mirror`]): a card of a set learns from it what
+//! the set's other cards did while it was out of the reader (the transfer
+//! plan's 2.12). Disposable, as stats.json is: a file that doesn't read is no
+//! cache at all, and the next save writes it over; one of a newer player is
+//! read as none and never written over. Every member this player doesn't
+//! know is kept.
 
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 
+use super::span::{self, Set};
 use super::state::{Copied, from_hex, hex};
 
 /// The file's schema.
 pub(crate) const VERSION: u64 = 1;
 
 /// The members of a card's entry this player reads and writes.
-const KNOWN: [&str; 4] = ["label", "lastSeen", "generation", "commitId"];
+const KNOWN: [&str; 5] = ["label", "lastSeen", "generation", "commitId", "set"];
 
 /// A card as this computer last saw it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -32,7 +36,9 @@ pub(crate) struct Seen {
     /// Its root then.
     pub(crate) generation: u32,
     pub(crate) commit_id: u64,
-    /// A newer player's members, by name (a multi-card set's, say).
+    /// The multi-card set it is a card of, by the set's id.
+    pub(crate) set: Option<u64>,
+    /// A newer player's members, by name.
     pub(crate) keep: BTreeMap<String, Value>,
 }
 
@@ -40,6 +46,8 @@ pub(crate) struct Seen {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Cards {
     pub(crate) cards: BTreeMap<u64, Seen>,
+    /// Each multi-card set's table, by its id: the newest seen.
+    pub(crate) sets: BTreeMap<u64, Set>,
     keep: BTreeMap<String, Value>,
     /// A newer player's file: read as none, and never written over.
     newer: bool,
@@ -61,19 +69,39 @@ impl Cards {
             let (Some(id), Some(entry)) = (from_hex(id), entry.as_object()) else { continue };
             let number = |key: &str| entry.get(key).and_then(Value::as_u64);
             let text = |key: &str| entry.get(key).and_then(Value::as_str);
-            let keep = entry.iter().filter(|(name, _)| !KNOWN.contains(&name.as_str()));
+            let set = text("set").and_then(from_hex);
+            let known = |name: &str| KNOWN.contains(&name) && (name != "set" || set.is_some());
+            let keep = entry.iter().filter(|(name, _)| !known(name));
             let seen = Seen {
                 label: text("label").unwrap_or_default().to_string(),
                 last_seen: number("lastSeen").unwrap_or(0),
                 generation: number("generation").and_then(|g| u32::try_from(g).ok()).unwrap_or(0),
                 commit_id: text("commitId").and_then(from_hex).unwrap_or(0),
+                set,
                 keep: keep.map(|(name, value)| (name.clone(), value.clone())).collect(),
             };
             cards.insert(id, seen);
         }
-        let keep = top.iter().filter(|(name, _)| !matches!(name.as_str(), "version" | "cards"));
-        let keep = keep.map(|(name, value)| (name.clone(), value.clone())).collect();
-        Cards { cards, keep, newer: false }
+        // A set's table this player can't read stays as it was, unread.
+        let mut sets = BTreeMap::new();
+        let mut unread = Map::new();
+        for (id, value) in top.get("sets").and_then(Value::as_object).into_iter().flatten() {
+            match (from_hex(id), Set::read(value)) {
+                (Some(n), Some(set)) if set.id == n => {
+                    sets.insert(n, set);
+                }
+                _ => {
+                    unread.insert(id.clone(), value.clone());
+                }
+            }
+        }
+        let others = |name: &&String| !matches!(name.as_str(), "version" | "cards" | "sets");
+        let keep = top.iter().filter(|(name, _)| others(name));
+        let mut keep: BTreeMap<String, Value> = keep.map(|(n, v)| (n.clone(), v.clone())).collect();
+        if !unread.is_empty() {
+            keep.insert("sets".into(), Value::Object(unread));
+        }
+        Cards { cards, sets, keep, newer: false }
     }
 
     /// The file's text.
@@ -85,11 +113,24 @@ impl Cards {
             entry.insert("lastSeen".into(), seen.last_seen.into());
             entry.insert("generation".into(), seen.generation.into());
             entry.insert("commitId".into(), hex(seen.commit_id).into());
+            if let Some(set) = seen.set {
+                entry.insert("set".into(), hex(set).into());
+            }
             cards.insert(hex(*id), Value::Object(entry));
         }
         let mut top: Map<String, Value> = self.keep.clone().into_iter().collect();
         top.insert("version".into(), json!(VERSION));
         top.insert("cards".into(), Value::Object(cards));
+        if !self.sets.is_empty() {
+            let mut sets = match top.remove("sets") {
+                Some(Value::Object(unread)) => unread,
+                _ => Map::new(),
+            };
+            for (id, set) in &self.sets {
+                sets.insert(hex(*id), set.value(None));
+            }
+            top.insert("sets".into(), Value::Object(sets));
+        }
         serde_json::to_string_pretty(&Value::Object(top)).unwrap_or_default() + "\n"
     }
 
@@ -132,6 +173,31 @@ impl Cards {
         if !diverged {
             seen.generation = generation;
             seen.commit_id = commit;
+        }
+    }
+
+    /// A set's table as a card of it left it: merged with the one kept
+    /// ([`span::merge`]: the newer ranges, each card's newest facts), and
+    /// each card of it this computer has seen marked as the set's.
+    pub(crate) fn mirror(&mut self, set: &Set) {
+        let merged = match self.sets.get(&set.id) {
+            Some(kept) => span::merge(set, kept),
+            None => set.clone(),
+        };
+        for id in merged.cards.iter().filter_map(|s| s.card_id) {
+            if let Some(seen) = self.cards.get_mut(&id) {
+                seen.set = Some(merged.id);
+            }
+        }
+        self.sets.insert(merged.id, merged);
+    }
+
+    /// The set of id `id` as a card of it knows it (`own`) and as this
+    /// computer last saw it, as one.
+    pub(crate) fn set_of(&self, own: &Set) -> Set {
+        match self.sets.get(&own.id) {
+            Some(kept) => span::merge(own, kept),
+            None => own.clone(),
         }
     }
 }

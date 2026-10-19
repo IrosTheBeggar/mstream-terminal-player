@@ -11,6 +11,8 @@
 //! - `created`: when this identity was set up, in Unix seconds;
 //! - `plays`: the play log's posted mark of each device and epoch (2.20.6),
 //!   once a run has settled any of the card's plays;
+//! - `set`: for a card of a multi-card set, the set's whole table and this
+//!   card's index in it ([`span`](super::span));
 //!
 //! and the sync's settings ([`Settings`]), written once a sync has stored
 //! them: `sources` (each server the card is filled from, by its URL's key
@@ -42,6 +44,7 @@ use super::contract::device_txt::DeviceTxt;
 use super::contract::msmf::Ack;
 use super::contract::prim::hex as hex_bytes;
 use super::engine::Removal;
+use super::span::Set;
 use super::volume::{Private, STATE_VERSION, Serial};
 use crate::api::types::TranscodeInfo;
 use crate::api::urls::{TransferBitrate, TransferCodec};
@@ -50,8 +53,10 @@ use crate::api::urls::{TransferBitrate, TransferCodec};
 pub(crate) const FORMAT: &str = "mstream-card-state";
 
 /// The members schema 1 reads and writes; every other member is kept.
-const KNOWN: [&str; 9] =
-    ["format", "version", "seq", "cardId", "label", "volumeSerial", "volumeUuid", "created", "plays"];
+const KNOWN: [&str; 10] = [
+    "format", "version", "seq", "cardId", "label", "volumeSerial", "volumeUuid", "created", "plays",
+    "set",
+];
 
 /// The settings' members ([`Settings`]).
 const SETTINGS: [&str; 7] =
@@ -78,6 +83,11 @@ pub(crate) struct State {
     /// plays up to the seq are settled, or weren't to be sent. The next
     /// commit's ACKS follow them (2.5.6).
     pub(crate) plays: Vec<Ack>,
+    /// The multi-card set the card is a card of, its whole table.
+    pub(crate) set: Option<Set>,
+    /// The file names a set this software can't read (a newer player's):
+    /// kept as it is, and the card isn't synced.
+    pub(crate) set_unread: bool,
     pub(crate) settings: Settings,
     /// Every member this software doesn't know, by name.
     pub(crate) keep: BTreeMap<String, Value>,
@@ -100,7 +110,12 @@ impl State {
             Serial::Fat(n) => Some(n),
             Serial::Uuid(_) => None,
         });
-        let known = |name: &str| KNOWN.contains(&name) || SETTINGS.contains(&name);
+        let set_value = object.get("set").filter(|v| !v.is_null());
+        let set = set_value.and_then(Set::read);
+        let set_unread = set_value.is_some() && set.is_none();
+        let known = |name: &str| {
+            (KNOWN.contains(&name) && !(name == "set" && set_unread)) || SETTINGS.contains(&name)
+        };
         let keep = object.iter().filter(|(name, _)| !known(name));
         Some(State {
             card_id: text("cardId").and_then(from_hex).unwrap_or(0),
@@ -110,6 +125,8 @@ impl State {
             uuid: text("volumeUuid").map(str::to_string),
             created: object.get("created").and_then(Value::as_u64).unwrap_or(0),
             plays: object.get("plays").map_or_else(Vec::new, marks_of),
+            set,
+            set_unread,
             settings: Settings::read(object),
             keep: keep.map(|(name, value)| (name.clone(), value.clone())).collect(),
         })
@@ -153,6 +170,9 @@ impl State {
         members.push(("created", self.created.into()));
         if !self.plays.is_empty() {
             members.push(("plays", marks_value(&self.plays)));
+        }
+        if let Some(set) = &self.set {
+            members.push(("set", set.value(set.slot_of(self.card_id).map(|i| i + 1))));
         }
         members.extend(self.settings.members());
         members.extend(self.keep.iter().map(|(name, value)| (name.as_str(), value.clone())));

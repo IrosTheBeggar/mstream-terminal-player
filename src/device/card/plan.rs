@@ -579,6 +579,35 @@ pub(crate) fn fit(space: &Space, fp: &Footprint, auto_dj: bool) -> Fit {
     Fit { needed: music + dirs + mstream + player + margin, room, tracks: fp.records }
 }
 
+/// What a track takes of a card beside its bytes: the next tags file's
+/// record and Auto DJ row beside the ones there, the player's room for it,
+/// and its name's directory entries (about a long name's). A multi-card
+/// set's split and its offers (B7) count a card's load by it.
+const TRACK_EXTRA: u64 = 2 * TAGS_PER_TRACK + 2 * MPDJ_PER_TRACK + PLAYER_PER_TRACK + 96;
+
+/// A track of `size` bytes on a card of `cluster`-byte clusters, its
+/// overheads with it.
+pub(crate) fn track_cost(size: u64, cluster: u32) -> u64 {
+    let cluster = (cluster as u64).max(512);
+    size.div_ceil(cluster) * cluster + TRACK_EXTRA
+}
+
+/// An album folder's own: its folder's cluster and its thumbnail's.
+pub(crate) fn album_cost(cluster: u32) -> u64 {
+    2 * (cluster as u64).max(512)
+}
+
+/// The room a card has for the transfer's files, as a set counts it: its
+/// size less the margin, and less what the rest of the card takes beside
+/// `ours`, the load of the files its ledger lists now ([`track_cost`]) — the
+/// player's own room at least (its library, its play log, there once it has
+/// booted with music), the listener's files, the file system's own.
+pub(crate) fn usable_room(space: &Space, ours: u64) -> u64 {
+    let margin = (space.size / 100).max(MARGIN_MIN);
+    let theirs = space.size.saturating_sub(space.free).saturating_sub(ours);
+    space.size.saturating_sub(margin + theirs.max(PLAYER_FIXED))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

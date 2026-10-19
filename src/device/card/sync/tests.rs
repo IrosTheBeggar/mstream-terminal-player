@@ -6,7 +6,7 @@
 //! corpus and made-up Ogg Opus streams; the covers are made-up pictures;
 //! the embeddings are made-up vectors (no real index: AUTODJ-INDEX.md 12.5).
 //! The server's federation peers, and their own loopback servers, are
-//! [`peers`]'s.
+//! [`peers`]'s; multi-card sets, several cards of one selection, [`span`]'s.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -1249,3 +1249,4 @@ fn the_hidden_command_syncs_only_a_volume_the_rule_accepts() {
 }
 
 mod peers;
+mod span;
