@@ -201,8 +201,9 @@ comes from the cache, or a download, beside them.
    `clock=unset`); the time itself is asked by a bare `@time`, answered
    `@time <unix-ms>` or `@time unset`, at once and changing nothing.
    - A board whose `@status` has a `clock=` key is asked a bare `@time`
-     once per listen, after its status, on the port the listen holds. This
-     computer's time is taken halfway between the question and its answer.
+     once per listen, after its status, on the port the listen holds; a
+     clock set is not read back. This computer's time is taken halfway
+     between the question and its answer.
    - When the answer is `@time unset`, or a time more than 2 s from this
      computer's (`listen::CLOCK_SLACK`: a restart alone leaves the board's
      clock within 1.5 s of the time set), it is sent one `@time <unix-ms>`
@@ -220,7 +221,13 @@ comes from the cache, or a download, beside them.
    - The page's listens do this, the tab's and `device flash`'s alike;
      `device flash --yes`'s lines, `device list` and `device format` only
      listen. The hidden `device time` reads and sets one board's clock the
-     same way, for the device checks.
+     same way, and reads it once more after a set (its `after`), for the
+     device checks.
+   - A listen told to stop (the tab left, a write asked for) sends no
+     `@time <unix-ms>`. A set the board answered `@time ok` before the
+     stop is still said and kept for Details, and a refusal it gave is
+     still said; only a silence the stop cut short, or a port that failed
+     meanwhile, is said by none.
    - A board whose `@status` has no `clock=` (before 0.12.0) is never
      asked: absence is how the page tells, never the version. Should one
      answer `@err 7 time` anyway, it is left as it is.
@@ -2381,3 +2388,24 @@ The cards' command-line lines are plain English, like the `plan:` line.
   - **Not tried on a board:** the set on a 0.12.0 Core2, its log line and
     the fact (the firmware's device check 10); nor the proxy's key against
     a running mStream of the batch.
+- **2026-10-19 — Part B13's review fixes.** The review of B13's terminal
+  half found no reset, no `@time` outside a listen and no old board or
+  old server misread, and three smaller gaps; fixed as follows. The entry
+  above's "the bare `@time` again to read it back" and "claims nothing"
+  were true of 36120c8.
+  - **One bare `@time` per listen, as clause 5 says.** The page's listen
+    no longer reads the clock back after a set (`listen::ClockTo::Set`):
+    one bare `@time`, then one `@time <unix-ms>` when due. The firmware
+    reads the chip back itself and answers `@err 4 time rtc` when it
+    didn't take, so the read-back told the page nothing it used. The
+    hidden `device time` still reads it again (`ClockTo::SetAndCheck`, its
+    `after`), for the device checks.
+  - **A stop drops only what it cut short.** A listen told to stop (the
+    tab left, a write asked for) sends no `@time <unix-ms>`; a set the
+    board answered `@time ok` just before the stop is still said and kept
+    for Details' *Clock* fact, and a refusal it gave is still said
+    (`desk::listen_clock`), where the whole outcome was dropped. A silence
+    the stop cut short, or a port that failed meanwhile, is said by none,
+    as before.
+  - **`desk::format_end` has its doc comment back:** `clock_line` had
+    been put between the two. Code only.
