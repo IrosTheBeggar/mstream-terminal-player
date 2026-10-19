@@ -22,7 +22,7 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::*;
 use crate::device::card::cards::Cards as Known;
-use crate::device::card::engine::{Answers, Guard, Removal};
+use crate::device::card::engine::{Answers, Removal};
 use crate::device::card::plan::{Fit, TRACK_CAP};
 use crate::device::card::state::Convert;
 use crate::device::card::volume::{Fs, Refusal, Table};
@@ -54,12 +54,7 @@ pub(crate) struct CardUi {
     pub(crate) syncing: Option<String>,
 }
 
-/// The removals the gate names before "and N more".
-const GATE_FIRST: usize = worker::GATE_PATHS;
-/// More removals than this ask first (clause 58).
-const GATE_MORE_THAN: usize = 50;
-/// A sync over a relay past this many bytes warns first (clause 58).
-const RELAY_WARN: u64 = 1_000_000_000;
+
 
 // ── The words ───────────────────────────────────────────────────────────────
 
@@ -171,7 +166,8 @@ impl CardPrimary {
         .to_string()
     }
 
-    /// Its label on the card: its word and `▸`.
+    /// Its label on the card: its word and `▸` (the floor tests' word).
+    #[cfg(test)]
     pub(crate) fn label(self) -> String {
         format!("{} {}", self.word(), glyphs().forward)
     }
@@ -1399,33 +1395,19 @@ pub(crate) enum GateKind {
     Server { card: String, old: String, new: String, rows: usize, plays: usize },
 }
 
-/// The gate a Sync ▸ passes first, if any: from the plan's guards and the
-/// card's server, in their order — the relay last (clause 58).
+/// The gate a Sync ▸ passes first, if any: the worker's, from the plan's
+/// guards, in their order, then the relay's (clause 58). The command line
+/// asks the same ones (clause 67).
 fn gate_for(card: &CardView, plan: &Planned, allow: Allow) -> Option<CardGate> {
     let key = card.key.clone();
-    let server = server_name(card);
-    let name = card_name(card);
-    let removals = plan.removals.len();
-    let strong = plan.guards.iter().any(|g| matches!(g, Guard::Removals { strong: true, .. }));
-    let gate = |kind: GateKind, allow: &Allow| Some(CardGate { key: key.clone(), kind, allow: allow.clone() });
-    if strong && !allow.answers.mass_removals {
-        let total = card.facts().map_or(0, |f| f.tracks);
-        return gate(GateKind::Half { card: name, server, n: removals, total, libs: Vec::new(), ticked: false }, &allow);
-    }
-    if removals > GATE_MORE_THAN && !allow.answers.removals && !strong {
-        let first = plan.removals.iter().take(GATE_FIRST).cloned().collect();
-        return gate(GateKind::Removals { card: name, server, n: removals, first }, &allow);
-    }
-    if let Some(Guard::Adopt(paths)) = plan.guards.iter().find(|g| matches!(g, Guard::Adopt(_)))
-        && allow.answers.adopt.is_none()
-    {
-        let all = card.facts().map_or(paths.len(), |f| f.music.unlisted as usize).max(paths.len());
-        return gate(GateKind::Adopt { drive: card.drive(), server, n: paths.len(), all }, &allow);
-    }
-    if card.server.link().is_some_and(|l| l.relay) && plan.bytes > RELAY_WARN && !allow.proxy_copies.contains(&0) {
-        return gate(GateKind::Relay { server, bytes: plan.bytes }, &allow);
-    }
-    None
+    let kind = match worker::gate_ahead(card, plan, &allow) {
+        Some(ahead) => gate_of_asked(card, &ahead)?,
+        None if worker::relay_ahead(card, plan) && !allow.proxy_copies.contains(&0) => {
+            GateKind::Relay { server: server_name(card), bytes: plan.bytes }
+        }
+        None => return None,
+    };
+    Some(CardGate { key, kind, allow })
 }
 
 /// A gate from the worker's ask, after a sync stopped for it.

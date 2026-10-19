@@ -60,6 +60,11 @@ const RETRY_FIRST: u64 = 60;
 const RETRY_MOST: u64 = 30 * 60;
 /// The removals a gate names before "and N more" (clause 58).
 pub(crate) const GATE_PATHS: usize = 5;
+/// More removals than this ask first (clause 58).
+pub(crate) const GATE_MORE_THAN: usize = 50;
+/// A sync through Quick Connect's relay past this many bytes says so first
+/// (clause 58).
+pub(crate) const RELAY_WARN: u64 = 1_000_000_000;
 
 // ── What the worker is given ────────────────────────────────────────────────
 
@@ -1803,6 +1808,38 @@ impl Worker {
     }
 }
 
+/// The gate a sync of `plan` stops at before it starts, past what `allow`
+/// lets through (clause 58), in their order: the stronger removals gate,
+/// more than 50 removals, the listener's files to adopt. The tab and the
+/// command line ask the same ones; the relay's word is [`relay_ahead`].
+pub(crate) fn gate_ahead(card: &CardView, plan: &Planned, allow: &Allow) -> Option<Gate> {
+    let removals = plan.removals.len();
+    let strong = plan.guards.iter().any(|g| matches!(g, Guard::Removals { strong: true, .. }));
+    if strong && !allow.answers.mass_removals {
+        let total = card.facts().map_or(0, |f| f.tracks);
+        return Some(Gate::Half { n: removals, total, by_library: Vec::new() });
+    }
+    if removals > GATE_MORE_THAN && !allow.answers.removals && !strong {
+        let first = plan.removals.iter().take(GATE_PATHS).cloned().collect();
+        return Some(Gate::Removals { n: removals, first });
+    }
+    let adopt = plan.guards.iter().find_map(|g| match g {
+        Guard::Adopt(paths) => Some(paths.len()),
+        _ => None,
+    });
+    if let Some(n) = adopt.filter(|_| allow.answers.adopt.is_none()) {
+        let all = card.facts().map_or(n, |f| f.music.unlisted as usize).max(n);
+        return Some(Gate::Adopt { n, all });
+    }
+    None
+}
+
+/// A sync of `plan` reaches its server through Quick Connect's relay and is
+/// big enough to say so first (clause 58).
+pub(crate) fn relay_ahead(card: &CardView, plan: &Planned) -> bool {
+    card.server.link().is_some_and(|l| l.relay) && plan.bytes > RELAY_WARN
+}
+
 /// The answers a paused sync is retried with: its take-over, if any.
 fn finished_allow(view: &CardView) -> Allow {
     Allow { take_over: view.take_over, ..Allow::default() }
@@ -2340,4 +2377,4 @@ history=1
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -84,24 +84,33 @@ enum DeviceCmd {
     /// List the firmware's releases on GitHub (one request): each one's date, its builds, and
     /// the ones already on this computer
     Releases(ReleasesArgs),
+    /// List the SD cards in this computer's card readers, one line each: the drive, the name,
+    /// the size and file system, then the server, tracks, last sync and next sync, or why the
+    /// player can't use it. Reads only, and asks each card's server once
+    Cards,
+    /// One card in a reader: `status` prints its facts; `setup`, `sync` and `plays` print their
+    /// plan and stop without --yes; `eject` lets it go. Each gate is a flag naming what it lets
+    /// through
+    Card(CardArgs),
+    // The hidden card commands below stay, as JSON, for the real-card checks
+    // and scripts that read every field: `device cards` and `device card`
+    // are the listener's, in plain lines, on the GUI's transfer worker
+    // (docs/ux-contracts/mp3-player-screen.md, clauses 64-67; the decision
+    // of 2026-10-19 in its deviations log).
+    //
     // The cards in this computer's readers as JSON, each volume with its
-    // verdict and an accepted card with what it holds; read only. For the
-    // real-card checks: the listener's `device cards` waits for its UX
-    // contract (docs/ux-contracts/mp3-player-screen.md, the command line).
+    // verdict and an accepted card with what it holds; read only.
     #[command(hide = true)]
     CardProbe,
     // Sets up the card at a volume the drive-safety rule accepts (`/music`,
     // the empty first commit, its state file) and prints what it found and
-    // did as JSON; `--dry-run` says what it would do and writes nothing. For
-    // the real-card checks: the listener's `device card <drive> setup` waits
-    // for its UX contract too.
+    // did as JSON; `--dry-run` says what it would do and writes nothing.
     #[command(hide = true)]
     CardSetup(CardSetupArgs),
     // Syncs a set-up card at a volume the drive-safety rule accepts from the
     // server of the saved session, and prints the plan and what came of it
-    // as JSON; `--dry-run` plans and writes nothing. For the real-card
-    // checks: the listener's `device card <drive> sync` waits for its UX
-    // contract too.
+    // as JSON; `--dry-run` plans and writes nothing. Its spread flags make a
+    // multi-card set, which the Card view doesn't yet.
     #[command(hide = true)]
     CardSync(CardSyncArgs),
     // Prints the multi-card set of a set-up card at a volume the drive-safety
@@ -116,8 +125,7 @@ enum DeviceCmd {
     // the server of the saved session, and prints what came of it as JSON.
     // It only reads the card: the plays it settles are acknowledged there
     // (ACKS, the state file's marks) by the next sync's commit. `--dry-run`
-    // maps them and saves and posts nothing. For the real-card checks: the
-    // listener's `device card <drive> plays` waits for its UX contract too.
+    // maps them and saves and posts nothing.
     #[command(hide = true)]
     CardPlays(CardPlaysArgs),
     // Reads the clock of the board on a port with a bare `@time`, over the
@@ -129,6 +137,166 @@ enum DeviceCmd {
     // waits for its UX contract.
     #[command(hide = true)]
     Time(TimeArgs),
+}
+
+/// What `device card` does to the card.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum CardWhat {
+    Status,
+    Setup,
+    Sync,
+    Plays,
+    Eject,
+}
+
+// The flags of `device card` (clause 65): the gates' name what they let
+// through; the settings' write state.json only. Each is checked against
+// the action it belongs to.
+#[derive(Args, Clone)]
+pub struct CardArgs {
+    /// The card: a drive letter (E:), a mount path, or a card's name when one card has it
+    drive: String,
+    /// What to do: status, setup, sync, plays or eject
+    #[arg(value_enum)]
+    what: CardWhat,
+    /// setup, sync, plays: no question; print each step and do it
+    #[arg(long, short = 'y')]
+    yes: bool,
+    /// sync: let it remove N tracks, N the plan's exact count (more than 50 removals, or half
+    /// the card, ask first)
+    #[arg(long, value_name = "N")]
+    allow_removals: Option<usize>,
+    /// sync: print every path the sync would remove
+    #[arg(long)]
+    list_removals: bool,
+    /// setup, sync: the saved server the card is filled from, by its name or its address
+    #[arg(long, value_name = "NAME")]
+    server: Option<String>,
+    /// setup, sync: with --server, make it the server of a card another server filled
+    #[arg(long, requires = "server")]
+    take_over: bool,
+    /// setup, sync: the music on the card that mStream didn't put there and the server also
+    /// has is the sync's from now on, removals and all
+    #[arg(long, conflicts_with = "keep_mine")]
+    adopt: bool,
+    /// setup, sync: the music on the card that mStream didn't put there stays yours
+    #[arg(long)]
+    keep_mine: bool,
+    /// sync: copy a peer's files through the parent server that alone reaches it
+    #[arg(long)]
+    through_parent: bool,
+    /// setup: a copied card takes an identity of its own
+    #[arg(long)]
+    new_identity: bool,
+    /// setup: the card's name
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    /// setup: the server's libraries it holds, comma-separated
+    #[arg(long, value_delimiter = ',', value_name = "LIST")]
+    libraries: Option<Vec<String>>,
+    /// setup: convert only what the player can't play, or everything
+    #[arg(long, value_parser = ["needed", "all"])]
+    convert: Option<String>,
+    /// setup: what it converts to: opus-64 to opus-192, mp3-128 to mp3-320
+    #[arg(long, value_name = "CODEC")]
+    to: Option<String>,
+    /// setup: follow the server's removals, or never remove
+    #[arg(long, value_parser = ["follow", "never"])]
+    removals: Option<String>,
+    /// setup: small covers for the player
+    #[arg(long, value_parser = ["on", "off"])]
+    covers: Option<String>,
+    /// setup: write its Auto DJ index
+    #[arg(long = "autodj", value_parser = ["on", "off"])]
+    auto_dj: Option<String>,
+    /// setup: a card for you, or for someone else (no Auto DJ index, plays not sent)
+    #[arg(long = "for", value_parser = ["me", "someone-else"])]
+    for_whom: Option<String>,
+    /// setup: what this computer takes from each peer a day, in MB
+    #[arg(long, value_name = "MB")]
+    budget: Option<u64>,
+}
+
+impl CardArgs {
+    /// What to do and how, or the flag that doesn't belong with it.
+    fn flags(&self) -> Result<(card::lines::What, card::lines::Flags), String> {
+        use card::lines::What;
+        let what = match self.what {
+            CardWhat::Status => What::Status,
+            CardWhat::Setup => What::Setup,
+            CardWhat::Sync => What::Sync,
+            CardWhat::Plays => What::Plays,
+            CardWhat::Eject => What::Eject,
+        };
+        let on = |v: &Option<String>| v.as_deref().map(|w| w == "on");
+        let to = match &self.to {
+            Some(word) => {
+                let refused = || format!("--to {word} isn't one it takes");
+                Some(card::lines::codec_of(word).ok_or_else(refused)?)
+            }
+            None => None,
+        };
+        let flags = card::lines::Flags {
+            yes: self.yes,
+            allow_removals: self.allow_removals,
+            list_removals: self.list_removals,
+            server: self.server.clone(),
+            take_over: self.take_over,
+            adopt: self.adopt,
+            keep_mine: self.keep_mine,
+            through_parent: self.through_parent,
+            new_identity: self.new_identity,
+            name: self.name.clone(),
+            libraries: self.libraries.clone(),
+            convert: self.convert.as_deref().map(|w| {
+                if w == "all" { card::state::Convert::Everything } else { card::state::Convert::Unplayable }
+            }),
+            to,
+            removals: self.removals.as_deref().map(|w| {
+                if w == "never" { card::engine::Removal::Never } else { card::engine::Removal::Mirror }
+            }),
+            covers: on(&self.covers),
+            auto_dj: on(&self.auto_dj),
+            for_someone_else: self.for_whom.as_deref().map(|w| w == "someone-else"),
+            budget_mb: self.budget,
+        };
+        // Each flag with the action it belongs to.
+        let setup_only = [
+            ("--new-identity", self.new_identity),
+            ("--name", self.name.is_some()),
+            ("--libraries", self.libraries.is_some()),
+            ("--convert", self.convert.is_some()),
+            ("--to", self.to.is_some()),
+            ("--removals", self.removals.is_some()),
+            ("--covers", self.covers.is_some()),
+            ("--autodj", self.auto_dj.is_some()),
+            ("--for", self.for_whom.is_some()),
+            ("--budget", self.budget.is_some()),
+        ];
+        let sync_only = [
+            ("--allow-removals", self.allow_removals.is_some()),
+            ("--list-removals", self.list_removals),
+            ("--through-parent", self.through_parent),
+        ];
+        let both = [
+            ("--server", self.server.is_some()),
+            ("--take-over", self.take_over),
+            ("--adopt", self.adopt),
+            ("--keep-mine", self.keep_mine),
+        ];
+        let (setup, sync) = (what == What::Setup, what == What::Sync);
+        let wrong = |list: &[(&'static str, bool)], fits: bool| {
+            list.iter().find(|(_, on)| *on && !fits).map(|(flag, _)| *flag)
+        };
+        let refused = wrong(&setup_only, setup)
+            .or_else(|| wrong(&sync_only, sync))
+            .or_else(|| wrong(&both, setup || sync))
+            .or_else(|| wrong(&[("--yes", self.yes)], setup || sync || what == What::Plays));
+        match refused {
+            Some(flag) => Err(format!("{flag} doesn't go with {}", what.word())),
+            None => Ok((what, flags)),
+        }
+    }
 }
 
 #[derive(Args, Clone)]
@@ -460,6 +628,30 @@ pub fn run(args: DeviceArgs) -> i32 {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             releases_on(&*firmware::net(), args.pre, &mut out, &mut err)
         }
+        DeviceCmd::Cards => {
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            let (mut ask, ctrl_c) = (|_: &str| None, std::sync::atomic::AtomicU8::new(0));
+            let mut io = card::lines::Io { out: &mut out, err: &mut err, ask: &mut ask, ctrl_c: &ctrl_c };
+            card::lines::cards(card::worker::Setup::system(), saved_servers(), &mut io)
+        }
+        DeviceCmd::Card(args) => {
+            let (what, flags) = match args.flags() {
+                Ok(asked) => asked,
+                Err(why) => {
+                    eprintln!("mstream-player: {why}");
+                    return 2;
+                }
+            };
+            if what == card::lines::What::Sync {
+                interrupt::catch();
+            }
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            let mut ask = ask_on_terminal;
+            let ctrl_c = &interrupt::PRESSED;
+            let mut io = card::lines::Io { out: &mut out, err: &mut err, ask: &mut ask, ctrl_c };
+            let setup = card::worker::Setup::system();
+            card::lines::card(setup, saved_servers(), &args.drive, &what, &flags, &mut io)
+        }
         DeviceCmd::CardProbe => card::volume::probe(&mut std::io::stdout(), &mut std::io::stderr()),
         DeviceCmd::CardSetup(args) => {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -513,6 +705,97 @@ pub fn run(args: DeviceArgs) -> i32 {
             page::run(args)
         }
     }
+}
+
+/// The servers saved on this computer as the command line reaches them
+/// (clause 3a): each at its address. A server reached with Quick Connect
+/// only the player can dial; it is listed, with why it can't be reached
+/// from here, so a card filled from it still names it.
+fn saved_servers() -> Vec<card::worker::ServerLink> {
+    let Ok(config) = crate::config::load() else { return Vec::new() };
+    let credentials = crate::config::load_credentials().ok();
+    let session = crate::config::preferred_server(&config).map(|e| e.url.clone());
+    let saved = config.servers.iter().filter(|e| e.peer.is_none());
+    saved
+        .map(|e| {
+            let base = if crate::quickconnect::is_tunnel_id(&e.url) {
+                let why = "reached with Quick Connect, which only the player can dial: sync it from the GUI";
+                Err(why.to_string())
+            } else {
+                Ok(e.url.clone())
+            };
+            card::worker::ServerLink {
+                id: e.url.clone(),
+                name: crate::config::display_name(e),
+                base,
+                token: credentials.as_ref().and_then(|c| crate::config::token_for(c, &e.url)),
+                self_signed: e.self_signed,
+                local_token: None,
+                relay: false,
+                session: session.as_deref() == Some(e.url.as_str()),
+            }
+        })
+        .collect()
+}
+
+/// "go on? [y/N]" on a terminal: the listener's answer; None off one, where
+/// only `--yes` goes on.
+fn ask_on_terminal(question: &str) -> Option<bool> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return None;
+    }
+    print!("{question}");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).ok()?;
+    Some(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+/// Ctrl+C in `device card <drive> sync` (clause 65, clause 57's rule): the
+/// first is counted, and the sync stops at its next save; a second ends
+/// the process at once, and the next sync goes on from the last save.
+mod interrupt {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    pub(super) static PRESSED: AtomicU8 = AtomicU8::new(0);
+
+    #[cfg(windows)]
+    pub(super) fn catch() {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+        unsafe extern "system" fn handler(kind: u32) -> windows_sys::core::BOOL {
+            if kind != CTRL_C_EVENT && kind != CTRL_BREAK_EVENT {
+                return 0;
+            }
+            if PRESSED.fetch_add(1, Ordering::SeqCst) >= 1 {
+                std::process::exit(130);
+            }
+            1
+        }
+        // SAFETY: the handler is a plain function that touches an atomic
+        // and, the second time, ends the process.
+        unsafe {
+            SetConsoleCtrlHandler(Some(handler), 1);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn catch() {
+        extern "C" fn handler(_: libc::c_int) {
+            if PRESSED.fetch_add(1, Ordering::SeqCst) >= 1 {
+                // SAFETY: _exit is async-signal-safe.
+                unsafe { libc::_exit(130) }
+            }
+        }
+        // SAFETY: the handler touches an atomic and, the second time, calls
+        // _exit: both async-signal-safe.
+        unsafe {
+            libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    pub(super) fn catch() {}
 }
 
 /// A time as Unix ms, as `@time` takes it; 0 before 1970.
@@ -1247,8 +1530,60 @@ mod tests {
         assert!(matches!(parse(&["list", "--ports"]), Ok(DeviceCmd::List(ListArgs { ports: true }))));
     }
 
-    /// The card probe answers to its name and stays out of the help: the
-    /// command line is the UX contract's, and `device cards` isn't in it yet.
+    /// `device cards` and `device card <drive> <what>` are the listener's,
+    /// in the help (clauses 64-67), and each flag goes with its action alone.
+    #[test]
+    fn the_cards_commands_are_in_the_help_and_each_flag_goes_with_its_action() {
+        use clap::CommandFactory;
+        use crate::api::urls::{TransferBitrate, TransferCodec};
+        use card::lines::What;
+        let help = Line::command().render_help().to_string();
+        assert!(help.contains("  cards ") && help.contains("  card "), "{help}");
+        let parse = |args: &[&str]| Line::try_parse_from(["mstream-player"].iter().chain(args)).map(|l| l.what);
+        assert!(matches!(parse(&["cards"]), Ok(DeviceCmd::Cards)));
+        let flags = |args: &[&str]| match parse(args) {
+            Ok(DeviceCmd::Card(args)) => args.flags(),
+            Ok(_) => Err("another command".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let sync = ["card", "E:", "sync", "--yes", "--allow-removals", "214", "--through-parent"];
+        let (what, f) = flags(&sync).unwrap();
+        assert_eq!((what, f.yes, f.allow_removals, f.through_parent), (What::Sync, true, Some(214), true));
+        let take = ["card", "E:", "sync", "--server", "Work", "--take-over", "--keep-mine"];
+        let take = flags(&take).unwrap().1;
+        assert_eq!((take.server.as_deref(), take.take_over, take.keep_mine), (Some("Work"), true, true));
+        let setup = [
+            "card", "Car music", "setup", "--name", "Gym", "--libraries", "Rock,Jazz", "--convert",
+            "all", "--to", "mp3-320", "--removals", "never", "--covers", "off", "--autodj", "on",
+            "--for", "someone-else", "--budget", "500",
+        ];
+        let (what, f) = flags(&setup).unwrap();
+        assert_eq!(what, What::Setup);
+        let libraries = Some(vec!["Rock".to_string(), "Jazz".to_string()]);
+        assert_eq!((f.name.as_deref(), f.libraries.clone()), (Some("Gym"), libraries));
+        assert_eq!(f.convert, Some(card::state::Convert::Everything));
+        assert_eq!(f.to, Some((TransferCodec::Mp3, Some(TransferBitrate::K320))));
+        assert_eq!(f.removals, Some(card::engine::Removal::Never));
+        let settings = (f.covers, f.auto_dj, f.for_someone_else, f.budget_mb);
+        assert_eq!(settings, (Some(false), Some(true), Some(true), Some(500)));
+        assert_eq!(flags(&["card", "E:", "status", "--yes"]).unwrap_err(), "--yes doesn't go with status");
+        assert_eq!(flags(&["card", "E:", "eject", "--yes"]).unwrap_err(), "--yes doesn't go with eject");
+        assert_eq!(flags(&["card", "E:", "sync", "--name", "x"]).unwrap_err(), "--name doesn't go with sync");
+        let removals = flags(&["card", "E:", "setup", "--allow-removals", "3"]).unwrap_err();
+        assert_eq!(removals, "--allow-removals doesn't go with setup");
+        assert_eq!(flags(&["card", "E:", "plays", "--adopt"]).unwrap_err(), "--adopt doesn't go with plays");
+        assert!(flags(&["card", "E:", "sync", "--take-over"]).is_err(), "--take-over names its server");
+        assert!(flags(&["card", "E:", "sync", "--adopt", "--keep-mine"]).is_err(), "one answer");
+        let opus = flags(&["card", "E:", "setup", "--to", "opus-320"]).unwrap_err();
+        assert!(opus.contains("--to opus-320 isn't"), "{opus}");
+        assert!(flags(&["card", "E:", "setup", "--convert", "some"]).is_err());
+        assert!(flags(&["card", "E:", "format"]).is_err(), "formatting is device format's (B6)");
+        assert!(flags(&["card", "E:"]).is_err(), "an action, always");
+    }
+
+    /// The card probe answers to its name and stays out of the help, as the
+    /// other JSON card commands do: the listener's are `device cards` and
+    /// `device card`.
     #[test]
     fn the_card_probe_parses_and_stays_out_of_the_help() {
         use clap::CommandFactory;

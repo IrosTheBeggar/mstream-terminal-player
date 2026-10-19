@@ -1281,6 +1281,7 @@ const TOP_KEYS: [&str; 5] =
 /// in the language on screen: the header's server label starts a blank
 /// cell past it, cut short where it would not (servers::draw_header;
 /// mp3-player-screen contract, clause 16).
+#[cfg(test)]
 pub(super) fn top_strip_end() -> u16 {
     top_strip_end_with("")
 }

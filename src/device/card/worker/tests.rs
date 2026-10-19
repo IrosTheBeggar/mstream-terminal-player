@@ -15,13 +15,13 @@ use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
 
 /// The volumes of the test: host folders, each a FAT card at a serial.
 #[derive(Default)]
-struct Shelf {
+pub(crate) struct Shelf {
     cards: Mutex<Vec<(Found, u32)>>,
-    ejected: Mutex<Vec<String>>,
+    pub(crate) ejected: Mutex<Vec<String>>,
 }
 
 impl Shelf {
-    fn put(&self, found: Found, serial: u32) {
+    pub(crate) fn put(&self, found: Found, serial: u32) {
         self.cards.lock().unwrap().push((found, serial));
     }
 
@@ -51,7 +51,7 @@ impl Volumes for Shelf {
 /// This computer, in memory: its cards.json, a fixed clock, and ids that
 /// never repeat from one session to the next.
 #[derive(Default)]
-struct Here {
+pub(crate) struct Here {
     cards: Mutex<Cards>,
     seed: std::sync::atomic::AtomicU64,
 }
@@ -100,7 +100,7 @@ impl Home for Here {
 }
 
 /// A volume at `dir`, as the OS would list a card in a USB reader.
-fn volume_at(dir: &std::path::Path, fs: Fs, serial: u32) -> Found {
+pub(crate) fn volume_at(dir: &std::path::Path, fs: Fs, serial: u32) -> Found {
     let volume = Volume {
         path: dir.to_path_buf(),
         device: "sdz1".into(),
@@ -125,7 +125,7 @@ fn volume_at(dir: &std::path::Path, fs: Fs, serial: u32) -> Found {
 }
 
 /// The fake server as a saved server, the session's.
-fn home_server(base: &str) -> ServerLink {
+pub(crate) fn home_server(base: &str) -> ServerLink {
     ServerLink {
         id: base.to_string(),
         name: "Home".into(),

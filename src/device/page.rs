@@ -460,7 +460,9 @@ impl Page {
         self.wants.take()
     }
 
-    /// The transfer worker for this visit (the GUI's).
+    /// The transfer worker for this visit (the GUI's), given to a page the
+    /// tests built quiet; `hosted` takes it at once.
+    #[cfg(test)]
     pub(crate) fn attach(&mut self, transfer: Transfer) {
         self.transfer = Some(transfer);
     }

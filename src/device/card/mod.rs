@@ -34,7 +34,9 @@
 //! A sync may read the server's federation peers too, each under a daily
 //! budget this computer keeps ([`budget`]), their files from
 //! [`source::peer`]. One selection may span several cards ([`span`]): a set,
-//! split by artist, each card a whole library of its own.
+//! split by artist, each card a whole library of its own. [`worker`] runs it
+//! all for the GUI's MP3 Player tab, one sync at a time, and [`lines`] for
+//! `device cards` and `device card <drive> …`, on that same worker.
 
 // The kit and the engine built on it wait for their callers (the Card view,
 // the public command line): until they land only the tests and a hidden
@@ -50,6 +52,7 @@ pub(crate) mod covers;
 pub(crate) mod dry;
 pub(crate) mod engine;
 pub(crate) mod history;
+pub(crate) mod lines;
 pub(crate) mod names;
 pub(crate) mod plan;
 pub(crate) mod setup;
