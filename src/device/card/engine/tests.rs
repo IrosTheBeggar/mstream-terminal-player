@@ -1120,7 +1120,18 @@ fn removals_ask_past_their_gates() {
     let ran = session.run(plan, &mut server, &mut NoHooks, &mut |_| {});
     assert!(matches!(ran, Err(Stop::Unanswered(g)) if g == [gate]));
     let yes = Answers { removals: true, ..Answers::default() };
-    let (session, plan) = plan_of(&card, &wanted, &mut server, yes, strict);
+    let (session, plan) = plan_of(&card, &wanted, &mut server, yes, strict.clone());
+    assert!(plan.guards.is_empty());
+    session.close();
+    // A yes that named its count passes that count only: the server's list
+    // changed since the look asks again.
+    let two = Answers { removals_seen: Some(2), ..yes };
+    let (session, plan) = plan_of(&card, &wanted, &mut server, two, strict.clone());
+    let asked = Guard::Removals { paths: vec!["Loose.mp3".into()], strong: false };
+    assert_eq!(plan.guards, [asked], "1 removal, not the 2 allowed");
+    session.close();
+    let one = Answers { removals_seen: Some(1), ..yes };
+    let (session, plan) = plan_of(&card, &wanted, &mut server, one, strict);
     assert!(plan.guards.is_empty());
     session.close();
 
@@ -1132,6 +1143,15 @@ fn removals_ask_past_their_gates() {
     session.close();
     let all = Answers { mass_removals: true, ..Answers::default() };
     let (session, plan) = plan_of(&card, &gone, &mut server, all, knobs());
+    assert!(plan.guards.is_empty());
+    session.close();
+    // Its count is its paths': 5 passes, 4 asks again.
+    let four = Answers { removals_seen: Some(4), ..all };
+    let (session, plan) = plan_of(&card, &gone, &mut server, four, knobs());
+    assert!(matches!(&plan.guards[..], [Guard::Removals { strong: true, .. }]), "{:?}", plan.guards);
+    session.close();
+    let five = Answers { removals_seen: Some(5), ..all };
+    let (session, plan) = plan_of(&card, &gone, &mut server, five, knobs());
     assert!(plan.guards.is_empty());
     session.close();
 

@@ -710,9 +710,16 @@ pub(super) fn plan(
         let gone = hashed.iter().filter(|l| !whole.contains(&l.audio_hash)).count();
         strong |= !lost.is_empty() && !hashed.is_empty() && gone * 2 > hashed.len();
     }
-    if strong && !answers.mass_removals {
-        guards.push(Guard::Removals { paths: lost, strong: true });
-    } else if removals.len() > s.knobs.gate && !answers.removals && !answers.mass_removals {
+    // A yes that named its count passes this plan only at that count: the
+    // stronger gate's is its paths', the other's the removals'.
+    let seen = |n: usize| answers.removals_seen.is_none_or(|seen| seen == n);
+    if strong {
+        if !(answers.mass_removals && seen(lost.len())) {
+            guards.push(Guard::Removals { paths: lost, strong: true });
+        }
+    } else if removals.len() > s.knobs.gate
+        && !((answers.removals || answers.mass_removals) && seen(removals.len()))
+    {
         guards.push(Guard::Removals { paths: removals, strong: false });
     }
 

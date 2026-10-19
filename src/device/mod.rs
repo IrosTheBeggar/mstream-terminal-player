@@ -500,6 +500,7 @@ impl CardSyncArgs {
             disk_checked: self.disk_checked,
             removals: self.allow_removals,
             mass_removals: self.allow_mass_removals,
+            removals_seen: None,
             adopt: self.adopt,
             new_servers: self.new_server,
             new_card_id: false,

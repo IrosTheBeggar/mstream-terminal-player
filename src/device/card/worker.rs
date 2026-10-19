@@ -36,8 +36,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::budget::{Budget, PeerKey};
+use super::budget::{Budget, DEFAULT_MB, MB, PeerKey};
 use super::cards::Cards;
+use super::contract::container;
 use super::contract::device_txt::DeviceTxt;
 use super::contract::server::server_url_key;
 use super::engine::{Answers, Env, Event as RunEvent, Guard, Removal, Stop};
@@ -348,6 +349,9 @@ pub(crate) enum Cmd {
     GiveUp { key: String },
     /// The gate the last sync stopped for is put away unanswered.
     Dismiss { key: String },
+    /// The proxy gate's no (clause 58): the peer stays out of this card's
+    /// syncs here, and is never asked about again.
+    LeaveOut { key: String, peer: u32 },
     /// Stop the run at its next save and end once nothing runs.
     Quit,
 }
@@ -369,6 +373,9 @@ pub(crate) struct Facts {
     pub(crate) by_library: Vec<(String, usize)>,
     /// Files of a newer format: read, never written (clause 45).
     pub(crate) newer: Vec<String>,
+    /// The highest card format major among them, where a contract file's
+    /// header says it (a private file or a plan's step says none).
+    pub(crate) newer_major: Option<u16>,
     /// A rename may have been cut: a disk check first.
     pub(crate) check: bool,
     /// A cut run's plan is on it, for the next sync to take up.
@@ -396,6 +403,7 @@ impl Default for Facts {
             tracks: 0,
             by_library: Vec::new(),
             newer: Vec::new(),
+            newer_major: None,
             check: false,
             pending: false,
             music: Music::default(),
@@ -495,6 +503,9 @@ pub(crate) struct Planned {
     pub(crate) tally: Option<Tally>,
     pub(crate) fit: Option<Fit>,
     pub(crate) guards: Vec<Guard>,
+    /// The stronger removals guard's paths' libraries, in its order, from
+    /// the card's ledger: what that gate counts by (clause 58).
+    pub(crate) removal_libs: Vec<String>,
     /// The server's list stood (a 304): unchanged since its last whole read.
     pub(crate) unchanged: bool,
     /// Every library the account sees, and the listed ones' files and bytes.
@@ -549,8 +560,8 @@ pub(crate) enum Phase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Pause {
     /// A peer's day is spent: goes on after `until` (Unix seconds); the
-    /// days its files take at this pace.
-    Budget { until: u64, peer: String, days: u64 },
+    /// days its files take at this pace, and its day's budget in MiB.
+    Budget { until: u64, peer: String, days: u64, mb: u64 },
     /// The server didn't answer: asked again at `until`, the `tries`th time.
     Server { until: u64, tries: u32 },
     /// The sign-in was refused: Sign in ▸.
@@ -617,7 +628,7 @@ pub(crate) struct CardView {
     /// The sheet's fit, by its request's seq.
     pub(crate) fit: Option<(u64, Next)>,
     /// The listener chose another server in its settings: the next sync
-    /// takes it over (the another-server gate's yes).
+    /// takes it over (the another-server gate's yes, which wrote them).
     pub(crate) take_over: bool,
 }
 
@@ -1048,11 +1059,19 @@ impl Worker {
             self.taken_out(&key);
         }
         // A card taken out mid-run, back in any reader: the run goes on
-        // from its last save at the next Sync.
+        // from its last save at the next Sync. Back in the reader its run
+        // still names, before the run met the gap, the run goes on as it
+        // was: its tab, its progress and its quit gate keep their slot.
         for f in &shown {
             let key = key_of(f);
             let back = self.slots.iter().position(|s| s.view.out && same_volume(f, &s.view.found));
             if let Some(at) = back {
+                let running = self.running.as_ref().is_some_and(|r| r.key == key);
+                if running && self.slots[at].view.key == key {
+                    self.slots[at].view.out = false;
+                    self.told(&key);
+                    continue;
+                }
                 let slot = self.slots.remove(at);
                 self.tell(Event::Gone { key: slot.view.key.clone() });
             }
@@ -1252,9 +1271,33 @@ impl Worker {
                 }
                 self.told(&key);
             }
+            Cmd::LeaveOut { key, peer } => {
+                let id = self.slot(&key).and_then(|s| s.view.facts()).and_then(|f| f.root);
+                if let Some((id, ..)) = id {
+                    let mut cards = self.setup.home.cards();
+                    cards.leave_out(id, peer);
+                    if let Err(why) = self.setup.home.save_cards(&cards) {
+                        self.tell(Event::Note(Note::Failed { why }));
+                    }
+                }
+                if let Some(slot) = self.slot(&key) {
+                    let mut asks = slot.view.gate.take().unwrap_or_default();
+                    asks.retain(|g| *g != Gate::Proxy { peer });
+                    slot.view.gate = (!asks.is_empty()).then_some(asks);
+                }
+                self.told(&key);
+            }
             Cmd::Quit => {
+                // The syncs waiting their turn never start (the quit's wait
+                // is for the running one's save alone).
                 self.quitting = true;
-                self.queue.clear();
+                let waiting: Vec<String> = self.queue.drain(..).map(|(key, _)| key).collect();
+                for key in waiting {
+                    if let Some(slot) = self.slot(&key) {
+                        slot.view.run = None;
+                    }
+                    self.told(&key);
+                }
                 if let Some(running) = &self.running {
                     running.stop.store(true, Ordering::SeqCst);
                 }
@@ -1313,20 +1356,28 @@ impl Worker {
             };
             let _ = me.send(In::Job(key_owned.clone(), JobDone::Read(Ok(Box::new(facts.clone())))));
             let server = server_of(&facts, &servers, take_over);
+            // A card its settings gave another server is asked as its
+            // take-over would run.
+            let answers = Answers { new_servers: take_over, ..Answers::default() };
+            let ask = sync::Ask { answers, ..sync::Ask::default() };
             match (facts.set_up(), server.link()) {
                 (true, Some(link)) if link.base.is_ok() => {
-                    JobDone::Looked(dry_run(card, home, link, &sync::Ask::default(), space))
+                    JobDone::Looked(dry_run(card, home, link, &ask, space))
                 }
                 _ => JobDone::Looked(Next::Unasked),
             }
         });
     }
 
-    /// A dry run with the sheet's settings: the fit line.
+    /// A dry run with the sheet's settings: the fit line. Another server
+    /// than the card's is planned as its take-over would run (the gate's
+    /// yes): its files a server of their own.
     fn fit(&mut self, key: &str, want: Want, seq: u64) {
         let servers = self.servers.clone();
         let Some(slot) = self.slot(key) else { return };
         let Some(facts) = slot.view.facts().cloned() else { return };
+        let current = slot.view.server.link().map(|l| l.id.clone());
+        let take_over = want.server.is_some() && want.server != current;
         let link = match &want.server {
             Some(id) => servers.iter().find(|s| s.id == *id).cloned(),
             None => slot.view.server.link().cloned(),
@@ -1348,6 +1399,7 @@ impl Worker {
                     let ask = sync::Ask {
                         libraries: want.libraries.clone(),
                         change: want.change(None),
+                        answers: Answers { new_servers: take_over, ..Answers::default() },
                         ..sync::Ask::default()
                     };
                     dry_run(&*card, &*home, &link, &ask, found.volume.space)
@@ -1417,8 +1469,29 @@ impl Worker {
         });
     }
 
-    /// A sync: started, or queued behind the running one (clause 56).
+    /// The answers a sync of `key`'s card runs with: `allow`, the take-over
+    /// its settings chose (the another-server gate's yes wrote them), and
+    /// the peers the proxy gate's no left out of its syncs here.
+    fn answers_for(&mut self, key: &str, mut allow: Allow) -> Allow {
+        let Some(slot) = self.slot(key) else { return allow };
+        allow.take_over |= slot.view.take_over;
+        let id = slot.view.facts().and_then(|f| f.root).map(|r| r.0);
+        let left_out = id.map(|id| self.setup.home.cards().left_out(id)).unwrap_or_default();
+        for peer in left_out {
+            if !allow.leave_out.contains(&peer) && !allow.proxy_copies.contains(&peer) {
+                allow.leave_out.push(peer);
+            }
+        }
+        allow
+    }
+
+    /// A sync: started, or queued behind the running one (clause 56), with
+    /// [`Worker::answers_for`] its card.
     fn sync(&mut self, key: &str, allow: Allow) {
+        if self.quitting {
+            return;
+        }
+        let allow = self.answers_for(key, allow);
         let running_here = self.running.as_ref().is_some_and(|r| r.key == key);
         let another = self.running.is_some();
         let started = self.setup.home.now();
@@ -1629,6 +1702,9 @@ impl Worker {
             JobDone::Synced(finished) => {
                 self.running = None;
                 self.synced(key, *finished, now);
+                // Its end is told before the sync waiting its turn starts:
+                // no report ever shows two runs under way.
+                self.told(key);
             }
         }
         // A command that waited for this job goes now, then a sync that
@@ -1707,9 +1783,10 @@ impl Worker {
                             let waiting = synced.peers.iter().find(|p| p.resume_at.is_some());
                             let peer = waiting.map(|p| p.id.to_string()).unwrap_or_default();
                             let days = waiting.map_or(0, |p| p.days);
-                            Pause::Budget { until, peer, days }
+                            let mb = waiting.and_then(|p| p.cap).map_or(DEFAULT_MB, |cap| cap / MB);
+                            Pause::Budget { until, peer, days, mb }
                         }
-                        None if why.contains("sign") => Pause::SignIn,
+                        None if signed_out(why) => Pause::SignIn,
                         None => {
                             slot.tries += 1;
                             let wait = (RETRY_FIRST << (slot.tries - 1).min(5)).min(RETRY_MOST);
@@ -1814,12 +1891,18 @@ impl Worker {
 /// command line ask the same ones; the relay's word is [`relay_ahead`].
 pub(crate) fn gate_ahead(card: &CardView, plan: &Planned, allow: &Allow) -> Option<Gate> {
     let removals = plan.removals.len();
-    let strong = plan.guards.iter().any(|g| matches!(g, Guard::Removals { strong: true, .. }));
-    if strong && !allow.answers.mass_removals {
-        let total = card.facts().map_or(0, |f| f.tracks);
-        return Some(Gate::Half { n: removals, total, by_library: Vec::new() });
+    let strong = strong_paths(&plan.guards);
+    if let Some(paths) = strong
+        && !allow.answers.mass_removals
+    {
+        // As the run's own gate counts: its paths, each library's of them.
+        let facts = card.facts();
+        let total = facts.map_or(0, |f| f.tracks);
+        let by = facts.map(|f| f.by_library.as_slice()).unwrap_or_default();
+        let by_library = half_counts(&plan.removal_libs, by);
+        return Some(Gate::Half { n: paths.len(), total, by_library });
     }
-    if removals > GATE_MORE_THAN && !allow.answers.removals && !strong {
+    if removals > GATE_MORE_THAN && !allow.answers.removals && strong.is_none() {
         let first = plan.removals.iter().take(GATE_PATHS).cloned().collect();
         return Some(Gate::Removals { n: removals, first });
     }
@@ -1861,17 +1944,7 @@ fn gates(
             }
             Guard::Removals { paths, strong: true } => {
                 let total = facts.map_or(0, |f| f.tracks);
-                let mut by: Vec<(String, usize, usize)> = Vec::new();
-                for lib in removal_libs {
-                    match by.iter_mut().find(|(l, ..)| l == lib) {
-                        Some((_, n, _)) => *n += 1,
-                        None => {
-                            let of = by_library.iter().find(|(l, _)| l == lib);
-                            let of = of.map_or(0, |(_, n)| *n);
-                            by.push((lib.clone(), 1, of));
-                        }
-                    }
-                }
+                let by = half_counts(removal_libs, by_library);
                 Some(Gate::Half { n: paths.len(), total, by_library: by })
             }
             Guard::Adopt(paths) => {
@@ -1883,6 +1956,46 @@ fn gates(
             Guard::Newer(_) => None,
         })
         .collect()
+}
+
+/// The stronger removals guard's paths, when the plan has one.
+fn strong_paths(guards: &[Guard]) -> Option<&Vec<String>> {
+    guards.iter().find_map(|g| match g {
+        Guard::Removals { paths, strong: true } => Some(paths),
+        _ => None,
+    })
+}
+
+/// The stronger gate's count per library (clause 58): each library's
+/// removals of `libs` (one a removal), and its tracks on the card.
+fn half_counts(libs: &[String], by_library: &[(String, usize)]) -> Vec<(String, usize, usize)> {
+    let mut by: Vec<(String, usize, usize)> = Vec::new();
+    for lib in libs {
+        match by.iter_mut().find(|(l, ..)| l == lib) {
+            Some((_, n, _)) => *n += 1,
+            None => {
+                let of = by_library.iter().find(|(l, _)| l == lib).map_or(0, |(_, n)| *n);
+                by.push((lib.clone(), 1, of));
+            }
+        }
+    }
+    by
+}
+
+/// Each of `paths`' library on the card, from its ledger row's server path
+/// (its first part); "" for a path the ledger doesn't list.
+fn libraries_of(card: &dyn CardWrite, paths: &[String]) -> Vec<String> {
+    let Ok(seen) = volume::inspect(card) else { return Vec::new() };
+    let Some(Ok(tags)) = seen.root.as_ref().map(|r| r.tags.as_ref()) else { return Vec::new() };
+    let lib_of: std::collections::HashMap<&str, &str> = tags
+        .records
+        .iter()
+        .filter_map(|e| {
+            let ledger = e.ledger.as_ref()?;
+            Some((e.path.as_str(), ledger.server_path.split('/').next().unwrap_or_default()))
+        })
+        .collect();
+    paths.iter().map(|p| lib_of.get(p.as_str()).copied().unwrap_or_default().to_string()).collect()
 }
 
 /// A write the card refused for want of room.
@@ -1898,9 +2011,14 @@ fn read_only(e: &io::Error) -> bool {
         || e.raw_os_error() == Some(19)
 }
 
-/// The server's answer refused the saved sign-in.
+/// The server's answer refused the saved sign-in: its 401, in the words
+/// the API gives it ([`ApiError::Unauthorized`]), whether the listing met
+/// it (the halt is its words) or a fetch (the run parks on them). A 403
+/// never means signing in again, and no other word is taken for it.
+///
+/// [`ApiError::Unauthorized`]: crate::api::ApiError::Unauthorized
 fn signed_out(why: &str) -> bool {
-    why.contains("401") || why.contains("403") || why.to_lowercase().contains("sign")
+    why.contains(&crate::api::ApiError::Unauthorized.to_string())
 }
 
 /// Two volumes are the same card: one serial (a card swapped into the
@@ -1981,12 +2099,23 @@ pub(crate) fn read(card: &dyn CardWrite, cards: &Cards) -> Result<Facts, String>
         let set = s.set.as_ref()?;
         Some((set.slot_of(s.card_id)? + 1, set.cards.len()))
     });
+    // The card format a newer writer left: its contract files' major, from
+    // their first 6 bytes (2.4.5's check reads no more).
+    let newer_major = seen
+        .newer
+        .iter()
+        .filter(|name| volume::contract_named(name))
+        .filter_map(|name| card.read_at(&format!("/.mstream/{name}"), 0, 6).ok())
+        .filter(|head| container::unknown_major(head))
+        .map(|head| u16::from_le_bytes([head[4], head[5]]))
+        .max();
     Ok(Facts {
         root,
         committed: seen.root.as_ref().map(|r| u64::from(r.manifest.commit_time)),
         tracks,
         by_library,
         newer: seen.newer.clone(),
+        newer_major,
         check: seen.root.as_ref().is_some_and(|r| r.twice) || seen.state.twice || seen.resume.twice,
         pending: seen.pending.is_some(),
         music: seen.music,
@@ -2024,7 +2153,14 @@ fn dry_run(
     let envs = &mut *envs;
     let (quiet, cards) = (&mut |_| {}, &mut cards);
     let synced = sync::sync(card, space, client, reached, &ask, cards, plays, &fed, envs, quiet);
-    planned(&synced, now)
+    let mut next = planned(&synced, now);
+    // The stronger gate counts by library, before the sync as after it.
+    if let Next::Plan(plan) = &mut next
+        && let Some(paths) = strong_paths(&plan.guards)
+    {
+        plan.removal_libs = libraries_of(card, paths);
+    }
+    next
 }
 
 /// A dry run's answer, as the Card view counts it.
@@ -2049,6 +2185,8 @@ fn planned(synced: &sync::Synced, now: u64) -> Next {
                 tally,
                 fit: s.fit,
                 guards: s.guards.clone(),
+                // Read off the card by the dry run that asked.
+                removal_libs: Vec::new(),
                 unchanged: s.listed == sync::Listed::NotModified,
                 offered: s.offered.clone(),
                 totals: s.totals.clone(),
@@ -2194,21 +2332,9 @@ fn run_sync(
     // card's ledger.
     let mut removal_libs = Vec::new();
     if let sync::End::Halted(sync::Halt::Card(Stop::Unanswered(guards))) = &synced.end
-        && guards.iter().any(|g| matches!(g, Guard::Removals { strong: true, .. }))
-        && let Ok(seen) = volume::inspect(&*card)
-        && let Some(Ok(tags)) = seen.root.as_ref().map(|r| r.tags.as_ref())
+        && let Some(paths) = strong_paths(guards)
     {
-        for g in guards {
-            if let Guard::Removals { paths, strong: true } = g {
-                for path in paths {
-                    let row = tags.records.iter().find(|e| e.path == *path);
-                    let ledger = row.and_then(|e| e.ledger.as_ref());
-                    let lib = ledger.map(|l| l.server_path.split('/').next().unwrap_or_default());
-                    let lib = lib.map(str::to_string);
-                    removal_libs.push(lib.unwrap_or_default());
-                }
-            }
-        }
+        removal_libs = libraries_of(&*card, paths);
     }
     Finished {
         synced: Some(synced),

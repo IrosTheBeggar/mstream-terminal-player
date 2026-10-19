@@ -226,6 +226,11 @@ pub(crate) struct Answers {
     pub(crate) removals: bool,
     /// Most of the ledger, or of one server's files, removed: go ahead.
     pub(crate) mass_removals: bool,
+    /// The count a yes to a removals gate named (the gate's own, or
+    /// `--allow-removals N`): a plan that removes another number asks
+    /// again, so a server that changed after the look never takes more
+    /// than was allowed. None: whatever the plan's count.
+    pub(crate) removals_seen: Option<usize>,
     /// U6: take the listener's files that equal the selection's into the
     /// ledger. None: not asked yet.
     pub(crate) adopt: Option<bool>,

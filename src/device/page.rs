@@ -5481,13 +5481,16 @@ mod tests {
             ("card, unknown server", c::with(c::ready("E:", now), |v| v.server = Server::Unknown("Home".into())), &[]),
             ("card, no server", c::with(c::ready("E:", now), |v| v.server = Server::New(None)), &[]),
             ("card, signed out", c::with(c::ready("E:", now), |v| v.next = Next::SignIn), &[]),
-            ("card, newer", c::with(c::ready("E:", now), |v| c::facts(v).newer = vec!["manifest.bin".into()]), &[]),
+            ("card, newer", c::with(c::ready("E:", now), |v| {
+                c::facts(v).newer = vec!["manifest.bin".into()];
+                c::facts(v).newer_major = Some(2);
+            }), &[]),
             ("card, disk check", c::with(c::ready("E:", now), |v| c::facts(v).check = true), &[]),
             ("card, copied", c::with(c::ready("E:", now), |v| c::facts(v).copied = true), &[]),
             ("card, no device.txt", c::with(c::ready("E:", now), |v| c::facts(v).device.present = false), &[]),
             ("card, syncing", c::syncing("E:", now), &[]),
             ("card, paused", c::with(c::ready("E:", now), |v| {
-                let pause = Pause::Budget { until: now + 18_720, peer: "3".into(), days: 4 };
+                let pause = Pause::Budget { until: now + 18_720, peer: "3".into(), days: 4, mb: 1_500 };
                 v.ended = Some(Ended::Paused { pause, at: 2_945, of: 4_812, bytes: (13_000_000_000, 21_300_000_000) });
             }), &[]),
             ("card, full", c::with(c::ready("E:", now), |v| v.ended = Some(Ended::Full { at: 3_980, of: 4_812 })), &[]),
@@ -5511,6 +5514,8 @@ mod tests {
             ("card, half gate", c::with(c::ready("E:", now), |v| plan(v, &|p| {
                 p.removals = many.clone();
                 p.guards = vec![Guard::Removals { paths: many.clone(), strong: true }];
+                // Its count per library, as the look's dry run gives them.
+                p.removal_libs = (0..214).map(|i| if i < 200 { "Rock" } else { "Jazz" }.to_string()).collect();
             })), &[Enter, Char('e')]),
             ("card, adopt gate", c::with(c::ready("E:", now), |v| {
                 plan(v, &|p| p.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])]);

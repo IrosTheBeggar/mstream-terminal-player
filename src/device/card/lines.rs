@@ -826,6 +826,9 @@ pub(crate) fn pass_gates(card: &CardView, plan: &Planned, flags: &Flags) -> Resu
     }
     let name = card.name().unwrap_or_else(|| card.drive());
     let server = server_name(card);
+    // A removals gate passed checks the count itself; the run removes that
+    // many or asks again (the engine's `removals_seen`).
+    let mut counted = false;
     while let Some(gate) = worker::gate_ahead(card, plan, &allow) {
         match gate {
             Gate::Half { n, total, .. } => {
@@ -834,12 +837,16 @@ pub(crate) fn pass_gates(card: &CardView, plan: &Planned, flags: &Flags) -> Resu
                 }
                 allow.answers.removals = true;
                 allow.answers.mass_removals = true;
+                allow.answers.removals_seen = Some(n);
+                counted = true;
             }
             Gate::Removals { n, .. } => {
                 if flags.allow_removals != Some(n) {
                     return Err(removals_refused(n, None, &name, &server, flags));
                 }
                 allow.answers.removals = true;
+                allow.answers.removals_seen = Some(n);
+                counted = true;
             }
             Gate::Adopt { n, all } => {
                 if flags.adopt {
@@ -868,7 +875,7 @@ pub(crate) fn pass_gates(card: &CardView, plan: &Planned, flags: &Flags) -> Resu
             "Nothing written: --through-parent copies through the parent.".to_string(),
         ]);
     }
-    if flags.allow_removals.is_some_and(|n| n != plan.removals.len()) {
+    if !counted && flags.allow_removals.is_some_and(|n| n != plan.removals.len()) {
         let n = fmt_count(plan.removals.len() as u64);
         let asked = flags.allow_removals.unwrap_or(0);
         return Err(vec![format!("Nothing written: this sync removes {n}, not {asked}.")]);
@@ -926,7 +933,10 @@ fn sync(session: &mut Session, key: &str, flags: &Flags, servers: &[ServerLink],
         io.warn(&format!("{}: {why}", card.drive()));
         return 1;
     }
-    let mut take_over = false;
+    // Another server (`--server S --take-over`, clause 58's gate): its plan
+    // is asked with nothing written — a dry run of the take-over — and the
+    // settings are written only once the listener goes on (clause 65).
+    let mut take_over = None;
     if let Some(name) = &flags.server {
         let link = match server_named(servers, name) {
             Ok(link) => link.clone(),
@@ -940,19 +950,11 @@ fn sync(session: &mut Session, key: &str, flags: &Flags, servers: &[ServerLink],
                 server_gate(&card, Some(&link), io);
                 return 1;
             }
-            // The take-over's settings first (the gate's yes, clause 58):
-            // the card is asked again from its new server.
             let mut want = Want::of(&facts, Some(&link));
             want.server = Some(link.id.clone());
-            session.link.send(Cmd::Apply { key: key.to_string(), want: Box::new(want) });
-            let (t0, mut began) = (Instant::now(), false);
-            while !job_done(session, key, &mut began) && t0.elapsed() < JOB_WITHIN {}
-            let _ = session.settle(Some(key));
-            take_over = facts.tracks > 0;
-            match session.card(key) {
-                Some(again) => card = again.clone(),
-                None => return 2,
-            }
+            card.next = asked_of(session, key, &want);
+            card.server = Server::Saved(link);
+            take_over = Some(want);
         }
     }
     let plan = match &card.next {
@@ -995,7 +997,6 @@ fn sync(session: &mut Session, key: &str, flags: &Flags, servers: &[ServerLink],
             return 1;
         }
     };
-    allow.take_over = take_over;
     if worker::relay_ahead(&card, &plan) {
         let size = gb(plan.bytes);
         io.say(&format!("{server} is reached through mStream's Quick Connect relay, not directly:"));
@@ -1005,7 +1006,44 @@ fn sync(session: &mut Session, key: &str, flags: &Flags, servers: &[ServerLink],
     if !go_on(flags, io, "sync") {
         return 1;
     }
+    // The take-over's yes: its settings written (clause 48's Apply), and
+    // the sync takes the card over.
+    if let Some(want) = take_over {
+        let from = session.fold.notes.len();
+        session.link.send(Cmd::Apply { key: key.to_string(), want: Box::new(want) });
+        let (t0, mut began) = (Instant::now(), false);
+        while !job_done(session, key, &mut began) {
+            if t0.elapsed() >= JOB_WITHIN {
+                io.warn("no answer from the card in time");
+                return 1;
+            }
+        }
+        for note in notes_since(session, from) {
+            if let Note::Failed { why } = note {
+                io.warn(&why);
+                return 1;
+            }
+        }
+        allow.take_over = true;
+    }
     run(session, key, allow, flags, io)
+}
+
+/// What a sync of the card with `want`'s settings would do, written nowhere
+/// (the worker's fit: a dry run, as the sheet's fit line asks it).
+fn asked_of(session: &mut Session, key: &str, want: &Want) -> Next {
+    // A number no other request of this command has.
+    let seq = 1;
+    session.link.send(Cmd::Fit { key: key.to_string(), want: Box::new(want.clone()), seq });
+    let t0 = Instant::now();
+    while t0.elapsed() < SETTLE_WITHIN {
+        session.pump(Duration::from_millis(50));
+        let answer = session.card(key).and_then(|c| c.fit.clone());
+        if let Some((_, next)) = answer.filter(|(n, next)| *n == seq && *next != Next::Asking) {
+            return next;
+        }
+    }
+    Next::Unreached { asked: now(), why: "no answer in time".into() }
 }
 
 /// The run, its steps as lines until it ends.

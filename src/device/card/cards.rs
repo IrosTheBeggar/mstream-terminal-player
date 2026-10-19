@@ -9,14 +9,15 @@
 //! ([`Cards::diverged`]). It mirrors each multi-card set's table too, the
 //! newest it has seen ([`Cards::mirror`]): a card of a set learns from it what
 //! the set's other cards did while it was out of the reader (the transfer
-//! plan's 2.12). The Card view (B4) keeps two things of its own beside them:
-//! which server each card was last synced from here, and when, for the
-//! board's card line (the MP3 Player contract's clause 20a); and the
-//! removable volumes the listener hid from the tab's row (clause 63), by
-//! their volume serials. Disposable, as stats.json is: a file that doesn't read is no
-//! cache at all, and the next save writes it over; one of a newer player is
-//! read as none and never written over. Every member this player doesn't
-//! know is kept.
+//! plan's 2.12). The Card view (B4) keeps three things of its own beside
+//! them: which server each card was last synced from here, and when, for
+//! the board's card line (the MP3 Player contract's clause 20a); the peers
+//! the listener left out of a card's syncs at the proxy gate (clause 58:
+//! asked once per peer); and the removable volumes the listener hid from
+//! the tab's row (clause 63), by their volume serials. Disposable, as
+//! stats.json is: a file that doesn't read is no cache at all, and the next
+//! save writes it over; one of a newer player is read as none and never
+//! written over. Every member this player doesn't know is kept.
 
 use std::collections::BTreeMap;
 
@@ -29,8 +30,8 @@ use super::state::{Copied, from_hex, hex};
 pub(crate) const VERSION: u64 = 1;
 
 /// The members of a card's entry this player reads and writes.
-const KNOWN: [&str; 7] =
-    ["label", "lastSeen", "generation", "commitId", "set", "server", "synced"];
+const KNOWN: [&str; 8] =
+    ["label", "lastSeen", "generation", "commitId", "set", "server", "synced", "leftOut"];
 
 /// A card as this computer last saw it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -47,6 +48,9 @@ pub(crate) struct Seen {
     /// when (Unix seconds; 0: never synced here).
     pub(crate) server: String,
     pub(crate) synced: u64,
+    /// The peers, by their ids on its server, the listener left out of its
+    /// syncs here: the proxy gate's no (clause 58), never asked again.
+    pub(crate) left_out: Vec<u32>,
     /// A newer player's members, by name.
     pub(crate) keep: BTreeMap<String, Value>,
 }
@@ -82,6 +86,8 @@ impl Cards {
             let number = |key: &str| entry.get(key).and_then(Value::as_u64);
             let text = |key: &str| entry.get(key).and_then(Value::as_str);
             let set = text("set").and_then(from_hex);
+            let left_out = entry.get("leftOut").and_then(Value::as_array).into_iter().flatten();
+            let left_out = left_out.filter_map(Value::as_u64).filter_map(|n| u32::try_from(n).ok());
             let known = |name: &str| KNOWN.contains(&name) && (name != "set" || set.is_some());
             let keep = entry.iter().filter(|(name, _)| !known(name));
             let seen = Seen {
@@ -92,6 +98,7 @@ impl Cards {
                 set,
                 server: text("server").unwrap_or_default().to_string(),
                 synced: number("synced").unwrap_or(0),
+                left_out: left_out.collect(),
                 keep: keep.map(|(name, value)| (name.clone(), value.clone())).collect(),
             };
             cards.insert(id, seen);
@@ -138,6 +145,9 @@ impl Cards {
             }
             if seen.synced != 0 {
                 entry.insert("synced".into(), seen.synced.into());
+            }
+            if !seen.left_out.is_empty() {
+                entry.insert("leftOut".into(), json!(seen.left_out));
             }
             cards.insert(hex(*id), Value::Object(entry));
         }
@@ -210,6 +220,20 @@ impl Cards {
         let address = super::state::looks_like_address(server);
         seen.server = if address { String::new() } else { server.into() };
         seen.synced = now;
+    }
+
+    /// The peers the listener left out of card `id`'s syncs here.
+    pub(crate) fn left_out(&self, id: u64) -> Vec<u32> {
+        self.cards.get(&id).map(|seen| seen.left_out.clone()).unwrap_or_default()
+    }
+
+    /// The proxy gate's no for `peer` on card `id` (clause 58): its syncs
+    /// here leave that peer out from now on, and never ask again.
+    pub(crate) fn leave_out(&mut self, id: u64, peer: u32) {
+        let seen = self.cards.entry(id).or_default();
+        if !seen.left_out.contains(&peer) {
+            seen.left_out.push(peer);
+        }
     }
 
     /// The volume of `serial` is hidden from the tab's row (clause 63).
@@ -303,13 +327,19 @@ mod tests {
         cards.hide("1A2B-3C4D");
         cards.hide("1A2B-3C4D");
         cards.hide("");
+        cards.leave_out(9, 4);
+        cards.leave_out(9, 4);
         let text = cards.text();
+        let top: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(top["cards"]["0x0000000000000009"]["leftOut"], json!([4]), "{text}");
         assert!(!text.contains("192.0.2.7"), "an address is never kept: {text}");
         let read = Cards::parse(&text);
         assert_eq!(read, cards);
         assert_eq!((read.cards[&9].server.as_str(), read.cards[&9].synced), ("Home", 6));
         assert_eq!((read.cards[&8].server.as_str(), read.cards[&8].synced), ("", 7));
         assert_eq!(read.hidden, ["1A2B-3C4D"]);
+        let left = (read.left_out(9), read.left_out(8));
+        assert_eq!(left, (vec![4], Vec::new()), "asked once per peer");
         assert!(read.is_hidden("1A2B-3C4D") && !read.is_hidden("FFFF-0000"));
         let mut shown = read.clone();
         shown.show_hidden();

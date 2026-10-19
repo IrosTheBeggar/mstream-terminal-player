@@ -5,7 +5,10 @@
 //! primary is *Eject ▸* (the user's pick of 2026-10-19, card 07 §7, choice
 //! 12).
 //!
-//! Each OS has its own way, and each is asked of an accepted card only:
+//! Each OS has its own way, and each is asked of a volume the tab lists
+//! only — any removable card, one the player can't read too (an exFAT
+//! card's *Eject ▸* is the first step of the route to the player's Format,
+//! clause 45), never the computer's own disks or a fixed disk:
 //! - **Windows:** the volume locked, dismounted and its medium ejected
 //!   (`FSCTL_LOCK_VOLUME`, `FSCTL_DISMOUNT_VOLUME`,
 //!   `IOCTL_STORAGE_EJECT_MEDIA`). Many card readers have no eject of their
@@ -17,7 +20,7 @@
 //! The words the OS gives when it can't (a file open on the card, say) are
 //! what the listener reads.
 
-use super::Found;
+use super::{Found, Refusal};
 
 /// One command a step runs: the program and its arguments.
 pub(crate) type Step = Vec<String>;
@@ -45,12 +48,21 @@ pub(crate) fn macos_steps(found: &Found) -> Vec<Step> {
     vec![vec!["/usr/sbin/diskutil".into(), "eject".into(), mount]]
 }
 
-/// Lets the card of `found` go, or says why the OS wouldn't. Only an
-/// accepted card is ever asked for.
-pub(crate) fn eject(found: &Found) -> Result<(), String> {
-    if !found.accepted() {
-        return Err("not a card this player writes".into());
+/// The drive-safety rule's word on ejecting `found`: a removable card,
+/// whatever its file system, may be let go; the computer's own disks and
+/// fixed disks are never asked of the OS.
+pub(crate) fn may_eject(found: &Found) -> Result<(), String> {
+    let own = found.refusals.iter().any(|r| matches!(r, Refusal::System(_) | Refusal::Fixed));
+    if own {
+        return Err("one of this computer's own disks, not a card".into());
     }
+    Ok(())
+}
+
+/// Lets the card of `found` go, or says why the OS wouldn't. Only a volume
+/// [`may_eject`] lets go is ever asked for.
+pub(crate) fn eject(found: &Found) -> Result<(), String> {
+    may_eject(found)?;
     #[cfg(windows)]
     return windows(found);
     #[cfg(target_os = "linux")]
@@ -184,5 +196,30 @@ mod tests {
         refused.disk.system = vec!["/".into()];
         refused.refusals = crate::device::card::volume::judge(&refused.disk, &refused.volume);
         assert!(eject(&refused).is_err());
+    }
+
+    #[test]
+    fn a_card_the_player_cant_read_may_be_ejected_and_a_fixed_disk_never() {
+        let judged = |found: &mut Found| {
+            found.refusals = crate::device::card::volume::judge(&found.disk, &found.volume);
+        };
+        // An exFAT card, a GPT one, a write-protected one: Eject ▸ is their
+        // way to the player's Format (clause 45).
+        let kinds = [
+            (Fs::ExFat, Table::Mbr, false),
+            (Fs::Fat32, Table::Gpt, false),
+            (Fs::Fat32, Table::Mbr, true),
+        ];
+        for (fs, table, locked) in kinds {
+            let mut found = card("/media/card", "sdb1", "sdb");
+            (found.volume.fs, found.volume.table, found.volume.read_only) = (fs, table, locked);
+            judged(&mut found);
+            assert!(!found.accepted(), "{:?}", found.refusals);
+            assert_eq!(may_eject(&found), Ok(()), "{:?}", found.refusals);
+        }
+        let mut fixed = card("/media/data", "sda2", "sda");
+        (fixed.disk.removable, fixed.disk.bus) = (false, Bus::Ata);
+        judged(&mut fixed);
+        assert!(may_eject(&fixed).is_err() && eject(&fixed).is_err(), "never asked of the OS");
     }
 }

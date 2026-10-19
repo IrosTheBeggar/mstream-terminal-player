@@ -52,9 +52,10 @@ pub(crate) struct CardUi {
     pub(crate) seq: u64,
     /// The card a sync was last seen on, for the busy line's right edge.
     pub(crate) syncing: Option<String>,
+    /// The cards on the row as the last look had them, in order: where a
+    /// card taken out stood (clause 29).
+    pub(crate) row: Vec<String>,
 }
-
-
 
 // ── The words ───────────────────────────────────────────────────────────────
 
@@ -339,17 +340,26 @@ impl Page {
             self.card_open = syncing.clone();
         }
         self.card.syncing = syncing;
-        // A card gone takes its view with it: the next subject, else none.
+        // A card gone takes its view with it to the next subject on the
+        // row, right else left, as a board unplugged does (clause 29): left
+        // of the first card is the last board.
         if let Some(open) = self.card_open.clone()
             && !keys.contains(&open)
         {
-            self.card_open = None;
             self.card.gate = None;
             self.card.sheet = None;
-            if self.boards.is_empty() {
-                self.card_open = keys.first().cloned();
+            let row = std::mem::take(&mut self.card.row);
+            let at = row.iter().position(|k| *k == open).unwrap_or(row.len());
+            let right = row.iter().skip(at + 1).find(|k| keys.contains(k));
+            let left = row.iter().take(at).rev().find(|k| keys.contains(k));
+            self.card_open = right.or(left).cloned();
+            if self.card_open.is_none()
+                && let Some(board) = self.boards.last()
+            {
+                self.open = Some(board.port().to_string());
             }
         }
+        self.card.row = keys.clone();
         // A card put in takes the view only from the empty card (clause 25,
         // the pick of 2026-10-19).
         if self.card_open.is_none() && self.boards.is_empty() {
@@ -360,7 +370,6 @@ impl Page {
     /// A worker's note on the busy line (clauses 29, 54).
     fn card_note(&mut self, note: Note, now: Instant) {
         let cards = self.cards();
-        let name_of = |key: &str| cards.iter().find(|c| c.key == key).map(card_name).unwrap_or_default();
         let (text, gold, stays) = match note {
             Note::PutIn { drive } => (t!("dev.card.busy_put_in", drive = drive).to_string(), false, false),
             Note::Read { key } => {
@@ -399,7 +408,6 @@ impl Page {
             }
             Note::Failed { why } => (why, true, true),
         };
-        let _ = name_of;
         self.say(text, gold, (!stays).then_some(now + NOTE_FOR));
     }
 
@@ -478,9 +486,17 @@ impl Page {
                     self.open_card_sheet(&card, false);
                 }
             }
-            Act::CardPlays if !locked => self.send_card(worker::Cmd::Plays { key }),
+            // The plays wait for no sync: during one they are its own to send.
+            Act::CardPlays if !locked => {
+                if card.is_some_and(|c| c.run.is_none()) {
+                    self.send_card(worker::Cmd::Plays { key });
+                }
+            }
+            // `e` where Enter's Eject ▸ is, too: a card the player can't read
+            // goes out on its way to the player's Format (clause 45).
             Act::CardEject if !locked => {
-                if card.is_some_and(|c| c.run.is_none() && c.found.accepted()) {
+                let may = |c: &CardView| c.found.accepted() || primary(c) == Some(CardPrimary::Eject);
+                if card.is_some_and(|c| c.run.is_none() && !c.out && may(&c)) {
                     self.send_card(worker::Cmd::Eject { key });
                 }
             }
@@ -763,7 +779,7 @@ fn last_rows(card: &CardView, w: u16) -> Vec<Row> {
         }
     }
     let mut rows = value_rows(label, &pieces, w);
-    if let Some(Ended::Refused { peer, why }) = &card.ended {
+    if let Some(Ended::Refused { peer, .. }) = &card.ended {
         let peer = peer_name(card, *peer);
         let mut words = t!("dev.card.err_refused", peer = peer.clone()).to_string();
         let libs = card
@@ -772,7 +788,6 @@ fn last_rows(card: &CardView, w: u16) -> Vec<Row> {
             .and_then(|s| s.settings.peers.iter().find(|p| p.nickname == peer).map(|p| p.libraries.join(", ")))
             .unwrap_or_default();
         words.push_str(&format!(": {}", t!("dev.card.err_refused_2", libs = libs)));
-        let _ = why;
         rows.extend(value_rows(None, &[(format!("{} {words}", glyphs().warn), gold)], w));
     }
     rows
@@ -932,9 +947,9 @@ fn run_rows(page: &Page, card: &CardView, w: u16) -> Option<Vec<Row>> {
             let mut rows = bar(*at, *of);
             rows.extend(value_rows(None, &[(count(*at, *of), Style::default())], w));
             let (why, more) = match pause {
-                Pause::Budget { until, peer, days } => {
+                Pause::Budget { until, peer, days, mb } => {
                     let peer = peer.parse().map(|id| peer_name(card, id)).unwrap_or_else(|_| peer.clone());
-                    let mb = fmt_count(crate::device::card::budget::DEFAULT_MB);
+                    let mb = fmt_count(*mb);
                     let why = t!("dev.card.paused_budget", peer = peer, mb = mb);
                     let left = span(until.saturating_sub(now()));
                     let more = t!("dev.card.paused_budget_2", t = left, days = days);
@@ -995,13 +1010,7 @@ fn run_rows(page: &Page, card: &CardView, w: u16) -> Option<Vec<Row>> {
         Ended::Failed(why) => problem(&t!("dev.card.label_syncing"), g.no, why, &[], w),
         Ended::Stopped { .. } | Ended::Done { .. } | Ended::Fit(_) | Ended::Refused { .. } => return None,
     };
-    let mut out = vec![];
-    if let Some(Row::Bar { .. }) = rows.first() {
-        out.extend(rows);
-    } else {
-        out.extend(rows);
-    }
-    Some(out)
+    Some(rows)
 }
 
 /// A gold line in the value column: the glyph, the words bold, the rest
@@ -1071,9 +1080,12 @@ pub(super) fn card_layout(page: &Page, card: &CardView, content_w: u16) -> Vec<R
         Read::Read(facts) => {
             let set_up = facts.set_up();
             if !facts.newer.is_empty() {
-                let major = "2";
                 let lines = [t!("dev.card.newer_2").to_string()];
-                rows.extend(problem(&holds, g.unknown, &t!("dev.card.newer", major = major), &lines, w));
+                let words = match facts.newer_major {
+                    Some(major) => t!("dev.card.newer", major = major),
+                    None => t!("dev.card.newer_any"),
+                };
+                rows.extend(problem(&holds, g.unknown, &words, &lines, w));
                 rows.extend(space_rows(card, false));
             } else if facts.check || card.gate.as_ref().is_some_and(|g| g.contains(&Asked::DiskCheck)) {
                 let label = t!("dev.card.label_check").to_string();
@@ -1128,12 +1140,7 @@ pub(super) fn card_layout(page: &Page, card: &CardView, content_w: u16) -> Vec<R
                     _ => {}
                 }
                 match run_rows(page, card, w) {
-                    Some(run) => {
-                        rows.extend(run);
-                        if let Some(Ended::Done { plays, .. }) = card.ended.as_ref().filter(|_| card.run.is_some()) {
-                            let _ = plays;
-                        }
-                    }
+                    Some(run) => rows.extend(run),
                     None => {
                         rows.extend(space_rows(card, true));
                         rows.extend(last_rows(card, w));
@@ -1150,9 +1157,9 @@ pub(super) fn card_layout(page: &Page, card: &CardView, content_w: u16) -> Vec<R
                     let run = card.run.as_ref().expect("a run");
                     if run.stopping {
                         // The stop is under way: no link, the words say so.
-                        // The file in flight finishes first: one to the save.
-                        let words = t!("dev.card.stopping", n = 1);
-                        links.push((words.to_string(), Act::Details));
+                        // The run fetches one file at a time: that one
+                        // finishes, then the save, with no count to give.
+                        links.push((t!("dev.card.stopping").to_string(), Act::Details));
                     } else if matches!(run.phase, Phase::Listing | Phase::Planning) {
                         links.push((t!("dev.card.link_stop_plain").to_string(), Act::CardStop));
                     } else if run.phase != Phase::Verifying {
@@ -1185,9 +1192,6 @@ pub(super) fn card_layout(page: &Page, card: &CardView, content_w: u16) -> Vec<R
                     }
                 }
             }
-            if !set_up || facts.copied || !facts.newer.is_empty() || facts.check {
-                // a card with nothing to sync yet: Eject beside Details.
-            }
         }
     }
     // Eject beside the links, but where it is the primary.
@@ -1214,7 +1218,7 @@ pub(super) fn card_layout(page: &Page, card: &CardView, content_w: u16) -> Vec<R
     });
     rows.push(Row::Actions { links: give_way(links, primary.as_ref(), content_w), primary });
     if page.details {
-        rows.extend(details_rows(page, card, content_w));
+        rows.extend(details_rows(card));
     }
     rows.push(Row::Blank);
     rows
@@ -1266,8 +1270,7 @@ fn give_way(
 }
 
 /// Details (clause 44): the facts, then the transfer's log.
-fn details_rows(page: &Page, card: &CardView, w: u16) -> Vec<Row> {
-    let _ = w;
+fn details_rows(card: &CardView) -> Vec<Row> {
     let mut rows = vec![Row::Rule];
     let fact = |label: String, value: String| Row::Fact { label, value, style: Style::default() };
     let v = &card.found.volume;
@@ -1326,7 +1329,6 @@ fn details_rows(page: &Page, card: &CardView, w: u16) -> Vec<Row> {
             rows.push(Row::Fact { label, value: format!("{path} · {why}"), style: Style::default() });
         }
     }
-    let _ = page;
     rows.push(Row::Log);
     if card.run.is_none() && card.facts().is_some_and(|f| f.set_up()) && card.found.accepted() {
         rows.push(Row::Blank);
@@ -1391,8 +1393,11 @@ pub(crate) enum GateKind {
     Relay { server: String, bytes: u64 },
     /// A peer reached only through its parent's proxy.
     Proxy { peer: String, id: u32, server: String },
-    /// The card's server becomes another.
-    Server { card: String, old: String, new: String, rows: usize, plays: usize },
+    /// The card's server becomes another. `want`: the Settings sheet's
+    /// choice, which the yes writes (Apply, clause 48), the next sync
+    /// taking the card over; None, a sync that stopped for it, which the
+    /// yes runs again taking it over.
+    Server { card: String, old: String, new: String, rows: usize, plays: usize, want: Option<Box<Want>> },
 }
 
 /// The gate a Sync ▸ passes first, if any: the worker's, from the plan's
@@ -1424,7 +1429,7 @@ fn gate_of_asked(card: &CardView, asked: &Asked) -> Option<GateKind> {
             let new = card.server.link().map(|l| l.name.clone()).unwrap_or_default();
             let old = card.facts().map(|f| f.nickname.clone()).unwrap_or_default();
             let plays = card.facts().and_then(|f| f.state.as_ref()).map_or(0, |s| s.plays.len());
-            GateKind::Server { card: name, old, new, rows: *rows, plays }
+            GateKind::Server { card: name, old, new, rows: *rows, plays, want: None }
         }
         Asked::Proxy { peer } => GateKind::Proxy { peer: peer_name(card, *peer), id: *peer, server },
         Asked::DiskCheck => return None,
@@ -1450,42 +1455,69 @@ impl Page {
         self.gate.is_some() || self.sheet.is_some()
     }
 
-    /// The gate's keep: nothing was written; the worker forgets its ask.
+    /// The gate's keep (Enter, Esc, `n`): what stays stays, and nothing is
+    /// written. Two keeps are answers of their own (the set's card 06):
+    /// *Leave them all as mine* syncs without adopting, as `--keep-mine`
+    /// does; *Leave Lisbon out* keeps that peer out of this card's syncs
+    /// here, never asked again (clause 58: once per peer).
     fn gate_keep(&mut self) {
         let Some(gate) = self.card.gate.take() else { return };
-        if let GateKind::Proxy { id, .. } = gate.kind {
-            // Left out: the peer stays out of this card's syncs until asked.
-            let allow = Allow { leave_out: vec![id], ..gate.allow };
-            let _ = allow;
+        match gate.kind {
+            GateKind::Adopt { .. } => {
+                let mut allow = gate.allow;
+                allow.answers.adopt = Some(false);
+                self.gate_next(gate.key, allow);
+            }
+            GateKind::Proxy { id, .. } => self.send_card(worker::Cmd::LeaveOut { key: gate.key, peer: id }),
+            // The sheet's choice, unwritten: there is no ask to forget.
+            GateKind::Server { want: Some(_), .. } => {}
+            _ => self.send_card(worker::Cmd::Dismiss { key: gate.key }),
         }
-        self.send_card(worker::Cmd::Dismiss { key: gate.key });
     }
 
     /// The gate's go: the sync, with this gate's yes among its answers —
-    /// or the next gate, if the plan has one more.
+    /// or the next gate, if the plan has one more. A removals gate's yes
+    /// names its count: the run removes that many, or asks again.
     fn gate_go(&mut self) {
         let Some(gate) = self.card.gate.clone() else { return };
         let mut allow = gate.allow.clone();
         match &gate.kind {
             GateKind::Half { ticked: false, .. } => return,
-            GateKind::Half { .. } => {
+            GateKind::Half { n, .. } => {
                 allow.answers.removals = true;
                 allow.answers.mass_removals = true;
+                allow.answers.removals_seen = Some(*n);
             }
-            GateKind::Removals { .. } => allow.answers.removals = true,
+            GateKind::Removals { n, .. } => {
+                allow.answers.removals = true;
+                allow.answers.removals_seen = Some(*n);
+            }
             GateKind::Adopt { .. } => allow.answers.adopt = Some(true),
             GateKind::Relay { .. } => allow.proxy_copies.push(0),
             GateKind::Proxy { id, .. } => allow.proxy_copies.push(*id),
-            GateKind::Server { .. } => allow.take_over = true,
+            // From Settings: the yes writes the settings, and only them
+            // (Apply never syncs, clause 48); the next sync takes it over.
+            GateKind::Server { want: Some(want), .. } => {
+                self.card.gate = None;
+                self.send_card(worker::Cmd::Apply { key: gate.key, want: want.clone() });
+                return;
+            }
+            GateKind::Server { want: None, .. } => allow.take_over = true,
         }
         self.card.gate = None;
-        let card = self.open_card().filter(|c| c.key == gate.key);
+        self.gate_next(gate.key, allow);
+    }
+
+    /// After a gate's answer: the plan's next gate, else the sync with
+    /// every answer given.
+    fn gate_next(&mut self, key: String, mut allow: Allow) {
+        let card = self.open_card().filter(|c| c.key == key);
         let next = card.as_ref().and_then(|c| gate_for(c, &plan_of(c).cloned().unwrap_or_default(), allow.clone()));
         match next {
             Some(next) => self.card.gate = Some(next),
             None => {
                 allow.proxy_copies.retain(|id| *id != 0);
-                self.send_card(worker::Cmd::Sync { key: gate.key, allow: Box::new(allow) });
+                self.send_card(worker::Cmd::Sync { key, allow: Box::new(allow) });
             }
         }
     }
@@ -1606,7 +1638,7 @@ fn gate_body(gate: &CardGate, width: usize) -> Vec<GLine> {
             lines.push(GLine::Blank);
             text(&mut lines, t!("dev.card.gate_proxy_once").to_string(), plain);
         }
-        GateKind::Server { card, old, new, rows, plays } => {
+        GateKind::Server { card, old, new, rows, plays, .. } => {
             let (t, s) = title(t!("dev.card.gate_server_title", new = new.clone()).to_string());
             text(&mut lines, t, s);
             lines.push(GLine::Blank);
@@ -1952,15 +1984,17 @@ impl Page {
             let card = card.expect("the card");
             let servers = self.servers();
             let new = servers.iter().find(|s| Some(&s.id) == sheet.want.server.as_ref()).map(|s| s.name.clone());
+            // The gate first, nothing written (clause 58): its yes writes the
+            // settings, and the next sync takes the card over; its keep
+            // writes nothing at all.
             let kind = GateKind::Server {
                 card: card_name(&card),
                 old: server_name(&card),
                 new: new.unwrap_or_default(),
                 rows: card.facts().map_or(0, |f| f.tracks),
                 plays: card.facts().and_then(|f| f.state.as_ref()).map_or(0, |s| s.plays.len()),
+                want: Some(Box::new(sheet.want)),
             };
-            // Its yes writes the settings, and the next sync takes it over.
-            self.send_card(worker::Cmd::Apply { key: key.clone(), want: Box::new(sheet.want) });
             self.card.gate = Some(CardGate { key, kind, allow: Allow::default() });
             return;
         }

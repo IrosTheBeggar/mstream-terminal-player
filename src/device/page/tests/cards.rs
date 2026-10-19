@@ -199,18 +199,23 @@ fn removals_past_fifty_ask_first_and_half_the_card_waits_for_its_box() {
     let sent_now = sent(&inbox);
     let [worker::Cmd::Sync { allow, .. }] = sent_now.as_slice() else { panic!("{sent_now:?}") };
     assert!(allow.answers.removals && !allow.answers.mass_removals);
+    assert_eq!(allow.answers.removals_seen, Some(214), "the yes names its count");
 
-    // Half the card: no second button until the box is ticked.
+    // Half the card: no second button until the box is ticked; its count
+    // per library from the look, as from a sync that stopped for it.
     let card = cards::with(cards::ready("E:", now()), |c| {
         if let Next::Plan(plan) = &mut c.next {
             plan.removals = many.clone();
             plan.guards = vec![Guard::Removals { paths: many.clone(), strong: true }];
+            plan.removal_libs = (0..214).map(|i| if i < 200 { "Rock" } else { "Jazz" }.to_string()).collect();
         }
     });
     let (mut page, _ends, inbox, _fold) = with_cards(|_| {}, vec![card]);
     press(&mut page, KeyCode::Enter);
     let frame = window(&mut page);
     assert!(frame.contains("Remove 214 of Car music's 4,812 tracks?"), "{frame}");
+    assert!(frame.contains("  Rock  200 of 2,904 gone"), "{frame}");
+    assert!(frame.contains("  Jazz  14 of 1,908 gone"), "{frame}");
     assert!(frame.contains("[ ] Home really has dropped them"), "{frame}");
     assert!(!frame.contains("Remove 214 and sync"), "no second button yet:\n{frame}");
     assert_eq!(page.hint(), "e tick the box · Enter or Esc not now");
@@ -227,6 +232,7 @@ fn removals_past_fifty_ask_first_and_half_the_card_waits_for_its_box() {
     let sent_now = sent(&inbox);
     let [worker::Cmd::Sync { allow, .. }] = sent_now.as_slice() else { panic!("{sent_now:?}") };
     assert!(allow.answers.removals && allow.answers.mass_removals);
+    assert_eq!(allow.answers.removals_seen, Some(214));
 }
 
 #[test]
@@ -253,10 +259,13 @@ fn a_sync_draws_its_progress_and_x_stops_it_at_the_next_save() {
     card.run.as_mut().unwrap().stopping = true;
     fold.borrow_mut().apply(worker::Event::Card(Box::new(card)));
     page.pump();
-    assert!(window(&mut page).contains("stopping at the next save… 1 files to it"));
-    // Settings and Eject wait for the sync: nothing goes.
+    let frame = window(&mut page);
+    assert!(frame.contains("stopping at the next save…") && !frame.contains("files to it"), "{frame}");
+    // Settings, Eject and the plays wait for the sync: nothing goes (the
+    // sync sends the plays itself).
     press(&mut page, KeyCode::Char('o'));
     press(&mut page, KeyCode::Char('e'));
+    press(&mut page, KeyCode::Char('p'));
     assert!(sent(&inbox).is_empty() && page.card.sheet.is_none());
 }
 
@@ -320,6 +329,11 @@ fn a_volume_the_player_cant_use_says_why_and_h_hides_it() {
     assert!(frame.contains("Your Core2 can format it: eject it, put it in the Core2"), "{frame}");
     assert!(frame.contains("│  Eject ▸  │") && frame.contains("Not a card? Hide it"), "{frame}");
     assert_eq!(page.hint(), "Enter eject · h hide · d details · Esc library");
+    // Eject ▸, the route's first step: Enter, and e (clause 12's key).
+    for code in [KeyCode::Enter, KeyCode::Char('e')] {
+        press(&mut page, code);
+        assert_eq!(sent(&inbox), [worker::Cmd::Eject { key: "G:\\".into() }], "{code:?}");
+    }
     press(&mut page, KeyCode::Char('h'));
     assert_eq!(sent(&inbox), [worker::Cmd::Hide { key: "G:\\".into() }]);
     // With a board plugged in, the route names its port.
@@ -395,8 +409,15 @@ fn the_cards_states_at_rest_say_what_the_card_is_and_the_way_on() {
     let frame = draw(cards::with(ready(), |c| c.next = Next::Unreached { asked: now() - 120, why: "x".into() }));
     assert!(frame.contains("Next sync     Home didn't answer · asked 2 min ago"), "{frame}");
     assert!(frame.contains("Try now"), "{frame}");
-    let frame = draw(cards::with(ready(), |c| cards::facts(c).newer = vec!["manifest.bin".into()]));
-    assert!(frame.contains("? Written by a newer mStream Player (card format 2)"), "{frame}");
+    let frame = draw(cards::with(ready(), |c| {
+        cards::facts(c).newer = vec!["manifest.bin".into()];
+        cards::facts(c).newer_major = Some(3);
+    }));
+    assert!(frame.contains("? Written by a newer mStream Player (card format 3)"), "{frame}");
+    // A private file's newer version names no card format.
+    let frame = draw(cards::with(ready(), |c| cards::facts(c).newer = vec!["state.json".into()]));
+    assert!(frame.contains("? Written by a newer mStream Player "), "{frame}");
+    assert!(!frame.contains("card format"), "{frame}");
     let frame = draw(cards::with(ready(), |c| cards::facts(c).check = true));
     assert!(frame.contains("Check         ✗ Check this card on the computer first"), "{frame}");
     assert!(frame.contains("Windows: E: › Properties › Tools › Check.") && frame.contains("Check again ▸"), "{frame}");
@@ -436,4 +457,112 @@ fn the_cards_states_at_rest_say_what_the_card_is_and_the_way_on() {
     }));
     assert!(frame.contains("not in a reader") && frame.contains("✗ Taken out · stopped at 1,204 of 4,812"), "{frame}");
     assert!(frame.contains("Give up this run…"), "{frame}");
+}
+
+/// Studio, a second server saved on this computer.
+fn studio() -> worker::ServerLink {
+    worker::ServerLink {
+        id: "http://127.0.0.1:4000".into(),
+        name: "Studio".into(),
+        base: Ok("http://127.0.0.1:4000".into()),
+        ..worker::ServerLink::default()
+    }
+}
+
+/// The sheet open on the card, From set to Studio, then Apply.
+fn apply_studio(page: &mut Page, inbox: &Receiver<In>) {
+    press(page, KeyCode::Char('o'));
+    press(page, KeyCode::Down);
+    press(page, KeyCode::Enter);
+    press(page, KeyCode::Down);
+    press(page, KeyCode::Enter);
+    let asked = sent(inbox);
+    assert!(matches!(asked.as_slice(), [worker::Cmd::Fit { .. }]), "the fit only: {asked:?}");
+    page.card.sheet.as_mut().unwrap().focus = 99;
+    press(page, KeyCode::Enter);
+}
+
+#[test]
+fn another_server_in_settings_asks_first_and_writes_nothing_until_its_yes() {
+    let _en = english();
+    let (mut page, _ends, inbox, fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+    fold.borrow_mut().servers.push(studio());
+    apply_studio(&mut page, &inbox);
+    // The gate first, and nothing sent: the card is as it was.
+    assert!(sent(&inbox).is_empty(), "nothing written before the gate's yes");
+    let frame = window(&mut page);
+    assert!(frame.contains("Make Studio this card's server?"), "{frame}");
+    assert!(frame.contains("◂ Keep Home") && frame.contains("Make Studio its server"), "{frame}");
+    assert_eq!(page.hint(), "y make Studio its server · Enter or Esc keep Home");
+    // Keep Home: nothing written, nothing to forget.
+    press(&mut page, KeyCode::Esc);
+    assert!(page.card.gate.is_none() && sent(&inbox).is_empty());
+
+    // Its yes writes the settings, and only them: Apply never syncs (clause
+    // 48); the next Sync takes the card over (the worker's slot).
+    apply_studio(&mut page, &inbox);
+    press(&mut page, KeyCode::Char('y'));
+    let applied = sent(&inbox);
+    let [worker::Cmd::Apply { key, want }] = applied.as_slice() else { panic!("{applied:?}") };
+    assert_eq!((key.as_str(), want.server.as_deref()), ("E:\\", Some("http://127.0.0.1:4000")));
+    assert!(page.card.gate.is_none());
+}
+
+#[test]
+fn leave_them_all_as_mine_syncs_without_adopting_and_a_peer_left_out_is_kept_out() {
+    let _en = english();
+    let card = cards::with(cards::ready("E:", now()), |c| {
+        if let Next::Plan(plan) = &mut c.next {
+            plan.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])];
+        }
+    });
+    let (mut page, _ends, inbox, _fold) = with_cards(|_| {}, vec![card]);
+    press(&mut page, KeyCode::Enter);
+    let frame = window(&mut page);
+    assert!(frame.contains("Adopt 1,190 files Home also has?"), "{frame}");
+    // The keep is an answer: the sync goes on, adopting nothing (as
+    // --keep-mine does).
+    press(&mut page, KeyCode::Esc);
+    let synced = sent(&inbox);
+    let [worker::Cmd::Sync { allow, .. }] = synced.as_slice() else { panic!("{synced:?}") };
+    assert_eq!(allow.answers.adopt, Some(false));
+    press(&mut page, KeyCode::Enter);
+    press(&mut page, KeyCode::Char('y'));
+    let synced = sent(&inbox);
+    let [worker::Cmd::Sync { allow, .. }] = synced.as_slice() else { panic!("{synced:?}") };
+    assert_eq!(allow.answers.adopt, Some(true));
+
+    // A peer only its parent's proxy reaches, asked after a sync: its keep
+    // leaves it out of this card's syncs, kept by the worker.
+    let card = cards::with(cards::ready("E:", now()), |c| c.gate = Some(vec![worker::Gate::Proxy { peer: 4 }]));
+    let (mut page, _ends, inbox, _fold) = with_cards(|_| {}, vec![card]);
+    let frame = window(&mut page);
+    assert!(frame.contains("Copy from #4 through Home?"), "{frame}");
+    press(&mut page, KeyCode::Esc);
+    assert_eq!(sent(&inbox), [worker::Cmd::LeaveOut { key: "E:\\".into(), peer: 4 }]);
+}
+
+#[test]
+fn a_card_taken_out_with_its_view_open_moves_the_view_right_else_left() {
+    let _en = english();
+    let (mut page, _ends, _inbox, fold) =
+        with_cards(Ends::up_to_date, vec![cards::ready("E:", now()), cards::ready("F:", now())]);
+    // COM3, E:, F: on the row; E: in view.
+    press(&mut page, KeyCode::Right);
+    assert_eq!(page.card_open.as_deref(), Some("E:\\"));
+    fold.borrow_mut().apply(worker::Event::Gone { key: "E:\\".into() });
+    page.pump();
+    assert_eq!(page.card_open.as_deref(), Some("F:\\"), "the next to its right");
+    // E: put back beside it; F: taken out: to its left, E:.
+    fold.borrow_mut().apply(worker::Event::Card(Box::new(cards::ready("E:", now()))));
+    page.pump();
+    assert_eq!(page.card_open.as_deref(), Some("F:\\"), "a card put in takes no view");
+    fold.borrow_mut().apply(worker::Event::Gone { key: "F:\\".into() });
+    page.pump();
+    assert_eq!(page.card_open.as_deref(), Some("E:\\"), "none to its right: to its left");
+    // The last card out: the board to its left.
+    fold.borrow_mut().apply(worker::Event::Gone { key: "E:\\".into() });
+    page.pump();
+    assert_eq!(page.card_open, None);
+    assert!(window(&mut page).contains("M5Stack Core2"), "the board's view");
 }

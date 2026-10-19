@@ -420,12 +420,13 @@ pub(crate) fn quit_waiting(gui: &Gui) -> bool {
     gui.device.quit_since.is_some()
 }
 
+/// The quit's word to the transfer worker: the running sync stops at its
+/// next save, and a sync waiting its turn (clause 56) never starts — the
+/// quit waits for that one save alone, and the worker ends once nothing
+/// runs.
 fn stop_syncs(gui: &mut Gui) {
     let Some(host) = gui.device.transfer.as_ref() else { return };
-    let keys: Vec<String> = host.fold().cards.iter().filter(|c| c.syncing()).map(|c| c.key.clone()).collect();
-    for key in keys {
-        host.link.send(worker::Cmd::Stop { key });
-    }
+    host.link.send(worker::Cmd::Quit);
 }
 
 /// The gold gate over the screen (clause 57).
@@ -1645,11 +1646,20 @@ mod tests {
         assert!(!quit_gate_open(&gui) && !quit_waiting(&gui));
         assert!(worker::sent(&inbox).is_empty());
 
+        // A second card waits its turn (clause 56).
+        let waiting = worker::fixtures::with(worker::fixtures::ready("F:", unix_now()), |v| {
+            v.run = Some(worker::Run { phase: worker::Phase::Waiting, ..worker::Run::default() });
+        });
+        tell.send(CardEvent::Card(Box::new(waiting))).unwrap();
+        frame(&mut gui);
+
         // y: the sync stops at its next save, and the quit waits for it.
+        // The worker is told to quit: the waiting card's sync never starts
+        // in the wait (its own tests: the queue cleared, nothing started).
         key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
         let flow = key_in(&mut gui, KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(flow, super::super::Flow::Continue);
-        assert_eq!(worker::sent(&inbox), vec![worker::Cmd::Stop { key: "E:\\".into() }]);
+        assert_eq!(worker::sent(&inbox), vec![worker::Cmd::Quit]);
         assert!(quit_waiting(&gui) && !quit_ready(&gui));
         stopped(&tell);
         frame(&mut gui);
@@ -1668,7 +1678,7 @@ mod tests {
             let heard = inbox.recv_timeout(Duration::from_secs(5));
             std::thread::sleep(Duration::from_millis(200));
             stopped(&tell);
-            matches!(heard, Ok(worker::In::Cmd(worker::Cmd::Stop { .. })))
+            matches!(heard, Ok(worker::In::Cmd(worker::Cmd::Quit)))
         });
         let t0 = Instant::now();
         quit(&mut gui);

@@ -201,6 +201,41 @@ fn with_card(scratch: &Scratch) -> (Rig, String, Fake, FatSim) {
     (rig, key, fake, sim)
 }
 
+/// A second set-up card ("Gym", another serial and id) put in the rig's
+/// shelf and read: its key, and its folder's scratch (kept while it lives).
+fn second_card(rig: &mut Rig, name: &str) -> (String, Scratch) {
+    let other = Scratch::new(name);
+    let root = other.0.join("card");
+    let second = FatSim::new(&root, SERIAL + 1);
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures");
+    let golden = fixtures.join("card/golden/device.txt");
+    std::fs::create_dir_all(root.join(".player")).unwrap();
+    std::fs::copy(golden, root.join(".player/device.txt")).unwrap();
+    let ask = setup::Ask { label: "Gym".into(), new_identity: false };
+    let mut cards = Cards::default();
+    setup::set_up(&second, &ask, &mut envs_from(0xB0B), &mut cards, &mut |_| {}).unwrap();
+    let found = volume_at(&root, Fs::Fat32, SERIAL + 1);
+    let key = key_of(&found);
+    rig.shelf.put(found, SERIAL + 1);
+    let wanted = key.clone();
+    rig.until("the second card", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some())
+    });
+    (key, other)
+}
+
+/// A run under way on the card, as an event tells it: its run past
+/// waiting its turn.
+fn running_in(event: &Event) -> Option<(&str, bool)> {
+    match event {
+        Event::Progress { key, run } => Some((key.as_str(), run.phase != Phase::Waiting)),
+        Event::Card(card) => {
+            Some((card.key.as_str(), card.run.as_ref().is_some_and(|r| r.phase != Phase::Waiting)))
+        }
+        _ => None,
+    }
+}
+
 fn without_lock(sim: &FatSim) -> std::collections::BTreeMap<String, (u64, u32, u64)> {
     let mut image = sim.image();
     image.retain(|p, _| !p.ends_with("run.lock"));
@@ -303,40 +338,45 @@ fn one_sync_at_a_time_the_second_waits_its_turn_and_dont_wait_forgets_it() {
     let scratch = Scratch::new("worker-two");
     let (mut rig, key, _fake, _sim) = with_card(&scratch);
     // A second card of its own: another serial, another id.
-    let other = Scratch::new("worker-two-b");
-    let root = other.0.join("card");
-    let second = FatSim::new(&root, SERIAL + 1);
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures");
-    let golden = fixtures.join("card/golden/device.txt");
-    std::fs::create_dir_all(root.join(".player")).unwrap();
-    std::fs::copy(golden, root.join(".player/device.txt")).unwrap();
-    let ask = setup::Ask { label: "Gym".into(), new_identity: false };
-    let mut cards = Cards::default();
-    setup::set_up(&second, &ask, &mut envs_from(0xB0B), &mut cards, &mut |_| {}).unwrap();
-    let found = volume_at(&root, Fs::Fat32, SERIAL + 1);
-    let key_b = key_of(&found);
-    rig.shelf.put(found, SERIAL + 1);
-    let wanted = key_b.clone();
-    rig.until("the second card", |f| {
-        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some())
-    });
+    let (key_b, _other) = second_card(&mut rig, "worker-two-b");
 
     rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
     rig.send(Cmd::Sync { key: key_b.clone(), allow: Box::default() });
-    let wanted = key_b.clone();
-    rig.until("the second waiting", |f| {
-        let waits = |r: &Run| r.phase == Phase::Waiting;
-        f.cards.iter().any(|c| c.key == wanted && c.run.as_ref().is_some_and(waits))
-    });
-    assert!(!rig.card(&key_b).syncing(), "waiting is not syncing");
-    // Both end, one after the other.
-    let (a, b) = (key.clone(), key_b.clone());
-    rig.until("both synced", |f| {
+    // Both end, one after the other: every report of a run under way names
+    // one card until that card's run has ended (the runs never overlap),
+    // and the second waits its turn meanwhile.
+    let (mut under_way, mut runs, mut waited) = (None::<String>, Vec::new(), false);
+    let t0 = Instant::now();
+    loop {
         let done = |k: &str| {
-            f.cards.iter().any(|c| c.key == k && matches!(c.ended, Some(Ended::Done { .. })))
+            let ended = |c: &CardView| c.run.is_none() && matches!(c.ended, Some(Ended::Done { .. }));
+            rig.fold.cards.iter().any(|c| c.key == k && ended(c))
         };
-        done(&a) && done(&b)
-    });
+        if done(&key) && done(&key_b) {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "both synced: {:#?}", rig.fold.cards);
+        let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) else { continue };
+        if let Some((k, running)) = running_in(&event) {
+            match (&under_way, running) {
+                (Some(on), true) => assert_eq!(on, k, "a second run began before {on}'s ended"),
+                (None, true) => {
+                    under_way = Some(k.to_string());
+                    runs.push(k.to_string());
+                }
+                (Some(on), false) if on == k => under_way = None,
+                _ => {}
+            }
+        }
+        if let Event::Card(card) = &event {
+            let waits = card.run.as_ref().is_some_and(|r| r.phase == Phase::Waiting);
+            waited |= card.key == key_b && waits;
+        }
+        rig.fold.apply(event);
+    }
+    assert_eq!(runs, [key.clone(), key_b.clone()], "one run each, the first first");
+    assert!(waited, "the second waited its turn");
+    assert!(!rig.card(&key_b).syncing());
 
     // A second one forgotten before its turn never runs.
     rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
@@ -347,6 +387,36 @@ fn one_sync_at_a_time_the_second_waits_its_turn_and_dont_wait_forgets_it() {
         f.cards.iter().any(|c| c.key == a && c.run.is_none() && c.ended.is_some())
     });
     assert!(rig.card(&key_b).run.is_none());
+}
+
+#[test]
+fn a_quit_stops_the_run_at_its_save_and_the_one_waiting_never_starts() {
+    let scratch = Scratch::new("worker-quit");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    let (key_b, _other) = second_card(&mut rig, "worker-quit-b");
+    // The second queued behind the first, then the quit, before the first
+    // can end: the quit's wait is the first's save alone.
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    rig.send(Cmd::Sync { key: key_b.clone(), allow: Box::default() });
+    rig.send(Cmd::Quit);
+    let (t0, mut waited) = (Instant::now(), false);
+    while !rig.fold.idle {
+        assert!(t0.elapsed() < Duration::from_secs(30), "idle: {:#?}", rig.fold.cards);
+        let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) else { continue };
+        if let Some((k, running)) = running_in(&event) {
+            assert!(!(k == key_b && running), "the waiting sync started in the quit's wait");
+        }
+        if let Event::Card(card) = &event {
+            let waits = card.run.as_ref().is_some_and(|r| r.phase == Phase::Waiting);
+            waited |= card.key == key_b && waits;
+        }
+        rig.fold.apply(event);
+    }
+    assert!(waited, "the second waited its turn");
+    assert!(rig.card(&key_b).run.is_none(), "told it won't run");
+    assert!(rig.card(&key).run.is_none(), "the first ended");
+    // The worker is gone: nothing more is told.
+    assert!(rig.events.recv_timeout(Duration::from_millis(200)).is_err());
 }
 
 #[test]
@@ -370,6 +440,17 @@ fn half_the_card_gone_from_the_server_is_a_gate_with_each_library_counted() {
     let Some(Gate::Half { n, total, by_library }) = gate.first() else { panic!("{gate:?}") };
     assert_eq!((*n, *total), (3, 5));
     assert_eq!(by_library, &[("Rock".to_string(), 3, 4)], "Rock's 3 of its 4");
+    // The look before a sync counts the same (the gate a Sync ▸ opens).
+    rig.send(Cmd::Dismiss { key: key.clone() });
+    rig.send(Cmd::Look { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("the look", |f| {
+        let counted = |p: &Planned| !p.removal_libs.is_empty();
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(counted))
+    });
+    let card = rig.card(&key).clone();
+    let ahead = gate_ahead(&card, planned(&card).unwrap(), &Allow::default());
+    assert_eq!(ahead, Some(Gate::Half { n: 3, total: 5, by_library: vec![("Rock".into(), 3, 4)] }));
 
     // Answered, the sync removes them.
     let answers = Answers { removals: true, mass_removals: true, ..Answers::default() };
@@ -462,6 +543,10 @@ fn a_volume_the_player_cant_use_is_listed_and_hidden_until_shown_again() {
     let wanted = key.clone();
     rig.until("listed", |f| f.cards.iter().any(|c| c.key == wanted));
     assert_eq!(rig.card(&key).read, Read::Refused, "listed with why, never read");
+    // Eject ▸, its way to the player's Format: the OS is asked (clause 45).
+    rig.send(Cmd::Eject { key: key.clone() });
+    rig.until("ejected", |f| f.notes.iter().any(|n| matches!(n, Note::Ejected { .. })));
+    assert_eq!(*rig.shelf.ejected.lock().unwrap(), [key.clone()]);
     rig.send(Cmd::Hide { key: key.clone() });
     let wanted = key.clone();
     rig.until("hidden", |f| f.watched && !f.cards.iter().any(|c| c.key == wanted));
@@ -532,10 +617,107 @@ fn a_card_taken_out_in_its_sync_keeps_its_tab_marked_out() {
         notes.iter().any(|e| matches!(e, Event::Note(Note::OutRun { at: 1204, of: 4812, .. }))),
         "{notes:?}"
     );
-    // Given up, it goes.
+    // Back in that reader before the run met the gap: the run goes on in
+    // its slot, its progress told (clause 53).
+    let back = worker.slots[0].view.found.clone();
+    shelf.put(back, SERIAL);
+    worker.watch();
+    assert_eq!(worker.slots.len(), 1, "one slot");
+    assert!(!worker.slots[0].view.out);
+    assert!(worker.slots[0].view.syncing(), "its run kept");
+    let _ = events.try_iter().count();
+    worker.progress(&key, RunEvent::Wrote { path: "a.flac".into(), bytes: 10 });
+    let wrote = |e: &Event| matches!(e, Event::Progress { run, .. } if run.done_files == 1205);
+    let told = events.try_iter().any(|e| wrote(&e));
+    assert!(told, "its progress told");
+    // Out again, and given up, it goes.
+    shelf.take(&key);
+    worker.watch();
     worker.running = None;
     worker.cmd(Cmd::GiveUp { key: key.clone() });
     assert!(worker.slots.is_empty());
+}
+
+#[test]
+fn a_sync_takes_the_server_its_settings_chose_and_leaves_out_the_peers_left_out() {
+    let scratch = Scratch::new("worker-answers");
+    let sim = card(&scratch);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let facts = read(&sim, &Cards::default()).unwrap();
+    let id = facts.root.unwrap().0;
+    let here = Arc::new(Here::default());
+    let (me, _inbox) = channel();
+    let (out, events) = channel();
+    let setup = Setup { volumes: Arc::new(Shelf::default()), home: here.clone(), every: EVERY };
+    let mut worker = Worker::new(setup, me, out);
+    let mut view = CardView::new(found);
+    view.read = Read::Read(Box::new(facts));
+    view.gate = Some(vec![Gate::Proxy { peer: 4 }, Gate::Proxy { peer: 5 }]);
+    worker.slots.push(Slot {
+        view,
+        look_again: false,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    });
+    assert_eq!(worker.answers_for(&key, Allow::default()), Allow::default());
+    // The proxy gate's no: kept on this computer, that gate put away.
+    worker.cmd(Cmd::LeaveOut { key: key.clone(), peer: 4 });
+    assert_eq!(here.cards().left_out(id), [4]);
+    assert_eq!(worker.slots[0].view.gate, Some(vec![Gate::Proxy { peer: 5 }]));
+    assert!(events.try_iter().any(|e| matches!(e, Event::Card(_))));
+    // Settings that chose another server: the next sync takes it over.
+    worker.slots[0].view.take_over = true;
+    let allow = worker.answers_for(&key, Allow::default());
+    assert!(allow.take_over);
+    assert_eq!(allow.leave_out, [4], "left out, never asked again");
+    // A yes given since stands.
+    let through = Allow { proxy_copies: vec![4], ..Allow::default() };
+    assert!(worker.answers_for(&key, through).leave_out.is_empty());
+}
+
+#[test]
+fn a_lapsed_sign_in_is_the_apis_401_and_no_other_word() {
+    let unauthorized = crate::api::ApiError::Unauthorized.to_string();
+    // The listing's halt, and a run parked by a fetch's.
+    assert!(signed_out(&unauthorized));
+    assert!(signed_out(&format!("the server no longer takes this sign-in: {unauthorized}")));
+    let refused = sync::Synced {
+        summary: None,
+        end: sync::End::Halted(sync::Halt::Server(unauthorized.clone())),
+        notes: Vec::new(),
+        plays: None,
+        peers: Vec::new(),
+        resume_at: None,
+    };
+    assert_eq!(super::planned(&refused, 0), Next::SignIn);
+    // A 403, and words that merely hold "sign", are not.
+    for other in [
+        crate::api::ApiError::Forbidden("transfer".into()).to_string(),
+        "server error 500: assignment failed".into(),
+        "could not reach server: no signal".into(),
+        "unexpected response from the design route: x".into(),
+    ] {
+        assert!(!signed_out(&other), "{other}");
+    }
+}
+
+#[test]
+fn a_newer_writers_card_format_is_read_off_its_file() {
+    let scratch = Scratch::new("worker-newer");
+    let sim = card(&scratch);
+    assert_eq!(read(&sim, &Cards::default()).unwrap().newer_major, None);
+    // The manifest's header made major 3: a newer writer's.
+    let path = scratch.0.join("card/.mstream/manifest.bin");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    let facts = read(&FatSim::new(&scratch.0.join("card"), SERIAL), &Cards::default()).unwrap();
+    assert!(facts.newer.contains(&"manifest.bin".to_string()), "{:?}", facts.newer);
+    assert_eq!(facts.newer_major, Some(3));
 }
 
 #[test]

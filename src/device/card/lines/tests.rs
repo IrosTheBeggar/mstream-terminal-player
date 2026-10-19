@@ -374,3 +374,89 @@ fn a_drive_that_is_no_card_is_exit_two() {
     let code = command(empty, &b.home, None, What::Status, &Flags::default(), None, &mut term);
     assert_eq!((code, term.said()), (1, "No card in a reader.\n".to_string()));
 }
+
+/// One `device card` command with these servers saved; `answer` the
+/// listener's to the question (None: no terminal).
+fn command_on(
+    setup: Setup,
+    servers: Vec<ServerLink>,
+    drive: &str,
+    flags: &Flags,
+    answer: Option<bool>,
+    term: &mut Term,
+) -> i32 {
+    let mut ask = |_: &str| answer;
+    let ctrl_c = AtomicU8::new(0);
+    let mut io = Io { out: &mut term.out, err: &mut term.err, ask: &mut ask, ctrl_c: &ctrl_c };
+    card(setup, servers, drive, &What::Sync, flags, &mut io)
+}
+
+#[test]
+fn a_take_over_is_planned_with_nothing_written_until_the_listener_goes_on() {
+    let scratch = Scratch::new("lines-take-over");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    let (base, _studio_server) = server();
+    let studio = ServerLink { name: "Studio".into(), session: false, ..home_server(&base) };
+    let both = || vec![b.home.clone(), studio.clone()];
+    let to_studio = Flags { server: Some("Studio".into()), take_over: true, ..Flags::default() };
+
+    // A new card: Studio's plan, then nothing written without --yes, nor
+    // on a terminal's no.
+    let before = b.sim.image();
+    let mut term = Term::new();
+    let code = command_on(b.setup(), both(), &key, &to_studio, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 1, "{said}");
+    let nothing = "Nothing written: add --yes to sync.";
+    assert!(said.contains("from Studio: ") && said.contains(nothing), "{said}");
+    let mut term = Term::new();
+    let code = command_on(b.setup(), both(), &key, &to_studio, Some(false), &mut term);
+    assert_eq!(code, 1, "{}", term.said());
+    assert_eq!(b.sim.image(), before, "state.json untouched: nothing written");
+
+    // A filled card: the gate's flag, then its plan, still nothing written.
+    let mut term = Term::new();
+    let yes = Flags { yes: true, ..Flags::default() };
+    let code = command_on(b.setup(), both(), &key, &yes, None, &mut term);
+    assert_eq!(code, 0, "filled from Home: {}", term.said());
+    let filled = b.sim.image();
+    let mut term = Term::new();
+    let bare = Flags { server: Some("Studio".into()), ..Flags::default() };
+    let code = command_on(b.setup(), both(), &key, &bare, None, &mut term);
+    assert_eq!(code, 1, "{}", term.said());
+    let flag = "--server Studio --take-over makes Studio its server";
+    assert!(term.said().contains(flag), "{}", term.said());
+    let mut term = Term::new();
+    let code = command_on(b.setup(), both(), &key, &to_studio, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("Nothing written"), "{said}");
+    assert_eq!(b.sim.image(), filled, "the take-over waits for --yes");
+}
+
+#[test]
+fn a_new_cards_server_chosen_on_the_command_line_is_written_then_synced_from() {
+    let scratch = Scratch::new("lines-other-server");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    let (base, _studio_server) = server();
+    let studio = ServerLink { name: "Studio".into(), session: false, ..home_server(&base) };
+    let both = || vec![b.home.clone(), studio.clone()];
+    // No tracks yet: no gate, but the same order: the plan, then the yes,
+    // then the settings, then the sync.
+    let mut term = Term::new();
+    let flags = Flags { yes: true, server: Some("Studio".into()), ..Flags::default() };
+    let code = command_on(b.setup(), both(), &key, &flags, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("from Studio: ") && said.contains("listing Studio's libraries…"), "{said}");
+    assert!(!said.contains("waiting for the sync under way"), "{said}");
+    let mut term = Term::new();
+    let mut ask = |_: &str| None;
+    let ctrl_c = AtomicU8::new(0);
+    let mut io = Io { out: &mut term.out, err: &mut term.err, ask: &mut ask, ctrl_c: &ctrl_c };
+    let code = card(b.setup(), both(), &key, &What::Status, &Flags::default(), &mut io);
+    assert_eq!(code, 0, "{}", term.said());
+    assert!(term.said().contains("server      Studio\n"), "{}", term.said());
+}
