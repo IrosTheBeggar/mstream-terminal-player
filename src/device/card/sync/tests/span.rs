@@ -354,6 +354,15 @@ fn new_music_lands_on_its_ranges_card_and_the_edges_stay_where_they_were() {
     let mirror = w.cards.sets.values().next().unwrap();
     assert_eq!(mirror.rev, 1);
     assert!((0..3).all(|i| mirror.holds(i, mirror.asks)), "{mirror:?}");
+
+    // The server at another address, known by its own id: the set's server
+    // still, and new music of card 3's range goes to card 3.
+    let served = w.fake.clone();
+    let was = std::mem::replace(&mut w.base, routed(move |asked| answer(&served, asked)));
+    w.add(&[("Artist G", &[0, 0, 2])], 24);
+    let synced = w.sync(three, ROOM, &plain());
+    assert_eq!(ran(&synced).written, 2, "{:?}", synced.notes);
+    assert_eq!(set_on(three).server, server_url_key(&was));
 }
 
 #[test]

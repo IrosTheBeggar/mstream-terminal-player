@@ -566,9 +566,6 @@ fn prepare(
     // (2.11), and goes into the root and SRVS as it is read.
     let url_key = server_url_key(&client.server());
     let instance = instance_of(info.instance_id.as_deref());
-    // The card's multi-card set, as it and this computer know it (B7).
-    let span = sets::SetRun::open(state, cards, card_id, url_key, ask, was.set_id);
-    let mut span = span.map_err(refused)?;
     let settings = &mut state.settings;
     let confirmed = settings.keys(url_key);
     let mut talk = Talk { url_key, instance, confirmed, peer: None };
@@ -604,6 +601,13 @@ fn prepare(
         let key = id_hex(srv.url_key);
         notes.push(format!("the card's server at {key} is this server: its files join this one's"));
     }
+    // The card's multi-card set, as it and this computer know it (B7), its
+    // server known by every key this one has.
+    let peers = settings.peers.iter().any(|p| !p.libraries.is_empty());
+    let (set, unread, label) = (state.set.as_ref(), state.set_unread, state.label.as_str());
+    let own = sets::Own { set, unread, label, peers };
+    let span = sets::SetRun::open(own, cards, card_id, &talk, ask, was.set_id);
+    let mut span = span.map_err(refused)?;
     let source = settings.source(url_key);
     if let Some(nickname) = &ask.change.nickname {
         source.nickname = nickname.trim().to_string();

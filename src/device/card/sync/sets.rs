@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::{Ask, Halt, Halted, Key as FileKey, Listed};
 use crate::device::card::cards::Cards;
 use crate::device::card::contract::mptg::{self, Ledger, RecordIn};
+use crate::device::card::contract::server::Talk;
 use crate::device::card::engine::{Answers, Commit, Fetcher, Guard, Outcome, Plan, Session};
 use crate::device::card::plan::{self, Wanted};
 use crate::device::card::span::{
@@ -44,6 +45,16 @@ impl Rows {
         let rows = if with_rows { records.iter().filter_map(row).collect() } else { Vec::new() };
         Rows { rows, ours: span::load_of(root, cluster_of(space)) }
     }
+}
+
+/// What a sync's set needs of the card's state file: its table, or that it
+/// names one this software can't read; its label; whether it reads any
+/// federation peer.
+pub(super) struct Own<'a> {
+    pub(super) set: Option<&'a Set>,
+    pub(super) unread: bool,
+    pub(super) label: &'a str,
+    pub(super) peers: bool,
 }
 
 /// A sync's part in its card's set.
@@ -153,31 +164,31 @@ fn sorted(libraries: &[String]) -> Vec<String> {
 impl SetRun {
     /// The card's set, as it and this computer (`cards`) know it, or a new
     /// one when the listener asks to spread the card's selection (`id`);
-    /// None for a card of no set. Refused: a set of a newer player's, a
-    /// table that doesn't name the card, another server's set, another
-    /// selection, a federation peer (a set's cards read the server's own
-    /// libraries), a decision for a card of no set.
+    /// None for a card of no set. `talk`: the server the run reads, by every
+    /// key it has. Refused: a set of a newer player's, a table that doesn't
+    /// name the card, another server's set, another selection, a federation
+    /// peer (a set's cards read the server's own libraries), a decision for
+    /// a card of no set.
     pub(super) fn open(
-        state: &State,
+        own: Own<'_>,
         cards: &Cards,
         card_id: u64,
-        url_key: u64,
+        talk: &Talk,
         ask: &Ask,
         id: u64,
     ) -> Result<Option<SetRun>, String> {
-        if state.set_unread {
+        if own.unread {
             return Err("the card is in a set of a newer player's: it isn't synced".into());
         }
-        let peers = ask.peers.as_ref().is_some_and(|p| !p.is_empty())
-            || ask.peers_only
-            || state.settings.peers.iter().any(|p| !p.libraries.is_empty());
+        let asked_peers = ask.peers.as_ref().is_some_and(|p| !p.is_empty());
+        let peers = asked_peers || ask.peers_only || own.peers;
         let no_peers = "a set's cards read the server's own libraries only: no federation peers";
         let run = |set: Option<Set>, slot: usize| SetRun {
             set,
             slot,
             card_id,
-            label: state.label.clone(),
-            server: url_key,
+            label: own.label.to_string(),
+            server: talk.url_key,
             new_id: id.max(1),
             asks0: None,
             asked: Asked::default(),
@@ -193,7 +204,7 @@ impl SetRun {
             created: false,
             written: false,
         };
-        let set = match (&state.set, ask.decide) {
+        let set = match (own.set, ask.decide) {
             (None, None) => return Ok(None),
             (None, Some(Decision::Spread)) if peers => return Err(no_peers.into()),
             (None, Some(Decision::Spread)) => return Ok(Some(run(None, 0))),
@@ -204,7 +215,7 @@ impl SetRun {
         let Some(slot) = set.slot_of(card_id) else {
             return Err(format!("the table of set {} doesn't name this card", hex(set.id)));
         };
-        if set.server != url_key && !state.settings.keys(url_key).contains(&set.server) {
+        if set.server != talk.url_key && !talk.confirmed.contains(&set.server) {
             return Err(format!("set {} is filled from another server", hex(set.id)));
         }
         if peers {
