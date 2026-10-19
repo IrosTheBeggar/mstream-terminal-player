@@ -6,7 +6,7 @@
 | **Design of record, the SD card transfer** | **The card-transfer design set (twelfth set), alternates per the user's picks of 2026-10-19.** **Provisional, with no commit pinned:** it is in no repo yet and will live in mStream `docs/designs/card-transfer`; its commit is pinned here once it lands there, in a commit of its own touching this header (the README's re-extraction rule). Until then the citations below ("card 07 §7, choice 6" and the like) can't be followed from a repo. It draws the placement chosen on 2026-10-18 (Q2, one tab row per subject) whole in its card 02, with the Card view's states (card 03), the sync (card 04), the card's Settings (card 05, alternate **A**, two tabs), the gates and formatting in the Core2 (card 06, the player's second step as alternate **B**, the hold), and play history, sets and the command line (card 07, whose section 7 holds the twelve choices and the picks). This repo's page is to draw it beside the board card (`src/device/page/card.rs`), over a transfer worker that lives at the GUI level (`src/device/card/worker.rs`; part B4). |
 | **Server API** | **For a board, none.** No mStream session is involved: each board is a USB serial port, asked over it with no reset (the firmware repo's `docs/HOST-STATUS.md`: `@status` with `cid=` and `clock=`, `@count`, `@identify`, `@time`, `@format`, and the console's `L` for firmware older than them), and the firmware written is the release this player pins — or, for one write, what the Advanced options sheet chose: the pin's other build, another release (GitHub's releases API, asked only when the sheet lists them), or a local build. **For a card in a reader, its own server**: the one the card names (its URL key and nickname in `/.mstream/state.json`), reached through this computer's saved sign-in for it, never necessarily the GUI's session; a peer's library through its parent (the multi-server contract). The calls: `GET /api/` (the server's `instanceId`, mStream B11); `POST /api/v1/sync/manifest` (paged, ETag/304) and `POST /api/v1/db/metadata/batch`; `GET /media/…` with Range, and `GET /transcode/…`; `/album-art/…` and `discovery/local/embeddings`; `POST /api/v1/stats/plays`; for peers, `federation/peers`, `…/peers/:id/access` and `file-explorer/recursive`, and the key's limits where the server offers them (mStream B10); beside the server on this computer, `admin/directories` and `admin/transcode`, to read its folders from disk (part A9). |
 | **Already in this repo** | The page, live as its own command on the admin hub's terminal session; the GUI's Stats tab, which showed how a hub page lives under the top bar (the stats-screen contract), and the hub's `HostedRoom`, whose per-frame call this screen uses. The kit's gold warning modal (the libraries room's remove gate), its tab row (the Discovery room), its scan widget and its tall buttons. For the SD card transfer: the card contract's kit, names, tag reader and Auto DJ writer (`src/device/card/{contract,names.rs,tags.rs,autodj.rs}`); cards in readers held to the drive-safety rule (`card/volume/`); set-up, the card's state file and this computer's `cards.json` (`setup.rs`, `state.rs`, `cards.rs`); the sync engine with its plan, covers, dry run, the peers' budget and sets (`engine/`, `sync.rs`, `plan.rs`, `covers.rs`, `dry.rs`, `budget.rs`, `span.rs`); the play log read and posted (`history.rs`); the transfer client (`src/api/transfer.rs`); `cid=`, `clock=` and `@time` in `listen.rs`; the hidden commands that drive them for the real-card and board checks (`device card-probe`, `card-setup`, `card-sync`, `card-set`, `card-plays`, `time`). The play outbox and `report_plays_async` (the play-reporting contract), and `session_reach`/`reach_client` (`src/gui/stats.rs`). |
-| **Status** | Implemented 2026-10-04 (the tenth set's alternate A: the step line, the question, the erase box); **redrawn as alternate A of the eleventh set 2026-10-10** — this document first, then the page, the tab and the command line (Deviations log); **Advanced options (card 07) 2026-10-10** — the worker and the command line first, then this document's clauses 33–43, then the sheet; **the SD card transfer (the twelfth set) 2026-10-19** — this document's clauses 3a, 20a, 25a and 44–67 with the user's picks (Deviations log); the card's engine, set-up, sync, sets, peers and plays are built behind hidden commands (parts A2–A9, A12, A13, B1, B2, B7, B9, B15); the transfer worker, the Card view and the public commands (B4), the Format route (B6) and the tab's half of the clock (clause 5) come next. |
+| **Status** | Implemented 2026-10-04 (the tenth set's alternate A: the step line, the question, the erase box); **redrawn as alternate A of the eleventh set 2026-10-10** — this document first, then the page, the tab and the command line (Deviations log); **Advanced options (card 07) 2026-10-10** — the worker and the command line first, then this document's clauses 33–43, then the sheet; **the SD card transfer (the twelfth set) 2026-10-19** — this document's clauses 3a, 20a, 25a and 44–67 with the user's picks (Deviations log); the card's engine, set-up, sync, sets, peers and plays are built behind hidden commands (parts A2–A9, A12, A13, B1, B2, B7, B9, B15); the transfer worker, the Card view and the public commands (B4), and the Format route with `device format` (B6), are built (Deviations log); the tab's half of the clock (clause 5) comes next. |
 
 ## Intent
 
@@ -1546,7 +1546,8 @@ changed), in all ten locales. Two more keep today's fix words for a
 board that can't format while the pin can't either (`card_fix_format_pc`,
 `card_fix_mbr_pc`, clause 20): moved, their ten locales as they are, not
 new. Part B6 adds the format's refusals and failures beside them
-(`fmt_refused_*`, `fmt_failed_*`), which the set did not draw.
+(`fmt_refused_*`, `fmt_failed_*`, `fmt_no_answer`, `fmt_lost`), which
+the set did not draw, and `gate_fmt_unread`: 19 keys (Deviations log).
 Not keys: the invented names, paths, sizes and versions; the command
 line's lines (plain English, like `device list`'s); the firmware's own
 strings for its dialogs (its repo's lib/core UiStrings, ten languages).
@@ -1656,7 +1657,10 @@ The cards' command-line lines are plain English, like the `plan:` line.
   grammar: `status:`, `old:`, `silent:`, `chip`, `busy`, `/in=`, `/out=`,
   `/held=`, `/mode=dio`, `/elf=`, `/loop=qio`, `/listing=<s>` — a board
   starting up, answering nothing for that long after each start while it
-  prints `[bt]` and Arduino lines — and any `@status` field),
+  prints `[bt]` and Arduino lines — `/format=` — how a board from 0.12.0
+  on answers `@format`: formatted by default, `no`, `late`, `silent`, a
+  refusal at once, `second-<why>`, `fail-<why>` — and any `@status`
+  field),
   whose trace says what was done to each board, and on a shelf of images
   and a release list in GitHub's place (`firmware::tests::Shelf`): no test
   reaches GitHub either.
@@ -2205,3 +2209,69 @@ The cards' command-line lines are plain English, like the `plan:` line.
     writer left, read off its file; a newer private file or plan names
     none, so `newer_any` says the rest of the sentence alone. Both in all
     ten locales, the nine others waiting for the native review.
+
+- **2026-10-19 — Part B6 built: formatting from the tab, and `device
+  format`.** Clause 59 as written, over the firmware's `@format` as built
+  (HOST-STATUS, "@format", at its d8855d7: the question for any card, the
+  second step a 2 s hold). What the build settled, and where it parts:
+  - **The protocol.** `@format` goes on the port a listen opens (DTR and
+    RTS low: no reset), as a job of the desk like a count
+    (`listen::format`, `desk::Cmd::Format`). Its first answer waits the
+    reply's 1.5 s; the listener's, 150 s (two dialogs of a minute and a
+    margin); each line after `@format 0`, a count's 60 s, the board's
+    restart among them. An `@format no` that came 59 s or more after
+    `@format ok` is the question's minute running out (`fmt_timeout`),
+    sooner a Cancel (`fmt_declined`): a Cancel in the minute's last second,
+    or a step 2 left to its own minute after step 1 was answered late,
+    reads by the clock alone. An `@err 4 format` is told apart by when it
+    came: before `@format ok` (not asked), after it with no restart (the
+    second answer's refusal), after `@format 0` (a failure); `@err 7
+    format` is firmware with no format, and the SD row says so from then
+    on.
+  - **While it runs** the board's work is the format's: no write, count,
+    read or second `@format` starts on it (the desk refuses a write too,
+    which would otherwise have stopped the job), and nothing locks the tab.
+    Leaving the tab or quitting lets the job go and the board goes on by
+    itself; the next visit asks it again. The board is asked again after
+    the format ends, after a refusal at the second answer and after a
+    failure (whose card is unknown until it answers), never after a
+    Cancel. Done shows the card the done line says (its size, free, no
+    tracks, `cid=-`) until that listen says it again, and "Formatted just
+    now: …" (`fmt_done`) in place of the board's card line while the card
+    is empty and unfilled.
+  - **The time** is estimated at 1 MB/s for the gap and both FATs, plus
+    15 s for the restart (`board::format_secs`: 34 s for a "64 GB" card,
+    263 s for "1 TB", HOST-STATUS's layouts at the slow end), in the gate
+    and on the row until the percent's rate says better. The device check
+    measures it.
+  - **What the gate names as lost.** `@status` reports no partitions, so
+    a GPT or damaged card's volumes can't be named: the gate says "what
+    the player can't read" (`gate_fmt_unread`, new).
+  - **Drawn beyond the frames.** On firmware that can't format, a damaged
+    card's row says so too ("v0.11.0 can't format a card." under "Try it
+    in a computer."), where its Format would be offered. The player's own
+    card's link in Details carries "erases the whole card", as the damaged
+    card's does.
+  - **Words.** 19 new `dev.card` keys: the refusals at once
+    (`fmt_refused_ui|screen|viz|busy|card|other`), at the second answer
+    (`fmt_refused_second_card|size|busy`), the failures
+    (`fmt_failed_card|size|write|mkfs|check|files|other`), `fmt_no_answer`,
+    `fmt_lost` and `gate_fmt_unread`. Each fits the hosted busy line (96
+    cells) in every locale, which the floor test now checks for every end
+    a format can have. German and the other eight written by the build,
+    all nine waiting for the native review.
+  - **`device format`** (clause 66) asks the board as `device list` does,
+    with no worker and no download, prints the card first and the rest as
+    plain lines; the listener's no and the minute go to stdout, the other
+    ends to stderr, all exit 1. A board that doesn't answer `@status` is
+    refused without being asked. Several boards: the localized title
+    `device flash --yes` prints, the boards' lines, then "Pass --port with
+    one of them." (flash's own last line names `--all`, which format
+    hasn't).
+  - **The pin can't format** (`PINNED_ANSWERS_FORMAT` false at v0.11.0, a
+    test holding it to the pin), so every board today keeps the `_pc` fix
+    lines and "v0.11.0 can't format a card.", and no board shows the
+    Format route until it runs 0.12.0.
+  - **Not tried on a board:** the whole route on a Core2 (the firmware's
+    device check 11, on a spare card): the port staying open across the
+    board's restart, the real percent's cadence, the minute's edge.

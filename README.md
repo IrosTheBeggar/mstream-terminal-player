@@ -672,6 +672,7 @@ mstream-player device card E: status              # one card's facts, as key-val
 mstream-player device card E: setup --name Car --yes     # make a new card one the player syncs
 mstream-player device card E: sync                # print the plan; --yes runs it
 mstream-player device card E: eject               # let the card go
+mstream-player device format --port COM3          # format the board's card as FAT32: the player asks first
 ```
 
 The [mStream MP3 player](https://github.com/IrosTheBeggar/mstream-mp3-player) is an M5Stack
@@ -798,6 +799,15 @@ what it lets through (`--allow-removals 214`, `--server Work --take-over`, `--ad
 `--budget`). Exit 3 means paused or stopped: run it again later. Only FAT32 cards on MBR are
 the player's; a card it can't read is listed with why.
 
+A card the player can't read (exFAT, NTFS, a GPT card) is **formatted in the player**, never on
+the computer: with firmware 0.12.0 or later, the board's SD card row offers *Format as FAT32 ▸*
+(`f` where something else comes first; for the player's own music card, in Details only), behind
+a gold warning that says what is lost. The tab only asks: the player shows the question on its
+own screen, *Format…* then its red button held 2 s, restarts and formats the card, and the row
+follows it to the empty card, ready to fill in a card reader. A damaged card is sent to a
+computer's disk check first. Leaving the tab never stops it. `device format` does the same from a
+terminal; it has no `--yes`, since the player confirms.
+
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported
 as such. `MSTREAM_DEVICE_FAKE=<word>` runs everything against a scripted board, for tests:
@@ -806,7 +816,9 @@ the running firmware's answers `status:<version>` (answers `@status`), `old:<ver
 then `L`), `silent:<version>` (ours, not running) and `chip` (a board that only shares the USB
 chip). Several boards are words separated by commas, and options after slashes script the rest:
 `status:v0.9.0/free=?,old:v0.7.0,chip/in=3` is three boards, the last plugged in three seconds
-on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). `/mode=dio`
+on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). A 0.12.0
+board's `@format` is formatted by default, or `/format=no`, `late`, `silent`, a refusal
+(`viz`, `card`, …, `second-size`), or `fail-write` and its kin. `/mode=dio`
 runs a release's DIO build (its ELF id), `/elf=<hex>` any ELF, and `/loop=qio` is a Core2
 whose flash cannot run QIO: a QIO image written to it keeps it restarting. src/device/engine.rs
 has the whole grammar.
