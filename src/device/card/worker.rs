@@ -378,6 +378,8 @@ pub(crate) struct Facts {
     pub(crate) copied: bool,
     /// Its multi-card set: its place, and how many cards.
     pub(crate) set: Option<(usize, usize)>,
+    /// The software that made its last commit (`mstream-terminal 0.13.0`).
+    pub(crate) producer: String,
 }
 
 impl Default for Facts {
@@ -397,6 +399,7 @@ impl Default for Facts {
             nickname: String::new(),
             copied: false,
             set: None,
+            producer: String::new(),
         }
     }
 }
@@ -540,8 +543,9 @@ pub(crate) enum Phase {
 /// A sync that waits by itself (clause 52): the run parked, to be taken up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Pause {
-    /// A peer's day is spent: goes on after `until` (Unix seconds).
-    Budget { until: u64, peer: String },
+    /// A peer's day is spent: goes on after `until` (Unix seconds); the
+    /// days its files take at this pace.
+    Budget { until: u64, peer: String, days: u64 },
     /// The server didn't answer: asked again at `until`, the `tries`th time.
     Server { until: u64, tries: u32 },
     /// The sign-in was refused: Sign in ▸.
@@ -815,6 +819,9 @@ pub(crate) struct Fold {
     pub(crate) logs: Vec<(String, LogItem)>,
     /// The worker said nothing runs.
     pub(crate) idle: bool,
+    /// The servers saved on this computer, as the worker was last told
+    /// them: the Settings sheet's From (clause 48).
+    pub(crate) servers: Vec<ServerLink>,
 }
 
 impl Fold {
@@ -1694,7 +1701,8 @@ impl Worker {
                         Some(until) => {
                             let waiting = synced.peers.iter().find(|p| p.resume_at.is_some());
                             let peer = waiting.map(|p| p.id.to_string()).unwrap_or_default();
-                            Pause::Budget { until, peer }
+                            let days = waiting.map_or(0, |p| p.days);
+                            Pause::Budget { until, peer, days }
                         }
                         None if why.contains("sign") => Pause::SignIn,
                         None => {
@@ -1950,6 +1958,7 @@ pub(crate) fn read(card: &dyn CardWrite, cards: &Cards) -> Result<Facts, String>
         nickname,
         copied,
         set,
+        producer: seen.root.as_ref().map(|r| r.manifest.producer.clone()).unwrap_or_default(),
         state,
     })
 }
@@ -2170,6 +2179,163 @@ fn run_sync(
         by_library: facts.by_library.clone(),
         removal_libs,
         stopped: stop.load(Ordering::SeqCst),
+    }
+}
+
+/// Cards as the worker would tell them, for the page's and the GUI's
+/// tests: the design set's examples (invented names, sizes and counts).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::*;
+    use crate::device::card::state::Settings;
+    use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
+
+    /// The design's card: 63.8 GB, 41.2 used.
+    pub(crate) fn space() -> Space {
+        Space { size: 63_800_000_000, free: 22_600_000_000, cluster: 32 * 1024, clusters: 0 }
+    }
+
+    /// A volume at `drive` (`E:`), FAT32 on MBR unless `fs` says, in a USB
+    /// reader.
+    pub(crate) fn found(drive: &str, fs: Fs, table: Table) -> Found {
+        let volume = Volume {
+            path: format!("{drive}\\").into(),
+            device: format!("vol-{drive}"),
+            fs,
+            table,
+            label: String::new(),
+            serial: Some(Serial::Fat(0x1A2B_3C4D)),
+            space: Some(space()),
+            read_only: false,
+            utf8: Some(true),
+            clock: Clock::Bias,
+        };
+        let disk = Disk {
+            id: format!("disk-{drive}"),
+            removable: true,
+            bus: Bus::Usb,
+            read_only: false,
+            system: Vec::new(),
+            others: Vec::new(),
+        };
+        Found::new(volume, disk)
+    }
+
+    /// Home, the session's server, at its URL key.
+    pub(crate) fn home() -> ServerLink {
+        ServerLink {
+            id: "http://127.0.0.1:3000".into(),
+            name: "Home".into(),
+            base: Ok("http://127.0.0.1:3000".into()),
+            token: Some("tok".into()),
+            session: true,
+            ..ServerLink::default()
+        }
+    }
+
+    /// A card being read.
+    pub(crate) fn reading(drive: &str) -> CardView {
+        CardView::new(found(drive, Fs::Fat32, Table::Mbr))
+    }
+
+    /// A volume the player can't use, listed with why.
+    pub(crate) fn refused(drive: &str, fs: Fs, table: Table) -> CardView {
+        CardView::new(found(drive, fs, table))
+    }
+
+    /// A FAT32 card with nothing from mStream on it.
+    pub(crate) fn new_card(drive: &str) -> CardView {
+        let mut view = reading(drive);
+        let mut facts = Facts::default();
+        facts.music.present = true;
+        view.read = Read::Read(Box::new(facts));
+        view.server = Server::New(Some(home()));
+        view
+    }
+
+    /// The design's ready card: Car music, Rock and Jazz from Home, 4,812
+    /// tracks, last synced 3 days before `now`, and a plan of 12 new, 2 to
+    /// remove and 37 plays.
+    pub(crate) fn ready(drive: &str, now: u64) -> CardView {
+        let mut view = reading(drive);
+        let link = home();
+        let key = link.url_key().unwrap_or(1);
+        let mut state = State::new(0x5EED_C0DE_0A1B_2C3D, "Car music", None, now - 30 * 86_400);
+        state.settings = Settings::defaults();
+        let source = state.settings.source(key);
+        source.nickname = "Home".into();
+        source.libraries = vec!["Rock".into(), "Jazz".into()];
+        let facts = Facts {
+            state: Some(state),
+            root: Some((0x5EED_C0DE_0A1B_2C3D, 42, 7)),
+            committed: Some(now - 3 * 86_400),
+            tracks: 4_812,
+            by_library: vec![("Rock".into(), 2_904), ("Jazz".into(), 1_908)],
+            device: crate::device::card::contract::device_txt::DeviceTxt::read(Some(
+                b"contract=1
+firmware=0.12.0
+read.mpdj=2
+codecs=mp3,flac,opus
+history=1
+",
+            )),
+            server: Some(key),
+            nickname: "Home".into(),
+            producer: "mstream-terminal 0.14.0".into(),
+            ..Facts::default()
+        };
+        view.read = Read::Read(Box::new(facts));
+        view.server = Server::Saved(link);
+        let removals = vec![
+            "Velvet Static/Harbour Songs/04 - Low Tide.flac".into(),
+            "Velvet Static/Harbour Songs/05 - Undertow.flac".into(),
+        ];
+        let fit = Fit { needed: 2_000_000_000, room: 22_600_000_000, tracks: 4_822 };
+        view.next = Next::Plan(Box::new(Planned {
+            asked: now,
+            new: 12,
+            bytes: 1_900_000_000,
+            removals,
+            plays: 37,
+            fit: Some(fit),
+            offered: vec!["Rock".into(), "Jazz".into(), "Audiobooks".into(), "Live".into()],
+            totals: vec![("Rock".into(), 2_904, 27_900_000_000), ("Jazz".into(), 1_908, 12_600_000_000)],
+            ..Planned::default()
+        }));
+        view
+    }
+
+    /// The ready card syncing: 1,204 of 4,812 files, 6.1 of 21.3 GB.
+    pub(crate) fn syncing(drive: &str, now: u64) -> CardView {
+        let mut view = ready(drive, now);
+        view.run = Some(Run {
+            phase: Phase::Copying,
+            files: 4_812,
+            bytes: 21_300_000_000,
+            done_files: 1_204,
+            done_bytes: 6_100_000_000,
+            now: Some("Orla Finch/Paper Boats/03 - Fold.flac".into()),
+            rate: Some(12_400_000.0),
+            saved: Some(now - 180),
+            stopping: false,
+            skipped: 0,
+            started: now - 600,
+        });
+        view
+    }
+
+    /// A card's view with `change` made to it.
+    pub(crate) fn with(mut view: CardView, change: impl FnOnce(&mut CardView)) -> CardView {
+        change(&mut view);
+        view
+    }
+
+    /// Its facts, changed.
+    pub(crate) fn facts(view: &mut CardView) -> &mut Facts {
+        match &mut view.read {
+            Read::Read(facts) => facts,
+            _ => panic!("a card read"),
+        }
     }
 }
 

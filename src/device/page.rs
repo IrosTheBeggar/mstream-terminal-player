@@ -23,7 +23,13 @@
 //! Advanced options sheet (sheet.rs) makes the board's next write, one
 //! write long, which the card shows on one line under its chip and the gate
 //! names again (contract clauses 33–43). The verdict never moves with it.
+//!
+//! Beside the boards, the GUI's tab shows the SD cards in this computer's
+//! readers (card.rs, clauses 3a, 20a, 25 and 44–63): a tab each on the
+//! same row, one Card view each, over the transfer worker the GUI owns.
+//! The standalone page shows boards only.
 
+mod card;
 mod sheet;
 
 use std::collections::HashSet;
@@ -38,6 +44,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use rust_i18n::t;
 
+use self::card::CardUi;
+pub(crate) use self::card::{Transfer, Wants};
 use self::sheet::{Dialogs, Listing, Sheet, mode_words, next_what};
 use super::FlashArgs;
 use super::board::{Board, By, Card, CardKind, CardUnknown, Count, CountWhy, Free, Heard, Next, NextState};
@@ -126,6 +134,34 @@ pub(crate) enum Act {
     Defaults,
     /// Apply.
     Apply,
+    /// A card's tab, by its place among the cards (clause 25).
+    Card(usize),
+    /// A card's links (clause 44): Settings…, Send the plays, Eject, Stop
+    /// at the next save, Not a card? Hide it, Try now, Stop for now, Don't
+    /// wait, Give up this run…, Fill it from … instead…, Sync again.
+    CardSettings,
+    CardPlays,
+    CardEject,
+    CardStop,
+    CardHide,
+    CardTryNow,
+    CardStopPause,
+    CardDontWait,
+    CardGiveUp,
+    CardOtherServer,
+    CardSyncAgain,
+    /// A card's gate: its keep, its go, the stronger gate's box (clause 58).
+    CardKeep,
+    CardGo,
+    CardBox,
+    /// The card's Settings sheet (clause 48): `[X]`, a tab, a row, a row of
+    /// its hanging list, Use defaults or Cancel, Apply or Set up.
+    CardSheetClose,
+    CardSheetTab(usize),
+    CardSheetRow(usize),
+    CardSheetPick(usize),
+    CardDefaults,
+    CardApply,
 }
 
 /// What a gate writes: its title, its words and its button follow.
@@ -304,6 +340,16 @@ pub(crate) struct Page {
     /// for the wheel.
     log_rect: Option<Rect>,
     ui: Surface<Act>,
+    /// The transfer worker, borrowed for the visit (clause 55): none on the
+    /// standalone page, which shows boards only.
+    transfer: Option<Transfer>,
+    /// The card in view, by its key: while it is set the subject is that
+    /// card, not a board (clause 25).
+    card_open: Option<String>,
+    card: CardUi,
+    /// What the GUI is asked to do for a card: its add-server form, a
+    /// sign-in (clause 3a). The host takes it.
+    wants: Option<Wants>,
 }
 
 pub(crate) fn run(args: FlashArgs) -> i32 {
@@ -347,7 +393,7 @@ fn flag_words(args: &FlashArgs) -> Option<String> {
 /// test: a test's page rides [`Page::quiet`], since this worker downloads
 /// the firmware and opens real serial ports.
 #[cfg(not(test))]
-pub(crate) fn hosted() -> Page {
+pub(crate) fn hosted(transfer: Option<Transfer>) -> Page {
     let engine: desk::Shared = std::sync::Arc::from(engine::from_env());
     let setup = desk::Setup {
         supply: super::firmware::net(),
@@ -358,7 +404,11 @@ pub(crate) fn hosted() -> Page {
         firmware_first: false,
     };
     let (cmds, events) = desk::spawn(engine, setup);
-    Page::with_channels(cmds, events, None)
+    let mut page = Page::with_channels(cmds, events, None);
+    page.transfer = transfer;
+    // This computer's cards, for the board's card line (clause 20a).
+    page.card.known = Some(super::card::cards::Cards::load());
+    page
 }
 
 impl Page {
@@ -398,7 +448,21 @@ impl Page {
             log_scroll: 0,
             log_rect: None,
             ui: Surface::new(),
+            transfer: None,
+            card_open: None,
+            card: CardUi::default(),
+            wants: None,
         }
+    }
+
+    /// What the GUI is asked to do for a card, taken once.
+    pub(crate) fn take_wants(&mut self) -> Option<Wants> {
+        self.wants.take()
+    }
+
+    /// The transfer worker for this visit (the GUI's).
+    pub(crate) fn attach(&mut self, transfer: Transfer) {
+        self.transfer = Some(transfer);
     }
 
     // ── The worker's reports ────────────────────────────────────────────────
@@ -719,8 +783,11 @@ impl Page {
         }
     }
 
-    /// The board in view.
+    /// The board in view: none while a card is (clause 25).
     fn shown(&self) -> Option<&Board> {
+        if self.card_open.is_some() {
+            return None;
+        }
         let open = self.open.as_deref()?;
         self.boards.iter().find(|b| b.port() == open)
     }
@@ -991,6 +1058,7 @@ impl Page {
 
     fn act(&mut self, act: Act) -> Option<Outcome> {
         match act {
+            Act::Primary if self.card_open.is_some() => self.card_primary(),
             Act::Primary => {
                 let board = self.shown().cloned()?;
                 if self.lock.is_some() {
@@ -1010,6 +1078,10 @@ impl Page {
                 self.log_scroll = 0;
                 if self.details {
                     self.ask_facts();
+                }
+                // Not showing up? shows the hidden volumes again (clause 63).
+                if self.details && self.boards.is_empty() && self.card_count() == 0 {
+                    self.send_card(crate::device::card::worker::Cmd::ShowHidden);
                 }
             }
             Act::WriteAgain => {
@@ -1048,6 +1120,7 @@ impl Page {
             }
             Act::Board(i) => {
                 if let Some(board) = self.boards.get(i) {
+                    self.card_open = None;
                     self.open = Some(board.port().to_string());
                     self.log_scroll = 0;
                     if self.details {
@@ -1082,6 +1155,7 @@ impl Page {
             | Act::SheetChooser(_)
             | Act::Defaults
             | Act::Apply => self.sheet_act(act),
+            act => self.card_act(act),
         }
         None
     }
@@ -1125,13 +1199,7 @@ impl Page {
     }
 
     fn switch(&mut self, step: isize) {
-        let n = self.boards.len();
-        if n < 2 {
-            return;
-        }
-        let at = self.shown_index().unwrap_or(0) as isize;
-        let next = (at + step).rem_euclid(n as isize) as usize;
-        self.act(Act::Board(next));
+        self.switch_subject(step);
     }
 
     /// Esc, or the host letting the page go: the worker is told to let
@@ -1143,6 +1211,8 @@ impl Page {
         }
         self.gate = None;
         self.sheet = None;
+        self.card.gate = None;
+        self.card.sheet = None;
         self.quitting = true;
         if self.cmds.send(Cmd::Quit).is_err() {
             self.released = true;
@@ -1271,6 +1341,12 @@ impl Page {
         if self.sheet.is_some() {
             return self.sheet_hint_parts();
         }
+        if self.gate.is_none()
+            && self.writing_port().is_none()
+            && let Some(card) = self.open_card()
+        {
+            return self.card_hint_parts(&card, hosted);
+        }
         if let Some(gate) = &self.gate {
             let yes = match gate.kind {
                 Kind::Update | Kind::Replace if gate.erase_any => "dev.hint_gate_erase_update",
@@ -1307,8 +1383,10 @@ impl Page {
             parts.push((back, 0));
             return parts;
         };
-        if self.boards.len() >= 2 {
-            parts.push((switch(t!("dev.hint_player").to_string()), 0));
+        // The switch word is "switch" once a card shares the row (clause 15).
+        if self.boards.len() + self.card_count() >= 2 {
+            let word = if self.card_count() > 0 { t!("dev.card.hint_switch") } else { t!("dev.hint_player") };
+            parts.push((switch(word.to_string()), 0));
         }
         let enter = match self.primary_of(board) {
             Some(Primary::Update) => Some("dev.hint_enter_update"),
@@ -1367,8 +1445,12 @@ impl Page {
         }
     }
 
-    /// The log lines about `port`, and the image's and the watch's.
+    /// The log lines about `port`, and the image's and the watch's; a
+    /// card's, its own alone.
     fn log_for(&self, port: &str) -> Vec<&LogLine> {
+        if self.card_open.as_deref() == Some(port) {
+            return self.log.iter().filter(|l| l.port.as_deref() == Some(port)).collect();
+        }
         self.log.iter().filter(|l| l.port.as_deref().is_none_or(|p| p == port)).collect()
     }
 }
@@ -1409,15 +1491,19 @@ impl Screen for Page {
         loop {
             match self.events.try_recv() {
                 Ok(event) => self.apply(event),
-                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if !self.released {
                         self.worker_gone();
                     }
-                    return;
+                    break;
                 }
             }
         }
+        // Then the transfer worker's notes and log lines, the boards known,
+        // and a gate its last sync stopped to ask (clause 58).
+        self.pump_cards(Instant::now());
+        self.card_asks();
     }
 
     /// A passing note goes once its time is up.
@@ -1444,15 +1530,15 @@ impl Screen for Page {
     }
 
     fn modal_open(&self) -> bool {
-        self.gate.is_some() || self.sheet.is_some()
+        self.gate.is_some() || self.sheet.is_some() || self.card.gate.is_some() || self.card.sheet.is_some()
     }
 
     /// The path field takes every key; the sheet walks its groups with Tab;
     /// the gate and the card leave the host its own letters (clause 12).
     fn claim(&self) -> Claim {
-        if self.typing() {
+        if self.typing() || self.card.sheet.as_ref().is_some_and(|s| s.field.is_some()) {
             Claim::All
-        } else if self.sheet.is_some() {
+        } else if self.sheet.is_some() || self.card.sheet.is_some() {
             Claim::OwnTab
         } else {
             Claim::Open
@@ -1475,6 +1561,23 @@ impl Screen for Page {
                 _ => None,
             };
             return act.and_then(|act| self.act(act));
+        }
+        // A card's sheet and gate are modals of their own (clauses 48, 58).
+        if self.card.sheet.is_some() {
+            self.card_sheet_key(key);
+            return None;
+        }
+        if self.card.gate.is_some() {
+            self.card_gate_key(key);
+            return None;
+        }
+        if self.card_open.is_some() {
+            if key.code == KeyCode::Esc {
+                self.leave();
+                return None;
+            }
+            self.card_key(key);
+            return None;
         }
         let act = match key.code {
             KeyCode::Esc => {
@@ -1646,18 +1749,19 @@ fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
     // A gate or the sheet makes the card beneath inert (the kit's modal
     // rule): drawn with no pointer, its clicks and tips dropped before the
     // modal draws.
-    let modal = page.gate.is_some() || page.sheet.is_some();
+    let modal = page.modal_open();
     let pointer = if modal { page.ui.pointer.take() } else { None };
     let mut y = top;
-    if page.boards.len() >= 2 && y < floor {
+    if page.boards.len() + page.card_count() >= 2 && y < floor {
         tab_row(frame, page, Rect { x, y, width, height: 1 });
         y += 2;
     }
     if y < floor {
         let room = Rect { x, y, width, height: floor - y };
-        match page.shown().cloned() {
-            Some(board) => card(frame, page, &board, room),
-            None => empty_card(frame, page, room),
+        match (page.open_card(), page.shown().cloned()) {
+            (Some(view), _) => card_view(frame, page, &view, room),
+            (None, Some(board)) => card(frame, page, &board, room),
+            (None, None) => empty_card(frame, page, room),
         }
     }
     let busy = page.busy();
@@ -1669,8 +1773,12 @@ fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
         page.ui.pointer = pointer;
         if page.gate.is_some() {
             draw_gate(frame, page, area);
-        } else {
+        } else if page.sheet.is_some() {
             sheet::draw_sheet(frame, page, area);
+        } else if page.card.gate.is_some() {
+            card::draw_card_gate(frame, page, area);
+        } else {
+            card::draw_card_sheet(frame, page, area);
         }
     }
     if let Some((target, text)) = page.ui.ripe_tooltip() {
@@ -1727,22 +1835,47 @@ fn mark(page: &Page, board: &Board) -> (String, Color) {
     }
 }
 
-/// The kit's tab row of ports (contract clause 25): the open one the slab,
-/// the others dim text that brightens under the pointer, each wearing its
-/// board's mark; the count, or Update all, at the right edge.
+/// The kit's tab row of subjects (contract clause 25): the boards, then the
+/// cards in this computer's readers; the open one the slab, the others dim
+/// text that brightens under the pointer, each wearing its mark; the
+/// count, or Update all, at the right edge. Short of room, the cards'
+/// names give way first, down to six cells; then the right edge's text;
+/// then the last tabs.
 fn tab_row(frame: &mut Frame, page: &mut Page, row: Rect) {
     let mut x = row.x;
     let boards = page.boards.clone();
+    let cards = page.cards();
+    let open_card = page.card_open.clone();
+    // Each tab's name, its mark and its act, in order.
+    let mut tabs: Vec<(String, (String, Color), bool, Act)> = Vec::new();
     for (i, board) in boards.iter().enumerate() {
-        let name = short(board.port());
-        let (mark, color) = mark(page, board);
+        let open = open_card.is_none() && page.open.as_deref() == Some(board.port());
+        tabs.push((short(board.port()), mark(page, board), open, Act::Board(i)));
+    }
+    let (right_text, _, _) = tabs_right(page);
+    let fixed: usize = tabs.iter().map(|(n, (m, _), ..)| kit::width(n) + kit::width(m) + 3).sum();
+    let names = |room: usize| -> Vec<String> { cards.iter().map(|c| card::tab_name(c, room)).collect() };
+    let width_of = |names: &[String]| -> usize {
+        let marks: usize = cards.iter().map(|c| kit::width(&card::mark(c).0) + 3).sum();
+        fixed + marks + names.iter().map(|n| kit::width(n)).sum::<usize>() + tabs.len() + cards.len()
+    };
+    let room_all = usize::from(row.width).saturating_sub(kit::width(&right_text) + 2);
+    let mut room = 64;
+    let mut card_names = names(room);
+    while width_of(&card_names) > room_all && room > 6 {
+        room -= 1;
+        card_names = names(room);
+    }
+    for (i, (card, name)) in cards.iter().zip(card_names).enumerate() {
+        tabs.push((name, card::mark(card), open_card.as_deref() == Some(card.key.as_str()), Act::Card(i)));
+    }
+    for (name, (mark, color), open, act) in tabs {
         let label = format!(" {name} {mark} ");
         let cells = kit::width(&label) as u16;
         if x + cells > row.right() {
             break;
         }
         let rect = Rect { x, y: row.y, width: cells, height: 1 };
-        let open = page.open.as_deref() == Some(board.port());
         let line = if open {
             let slab = Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD);
             Line::from(Span::styled(label, slab))
@@ -1755,7 +1888,7 @@ fn tab_row(frame: &mut Frame, page: &mut Page, row: Rect) {
             ])
         };
         frame.render_widget(Paragraph::new(line), rect);
-        page.ui.click(rect, Act::Board(i));
+        page.ui.click(rect, act);
         x = rect.right() + 1;
     }
     let (text, style, act) = tabs_right(page);
@@ -1788,6 +1921,24 @@ fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
         }
         None => {}
     }
+    // A sync, then a card being read (clause 25).
+    let cards = page.cards();
+    if let Some(card) = cards.iter().find(|c| c.syncing()) {
+        return (t!("dev.card.tabs_syncing", card = card::card_name(card)).to_string(), accent(), None);
+    }
+    if let Some(card) = cards.iter().find(|c| c.read == crate::device::card::worker::Read::Reading) {
+        return (t!("dev.card.tabs_reading", drive = card.drive()).to_string(), dim(), None);
+    }
+    let card_words = match cards.len() {
+        0 => None,
+        1 => Some(t!("dev.card.tabs_card_one").to_string()),
+        n => Some(t!("dev.card.tabs_cards", n = n).to_string()),
+    };
+    let with_cards = |words: String| match &card_words {
+        Some(cards) if words.is_empty() => cards.clone(),
+        Some(cards) => format!("{words} · {cards}"),
+        None => words,
+    };
     let needing = page.needing().len();
     if page.can_update_all() {
         // It counts only the boards it writes (clause 42).
@@ -1814,7 +1965,7 @@ fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
             _ => others += 1,
         }
     }
-    if players == n {
+    if players == n && card_words.is_none() {
         return (t!("dev.tabs_plugged", n = n).to_string(), dim(), None);
     }
     let mut parts = Vec::new();
@@ -1832,7 +1983,7 @@ fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
     if let Some(board) = asking.first() {
         parts.push(t!("dev.tabs_asking", port = short(board.port())).to_string());
     }
-    (parts.join(" · "), dim(), None)
+    (with_cards(parts.join(" · ")), dim(), None)
 }
 
 // ── The card ────────────────────────────────────────────────────────────────
@@ -2281,11 +2432,13 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             CardUnknown::Unreadable => unknown(t!("dev.card_unreadable_board").to_string()),
         },
         Card::Empty => problem(t!("dev.card_none").to_string(), None, t!("dev.card_put_in").to_string()),
+        // Until the tab can format (part B6), the fix lines keep today's
+        // words, on a computer (clause 20: the `_pc` keys).
         Card::Foreign { kind, .. } => {
             let (words, why, fix) = match kind {
-                CardKind::ExFat => ("dev.card_exfat", Some("dev.card_fat32_only"), "dev.card_fix_format"),
-                CardKind::Ntfs => ("dev.card_ntfs", Some("dev.card_fat32_only"), "dev.card_fix_format"),
-                CardKind::Gpt => ("dev.card_gpt", Some("dev.card_mbr_only"), "dev.card_fix_mbr"),
+                CardKind::ExFat => ("dev.card_exfat", Some("dev.card_fat32_only"), "dev.card_fix_format_pc"),
+                CardKind::Ntfs => ("dev.card_ntfs", Some("dev.card_fat32_only"), "dev.card_fix_format_pc"),
+                CardKind::Gpt => ("dev.card_gpt", Some("dev.card_mbr_only"), "dev.card_fix_mbr_pc"),
                 _ => ("dev.card_unreadable", None, "dev.card_try_computer"),
             };
             problem(t!(words).to_string(), why.map(|k| t!(k).to_string()), t!(fix).to_string())
@@ -2354,9 +2507,15 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
                     }
                 }
             }
-            // No tracks: where the music goes is the next step.
-            if matches!(tracks, Tracks::Count(0)) {
+            // The card it holds, by its `cid=` (clause 20a): its line gives
+            // way to nothing but the floor. A card not filled yet says so in
+            // place of where the music goes.
+            let named = card::board_lines(page, board);
+            if matches!(tracks, Tracks::Count(0)) && named.is_empty() {
                 rows.extend(dim_rows(None, &t!("dev.card_music_hint"), w));
+            }
+            for line in &named {
+                rows.extend(dim_rows(None, line, w));
             }
             rows
         }
@@ -2811,6 +2970,11 @@ fn empty_card(frame: &mut Frame, page: &mut Page, room: Rect) {
         rows.extend(bullet(vec![t!("dev.no_device_cable").to_string()]));
         rows.extend(bullet(vec![t!("dev.no_device_driver").to_string(), t!("dev.no_device_driver_2").to_string()]));
         rows.extend(bullet(vec![t!("dev.no_device_linux").to_string()]));
+        // The cards' two, on the GUI's tab (clause 30).
+        if page.transfer.is_some() {
+            rows.extend(bullet(vec![t!("dev.card.hint_card_shows").to_string()]));
+            rows.extend(bullet(vec![t!("dev.card.hint_own_disks").to_string()]));
+        }
         rows.push(Row::Blank);
         let seen = if page.others.is_empty() {
             vec![(format!("{} {}", t!("dev.ports_seen"), t!("dev.ports_seen_none")), dim())]
@@ -2825,6 +2989,17 @@ fn empty_card(frame: &mut Frame, page: &mut Page, room: Rect) {
     }
     rows.push(Row::Blank);
     draw_card(frame, page, "", &rows, room);
+}
+
+/// A card's view (clause 44) in `room`, as the board's card is drawn.
+fn card_view(frame: &mut Frame, page: &mut Page, view: &crate::device::card::worker::CardView, room: Rect) {
+    if room.height < 3 || room.width < CARD_INSET * 2 + 2 {
+        return;
+    }
+    let content_w = room.width - inset(room.width) * 2;
+    let mut rows = card::card_layout(page, view, content_w);
+    card::give_way_rows(&mut rows, room.height.saturating_sub(2));
+    draw_card(frame, page, &view.key, &rows, room);
 }
 
 // ── The gate ────────────────────────────────────────────────────────────────
@@ -3341,6 +3516,8 @@ mod tests {
     use super::fixtures::{answering, answering_with, heard, old, ours, read};
     use super::*;
     use crate::device::board::Status;
+
+    mod cards;
 
     fn english() -> std::sync::MutexGuard<'static, ()> {
         let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -4142,9 +4319,10 @@ mod tests {
         let _en = english();
         let (mut page, ends) = page_with(Ends::no_board);
         let frame = window(&mut page);
-        assert!(frame.contains("│  No player plugged in"), "{frame}");
-        assert!(frame.contains("Plug the M5Stack Core2 in over USB. It shows up here by itself."), "{frame}");
-        assert!(frame.contains("▱▱▱▱▱▱▱▱▱▱ watching the USB ports…"), "{frame}");
+        // The readers are watched too (clause 30): the words say both.
+        assert!(frame.contains("│  Nothing plugged in"), "{frame}");
+        assert!(frame.contains("Plug the Core2 in over USB, or put its SD card in this computer's card"), "{frame}");
+        assert!(frame.contains("▱▱▱▱▱▱▱▱▱▱ watching the USB ports and card readers…"), "{frame}");
         assert!(frame.contains("▸ Not showing up?"), "{frame}");
         assert!(!frame.contains("Look again") && !frame.contains("Close"), "the worker watches by itself");
         assert_eq!(page.hint(), "d not showing up? · Esc library");
@@ -5276,7 +5454,90 @@ mod tests {
         for (name, (page, ends)) in more {
             states.push((name, page, ends));
         }
+        // The cards (clauses 25, 44–63): each state at rest, a sync, its
+        // gates and its sheet, alone and beside a board.
+        use crate::device::card::engine::Guard;
+        use crate::device::card::volume::{Fs, Table};
+        use crate::device::card::worker::{CardView, Ended, Next, Pause, Phase, Planned, Run, Server};
+        use crate::device::card::worker::fixtures as c;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let many: Vec<String> = (0..214).map(|i| format!("Velvet Static/Harbour Songs/{i:03} - Track.flac")).collect();
+        let plan = |view: &mut CardView, f: &dyn Fn(&mut Planned)| {
+            if let Next::Plan(plan) = &mut view.next {
+                f(plan);
+            }
+        };
+        let card_states: Vec<(&'static str, CardView, &[KeyCode])> = vec![
+            ("card, ready", c::ready("E:", now), &[]),
+            ("card, details", c::ready("E:", now), &[Char('d')]),
+            ("card, reading", c::reading("E:"), &[]),
+            ("card, new", c::new_card("F:"), &[]),
+            ("card, new with music", c::with(c::new_card("F:"), |v| c::facts(v).music.unlisted = 1_204), &[]),
+            ("card, set up", c::new_card("F:"), &[Enter]),
+            ("card, exfat", c::refused("G:", Fs::ExFat, Table::Mbr), &[]),
+            ("card, gpt", c::refused("G:", Fs::Fat32, Table::Gpt), &[]),
+            ("card, unknown server", c::with(c::ready("E:", now), |v| v.server = Server::Unknown("Home".into())), &[]),
+            ("card, no server", c::with(c::ready("E:", now), |v| v.server = Server::New(None)), &[]),
+            ("card, signed out", c::with(c::ready("E:", now), |v| v.next = Next::SignIn), &[]),
+            ("card, newer", c::with(c::ready("E:", now), |v| c::facts(v).newer = vec!["manifest.bin".into()]), &[]),
+            ("card, disk check", c::with(c::ready("E:", now), |v| c::facts(v).check = true), &[]),
+            ("card, copied", c::with(c::ready("E:", now), |v| c::facts(v).copied = true), &[]),
+            ("card, no device.txt", c::with(c::ready("E:", now), |v| c::facts(v).device.present = false), &[]),
+            ("card, syncing", c::syncing("E:", now), &[]),
+            ("card, paused", c::with(c::ready("E:", now), |v| {
+                let pause = Pause::Budget { until: now + 18_720, peer: "3".into(), days: 4 };
+                v.ended = Some(Ended::Paused { pause, at: 2_945, of: 4_812, bytes: (13_000_000_000, 21_300_000_000) });
+            }), &[]),
+            ("card, full", c::with(c::ready("E:", now), |v| v.ended = Some(Ended::Full { at: 3_980, of: 4_812 })), &[]),
+            ("card, taken out", c::with(c::ready("E:", now), |v| {
+                v.out = true;
+                v.ended = Some(Ended::Out { at: 1_204, of: 4_812 });
+            }), &[]),
+            ("card, done", c::with(c::ready("E:", now), |v| {
+                let skipped = vec![("a/b.flac".into(), "x".into())];
+                v.ended = Some(Ended::Done { tracks: 4_822, took: 1_680, skipped, plays: 37 });
+            }), &[]),
+            ("card, waiting its turn", c::with(c::ready("E:", now), |v| {
+                v.run = Some(Run { phase: Phase::Waiting, ..Run::default() });
+            }), &[]),
+            ("card, settings", c::ready("E:", now), &[Char('o')]),
+            ("card, settings, writing", c::ready("E:", now), &[Char('o'), Right]),
+            ("card, settings, into", c::ready("E:", now), &[Char('o'), Right, Down, Enter]),
+            ("card, removals gate", c::with(c::ready("E:", now), |v| {
+                plan(v, &|p| p.removals = many.clone());
+            }), &[Enter]),
+            ("card, half gate", c::with(c::ready("E:", now), |v| plan(v, &|p| {
+                p.removals = many.clone();
+                p.guards = vec![Guard::Removals { paths: many.clone(), strong: true }];
+            })), &[Enter, Char('e')]),
+            ("card, adopt gate", c::with(c::ready("E:", now), |v| {
+                plan(v, &|p| p.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])]);
+            }), &[Enter]),
+        ];
+        for (name, card, keys) in card_states {
+            for with_board in [false, true] {
+                let (mut page, ends, _inbox, _fold) = if with_board {
+                    cards::with_cards(Ends::up_to_date, vec![card.clone()])
+                } else {
+                    cards::with_cards(|_| {}, vec![card.clone()])
+                };
+                if with_board {
+                    press(&mut page, Right);
+                }
+                for code in keys {
+                    press(&mut page, *code);
+                }
+                // The inbox goes with the state: a page that sends reaches
+                // nobody, as a worker gone would.
+                states.push((if with_board { name } else { leak(format!("{name}, alone")) }, page, ends));
+            }
+        }
         states
+    }
+
+    /// A state's name made at run time, for the floor's messages.
+    fn leak(name: String) -> &'static str {
+        Box::leak(name.into_boxed_str())
     }
 
     /// The labels the state's buttons wear — its primary, its gate's, the
@@ -5285,6 +5546,22 @@ mod tests {
         if let Some(gate) = &page.gate {
             let (keep, write) = gate_buttons(gate);
             return vec![keep, write];
+        }
+        if let Some(gate) = &page.card.gate {
+            let (keep, go) = card::gate_buttons_of(gate);
+            return std::iter::once(keep).chain(go).collect();
+        }
+        if let Some(sheet) = &page.card.sheet {
+            let (other, go) = if sheet.setup {
+                ("dev.card.btn_cancel", "dev.card.btn_do_setup")
+            } else {
+                ("dev.card.btn_defaults", "dev.card.btn_apply")
+            };
+            return vec![t!(other).to_string(), t!(go).to_string()];
+        }
+        if let Some(view) = page.open_card() {
+            let primary = card::primary(&view).filter(|_| page.lock.is_none());
+            return primary.map(|p| p.label()).into_iter().collect();
         }
         if page.sheet.is_some() {
             return vec![t!("dev.adv_defaults").to_string(), t!("dev.adv_apply").to_string()];
@@ -5373,8 +5650,9 @@ mod tests {
             assert!(!hint.contains("dev."), "{code}, {name}: a key with no words: {hint}");
             let all = alone(&mut page, 72, 24);
             assert!(!all.contains("dev."), "{code}, {name}: a key with no words:\n{all}");
-            // The console's gate is as wide as its card, and covers its corners.
-            if page.gate.is_none() {
+            // The console's gate is as wide as its card, and covers its
+            // corners; so do a card's gate and its sheet.
+            if page.gate.is_none() && page.card.gate.is_none() && page.card.sheet.is_none() {
                 let (tops, bottoms) = (all.matches('╭').count(), all.matches('╰').count());
                 assert_eq!(tops, bottoms, "{code}, {name} at 72×24: frames whole:\n{all}");
             }
@@ -5426,8 +5704,9 @@ mod tests {
                     .filter(|at| !area.contains(*at))
                     .all(|at| buf[(at.x, at.y)].symbol() == "#");
                 assert!(outside, "{name} in {area:?}: drawn outside its area:\n{all}");
-                // A gate as wide as the card covers its corners.
-                if page.gate.is_none() {
+                // A gate as wide as the card covers its corners; so do a
+                // card's gate and its sheet.
+                if page.gate.is_none() && page.card.gate.is_none() && page.card.sheet.is_none() {
                     let (tops, bottoms) = (all.matches('╭').count(), all.matches('╰').count());
                     assert_eq!(tops, bottoms, "{name} in {area:?}: frames whole:\n{all}");
                 }

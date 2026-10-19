@@ -125,6 +125,9 @@ pub(crate) enum Act {
     /// The top bar's Visualizer item: open the window, or bring it to the
     /// front (docs/ux-contracts/visualizer-window.md).
     VizWindow,
+    /// The quit's gate during a sync (mp3-player-screen contract, clause
+    /// 57): stop at the next save and quit, or keep syncing.
+    QuitSync(bool),
     /// A settings row, activated (click, Enter, Space).
     Row(usize),
     BlendDown,
@@ -865,6 +868,7 @@ impl Gui {
                 }
             }
             Act::VizWindow => vizwin::toggle(self),
+            Act::QuitSync(yes) => device::quit_answer(self, yes),
             Act::Nav(i) => {
                 // A nav row is the Library's: it brings that screen back.
                 self.screen = Screen::Library;
@@ -1201,11 +1205,19 @@ fn demo_now() -> Now {
 /// click — since the tab cannot be left (mp3-player-screen contract,
 /// clause 9).
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
+    // While a sync runs the MP3 Player tab wears its percentage after its
+    // name, in the accent, dim while paused (mp3-player-screen contract,
+    // clause 16; the pick of 2026-10-19 over a chip at the bar's right).
+    let mark = device::sync_mark(gui);
+    let mp3 = match &mark {
+        Some((_, pct, _)) => format!("{} {pct}%", t!("gui.top.mp3")),
+        None => t!("gui.top.mp3").to_string(),
+    };
     let tabs = [
-        (Screen::Library, t!("gui.top.library")),
-        (Screen::Stats, t!("sta.title")),
-        (Screen::Admin, t!("gui.top.admin")),
-        (Screen::Device, t!("gui.top.mp3")),
+        (Screen::Library, t!("gui.top.library").to_string()),
+        (Screen::Stats, t!("sta.title").to_string()),
+        (Screen::Admin, t!("gui.top.admin").to_string()),
+        (Screen::Device, mp3),
     ];
     let viz = t!("gui.top.viz");
     let rects = top_rects([&tabs[0].1, &tabs[1].1, &tabs[2].1, &tabs[3].1, &viz]);
@@ -1219,6 +1231,12 @@ fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
             dim()
         };
         put(frame, rect.x, 0, &format!(" {label} "), style);
+        if let Some((_, pct, paused)) = mark.as_ref().filter(|_| screen == Screen::Device && gui.screen != screen) {
+            let words = format!("{pct}%");
+            let x = rect.right().saturating_sub(crate::kit::width(&words) as u16 + 1);
+            let tone = if *paused { dim() } else { Style::default().fg(th().accent) };
+            put(frame, x, 0, &words, tone);
+        }
         if live {
             gui.ui.click(rect, Act::Screen(screen));
         }
@@ -1264,7 +1282,17 @@ const TOP_KEYS: [&str; 5] =
 /// cell past it, cut short where it would not (servers::draw_header;
 /// mp3-player-screen contract, clause 16).
 pub(super) fn top_strip_end() -> u16 {
-    let labels = TOP_KEYS.map(|key| t!(key).to_string());
+    top_strip_end_with("")
+}
+
+/// [`top_strip_end`] with the MP3 Player tab wearing `mark` (a sync's
+/// percentage, clause 16): the server label's cut measures the strip with
+/// it.
+pub(super) fn top_strip_end_with(mark: &str) -> u16 {
+    let mut labels = TOP_KEYS.map(|key| t!(key).to_string());
+    if !mark.is_empty() {
+        labels[3] = format!("{} {mark}", labels[3]);
+    }
     top_rects([&labels[0], &labels[1], &labels[2], &labels[3], &labels[4]])[4].right()
 }
 
@@ -1561,8 +1589,11 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // armed pick's tips, since its keys are the page's there (mp3-player-
     // screen contract, clauses 12 and 15) — only a GUI modal's own tips
     // come first, and not even those during a write, which holds every key
-    // (clause 9).
-    let tips = if gui.screen == Screen::Device && (device::writing(gui) || !gui.modal_open()) {
+    // (clause 9). The quit's gate during a sync is the GUI's own modal, on
+    // any screen (clause 57).
+    let tips = if device::quit_gate_open(gui) {
+        std::borrow::Cow::from(device::quit_tips())
+    } else if gui.screen == Screen::Device && (device::writing(gui) || !gui.modal_open()) {
         std::borrow::Cow::from(device::tips(gui))
     } else if let Some(tip) = actions::tips(gui) {
         std::borrow::Cow::from(tip)
@@ -1673,6 +1704,13 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     servers::draw_modals(frame, gui, area);
     dj::draw_modals(frame, gui, area);
     actions::draw_modals(frame, gui, area);
+    // The quit's gate during a sync, over any screen (mp3-player-screen
+    // contract, clause 57); and while the quit waits for the save, the
+    // footer says so, counting.
+    device::draw_quit_gate(frame, gui, area);
+    if let Some(words) = device::quit_words(gui) {
+        put(frame, 1, area.height - 1, &format!("{words:<width$}", width = usize::from(area.width - 2)), accent());
+    }
 
     // The tooltip draws over everything, once the dwell matures — the
     // wizard's order.
@@ -2419,6 +2457,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return true;
     }
+    // The quit's gate during a sync holds every key but Ctrl+C (clause 57).
+    if device::quit_gate_open(gui) {
+        device::quit_gate_key(gui, key);
+        return false;
+    }
     // A write on the MP3 Player tab holds every key but Ctrl+C, ahead of
     // any modal a worker's answer opened over it (mp3-player-screen
     // contract, clauses 9–10).
@@ -2880,6 +2923,18 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             gui.ui.dismiss_tooltip();
             gui.ui.caret_touch();
             if handle_key(gui, key) {
+                // A quit by a key during a sync asks first; Ctrl+C stops at
+                // the next save without asking (mp3-player-screen contract,
+                // clause 57), as the way out's wait says on stderr.
+                let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
+                if !ctrl_c && device::ask_before_quit(gui) {
+                    return Flow::Continue;
+                }
+                ctx.saver.flush(&gui.app);
+                return Flow::Quit;
+            }
+            // The gate's yes: the terminal waits for the save in its loop.
+            if device::quit_ready(gui) {
                 ctx.saver.flush(&gui.app);
                 return Flow::Quit;
             }
@@ -3055,6 +3110,12 @@ fn event_loop(
 ) -> std::io::Result<()> {
     loop {
         let wait = frame(terminal, gui, ctx, host)?;
+        // The quit gate's yes, once the sync has saved (clause 57).
+        if device::quit_ready(gui) {
+            ctx.saver.flush(&gui.app);
+            return Ok(());
+        }
+        let wait = if device::quit_waiting(gui) { wait.min(Duration::from_millis(100)) } else { wait };
         if !event::poll(wait)? {
             continue;
         }
@@ -3255,6 +3316,7 @@ impl Gui {
             || playlists::modal_open(self)
             || self.servers.modal_open()
             || self.torrent.modal_open()
+            || device::quit_gate_open(self)
     }
 
     /// Which App tab the active browse room's pane rides — the bar's acts
@@ -3468,6 +3530,9 @@ fn start(
 
     let mut gui = Gui::new(config, config_ok, app);
     gui.pending = pending;
+    // The SD card transfer's worker is the GUI's, for the whole session
+    // (mp3-player-screen contract, clause 55).
+    device::start_transfer(&mut gui);
     if std::env::var("MSTREAM_GUI_DEMO").is_ok_and(|v| v == "1") {
         gui.demo = Some(demo_now());
     }
@@ -3530,7 +3595,13 @@ impl window::face::Face for GuiFace {
     }
 
     fn input(&mut self, event: TermEvent) -> Flow {
-        input(&mut self.gui, &mut self.ctx, event)
+        let flow = input(&mut self.gui, &mut self.ctx, event);
+        // The quit gate's yes in a window: it closes now, and its teardown
+        // waits for the sync's next save (clause 57).
+        if device::quit_waiting(&self.gui) {
+            return Flow::Quit;
+        }
+        flow
     }
 
     fn caret_at(&self) -> Option<Position> {

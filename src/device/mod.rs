@@ -59,7 +59,10 @@ use self::firmware::{Cached, Image, Images, Release, Supply, Target};
 // while a page it left lets its ports go.
 #[cfg(not(test))]
 pub(crate) use self::page::hosted;
-pub(crate) use self::page::{LET_GO, Page, draw_waiting};
+pub(crate) use self::page::{LET_GO, Page, Transfer, Wants, draw_waiting};
+// The SD card transfer's worker, which the GUI starts and owns (the MP3
+// Player contract's clause 55).
+pub(crate) use self::card::worker;
 #[cfg(test)]
 pub(crate) use self::{desk::Cmd as WorkerCmd, page::Ends};
 #[cfg(test)]
