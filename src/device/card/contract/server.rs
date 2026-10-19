@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::prim::{fnv1a64, u32_at, u64_at, bytes16_at};
+use super::prim::{fnv1a64, hex16, u32_at, u64_at, bytes16_at};
 
 /// SRVS flag bit 0: a federation peer, reached through its parent.
 pub(crate) const PEER: u32 = 1;
@@ -74,6 +74,21 @@ pub(crate) fn normalise_url(url: &str) -> Option<String> {
 /// (unknown) when the URL has no host.
 pub(crate) fn server_url_key(url: &str) -> u64 {
     normalise_url(url).map_or(0, |u| fnv1a64(u.as_bytes()))
+}
+
+/// serverInstance (2.5.1) from mStream's `instanceId` (`GET /api/`, the
+/// card transfer's batch of mStream changes): a UUID in its own text, five
+/// groups of 8-4-4-4-12 hex digits in either case, as its 16 bytes in RFC
+/// 4122 order (2.3.1). Anything else is unknown, the nil UUID too: an id
+/// read from a near-miss could make two servers one.
+pub(crate) fn instance_of(text: Option<&str>) -> [u8; 16] {
+    let Some(text) = text else { return NO_INSTANCE };
+    let shape = text.split('-').map(str::len).eq([8, 4, 4, 4, 12]);
+    let digits = text.bytes().all(|b| b == b'-' || b.is_ascii_hexdigit());
+    match (shape && digits).then(|| hex16(text)).flatten() {
+        Some(id) => id,
+        None => NO_INSTANCE,
+    }
 }
 
 /// One of the card's servers: server 0 (the root header's fields), or an

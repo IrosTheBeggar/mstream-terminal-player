@@ -1215,6 +1215,65 @@ fn a_server_that_may_be_the_cards_own_is_asked_about() {
     assert!(theirs.contains(&"Alex Artist/First Album/01 - One (2).mp3"), "{theirs:?}");
 }
 
+/// 2.11 once the server gives its own id: the id goes into the root when
+/// the run reads that server, decides at any address, and outweighs every
+/// key; and two servers never share one key in SRVS (2.5.5).
+#[test]
+fn a_server_is_known_by_its_own_id_at_any_address_and_never_by_another_one() {
+    let dir = Scratch::new("instances");
+    let (card, wanted, mut server) = first(&dir.0);
+    let (a, b) = ([0xA1; 16], [0xB2; 16]);
+    let with = |url: &str, instance: [u8; 16]| {
+        let mut o = origin(url);
+        (o.talk.instance, o.server.instance) = (instance, instance);
+        WantedCard { origins: vec![o], files: wanted.files.clone() }
+    };
+    let root = |card: &FatSim| look(card).root.unwrap().manifest.server_table();
+    let (home, tunnel) = ("http://music.example:3000", "https://tunnel.example");
+
+    // The card's server, first read with its id: by its key, and the id is
+    // kept from then on. Nothing changes but the root.
+    let outcome = sync(&card, &with(home, a), &mut server, 2).unwrap();
+    assert_eq!((outcome.written, outcome.deleted, outcome.verified.clone()), (0, 0, Ok(())));
+    assert_eq!(root(&card).root, Server::root(a, server_url_key(home)));
+
+    // At another address: the same server by its id, with nothing asked,
+    // and the root takes the address it was read at.
+    let (session, plan) = plan_of(&card, &with(tunnel, a), &mut server, Answers::default(), knobs());
+    assert!(plan.guards.is_empty(), "{:?}", plan.guards);
+    assert_eq!((plan.fetches().0, plan.kept().0), (0, 6));
+    session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    assert_eq!(root(&card).root, Server::root(a, server_url_key(tunnel)));
+
+    // Another server at that address: never this card's, whatever the
+    // listener confirmed of its key, and a server of its own can't share
+    // the root's key. Refused, before anything is written.
+    let mut other = with(tunnel, b);
+    other.origins[0].talk.confirmed = vec![server_url_key(home)];
+    let image = card.image();
+    let new = Answers { new_servers: true, ..Answers::default() };
+    for answers in [Answers::default(), new] {
+        let mut session = open(&card, answers, 3, &mut |_| {}).unwrap();
+        let refused = session.plan(&other, &answers, &mut server);
+        assert!(matches!(&refused, Err(Stop::Refused(why)) if why.contains("address")), "{:?}", refused.err());
+        session.close();
+    }
+    assert_eq!(card.image(), image, "nothing written");
+
+    // At an address of its own: asked about (the card's files are another
+    // server's), then a second server, in SRVS with its id.
+    let third = with("https://third.example", b);
+    let (session, plan) = plan_of(&card, &third, &mut server, Answers::default(), knobs());
+    assert_eq!(plan.guards, [Guard::Server { origin: 0, rows: 6 }]);
+    session.close();
+    let (session, plan) = plan_of(&card, &third, &mut server, new, knobs());
+    assert!(plan.guards.is_empty());
+    session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    let table = root(&card);
+    assert_eq!(table.root, Server::root(a, server_url_key(tunnel)));
+    assert_eq!(table.entries, [Server::direct(b, server_url_key("https://third.example"))]);
+}
+
 #[test]
 fn music_without_a_ledger_is_adopted_only_when_the_listener_says() {
     let dir = Scratch::new("adopt");

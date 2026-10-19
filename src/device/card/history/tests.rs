@@ -98,6 +98,8 @@ const EPOCH_2: u64 = 0xF0E1_D2C3_B4A5_9687;
 /// The golden root's server, and another.
 const HOME: &str = "http://music.example:3000";
 const OTHER: &str = "https://second.example/mstream";
+/// The golden root's server's own id (`manifest.bin`'s serverInstance).
+const HOME_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
 
 /// The golden root and the files it names: `manifest.bin` (generation 42,
 /// one server) or `manifest-servers.bin` (generation 7, a server and two
@@ -208,6 +210,8 @@ struct Mstream {
     /// Older than the card transfer's batch: no `instanceId`, and a batch
     /// with a `device` source refused whole (a 400).
     old: bool,
+    /// Its `instanceId`, when not the golden root's server's own.
+    instance: Option<&'static str>,
     /// No Stats API: nothing to post to.
     no_stats: bool,
     /// The manifest's entries.
@@ -228,7 +232,7 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
                 body["features"]["stats"] = json!(2);
             }
             if !m.old {
-                body["instanceId"] = json!("3f2b8c1e-6a4d-4e0f-9b7a-2c5d8e1f0a93");
+                body["instanceId"] = json!(m.instance.unwrap_or(HOME_ID));
             }
             json_reply("200 OK", &body.to_string())
         }
@@ -1069,6 +1073,38 @@ fn a_dry_run_saves_nothing_and_a_short_read_maps_nothing() {
     assert_eq!(short.marks(), [ack(ONE, EPOCH_1, 2)], "the state file's, as they were");
     assert_eq!(short.acks(&[ack(ONE, EPOCH_1, 2)]), [ack(ONE, EPOCH_1, 2)]);
     assert_eq!((short.unstored(), store.text.borrow().is_none()), (None, true), "nothing saved");
+}
+
+/// 2.11: a server's own id decides first. The golden root names its
+/// server's: that server, reached at an address the card has never seen,
+/// takes the card's plays; another at an address the listener called the
+/// card's server's (one set up again there, say) takes none.
+#[test]
+fn a_cards_plays_go_to_the_server_its_root_names_by_id_at_any_address() {
+    let scratch = Scratch::new("by-id");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let store = Rc::new(MemStore::default());
+    let another = Mstream { instance: Some("8899aabb-ccdd-4eff-8011-223344556677"), ..Mstream::default() };
+    let (other, other_fake) = server(another);
+    let (theirs, home) = (id_hex(server_url_key(&other.server())), id_hex(server_url_key(HOME)));
+    let state = json!({"format": "mstream-card-state", "version": 1, "seq": 2, "cardId": id_hex(CARD_ID),
+        "label": "Car", "sources": [{"serverUrlKey": theirs, "confirmed": [home]}]});
+    let state_file = scratch.0.join("card/.mstream/state.json");
+    std::fs::write(&state_file, state.to_string()).unwrap();
+    let (tally, _) = plays_of(&sim, &other, false, store.clone());
+    assert_eq!((tally.new, tally.due, tally.failed), (7, 0, false), "{tally:?}");
+    assert!(other_fake.lock().unwrap().posts.is_empty(), "not the card's server, by its id");
+
+    std::fs::remove_file(&state_file).unwrap();
+    let (client, fake) = server(Mstream::default());
+    assert_ne!(server_url_key(&client.server()), server_url_key(HOME), "an address the card never saw");
+    let (tally, _) = plays_of(&sim, &client, false, store.clone());
+    assert_eq!((tally.accepted, tally.due), (5, 0), "{tally:?}");
+    assert_eq!(posted_ids(&fake).concat().len(), 5);
+
+    // A dry run asks no server: by the key rule alone, none of them is due.
+    let (tally, _) = plays_of(&sim, &client, true, Rc::new(MemStore::default()));
+    assert_eq!((tally.new, tally.due), (7, 0));
 }
 
 /// The outbox reads back what it wrote, keeps what a newer player wrote

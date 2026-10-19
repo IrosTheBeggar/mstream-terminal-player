@@ -23,7 +23,9 @@ use super::mpth;
 use super::numbers;
 use super::order::{album_folder, compare_file_paths, compare_names, thumb_path};
 use super::prim::{self, crc32, crc32_after, fnv1a64, hex, hex16, md5, path_hash, qfp_of};
-use super::server::{PEER, Server, Servers, Talk, TalkPeer, Verdict, normalise_url, server_url_key};
+use super::server::{
+    self, PEER, Server, Servers, Talk, TalkPeer, Verdict, normalise_url, server_url_key,
+};
 use super::text::{FIELD_NAMES, RUN_FIELDS, Run, build_field, is_list};
 use super::{MAX_FILE, Why};
 
@@ -541,6 +543,24 @@ fn vectors_bytes() {
     assert_eq!(spaced_of(&file[20..24]), text(&t["head20to23"]));
     let si = &b["serverInstance"];
     assert_eq!(spaced_of(&hex16(text(&si["uuid"])).expect("a UUID")), text(&si["stored"]));
+    // mStream's `instanceId` reads the same way, and only as a UUID's text.
+    let uuid = text(&si["uuid"]);
+    assert_eq!(spaced_of(&server::instance_of(Some(uuid))), text(&si["stored"]));
+    assert_eq!(server::instance_of(Some(&uuid.to_ascii_uppercase())), server::instance_of(Some(uuid)));
+    let unknown = [
+        "",
+        "00112233445566778899aabbccddeeff",
+        "{00112233-4455-6677-8899-aabbccddeeff}",
+        "00112233-4455-6677-8899-aabbccddeef",
+        "0011223-34455-6677-8899-aabbccddeeff",
+        "00112233-4455-6677-8899-aabbccddeegg",
+        " 00112233-4455-6677-8899-aabbccddeeff",
+        "00000000-0000-0000-0000-000000000000",
+    ];
+    for text in unknown {
+        assert_eq!(server::instance_of(Some(text)), server::NO_INSTANCE, "{text:?}");
+    }
+    assert_eq!(server::instance_of(None), server::NO_INSTANCE);
     let ah = &b["audioHash"];
     assert_eq!(spaced_of(&hex16(text(&ah["audioHash"])).expect("a digest")), text(&ah["stored"]));
     let dj = golden("autodj-00000029.bin");

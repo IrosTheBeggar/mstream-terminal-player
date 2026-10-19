@@ -344,11 +344,12 @@ pub(super) fn plan(
             continue;
         }
         // A server none of the card's is known to be, while the card holds
-        // files of one that can't be told apart from it: the same server at
-        // another address, perhaps. Asked (U7).
+        // files of one that can't be told apart from it (the same server at
+        // another address, perhaps), or of another server by its own id:
+        // asked (U7). Neither's files are deleted or replaced (2.11).
         let unsure: usize = (0..table.len())
             .filter(|&i| !read.contains(&i) && !broken.contains(&i))
-            .filter(|&i| old.same_server(i, &origin.talk) == Verdict::Unknown)
+            .filter(|&i| old.same_server(i, &origin.talk) != Verdict::Same)
             .map(rows_of)
             .sum();
         if unsure > 0 && !answers.new_servers {
@@ -367,6 +368,16 @@ pub(super) fn plan(
         }
         table.push(srv);
         at[o] = Some(table.len() - 1);
+    }
+    // Two of the card's servers under one key, which no commit may name
+    // (2.5.5): a server with an id of its own at an address the card has
+    // for another (one set up again, say), or the card's server read at an
+    // address another of its servers had. Refused before anything is
+    // written, as the commit would refuse it after.
+    if srvs_breaks(&table[0], &table[1..]).iter().any(|i| !broken.contains(i)) {
+        let why = "another server answers at the address of one of the card's servers: the \
+                   card can't hold both under one address";
+        return Err(Stop::Refused(why.into()));
     }
     let at: Vec<usize> = at.into_iter().map(|i| i.unwrap_or(0)).collect();
     let reader: HashMap<usize, usize> = at.iter().enumerate().map(|(o, &i)| (i, o)).collect();

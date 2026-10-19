@@ -61,7 +61,9 @@ use super::contract::mppl::{self, FILE_BYTES, Log, LogFile, NAMES, Slot};
 use super::contract::mptg::{Entry, Ledger, Tags};
 use super::contract::msmf::Ack;
 use super::contract::prim::{hex, hex16};
-use super::contract::server::{NO_INSTANCE, Server, Servers, Talk, Verdict, server_url_key};
+use super::contract::server::{
+    NO_INSTANCE, Server, Servers, Talk, Verdict, instance_of, server_url_key,
+};
 use super::contract::text::{ALBUM, ARTIST, TITLE};
 use super::engine::Hooks;
 use super::names::match_key;
@@ -1043,8 +1045,9 @@ pub(crate) fn plays_of(
     history.look(card, Some(root), skew);
     let url_key = server_url_key(&client.server());
     let confirmed = state.as_ref().map_or_else(Vec::new, |s| s.settings.keys(url_key));
-    let talk = Talk { url_key, instance: NO_INSTANCE, confirmed, peer: None };
-    if dry_run || history.due(&talk) == 0 {
+    let mut talk = Talk { url_key, instance: NO_INSTANCE, confirmed, peer: None };
+    // A dry run asks no server, so it counts by the key rule alone.
+    if dry_run || history.owing.plays.is_empty() {
         history.tally.due = history.due(&talk);
         return (history.tally.clone(), history.marks());
     }
@@ -1055,6 +1058,13 @@ pub(crate) fn plays_of(
             return (history.tally.clone(), history.marks());
         }
     };
+    // The server's own id decides first (2.11): this server at another
+    // address is the card's, and another set up at its address isn't.
+    talk.instance = instance_of(info.instance_id.as_deref());
+    if history.due(&talk) == 0 {
+        history.tally.due = 0;
+        return (history.tally.clone(), history.marks());
+    }
     // The paths it moved since, found again before any play goes: a play
     // of a path it doesn't know is rejected, and settles lost.
     if info.features.sync {

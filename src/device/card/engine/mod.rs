@@ -261,9 +261,10 @@ pub(crate) enum Guard {
     /// delete or replace.
     Removals { paths: Vec<String>, strong: bool },
     /// U7: a server none of the card's servers is known to be, while files
-    /// on the card came from a server that can't be told apart from it:
-    /// [`Answers::new_servers`], or the caller confirms it as that server
-    /// (2.11's key rule) and plans again.
+    /// on the card came from a server that can't be told apart from it, or
+    /// from another server by its own id: [`Answers::new_servers`], or the
+    /// caller confirms it as a server whose id the card doesn't know (2.11's
+    /// key rule) and plans again. `rows`: the files of those servers.
     Server { origin: usize, rows: usize },
 }
 

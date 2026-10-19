@@ -60,7 +60,7 @@ use super::contract::mptg::{Entry, Ledger, RecordIn};
 use super::contract::msmf::Ack;
 use super::contract::order::{compare_file_paths, split_last};
 use super::contract::prim::{fnv1a64, hex, hex16, path_hash};
-use super::contract::server::{NO_INSTANCE, Server, Talk, Verdict, server_url_key};
+use super::contract::server::{Server, Talk, Verdict, instance_of, server_url_key};
 use super::covers::{self, Covers, folders, most_common};
 use super::dry::DryCard;
 use super::engine::{
@@ -435,11 +435,13 @@ fn prepare(
     // This server, and the card's servers: one source answers every address
     // the listener called this server, and each of its other keys is one a
     // card's server may have (2.11's key rule; a run rewrites server 0's key
-    // to the address it read).
+    // to the address it read). Its own id, once it gives one, decides first
+    // (2.11), and goes into the root and SRVS as it is read.
     let url_key = server_url_key(&client.server());
+    let instance = instance_of(info.instance_id.as_deref());
     let settings = &mut state.settings;
     let confirmed = settings.keys(url_key);
-    let mut talk = Talk { url_key, instance: NO_INSTANCE, confirmed, peer: None };
+    let mut talk = Talk { url_key, instance, confirmed, peer: None };
     let mut ours = ours_on(Some(root), &talk);
     if ours.is_none() && ask.same_server {
         let zero = root.manifest.server_table().root;
@@ -448,6 +450,16 @@ fn prepare(
             talk.confirmed = settings.keys(url_key);
             ours = ours_on(Some(root), &talk);
         }
+    }
+    // The card's server by its own id, at an address the card had another
+    // key for: one source answers both from now on, as the listener's own
+    // answer makes it, so its selection and schedule carry over.
+    let theirs = ours.and_then(|i| root.manifest.server_table().get(i).copied());
+    if let Some(srv) = theirs.filter(|s| !s.is_peer() && s.url_key != 0 && s.url_key != url_key)
+        && !talk.confirmed.contains(&srv.url_key)
+    {
+        settings.confirm(url_key, srv.url_key);
+        talk.confirmed = settings.keys(url_key);
     }
     let source = settings.source(url_key);
     if let Some(nickname) = &ask.change.nickname {
@@ -502,7 +514,7 @@ fn prepare(
     let reads = talk.clone();
     let mut origin = Origin {
         talk,
-        server: Server::direct(NO_INSTANCE, url_key),
+        server: Server::direct(instance, url_key),
         revision: known.clone(),
         ..Origin::default()
     };

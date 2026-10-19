@@ -102,7 +102,15 @@ struct Library {
     transcode: Option<Value>,
     /// Each `/transcode` request's query, as it came.
     transcodes: Vec<String>,
+    /// Older than the card transfer's batch of mStream changes: no
+    /// `instanceId` in `/api/`.
+    old: bool,
+    /// Its `instanceId`, when not [`ID`].
+    instance: Option<&'static str>,
 }
+
+/// The fake server's own id.
+const ID: &str = "3f2b8c1e-6a4d-4e0f-9b7a-2c5d8e1f0a93";
 
 type Fake = Arc<Mutex<Library>>;
 
@@ -160,12 +168,14 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
         ("GET", "/api/") => {
             let mut body = json!({
                 "server": "6.31.1",
-                "instanceId": "3f2b8c1e-6a4d-4e0f-9b7a-2c5d8e1f0a93",
                 "features": {"sync": true, "discovery": true, "stats": 2,
                              "transcode": lib.transcode.clone().unwrap_or_else(
                                  || json!({"defaultCodec": "opus", "defaultBitrate": "96k"}))},
                 "user": {"vpaths": lib.vpaths, "admin": false},
             });
+            if !lib.old {
+                body["instanceId"] = json!(lib.instance.unwrap_or(ID));
+            }
             if lib.disk.is_some() {
                 body["user"]["admin"] = json!(true);
                 body["admin"] = json!({"platform": if cfg!(windows) { "win32" } else { "linux" }});
@@ -811,6 +821,8 @@ fn another_address_confirmed_as_the_same_server_is_one_source_from_then_on() {
     let scratch = Scratch::new("same");
     let sim = card(&scratch);
     let (base, fake) = server();
+    // A server that doesn't say its own id: the listener says it.
+    fake.lock().unwrap().old = true;
     let served = fake.clone();
     let other = routed(move |asked| answer(&served, asked));
     let mut envs = envs();
@@ -838,6 +850,56 @@ fn another_address_confirmed_as_the_same_server_is_one_source_from_then_on() {
     let keys = (server_url_key(&base), server_url_key(&other));
     assert_eq!((source.url_key, source.confirmed.clone()), (keys.0, vec![keys.1]));
     assert_eq!((source.nickname.as_str(), source.libraries.clone()), ("Home", vec!["Rock".to_string()]));
+}
+
+/// 2.11 with the server's own id (the card transfer's batch of mStream
+/// changes): the id goes into the root as it is read; the server at another
+/// address is the card's by it, with nothing asked and its selection kept;
+/// another server at the card's server's address is never taken for it.
+#[test]
+fn a_server_is_known_by_its_own_id_at_any_address() {
+    let scratch = Scratch::new("by-id");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let served = fake.clone();
+    let other = routed(move |asked| answer(&served, asked));
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    let table = look(&sim).root.unwrap().manifest.server_table();
+    assert_eq!((table.root.instance, table.root.url_key), (instance_of(Some(ID)), server_url_key(&base)));
+
+    // Its other address: the same server by its id. Nothing asked, nothing
+    // written but the root, which takes the address it was read at.
+    let synced = sync_now(&sim, &other, &Ask::default(), &mut envs).0;
+    let outcome = ran(&synced);
+    assert_eq!((outcome.written, outcome.deleted, outcome.records), (0, 0, 4), "{:?}", synced.notes);
+    let seen = look(&sim);
+    let table = seen.root.unwrap().manifest.server_table();
+    assert_eq!((table.root.instance, table.root.url_key), (instance_of(Some(ID)), server_url_key(&other)));
+    assert!(table.entries.is_empty());
+    let s = State::of(&seen.state).unwrap().settings;
+    assert_eq!(s.sources.len(), 1, "one source answers both: {:?}", s.sources);
+    assert_eq!(s.sources[0].libraries, ["Rock"], "its selection, carried");
+
+    // Another server set up at that address: never the card's, and a
+    // server of its own can't share the card's server's address. Refused
+    // before anything is written, whatever the answers.
+    fake.lock().unwrap().instance = Some("8899aabb-ccdd-4eff-8011-223344556677");
+    let image = sim.image();
+    let new_server = Answers { new_servers: true, ..Answers::default() };
+    for ask in [Ask::default(), Ask { same_server: true, answers: new_server, ..Ask::default() }] {
+        let refused = sync_now(&sim, &other, &ask, &mut envs).0;
+        let End::Halted(Halt::Card(Stop::Refused(why))) = &refused.end else { panic!("{:?}", refused.end) };
+        assert!(why.contains("address"), "{why}");
+    }
+    assert_eq!(sim.image(), image, "nothing written");
+
+    // At an address of its own, the other server is asked about (U7).
+    let served = fake.clone();
+    let third = routed(move |asked| answer(&served, asked));
+    let asked = sync_now(&sim, &third, &Ask::default(), &mut envs).0;
+    let End::Halted(Halt::Card(Stop::Unanswered(guards))) = &asked.end else { panic!("{:?}", asked.end) };
+    assert_eq!(guards[..], [Guard::Server { origin: 0, rows: 4 }]);
 }
 
 #[test]
