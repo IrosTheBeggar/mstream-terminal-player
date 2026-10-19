@@ -221,6 +221,40 @@ pub(crate) fn set_up(
     Ok(done)
 }
 
+/// The card's settings changed by `change` and written (the Card view's
+/// Settings sheet, its Apply: the MP3 Player contract's clause 48) in a
+/// session bound to the card: `state.json` alone, by 2.12.7's rule, and
+/// nothing else on the card. Only a set-up card's: a root, and a state file
+/// of its own. What it wrote.
+pub(crate) fn store(
+    card: &dyn CardWrite,
+    change: &mut dyn FnMut(&mut State),
+    envs: &mut dyn FnMut() -> Env,
+    events: &mut dyn FnMut(Event),
+) -> Result<State, Stop> {
+    let seen = volume::inspect(card).map_err(|_| Stop::Pulled)?;
+    if !seen.newer.is_empty() {
+        return Err(Stop::Guard(Guard::Newer(seen.newer)));
+    }
+    let not_set_up = || Stop::Refused("the card isn't set up for the transfer".into());
+    let root = seen.root.as_ref().ok_or_else(not_set_up)?;
+    let (card_id, commit_id) = (root.manifest.header.card_id, root.manifest.commit_id);
+    let state = State::of(&seen.state).filter(|s| s.card_id == card_id);
+    let mut state = state.ok_or_else(not_set_up)?;
+    let serial = card.serial().map_err(|_| Stop::Pulled)?;
+    let expect = Expect { serial, card_id: Some(card_id), commit_id: Some(commit_id) };
+    let (knobs, answers) = (Knobs::default(), Answers::default());
+    let session = Session::open(card, &expect, knobs, &answers, envs(), &mut NoHooks, events)?;
+    change(&mut state);
+    state.card_id = card_id;
+    state.settings.stored = true;
+    let bytes = state.text(volume::next_seq(session.state().seq));
+    let (session, _) = step(session, |s| s.write_state(&bytes))?;
+    session.close();
+    state.seq = volume::next_seq(state.seq);
+    Ok(state)
+}
+
 // ── The hidden command ──────────────────────────────────────────────────────
 
 /// `device card-setup <volume> [--dry-run]`, undocumented: sets up the

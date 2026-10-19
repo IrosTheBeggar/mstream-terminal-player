@@ -59,3 +59,4 @@ pub(crate) mod state;
 pub(crate) mod sync;
 pub(crate) mod tags;
 pub(crate) mod volume;
+pub(crate) mod worker;

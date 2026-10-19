@@ -65,52 +65,52 @@ fn corpus(name: &str) -> Vec<u8> {
 
 /// A track of the fake server.
 #[derive(Clone)]
-struct Track {
-    path: String,
-    id: i64,
-    bytes: Vec<u8>,
-    seconds: f64,
-    art: Option<String>,
+pub(crate) struct Track {
+    pub(crate) path: String,
+    pub(crate) id: i64,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) seconds: f64,
+    pub(crate) art: Option<String>,
     /// The full metadata's own fields: sample rate, channels, BPM.
-    full: Value,
+    pub(crate) full: Value,
 }
 
 #[derive(Default)]
 pub(crate) struct Library {
-    vpaths: Vec<String>,
-    tracks: Vec<Track>,
-    revision: String,
+    pub(crate) vpaths: Vec<String>,
+    pub(crate) tracks: Vec<Track>,
+    pub(crate) revision: String,
     /// Folder images, by path: served, never listed.
-    images: HashMap<String, Vec<u8>>,
-    art: HashMap<String, Vec<u8>>,
+    pub(crate) images: HashMap<String, Vec<u8>>,
+    pub(crate) art: HashMap<String, Vec<u8>>,
     /// A conversion's bytes, by its source's path.
-    converted: HashMap<String, Vec<u8>>,
+    pub(crate) converted: HashMap<String, Vec<u8>>,
     /// Conversions that end short once, as a dying ffmpeg leaves them.
-    short_once: HashSet<String>,
+    pub(crate) short_once: HashSet<String>,
     /// Files whose `/media` GET answers 401: the sign-in revoked mid-run.
-    refused: HashSet<String>,
+    pub(crate) refused: HashSet<String>,
     /// Rock's folder on this computer: the session is an admin's, which
     /// may ask `admin/directories`.
-    disk: Option<PathBuf>,
+    pub(crate) disk: Option<PathBuf>,
     /// Every request, as "METHOD path".
-    asked: Vec<String>,
+    pub(crate) asked: Vec<String>,
     /// Each path `metadata/batch` was asked for.
-    batched: Vec<String>,
+    pub(crate) batched: Vec<String>,
     /// The plays posted to `stats/plays`, as they came, and the ids it has.
-    plays: Vec<Value>,
-    has: HashSet<String>,
+    pub(crate) plays: Vec<Value>,
+    pub(crate) has: HashSet<String>,
     /// `stats/plays` answers 500: a post that fails.
-    stats_down: bool,
+    pub(crate) stats_down: bool,
     /// `/api/`'s transcode block, when not an older server's (no rates
     /// listed, no bulk queue).
-    transcode: Option<Value>,
+    pub(crate) transcode: Option<Value>,
     /// Each `/transcode` request's query, as it came.
-    transcodes: Vec<String>,
+    pub(crate) transcodes: Vec<String>,
     /// Older than the card transfer's batch of mStream changes: no
     /// `instanceId` in `/api/`.
-    old: bool,
+    pub(crate) old: bool,
     /// Its `instanceId`, when not [`ID`].
-    instance: Option<&'static str>,
+    pub(crate) instance: Option<&'static str>,
     /// Its federation peers (B9).
     peers: Vec<peers::FedPeer>,
 }
