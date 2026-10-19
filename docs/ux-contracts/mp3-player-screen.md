@@ -1267,7 +1267,7 @@ comes from the cache, or a download, beside them.
 59. **Formatting is the player's (Q3).** The PC never writes a card's file
     system: the tab asks, and the player confirms on its own screen and
     formats (the firmware repo's `docs/HOST-STATUS.md`, "@format", as at
-    its commit 76a10dc).
+    its commit d8855d7).
     - **Where it is offered:** for a card the player can't read
       (`card=exfat`, `ntfs`, `gpt`), the board's SD row offers *Format as
       FAT32 ▸*: the primary when the verdict has none (clause 18), else the
@@ -1297,9 +1297,11 @@ comes from the cache, or a download, beside them.
       two steps (`gate_fmt_confirm`; the hold is named once the player
       asks, below); what is lost, in gold, named from `@status` — the
       card's kind (`card=`) and size, and on a card the player reads its
-      music ("your music, 1,284 tracks, on one FAT32 volume"); and that the
-      player writes its `device.txt` at once. *◂ Keep the card as it is*
-      and *Ask the player*.
+      music ("your music, 1,284 tracks, on one FAT32 volume"; while the
+      board indexes it, `tracks=building`, "your music, still being
+      indexed, on one FAT32 volume"); and that the player writes its
+      `device.txt` at once. *◂ Keep the card as it is* and *Ask the
+      player*.
     - **On the yes** the tab sends `@format`. At `@format ok` the question
       is on the player's screen, and the SD row says "waiting for you to
       confirm on the player" and "Nothing is erased until you hold the red
@@ -1326,25 +1328,31 @@ comes from the cache, or a download, beside them.
         with no restart (`@err 4 format card|size|busy`: another card in
         the slot since the board started or none answering, a card FAT32
         can't take, a restart under way), says why and that nothing was
-        formatted, and the row is the card as the board reports it;
+        formatted, a word this player doesn't know too ("Not formatted:
+        COM3 answered …; nothing was erased."), and the row is the card as
+        the board reports it;
       - a failure after the restart (`@err 4 format
         card|size|write|mkfs|check|files`) says so in gold, the row shows
         the card as the board then reports it, and Details' log has the
         reason.
 
       Their words are new with part B6 (`fmt_refused_*`, the second
-      answer's three among them, and `fmt_failed_*`): the set drew none.
-      Leaving the tab doesn't stop a format: the player formats on its own,
-      and coming back asks the board again (clause 5).
-    - **On the player** (part B5, as built at 76a10dc): step 1, the
+      answer's among them, and `fmt_failed_*`): the set drew none. Each
+      fits the hosted busy line, 96 cells, beside the longest port name
+      the page shows (16 cells, a Mac's `cu.usbmodem14101`). Leaving the
+      tab doesn't stop a format: the player formats on its own, and coming
+      back asks the board again (clause 5).
+    - **On the player** (part B5, as built at d8855d7): step 1, the
       firmware's question, its words by the card, with *Cancel* and
       *Format…*; step 2, "Erase the whole card?", **the hold** (the user's
-      pick of 2026-10-19, card 06 alternate B): its red *Format* answers
-      only to a finger kept on it 2 s, filling meanwhile. Lifted sooner or
-      slid off, it empties and nothing happens but the hint "Hold the red
-      button for 2 seconds"; the question stays up, and no tap, double tap
-      or run of taps passes both steps. *Cancel* stays the default: its
-      button, a tap on the tab bar or each step's minute ends the question.
+      pick of 2026-10-19, card 06 alternate B): its red *Hold to erase*
+      (`format.sure_button`) answers only to a finger kept on it 2 s,
+      filling meanwhile, and under the body, from the start, the hint
+      "Hold the red button for 2 seconds". Lifted sooner or slid off, it
+      empties, the hint turns amber and nothing else happens; the question
+      stays up, and no tap, double tap or run of taps passes both steps.
+      *Cancel* stays the default: its button, a tap on the tab bar or each
+      step's minute ends the question.
       Then the boot's "Formatting the card" over a bar, and "Card
       formatted: ready for your music". The words are the firmware's own
       (its repo's UiStrings, ten languages). Whether a 2 s hold reads well
@@ -1547,7 +1555,9 @@ board that can't format while the pin can't either (`card_fix_format_pc`,
 `card_fix_mbr_pc`, clause 20): moved, their ten locales as they are, not
 new. Part B6 adds the format's refusals and failures beside them
 (`fmt_refused_*`, `fmt_failed_*`, `fmt_no_answer`, `fmt_lost`), which
-the set did not draw, and `gate_fmt_unread`: 19 keys (Deviations log).
+the set did not draw, and `gate_fmt_unread`: 19 keys; its review adds
+`fmt_refused_second_other` and `gate_fmt_music_building`, 21 in all
+(Deviations log).
 Not keys: the invented names, paths, sizes and versions; the command
 line's lines (plain English, like `device list`'s); the firmware's own
 strings for its dialogs (its repo's lib/core UiStrings, ten languages).
@@ -2275,3 +2285,43 @@ The cards' command-line lines are plain English, like the `plan:` line.
   - **Not tried on a board:** the whole route on a Core2 (the firmware's
     device check 11, on a spare card): the port staying open across the
     board's restart, the real percent's cadence, the minute's edge.
+- **2026-10-19 — Part B6's review fixes.** The review of B6 found no
+  format that starts by itself and seven smaller gaps; fixed as follows.
+  - **Clause 59 follows the firmware as at d8855d7**, where B6 was built:
+    step 2's red button says *Hold to erase*, as the picked frame drew it,
+    and its hint is under the body from the start. The decision entry's
+    "*Format*, held, where the picked frame says *Hold to erase*" and the
+    firmware entry's "as at 76a10dc" were true of 76a10dc; the SD row's
+    and the busy line's words already named no button, so none changes.
+  - **The busy line fits beside a Mac's port.** The floor test measured
+    the format's ends with "COM3" (4 cells), where the page names a port
+    by up to 16 (`cu.usbmodem14101`); measured with that, eight lines ran
+    over 96 cells, now shortened: German `fmt_asked`, French and
+    Portuguese and Russian `fmt_failed_check`, Italian `fmt_failed_write`,
+    Japanese `fmt_refused_viz`, `fmt_refused_second_busy` and
+    `fmt_failed_size` (the last now ends "書き込みなし。", nothing written,
+    in three words). The test now measures every end, and the asked and
+    done notes, beside a 16-cell port in every locale.
+  - **A refusal at the second answer in a word this player doesn't know**
+    says it was not formatted, as clause 59 has it and as `device format`
+    already did ("Not formatted: COM3 answered …; nothing was erased.",
+    `fmt_refused_second_other`, new), where it said "Couldn't format".
+  - **The player's own card while it indexes** (`tracks=building`): the
+    gate's gold line names the music ("your music, still being indexed,
+    on one FAT32 volume", `gate_fmt_music_building`, new), where it said
+    "one FAT32 volume" alone.
+  - **A write forgets how the last format ended**, as it forgets the
+    count: a board that answered `@err 7 format` and is then written with
+    firmware that formats is offered the format on the same visit, and a
+    "Formatted just now" doesn't outlive the write (a half-written board
+    forgets it too).
+  - **`device format` refuses an empty slot** before asking ("Not asked:
+    COM3: no card answers in its slot.", exit 1), where it printed "no
+    card. Formatting erases all of it…" and then asked, for the board to
+    refuse.
+  - **A test's timing.** The listen test of a no past the minute kept a
+    margin of about 0.1 s against the scheduler; it now waits 1 s past a
+    minute of 0.1 s.
+  - **Words.** The two new keys in all ten locales, and the eight
+    shortened lines: the nine languages other than English wait for the
+    native review with the rest of B6's.
