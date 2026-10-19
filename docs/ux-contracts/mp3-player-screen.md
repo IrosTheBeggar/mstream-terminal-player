@@ -2156,3 +2156,52 @@ The cards' command-line lines are plain English, like the `plan:` line.
     other eight written by the build (Translation notes) — all nine wait
     for a native review. Not tried on hardware: ejecting a real card (the
     OS's eject, part V1), and a card's sync under the GUI end to end.
+- **2026-10-19 — Part B4's review fixes.** The review of B4 found three
+  writes before their gate and a handful of smaller gaps; fixed as follows.
+  - **Nothing is written before its gate.** Settings' From set to another
+    server opens the another-server gate before anything is sent: *Make
+    Studio its server* writes the settings (Apply, which never syncs:
+    clause 48) and the next *Sync ▸* takes the card over; *◂ Keep Home*
+    writes nothing (clause 58). `device card <drive> sync --server S
+    --take-over` prints the take-over's plan from a dry run (the sheet's
+    fit, which plans another server as its take-over runs), and writes
+    `state.json` only after `--yes` or "go on? y" (clause 65). A card's
+    Next sync, and the sheet's fit line, plan a chosen server the same way.
+  - **Eject ▸ on a card the player can't read** (exFAT, NTFS, GPT,
+    write-protected) now asks the OS, as the route to the player's Format
+    needs (clause 45): the eject asks of any removable volume the tab
+    lists, never the computer's own disks or a fixed disk; `e` works where
+    Enter's *Eject ▸* does, and `device card <drive> eject` too.
+  - **The gates' keeps that answer.** *◂ Leave them all as mine* syncs
+    adopting nothing, as `--keep-mine` does (the set's card 06 note:
+    "Leave them all as mine still sets the card up"); *◂ Leave Lisbon out*
+    is kept on this computer, in `cards.json` (`leftOut`, by card id), so
+    that peer is left out of the card's syncs here and never asked again
+    (clause 58: once per peer); the yes was already kept on the card
+    (`state.json`'s `proxyCopies`). The command line has no flag for that
+    no yet: `--through-parent` remains its only answer.
+  - **The removals gates name their count.** A yes (the gate's, or
+    `--allow-removals N`) carries its count into the run, and a plan that
+    removes another number asks again, so a server that changed since the
+    look never takes more than was allowed. The stronger gate counts as
+    the run's own gate does, its paths (every file deleted or replaced in
+    place), each library's share read off the card's ledger by the look as
+    by the run; the command line's check of N against the plan's removals
+    is made only where no removals gate counted it.
+  - **Quitting during a sync** tells the worker to quit: the running sync
+    stops at its next save, and one waiting its turn never starts in the
+    wait (clause 57). The end of one run is told before the next starts.
+  - **Smaller.** A card pulled and put back in its reader while its sync
+    lists or plans keeps its tab, its progress and its quit gate; `p`
+    during a sync does nothing (the sync sends the plays); a card taken
+    out with its view open moves the view right, else left, as a board
+    unplugged does (clause 29); a paused peer's budget is its own, not the
+    default; a lapsed sign-in is the API's 401, never a word in an error's
+    text (a 403 never asks to sign in again).
+  - **Words.** `stopping` loses its count ("stopping at the next save…",
+    where the set has "… 37 files to it"): the run fetches one file at a
+    time, so only that file finishes before the save, and the count was
+    never better than "1 files". `newer` names the card format a newer
+    writer left, read off its file; a newer private file or plan names
+    none, so `newer_any` says the rest of the sentence alone. Both in all
+    ten locales, the nine others waiting for the native review.
