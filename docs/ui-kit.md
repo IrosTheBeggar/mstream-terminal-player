@@ -186,6 +186,34 @@ anywhere else closes and keeps — the whole screen registers that close
 under the rows. No title bar, no `[X]`. Consumers: the GUI header's
 server switcher, the stats page's period.
 
+### Context list
+The verbs a thing has beyond its one hover verb, hung from the thing
+itself — the Discover room's connected-server tile (its list: Play album ·
+Queue album · Keep a copy… · Open on {server}; discovery-page clause 103).
+The Dropdown's frame and grammar: a Rounded frame (`frame_at`: `Clear`,
+ground, border in the accent) from the thing's first cell, one row under
+it, kept inside the room, `Surface::overlay`-registered so the covers it
+touches draw as the mosaic; no title bar, no `[X]`. Rows are verbs, not
+values — no `•` — each a text row with its key DIM after the label where
+it has one (`Queue album  a`, `Keep a copy…  c`); the keyboard cursor
+wears the accent slab, hover BRIGHT + BOLD. A **right click** on the
+thing, or `m` with the hand on it, opens it; ↑ ↓ walk, Enter or a click
+picks and closes, the rows' own keys act from inside it too; Esc, `m`
+again or a click anywhere else closes and keeps. A row whose verb is not
+on offer is not drawn (hidden, never grey). The track-actions sheet stays
+the modal for a song's verbs; a context list is for a thing that is not a
+song row.
+**Hung from a modal's row** (Open elsewhere's links from the
+track-actions sheet, discovery-page clause 140): the same frame and
+grammar inside the modal — its last line level with its row, rising over
+the rows above (never past the modal's title row, scrolling past that
+with the kit's bar on its right border), clear of the `[X]`; DIM
+UPPERCASE heads between groups, the items indented under them, the held
+one in the plain selection colours and the hovered one BRIGHT — neither
+bold (the board `TermCopies` G); the row
+it hangs from gives up its slab and wears ACCENT BOLD while the list
+holds the keyboard's; Esc or ← folds it and the modal stays.
+
 ### State line
 One row under the header, on rooms that watch a live thing: `• word` in
 the state's color and BOLD — Green when it is well, Yellow while it is
@@ -481,6 +509,20 @@ choice. A gate may name its safe choice for what it keeps rather than
 still the modal primary.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
+**Keyboard stops** in a modal of radios, checkboxes and 1-row buttons
+(the Discover room's Keep a copy, discovery-page clause 106): a radio's or
+a checkbox's label wears ACCENT BOLD under the hand (the chosen radio's
+label BOLD, its `(•)` OK), a `[ button ]` the selection slab; where the
+modal's only way forward is its primary the hand may rest stowed and
+Enter presses it. On the legacy console that modal's frame is `+ - |`.
+**A list in a modal** (the Discover room's Copies, discovery-page clause
+117): the kit table under the title — its DIM header and rule never
+scroll — items of one or two rows (the held one's slab across all of
+them, plain — its action too, never bold), a `ListView` counted in items, the kit's bar (`scroll_items`) on
+the modal's right border; the footer row's text buttons bottom-right (a
+quiet one DIM, Try again ACCENT; hover BRIGHT + BOLD) and a one-off note
+bottom-left. Its height follows its rows up to a cap, anchored as if at
+the cap so the top holds.
 **Over pixels**: on a screen that draws real pixels (the queue's, the
 wall's and the Discover strip's covers), every overlay — a modal frame (`modal_frame_on`), the
 header dropdown, the tooltip — registers its footprint with the surface

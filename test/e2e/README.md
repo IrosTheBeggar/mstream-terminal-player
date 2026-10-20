@@ -2,8 +2,9 @@
 
 `bash test/e2e/run.sh` drives the real binary through the real event
 loop with expect(1), against a **stateful fake mStream**
-(`fake_mstream.py`) — no Node, no real server, no audio files. Nine
-scenarios, each on a fresh fake and a fresh `$HOME`:
+(`fake_mstream.py`) — no Node, no real server, no audio files. Its
+scenarios each run on a fresh fake and a fresh `$HOME` (T, the Discover
+room against the taste route, is described in run.sh):
 
 - **A** — the full English walk (folders → extras → login → Done), then
   the standalone `qr` pages on the session it saved: the half-block
@@ -39,6 +40,16 @@ scenarios, each on a fresh fake and a fresh `$HOME`:
   written", `d` opens Details, Esc leaves. Then, without expect, `device
   list` on two fake boards, `--yes` writing a fresh board end to end, and a
   held port refused.
+- **K** — Keep a copy, end to end (`FAKE_TASTE=1 FAKE_PLUGINS=1`: the
+  ping's `discoveryPlugins`, the plug-in listing, a throwaway `copies`
+  destination, jobs that walk queued → running → done on the wall clock):
+  the GUI at 100 × 30 with the queue folded opens the Discover room's
+  Connected servers tab, lights the peer's album, `c` opens Keep a copy,
+  Add album starts the copy, Esc leaves it running, the room's poll sees
+  it live and kept, `C` lists it in the Copies modal. `check_keep.py`
+  replays the stream frame by frame for those states; the fake's
+  `/_state` says what was sent (the row unchanged, scope album) and how
+  the rows were looked up.
 
 ## The two harness laws (learned the hard way)
 

@@ -33,6 +33,12 @@
 //! to the room's last row. The seeds modal and the window's list draw
 //! last, from [`draw_modals`], so they win the pointer; the save prompt is
 //! the sonic room's (`sonic::draw_modals`).
+//!
+//! Since 2026-10-19 the Connected servers tab carries the plug-ins
+//! (clauses 100–141): a copy's mark on a row's LEAD and a tile's artist
+//! row, the copies' indicator at the verbs line's right, `c` and the
+//! sheet's Keep a copy… row, a tile's own list — and the Keep a copy modal
+//! itself, drawn by `gui::keep` over the App's flow.
 
 use std::collections::{HashMap, HashSet};
 
@@ -46,10 +52,12 @@ use rust_i18n::t;
 use crate::api::types::{SeedSource, TasteOutcome, Track};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, dim, frame_at, modal_close, modal_frame_on, scroll_list, width};
+use crate::tui::app::keep::{JobsIndicator, KeepPin, KeepTarget};
 use crate::tui::app::taste::{TASTE_STRIP_MAX, TastePeerAlbum};
 use crate::tui::app::{App, Capture, Origin, TasteLatch, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb};
 
 use super::cover::{Pace, Slot};
+use super::keep::{CopiesUi, KeepAct, KeepUi, LinksUi, mark_glyph, mark_style, mark_word};
 use super::{Act, Gui, List, RowVerb, Screen, accent, bright_bold, bullet_glyph, check_glyphs, put, sel};
 
 /// The window dropdown's choices, in days (0 = all time) — clause 15.
@@ -136,6 +144,59 @@ pub(crate) struct DiscoverUi {
     /// scroll moves each cover with its tile and only a cover newly
     /// revealed pays an encode.
     slots: HashMap<u64, Slot>,
+    /// The connected server's row or tile under the pointer last frame:
+    /// what `c` acts on when the keyboard's hand holds nothing (clause
+    /// 102).
+    hovered: Option<Hovered>,
+    /// Where each strip tile stood last frame, by its place in the tab's
+    /// [`tiles`] — what the tile's list hangs from.
+    tile_rects: Vec<(usize, Rect)>,
+    /// A connected server's tile's context list while it hangs (clause
+    /// 103).
+    pub tile_list: Option<TileList>,
+    /// The Keep a copy modal's keyboard stop and cover (clauses 106–110);
+    /// the flow itself is the App's.
+    pub keep: KeepUi,
+    /// The Copies modal while it is up (clause 117).
+    pub copies: Option<CopiesUi>,
+    /// Open elsewhere's list, hung from the track-actions sheet (clause
+    /// 140): its keyboard stop, its row's place, the opener's answers.
+    pub links: LinksUi,
+    /// The album "Open on {server}" opens once that server's session
+    /// answers (clause 103).
+    pub open_on: Option<crate::tui::worker::LibraryNode>,
+}
+
+/// What the pointer rests on, for `c` (clause 102).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hovered {
+    /// A table line, by its index in [`rows`].
+    Row(usize),
+    /// A strip tile, by its place in the tab's [`tiles`].
+    Tile(usize),
+}
+
+/// A connected server's tile's context list (clause 103; the kit's Context
+/// list): hung from the tile, its verbs one row each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TileList {
+    /// The tile's album, pinned by its server, album and credit — never by
+    /// its place: a peers answer landing while the list hangs moves the
+    /// list with its album, or folds it when the album left
+    /// ([`tile_list_at`]).
+    pub pin: KeepPin,
+    /// The keyboard's row; `None` while the pointer opened it.
+    pub cursor: Option<usize>,
+}
+
+/// One verb of the tile's list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TileVerb {
+    Play,
+    Queue,
+    Keep,
+    /// The album as that server holds it: its saved entry, by index.
+    OpenOn(usize),
 }
 
 /// The album strip's own state (clauses 46–47).
@@ -164,6 +225,13 @@ impl DiscoverUi {
             strip_at: None,
             stood: None,
             slots: HashMap::new(),
+            hovered: None,
+            tile_rects: Vec::new(),
+            tile_list: None,
+            keep: KeepUi::default(),
+            copies: None,
+            links: LinksUi::default(),
+            open_on: None,
         }
     }
 
@@ -181,6 +249,7 @@ impl DiscoverUi {
         for slot in self.slots.values_mut() {
             slot.on_resize();
         }
+        self.keep.on_resize();
     }
 }
 
@@ -246,6 +315,32 @@ pub(crate) enum DiscAct {
     QueueAll,
     Shuffle,
     SavePlaylist,
+    /// A connected server's tile, right-clicked: its list (clause 103).
+    TileList(usize),
+    /// A row of the tile's list.
+    TileVerb(TileVerb),
+    /// A click outside the tile's list: it closes and keeps.
+    TileListClose,
+    /// The verbs line's indicator, and `C`: the Copies modal (clause 116).
+    Copies,
+    CopiesClose,
+    /// A Copies row's action (Retry, Copy again, Start again, Play your
+    /// copy) and its `[X]`, by the job's id; Clear finished; Try again;
+    /// the list's scrollbar (clause 117).
+    CopiesAct(i64),
+    CopiesCancel(i64),
+    CopiesClear,
+    CopiesTryAgain,
+    CopiesScroll(i32),
+    CopiesJump(usize),
+    /// Open elsewhere's list (clause 140): a link, by its place among the
+    /// answer's https links; Try again; the list's scrollbar.
+    LinkOpen(usize),
+    LinksRetry,
+    LinksScroll(i32),
+    LinksJump(usize),
+    /// The Keep a copy modal's controls (clauses 106–110).
+    Keep(KeepAct),
 }
 
 // ── The row model ───────────────────────────────────────────────────────────
@@ -425,8 +520,9 @@ fn saveable(app: &App, tab: TasteTab) -> bool {
 
 /// The plural form a count takes in the running locale — the DJ room's
 /// `songs_words` rule, for the two languages here with more than one plural.
-/// The room shows no counts; the seeds modal's ages are its only family.
-fn plural_form(count: u64) -> &'static str {
+/// The room shows no counts; the seeds modal's ages and the Keep a copy
+/// modal's sizes and counts are its families (clause 126).
+pub(crate) fn plural_form(count: u64) -> &'static str {
     let locale = rust_i18n::locale();
     let lang: &str = &locale;
     let few_many = |n: u64| (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100));
@@ -445,7 +541,7 @@ fn plural_form(count: u64) -> &'static str {
 
 /// A `_*` family's words for `count` (the contract's Wording: `%{count}` is
 /// the family's placeholder).
-fn plural(stem: &str, count: u64) -> String {
+pub(crate) fn plural(stem: &str, count: u64) -> String {
     let key = format!("{stem}_{}", plural_form(count));
     t!(key.as_str(), count = count).to_string()
 }
@@ -677,6 +773,9 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         gui.discover.stow();
     }
     gui.discover.content = content;
+    // This frame's pointer targets for `c` and the tile's list, drawn anew.
+    gui.discover.hovered = None;
+    gui.discover.tile_rects.clear();
     let fill = strip_fill(&gui.app, gui.app.taste.tab);
     let lay = layout(content, gui.app.taste.no_history, fill.is_some());
     draw_header(frame, gui, content, lay.header_y);
@@ -706,8 +805,11 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if !strip {
         gui.discover.strip.on = false;
     }
-    draw_verbs(frame, gui, content, lay.verbs_y);
-    draw_table(frame, gui, content, lay.table_y, strip);
+    let table = table_plan(&gui.app, content, lay.table_y, strip);
+    // The verbs line's indicator squeezes to its glyphs in the room whose
+    // table gives ALBUM up — the queue-open room (clause 116).
+    draw_verbs(frame, gui, content, lay.verbs_y, table.cols.album.is_none());
+    draw_table(frame, gui, content, lay.table_y, strip, table);
 }
 
 /// The strip came (`stands`) or went on the same tab: the table's rows are
@@ -1150,6 +1252,15 @@ fn draw_strip(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, fill: Str
     }
     gui.pend(fetches);
 
+    // A connected server's tile wears its album's copy on its artist row
+    // (clause 114): words, never a number.
+    let marks: Vec<Option<crate::api::types::JobMark>> = (first..first + shown)
+        .map(|index| match tiles[index] {
+            Tile::Peer(i) => peers.get(i).and_then(|album| gui.app.keep_tile_mark(album)),
+            Tile::Library(_) => None,
+        })
+        .collect();
+
     // Split borrows: the faces and covers are READ from the App while each
     // slot's caches are written — the queue panel's move, so a frame never
     // clones a decoded cover.
@@ -1207,12 +1318,29 @@ fn draw_strip(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, fill: Str
             put(frame, x, name_y, &title, title_style);
             // The artist stays DIM on the ground under the hand too: the slab
             // is the title line's alone (clause 47), never a ragged second
-            // run of accent under it.
-            if let Some(artist) = &face.artist {
-                put(frame, x, name_y + 1, &super::bar::clip(artist, usize::from(w)), dim());
+            // run of accent under it. A copy's state takes the artist's row
+            // in its own token (clause 114) — never the cover's pixels — and
+            // keeps it under the hand, whose slab is the title's alone.
+            match marks[k] {
+                Some(mark) => put(frame, x, name_y + 1, &super::bar::clip(&mark_word(mark), usize::from(w)), mark_style(mark)),
+                None => {
+                    if let Some(artist) = &face.artist {
+                        put(frame, x, name_y + 1, &super::bar::clip(artist, usize::from(w)), dim());
+                    }
+                }
+            }
+            discover.tile_rects.push((index, tile));
+            let peer_tile = matches!(tiles[index], Tile::Peer(_));
+            if hover && peer_tile {
+                discover.hovered = Some(Hovered::Tile(index));
             }
             // The tile's click first, its verb after: the last registered wins.
             ui.click(tile, Act::Disc(DiscAct::Tile(index, RowVerb::Open)));
+            // A connected server's tile hangs its list on a right click
+            // (clause 103).
+            if peer_tile {
+                ui.context(tile, Act::Disc(DiscAct::TileList(index)));
+            }
             ui.tip_keyed(Rect { width: (width(&title) as u16).max(1), ..name }, face.tip);
             if verb {
                 let cell = Rect { x: x + TILE_W - 3, y: name_y, width: 3, height: 1 };
@@ -1453,45 +1581,63 @@ fn sentence_lines(frame: &mut Frame, list: Rect, sentence: &str, style: Style) -
     shown as u16
 }
 
-/// The tab's table: header and rule, then the rows or what stands for them,
-/// and the kit scrollbar while the rows overflow. `strip`: the album strip
-/// stands above it and holds the albums (clause 45).
-fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, table_y: u16, strip: bool) {
-    let tab = gui.app.taste.tab;
+/// The tab's table as this frame lays it out: its list's place, its lines
+/// and their cells, its heads and its columns — worked out before the
+/// verbs line, whose indicator squeezes where the columns give ALBUM up.
+struct TablePlan {
+    list: Rect,
+    all: Vec<Line>,
+    row_cells: Vec<Option<Cells>>,
+    pane: Pane,
+    heads: [String; 5],
+    cols: Cols,
+    len_w: u16,
+}
+
+fn table_plan(app: &App, content: Rect, table_y: u16, strip: bool) -> TablePlan {
+    let tab = app.taste.tab;
     let list = Rect {
         x: content.x,
         y: table_y + 2,
         width: content.width.saturating_sub(2),
         height: content.bottom().saturating_sub(table_y + 2),
     };
-    let all = table_lines(&gui.app, tab, strip);
-    // An answer of albums and no songs: the strip holds all of it, and an
-    // empty table (its header, its rule, nothing under them) would read as
-    // something missing — no table stands under the strip then.
-    let pane_now = pane(&gui.app, tab, lines(&gui.app, tab).is_empty());
-    if strip && all.is_empty() && matches!(pane_now, Pane::Rows { failed_over: None }) {
-        return;
-    }
-    let row_cells: Vec<Option<Cells>> = all.iter().map(|line| cells(&gui.app, *line)).collect();
-
+    let all = table_lines(app, tab, strip);
+    let pane = pane(app, tab, lines(app, tab).is_empty());
+    let row_cells: Vec<Option<Cells>> = all.iter().map(|line| cells(app, *line)).collect();
     let head = |key: &str| t!(key).to_uppercase();
-    let (track_head, artist_head, album_head, on_head, len_head) = (
+    let heads = [
         head("gui.discover.col_track"),
         head("gui.discover.col_artist"),
         head("gui.discover.col_album"),
         head("gui.discover.col_on"),
         head("gui.discover.col_length"),
-    );
+    ];
     let widest = |pick: fn(&Cells) -> &str, floor: &str| {
         row_cells.iter().flatten().map(|c| width(pick(c))).chain([width(floor)]).max().unwrap_or(0) as u16
     };
     let wants = Wants {
-        artist: widest(|c| c.artist.as_str(), &artist_head),
-        album: widest(|c| c.album.as_str(), &album_head),
-        on: (tab == TasteTab::Servers).then(|| widest(|c| c.on.as_str(), &on_head)),
+        artist: widest(|c| c.artist.as_str(), &heads[1]),
+        album: widest(|c| c.album.as_str(), &heads[2]),
+        on: (tab == TasteTab::Servers).then(|| widest(|c| c.on.as_str(), &heads[3])),
     };
-    let len_w = widest(|c| c.length.as_str(), &len_head).min(10);
+    let len_w = widest(|c| c.length.as_str(), &heads[4]).min(10);
     let cols = columns(list, wants, len_w);
+    TablePlan { list, all, row_cells, pane, heads, cols, len_w }
+}
+
+/// The tab's table: header and rule, then the rows or what stands for them,
+/// and the kit scrollbar while the rows overflow. `strip`: the album strip
+/// stands above it and holds the albums (clause 45).
+fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, table_y: u16, strip: bool, plan: TablePlan) {
+    let TablePlan { list, all, row_cells, pane: pane_now, heads, cols, len_w } = plan;
+    // An answer of albums and no songs: the strip holds all of it, and an
+    // empty table (its header, its rule, nothing under them) would read as
+    // something missing — no table stands under the strip then.
+    if strip && all.is_empty() && matches!(pane_now, Pane::Rows { failed_over: None }) {
+        return;
+    }
+    let [track_head, artist_head, album_head, on_head, len_head] = heads;
     let clipped = |text: &str, w: u16| super::bar::clip(text, w as usize).into_owned();
     put(frame, cols.track_x, table_y, &clipped(&track_head, cols.track_w), dim());
     for (at, words) in [(cols.artist, &artist_head), (cols.album, &album_head), (cols.on, &on_head)] {
@@ -1640,10 +1786,24 @@ fn draw_row(
     let title = super::bar::clip(&cells.title, track_w.saturating_sub(tag_w) as usize).into_owned();
     put(frame, cols.track_x, y, &title, title_style);
     // The playing row wears the house `▸` as in every room (clause 55; the
-    // Files rows' marker), in the lead before its title.
+    // Files rows' marker), in the lead before its title. Else a connected
+    // server's row wears its copy's mark there (clause 113): one BOLD
+    // glyph in its token — the selection's colours under the hand — and
+    // its words under the pointer; the playing `▸` wins the cell.
+    let lead = Rect { x: cols.track_x.saturating_sub(LEAD), y, width: 1, height: 1 };
+    let mark = match line {
+        Line::Peer { group, row } if !cells.playing => gui.app.keep_row_mark(group, row),
+        _ => None,
+    };
     if cells.playing {
         let style = if is_sel { sel() } else { Style::default().fg(th().ok) };
-        put(frame, cols.track_x.saturating_sub(LEAD), y, super::forward_glyph(), style.add_modifier(Modifier::BOLD));
+        put(frame, lead.x, y, super::forward_glyph(), style.add_modifier(Modifier::BOLD));
+    } else if let Some(mark) = mark {
+        let style = if is_sel { sel() } else { mark_style(mark) };
+        put(frame, lead.x, y, mark_glyph(mark), style.add_modifier(Modifier::BOLD));
+    }
+    if hover && matches!(line, Line::Peer { .. }) {
+        gui.discover.hovered = Some(Hovered::Row(index));
     }
     let title_w = width(&title) as u16;
     let detail = if is_sel { sel() } else { dim() };
@@ -1674,6 +1834,11 @@ fn draw_row(
             gui.ui.tip(target, tip.clone());
         }
     }
+    // The mark's words under the pointer — a mouse-only extra; the glyph
+    // says it on the row (clause 113).
+    if let Some(mark) = mark {
+        gui.ui.tip(lead, mark_word(mark));
+    }
     let mut x = verbs_x;
     for (glyph, act, tip) in verbs {
         let cell = Rect { x, y, width: 3, height: 1 };
@@ -1690,27 +1855,50 @@ fn draw_row(
 /// over the table, on a tab that has something to play — the browse bar's
 /// grammar: play the one accent, the rest DIM text buttons, the keys in
 /// their tooltips, dropped from the tail when squeezed. Hidden, never grey,
-/// while the tab has no rows; the line keeps its row so nothing moves.
-fn draw_verbs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
+/// while the tab has no rows; the line keeps its row so nothing moves. At
+/// its right edge the copies' indicator (clause 116).
+fn draw_verbs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, narrow: bool) {
     let tab = gui.app.taste.tab;
-    if !playable(&gui.app, tab) {
-        return;
-    }
     let forward = super::forward_glyph();
     let shuffle = if legacy_conhost() { "" } else { "⇄ " };
-    let mut verbs: Vec<(String, DiscAct, &str)> = vec![
-        (format!("{forward} {}", t!("gui.bar.play")), DiscAct::PlayAll, "p"),
-        (format!("+ {}", t!("gui.bar.queue")), DiscAct::QueueAll, "A"),
-        (format!("{shuffle}{}", t!("gui.shuffle_word")), DiscAct::Shuffle, "S"),
-    ];
-    if saveable(&gui.app, tab) {
-        verbs.push((t!("gui.discover.save_playlist").to_string(), DiscAct::SavePlaylist, "s"));
+    let mut verbs: Vec<(String, DiscAct, &str)> = Vec::new();
+    if playable(&gui.app, tab) {
+        verbs = vec![
+            (format!("{forward} {}", t!("gui.bar.play")), DiscAct::PlayAll, "p"),
+            (format!("+ {}", t!("gui.bar.queue")), DiscAct::QueueAll, "A"),
+            (format!("{shuffle}{}", t!("gui.shuffle_word")), DiscAct::Shuffle, "S"),
+        ];
+        if saveable(&gui.app, tab) {
+            verbs.push((t!("gui.discover.save_playlist").to_string(), DiscAct::SavePlaylist, "s"));
+        }
     }
     let sep = " · ";
     let width_of = |verbs: &[(String, DiscAct, &str)]| -> u16 {
         let labels: u16 = verbs.iter().map(|(l, _, _)| width(l) as u16).sum();
         labels + width(sep) as u16 * verbs.len().saturating_sub(1) as u16
     };
+    // The indicator's words — or the squeeze's glyphs in every state in the
+    // narrow room (`narrow`: its table gives ALBUM up, the queue-open
+    // room's), and anywhere the verbs leave the words too little. Never
+    // clipped; the verbs give way from their tail only when even the
+    // glyphs would not fit.
+    let indicator = gui.app.keep_indicator();
+    let room_for = |verbs: &[(String, DiscAct, &str)]| -> u16 {
+        let used = width_of(verbs);
+        let gap = if verbs.is_empty() { 0 } else { HEAD_GAP };
+        content.width.saturating_sub(used + gap)
+    };
+    let mut squeezed = false;
+    if let Some(ind) = indicator {
+        let full = indicator_width(ind, false);
+        let small = indicator_width(ind, true);
+        if narrow || room_for(&verbs) < full {
+            squeezed = true;
+            while verbs.len() > 1 && room_for(&verbs) < small {
+                verbs.pop();
+            }
+        }
+    }
     while verbs.len() > 1 && content.width.saturating_sub(1) < width_of(&verbs) {
         verbs.pop();
     }
@@ -1732,6 +1920,62 @@ fn draw_verbs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
         gui.ui.tip_keyed(rect, format!("{label} — {key}"));
         x += rect.width;
     }
+    if let Some(ind) = indicator {
+        draw_indicator(frame, gui, content, y, ind, squeezed);
+    }
+}
+
+/// The indicator's runs (clause 116): "copying…" ACCENT while a copy is
+/// live, " · " DIM, "! failed" GOLD while one failed — or, squeezed, their
+/// glyphs "↓ · !". Words, never a count.
+fn indicator_runs(ind: JobsIndicator, squeezed: bool) -> Vec<(String, Style)> {
+    let gold = Style::default().fg(th().gold);
+    let mut runs = Vec::new();
+    if ind.live {
+        let word = if squeezed {
+            mark_glyph(crate::api::types::JobMark::Copying).to_string()
+        } else {
+            super::keep::ell(&t!("gui.discover.copies.live"))
+        };
+        runs.push((word, accent()));
+    }
+    if ind.failed {
+        if !runs.is_empty() {
+            runs.push((" · ".to_string(), dim()));
+        }
+        let word = if squeezed { "!".to_string() } else { format!("! {}", t!("gui.discover.copies.failed")) };
+        runs.push((word, gold));
+    }
+    runs
+}
+
+fn indicator_width(ind: JobsIndicator, squeezed: bool) -> u16 {
+    indicator_runs(ind, squeezed).iter().map(|(w, _)| width(w) as u16).sum()
+}
+
+/// The indicator at the verbs line's right edge — the room's right less
+/// nothing (cell 96 at 100 columns): a click, or `C`, opens the Copies
+/// modal; the pointer brightens it whole; its tooltip names the key, and
+/// the words the squeeze dropped.
+fn draw_indicator(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, ind: JobsIndicator, squeezed: bool) {
+    let runs = indicator_runs(ind, squeezed);
+    let w: u16 = runs.iter().map(|(t, _)| width(t) as u16).sum();
+    let rect = Rect { x: content.right().saturating_sub(w), y, width: w, height: 1 };
+    let hover = gui.ui.hovers(rect);
+    let mut x = rect.x;
+    for (text, style) in &runs {
+        put(frame, x, y, text, if hover { bright_bold() } else { *style });
+        x += width(text) as u16;
+    }
+    gui.ui.click(rect, Act::Disc(DiscAct::Copies));
+    let tip = t!("gui.discover.copies.tip").to_string();
+    let tip = if squeezed {
+        let words: String = indicator_runs(ind, false).into_iter().map(|(t, _)| t).collect();
+        format!("{words} — {tip}")
+    } else {
+        tip
+    };
+    gui.ui.tip_keyed(rect, tip);
 }
 
 // ── The window's list and the modal ─────────────────────────────────────────
@@ -1804,6 +2048,107 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
     if gui.discover.seeds.is_some() {
         draw_seeds_modal(frame, gui, area);
+    }
+    if gui.discover.tile_list.is_some() {
+        draw_tile_list(frame, gui, area);
+    }
+    if gui.app.taste.keep.flow.is_some() {
+        super::keep::draw(frame, gui, area);
+    }
+    if gui.discover.copies.is_some() {
+        super::keep::draw_copies(frame, gui, area);
+    }
+}
+
+/// The verbs a connected server's tile's list offers (clause 103): Play
+/// album and Queue album always; Keep a copy… while the copy gate holds and
+/// the tile offers a choice; Open on {server} where that server is saved
+/// and offered — hidden, never grey, otherwise.
+fn tile_verbs(gui: &Gui, album: usize) -> Vec<TileVerb> {
+    let mut verbs = vec![TileVerb::Play, TileVerb::Queue];
+    if !gui.app.keep_choices(KeepTarget::Tile(album)).is_empty() {
+        verbs.push(TileVerb::Keep);
+    }
+    if let Some(peer) = gui.app.taste.peer_albums().get(album).map(|a| a.peer)
+        && let Some(index) = saved_peer(gui, peer)
+    {
+        verbs.push(TileVerb::OpenOn(index));
+    }
+    verbs
+}
+
+/// The saved entry of a connected server of this session, where it is
+/// offered (not parked, not missing).
+fn saved_peer(gui: &Gui, peer: i64) -> Option<usize> {
+    gui.config.servers.iter().position(|entry| {
+        entry.peer.as_ref().is_some_and(|p| {
+            p.id == peer && crate::config::same_server(&p.parent, &gui.app.session.server_id)
+        }) && crate::config::selectable(entry)
+    })
+}
+
+/// A tile verb's words, and the key named after them DIM.
+fn tile_verb_words(gui: &Gui, verb: TileVerb, album: usize) -> (String, Option<&'static str>) {
+    match verb {
+        TileVerb::Play => (t!("gui.discover.tile_play").to_string(), None),
+        TileVerb::Queue => (t!("gui.discover.tile_queue").to_string(), Some("a")),
+        TileVerb::Keep => (super::keep::ell(&t!("gui.act.keep_copy")), Some("c")),
+        TileVerb::OpenOn(_) => {
+            let server = gui.app.taste.peer_albums().get(album).map(|a| a.server.clone()).unwrap_or_default();
+            (t!("gui.discover.tile_open_on", server = server).to_string(), None)
+        }
+    }
+}
+
+/// The tile's list (the kit's Context list): an ACCENT frame from the
+/// tile's first cell, one row under it, kept inside the room; no title,
+/// no `[X]`; the cursor the accent slab, hover BRIGHT + BOLD; a click
+/// elsewhere closes and keeps.
+fn draw_tile_list(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    let Some(list) = gui.discover.tile_list.clone() else { return };
+    let at = tile_list_at(gui, &list);
+    let Some((album, &(_, tile))) = at.and_then(|(index, album)| {
+        gui.discover.tile_rects.iter().find(|(i, _)| *i == index).map(|rect| (album, rect))
+    }) else {
+        // The tile left the view (a scroll, a new answer that holds its
+        // album no more): so does its list.
+        gui.discover.tile_list = None;
+        return;
+    };
+    let verbs = tile_verbs(gui, album);
+    let words: Vec<(String, Option<&'static str>)> = verbs.iter().map(|v| tile_verb_words(gui, *v, album)).collect();
+    let widest = words.iter().map(|(w, key)| width(w) + key.map_or(0, |_| 3)).max().unwrap_or(0) as u16;
+    let room = gui.discover.content;
+    let w = (widest + 4).max(24).min(room.width + 1);
+    let h = verbs.len() as u16 + 2;
+    let x = tile.x.saturating_sub(1).min(room.right().saturating_sub(w));
+    let below = tile.bottom();
+    let y = if below + h <= area.bottom() { below } else { tile.y.saturating_sub(h) };
+    let rect = Rect { x, y, width: w, height: h };
+    gui.ui.click(area, Act::Disc(DiscAct::TileListClose));
+    gui.ui.overlay(rect);
+    let inner = frame_at(frame, rect, th().accent);
+    for (i, (verb, (label, key))) in verbs.iter().zip(words).enumerate() {
+        let row = Rect { x: inner.x, y: inner.y + i as u16, width: inner.width, height: 1 };
+        let on = list.cursor == Some(i);
+        let hover = !on && gui.ui.hovers(row);
+        if on {
+            frame.render_widget(ratatui::widgets::Block::default().style(sel()), row);
+        }
+        let style = match (on, hover) {
+            (true, _) => sel().add_modifier(Modifier::BOLD),
+            (false, true) => bright_bold(),
+            (false, false) => Style::default(),
+        };
+        let label = super::bar::clip(&label, usize::from(inner.width.saturating_sub(2))).into_owned();
+        put(frame, row.x + 1, row.y, &label, style);
+        if let Some(key) = key {
+            let kx = row.x + 1 + width(&label) as u16 + 2;
+            if kx < inner.right() {
+                put(frame, kx, row.y, key, if on { sel() } else { dim() });
+            }
+        }
+        gui.ui.click(row, Act::Disc(DiscAct::TileVerb(*verb)));
     }
 }
 
@@ -1970,7 +2315,23 @@ fn draw_seeds_modal(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 }
 
 pub(crate) fn modal_open(gui: &Gui) -> bool {
-    gui.discover.menu.is_some() || gui.discover.seeds.is_some()
+    gui.discover.menu.is_some()
+        || gui.discover.seeds.is_some()
+        || gui.discover.tile_list.is_some()
+        || gui.discover.copies.is_some()
+        || gui.app.taste.keep.flow.is_some()
+}
+
+/// Everything hung over the room goes: the window's list, the seeds modal,
+/// the tile's list, the Keep a copy and Copies modals — a copy keeps
+/// running on the server.
+pub(crate) fn close_all(gui: &mut Gui) {
+    gui.discover.menu = None;
+    gui.discover.seeds = None;
+    gui.discover.tile_list = None;
+    gui.discover.copies = None;
+    gui.discover.keep.focus = None;
+    gui.app.keep_close();
 }
 
 /// The room is entered — every visit asks (clause 3): a fresh one lets the
@@ -1979,6 +2340,7 @@ pub(crate) fn modal_open(gui: &Gui) -> bool {
 /// opens with nothing hung, and the old answer stands until the new lands.
 pub(crate) fn enter(gui: &mut Gui, again: bool) {
     gui.discover.menu = None;
+    gui.discover.tile_list = None;
     // The list stays where it was left (clause 61's way back); only the
     // keyboard's hand goes down.
     if !again {
@@ -1992,13 +2354,11 @@ pub(crate) fn enter(gui: &mut Gui, again: bool) {
 /// to Files when the row went with the ping (clause 1).
 pub(crate) fn reopen(gui: &mut Gui) {
     if !gate(&gui.app) {
-        gui.discover.menu = None;
-        gui.discover.seeds = None;
+        close_all(gui);
         gui.act(Act::Nav(super::FILES_NAV));
         return;
     }
-    gui.discover.menu = None;
-    gui.discover.seeds = None;
+    close_all(gui);
     gui.discover.stow();
     let effects = gui.app.taste_open();
     gui.pend(effects);
@@ -2102,8 +2462,132 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
                 gui.discover.menu = None;
             }
         }
+        DiscAct::TileList(index) => open_tile_list(gui, index, false),
+        DiscAct::TileVerb(verb) => tile_verb(gui, verb),
+        DiscAct::TileListClose => gui.discover.tile_list = None,
+        DiscAct::Copies => super::keep::open_copies(gui),
+        DiscAct::CopiesClose => gui.discover.copies = None,
+        act @ (DiscAct::CopiesAct(_)
+        | DiscAct::CopiesCancel(_)
+        | DiscAct::CopiesClear
+        | DiscAct::CopiesTryAgain
+        | DiscAct::CopiesScroll(_)
+        | DiscAct::CopiesJump(_)) => super::keep::copies_act(gui, &act),
+        act @ (DiscAct::LinkOpen(_) | DiscAct::LinksRetry | DiscAct::LinksScroll(_) | DiscAct::LinksJump(_)) => {
+            super::keep::links_act(gui, &act)
+        }
+        DiscAct::Keep(act) => super::keep::act(gui, act),
     }
     true
+}
+
+/// A connected server's tile's list (clause 103), from a right click (no
+/// row lit) or `m` with the hand on the tile (its first row lit).
+fn open_tile_list(gui: &mut Gui, index: usize, by_key: bool) {
+    let Some(Tile::Peer(album)) = tiles(&gui.app, gui.app.taste.tab).get(index).copied() else { return };
+    let Some(pin) = gui.app.keep_pin(KeepTarget::Tile(album)) else { return };
+    gui.discover.menu = None;
+    gui.discover.tile_list = Some(TileList { pin, cursor: by_key.then_some(0) });
+}
+
+/// Where the tile's list's album stands now: its tile's place in the tab's
+/// [`tiles`] and its album's in
+/// [`crate::tui::app::taste::TasteState::peer_albums`] — `None` once a new
+/// answer left it out.
+fn tile_list_at(gui: &Gui, list: &TileList) -> Option<(usize, usize)> {
+    let KeepTarget::Tile(album) = gui.app.keep_find(&list.pin)? else { return None };
+    let tile = tiles(&gui.app, gui.app.taste.tab).iter().position(|t| *t == Tile::Peer(album))?;
+    Some((tile, album))
+}
+
+/// A verb of the tile's list: the list closes, the verb acts — on the
+/// album the list was opened for, wherever a new answer put it.
+fn tile_verb(gui: &mut Gui, verb: TileVerb) {
+    let Some(list) = gui.discover.tile_list.take() else { return };
+    let Some((tile, album)) = tile_list_at(gui, &list) else { return };
+    match verb {
+        TileVerb::Play => tile_act(gui, tile, RowVerb::Open),
+        TileVerb::Queue => tile_act(gui, tile, RowVerb::Queue),
+        TileVerb::Keep => super::keep::open(gui, KeepTarget::Tile(album)),
+        TileVerb::OpenOn(index) => {
+            let Some(album) = gui.app.taste.peer_albums().get(album).map(|a| a.album.clone()) else { return };
+            open_on(gui, index, album);
+        }
+    }
+}
+
+/// "Open on {server}" (clause 103): the album as that server holds it —
+/// the session moves to the saved connected server, the Albums room opens,
+/// and the album opens there once that server answers.
+fn open_on(gui: &mut Gui, index: usize, album: String) {
+    gui.discover.open_on = Some(crate::tui::worker::LibraryNode::Album { name: album, artist: None });
+    super::servers::switch_to(gui, index);
+    if gui.app.connected {
+        // The switch went nowhere (already there): nothing waits.
+        gui.discover.open_on = None;
+        return;
+    }
+    gui.act(Act::Nav(super::ALBUMS_NAV));
+}
+
+/// The target a strip tile names for Keep a copy: a connected server's.
+fn tile_target(gui: &Gui, index: usize) -> Option<KeepTarget> {
+    match tiles(&gui.app, gui.app.taste.tab).get(index) {
+        Some(Tile::Peer(album)) => Some(KeepTarget::Tile(*album)),
+        _ => None,
+    }
+}
+
+/// `c` (clause 102): Keep a copy on the held connected server's row — else
+/// the one under the pointer, or the tile under it. True when it opened.
+fn keep_key(gui: &mut Gui) -> bool {
+    let all = rows(gui);
+    let row_target = |at: usize| match all.get(at) {
+        Some(Line::Peer { group, row }) => Some(KeepTarget::Row { group: *group, row: *row }),
+        _ => None,
+    };
+    let held = gui.discover.view.held.then_some(gui.discover.cursor).flatten();
+    let target = match held {
+        Some(at) => row_target(at),
+        None => match gui.discover.hovered {
+            Some(Hovered::Row(at)) => row_target(at),
+            Some(Hovered::Tile(at)) => tile_target(gui, at),
+            None => None,
+        },
+    };
+    let Some(target) = target.filter(|t| !gui.app.keep_choices(*t).is_empty()) else { return false };
+    super::keep::open(gui, target);
+    true
+}
+
+/// The tile's list's keys (clause 103): ↑ ↓ walk, Enter picks, `a` and `c`
+/// act from inside it, Esc or `m` again closes and keeps.
+fn tile_list_key(gui: &mut Gui, key: KeyEvent, list: TileList) {
+    let Some((_, album)) = tile_list_at(gui, &list) else {
+        // Its album left with a new answer: the list folds, the key passes.
+        gui.discover.tile_list = None;
+        return;
+    };
+    let verbs = tile_verbs(gui, album);
+    let last = verbs.len().saturating_sub(1);
+    let set = |gui: &mut Gui, cursor: usize| {
+        if let Some(l) = gui.discover.tile_list.as_mut() {
+            l.cursor = Some(cursor);
+        }
+    };
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('m') => gui.discover.tile_list = None,
+        KeyCode::Down => set(gui, list.cursor.map_or(0, |c| (c + 1).min(last))),
+        KeyCode::Up => set(gui, list.cursor.map_or(last, |c| c.saturating_sub(1))),
+        KeyCode::Enter => {
+            if let Some(verb) = list.cursor.and_then(|c| verbs.get(c).copied()) {
+                tile_verb(gui, verb);
+            }
+        }
+        KeyCode::Char('a' | '+') => tile_verb(gui, TileVerb::Queue),
+        KeyCode::Char('c') if verbs.contains(&TileVerb::Keep) => tile_verb(gui, TileVerb::Keep),
+        _ => {}
+    }
 }
 
 /// A window picked (clause 15): asked at once, and remembered in `[gui]
@@ -2228,7 +2712,15 @@ fn more(gui: &mut Gui, index: usize) {
         Some(Line::Peer { group, row }) => {
             let Some((peer, lead)) = gui.app.taste.peer_row(group, row) else { return };
             let Some(track) = lead.to_track() else { return };
-            (Origin { server: gui.app.origin().server, peer: Some(peer) }, track)
+            let origin = Origin { server: gui.app.origin().server, peer: Some(peer) };
+            // A connected server's song: the sheet gains Keep a copy… and
+            // Open elsewhere…, and names its server (clause 102).
+            super::actions::open_for(gui, origin, track, None);
+            let pin = gui.app.keep_pin(KeepTarget::Row { group, row });
+            if let Some(sheet) = gui.actions.sheet.as_mut() {
+                sheet.keep = pin;
+            }
+            return;
         }
         _ => return,
     };
@@ -2318,6 +2810,15 @@ fn choose(gui: &mut Gui) {
 /// always show whole: over its list the wheel moves nothing, and not the
 /// table under it either.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
+    // The Keep a copy modal and the tile's list hold their rows whole; the
+    // Copies modal scrolls its own, a copy a notch.
+    if gui.app.taste.keep.flow.is_some() || gui.discover.tile_list.is_some() {
+        return;
+    }
+    if gui.discover.copies.is_some() {
+        super::keep::copies_wheel(gui, delta);
+        return;
+    }
     if let Some(modal) = gui.discover.seeds.as_mut() {
         modal.view.step(delta);
         return;
@@ -2341,6 +2842,20 @@ pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
 pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if gui.screen != Screen::Library || gui.active != super::DISCOVER_NAV {
         return None;
+    }
+    // The Keep a copy and Copies modals, then the tile's list, own the keys
+    // while up (clauses 103, 106, 117).
+    if gui.app.taste.keep.flow.is_some() {
+        super::keep::handle_key(gui, key);
+        return Some(false);
+    }
+    if gui.discover.copies.is_some() {
+        super::keep::copies_key(gui, key);
+        return Some(false);
+    }
+    if let Some(list) = gui.discover.tile_list.clone() {
+        tile_list_key(gui, key, list);
+        return Some(false);
     }
     if gui.discover.seeds.is_some() {
         seeds_key(gui, key);
@@ -2413,6 +2928,16 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             let index = held?;
             more(gui, index);
         }
+        // Keep a copy on the held connected server's row, else the row or
+        // tile under the pointer (clause 102); the Copies modal while the
+        // copy gate holds (clause 116) — `C` is the queue panel's clear
+        // only while the panel has the keys, which it took first.
+        KeyCode::Char('c') => {
+            if !keep_key(gui) {
+                return None;
+            }
+        }
+        KeyCode::Char('C') if gui.app.keep_gate() => super::keep::open_copies(gui),
         KeyCode::Left | KeyCode::Right => {
             let tabs = visible_tabs(&gui.app);
             let at = tabs.iter().position(|t| *t == tab).unwrap_or(0);
@@ -2475,8 +3000,16 @@ fn strip_key(gui: &mut Gui, key: KeyEvent, tiles: usize, rows: usize) -> Option<
         // Acted by key: the hand stays on the tile.
         KeyCode::Enter => tile_act(gui, index, RowVerb::Open),
         KeyCode::Char('a' | '+') => tile_act(gui, index, RowVerb::Queue),
-        // A tile's one verb is its queue (clause 48).
-        KeyCode::Char('N' | 'P' | 'm') => {}
+        // Keep a copy in album focus, and a connected server's tile's list
+        // (clause 103).
+        KeyCode::Char('c') => {
+            if let Some(target) = tile_target(gui, index).filter(|t| !gui.app.keep_choices(*t).is_empty()) {
+                super::keep::open(gui, target);
+            }
+        }
+        KeyCode::Char('m') => open_tile_list(gui, index, true),
+        // A tile's one hover verb is its queue (clause 48).
+        KeyCode::Char('N' | 'P') => {}
         _ => return None,
     }
     Some(false)
@@ -2548,8 +3081,20 @@ fn seeds_key(gui: &mut Gui, key: KeyEvent) {
 
 // ── Tips ────────────────────────────────────────────────────────────────────
 
-/// The tips line for this room's states.
+/// The tips line for this room's states. Each names a key only where it
+/// works (clause 119): `c` only on a connected server's row or tile while
+/// the copy gate holds, `C` only while the indicator stands.
 pub(crate) fn tips(gui: &Gui) -> String {
+    if gui.app.taste.keep.flow.is_some() {
+        return super::keep::tips(gui);
+    }
+    if gui.discover.copies.is_some() {
+        return super::keep::copies_tips(gui);
+    }
+    if let Some(list) = &gui.discover.tile_list {
+        let keep = tile_list_at(gui, list).is_some_and(|(_, album)| tile_verbs(gui, album).contains(&TileVerb::Keep));
+        return if keep { t!("gui.tips.discover_tile_list_keep") } else { t!("gui.tips.discover_tile_list") }.to_string();
+    }
     if gui.discover.seeds.is_some() {
         return t!("gui.tips.discover_seeds").to_string();
     }
@@ -2560,9 +3105,16 @@ pub(crate) fn tips(gui: &Gui) -> String {
     // everywhere else — the tips say which.
     if gui.discover.strip.on {
         let tiles = strip_tiles(gui);
-        match tiles.get(gui.discover.strip.cursor.min(tiles.len().saturating_sub(1))) {
+        let at = gui.discover.strip.cursor.min(tiles.len().saturating_sub(1));
+        match tiles.get(at) {
             Some(Tile::Library(_)) => return t!("gui.tips.discover_tile").to_string(),
-            Some(Tile::Peer(_)) => return t!("gui.tips.discover_peer_tile").to_string(),
+            // A connected server's tile has its list (`m`), and Keep a copy
+            // (`c`) while the copy gate holds (clause 103).
+            Some(Tile::Peer(album)) => {
+                let keep = !gui.app.keep_choices(KeepTarget::Tile(*album)).is_empty();
+                return if keep { t!("gui.tips.discover_peer_tile_keep") } else { t!("gui.tips.discover_peer_tile_more") }
+                    .to_string();
+            }
             None => {}
         }
     }
@@ -2570,12 +3122,16 @@ pub(crate) fn tips(gui: &Gui) -> String {
     match held.and_then(|i| rows(gui).get(i).copied()) {
         // Only what works on THIS row (the kit's tips law): an album opens
         // or queues whole (clause 61); a connected server's row has every
-        // song verb (clause 62).
+        // song verb (clause 62), and Keep a copy while the gate holds.
         Some(Line::Album(_)) => t!("gui.tips.discover_album").to_string(),
+        Some(Line::Peer { group, row }) if !gui.app.keep_choices(KeepTarget::Row { group, row }).is_empty() => {
+            t!("gui.tips.discover_row_keep").to_string()
+        }
         Some(Line::Song(_) | Line::Peer { .. }) => t!("gui.tips.discover_row").to_string(),
         // At rest: the fallback card's own tip, or over a strip ↓ lands on
         // its albums, not a row; `s` is named wherever the tab's songs can
-        // be saved, the fallback card's included (clause 64).
+        // be saved, the fallback card's included (clause 64); `C` while the
+        // indicator stands and the line has the cells.
         None => {
             let rest = if gui.app.taste.no_history {
                 t!("gui.tips.discover_fallback")
@@ -2584,14 +3140,23 @@ pub(crate) fn tips(gui: &Gui) -> String {
             } else {
                 t!("gui.tips.discover_strip")
             };
+            let mut line = rest.to_string();
             if saveable(&gui.app, gui.app.taste.tab) {
-                format!("{rest} · {}", t!("gui.tips.discover_save"))
-            } else {
-                rest.to_string()
+                line = format!("{line} · {}", t!("gui.tips.discover_save"));
             }
+            if gui.app.keep_indicator().is_some() {
+                let with = format!("{line} · {}", t!("gui.tips.discover_copies"));
+                if width(&with) <= TIPS_MAX {
+                    line = with;
+                }
+            }
+            line
         }
     }
 }
+
+/// The footer's cells at the 100-column floor (it is drawn from x 1).
+const TIPS_MAX: usize = 99;
 
 /// The banner over the library while the room's pick is armed (clause 14).
 pub(crate) fn banner(gui: &Gui) -> Option<String> {
@@ -2972,7 +3537,13 @@ mod tests {
             vec![(TastePart::Main, vec!["library".to_string()], Some(30))],
             "the library first, never the p2p network, even advertised (clause 30)"
         );
-        assert!(gui.pending.iter().all(|e| matches!(e, Effect::Api(ApiCmd::Taste { .. }))), "no prefs: {:?}", gui.pending);
+        // The taste asks, and the plug-in gate a visit asks (clause 101) —
+        // no prefs.
+        assert!(
+            gui.pending.iter().all(|e| matches!(e, Effect::Api(ApiCmd::Taste { .. } | ApiCmd::KeepGate { .. }))),
+            "no prefs: {:?}",
+            gui.pending
+        );
         land_main(&mut gui, main_answer());
         assert_eq!(
             asks(&gui),
@@ -3200,12 +3771,15 @@ mod tests {
         assert_eq!((sheet.origin.server.as_str(), sheet.origin.peer), (HOST, Some(7)), "the peer's origin");
         assert_eq!(sheet.track.filepath, "Music/p2.mp3");
         assert_eq!(sheet.queue_row, None);
-        // `m` with the cursor up, too — not on the strip, whose tile has
-        // one verb.
+        // `m` with the cursor up, too — on the strip a connected server's
+        // tile hangs its own list instead (clause 103), and Esc folds it.
         gui.actions.sheet = None;
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Char('m'));
         assert!(gui.actions.sheet.is_none(), "a tile has no sheet");
+        assert!(gui.discover.tile_list.is_some(), "its list instead");
+        key(&mut gui, KeyCode::Esc);
+        assert!(gui.discover.tile_list.is_none());
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Char('m'));
         assert_eq!(gui.actions.sheet.as_ref().map(|s| s.track.filepath.as_str()), Some("Music/p1.mp3"));
@@ -3249,6 +3823,7 @@ mod tests {
             tracks,
             name: "Night Album".into(),
             artist: None,
+            album_artist: None,
             peer: None,
             play: false,
         };
@@ -3961,7 +4536,7 @@ mod tests {
             .pending
             .iter()
             .find_map(|e| match e {
-                Effect::Api(ApiCmd::TasteAlbum { name, artist, generation, peer, reach, play }) => {
+                Effect::Api(ApiCmd::TasteAlbum { name, artist, generation, peer, reach, play, album_artist: None }) => {
                     Some((name.clone(), artist.clone(), *generation, *peer, reach.as_ref().and_then(|r| r.peer), *play))
                 }
                 _ => None,
@@ -3981,6 +4556,7 @@ mod tests {
             tracks,
             name: "Theirs".into(),
             artist: Some("Pia".into()),
+            album_artist: None,
             peer: Some(7),
             play,
         };

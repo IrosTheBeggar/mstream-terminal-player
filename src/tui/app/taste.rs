@@ -64,7 +64,9 @@ pub fn taste_window(days: u32) -> Option<u32> {
 pub const TASTE_STRIP_MAX: usize = 12;
 
 /// One album on the Connected servers tab's strip: the playable rows of one
-/// server that share an album and an artist (the webapp's `peerAlbums`).
+/// server that share an album and an artist (the webapp's `peerAlbums`) —
+/// the album's own credit where the rows carry one (`albumArtist`), so a
+/// compilation is ONE tile whoever sings each song (the 2026-10-19 log).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TastePeerAlbum {
     /// The server's id on the session's server — the federation proxy's.
@@ -72,7 +74,15 @@ pub struct TastePeerAlbum {
     /// Its name, for the tile's tooltip.
     pub server: String,
     pub album: String,
+    /// The tile's artist row: the album artist when the rows carry one,
+    /// else their track artist.
     pub artist: Option<String>,
+    /// The rows' album artist, when they carry one: a compilation's
+    /// "Various Artists". Its songs are asked by it, not by a track artist.
+    pub album_artist: Option<String>,
+    /// The best row's TRACK artist — what `album-songs` narrows an album
+    /// with no album artist by, and whom "Every album by" copies.
+    pub track_artist: Option<String>,
     /// The first cover one of its rows names (the row's `albumArt`), fetched
     /// through the federation art proxy; `None` draws the note tile.
     pub art: Option<String>,
@@ -271,6 +281,9 @@ pub struct TasteState {
     /// The last capture pick the room refused, for the GUI to word once
     /// and take (clause 14).
     pub refused: Option<TastePinRefusal>,
+    /// The room's plug-ins — Keep a copy, the Copies list, Open elsewhere
+    /// (clauses 100–149) — reset with the answer.
+    pub keep: super::keep::KeepState,
 }
 
 impl TasteState {
@@ -382,12 +395,14 @@ impl TasteState {
 
     /// The Connected servers tab's album strip, the webapp's `peerAlbums`:
     /// the rows that play now ([`TasteState::peer_lines`]), best match
-    /// first across the servers, grouped by server + album + artist (case
-    /// and surrounding blanks folded) — a row with no album tag joins no
-    /// album. An album ranks by its best row, carries the first art one of
-    /// its rows names, and is capped at [`TASTE_STRIP_MAX`].
+    /// first across the servers, grouped by server + album + the album's
+    /// credit — its album artist where the row carries one, else its track
+    /// artist (case and surrounding blanks folded; the 2026-10-19 log: a
+    /// compilation is one tile) — a row with no album tag joins no album.
+    /// An album ranks by its best row, takes that row's spellings, carries
+    /// the first art one of its rows names, and is capped at
+    /// [`TASTE_STRIP_MAX`].
     pub fn peer_albums(&self) -> Vec<TastePeerAlbum> {
-        let fold = |s: Option<&str>| s.unwrap_or("").trim().to_lowercase();
         let mut rows: Vec<(usize, usize, i64, &TasteLead)> = self
             .peer_lines()
             .into_iter()
@@ -398,9 +413,11 @@ impl TasteState {
         let mut out: Vec<TastePeerAlbum> = Vec::new();
         for (group, row, peer, lead) in rows {
             let Some(album) = lead.album.as_deref().map(str::trim).filter(|a| !a.is_empty()) else { continue };
-            let artist = lead.artist.as_deref().map(str::trim).filter(|a| !a.is_empty());
-            let key = (peer, fold(Some(album)), fold(artist));
-            let found = out.iter().position(|a| (a.peer, fold(Some(&a.album)), fold(a.artist.as_deref())) == key);
+            let track_artist = lead.artist.as_deref().map(str::trim).filter(|a| !a.is_empty());
+            let album_artist = lead.album_artist.as_deref().map(str::trim).filter(|a| !a.is_empty());
+            let artist = album_artist.or(track_artist);
+            let key = peer_album_key(peer, album, artist);
+            let found = out.iter().position(|a| peer_album_key(a.peer, &a.album, a.artist.as_deref()) == key);
             let at = match found {
                 Some(at) => at,
                 None => {
@@ -409,6 +426,8 @@ impl TasteState {
                         server: self.peer_name(group).unwrap_or_default().to_string(),
                         album: album.to_string(),
                         artist: artist.map(str::to_string),
+                        album_artist: album_artist.map(str::to_string),
+                        track_artist: track_artist.map(str::to_string),
                         art: None,
                         rows: Vec::new(),
                     });
@@ -460,7 +479,12 @@ impl App {
         if matches!(self.taste.latch, TasteLatch::Off | TasteLatch::Probing) {
             return Vec::new();
         }
-        self.taste_ask()
+        let mut effects = self.taste_ask();
+        // The plug-in gate is asked again with every visit (clause 101).
+        if self.connected && self.capabilities.taste() {
+            effects.extend(self.keep_ask_gate());
+        }
+        effects
     }
 
     /// Ask again now, the visit kept: `G` or the nav row while the room is
@@ -820,6 +844,7 @@ impl App {
         vec![Effect::Api(ApiCmd::TasteAlbum {
             name,
             artist: None,
+            album_artist: None,
             generation: self.session_gen,
             peer: None,
             reach: None,
@@ -833,15 +858,19 @@ impl App {
     /// the album has no drill of its own to open into here. Its songs are
     /// asked of THAT server through the parent's federation proxy, by name
     /// and artist (a peer's row names its track artist, `album-songs`' own
-    /// key); a server that will not list it leaves the rows that matched,
-    /// the webapp's `discoveryQueuePeerAlbum`.
+    /// key) — or, for an album whose rows carry its album artist (a
+    /// compilation), by name and that album artist alone, so every song of
+    /// it comes back whoever sings it; a server that will not list it
+    /// leaves the rows that matched, the webapp's `discoveryQueuePeerAlbum`.
     pub(crate) fn taste_peer_album(&mut self, index: usize, play: bool) -> Vec<Effect> {
         let Some(album) = self.taste.peer_albums().into_iter().nth(index) else { return Vec::new() };
         let origin = Origin { server: self.origin().server, peer: Some(album.peer) };
+        let artist = if album.album_artist.is_some() { None } else { album.track_artist.clone() };
         match self.reach(&origin) {
             Ok(reach) => vec![Effect::Api(ApiCmd::TasteAlbum {
                 name: album.album,
-                artist: album.artist,
+                artist,
+                album_artist: album.album_artist,
                 generation: self.session_gen,
                 peer: Some(album.peer),
                 reach: Some(reach),
@@ -931,7 +960,7 @@ impl App {
 
     /// The state belongs to the session it was filled under; a moved
     /// generation means a server switch the reset did not see.
-    fn taste_sync(&mut self) {
+    pub(super) fn taste_sync(&mut self) {
         if self.taste.generation != self.session_gen {
             self.reset_taste();
         }
@@ -946,7 +975,7 @@ impl App {
                 self.taste_sync();
                 self.taste_answered(seq, part, answer)
             }
-            Event::TasteAlbum { generation, tracks, name, artist, peer, play } => {
+            Event::TasteAlbum { generation, tracks, name, artist, album_artist, peer, play } => {
                 if generation != self.session_gen {
                     return Vec::new();
                 }
@@ -961,13 +990,14 @@ impl App {
                         tracks.into_iter().map(|track| Queued { dj: None, origin: origin.clone(), track }).collect()
                     }
                     (Some(id), _) => {
-                        let fold = |s: Option<&str>| s.unwrap_or("").trim().to_lowercase();
-                        let key = (id, fold(Some(&name)), fold(artist.as_deref()));
+                        // The tile's own key: its album artist where it
+                        // was asked by one, else the track artist.
+                        let key = peer_album_key(id, &name, album_artist.as_deref().or(artist.as_deref()));
                         let rows = self
                             .taste
                             .peer_albums()
                             .into_iter()
-                            .find(|a| (a.peer, fold(Some(&a.album)), fold(a.artist.as_deref())) == key)
+                            .find(|a| peer_album_key(a.peer, &a.album, a.artist.as_deref()) == key)
                             .map(|a| a.rows)
                             .unwrap_or_default();
                         self.taste_peer_queued(&rows)
@@ -1067,6 +1097,10 @@ impl App {
             t.peers.not_asked_random = lists.is_none() && random;
             t.peers.data = lists;
         }
+        // New connected-server rows: their copies' marks are looked up
+        // (clause 111).
+        let lookups = if peers { self.keep_peers_landed() } else { Vec::new() };
+        let t = &mut self.taste;
         if main {
             // The fallback card's memory (clause 20): learned from a
             // pinless answer, kept until one carries history seeds.
@@ -1091,11 +1125,12 @@ impl App {
             t.head = Some(*response);
         }
         if peers_wait && let Some(head) = self.taste.head.take() {
-            let effects = self.taste_ask_peers(&head, random);
+            let mut effects = self.taste_ask_peers(&head, random);
             self.taste.head = Some(head);
+            effects.extend(lookups);
             return effects;
         }
-        Vec::new()
+        lookups
     }
 
     /// The probe's verdict for the room (clause 82): the gate still on is
@@ -1116,6 +1151,11 @@ impl App {
         if self.taste.latch == TasteLatch::Off {
             self.taste.latch = TasteLatch::Clear;
         }
+        // The plug-ins' asks out before a session went bad (a 401 clears no
+        // wait) would hold the gate's next ask back: none of them is
+        // waited on now, and a reply that lands after all is judged by its
+        // seq (clauses 101, 111–112).
+        self.clear_keep_waits();
     }
 
     /// An error cleared every wait (`clear_pending`): a probe or a part
@@ -1140,6 +1180,14 @@ impl App {
         }
         t.main_pending = false;
     }
+}
+
+/// A connected server's album on the strip, as its rows are grouped and
+/// its tile found again: the server, the album and its credit, case and
+/// surrounding blanks folded.
+pub(crate) fn peer_album_key(peer: i64, album: &str, credit: Option<&str>) -> (i64, String, String) {
+    let fold = |s: Option<&str>| s.unwrap_or("").trim().to_lowercase();
+    (peer, fold(Some(album)), fold(credit))
 }
 
 /// The last `cap` of `list`, which is oldest first.

@@ -27,6 +27,7 @@ mod cover;
 mod device;
 mod discover;
 mod dj;
+mod keep;
 mod library;
 mod log_file;
 mod mini;
@@ -960,11 +961,11 @@ impl Gui {
                 if i == FILES_NAV {
                     self.app.tab = Tab::Files;
                 }
-                // Leaving the Discover room lets its hanging list and its
-                // modal go: they would hold the keys of a room off screen.
+                // Leaving the Discover room lets its hanging lists and its
+                // modals go: they would hold the keys of a room off screen.
+                // A copy keeps running on the server.
                 if i != DISCOVER_NAV {
-                    self.discover.menu = None;
-                    self.discover.seeds = None;
+                    discover::close_all(self);
                 }
                 // Leaving for a section stows every servers surface; the
                 // room is a Settings sub-view, not a place to come back to.
@@ -1223,13 +1224,23 @@ impl Gui {
         }
     }
 
-    /// The note to show: the shell's own first, else the App's words.
-    fn note_words(&self) -> Option<(String, bool)> {
-        self.note.clone().or_else(|| {
-            self.app
-                .message
-                .as_ref()
-                .map(|m| (m.text.clone(), matches!(m.kind, MessageKind::Error)))
+    /// The note to show and its colour: the shell's own first (DIM, or
+    /// Yellow for an error), else the App's words in their kind's — busy
+    /// LightBlue and a landing Green among them (the kit's Status line;
+    /// discovery-page clause 118).
+    fn note_words(&self) -> Option<(String, Style)> {
+        if let Some((text, is_err)) = self.note.clone() {
+            return Some((text, if is_err { Style::default().fg(th().gold) } else { dim() }));
+        }
+        self.app.message.as_ref().map(|m| {
+            let style = match m.kind {
+                MessageKind::Error => Style::default().fg(th().gold),
+                MessageKind::Info => dim(),
+                MessageKind::Busy => accent(),
+                MessageKind::Success => Style::default().fg(th().ok),
+                MessageKind::Plain => Style::default(),
+            };
+            (m.text.clone(), style)
         })
     }
 
@@ -1513,6 +1524,10 @@ fn clip_lead(text: &str, max: usize) -> String {
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
+    // The Discover room's copies: the poll's beat from what shows, and the
+    // copies that ended since, worded on the status line (discovery-page
+    // clauses 112, 118).
+    keep::frame_tick(gui);
     // Where the Admin screen's room and log stood is this frame's to say:
     // a frame drawn as the mini player leaves no target behind.
     gui.admin.room_at = Rect::default();
@@ -1623,10 +1638,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // words); the keyboard tips, when shown, take the very last row. The
     // Now Playing screen has no bar and draws its note on its own row.
     if matches!(gui.screen, Screen::Library | Screen::Admin)
-        && let Some((text, is_err)) = gui.note_words()
+        && let Some((text, style)) = gui.note_words()
     {
         let note = bar::note_rect(area, gui.footer());
-        let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, note.x, note.y, &bar::clip(&text, note.width as usize), style);
     }
     // On the MP3 Player tab the page's hint outranks the queue's and an
@@ -3335,6 +3349,15 @@ impl Gui {
             self.albums.wall = albums::WallState::default();
             let effects = self.app.open_library_node(crate::tui::worker::LibraryNode::Albums, true);
             self.pend(effects);
+            // The Discover room's "Open on {server}": the album, once that
+            // server's session answers (discovery-page clause 103).
+            if let Some(node) = self.discover.open_on.take().filter(|_| self.app.session.peer.is_some()) {
+                self.albums.wall.held = false;
+                self.albums.wall.tracks.scroll = 0;
+                self.albums.wall.tracks.stow();
+                let effects = self.app.open_library_node(node, false);
+                self.pend(effects);
+            }
         } else if self.active == PLAYLISTS_NAV {
             let effects = self.app.open_library_node(crate::tui::worker::LibraryNode::Playlists, true);
             self.pend(effects);
@@ -3394,6 +3417,11 @@ impl Gui {
         // The header dropdown is on top of everything while it is open.
         if self.servers.drop_open {
             servers::wheel_dropdown(self, delta);
+            return;
+        }
+        // Open elsewhere's list over the track-actions sheet scrolls its
+        // own links under the pointer (discovery-page clause 140).
+        if self.actions.sheet.as_ref().is_some_and(|s| s.links) && keep::links_wheel(self, delta) {
             return;
         }
         // The Admin screen's log scrolls under the wheel; a wheel over the

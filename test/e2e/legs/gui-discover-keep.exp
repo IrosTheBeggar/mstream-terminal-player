@@ -1,0 +1,108 @@
+#!/usr/bin/expect -f
+# The GUI player's Keep a copy against the fake server's plug-ins
+# (test/e2e/fake_mstream.py, FAKE_TASTE=1 FAKE_PLUGINS=1; docs/ux-contracts/
+# discovery-page.md, clauses 100–141). The ping advertises
+# `discoveryPlugins` and `noUpload: false`, the listing names
+# `federation-copy` with jobs allowed and the destination a throwaway
+# `copies` library — the five-part gate holds. At 100 × 30 with the queue
+# panel folded (Tab: the 80-cell room the canvas draws), `G` opens the
+# room, → its Connected servers tab and ↓ lights the strip's one album,
+# "Lanterns" from Attic (no tips line: key hints are off by default). `c` opens
+# Keep a copy in album focus (Album preselected), ↓ ↓ ↓ walks Album,
+# Every album by and Cancel to the primary, Enter starts the album copy:
+# the modal follows the job ("waiting for a free slot" — the fake keeps a
+# copy queued for a second, running for six). Esc closes it at once — the
+# copy keeps running, the tile's artist row wears its mark and the verbs
+# line the indicator while it is live; the room's 4 s poll sees it run and
+# end ("✓ kept").
+# `C` opens the Copies modal (its header's TITLE), Esc closes, q quits.
+# run.sh replays the captured stream through time for the states that
+# repaint in place (the README's first law) and asks the fake what was
+# sent: the row unchanged with scope "album". Gates on first-paint words
+# only; each gate's braces span lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "Discover" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-DISCOVER-ROW" 2 }
+}
+drain 1
+# The queue panel folds: the room takes its 80 cells.
+send "\t"
+drain 1
+send "G"
+expect {
+    "more options" {}
+    eof { puts "DIED-ON-G"; exit 7 }
+    timeout { fail "NO-ROOM" 3 }
+}
+expect {
+    "based on songs you finished" {}
+    eof { puts "DIED-ON-ANSWER"; exit 8 }
+    timeout { fail "NO-ANSWER" 4 }
+}
+drain 1
+send "\x1b\[C"
+expect {
+    "Lanterns" {}
+    eof { puts "DIED-ON-SERVERS"; exit 9 }
+    timeout { fail "NO-PEER-ALBUM" 5 }
+}
+# The gate's two reads and the rows' lookup land.
+drain 2
+send "\x1b\[B"
+drain 1
+send "c"
+expect {
+    "Keep a copy" {}
+    eof { puts "DIED-ON-C"; exit 12 }
+    timeout { fail "NO-KEEP-MODAL" 13 }
+}
+expect {
+    "Add album" {}
+    eof { puts "DIED-ON-PRIMARY"; exit 14 }
+    timeout { fail "NO-ADD-ALBUM" 15 }
+}
+drain 1
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\r"
+expect {
+    -re "(waiting|song 1|collection)" {}
+    eof { puts "DIED-ON-START"; exit 16 }
+    timeout { fail "NO-COPY-FOLLOWED" 17 }
+}
+# Closed at once on the live copy: it keeps running, the room's 4 s poll
+# walks it to done while the tile and the indicator say so.
+send "\x1b"
+drain 12
+send "C"
+expect {
+    "TITLE" {}
+    eof { puts "DIED-ON-COPIES"; exit 18 }
+    timeout { fail "NO-COPIES-MODAL" 19 }
+}
+drain 1
+send "\x1b"
+drain 1
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 20 }
+}
+catch wait result
+exit [lindex $result 3]

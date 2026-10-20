@@ -213,6 +213,41 @@ assert all(urllib.parse.parse_qs(urllib.parse.urlsplit(p).query).get('compress')
 "
 stop_fake
 
+# ── Scenario K: Keep a copy, end to end, against the fake's plug-ins ─────
+# The five-part gate open (the ping's `discoveryPlugins` and `noUpload:
+# false`, `federation-copy` listed with jobs allowed, a throwaway `copies`
+# destination): `c` on the Connected servers tab's lit tile opens Keep a
+# copy, Add album starts the copy with the row unchanged, the tile and the
+# verbs line say so while the room's poll walks it to done, `C` lists it in
+# the Copies modal (docs/ux-contracts/discovery-page.md, clauses 100-141).
+# check_keep.py replays the stream frame by frame for those states.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake K)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-keep gui-discover-keep.exp "$WORK/h13" "$WORK/gui-discover-keep.out"
+if python3 "$E2E/check_keep.py" "$WORK/gui-discover-keep.out" "$E2E/replay.py" 30 100; then
+  echo "PASS keep a copy: modal, live marks, kept, Copies"
+else
+  echo "FAIL keep a copy: modal, live marks, kept, Copies"; FAILS=$((FAILS+1))
+fi
+assert "the album copy sent the row unchanged, scope album, to the user's own server" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert len(s['job_starts']) == 1, s['job_starts']
+start = s['job_starts'][0]
+assert start['scope'] == 'album', start
+assert start['recommendation'] == {'artist': 'Attic Band', 'title': 'Ember', 'album': 'Lanterns', 'duration': 199,
+    'similarity': 0.81, 'filepath': 'Music/ember.mp3', 'albumArt': 'attic-lanterns.png',
+    'peer': {'id': 7, 'name': 'Attic'}, 'source': 'federation'}, start
+assert [j['state'] for j in s['jobs']] == ['done'], s['jobs']
+"
+assert "the rows were looked up in chunks of at most 100, again once the copy ended" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert len(s['lookup_sizes']) >= 2 and all(0 < n <= 100 for n in s['lookup_sizes']), s['lookup_sizes']
+assert s['cancels'] == 0 and s['clears'] == 0, s
+"
+stop_fake
+
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
 # No fake mStream at all: the page talks to a board, and the board is the
 # fake behind MSTREAM_DEVICE_FAKE. The image is a merged one in miniature —

@@ -30,12 +30,29 @@ server, and no audio files:
     (mStream 2026-10-16), served through the federation art proxy
     GET /api/v1/federation/peers/7/art/<file> — /_state counts those
     gets (`peer_art_gets`) and keeps their paths.
+  - FAKE_PLUGINS=1 (with FAKE_TASTE): the room's plug-ins — Keep a copy,
+    the Copies list, Open elsewhere (discovery-page clauses 100–141). The
+    ping adds `discoveryPlugins`; GET /discovery/plugins lists `links` and
+    `federation-copy` (every scope) with jobs allowed; the destination is a
+    throwaway `copies` library; POST …/federation-copy/jobs queues a job
+    (409 for a recommendation titled "Taken", 429 for "Full") that walks
+    queued → running → done (a song copied, or an album's counts);
+    …/cancel cancels a live one and answers 409 for a
+    finished one; …/clear drops the finished; …/lookup/batch answers each
+    recommendation's keys (text:/album:/artist: over its names) and the
+    jobs under them; …/links/resolve two https links and one that is not.
+    A job walks on the wall clock — queued for a second, running for six,
+    then done — and every list, lookup, start and cancel sees it where its
+    age puts it.
+    /_state keeps the starts' bodies (`job_starts`), the lookups' sizes
+    (`lookup_sizes`), the cancels, clears and resolves.
 
 Usage: fake_mstream.py PORT
 """
 import json
 import os
 import struct
+import time
 import sys
 import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -48,6 +65,7 @@ LOOP = os.environ.get("FAKE_LOOP", "") not in ("", "0")
 # wizard legs run on the zero-account window this would close.
 AUTH = os.environ.get("FAKE_AUTH", "") not in ("", "0")
 TASTE = os.environ.get("FAKE_TASTE", "") not in ("", "0")
+PLUGINS = TASTE and os.environ.get("FAKE_PLUGINS", "") not in ("", "0")
 
 # The room's answer, as the server words it (plan §3.1). The sources it was
 # not asked for come back null, as the real route's do.
@@ -119,7 +137,76 @@ STATUS_STEPS = [
 
 calls = {"n": 0, "s": 0}
 state = {"directories": {}, "users": [], "taste_asks": 0, "taste_body": None, "prefs_calls": 0, "art_gets": 0,
-         "peer_asks": 0, "peer_art_gets": 0, "peer_art_paths": []}
+         "peer_asks": 0, "peer_art_gets": 0, "peer_art_paths": [],
+         "jobs": [], "job_starts": [], "lookup_sizes": [], "cancels": 0, "clears": 0, "resolves": 0}
+
+# The plug-in listing, the destination and the links (FAKE_PLUGINS).
+PLUGIN_LISTING = {
+    "plugins": [
+        {"name": "links", "title": "Open elsewhere", "capabilities": ["links"], "scope": "server",
+         "scopes": ["song"], "settings": [], "enabled": True, "available": True},
+        {"name": "federation-copy", "title": "Add to your collection", "capabilities": ["acquire"], "scope": "server",
+         "scopes": ["song", "album", "artist", "artist-missing", "folder"], "settings": [], "enabled": True, "available": True},
+    ],
+    "jobs": {"allowed": True},
+}
+DESTINATION = {
+    "destination": {"vpath": "copies", "base": "", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "default"},
+    "saved": None, "libraries": [{"vpath": "copies", "template": None}],
+    "defaultLayout": "{{ARTIST}}/{{ALBUM}}", "variables": ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"],
+}
+LINKS = {"links": [
+    {"id": "mb-search", "label": "MusicBrainz", "url": "https://musicbrainz.org/search?query=x", "kind": "search"},
+    {"id": "deezer", "label": "Deezer", "url": "https://www.deezer.com/search/x", "kind": "search"},
+    {"id": "odd", "label": "Odd", "url": "javascript:alert(1)", "kind": "search"},
+]}
+
+
+def _keys(rec):
+    """A recommendation's keys over its names — the server computes its own;
+    the client only ever matches them."""
+    low = lambda k: str(rec.get(k) or "").strip().lower()
+    credit = str(rec.get("albumArtist") or "").strip().lower() or low("artist")
+    keys = {"song": "text:" + low("title")}
+    if rec.get("album"):
+        keys["album"] = "album:" + credit + "|" + low("album")
+    if rec.get("artist"):
+        keys["artist"] = "artist:" + low("artist")
+        keys["artist-missing"] = "artist-missing:" + low("artist")
+    return keys
+
+
+# A copy's life on the wall clock: waiting for a free slot this long, then
+# running this long, then done — long enough for the room's 4 s poll to
+# see it live, short enough for a leg.
+JOB_QUEUED_S = 1.0
+JOB_RUNNING_S = 6.0
+
+
+def _walk_jobs():
+    """Every live job where its age puts it: queued → running → done — asked
+    by the list and the lookups alike, so both say the same."""
+    now = time.time()
+    for job in state["jobs"]:
+        age = now - job["_born"]
+        if job["state"] == "queued" and age >= JOB_QUEUED_S:
+            job.update(state="running", progress=0.5, statusText="song 1 of 2")
+        if job["state"] == "running" and age >= JOB_QUEUED_S + JOB_RUNNING_S:
+            scope = (job.get("params") or {}).get("scope")
+            rec = job["recommendation"]
+            if scope:
+                result = {"scope": scope, "counts": {"total": 2, "copied": 2, "skipped": 0, "failed": 0},
+                          "songs": {"total": 2, "copied": [{}, {}], "skipped": [], "failed": []}, "stopped": None,
+                          "peer": rec.get("peer")}
+            else:
+                result = {"copied": {"vpath": "copies", "filepath": "copies/%s/%s/%s.mp3" % (
+                    rec.get("artist"), rec.get("album"), rec.get("title")), "title": rec.get("title")}}
+            job.update(state="done", progress=1, statusText=None, result=result)
+
+def _public(job):
+    """A job as the server words it: without the fake's own clock."""
+    return {k: v for k, v in job.items() if not k.startswith("_")}
+
 
 # Keys the stateless taste route refuses (mStream 8dcfad0e): a 400.
 TASTE_GONE = ("remember", "filter", "staleDays")
@@ -201,7 +288,17 @@ class Handler(BaseHTTPRequestHandler):
             ping = {"vpaths": sorted(state["directories"]), "noFileModify": False, "noUpload": False}
             if TASTE:
                 ping.update({"discovery": True, "discoveryTaste": 1, "federationDiscovery": True})
+            if PLUGINS:
+                ping["discoveryPlugins"] = True
             return self._json(ping)
+        if PLUGINS and self.path == "/api/v1/discovery/plugins":
+            return self._json(PLUGIN_LISTING)
+        if PLUGINS and self.path == "/api/v1/discovery/collection/destination":
+            return self._json(DESTINATION)
+        if PLUGINS and self.path.split("?")[0] == "/api/v1/discovery/plugin-jobs":
+            _walk_jobs()
+            return self._json({"jobs": [_public(j) for j in sorted(state["jobs"], key=lambda j: -j["id"])],
+                               "runner": {"running": sum(j["state"] == "running" for j in state["jobs"]), "active": True}})
         if TASTE and self.path == "/api/v1/discovery/taste/prefs":
             state["prefs_calls"] += 1
             return self._status(404, {"error": "Not Found"})
@@ -248,6 +345,54 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(
                 {"token": "fake-token", "vpaths": sorted(state["directories"])}
             )
+        if PLUGINS and self.path == "/api/v1/discovery/plugins/federation-copy/jobs":
+            rec = body.get("recommendation") or {}
+            state["job_starts"].append(body)
+            if rec.get("title") == "Taken":
+                return self._status(409, {"error": "someone else on this server is already getting this — try again in a moment"})
+            if rec.get("title") == "Full":
+                return self._status(429, {"error": "you have 20 jobs queued or running — wait for some to finish (the limit is 20)"})
+            scope = body.get("scope")
+            key = _keys(rec)[scope or "song"] if (scope or "song") in _keys(rec) else None
+            _walk_jobs()
+            live = [j for j in state["jobs"] if j["key"] == key and j["state"] in ("queued", "running")]
+            if live:
+                return self._json({"created": False, "job": _public(live[0])})
+            job = {"id": len(state["jobs"]) + 1, "plugin": "federation-copy", "key": key, "recommendation": rec,
+                   "params": {"scope": scope} if scope else None, "state": "queued", "progress": None,
+                   "statusText": None, "result": None, "error": None, "attempts": 0, "cancelRequested": False,
+                   "createdAt": 1760000000000 + len(state["jobs"]), "_born": time.time()}
+            state["jobs"].append(job)
+            return self._status(202, {"created": True, "job": _public(job)})
+        if PLUGINS and self.path == "/api/v1/discovery/plugin-jobs/lookup/batch":
+            recs = body.get("recommendations") or []
+            state["lookup_sizes"].append(len(recs))
+            _walk_jobs()
+            results = []
+            for rec in recs:
+                keys = _keys(rec)
+                results.append({"key": keys["song"], "keys": keys,
+                                "jobs": [_public(j) for j in sorted(state["jobs"], key=lambda j: -j["id"]) if j["key"] in keys.values()]})
+            return self._json({"results": results})
+        if PLUGINS and self.path.startswith("/api/v1/discovery/plugin-jobs/") and self.path.endswith("/cancel"):
+            state["cancels"] += 1
+            jid = int(self.path.split("/")[-2])
+            job = next((j for j in state["jobs"] if j["id"] == jid), None)
+            if job is None:
+                return self._status(404, {"error": "No such job"})
+            _walk_jobs()
+            if job["state"] not in ("queued", "running"):
+                return self._status(409, {"error": "job %d has already finished" % jid})
+            job.update(state="cancelled")
+            return self._json({"outcome": "cancelled", "job": _public(job)})
+        if PLUGINS and self.path == "/api/v1/discovery/plugin-jobs/clear":
+            state["clears"] += 1
+            before = len(state["jobs"])
+            state["jobs"] = [j for j in state["jobs"] if j["state"] in ("queued", "running")]
+            return self._json({"removed": before - len(state["jobs"])})
+        if PLUGINS and self.path == "/api/v1/discovery/plugins/links/resolve":
+            state["resolves"] += 1
+            return self._json({"plugin": "links", "result": LINKS})
         if TASTE and self.path == "/api/v1/discovery/taste":
             state["taste_asks"] += 1
             state["taste_body"] = body

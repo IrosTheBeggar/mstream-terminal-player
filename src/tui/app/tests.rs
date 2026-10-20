@@ -72,6 +72,7 @@ fn connected_app() -> App {
         stats: true,
         discovery_taste: 0,
         discovery_plugins: false,
+        uploads: true,
     };
     // What a real ping does on the way in: the Auto-DJ rows depend on it.
     app.dj_panel.rebuild(&app.dj, None, false);
@@ -7538,6 +7539,7 @@ fn a_connected_servers_album_is_asked_of_its_server_with_its_origin() {
         tracks: None,
         name: "Theirs".into(),
         artist: Some("Them".into()),
+        album_artist: None,
         peer: Some(3),
         play: false,
     });
@@ -8157,4 +8159,758 @@ fn the_window_shown_is_the_one_asked_while_it_is_out() {
     let (_, _, main) = taste_ask(&app.set_taste_window(30), TastePart::Main);
     assert_eq!(main.window, Some(30));
     assert_eq!(app.taste.window, Some(30));
+}
+
+// ── The Discover room's plug-ins (discovery-page clauses 100–149) ─────────
+
+mod keep {
+    use super::*;
+    use crate::api::PluginFailure;
+    use crate::api::types::{
+        CancelAnswer, CollectionDestinationView, DiscoveryPluginsResponse, JobCancelled, JobLookup, JobMark,
+        JobScope, JobStarted, PluginJob, PluginJobList, PluginLink,
+    };
+    use crate::tui::app::keep::{
+        ChoiceSize, CopyTitle, Fact, JobsIndicator, KEEP_POLL_MAX, KeepChoice, KeepNote, KeepPhase, KeepStage,
+        KeepTarget, KeepVerb, KeepWatch, LinksStatus,
+    };
+    use crate::tui::worker::{KeepFacts, KeepFactsAsk};
+
+    const B: i64 = 1;
+    const C: i64 = 4;
+
+    /// A connected server's row as the taste route sends it — with the keys
+    /// the plug-in schema strips (`albumArt`, `similarity`, `seedHash`,
+    /// `genreTags`), so "sent unchanged" means exactly that.
+    fn fed_row(peer: i64, title: &str, artist: &str, album: &str, similarity: f64) -> serde_json::Value {
+        let name = if peer == B { "Stage Peer B" } else { "Stage Peer C" };
+        serde_json::json!({
+            "artist": artist, "title": title, "album": album, "year": 2019, "duration": 8.4,
+            "similarity": similarity, "seedHash": null, "genreTags": ["Hip-Hop"], "albumArt": "c0ffee.jpg",
+            "filepath": format!("peerlib/{artist}/{album}/{title}.mp3"),
+            "peer": { "id": peer, "name": name }, "source": "federation",
+        })
+    }
+
+    /// The stage's sample (the canvas's): Stage Peer B holds Late Train
+    /// Verse and Corner Store Loop of Boukmanflow's Borrowed Tapes and a
+    /// compilation's two songs, Stage Peer C Rooftop Cypher of Borrowed
+    /// Tapes.
+    fn keep_peers() -> TasteResponse {
+        let mut kim = fed_row(B, "Kim Song", "Peer Kim", "Mixtape Vol 1", 0.6);
+        kim["albumArtist"] = serde_json::json!("Various Artists");
+        let mut lou = fed_row(B, "Lou Song", "Peer Lou", "Mixtape Vol 1", 0.5);
+        lou["albumArtist"] = serde_json::json!("various artists ");
+        serde_json::from_value(serde_json::json!({
+            "seedSource": "history", "seeds": [], "library": null, "network": null,
+            "peers": {
+                "peers": [
+                    { "id": B, "name": "Stage Peer B", "reachable": true, "mismatched": false, "results": [
+                        fed_row(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.9),
+                        fed_row(B, "Corner Store Loop", "Boukmanflow", "Borrowed Tapes", 0.7),
+                        kim, lou,
+                    ] },
+                    { "id": C, "name": "Stage Peer C", "reachable": true, "mismatched": false, "results": [
+                        fed_row(C, "Rooftop Cypher", "Boukmanflow", "Borrowed Tapes", 0.8),
+                    ] }
+                ],
+                "searched": { "peers": 2, "unreachable": 0, "mismatched": 0 }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn listing(allowed: bool) -> DiscoveryPluginsResponse {
+        serde_json::from_value(serde_json::json!({
+            "plugins": [
+                { "name": "links", "title": "Open elsewhere", "capabilities": ["links"], "scopes": ["song"] },
+                { "name": "federation-copy", "capabilities": ["acquire"], "scopes": ["song", "album", "artist", "artist-missing", "folder"] }
+            ],
+            "jobs": { "allowed": allowed }
+        }))
+        .unwrap()
+    }
+
+    fn destination(vpath: Option<&str>) -> CollectionDestinationView {
+        serde_json::from_value(serde_json::json!({
+            "destination": vpath.map(|v| serde_json::json!({ "vpath": v, "base": "", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "default" })),
+            "libraries": [{ "vpath": "copies" }], "defaultLayout": "{{ARTIST}}/{{ALBUM}}", "variables": ["ARTIST", "ALBUM"]
+        }))
+        .unwrap()
+    }
+
+    /// A server with the room, its connected servers and its plug-ins, an
+    /// account that may upload.
+    fn plugin_app() -> App {
+        let mut app = taste_app();
+        app.capabilities.discovery_plugins = true;
+        app.capabilities.uploads = true;
+        app
+    }
+
+    fn gate_asks(effects: &[Effect]) -> usize {
+        effects.iter().filter(|e| matches!(e, Effect::Api(ApiCmd::KeepGate { .. }))).count()
+    }
+
+    fn lookups(effects: &[Effect]) -> Vec<(u64, Vec<serde_json::Value>)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::JobsLookup { seq, recs, .. }) => Some((*seq, recs.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn job_asks(effects: &[Effect]) -> Vec<u64> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::Jobs { seq, .. }) => Some(*seq),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn starts(effects: &[Effect]) -> Vec<(u64, serde_json::Value, JobScope)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::JobStart { ticket, rec, scope, plugin, .. }) => {
+                    assert_eq!(plugin, "federation-copy");
+                    Some((*ticket, (**rec).clone(), *scope))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Open the room and land everything: Main, the peers, the gate — and
+    /// the effects the last landing sent (the lookup, the first list ask).
+    fn keep_room(listed: DiscoveryPluginsResponse, dest: Option<&str>) -> (App, Vec<Effect>) {
+        let mut app = plugin_app();
+        let opened = app.taste_open();
+        assert_eq!(gate_asks(&opened), 1, "a visit asks the gate: {opened:?}");
+        let next = land_main(&mut app, &opened, taste_main());
+        let (peers, generation, _) = taste_ask(&next, TastePart::Peers);
+        let landed = app.apply_event(Event::Taste { seq: peers, generation, part: TastePart::Peers, answer: Ok(Box::new(keep_peers())) });
+        assert!(lookups(&landed).is_empty(), "no lookup before the gate says copies run here");
+        let destination = listed.copies(JobScope::Song).then(|| Ok(Box::new(destination(dest))));
+        let effects = app.apply_event(Event::KeepGate { generation, plugins: Ok(Box::new(listed)), destination });
+        (app, effects)
+    }
+
+    fn ready_room() -> (App, Vec<Effect>) {
+        keep_room(listing(true), Some("copies"))
+    }
+
+    fn row_at(app: &App, title: &str) -> (usize, usize) {
+        app.taste
+            .peer_lines()
+            .into_iter()
+            .find(|&(g, r)| app.taste.peer_row(g, r).and_then(|(_, l)| l.title.clone()).as_deref() == Some(title))
+            .unwrap_or_else(|| panic!("no row {title}"))
+    }
+
+    fn copy_job(id: i64, key: &str, scope: Option<&str>, state: &str, peer: i64, result: serde_json::Value) -> PluginJob {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "plugin": "federation-copy", "key": key, "state": state,
+            "params": scope.map(|s| serde_json::json!({ "scope": s })),
+            "recommendation": { "artist": "Boukmanflow", "title": "Late Train Verse", "album": "Borrowed Tapes",
+                "peer": { "id": peer, "name": if peer == B { "Stage Peer B" } else { "Stage Peer C" } } },
+            "result": result, "progress": if state == "running" { serde_json::json!(0.52) } else { serde_json::Value::Null },
+            "statusText": if state == "running" { serde_json::json!("song 2 of 3 · Late Train Verse") } else { serde_json::Value::Null },
+        }))
+        .unwrap()
+    }
+
+    /// A lookup answer for the rows asked, in their order: each row's keys
+    /// from its own fields, and `jobs` under whichever key they carry.
+    fn answer_lookup(app: &mut App, effects: &[Effect], jobs: &[PluginJob]) -> Vec<Effect> {
+        let (seq, recs) = lookups(effects).pop().expect("a lookup");
+        let results: Vec<JobLookup> = recs.iter().map(|rec| lookup_of(rec, jobs)).collect();
+        let generation = app.session_gen();
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(results) })
+    }
+
+    fn keys_of(rec: &serde_json::Value) -> Vec<(String, String)> {
+        let text = |k: &str| rec.get(k).and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+        vec![
+            ("song".into(), format!("text:{}", text("title"))),
+            ("album".into(), format!("album:{}|{}", rec.get("albumArtist").and_then(|v| v.as_str()).map(|s| s.trim().to_lowercase()).unwrap_or_else(|| text("artist")), text("album"))),
+            ("artist".into(), format!("artist:{}", text("artist"))),
+            ("artist-missing".into(), format!("artist-missing:{}", text("artist"))),
+            ("folder".into(), format!("folder:{}", text("filepath"))),
+        ]
+    }
+
+    fn lookup_of(rec: &serde_json::Value, jobs: &[PluginJob]) -> JobLookup {
+        let keys = keys_of(rec);
+        JobLookup {
+            key: Some(keys[0].1.clone()),
+            keys: keys.iter().map(|(s, k)| (s.clone(), serde_json::json!(k))).collect(),
+            jobs: jobs.iter().filter(|j| keys.iter().any(|(_, k)| Some(k.as_str()) == j.key.as_deref())).cloned().collect(),
+        }
+    }
+
+    #[test]
+    fn the_gate_needs_the_flag_the_copy_plugin_jobs_an_upload_right_and_a_library() {
+        let (app, _) = ready_room();
+        assert!(app.keep_gate() && app.keep_listed() && app.links_gate());
+        let late = row_at(&app, "Late Train Verse");
+        assert_eq!(
+            app.keep_choices(KeepTarget::Row { group: late.0, row: late.1 }),
+            vec![KeepChoice::Song, KeepChoice::Album, KeepChoice::Artist]
+        );
+        // Each missing half hides every entry point — never grey.
+        let (refused, _) = keep_room(listing(false), Some("copies"));
+        assert!(!refused.keep_gate() && !refused.keep_listed());
+        assert!(refused.links_gate(), "Open elsewhere has its own gate");
+        assert!(refused.keep_choices(KeepTarget::Row { group: late.0, row: late.1 }).is_empty());
+        let (nowhere, _) = keep_room(listing(true), None);
+        assert!(!nowhere.keep_gate() && nowhere.keep_listed(), "a null destination: no library to land in");
+        let (mut no_upload, _) = ready_room();
+        no_upload.capabilities.uploads = false;
+        assert!(!no_upload.keep_gate());
+        // No flag: the gate is never asked, nothing shows.
+        let mut off = taste_app();
+        assert_eq!(gate_asks(&off.taste_open()), 0);
+        assert!(!off.keep_gate() && !off.links_gate());
+        // A peer session asks nothing of the plug-ins.
+        let mut peer = plugin_app();
+        peer.session.peer = Some(("http://host:3000".into(), 3));
+        assert!(peer.keep_ask_gate().is_empty());
+        // A failed listing hides everything until the next visit asks again.
+        let mut failed = plugin_app();
+        let opened = failed.taste_open();
+        let generation = failed.session_gen();
+        failed.apply_event(Event::KeepGate { generation, plugins: Err(PluginFailure::Unreachable("down".into())), destination: None });
+        assert!(!failed.keep_gate() && failed.taste.keep.gate.failed.is_some());
+        drop(opened);
+        assert_eq!(gate_asks(&failed.taste_open()), 1);
+        // A gate reply from the server the session left fills nothing.
+        let mut moved = plugin_app();
+        moved.taste_open();
+        let stale = moved.session_gen() + 1;
+        moved.apply_event(Event::KeepGate { generation: stale, plugins: Ok(Box::new(listing(true))), destination: Some(Ok(Box::new(destination(Some("copies"))))) });
+        assert!(moved.taste.keep.gate.plugins.is_none());
+    }
+
+    #[test]
+    fn the_rows_are_looked_up_unchanged_once_the_gate_opens_and_after_every_peers_answer() {
+        let (mut app, effects) = ready_room();
+        let asked = lookups(&effects);
+        assert_eq!(asked.len(), 1, "{effects:?}");
+        // Every row that plays, its raw JSON exactly as it came.
+        let lines = app.taste.peer_lines();
+        let raw: Vec<serde_json::Value> = lines.iter().map(|&(g, r)| app.taste.peer_row(g, r).unwrap().1.raw.clone()).collect();
+        assert_eq!(asked[0].1, raw);
+        assert_eq!(asked[0].1[0]["albumArt"], "c0ffee.jpg", "nothing stripped here: the server's schema does that");
+        assert_eq!(job_asks(&effects).len(), 1, "and the list once, for the indicator");
+        // A new peers answer: its rows lose the old marks at once and are looked up.
+        let late = row_at(&app, "Late Train Verse");
+        let running = copy_job(7, "text:late train verse", None, "running", B, serde_json::Value::Null);
+        answer_lookup(&mut app, &effects, &[running]);
+        assert_eq!(app.keep_row_mark(late.0, late.1), Some(JobMark::Copying));
+        let again = app.taste_ask_again();
+        let next = land_main(&mut app, &again, taste_main());
+        let (peers, generation, _) = taste_ask(&next, TastePart::Peers);
+        let old_lookup = lookups(&effects);
+        let landed = app.apply_event(Event::Taste { seq: peers, generation, part: TastePart::Peers, answer: Ok(Box::new(keep_peers())) });
+        assert_eq!(app.keep_row_mark(late.0, late.1), None, "the old answer's marks went with it");
+        assert_eq!(lookups(&landed).len(), 1);
+        // The old lookup's answer, landing late, fills nothing.
+        let (seq, recs) = old_lookup[0].clone();
+        let stale: Vec<JobLookup> = recs.iter().map(|rec| lookup_of(rec, &[copy_job(7, "text:late train verse", None, "running", B, serde_json::Value::Null)])).collect();
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(stale) });
+        assert_eq!(app.keep_row_mark(late.0, late.1), None);
+        answer_lookup(&mut app, &landed, &[]);
+        assert_eq!(app.keep_row_mark(late.0, late.1), None);
+    }
+
+    #[test]
+    fn marks_are_per_server_and_a_tile_wears_only_its_album_and_artist_copies() {
+        let (mut app, effects) = ready_room();
+        // Stage Peer C's album copy of Borrowed Tapes: C's row and tile, never B's.
+        let theirs = copy_job(30, "album:boukmanflow|borrowed tapes", Some("album"), "running", C, serde_json::Value::Null);
+        answer_lookup(&mut app, &effects, &[theirs]);
+        let late = row_at(&app, "Late Train Verse");
+        let roof = row_at(&app, "Rooftop Cypher");
+        assert_eq!(app.keep_row_mark(late.0, late.1), None);
+        assert_eq!(app.keep_row_mark(roof.0, roof.1), Some(JobMark::Copying));
+        let albums = app.taste.peer_albums();
+        let b_tapes = albums.iter().find(|a| a.peer == B && a.album == "Borrowed Tapes").unwrap();
+        let c_tapes = albums.iter().find(|a| a.peer == C && a.album == "Borrowed Tapes").unwrap();
+        assert_eq!(app.keep_tile_mark(b_tapes), None);
+        assert_eq!(app.keep_tile_mark(c_tapes), Some(JobMark::Copying));
+        // A song copy marks its row only, never the tile.
+        let (mut app, effects) = ready_room();
+        let song = copy_job(31, "text:late train verse", None, "done", B, serde_json::json!({ "copied": { "vpath": "copies", "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3" } }));
+        answer_lookup(&mut app, &effects, &[song]);
+        let albums = app.taste.peer_albums();
+        let b_tapes = albums.iter().find(|a| a.peer == B && a.album == "Borrowed Tapes").unwrap();
+        assert_eq!(app.keep_row_mark(late.0, late.1), Some(JobMark::Kept));
+        assert_eq!(app.keep_tile_mark(b_tapes), None, "one song of the album is not the album");
+        // No marks at all while the listing says copies do not run here.
+        let (refused, _) = keep_room(listing(false), Some("copies"));
+        assert_eq!(refused.keep_row_mark(late.0, late.1), None);
+    }
+
+    #[test]
+    fn a_compilation_is_one_tile_by_its_album_artist() {
+        let (app, _) = ready_room();
+        let albums = app.taste.peer_albums();
+        let comp: Vec<_> = albums.iter().filter(|a| a.album == "Mixtape Vol 1").collect();
+        assert_eq!(comp.len(), 1, "one tile whoever sings each song: {albums:?}");
+        let comp = comp[0];
+        assert_eq!(comp.rows.len(), 2);
+        assert_eq!(comp.artist.as_deref(), Some("Various Artists"), "the tile's artist row is the album artist");
+        assert_eq!((comp.album_artist.as_deref(), comp.track_artist.as_deref()), (Some("Various Artists"), Some("Peer Kim")));
+        // Borrowed Tapes stays one tile per server, by its track artist.
+        assert_eq!(albums.iter().filter(|a| a.album == "Borrowed Tapes").count(), 2);
+        let tapes = albums.iter().find(|a| a.album == "Borrowed Tapes" && a.peer == B).unwrap();
+        assert_eq!((tapes.artist.as_deref(), tapes.album_artist.as_deref()), (Some("Boukmanflow"), None));
+    }
+
+    #[test]
+    fn a_compilation_tile_is_asked_by_its_album_artist_and_falls_back_to_its_rows() {
+        let (mut app, _) = ready_room();
+        let index = app.taste.peer_albums().iter().position(|a| a.album == "Mixtape Vol 1").unwrap();
+        let effects = app.taste_peer_album(index, false);
+        let (name, artist, album_artist) = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::TasteAlbum { name, artist, album_artist, peer: Some(B), .. }) => {
+                    Some((name.clone(), artist.clone(), album_artist.clone()))
+                }
+                _ => None,
+            })
+            .expect("asked of its server");
+        assert_eq!((name.as_str(), artist, album_artist.as_deref()), ("Mixtape Vol 1", None, Some("Various Artists")));
+        // Nothing listed: the two rows that matched, by the tile's own key.
+        let generation = app.session_gen();
+        app.apply_event(Event::TasteAlbum { generation, tracks: None, name, artist: None, album_artist, peer: Some(B), play: false });
+        let queued: Vec<&str> = app.queue.items.iter().map(|q| q.filepath.as_str()).collect();
+        assert_eq!(queued, vec!["peerlib/Peer Kim/Mixtape Vol 1/Kim Song.mp3", "peerlib/Peer Lou/Mixtape Vol 1/Lou Song.mp3"]);
+    }
+
+    #[test]
+    fn a_rows_keep_sends_the_row_unchanged_and_a_tiles_sends_its_best_row_as_the_album() {
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        let late = row_at(&app, "Late Train Verse");
+        let raw = app.taste.peer_row(late.0, late.1).unwrap().1.raw.clone();
+        let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        // The facts are asked through the peer's reach, with the copy's own selectors.
+        let (reach, ask) = opened
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::KeepFacts { reach, ask, .. }) => Some((reach.clone(), (**ask).clone())),
+                _ => None,
+            })
+            .expect("the sizes are asked");
+        assert_eq!(reach.and_then(|r| r.peer), Some(B));
+        assert_eq!(ask, KeepFactsAsk { album: Some("Borrowed Tapes".into()), artist: Some("Boukmanflow".into()), album_artist: None, year: Some(2019) });
+        assert!(lookups(&opened).is_empty(), "its row was looked up already");
+        let view = app.keep_view().unwrap();
+        assert_eq!((view.choice, view.scope), (KeepChoice::Song, JobScope::Song));
+        assert!(matches!(view.stage, KeepStage::Choose { verb: Some(KeepVerb::Song), other: None }));
+        let effects = app.keep_start();
+        let started = starts(&effects);
+        assert_eq!(started.len(), 1);
+        assert_eq!((started[0].1.clone(), started[0].2), (raw.clone(), JobScope::Song), "the row exactly as it came");
+        assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Starting));
+        assert!(app.keep_start().is_empty(), "no second start while one is out");
+        // Album: the same row, scope album.
+        app.keep_close();
+        app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        app.keep_pick(KeepChoice::Album);
+        let started = starts(&app.keep_start());
+        assert_eq!((started[0].1.clone(), started[0].2), (raw, JobScope::Album));
+        // A tile: album focus, no This song, its best row with scope album.
+        app.keep_close();
+        let index = app.taste.peer_albums().iter().position(|a| a.album == "Borrowed Tapes" && a.peer == B).unwrap();
+        assert_eq!(app.keep_choices(KeepTarget::Tile(index)), vec![KeepChoice::Album, KeepChoice::Artist]);
+        app.keep_open(KeepTarget::Tile(index));
+        let view = app.keep_view().unwrap();
+        assert!(view.subject.album_focus());
+        assert_eq!(view.choice, KeepChoice::Album);
+        app.keep_pick(KeepChoice::Song);
+        assert_eq!(app.keep_view().unwrap().choice, KeepChoice::Album, "a tile has no This song");
+        let started = starts(&app.keep_start());
+        let best = app.taste.peer_row(late.0, late.1).unwrap().1.raw.clone();
+        assert_eq!((started[0].1.clone(), started[0].2), (best, JobScope::Album), "the tile's best row, never a song job");
+        // A compilation tile copies the whole album by its row, unchanged; no artist copy.
+        app.keep_close();
+        let comp = app.taste.peer_albums().iter().position(|a| a.album == "Mixtape Vol 1").unwrap();
+        assert_eq!(app.keep_choices(KeepTarget::Tile(comp)), vec![KeepChoice::Album]);
+        app.keep_open(KeepTarget::Tile(comp));
+        let started = starts(&app.keep_start());
+        assert_eq!(started[0].1["albumArtist"], "Various Artists");
+        assert_eq!(started[0].2, JobScope::Album);
+    }
+
+    fn open_late(app: &mut App) -> (usize, usize) {
+        let late = row_at(app, "Late Train Verse");
+        app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        late
+    }
+
+    fn land_start(app: &mut App, effects: &[Effect], answer: Result<JobStarted, PluginFailure>) -> Vec<Effect> {
+        let ticket = starts(effects)[0].0;
+        let generation = app.session_gen();
+        app.apply_event(Event::JobStarted { ticket, generation, answer: answer.map(Box::new) })
+    }
+
+    #[test]
+    fn a_start_follows_its_job_and_a_refusal_keeps_the_choice_with_the_servers_words() {
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        open_late(&mut app);
+        let effects = app.keep_start();
+        let refused = PluginFailure::Refused { status: 403, words: "Uploading Disabled".into() };
+        land_start(&mut app, &effects, Err(refused.clone()));
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.stage, KeepStage::Refused { failure: refused, verb: Some(KeepVerb::Song) });
+        app.keep_pick(KeepChoice::Album);
+        assert_eq!(app.keep_view().unwrap().choice, KeepChoice::Album, "the choice stays editable");
+        // Started: it follows the job, live, polled.
+        let effects = app.keep_start();
+        let job = copy_job(40, "album:boukmanflow|borrowed tapes", Some("album"), "queued", B, serde_json::Value::Null);
+        land_start(&mut app, &effects, Ok(JobStarted { job: job.clone(), created: true }));
+        match app.keep_view().unwrap().stage {
+            KeepStage::Job { job, outcome, action } => {
+                assert_eq!(job.id, 40);
+                assert!(outcome.live());
+                assert_eq!(action, Some(crate::api::types::JobAction::Cancel));
+            }
+            other => panic!("{other:?}"),
+        }
+        // The row and its tile mark it at once (the start's job folded in).
+        let late = row_at(&app, "Late Train Verse");
+        assert_eq!(app.keep_row_mark(late.0, late.1), Some(JobMark::Waiting));
+        // `x` or Cancel copy: the followed copy's cancel, once.
+        let cancel = app.keep_cancel();
+        assert!(matches!(cancel.as_slice(), [Effect::Api(ApiCmd::JobCancel { id: 40, .. })]), "{cancel:?}");
+        assert!(app.keep_cancel().is_empty());
+        // Another server's live copy covering it (200, created: false): the choice, its server, no primary.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        let generation = app.session_gen();
+        app.apply_event(Event::Jobs { seq: job_asks(&effects)[0], generation, answer: Ok(Box::new(PluginJobList::default())) });
+        open_late(&mut app);
+        app.keep_pick(KeepChoice::Album);
+        let effects = app.keep_start();
+        let theirs = copy_job(41, "album:boukmanflow|borrowed tapes", Some("album"), "running", C, serde_json::Value::Null);
+        land_start(&mut app, &effects, Ok(JobStarted { job: theirs.clone(), created: false }));
+        assert_eq!(app.keep_view().unwrap().stage, KeepStage::Choose { verb: None, other: Some("Stage Peer C".into()) });
+        assert!(app.keep_start().is_empty(), "the primary is hidden while it runs");
+        // It ends: the primary is back.
+        let mut done = theirs;
+        done.state = crate::api::types::JobState::Done;
+        app.taste.keep.watch = KeepWatch::Modal;
+        let polled = app.tick_at(crate::clock::Instant::now() + std::time::Duration::from_secs(2));
+        let seq = job_asks(&polled)[0];
+        app.apply_event(Event::Jobs { seq, generation, answer: Ok(Box::new(PluginJobList { jobs: vec![done], runner: None })) });
+        assert_eq!(app.keep_view().unwrap().stage, KeepStage::Choose { verb: Some(KeepVerb::Album), other: None });
+    }
+
+    #[test]
+    fn the_modal_opens_on_its_scopes_own_job_and_reads_its_outcome() {
+        // A kept song: the outcome, its file, Play your copy.
+        let (mut app, effects) = ready_room();
+        let kept = copy_job(50, "text:late train verse", None, "done", B, serde_json::json!({ "copied": { "vpath": "copies", "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3", "title": "Late Train Verse", "artist": "Boukmanflow", "album": "Borrowed Tapes" } }));
+        answer_lookup(&mut app, &effects, &[kept]);
+        open_late(&mut app);
+        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(50));
+        let view = app.keep_view().unwrap();
+        let KeepStage::Job { outcome, action, .. } = view.stage else { panic!("{:?}", view.stage) };
+        assert!(outcome.kept());
+        assert_eq!(action, Some(crate::api::types::JobAction::Play));
+        // Play your copy: the user's own file, the session's origin.
+        app.keep_again();
+        let item = app.queue.items.last().expect("queued");
+        assert_eq!((item.filepath.as_str(), item.origin.peer), ("copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3", None));
+        assert_eq!(item.metadata.title.as_deref(), Some("Late Train Verse"));
+        // Cancelled: Start again brings the choice back.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[copy_job(51, "text:late train verse", None, "cancelled", B, serde_json::Value::Null)]);
+        open_late(&mut app);
+        assert!(app.keep_again().is_empty());
+        assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Choose { verb: Some(KeepVerb::Song), .. }));
+        // Failed: Retry starts the same copy again, as it was started.
+        let (mut app, effects) = ready_room();
+        let failed = copy_job(52, "text:late train verse", None, "failed", B, serde_json::Value::Null);
+        answer_lookup(&mut app, &effects, &[failed.clone()]);
+        open_late(&mut app);
+        let retried = starts(&app.keep_again());
+        assert_eq!((retried[0].1.clone(), retried[0].2), (failed.recommendation.clone(), JobScope::Song));
+        assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Starting));
+        // Another server's FINISHED album copy is not this one's: the choice, idle.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[copy_job(53, "album:boukmanflow|borrowed tapes", Some("album"), "done", C, serde_json::json!({ "counts": { "total": 1, "copied": 1, "skipped": 0, "failed": 0 } }))]);
+        let late = row_at(&app, "Late Train Verse");
+        let index = app.taste.peer_albums().iter().position(|a| a.album == "Borrowed Tapes" && a.peer == B).unwrap();
+        app.keep_open(KeepTarget::Tile(index));
+        assert_eq!(app.keep_view().unwrap().stage, KeepStage::Choose { verb: Some(KeepVerb::Album), other: None });
+        assert_eq!(app.keep_row_mark(late.0, late.1), None);
+    }
+
+    #[test]
+    fn the_sizes_land_and_only_the_albums_you_dont_have_shows_by_name() {
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        let late = row_at(&app, "Late Train Verse");
+        let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.choices[1].1, ChoiceSize::Album { songs: Fact::Asking }, "DIM … until the sizes land");
+        assert_eq!(view.choices[0].1, ChoiceSize::Song { seconds: Some(8.4), format: Some("mp3".into()) });
+        assert_eq!(view.missing, None, "the checkbox waits for the sizes");
+        let seq = opened
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::KeepFacts { seq, .. }) => Some(*seq),
+                _ => None,
+            })
+            .unwrap();
+        let row = |name: &str, artist: Option<&str>| crate::api::types::ArtistAlbumRow {
+            name: Some(name.into()),
+            album_artist: artist.map(str::to_string),
+            ..Default::default()
+        };
+        let facts = KeepFacts {
+            album_songs: Some(3),
+            peer_albums: Some(vec![row("Borrowed Tapes", Some("Boukmanflow"))]),
+            local_albums: Some(vec![row("One", None), row("Two", None), row("Three", None)]),
+        };
+        let generation = app.session_gen();
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(facts) });
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.choices[1].1, ChoiceSize::Album { songs: Fact::Known(3) });
+        assert_eq!(view.choices[2].1, ChoiceSize::Artist { albums: Fact::Known(1), have: Fact::Known(3) });
+        assert_eq!(view.missing, Some((false, 1)), "one of theirs missing by name, three of the artist's here");
+        app.keep_set_missing(true);
+        let view = app.keep_view().unwrap();
+        assert_eq!((view.choice, view.scope, view.missing), (KeepChoice::Artist, JobScope::ArtistMissing, Some((true, 1))));
+        assert!(matches!(view.stage, KeepStage::Choose { verb: Some(KeepVerb::Missing(1)), .. }));
+        assert_eq!(view.landing("each album"), Some(vec!["copies".into(), "Boukmanflow".into(), "each album".into()]));
+        assert_eq!(starts(&app.keep_start())[0].2, JobScope::ArtistMissing);
+        // Picking another radio unticks it.
+        app.keep_close();
+        app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        app.keep_set_missing(true);
+        assert!(!app.taste.keep.flow.as_ref().unwrap().only_missing, "hidden until the sizes land: nothing to tick");
+        // Everything of theirs here by name: no checkbox.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        let seq = opened.iter().find_map(|e| match e { Effect::Api(ApiCmd::KeepFacts { seq, .. }) => Some(*seq), _ => None }).unwrap();
+        let facts = KeepFacts { album_songs: Some(3), peer_albums: Some(vec![row("Borrowed Tapes", Some("Boukmanflow"))]), local_albums: Some(vec![row("borrowed  TAPES", None)]) };
+        let generation = app.session_gen();
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(facts) });
+        assert_eq!(app.keep_view().unwrap().missing, None);
+        // A stale facts answer (an older open) fills nothing.
+        app.apply_event(Event::KeepFacts { seq: seq + 99, generation, facts: Box::new(KeepFacts::default()) });
+        assert_eq!(app.keep_view().unwrap().choices[1].1, ChoiceSize::Album { songs: Fact::Known(3) });
+    }
+
+    #[test]
+    fn the_poll_runs_only_while_a_copy_is_live_and_shown_and_backs_off() {
+        let (mut app, effects) = ready_room();
+        let first = job_asks(&effects)[0];
+        let generation = app.session_gen();
+        let now = crate::clock::Instant::now();
+        let live = copy_job(60, "text:late train verse", None, "running", B, serde_json::Value::Null);
+        app.apply_event(Event::Jobs { seq: first, generation, answer: Ok(Box::new(PluginJobList { jobs: vec![live.clone()], runner: None })) });
+        // Away from the room: never.
+        assert!(job_asks(&app.tick_at(now + std::time::Duration::from_secs(30))).is_empty());
+        // In the room: every 4 s while live.
+        app.keep_watch(KeepWatch::Room);
+        let asked = app.tick_at(now + std::time::Duration::from_secs(5));
+        assert_eq!(job_asks(&asked).len(), 1);
+        assert!(job_asks(&app.tick_at(now + std::time::Duration::from_secs(6))).is_empty(), "one ask in flight");
+        let seq = job_asks(&asked)[0];
+        // A failure backs off: 8 s, then 16 s.
+        app.apply_event(Event::Jobs { seq, generation, answer: Err(PluginFailure::Unreachable("down".into())) });
+        let at = now + std::time::Duration::from_secs(5);
+        assert_eq!(app.keep_next_try(at), Some(std::time::Duration::from_secs(8)));
+        assert!(job_asks(&app.tick_at(at + std::time::Duration::from_secs(7))).is_empty());
+        let asked = app.tick_at(at + std::time::Duration::from_secs(8));
+        let seq = job_asks(&asked)[0];
+        // A modal open: 1.5 s; it answers, the failures are forgiven.
+        app.keep_watch(KeepWatch::Modal);
+        app.apply_event(Event::Jobs { seq, generation, answer: Ok(Box::new(PluginJobList { jobs: vec![live.clone()], runner: None })) });
+        assert_eq!(app.keep_next_try(at), None);
+        let t = at + std::time::Duration::from_secs(8);
+        assert!(job_asks(&app.tick_at(t + std::time::Duration::from_millis(1400))).is_empty());
+        let asked = app.tick_at(t + std::time::Duration::from_millis(1500));
+        let seq = job_asks(&asked)[0];
+        // It finished: news for the status line, the rows looked up again — and the poll stops.
+        let mut done = live;
+        done.state = crate::api::types::JobState::Done;
+        done.result = Some(serde_json::json!({ "copied": { "vpath": "copies", "filepath": "copies/x.mp3" } }));
+        let landed = app.apply_event(Event::Jobs { seq, generation, answer: Ok(Box::new(PluginJobList { jobs: vec![done], runner: None })) });
+        assert_eq!(lookups(&landed).len(), 1, "after a job ends");
+        let news = app.keep_take_news();
+        assert_eq!(news.iter().map(|j| j.id).collect::<Vec<_>>(), vec![60]);
+        assert!(app.keep_take_news().is_empty(), "said once");
+        assert!(job_asks(&app.tick_at(t + std::time::Duration::from_secs(60))).is_empty(), "nothing live: no poll");
+        assert!(crate::tui::app::keep::keep_backoff(crate::tui::app::keep::KEEP_POLL_ROOM, 9) == KEEP_POLL_MAX);
+    }
+
+    #[test]
+    fn a_page_load_is_not_news_and_a_cancel_that_lost_the_race_says_so() {
+        let (mut app, effects) = ready_room();
+        let first = job_asks(&effects)[0];
+        let generation = app.session_gen();
+        let done = copy_job(70, "text:late train verse", None, "done", B, serde_json::Value::Null);
+        app.apply_event(Event::Jobs { seq: first, generation, answer: Ok(Box::new(PluginJobList { jobs: vec![done], runner: None })) });
+        assert!(app.keep_take_news().is_empty(), "only a job seen live and now finished is news");
+        // A cancel: out once; a 409 is the server's word it had already finished.
+        let live = copy_job(71, "album:boukmanflow|borrowed tapes", Some("album"), "running", B, serde_json::Value::Null);
+        app.taste.keep.book.jobs.insert(71, live);
+        let cancel = app.keep_cancel_job(71);
+        assert!(matches!(cancel.as_slice(), [Effect::Api(ApiCmd::JobCancel { id: 71, .. })]), "{cancel:?}");
+        assert!(app.keep_cancel_job(71).is_empty(), "one cancel at a time");
+        assert!(app.copies_rows().iter().any(|r| r.job.id == 71 && r.cancelling));
+        let landed = app.apply_event(Event::JobCancelled { generation, id: 71, answer: Ok(CancelAnswer::AlreadyFinished) });
+        assert_eq!(app.keep_take_note(), Some(KeepNote::TooLate { title: Some("Borrowed Tapes".into()) }));
+        assert_eq!(job_asks(&landed).len(), 1, "the list is asked again for the outcome");
+        // A cancel that took: the job as it now stands.
+        let mut stopping = copy_job(72, "text:corner store loop", None, "running", B, serde_json::Value::Null);
+        app.taste.keep.book.jobs.insert(72, stopping.clone());
+        app.keep_cancel_job(72);
+        stopping.cancel_requested = true;
+        app.apply_event(Event::JobCancelled { generation, id: 72, answer: Ok(CancelAnswer::Cancelled(Box::new(JobCancelled { job: Some(stopping), outcome: Some("requested".into()) }))) });
+        let row = app.copies_rows().into_iter().find(|r| r.job.id == 72).unwrap();
+        assert!(row.job.stopping() && row.action.is_none(), "stopping: no button");
+    }
+
+    #[test]
+    fn the_copies_list_orders_supersedes_titles_and_lights_the_indicator() {
+        let (mut app, effects) = ready_room();
+        let first = job_asks(&effects)[0];
+        let generation = app.session_gen();
+        assert_eq!(app.keep_indicator(), None, "nothing live or failed: hidden");
+        let mut artist = copy_job(5, "artist-missing:boukmanflow", Some("artist-missing"), "queued", B, serde_json::Value::Null);
+        artist.recommendation["artist"] = serde_json::json!("Color Out");
+        let jobs = vec![
+            copy_job(9, "album:boukmanflow|borrowed tapes", Some("album"), "running", B, serde_json::Value::Null),
+            artist,
+            copy_job(6, "text:rooftop cypher", None, "queued", C, serde_json::Value::Null),
+            copy_job(8, "text:static lullaby", None, "failed", C, serde_json::Value::Null),
+            copy_job(7, "text:northern signal", None, "done", B, serde_json::json!({ "copied": { "filepath": "copies/x.mp3" } })),
+            // A retried failure: the newer job of the same key and server supersedes it.
+            copy_job(3, "text:northern signal", None, "failed", B, serde_json::Value::Null),
+            // The same album from the other server is its own row.
+            copy_job(2, "album:boukmanflow|borrowed tapes", Some("album"), "done", C, serde_json::json!({ "counts": { "total": 1, "copied": 1, "skipped": 0, "failed": 0 } })),
+        ];
+        app.apply_event(Event::Jobs { seq: first, generation, answer: Ok(Box::new(PluginJobList { jobs, runner: None })) });
+        let rows = app.copies_rows();
+        assert_eq!(rows.iter().map(|r| r.job.id).collect::<Vec<_>>(), vec![9, 5, 6, 8, 7, 2], "running, waiting in slot order, GOLD, finished");
+        assert_eq!(rows[0].title, CopyTitle::Album("Borrowed Tapes".into()));
+        assert_eq!(rows[1].title, CopyTitle::Artist { artist: "Color Out".into(), missing_only: true });
+        assert_eq!(rows[2].title, CopyTitle::Song("Late Train Verse".into()));
+        assert_eq!((rows[2].from.as_deref(), rows[5].from.as_deref()), (Some("Stage Peer C"), Some("Stage Peer C")));
+        assert_eq!(app.keep_indicator(), Some(JobsIndicator { live: true, failed: true }));
+        assert!(app.copies_clearable());
+        // Opening the Copies modal asks the list now — one ask at a time.
+        let opened = app.copies_open();
+        assert_eq!(job_asks(&opened).len(), 1);
+        assert!(app.copies_open().is_empty(), "one ask at a time");
+        let generation = app.session_gen();
+        app.apply_event(Event::Jobs { seq: job_asks(&opened)[0], generation, answer: Err(PluginFailure::Unreachable("down".into())) });
+        assert!(app.taste.keep.book.failed.is_some() && app.copies_rows().len() == 6, "a failed refresh keeps the rows");
+        // Clear finished: what went leaves, the list and the rows are asked again.
+        let clear = app.copies_clear();
+        assert!(matches!(clear.as_slice(), [Effect::Api(ApiCmd::JobsClear { .. })]));
+        let landed = app.apply_event(Event::JobsCleared { generation, answer: Ok(4) });
+        assert_eq!(app.copies_rows().iter().map(|r| r.job.id).collect::<Vec<_>>(), vec![9, 5, 6]);
+        assert_eq!((job_asks(&landed).len(), lookups(&landed).len()), (1, 1));
+        assert_eq!(app.keep_indicator(), Some(JobsIndicator { live: true, failed: false }));
+        // The gate closed: no indicator, whatever runs.
+        app.capabilities.uploads = false;
+        assert_eq!(app.keep_indicator(), None);
+    }
+
+    #[test]
+    fn a_copies_retry_starts_the_same_copy_and_a_refusal_is_a_note() {
+        let (mut app, effects) = ready_room();
+        let first = job_asks(&effects)[0];
+        let generation = app.session_gen();
+        let stopped = copy_job(12, "album:boukmanflow|borrowed tapes", Some("album"), "done", B,
+            serde_json::json!({ "scope": "album", "counts": { "total": 3, "copied": 1, "skipped": 0, "failed": 2 }, "stopped": "quota" }));
+        let refused = copy_job(13, "text:rooftop cypher", None, "failed", C, serde_json::Value::Null);
+        let mut refused = refused;
+        refused.error = Some("Stage Peer C does not allow copies with this server's key".into());
+        app.apply_event(Event::Jobs { seq: first, generation, answer: Ok(Box::new(PluginJobList { jobs: vec![stopped.clone(), refused], runner: None })) });
+        assert!(app.copies_act(13).is_empty(), "no Retry after a refusal");
+        let effects = app.copies_act(12);
+        let started = starts(&effects);
+        assert_eq!((started[0].1.clone(), started[0].2), (stopped.recommendation, JobScope::Album), "the same copy: it takes only the gaps");
+        land_start(&mut app, &effects, Err(PluginFailure::Refused { status: 429, words: "you have 20 jobs queued or running".into() }));
+        assert_eq!(app.keep_take_note(), Some(KeepNote::StartFailed(PluginFailure::Refused { status: 429, words: "you have 20 jobs queued or running".into() })));
+        // A peer that is no longer paired: the room is asked again instead.
+        let mut unpaired = copy_job(14, "text:late train verse", None, "failed", B, serde_json::Value::Null);
+        unpaired.error = Some("this server is no longer paired with that peer".into());
+        app.taste.keep.book.jobs.insert(14, unpaired);
+        let effects = app.copies_act(14);
+        assert!(starts(&effects).is_empty());
+        assert_eq!(taste_ask(&effects, TastePart::Main).0 > 0, true, "{effects:?}");
+    }
+
+    #[test]
+    fn open_elsewhere_asks_on_open_and_keeps_https_links_only() {
+        let (mut app, _) = ready_room();
+        let late = row_at(&app, "Late Train Verse");
+        let effects = app.links_open(KeepTarget::Row { group: late.0, row: late.1 });
+        let (seq, plugin, rec) = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::PluginLinks { seq, plugin, rec, .. }) => Some((*seq, plugin.clone(), (**rec).clone())),
+                _ => None,
+            })
+            .expect("asked on open");
+        assert_eq!(plugin, "links");
+        assert_eq!(rec, app.taste.peer_row(late.0, late.1).unwrap().1.raw);
+        assert_eq!(app.taste.keep.links.as_ref().unwrap().status, LinksStatus::Asking);
+        let link = PluginLink { id: "deezer".into(), label: "Deezer".into(), url: "https://www.deezer.com/search/x".into(), kind: "search".into() };
+        let generation = app.session_gen();
+        app.apply_event(Event::PluginLinks { seq, generation, answer: Ok(vec![link.clone()]) });
+        assert_eq!(app.taste.keep.links.as_ref().unwrap().status, LinksStatus::Ready(vec![link]));
+        app.links_close();
+        assert!(app.taste.keep.links.is_none());
+        // Without a links plug-in: nothing asked.
+        let (mut bare, _) = keep_room(
+            serde_json::from_value(serde_json::json!({ "plugins": [{ "name": "federation-copy", "capabilities": ["acquire"], "scopes": ["song"] }], "jobs": { "allowed": true } })).unwrap(),
+            Some("copies"),
+        );
+        assert!(bare.links_open(KeepTarget::Row { group: late.0, row: late.1 }).is_empty());
+    }
+
+    #[test]
+    fn a_server_switch_drops_the_plugins_state_with_the_answer() {
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[copy_job(7, "text:late train verse", None, "running", B, serde_json::Value::Null)]);
+        open_late(&mut app);
+        app.reset_taste();
+        assert!(app.taste.keep.gate.plugins.is_none() && app.taste.keep.flow.is_none());
+        assert!(!app.keep_gate());
+        // An error clears every wait: no start stays "starting…".
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        open_late(&mut app);
+        app.keep_start();
+        app.apply_event(Event::Error("could not reach server".into()));
+        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Choose);
+        // A 401 clears no wait: a gate ask out when the session went bad
+        // would hold every later visit's back, so a reconnect lets it go.
+        let mut app = plugin_app();
+        app.taste_open();
+        assert!(app.keep_ask_gate().is_empty(), "one gate ask at a time");
+        app.apply_event(Event::Unauthorized);
+        app.connected = true;
+        app.taste_reconnected();
+        assert_eq!(gate_asks(&app.taste_open()), 1);
+    }
 }

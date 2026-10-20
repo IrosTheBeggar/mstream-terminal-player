@@ -1096,6 +1096,15 @@ impl Queue {
 pub enum MessageKind {
     Info,
     Error,
+    /// Something is under way — "copying Borrowed Tapes…" (the kit's busy
+    /// line, LightBlue: the GUI's Discover copies, discovery-page clause
+    /// 118).
+    Busy,
+    /// Something landed — "copied Late Train Verse" (Green).
+    Success,
+    /// A plain fact in the text colour — "opened Deezer" (the GUI's Open
+    /// elsewhere, discovery-page clause 141).
+    Plain,
 }
 
 #[derive(Debug, Clone)]
@@ -1120,6 +1129,7 @@ mod nav;
 mod session;
 mod sonic;
 pub(crate) mod taste;
+pub(crate) mod keep;
 
 // The row builders moved out whole (audit #61); the app and its tests
 // go on naming them exactly as they did.
@@ -2358,8 +2368,10 @@ impl App {
             self.sonic.probe = false;
             self.refresh_sonic_rows();
         }
-        // The Discover room's probe and its parts, for the same reason.
+        // The Discover room's probe and its parts, for the same reason —
+        // and its plug-ins' asks.
         self.clear_taste_waits();
+        self.clear_keep_waits();
         // So does the full-screen Discover panel. Its wait is only ever
         // cleared by a matching reply, and `refresh_now_discover` will not
         // re-ask while an entry for this seed exists — so an error left it
@@ -4567,6 +4579,9 @@ impl App {
         effects.extend(self.reconcile_tunnels(now));
         effects.extend(self.probe_stall(now));
         effects.extend(self.stats_flush_due(now));
+        // The Discover room's copies, polled while one is live and shown
+        // (discovery-page clause 112).
+        effects.extend(self.keep_tick(now));
         effects
     }
 
@@ -5652,6 +5667,15 @@ impl App {
             // The GUI's Discover room keeps its own replies (clause 31's
             // guards live there).
             event @ (Event::Taste { .. } | Event::TasteAlbum { .. }) => self.consume_taste(event),
+            // Its plug-ins too (clauses 100–149): never an `Event::Error`.
+            event @ (Event::KeepGate { .. }
+            | Event::JobsLookup { .. }
+            | Event::Jobs { .. }
+            | Event::JobStarted { .. }
+            | Event::JobCancelled { .. }
+            | Event::JobsCleared { .. }
+            | Event::PluginLinks { .. }
+            | Event::KeepFacts { .. }) => self.consume_keep(event),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just

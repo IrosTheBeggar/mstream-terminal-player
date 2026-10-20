@@ -312,6 +312,9 @@ fn connect_message(app: &App, area: Rect) -> Vec<Line<'static>> {
     let style = match message.kind {
         MessageKind::Error => Style::new().fg(Color::Red),
         MessageKind::Info => Style::new().fg(dim()),
+        MessageKind::Busy => Style::new().fg(accent()),
+        MessageKind::Success => Style::new().fg(Color::Green),
+        MessageKind::Plain => Style::new(),
     };
     wrap(&message.text, MESSAGE_WIDTH.min(area.width as usize))
         .into_iter()
@@ -2373,6 +2376,9 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
                 match m.kind {
                     MessageKind::Error => Style::new().fg(Color::Red),
                     MessageKind::Info => Style::new().fg(dim()),
+                    MessageKind::Busy => Style::new().fg(accent()),
+                    MessageKind::Success => Style::new().fg(Color::Green),
+                    MessageKind::Plain => Style::new(),
                 },
             ),
             None => Span::styled(
@@ -3198,6 +3204,7 @@ mod tests {
             stats: true,
             discovery_taste: 0,
             discovery_plugins: false,
+            uploads: false,
         };
         // What a real ping does on the way in: the Auto-DJ rows depend on it.
         app.dj_panel.rebuild(&app.dj, None, false);

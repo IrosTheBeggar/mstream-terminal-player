@@ -10,6 +10,11 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 
+// The discovery plug-ins — Keep a copy, Open elsewhere — in a file of
+// their own (discovery-page clauses 100–149).
+mod plugins;
+pub use plugins::*;
+
 /// Accept an explicit JSON `null` where the server documents a nullable object,
 /// yielding `T::default()` instead of failing the whole response.
 fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
@@ -77,8 +82,11 @@ pub struct Ping {
     pub transcode: Option<TranscodeInfo>,
     #[serde(rename = "noFileModify")]
     pub no_file_modify: bool,
+    /// Uploads are off for this caller (the server's switch OR the user's
+    /// right). `None` when the server does not say — which, like every
+    /// flag here, grants nothing ([`Capabilities::uploads`]).
     #[serde(rename = "noUpload")]
-    pub no_upload: bool,
+    pub no_upload: Option<bool>,
 
     // Discovery features. All are off by default in mStream, and an older
     // server omits the field entirely — which `#[serde(default)]` turns into
@@ -168,7 +176,7 @@ pub struct LayeredUser {
     #[serde(rename = "noFileModify")]
     pub no_file_modify: bool,
     #[serde(rename = "noUpload")]
-    pub no_upload: bool,
+    pub no_upload: Option<bool>,
     #[serde(rename = "federationDiscovery")]
     pub federation_discovery: bool,
     #[serde(rename = "federationBrowse")]
@@ -288,8 +296,15 @@ pub struct Capabilities {
     /// the room asks `>= 1` (discovery-page contract, clause 1), a later
     /// body key a higher floor.
     pub discovery_taste: u32,
-    /// Recommendation rows have plug-in actions (discovery-page clause 63).
+    /// Recommendation rows have plug-in actions: the Discover room's Keep a
+    /// copy and Open elsewhere (discovery-page clause 101).
     pub discovery_plugins: bool,
+    /// The account may put files on this server — the ping's `noUpload`
+    /// false (the server's switch OR the user's right). A copy is an
+    /// upload, so Keep a copy is hidden without it (clause 101). Off until
+    /// a ping says otherwise, like every flag here, and off in a peer
+    /// session.
+    pub uploads: bool,
 }
 
 impl Capabilities {
@@ -313,6 +328,7 @@ impl From<&Ping> for Capabilities {
             stats: ping.stats.is_some(),
             discovery_taste: ping.discovery_taste,
             discovery_plugins: ping.discovery_plugins,
+            uploads: ping.no_upload == Some(false),
         }
     }
 }
@@ -1454,9 +1470,16 @@ pub struct LeadPeer {
 /// still lists.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TasteLead {
+    /// The TRACK artist.
     pub artist: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
+    /// The album's own credit when the row carries one (mStream's
+    /// `albumArtist`, 2026-10-19: a compilation's "Various Artists"), so a
+    /// connected server's album strip groups a compilation as one tile and
+    /// its album copy takes the whole album (discovery-page clauses 45 and
+    /// 104). `None` from an older server, or blank.
+    pub album_artist: Option<String>,
     pub year: Option<i32>,
     /// Seconds, when the row carries one.
     pub duration: Option<f64>,
@@ -1518,6 +1541,7 @@ impl TasteLead {
             artist: text("artist"),
             title: text("title"),
             album: text("album"),
+            album_artist: text("albumArtist").filter(|a| !a.trim().is_empty()),
             year: number("year").filter(|y| y.is_finite()).map(|y| y as i32),
             duration: number("duration").filter(|d| d.is_finite() && *d > 0.0),
             similarity: number("similarity").filter(|s| s.is_finite()).unwrap_or(0.0),
@@ -2038,7 +2062,7 @@ mod tests {
         assert!(ping.federation_browse && ping.federation_direct && !ping.federation_discovery);
         assert_eq!(ping.stats, Some(2), "the Stats API's version rides `features`");
         assert!(ping.discovery && ping.discovery_path && !ping.discovery_p2p);
-        assert!(ping.no_upload && !ping.no_file_modify);
+        assert!(ping.no_upload == Some(true) && !ping.no_file_modify);
         assert_eq!(ping.transcode.as_ref().and_then(|t| t.default_codec.clone()).as_deref(), Some("opus"));
 
         // A guest's answer over the peer's own tunnel: no transcode, one library.
@@ -2163,6 +2187,7 @@ mod tests {
                 stats: false,
                 discovery_taste: 0,
                 discovery_plugins: false,
+                uploads: false,
             }
         );
         assert_eq!(caps.enabled_names(), vec!["similarity", "sonic journey"]);
