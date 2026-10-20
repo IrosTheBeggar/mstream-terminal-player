@@ -1207,10 +1207,11 @@ pub(super) fn card_layout(page: &Page, card: &CardView, content_w: u16) -> Vec<R
         links.push((t!("dev.card.link_eject").to_string(), Act::CardEject));
     }
     rows.push(Row::Blank);
-    // Under its gate or its sheet the card's primary isn't drawn: a modal
-    // shorter than the card would leave half a button showing.
-    let modal = page.card.gate.is_some() || page.card.sheet.is_some();
-    let primary = primary.filter(|_| !modal).map(|p| {
+    // Under its gate or its sheet the card keeps its rows, as the design
+    // draws it, and its primary keeps its place undrawn: a modal shorter
+    // than the card leaves no half a button showing.
+    let covered = page.card.gate.is_some() || page.card.sheet.is_some();
+    let primary = primary.map(|p| {
         let word = p.word();
         match page.lock.as_ref() {
             Some(_) if !locked => (word, false, None),
@@ -1221,9 +1222,9 @@ pub(super) fn card_layout(page: &Page, card: &CardView, content_w: u16) -> Vec<R
             None => (format!("{word} {}", g.forward), true, None),
         }
     });
-    rows.push(Row::Actions { links: give_way(links, primary.as_ref(), content_w), primary });
+    rows.push(Row::Actions { links: give_way(links, primary.as_ref(), content_w), primary, covered });
     if page.details {
-        rows.extend(details_rows(card));
+        rows.extend(details_rows(card, w));
     }
     rows.push(Row::Blank);
     rows
@@ -1274,26 +1275,12 @@ fn give_way(
     links
 }
 
-/// Details (clause 44): the facts, then the transfer's log.
-fn details_rows(card: &CardView) -> Vec<Row> {
+/// Details (clause 44): the facts, a line each in the value column's `w`
+/// cells, then the transfer's log.
+fn details_rows(card: &CardView, w: u16) -> Vec<Row> {
     let mut rows = vec![Row::Rule];
     let fact = |label: String, value: String| Row::Fact { label, value, style: Style::default() };
-    let v = &card.found.volume;
-    // In the locale's words, a piece at a time: a card may lack its size,
-    // its clusters or its serial.
-    let table = v.table.name().to_uppercase();
-    let fs = t!("dev.card.head_on", fs = v.fs.name(), table = table).to_string();
-    let mut drive = vec![card.drive(), fs];
-    if let Some(space) = v.space {
-        drive.push(size_words(space.size));
-        if space.cluster > 0 {
-            drive.push(t!("dev.card.fact_drive_kb", kb = space.cluster / 1024).to_string());
-        }
-    }
-    if let Some(serial) = &v.serial {
-        drive.push(serial.to_string());
-    }
-    rows.push(fact(t!("dev.card.fact_drive").to_string(), drive.join(" · ")));
+    rows.push(fact(t!("dev.card.fact_drive").to_string(), drive_fact(card, w)));
     if let Some(facts) = card.facts() {
         if let Some((id, generation, _)) = facts.root {
             let version = facts.producer.rsplit(' ').next().unwrap_or_default().to_string();
@@ -1307,11 +1294,7 @@ fn details_rows(card: &CardView) -> Vec<Row> {
         rows.push(fact(t!("dev.card.label_server").to_string(), server));
         if let Some(plan) = plan_of(card).filter(|p| !p.removals.is_empty()) {
             let more = plan.removals.len() - 1;
-            let words = if more == 0 {
-                plan.removals[0].clone()
-            } else {
-                t!("dev.card.fact_removes_v", path = plan.removals[0].clone(), n = fmt_count(more as u64)).to_string()
-            };
+            let words = if more == 0 { plan.removals[0].clone() } else { removes_fact(&plan.removals[0], more, w) };
             rows.push(fact(t!("dev.card.fact_removes").to_string(), words));
         }
         if let Some(tally) = plan_of(card).and_then(|p| p.tally.as_ref()) {
@@ -1345,6 +1328,48 @@ fn details_rows(card: &CardView) -> Vec<Row> {
         rows.push(Row::Link { wide: true, text, act: Act::CardSyncAgain, note: None });
     }
     rows
+}
+
+/// The Drive fact in `w` cells, in the locale's words a piece at a time (a
+/// card may lack its size, its clusters or its serial). Short of cells (a
+/// volume's long name, on Linux or macOS) its serial gives way first, then
+/// its clusters, each whole, never cut (clause 44).
+fn drive_fact(card: &CardView, w: u16) -> String {
+    let v = &card.found.volume;
+    let table = v.table.name().to_uppercase();
+    let fs = t!("dev.card.head_on", fs = v.fs.name(), table = table).to_string();
+    let mut drive = vec![card.drive(), fs];
+    // The pieces that give way, the last first.
+    let mut spare = Vec::new();
+    if let Some(space) = v.space {
+        drive.push(size_words(space.size));
+        if space.cluster > 0 {
+            spare.push(t!("dev.card.fact_drive_kb", kb = space.cluster / 1024).to_string());
+        }
+    }
+    if let Some(serial) = &v.serial {
+        spare.push(serial.to_string());
+    }
+    loop {
+        let words = drive.iter().chain(&spare).map(String::as_str).collect::<Vec<_>>().join(" · ");
+        if kit::width(&words) <= usize::from(w) || spare.pop().is_none() {
+            return words;
+        }
+    }
+}
+
+/// The Removes fact in `w` cells: the first path and how many more. Short
+/// of cells the path gives way, cut with an ellipsis, never the count
+/// (clause 44).
+fn removes_fact(path: &str, more: usize, w: u16) -> String {
+    let n = fmt_count(more as u64);
+    let words = |path: &str| t!("dev.card.fact_removes_v", path = path, n = n.as_str()).to_string();
+    let whole = words(path);
+    let over = kit::width(&whole).saturating_sub(usize::from(w));
+    if over == 0 {
+        return whole;
+    }
+    words(&fit(path, kit::width(path).saturating_sub(over)))
 }
 
 // ── The board's card line (clause 20a) ──────────────────────────────────────
@@ -2227,13 +2252,18 @@ fn fit_line(fit: &Fit, size: u64) -> (Vec<(String, Style)>, Option<String>) {
 
 /// The help line's words, about the focused row (clause 48).
 fn sheet_help(sheet: &CardSheet, server: &str) -> String {
-    match sheet.row() {
+    row_help(&sheet.row(), &sheet.offered, server)
+}
+
+/// The help about `row`, its library's size from what the server `offered`.
+pub(super) fn row_help(row: &SRow, offered: &[(String, Option<(usize, u64)>)], server: &str) -> String {
+    match row {
         SRow::Name => t!("dev.card.help_name").to_string(),
         SRow::Removals => t!("dev.card.help_removals", server = server).to_string(),
         SRow::Into => t!("dev.card.help_into", server = server).to_string(),
         SRow::Player => t!("dev.card.help_player").to_string(),
         SRow::Library(lib) => {
-            let size = sheet.offered.iter().find(|(l, _)| *l == lib).and_then(|(_, s)| *s);
+            let size = offered.iter().find(|(l, _)| l == lib).and_then(|(_, s)| *s);
             match size {
                 Some((n, _)) => {
                     t!("dev.card.help_lib_short", lib = lib, server = server, n = fmt_count(n as u64)).to_string()
@@ -2247,6 +2277,21 @@ fn sheet_help(sheet: &CardSheet, server: &str) -> String {
     }
 }
 
+/// The help in two lines of `tw` cells, an ellipsis past them (clause 48).
+pub(super) fn help_lines(text: &str, tw: usize) -> Vec<Line<'static>> {
+    let help = wrap_spans(&[(text.to_string(), dim())], tw);
+    let more = help.len() > 2;
+    let cut = |line: Line<'static>| Line::from(Span::styled(fit(&format!("{line} …"), tw), dim()));
+    help.into_iter().take(2).enumerate().map(|(i, line)| if more && i == 1 { cut(line) } else { line }).collect()
+}
+
+/// The sheet's width in an area `area_w` cells wide (the kit's modal: 74,
+/// the area's less four), and its text's inside its border and padding.
+pub(super) fn sheet_widths(area_w: u16) -> (u16, u16) {
+    let width = GATE_W.min(area_w.saturating_sub(4));
+    (width, width.saturating_sub(4))
+}
+
 /// The sheet's rows' height, its tallest state: its top is held there.
 const CARD_SHEET_MAX: u16 = 22;
 
@@ -2255,7 +2300,7 @@ const CARD_SHEET_MAX: u16 = 22;
 pub(super) fn draw_card_sheet(frame: &mut Frame, page: &mut Page, area: Rect) {
     let Some(sheet) = page.card.sheet.clone() else { return };
     let Some(card) = page.open_card() else { return };
-    let width = GATE_W.min(area.width.saturating_sub(4));
+    let (width, text_w) = sheet_widths(area.width);
     if width < 24 || area.height < 8 {
         return;
     }
@@ -2267,7 +2312,6 @@ pub(super) fn draw_card_sheet(frame: &mut Frame, page: &mut Page, area: Rect) {
         .and_then(|id| servers.iter().find(|s| &s.id == id))
         .map(|s| s.name.clone())
         .unwrap_or_else(|| server_name(&card));
-    let text_w = width.saturating_sub(4);
     let tw = usize::from(text_w);
     let g = glyphs();
     // The lines: (text pieces, its row's act, whether it is the keyboard's).
@@ -2402,12 +2446,7 @@ pub(super) fn draw_card_sheet(frame: &mut Frame, page: &mut Page, area: Rect) {
         _ => {}
     }
     lines.push(L::Rule);
-    let help = wrap_spans(&[(sheet_help(&sheet, &server), dim())], tw);
-    let more = help.len() > 2;
-    for (i, line) in help.into_iter().take(2).enumerate() {
-        let line = if more && i == 1 { Line::from(Span::styled(fit(&format!("{line} …"), tw), dim())) } else { line };
-        lines.push(L::Help(line));
-    }
+    lines.extend(help_lines(&sheet_help(&sheet, &server), tw).into_iter().map(L::Help));
     lines.push(L::Buttons);
     // The frame takes at most two rows short of the area (kit::modal_rect), and
     // its own two borders.

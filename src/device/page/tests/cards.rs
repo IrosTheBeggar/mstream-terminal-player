@@ -94,7 +94,7 @@ fn a_card_alone_is_its_view_card_03s_rows_with_no_tab_row() {
     press(&mut page, KeyCode::Char('d'));
     let frame = window(&mut page);
     assert!(frame.contains("Drive         E: · FAT32 on MBR · 63.8 GB · 32 KB clusters · 1A2B-3C4D"), "{frame}");
-    assert!(frame.contains("Card          id 5eedc0de0a1b2c3d · revision 42 · mStream Player 0.14.0"), "{frame}");
+    assert!(frame.contains("Card          id 5eedc0de0a1b2c3d · rev. 42 · mStream Player 0.14.0"), "{frame}");
     assert!(frame.contains("Server        Home · signed in on this computer"), "{frame}");
     assert!(frame.contains("Removes       Velvet Static/Harbour Songs/04 - Low Tide.flac and 1 more"), "{frame}");
     assert!(frame.contains("Player        Core2 0.12.0: mp3,flac,opus · Auto DJ 2 · play log"), "{frame}");
@@ -105,18 +105,209 @@ fn a_card_alone_is_its_view_card_03s_rows_with_no_tab_row() {
 fn details_drive_row_is_in_the_locales_words() {
     // Its file system, table, size and clusters were English in every
     // locale; a size is in the locale's unit (Go in French, whose row is
-    // cut at its serial).
+    // whole now, under a label that is no longer the player's, Lecteur).
     let rows = [
         ("de", "Laufwerk      E: · FAT32 auf MBR · 63.8 GB · 32-KB-Cluster · 1A2B-3C4D"),
-        ("fr", "Lecteur       E: · FAT32 sur MBR · 63.8 Go · clusters de 32 Ko · "),
+        ("fr", "Volume        E: · FAT32 sur MBR · 63.8 Go · cluster 32 Ko · 1A2B-3C4D"),
     ];
     for (code, drive) in rows {
         let _in = crate::setup::tests::in_locale(code);
         let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
         press(&mut page, KeyCode::Char('d'));
         let frame = window(&mut page);
-        assert!(frame.contains(drive), "{code}:
-{frame}");
+        assert!(frame.contains(drive), "{code}:\n{frame}");
+    }
+}
+
+/// The longest names a server realistically goes by here (the config's
+/// `display_name`): an address with its scheme and port, one word a line
+/// can't break, and Quick Connect's, its id's first 12 characters.
+const LONG_SERVERS: [&str; 2] = ["https://192.168.100.200:3000", "quick connect · 0123456789ab"];
+
+#[test]
+fn every_locales_help_keeps_to_its_two_lines_at_the_floor_and_on_the_console() {
+    // Clause 48: the help under the rule is two lines, an ellipsis past
+    // them. With the longest server names, a library's name of 23 cells and
+    // six digits of tracks, no row's help needs the ellipsis in any
+    // language, in the sheet at the GUI's floor (70 cells of text) or on
+    // the console (64); nor does a line start with a mark a space sets
+    // apart (French's colon, Russian's dash).
+    let lib = "Classical Music Archive";
+    let offered = vec![(lib.to_string(), Some((123_456, 1_234_500_000_000))), ("Live".to_string(), None)];
+    let rows = [
+        card::SRow::Name,
+        card::SRow::From,
+        card::SRow::Library(lib.into()),
+        card::SRow::Library("Live".into()),
+        card::SRow::PeerLibrary(4, lib.into()),
+        card::SRow::Convert,
+        card::SRow::Into,
+        card::SRow::Removals,
+        card::SRow::Covers,
+        card::SRow::AutoDj,
+        card::SRow::For,
+        card::SRow::Player,
+        card::SRow::Budget,
+        card::SRow::Buttons,
+    ];
+    for (code, _) in crate::setup::LANGS {
+        let _in = crate::setup::tests::in_locale(code);
+        for (area_w, tw) in [(100, 70), (MIN_W, 64)] {
+            assert_eq!(usize::from(card::sheet_widths(area_w).1), tw, "the sheet's text at {area_w} columns");
+            for server in LONG_SERVERS {
+                for row in &rows {
+                    let text = card::row_help(row, &offered, server);
+                    assert!(!text.contains("dev."), "{code}: {row:?} has no words");
+                    let lines: Vec<String> = card::help_lines(&text, tw).iter().map(|l| l.to_string()).collect();
+                    let whole = wrap_spans(&[(text.clone(), dim())], tw).len() <= 2;
+                    assert!(whole, "{code}, {row:?} in {tw} cells runs past its two lines: {lines:?}");
+                    for line in &lines {
+                        assert!(kit::width(line) <= tw, "{code}, {row:?} in {tw} cells: {line:?}");
+                        let first = line.chars().next();
+                        let set_apart = matches!(first, Some(':' | ';' | '!' | '?' | '—' | '–'));
+                        assert!(!set_apart, "{code}, {row:?} in {tw} cells starts a line with a mark: {lines:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The ready card on `drive` with the longest values a card realistically
+/// shows in Details: a 1 TB card in 64 KB clusters, its revision in four
+/// digits, filled from `server`, a month of plays to send, the player's
+/// every codec, and a removal's long path among 1,235.
+fn longest(drive: &str, server: &str, now: u64) -> CardView {
+    cards::with(cards::ready(drive, now), |v| {
+        if let Some(space) = v.found.volume.space.as_mut() {
+            space.size = 1_000_200_000_000;
+            space.cluster = 64 * 1024;
+        }
+        let facts = cards::facts(v);
+        facts.root = Some((0x5EED_C0DE_0A1B_2C3D, 4_821, 7));
+        facts.nickname = server.into();
+        let txt = b"contract=1\nfirmware=0.12.0\nread.mpdj=2\ncodecs=mp3,flac,opus,wav\nhistory=1\n";
+        facts.device = crate::device::card::contract::device_txt::DeviceTxt::read(Some(txt));
+        if let Next::Plan(plan) = &mut v.next {
+            let long = "Velvet Static/Harbour Songs (Deluxe Edition)/04 - Low Tide (Extended Mix).flac".to_string();
+            plan.removals = std::iter::once(long).chain((0..1_234).map(|i| format!("x/{i}.flac"))).collect();
+            let tally = crate::device::card::history::Tally { owed: 1_234, clock: 99, own: 1_234, ..Default::default() };
+            plan.tally = Some(tally);
+        }
+    })
+}
+
+#[test]
+fn every_locales_facts_keep_to_their_line_with_the_longest_values() {
+    // Details' facts are a line each in the value column (clause 44): with
+    // the longest values, every fact is whole in every language, but where
+    // a value of its own runs long: Removes' path gives way before its
+    // count, and a volume's long name (Linux, macOS) takes the Drive fact's
+    // serial, then its clusters, never cutting a piece.
+    let now = now();
+    let content_w = CARD_W - inset(CARD_W) * 2;
+    let w = usize::from(content_w - LABEL_W);
+    assert_eq!(w, 58, "the value column at the GUI's floor");
+    for (code, _) in crate::setup::LANGS {
+        let _in = crate::setup::tests::in_locale(code);
+        for drive in ["E:", "MSTREAM_CAR"] {
+            for server in LONG_SERVERS {
+                let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![longest(drive, server, now)]);
+                press(&mut page, KeyCode::Char('d'));
+                let view = page.open_card().expect("the card in view");
+                let facts: Vec<(String, String)> = card::card_layout(&page, &view, content_w)
+                    .into_iter()
+                    .filter_map(|row| match row {
+                        Row::Fact { label, value, .. } => Some((label, value)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(facts.len(), 6, "{code}: Drive, Card, Server, Removes, Plays, Player: {facts:?}");
+                for (label, value) in &facts {
+                    assert!(kit::width(label) < usize::from(LABEL_W), "{code}: the label {label:?}");
+                    let cells = kit::width(value);
+                    assert!(cells <= w, "{code}, {drive}, {server}: {label} is {cells} cells: {value}");
+                }
+                let [drive_f, card_f, server_f, removes, plays, player] = &facts[..] else { unreachable!() };
+                let size = t!("dev.card_size", size = "1000.2").to_string();
+                let kb = t!("dev.card.fact_drive_kb", kb = 64).to_string();
+                if drive == "E:" {
+                    let whole = format!(" · {size} · {kb} · 1A2B-3C4D");
+                    assert!(drive_f.1.starts_with("E: · ") && drive_f.1.ends_with(&whole), "{code}: {drive_f:?}");
+                } else {
+                    assert!(drive_f.1.starts_with("MSTREAM_CAR · ") && drive_f.1.contains(&size), "{code}: {drive_f:?}");
+                }
+                assert!(card_f.1.ends_with(" 0.14.0") && card_f.1.contains("4821"), "{code}: {card_f:?}");
+                let more = t!("dev.card.fact_removes_v", path = "", n = "1,234").to_string();
+                assert!(removes.1.ends_with(&more) && removes.1.starts_with("Velvet Static/"), "{code}: {removes:?}");
+                for whole in [server_f, plays, player] {
+                    assert!(!whole.1.contains('…'), "{code}: {whole:?}");
+                }
+                assert!(server_f.1.starts_with(server), "{code}: {server_f:?}");
+                assert!(player.1.contains("mp3,flac,opus,wav"), "{code}: {player:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn under_its_gate_or_its_sheet_a_card_keeps_its_rows_and_hides_its_primary() {
+    // The design draws the Card view beneath a modal at its own height
+    // (cards 05 and 06): the modal covers the card but the two cells at
+    // each side, where a taller modal shows the card's corners beside it.
+    // The card's primary keeps its rows and isn't drawn, so a modal shorter
+    // than the card leaves no half a button below it.
+    let _en = english();
+    let now = now();
+    let many: Vec<String> = (0..214).map(|i| format!("Velvet Static/Harbour Songs/{i:03} - Track.flac")).collect();
+    let planned = |change: &dyn Fn(&mut worker::Planned)| {
+        cards::with(cards::ready("E:", now), |v| {
+            if let Next::Plan(plan) = &mut v.next {
+                change(plan);
+            }
+        })
+    };
+    let removals = planned(&|p| p.removals = many.clone());
+    let half = planned(&|p| {
+        p.removals = many.clone();
+        p.guards = vec![Guard::Removals { paths: many.clone(), strong: true }];
+    });
+    let adopt = planned(&|p| p.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])]);
+    let states: [(&str, CardView, &[KeyCode]); 5] = [
+        ("settings", cards::ready("E:", now), &[KeyCode::Char('o')]),
+        ("settings, writing", cards::ready("E:", now), &[KeyCode::Char('o'), KeyCode::Right]),
+        ("removals gate", removals, &[KeyCode::Enter]),
+        ("half gate", half, &[KeyCode::Enter]),
+        ("adopt gate", adopt, &[KeyCode::Enter]),
+    ];
+    // The card's left edge: 78 cells centred in 100.
+    let left = (100 - CARD_W) / 2;
+    let corner = |buf: &Buffer, glyph: &str| (0..buf.area.height).find(|&y| buf[(left, y)].symbol() == glyph);
+    for (name, card, keys) in states {
+        for with_board in [false, true] {
+            for area in [FLOOR, WINDOW] {
+                let (mut page, _ends, _inbox, _fold) = if with_board {
+                    with_cards(Ends::up_to_date, vec![card.clone()])
+                } else {
+                    with_cards(|_| {}, vec![card.clone()])
+                };
+                if with_board {
+                    press(&mut page, KeyCode::Right);
+                }
+                let h = area.bottom() + 1;
+                let rest = hosted_at(&mut page, 100, h, area);
+                for code in keys {
+                    press(&mut page, *code);
+                }
+                assert!(page.card.gate.is_some() || page.card.sheet.is_some(), "{name}: its modal is up");
+                let modal = hosted_at(&mut page, 100, h, area);
+                let all = text_of(&modal);
+                assert_eq!(corner(&modal, "╭"), corner(&rest, "╭"), "{name}, {area:?}: the card's top:\n{all}");
+                assert_eq!(corner(&modal, "╰"), corner(&rest, "╰"), "{name}, {area:?}: the card's bottom:\n{all}");
+                assert!(text_of(&rest).contains("Sync ▸"), "{name}: the primary at rest");
+                assert!(!all.contains("Sync ▸"), "{name}, {area:?}: no primary under the modal:\n{all}");
+            }
+        }
     }
 }
 

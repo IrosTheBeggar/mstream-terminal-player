@@ -2156,8 +2156,11 @@ enum Row {
     /// at the column's right edge (clause 38).
     Next { line: Line<'static>, reset: bool },
     /// The bottom row: text buttons at the left, the primary at the right
-    /// (enabled, or the kit's disabled frame with why in a tooltip).
-    Actions { links: Vec<(String, Act)>, primary: Option<(String, bool, Option<String>)> },
+    /// (enabled, or the kit's disabled frame with why in a tooltip). Under
+    /// a gate or a sheet (`covered`) the primary keeps its rows and is not
+    /// drawn: the card beneath keeps its height, and a modal shorter than
+    /// the card shows no half a button.
+    Actions { links: Vec<(String, Act)>, primary: Option<(String, bool, Option<String>)>, covered: bool },
     /// Details' dim rule.
     Rule,
     /// A Details fact: its label, its value cut to the column.
@@ -2917,7 +2920,7 @@ fn card_layout(page: &Page, board: &Board, content_w: u16) -> Vec<Row> {
             None => (format!("{word} {}", g.forward), true, None),
         }
     });
-    rows.push(Row::Actions { links, primary });
+    rows.push(Row::Actions { links, primary, covered: false });
     if page.details {
         rows.extend(details_rows(page, board));
     }
@@ -3011,11 +3014,11 @@ fn draw_rows(frame: &mut Frame, page: &mut Page, port: &str, rows: &[Row], conte
                     text_button(frame, page, at, &words, Act::Reset);
                 }
             }
-            Row::Actions { links, primary } => {
+            Row::Actions { links, primary, covered } => {
                 let tall = primary.is_some();
                 // Half a frame is not a button: short of rows, the primary
                 // is not drawn and Enter still does what it would.
-                let whole_button = tall && bottom - y >= BUTTON_H;
+                let whole_button = tall && bottom - y >= BUTTON_H && !covered;
                 let mid = if tall { y + 1 } else { y };
                 // The links stop short of the primary: one that would run
                 // under it is not drawn, its key still works.
@@ -3189,7 +3192,7 @@ fn empty_card(frame: &mut Frame, page: &mut Page, room: Rect) {
     }
     rows.push(Row::Blank);
     let help = format!("{} {}", if page.details { g.open } else { g.forward }, t!("dev.not_showing"));
-    rows.push(Row::Actions { links: vec![(help, Act::Details)], primary: None });
+    rows.push(Row::Actions { links: vec![(help, Act::Details)], primary: None, covered: false });
     if page.details {
         rows.push(Row::Blank);
         // Today's hints, each under its bullet with its lines hung under the
