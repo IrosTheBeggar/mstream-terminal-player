@@ -1056,9 +1056,21 @@ comes from the cache, or a download, beside them.
     - **Details:** a dim rule, then the facts (Drive, Card, Server,
       Removes, Plays, Player), then the transfer's log in the page's
       grammar, then *Sync again* and *Check every file…* (the deep check).
+      A fact is one line in the value column, its words whole in every
+      locale with the longest values a card realistically shows (the
+      Deviations log's entry of 2026-10-20 names them). Where a value of
+      its own runs longer, what is the card's gives way, never the words:
+      Removes' path is cut with an ellipsis before its count ("… and 1,234
+      more"), and a volume's long name (Linux, macOS) takes the Drive
+      fact's serial, then its cluster size, each whole. Past that, the
+      line ends in an ellipsis.
 
-    A state replaces the rows it can't fill and never moves the others. The
-    primary, one or none:
+    A state replaces the rows it can't fill and never moves the others.
+    Under its gate or its sheet the card keeps the rows it has at rest,
+    its primary's place kept and the button not drawn, so the modal
+    covers the card as the set draws it (cards 05 and 06: a modal taller
+    than the card shows the card's corners beside it) and one shorter
+    leaves no half a button. The primary, one or none:
     - *Sync ▸* whenever something waits; none when the card is in step;
     - *Set up ▸* on a new card;
     - *Eject ▸* for a card the player can't read, and after Done;
@@ -1124,7 +1136,12 @@ comes from the cache, or a download, beside them.
       or the firmware last flashed), Peer budget (the volume widget).
 
     A help line under the rule explains the focused row (two lines, an
-    ellipsis past them). The buttons: *Use defaults* and *Apply*. Apply
+    ellipsis past them). Its words keep to the two lines in every locale,
+    at the GUI's floor (70 cells) and on the console's narrower sheet
+    (64), with the longest names a server realistically goes by (28
+    cells: an address with its scheme and port, or Quick Connect's name)
+    and a long library; the ellipsis is for a longer name still. The
+    buttons: *Use defaults* and *Apply*. Apply
     writes `state.json` and closes; it never syncs. Esc or `[X]` changes
     nothing. Set-up is the same sheet titled "Set up F:" with *Cancel* and
     *Set up*.
@@ -1742,8 +1759,10 @@ The cards' command-line lines are plain English, like the `plan:` line.
   The page's tests compare its English frames character for character at
   100×30, and draw every state, gate and sheet whole at 100×24 in every
   locale, as the board card's do.
-- **Words:** the set's German drafts are a start; German and French are
-  checked at the 14-cell label column and the 58-cell value column. German
+- **Words:** the set's German drafts are a start. Every locale is checked
+  at the 14-cell label column and the 58-cell value column (Details'
+  facts), and at the sheet's 70 and 64 cells of help, with the longest
+  values of the Deviations log's entry of 2026-10-20. German
   addresses the listener as *du* ("Deine eigenen Dateien bleiben", "Du
   bestätigst …"), the form `locales/de.yml` uses everywhere it addresses
   anyone (about 60 *du*-forms; no formal *Sie*: its capitalised
@@ -2440,3 +2459,67 @@ The cards' command-line lines are plain English, like the `plan:` line.
     *Drive* fact loses its serial.
   - **French names two facts *Lecteur*:** the drive (`fact_drive`) and the
     player (`row_player`).
+- **2026-10-20 — The wave-4 gate's findings fixed.** Measured with the
+  longest values a card realistically shows: a server named by 28 cells
+  (`https://192.168.100.200:3000`, one word a line can't break, and Quick
+  Connect's `quick connect · 0123456789ab`), a library of 23 cells and
+  six digits of tracks; a 1 TB card (1000.2 GB) in 64 KB clusters on
+  `E:` or under a FAT32 label's 11 cells, its revision in four digits,
+  1,234 plays to send, 99 undated and 1,234 of your own, and firmware
+  0.12.0 listing four codecs.
+  - **The help line (clause 48)** keeps to its two lines in every locale
+    at the GUI's floor (70 cells) and on the console's sheet (64), so the
+    ellipsis is left for a longer name still. Shorter words for
+    `help_name`, `help_removals`, `help_into` and `help_player` in de, es,
+    fr, it, ja, pl, pt and ru. English changed only where it was cut
+    itself: `help_player` on the console's sheet, `help_removals` past 26
+    cells of server name (14 on the console) and `help_into` past 19 on
+    the console. French ties its colons and semicolons to the word before
+    with a no-break space, and Russian its dash, so no line starts with
+    one.
+  - **Details' facts (clause 44)** are whole in the 58-cell column.
+    Shorter words where a fact ran over: `fact_drive_kb` (es, fr, it, ja,
+    pt), `fact_card_v` (de, es, fr, it, ja), `fact_plays_v` (de, es, fr,
+    it, pl), `fact_player_v` (de, es, fr, it, pl, pt, ru) and
+    `fact_signed_in` (de, es, it, ja, pl, pt, ru). English's Card fact says
+    "rev." (a four-digit revision ran it to 59 cells) and its Plays fact
+    "undated" for the plays made before the clock was set (four-digit
+    counts ran it to 63).
+  - **Two rules for the values no wording can hold,** the smallest change
+    found: Removes' path is cut before its count, and a volume's long name
+    takes the Drive fact's serial, then its cluster size, each whole
+    (clause 44). The line used to be cut at its end, which took German's
+    "weitere" and French's serial.
+  - **French's two *Lecteur*:** the drive's fact is *Volume* now; the
+    player keeps *Lecteur*.
+  - **The card under its gate or sheet.** The set draws the Card view
+    beneath a modal at its height at rest, its corners beside a taller
+    modal (card 05's sheets at 100×30, card 06's German gates at the
+    floor). The build hid the primary and dropped its three rows with it,
+    so the card stood two rows short and its corners rose into the
+    modal's text. It keeps its rows now and only the button is not drawn
+    (`Row::Actions`' `covered`), which supersedes part B4's entry ("its
+    primary is not drawn under it"): a modal shorter than the card still
+    shows no half a button, and the floor's frames stay whole.
+  - **Not changed: the command line's "GB free" and "KB clusters"** (`device
+    card status`; `device format`'s done line). The cards' command-line
+    lines are plain English, lines a script reads (clauses 64–67 and the
+    Wording section), and those commands never set a locale, so `t!`
+    would print the same English; two translated fragments would only
+    mix the languages of one line. Speaking the locale on the command line
+    would be a change to the contract for all its lines.
+  - **Tests:** every locale's help for every row at both widths (no line
+    starting with a mark a space sets apart), every locale's facts with
+    the values above on a drive letter and on a long volume name, and the
+    card's corners where they are at rest under each of its modals, at
+    the floor and at 100×30, with no primary drawn.
+  - **For the native review:** the 62 rewritten values in the eight
+    languages above (de 8, es 9, fr 9, it 9, ja 7, pl 7, pt 7, ru 6),
+    among them "6.32+" (es, fr, pl, pt), "ab 6.32" (de) and "dalla 6.32"
+    (it) for "6.32 or later", and the shorter words for the revision
+    (Rev., rev., rév., 改訂).
+  - **Found, not changed:** French `fact_removes_v` says "et 1 autres" for
+    one (a plural that bends, against the Translation notes' rule), and
+    the wrap may start a Japanese or Chinese line with "。", since it
+    breaks those languages at any cell (Japanese Removals help with a
+    short server name at 64 cells).
