@@ -1385,19 +1385,70 @@ pub(crate) mod stub {
         }
     }
 
+    /// A link of `total` bytes a second that no one connection takes more
+    /// than `each` of: a LAN as one stream and three measured it. Answers go
+    /// out in pieces of [`Pace::PIECE`], each when both clocks allow it, so
+    /// a late wake-up is made up by the pieces after it.
+    pub(crate) struct Pace {
+        each: f64,
+        total: f64,
+        /// When the link is free next.
+        link: std::sync::Mutex<std::time::Instant>,
+    }
+
+    impl Pace {
+        const PIECE: usize = 16 * 1024;
+
+        pub(crate) fn new(each: f64, total: f64) -> std::sync::Arc<Pace> {
+            let link = std::sync::Mutex::new(std::time::Instant::now());
+            std::sync::Arc::new(Pace { each, total, link })
+        }
+
+        fn send(&self, sock: &mut std::net::TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+            let until = |t: std::time::Instant| {
+                let now = std::time::Instant::now();
+                if t > now {
+                    std::thread::sleep(t - now);
+                }
+            };
+            let mut mine = std::time::Instant::now();
+            for piece in bytes.chunks(Pace::PIECE) {
+                until(mine);
+                let at = {
+                    let mut free = self.link.lock().unwrap_or_else(|e| e.into_inner());
+                    let at = (*free).max(std::time::Instant::now());
+                    *free = at + Duration::from_secs_f64(piece.len() as f64 / self.total);
+                    at
+                };
+                until(at);
+                sock.write_all(piece)?;
+                mine = mine.max(at) + Duration::from_secs_f64(piece.len() as f64 / self.each);
+            }
+            Ok(())
+        }
+    }
+
     /// A server whose answers depend on the request, not its turn: every
     /// connection on a thread of its own, its one request handed to
     /// `answer`, whose bytes go back before the connection closes. For
     /// requests that come in no set order (a run's, made on several
     /// threads). It serves until the test process ends.
     pub(crate) fn routed(answer: impl Fn(&Asked) -> Vec<u8> + Send + Sync + 'static) -> String {
+        routed_at(None, answer)
+    }
+
+    /// [`routed`], its answers sent at `pace`.
+    pub(crate) fn routed_at(
+        pace: Option<std::sync::Arc<Pace>>,
+        answer: impl Fn(&Asked) -> Vec<u8> + Send + Sync + 'static,
+    ) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
         let answer = std::sync::Arc::new(answer);
         std::thread::spawn(move || {
             for sock in listener.incoming() {
                 let Ok(mut sock) = sock else { continue };
-                let answer = answer.clone();
+                let (answer, pace) = (answer.clone(), pace.clone());
                 std::thread::spawn(move || {
                     let mut request = Vec::new();
                     let mut buf = [0u8; 8192];
@@ -1434,7 +1485,11 @@ pub(crate) mod stub {
                         headers,
                         body: request[head_end..].to_vec(),
                     };
-                    let _ = sock.write_all(&answer(&asked));
+                    let bytes = answer(&asked);
+                    let _ = match &pace {
+                        Some(pace) => pace.send(&mut sock, &bytes),
+                        None => sock.write_all(&bytes),
+                    };
                     let _ = sock.flush();
                 });
             }

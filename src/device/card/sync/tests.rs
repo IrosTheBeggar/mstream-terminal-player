@@ -1323,5 +1323,6 @@ fn the_hidden_command_syncs_only_a_volume_the_rule_accepts() {
     assert_eq!(sim.image(), image, "nothing reached the card");
 }
 
+mod bench;
 mod peers;
 mod span;
