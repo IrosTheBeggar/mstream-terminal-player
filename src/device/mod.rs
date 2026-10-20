@@ -992,8 +992,12 @@ fn format_on(
     match result {
         Ok(done) => {
             let took = desk::took_text(done.took);
-            let (size, free, kb) = (gb(done.size), gb(done.free), done.cluster / 1024);
-            let card = format!("{size} GB, {free} GB free, {kb} KB clusters");
+            // The card in the Card view's words, English as the command
+            // line sets no locale (clause 67).
+            let size = t!("dev.card_size", size = gb(done.size));
+            let free = t!("dev.card_free", free = gb(done.free));
+            let kb = t!("dev.card.fact_drive_kb", kb = done.cluster / 1024);
+            let card = format!("{size}, {free}, {kb}");
             let _ = writeln!(out, "Formatted {name}'s card as FAT32 in {took}: {card}.");
             let _ = writeln!(out, "Next: put it in this computer's card reader to fill it (device cards).");
             0

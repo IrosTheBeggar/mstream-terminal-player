@@ -46,6 +46,7 @@ fn to_takes_the_into_lists_codecs_and_no_other() {
 
 #[test]
 fn a_cards_line_says_its_drive_name_volume_server_and_next_sync_or_why_not() {
+    let _en = crate::setup::tests::in_locale("en");
     let line = card_line(&f::ready("E:", now()));
     let want = "E: · Car music · 63.8 GB FAT32 · Home · 4,812 tracks · last sync ";
     assert!(line.starts_with(want), "{line}");
@@ -69,6 +70,7 @@ fn a_cards_line_says_its_drive_name_volume_server_and_next_sync_or_why_not() {
 
 #[test]
 fn status_prints_the_card_views_facts_as_key_value_rows() {
+    let en = crate::setup::tests::in_locale("en");
     let rows = facts_rows(&f::ready("E:", now()));
     let get = |key: &str| rows.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()).unwrap_or_default();
     assert_eq!(get("drive"), "E:");
@@ -86,6 +88,13 @@ fn status_prints_the_card_views_facts_as_key_value_rows() {
     assert_eq!(get("player"), "Core2 0.12.0: mp3,flac,opus (its device.txt)");
     // Every key fits its column: one space at least before its value.
     assert!(rows.iter().all(|(k, _)| k.len() < KEY_W), "{rows:?}");
+    drop(en);
+    // The card's sizes are the Card view's words, so a locale set would
+    // reach them too; the command line sets none, and prints the English.
+    let _de = crate::setup::tests::in_locale("de");
+    let rows = facts_rows(&f::ready("E:", now()));
+    let volume = rows.iter().find(|(k, _)| *k == "volume").map(|(_, v)| v.clone()).unwrap_or_default();
+    assert_eq!(volume, "63.8 GB FAT32 · 22.6 GB frei · 32-KB-Cluster");
 }
 
 #[test]

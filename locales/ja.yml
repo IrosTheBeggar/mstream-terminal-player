@@ -2487,7 +2487,7 @@ dev:
     fact_drive: "ドライブ"
     fact_removes: "削除"
     fact_drive_kb: "%{kb} KB クラスタ"
-    fact_card_v: "id %{id} · 改訂 %{rev} · mStream Player %{version}"
+    fact_card_v: "id %{id} · rev. %{rev} · mStream Player %{version}"
     fact_signed_in: "この PC でサインイン済み"
     fact_reached_direct: "直接接続"
     fact_removes_v: "%{path} ほか %{n}"

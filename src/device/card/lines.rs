@@ -5,7 +5,9 @@
 //! so the plan, the gates and the run are the tab's own. Each gate is a
 //! flag that names what it lets through, never merely "yes" (clause 65);
 //! the lines are plain English whatever the locale, as `device list`'s
-//! are: lines a script reads (clause 67).
+//! are: lines a script reads (clause 67). A card's sizes are the Card
+//! view's words (`dev.card_size`, `dev.card_free`, `dev.card.fact_drive_kb`),
+//! which the command line, setting no locale, prints in English.
 //!
 //! Exit codes: 0 done; 1 refused (a gate its flag didn't let through, no
 //! `--yes`, nothing to sync from) or failed; 2 the volumes can't be listed,
@@ -16,6 +18,8 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
+
+use rust_i18n::t;
 
 use super::engine::Removal;
 use super::plan::TRACK_CAP;
@@ -287,7 +291,8 @@ fn card_line(card: &CardView) -> String {
     parts.join(" · ")
 }
 
-/// `63.8 GB FAT32`, `128.0 GB exFAT on GPT`.
+/// `63.8 GB FAT32`, `128.0 GB exFAT on GPT`. The size is the Card view's
+/// words (`dev.card_size`), English as the command line sets no locale.
 fn volume_words(card: &CardView) -> String {
     let v = &card.found.volume;
     let mut words = v.fs.name().to_string();
@@ -295,7 +300,7 @@ fn volume_words(card: &CardView) -> String {
         words.push_str(" on GPT");
     }
     match v.space {
-        Some(space) => format!("{} GB {words}", gb(space.size)),
+        Some(space) => format!("{} {words}", t!("dev.card_size", size = gb(space.size))),
         None => words,
     }
 }
@@ -502,8 +507,13 @@ fn facts_rows(card: &CardView) -> Vec<(&'static str, String)> {
     let v = &card.found.volume;
     let mut rows = vec![("drive", card.drive())];
     let mut volume = volume_words(card);
+    // The free space and the clusters in the Card view's words (its Space
+    // row's and its Drive fact's), English as the command line sets no
+    // locale (clause 67).
     if let Some(space) = v.space {
-        volume.push_str(&format!(" · {} GB free · {} KB clusters", gb(space.free), space.cluster / 1024));
+        let free = t!("dev.card_free", free = gb(space.free));
+        let kb = t!("dev.card.fact_drive_kb", kb = space.cluster / 1024);
+        volume.push_str(&format!(" · {free} · {kb}"));
     }
     rows.push(("volume", volume));
     let facts = match &card.read {

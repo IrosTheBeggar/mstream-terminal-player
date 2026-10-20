@@ -129,9 +129,11 @@ fn every_locales_help_keeps_to_its_two_lines_at_the_floor_and_on_the_console() {
     // Clause 48: the help under the rule is two lines, an ellipsis past
     // them. With the longest server names, a library's name of 23 cells and
     // six digits of tracks, no row's help needs the ellipsis in any
-    // language, in the sheet at the GUI's floor (70 cells of text) or on
-    // the console (64); nor does a line start with a mark a space sets
-    // apart (French's colon, Russian's dash).
+    // language, in the sheet at the GUI's floor (70 cells of text) or in
+    // the console's narrower sheet (64: only the GUI shows a Card view
+    // today, so this width keeps the words ready for a page that would);
+    // nor does a line start with a mark a space sets apart (French's
+    // colon, Russian's dash).
     let lib = "Classical Music Archive";
     let offered = vec![(lib.to_string(), Some((123_456, 1_234_500_000_000))), ("Live".to_string(), None)];
     let rows = [
@@ -208,9 +210,20 @@ fn every_locales_facts_keep_to_their_line_with_the_longest_values() {
     let content_w = CARD_W - inset(CARD_W) * 2;
     let w = usize::from(content_w - LABEL_W);
     assert_eq!(w, 58, "the value column at the GUI's floor");
+    // A drive letter, a FAT32 label's 11 cells (a mount point's name on
+    // Linux or macOS), and a name longer than a label holds, for the rule
+    // alone: it takes the clusters too.
+    let drives = ["E:", "MSTREAM_CAR", "MSTREAM_CAR_MUSIC_BACKUP"];
     for (code, _) in crate::setup::LANGS {
         let _in = crate::setup::tests::in_locale(code);
-        for drive in ["E:", "MSTREAM_CAR"] {
+        // The Drive fact's pieces, the last of them the first to give way.
+        let pieces = |drive: &str| {
+            let fs = t!("dev.card.head_on", fs = "FAT32", table = "MBR").to_string();
+            let size = t!("dev.card_size", size = "1000.2").to_string();
+            let kb = t!("dev.card.fact_drive_kb", kb = 64).to_string();
+            vec![drive.to_string(), fs, size, kb, "1A2B-3C4D".to_string()]
+        };
+        for drive in drives {
             for server in LONG_SERVERS {
                 let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![longest(drive, server, now)]);
                 press(&mut page, KeyCode::Char('d'));
@@ -229,13 +242,18 @@ fn every_locales_facts_keep_to_their_line_with_the_longest_values() {
                     assert!(cells <= w, "{code}, {drive}, {server}: {label} is {cells} cells: {value}");
                 }
                 let [drive_f, card_f, server_f, removes, plays, player] = &facts[..] else { unreachable!() };
-                let size = t!("dev.card_size", size = "1000.2").to_string();
-                let kb = t!("dev.card.fact_drive_kb", kb = 64).to_string();
-                if drive == "E:" {
-                    let whole = format!(" · {size} · {kb} · 1A2B-3C4D");
-                    assert!(drive_f.1.starts_with("E: · ") && drive_f.1.ends_with(&whole), "{code}: {drive_f:?}");
-                } else {
-                    assert!(drive_f.1.starts_with("MSTREAM_CAR · ") && drive_f.1.contains(&size), "{code}: {drive_f:?}");
+                // The Drive fact keeps the most pieces that fit, each whole:
+                // the serial gives way first, then the clusters; the drive,
+                // its file system and its size stay.
+                let pieces = pieces(drive);
+                let joined = |k: usize| pieces[..k].join(" · ");
+                let kept = (3..=5).rev().find(|&k| kit::width(&joined(k)) <= w).unwrap_or(3);
+                assert_eq!(drive_f.1, joined(kept), "{code}: the Drive fact gives way a piece at a time");
+                assert!(!drive_f.1.contains('…'), "{code}: {drive_f:?}");
+                match drive {
+                    "E:" => assert_eq!(kept, 5, "{code}: whole on a drive letter: {drive_f:?}"),
+                    "MSTREAM_CAR" => assert!(kept >= 4, "{code}: a label keeps the clusters: {drive_f:?}"),
+                    _ => assert_eq!(kept, 3, "{code}: the clusters gone too: {drive_f:?}"),
                 }
                 assert!(card_f.1.ends_with(" 0.14.0") && card_f.1.contains("4821"), "{code}: {card_f:?}");
                 let more = t!("dev.card.fact_removes_v", path = "", n = "1,234").to_string();
@@ -273,17 +291,30 @@ fn under_its_gate_or_its_sheet_a_card_keeps_its_rows_and_hides_its_primary() {
         p.guards = vec![Guard::Removals { paths: many.clone(), strong: true }];
     });
     let adopt = planned(&|p| p.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])]);
-    let states: [(&str, CardView, &[KeyCode]); 5] = [
-        ("settings", cards::ready("E:", now), &[KeyCode::Char('o')]),
-        ("settings, writing", cards::ready("E:", now), &[KeyCode::Char('o'), KeyCode::Right]),
-        ("removals gate", removals, &[KeyCode::Enter]),
-        ("half gate", half, &[KeyCode::Enter]),
-        ("adopt gate", adopt, &[KeyCode::Enter]),
+    // Each with the primary at rest. A new card's Set up sheet, no library
+    // offered, is shorter than the card: its button's rows are below it.
+    let states: [(&str, CardView, &[KeyCode], &str); 6] = [
+        ("settings", cards::ready("E:", now), &[KeyCode::Char('o')], "Sync ▸"),
+        ("settings, writing", cards::ready("E:", now), &[KeyCode::Char('o'), KeyCode::Right], "Sync ▸"),
+        ("removals gate", removals, &[KeyCode::Enter], "Sync ▸"),
+        ("half gate", half, &[KeyCode::Enter], "Sync ▸"),
+        ("adopt gate", adopt, &[KeyCode::Enter], "Sync ▸"),
+        ("set up", cards::new_card("F:"), &[KeyCode::Enter], "Set up ▸"),
     ];
     // The card's left edge: 78 cells centred in 100.
     let left = (100 - CARD_W) / 2;
     let corner = |buf: &Buffer, glyph: &str| (0..buf.area.height).find(|&y| buf[(left, y)].symbol() == glyph);
-    for (name, card, keys) in states {
+    // The modal's bottom edge: a ╰ inside the card and a long rule after
+    // it, where a button's frame is a dozen cells.
+    let modal_bottom = |buf: &Buffer| {
+        (0..buf.area.height).rev().find(|&y| {
+            (left + 1..left + CARD_W - 1).any(|x| {
+                let rule = |d: u16| x + d < buf.area.width && buf[(x + d, y)].symbol() == "─";
+                buf[(x, y)].symbol() == "╰" && (1..=30).all(rule)
+            })
+        })
+    };
+    for (name, card, keys, primary) in states {
         for with_board in [false, true] {
             for area in [FLOOR, WINDOW] {
                 let (mut page, _ends, _inbox, _fold) = if with_board {
@@ -304,8 +335,17 @@ fn under_its_gate_or_its_sheet_a_card_keeps_its_rows_and_hides_its_primary() {
                 let all = text_of(&modal);
                 assert_eq!(corner(&modal, "╭"), corner(&rest, "╭"), "{name}, {area:?}: the card's top:\n{all}");
                 assert_eq!(corner(&modal, "╰"), corner(&rest, "╰"), "{name}, {area:?}: the card's bottom:\n{all}");
-                assert!(text_of(&rest).contains("Sync ▸"), "{name}: the primary at rest");
-                assert!(!all.contains("Sync ▸"), "{name}, {area:?}: no primary under the modal:\n{all}");
+                assert!(text_of(&rest).contains(primary), "{name}: the primary at rest");
+                assert!(!all.contains(primary), "{name}, {area:?}: no primary under the modal:\n{all}");
+                // Below a modal shorter than the card, its rows show no part
+                // of the button's frame.
+                let end = modal_bottom(&modal).expect("the modal's bottom edge");
+                let card_end = corner(&modal, "╰").expect("the card's bottom");
+                for y in end + 1..card_end {
+                    let row: String = (left + 1..left + CARD_W - 1).map(|x| modal[(x, y)].symbol()).collect();
+                    let framed = row.chars().any(|c| matches!(c, '╭' | '╮' | '╰' | '╯'));
+                    assert!(!framed, "{name}, {area:?}: half a button below the modal, row {y}:\n{all}");
+                }
             }
         }
     }

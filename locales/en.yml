@@ -2656,7 +2656,7 @@ dev:
     help_name: "The card's name: it names its tab here and the player's SD row. Kept on the card; no address, token or username is."
     help_removals: "What %{server} removes leaves the card at the next sync, after you've seen the list; over 50 asks first."
     help_into: "Opus is always 48 kHz and gapless on the Core2. MP3 above 192k needs mStream 6.32 or later on %{server}."
-    help_player: "No device.txt yet: this card hasn't been in a player. Opus and Auto DJ need v0.11.0 or later; an older Core2 gets MP3 and FLAC."
+    help_player: "No device.txt yet: this card hasn't been in a player. Opus and Auto DJ need v0.11.0 or later; before that, MP3 and FLAC only."
     btn_defaults: "Use defaults"
     btn_apply: "Apply"
     btn_cancel: "Cancel"

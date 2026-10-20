@@ -2494,7 +2494,7 @@ dev:
     fact_plays_v: "%{n} da inviare · %{old} senza data · %{mine} tuoi"
     fact_player_v: "%{name} %{version}: %{codecs} · Auto DJ %{adj} · cronologia"
     log_put_in: "%{drive} inserita: %{card}, revisione %{rev}, %{n} brani"
-    log_plays: "registro ascolti letto: %{n} nuovi ascolti (%{send} da inviare)"
+    log_plays: "cronologia di ascolto letta: %{n} nuovi ascolti (%{send} da inviare)"
     log_asked: "chiesto a %{server}: %{n} nuovi, %{m} tolti"
     log_kept_yours: "%{file} tenuto: modificato sulla scheda dall'ultima sincronizzazione; la copia di %{server} è accanto, %{copy}"
     set_of: "scheda %{i} di %{n}"

@@ -2494,7 +2494,7 @@ dev:
     fact_plays_v: "%{n} a enviar · %{old} de antes do relógio · %{mine} suas"
     fact_player_v: "%{name} %{version}: %{codecs} · Auto DJ %{adj} · histórico"
     log_put_in: "%{drive} inserido: %{card}, revisão %{rev}, %{n} faixas"
-    log_plays: "registo de audições lido: %{n} audições novas (%{send} a enviar)"
+    log_plays: "histórico de reprodução lido: %{n} audições novas (%{send} a enviar)"
     log_asked: "perguntado a %{server}: %{n} novas, %{m} removidas"
     log_kept_yours: "%{file} mantido: mudou no cartão desde a última sincronização; a cópia de %{server} está ao lado, %{copy}"
     set_of: "cartão %{i} de %{n}"
