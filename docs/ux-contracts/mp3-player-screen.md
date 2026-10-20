@@ -1137,11 +1137,12 @@ comes from the cache, or a download, beside them.
 
     A help line under the rule explains the focused row (two lines, an
     ellipsis past them). Its words keep to the two lines in every locale,
-    at the GUI's floor (70 cells) and on the console's narrower sheet
-    (64), with the longest names a server realistically goes by (28
-    cells: an address with its scheme and port, or Quick Connect's name)
-    and a long library; the ellipsis is for a longer name still. The
-    buttons: *Use defaults* and *Apply*. Apply
+    at the GUI's floor (70 cells) and in the console's narrower sheet
+    (64: only the GUI hosts a Card view today, so this width keeps the
+    words ready for a page that would), with the longest names a server
+    realistically goes by (28 cells: an address with its scheme and port,
+    or Quick Connect's name) and a long library; the ellipsis is for a
+    longer name still. The buttons: *Use defaults* and *Apply*. Apply
     writes `state.json` and closes; it never syncs. Esc or `[X]` changes
     nothing. Set-up is the same sheet titled "Set up F:" with *Cancel* and
     *Set up*.
@@ -1623,7 +1624,10 @@ and the caret.
 | `dev.card_fix_format` (changed) | Fix: format it as FAT32 in the player (below). That erases the whole card. |
 | `dev.none_title` (changed) | Nothing plugged in |
 
-The cards' command-line lines are plain English, like the `plan:` line.
+The cards' command-line lines are plain English, like the `plan:` line. A
+card's sizes in them are the Card view's words (`dev.card_size`,
+`dev.card_free`, `dev.card.fact_drive_kb`), which the command line,
+setting no locale, prints in English.
 
 ## Out of scope here
 
@@ -2523,3 +2527,72 @@ The cards' command-line lines are plain English, like the `plan:` line.
     the wrap may start a Japanese or Chinese line with "。", since it
     breaks those languages at any cell (Japanese Removals help with a
     short server name at 64 cells).
+- **2026-10-20 — The wave-4 fixes reviewed.** What the review of the
+  entry above found, and what changed for it:
+  - **The command line's sizes are the Card view's words**
+    (`dev.card_size`, `dev.card_free`, `dev.card.fact_drive_kb`): `device
+    card status`' volume row, the size in `device cards`' lines, and
+    `device format`'s done line. The command line sets no locale, so they
+    print the same English and clause 67 holds; `device format` already
+    printed `dev.no_device_title` and `dev.several_title` the same way.
+    This supersedes the entry above's "Not changed: the command line's
+    'GB free' and 'KB clusters'". Speaking the user's locale on the
+    command line would still be a change to the contract for all its
+    lines, and is not made.
+  - **The 64-cell sheet is not drawn for a card.** It is the console
+    page's width, and that page has no transfer worker: only the GUI
+    shows a Card view, its sheet at 70 cells. English's `help_player` and
+    `help_into` were whole at 70 and changed for the 64-cell leg alone,
+    which the brief asked of every locale. Kept, and clause 48 says why
+    the width is tested; a main session that drops the leg can restore
+    the originals: "This card has no device.txt yet: it hasn't been in a
+    player. Opus and Auto DJ need v0.11.0 or later; an older Core2 gets
+    MP3 and FLAC only." and "Opus is always 48 kHz and gapless on the
+    Core2. MP3 above 192k needs %{server}'s mStream to offer it (6.32 or
+    later)."
+  - **"Only" again in `help_player`.** The rewrite had dropped it: English
+    now ends "need v0.11.0 or later; before that, MP3 and FLAC only", and
+    the three that followed it say it too: Spanish "si no, solo MP3 y
+    FLAC", Polish "starsze: tylko MP3 i FLAC", French "Opus et Auto DJ dès
+    la v0.11.0 ; avant, MP3 et FLAC seulement".
+  - **One word for the play log in each locale.** The Player fact's
+    shorter word ended the line where the log line under it kept the
+    longer one; the log line takes the fact's word now (`log_plays`):
+    "Hörverlauf gelesen", "historial de escuchas leído", "historique
+    d'écoute lu", "cronologia di ascolto letta", "przeczytano historię
+    odtwarzania", "histórico de reprodução lido", "история прослушиваний
+    прочитана".
+  - **Rewordings for sense:** German `help_removals` says "wenn du die
+    Liste gesehen hast; ab 51 fragt er erst" (it said "once you know the
+    list"); French `help_removals` "à la synchro, une fois la liste vue ;
+    dès 51, confirmation d'abord" (a bare "liste vue", and an "il" with no
+    subject); Japanese `fact_card_v` says "rev." as English does (改訂 is
+    a revised edition); Chinese spaces "Opus 和 Auto DJ" on both sides
+    (`help_player`, and `gate_fmt_txt`, which had the same phrase).
+  - **Kept: "rev." in English.** The revision is the root's generation,
+    which counts commits, not syncs: a sync commits at least once, and a
+    long one at each checkpoint (500 files or 5 minutes), so a fourth
+    digit comes within a card's life, and "revision 1000" runs the fact
+    to 59 cells.
+  - **The no-break space** of the French and Russian help lines has a
+    glyph of its own in the window's face (Hack maps U+00A0), so the GUI
+    draws it as the frames show. The rest of fr.yml keeps a plain space
+    before its colons; only the help lines are tested for a line that
+    starts with one.
+  - **Tests:** the corners test adds a modal shorter than the card (a new
+    card's Set up sheet, no library offered) and checks every state for
+    a button's frame in the rows between the modal and the card's
+    bottom; with the primary drawn under its modal it fails (on that
+    sheet, and on the half gate beside a board at the floor). The facts
+    test checks the Drive fact a piece at a time (the most pieces that
+    fit, never an ellipsis): whole on a drive letter, its clusters kept
+    under a label's 11 cells, gone too under a name longer than a label
+    holds; a Drive fact cut at the column fails it. The command line's
+    tests hold the English locale, and its volume row in German shows
+    that the words are the Card view's.
+  - **For the native review, added:** the 16 values above (en 1, de 2,
+    es 2, fr 3, it 1, ja 1, pl 2, pt 1, ru 1, zh 2); the Plays fact's
+    "undated" (en, de, es, fr, it, pl) beside "before the clock" (ja, pt,
+    ru, zh), one meaning in two wordings. Found in passing, not changed:
+    Polish `fact_card_v` calls the revision "wersja", the word for the
+    player's version beside it.
