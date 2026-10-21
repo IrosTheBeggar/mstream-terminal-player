@@ -1092,8 +1092,11 @@ fn run(session: &mut Session, key: &str, mut allow: Allow, flags: &Flags, io: &m
                 let now = run.done_bytes.min(run.bytes) * 10 / run.bytes;
                 if now > tenth && now < 10 {
                     tenth = now;
+                    // The Card view's rate too (clause 51's "12.4 MB/s").
+                    let rate = run.rate.map(|r| format!(" · {:.1} MB/s", r / 1e6));
+                    let rate = rate.unwrap_or_default();
                     io.say(&format!(
-                        "  {} of {} files · {} of {} GB",
+                        "  {} of {} files · {} of {} GB{rate}",
                         fmt_count(run.done_files as u64),
                         fmt_count(run.files as u64),
                         gb(run.done_bytes),
