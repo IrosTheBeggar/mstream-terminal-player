@@ -2111,6 +2111,40 @@ fn a_parked_download_is_taken_up_and_a_changed_file_starts_over() {
     let _ = finished(&card);
 }
 
+/// A file's bytes go to the card [`CARD_WRITE`] at a time however they
+/// come (the canned server's are 1000 a write): a stage file's in whole
+/// pieces and then the rest, as a partial's are between its listings. Both
+/// land whole, their MD5 the server's.
+#[test]
+fn a_files_bytes_go_to_the_card_in_large_pieces() {
+    let size = 2 * CARD_WRITE + 123_456;
+    let mut bytes = corpus("cbr.mp3");
+    bytes.resize(size, 0x55);
+    let rel = "Peer/Album/01 - Big.mp3";
+    for resumable in [false, true] {
+        let dir = Scratch::new("pieces");
+        set_up(&dir.0);
+        let card = FatSim::new(&dir.0, SERIAL);
+        let mut server = Canned { resumable, ..Canned::default() };
+        server.add(BIG, bytes.clone());
+        let wanted = WantedCard { origins: vec![home()], files: vec![track(BIG, &bytes, 601)] };
+        // A partial listed every 8 MiB, as a run's is.
+        let k = Knobs { part_bytes: 8 << 20, ..knobs() };
+        let hooks = &mut Extras::default();
+        let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, k, Answers::default(), 1);
+        let ran = ran.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((ran.written, ran.verified), (1, Ok(())));
+        let into = if resumable { "/resume/" } else { "/stage/" };
+        let sizes = card.sizes(|p| p.contains(into));
+        assert_eq!(sizes, [CARD_WRITE, CARD_WRITE, 123_456], "{into}");
+        let on = card.read(&format!("/music/{rel}"), usize::MAX).unwrap().expect("on the card");
+        assert!(on == bytes, "{into}: the server's bytes");
+        let rec = records(&card).into_iter().find(|e| e.path == rel).expect("its record");
+        assert_eq!(rec.ledger.unwrap().origin_flags, VERIFIED, "{into}");
+        let _ = finished(&card);
+    }
+}
+
 /// A card pulled mid-download keeps the bytes its last listing names; the
 /// next run cuts off what came after them and asks for the rest.
 #[test]

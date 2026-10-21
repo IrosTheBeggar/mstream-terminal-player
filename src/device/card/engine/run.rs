@@ -604,8 +604,13 @@ impl<'r, 'c> Runner<'r, 'c> {
         let path = w.path.clone();
         let mut progress = |bytes: u64| events(Event::Progress { path: path.clone(), bytes });
         let md5 = full.then(Md5Sum::new);
-        let mut sink = Sink { file: &mut *f, md5, bytes: 0, error: None, progress: &mut progress };
+        let mut sink = Sink::new(&mut *f, md5, &mut progress);
         let fetched = fetcher.fetch(file, &mut sink);
+        // The bytes still held go to the card once the fetch came whole: a
+        // write the card refuses is kept as any other.
+        if fetched.is_ok() {
+            let _ = sink.drain();
+        }
         let (md5, bytes, error) = (sink.md5.take(), sink.bytes, sink.error.take());
         if let Some(e) = error {
             drop(f);
@@ -750,6 +755,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             since: Instant::now(),
             stop: None,
             progress: &mut progress,
+            held: Vec::new(),
         };
         let fetched = fetcher.fetch_part(file, have.as_ref(), &mut sink);
         let len = sink.finish()?;
@@ -1492,35 +1498,85 @@ fn pend_order(mut ops: Vec<Op>) -> Vec<Op> {
     ops
 }
 
+/// A stage file's or a partial's bytes go to the card this many at a time,
+/// the last piece less. A card in a reader that Windows writes through (the
+/// quick-removal policy: no write cache) pays a wait on the card, its FAT
+/// and its directory entry for every write call, so a download written as
+/// it comes — 16-300 KB a read of the network — keeps the card busy on
+/// small writes (the user's 1 TB card: 4.7 MB/s, 239 writes a second). A
+/// whole number of clusters on any FAT card, each piece starting on one.
+pub(crate) const CARD_WRITE: usize = 4 << 20;
+
 /// The stage file a fetch writes into: the MD5 of what passes, its count,
 /// and a write the card refused, told apart from the source's own failure.
+/// The bytes go to the card [`CARD_WRITE`] at a time; those held when the
+/// fetch ends, when it is flushed ([`Sink::drain`]).
 struct Sink<'a> {
     file: &'a mut dyn CardFile,
     md5: Option<Md5Sum>,
     bytes: u64,
+    /// Bytes not on the card yet: fewer than [`CARD_WRITE`].
+    held: Vec<u8>,
     error: Option<io::Error>,
     progress: &'a mut dyn FnMut(u64),
 }
 
+impl<'a> Sink<'a> {
+    fn new(
+        file: &'a mut dyn CardFile,
+        md5: Option<Md5Sum>,
+        progress: &'a mut dyn FnMut(u64),
+    ) -> Sink<'a> {
+        Sink { file, md5, bytes: 0, held: Vec::new(), error: None, progress }
+    }
+
+    /// A write the card refused, kept for the run.
+    fn keep(&mut self, e: io::Error) -> io::Error {
+        self.error = Some(io::Error::new(e.kind(), e.to_string()));
+        e
+    }
+
+    /// The bytes held, to the card.
+    fn drain(&mut self) -> io::Result<()> {
+        if self.held.is_empty() || self.error.is_some() {
+            return Ok(());
+        }
+        let wrote = self.file.write_all(&self.held);
+        self.held.clear();
+        wrote.map_err(|e| self.keep(e))
+    }
+}
+
 impl io::Write for Sink<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self.file.write(buf) {
-            Ok(n) => {
-                if let Some(md5) = &mut self.md5 {
-                    md5.update(&buf[..n]);
-                }
-                self.bytes += n as u64;
-                (self.progress)(self.bytes);
-                Ok(n)
-            }
-            Err(e) => {
-                self.error = Some(io::Error::new(e.kind(), e.to_string()));
-                Err(e)
-            }
+        if self.error.is_some() {
+            return Err(io::Error::other("the card refused a write"));
         }
+        let n = if self.held.is_empty() && buf.len() >= CARD_WRITE {
+            // A whole piece: straight to the card.
+            self.file.write_all(&buf[..CARD_WRITE]).map_err(|e| self.keep(e))?;
+            CARD_WRITE
+        } else {
+            if self.held.capacity() == 0 {
+                self.held.reserve_exact(CARD_WRITE);
+            }
+            let n = buf.len().min(CARD_WRITE - self.held.len());
+            self.held.extend_from_slice(&buf[..n]);
+            if self.held.len() == CARD_WRITE {
+                self.drain()?;
+            }
+            n
+        };
+        if let Some(md5) = &mut self.md5 {
+            md5.update(&buf[..n]);
+        }
+        self.bytes += n as u64;
+        (self.progress)(self.bytes);
+        Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        self.drain()?;
         self.file.flush()
     }
 }
@@ -1530,14 +1586,16 @@ impl io::Write for Sink<'_> {
 /// `part_secs`), and cut back — the listing first, so it never claims bytes
 /// that are gone — when the answer starts it over. A write the card refused,
 /// or a listing that failed, stops the run: the stop is kept for it, the
-/// fetch hearing only an error.
+/// fetch hearing only an error. The bytes go to the card [`CARD_WRITE`] at
+/// a time, as a stage file's; those held, before a listing, a cut or the
+/// fetch's end.
 ///
 /// [`Knobs`]: super::Knobs
 struct PartSink<'x, 'r, 'c> {
     run: &'x mut Runner<'r, 'c>,
     file: Box<dyn CardFile + 'c>,
     name: String,
-    /// The partial's length now.
+    /// The partial's length now, the bytes held included.
     len: u64,
     /// The ETag the bytes it holds came under (`""`: none).
     etag: String,
@@ -1545,6 +1603,8 @@ struct PartSink<'x, 'r, 'c> {
     since: Instant,
     stop: Option<Stop>,
     progress: &'x mut dyn FnMut(u64),
+    /// Bytes not on the card yet: fewer than [`CARD_WRITE`].
+    held: Vec<u8>,
 }
 
 impl PartSink<'_, '_, '_> {
@@ -1555,8 +1615,19 @@ impl PartSink<'_, '_, '_> {
         e
     }
 
+    /// The bytes held, to the card.
+    fn drain(&mut self) -> Result<(), Stop> {
+        if self.held.is_empty() {
+            return Ok(());
+        }
+        let wrote = self.file.write_all(&self.held);
+        self.held.clear();
+        wrote.map_err(|e| self.run.failed(e))
+    }
+
     /// Flushed, and listed with what it holds.
     fn list(&mut self) -> Result<(), Stop> {
+        self.drain()?;
         self.file.sync().map_err(|e| self.run.failed(e))?;
         self.run.s.settled.parts.set(&self.name, self.len, &self.etag);
         self.run.s.write_resume()?;
@@ -1571,6 +1642,7 @@ impl PartSink<'_, '_, '_> {
         if let Some(stop) = self.stop.take() {
             return Err(stop);
         }
+        self.drain()?;
         self.file.sync().map_err(|e| self.run.failed(e))?;
         self.run.s.settled.parts.set(&self.name, self.len, &self.etag);
         Ok(self.len)
@@ -1582,13 +1654,16 @@ impl io::Write for PartSink<'_, '_, '_> {
         if self.stop.is_some() {
             return Err(io::Error::other("the run stopped"));
         }
-        let n = match self.file.write(buf) {
-            Ok(n) => n,
-            Err(e) => {
-                let stop = self.run.failed(e);
-                return Err(self.hold(stop));
-            }
-        };
+        if self.held.capacity() == 0 {
+            self.held.reserve_exact(CARD_WRITE);
+        }
+        let n = buf.len().min(CARD_WRITE - self.held.len());
+        self.held.extend_from_slice(&buf[..n]);
+        if self.held.len() == CARD_WRITE
+            && let Err(stop) = self.drain()
+        {
+            return Err(self.hold(stop));
+        }
         self.len += n as u64;
         (self.progress)(self.len);
         let (bytes, secs) = (self.run.s.knobs.part_bytes, self.run.s.knobs.part_secs);
@@ -1605,6 +1680,12 @@ impl io::Write for PartSink<'_, '_, '_> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if self.stop.is_some() {
+            return Err(io::Error::other("the run stopped"));
+        }
+        if let Err(stop) = self.drain() {
+            return Err(self.hold(stop));
+        }
         self.file.flush()
     }
 }
@@ -1617,6 +1698,11 @@ impl Part for PartSink<'_, '_, '_> {
         if from > self.len {
             let past = format!("an answer from byte {from}, past the {} held", self.len);
             return Err(io::Error::other(past));
+        }
+        // The bytes held go to the card first: the partial's length is
+        // what the card holds of it.
+        if let Err(stop) = self.drain() {
+            return Err(self.hold(stop));
         }
         // An ETag only: a listing with none asks by the date of `modified`.
         let etag = validator.filter(|v| v.contains('"')).unwrap_or_default().to_string();

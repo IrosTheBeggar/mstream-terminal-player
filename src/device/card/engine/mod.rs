@@ -59,6 +59,7 @@ use std::io::{self, Write};
 
 pub(crate) use self::bind::Expect;
 pub(crate) use self::plan::{Footprint, Plan};
+pub(crate) use self::run::CARD_WRITE;
 
 use self::bind::{Bound, Identity};
 use self::settle::Settled;

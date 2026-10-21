@@ -57,6 +57,8 @@ pub(crate) struct FatSim {
     state: RefCell<State>,
     /// The writes a test may count on: (op, what).
     log: RefCell<Vec<String>>,
+    /// Each write of a file's bytes: its card path and how many.
+    sizes: RefCell<Vec<(String, usize)>>,
     quiet: Cell<bool>,
 }
 
@@ -85,6 +87,7 @@ impl FatSim {
             key: dir.display().to_string(),
             state: RefCell::new(state),
             log: RefCell::new(Vec::new()),
+            sizes: RefCell::new(Vec::new()),
             quiet: Cell::new(false),
         }
     }
@@ -120,6 +123,12 @@ impl FatSim {
     /// The writes so far, each as "op path".
     pub(crate) fn log(&self) -> Vec<String> {
         self.log.borrow().clone()
+    }
+
+    /// How many bytes each write of a file's bytes took, in turn, of the
+    /// files whose card path `of` says.
+    pub(crate) fn sizes(&self, of: impl Fn(&str) -> bool) -> Vec<usize> {
+        self.sizes.borrow().iter().filter(|(p, _)| of(p)).map(|(_, n)| *n).collect()
     }
 
     fn settle_swap(&self) {
@@ -314,6 +323,7 @@ impl Write for SimFile<'_> {
             return Err(pulled());
         }
         self.file.write_all(buf)?;
+        self.sim.sizes.borrow_mut().push((self.path.clone(), buf.len()));
         self.stamp = Some(self.sim.stamp());
         Ok(buf.len())
     }
