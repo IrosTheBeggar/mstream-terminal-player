@@ -368,6 +368,13 @@ impl<F: Fetcher> Local<F> {
         join(self.roots.get(vpath)?, rel)
     }
 
+    /// `file` is one this computer's disk may give: the server's bytes, in a
+    /// library read from here. Its fetch still checks it is the manifest's
+    /// file, and takes it over the network when it isn't.
+    pub(crate) fn reads(&self, file: &WantedFile) -> bool {
+        self.path_of(file).is_some()
+    }
+
     /// The image a server folder's cover is made from (2.14.2, item 1), as
     /// the device elects one in a folder: `cover`, `folder`, then `front`,
     /// else the largest other `.jpg` ([`image_rank`]). `folder` is a folder

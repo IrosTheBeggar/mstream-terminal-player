@@ -64,6 +64,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -914,6 +915,13 @@ fn prepare(
         let of = |i: &&usize| wanted.card.files[**i].origin == o;
         order.iter().filter(|i| converted(i)).filter(of).filter_map(length).collect()
     };
+    // The server's own bytes that come over the network, in the run's order:
+    // downloaded ahead of the card.
+    let media: Vec<&WantedFile> = order
+        .iter()
+        .map(|&i| &wanted.card.files[i])
+        .filter(|f| f.origin == 0 && f.original() && !fetcher.reads(f))
+        .collect();
     let network = fetcher.network();
     for peer in network.peers.iter_mut() {
         peer.finish_with(Box::new(retag()));
@@ -930,6 +938,7 @@ fn prepare(
             .collect();
         if !ask.dry_run {
             own.ahead(&ahead);
+            own.prefetch(&media, ask.stop.clone());
         }
     }
     let origin_of: HashMap<usize, usize> =
@@ -1506,7 +1515,8 @@ fn reached(server: &str) -> Reached {
 /// volume layer accepts — a refused volume, or one that isn't a card at
 /// all, is never opened — from the server of the terminal's saved session.
 /// Prints the plan and what came of it as JSON; the engine's events go to
-/// stderr as they come. With `ask.dry_run`, the plan only: nothing is
+/// stderr as they come, and while it copies, a line of its rate every 30 s
+/// ([`Rate`]). With `ask.dry_run`, the plan only: nothing is
 /// written. For the real-card checks: the listener's `device card <drive>
 /// sync` waits for its UX contract. Exit 0: done and verified, or a dry run;
 /// 1 when the sync stopped (a guard to answer, a fit, the server, the
@@ -1561,8 +1571,12 @@ fn on(
     };
     let mut cards = Cards::load();
     let synced = {
+        let mut rate = Rate::default();
         let mut say = |e: Event| {
             if let Some(line) = event_line(&e) {
+                let _ = writeln!(err, "{line}");
+            }
+            if let Some(line) = rate.heard(&e, Instant::now()) {
                 let _ = writeln!(err, "{line}");
             }
         };
@@ -1601,6 +1615,68 @@ fn event_line(e: &Event) -> Option<String> {
             format!("committed generation {generation}{}", if *last { " (final)" } else { "" })
         }
     })
+}
+
+/// How often [`Rate`] says where the copying stands.
+const RATE_EVERY: Duration = Duration::from_secs(30);
+
+/// The hidden command's line of the copying's rate, for watching a long
+/// run: the files and bytes written of the plan's, the rate over the last
+/// stretch and since the copying began, and the time left at the recent
+/// rate. One every [`RATE_EVERY`], and one when the last file is in.
+#[derive(Default)]
+struct Rate {
+    files: usize,
+    bytes: u64,
+    done_files: usize,
+    done_bytes: u64,
+    /// When the copying began, and the last line: when, and the bytes then.
+    began: Option<Instant>,
+    said: Option<(Instant, u64)>,
+}
+
+impl Rate {
+    fn heard(&mut self, e: &Event, now: Instant) -> Option<String> {
+        match e {
+            Event::Planned { files, bytes } => {
+                (self.files, self.bytes) = (*files, *bytes);
+                self.began = Some(now);
+                self.said = Some((now, 0));
+                return None;
+            }
+            Event::Wrote { bytes, .. } => {
+                self.done_files += 1;
+                self.done_bytes += bytes;
+            }
+            Event::Failed { .. } => self.done_files += 1,
+            _ => return None,
+        }
+        let (began, (then, then_bytes)) = (self.began?, self.said?);
+        let last = self.done_files >= self.files;
+        if now.duration_since(then) < RATE_EVERY && !last {
+            return None;
+        }
+        self.said = Some((now, self.done_bytes));
+        let mbs = |bytes: u64, since: Instant| {
+            bytes as f64 / 1e6 / now.duration_since(since).as_secs_f64().max(0.001)
+        };
+        let recent = mbs(self.done_bytes - then_bytes, then);
+        let overall = mbs(self.done_bytes, began);
+        let left = self.bytes.saturating_sub(self.done_bytes) as f64 / 1e6;
+        let to_go = match (left / recent.max(0.001)) as u64 {
+            _ if last => String::new(),
+            secs if secs < 60 => "; under a minute to go".to_string(),
+            secs if secs < 3600 => format!("; about {} min to go", secs / 60),
+            secs => format!("; about {} h {} min to go", secs / 3600, secs % 3600 / 60),
+        };
+        let (done, all) = (self.done_bytes as f64 / 1e9, self.bytes as f64 / 1e9);
+        let stretch = now.duration_since(then).as_secs();
+        Some(format!(
+            "rate: {} of {} files, {done:.1} of {all:.1} GB; {recent:.1} MB/s the last {stretch} s, \
+             {overall:.1} MB/s in all{to_go}",
+            self.done_files, self.files,
+        ))
+    }
 }
 
 fn guard_json(g: &Guard) -> Value {

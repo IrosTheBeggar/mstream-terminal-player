@@ -1323,6 +1323,27 @@ fn the_hidden_command_syncs_only_a_volume_the_rule_accepts() {
     assert_eq!(sim.image(), image, "nothing reached the card");
 }
 
+#[test]
+fn the_hidden_commands_rate_line_says_where_the_copying_stands() {
+    let t0 = std::time::Instant::now();
+    let at = |secs: u64| t0 + Duration::from_secs(secs);
+    let wrote = |bytes: u64| Event::Wrote { path: "Rock/a.mp3".into(), bytes };
+    let mut rate = Rate::default();
+    assert_eq!(rate.heard(&Event::Planned { files: 4, bytes: 400_000_000_000 }, at(0)), None);
+    assert_eq!(rate.heard(&wrote(300_000_000), at(10)), None, "not 30 s yet");
+    let line = rate.heard(&wrote(300_000_000), at(30));
+    let want = "rate: 2 of 4 files, 0.6 of 400.0 GB; 20.0 MB/s the last 30 s, 20.0 MB/s in all; \
+                about 5 h 32 min to go";
+    assert_eq!(line.as_deref(), Some(want));
+    let failed = Event::Failed { server_path: "Rock/b.mp3".into(), why: "gone".into() };
+    assert_eq!(rate.heard(&failed, at(40)), None);
+    assert_eq!(rate.heard(&Event::Listed, at(80)), None);
+    // The last file in: a line at once, with no time to go.
+    let line = rate.heard(&wrote(1_000_000_000), at(90));
+    let want = "rate: 4 of 4 files, 1.6 of 400.0 GB; 16.7 MB/s the last 60 s, 17.8 MB/s in all";
+    assert_eq!(line.as_deref(), Some(want));
+}
+
 mod bench;
 mod peers;
 mod span;
