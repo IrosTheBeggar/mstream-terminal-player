@@ -2691,3 +2691,5 @@ dev:
     help_budget: "O que este computador tira de cada par por dia; o limite do próprio par também conta."
     help_writing: "Como a música é escrita: o que é convertido, o que é removido, as capas e o índice Auto DJ."
     help_from: "O servidor guardado a partir do qual este cartão é enchido: o cartão guarda o nome, nunca o endereço."
+    log_hidden: "%{n} ficheiros ocultos deixados de fora: o servidor não os pode servir"
+    log_hidden_one: "1 ficheiro oculto deixado de fora: o servidor não o pode servir"

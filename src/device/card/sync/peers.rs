@@ -136,8 +136,9 @@ pub(crate) struct PeerSummary {
     pub(crate) files: usize,
     pub(crate) skipped: Vec<(String, Skip)>,
     /// Its files it can't serve, left out of its listing
-    /// ([`plan::hidden`]): counted, never skipped one by one.
-    pub(crate) hidden: usize,
+    /// ([`plan::hidden`]): counted and a few of their places named, never
+    /// skipped one by one.
+    pub(crate) hidden: plan::Hidden,
     /// What the run fetches of it, and the UTC days that takes.
     pub(crate) fetches: usize,
     pub(crate) fetch_bytes: u64,
@@ -164,7 +165,7 @@ impl PeerSummary {
             libraries: Vec::new(),
             files: 0,
             skipped: Vec::new(),
-            hidden: 0,
+            hidden: plan::Hidden::default(),
             fetches: 0,
             fetch_bytes: 0,
             days: 0,
@@ -181,7 +182,8 @@ impl PeerSummary {
         json!({
             "id": self.id, "status": self.status.code(), "why": self.why,
             "reach": self.reach.map(Reach::code), "libraries": self.libraries, "files": self.files,
-            "skipped": self.skipped.iter().map(skip).collect::<Vec<_>>(), "hidden": self.hidden,
+            "skipped": self.skipped.iter().map(skip).collect::<Vec<_>>(), "hidden": self.hidden.n,
+            "hiddenSample": self.hidden.sample,
             "fetch": { "files": self.fetches, "bytes": self.fetch_bytes, "days": self.days },
             "left": self.left, "cap": self.cap, "ffmpeg": self.ffmpeg, "relay": self.relay,
             "resumeAt": self.resume_at,
@@ -507,7 +509,7 @@ fn side(
         libraries,
         files: wanted.card.files.len(),
         skipped: wanted.skipped.clone(),
-        hidden: listing.hidden,
+        hidden: listing.hidden.clone(),
         left: peer.left(),
         cap: peer.cap(),
         ffmpeg: convert.as_ref().map(|c| c.found()),

@@ -61,7 +61,7 @@ use std::time::Duration;
 use super::super::budget::{self, Clock, Day, PeerKey, Spend};
 use super::super::engine::{Failed, Fetched, Fetcher, Have, Part, WantedFile};
 use super::super::names::Bytes;
-use super::super::plan::{codec_of, extension, leave_hidden_out};
+use super::super::plan::{Hidden, codec_of, extension, leave_hidden_out};
 use super::ffmpeg::Convert;
 use super::http::{AsMade, Finish, Scratch, passing, pause, pour, skip};
 use super::length::{self, FileAt};
@@ -98,8 +98,8 @@ pub(crate) struct Listed {
     /// Files the folders hold that the database doesn't yet.
     pub(crate) unscanned: usize,
     /// Files the peer can't serve, left out before their metadata was asked
-    /// for (the selection's rule: [`leave_hidden_out`]).
-    pub(crate) hidden: usize,
+    /// for (the selection's rule: [`leave_hidden_out`]), and where.
+    pub(crate) hidden: Hidden,
 }
 
 /// A peer's file as a manifest entry, from its full metadata.

@@ -330,7 +330,14 @@ impl Page {
             let drive = drives.iter().find(|(k, _)| *k == key).map(|(_, d)| d.clone());
             let text = log_words(&item, &drive.unwrap_or_default());
             let kind = if matches!(item, LogItem::Skipped { .. }) { LogKind::Fail } else { LogKind::Fact };
-            self.log_at(now, Some(key), text, kind);
+            self.log_at(now, Some(key.clone()), text, kind);
+            // The files left out: a few of their places, a line each under
+            // their count (a line is cut at the log's width, never wrapped).
+            if let LogItem::Hidden(hidden) = &item {
+                for place in hidden.places() {
+                    self.log_at(now, Some(key.clone()), format!("  {place}"), LogKind::Quiet);
+                }
+            }
         }
         for note in notes {
             self.card_note(note, now);
@@ -678,6 +685,10 @@ fn log_words(item: &LogItem, drive: &str) -> String {
             t!("dev.card.log_kept_yours", file = file, server = server, copy = copy).to_string()
         }
         LogItem::Skipped { path, why } => format!("{path} · {why}"),
+        LogItem::Hidden(hidden) if hidden.n == 1 => t!("dev.card.log_hidden_one").to_string(),
+        LogItem::Hidden(hidden) => {
+            t!("dev.card.log_hidden", n = fmt_count(hidden.n as u64)).to_string()
+        }
         LogItem::Said(text) => text.clone(),
     }
 }

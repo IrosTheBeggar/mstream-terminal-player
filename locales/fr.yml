@@ -2691,3 +2691,5 @@ dev:
     help_budget: "Ce que cet ordinateur prend à chaque pair par jour ; le quota du pair compte aussi."
     help_writing: "Comment la musique est écrite : ce qui est converti, ce qui est retiré, les pochettes et l'index Auto DJ."
     help_from: "Le serveur enregistré d'où cette carte est remplie : la carte garde son nom, jamais son adresse."
+    log_hidden: "%{n} fichiers cachés laissés de côté : le serveur ne peut pas les servir"
+    log_hidden_one: "1 fichier caché laissé de côté : le serveur ne peut pas le servir"

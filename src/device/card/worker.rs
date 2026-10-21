@@ -43,7 +43,7 @@ use super::contract::device_txt::DeviceTxt;
 use super::contract::server::server_url_key;
 use super::engine::{Answers, Env, Event as RunEvent, Guard, Removal, Stop};
 use super::history::{self, Tally};
-use super::plan::Fit;
+use super::plan::{Fit, Hidden};
 use super::setup;
 use super::state::{self, Convert, State};
 use super::sync::{self, Federation, PeerStatus};
@@ -514,6 +514,9 @@ pub(crate) struct Planned {
     /// The peers the card names that only a parent's proxy reaches (clause
     /// 58's proxy gate), by id.
     pub(crate) ask_proxy: Vec<u32>,
+    /// The files left out that no server serves, its peers' with its own:
+    /// none of the plan's, said beside it once.
+    pub(crate) hidden: Hidden,
 }
 
 /// A sync under way, as its progress says it (clause 51).
@@ -726,6 +729,9 @@ pub(crate) enum LogItem {
     KeptYours { file: String, server: String, copy: String },
     /// A file skipped, and why.
     Skipped { path: String, why: String },
+    /// The files left out of a listing that no server serves, and where:
+    /// one item for them all, beside its asked.
+    Hidden(Hidden),
     /// Anything else, in the run's own words.
     Said(String),
 }
@@ -1643,6 +1649,11 @@ impl Worker {
                         let plays = plan.tally.as_ref().map(|t| (t.new, plan.plays));
                         let key = key.to_string();
                         let _ = self.out.send(Event::Log { key: key.clone(), item });
+                        // What the listing left out, which no server serves.
+                        if plan.hidden.n > 0 {
+                            let item = LogItem::Hidden(plan.hidden.clone());
+                            let _ = self.out.send(Event::Log { key: key.clone(), item });
+                        }
                         if let Some((new, send)) = plays.filter(|(new, _)| *new > 0) {
                             let item = LogItem::Plays { new, send };
                             let _ = self.out.send(Event::Log { key, item });
@@ -2196,6 +2207,10 @@ fn planned(synced: &sync::Synced, now: u64) -> Next {
                     .filter(|p| p.status == PeerStatus::AskProxy)
                     .map(|p| p.id)
                     .collect(),
+                hidden: s.peers.iter().fold(s.hidden.clone(), |mut all, p| {
+                    all.add(&p.hidden);
+                    all
+                }),
             }))
         }
     }

@@ -777,11 +777,12 @@ fn a_dry_run_plans_and_writes_nothing() {
 /// The files the server lists and can't serve (a dot part past the vpath)
 /// are left out of the selection before anything is asked of them: never
 /// planned, fetched, sniffed or looked up, in the dry run as in the run;
-/// counted in one note, never a failure, and the run ends clean. A name
-/// with a dot inside it is synced, and so is a library whose own name has
-/// one (the card names it by 2.8.3's rule).
+/// counted with their places in the summary (no note: the plan says them),
+/// never a failure, and the run ends clean. A name with a dot inside it is
+/// synced, and so is a library whose own name has one (the card names it
+/// by 2.8.3's rule).
 #[test]
-fn the_files_the_server_cant_serve_are_left_out_and_counted_in_one_note() {
+fn the_files_the_server_cant_serve_are_left_out_and_counted_with_their_places() {
     let scratch = Scratch::new("hidden");
     let sim = card(&scratch);
     let (base, fake) = server();
@@ -793,10 +794,13 @@ fn the_files_the_server_cant_serve_are_left_out_and_counted_in_one_note() {
         let bytes = corpus("mpeg2.mp3");
         lib.tracks.push(Track { path: ".Attic/Artist G/Album H/01.mp3".into(), id: 9, bytes, ..like });
     }
-    let note = plan::hidden_note(2);
-    let notes_of = |synced: &Synced| -> Vec<String> {
-        synced.notes.iter().filter(|n| n.contains("hidden")).cloned().collect()
+    // Where they are: the dot-folder first, then the twin.
+    let left_out = plan::Hidden {
+        n: 2,
+        sample: vec!["Rock/Artist A/.hidden/".into(), "Rock/Artist A/Album B/._01.mp3".into()],
+        more: false,
     };
+    let told = |synced: &Synced| synced.notes.iter().filter(|n| n.contains("hidden")).count();
     let ask = Ask { libraries: Some(vec!["Rock".into(), ".Attic".into()]), ..rock() };
     let mut envs = envs();
 
@@ -805,12 +809,15 @@ fn the_files_the_server_cant_serve_are_left_out_and_counted_in_one_note() {
     let dry = sync_now(&sim, &base, &Ask { dry_run: true, ..ask.clone() }, &mut envs).0;
     assert!(matches!(dry.end, End::Dry), "{:?}", dry.end);
     let summary = dry.summary.as_ref().unwrap();
-    assert_eq!((summary.files, summary.fetches, summary.hidden), (6, 6, 2), "{summary:?}");
+    assert_eq!((summary.files, summary.fetches), (6, 6), "{summary:?}");
+    assert_eq!(summary.hidden, left_out);
     assert!(summary.skipped.is_empty(), "{:?}", summary.skipped);
-    assert_eq!(notes_of(&dry), [note.clone()]);
+    assert_eq!(told(&dry), 0, "{:?}", dry.notes);
     let rock: Vec<&(String, usize, u64)> = summary.totals.iter().filter(|t| t.0 == "Rock").collect();
     assert_eq!(rock[0].1, 5, "Rock's files the server serves");
-    assert_eq!(synced_json(&dry, true)["plan"]["hidden"], 2);
+    let printed = synced_json(&dry, true);
+    assert_eq!(printed["plan"]["hidden"], 2);
+    assert_eq!(printed["plan"]["hiddenSample"], json!(left_out.sample));
     assert_eq!(sim.image(), image, "nothing reached the card");
     never_asked(&fake, &hidden);
 
@@ -822,7 +829,8 @@ fn the_files_the_server_cant_serve_are_left_out_and_counted_in_one_note() {
     let report = &outcome.report;
     assert!(report.failed.is_empty() && report.refused.is_empty(), "{report:?}");
     assert!(!events.iter().any(|e| matches!(e, Event::Failed { .. })), "{events:?}");
-    assert_eq!(notes_of(&synced), [note.clone()]);
+    assert_eq!(synced.summary.as_ref().map(|s| &s.hidden), Some(&left_out));
+    assert_eq!(told(&synced), 0, "{:?}", synced.notes);
     never_asked(&fake, &hidden);
     let asked = fake.lock().unwrap().asked.clone();
     for served in ["Rock/Artist A/Album B/03 Mr. Blue.mp3", ".Attic/Artist G/Album H/01.mp3"] {
@@ -836,13 +844,14 @@ fn the_files_the_server_cant_serve_are_left_out_and_counted_in_one_note() {
     let dotted = |p: &&str| p.split('/').any(|part| part.starts_with('.'));
     assert!(!paths.iter().any(dotted), "{paths:?}");
 
-    // Read whole again: still left out, said again, and nothing to retry.
+    // Read whole again: still left out, counted again, and nothing to retry.
     let again = sync_now(&sim, &base, &Ask { whole: true, ..Ask::default() }, &mut envs).0;
     let outcome = ran(&again);
     assert_eq!((outcome.written, outcome.deleted, outcome.verified.clone()), (0, 0, Ok(())));
     assert!(outcome.report.failed.is_empty(), "{:?}", outcome.report);
-    assert_eq!(again.summary.as_ref().map(|s| (s.listed, s.hidden)), Some((Listed::Whole, 2)));
-    assert_eq!(notes_of(&again), [note]);
+    let listed = again.summary.as_ref().map(|s| (s.listed, s.hidden.clone()));
+    assert_eq!(listed, Some((Listed::Whole, left_out)));
+    assert_eq!(told(&again), 0, "{:?}", again.notes);
     never_asked(&fake, &hidden);
 }
 

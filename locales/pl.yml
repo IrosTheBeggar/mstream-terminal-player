@@ -2691,3 +2691,5 @@ dev:
     help_budget: "Ile ten komputer pobiera od każdego peera dziennie; liczy się też limit samego peera."
     help_writing: "Jak muzyka jest zapisywana: co jest konwertowane, co usuwane, okładki i indeks Auto DJ."
     help_from: "Zapisany serwer, z którego wypełnia się ta karta: karta zachowuje jego nazwę, nigdy adres."
+    log_hidden: "pominięte ukryte pliki: %{n} · serwer nie może ich udostępnić"
+    log_hidden_one: "pominięto 1 ukryty plik: serwer nie może go udostępnić"

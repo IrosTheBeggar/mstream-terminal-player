@@ -816,3 +816,51 @@ fn a_card_taken_out_with_its_view_open_moves_the_view_right_else_left() {
     assert_eq!(page.card_open, None);
     assert!(window(&mut page).contains("M5Stack Core2"), "the board's view");
 }
+
+/// The files a look left out, which no server serves (clause 44's log):
+/// their count in the locale's words, then a few of their places a quiet
+/// line each, the rest an ellipsis.
+#[test]
+fn details_log_says_the_files_left_out_then_their_places_in_every_locale() {
+    use crate::device::card::plan::Hidden;
+    let twin = "Rock/Artist A/Album B/._01 Song.mp3";
+    let many = Hidden { n: 1_312, sample: vec!["Metal/.38 Special/".into(), twin.into()], more: true };
+    let one = Hidden { n: 1, sample: vec![twin.into()], more: false };
+    for (code, _) in crate::setup::LANGS {
+        let _in = crate::setup::tests::in_locale(code);
+        let (mut page, _ends, _inbox, fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+        let key = fold.borrow().cards[0].key.clone();
+        for hidden in [&many, &one] {
+            let item = worker::LogItem::Hidden(hidden.clone());
+            fold.borrow_mut().apply(worker::Event::Log { key: key.clone(), item });
+        }
+        page.pump();
+        let lines: Vec<(String, LogKind)> =
+            page.log_for(&key).iter().map(|l| (l.text.clone(), l.kind)).collect();
+        let count = t!("dev.card.log_hidden", n = "1,312").to_string();
+        let lone = t!("dev.card.log_hidden_one").to_string();
+        assert!(count.contains("1,312") && !count.contains("dev.") && !lone.contains("dev."), "{code}");
+        let place = |text: &str| (format!("  {text}"), LogKind::Quiet);
+        let want = vec![
+            (count, LogKind::Fact),
+            place("Metal/.38 Special/"),
+            place(twin),
+            place("…"),
+            (lone, LogKind::Fact),
+            place(twin),
+        ];
+        assert_eq!(lines[lines.len().saturating_sub(6)..], want[..], "{code}");
+    }
+    // In English, in Details' log, in a window tall enough to show it whole.
+    let _en = english();
+    let (mut page, _ends, _inbox, fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+    let key = fold.borrow().cards[0].key.clone();
+    let item = worker::LogItem::Hidden(many);
+    fold.borrow_mut().apply(worker::Event::Log { key, item });
+    page.pump();
+    press(&mut page, KeyCode::Char('d'));
+    let tall = Rect { x: 0, y: 1, width: 100, height: 46 };
+    let frame = text_of(&hosted_at(&mut page, 100, 48, tall));
+    assert!(frame.contains("1,312 hidden files left out: the server can't serve them"), "{frame}");
+    assert!(frame.contains("  Metal/.38 Special/"), "{frame}");
+}

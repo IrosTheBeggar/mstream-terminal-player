@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use rust_i18n::t;
 
 use super::engine::Removal;
-use super::plan::TRACK_CAP;
+use super::plan::{Hidden, TRACK_CAP};
 use super::state::{Convert, LabelFault};
 use super::volume::{Fs, Refusal, Table};
 use super::worker::{
@@ -421,6 +421,19 @@ fn plan_words(plan: &Planned, server: &str) -> String {
         return format!("nothing new on {server}");
     }
     parts.join(", ")
+}
+
+/// The files the server lists and can't serve, which the plan left out:
+/// how many, then a few of their places a line each, for the listener to
+/// tell a Mac's junk from an album whose folder starts with a dot.
+fn hidden_lines(hidden: &Hidden) -> Vec<String> {
+    let files = if hidden.n == 1 { "file" } else { "files" };
+    let (n, them) = (fmt_count(hidden.n as u64), if hidden.n == 1 { "it" } else { "them" });
+    let why = "a name or a folder starting with a dot";
+    let first = format!("  {n} hidden {files} left out: the server can't serve {them} ({why})");
+    let mut lines = vec![first];
+    lines.extend(hidden.places().iter().map(|place| format!("    {place}")));
+    lines
 }
 
 fn server_name(card: &CardView) -> String {
@@ -982,6 +995,11 @@ fn sync(session: &mut Session, key: &str, flags: &Flags, servers: &[ServerLink],
         let codec = c.map(|c| codec_words(c.codec, c.bitrate)).unwrap_or_default();
         io.say(&format!("  converts {} to {codec}", fmt_count(plan.conversions as u64)));
     }
+    if plan.hidden.n > 0 {
+        for line in hidden_lines(&plan.hidden) {
+            io.say(&line);
+        }
+    }
     if let Some(fit) = plan.fit.as_ref().filter(|f| !f.fits() || f.over_cap()) {
         let why = if fit.over_cap() {
             let (n, cap) = (fmt_count(fit.tracks as u64), fmt_count(TRACK_CAP as u64));
@@ -1150,7 +1168,8 @@ fn phase_words(phase: Phase, files: usize, bytes: u64, server: &str) -> String {
     }
 }
 
-/// A log item as a line, or nothing.
+/// A log item as a line, or nothing (an asked's, and the files its
+/// listing left out, are the plan's lines before the run).
 fn log_line(item: &LogItem) -> Option<String> {
     Some(match item {
         LogItem::Skipped { path, why } => format!("skipped {path}: {why}"),

@@ -20,7 +20,8 @@
 //!    10th run, and whenever the plan's settings changed (2.10.2). A file
 //!    the server can't serve (a dotfile, or one in a dot-folder:
 //!    [`plan::hidden`]) is left out of it before anything else, a peer's
-//!    too, and the run says how many in one note. Then
+//!    too, counted with a few of their places ([`plan::Hidden`]): the plan
+//!    says them once, never a skipped line each. Then
 //!    `metadata/batch` for the files a decision needs it for, and each
 //!    `.ogg`'s first bytes (Opus is copied as it is). The plays waiting for
 //!    this server are posted then, a path it moved found again in a whole
@@ -241,8 +242,9 @@ pub(crate) struct Summary {
     pub(crate) files: usize,
     pub(crate) skipped: Vec<(String, Skip)>,
     /// The server's files it can't serve, left out of the selection
-    /// ([`plan::hidden`]): counted, never skipped one by one.
-    pub(crate) hidden: usize,
+    /// ([`plan::hidden`]): counted and a few of their places named, never
+    /// skipped one by one. The peers' are in theirs.
+    pub(crate) hidden: plan::Hidden,
     pub(crate) fetches: usize,
     pub(crate) fetch_bytes: u64,
     pub(crate) conversions: usize,
@@ -720,7 +722,7 @@ fn prepare(
     let conversion = settings.conversion;
     // The files the server can't serve are left out of the selection first,
     // whatever reads the rest ([`plan::leave_hidden_out`]).
-    let mut hidden = 0;
+    let mut hidden = plan::Hidden::default();
     let (listed, mut wanted, entries) = match answer {
         Manifest::NotModified => {
             // A row of one (a disk-mode sync's from before the rule) is left
@@ -800,12 +802,6 @@ fn prepare(
         first_origin: 1,
     };
     let (sides, mut peer_summaries) = peers::prepare(&cx, settings, notes);
-    // The files left out that no server serves, the peers' with the
-    // server's: one note for them all, never a line each.
-    let left_out = hidden + peer_summaries.iter().map(|s| s.hidden).sum::<usize>();
-    if left_out > 0 {
-        notes.push(plan::hidden_note(left_out));
-    }
     let mut peer_fetchers = Vec::new();
     let mut shelves: Vec<Covers> = Vec::new();
     let mut lists: Vec<(Arc<Client>, Option<Gate>)> = vec![(client.clone(), None)];
@@ -1741,7 +1737,8 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
             "libraries": p.libraries,
             "files": p.files,
             "skipped": skipped,
-            "hidden": p.hidden,
+            "hidden": p.hidden.n,
+            "hiddenSample": p.hidden.sample,
             "fetch": { "files": p.fetches, "bytes": p.fetch_bytes, "conversions": p.conversions },
             "renames": p.renames,
             "kept": p.kept,

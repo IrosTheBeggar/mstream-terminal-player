@@ -8,7 +8,6 @@ use std::sync::Arc;
 use super::*;
 use crate::device::card::engine::Guard;
 use crate::device::card::engine::fatsim::FatSim;
-use crate::device::card::plan::hidden_note;
 use crate::device::card::sync::tests::{
     Fake, SERIAL, Scratch, card as set_up_card, server, with_hidden,
 };
@@ -357,22 +356,36 @@ fn setup_names_a_new_card_and_a_set_up_cards_flags_change_its_settings() {
 }
 
 /// The files the server lists and can't serve (a dot part past the vpath)
-/// are left out of the sync: one line says how many, none says skipped,
-/// nothing is asked of them, and the run ends clean.
+/// are left out of the sync: the plan says how many and where, once, before
+/// the question (a look that writes nothing says it too); none says
+/// skipped, nothing is asked of them, and the run ends clean.
 #[test]
 fn a_sync_leaves_the_files_the_server_cant_serve_out_and_says_so_once() {
     let scratch = Scratch::new("lines-hidden");
     let b = bench(&scratch);
     let hidden = with_hidden(&b.server);
     let key = b.key.clone();
+    let told = "\n  2 hidden files left out: the server can't serve them \
+                (a name or a folder starting with a dot)\n    Rock/Artist A/.hidden/\n    \
+                Rock/Artist A/Album B/._01.mp3\n";
+
+    // Off a terminal without --yes: the plan and its files left out.
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Sync, &Flags::default(), None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 1, "{said}");
+    let plan = said.find(" from Home: ").expect("the plan");
+    let (at, nothing) = (said.find(told), said.find("Nothing written: add --yes to sync."));
+    assert!(at.is_some_and(|at| at > plan) && nothing > at, "{said}");
+
     let mut term = Term::new();
     let yes = Flags { yes: true, ..Flags::default() };
     let code = b.run(Some(&key), What::Sync, &yes, None, &mut term);
     let said = term.said();
     assert_eq!(code, 0, "{said}");
     assert!(said.contains("Car synced in ") && said.contains("verified."), "{said}");
-    let line = format!("\n  {}\n", hidden_note(2));
-    assert_eq!(said.matches(&line).count(), 1, "{said}");
+    assert_eq!(said.matches(told).count(), 1, "{said}");
+    assert_eq!(said.matches("hidden files").count(), 1, "said once: {said}");
     assert!(!said.contains("skipped"), "{said}");
     let asked = b.server.lock().unwrap().asked.clone();
     for path in hidden {

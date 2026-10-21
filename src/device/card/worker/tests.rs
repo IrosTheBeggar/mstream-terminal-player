@@ -10,7 +10,7 @@ use std::sync::mpsc::Receiver;
 use super::*;
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::history::tests::MemStore;
-use crate::device::card::sync::tests::{Fake, SERIAL, Scratch, card, no_peers, server};
+use crate::device::card::sync::tests::{Fake, SERIAL, Scratch, card, no_peers, server, with_hidden};
 use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
 
 /// The volumes of the test: host folders, each a FAT card at a serial.
@@ -279,6 +279,46 @@ fn a_card_put_in_is_read_and_its_server_asked_with_nothing_written() {
         rig.fold.logs.iter().filter(|(k, _)| *k == key).map(|(_, l)| l).collect();
     assert!(matches!(logs[0], LogItem::PutIn { card, .. } if card == "Car"), "{logs:?}");
     assert!(logs.iter().any(|l| matches!(l, LogItem::Asked { new: 5, .. })), "{logs:?}");
+    // Nothing left out, nothing said of it.
+    assert_eq!(plan.hidden, Hidden::default());
+    assert!(!logs.iter().any(|l| matches!(l, LogItem::Hidden(_))), "{logs:?}");
+}
+
+/// A look whose listing left out files no server serves (a Mac's twin, a
+/// dot-folder's file) says so in the card's log right under its asked:
+/// how many and where, once. They are none of the plan's new files.
+#[test]
+fn a_look_says_the_files_the_server_cant_serve_under_its_asked() {
+    let scratch = Scratch::new("worker-hidden");
+    drop(card(&scratch));
+    let (base, fake) = server();
+    with_hidden(&fake);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    let plan = planned(rig.card(&key)).unwrap().clone();
+    let left_out = Hidden {
+        n: 2,
+        sample: vec!["Rock/Artist A/.hidden/".into(), "Rock/Artist A/Album B/._01.mp3".into()],
+        more: false,
+    };
+    assert_eq!(plan.hidden, left_out);
+    assert_eq!(plan.new, 6, "the five, and the one served beside them: {plan:?}");
+    let logs: Vec<&LogItem> =
+        rig.fold.logs.iter().filter(|(k, _)| *k == key).map(|(_, l)| l).collect();
+    // Once a look, each right under its asked.
+    let asked = logs.iter().filter(|l| matches!(l, LogItem::Asked { new: 6, .. })).count();
+    let told: Vec<usize> = (0..logs.len()).filter(|i| matches!(logs[*i], LogItem::Hidden(_))).collect();
+    assert_eq!((asked > 0, told.len()), (true, asked), "{logs:?}");
+    for i in told {
+        assert!(i > 0 && matches!(logs[i - 1], LogItem::Asked { new: 6, .. }), "{logs:?}");
+        assert_eq!(logs[i], &LogItem::Hidden(left_out.clone()));
+    }
 }
 
 #[test]

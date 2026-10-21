@@ -86,28 +86,98 @@ pub(crate) fn extension(path: &str) -> String {
 /// part of the path under the library's folder, while its scanner lists
 /// them all the same. A vpath's own dot is the route's, which it serves.
 pub(crate) fn hidden(server_path: &str) -> bool {
-    server_path.split('/').skip(1).any(|part| part.starts_with('.'))
+    hidden_place(server_path).is_some()
+}
+
+/// Where a [`hidden`] path is hidden: the path up to its first part past
+/// the vpath that starts with a dot — that folder, its `/` kept
+/// (`Rock/.38 Special/`), or the file itself (`Rock/A/B/._01 Song.mp3`).
+fn hidden_place(server_path: &str) -> Option<&str> {
+    let mut at = server_path.find('/')? + 1;
+    loop {
+        let rest = &server_path[at..];
+        let end = rest.find('/');
+        if rest.starts_with('.') {
+            return Some(end.map_or(server_path, |end| &server_path[..at + end + 1]));
+        }
+        at += end? + 1;
+    }
+}
+
+/// How many places a [`Hidden`] names.
+pub(crate) const HIDDEN_SAMPLE: usize = 3;
+
+/// What [`leave_hidden_out`] left out of a listing: how many files, and a
+/// few of the places they are ([`hidden_place`]), for the listener to tell
+/// a Mac's junk from music whose folder starts with a dot (`...And Justice
+/// for All`, which mStream can't serve either), as a line each skipped
+/// once did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hidden {
+    pub(crate) n: usize,
+    /// Up to [`HIDDEN_SAMPLE`] places, each once: the folders first (a
+    /// folder may be an album), each kind in the listing's order.
+    pub(crate) sample: Vec<String>,
+    /// More places than the sample names.
+    pub(crate) more: bool,
+}
+
+impl Hidden {
+    /// A place one of its files is.
+    fn saw(&mut self, place: &str) {
+        if self.sample.iter().any(|p| p == place) {
+            return;
+        }
+        let folders = self.sample.iter().filter(|p| p.ends_with('/')).count();
+        let at = if place.ends_with('/') { folders } else { self.sample.len() };
+        if at >= HIDDEN_SAMPLE {
+            self.more = true;
+            return;
+        }
+        self.sample.insert(at, place.to_string());
+        if self.sample.len() > HIDDEN_SAMPLE {
+            self.sample.pop();
+            self.more = true;
+        }
+    }
+
+    /// `other`'s with these: a peer's with the server's, for one count.
+    pub(crate) fn add(&mut self, other: &Hidden) {
+        self.n += other.n;
+        for place in &other.sample {
+            self.saw(place);
+        }
+        self.more |= other.more;
+    }
+
+    /// The places as a list says them: the sample, then `…` for the rest.
+    pub(crate) fn places(&self) -> Vec<String> {
+        let mut places = self.sample.clone();
+        if self.more {
+            places.push("…".to_string());
+        }
+        places
+    }
 }
 
 /// The selection's rule for the files the server can't serve ([`hidden`]):
-/// `items` less them, and how many it left out. Every listing a sync reads
-/// goes through it before anything is asked of its files — the server's
+/// `items` less them, and what it left out. Every listing a sync reads goes
+/// through it before anything is asked of its files — the server's
 /// manifest, its ledger after a 304, a peer's listing — so no source ever
 /// sees one: not the network, which would answer 404 at every sync, nor
 /// the local-disk source, which could read them but takes the server's
 /// rule (they are filesystem junk all the same).
-pub(crate) fn leave_hidden_out<T>(items: &mut Vec<T>, server_path: impl Fn(&T) -> &str) -> usize {
-    let before = items.len();
-    items.retain(|item| !hidden(server_path(item)));
-    before - items.len()
-}
-
-/// The note a run gives the files it left out by [`leave_hidden_out`]: one
-/// line for them all.
-pub(crate) fn hidden_note(n: usize) -> String {
-    let files = if n == 1 { "file" } else { "files" };
-    let which = "a name or a folder starting with a dot";
-    format!("{n} hidden {files} the server can't serve left out ({which})")
+pub(crate) fn leave_hidden_out<T>(items: &mut Vec<T>, server_path: impl Fn(&T) -> &str) -> Hidden {
+    let mut hidden = Hidden::default();
+    items.retain(|item| match hidden_place(server_path(item)) {
+        Some(place) => {
+            hidden.n += 1;
+            hidden.saw(place);
+            false
+        }
+        None => true,
+    });
+    hidden
 }
 
 /// An `.ogg` or `.oga`, whose codec only its bytes say.
@@ -779,13 +849,45 @@ mod tests {
 
         let all = [&hidden_ones[..], &served[..]].concat();
         let mut paths: Vec<String> = all.iter().map(|p| p.to_string()).collect();
-        assert_eq!(leave_hidden_out(&mut paths, |p| p.as_str()), 4);
+        let left_out = leave_hidden_out(&mut paths, |p| p.as_str());
         assert_eq!(paths, served, "the rest, in their order");
-        assert_eq!(leave_hidden_out(&mut paths, |p| p.as_str()), 0);
-        let one = "1 hidden file the server can't serve left out \
-                   (a name or a folder starting with a dot)";
-        assert_eq!(hidden_note(1), one);
-        assert!(hidden_note(12).starts_with("12 hidden files the server can't serve left out"));
+        // Where they are: the folders first, then a file; the fourth place
+        // past the sample.
+        let twin = "Rock/Artist A/Album B/._01 Song.mp3";
+        assert_eq!(left_out.sample, ["Rock/Artist A/.hidden/", "Rock/.Trashes/", twin]);
+        assert_eq!((left_out.n, left_out.more), (4, true));
+        assert_eq!(left_out.places().last().map(String::as_str), Some("…"));
+        assert_eq!(leave_hidden_out(&mut paths, |p| p.as_str()), Hidden::default());
+    }
+
+    #[test]
+    fn the_places_of_the_files_left_out_name_a_folder_once_and_before_the_files() {
+        // A dot-folder of many files is one place; a folder seen after the
+        // sample is full of files takes a file's place.
+        let mut paths: Vec<String> = ["._a.mp3", "._b.mp3", "._c.mp3"]
+            .iter()
+            .map(|f| format!("Rock/Artist A/Album B/{f}"))
+            .chain((1..=12).map(|i| format!("Metal/.38 Special/Album C/{i:02}.mp3")))
+            .collect();
+        let server = leave_hidden_out(&mut paths, |p| p.as_str());
+        assert!(paths.is_empty());
+        let (a, b) = ("Rock/Artist A/Album B/._a.mp3", "Rock/Artist A/Album B/._b.mp3");
+        assert_eq!(server.sample, ["Metal/.38 Special/", a, b]);
+        assert_eq!((server.n, server.more), (15, true));
+
+        // A peer's with the server's: one count, the folders still first.
+        let twin = "Folk/Artist D/Album E/._01.flac";
+        let mut few = vec![twin.to_string(), "Folk/.Trashes/01.mp3".into()];
+        let peer = leave_hidden_out(&mut few, |p| p.as_str());
+        assert_eq!(peer.sample, ["Folk/.Trashes/", twin]);
+        assert_eq!((peer.n, peer.more, peer.places()), (2, false, peer.sample.clone()));
+        let mut all = peer.clone();
+        all.add(&server);
+        assert_eq!(all.sample, ["Folk/.Trashes/", "Metal/.38 Special/", twin]);
+        assert_eq!((all.n, all.more), (17, true));
+        let mut none = Hidden::default();
+        none.add(&peer);
+        assert_eq!(none, peer, "adding to nothing is the same");
     }
 
     #[test]

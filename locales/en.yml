@@ -2691,3 +2691,5 @@ dev:
     help_budget: "How much this computer takes from each peer a day; the peer's own quota counts too."
     help_writing: "How the music is written: what is converted, what is removed, covers and the Auto DJ index."
     help_from: "The saved server this card is filled from: the card keeps its name, never its address."
+    log_hidden: "%{n} hidden files left out: the server can't serve them"
+    log_hidden_one: "1 hidden file left out: the server can't serve it"

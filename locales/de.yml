@@ -2691,3 +2691,5 @@ dev:
     help_budget: "Wie viel dieser Computer pro Tag von jedem Peer holt; das eigene Kontingent des Peers zählt auch."
     help_writing: "Wie die Musik geschrieben wird: was umgewandelt, was entfernt wird, Cover und der Auto-DJ-Index."
     help_from: "Der gespeicherte Server, aus dem diese Karte gefüllt wird: die Karte kennt seinen Namen, nie seine Adresse."
+    log_hidden: "%{n} versteckte Dateien ausgelassen: der Server kann sie nicht ausliefern"
+    log_hidden_one: "1 versteckte Datei ausgelassen: der Server kann sie nicht ausliefern"

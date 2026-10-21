@@ -464,8 +464,8 @@ fn a_peers_files_go_on_the_card_beside_the_servers_and_every_byte_is_counted() {
 
 /// A peer's files no server serves (a Mac's AppleDouble twin beside each
 /// of its files) are left out of its listing before it is asked anything
-/// of them, its metadata included; the run counts them with the server's
-/// in its one note, and ends clean.
+/// of them, its metadata included; the run counts them and names their
+/// places in its summary, as the server's in its own, and ends clean.
 #[test]
 fn a_peers_hidden_files_are_left_out_before_it_is_asked_about_them() {
     let scratch = Scratch::new("peer-hidden");
@@ -485,11 +485,14 @@ fn a_peers_hidden_files_are_left_out_before_it_is_asked_about_them() {
     assert_eq!((outcome.written, outcome.records), (7, 7), "{:?}", outcome.report);
     assert!(outcome.report.failed.is_empty(), "{:?}", outcome.report);
     let summary = &synced.peers[0];
-    assert_eq!((summary.status.clone(), summary.files, summary.hidden), (Status::Read, 2, 2));
-    assert_eq!(synced.summary.as_ref().map(|s| s.hidden), Some(2), "the server's own");
-    let hidden: Vec<&String> = synced.notes.iter().filter(|n| n.contains("hidden")).collect();
-    assert_eq!(hidden, [&plan::hidden_note(4)], "one note for the server's and the peer's");
-    assert_eq!(synced_json(&synced, false)["peers"][0]["hidden"], 2);
+    assert_eq!((summary.status.clone(), summary.files, summary.hidden.n), (Status::Read, 2, 2));
+    assert_eq!((summary.hidden.sample.as_slice(), summary.hidden.more), (&twins[..], false));
+    assert_eq!(synced.summary.as_ref().map(|s| s.hidden.n), Some(2), "the server's own");
+    let told = synced.notes.iter().filter(|n| n.contains("hidden")).count();
+    assert_eq!(told, 0, "the plan says them, no note: {:?}", synced.notes);
+    let printed = synced_json(&synced, false);
+    assert_eq!(printed["peers"][0]["hidden"], 2);
+    assert_eq!(printed["peers"][0]["hiddenSample"], json!(twins));
 
     // The peer was never asked about them: no metadata, no byte.
     let lib = peer.lock().unwrap();

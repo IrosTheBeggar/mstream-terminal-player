@@ -2691,3 +2691,5 @@ dev:
     help_budget: "Quanto questo computer prende da ogni peer al giorno; conta anche il limite del peer stesso."
     help_writing: "Come viene scritta la musica: cosa si converte, cosa si toglie, le copertine e l'indice Auto DJ."
     help_from: "Il server salvato da cui si riempie questa scheda: la scheda conserva il suo nome, mai il suo indirizzo."
+    log_hidden: "%{n} file nascosti lasciati fuori: il server non può servirli"
+    log_hidden_one: "1 file nascosto lasciato fuori: il server non può servirlo"
