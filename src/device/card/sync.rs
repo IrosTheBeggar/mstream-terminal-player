@@ -17,7 +17,10 @@
 //!    revision the last whole read ended with (If-None-Match). A 304 means
 //!    "probably unchanged", so the card's ledger stands for the listing
 //!    ([`wanted_of_ledger`]); the manifest is read whole every 7 days, every
-//!    10th run, and whenever the plan's settings changed (2.10.2). Then
+//!    10th run, and whenever the plan's settings changed (2.10.2). A file
+//!    the server can't serve (a dotfile, or one in a dot-folder:
+//!    [`plan::hidden`]) is left out of it before anything else, a peer's
+//!    too, and the run says how many in one note. Then
 //!    `metadata/batch` for the files a decision needs it for, and each
 //!    `.ogg`'s first bytes (Opus is copied as it is). The plays waiting for
 //!    this server are posted then, a path it moved found again in a whole
@@ -237,6 +240,9 @@ pub(crate) struct Summary {
     /// The selection's files, and those the card can't take.
     pub(crate) files: usize,
     pub(crate) skipped: Vec<(String, Skip)>,
+    /// The server's files it can't serve, left out of the selection
+    /// ([`plan::hidden`]): counted, never skipped one by one.
+    pub(crate) hidden: usize,
     pub(crate) fetches: usize,
     pub(crate) fetch_bytes: u64,
     pub(crate) conversions: usize,
@@ -667,7 +673,7 @@ fn prepare(
     let source = settings.source(url_key).clone();
 
     // The rows of this server on the card, which a listing reuses.
-    let rows: Vec<Kept> = match (root.tags.as_ref(), ours) {
+    let mut rows: Vec<Kept> = match (root.tags.as_ref(), ours) {
         (Ok(tags), Some(i)) => tags
             .records
             .iter()
@@ -712,13 +718,23 @@ fn prepare(
     };
     let answer = answer.map_err(server_halt)?;
     let conversion = settings.conversion;
+    // The files the server can't serve are left out of the selection first,
+    // whatever reads the rest ([`plan::leave_hidden_out`]).
+    let mut hidden = 0;
     let (listed, mut wanted, entries) = match answer {
         Manifest::NotModified => {
+            // A row of one (a disk-mode sync's from before the rule) is left
+            // out as its entry would be; a run of the peers alone leaves the
+            // server's rows as they are.
+            if !ask.peers_only {
+                hidden = plan::leave_hidden_out(&mut rows, |k| k.ledger.server_path.as_str());
+            }
             let entries: Vec<ManifestEntry> = rows.iter().map(entry_of).collect();
             let listed = if ask.peers_only { Listed::Unread } else { Listed::NotModified };
             (listed, wanted_of_ledger(origin, &rows), entries)
         }
-        Manifest::Listed(listing) => {
+        Manifest::Listed(mut listing) => {
+            hidden = plan::leave_hidden_out(&mut listing.entries, |e| e.filepath.as_str());
             origin.revision = listing.revision.clone();
             origin.scanning = !listing.deletions_trusted();
             if listing.deletions_trusted() {
@@ -784,6 +800,12 @@ fn prepare(
         first_origin: 1,
     };
     let (sides, mut peer_summaries) = peers::prepare(&cx, settings, notes);
+    // The files left out that no server serves, the peers' with the
+    // server's: one note for them all, never a line each.
+    let left_out = hidden + peer_summaries.iter().map(|s| s.hidden).sum::<usize>();
+    if left_out > 0 {
+        notes.push(plan::hidden_note(left_out));
+    }
     let mut peer_fetchers = Vec::new();
     let mut shelves: Vec<Covers> = Vec::new();
     let mut lists: Vec<(Arc<Client>, Option<Gate>)> = vec![(client.clone(), None)];
@@ -851,6 +873,7 @@ fn prepare(
         libraries,
         files: wanted.card.files.len(),
         skipped: wanted.skipped.clone(),
+        hidden,
         fetches,
         fetch_bytes,
         conversions: order.iter().filter(|i| converted(i)).count(),
@@ -1718,6 +1741,7 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
             "libraries": p.libraries,
             "files": p.files,
             "skipped": skipped,
+            "hidden": p.hidden,
             "fetch": { "files": p.fetches, "bytes": p.fetch_bytes, "conversions": p.conversions },
             "renames": p.renames,
             "kept": p.kept,

@@ -336,6 +336,38 @@ pub(crate) fn server() -> (String, Fake) {
     (base, fake)
 }
 
+/// What a Mac leaves in a library it copied, which mStream's scanner lists
+/// and its `/media` answers 404 for: an AppleDouble twin beside a file, and
+/// a file in a dot-folder (an Ogg, so a sniff of its first bytes would be a
+/// request too). Beside them a file whose name only has a dot in it, which
+/// is served. The paths the server can't serve come back.
+pub(crate) fn with_hidden(fake: &Fake) -> [&'static str; 2] {
+    let twin = "Rock/Artist A/Album B/._01.mp3";
+    let in_dot_folder = "Rock/Artist A/.hidden/03.ogg";
+    let mut lib = fake.lock().unwrap();
+    let like = lib.tracks[0].clone();
+    let track = |path: &str, id: i64, bytes: Vec<u8>| {
+        Track { path: path.into(), id, bytes, ..like.clone() }
+    };
+    let apple_double = b"\0\x05\x16\x07\0\x02\0\0Mac OS X a made-up AppleDouble".to_vec();
+    lib.tracks.push(track(twin, 6, apple_double));
+    lib.tracks.push(track(in_dot_folder, 7, opus_bytes(1000, 2, true)));
+    lib.tracks.push(track("Rock/Artist A/Album B/03 Mr. Blue.mp3", 8, corpus("latin1.mp3")));
+    lib.revision = "1:8:1790000000008:7".into();
+    [twin, in_dot_folder]
+}
+
+/// No request of the server named one of `paths`: no `/media` GET or HEAD,
+/// no conversion, no `metadata/batch`.
+fn never_asked(fake: &Fake, paths: &[&str]) {
+    let lib = fake.lock().unwrap();
+    for path in paths {
+        let asked: Vec<&String> = lib.asked.iter().filter(|a| a.contains(path)).collect();
+        assert!(asked.is_empty(), "{path}: {asked:?}");
+        assert!(!lib.batched.iter().any(|b| b == path), "{path}: its metadata was asked for");
+    }
+}
+
 // ── The card ────────────────────────────────────────────────────────────────
 
 pub(crate) const SERIAL: u32 = 0x1A2B_3C4D;
@@ -740,6 +772,78 @@ fn a_dry_run_plans_and_writes_nothing() {
     let printed = synced_json(&synced, true);
     assert_eq!(printed["plan"]["fetch"]["files"], 4);
     assert_eq!(printed["dryRun"], true);
+}
+
+/// The files the server lists and can't serve (a dot part past the vpath)
+/// are left out of the selection before anything is asked of them: never
+/// planned, fetched, sniffed or looked up, in the dry run as in the run;
+/// counted in one note, never a failure, and the run ends clean. A name
+/// with a dot inside it is synced, and so is a library whose own name has
+/// one (the card names it by 2.8.3's rule).
+#[test]
+fn the_files_the_server_cant_serve_are_left_out_and_counted_in_one_note() {
+    let scratch = Scratch::new("hidden");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let hidden = with_hidden(&fake);
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.vpaths.push(".Attic".into());
+        let like = lib.tracks[0].clone();
+        let bytes = corpus("mpeg2.mp3");
+        lib.tracks.push(Track { path: ".Attic/Artist G/Album H/01.mp3".into(), id: 9, bytes, ..like });
+    }
+    let note = plan::hidden_note(2);
+    let notes_of = |synced: &Synced| -> Vec<String> {
+        synced.notes.iter().filter(|n| n.contains("hidden")).cloned().collect()
+    };
+    let ask = Ask { libraries: Some(vec!["Rock".into(), ".Attic".into()]), ..rock() };
+    let mut envs = envs();
+
+    // The dry run: the plan has the rest, and says how many it left out.
+    let image = sim.image();
+    let dry = sync_now(&sim, &base, &Ask { dry_run: true, ..ask.clone() }, &mut envs).0;
+    assert!(matches!(dry.end, End::Dry), "{:?}", dry.end);
+    let summary = dry.summary.as_ref().unwrap();
+    assert_eq!((summary.files, summary.fetches, summary.hidden), (6, 6, 2), "{summary:?}");
+    assert!(summary.skipped.is_empty(), "{:?}", summary.skipped);
+    assert_eq!(notes_of(&dry), [note.clone()]);
+    let rock: Vec<&(String, usize, u64)> = summary.totals.iter().filter(|t| t.0 == "Rock").collect();
+    assert_eq!(rock[0].1, 5, "Rock's files the server serves");
+    assert_eq!(synced_json(&dry, true)["plan"]["hidden"], 2);
+    assert_eq!(sim.image(), image, "nothing reached the card");
+    never_asked(&fake, &hidden);
+
+    // The run: the same, nothing fetched of them, nothing failed.
+    let (synced, events) = sync_now(&sim, &base, &ask, &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.verified.clone(), outcome.parked.clone()), (Ok(()), None), "{:?}", synced.notes);
+    assert_eq!((outcome.written, outcome.records), (6, 6), "{:?}", outcome.report);
+    let report = &outcome.report;
+    assert!(report.failed.is_empty() && report.refused.is_empty(), "{report:?}");
+    assert!(!events.iter().any(|e| matches!(e, Event::Failed { .. })), "{events:?}");
+    assert_eq!(notes_of(&synced), [note.clone()]);
+    never_asked(&fake, &hidden);
+    let asked = fake.lock().unwrap().asked.clone();
+    for served in ["Rock/Artist A/Album B/03 Mr. Blue.mp3", ".Attic/Artist G/Album H/01.mp3"] {
+        assert!(asked.contains(&format!("GET /media/{served}")), "{served}: {asked:?}");
+    }
+    let seen = look(&sim);
+    let records = &seen.root.as_ref().unwrap().tags.as_ref().unwrap().records;
+    let paths: Vec<&str> = records.iter().map(|e| e.path.as_str()).collect();
+    assert!(paths.contains(&"_Attic/Artist G/Album H/01.mp3"), "{paths:?}");
+    assert!(paths.contains(&"Rock/Artist A/Album B/03 Mr. Blue.mp3"), "{paths:?}");
+    let dotted = |p: &&str| p.split('/').any(|part| part.starts_with('.'));
+    assert!(!paths.iter().any(dotted), "{paths:?}");
+
+    // Read whole again: still left out, said again, and nothing to retry.
+    let again = sync_now(&sim, &base, &Ask { whole: true, ..Ask::default() }, &mut envs).0;
+    let outcome = ran(&again);
+    assert_eq!((outcome.written, outcome.deleted, outcome.verified.clone()), (0, 0, Ok(())));
+    assert!(outcome.report.failed.is_empty(), "{:?}", outcome.report);
+    assert_eq!(again.summary.as_ref().map(|s| (s.listed, s.hidden)), Some((Listed::Whole, 2)));
+    assert_eq!(notes_of(&again), [note]);
+    never_asked(&fake, &hidden);
 }
 
 #[test]

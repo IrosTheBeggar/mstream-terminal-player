@@ -8,7 +8,10 @@ use std::sync::Arc;
 use super::*;
 use crate::device::card::engine::Guard;
 use crate::device::card::engine::fatsim::FatSim;
-use crate::device::card::sync::tests::{Fake, SERIAL, Scratch, card as set_up_card, server};
+use crate::device::card::plan::hidden_note;
+use crate::device::card::sync::tests::{
+    Fake, SERIAL, Scratch, card as set_up_card, server, with_hidden,
+};
 use crate::device::card::volume::{Fs, Table};
 use crate::device::card::worker::fixtures as f;
 use crate::device::card::worker::tests::{Here, Shelf, home_server, volume_at};
@@ -197,7 +200,8 @@ struct Bench {
     key: String,
     fresh: String,
     sim: FatSim,
-    _server: Fake,
+    /// The fake server, its saved Home.
+    server: Fake,
 }
 
 fn bench(scratch: &Scratch) -> Bench {
@@ -214,7 +218,7 @@ fn bench(scratch: &Scratch) -> Bench {
     let fresh_key = worker::key_of(&fresh);
     shelf.put(fresh, 0x0BAD_F00D);
     let (shelf, here) = (Arc::new(shelf), Arc::new(Here::default()));
-    Bench { shelf, here, home: home_server(&base), key, fresh: fresh_key, sim, _server: fake }
+    Bench { shelf, here, home: home_server(&base), key, fresh: fresh_key, sim, server: fake }
 }
 
 impl Bench {
@@ -350,6 +354,30 @@ fn setup_names_a_new_card_and_a_set_up_cards_flags_change_its_settings() {
     let code = b.run(Some(&key), What::Setup, &flags, None, &mut term);
     assert_eq!(code, 1, "{}", term.said());
     assert!(term.said().contains("a name, never an address"), "{}", term.said());
+}
+
+/// The files the server lists and can't serve (a dot part past the vpath)
+/// are left out of the sync: one line says how many, none says skipped,
+/// nothing is asked of them, and the run ends clean.
+#[test]
+fn a_sync_leaves_the_files_the_server_cant_serve_out_and_says_so_once() {
+    let scratch = Scratch::new("lines-hidden");
+    let b = bench(&scratch);
+    let hidden = with_hidden(&b.server);
+    let key = b.key.clone();
+    let mut term = Term::new();
+    let yes = Flags { yes: true, ..Flags::default() };
+    let code = b.run(Some(&key), What::Sync, &yes, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("Car synced in ") && said.contains("verified."), "{said}");
+    let line = format!("\n  {}\n", hidden_note(2));
+    assert_eq!(said.matches(&line).count(), 1, "{said}");
+    assert!(!said.contains("skipped"), "{said}");
+    let asked = b.server.lock().unwrap().asked.clone();
+    for path in hidden {
+        assert!(!asked.iter().any(|a| a.contains(path)), "{path}: {asked:?}");
+    }
 }
 
 #[test]

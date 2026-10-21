@@ -20,10 +20,11 @@
 //! 4. Its `/api/`: its libraries, its own id, and its key's allowance
 //!    where it shows one (a key that forbids copies is never read). A day
 //!    with nothing left, by the budget or the key's quota, parks it there.
-//! 5. Its listing, and its wanted files: as the user's own server's are
-//!    decided, a conversion made by this computer's ffmpeg where it has one
-//!    and skipped (and listed) where it hasn't. A listing that spends what
-//!    was left parks it too, the card's rows of it as they are.
+//! 5. Its listing, less the files no server serves ([`plan::hidden`]),
+//!    and its wanted files: as the user's own server's are decided, a
+//!    conversion made by this computer's ffmpeg where it has one and
+//!    skipped (and listed) where it hasn't. A listing that spends what was
+//!    left parks it too, the card's rows of it as they are.
 //!
 //! Whatever a peer comes to is said in its [`PeerSummary`]: read, or why
 //! not, its way, what is left of its day and the days its files take.
@@ -134,6 +135,9 @@ pub(crate) struct PeerSummary {
     /// The selection's files, and those the card can't take.
     pub(crate) files: usize,
     pub(crate) skipped: Vec<(String, Skip)>,
+    /// Its files it can't serve, left out of its listing
+    /// ([`plan::hidden`]): counted, never skipped one by one.
+    pub(crate) hidden: usize,
     /// What the run fetches of it, and the UTC days that takes.
     pub(crate) fetches: usize,
     pub(crate) fetch_bytes: u64,
@@ -160,6 +164,7 @@ impl PeerSummary {
             libraries: Vec::new(),
             files: 0,
             skipped: Vec::new(),
+            hidden: 0,
             fetches: 0,
             fetch_bytes: 0,
             days: 0,
@@ -176,7 +181,7 @@ impl PeerSummary {
         json!({
             "id": self.id, "status": self.status.code(), "why": self.why,
             "reach": self.reach.map(Reach::code), "libraries": self.libraries, "files": self.files,
-            "skipped": self.skipped.iter().map(skip).collect::<Vec<_>>(),
+            "skipped": self.skipped.iter().map(skip).collect::<Vec<_>>(), "hidden": self.hidden,
             "fetch": { "files": self.fetches, "bytes": self.fetch_bytes, "days": self.days },
             "left": self.left, "cap": self.cap, "ffmpeg": self.ffmpeg, "relay": self.relay,
             "resumeAt": self.resume_at,
@@ -502,6 +507,7 @@ fn side(
         libraries,
         files: wanted.card.files.len(),
         skipped: wanted.skipped.clone(),
+        hidden: listing.hidden,
         left: peer.left(),
         cap: peer.cap(),
         ffmpeg: convert.as_ref().map(|c| c.found()),

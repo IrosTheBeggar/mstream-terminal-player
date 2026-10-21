@@ -78,6 +78,38 @@ pub(crate) fn extension(path: &str) -> String {
     name.rsplit_once('.').map_or(String::new(), |(_, e)| e.to_ascii_lowercase())
 }
 
+/// A server path no server serves: a part of it past its library's (the
+/// vpath) starts with a dot — a dotfile, such as the AppleDouble twin
+/// (`._01 Song.mp3`) a Mac leaves beside each file it copies, or a file in a
+/// dot-folder. mStream serves `/media/<vpath>/` with express.static, whose
+/// dotfiles policy (`ignore`, Express 5's default) answers 404 for any such
+/// part of the path under the library's folder, while its scanner lists
+/// them all the same. A vpath's own dot is the route's, which it serves.
+pub(crate) fn hidden(server_path: &str) -> bool {
+    server_path.split('/').skip(1).any(|part| part.starts_with('.'))
+}
+
+/// The selection's rule for the files the server can't serve ([`hidden`]):
+/// `items` less them, and how many it left out. Every listing a sync reads
+/// goes through it before anything is asked of its files — the server's
+/// manifest, its ledger after a 304, a peer's listing — so no source ever
+/// sees one: not the network, which would answer 404 at every sync, nor
+/// the local-disk source, which could read them but takes the server's
+/// rule (they are filesystem junk all the same).
+pub(crate) fn leave_hidden_out<T>(items: &mut Vec<T>, server_path: impl Fn(&T) -> &str) -> usize {
+    let before = items.len();
+    items.retain(|item| !hidden(server_path(item)));
+    before - items.len()
+}
+
+/// The note a run gives the files it left out by [`leave_hidden_out`]: one
+/// line for them all.
+pub(crate) fn hidden_note(n: usize) -> String {
+    let files = if n == 1 { "file" } else { "files" };
+    let which = "a name or a folder starting with a dot";
+    format!("{n} hidden {files} the server can't serve left out ({which})")
+}
+
 /// An `.ogg` or `.oga`, whose codec only its bytes say.
 pub(crate) fn is_ogg(path: &str) -> bool {
     matches!(extension(path).as_str(), "ogg" | "oga")
@@ -720,6 +752,40 @@ mod tests {
         assert_eq!(estimate(None, &f, 90), 3_208_643);
         let bare = Facts { bitrate: None, ..f.clone() };
         assert_eq!(estimate(None, &bare, 192), 30 << 20);
+    }
+
+    #[test]
+    fn a_file_the_server_cant_serve_is_one_with_a_dot_part_past_its_vpath() {
+        let hidden_ones = [
+            "Rock/Artist A/Album B/._01 Song.mp3",
+            "Rock/Artist A/.hidden/02.mp3",
+            "Rock/.Trashes/501/03.flac",
+            "Rock/.x.ogg",
+        ];
+        for path in hidden_ones {
+            assert!(hidden(path), "{path}");
+        }
+        let served = [
+            "Rock/Artist A/Album B/03 Mr. Blue.mp3",
+            "Rock/Artist A./Album B/04.flac",
+            "Rock/Artist A/Album B/05..opus",
+            // A vpath's own dot is the route's: mStream serves it.
+            ".Attic/Artist G/Album H/01.mp3",
+            "Rock/01.mp3",
+        ];
+        for path in served {
+            assert!(!hidden(path), "{path}");
+        }
+
+        let all = [&hidden_ones[..], &served[..]].concat();
+        let mut paths: Vec<String> = all.iter().map(|p| p.to_string()).collect();
+        assert_eq!(leave_hidden_out(&mut paths, |p| p.as_str()), 4);
+        assert_eq!(paths, served, "the rest, in their order");
+        assert_eq!(leave_hidden_out(&mut paths, |p| p.as_str()), 0);
+        let one = "1 hidden file the server can't serve left out \
+                   (a name or a folder starting with a dot)";
+        assert_eq!(hidden_note(1), one);
+        assert!(hidden_note(12).starts_with("12 hidden files the server can't serve left out"));
     }
 
     #[test]

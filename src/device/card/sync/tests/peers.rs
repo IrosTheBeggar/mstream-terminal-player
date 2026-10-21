@@ -40,6 +40,8 @@ pub(super) struct PeerLib {
     /// Every request, as "via METHOD target": `direct`, or `parent` for one
     /// its parent's proxies forwarded.
     asked: Vec<String>,
+    /// Each path `metadata/batch` was asked for.
+    batched: Vec<String>,
     /// Each track GET's X-mStream-Purpose and Range, as they came.
     purposes: Vec<Option<String>>,
     ranges: Vec<Option<String>>,
@@ -133,6 +135,7 @@ fn peer_answer(fake: &PeerFake, asked: &Asked, via: &str) -> Vec<u8> {
         }
         ("POST", "/api/v1/db/metadata/batch") => {
             let paths: Vec<String> = serde_json::from_value(asked.json()).unwrap_or_default();
+            lib.batched.extend(paths.iter().cloned());
             let mut out = serde_json::Map::new();
             for p in paths {
                 let row = |t: &Track| json!({"filepath": p, "metadata": peer_meta(t)});
@@ -457,6 +460,44 @@ fn a_peers_files_go_on_the_card_beside_the_servers_and_every_byte_is_counted() {
     let printed = synced_json(&again, false);
     assert_eq!(printed["peers"][0]["status"], "read");
     assert_eq!(printed["peers"][0]["reach"], "direct");
+}
+
+/// A peer's files no server serves (a Mac's AppleDouble twin beside each
+/// of its files) are left out of its listing before it is asked anything
+/// of them, its metadata included; the run counts them with the server's
+/// in its one note, and ends clean.
+#[test]
+fn a_peers_hidden_files_are_left_out_before_it_is_asked_about_them() {
+    let scratch = Scratch::new("peer-hidden");
+    let sim = card(&scratch);
+    let mut tracks = folk();
+    let twins = [format!("{ALBUM}/._01.mp3"), format!("{ALBUM}/._02.flac")];
+    for (i, twin) in twins.iter().enumerate() {
+        tracks.push(peer_track(twin, 3 + i as i64, b"\0\x05\x16\x07 a made-up AppleDouble".to_vec()));
+    }
+    let (base, fake, peer, dial) = world(true, false, tracks);
+    let server_hidden = super::with_hidden(&fake);
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs());
+    let outcome = ran(&synced);
+    assert_eq!((outcome.verified.clone(), outcome.parked.clone()), (Ok(()), None), "{:?}", synced.notes);
+    assert_eq!((outcome.written, outcome.records), (7, 7), "{:?}", outcome.report);
+    assert!(outcome.report.failed.is_empty(), "{:?}", outcome.report);
+    let summary = &synced.peers[0];
+    assert_eq!((summary.status.clone(), summary.files, summary.hidden), (Status::Read, 2, 2));
+    assert_eq!(synced.summary.as_ref().map(|s| s.hidden), Some(2), "the server's own");
+    let hidden: Vec<&String> = synced.notes.iter().filter(|n| n.contains("hidden")).collect();
+    assert_eq!(hidden, [&plan::hidden_note(4)], "one note for the server's and the peer's");
+    assert_eq!(synced_json(&synced, false)["peers"][0]["hidden"], 2);
+
+    // The peer was never asked about them: no metadata, no byte.
+    let lib = peer.lock().unwrap();
+    assert!(!lib.asked.iter().any(|a| a.contains("._0")), "{:?}", lib.asked);
+    assert!(!lib.batched.iter().any(|p| twins.contains(p)), "{:?}", lib.batched);
+    assert!(lib.batched.contains(&ONE.to_string()), "the rest were: {:?}", lib.batched);
+    drop(lib);
+    super::never_asked(&fake, &server_hidden);
 }
 
 /// A peer whose key forbids copies refuses the first one with a 403: the

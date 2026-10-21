@@ -7,7 +7,10 @@
 //! stay inside the proxy's 15 s deadline), then `metadata/batch` in chunks,
 //! which gives each file's size, `modified` and hashes — what tells a file
 //! changed. A file the folders hold and the peer's database doesn't yet is
-//! a scan behind: no path missing from that listing is a deletion.
+//! a scan behind: no path missing from that listing is a deletion. A file
+//! no server serves ([`hidden`](super::super::plan::hidden): a dotfile, or
+//! one in a dot-folder) is left out before its metadata is asked for, and
+//! counted.
 //!
 //! **The bytes** ([`reach`]): the direct guest path first — the parent's
 //! `peers/:id/access` mints a 24 h guest token, and the peer's own tunnel
@@ -58,7 +61,7 @@ use std::time::Duration;
 use super::super::budget::{self, Clock, Day, PeerKey, Spend};
 use super::super::engine::{Failed, Fetched, Fetcher, Have, Part, WantedFile};
 use super::super::names::Bytes;
-use super::super::plan::{codec_of, extension};
+use super::super::plan::{codec_of, extension, leave_hidden_out};
 use super::ffmpeg::Convert;
 use super::http::{AsMade, Finish, Scratch, passing, pause, pour, skip};
 use super::length::{self, FileAt};
@@ -94,6 +97,9 @@ pub(crate) struct Listed {
     pub(crate) metadata: HashMap<String, Option<Metadata>>,
     /// Files the folders hold that the database doesn't yet.
     pub(crate) unscanned: usize,
+    /// Files the peer can't serve, left out before their metadata was asked
+    /// for (the selection's rule: [`leave_hidden_out`]).
+    pub(crate) hidden: usize,
 }
 
 /// A peer's file as a manifest entry, from its full metadata.
@@ -128,8 +134,9 @@ pub(crate) fn list(client: &Client, libraries: &[String]) -> Result<Listed, ApiE
     paths.retain(|p| !LISTS.contains(&extension(p).as_str()));
     paths.sort();
     paths.dedup();
+    let hidden = leave_hidden_out(&mut paths, |p| p.as_str());
     let metadata = client.metadata_batch(&paths)?;
-    let mut listed = Listed::default();
+    let mut listed = Listed { hidden, ..Listed::default() };
     for path in &paths {
         match metadata.get(path).and_then(Option::as_ref) {
             Some(m) => listed.entries.push(entry_of(path, m)),
