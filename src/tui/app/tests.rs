@@ -8657,6 +8657,63 @@ mod keep {
     }
 
     #[test]
+    fn a_choice_a_wider_copy_already_kept_opens_on_that_copy_never_on_add() {
+        use crate::api::types::{JobAction, JobOutcome};
+        // The user's 2026-10-20 report: "Only the albums you don't have"
+        // copied Stage Peer B's Borrowed Tapes, and Album still said Add.
+        let late_file = "peerlib/Boukmanflow/Borrowed Tapes/Late Train Verse.mp3";
+        let landed = "copies/Boukmanflow/Borrowed Tapes/Late Train Verse.mp3";
+        let songs = serde_json::json!({ "total": 1, "skipped": [], "failed": [],
+            "copied": [{ "from": late_file, "vpath": "copies", "filepath": landed, "title": "Late Train Verse", "artist": "Boukmanflow", "album": "Borrowed Tapes" }] });
+        let walk = serde_json::json!({ "scope": "artist-missing", "artist": { "name": "Boukmanflow" },
+            "albums": [{ "name": "Borrowed Tapes", "songs": songs, "stopped": null }], "skippedAlbums": [],
+            "songs": songs, "counts": { "total": 1, "copied": 1, "skipped": 0, "failed": 0 }, "stopped": null,
+            "peer": { "id": B, "name": "Stage Peer B" } });
+        let missing = copy_job(70, "artist-missing:boukmanflow", Some("artist-missing"), "done", B, walk);
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[missing]);
+        // The tile: Album reads in your collection; Copy again copies the
+        // album from the tile's row — never the artist copy again.
+        let index = app.taste.peer_albums().iter().position(|a| a.album == "Borrowed Tapes" && a.peer == B).unwrap();
+        app.keep_open(KeepTarget::Tile(index));
+        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Covered(70));
+        let view = app.keep_view().unwrap();
+        let KeepStage::Job { job, outcome, action } = view.stage else { panic!("{:?}", view.stage) };
+        assert!(outcome.kept(), "{outcome:?}");
+        assert_eq!((job.scope(), action), (Some(JobScope::Album), Some(JobAction::CopyAgain)));
+        let started = starts(&app.keep_again());
+        assert_eq!((started[0].1.clone(), started[0].2), (view.subject.rec.clone(), JobScope::Album));
+        assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Starting));
+        // The row: This song reads in your collection, its landed file;
+        // Play your copy plays the user's own file.
+        app.keep_close();
+        open_late(&mut app);
+        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Covered(70));
+        let KeepStage::Job { outcome, action, .. } = app.keep_view().unwrap().stage else { panic!("not the copy") };
+        assert_eq!((outcome, action), (JobOutcome::Copied { filepath: landed.into(), vpath: Some("copies".into()) }, Some(JobAction::Play)));
+        app.keep_again();
+        assert_eq!(app.queue.items.last().map(|q| (q.filepath.as_str(), q.origin.peer)), Some((landed, None)));
+        // A song its lists do not name: the choice, Add song.
+        app.keep_close();
+        let corner = row_at(&app, "Corner Store Loop");
+        app.keep_open(KeepTarget::Row { group: corner.0, row: corner.1 });
+        assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Choose { verb: Some(KeepVerb::Song), .. }));
+        // Stage Peer C's Borrowed Tapes: Stage Peer B's copy is not its own.
+        app.keep_close();
+        let theirs = app.taste.peer_albums().iter().position(|a| a.album == "Borrowed Tapes" && a.peer == C).unwrap();
+        app.keep_open(KeepTarget::Tile(theirs));
+        assert_eq!(app.keep_view().unwrap().stage, KeepStage::Choose { verb: Some(KeepVerb::Album), other: None });
+        // The album's own copy arriving live takes the covered choice over.
+        app.keep_close();
+        app.keep_open(KeepTarget::Tile(index));
+        let own = copy_job(71, "album:boukmanflow|borrowed tapes", Some("album"), "queued", B, serde_json::Value::Null);
+        let generation = app.session_gen();
+        app.apply_event(Event::Jobs { seq: job_asks(&effects)[0], generation, answer: Ok(Box::new(PluginJobList { jobs: vec![own], runner: None })) });
+        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(71));
+        assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Job { outcome: JobOutcome::Queued, .. }));
+    }
+
+    #[test]
     fn the_sizes_land_and_only_the_albums_you_dont_have_shows_by_name() {
         let (mut app, effects) = ready_room();
         answer_lookup(&mut app, &effects, &[]);

@@ -23,8 +23,8 @@ use super::*;
 use crate::api::PluginFailure;
 use crate::api::types::{
     COPY_PLUGIN, CancelAnswer, CollectionDestination, DiscoveryPluginsResponse, JobAction, JobLookup, JobMark,
-    JobOutcome, JobScope, JobStarted, LayoutTags, PluginJob, PluginJobList, PluginLink, TasteLead,
-    artist_ownership, job_for_album,
+    JobOutcome, JobParams, JobScope, JobStarted, JobState, LayoutTags, PluginJob, PluginJobList, PluginLink,
+    TasteLead, artist_ownership, job_for_album,
 };
 use crate::tui::worker::{KeepFacts, KeepFactsAsk};
 
@@ -142,6 +142,117 @@ pub fn tile_mark<'a>(rows: impl IntoIterator<Item = &'a RowJobs>, peer: i64, alb
         }
     }
     best_mark(held.values().filter_map(|job| job_for_album(job, Some(album))))
+}
+
+/// `a` moved after `b`: its finish, else its last update (ms epochs) —
+/// and where either carries neither, or both the same, the higher id (the
+/// server's own order).
+fn newer(a: &PluginJob, b: &PluginJob) -> bool {
+    let moved = |j: &PluginJob| j.finished_at.or(j.updated_at);
+    match (moved(a), moved(b)) {
+        (Some(x), Some(y)) if x != y => x > y,
+        _ => a.id > b.id,
+    }
+}
+
+/// One song's line in a many-song copy's lists, as a song copy's result
+/// reads it — found by the song's file on the server it came from (`from`,
+/// federation-copy's `copySongs`): copied (the entry carries the landed
+/// file), or skipped `owned` (`at`: where the library has it) or `exists`
+/// (`at`: the file in the way). A failed song, or one the lists do not
+/// name, is `None`.
+fn song_account(job: &PluginJob, from: &str) -> Option<serde_json::Value> {
+    let songs = job.copy_result().songs?;
+    let named = |entry: &&serde_json::Value| entry.get("from").and_then(serde_json::Value::as_str) == Some(from);
+    let peer = job.result.as_ref().and_then(|r| r.get("peer")).cloned().unwrap_or(serde_json::Value::Null);
+    if let Some(copied) = songs.copied.iter().find(named) {
+        return Some(serde_json::json!({ "copied": copied, "peer": peer }));
+    }
+    let skipped = songs.skipped.iter().find(named)?;
+    let at = skipped.get("at").cloned().unwrap_or(serde_json::Value::Null);
+    match skipped.get("why").and_then(serde_json::Value::as_str) {
+        Some("owned") => Some(serde_json::json!({ "skipped": "owned", "existing": { "filepath": at }, "peer": peer })),
+        Some("exists") => Some(serde_json::json!({ "skipped": "exists", "filepath": at, "peer": peer })),
+        _ => None,
+    }
+}
+
+/// A finished WIDER copy of the subject's server as it speaks for one
+/// choice of the Keep modal — the marks' rule (clause 115) carried into the
+/// modal (the user's 2026-10-20 report: an only-missing copy had copied the
+/// album, and Album still offered Add album). `None` where it says nothing
+/// for that choice; else the job to draw: the copy's id, the choice's scope
+/// and recommendation, the choice's own account.
+/// - **Album**: a done artist or only-missing copy through
+///   [`job_for_album`] — the album's own account where the walk took it,
+///   already yours where only-missing left it out — and only where that
+///   view marks the row: a guest spot, an album never walked or a listing
+///   that failed mid-walk say nothing. A failed or cancelled artist copy is
+///   the whole run's state, never this album's: nothing.
+/// - **This song**: a done album copy, or a done artist copy's view of the
+///   row's album, whose lists name this song's file ([`song_account`]):
+///   copied → in your collection, its landed file; skipped `owned` →
+///   already yours; `exists` → a file in the way. The lists stop at 500,
+///   so a song they do not name is never claimed. A failed or cancelled
+///   run says nothing new here (the webapp's and the phone's rule too).
+///
+/// A live copy, another server's, another plug-in's and every other pair of
+/// scopes: `None`.
+pub fn covered_view(job: &PluginJob, subject: &KeepSubject, scope: JobScope) -> Option<PluginJob> {
+    if job.live() || job.plugin != COPY_PLUGIN || job.other_peer(Some(subject.peer)) {
+        return None;
+    }
+    let view = match (scope, job.scope()?) {
+        (JobScope::Album, JobScope::Artist | JobScope::ArtistMissing) if job.state == JobState::Done => {
+            let one = job_for_album(job, subject.album.as_deref())?;
+            PluginJob { params: JobParams { scope: Some(JobScope::Album.as_str().to_string()) }, ..one }
+        }
+        (JobScope::Song, JobScope::Album | JobScope::Artist | JobScope::ArtistMissing) if job.state == JobState::Done => {
+            let from = subject.filepath.as_deref().filter(|p| !p.trim().is_empty())?;
+            let one = job_for_album(job, subject.album.as_deref())?;
+            let result = song_account(&one, from)?;
+            PluginJob {
+                params: JobParams { scope: None },
+                state: JobState::Done,
+                result: Some(result),
+                error: None,
+                progress: None,
+                status_text: None,
+                cancel_requested: false,
+                ..one
+            }
+        }
+        _ => return None,
+    };
+    let view = PluginJob { recommendation: subject.rec.clone(), ..view };
+    view.outcome().mark().is_some().then_some(view)
+}
+
+/// What a Keep modal opening on `scope` follows (clauses 109, 115): its own
+/// copy of that scope from this server — always while that is live — else
+/// the newest finished wider copy of this server that speaks for the
+/// choice ([`covered_view`]) unless its own is newer; `None` leaves the
+/// choice. So a choice a wider copy already put in the library opens on
+/// that, never on Add.
+pub fn opening_phase(jobs: &RowJobs, subject: &KeepSubject, scope: JobScope) -> Option<KeepPhase> {
+    let own = jobs.slot(scope).filter(|j| !j.other_peer(Some(subject.peer)));
+    if let Some(own) = own.filter(|j| j.live()) {
+        return Some(KeepPhase::Following(own.id));
+    }
+    let wider = jobs
+        .held
+        .values()
+        .filter(|j| covered_view(j, subject, scope).is_some())
+        .fold(None, |best: Option<&PluginJob>, j| match best {
+            Some(b) if !newer(j, b) => Some(b),
+            _ => Some(j),
+        });
+    match (own, wider) {
+        (Some(own), Some(wider)) if newer(own, wider) => Some(KeepPhase::Following(own.id)),
+        (_, Some(wider)) => Some(KeepPhase::Covered(wider.id)),
+        (Some(own), None) => Some(KeepPhase::Following(own.id)),
+        (None, None) => None,
+    }
 }
 
 /// The verbs line's indicator (clause 116): words only, never a count —
@@ -365,6 +476,10 @@ pub enum KeepPhase {
     Refused(PluginFailure),
     /// Following this job to its outcome.
     Following(i64),
+    /// A finished wider copy of this server speaks for the choice it
+    /// opened on ([`covered_view`]): its outcome for that choice, with the
+    /// choice's own buttons — Retry and Copy again start the choice's copy.
+    Covered(i64),
 }
 
 /// One open Keep a copy modal (clauses 106–110).
@@ -383,6 +498,18 @@ pub struct KeepFlow {
     /// Its subject's jobs, merged as the room's rows are.
     pub jobs: RowJobs,
     pub phase: KeepPhase,
+}
+
+impl KeepFlow {
+    /// A covered choice looks again whenever its jobs change: its own copy
+    /// started since (live, or newer) takes over, and a wider copy that no
+    /// longer speaks for it gives the choice back.
+    fn resettle(&mut self) {
+        if matches!(self.phase, KeepPhase::Covered(_)) {
+            self.phase = opening_phase(&self.jobs, &self.subject, self.choice.scope(self.only_missing))
+                .unwrap_or(KeepPhase::Choose);
+        }
+    }
 }
 
 /// A size the modal shows DIM beside a choice: "…" while it is asked.
@@ -597,6 +724,7 @@ impl KeepState {
         }
         if let Some(flow) = self.flow.as_mut() {
             flow.jobs.merge(job);
+            flow.resettle();
         }
         if job.live() {
             self.book.seen_live.insert(job.id);
@@ -1019,7 +1147,7 @@ impl App {
         let Some(job) = self.taste.keep.job(id).cloned() else { return Vec::new() };
         match copies_action(&job.outcome()) {
             Some(JobAction::Cancel) => self.keep_cancel_job(id),
-            Some(JobAction::Play) => self.keep_play_copy(id, true),
+            Some(JobAction::Play) => self.keep_play_copy(&job, true),
             Some(JobAction::Retry | JobAction::CopyAgain | JobAction::StartAgain) => {
                 let (effects, ticket) = self.keep_restart(&job);
                 if let Some(ticket) = ticket {
@@ -1060,9 +1188,10 @@ impl App {
     }
 
     /// Play (or queue) a copied song from the user's own library (clause
-    /// 110's Play your copy and Add to queue), with the session's origin.
-    pub(crate) fn keep_play_copy(&mut self, id: i64, play: bool) -> Vec<Effect> {
-        let Some(job) = self.taste.keep.job(id).cloned() else { return Vec::new() };
+    /// 110's Play your copy and Add to queue), with the session's origin —
+    /// `job` as the surface shows it: a song copy, or a wider copy's account
+    /// of this song ([`covered_view`]).
+    pub(crate) fn keep_play_copy(&mut self, job: &PluginJob, play: bool) -> Vec<Effect> {
         let JobOutcome::Copied { filepath, .. } = job.outcome() else { return Vec::new() };
         let copied = job.copy_result().copied.unwrap_or_default();
         let track = Track {
@@ -1111,10 +1240,7 @@ impl App {
         let choice = if subject.album_focus() { KeepChoice::Album } else { KeepChoice::Song };
         let choice = if choices.contains(&choice) { choice } else { choices[0] };
         let peer = subject.peer;
-        let phase = match jobs.slot(choice.scope(false)) {
-            Some(job) if !job.other_peer(Some(peer)) => KeepPhase::Following(job.id),
-            _ => KeepPhase::Choose,
-        };
+        let phase = opening_phase(&jobs, &subject, choice.scope(false)).unwrap_or(KeepPhase::Choose);
         let mut effects = Vec::new();
         let facts_seq = self.taste.keep.next_seq();
         let origin = Origin { server: self.origin().server, peer: Some(peer) };
@@ -1232,8 +1358,10 @@ impl App {
     }
 
     /// The finished copy's button (clause 110): Retry and Copy again start
-    /// the same copy again (taking only the gaps), Start again brings the
-    /// choice back, Play your copy plays it.
+    /// the same copy again (taking only the gaps) — a wider copy's account
+    /// of the choice ([`covered_view`]) carries the choice's scope and the
+    /// modal's row, so it starts the choice's own copy — Start again brings
+    /// the choice back, Play your copy plays it.
     pub(crate) fn keep_again(&mut self) -> Vec<Effect> {
         let Some(view) = self.keep_view() else { return Vec::new() };
         let KeepStage::Job { job, action, .. } = view.stage else { return Vec::new() };
@@ -1251,7 +1379,7 @@ impl App {
                 }
                 effects
             }
-            Some(JobAction::Play) => self.keep_play_copy(job.id, true),
+            Some(JobAction::Play) => self.keep_play_copy(&job, true),
             Some(JobAction::Cancel) => self.keep_cancel_job(job.id),
             None => Vec::new(),
         }
@@ -1336,6 +1464,16 @@ impl App {
                 }
                 // Gone from everything known (cleared elsewhere): the
                 // choice again.
+                None => KeepStage::Choose { verb: other.is_none().then_some(verb), other },
+            },
+            // A wider copy's account of this choice; the choice again once
+            // it no longer gives one (cleared elsewhere).
+            KeepPhase::Covered(id) => match followed(*id).and_then(|job| covered_view(&job, s, scope)) {
+                Some(view) => {
+                    let outcome = view.outcome();
+                    let action = outcome.action();
+                    KeepStage::Job { job: Box::new(view), outcome, action }
+                }
                 None => KeepStage::Choose { verb: other.is_none().then_some(verb), other },
             },
         };
@@ -1507,13 +1645,13 @@ impl App {
                 for job in self.taste.keep.book.jobs.values() {
                     jobs.merge(job);
                 }
-                let peer = flow.subject.peer;
                 if flow.phase == KeepPhase::Choose
-                    && let Some(job) = jobs.slot(flow.choice.scope(flow.only_missing)).filter(|j| !j.other_peer(Some(peer)))
+                    && let Some(phase) = opening_phase(&jobs, &flow.subject, flow.choice.scope(flow.only_missing))
                 {
-                    flow.phase = KeepPhase::Following(job.id);
+                    flow.phase = phase;
                 }
                 flow.jobs = jobs;
+                flow.resettle();
             }
             return self.keep_seen(answer.as_deref().unwrap_or(&[]));
         }
@@ -1643,6 +1781,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::ManyCounts;
 
     fn job(id: i64, key: &str, scope: Option<&str>, state: &str, peer: i64, result: serde_json::Value) -> PluginJob {
         serde_json::from_value(serde_json::json!({
@@ -1804,6 +1943,182 @@ mod tests {
         let mut refused = all.clone();
         refused.jobs.allowed = false;
         assert!(keep_choices(&refused, &row).is_empty());
+    }
+
+    /// The subject's song on its server (the `subject` helper's file).
+    const LATE: &str = "peerlib/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.MP3";
+    const LANDED: &str = "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3";
+
+    /// One album's songs as copySongs accounts them.
+    fn songs(copied: serde_json::Value, skipped: serde_json::Value, failed: serde_json::Value) -> serde_json::Value {
+        let n = [&copied, &skipped, &failed].iter().map(|l| l.as_array().map_or(0, Vec::len)).sum::<usize>();
+        serde_json::json!({ "total": n, "copied": copied, "skipped": skipped, "failed": failed })
+    }
+
+    fn landed() -> serde_json::Value {
+        serde_json::json!([{ "from": LATE, "vpath": "copies", "filepath": LANDED, "title": "Late Train Verse", "album": "Borrowed Tapes" }])
+    }
+
+    /// A finished artist walk: the albums it took (`name`, its songs) and
+    /// the ones it left out.
+    fn walk(scope: &str, albums: Vec<(&str, serde_json::Value)>, left: serde_json::Value) -> serde_json::Value {
+        let albums: Vec<serde_json::Value> =
+            albums.into_iter().map(|(name, s)| serde_json::json!({ "name": name, "songs": s, "stopped": null })).collect();
+        serde_json::json!({ "scope": scope, "albums": albums, "skippedAlbums": left,
+            "songs": songs(serde_json::json!([]), serde_json::json!([]), serde_json::json!([])),
+            "stopped": null, "peer": { "id": 1, "name": "Stage Peer B" } })
+    }
+
+    fn at(mut job: PluginJob, finished: i64) -> PluginJob {
+        job.finished_at = Some(finished);
+        job.updated_at = Some(finished);
+        job
+    }
+
+    const KEYS: [&str; 5] = ["text:late", "album:tapes", "artist:bouk", "artist-missing:bouk", "folder:x"];
+
+    #[test]
+    fn a_finished_artist_copy_speaks_for_the_album_choice_as_its_walk_did() {
+        let tile = subject(None, Some("Boukmanflow"), Some("Borrowed Tapes"), None);
+        let phase = |jobs: Vec<PluginJob>| opening_phase(&row_of(&KEYS, jobs), &tile, JobScope::Album);
+        // The user's case: only-missing copied the album — in your collection, Copy again.
+        let missing = job(20, "artist-missing:bouk", Some("artist-missing"), "done", 1,
+            walk("artist-missing", vec![("Borrowed Tapes", songs(landed(), serde_json::json!([]), serde_json::json!([])))], serde_json::json!([])));
+        assert_eq!(phase(vec![missing.clone()]), Some(KeepPhase::Covered(20)));
+        let view = covered_view(&missing, &tile, JobScope::Album).unwrap();
+        assert_eq!((view.id, view.scope(), &view.recommendation), (20, Some(JobScope::Album), &tile.rec), "the choice's scope and row");
+        assert!(matches!(view.outcome(), JobOutcome::CopiedMany(ManyCounts { copied: 1, total: 1, .. })), "{:?}", view.outcome());
+        assert_eq!(view.outcome().action(), Some(JobAction::CopyAgain));
+        // Only-missing left it out as already here: already yours, Close.
+        let owned = job(21, "artist-missing:bouk", Some("artist-missing"), "done", 1,
+            walk("artist-missing", vec![], serde_json::json!([{ "name": "borrowed  TAPES", "why": "owned" }])));
+        assert_eq!(phase(vec![owned.clone()]), Some(KeepPhase::Covered(21)));
+        let view = covered_view(&owned, &tile, JobScope::Album).unwrap();
+        assert!(matches!(view.outcome(), JobOutcome::Owned { many: Some(_), .. }), "{:?}", view.outcome());
+        assert_eq!(view.outcome().action(), None);
+        // Its walk failed every song of the album: it says so (its mark does), Retry.
+        let failed = job(22, "artist:bouk", Some("artist"), "done", 1,
+            walk("artist", vec![("Borrowed Tapes", songs(serde_json::json!([]), serde_json::json!([]), serde_json::json!([{ "from": LATE, "error": "gone" }])))], serde_json::json!([])));
+        assert!(matches!(covered_view(&failed, &tile, JobScope::Album).map(|v| v.outcome()), Some(JobOutcome::Failed { .. })));
+        // A guest spot, an album the walk never took: nothing — Add album stays.
+        let guest = job(23, "artist:bouk", Some("artist"), "done", 1, walk("artist", vec![], serde_json::json!([{ "name": "Borrowed Tapes", "why": "appearance" }])));
+        assert_eq!(phase(vec![guest]), None);
+        let elsewhere = job(24, "artist:bouk", Some("artist"), "done", 1,
+            walk("artist", vec![("Second Wind", songs(serde_json::json!([{ "from": "x" }]), serde_json::json!([]), serde_json::json!([])))], serde_json::json!([])));
+        assert_eq!(phase(vec![elsewhere]), None);
+        // Another server's finished artist copy: not this one's.
+        let mut theirs = missing.clone();
+        theirs.recommendation["peer"]["id"] = serde_json::json!(4);
+        assert_eq!(phase(vec![theirs]), None);
+        // A live, failed or cancelled artist copy is the whole run's state, never the album's.
+        for state in ["running", "failed", "cancelled"] {
+            let mut j = missing.clone();
+            j.state = serde_json::from_value(serde_json::json!(state)).unwrap();
+            assert_eq!(phase(vec![j]), None, "{state}");
+        }
+        // Only the album choice reads a walk this way; an album copy is the choice's own.
+        assert_eq!(covered_view(&missing, &tile, JobScope::Artist), None);
+        assert_eq!(covered_view(&job(25, "album:tapes", Some("album"), "done", 1, album_done(3)), &tile, JobScope::Album), None);
+    }
+
+    #[test]
+    fn the_choices_own_copy_wins_when_it_is_live_or_newer() {
+        let tile = subject(None, Some("Boukmanflow"), Some("Borrowed Tapes"), None);
+        let phase = |jobs: Vec<PluginJob>| opening_phase(&row_of(&KEYS, jobs), &tile, JobScope::Album);
+        let kept = |id: i64| {
+            job(id, "artist-missing:bouk", Some("artist-missing"), "done", 1,
+                walk("artist-missing", vec![("Borrowed Tapes", songs(landed(), serde_json::json!([]), serde_json::json!([])))], serde_json::json!([])))
+        };
+        // The artist copy finished after the album's own: the artist copy speaks.
+        let album = job(10, "album:tapes", Some("album"), "done", 1, album_done(0));
+        assert_eq!(phase(vec![at(album.clone(), 1_000), at(kept(20), 2_000)]), Some(KeepPhase::Covered(20)));
+        // The album's own finished after it (its timestamps, whatever the ids): the own copy.
+        assert_eq!(phase(vec![at(album.clone(), 3_000), at(kept(20), 2_000)]), Some(KeepPhase::Following(10)));
+        // No timestamps: the server's order.
+        assert_eq!(phase(vec![job(30, "album:tapes", Some("album"), "done", 1, album_done(0)), kept(20)]), Some(KeepPhase::Following(30)));
+        assert_eq!(phase(vec![album.clone(), kept(20)]), Some(KeepPhase::Covered(20)));
+        // Its own live copy always wins.
+        let live = job(5, "album:tapes", Some("album"), "queued", 1, serde_json::Value::Null);
+        assert_eq!(phase(vec![live, at(kept(20), 2_000)]), Some(KeepPhase::Following(5)));
+        // A wider copy that says nothing for the album leaves the own copy as it was.
+        let guest = job(40, "artist:bouk", Some("artist"), "done", 1, walk("artist", vec![], serde_json::json!([{ "name": "Borrowed Tapes", "why": "appearance" }])));
+        assert_eq!(phase(vec![album.clone(), guest]), Some(KeepPhase::Following(10)));
+        // Another server's album copy is not its own: the wider copy of this server speaks.
+        let theirs = job(50, "album:tapes", Some("album"), "done", 4, album_done(3));
+        assert_eq!(phase(vec![theirs, kept(20)]), Some(KeepPhase::Covered(20)));
+        // Nothing at all: the choice.
+        assert_eq!(phase(vec![]), None);
+    }
+
+    #[test]
+    fn the_newest_wider_copy_that_speaks_wins_and_a_walk_that_marks_nothing_never_does() {
+        let tile = subject(None, Some("Boukmanflow"), Some("Borrowed Tapes"), None);
+        let phase = |jobs: Vec<PluginJob>| opening_phase(&row_of(&KEYS, jobs), &tile, JobScope::Album);
+        let none = || serde_json::json!([]);
+        // Every album took it; a later only-missing copy left it out as already here: the later speaks.
+        let took = job(20, "artist:bouk", Some("artist"), "done", 1, walk("artist", vec![("Borrowed Tapes", songs(landed(), none(), none()))], none()));
+        let left = job(21, "artist-missing:bouk", Some("artist-missing"), "done", 1,
+            walk("artist-missing", vec![], serde_json::json!([{ "name": "Borrowed Tapes", "why": "owned" }])));
+        assert_eq!(phase(vec![took.clone(), left.clone()]), Some(KeepPhase::Covered(21)));
+        // Their finish times say the every-album copy ended last: it speaks.
+        assert_eq!(phase(vec![at(took, 3_000), at(left, 2_000)]), Some(KeepPhase::Covered(20)));
+        // A walk that took the album and found no song in it marks nothing: Add album stays.
+        let empty = job(22, "artist:bouk", Some("artist"), "done", 1, walk("artist", vec![("Borrowed Tapes", songs(none(), none(), none()))], none()));
+        assert_eq!(covered_view(&empty, &tile, JobScope::Album), None);
+        assert_eq!(phase(vec![empty]), None);
+    }
+
+    #[test]
+    fn a_wider_copy_speaks_for_this_song_only_where_its_lists_name_the_songs_file() {
+        let row = subject(Some("Late Train Verse"), Some("Boukmanflow"), Some("Borrowed Tapes"), None);
+        let phase = |jobs: Vec<PluginJob>| opening_phase(&row_of(&KEYS, jobs), &row, JobScope::Song);
+        let album = |id: i64, state: &str, s: serde_json::Value, peer: i64| {
+            job(id, "album:tapes", Some("album"), state, peer, serde_json::json!({ "scope": "album", "songs": s, "stopped": null, "peer": { "id": peer } }))
+        };
+        // The album copy copied it: in your collection, its landed file, Play your copy.
+        let copied = album(30, "done", songs(landed(), serde_json::json!([{ "from": "peerlib/x.mp3", "why": "owned" }]), serde_json::json!([])), 1);
+        assert_eq!(phase(vec![copied.clone()]), Some(KeepPhase::Covered(30)));
+        let view = covered_view(&copied, &row, JobScope::Song).unwrap();
+        assert_eq!(view.scope(), Some(JobScope::Song));
+        assert_eq!(view.outcome(), JobOutcome::Copied { filepath: LANDED.into(), vpath: Some("copies".into()) });
+        assert_eq!(view.outcome().action(), Some(JobAction::Play));
+        // Skipped as owned: already yours, where the library has it; a file in the way: that.
+        let owned = album(31, "done", songs(serde_json::json!([]), serde_json::json!([{ "from": LATE, "why": "owned", "at": "music/Late.mp3" }]), serde_json::json!([])), 1);
+        assert_eq!(covered_view(&owned, &row, JobScope::Song).map(|v| v.outcome()), Some(JobOutcome::Owned { filepath: Some("music/Late.mp3".into()), many: None }));
+        let exists = album(32, "done", songs(serde_json::json!([]), serde_json::json!([{ "from": LATE, "why": "exists", "at": LANDED }]), serde_json::json!([])), 1);
+        assert_eq!(covered_view(&exists, &row, JobScope::Song).map(|v| v.outcome()), Some(JobOutcome::Exists { filepath: Some(LANDED.into()) }));
+        // Failed, another song, another spelling of the path: never claimed.
+        let failed = album(33, "done", songs(serde_json::json!([]), serde_json::json!([]), serde_json::json!([{ "from": LATE, "error": "gone" }])), 1);
+        let other = album(34, "done", songs(serde_json::json!([{ "from": "peerlib/Boukmanflow/Borrowed Tapes/01 - Corner Store Loop.MP3", "filepath": "copies/x.mp3" }]), serde_json::json!([]), serde_json::json!([])), 1);
+        let cased = album(35, "done", songs(serde_json::json!([{ "from": LATE.to_lowercase(), "filepath": LANDED }]), serde_json::json!([]), serde_json::json!([])), 1);
+        for j in [failed, other, cased] {
+            assert_eq!(phase(vec![j.clone()]), None, "{}", j.id);
+        }
+        // Another server's album copy naming the same path, a live one: not this choice's.
+        assert_eq!(phase(vec![album(36, "done", songs(landed(), serde_json::json!([]), serde_json::json!([])), 4)]), None);
+        assert_eq!(phase(vec![album(37, "running", songs(landed(), serde_json::json!([]), serde_json::json!([])), 1)]), None);
+        // A failed or cancelled run says nothing new for the song, whatever
+        // its lists name (rule 3; the webapp's and the phone's rule too).
+        for state in ["cancelled", "failed"] {
+            let ended = album(38, state, songs(landed(), serde_json::json!([]), serde_json::json!([])), 1);
+            assert_eq!(phase(vec![ended]), None, "{state}");
+            let mut run = job(38, "artist-missing:bouk", Some("artist-missing"), state, 1,
+                walk("artist-missing", vec![("Borrowed Tapes", songs(landed(), serde_json::json!([]), serde_json::json!([])))], serde_json::json!([])));
+            run.result.as_mut().unwrap()["songs"] = songs(landed(), serde_json::json!([]), serde_json::json!([]));
+            assert_eq!(phase(vec![run]), None, "artist {state}");
+        }
+        // An artist copy speaks through its walk of the row's album.
+        let walked = job(39, "artist-missing:bouk", Some("artist-missing"), "done", 1,
+            walk("artist-missing", vec![("Borrowed Tapes", songs(landed(), serde_json::json!([]), serde_json::json!([])))], serde_json::json!([])));
+        assert_eq!(phase(vec![walked]), Some(KeepPhase::Covered(39)));
+        // The song's own copy wins when live or newer; an older one gives way.
+        let own = |id: i64, state: &str| job(id, "text:late", None, state, 1, serde_json::json!({ "skipped": "owned" }));
+        assert_eq!(phase(vec![own(50, "done"), copied.clone()]), Some(KeepPhase::Following(50)));
+        assert_eq!(phase(vec![own(5, "done"), copied.clone()]), Some(KeepPhase::Covered(30)));
+        assert_eq!(phase(vec![own(5, "running"), copied.clone()]), Some(KeepPhase::Following(5)));
+        // A row naming no file: nothing to find.
+        let nameless = KeepSubject { filepath: None, ..row.clone() };
+        assert_eq!(covered_view(&copied, &nameless, JobScope::Song), None);
     }
 
     #[test]

@@ -900,7 +900,21 @@ with `{{ARTIST}}/{{ALBUM}}`.
      open (clause 112). The modal opens straight onto this when the
      preselected scope's copy from **this** server already stands (a
      reopened row reads its copy's real state); another server's finished
-     copy is not this one's — the choice, idle.
+     copy is not this one's — the choice, idle. **A wider copy speaks too**
+     (the user's 2026-10-20 report: only-missing had copied the album and
+     Album still offered Add album): with no copy of its own that is live
+     or newer (finish, else update time; else id), the newest finished
+     wider copy from this server opens the choice on what it recorded for
+     it (`opening_phase`, `covered_view`, `KeepPhase::Covered`) — **Album**:
+     a done artist or only-missing copy read through `job_for_album`, and
+     only where that view marks the row ("in your collection · 1 copied",
+     "already yours"; nothing for a guest spot, an album never walked, a
+     failed or cancelled run); **This song**: a done album copy, or a done
+     artist copy's walk of the row's album, whose lists name the song's
+     file on its server (`from`) — copied (its landed file, Play your
+     copy), skipped `owned` (already yours), `exists` (a file in the way);
+     a song the lists do not name (they stop at 500), or one a failed or
+     cancelled run names, is never claimed.
 110. **How it ended** — "done" is not "kept" (clause 120); each with its
      buttons, the primary on the right:
      - **one song copied** — "✓ in your collection" (OK) and the new
@@ -934,7 +948,9 @@ with `{{ARTIST}}/{{ALBUM}}`.
        albums: "nothing of theirs to copy" · "Boukmanflow only appears on
        other artists' albums there" · `[ Close ]`.
      Retry and Copy again start the same copy again — the job's own
-     recommendation and scope (`App::keep_again`). Keys: Enter the
+     recommendation and scope (`App::keep_again`); where a wider copy
+     speaks for the choice (clause 109), the choice's own copy of the
+     modal's subject. Keys: Enter the
      primary, ↑ ↓ the buttons, Esc closes.
 
 **Marks, lookups and the poll**

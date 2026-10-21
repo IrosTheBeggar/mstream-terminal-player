@@ -998,7 +998,7 @@ pub(crate) fn act(gui: &mut Gui, act: KeepAct) {
             }
             Some(Button::AddToQueue) => {
                 if let KeepStage::Job { job, .. } = &view.stage {
-                    let effects = gui.app.keep_play_copy(job.id, false);
+                    let effects = gui.app.keep_play_copy(job, false);
                     gui.pend(effects);
                     close(gui);
                 }
@@ -3399,6 +3399,86 @@ pub(crate) mod tests {
             sent,
             vec![(fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0)), crate::api::types::JobScope::Album)]
         );
+    }
+
+    #[test]
+    fn a_choice_an_only_missing_copy_already_kept_reads_its_state_never_add() {
+        let _en = english();
+        // The user's 2026-10-20 report: "Only the albums you don't have"
+        // copied Borrowed Tapes; the tile and the row then read that.
+        let late = fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0));
+        let landed = "copies/Boukmanflow/Borrowed Tapes/Late Train Verse.mp3";
+        let songs = json!({ "total": 1, "skipped": [], "failed": [],
+            "copied": [{ "from": late["filepath"], "vpath": "copies", "filepath": landed, "title": "Late Train Verse" }] });
+        let walk = |albums: Value, left: Value| {
+            job(80, &late, Some("artist-missing"), "done", json!({ "result": { "scope": "artist-missing",
+                "albums": albums, "skippedAlbums": left, "songs": songs, "counts": { "total": 1, "copied": 1, "skipped": 0, "failed": 0 },
+                "stopped": null, "peer": { "id": B, "name": "Stage Peer B" } } }))
+        };
+        let kept = walk(json!([{ "name": "Borrowed Tapes", "songs": songs, "stopped": null }]), json!([]));
+        let mut gui = canvas_gui(&[kept]);
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, KeepTarget::Tile(0));
+        stage_facts(&mut gui);
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!(
+            lower_rows(&rows),
+            canvas(&[
+                "│ WHAT      Album · 3 songs                                      │",
+                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
+                "│                                                                │",
+                "│ ✓ in your collection                                           │",
+                "│ 1 copied                                                       │",
+                "│ Copy again takes only the gaps                                 │",
+                "│                                                                │",
+                "│                                       [ Close ] [ Copy again ] │",
+                "╰────────────────────────────────────────────────────────────────╯",
+            ])
+        );
+        // Copy again: the album's copy of the tile's row, never the artist copy again.
+        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
+        assert_eq!(starts(&gui), vec![(late.clone(), crate::api::types::JobScope::Album)]);
+        // The row: This song in your collection, its landed file.
+        super::close(&mut gui);
+        gui.pending.clear();
+        super::open(&mut gui, LATE);
+        stage_facts(&mut gui);
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!(
+            lower_rows(&rows),
+            canvas(&[
+                "│ WHAT      This song · 0:08 · mp3                               │",
+                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
+                "│                                                                │",
+                "│ ✓ in your collection                                           │",
+                "│ copies/Boukmanflow/Borrowed Tapes/Late Train Verse.mp3         │",
+                "│                                                                │",
+                "│                                                                │",
+                "│                            [ Add to queue ] [ Play your copy ] │",
+                "╰────────────────────────────────────────────────────────────────╯",
+            ])
+        );
+        // Add to queue queues the user's own file.
+        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Secondary)));
+        assert_eq!(gui.app.queue.items.last().map(|q| q.filepath.as_str()), Some(landed));
+        // Left out as already here: already yours, Close alone.
+        let owned = walk(json!([]), json!([{ "name": "Borrowed Tapes", "why": "owned" }]));
+        let mut gui = canvas_gui(&[owned]);
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, KeepTarget::Tile(0));
+        stage_facts(&mut gui);
+        let rows = draw(&mut gui, 100, 30);
+        let lower = lower_rows(&rows);
+        assert_eq!(lower[3], "│ ✓ already yours                                                │", "{}", lower.join("\n"));
+        assert_eq!(lower[lower.len() - 2], "│                                                      [ Close ] │");
+        // A guest spot: nothing claimed — Add album.
+        let guest = walk(json!([]), json!([{ "name": "Borrowed Tapes", "why": "appearance" }]));
+        let mut gui = canvas_gui(&[guest]);
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, KeepTarget::Tile(0));
+        stage_facts(&mut gui);
+        let rows = draw(&mut gui, 100, 30);
+        assert!(lower_rows(&rows).iter().any(|r| r.contains("[ Cancel ] [ Add album ]")), "{}", rows.join("\n"));
     }
 
     #[test]
