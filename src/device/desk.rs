@@ -2302,10 +2302,18 @@ pub(crate) mod tests {
 
     #[test]
     fn read_the_board_is_the_one_reset_and_restarts_it_as_it_was() {
-        let mut r = rig(Fake::new("other,chip,silent:v0.7.0,fresh"));
+        let fake = Fake::new("other,chip,silent:v0.7.0,fresh");
+        let bootloader = fake.clone();
+        let mut r = rig(fake);
         r.settled(4);
+        // FAKE0 kept in its bootloader until FAKE1's read is answered: the
+        // fake's read is over in a blink, and a busy machine can end it
+        // before the worker takes the second command (macOS's CI did).
+        bootloader.hold();
         r.send(Cmd::Read { port: "FAKE0".into() });
         r.send(Cmd::Read { port: "FAKE1".into() });
+        r.until("FAKE1's read answered", |r| !r.refused().is_empty());
+        bootloader.release();
         r.until("FAKE0 read", |r| matches!(r.board("FAKE0").verdict, Verdict::Other { .. }));
         assert_eq!(r.board("FAKE0").verdict, Verdict::Other { name: "arduino-lib-builder".into() });
         assert_eq!(r.board("FAKE0").primary(), Some(Primary::Install));

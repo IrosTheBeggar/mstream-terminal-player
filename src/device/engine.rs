@@ -489,7 +489,7 @@ fn flash_error(port: &str, e: espflash::Error) -> DeviceError {
 pub(crate) mod fake {
     use std::collections::VecDeque;
     use std::io::{self, ErrorKind, Read, Write};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     use clap::ValueEnum;
@@ -879,6 +879,9 @@ pub(crate) mod fake {
         /// second or more on a real board, during which the worker hears
         /// nothing. None by default.
         reach: Duration,
+        /// A test's hand on the bootloader ([`Fake::hold`]): while it is
+        /// held, an `open` that reset its board waits before it answers.
+        hold: Arc<(Mutex<bool>, Condvar)>,
         /// What was done to the boards, in order (`open 921600`, `let go`,
         /// `restart`, `let go FAKE0`, `listen FAKE1`, `identify FAKE1
         /// FAKE1`), for the tests to read.
@@ -902,6 +905,7 @@ pub(crate) mod fake {
                 born: Instant::now(),
                 pace: Duration::from_millis(1200),
                 reach: Duration::ZERO,
+                hold: Arc::default(),
                 trace: Arc::default(),
             }
         }
@@ -919,6 +923,23 @@ pub(crate) mod fake {
         pub(crate) fn with_reach(mut self, reach: Duration) -> Fake {
             self.reach = reach;
             self
+        }
+
+        /// Every `open` from now on keeps its board in its bootloader, the
+        /// reset done, until [`Fake::release`]: a fake read is over in a
+        /// blink, which a busy machine can let end before the worker takes
+        /// the page's next command, so a test that needs a board in its
+        /// bootloader holds it there.
+        #[cfg(test)]
+        pub(crate) fn hold(&self) {
+            *lock(&self.hold.0) = true;
+        }
+
+        /// The `open`s held go on.
+        #[cfg(test)]
+        pub(crate) fn release(&self) {
+            *lock(&self.hold.0) = false;
+            self.hold.1.notify_all();
         }
 
         /// What was done to the boards so far, shared with the fake.
@@ -1006,6 +1027,8 @@ pub(crate) mod fake {
             // whether or not it then answers.
             Fake::note(&self.trace, format!("open {baud}"));
             std::thread::sleep(self.reach);
+            let (held, freed) = &*self.hold;
+            drop(freed.wait_while(lock(held), |held| *held).unwrap_or_else(|e| e.into_inner()));
             if board.nosync {
                 let detail = "no answer".into();
                 return Err(DeviceError::NoSync { port: candidate.port.clone(), detail });
