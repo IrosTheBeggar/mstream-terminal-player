@@ -1261,15 +1261,34 @@ fn draw_strip(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, fill: Str
         })
         .collect();
 
+    // A hovered connected server's tile hangs its list from a `[⋯]` too
+    // (clause 103), whose tip names what the list holds now — asked only of
+    // the tile under the pointer.
+    let more_tips: Vec<Option<String>> = (first..first + shown)
+        .enumerate()
+        .map(|(k, index)| {
+            let tile = Rect { x: row.x + k as u16 * TILE_STRIDE, y, width: TILE_W, height: TILE_H };
+            match tiles[index] {
+                Tile::Peer(i) if k < whole && gui.ui.hovers(tile) => Some(tile_more_tip(gui, i)),
+                _ => None,
+            }
+        })
+        .collect();
+
     // Split borrows: the faces and covers are READ from the App while each
     // slot's caches are written — the queue panel's move, so a frame never
     // clones a decoded cover.
     let pace = Pace::frame();
     let mut on_view: HashSet<u64> = HashSet::new();
-    let [_, _, plus, _] = verb_glyphs();
+    let [_, _, plus, dots] = verb_glyphs();
     {
         let Gui { app, discover, ui, .. } = &mut *gui;
         let StripUi { cursor, on, .. } = discover.strip;
+        // While a tile's list hangs from the strip, the strip's tips stand
+        // down: the hand that just clicked a `[⋯]` (or right-clicked a
+        // tile) rests where it was, and its tip, drawn over everything,
+        // would cover the list it opened.
+        let tips = discover.tile_list.is_none();
         for (k, index) in (first..first + shown).enumerate() {
             let x = row.x + k as u16 * TILE_STRIDE;
             let w = if k < whole { TILE_W } else { cut_w };
@@ -1298,11 +1317,14 @@ fn draw_strip(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, fill: Str
             }
             // The title (BOLD and bright under the pointer, the slab under
             // the keyboard's hand) and the artist DIM; a hovered whole tile
-            // gives its title's tail to its one verb, `[+]`.
+            // gives its title's tail to its verb, `[+]`, and a connected
+            // server's its artist line's tail to its list's, `[⋯]`.
             let tile = Rect { x, y, width: w, height: TILE_H };
             let selected = on && cursor == index;
             let hover = ui.hovers(tile);
             let verb = hover && !selected && !cut;
+            let peer_tile = matches!(tiles[index], Tile::Peer(_));
+            let more = verb && peer_tile;
             let name_y = y + TILE_COVER_H;
             let name = Rect { x, y: name_y, width: w, height: 1 };
             if selected {
@@ -1320,33 +1342,51 @@ fn draw_strip(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, fill: Str
             // is the title line's alone (clause 47), never a ragged second
             // run of accent under it. A copy's state takes the artist's row
             // in its own token (clause 114) — never the cover's pixels — and
-            // keeps it under the hand, whose slab is the title's alone.
+            // keeps it under the hand, whose slab is the title's alone. Either
+            // gives its tail to the `[⋯]` while it shows, as the title does
+            // to the `[+]`.
+            let artist_room = usize::from(if more { TILE_W - 4 } else { w });
             match marks[k] {
-                Some(mark) => put(frame, x, name_y + 1, &super::bar::clip(&mark_word(mark), usize::from(w)), mark_style(mark)),
+                Some(mark) => put(frame, x, name_y + 1, &super::bar::clip(&mark_word(mark), artist_room), mark_style(mark)),
                 None => {
                     if let Some(artist) = &face.artist {
-                        put(frame, x, name_y + 1, &super::bar::clip(artist, usize::from(w)), dim());
+                        put(frame, x, name_y + 1, &super::bar::clip(artist, artist_room), dim());
                     }
                 }
             }
             discover.tile_rects.push((index, tile));
-            let peer_tile = matches!(tiles[index], Tile::Peer(_));
             if hover && peer_tile {
                 discover.hovered = Some(Hovered::Tile(index));
             }
-            // The tile's click first, its verb after: the last registered wins.
+            // The tile's click first, its verbs after: the last registered wins.
             ui.click(tile, Act::Disc(DiscAct::Tile(index, RowVerb::Open)));
             // A connected server's tile hangs its list on a right click
-            // (clause 103).
+            // (clause 103), and on its `[⋯]` while hovered (below).
             if peer_tile {
                 ui.context(tile, Act::Disc(DiscAct::TileList(index)));
             }
-            ui.tip_keyed(Rect { width: (width(&title) as u16).max(1), ..name }, face.tip);
+            if tips {
+                ui.tip_keyed(Rect { width: (width(&title) as u16).max(1), ..name }, face.tip);
+            }
             if verb {
                 let cell = Rect { x: x + TILE_W - 3, y: name_y, width: 3, height: 1 };
                 put(frame, cell.x, name_y, plus, if ui.hovers(cell) { bright_bold() } else { dim() });
                 ui.click(cell, Act::Disc(DiscAct::Tile(index, RowVerb::Queue)));
-                ui.tip_keyed(cell, t!("gui.discover.album_queue_tip").to_string());
+                if tips {
+                    ui.tip_keyed(cell, t!("gui.discover.album_queue_tip").to_string());
+                }
+            }
+            // The tile's list by a left click (clause 103): `[⋯]` under the
+            // `[+]`, at the artist line's end — what a terminal that reports
+            // no right click (Apple's) has instead of the context click.
+            // Registered after the tile's own click, so it wins.
+            if more {
+                let cell = Rect { x: x + TILE_W - 3, y: name_y + 1, width: 3, height: 1 };
+                put(frame, cell.x, cell.y, dots, if ui.hovers(cell) { bright_bold() } else { dim() });
+                ui.click(cell, Act::Disc(DiscAct::TileList(index)));
+                if let Some(tip) = more_tips[k].clone().filter(|_| tips) {
+                    ui.tip_keyed(cell, tip);
+                }
             }
         }
     }
@@ -2098,6 +2138,15 @@ fn tile_verb_words(gui: &Gui, verb: TileVerb, album: usize) -> (String, Option<&
             (t!("gui.discover.tile_open_on", server = server).to_string(), None)
         }
     }
+}
+
+/// The tip on a hovered connected server's tile's `[⋯]` (clause 103): the
+/// verbs its list holds now, in the list's own words, and the other ways
+/// in — a right click on the tile, and `m` (the key's tail goes with the
+/// key hints, the kit's `tip_keyed` law).
+fn tile_more_tip(gui: &Gui, album: usize) -> String {
+    let verbs: Vec<String> = tile_verbs(gui, album).into_iter().map(|verb| tile_verb_words(gui, verb, album).0).collect();
+    t!("gui.discover.tile_more_tip", verbs = verbs.join(" · ")).to_string()
 }
 
 /// The tile's list (the kit's Context list): an ACCENT frame from the
@@ -3169,7 +3218,7 @@ pub(crate) fn banner(gui: &Gui) -> Option<String> {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::{Position, Rect};
     use serde_json::json;
 
@@ -4597,6 +4646,229 @@ mod tests {
             gui.pending
         );
         assert!(gui.discover.strip.on && gui.active == DISCOVER_NAV, "played by key, the hand stays on the tile");
+    }
+
+    // ── The tile's `[⋯]`, and Apple Terminal's release echo ─────────────
+
+    /// A mouse event through the GUI's own loop, the terminal's routing
+    /// whole: the release echo's filter first, then the page owners and
+    /// the surface.
+    fn mouse(gui: &mut Gui, kind: MouseEventKind, at: Position) {
+        let event = MouseEvent { kind, column: at.x, row: at.y, modifiers: KeyModifiers::NONE };
+        let mut ctx = super::super::tests::quiet_ctx(gui);
+        super::super::input(gui, &mut ctx, ratatui::crossterm::event::Event::Mouse(event));
+    }
+
+    /// One click as Apple Terminal reports it (the kit's `EchoFilter`): the
+    /// pointer arrives and a frame lights what it rests on; the press comes
+    /// as an instant pair, and a frame shows what it opened; the physical
+    /// release then sends the same pair again where the hand let go — here,
+    /// where it pressed — and a frame.
+    fn apple_click(gui: &mut Gui, at: Position) {
+        let (down, up) = (MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left));
+        mouse(gui, MouseEventKind::Moved, at);
+        draw(gui);
+        mouse(gui, down, at);
+        mouse(gui, up, at);
+        draw(gui);
+        mouse(gui, down, at);
+        mouse(gui, up, at);
+        draw(gui);
+    }
+
+    /// The room on its Connected servers tab, Sam's album the strip's one
+    /// tile (x 17–28: the cover on rows 6–10, the title on 11, the artist on
+    /// 12).
+    fn servers_gui() -> Gui {
+        let mut gui = answered_gui();
+        gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        draw(&mut gui);
+        gui
+    }
+
+    fn lists_on(gui: &Gui) -> Vec<Rect> {
+        gui.ui.clicks.iter().filter(|(_, act)| matches!(act, Act::Disc(DiscAct::TileList(_)))).map(|(rect, _)| *rect).collect()
+    }
+
+    #[test]
+    fn a_hovered_connected_servers_tile_hangs_its_list_on_a_dots_under_its_plus() {
+        let _en = english();
+        let mut gui = servers_gui();
+        gui.ui.pointer = Some(Position { x: 20, y: 8 });
+        let buffer = draw_buffer(&mut gui);
+        let cells = |buffer: &ratatui::buffer::Buffer, y: u16| (26..29).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert_eq!(cells(&buffer, 11), "[+]", "the queue verb at the title line's end");
+        assert_eq!(cells(&buffer, 12), "[⋯]", "the list's verb under it, at the artist line's end");
+        assert_eq!(buffer[(27, 12)].fg, th().dim, "DIM until the hand is on it");
+        // Its click is the tile's list; the rest of the tile is its own.
+        assert_eq!(gui.ui.hit(Position { x: 27, y: 12 }), Some(Act::Disc(DiscAct::TileList(0))));
+        assert_eq!(gui.ui.hit(Position { x: 27, y: 11 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Queue))));
+        assert_eq!(gui.ui.hit(Position { x: 20, y: 12 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Open))));
+        assert_eq!(gui.ui.hit_context(Position { x: 27, y: 12 }), Some(Act::Disc(DiscAct::TileList(0))), "the right click as ever");
+        // Under the hand: BRIGHT + BOLD, and a tip that names the list's
+        // verbs and the other ways in, the key's with the key hints alone.
+        gui.ui.pointer = Some(Position { x: 27, y: 12 });
+        let buffer = draw_buffer(&mut gui);
+        let dots = &buffer[(27, 12)];
+        assert!(dots.fg == th().bright && dots.modifier.contains(ratatui::style::Modifier::BOLD), "{dots:?}");
+        let tip = |gui: &Gui| gui.ui.tips.iter().find(|(r, _)| r.contains(Position { x: 27, y: 12 })).map(|(_, t)| t.clone());
+        assert!(!gui.ui.key_hints, "the GUI's default");
+        assert_eq!(tip(&gui).as_deref(), Some("More: Play album · Queue album (or right-click the album)"));
+        gui.ui.key_hints = true;
+        draw(&mut gui);
+        assert_eq!(tip(&gui).as_deref(), Some("More: Play album · Queue album (or right-click the album) — m"));
+        // The hand rests on it long enough for the tip.
+        gui.ui.dwell_tick();
+        gui.ui.dwell_backdate(crate::kit::TIP_DELAY);
+        assert!(gui.ui.ripe_tooltip().is_some());
+        // The click hangs the list from the tile, one row under it — right
+        // under the `[⋯]` — by the pointer: no row lit. The hand rests where
+        // it clicked, and the strip's tips stand down while the list hangs,
+        // so no tooltip covers it.
+        gui.act(Act::Disc(DiscAct::TileList(0)));
+        assert_eq!(gui.discover.tile_list.as_ref().map(|l| l.cursor), Some(None), "opened by the pointer");
+        draw(&mut gui);
+        assert_eq!(tip(&gui), None, "no tip on the strip while its list hangs");
+        gui.ui.dwell_tick();
+        gui.ui.dwell_backdate(crate::kit::TIP_DELAY);
+        assert!(gui.ui.ripe_tooltip().is_none(), "no tooltip over the list");
+        let rows = draw(&mut gui);
+        assert_eq!(rows[13].chars().skip(16).take(24).collect::<String>(), "╭──────────────────────╮", "{}", rows.join("\n"));
+        assert!(rows[14].contains("Play album") && rows[15].contains("Queue album"), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn the_dots_stand_on_a_hovered_whole_connected_servers_tile_alone() {
+        let _en = english();
+        // A library album has no list: its tile keeps the one verb.
+        let mut gui = answered_gui();
+        draw(&mut gui);
+        gui.ui.pointer = Some(Position { x: 20, y: 8 });
+        let rows = draw(&mut gui);
+        assert!(rows[11].contains("[+]") && !rows[12].contains("[⋯]"), "{}\n{}", rows[11], rows[12]);
+        assert!(lists_on(&gui).is_empty());
+        assert_eq!(gui.ui.hit(Position { x: 27, y: 12 }), Some(Act::Disc(DiscAct::Tile(0, RowVerb::Open))));
+        // No hover, no verb.
+        let mut gui = servers_gui();
+        gui.ui.pointer = Some(Position { x: 60, y: 8 });
+        let rows = draw(&mut gui);
+        assert!(!rows[12].contains("[⋯]") && lists_on(&gui).is_empty(), "{}", rows[12]);
+        // The keyboard's tile: the slab, and no hover verb (clause 48).
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.discover.strip.on);
+        gui.ui.pointer = Some(Position { x: 20, y: 8 });
+        let rows = draw(&mut gui);
+        assert!(!rows[11].contains("[+]") && !rows[12].contains("[⋯]"), "{}\n{}", rows[11], rows[12]);
+        assert!(lists_on(&gui).is_empty());
+        // A cut tile: none either.
+        let mut gui = answered_gui();
+        land(&mut gui, TastePart::Peers, peer_strip_answer());
+        gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        draw(&mut gui);
+        let &(last, cut) = gui.discover.tile_rects.last().expect("tiles");
+        assert!(cut.width < super::TILE_W, "the last tile shown is cut: {cut:?}");
+        gui.ui.pointer = Some(Position { x: cut.x, y: cut.y + 2 });
+        draw(&mut gui);
+        assert_eq!(gui.ui.hit(Position { x: cut.x, y: cut.y + 2 }), Some(Act::Disc(DiscAct::Tile(last, RowVerb::Open))));
+        assert!(lists_on(&gui).is_empty(), "a cut tile shows no verb");
+        // The whole one beside it does.
+        let whole = gui.discover.tile_rects[0].1;
+        gui.ui.pointer = Some(Position { x: whole.x + 3, y: whole.y + 2 });
+        draw(&mut gui);
+        assert_eq!(lists_on(&gui), [Rect { x: whole.x + 9, y: whole.y + 6, width: 3, height: 1 }]);
+    }
+
+    #[test]
+    fn the_artist_line_gives_its_tail_to_the_dots() {
+        let _en = english();
+        let mut gui = answered_gui();
+        let mut answer = peers_answer();
+        answer.peers.as_mut().unwrap().peers[0].results[0].artist = Some("Pia Lindqvist".into());
+        land(&mut gui, TastePart::Peers, answer);
+        gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        let tile = |rows: &[String], y: usize| rows[y].chars().skip(17).take(12).collect::<String>();
+        let rows = draw(&mut gui);
+        assert_eq!(tile(&rows, 12), "Pia Lindqvi…", "the whole tile's width at rest");
+        gui.ui.pointer = Some(Position { x: 20, y: 8 });
+        let rows = draw(&mut gui);
+        assert_eq!(tile(&rows, 12), "Pia Lin… [⋯]", "nothing runs under the verb");
+        assert_eq!(tile(&rows, 11), "Theirs   [+]");
+    }
+
+    #[test]
+    fn in_apple_terminal_a_rows_dots_opens_the_sheet_and_the_echo_fires_nothing() {
+        let _en = english();
+        let mut gui = servers_gui();
+        gui.ui.set_echo_dialect(true);
+        mouse(&mut gui, MouseEventKind::Moved, Position { x: 30, y: 18 });
+        let rows = draw(&mut gui);
+        let x = rows[18].find("[⋯]").map(|i| rows[18][..i].chars().count()).expect("the row's [⋯]") as u16;
+        let dots = Position { x: x + 1, y: 18 };
+        gui.pending.clear();
+        apple_click(&mut gui, dots);
+        let sheet = gui.actions.sheet.as_ref().expect("the sheet stays open");
+        assert_eq!(sheet.track.filepath, "Music/p2.mp3", "on the row's song");
+        assert!(gui.app.queue.items.is_empty(), "nothing queued: {:?}", gui.app.queue.items);
+        assert!(
+            !gui.pending.iter().any(|e| matches!(e, Effect::Audio(_) | Effect::Api(ApiCmd::TasteAlbum { .. }))),
+            "nothing played: {:?}",
+            gui.pending
+        );
+        assert!(gui.discover.tile_list.is_none() && gui.app.taste.keep.flow.is_none());
+        // The next click is real again: a click outside the sheet closes it.
+        mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), Position { x: 2, y: 2 });
+        mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), Position { x: 2, y: 2 });
+        assert!(gui.actions.sheet.is_none(), "the next pair is a click");
+    }
+
+    #[test]
+    fn in_apple_terminal_a_tiles_dots_opens_its_list_and_the_list_stays() {
+        let _en = english();
+        let mut gui = servers_gui();
+        gui.ui.set_echo_dialect(true);
+        gui.pending.clear();
+        apple_click(&mut gui, Position { x: 27, y: 12 });
+        let list = gui.discover.tile_list.as_ref().expect("the list stays open");
+        assert_eq!(list.cursor, None);
+        assert!(!gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::TasteAlbum { .. }))), "{:?}", gui.pending);
+        let rows = draw(&mut gui);
+        assert!(rows[14].contains("Play album"), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn in_apple_terminal_a_click_on_a_tile_plays_its_album_once() {
+        let _en = english();
+        let asks = |gui: &Gui| gui.pending.iter().filter(|e| matches!(e, Effect::Api(ApiCmd::TasteAlbum { play: true, .. }))).count();
+        let mut gui = servers_gui();
+        gui.ui.set_echo_dialect(true);
+        gui.pending.clear();
+        apple_click(&mut gui, Position { x: 20, y: 8 });
+        assert_eq!(asks(&gui), 1, "{:?}", gui.pending);
+        // Every other terminal's events are left as they come: the same
+        // events there are two clicks, and play twice.
+        let mut gui = servers_gui();
+        gui.pending.clear();
+        apple_click(&mut gui, Position { x: 20, y: 8 });
+        assert_eq!(asks(&gui), 2, "{:?}", gui.pending);
+    }
+
+    /// Ask B with eight albums on Sam's server: more than the room's 80
+    /// cells show whole.
+    fn peer_strip_answer() -> TasteResponse {
+        let results: Vec<serde_json::Value> = (0..8)
+            .map(|i| {
+                json!({
+                    "artist": format!("Artist {i}"), "title": format!("Song {i}"), "album": format!("Record {i}"),
+                    "filepath": format!("Music/s{i}.mp3"), "similarity": 0.9 - f64::from(i) * 0.01,
+                    "peer": { "id": 7, "name": "Sam's server" }, "source": "federation"
+                })
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "seedSource": "history",
+            "peers": { "peers": [ { "id": 7, "name": "Sam's server", "reachable": true, "results": results } ] }
+        }))
+        .unwrap()
     }
 
     #[test]

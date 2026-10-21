@@ -248,6 +248,26 @@ assert s['cancels'] == 0 and s['clears'] == 0, s
 "
 stop_fake
 
+# ── Scenario M: Apple Terminal's mouse dialect, the release echo ─────────
+# The GUI spawned with TERM_PROGRAM=Apple_Terminal and every click sent as
+# that terminal sends one: the press an instant pair, the physical release
+# the same pair again (docs/ui-kit.md, behavioral rules). A connected
+# server's tile's `[⋯]` opens its list and the echo, landing on the list's
+# catcher, leaves it open; a row's `[⋯]` opens the track-actions sheet and
+# the echo, landing outside it, leaves it open and presses nothing — the
+# queue empty, nothing playing (docs/ux-contracts/discovery-page.md,
+# clauses 48, 102 and 103). check_echo.py replays the stream between the
+# leg's marks.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake M)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-echo gui-discover-echo.exp "$WORK/h14" "$WORK/gui-discover-echo.out"
+if python3 "$E2E/check_echo.py" "$WORK/gui-discover-echo.out" "$E2E/replay.py" 30 100; then
+  echo "PASS the release echo: the tile's list and the sheet stay, nothing pressed"
+else
+  echo "FAIL the release echo: the tile's list and the sheet stay, nothing pressed"; FAILS=$((FAILS+1))
+fi
+stop_fake
+
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
 # No fake mStream at all: the page talks to a board, and the board is the
 # fake behind MSTREAM_DEVICE_FAKE. The image is a merged one in miniature —

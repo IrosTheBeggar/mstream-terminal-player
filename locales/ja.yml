@@ -1733,6 +1733,7 @@ gui:
     album: "アルバム"
     album_tip: "アルバムを開く — Enter"
     album_queue_tip: "アルバムをキューに追加 — a"
+    tile_more_tip: "その他: %{verbs}（アルバムを右クリックしても開きます） — m"
     peer_album_tip: "%{server} のアルバムを再生 — Enter"
     seed_tip: "%{track} に似ています"
     listen_tip: "あなたのサーバー経由で聴く — P"

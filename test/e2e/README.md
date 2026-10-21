@@ -51,6 +51,18 @@ room against the taste route, is described in run.sh):
   `/_state` says what was sent (the row unchanged, scope album) and how
   the rows were looked up.
 
+- **M** — Apple Terminal's mouse dialect (`TERM_PROGRAM=Apple_Terminal`
+  in the spawned env, `FAKE_TASTE=1 FAKE_PLUGINS=1`): every click is sent
+  as that terminal sends one — the press an instant SGR pair, then, once
+  the frame shows what it opened, the same pair again where the hand let
+  go (the release echo; docs/ui-kit.md, behavioral rules). A connected
+  server's tile's `[⋯]` opens its list and the list stays; a row's `[⋯]`
+  opens the track-actions sheet and the sheet stays, the queue empty and
+  nothing playing. The leg writes marks into the stream after each echo
+  (`@@ECHO:list@@`, …); `check_echo.py` cuts them out and replays every
+  frame between them. The same events with any other `TERM_PROGRAM` close
+  the list and the sheet — the bug the dialect's filter fixes.
+
 ## The two harness laws (learned the hard way)
 
 1. **Never grep the raw stream for anything that repaints in place.**

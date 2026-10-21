@@ -3000,6 +3000,16 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
         }
         TermEvent::Mouse(mouse) => {
             let at = Position { x: mouse.column, y: mouse.row };
+            // Apple Terminal's release echo — the second click pair its
+            // physical release sends after every click — is dropped whole,
+            // its press and its release, before anything below reads it:
+            // the Stats, Admin and MP3 Player pages, a grip, the surface.
+            // A click that opened a sheet or a list stops there, wherever
+            // the echo lands (the kit's `EchoFilter`; off in every other
+            // terminal and in the window).
+            if gui.ui.swallow_echo(mouse.kind, at) {
+                return Flow::Continue;
+            }
             // The App keeps the pointer too: the Now Playing band
             // lights under it, the TUI's way.
             gui.app.note_pointer(at);
@@ -3540,6 +3550,9 @@ pub fn run(
         return window::run(Box::new(GuiFace::new(gui, channels)), instance.take());
     }
     let (mut gui, channels) = start(server, token, torrent, bundled, control);
+    // The terminal's mouse dialect: Apple Terminal's release echo is the
+    // surface's to swallow. The window above never sets it.
+    gui.ui.set_echo_dialect(crate::kit::apple_dialect());
 
     let _title = crate::tui::WindowTitle::claim("mStream Player");
     // The OSC 11 ground lease runs before ratatui takes the terminal — the

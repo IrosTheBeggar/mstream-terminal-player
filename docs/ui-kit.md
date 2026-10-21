@@ -400,7 +400,16 @@ within 150ms of arming downgrades the capture to a SOFT one: hover
 stays pinned within 2 cells of the press until the pointer genuinely
 travels away or a real press lands, and an off-bar press inside that
 radius is swallowed as the release re-click. Honest terminals release
-late and never enter the soft path. Empty state:
+late and never enter the soft path. In Apple Terminal itself the
+re-click — after a bar press as after any click — is the release
+echo's, swallowed whole before the bar sees it (the behavioral rule
+below), so there an endcap click steps once and a press beside the bar
+after the echo is a real one; the soft capture keeps its hover pin and
+its end on travel or a real press either way. A page the GUI hosts (an
+Admin room, the Stats page, the MP3 Player page) sees no echo either —
+the GUI's surface took it — but its own surface is never told, so after
+a click on one of its bars an off-bar press inside the radius is still
+swallowed as the re-click, as it was before the echo filter. Empty state:
 **Every added folder is validated LOCALLY, on the worker** (a stat can
 hang on a dead mount): exists / is a folder / readable, plus
 canonicalization for truth-telling — another SPELLING of a chosen
@@ -481,8 +490,8 @@ a host that routes events to a hosted room skips it while
 still answers — and a click registered AFTER it over the press's cell (an
 overlay, a modal's catcher) takes the press instead. A region never
 enters the phantom-release soft capture, so in Apple Terminal, whose
-press is an instant click pair, a press is a plain click and no drag
-begins. The host keeps a grip honest: after `Surface::release_at` it
+press is an instant click pair, a press is a plain click (its release's
+echo swallowed, behavioral rules) and no drag begins. The host keeps a grip honest: after `Surface::release_at` it
 runs `Surface::motion` at the release's cell, so the control under it
 lights at once; a press arriving while a grip stands means the terminal
 lost the release (some drop it when the focus leaves mid-drag), so the
@@ -764,6 +773,44 @@ owned `String`s so they translate like everything else.
   query dialect, and their I-beams persist even under mouse reporting —
   so their pointers cannot be changed by any escape, which is why the
   pointer is enhancement, never signal.
+- **Apple Terminal's release echo is swallowed whole.** That terminal
+  (probed, 470.2) reports a left press as an INSTANT click pair — the
+  press and its release in the same millisecond — the still-held
+  button's motion as plain Moved, and the PHYSICAL release as a second
+  click pair wherever the hand let go. Taken as it comes, every click
+  there is two: a row's `[⋯]` opens the track-actions sheet and the echo
+  clicks whatever the sheet drew under the pointer, or closes it; a list
+  hung from a click is closed again by the echo's press on its own
+  catcher. So every host asks `Surface::swallow_echo` (the kit's
+  `EchoFilter`) FIRST about every mouse event — before a hosted page, a
+  grip or the surface's own press reads it — and drops the events it
+  claims. **The rule**: a left press passes and is watched; its release
+  arriving within `PHANTOM_RELEASE` (150ms) makes it an instant pair,
+  which now awaits its echo. The next left press is that echo when it
+  lands within `SOFT_RADIUS` (2 cells) of the pair at any time, or
+  anywhere within `ECHO_WAIT` (2s: a click is held for well under a
+  second, so the wait covers a press that wandered off its control or a
+  drag the dialect cannot report, and bounds what a lost echo can cost
+  to the one click it mistakes for it); that press and the release after
+  it are swallowed, whole, whatever they land on — a sheet, a list, a
+  modal opened by the click. A press far away after the wait is real.
+  After the echo the next pair is real again: two quick clicks are pair,
+  echo, pair, echo, and each acts once. A press whose release came late
+  awaits nothing; moves, the wheel and the other buttons are never
+  claimed. **The gate**: only Apple Terminal — `TERM_PROGRAM=
+  Apple_Terminal` (the launcher log's `apple-terminal` host,
+  `instance::host_from_env`), read once by `kit::apple_dialect` and set
+  on the surface by each TERMINAL shell (`Surface::set_echo_dialect`):
+  the GUI player, the admin hub and its pages, the setup wizard and the
+  classic TUI's loop (its own `EchoFilter`, for the one click it takes,
+  the seek bar). A native window never sets it, whatever terminal
+  started it, and nor does a page the GUI hosts (the GUI's own surface
+  already swallowed the echo). Every other terminal is untouched: a
+  trackpad tap in iTerm2 or Ghostty can be a near-instant pair with NO
+  echo, and a second click or a double click after it is real. ssh does
+  not forward `TERM_PROGRAM` and a multiplexer writes its own name over
+  it, so Terminal.app behind tmux or ssh still clicks twice — the known
+  gap.
 - **The UI never blocks.** Network calls and native dialogs run on a
   worker thread; results fold back between draws (see `src/setup/mod.rs`,
   the Job/Done pattern).

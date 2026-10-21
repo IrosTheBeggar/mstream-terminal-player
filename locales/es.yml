@@ -1733,6 +1733,7 @@ gui:
     album: "álbum"
     album_tip: "Abrir el álbum — Enter"
     album_queue_tip: "Añadir el álbum a la cola — a"
+    tile_more_tip: "Más: %{verbs} (o clic derecho en el álbum) — m"
     peer_album_tip: "Reproducir el álbum de %{server} — Enter"
     seed_tip: "suena como %{track}"
     listen_tip: "Escuchar a través de tu servidor — P"

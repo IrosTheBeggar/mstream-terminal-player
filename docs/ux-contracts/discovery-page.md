@@ -438,7 +438,8 @@ answer and the visit (the session generation, clause 31).
     under the strip); ↑ on the strip does nothing; Esc stows. Nothing is
     lit on arrival; the keyboard's tile wears the slab on its **title
     line alone** (its artist stays DIM on the ground); the pointer never
-    lights a tile — hover brightens its title to BRIGHT + BOLD. The lit
+    lights a tile — hover brightens its title to BRIGHT + BOLD and shows
+    its verbs (clause 48). The lit
     tile is always whole in view: a narrowed room (the queue panel
     opening, a resize) scrolls the strip to keep it, so Enter and `+`
     never act on an album off screen. **`←` `→` switch tabs whenever the
@@ -447,10 +448,19 @@ answer and the visit (the session generation, clause 31).
     strip stands — and on a song or album row). A tab switch starts its
     strip from the left.
 48. **A tile's verbs.** A click or Enter on a **library album** opens it
-    in the Albums room, its row's way (clause 61); a hovered tile shows
-    one verb at its corner — `[+]` at the right of its title line, the
-    title giving way — and `[+]`, `+` or `a` with the hand on it **queues
-    the album** (`ApiCmd::TasteAlbum`, clause 61). A **connected server's
+    in the Albums room, its row's way (clause 61); a hovered whole tile
+    (not cut, not the keyboard's) shows its verbs at its right edge —
+    `[+]` at the right of its title line, the title giving way — and
+    `[+]`, `+` or `a` with the hand on it **queues the album**
+    (`ApiCmd::TasteAlbum`, clause 61). A hovered **connected server's**
+    tile shows a second, `[⋯]` under the `[+]` at the right of its artist
+    line (the rows' own `[⋯]` glyph, `[.]` on the legacy console; DIM,
+    BRIGHT + BOLD under the hand), the artist — or the copy's state word
+    in its place (clause 114) — giving way as the title does: both lines
+    clip to the tile's width less four while the verbs show, so nothing
+    runs under either. A click on it opens **the tile's list** (clause
+    103) — registered after the tile's own click, so it wins; the rest of
+    the tile still plays. A library tile has no list and no `[⋯]`. A **connected server's
     album** has no drill here to open into (the room cannot browse a
     peer), so its click or Enter **plays** it — the queue replaced, the
     first song started — and `[+]` / `+` / `a` queue it; either way its
@@ -467,11 +477,16 @@ answer and the visit (the session generation, clause 31).
     album artist, and its songs are asked by the album artist alone
     (`album-songs {album, album_artist}`), so every song of it comes back
     (the 2026-10-19 log). `N` and `P` do nothing on a tile; on a
-    **connected server's** tile, `m` and a right click open **the tile's
-    list** (clause 103; 2026-10-19 — they did nothing before), and `c`
-    opens Keep a copy in album focus where the copy gate holds. The tile's title has
-    a tooltip ("Open the album — Enter"; "Play the album from {server} —
-    Enter"), its `[+]` "Add the album to the queue — a". A library album
+    **connected server's** tile, `m`, a right click and a click on its
+    `[⋯]` open **the tile's list** (clause 103; 2026-10-19 — they did
+    nothing before; the `[⋯]` 2026-10-20, for a terminal that reports no
+    right click — Apple's), and `c` opens Keep a copy in album focus where
+    the copy gate holds. The tile's title has a tooltip ("Open the album —
+    Enter"; "Play the album from {server} — Enter"), its `[+]` "Add the
+    album to the queue — a", its `[⋯]` the list's verbs as they stand and
+    the other ways in ("More: Play album · Queue album · Keep a copy… (or
+    right-click the album) — m"; `gui.discover.tile_more_tip`, the ` — m`
+    tail with the key hints alone). A library album
     is opened and queued **by name alone**, as its row always was (clause
     61): two albums of one name by different artists (two "Greatest
     Hits") open and queue the songs of both — the strip, showing both
@@ -765,9 +780,12 @@ with `{{ARTIST}}/{{ALBUM}}`.
      leaves it out, both rows go (hidden, never grey — what they would
      send is gone), except a links list already asked, which hangs on, its
      Try again asking again for the row it was first asked for.
-103. **On a connected server's tile.** A right click on the tile, or `m`
+103. **On a connected server's tile.** A click on the hovered tile's
+     `[⋯]` (clause 48 — the left click's way in, for a terminal that
+     reports no right click, Apple's), a right click on the tile, or `m`
      on the lit tile, hangs **the tile's list** from the tile's first
-     cell, one row under it — the kit's context list (docs/ui-kit.md,
+     cell, one row under it — right under the `[⋯]`; opened by the
+     pointer no row is lit, by `m` the first — the kit's context list (docs/ui-kit.md,
      Context list): an ACCENT `frame_at`, `Clear` beneath,
      overlay-registered, no title, no `[X]`, 24 cells wide, kept inside
      the room — with **Play album** (Enter or a click on the tile does the
@@ -779,14 +797,24 @@ with `{{ARTIST}}/{{ALBUM}}`.
      parked). ↑ ↓ rows
      (the accent slab), Enter picks, `a` and `c` act from the list too;
      Esc, `m` again or a click elsewhere closes and keeps; hover BRIGHT +
-     BOLD. The list keeps Play album, Queue album and Open on {server}
+     BOLD. While the list hangs the strip's tooltips stand down: the hand
+     that clicked the `[⋯]` (or right-clicked the tile) rests where it was,
+     and its tip, drawn over everything, would cover the list it opened. The list keeps Play album, Queue album and Open on {server}
      whatever the gate; Keep a copy… stands only while it holds and the
      tile offers a choice (clause 104 — a tile with no artist has none).
      **`c`** on the lit or hovered tile goes straight to Keep a copy in
      album focus. The list **pins its album** (its server, album and
      credit): a new answer moves the list with its tile, and folds it once
      the album left — no verb of the list ever acts on another album. The
-     tile's hover verb stays `[+]`. **What each sends**:
+     tile's hover verbs are `[+]` (queue) and `[⋯]` (this list); a click
+     anywhere else on it plays (clause 48). **In Apple Terminal** a click
+     arrives as an instant pair and the physical release sends a second
+     pair, the **release echo**, which the player swallows whole for every
+     click (docs/ui-kit.md, behavioral rules): the `[⋯]`'s click opens the
+     list and it stays — the echo neither closes it on its own catcher nor
+     picks the row under the hand — as a row's `[⋯]` opens its sheet and
+     the sheet stays (clause 102), and a click on the tile plays it once.
+     **What each sends**:
      a row's job sends its row; a tile's sends its **best row** (the first
      of its rows, best match first) with scope `album` — or the artist
      scopes — and **never a song job** (the server would take it and

@@ -1733,6 +1733,7 @@ gui:
     album: "альбом"
     album_tip: "Открыть альбом — Enter"
     album_queue_tip: "Альбом в очередь — a"
+    tile_more_tip: "Ещё: %{verbs} (или правый щелчок по альбому) — m"
     peer_album_tip: "Слушать альбом с %{server} — Enter"
     seed_tip: "похоже на %{track}"
     listen_tip: "Слушать через ваш сервер — P"

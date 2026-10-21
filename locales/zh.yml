@@ -1733,6 +1733,7 @@ gui:
     album: "专辑"
     album_tip: "打开专辑 — Enter"
     album_queue_tip: "将专辑加入队列 — a"
+    tile_more_tip: "更多：%{verbs}（也可右键点击专辑打开） — m"
     peer_album_tip: "播放来自 %{server} 的专辑 — Enter"
     seed_tip: "听起来像 %{track}"
     listen_tip: "通过你的服务器收听 — P"
