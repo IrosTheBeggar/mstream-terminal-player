@@ -430,6 +430,15 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
+# A card sync checks each file it downloads against mStream's MD5 as the
+# bytes go to the card, on the card writer's own thread: unoptimised, md-5
+# took a quarter second of each 9 MB file there, near a third of what a
+# slow card takes for it, and a debug build is what runs the real-card
+# checks. Optimised, next to nothing; nothing else about the build
+# changes.
+[profile.dev.package.md-5]
+opt-level = 3
+
 # cargo-deb wraps the already-cross-built binaries in the release workflow
 # (--no-build --no-strip --target <triple>); nothing here compiles anything.
 # The dependency alternative below is the noble rename of libasound2 — the
