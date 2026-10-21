@@ -1387,21 +1387,39 @@ pub(crate) mod stub {
 
     /// A link of `total` bytes a second that no one connection takes more
     /// than `each` of: a LAN as one stream and three measured it. Answers go
-    /// out in pieces of [`Pace::PIECE`], each when both clocks allow it, so
-    /// a late wake-up is made up by the pieces after it.
+    /// out in pieces of [`Pace::PIECE`], each when both clocks allow it. The
+    /// link's clock is let fall behind by [`Pace::SLACK`] at most, so a
+    /// sleep that woke late (a piece's time is under a millisecond, near the
+    /// OS timer's own) is made up by the pieces after it rather than lost:
+    /// the link keeps its rate. What went out is kept ([`Pace::sent`]).
     pub(crate) struct Pace {
         each: f64,
         total: f64,
         /// When the link is free next.
         link: std::sync::Mutex<std::time::Instant>,
+        /// Each answer's start, end and bytes.
+        answers: std::sync::Mutex<Vec<(std::time::Instant, std::time::Instant, u64)>>,
+    }
+
+    /// What a [`Pace`]d server sent.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct Sent {
+        pub(crate) answers: usize,
+        pub(crate) bytes: u64,
+        /// Bytes a second of an answer: their bytes over the time they took.
+        pub(crate) each: f64,
+        /// Bytes a second while any answer was going out.
+        pub(crate) busy: f64,
     }
 
     impl Pace {
         const PIECE: usize = 16 * 1024;
+        const SLACK: Duration = Duration::from_millis(20);
 
         pub(crate) fn new(each: f64, total: f64) -> std::sync::Arc<Pace> {
             let link = std::sync::Mutex::new(std::time::Instant::now());
-            std::sync::Arc::new(Pace { each, total, link })
+            let answers = std::sync::Mutex::new(Vec::new());
+            std::sync::Arc::new(Pace { each, total, link, answers })
         }
 
         fn send(&self, sock: &mut std::net::TcpStream, bytes: &[u8]) -> std::io::Result<()> {
@@ -1411,12 +1429,15 @@ pub(crate) mod stub {
                     std::thread::sleep(t - now);
                 }
             };
-            let mut mine = std::time::Instant::now();
+            let start = std::time::Instant::now();
+            let mut mine = start;
             for piece in bytes.chunks(Pace::PIECE) {
                 until(mine);
                 let at = {
+                    let now = std::time::Instant::now();
+                    let floor = now.checked_sub(Pace::SLACK).unwrap_or(now);
                     let mut free = self.link.lock().unwrap_or_else(|e| e.into_inner());
-                    let at = (*free).max(std::time::Instant::now());
+                    let at = (*free).max(floor);
                     *free = at + Duration::from_secs_f64(piece.len() as f64 / self.total);
                     at
                 };
@@ -1424,7 +1445,29 @@ pub(crate) mod stub {
                 sock.write_all(piece)?;
                 mine = mine.max(at) + Duration::from_secs_f64(piece.len() as f64 / self.each);
             }
+            let end = std::time::Instant::now();
+            let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+            answers.push((start, end, bytes.len() as u64));
             Ok(())
+        }
+
+        /// What went out so far.
+        pub(crate) fn sent(&self) -> Sent {
+            let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            answers.sort_by_key(|a| a.0);
+            let bytes: u64 = answers.iter().map(|a| a.2).sum();
+            let took: f64 = answers.iter().map(|a| (a.1 - a.0).as_secs_f64()).sum();
+            // The time any answer was going out: their spans, joined.
+            let (mut busy, mut reach) = (0.0, None::<std::time::Instant>);
+            for &(start, end, _) in &answers {
+                let from = reach.map_or(start, |r| r.max(start));
+                if end > from {
+                    busy += (end - from).as_secs_f64();
+                }
+                reach = Some(reach.map_or(end, |r| r.max(end)));
+            }
+            let rate = |seconds: f64| bytes as f64 / seconds.max(1e-9);
+            Sent { answers: answers.len(), bytes, each: rate(took), busy: rate(busy) }
         }
     }
 

@@ -31,13 +31,16 @@
 //! **Ahead of the card** ([`Http::prefetch`]): the run's files of the
 //! server's own bytes download up to three at once in the engine's order,
 //! ahead of its card writer, so the card never waits on the network for a
-//! file that is in: held in memory (256 MiB at most of files started and
-//! not yet taken), a file past 64 MiB in this computer's temp folder,
-//! deleted once on the card or passed by. A download ahead is given up when
-//! the engine passes its file by, and at the listener's stop for every file
-//! past the one the engine is on; whatever the run leaves goes with it. A
-//! failure that stops the run starts nothing past it, and is the engine's
-//! once it comes to that file, the files before it written first.
+//! file that is in: held in memory (256 MiB at most, the file being poured
+//! counted: [`MEDIA_HELD`]), a file past 64 MiB in this computer's temp
+//! folder, deleted once on the card or passed by. A download ahead is given
+//! up when the engine passes its file by, and at the listener's stop for
+//! every file past the one the engine is on; whatever the run leaves goes
+//! with it, and a run killed before it could ([`Scratch`]) is swept by the
+//! next. A failure ahead is never the engine's: it fetches that file itself
+//! when it comes to it, as it did before there were downloads ahead, so a
+//! skip or a park follows only a failure it saw. One that would stop the
+//! run starts nothing past it until then.
 //!
 //! Whether a failure stops the run or skips one file ([`Failed::stop`]):
 //! lost sign-in, a server out of reach after three tries, and a 429 stop it
@@ -45,6 +48,7 @@
 //! changed, refused, a wrong type, a conversion that won't come whole —
 //! skips that file, which the next run tries again.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -463,13 +467,21 @@ fn container_of(codec: TransferCodec) -> u8 {
 /// transfer plan's 2.4).
 const MEDIA_AT_ONCE: usize = 3;
 /// How far ahead of the file the engine is on they go: this many files,
-/// and this many bytes of the files started and not yet taken. The file
-/// after the engine's always starts, whatever its size.
+/// and a file starts while what is held stays within this many bytes with
+/// it — the files started and not yet poured, the one being poured among
+/// them, in memory or in the scratch folder alike. The engine's file and
+/// the one after it start whatever their size, so the card never waits on
+/// room: no file past them is started then, so at most four are held
+/// (three downloads and the one being poured), each at most
+/// [`MEDIA_IN_MEMORY`] in memory. Memory holds [`MEDIA_HELD`] at most,
+/// always; the scratch folder those two files of any size (to FAT32's
+/// 4 GiB each), and others only within [`MEDIA_HELD`] with them.
 const MEDIA_AHEAD: usize = 16;
 const MEDIA_HELD: u64 = 256 << 20;
 /// A file past this size downloads into the run's scratch folder on this
 /// computer, not into memory.
 const MEDIA_IN_MEMORY: u64 = 64 << 20;
+const _: () = assert!(MEDIA_IN_MEMORY * (MEDIA_AT_ONCE as u64 + 1) <= MEDIA_HELD);
 
 /// How far ahead of the engine the downloads go.
 #[derive(Clone, Copy, Debug)]
@@ -496,17 +508,21 @@ enum Held {
 impl Held {
     /// Into the card's stage file, [`CARD_WRITE`] a write; a spooled file
     /// deleted after.
-    fn pour(self, into: &mut dyn Write) -> Result<(), Failed> {
+    fn pour(self, into: &mut dyn Write) -> Poured {
         match self {
             Held::Memory(bytes) => {
                 for piece in bytes.chunks(CARD_WRITE) {
-                    into.write_all(piece).map_err(|e| skip(e.to_string()))?;
+                    if let Err(e) = into.write_all(piece) {
+                        return Poured::Failed(skip(e.to_string()));
+                    }
                 }
-                Ok(())
+                Poured::Whole
             }
             Held::Spooled(path) => {
-                let opened = File::open(&path).map_err(|e| skip(format!("{}: {e}", path.display())));
-                let poured = opened.and_then(|mut file| pour(&mut file, into));
+                let poured = match File::open(&path) {
+                    Ok(mut file) => pour_from(&mut file, into),
+                    Err(e) => Poured::Unread(format!("{}: {e}", path.display())),
+                };
                 let _ = fs::remove_file(&path);
                 poured
             }
@@ -520,13 +536,24 @@ impl Held {
     }
 }
 
+/// How a file of this computer's went into the card's stage file.
+enum Poured {
+    Whole,
+    /// Its file here couldn't be read before a byte of it went, and why:
+    /// a download ahead's the engine fetches from the server itself.
+    Unread(String),
+    /// Partway, or the card refused a write: the file fails.
+    Failed(Failed),
+}
+
 /// How a download ahead ended.
 enum Got {
     Held(Held, Option<String>),
-    Failed(Failed),
+    /// It failed; `stops`: a failure the run would stop for (nothing past
+    /// it starts until the engine passes it by).
+    Failed { stops: bool },
     /// Given up: the run stopping, the engine passing its file by, or no
-    /// room for it on this computer. The engine fetches it itself if it
-    /// asks for it.
+    /// room for it on this computer.
     Dropped,
 }
 
@@ -535,6 +562,35 @@ impl Got {
         if let Got::Held(held, _) = self {
             held.discard();
         }
+    }
+}
+
+/// A file downloaded ahead, the engine's now: its bytes count against the
+/// room ahead until it is dropped, poured or not.
+struct Ready {
+    held: Option<Held>,
+    content_type: Option<String>,
+    size: u64,
+    ahead: Arc<Ahead>,
+}
+
+impl Ready {
+    /// Into the card's stage file; its room given back after.
+    fn pour(mut self, into: &mut dyn Write) -> Poured {
+        match self.held.take() {
+            Some(held) => held.pour(into),
+            None => Poured::Unread("poured already".into()),
+        }
+    }
+}
+
+impl Drop for Ready {
+    fn drop(&mut self) {
+        if let Some(held) = self.held.take() {
+            held.discard();
+        }
+        self.ahead.lane().held -= self.size;
+        self.ahead.cv.notify_all();
     }
 }
 
@@ -554,10 +610,11 @@ struct Lane {
     on: usize,
     running: HashSet<usize>,
     done: HashMap<usize, Got>,
-    /// The bytes of the files started and not yet taken or let go.
+    /// The bytes of the files started and not yet poured ([`Ready`]) or
+    /// let go.
     held: u64,
-    /// Files the engine passed by: a download of one still running is given
-    /// up, and what came of it goes.
+    /// Files the engine passed by, or asked for once: a download of one
+    /// still running is given up, and what came of it goes.
     passed: HashSet<usize>,
     /// A file whose failure stops the run: nothing past it starts until the
     /// engine passes it by.
@@ -630,11 +687,13 @@ impl Prefetch {
         Prefetch { shared, at, workers }
     }
 
-    /// The file at `path`, waiting for its download: the bytes and their
-    /// Content-Type, or why it failed. None when the engine is to fetch it
-    /// itself: not one of these, not started yet, or given up. The files
-    /// before it the engine passed by: what came of them goes.
-    fn take(&self, path: &str) -> Option<Result<(Held, Option<String>), Failed>> {
+    /// The file at `path`, waiting for its download: its bytes and their
+    /// Content-Type. None when the engine is to fetch it itself: not one of
+    /// these, not started yet, asked for before, given up, or failed (a
+    /// failure ahead is never the engine's: it may be long over by the
+    /// time the engine comes to the file). The files before it the engine
+    /// passed by: what came of them goes.
+    fn take(&self, path: &str) -> Option<Ready> {
         let &i = self.at.get(path)?;
         let s = &self.shared;
         let mut lane = s.lane();
@@ -655,24 +714,36 @@ impl Prefetch {
         if lane.halted.is_some_and(|h| h < i) {
             lane.halted = None;
         }
+        // Not started: the engine's own, and the downloads go on past it.
+        lane.next = lane.next.max(i + 1);
         s.cv.notify_all();
-        if lane.next <= i {
-            // Not started: the engine's own, and the downloads go on past it.
-            lane.next = i + 1;
-            return None;
-        }
-        loop {
+        // Its download's end; none when none is running (never started, or
+        // passed over by an earlier ask): nothing to wait for.
+        let got = loop {
             if let Some(got) = lane.done.remove(&i) {
-                lane.held -= s.wants[i].size;
-                s.cv.notify_all();
-                return match got {
-                    Got::Held(held, content_type) => Some(Ok((held, content_type))),
-                    Got::Failed(failed) => Some(Err(failed)),
-                    Got::Dropped => None,
-                };
+                break Some(got);
+            }
+            if !lane.running.contains(&i) {
+                break None;
             }
             lane = s.cv.wait(lane).unwrap_or_else(|e| e.into_inner());
-        }
+        };
+        // Asked for once: asked for again, it is the engine's own.
+        lane.passed.insert(i);
+        let ready = match got {
+            Some(Got::Held(held, content_type)) => {
+                let (held, size, ahead) = (Some(held), s.wants[i].size, s.clone());
+                Some(Ready { held, content_type, size, ahead })
+            }
+            // Failed, or given up: its room back, and the engine's own.
+            Some(_) => {
+                lane.held -= s.wants[i].size;
+                None
+            }
+            None => None,
+        };
+        s.cv.notify_all();
+        ready
     }
 }
 
@@ -715,15 +786,16 @@ fn fetch_ahead(s: &Ahead) {
             lane.running.insert(i);
             i
         };
-        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| download(s, i)));
-        let got = got.unwrap_or(Got::Dropped);
+        let gives_up = || s.gives_up(i);
+        let got = std::panic::AssertUnwindSafe(|| download(s, i, &gives_up));
+        let got = std::panic::catch_unwind(got).unwrap_or(Got::Dropped);
         let mut lane = s.lane();
         lane.running.remove(&i);
         if lane.passed.contains(&i) {
             lane.held -= s.wants[i].size;
             got.discard();
         } else {
-            if matches!(&got, Got::Failed(f) if f.stop) {
+            if matches!(got, Got::Failed { stops: true }) {
                 lane.halted = Some(lane.halted.map_or(i, |h| h.min(i)));
             }
             lane.done.insert(i, got);
@@ -750,34 +822,39 @@ impl Write for Spool {
 }
 
 /// File `i`, downloaded: into memory, or into the scratch folder past
-/// [`Room::in_memory`].
-fn download(s: &Ahead, i: usize) -> Got {
+/// [`Room::in_memory`]; given up once `gives_up` says so.
+fn download(s: &Ahead, i: usize, gives_up: &dyn Fn() -> bool) -> Got {
     let want = &s.wants[i];
-    let gives_up = || s.gives_up(i);
     let client = &s.client;
+    // Given up as it ran: what came of it is no failure of the file's,
+    // whatever `gives_up` says by the time it ends.
+    let cancelled = Cell::new(false);
     let mut once = |fetch: &Fetch<'_>, into: &mut dyn Write, held: u64| {
-        until_with(client.stream_async(fetch, into, held, &mut |_, _| {}), &gives_up)
+        let tried = until_with(client.stream_async(fetch, into, held, &mut |_, _| {}), gives_up);
+        if tried.is_none() {
+            cancelled.set(true);
+        }
+        tried
     };
     let ended = |got: Result<Fetched, Failed>, held: Held| match got {
         Ok(fetched) => Got::Held(held, fetched.content_type),
-        Err(_) if gives_up() => {
-            held.discard();
-            Got::Dropped
-        }
         Err(failed) => {
             held.discard();
-            Got::Failed(failed)
+            match cancelled.get() {
+                true => Got::Dropped,
+                false => Got::Failed { stops: failed.stop },
+            }
         }
     };
     if want.size <= s.room.in_memory {
         let mut bytes = Vec::with_capacity(want.size as usize);
-        let got = media(&want.path, want.size, &mut bytes, &gives_up, &mut once);
+        let got = media(&want.path, want.size, &mut bytes, gives_up, &mut once);
         return ended(got, Held::Memory(bytes));
     }
     let path = s.dir.join(format!("media-{i}.bin"));
     let Ok(file) = File::create(&path) else { return Got::Dropped };
     let mut spool = Spool { file, failed: false };
-    let got = media(&want.path, want.size, &mut spool, &gives_up, &mut once);
+    let got = media(&want.path, want.size, &mut spool, gives_up, &mut once);
     let Spool { file, failed } = spool;
     drop(file);
     if failed {
@@ -789,23 +866,101 @@ fn download(s: &Ahead, i: usize) -> Got {
 
 // ── The source ──────────────────────────────────────────────────────────────
 
-/// A folder of this computer's for a run's conversions, gone when dropped.
-pub(super) struct Scratch(pub(super) PathBuf);
+/// The start of a scratch folder's name in the OS temp folder.
+const SCRATCH: &str = "mstream-card-";
+/// The end of the name of the lock file beside a scratch folder.
+const LOCKED: &str = ".lock";
+/// A scratch folder whose lock no process holds is swept once its lock file
+/// is this old: its lock is taken a moment after the file is made, so a
+/// younger one may be a run's being made.
+const STALE: Duration = Duration::from_secs(10 * 60);
+/// One with no lock file (made before there were any), once the folder was
+/// left untouched this long: no run lasts so long.
+const STALE_UNLOCKED: Duration = Duration::from_secs(2 * 24 * 60 * 60);
+
+/// A folder of this computer's for a run's conversions and downloads
+/// ahead, gone when dropped. Beside it, a lock file this process holds
+/// while it lives, so another can tell a live run's folder from one a
+/// process killed partway left behind: those go at a process's first
+/// ([`sweep`]).
+pub(super) struct Scratch(pub(super) PathBuf, Option<File>);
 
 impl Scratch {
     pub(super) fn new() -> io::Result<Scratch> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        static SWEPT: std::sync::Once = std::sync::Once::new();
+        let temp = std::env::temp_dir();
+        SWEPT.call_once(|| sweep(&temp, STALE, STALE_UNLOCKED));
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("mstream-card-{}-{n}", std::process::id()));
+        let name = format!("{SCRATCH}{}-{n}", std::process::id());
+        let dir = temp.join(&name);
+        // The lock first: a folder is never a live run's without it. A file
+        // system that takes no lock leaves the folder as one from before
+        // the lock files.
+        let path = temp.join(format!("{name}{LOCKED}"));
+        let lock = File::create(&path)?;
+        let lock = match lock.try_lock() {
+            Ok(()) => Some(lock),
+            Err(_) => {
+                drop(lock);
+                let _ = fs::remove_file(&path);
+                None
+            }
+        };
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir)?;
-        Ok(Scratch(dir))
+        Ok(Scratch(dir, lock))
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        let mut path = self.0.clone().into_os_string();
+        path.push(LOCKED);
+        PathBuf::from(path)
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+        if self.1.take().is_some() {
+            let _ = fs::remove_file(self.lock_path());
+        }
+    }
+}
+
+/// The scratch folders in `temp` no live run has, and their lock files:
+/// each whose lock no process holds, its lock file `stale` old; each with
+/// no lock file, untouched `unlocked`. This process's own are left.
+fn sweep(temp: &Path, stale: Duration, unlocked: Duration) {
+    let Ok(entries) = fs::read_dir(temp) else { return };
+    let ours = format!("{SCRATCH}{}-", std::process::id());
+    let age = |path: &Path| {
+        let modified = fs::metadata(path).and_then(|m| m.modified());
+        modified.ok().and_then(|t| t.elapsed().ok()).unwrap_or_default()
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(SCRATCH) || name.starts_with(&ours) {
+            continue;
+        }
+        let path = entry.path();
+        if let Some(folder) = name.strip_suffix(LOCKED) {
+            if age(&path) < stale {
+                continue;
+            }
+            let Ok(lock) = File::options().read(true).write(true).open(&path) else { continue };
+            if lock.try_lock().is_err() {
+                continue;
+            }
+            let _ = fs::remove_dir_all(temp.join(folder));
+            drop(lock);
+            let _ = fs::remove_file(&path);
+        } else if entry.file_type().is_ok_and(|t| t.is_dir())
+            && !temp.join(format!("{name}{LOCKED}")).exists()
+            && age(&path) >= unlocked
+        {
+            let _ = fs::remove_dir_all(&path);
+        }
     }
 }
 
@@ -929,13 +1084,17 @@ impl Http {
     }
 
     /// The server's bytes: downloaded ahead when they were, else now,
-    /// straight into the card's stage file.
+    /// straight into the card's stage file — now too when the file they
+    /// wait in here can't be read, before a byte of it went.
     fn original(&mut self, file: &WantedFile, into: &mut dyn Write) -> Result<Fetched, Failed> {
         let l = &file.ledger;
-        if let Some(got) = self.prefetch.as_ref().and_then(|p| p.take(&l.server_path)) {
-            let (held, content_type) = got?;
-            held.pour(into)?;
-            return Ok(Fetched { content_type });
+        if let Some(ready) = self.prefetch.as_ref().and_then(|p| p.take(&l.server_path)) {
+            let content_type = ready.content_type.clone();
+            match ready.pour(into) {
+                Poured::Whole => return Ok(Fetched { content_type }),
+                Poured::Failed(failed) => return Err(failed),
+                Poured::Unread(_) => {}
+            }
         }
         let (client, stop) = (&self.client, &self.stop);
         let stopped = || stop.load(Ordering::Relaxed);
@@ -975,17 +1134,32 @@ impl Http {
 /// A file of this computer's (a conversion, a download ahead) into the
 /// card's stage, whole, [`CARD_WRITE`] a read.
 pub(super) fn pour(from: &mut dyn Read, into: &mut dyn Write) -> Result<(), Failed> {
+    match pour_from(from, into) {
+        Poured::Whole => Ok(()),
+        Poured::Unread(why) => Err(skip(format!("the file on this computer can't be read: {why}"))),
+        Poured::Failed(failed) => Err(failed),
+    }
+}
+
+/// [`pour`], a read that fails before a byte went told apart.
+fn pour_from(from: &mut dyn Read, into: &mut dyn Write) -> Poured {
     let mut buf = vec![0u8; CARD_WRITE];
+    let mut went = false;
     loop {
         let n = match from.read(&mut buf) {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Poured::Whole,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if !went => return Poured::Unread(e.to_string()),
             Err(e) => {
-                return Err(skip(format!("the file on this computer can't be read: {e}")));
+                let why = format!("the file on this computer can't be read: {e}");
+                return Poured::Failed(skip(why));
             }
         };
-        into.write_all(&buf[..n]).map_err(|e| skip(e.to_string()))?;
+        if let Err(e) = into.write_all(&buf[..n]) {
+            return Poured::Failed(skip(e.to_string()));
+        }
+        went = true;
     }
 }
 
@@ -1360,15 +1534,21 @@ mod tests {
         assert_eq!(seen.try_iter().count(), 0);
     }
 
+    /// Whether the download of file `i` ahead is in.
+    fn in_ahead(http: &Http, i: usize) -> bool {
+        http.prefetch.as_ref().is_some_and(|p| p.shared.lane().done.contains_key(&i))
+    }
+
     #[test]
-    fn a_failure_ahead_is_the_engines_at_its_file_and_one_that_stops_the_run_halts_them() {
-        // A file gone skips that file only.
+    fn a_failure_ahead_is_the_engines_own_to_find_and_one_that_stops_the_run_halts_them() {
+        // A file gone skips that file only, once the engine finds it gone.
         let files = named(4, 500);
         let gone = HashMap::from([("lib/A/01.flac".to_string(), "404 Not Found")]);
-        let (base, _, _) = media_of(&files, Duration::ZERO, HashMap::new(), gone);
+        let (base, seen, _) = media_of(&files, Duration::ZERO, HashMap::new(), gone);
         let mut http = Http::new(Arc::new(Client::new(&base).unwrap()), 0, 2).unwrap();
         let wanted = originals(&files);
         http.prefetch(&wanted.iter().collect::<Vec<_>>(), None);
+        eventually("the 404 ahead", || in_ahead(&http, 1));
         for (n, file) in wanted.iter().enumerate() {
             let got = http.fetch(file, &mut Vec::new());
             match n {
@@ -1376,9 +1556,12 @@ mod tests {
                 _ => assert!(got.is_ok(), "{n}: {got:?}"),
             }
         }
+        let asked: Vec<String> = seen.try_iter().collect();
+        let gone = asked.iter().filter(|p| p.ends_with("/01.flac")).count();
+        assert_eq!(gone, 2, "ahead, then the engine's own: {asked:?}");
 
         // Lost sign-in stops the run: nothing past it starts, the files
-        // before it still come.
+        // before it still come, and the engine asks again before it stops.
         let files = named(5, 500);
         let refused = HashMap::from([("lib/A/02.flac".to_string(), "401 Unauthorized")]);
         let slow: HashMap<String, Duration> =
@@ -1393,6 +1576,182 @@ mod tests {
         assert!(http.fetch(&wanted[1], &mut Vec::new()).is_ok());
         let stopped = http.fetch(&wanted[2], &mut Vec::new()).unwrap_err();
         assert!(stopped.stop && stopped.why.contains("sign-in"), "{stopped:?}");
+        assert_eq!(seen.try_iter().collect::<Vec<_>>(), [THREE[2]], "the engine's own try");
+    }
+
+    /// A refusal ahead that is over by the time the engine comes to its
+    /// file (the server back, the sign-in renewed) parks nothing: the
+    /// engine's own try gets the file, and the downloads go on past it.
+    #[test]
+    fn a_failure_ahead_over_by_the_engines_turn_doesnt_stop_the_run() {
+        let files = named(4, 500);
+        let served: HashMap<String, Vec<u8>> = files.iter().cloned().collect();
+        let (tx, seen) = mpsc::channel::<String>();
+        let (tx, refused) = (Mutex::new(tx), AtomicBool::new(false));
+        let base = routed(move |asked| {
+            let path = asked.path();
+            let _ = tx.lock().unwrap().send(path.clone());
+            let rel = path.trim_start_matches("/media/");
+            if rel == "lib/A/01.flac" && !refused.swap(true, Ordering::SeqCst) {
+                return reply("401 Unauthorized", &[], br#"{"error":"Authentication Error"}"#);
+            }
+            reply("200 OK", &[("ETag", "\"e\"")], &served[rel])
+        });
+        let mut http = Http::new(Arc::new(Client::new(&base).unwrap()), 0, 2).unwrap();
+        let wanted = originals(&files);
+        http.prefetch(&wanted.iter().collect::<Vec<_>>(), None);
+        eventually("the refusal ahead", || in_ahead(&http, 1));
+        for (n, file) in wanted.iter().enumerate() {
+            let mut into = Vec::new();
+            http.fetch(file, &mut into).unwrap_or_else(|e| panic!("{n}: {e:?}"));
+            assert!(into == files[n].1, "{n}: its bytes");
+        }
+        let asked: Vec<String> = seen.try_iter().collect();
+        assert_eq!(asked.iter().filter(|p| p.ends_with("/01.flac")).count(), 2, "{asked:?}");
+    }
+
+    /// The engine asking for a file twice, or for one the downloads ahead
+    /// went past without starting, never waits on a download that isn't
+    /// running: the file is its own to fetch.
+    #[test]
+    fn a_file_asked_for_again_or_out_of_turn_is_the_engines_own() {
+        let files = named(5, 600);
+        let (base, seen, _) = media_at(&files, Duration::ZERO);
+        let client = Arc::new(Client::new(&base).unwrap());
+        let scratch = Scratch::new().unwrap();
+        let want = |(p, b): &(String, Vec<u8>)| Want { path: p.clone(), size: b.len() as u64 };
+        let wants = files.iter().map(want).collect();
+        // The engine's file and the one after it, no more.
+        let room = Room { files: 1, bytes: 1 << 20, in_memory: 1 << 20 };
+        let prefetch = Prefetch::new(client, wants, scratch.0.clone(), room, None);
+        assert_eq!(first(&seen, 2), ["/media/lib/A/00.flac", "/media/lib/A/01.flac"]);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let take = |k: usize| prefetch.take(&format!("lib/A/{k:02}.flac")).is_some();
+            let once = take(0);
+            let again = take(0);
+            // Past two not started: its own, and the downloads go on past it.
+            let past = take(3);
+            // The one it went past, never started, and the one before it.
+            let behind = (take(2), take(1));
+            // Kept going until the download past them is seen to start.
+            let _ = tx.send(((once, again, past, behind), prefetch));
+        });
+        let asks = rx.recv_timeout(Duration::from_secs(10));
+        let (asks, _going) = asks.expect("no wait on a download that isn't running");
+        assert_eq!(asks, (true, false, false, (false, false)));
+        assert_eq!(seen.recv_timeout(Duration::from_secs(5)).unwrap(), "/media/lib/A/04.flac");
+    }
+
+    /// The file being poured keeps its room ahead until it is on the card.
+    #[test]
+    fn the_file_being_poured_counts_against_the_room_ahead() {
+        let files = named(3, 1000);
+        let (base, seen, _) = media_at(&files, Duration::ZERO);
+        let client = Arc::new(Client::new(&base).unwrap());
+        let scratch = Scratch::new().unwrap();
+        let want = |(p, b): &(String, Vec<u8>)| Want { path: p.clone(), size: b.len() as u64 };
+        let wants = files.iter().map(want).collect();
+        // Room for two of them.
+        let room = Room { files: 16, bytes: 2500, in_memory: 1 << 20 };
+        let prefetch = Prefetch::new(client, wants, scratch.0.clone(), room, None);
+        assert_eq!(first(&seen, 2), ["/media/lib/A/00.flac", "/media/lib/A/01.flac"]);
+        let ready = prefetch.take("lib/A/00.flac").expect("downloaded ahead");
+        let quiet = Duration::from_millis(500);
+        assert!(seen.recv_timeout(quiet).is_err(), "no room while the first is held");
+        let mut into = Vec::new();
+        assert!(matches!(ready.pour(&mut into), Poured::Whole));
+        assert!(into == files[0].1);
+        assert_eq!(seen.recv_timeout(Duration::from_secs(5)).unwrap(), "/media/lib/A/02.flac");
+    }
+
+    /// A file downloaded ahead whose file here is gone (a temp-folder
+    /// cleaner, say) comes from the server again, not skipped.
+    #[test]
+    fn a_file_waiting_here_that_cant_be_read_is_fetched_again() {
+        let files = named(2, 3000);
+        let (base, seen, _) = media_at(&files, Duration::ZERO);
+        let mut http = Http::new(Arc::new(Client::new(&base).unwrap()), 0, 2).unwrap();
+        http.room = Room { files: 16, bytes: 1 << 20, in_memory: 1000 };
+        let wanted = originals(&files);
+        http.prefetch(&wanted.iter().collect::<Vec<_>>(), None);
+        assert_eq!(first(&seen, 2), ["/media/lib/A/00.flac", "/media/lib/A/01.flac"]);
+        eventually("both in", || in_ahead(&http, 0) && in_ahead(&http, 1));
+        fs::remove_file(http.scratch.0.join("media-0.bin")).unwrap();
+        for (n, file) in wanted.iter().enumerate() {
+            let mut into = Vec::new();
+            http.fetch(file, &mut into).unwrap_or_else(|e| panic!("{n}: {e:?}"));
+            assert!(into == files[n].1, "{n}: its bytes");
+        }
+        assert_eq!(seen.try_iter().collect::<Vec<_>>(), ["/media/lib/A/00.flac"]);
+        assert_eq!(spooled(&http), 0);
+    }
+
+    /// A download given up as it ran is dropped, never a failure of its
+    /// file, whatever the engine did meanwhile (the listener's stop, then
+    /// the engine reaching the file, is a give-up that no longer holds).
+    #[test]
+    fn a_download_given_up_is_dropped_not_failed() {
+        let files = named(1, 500);
+        let (base, _, _) = media_at(&files, Duration::from_secs(2));
+        let scratch = Scratch::new().unwrap();
+        let ahead = Ahead {
+            client: Arc::new(Client::new(&base).unwrap()),
+            wants: vec![Want { path: files[0].0.clone(), size: 500 }],
+            dir: scratch.0.clone(),
+            room: Room::RUN,
+            lane: Mutex::new(Lane::default()),
+            cv: Condvar::new(),
+            stop: AtomicBool::new(false),
+            listener: None,
+        };
+        // Given up at its first look, then no longer.
+        let looks = AtomicU64::new(0);
+        let gives_up = || looks.fetch_add(1, Ordering::SeqCst) == 0;
+        assert!(matches!(download(&ahead, 0, &gives_up), Got::Dropped));
+    }
+
+    #[test]
+    fn a_scratch_folder_a_killed_run_left_is_swept_and_a_live_ones_kept() {
+        let temp = std::env::temp_dir().join(format!("mstream-sweep-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let folder = |name: &str| {
+            let dir = temp.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("media-0.bin"), b"bytes").unwrap();
+            dir
+        };
+        // A killed run's: its lock held by no one.
+        let killed = folder("mstream-card-killed-0");
+        fs::write(temp.join("mstream-card-killed-0.lock"), b"").unwrap();
+        // A live run's: its lock held.
+        let live = folder("mstream-card-live-0");
+        let held = File::create(temp.join("mstream-card-live-0.lock")).unwrap();
+        held.try_lock().unwrap();
+        // One from before the lock files, and someone else's.
+        let (older, other) = (folder("mstream-card-older-0"), folder("other-0"));
+        let hour = Duration::from_secs(3600);
+        sweep(&temp, hour, hour);
+        assert!(killed.exists() && live.exists() && older.exists(), "none old enough");
+        sweep(&temp, Duration::ZERO, Duration::ZERO);
+        assert!(!killed.exists() && !temp.join("mstream-card-killed-0.lock").exists());
+        assert!(live.exists() && temp.join("mstream-card-live-0.lock").exists(), "its lock held");
+        assert!(!older.exists() && other.exists());
+        drop(held);
+        sweep(&temp, Duration::ZERO, Duration::ZERO);
+        assert!(!live.exists(), "its process gone");
+        fs::remove_dir_all(&temp).unwrap();
+
+        // A run's own: its lock held while it lives, both gone with it.
+        let scratch = Scratch::new().unwrap();
+        let lock = scratch.lock_path();
+        let other = File::options().read(true).write(true).open(&lock).unwrap();
+        assert!(other.try_lock().is_err(), "held");
+        drop(other);
+        let dir = scratch.0.clone();
+        drop(scratch);
+        assert!(!dir.exists() && !lock.exists());
     }
 
     #[test]

@@ -46,7 +46,7 @@ use std::time::UNIX_EPOCH;
 
 use super::super::contract::MAX_FILE;
 use super::super::contract::mptg::Ledger;
-use super::super::engine::{Failed, Fetched, Fetcher, Have, Part, WantedFile};
+use super::super::engine::{CARD_WRITE, Failed, Fetched, Fetcher, Have, Part, WantedFile};
 use crate::api::ApiError;
 use crate::api::transfer::ManifestEntry;
 use crate::api::types::{AdminDirEntry, LayeredAdmin};
@@ -55,7 +55,7 @@ use crate::api::types::{AdminDirEntry, LayeredAdmin};
 /// across the library.
 const SAMPLE: usize = 8;
 
-/// What a copy reads at a time.
+/// What a read of a range takes at most at first.
 const CHUNK: usize = 256 * 1024;
 
 /// The rank of a cover image with no better name (the device's 3).
@@ -523,9 +523,10 @@ fn copy(path: &Path, l: &Ledger, into: &mut dyn Write) -> Result<(), Cut> {
     Err(Cut::Partway("it changed on disk while it was read".into()))
 }
 
-/// All of `from` into `into`: how many bytes.
+/// All of `from` into `into`, [`CARD_WRITE`] a read, as the card's stage
+/// file takes it a write: how many bytes.
 fn pour(from: &mut dyn Read, into: &mut dyn Write) -> Result<u64, Cut> {
-    let mut buf = vec![0u8; CHUNK];
+    let mut buf = vec![0u8; CARD_WRITE];
     let mut copied = 0u64;
     loop {
         let n = match from.read(&mut buf) {

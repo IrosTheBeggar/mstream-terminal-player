@@ -7,8 +7,10 @@
 //! and its bytes at the card's rate ([`Slow`]: a card in a reader Windows
 //! writes through, with no cache, so each call waits for the card). Reads
 //! cost nothing: the measured run read nothing from the card, the OS's
-//! cache answering. It prints the copying phase's rate and each fetched
-//! file's card calls by kind.
+//! cache answering. It prints the copying phase's rate, what the link
+//! sent (an answer's rate, and the rate while any went out: a check that
+//! the link was not what held a run back), and each fetched file's card
+//! calls by kind.
 //!
 //! The defaults, and the variables that change them:
 //! - `MSTREAM_BENCH_FILES` (40) files of `MSTREAM_BENCH_MB` (9) MB, ten an
@@ -20,11 +22,13 @@
 //! - `MSTREAM_BENCH_LINK_MBS` (16.5) a stream, `MSTREAM_BENCH_LINK_ALL_MBS`
 //!   (18.5) every stream together.
 //!
-//! The card's two figures are the ones that bring the code before the
-//! large writes and the downloads ahead (0b378c5) to the user's measured
-//! 4.5-5 MB/s, writing what `/media` gives it a read at a time (about
-//! 300 KB here); a card that takes 8 ms a call and 20 MB/s gives it
-//! 8.4 MB/s.
+//! The card's two figures are a model's, fitted, not measured on a card:
+//! they bring the code before the large writes and the downloads ahead
+//! (0b378c5) to the user's measured 4.5-5 MB/s, writing what `/media`
+//! gives it a read at a time (about 300 KB here); a card that takes 8 ms a
+//! call and 20 MB/s gives it 8.4 MB/s. How a real card takes a 4 MiB write
+//! through (its FAT and directory updated cluster by cluster) a per-call
+//! model can't say: the real run's Disk Writes/sec and bytes a write can.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -289,7 +293,7 @@ fn sync_throughput() {
     let fake: Fake = Arc::new(Mutex::new(library(files, size)));
     let served = fake.clone();
     let pace = Pace::new(each * MB, all * MB);
-    let base = routed_at(Some(pace), move |asked| super::answer(&served, asked));
+    let base = routed_at(Some(pace.clone()), move |asked| super::answer(&served, asked));
     let scratch = Scratch::new("bench");
     let sim = card(&scratch);
     let slow = Slow::new(&sim, costs);
@@ -318,8 +322,8 @@ fn sync_throughput() {
     let copying = last.zip(planned).map(|(l, p)| l - p).unwrap_or_default();
     let rate = |bytes: f64, d: Duration| bytes / MB / d.as_secs_f64().max(1e-9);
     println!(
-        "sync throughput: {files} files of {:.1} MB; card {:.1} ms a write call + {:.1} MB/s; \
-         link {each} MB/s a stream, {all} MB/s in all",
+        "sync throughput: {files} files of {:.1} MB; card model {:.1} ms a write call + \
+         {:.1} MB/s; link {each} MB/s a stream, {all} MB/s in all",
         size as f64 / MB,
         costs.call.as_secs_f64() * 1000.0,
         costs.rate / MB,
@@ -331,6 +335,16 @@ fn sync_throughput() {
         rate(wrote as f64, copying),
         files as f64 / copying.as_secs_f64().max(1e-9),
         whole.as_secs_f64(),
+    );
+    // What the link gave: the card figures are a model's, fitted to the
+    // measured run of the code before; the link's are what the stub sent.
+    let sent = pace.sent();
+    println!(
+        "  link: {} answers, {:.1} MB; {:.2} MB/s an answer, {:.2} MB/s while any went out",
+        sent.answers,
+        sent.bytes as f64 / MB,
+        sent.each / MB,
+        sent.busy / MB,
     );
     println!("  card calls a fetched file (count, KB a call):");
     for (kind, (n, bytes)) in slow.calls() {

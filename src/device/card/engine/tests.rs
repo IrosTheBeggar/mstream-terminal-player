@@ -366,12 +366,23 @@ struct Recovered {
 }
 
 fn recover(card: &FatSim, wanted: &WantedCard, server: &mut Canned, seed: u64) -> Recovered {
+    recover_with(card, wanted, server, seed, knobs())
+}
+
+/// [`recover`], under these knobs.
+fn recover_with(
+    card: &FatSim,
+    wanted: &WantedCard,
+    server: &mut Canned,
+    seed: u64,
+    knobs: Knobs,
+) -> Recovered {
     let start = card.log().len();
     let mut answers = Answers::default();
     loop {
         let before = card.log().len() - start;
-        let (hooks, expect) = (&mut Extras::default(), Expect::default());
-        let opened = Session::open(card, &expect, knobs(), &answers, env(seed), hooks, &mut |_| {});
+        let (hooks, expect, knobs) = (&mut Extras::default(), Expect::default(), knobs.clone());
+        let opened = Session::open(card, &expect, knobs, &answers, env(seed), hooks, &mut |_| {});
         let (ran, opened) = match opened {
             Err(Stop::Guard(Guard::DiskCheck(_))) if !answers.disk_checked => {
                 answers.disk_checked = true;
@@ -2142,6 +2153,78 @@ fn a_files_bytes_go_to_the_card_in_large_pieces() {
         let rec = records(&card).into_iter().find(|e| e.path == rel).expect("its record");
         assert_eq!(rec.ledger.unwrap().origin_flags, VERIFIED, "{into}");
         let _ = finished(&card);
+    }
+}
+
+/// Each piece of a large file's bytes cut in turn (a torn write: half of it
+/// lands, and the card is pulled), into a stage file and into a partial
+/// listed every 6 MiB — between two pieces, so a listing first writes out
+/// the bytes held: its listing never vouches for a byte the card doesn't
+/// hold, and the next run finishes as the uncut run did, a partial taken up
+/// from its listing.
+#[test]
+fn every_cut_inside_a_large_files_pieces_is_finished() {
+    let size = 2 * CARD_WRITE + 123_456;
+    let mut bytes = corpus("cbr.mp3");
+    bytes.resize(size, 0x55);
+    for resumable in [false, true] {
+        let base = Scratch::new("pieces-cut-base");
+        set_up(&base.0);
+        let mut server = Canned { resumable, ..Canned::default() };
+        server.add(BIG, bytes.clone());
+        let wanted = WantedCard { origins: vec![home()], files: vec![track(BIG, &bytes, 601)] };
+        let k = Knobs { part_bytes: 6 << 20, ..knobs() };
+        let run = |card: &FatSim, server: &mut Canned| {
+            let hooks = &mut Extras::default();
+            sync_with(card, &wanted, server, hooks, k.clone(), Answers::default(), 1).0
+        };
+        let whole = Scratch::new("pieces-cut-whole");
+        copy_tree(&base.0, &whole.0);
+        let card = FatSim::new(&whole.0, SERIAL);
+        run(&card, &mut server).expect("uncut");
+        let want = finished(&card);
+        let into = if resumable { "/resume/" } else { "/stage/" };
+        let pieces: Vec<u64> = card
+            .log()
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.starts_with("write ") && w.contains(into))
+            .map(|(n, _)| n as u64 + 1)
+            .collect();
+        assert_eq!(pieces.len(), 3, "{into}: {:?}", card.sizes(|p| p.contains(into)));
+
+        let mut taken_up = 0;
+        for n in pieces {
+            let what = format!("{into}: cut at write {n}");
+            let dir = Scratch::new("pieces-cut");
+            copy_tree(&base.0, &dir.0);
+            let card = FatSim::new(&dir.0, SERIAL);
+            card.cut_at(n, Cut::Fail);
+            let _ = run(&card, &mut server);
+            card.replug();
+            let mut have = 0;
+            if resumable {
+                have = resume_of(&card)["parts"][0]["have"].as_u64().unwrap_or(0);
+                let items = card.list("/.mstream/resume").unwrap_or_default();
+                let part = items.iter().find(|i| !i.dir).expect("its partial");
+                let path = format!("/.mstream/resume/{}", part.name);
+                let on = card.read(&path, usize::MAX).unwrap().expect("its bytes");
+                assert!(on.len() as u64 > have, "{what}: the torn write's bytes past {have}");
+                let listed = on[..have as usize] == bytes[..have as usize];
+                assert!(listed, "{what}: what is listed is on the card");
+            }
+            let asked = server.asked.len();
+            let again = recover_with(&card, &wanted, &mut server, 3, k.clone());
+            let outcome = again.ran.unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(outcome.verified, Ok(()), "{what}");
+            assert_eq!(finished(&card), want, "{what}");
+            if have > 0 {
+                assert_eq!(server.asked[asked], (BIG.to_string(), have, have), "{what}");
+                taken_up += 1;
+            }
+        }
+        let after = "the last piece's cut, after a listing";
+        assert_eq!(taken_up, usize::from(resumable), "{into}: {after}");
     }
 }
 
