@@ -2309,11 +2309,11 @@ pub(crate) mod tests {
         // FAKE0 kept in its bootloader until FAKE1's read is answered: the
         // fake's read is over in a blink, and a busy machine can end it
         // before the worker takes the second command (macOS's CI did).
-        bootloader.hold();
+        let held = bootloader.hold();
         r.send(Cmd::Read { port: "FAKE0".into() });
         r.send(Cmd::Read { port: "FAKE1".into() });
         r.until("FAKE1's read answered", |r| !r.refused().is_empty());
-        bootloader.release();
+        drop(held);
         r.until("FAKE0 read", |r| matches!(r.board("FAKE0").verdict, Verdict::Other { .. }));
         assert_eq!(r.board("FAKE0").verdict, Verdict::Other { name: "arduino-lib-builder".into() });
         assert_eq!(r.board("FAKE0").primary(), Some(Primary::Install));

@@ -893,6 +893,22 @@ pub(crate) mod fake {
         m.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// A test's hold on the fake's `open`s ([`Fake::hold`]). Dropped, a
+    /// panic's unwind included, the `open`s held go on: a test that fails
+    /// while it holds them leaves no read waiting for good.
+    #[cfg(test)]
+    #[must_use = "dropped, the opens go on at once"]
+    pub(crate) struct Hold(Arc<(Mutex<bool>, Condvar)>);
+
+    #[cfg(test)]
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            let (held, freed) = &*self.0;
+            *lock(held) = false;
+            freed.notify_all();
+        }
+    }
+
     impl Fake {
         pub(crate) fn new(spec: &str) -> Fake {
             let boards = match spec.trim() {
@@ -925,21 +941,15 @@ pub(crate) mod fake {
             self
         }
 
-        /// Every `open` from now on keeps its board in its bootloader, the
-        /// reset done, until [`Fake::release`]: a fake read is over in a
-        /// blink, which a busy machine can let end before the worker takes
-        /// the page's next command, so a test that needs a board in its
-        /// bootloader holds it there.
+        /// Every `open` from now on, whichever board's, keeps its board in
+        /// its bootloader, the reset done, until the [`Hold`] is dropped: a
+        /// fake read is over in a blink, which a busy machine can let end
+        /// before the worker takes the page's next command, so a test that
+        /// needs a board in its bootloader holds it there.
         #[cfg(test)]
-        pub(crate) fn hold(&self) {
+        pub(crate) fn hold(&self) -> Hold {
             *lock(&self.hold.0) = true;
-        }
-
-        /// The `open`s held go on.
-        #[cfg(test)]
-        pub(crate) fn release(&self) {
-            *lock(&self.hold.0) = false;
-            self.hold.1.notify_all();
+            Hold(self.hold.clone())
         }
 
         /// What was done to the boards so far, shared with the fake.
