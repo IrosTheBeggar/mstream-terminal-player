@@ -428,9 +428,14 @@ fn many_outcome(result: &CopyResult, n: ManyCounts) -> JobOutcome {
     JobOutcome::Nothing { appearances: n.albums_appearance, many: n }
 }
 
-/// A finished song job: copied, already owned, a file in the way, or a
-/// result this client cannot read.
+/// A finished song job: refused by the peer, copied, already owned, a file
+/// in the way, or a result this client cannot read. A peer that refuses
+/// copies ends a song's job `done` with `stopped: "refused"` (mStream since
+/// 2026-10-21; older servers fail it, `refused_by_peer`).
 fn song_outcome(result: &CopyResult) -> JobOutcome {
+    if result.stopped.as_deref().map(str::trim) == Some("refused") {
+        return JobOutcome::Refused { many: None };
+    }
     if let Some(copied) = result.copied.as_ref().and_then(|c| c.filepath.clone()) {
         let vpath = result.copied.as_ref().and_then(|c| c.vpath.clone());
         return JobOutcome::Copied { filepath: copied, vpath };
@@ -1407,6 +1412,11 @@ mod tests {
         assert!(refused.refused_by_peer());
         assert_eq!(refused.outcome(), JobOutcome::Refused { many: None });
         assert_eq!((refused.outcome().mark(), refused.outcome().action()), (Some(JobMark::Refused), None));
+        // Since 2026-10-21 the server ends a refused song's job done, with
+        // `stopped: "refused"` and nothing copied.
+        let stopped = job(serde_json::json!({ "state": "done", "params": { "destination": null },
+            "result": { "stopped": "refused", "peer": { "id": 3, "name": "Stage Peer C" }, "destination": null } })).outcome();
+        assert_eq!((stopped.clone(), stopped.mark(), stopped.action()), (JobOutcome::Refused { many: None }, Some(JobMark::Refused), None));
         let unpaired = job(serde_json::json!({ "state": "failed", "error": "this server is no longer paired with that peer" }));
         assert!(unpaired.unpaired() && !unpaired.refused_by_peer());
         let cancelled = job(serde_json::json!({ "state": "cancelled" })).outcome();
