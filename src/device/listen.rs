@@ -12,7 +12,15 @@
 //! - `@count` → one count of the card's free clusters, `@count <pct>` as it
 //!   goes and `@count done free=<bytes>`;
 //! - `@identify <label>` → "This one" and the label on the board's screen
-//!   for five seconds, `@identify ok`.
+//!   for five seconds, `@identify ok`;
+//! - `@time` → the board's clock, `@time <unix-ms>` or `@time unset`, and
+//!   `@time <unix-ms>` sets it, `@time ok` (0.12.0's: older firmware
+//!   answers `@err 7 time`);
+//! - `@format` → the question "Format this card?" on the board's screen,
+//!   `@format ok`, nothing more: the listener answers there, `@format no`,
+//!   or `@format 0` and the board restarts to format the card itself,
+//!   `@format <pct>` as it goes and `@format done size=… free=… cluster=…`
+//!   (0.12.0's too: older firmware answers `@err 7 format`).
 //!
 //! The board talks all the time — `[stats]` every few seconds, the boot
 //! log after a restart, the console's own replies — and a host line can
@@ -34,7 +42,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::DeviceError;
-use super::board::{CardKind, CountWhy, Free, Heard, PlayState, Status, Tracks};
+use super::board::{CardKind, CardRoot, Clock, CountWhy, Format, FormatWhy, Formatted, Free, Heard, PlayState};
+use super::board::{Status, Tracks};
 use super::firmware::Version;
 
 /// An open port to a running firmware: bytes both ways, a read that gives
@@ -87,6 +96,13 @@ pub(crate) struct Waits {
     pub again: Duration,
     /// …and given this long to answer ([`STARTING_UP`]).
     pub up: Duration,
+    /// `@format`'s question up, the listener's answer on the board: two
+    /// dialogs of a minute each at most ([`Waits::minute`]), and a margin.
+    pub answer: Duration,
+    /// The firmware's minute (its `formatask::kAskMs`): an `@format no`
+    /// that came this long after `@format ok` is the question running
+    /// out, not a Cancel — the two answer alike.
+    pub minute: Duration,
 }
 
 impl Waits {
@@ -97,6 +113,8 @@ impl Waits {
         count_idle: Duration::from_secs(60),
         again: Duration::from_secs(30),
         up: STARTING_UP,
+        answer: Duration::from_secs(150),
+        minute: Duration::from_secs(60),
     };
 }
 
@@ -570,6 +588,315 @@ pub(crate) fn label_for(port: &str) -> String {
     short[short.len().saturating_sub(16)..].to_string()
 }
 
+// ── The board's clock ───────────────────────────────────────────────────────
+
+/// How far off the board's clock may be before it is set (the firmware
+/// repo's docs/HOST-STATUS.md, @time): a restart alone leaves it within
+/// 1.5 s of the time it was set to, so only a clock that lost its time or
+/// drifted is written.
+pub(crate) const CLOCK_SLACK: Duration = Duration::from_secs(2);
+/// The times the board takes, in Unix ms: 2026-01-01 00:00:00.000 UTC to
+/// 2099-12-31 23:59:59.999 UTC (the firmware's `wallclock::kMinMs` and
+/// `kMaxMs`). Past them it answers `@err 5 time`.
+pub(crate) const CLOCK_RANGE: std::ops::RangeInclusive<u64> = 1_767_225_600_000..=4_102_444_799_999;
+
+/// What `@time` alone says of the board's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoardTime {
+    /// Its time now, in Unix ms.
+    At(u64),
+    /// `@time unset`: no time it believes.
+    Unset,
+}
+
+/// Why the board's clock was not read, or not set. Whatever the reason,
+/// the board's clock is as it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TimeWhy {
+    /// `@err 7 time`: firmware older than 0.12.0, which has no clock verb.
+    Old,
+    /// `@err 5 time`: a time outside the range the board takes.
+    Range,
+    /// `@err 1 time`: not a time the board reads.
+    Syntax,
+    /// `@err 4 time rtc`: the board's clock chip didn't take the time.
+    Rtc,
+    /// This computer's own clock is outside the range the board takes: no
+    /// time was sent.
+    OurClock,
+    NoAnswer,
+    Port(DeviceError),
+    Other(String),
+}
+
+impl TimeWhy {
+    /// The reason as one stable word, for the debug command and the tests.
+    pub fn code(&self) -> &'static str {
+        match self {
+            TimeWhy::Old => "old",
+            TimeWhy::Range => "range",
+            TimeWhy::Syntax => "syntax",
+            TimeWhy::Rtc => "rtc",
+            TimeWhy::OurClock => "our-clock",
+            TimeWhy::NoAnswer => "no-answer",
+            TimeWhy::Port(_) => "port",
+            TimeWhy::Other(_) => "other",
+        }
+    }
+}
+
+/// What [`clock`] found of the board's clock, and what it did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Clocked {
+    pub before: BoardTime,
+    /// The board's time less this computer's, in ms, when it had one: this
+    /// computer's taken halfway between the question and its answer.
+    pub off_ms: Option<i64>,
+    /// Unset, or off by more than [`CLOCK_SLACK`]: set, or in a dry run, to
+    /// be set.
+    pub due: bool,
+    /// The time sent, in Unix ms; None when none was.
+    pub sent: Option<u64>,
+    /// The board's clock read again once set ([`ClockTo::SetAndCheck`]):
+    /// off by this much then.
+    pub after_ms: Option<i64>,
+}
+
+/// What [`clock`] does once it has read the board's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClockTo {
+    /// Nothing more: `device time --dry-run`.
+    Read,
+    /// Set it when due, and no more: the page's listen asks its bare
+    /// `@time` once (clause 5).
+    Set,
+    /// Set it when due, then read it again: `device time`, whose `after`
+    /// the device checks note.
+    SetAndCheck,
+}
+
+/// An `@err … time` line, as the reason it is.
+fn time_err<T>(line: &str) -> Option<Result<T, TimeWhy>> {
+    let err = parse_err(line).filter(|e| e.verb == "time")?;
+    Some(Err(match (err.code, err.why.as_deref()) {
+        (7, _) => TimeWhy::Old,
+        (5, _) => TimeWhy::Range,
+        (1, _) => TimeWhy::Syntax,
+        (4, Some("rtc")) => TimeWhy::Rtc,
+        (code, why) => {
+            TimeWhy::Other(format!("@err {code} time {}", why.unwrap_or_default()).trim().to_string())
+        }
+    }))
+}
+
+/// `@time` alone, and the computer's time halfway between the question and
+/// its answer: the board answers in its next loop pass, from the time it
+/// holds, with no read of its chip.
+fn ask_time(
+    console: &mut Console,
+    now: &dyn Fn() -> u64,
+    waits: Waits,
+    note: Note,
+) -> Result<(BoardTime, u64), TimeWhy> {
+    note("@time".to_string());
+    let asked = now();
+    console.send(b"@time\n").map_err(TimeWhy::Port)?;
+    let answer = console
+        .reply(Instant::now() + waits.reply, waits.boot, &mut *note, |line| {
+            match line.trim().strip_prefix("@time ").map(str::trim) {
+                Some("unset") => Some(Ok(BoardTime::Unset)),
+                Some(ms) if !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()) => {
+                    ms.parse().ok().map(|ms| Ok(BoardTime::At(ms)))
+                }
+                _ => time_err(line),
+            }
+        })
+        .map_err(TimeWhy::Port)?;
+    let answered = now();
+    let at = asked + answered.saturating_sub(asked) / 2;
+    answer.unwrap_or(Err(TimeWhy::NoAnswer)).map(|time| (time, at))
+}
+
+/// `@time <unix-ms>`: the board's clock set to `ms`.
+fn set_time(console: &mut Console, ms: u64, waits: Waits, note: Note) -> Result<(), TimeWhy> {
+    let line = format!("@time {ms}");
+    note(line.clone());
+    console.send(format!("{line}\n").as_bytes()).map_err(TimeWhy::Port)?;
+    let answer = console
+        .reply(Instant::now() + waits.reply, waits.boot, &mut *note, |line| {
+            if line.trim() == "@time ok" {
+                return Some(Ok(()));
+            }
+            time_err(line)
+        })
+        .map_err(TimeWhy::Port)?;
+    answer.unwrap_or(Err(TimeWhy::NoAnswer))
+}
+
+/// The board's clock, read with `@time` alone, and set to this computer's
+/// (`now`, Unix ms) with `@time <unix-ms>` when it is unset or more than
+/// [`CLOCK_SLACK`] off, as `to` says: only read, set, or set and read
+/// again. Told to stop before the set, it sends none: the clock as read,
+/// nothing sent. A board that has no clock verb (older than 0.12.0)
+/// answers `@err 7 time`: [`TimeWhy::Old`].
+pub(crate) fn clock(
+    wire: &mut dyn Wire,
+    port: &str,
+    now: &dyn Fn() -> u64,
+    to: ClockTo,
+    waits: Waits,
+    stop: &AtomicBool,
+    note: Note,
+) -> Result<Clocked, TimeWhy> {
+    let mut console = Console::new(wire, port, stop);
+    let (before, at) = ask_time(&mut console, now, waits, &mut *note)?;
+    let off_ms = match before {
+        BoardTime::At(ms) => Some(ms as i64 - at as i64),
+        BoardTime::Unset => None,
+    };
+    let slack = CLOCK_SLACK.as_millis() as u64;
+    let due = off_ms.is_none_or(|off| off.unsigned_abs() > slack);
+    let mut clocked = Clocked { before, off_ms, due, sent: None, after_ms: None };
+    if !due || to == ClockTo::Read || console.stopped() {
+        return Ok(clocked);
+    }
+    let ms = now();
+    if !CLOCK_RANGE.contains(&ms) {
+        return Err(TimeWhy::OurClock);
+    }
+    set_time(&mut console, ms, waits, &mut *note)?;
+    clocked.sent = Some(ms);
+    if to == ClockTo::SetAndCheck
+        && let Ok((BoardTime::At(board), at)) = ask_time(&mut console, now, waits, &mut *note)
+    {
+        clocked.after_ms = Some(board as i64 - at as i64);
+    }
+    Ok(clocked)
+}
+
+// ── The card formatted in the player ────────────────────────────────────────
+
+/// One of the format's lines: the question's answer, the listener's, a
+/// percent, the end, a refusal.
+#[derive(Debug, PartialEq, Eq)]
+enum FormatLine {
+    Ok,
+    No,
+    Pct(u8),
+    Done { size: u64, free: u64, cluster: u64 },
+    Err { code: u8, why: String },
+}
+
+/// `@format ok|no|<pct>|done size=… free=… cluster=…`, or `@err <code>
+/// format [<why>]`. A field of done's this player can't read is 0: the
+/// listen after it says the card as it is.
+fn format_line(line: &str) -> Option<FormatLine> {
+    if let Some(rest) = line.trim().strip_prefix("@format ") {
+        let rest = rest.trim();
+        if let Some(fields) = rest.strip_prefix("done") {
+            let num = |key: &str| field(fields, key).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            return Some(FormatLine::Done { size: num("size"), free: num("free"), cluster: num("cluster") });
+        }
+        return match rest {
+            "ok" => Some(FormatLine::Ok),
+            "no" => Some(FormatLine::No),
+            pct => pct.parse::<u8>().ok().map(|p| FormatLine::Pct(p.min(100))),
+        };
+    }
+    let err = parse_err(line).filter(|e| e.verb == "format")?;
+    Some(FormatLine::Err { code: err.code, why: err.why.unwrap_or_default() })
+}
+
+/// Where a format stands: what a silence means, and how long one lasts.
+#[derive(Clone, Copy)]
+enum Stage {
+    /// `@format` sent, its answer not in.
+    Asking,
+    /// The question up since then: the listener answers on the board.
+    Waiting(Instant),
+    /// `@format 0` since then: the board restarts and formats.
+    Formatting(Instant),
+}
+
+/// An `@format no` that came `waited` after the question went up: its
+/// minute ran out, a whole one less a sixtieth for the lines' way
+/// (`minute`, the firmware's). A Cancel just before the minute is told as
+/// the minute: the two answer alike, and only the time tells them apart.
+fn timed_out(waited: Duration, minute: Duration) -> bool {
+    waited >= minute.saturating_sub(minute / 60)
+}
+
+/// The card formatted in the player (`@format`; contract clause 59): only
+/// the question goes on the board's screen, and the listener answers it
+/// there, a tap and then a 2 s hold; the board then restarts and formats
+/// the card itself, before anything mounts it. Nothing on this side
+/// writes the card. `told` hears each step as it comes: the question up
+/// ([`Format::Waiting`]), the restart ([`Format::Restarting`]), each
+/// percent ([`Format::Running`]). The card as the firmware made it, or why
+/// it wasn't formatted — an `@err 4 format` told apart by when it came:
+/// before the question was up, at the listener's second answer, after the
+/// restart.
+pub(crate) fn format(
+    wire: &mut dyn Wire,
+    port: &str,
+    waits: Waits,
+    stop: &AtomicBool,
+    told: &mut dyn FnMut(Format),
+    note: Note,
+) -> Result<Formatted, FormatWhy> {
+    let mut console = Console::new(wire, port, stop);
+    note("@format".to_string());
+    console.send(b"@format\n").map_err(FormatWhy::Port)?;
+    let mut stage = Stage::Asking;
+    loop {
+        let wait = match stage {
+            Stage::Asking => waits.reply,
+            Stage::Waiting(_) => waits.answer,
+            Stage::Formatting(_) => waits.count_idle,
+        };
+        let line = console.reply(Instant::now() + wait, waits.boot, &mut *note, format_line);
+        let line = line.map_err(FormatWhy::Port)?;
+        match (line, stage) {
+            (None, _) if console.stopped() => return Err(FormatWhy::Abandoned),
+            (None, Stage::Asking) => return Err(FormatWhy::NoAnswer),
+            (None, _) => return Err(FormatWhy::Lost),
+            (Some(FormatLine::Ok), Stage::Asking) => {
+                stage = Stage::Waiting(Instant::now());
+                told(Format::Waiting);
+            }
+            // Asked again while it is up: the answer comes once.
+            (Some(FormatLine::Ok), _) => {}
+            (Some(FormatLine::No), Stage::Waiting(asked)) if timed_out(asked.elapsed(), waits.minute) => {
+                return Err(FormatWhy::TimedOut);
+            }
+            (Some(FormatLine::No), Stage::Asking | Stage::Waiting(_)) => return Err(FormatWhy::Declined),
+            (Some(FormatLine::No), Stage::Formatting(_)) => {}
+            (Some(FormatLine::Pct(pct)), _) => {
+                // The restart's `0`; a later percent with no `0` before it
+                // is the format under way all the same.
+                if !matches!(stage, Stage::Formatting(_)) {
+                    stage = Stage::Formatting(Instant::now());
+                    told(Format::Restarting);
+                }
+                if pct > 0 {
+                    told(Format::Running { pct });
+                }
+            }
+            (Some(FormatLine::Done { size, free, cluster }), _) => {
+                let took = match stage {
+                    Stage::Formatting(at) => at.elapsed(),
+                    _ => Duration::ZERO,
+                };
+                return Ok(Formatted { size, free, cluster, took });
+            }
+            (Some(FormatLine::Err { code: 7, .. }), _) => return Err(FormatWhy::Old),
+            (Some(FormatLine::Err { why, .. }), Stage::Asking) => return Err(FormatWhy::NotAsked(why)),
+            (Some(FormatLine::Err { why, .. }), Stage::Waiting(_)) => return Err(FormatWhy::Refused(why)),
+            (Some(FormatLine::Err { why, .. }), Stage::Formatting(_)) => return Err(FormatWhy::Failed(why)),
+        }
+    }
+}
+
 // ── The lines ───────────────────────────────────────────────────────────────
 
 /// `@status`'s fields, in any order; a key this player does not know is
@@ -589,6 +916,8 @@ pub(crate) fn parse_status(line: &str) -> Option<Status> {
         music: None,
         bat: None,
         state: PlayState::Unknown(String::new()),
+        cid: CardRoot::Unknown,
+        clock: Clock::Unknown,
         bt: None,
     };
     let mut fw = None;
@@ -616,6 +945,8 @@ pub(crate) fn parse_status(line: &str) -> Option<Status> {
             "music" => status.music = value.parse().ok(),
             "bat" => status.bat = value.parse::<u8>().ok().filter(|b| *b <= 100),
             "state" => status.state = PlayState::parse(value),
+            "cid" => status.cid = CardRoot::parse(value),
+            "clock" => status.clock = Clock::parse(value),
             "bt" => status.bt = known(value).map(|v| percent_decode(&v)),
             _ => {}
         }
@@ -670,7 +1001,7 @@ fn field<'a>(fields: &'a str, key: &str) -> Option<&'a str> {
     fields.split_whitespace().find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
 }
 
-/// `Paul%27s%20headphones` → `Paul's headphones`: RFC 3986's encoding of
+/// `Alex%27s%20headphones` → `Alex's headphones`: RFC 3986's encoding of
 /// the name's UTF-8, read back byte for byte. A broken escape stays as it
 /// was written.
 pub(crate) fn percent_decode(text: &str) -> String {
@@ -698,9 +1029,11 @@ pub(crate) mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::device::board::CardRef;
 
-    /// The real Core2's answer of 2026-10-10 (a 1 TB card).
-    const REAL: &str = "@status fw=v0.8.0-5-g4e94418 elf=be894f89 card=fat32 size=1023871549440 free=1022132355072 tracks=113 music=? bat=100 state=paused bt=SPYDRONE";
+    /// The real Core2's answer of 2026-10-10 (a 1 TB card), but for the
+    /// headphones' name: a made-up one, percent-encoded as the board sends it.
+    const REAL: &str = "@status fw=v0.8.0-5-g4e94418 elf=be894f89 card=fat32 size=1023871549440 free=1022132355072 tracks=113 music=? bat=100 state=paused bt=Alex%27s%20headphones";
 
     /// A wire that answers from a script: what the board sends back after
     /// each thing the host writes, in chunks as a port delivers them.
@@ -764,6 +1097,10 @@ pub(crate) mod tests {
         count_idle: Duration::from_millis(1500),
         again: Duration::from_millis(200),
         up: Duration::from_millis(2500),
+        // The fake's listener answers at once, or (`late`) a pace later:
+        // 1.2 s by default, past this minute and within this wait.
+        answer: Duration::from_millis(2500),
+        minute: Duration::from_millis(500),
     };
 
     fn asked(script: &mut Script) -> Asked {
@@ -783,19 +1120,19 @@ pub(crate) mod tests {
         assert_eq!(status.music, None, "music=? is unknown");
         assert_eq!(status.bat, Some(100));
         assert_eq!(status.state, PlayState::Paused);
-        assert_eq!(status.bt.as_deref(), Some("SPYDRONE"));
+        assert_eq!(status.bt.as_deref(), Some("Alex's headphones"));
     }
 
     #[test]
     fn a_status_line_passes_over_what_it_does_not_know_and_never_guesses() {
-        let line = "@status fw=v0.9.0 elf=63ee7a2b card=exfat size=63864569856 free=? tracks=building music=? bat=- state=host shiny=new bt=Paul%27s%20headphones";
+        let line = "@status fw=v0.9.0 elf=63ee7a2b card=exfat size=63864569856 free=? tracks=building music=? bat=- state=host shiny=new bt=Alex%27s%20headphones";
         let status = parse_status(line).unwrap();
         assert_eq!(status.card, CardKind::ExFat);
         assert_eq!(status.free, Free::NotCounted, "free=? is not counted, never 0");
         assert_eq!(status.tracks, Tracks::Building);
         assert_eq!(status.bat, None);
         assert_eq!(status.state, PlayState::Host);
-        assert_eq!(status.bt.as_deref(), Some("Paul's headphones"));
+        assert_eq!(status.bt.as_deref(), Some("Alex's headphones"));
         let none = parse_status("@status fw=v0.9.0 card=none size=- free=? tracks=- bt=-").unwrap();
         assert_eq!((none.card, none.size, none.tracks, none.bt), (CardKind::None, None, Tracks::NoCard, None));
         assert_eq!(parse_status("@status fw=v0.9.0 free=counting card=fat16").unwrap().free, Free::Counting { pct: None });
@@ -804,6 +1141,36 @@ pub(crate) mod tests {
         assert!(parse_status("@statusfw=v1").is_none());
         assert!(parse_status("[stats] fw=v0.9.0").is_none());
         assert_eq!(parse_status("@status fw=v0.9.0 bat=250").unwrap().bat, None, "a battery past 100 is no reading");
+    }
+
+    #[test]
+    fn a_status_line_names_the_root_its_card_was_loaded_with_or_says_it_had_none() {
+        // `cid=<cardId>.<generation>` goes before `bt=`, which still reads.
+        let line = "@status fw=v0.12.0 card=fat32 tracks=1284 state=idle cid=0123456789abcdef.0000002a bt=Synth%20Cans";
+        let status = parse_status(line).unwrap();
+        let loaded = CardRoot::Loaded(CardRef { card_id: 0x0123_4567_89ab_cdef, generation: 42 });
+        assert_eq!(status.cid, loaded);
+        assert_eq!((status.tracks, status.bt.as_deref()), (Tracks::Count(1284), Some("Synth Cans")));
+        let cid = |value: &str| parse_status(&format!("@status fw=v0.12.0 cid={value}")).unwrap().cid;
+        assert_eq!(cid("0123456789ABCDEF.0000002A"), loaded, "either case");
+        let top = CardRef { card_id: u64::MAX, generation: u32::MAX };
+        assert_eq!(cid("ffffffffffffffff.ffffffff"), CardRoot::Loaded(top));
+        let first = CardRef { card_id: 0x00c0_ffee_0000_0001, generation: 1 };
+        assert_eq!(cid("00c0ffee00000001.00000001"), CardRoot::Loaded(first), "leading zeros are digits");
+        // `-`: the firmware loaded no root (none on the card, or no card).
+        assert_eq!(cid("-"), CardRoot::None);
+        assert_eq!(parse_status("@status fw=v0.12.0 card=none cid=-").unwrap().cid, CardRoot::None);
+        // No key — every firmware so far, or a long line that gave it up —
+        // and a value not in its exact shape are unknown, never a guess.
+        assert_eq!(parse_status(REAL).unwrap().cid, CardRoot::Unknown);
+        for bad in [
+            "?", "", "0123456789abcdef", "0123456789abcdef.", ".0000002a", "0123456789abcdef-0000002a",
+            "123456789abcdef.0000002a", "0123456789abcdef0.0000002a", "0123456789abcdef.2a",
+            "0123456789abcdef.000000002a", "0123456789abcdef.0000002a.1", "0123456789abcdeg.0000002a",
+            "+123456789abcdef.0000002a", "0123456789abcdef.+000002a", "0x23456789abcdef.0000002a",
+        ] {
+            assert_eq!(cid(bad), CardRoot::Unknown, "cid={bad}");
+        }
     }
 
     #[test]
@@ -1058,5 +1425,210 @@ pub(crate) mod tests {
         assert_eq!(label_for("/dev/cu.usbmodem14101"), "cu.usbmodem14101");
         assert_eq!(label_for("/dev/cu.usbserial-14130"), "usbserial-14130");
         assert!(label_for("/dev/cu.wchusbserial-5B1F007751").len() <= 16);
+    }
+
+    /// The firmware's HOST-STATUS.md, @time: the clock asked with a bare
+    /// `@time`, set when it is unset or more than 2 s off; asked again only
+    /// for `device time` (ClockTo::SetAndCheck), never on the page's listen.
+    #[test]
+    fn the_clock_is_set_only_when_it_is_unset_or_more_than_two_seconds_off() {
+        let stop = AtomicBool::new(false);
+        let now = || 1_792_332_202_123u64;
+        let run = |script: &mut Script, to: ClockTo| {
+            clock(script, "COM3", &now, to, QUICK, &stop, &mut |_| {})
+        };
+        let unset = || {
+            Script::new(&[
+                ("@time\n", "[stats] bat=87 state=paused\n@time unset\n"),
+                ("@time 1792332202123\n", "@time ok\n"),
+                ("@time\n", "@time 1792332202150\n"),
+            ])
+        };
+        let mut checked = unset();
+        let sent = checked.sent.clone();
+        let (sent_ms, after_ms) = (Some(1_792_332_202_123), Some(27));
+        let set = Clocked { before: BoardTime::Unset, off_ms: None, due: true, sent: sent_ms, after_ms };
+        assert_eq!(run(&mut checked, ClockTo::SetAndCheck), Ok(set.clone()));
+        assert_eq!(*sent.lock().unwrap(), ["@time\n", "@time 1792332202123\n", "@time\n"]);
+        // The page's listen: asked once, set, not asked again.
+        let mut page = unset();
+        let sent = page.sent.clone();
+        assert_eq!(run(&mut page, ClockTo::Set), Ok(Clocked { after_ms: None, ..set }));
+        assert_eq!(*sent.lock().unwrap(), ["@time\n", "@time 1792332202123\n"]);
+
+        // Two seconds off either way is in step: only asked.
+        for (board, off) in [("1792332200123", -2000), ("1792332204123", 2000)] {
+            let mut close = Script::new(&[("@time\n", &format!("@time {board}\n"))]);
+            let sent = close.sent.clone();
+            let got = run(&mut close, ClockTo::SetAndCheck).unwrap();
+            assert_eq!((got.off_ms, got.due, got.sent), (Some(off), false, None));
+            assert_eq!(sent.lock().unwrap().len(), 1);
+        }
+        // Past that, set: a board ahead as well as one behind.
+        for board in ["1792332200122", "1792332209000"] {
+            let reply = format!("@time {board}\n");
+            let again = "@time 1792332202123\n";
+            let replies = [("@time\n", reply.as_str()), ("@time 1", "@time ok\n"), ("@time\n", again)];
+            let mut off = Script::new(&replies);
+            let got = run(&mut off, ClockTo::SetAndCheck).unwrap();
+            assert_eq!((got.due, got.sent, got.after_ms), (true, Some(1_792_332_202_123), Some(0)), "{board}");
+        }
+        // A dry run only asks.
+        let mut dry = Script::new(&[("@time\n", "@time unset\n")]);
+        let sent = dry.sent.clone();
+        let got = run(&mut dry, ClockTo::Read).unwrap();
+        assert_eq!((got.before, got.due, got.sent), (BoardTime::Unset, true, None));
+        assert_eq!(sent.lock().unwrap().len(), 1);
+
+        // The computer's time is taken halfway between the question and the
+        // answer.
+        let tick = std::cell::Cell::new(1_792_332_202_000u64);
+        let ticking = || {
+            tick.set(tick.get() + 100);
+            tick.get()
+        };
+        let mut halfway = Script::new(&[("@time\n", "@time 1792332202150\n")]);
+        let got = clock(&mut halfway, "COM3", &ticking, ClockTo::Set, QUICK, &stop, &mut |_| {});
+        assert_eq!(got.unwrap().off_ms, Some(0));
+
+        // Older firmware has no clock verb; a refusal leaves it as it was.
+        let old = &[("@time\n", "@err 7 time\n")];
+        assert_eq!(run(&mut Script::new(old), ClockTo::Set), Err(TimeWhy::Old));
+        let rtc = &[("@time\n", "@time unset\n"), ("@time 1", "@err 4 time rtc\n")];
+        assert_eq!(run(&mut Script::new(rtc), ClockTo::Set), Err(TimeWhy::Rtc));
+        let range = &[("@time\n", "@time unset\n"), ("@time 1", "@err 5 time\n")];
+        assert_eq!(run(&mut Script::new(range), ClockTo::Set), Err(TimeWhy::Range));
+        assert_eq!(run(&mut Script::new(&[]), ClockTo::Set), Err(TimeWhy::NoAnswer));
+        // A computer whose own clock was never set sends nothing.
+        let mut ours = Script::new(&[("@time\n", "@time unset\n")]);
+        let sent = ours.sent.clone();
+        let got = clock(&mut ours, "COM3", &|| 1_000, ClockTo::Set, QUICK, &stop, &mut |_| {});
+        assert_eq!((got, sent.lock().unwrap().len()), (Err(TimeWhy::OurClock), 1));
+    }
+
+    /// A stop that comes before the set sends none; one that comes once the
+    /// board took it leaves the set as it was done.
+    #[test]
+    fn a_clock_told_to_stop_sends_no_time_but_keeps_one_the_board_took() {
+        let now = || 1_792_332_202_123u64;
+        let stopped_at = |at: &str| {
+            let stop = AtomicBool::new(false);
+            let mut script = Script::new(&[("@time\n", "@time unset\n"), ("@time 1", "@time ok\n")]);
+            let sent = script.sent.clone();
+            let mut note = |line: String| {
+                if line == at {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            };
+            let got = clock(&mut script, "COM3", &now, ClockTo::Set, QUICK, &stop, &mut note);
+            (got, sent.lock().unwrap().clone())
+        };
+        let (got, sent) = stopped_at("@time unset");
+        let unset = BoardTime::Unset;
+        let read = Clocked { before: unset, off_ms: None, due: true, sent: None, after_ms: None };
+        assert_eq!((got, sent), (Ok(read), vec!["@time\n".to_string()]));
+        let (got, sent) = stopped_at("@time ok");
+        assert_eq!(got.map(|c| c.sent), Ok(Some(1_792_332_202_123)));
+        assert_eq!(sent, ["@time\n", "@time 1792332202123\n"]);
+    }
+
+    #[test]
+    fn a_status_line_says_whether_the_boards_clock_is_set() {
+        let line = "@status fw=v0.12.0 card=fat32 state=idle cid=- clock=ok bt=-";
+        assert_eq!(parse_status(line).unwrap().clock, Clock::Ok);
+        let clock = |value: &str| parse_status(&format!("@status fw=v0.12.0 cid=- clock={value}")).unwrap().clock;
+        assert_eq!(clock("unset"), Clock::Unset);
+        assert_eq!(clock("drifting"), Clock::Unset, "any other value is unset, as the firmware says");
+        assert_eq!(parse_status(REAL).unwrap().clock, Clock::Unknown, "no key: firmware from before it");
+    }
+
+    /// `format` on `wire`: what it ended with, and the steps it told.
+    fn formatted(wire: &mut dyn Wire, waits: Waits) -> (Result<Formatted, FormatWhy>, Vec<Format>) {
+        let stop = AtomicBool::new(false);
+        let mut told = Vec::new();
+        let got = format(wire, "COM3", waits, &stop, &mut |f| told.push(f), &mut |_| {});
+        (got, told)
+    }
+
+    /// HOST-STATUS's own example, the board's restart and a log line among
+    /// its lines.
+    const FORMATTED: &str = "@format 0\r\n[format] confirmed twice (a computer's @format)\r\n\
+        ets Jul 29 2019 12:21:46\r\nrst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\r\n\
+        mstream-mp3-player v0.12.0 (commit 1234567, 2026-10-19), ELF 63ee7a2b\r\n\
+        @format 10\r\n@format 50\r\n@format 100\r\n\
+        @format done size=63864569856 free=63843467264 cluster=32768\r\n";
+
+    #[test]
+    fn the_format_is_asked_and_the_player_answers_formats_and_says_its_card() {
+        // The question up at once; the listener's two answers on the board;
+        // the restart, the percent and the end.
+        let script = Script::new(&[("@format\n", "[stats] bat=87\r\n@format ok\r\n")]);
+        let sent = script.sent.clone();
+        let late = FORMATTED.as_bytes().to_vec();
+        let mut wire = Delayed { inner: script, late, after: Instant::now() + Duration::from_millis(100) };
+        let (got, told) = formatted(&mut wire, QUICK);
+        let done = got.expect("formatted");
+        assert_eq!((done.size, done.free, done.cluster), (63_864_569_856, 63_843_467_264, 32_768));
+        let steps = [Format::Waiting, Format::Restarting, Format::Running { pct: 10 }, Format::Running { pct: 50 }];
+        assert_eq!(told, [&steps[..], &[Format::Running { pct: 100 }]].concat());
+        assert_eq!(*sent.lock().unwrap(), ["@format\n"], "one question, nothing else written");
+    }
+
+    #[test]
+    fn a_no_is_a_cancel_within_the_firmwares_minute_and_its_minute_past_it() {
+        let declined = &[("@format\n", "@format ok\r\n@format no\r\n")];
+        assert_eq!(formatted(&mut Script::new(declined), QUICK).0, Err(FormatWhy::Declined));
+        // The same answer a minute on: the question ran out (a minute of
+        // nothing here, the firmware's own a whole one).
+        let waits = Waits { minute: Duration::ZERO, ..QUICK };
+        assert_eq!(formatted(&mut Script::new(declined), waits).0, Err(FormatWhy::TimedOut));
+        // The no a second on, past a minute of a tenth: wide of it, so a
+        // machine busy with the whole suite can't carry it across.
+        let ok = Script::new(&[("@format\n", "@format ok\r\n")]);
+        let late = b"@format no\r\n".to_vec();
+        let mut wire = Delayed { inner: ok, late, after: Instant::now() + Duration::from_millis(1000) };
+        let waits = Waits { minute: Duration::from_millis(100), ..QUICK };
+        let (got, told) = formatted(&mut wire, waits);
+        assert_eq!((got, told), (Err(FormatWhy::TimedOut), vec![Format::Waiting]), "past the minute");
+        assert!(timed_out(Duration::from_millis(59_100), Duration::from_secs(60)), "the minute, less its way");
+        assert!(!timed_out(Duration::from_millis(58_000), Duration::from_secs(60)), "a Cancel");
+    }
+
+    #[test]
+    fn a_refusal_is_told_apart_by_when_it_came() {
+        let run = |reply: &'static str| formatted(&mut Script::new(&[("@format\n", reply)]), QUICK).0;
+        // At once: the question never shown.
+        assert_eq!(run("@err 4 format viz\r\n"), Err(FormatWhy::NotAsked("viz".into())));
+        assert_eq!(run("@err 4 format card\r\n"), Err(FormatWhy::NotAsked("card".into())));
+        // At the listener's second answer, before any restart.
+        assert_eq!(run("@format ok\r\n@err 4 format size\r\n"), Err(FormatWhy::Refused("size".into())));
+        // After the restart: the format itself failed.
+        let failed = "@format ok\r\n@format 0\r\n@format 30\r\n@err 4 format mkfs\r\n";
+        assert_eq!(run(failed), Err(FormatWhy::Failed("mkfs".into())));
+        // Firmware from before the verb.
+        assert_eq!(run("@err 7 format\r\n"), Err(FormatWhy::Old));
+        // Nothing at all; the question up and then nothing more.
+        assert_eq!(formatted(&mut Script::new(&[]), QUICK).0, Err(FormatWhy::NoAnswer));
+        let quick = Waits { answer: Duration::from_millis(200), count_idle: Duration::from_millis(200), ..QUICK };
+        let up = &[("@format\n", "@format ok\r\n")];
+        assert_eq!(formatted(&mut Script::new(up), quick).0, Err(FormatWhy::Lost));
+        let restarted = &[("@format\n", "@format ok\r\n@format 0\r\n@format 20\r\n")];
+        assert_eq!(formatted(&mut Script::new(restarted), quick).0, Err(FormatWhy::Lost));
+        // Told to stop: let go, the board goes on by itself.
+        let stop = AtomicBool::new(true);
+        let mut script = Script::new(up);
+        let got = format(&mut script, "COM3", QUICK, &stop, &mut |_| {}, &mut |_| {});
+        assert_eq!(got, Err(FormatWhy::Abandoned));
+    }
+
+    #[test]
+    fn the_formats_lines_are_read_whatever_comes_between_and_a_done_this_player_cant_read_is_zeros() {
+        assert_eq!(format_line("@format 41"), Some(FormatLine::Pct(41)));
+        assert_eq!(format_line("@format 250"), Some(FormatLine::Pct(100)));
+        assert_eq!(format_line("@format ok\r"), Some(FormatLine::Ok));
+        assert_eq!(format_line("@format done"), Some(FormatLine::Done { size: 0, free: 0, cluster: 0 }));
+        assert_eq!(format_line("@formatted"), None);
+        assert_eq!(format_line("@err 4 count card"), None, "another verb's refusal");
+        assert_eq!(format_line("@err 4 format"), Some(FormatLine::Err { code: 4, why: String::new() }));
     }
 }

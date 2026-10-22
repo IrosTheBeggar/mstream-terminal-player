@@ -667,6 +667,12 @@ mstream-player device flash --flash-mode dio      # this player's release, in DI
 mstream-player device releases --pre-releases     # the firmware's releases on GitHub
 mstream-player device flash --yes --port COM3     # no screen, no questions
 mstream-player device flash --yes --all           # update every board that runs an older release
+mstream-player device cards                       # the SD cards in this computer's card readers
+mstream-player device card E: status              # one card's facts, as key-value lines
+mstream-player device card E: setup --name Car --yes     # make a new card one the player syncs
+mstream-player device card E: sync                # print the plan; --yes runs it
+mstream-player device card E: eject               # let the card go
+mstream-player device format --port COM3          # format the board's card as FAT32: the player asks first
 ```
 
 The [mStream MP3 player](https://github.com/IrosTheBeggar/mstream-mp3-player) is an M5Stack
@@ -682,7 +688,7 @@ or a development build based below it), ✗ *Not mStream firmware*, ? *Not answe
 free space under it, in decimal GB as the Core2's About shows them — or what the card is and
 how to fix it (no card, exFAT, GPT), or why it cannot be shown (firmware too old to report it,
 a write under way): the card comes from the firmware's `@status`, which firmware 0.9.0 and
-later answer — v0.10.0, the release this player pins, among them, so a board on v0.8.0 or
+later answer — v0.11.0, the release this player pins, among them, so a board on v0.8.0 or
 older is told *Updating shows it.* Free space a card never counted is offered as one count
 (`c`), never started by itself. One button follows the chip — *Update ▸*, *Install ▸*,
 *Read the board ▸* (a board that does not answer: reading it restarts it, said on the card
@@ -691,7 +697,7 @@ dark screen while it writes, what stays (settings, the paired headphones, the mu
 card), and that unplugging halfway leaves it half written; Enter, Esc and `n` keep the board
 as it is, `y` writes, and the board is reset only then. The erase box is in the install's
 warning alone, on by default over other firmware. When the board restarts, the card is the
-board again — `✓ Up to date · v0.10.0 · just written`, its SD card as the new firmware reports
+board again — `✓ Up to date · v0.11.0 · just written`, its SD card as the new firmware reports
 it — and one line says what was done. Everything technical — the port and bridge, the flash
 size, the firmware's ELF, where this player's image came from, the card's bytes, the run's log
 with a clock, and *Write again* — is behind **Details** (`d`, or
@@ -751,7 +757,7 @@ step and writes without a screen, the flags answering the warning.
 opened with DTR and RTS held low, so the music on it plays on): the firmware's `@status` line —
 its version and its SD card's size, free space and tracks — or, from firmware older than the
 query, the console's `L` for the version alone. Each board's line is the port's as before, then
-its firmware against the pin (`v0.7.0, update to v0.10.0`) and its card (`card 38.2 GB free of
+its firmware against the pin (`v0.7.0, update to v0.11.0`) and its card (`card 38.2 GB free of
 59.6 GB, 1,284 tracks`); a board that says nothing is `not answering`, and a port another
 program holds is `in use by another program`. With several boards, `--yes` still asks for
 `--port` — its refusal lists each board's firmware now — or `--all`, which updates every board
@@ -759,7 +765,7 @@ running an older release of this firmware to the pin, one after another, each in
 it runs (or the one `--flash-mode` names), stopping at the first failure; it never installs
 over other firmware, never erases and never goes back, and names the boards it left alone.
 
-The pinned release is v0.10.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
+The pinned release is v0.11.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
 ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
 `-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install,
 `device flash --flash-mode dio` writes it, or the tab's Advanced… does (Flash mode, DIO). It
@@ -771,6 +777,37 @@ never its firmware's first line is said to keep restarting: the card goes gold, 
 restarting*, and its button is *Write the DIO image ▸* — through the warning, never written by
 itself.
 
+The board's SD card is filled with the card in **this computer's card reader**, never over the
+cable. A card in a reader is a subject of the MP3 Player tab beside the boards, a tab of its
+own (`E: Car music` on Windows): its **Card view** says what it holds and from which saved
+server, its space, its last sync and what the next one would do (`12 new · 2 to remove · 37
+plays to send`, as that server answered it), and *Sync ▸* fills it — converting what the
+player can't play, writing the covers and the Auto DJ index the firmware reads, and sending
+the player's plays back to the server they came from. A sync saves as it goes: `x` stops it
+at the next save, a card taken out goes on from there in any reader, and it runs on while
+you listen, the MP3 Player tab wearing its percentage. **Settings…** (`o`) holds the card's
+choices on two tabs, Music (its server and libraries) and Writing (what is converted and to
+what, removals, covers, Auto DJ, a card for someone else), with a line that says at every
+change whether it fits. More than 50 removals, half the card gone, music on the card that
+mStream didn't put there, another server, a relay and a peer reached only through its parent
+each ask first, behind the gold warning. Quitting during a sync asks, then stops at the next
+save. `device cards` lists the cards, one line each, and `device card <drive>
+status|setup|sync|plays|eject` does what the Card view does; each warning is a flag that names
+what it lets through (`--allow-removals 214`, `--server Work --take-over`, `--adopt` or
+`--keep-mine`, `--through-parent`), and `setup`'s flags are the Settings' (`--name`,
+`--libraries`, `--convert`, `--to`, `--removals`, `--covers`, `--autodj`, `--for`,
+`--budget`). Exit 3 means paused or stopped: run it again later. Only FAT32 cards on MBR are
+the player's; a card it can't read is listed with why.
+
+A card the player can't read (exFAT, NTFS, a GPT card) is **formatted in the player**, never on
+the computer: with firmware 0.12.0 or later, the board's SD card row offers *Format as FAT32 ▸*
+(`f` where something else comes first; for the player's own music card, in Details only), behind
+a gold warning that says what is lost. The tab only asks: the player shows the question on its
+own screen, *Format…* then its red button held 2 s, restarts and formats the card, and the row
+follows it to the empty card, ready to fill in a card reader. A damaged card is sent to a
+computer's disk check first. Leaving the tab never stops it. `device format` does the same from a
+terminal; it has no `--yes`, since the player confirms.
+
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported
 as such. `MSTREAM_DEVICE_FAKE=<word>` runs everything against a scripted board, for tests:
@@ -779,7 +816,9 @@ the running firmware's answers `status:<version>` (answers `@status`), `old:<ver
 then `L`), `silent:<version>` (ours, not running) and `chip` (a board that only shares the USB
 chip). Several boards are words separated by commas, and options after slashes script the rest:
 `status:v0.9.0/free=?,old:v0.7.0,chip/in=3` is three boards, the last plugged in three seconds
-on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). `/mode=dio`
+on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). A 0.12.0
+board's `@format` is formatted by default, or `/format=no`, `late`, `silent`, a refusal
+(`viz`, `card`, …, `second-size`), or `fail-write` and its kin. `/mode=dio`
 runs a release's DIO build (its ELF id), `/elf=<hex>` any ELF, and `/loop=qio` is a Core2
 whose flash cannot run QIO: a QIO image written to it keeps it restarting. src/device/engine.rs
 has the whole grammar.

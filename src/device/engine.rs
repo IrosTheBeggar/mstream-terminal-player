@@ -489,7 +489,7 @@ fn flash_error(port: &str, e: espflash::Error) -> DeviceError {
 pub(crate) mod fake {
     use std::collections::VecDeque;
     use std::io::{self, ErrorKind, Read, Write};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     use clap::ValueEnum;
@@ -497,7 +497,7 @@ pub(crate) mod fake {
     use super::{DeviceInfo, Engine, Link, Report, Restart};
     use crate::device::DeviceError;
     use crate::device::firmware::{AppDesc, BOOTLOADER_OFFSET, BUILDS, Mode, Segment, Version};
-    use crate::device::listen::Wire;
+    use crate::device::listen::{CLOCK_RANGE, Wire};
     use crate::device::ports::Candidate;
 
     /// What a fake board's flash holds.
@@ -529,6 +529,12 @@ pub(crate) mod fake {
         }
     }
 
+    /// This computer's clock, in Unix ms: what a fake board's clock runs by.
+    fn now_ms() -> i64 {
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        since.map_or(0, |d| d.as_millis() as i64)
+    }
+
     #[derive(Clone, Debug)]
     struct FakeBoard {
         port: String,
@@ -556,6 +562,15 @@ pub(crate) mod fake {
         fields: Vec<(String, String)>,
         /// `@identify` refused with this word (ui, screen, viz).
         identify: Option<String>,
+        /// Its clock (0.12.0's): off from this computer's by this many ms,
+        /// or unset (None).
+        clock: Option<i64>,
+        /// Its clock chip takes no time: `@time <ms>` answers `@err 4 time
+        /// rtc`.
+        rtc_dead: bool,
+        /// How its listener answers `@format`'s question (0.12.0's), and how
+        /// the format goes (`/format=`): none formats.
+        format: Option<String>,
         /// The free bytes a count found, said by `@status` from then on.
         counted: Option<u64>,
         /// The ELF id its firmware reports — in `@status`, `L`, its app
@@ -602,6 +617,9 @@ pub(crate) mod fake {
                 leaves: None,
                 fields: Vec::new(),
                 identify: None,
+                clock: Some(0),
+                rtc_dead: false,
+                format: None,
                 counted: None,
                 elf: None,
                 qio_loops: false,
@@ -644,6 +662,15 @@ pub(crate) mod fake {
                     "out" => board.leaves = Some(secs(value)),
                     "held" => board.held_for = secs(value),
                     "identify" => board.identify = Some(value.to_string()),
+                    "clock" => {
+                        board.clock = match value {
+                            "unset" => None,
+                            "ok" => Some(0),
+                            off => Some(off.parse::<i64>().unwrap_or(0)),
+                        }
+                    }
+                    "rtc" => board.rtc_dead = value == "dead",
+                    "format" => board.format = Some(value.to_string()),
                     "talk" => {
                         board.talk = match value {
                             "status" => Talk::Status,
@@ -726,6 +753,12 @@ pub(crate) mod fake {
             }
         }
 
+        /// Its firmware has the clock, and `@status` its `cid=` and
+        /// `clock=`: 0.12.0's work, its dev builds too.
+        fn clocked(&self) -> bool {
+            self.version().and_then(Version::parse).is_some_and(|v| v.core >= (0, 12, 0))
+        }
+
         /// A field of `@status`: what the board was told to say, else the
         /// default, a 64 GB card with music on it, paused.
         fn field(&self, key: &str) -> String {
@@ -742,14 +775,33 @@ pub(crate) mod fake {
                 "music" => "?".to_string(),
                 "bat" => "87".to_string(),
                 "state" => "paused".to_string(),
+                "cid" => "-".to_string(),
+                "clock" => if self.clock.is_some() { "ok" } else { "unset" }.to_string(),
                 "bt" => "-".to_string(),
                 _ => String::new(),
             }
         }
 
+        /// `@status` says `value` for `key` from now on.
+        fn set_field(&mut self, key: &str, value: String) {
+            match self.fields.iter_mut().find(|(k, _)| k == key) {
+                Some((_, v)) => *v = value,
+                None => self.fields.push((key.to_string(), value)),
+            }
+        }
+
+        /// The keys in the firmware's order. `cid=` and `clock=` came in
+        /// 0.12.0, after `state=` and before `bt=`: an older board's line
+        /// has neither, but a `cid=` its script names.
         fn status_line(&self) -> String {
             let mut line = "@status".to_string();
-            for key in ["fw", "elf", "card", "size", "free", "tracks", "music", "bat", "state", "bt"] {
+            let keys =
+                ["fw", "elf", "card", "size", "free", "tracks", "music", "bat", "state", "cid", "clock", "bt"];
+            let scripted = |key: &str| self.fields.iter().any(|(k, _)| k == key);
+            for key in keys {
+                if matches!(key, "cid" | "clock") && !self.clocked() && !scripted(key) {
+                    continue;
+                }
                 line.push_str(&format!(" {key}={}", self.field(key)));
             }
             line
@@ -776,7 +828,18 @@ pub(crate) mod fake {
     ///
     /// Options: `/in=<s>` plugged in that long after the fake begins,
     /// `/out=<s>` unplugged then, `/held=<s>` its port held that long,
-    /// `/identify=<why>` `@identify` refused (ui, screen, viz),
+    /// `/identify=<why>` `@identify` refused (ui, screen, viz), the clock
+    /// of a board from 0.12.0 on `/clock=unset|ok|<ms>` (unset; in step,
+    /// as without; or off from this computer's by that many ms, `-5000`
+    /// behind), `/rtc=dead` (it takes no `@time <ms>`), and how its
+    /// listener answers `@format` (0.12.0's too; without the option the
+    /// card is formatted, the question up at once, confirmed a tenth of the
+    /// pace on, the format across the pace): `/format=no` (Cancel at once),
+    /// `late` (Cancel a pace on: a test's minute is shorter), `silent` (the
+    /// question up, then nothing), `ui|screen|viz|busy|card` (refused at
+    /// once), `second-card|size|busy` (refused at the second answer, no
+    /// restart), `fail-<why>` (the restart, then a failure at 40 %: write,
+    /// mkfs, check, files, card, size),
     /// `/talk=status|old|silent`, `/serial=<s>`, `/fail=write` (its write
     /// dies halfway), `/flash=other|blank|<version>` (what its bootloader
     /// reads, whatever it says), and any of `@status`'s fields
@@ -816,6 +879,9 @@ pub(crate) mod fake {
         /// second or more on a real board, during which the worker hears
         /// nothing. None by default.
         reach: Duration,
+        /// A test's hand on the bootloader ([`Fake::hold`]): while it is
+        /// held, an `open` that reset its board waits before it answers.
+        hold: Arc<(Mutex<bool>, Condvar)>,
         /// What was done to the boards, in order (`open 921600`, `let go`,
         /// `restart`, `let go FAKE0`, `listen FAKE1`, `identify FAKE1
         /// FAKE1`), for the tests to read.
@@ -825,6 +891,22 @@ pub(crate) mod fake {
     /// The boards' list, whoever panicked while holding it.
     fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A test's hold on the fake's `open`s ([`Fake::hold`]). Dropped, a
+    /// panic's unwind included, the `open`s held go on: a test that fails
+    /// while it holds them leaves no read waiting for good.
+    #[cfg(test)]
+    #[must_use = "dropped, the opens go on at once"]
+    pub(crate) struct Hold(Arc<(Mutex<bool>, Condvar)>);
+
+    #[cfg(test)]
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            let (held, freed) = &*self.0;
+            *lock(held) = false;
+            freed.notify_all();
+        }
     }
 
     impl Fake {
@@ -839,6 +921,7 @@ pub(crate) mod fake {
                 born: Instant::now(),
                 pace: Duration::from_millis(1200),
                 reach: Duration::ZERO,
+                hold: Arc::default(),
                 trace: Arc::default(),
             }
         }
@@ -856,6 +939,17 @@ pub(crate) mod fake {
         pub(crate) fn with_reach(mut self, reach: Duration) -> Fake {
             self.reach = reach;
             self
+        }
+
+        /// Every `open` from now on, whichever board's, keeps its board in
+        /// its bootloader, the reset done, until the [`Hold`] is dropped: a
+        /// fake read is over in a blink, which a busy machine can let end
+        /// before the worker takes the page's next command, so a test that
+        /// needs a board in its bootloader holds it there.
+        #[cfg(test)]
+        pub(crate) fn hold(&self) -> Hold {
+            *lock(&self.hold.0) = true;
+            Hold(self.hold.clone())
         }
 
         /// What was done to the boards so far, shared with the fake.
@@ -943,6 +1037,8 @@ pub(crate) mod fake {
             // whether or not it then answers.
             Fake::note(&self.trace, format!("open {baud}"));
             std::thread::sleep(self.reach);
+            let (held, freed) = &*self.hold;
+            drop(freed.wait_while(lock(held), |held| *held).unwrap_or_else(|e| e.into_inner()));
             if board.nosync {
                 let detail = "no answer".into();
                 return Err(DeviceError::NoSync { port: candidate.port.clone(), detail });
@@ -1205,6 +1301,8 @@ pub(crate) mod fake {
                 Talk::Status => match verb {
                     "status" => self.answer(&board.status_line()),
                     "count" => self.count(&board),
+                    "time" if board.clocked() => self.time(&board, arg.trim()),
+                    "format" if board.clocked() => self.format(&board),
                     "identify" => {
                         let label = arg.trim();
                         if label.is_empty() {
@@ -1243,6 +1341,118 @@ pub(crate) mod fake {
             self.say(t0 + self.fake.pace, &format!("@count done free={free}"));
             if let Some(i) = self.index {
                 lock(&self.fake.boards)[i].counted = Some(free);
+            }
+        }
+
+        /// `@time`: alone, the board's clock; with a time, its clock set to
+        /// it, which the board keeps from then on. Refused as the firmware
+        /// refuses: digits only, in 2026-2099, a chip that takes it.
+        fn time(&mut self, board: &FakeBoard, arg: &str) {
+            if arg.is_empty() {
+                return match board.clock {
+                    Some(off) => self.answer(&format!("@time {}", now_ms() + off)),
+                    None => self.answer("@time unset"),
+                };
+            }
+            let digits = arg.bytes().all(|b| b.is_ascii_digit());
+            let Some(ms) = arg.parse::<u64>().ok().filter(|_| digits) else {
+                return self.answer("@err 1 time");
+            };
+            if !CLOCK_RANGE.contains(&ms) {
+                return self.answer("@err 5 time");
+            }
+            if board.rtc_dead {
+                return self.answer("@err 4 time rtc");
+            }
+            Fake::note(&self.fake.trace, format!("time {} {ms}", board.port));
+            if let Some(i) = self.index {
+                lock(&self.fake.boards)[i].clock = Some(ms as i64 - now_ms());
+            }
+            self.answer("@time ok");
+        }
+
+        /// `@format`: refused as the firmware refuses (no card in the slot, a
+        /// computer driving the dancer, or as scripted), else the question up
+        /// at once and the listener's answer a tenth of the pace on; then
+        /// the restart — the ROM's lines and the boot line — the percent
+        /// across the pace and the end. Its card is from then on what the
+        /// format left: an empty FAT32 card; or, cut short, one no FAT
+        /// mounts. Its main loop runs again once the format ends: a host
+        /// line meanwhile waits in its port.
+        fn format(&mut self, board: &FakeBoard) {
+            let script = board.format.clone().unwrap_or_default();
+            let refused = match script.as_str() {
+                why @ ("ui" | "screen" | "viz" | "busy" | "card") => Some(why.to_string()),
+                _ if board.field("card") == "none" => Some("card".to_string()),
+                _ if board.field("state") == "host" => Some("viz".to_string()),
+                _ => None,
+            };
+            if let Some(why) = refused {
+                return self.answer(&format!("@err 4 format {why}"));
+            }
+            Fake::note(&self.fake.trace, format!("format {}", board.port));
+            self.answer("@format ok");
+            let (now, pace) = (Instant::now(), self.fake.pace);
+            let answered = now + pace / 10;
+            match script.as_str() {
+                "no" => return self.say(now, "@format no"),
+                "late" => return self.say(now + pace, "@format no"),
+                "silent" => return,
+                second if second.starts_with("second-") => {
+                    let why = &second["second-".len()..];
+                    return self.say(answered, &format!("@err 4 format {why}"));
+                }
+                _ => {}
+            }
+            self.say(answered, "@format 0");
+            self.say(answered, "[format] confirmed twice (a computer's @format): restarting to format");
+            self.say(answered, "ets Jul 29 2019 12:21:46");
+            self.say(answered, "rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)");
+            let version = board.version().unwrap_or("v0.12.0").to_string();
+            let elf = board.elf_or("63ee7a2b");
+            let boot = format!("mstream-mp3-player {version} (commit fake000, 2026-10-01), ELF {elf}");
+            self.say(answered, &boot);
+            let fail = script.strip_prefix("fail-");
+            let steps: u32 = if fail.is_some() { 4 } else { 10 };
+            for step in 1..=steps {
+                self.say(answered + pace * step / 10, &format!("@format {}", step * 10));
+            }
+            let end = answered + pace;
+            let size: u64 = board.field("size").parse().unwrap_or(0);
+            // Both FATs, the gap, and the clusters /music, /.player and
+            // device.txt take.
+            let cluster = 32_768u64;
+            let free = size.saturating_sub(size / 4096 + (4 << 20) + 3 * cluster) / cluster * cluster;
+            let card = match fail {
+                Some(why) => {
+                    self.say(end, &format!("@err 4 format {why}"));
+                    matches!(why, "write" | "mkfs" | "check").then_some("other")
+                }
+                None => {
+                    self.say(end, &format!("@format done size={size} free={free} cluster={cluster}"));
+                    Some("fat32")
+                }
+            };
+            let Some(i) = self.index else { return };
+            let loop_at = self.fake.age() + pace / 10 + pace;
+            let mut boards = lock(&self.fake.boards);
+            let board = &mut boards[i];
+            board.loop_at = loop_at;
+            board.counted = None;
+            match card {
+                Some("fat32") => {
+                    board.set_field("card", "fat32".into());
+                    board.set_field("free", free.to_string());
+                    board.set_field("tracks", "0".into());
+                    board.set_field("cid", "-".into());
+                }
+                Some(other) => {
+                    board.set_field("card", other.into());
+                    board.set_field("free", "?".into());
+                    board.set_field("tracks", "-".into());
+                    board.set_field("cid", "-".into());
+                }
+                None => {}
             }
         }
 

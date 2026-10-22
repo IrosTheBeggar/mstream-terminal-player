@@ -1428,7 +1428,7 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let many = gui.config.servers.iter().filter(|e| config::selectable(e)).count() > 1;
     let chevron = if legacy_conhost() { " v" } else { " ▾" };
     let mark = if many { chevron } else { "" };
-    let strip_end = super::top_strip_end();
+    let strip_end = super::top_strip_end_with(&super::device::strip_mark(gui));
     let Some((x, label)) = header_label(&server, mark, strip_end, plus.x) else { return };
     let width = crate::kit::width(&label) as u16;
     let rect = Rect { x, y: 0, width, height: 1 };

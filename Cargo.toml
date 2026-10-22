@@ -158,6 +158,29 @@ espflash = { version = "4.6", default-features = false, features = ["serialport"
 serialport = { version = "4.10", default-features = false }
 # The firmware's checksum, checked before anything is written to a board.
 sha2 = "0.11"
+# The SD card's files (src/device/card/contract, the firmware repo's
+# docs/METADATA.md part 2): every one is checked with CRC-32/ISO-HDLC,
+# zlib's CRC, which crc32fast computes; a download is checked against
+# mStream's `hash`, an MD5. Both were in the tree already (flate2 and png
+# bring crc32fast, espflash this md-5, on sha2's digest 0.11), so they
+# add no package.
+crc32fast = "1.5"
+md-5 = "0.11"
+# The names the transfer gives files on the card (src/device/card/names.rs,
+# the firmware's docs/METADATA.md 2.8.3) are NFC, and a card's names as it
+# stores them are brought back to NFC where macOS lists them decomposed
+# (src/device/card/volume, 2.8.5). Pure Rust tables.
+unicode-normalization = "0.1.24"
+# The SD card's tag reader (src/device/card/tags.rs): the record of a file
+# the transfer puts on a card is read from the card's bytes the way
+# mStream's default scanner reads them, and that scanner is lofty 0.25 (the
+# firmware repo's docs/METADATA.md part 5, whose reference reader pins
+# =0.25.1). Pinned exactly for the same reason: a release that reads one
+# frame differently changes records the device's own scan must equal field
+# for field. The default feature is part of that: it inflates a compressed
+# ID3v2 frame, as the reference does. lofty, lofty_attr and ogg_pager are
+# new to the tree; flate2, byteorder, data-encoding and paste were in it.
+lofty = "=0.25.1"
 stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
@@ -311,10 +334,22 @@ rfd = { version = "0.15", default-features = false }
 # probe too, so the crate is not optional, and the desktop flavour's calls
 # are gated on its feature where they are made. windows-sys is bindings
 # alone, so the terminal binary links nothing it does not call.
+#
+# The SD card transfer's volume probe (src/device/card/volume/windows.rs):
+# Storage_FileSystem lists the volumes and their filesystems, serials and
+# free space, and reads a card's stamps back with the current bias;
+# System_IO's DeviceIoControl asks System_Ioctl's queries (a volume's disk,
+# the disk's bus and removable flag, its partition style); System_Registry
+# reads where Windows itself lives (the system partition, the page files),
+# whose disks are never a card's.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Registry",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -344,6 +379,14 @@ objc2-foundation = { version = "0.3.2", optional = true, default-features = fals
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+
+# The SD card transfer's volume probe (src/device/card/volume): statvfs on
+# Linux and statfs on macOS for a card's size, free space and cluster; the
+# kernel's FAT time zone (the raw gettimeofday) on Linux, localtime_r on
+# macOS. Already in both trees (mio, socket2 and others bring it), so
+# this adds no package.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ratzilla = "0.3.1"
@@ -386,6 +429,15 @@ fastrand = { version = "2", features = ["js"] }
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# A card sync checks each file it downloads against mStream's MD5 as the
+# bytes go to the card, on the card writer's own thread: unoptimised, md-5
+# took a quarter second of each 9 MB file there, near a third of what a
+# slow card takes for it, and a debug build is what runs the real-card
+# checks. Optimised, next to nothing; nothing else about the build
+# changes.
+[profile.dev.package.md-5]
+opt-level = 3
 
 # cargo-deb wraps the already-cross-built binaries in the release workflow
 # (--no-build --no-strip --target <triple>); nothing here compiles anything.

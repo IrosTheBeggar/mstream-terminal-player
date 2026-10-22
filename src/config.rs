@@ -969,6 +969,49 @@ pub fn delete_stats_file() -> Result<(), String> {
     }
 }
 
+/// `cards.json` — the MP3 player's SD cards this computer has seen, by card
+/// id (src/device/card/cards.rs): a cache of what each card's own settings
+/// file says, beside stats.json and as disposable: a corrupt file is
+/// ignored, and written over at the next save.
+pub fn cards_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("cards.json"))
+}
+
+pub fn load_cards_file() -> Result<Option<String>, String> {
+    let path = cards_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+pub fn save_cards_file(body: &str) -> Result<(), String> {
+    write_atomic(&cards_path()?, body, false)
+}
+
+/// `card-plays.json` — the plays read from the MP3 player's SD cards that
+/// wait for their server, and what this computer has settled of each
+/// card's play log (src/device/card/history.rs), beside stats.json. Not
+/// disposable as the cache is: a play mapped through a ledger a sync has
+/// since replaced can't be mapped again.
+pub fn card_plays_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("card-plays.json"))
+}
+
+pub fn load_card_plays_file() -> Result<Option<String>, String> {
+    let path = card_plays_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+pub fn save_card_plays_file(body: &str) -> Result<(), String> {
+    write_atomic(&card_plays_path()?, body, false)
+}
+
 /// Drop the saved queue: a cleared queue must not come back on the next
 /// launch, and neither may one the setting was turned off for.
 pub fn delete_queue_file() -> Result<(), String> {

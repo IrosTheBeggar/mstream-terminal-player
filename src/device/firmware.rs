@@ -39,28 +39,35 @@ const ASSET_STEM: &str = "mstream-player-core2";
 /// date" is this, exactly, whatever image is chosen for a write). Bumped by
 /// hand with player releases, once a firmware release has been tried on a
 /// board.
-pub(crate) const PINNED_TAG: Option<&str> = Some("v0.10.0");
+pub(crate) const PINNED_TAG: Option<&str> = Some("v0.11.0");
 /// The sha256 of that release's `*-full.bin` (the QIO build), from its
 /// SHA256SUMS (and the same as GitHub's own digest of the asset, checked
 /// when it was pinned). Release assets are mutable on GitHub; this is the
 /// trust anchor, not the file.
 pub(crate) const PINNED_FULL_SHA256: Option<&str> =
-    Some("452058e5294601baf01ee4715f2dc709f2d6ae6263ef0e7e0482db978656a706");
+    Some("61a9edb3dab28a680aa153bae6d9871dcffdd7ddede889bde1f4a516b22298e9");
 /// The sha256 of that release's `*-dio-full.bin`: the same firmware with
 /// the flash in DIO, for a Core2 that keeps restarting on QIO. From
-/// v0.10.0's SHA256SUMS and GitHub's digest of the asset (both `2753aede…`,
-/// checked 2026-10-12); bumped with the pin, or none for a pin with no DIO
+/// v0.11.0's SHA256SUMS and GitHub's digest of the asset (both `3616458e…`,
+/// checked 2026-10-18); bumped with the pin, or none for a pin with no DIO
 /// build.
 pub(crate) const PINNED_DIO_SHA256: Option<&str> =
-    Some("2753aede09b3bc5078bad3a1cf1b464be474eab75d25160d02e6ba0cee09980d");
+    Some("3616458e6327193f2355cf90d6565df86f35607f26b25d2b833f16659053ec64");
 /// Whether a board running the pinned release answers `@status` — the
 /// running firmware's report of its card (the firmware repo's
 /// docs/HOST-STATUS.md, from v0.9.0 on). v0.8.0 and older say `@err 7
 /// status`: their boards show their version but not their card, and "update
 /// to see the card" is a promise only an update to a pin that answers keeps.
-/// v0.10.0 answers (its HostStatus and HOST-STATUS.md are the ones the
+/// v0.11.0 answers (its HostStatus and HOST-STATUS.md are the ones the
 /// player was built against, unchanged since they were merged).
 pub(crate) const PINNED_ANSWERS_STATUS: bool = true;
+/// Whether a board running the pinned release formats a card at a
+/// computer's ask (`@format`, the firmware repo's docs/HOST-STATUS.md, from
+/// 0.12.0 on): only then does the MP3 Player tab say "Updating lets it."
+/// under a board that can't (contract clauses 20 and 59), and only then do
+/// the fix lines of a board that can't point at the player. v0.11.0 does
+/// not: it answers `@err 7 format`.
+pub(crate) const PINNED_ANSWERS_FORMAT: bool = false;
 
 /// Where the merged image expects the app: ota_0 in the firmware's
 /// partition table, and where the bootloader at 0x1000 sits inside it.
@@ -245,11 +252,17 @@ impl Image {
 pub(crate) struct Target {
     pub version: String,
     pub answers_status: bool,
+    /// A board running it formats its card (`@format`).
+    pub answers_format: bool,
 }
 
 /// The pin as a target, or none in a build of the player with no pin.
 pub(crate) fn pin_target() -> Option<Target> {
-    PINNED_TAG.map(|tag| Target { version: tag.to_string(), answers_status: PINNED_ANSWERS_STATUS })
+    PINNED_TAG.map(|tag| Target {
+        version: tag.to_string(),
+        answers_status: PINNED_ANSWERS_STATUS,
+        answers_format: PINNED_ANSWERS_FORMAT,
+    })
 }
 
 /// A piece of the image and where it goes.
@@ -586,8 +599,9 @@ pub(crate) struct Builds {
 /// build; ELF … for the `-dio-full.bin`") and against the images
 /// themselves: v0.8.0's two, v0.7.0's and v0.5.0's `-full.bin` carry these
 /// ids in their app descriptions. v0.9.0's and v0.10.0's from their notes,
-/// 2026-10-12.
+/// 2026-10-12; v0.11.0's from its notes and both its images, 2026-10-18.
 pub(crate) const BUILDS: &[Builds] = &[
+    Builds { tag: "v0.11.0", qio: Some("1b1b71a1"), dio: "0d07e24d" },
     Builds { tag: "v0.10.0", qio: Some("dbd6d45e"), dio: "1826743e" },
     Builds { tag: "v0.9.0", qio: Some("fdfe6de2"), dio: "0917a266" },
     Builds { tag: "v0.8.0", qio: Some("e127a6bf"), dio: "3523b80e" },
@@ -1797,7 +1811,16 @@ pub(crate) mod tests {
         // the card after an update only when it is true.
         let answers = place(pin(), "v0.9.0") != Place::Older;
         assert_eq!(PINNED_ANSWERS_STATUS, answers, "{} and the status query", pin());
-        assert_eq!(pin_target(), Some(Target { version: pin().into(), answers_status: PINNED_ANSWERS_STATUS }));
+        // `@format` is 0.12.0's: the page says "Updating lets it." only
+        // while this is true.
+        let formats = place(pin(), "v0.12.0") != Place::Older;
+        assert_eq!(PINNED_ANSWERS_FORMAT, formats, "{} and the format", pin());
+        let target = Target {
+            version: pin().into(),
+            answers_status: PINNED_ANSWERS_STATUS,
+            answers_format: PINNED_ANSWERS_FORMAT,
+        };
+        assert_eq!(pin_target(), Some(target));
     }
 
     #[test]

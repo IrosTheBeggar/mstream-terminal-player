@@ -23,7 +23,13 @@
 //! Advanced options sheet (sheet.rs) makes the board's next write, one
 //! write long, which the card shows on one line under its chip and the gate
 //! names again (contract clauses 33–43). The verdict never moves with it.
+//!
+//! Beside the boards, the GUI's tab shows the SD cards in this computer's
+//! readers (card.rs, clauses 3a, 20a, 25 and 44–63): a tab each on the
+//! same row, one Card view each, over the transfer worker the GUI owns.
+//! The standalone page shows boards only.
 
+mod card;
 mod sheet;
 
 use std::collections::HashSet;
@@ -38,12 +44,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use rust_i18n::t;
 
+use self::card::CardUi;
+pub(crate) use self::card::{Transfer, Wants};
 use self::sheet::{Dialogs, Listing, Sheet, mode_words, next_what};
 use super::FlashArgs;
-use super::board::{Board, By, Card, CardKind, CardUnknown, Count, CountWhy, Free, Heard, Next, NextState};
-use super::board::{Primary, Probe, Tracks, Verdict, Work, Written, gb};
-use super::desk::{self, All, Cmd, Event, LogKind, Refusal};
-use super::firmware::{Check, Image, Mode, Origin, Place, Target, place};
+use super::board::{Board, By, Card, CardKind, CardRoot, CardUnknown, Count, CountWhy, Format, FormatOffer};
+use super::board::{FormatWhy, Free, Heard, Next, NextState, Primary, Probe, Status, Tracks, Verdict, Work};
+use super::board::{Written, format_secs, gb};
+use super::desk::{self, All, Cmd, Event, LogKind, Refusal, format_end, took_text};
+use super::firmware::{Check, Image, Mode, Origin, Place, Target, clock_at, place};
 use super::flow::Phase;
 use super::listen::{self, IdentifyWhy};
 use super::{DeviceError, engine};
@@ -108,6 +117,9 @@ pub(crate) enum Act {
     Advanced,
     /// Reset: the board's next write back to the defaults (clause 38).
     Reset,
+    /// Format as FAT32 ▸, Format as FAT32… or Format as FAT32 anyway…: the
+    /// format's gate for the board in view (clause 59).
+    Format,
     /// The sheet's `[X]`.
     SheetClose,
     /// The sheet's firmware choice, by its place.
@@ -126,6 +138,34 @@ pub(crate) enum Act {
     Defaults,
     /// Apply.
     Apply,
+    /// A card's tab, by its place among the cards (clause 25).
+    Card(usize),
+    /// A card's links (clause 44): Settings…, Send the plays, Eject, Stop
+    /// at the next save, Not a card? Hide it, Try now, Stop for now, Don't
+    /// wait, Give up this run…, Fill it from … instead…, Sync again.
+    CardSettings,
+    CardPlays,
+    CardEject,
+    CardStop,
+    CardHide,
+    CardTryNow,
+    CardStopPause,
+    CardDontWait,
+    CardGiveUp,
+    CardOtherServer,
+    CardSyncAgain,
+    /// A card's gate: its keep, its go, the stronger gate's box (clause 58).
+    CardKeep,
+    CardGo,
+    CardBox,
+    /// The card's Settings sheet (clause 48): `[X]`, a tab, a row, a row of
+    /// its hanging list, Use defaults or Cancel, Apply or Set up.
+    CardSheetClose,
+    CardSheetTab(usize),
+    CardSheetRow(usize),
+    CardSheetPick(usize),
+    CardDefaults,
+    CardApply,
 }
 
 /// What a gate writes: its title, its words and its button follow.
@@ -147,6 +187,9 @@ enum Kind {
     Mode,
     /// A local build over our firmware: never called an update.
     Local,
+    /// Not a write: the player asked to format its card, which it confirms
+    /// on its own screen (clause 59).
+    Format,
 }
 
 /// How a gate's line is meant: plain, or gold for what may go wrong.
@@ -187,6 +230,16 @@ struct Gate {
     /// What this gate names, for one board: its yes asks the worker for this
     /// image and no other (desk::Cmd::Write).
     image: Option<Image>,
+    /// The format's gate: the card as the board reported it.
+    format: Option<FormatAsk>,
+}
+
+/// What the format's gate says of the card (clause 59), from the board's
+/// status: its size, and what is lost.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FormatAsk {
+    size: Option<u64>,
+    lost: String,
 }
 
 /// One board in Update all's gate.
@@ -287,6 +340,11 @@ pub(crate) struct Page {
     lock: Option<Lock>,
     rate: Option<Rate>,
     time_left: Option<u64>,
+    /// A format's: when the board restarted to format, its rate once its
+    /// percent moves, and the time left that says (clause 59).
+    fmt_zero: Option<(String, Instant)>,
+    fmt_rate: Option<Rate>,
+    fmt_left: Option<u64>,
     /// The boards Details asked `L` of, once each.
     facts_asked: HashSet<String>,
     note: Option<Note>,
@@ -304,6 +362,16 @@ pub(crate) struct Page {
     /// for the wheel.
     log_rect: Option<Rect>,
     ui: Surface<Act>,
+    /// The transfer worker, borrowed for the visit (clause 55): none on the
+    /// standalone page, which shows boards only.
+    transfer: Option<Transfer>,
+    /// The card in view, by its key: while it is set the subject is that
+    /// card, not a board (clause 25).
+    card_open: Option<String>,
+    card: CardUi,
+    /// What the GUI is asked to do for a card: its add-server form, a
+    /// sign-in (clause 3a). The host takes it.
+    wants: Option<Wants>,
 }
 
 pub(crate) fn run(args: FlashArgs) -> i32 {
@@ -318,6 +386,7 @@ pub(crate) fn run(args: FlashArgs) -> i32 {
         port: args.port.clone(),
         timing: desk::Timing::REAL,
         firmware_first: false,
+        clock: Some(desk::wall_ms),
     };
     let (cmds, events) = desk::spawn(engine, setup);
     let mut page = Page::with_channels(cmds, events, args.erase_asked());
@@ -347,7 +416,7 @@ fn flag_words(args: &FlashArgs) -> Option<String> {
 /// test: a test's page rides [`Page::quiet`], since this worker downloads
 /// the firmware and opens real serial ports.
 #[cfg(not(test))]
-pub(crate) fn hosted() -> Page {
+pub(crate) fn hosted(transfer: Option<Transfer>) -> Page {
     let engine: desk::Shared = std::sync::Arc::from(engine::from_env());
     let setup = desk::Setup {
         supply: super::firmware::net(),
@@ -356,9 +425,14 @@ pub(crate) fn hosted() -> Page {
         port: None,
         timing: desk::Timing::REAL,
         firmware_first: false,
+        clock: Some(desk::wall_ms),
     };
     let (cmds, events) = desk::spawn(engine, setup);
-    Page::with_channels(cmds, events, None)
+    let mut page = Page::with_channels(cmds, events, None);
+    page.transfer = transfer;
+    // This computer's cards, for the board's card line (clause 20a).
+    page.card.known = Some(super::card::cards::Cards::load());
+    page
 }
 
 impl Page {
@@ -388,6 +462,9 @@ impl Page {
             lock: None,
             rate: None,
             time_left: None,
+            fmt_zero: None,
+            fmt_rate: None,
+            fmt_left: None,
             facts_asked: HashSet::new(),
             note: None,
             quitting: false,
@@ -398,7 +475,23 @@ impl Page {
             log_scroll: 0,
             log_rect: None,
             ui: Surface::new(),
+            transfer: None,
+            card_open: None,
+            card: CardUi::default(),
+            wants: None,
         }
+    }
+
+    /// What the GUI is asked to do for a card, taken once.
+    pub(crate) fn take_wants(&mut self) -> Option<Wants> {
+        self.wants.take()
+    }
+
+    /// The transfer worker for this visit (the GUI's), given to a page the
+    /// tests built quiet; `hosted` takes it at once.
+    #[cfg(test)]
+    pub(crate) fn attach(&mut self, transfer: Transfer) {
+        self.transfer = Some(transfer);
     }
 
     // ── The worker's reports ────────────────────────────────────────────────
@@ -472,6 +565,10 @@ impl Page {
     fn board(&mut self, board: Board, now: Instant) {
         self.touched = true;
         let port = board.port().to_string();
+        let was = self.boards.iter().find(|b| b.port() == port).map(|b| b.format.clone());
+        if was.unwrap_or(Format::Idle) != board.format {
+            self.formatting(&board, now);
+        }
         match self.boards.iter_mut().find(|b| b.port() == port) {
             Some(known) => *known = board.clone(),
             None => {
@@ -697,6 +794,67 @@ impl Page {
         }
     }
 
+    /// A board's format moved on (clause 59): the busy line says the
+    /// question is up and how it ended, and the time left is worked out
+    /// from the restart and the percent.
+    fn formatting(&mut self, board: &Board, now: Instant) {
+        let port = short(board.port());
+        match &board.format {
+            Format::Idle | Format::Asking => {}
+            Format::Waiting => self.say(t!("dev.card.fmt_asked", port = port), false, None),
+            Format::Restarting => {
+                self.note = None;
+                self.fmt_zero = Some((board.port().to_string(), now));
+                self.fmt_rate = None;
+                self.fmt_left = None;
+            }
+            Format::Running { pct } => {
+                let pct = *pct;
+                match &self.fmt_rate {
+                    Some(rate) if rate.port == board.port() && pct > rate.from => {
+                        let gone = now.saturating_duration_since(rate.since);
+                        if gone >= ESTIMATE_AFTER {
+                            let speed = f64::from(pct - rate.from) / gone.as_secs_f64();
+                            let left = f64::from(100 - pct.min(100)) / speed;
+                            self.fmt_left = Some(((left / 5.0).round() * 5.0) as u64);
+                        }
+                    }
+                    Some(rate) if rate.port == board.port() => {}
+                    _ => self.fmt_rate = Some(Rate { port: board.port().to_string(), since: now, from: pct }),
+                }
+            }
+            Format::Done(done) => {
+                self.say(t!("dev.card.fmt_note", port = port, t = took_text(done.took)), false, None);
+            }
+            // Firmware with no format: the SD card row says it.
+            Format::Ended(FormatWhy::Old) => {}
+            Format::Ended(why) => {
+                if let Some(text) = format_end(why, &port, board.version()) {
+                    // A refusal at once passes; what the listener or the
+                    // format came to stays until something replaces it.
+                    let passing = matches!(why, FormatWhy::NotAsked(_) | FormatWhy::NoAnswer);
+                    self.say(text, true, passing.then(|| now + NOTE_FOR));
+                }
+            }
+        }
+    }
+
+    /// About how long `board`'s format has left, in seconds: from its
+    /// percent's rate once that is known, else from the card's size less
+    /// the time since its restart (never under five).
+    fn format_left(&self, board: &Board) -> u64 {
+        let mine = |port: &str| port == board.port();
+        if let (Some(left), Some(rate)) = (self.fmt_left, &self.fmt_rate)
+            && mine(&rate.port)
+        {
+            return left.max(5);
+        }
+        let size = board.status().and_then(|s| s.size).unwrap_or(0);
+        let zero = self.fmt_zero.as_ref().filter(|(port, _)| mine(port));
+        let gone = zero.map_or(0, |(_, at)| at.elapsed().as_secs());
+        format_secs(size).saturating_sub(gone).max(5)
+    }
+
     // ── What the page asks ──────────────────────────────────────────────────
 
     fn send(&mut self, cmd: Cmd) -> bool {
@@ -719,8 +877,11 @@ impl Page {
         }
     }
 
-    /// The board in view.
+    /// The board in view: none while a card is (clause 25).
     fn shown(&self) -> Option<&Board> {
+        if self.card_open.is_some() {
+            return None;
+        }
         let open = self.open.as_deref()?;
         self.boards.iter().find(|b| b.port() == open)
     }
@@ -776,6 +937,40 @@ impl Page {
 
     fn can_show(&self, board: &Board) -> bool {
         self.boards.len() >= 2 && self.lock.is_none() && board.work == Work::Idle && board.answers_status()
+    }
+
+    /// The format's gate can open for `board` (clauses 12, 59): a card it
+    /// offers to format, nothing under way on it, no write on the desk —
+    /// and a card the player reads only with Details open, as `w`.
+    fn can_format(&self, board: &Board) -> bool {
+        let Some(offer) = board.format_offer() else { return false };
+        self.lock.is_none() && board.work == Work::Idle && (offer != FormatOffer::Readable || self.details)
+    }
+
+    /// The format's gate for `board` (clause 59): the card as its status
+    /// says it, what is lost, how long.
+    fn gate_format(&self, board: &Board) -> Option<Gate> {
+        if !self.can_format(board) {
+            return None;
+        }
+        let status = board.status()?;
+        Some(Gate {
+            kind: Kind::Format,
+            port: Some(board.port().to_string()),
+            from: None,
+            to: String::new(),
+            name: None,
+            erase: false,
+            rows: Vec::new(),
+            title_mode: None,
+            lines: Vec::new(),
+            after: Vec::new(),
+            erase_any: false,
+            chosen: false,
+            left_out: Vec::new(),
+            image: None,
+            format: Some(FormatAsk { size: status.size, lost: format_lost(status) }),
+        })
     }
 
     /// Ask again, named on the card where a board could not be asked.
@@ -883,6 +1078,7 @@ impl Page {
             chosen: chosen.is_some(),
             left_out: Vec::new(),
             image: Some(board.write_image()),
+            format: None,
         };
         self.gate_words(&mut gate, board);
         Some(gate)
@@ -985,12 +1181,14 @@ impl Page {
             chosen: false,
             left_out,
             image: None,
+            format: None,
         };
         (gate.rows.len() >= 2).then_some(gate)
     }
 
     fn act(&mut self, act: Act) -> Option<Outcome> {
         match act {
+            Act::Primary if self.card_open.is_some() => self.card_primary(),
             Act::Primary => {
                 let board = self.shown().cloned()?;
                 if self.lock.is_some() {
@@ -1001,8 +1199,16 @@ impl Page {
                     Some(Primary::Read) => {
                         self.send(Cmd::Read { port: board.port().to_string() });
                     }
+                    Some(Primary::Format) => self.gate = self.gate_format(&board),
                     Some(_) => self.gate = self.gate_for(&board, false),
                     None => {}
+                }
+            }
+            Act::Format => {
+                if let Some(board) = self.shown().cloned()
+                    && let Some(gate) = self.gate_format(&board)
+                {
+                    self.gate = Some(gate);
                 }
             }
             Act::Details => {
@@ -1010,6 +1216,10 @@ impl Page {
                 self.log_scroll = 0;
                 if self.details {
                     self.ask_facts();
+                }
+                // Not showing up? shows the hidden volumes again (clause 63).
+                if self.details && self.boards.is_empty() && self.card_count() == 0 {
+                    self.send_card(crate::device::card::worker::Cmd::ShowHidden);
                 }
             }
             Act::WriteAgain => {
@@ -1048,6 +1258,7 @@ impl Page {
             }
             Act::Board(i) => {
                 if let Some(board) = self.boards.get(i) {
+                    self.card_open = None;
                     self.open = Some(board.port().to_string());
                     self.log_scroll = 0;
                     if self.details {
@@ -1082,14 +1293,23 @@ impl Page {
             | Act::SheetChooser(_)
             | Act::Defaults
             | Act::Apply => self.sheet_act(act),
+            act => self.card_act(act),
         }
         None
     }
 
-    /// The gate's yes: the write sent, the page locked from now on.
+    /// The gate's yes: the write sent, the page locked from now on — or the
+    /// format asked of the player, which locks nothing: the player
+    /// confirms on its own screen, and leaving the tab never stops it.
     fn gate_yes(&mut self) {
         let Some(gate) = self.gate.take() else { return };
         self.note = None;
+        if gate.kind == Kind::Format {
+            if let Some(port) = gate.port {
+                self.send(Cmd::Format { port });
+            }
+            return;
+        }
         self.rate = None;
         self.time_left = None;
         if gate.kind == Kind::All {
@@ -1125,13 +1345,7 @@ impl Page {
     }
 
     fn switch(&mut self, step: isize) {
-        let n = self.boards.len();
-        if n < 2 {
-            return;
-        }
-        let at = self.shown_index().unwrap_or(0) as isize;
-        let next = (at + step).rem_euclid(n as isize) as usize;
-        self.act(Act::Board(next));
+        self.switch_subject(step);
     }
 
     /// Esc, or the host letting the page go: the worker is told to let
@@ -1143,6 +1357,8 @@ impl Page {
         }
         self.gate = None;
         self.sheet = None;
+        self.card.gate = None;
+        self.card.sheet = None;
         self.quitting = true;
         if self.cmds.send(Cmd::Quit).is_err() {
             self.released = true;
@@ -1271,6 +1487,18 @@ impl Page {
         if self.sheet.is_some() {
             return self.sheet_hint_parts();
         }
+        if self.gate.is_none()
+            && self.writing_port().is_none()
+            && let Some(card) = self.open_card()
+        {
+            return self.card_hint_parts(&card, hosted);
+        }
+        // The format's gate asks the player; its keys say so (clause 59).
+        if self.gate.as_ref().is_some_and(|g| g.kind == Kind::Format) {
+            parts.push((t!("dev.card.hint_gate_fmt").to_string(), 0));
+            parts.push((t!("dev.card.hint_gate_fmt_keep").to_string(), 0));
+            return parts;
+        }
         if let Some(gate) = &self.gate {
             let yes = match gate.kind {
                 Kind::Update | Kind::Replace if gate.erase_any => "dev.hint_gate_erase_update",
@@ -1281,6 +1509,7 @@ impl Page {
                 Kind::Back => "dev.hint_gate_back",
                 Kind::All => "dev.hint_gate_all",
                 Kind::Mode | Kind::Local => "dev.hint_gate_write",
+                Kind::Format => "dev.card.hint_gate_fmt",
             };
             parts.push((t!(yes).to_string(), 0));
             if gate.kind == Kind::Install {
@@ -1307,8 +1536,10 @@ impl Page {
             parts.push((back, 0));
             return parts;
         };
-        if self.boards.len() >= 2 {
-            parts.push((switch(t!("dev.hint_player").to_string()), 0));
+        // The switch word is "switch" once a card shares the row (clause 15).
+        if self.boards.len() + self.card_count() >= 2 {
+            let word = if self.card_count() > 0 { t!("dev.card.hint_switch") } else { t!("dev.hint_player") };
+            parts.push((switch(word.to_string()), 0));
         }
         let enter = match self.primary_of(board) {
             Some(Primary::Update) => Some("dev.hint_enter_update"),
@@ -1318,6 +1549,7 @@ impl Page {
             Some(Primary::Write) => Some("dev.hint_enter_write"),
             Some(Primary::Back) => Some("dev.hint_enter_back"),
             Some(Primary::Dio) => Some("dev.hint_enter_dio"),
+            Some(Primary::Format) => Some("dev.card.hint_enter_format"),
             None => None,
         };
         if let Some(key) = enter {
@@ -1340,6 +1572,10 @@ impl Page {
         }
         if self.can_advance(board) {
             parts.push((t!("dev.hint_advanced").to_string(), 2));
+        }
+        // `f`, where Format is not Enter's already (clause 15).
+        if self.can_format(board) && self.primary_of(board) != Some(Primary::Format) {
+            parts.push((t!("dev.card.hint_format").to_string(), 2));
         }
         if self.offers_reset(board) {
             parts.push((t!("dev.hint_reset").to_string(), 1));
@@ -1367,8 +1603,12 @@ impl Page {
         }
     }
 
-    /// The log lines about `port`, and the image's and the watch's.
+    /// The log lines about `port`, and the image's and the watch's; a
+    /// card's, its own alone.
     fn log_for(&self, port: &str) -> Vec<&LogLine> {
+        if self.card_open.as_deref() == Some(port) {
+            return self.log.iter().filter(|l| l.port.as_deref() == Some(port)).collect();
+        }
         self.log.iter().filter(|l| l.port.as_deref().is_none_or(|p| p == port)).collect()
     }
 }
@@ -1376,16 +1616,6 @@ impl Page {
 /// `about 20 s left`, or `a few seconds left` under five.
 fn time_left_text(secs: u64) -> String {
     if secs < 5 { t!("dev.time_left_few").to_string() } else { t!("dev.time_left", secs = secs).to_string() }
-}
-
-/// `1 min 31 s`, or `47 s`.
-fn took_text(took: Duration) -> String {
-    let secs = took.as_secs();
-    if secs < 60 {
-        t!("dev.dur_s", s = secs).to_string()
-    } else {
-        t!("dev.dur_min", m = secs / 60, s = secs % 60).to_string()
-    }
 }
 
 /// A port's short name — `COM5`, `ttyACM0`, `cu.usbmodem14101` — where
@@ -1409,15 +1639,19 @@ impl Screen for Page {
         loop {
             match self.events.try_recv() {
                 Ok(event) => self.apply(event),
-                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if !self.released {
                         self.worker_gone();
                     }
-                    return;
+                    break;
                 }
             }
         }
+        // Then the transfer worker's notes and log lines, the boards known,
+        // and a gate its last sync stopped to ask (clause 58).
+        self.pump_cards(Instant::now());
+        self.card_asks();
     }
 
     /// A passing note goes once its time is up.
@@ -1444,15 +1678,15 @@ impl Screen for Page {
     }
 
     fn modal_open(&self) -> bool {
-        self.gate.is_some() || self.sheet.is_some()
+        self.gate.is_some() || self.sheet.is_some() || self.card.gate.is_some() || self.card.sheet.is_some()
     }
 
     /// The path field takes every key; the sheet walks its groups with Tab;
     /// the gate and the card leave the host its own letters (clause 12).
     fn claim(&self) -> Claim {
-        if self.typing() {
+        if self.typing() || self.card.sheet.as_ref().is_some_and(|s| s.field.is_some()) {
             Claim::All
-        } else if self.sheet.is_some() {
+        } else if self.sheet.is_some() || self.card.sheet.is_some() {
             Claim::OwnTab
         } else {
             Claim::Open
@@ -1476,6 +1710,23 @@ impl Screen for Page {
             };
             return act.and_then(|act| self.act(act));
         }
+        // A card's sheet and gate are modals of their own (clauses 48, 58).
+        if self.card.sheet.is_some() {
+            self.card_sheet_key(key);
+            return None;
+        }
+        if self.card.gate.is_some() {
+            self.card_gate_key(key);
+            return None;
+        }
+        if self.card_open.is_some() {
+            if key.code == KeyCode::Esc {
+                self.leave();
+                return None;
+            }
+            self.card_key(key);
+            return None;
+        }
         let act = match key.code {
             KeyCode::Esc => {
                 self.leave();
@@ -1490,6 +1741,7 @@ impl Screen for Page {
             KeyCode::Char('r') => Some(Act::Ask),
             KeyCode::Char('o') => Some(Act::Advanced),
             KeyCode::Char('x') => Some(Act::Reset),
+            KeyCode::Char('f') => Some(Act::Format),
             KeyCode::Left => {
                 self.switch(-1);
                 None
@@ -1646,18 +1898,19 @@ fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
     // A gate or the sheet makes the card beneath inert (the kit's modal
     // rule): drawn with no pointer, its clicks and tips dropped before the
     // modal draws.
-    let modal = page.gate.is_some() || page.sheet.is_some();
+    let modal = page.modal_open();
     let pointer = if modal { page.ui.pointer.take() } else { None };
     let mut y = top;
-    if page.boards.len() >= 2 && y < floor {
+    if page.boards.len() + page.card_count() >= 2 && y < floor {
         tab_row(frame, page, Rect { x, y, width, height: 1 });
         y += 2;
     }
     if y < floor {
         let room = Rect { x, y, width, height: floor - y };
-        match page.shown().cloned() {
-            Some(board) => card(frame, page, &board, room),
-            None => empty_card(frame, page, room),
+        match (page.open_card(), page.shown().cloned()) {
+            (Some(view), _) => card_view(frame, page, &view, room),
+            (None, Some(board)) => card(frame, page, &board, room),
+            (None, None) => empty_card(frame, page, room),
         }
     }
     let busy = page.busy();
@@ -1669,8 +1922,12 @@ fn draw(frame: &mut Frame, page: &mut Page, area: Rect, hosted: bool) {
         page.ui.pointer = pointer;
         if page.gate.is_some() {
             draw_gate(frame, page, area);
-        } else {
+        } else if page.sheet.is_some() {
             sheet::draw_sheet(frame, page, area);
+        } else if page.card.gate.is_some() {
+            card::draw_card_gate(frame, page, area);
+        } else {
+            card::draw_card_sheet(frame, page, area);
         }
     }
     if let Some((target, text)) = page.ui.ripe_tooltip() {
@@ -1727,22 +1984,47 @@ fn mark(page: &Page, board: &Board) -> (String, Color) {
     }
 }
 
-/// The kit's tab row of ports (contract clause 25): the open one the slab,
-/// the others dim text that brightens under the pointer, each wearing its
-/// board's mark; the count, or Update all, at the right edge.
+/// The kit's tab row of subjects (contract clause 25): the boards, then the
+/// cards in this computer's readers; the open one the slab, the others dim
+/// text that brightens under the pointer, each wearing its mark; the
+/// count, or Update all, at the right edge. Short of room, the cards'
+/// names give way first, down to six cells; then the right edge's text;
+/// then the last tabs.
 fn tab_row(frame: &mut Frame, page: &mut Page, row: Rect) {
     let mut x = row.x;
     let boards = page.boards.clone();
+    let cards = page.cards();
+    let open_card = page.card_open.clone();
+    // Each tab's name, its mark and its act, in order.
+    let mut tabs: Vec<(String, (String, Color), bool, Act)> = Vec::new();
     for (i, board) in boards.iter().enumerate() {
-        let name = short(board.port());
-        let (mark, color) = mark(page, board);
+        let open = open_card.is_none() && page.open.as_deref() == Some(board.port());
+        tabs.push((short(board.port()), mark(page, board), open, Act::Board(i)));
+    }
+    let (right_text, _, _) = tabs_right(page);
+    let fixed: usize = tabs.iter().map(|(n, (m, _), ..)| kit::width(n) + kit::width(m) + 3).sum();
+    let names = |room: usize| -> Vec<String> { cards.iter().map(|c| card::tab_name(c, room)).collect() };
+    let width_of = |names: &[String]| -> usize {
+        let marks: usize = cards.iter().map(|c| kit::width(&card::mark(c).0) + 3).sum();
+        fixed + marks + names.iter().map(|n| kit::width(n)).sum::<usize>() + tabs.len() + cards.len()
+    };
+    let room_all = usize::from(row.width).saturating_sub(kit::width(&right_text) + 2);
+    let mut room = 64;
+    let mut card_names = names(room);
+    while width_of(&card_names) > room_all && room > 6 {
+        room -= 1;
+        card_names = names(room);
+    }
+    for (i, (card, name)) in cards.iter().zip(card_names).enumerate() {
+        tabs.push((name, card::mark(card), open_card.as_deref() == Some(card.key.as_str()), Act::Card(i)));
+    }
+    for (name, (mark, color), open, act) in tabs {
         let label = format!(" {name} {mark} ");
         let cells = kit::width(&label) as u16;
         if x + cells > row.right() {
             break;
         }
         let rect = Rect { x, y: row.y, width: cells, height: 1 };
-        let open = page.open.as_deref() == Some(board.port());
         let line = if open {
             let slab = Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD);
             Line::from(Span::styled(label, slab))
@@ -1755,7 +2037,7 @@ fn tab_row(frame: &mut Frame, page: &mut Page, row: Rect) {
             ])
         };
         frame.render_widget(Paragraph::new(line), rect);
-        page.ui.click(rect, Act::Board(i));
+        page.ui.click(rect, act);
         x = rect.right() + 1;
     }
     let (text, style, act) = tabs_right(page);
@@ -1788,6 +2070,24 @@ fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
         }
         None => {}
     }
+    // A sync, then a card being read (clause 25).
+    let cards = page.cards();
+    if let Some(card) = cards.iter().find(|c| c.syncing()) {
+        return (t!("dev.card.tabs_syncing", card = card::card_name(card)).to_string(), accent(), None);
+    }
+    if let Some(card) = cards.iter().find(|c| c.read == crate::device::card::worker::Read::Reading) {
+        return (t!("dev.card.tabs_reading", drive = card.drive()).to_string(), dim(), None);
+    }
+    let card_words = match cards.len() {
+        0 => None,
+        1 => Some(t!("dev.card.tabs_card_one").to_string()),
+        n => Some(t!("dev.card.tabs_cards", n = n).to_string()),
+    };
+    let with_cards = |words: String| match &card_words {
+        Some(cards) if words.is_empty() => cards.clone(),
+        Some(cards) => format!("{words} · {cards}"),
+        None => words,
+    };
     let needing = page.needing().len();
     if page.can_update_all() {
         // It counts only the boards it writes (clause 42).
@@ -1814,7 +2114,7 @@ fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
             _ => others += 1,
         }
     }
-    if players == n {
+    if players == n && card_words.is_none() {
         return (t!("dev.tabs_plugged", n = n).to_string(), dim(), None);
     }
     let mut parts = Vec::new();
@@ -1832,7 +2132,7 @@ fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
     if let Some(board) = asking.first() {
         parts.push(t!("dev.tabs_asking", port = short(board.port())).to_string());
     }
-    (parts.join(" · "), dim(), None)
+    (with_cards(parts.join(" · ")), dim(), None)
 }
 
 // ── The card ────────────────────────────────────────────────────────────────
@@ -1856,8 +2156,11 @@ enum Row {
     /// at the column's right edge (clause 38).
     Next { line: Line<'static>, reset: bool },
     /// The bottom row: text buttons at the left, the primary at the right
-    /// (enabled, or the kit's disabled frame with why in a tooltip).
-    Actions { links: Vec<(String, Act)>, primary: Option<(String, bool, Option<String>)> },
+    /// (enabled, or the kit's disabled frame with why in a tooltip). Under
+    /// a gate or a sheet (`covered`) the primary keeps its rows and is not
+    /// drawn: the card beneath keeps its height, and a modal shorter than
+    /// the card shows no half a button.
+    Actions { links: Vec<(String, Act)>, primary: Option<(String, bool, Option<String>)>, covered: bool },
     /// Details' dim rule.
     Rule,
     /// A Details fact: its label, its value cut to the column.
@@ -2252,6 +2555,38 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
         rows
     };
     let unknown = |words: String| -> Vec<Row> { dim_rows(label.clone(), &format!("{} {words}", g.unknown), w) };
+    // The format under way is the row (clause 59): the question on the
+    // player's screen, then its restart and its percent.
+    match board.format {
+        Format::Asking => return value_rows(label, &scan(None, &t!("dev.fw_asking")), w),
+        Format::Waiting => {
+            let mut rows = value_rows(label, &scan(None, &t!("dev.card.fmt_waiting")), w);
+            rows.extend(dim_rows(None, &t!("dev.card.fmt_waiting_2"), w));
+            return rows;
+        }
+        Format::Restarting | Format::Running { .. } => {
+            let pct = match board.format {
+                Format::Running { pct } => Some(pct),
+                _ => None,
+            };
+            let mut rows = value_rows(label, &scan(pct, &t!("dev.card.fmt_running")), w);
+            let left = card::span(page.format_left(board));
+            rows.extend(dim_rows(None, &t!("dev.card.fmt_left", t = left), w));
+            return rows;
+        }
+        _ => {}
+    }
+    // Firmware that can't format, said where the format would be offered:
+    // "Updating lets it." only while the pin can (firmware.rs,
+    // PINNED_ANSWERS_FORMAT), as "Updating shows it." above.
+    let cant_format = || {
+        let mut words = t!("dev.card.fmt_old", version = board.version().unwrap_or("?")).to_string();
+        if page.target.as_ref().is_some_and(|t| t.answers_format) {
+            words.push(' ');
+            words.push_str(&t!("dev.card.fmt_old_update"));
+        }
+        words
+    };
     // Nothing can read the card while its board is written.
     let card = if page.written_now(board) { Card::Unknown(CardUnknown::Writing) } else { board.card() };
     match card {
@@ -2281,14 +2616,48 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
             CardUnknown::Unreadable => unknown(t!("dev.card_unreadable_board").to_string()),
         },
         Card::Empty => problem(t!("dev.card_none").to_string(), None, t!("dev.card_put_in").to_string()),
+        // A card the player can't read (clauses 20, 59, 60). On a board that
+        // can format it, the fix is the player's: Format as FAT32 ▸ when
+        // nothing else is to be done, else its dim link here; a damaged card
+        // goes to a computer's disk check first, the format its dim second
+        // step. On one that can't, today's words, on a computer (the `_pc`
+        // keys), and that it can't — or, while the pin can, that updating
+        // lets it, in the fix line's place.
         Card::Foreign { kind, .. } => {
-            let (words, why, fix) = match kind {
-                CardKind::ExFat => ("dev.card_exfat", Some("dev.card_fat32_only"), "dev.card_fix_format"),
-                CardKind::Ntfs => ("dev.card_ntfs", Some("dev.card_fat32_only"), "dev.card_fix_format"),
-                CardKind::Gpt => ("dev.card_gpt", Some("dev.card_mbr_only"), "dev.card_fix_mbr"),
-                _ => ("dev.card_unreadable", None, "dev.card_try_computer"),
+            let damaged = !matches!(kind, CardKind::ExFat | CardKind::Ntfs | CardKind::Gpt);
+            let (words, why) = match kind {
+                CardKind::ExFat | CardKind::Ntfs => {
+                    let fs = if kind == CardKind::ExFat { "dev.card_exfat" } else { "dev.card_ntfs" };
+                    (t!(fs), Some(t!("dev.card_fat32_only")))
+                }
+                CardKind::Gpt => (t!("dev.card_gpt"), Some(t!("dev.card_mbr_only"))),
+                _ => (t!("dev.card_unreadable"), None),
             };
-            problem(t!(words).to_string(), why.map(|k| t!(k).to_string()), t!(fix).to_string())
+            let (gpt, offered) = (kind == CardKind::Gpt, board.format_offer().is_some());
+            let pin_formats = page.target.as_ref().is_some_and(|t| t.answers_format);
+            let fix = match (damaged, offered, gpt) {
+                (true, true, _) => t!("dev.card.board_unreadable_2").to_string(),
+                (true, false, _) => t!("dev.card_try_computer").to_string(),
+                (false, true, false) => t!("dev.card_fix_format").to_string(),
+                (false, true, true) => t!("dev.card_fix_mbr").to_string(),
+                (false, false, _) if pin_formats && !board.can_format() => cant_format(),
+                (false, false, false) => t!("dev.card_fix_format_pc").to_string(),
+                (false, false, true) => t!("dev.card_fix_mbr_pc").to_string(),
+            };
+            let mut rows = problem(words.to_string(), why.map(|w| w.to_string()), fix);
+            if !board.can_format() && (damaged || !pin_formats) {
+                rows.extend(dim_rows(None, &cant_format(), w));
+            }
+            if page.can_format(board) && page.primary_of(board) != Some(Primary::Format) {
+                let (text, note) = if damaged {
+                    let note = t!("dev.card.link_format_anyway_note").to_string();
+                    (t!("dev.card.link_format_anyway"), Some(note))
+                } else {
+                    (t!("dev.card.link_format"), None)
+                };
+                rows.push(Row::Link { wide: false, text: text.to_string(), act: Act::Format, note });
+            }
+            rows
         }
         Card::Fat { size, free, tracks, .. } => {
             let tracks_text = tracks_words(&tracks);
@@ -2354,9 +2723,20 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
                     }
                 }
             }
-            // No tracks: where the music goes is the next step.
-            if matches!(tracks, Tracks::Count(0)) {
+            // The card it holds, by its `cid=` (clause 20a): its line gives
+            // way to nothing but the floor. A card not filled yet says so in
+            // place of where the music goes — one the player just formatted,
+            // that it was (clause 59).
+            let fresh = matches!(board.format, Format::Done(_))
+                && matches!(tracks, Tracks::Count(0))
+                && board.status().is_some_and(|s| !matches!(s.cid, CardRoot::Loaded(_)));
+            let named =
+                if fresh { vec![t!("dev.card.fmt_done").to_string()] } else { card::board_lines(page, board) };
+            if matches!(tracks, Tracks::Count(0)) && named.is_empty() {
                 rows.extend(dim_rows(None, &t!("dev.card_music_hint"), w));
+            }
+            for line in &named {
+                rows.extend(dim_rows(None, line, w));
             }
             rows
         }
@@ -2463,13 +2843,34 @@ fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
             }
             rows.push(fact("dev.label_card_fact", card.join(" · ")));
         }
+        // The clock as a listen of this visit set it (clauses 5 and 61).
+        if let Some(set) = &board.clock_set
+            && let Some(ms) = set.sent
+        {
+            let time = clock_at(ms / 1000);
+            let value = match set.off_ms {
+                None => t!("dev.card.board_clock_set", time = time),
+                Some(off) => t!("dev.card.board_clock_off", time = time, s = desk::seconds_off(off)),
+            };
+            rows.push(fact("dev.card.board_clock", value.to_string()));
+        }
     }
     rows.push(Row::Log);
-    if page.can_write_again(board) {
+    let again = page.can_write_again(board);
+    if again {
         let to = page.target.as_ref().map_or("?", |t| t.version.as_str());
         rows.push(Row::Blank);
         let text = t!("dev.link_write", version = to).to_string();
         rows.push(Row::Link { wide: true, text, act: Act::WriteAgain, note: None });
+    }
+    // A card the player reads is offered the format here only (clause 59).
+    if page.can_format(board) && board.format_offer() == Some(FormatOffer::Readable) {
+        if !again {
+            rows.push(Row::Blank);
+        }
+        let text = t!("dev.card.link_format").to_string();
+        let note = Some(t!("dev.card.link_format_anyway_note").to_string());
+        rows.push(Row::Link { wide: true, text, act: Act::Format, note });
     }
     rows
 }
@@ -2511,6 +2912,7 @@ fn card_layout(page: &Page, board: &Board, content_w: u16) -> Vec<Row> {
             Primary::Write => "dev.btn_write",
             Primary::Back => "dev.btn_back",
             Primary::Dio => "dev.btn_dio",
+            Primary::Format => "dev.card.btn_format",
         });
         match page.writing_port() {
             // The kit's disabled frame: dim, no ▸, why in its tooltip.
@@ -2518,7 +2920,7 @@ fn card_layout(page: &Page, board: &Board, content_w: u16) -> Vec<Row> {
             None => (format!("{word} {}", g.forward), true, None),
         }
     });
-    rows.push(Row::Actions { links, primary });
+    rows.push(Row::Actions { links, primary, covered: false });
     if page.details {
         rows.extend(details_rows(page, board));
     }
@@ -2612,11 +3014,11 @@ fn draw_rows(frame: &mut Frame, page: &mut Page, port: &str, rows: &[Row], conte
                     text_button(frame, page, at, &words, Act::Reset);
                 }
             }
-            Row::Actions { links, primary } => {
+            Row::Actions { links, primary, covered } => {
                 let tall = primary.is_some();
                 // Half a frame is not a button: short of rows, the primary
                 // is not drawn and Enter still does what it would.
-                let whole_button = tall && bottom - y >= BUTTON_H;
+                let whole_button = tall && bottom - y >= BUTTON_H && !covered;
                 let mid = if tall { y + 1 } else { y };
                 // The links stop short of the primary: one that would run
                 // under it is not drawn, its key still works.
@@ -2790,7 +3192,7 @@ fn empty_card(frame: &mut Frame, page: &mut Page, room: Rect) {
     }
     rows.push(Row::Blank);
     let help = format!("{} {}", if page.details { g.open } else { g.forward }, t!("dev.not_showing"));
-    rows.push(Row::Actions { links: vec![(help, Act::Details)], primary: None });
+    rows.push(Row::Actions { links: vec![(help, Act::Details)], primary: None, covered: false });
     if page.details {
         rows.push(Row::Blank);
         // Today's hints, each under its bullet with its lines hung under the
@@ -2811,6 +3213,11 @@ fn empty_card(frame: &mut Frame, page: &mut Page, room: Rect) {
         rows.extend(bullet(vec![t!("dev.no_device_cable").to_string()]));
         rows.extend(bullet(vec![t!("dev.no_device_driver").to_string(), t!("dev.no_device_driver_2").to_string()]));
         rows.extend(bullet(vec![t!("dev.no_device_linux").to_string()]));
+        // The cards' two, on the GUI's tab (clause 30).
+        if page.transfer.is_some() {
+            rows.extend(bullet(vec![t!("dev.card.hint_card_shows").to_string()]));
+            rows.extend(bullet(vec![t!("dev.card.hint_own_disks").to_string()]));
+        }
         rows.push(Row::Blank);
         let seen = if page.others.is_empty() {
             vec![(format!("{} {}", t!("dev.ports_seen"), t!("dev.ports_seen_none")), dim())]
@@ -2825,6 +3232,17 @@ fn empty_card(frame: &mut Frame, page: &mut Page, room: Rect) {
     }
     rows.push(Row::Blank);
     draw_card(frame, page, "", &rows, room);
+}
+
+/// A card's view (clause 44) in `room`, as the board's card is drawn.
+fn card_view(frame: &mut Frame, page: &mut Page, view: &crate::device::card::worker::CardView, room: Rect) {
+    if room.height < 3 || room.width < CARD_INSET * 2 + 2 {
+        return;
+    }
+    let content_w = room.width - inset(room.width) * 2;
+    let mut rows = card::card_layout(page, view, content_w);
+    card::give_way_rows(&mut rows, room.height.saturating_sub(2));
+    draw_card(frame, page, &view.key, &rows, room);
 }
 
 // ── The gate ────────────────────────────────────────────────────────────────
@@ -2865,6 +3283,7 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
         Kind::All => t!("dev.gate_title_all", n = gate.rows.len(), to = to),
         Kind::Mode => t!("dev.gate_title_mode", to = to),
         Kind::Local => t!("dev.gate_title_local", from = from),
+        Kind::Format => t!("dev.card.gate_fmt_title", port = short(gate.port.as_deref().unwrap_or("?"))),
     };
     text(&mut lines, title.to_string(), gold.add_modifier(Modifier::BOLD));
     lines.push(GateLine::Blank);
@@ -2879,6 +3298,21 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
     }
     let old = gate.name.clone().unwrap_or_else(|| t!("dev.gate_old_firmware").to_string());
     match gate.kind {
+        // What the player erases and how long it takes, that it asks on its
+        // own screen first, what is lost in gold, and its device.txt
+        // (clause 59).
+        Kind::Format => {
+            let ask = gate.format.clone().unwrap_or(FormatAsk { size: None, lost: String::new() });
+            let size = ask.size.map_or_else(|| "?".to_string(), gb);
+            let took = card::span(format_secs(ask.size.unwrap_or(0)));
+            text(&mut lines, t!("dev.card.gate_fmt_body", size = size, t = took).to_string(), Style::default());
+            lines.push(GateLine::Blank);
+            text(&mut lines, t!("dev.card.gate_fmt_confirm").to_string(), Style::default());
+            lines.push(GateLine::Blank);
+            text(&mut lines, t!("dev.card.gate_fmt_lost", what = ask.lost).to_string(), gold);
+            lines.push(GateLine::Blank);
+            text(&mut lines, t!("dev.card.gate_fmt_txt").to_string(), Style::default());
+        }
         Kind::All => {
             text(&mut lines, t!("dev.gate_all_time").to_string(), Style::default());
             lines.push(GateLine::Blank);
@@ -2951,12 +3385,35 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
     lines
 }
 
+/// What the format's gate says is lost (clause 59), as `@status` said
+/// the card: the music on a card the player reads (counted, or still being
+/// indexed), else its one volume, or what the player can't read.
+fn format_lost(status: &Status) -> String {
+    let fs = match status.card {
+        CardKind::Fat32 => "FAT32",
+        CardKind::Fat16 => "FAT16",
+        CardKind::ExFat => "exFAT",
+        CardKind::Ntfs => "NTFS",
+        _ => return t!("dev.card.gate_fmt_unread").to_string(),
+    };
+    match status.tracks {
+        Tracks::Count(n) if n > 0 && status.card.readable() => {
+            t!("dev.card.gate_fmt_music", n = fmt_count(n), fs = fs).to_string()
+        }
+        Tracks::Building if status.card.readable() => {
+            t!("dev.card.gate_fmt_music_building", fs = fs).to_string()
+        }
+        _ => t!("dev.card.gate_fmt_one", fs = fs).to_string(),
+    }
+}
+
 /// The gate's two buttons: the safe choice, named for what stays, then
 /// the write.
 fn gate_buttons(gate: &Gate) -> (String, String) {
     let back = glyphs().back;
     let keep = match gate.kind {
         Kind::All => t!("dev.gate_keep_all").to_string(),
+        Kind::Format => t!("dev.card.gate_fmt_keep").to_string(),
         Kind::Install | Kind::Mode => t!("dev.gate_keep_as_is").to_string(),
         _ => match &gate.from {
             Some(from) => t!("dev.gate_keep", version = from).to_string(),
@@ -2975,6 +3432,7 @@ fn gate_buttons(gate: &Gate) -> (String, String) {
             Kind::Back => "dev.gate_do_back",
             Kind::All => "dev.gate_do_all",
             Kind::Mode | Kind::Local => "dev.gate_do_local",
+            Kind::Format => "dev.card.gate_fmt_do",
         }),
     };
     (format!("{back} {keep}"), write.to_string())
@@ -3081,7 +3539,7 @@ pub(crate) mod fixtures {
     /// that runs the real worker (the_page_over_the_real_worker_…) meets
     /// the real pin instead.
     pub(crate) fn pin() -> Target {
-        Target { version: "v0.8.0".into(), answers_status: false }
+        Target { version: "v0.8.0".into(), answers_status: false, answers_format: false }
     }
 
     /// The board's verdict again, against the pin.
@@ -3342,6 +3800,8 @@ mod tests {
     use super::*;
     use crate::device::board::Status;
 
+    mod cards;
+
     fn english() -> std::sync::MutexGuard<'static, ()> {
         let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale("en");
@@ -3536,7 +3996,8 @@ mod tests {
         let _en = english();
         let (mut page, ends) = page_with(Ends::update_available);
         assert!(!window(&mut page).contains("Updating shows it"), "v0.8.0 does not answer @status");
-        ends.tell([Event::Target(Target { version: "v0.9.0".into(), answers_status: true })]);
+        let answering = Target { version: "v0.9.0".into(), answers_status: true, answers_format: false };
+        ends.tell([Event::Target(answering)]);
         page.pump();
         assert!(window(&mut page).contains("? v0.7.0 can't report the card. Updating shows it."));
     }
@@ -3928,6 +4389,63 @@ mod tests {
         assert!(ends.sent().is_empty(), "L asked once per board");
     }
 
+    /// `board` with its clock set by a listen (clause 5) at [`SET_AT`], off
+    /// by `off_ms` before (None: unset).
+    fn clock_set(board: Board, off_ms: Option<i64>) -> Board {
+        let at = |off: i64| listen::BoardTime::At((SET_AT as i64 + off) as u64);
+        let before = off_ms.map_or(listen::BoardTime::Unset, at);
+        let set = listen::Clocked { before, off_ms, due: true, sent: Some(SET_AT), after_ms: None };
+        Board { clock_set: Some(set), ..board }
+    }
+
+    /// 2026-10-18 14:03:22.123 UTC.
+    const SET_AT: u64 = 1_792_332_202_123;
+
+    /// Details' *Clock* fact says when this computer set the player's clock
+    /// and how it was (clauses 5 and 61); the log says it was set, and a
+    /// clock left as it was in gold. A board whose clock no listen set has
+    /// no Clock fact.
+    #[test]
+    fn details_says_when_this_computer_set_the_players_clock_and_the_log_says_why_not_in_gold() {
+        let _en = english();
+        let own = formats("COM3", "v0.8.0", |_| {});
+        let (mut page, ends) = page_with(|e| e.boards(vec![own.clone()]));
+        press(&mut page, KeyCode::Char('d'));
+        assert!(!window(&mut page).contains("Clock "), "no clock set, no fact");
+
+        let line = |clocked: Result<listen::Clocked, listen::TimeWhy>| {
+            let (text, kind) = desk::clock_line(&clocked).expect("a line");
+            Event::Log { port: Some("COM3".into()), text, kind }
+        };
+        let unset = clock_set(own.clone(), None);
+        ends.tell([Event::Board(unset.clone()), line(Ok(unset.clock_set.clone().unwrap()))]);
+        page.pump();
+        let time = clock_at(SET_AT / 1000);
+        let frame = window(&mut page);
+        let fact = format!("Clock         set by this computer at {time} (it was unset)");
+        assert!(frame.contains(&fact), "{frame}");
+        assert!(frame.contains("00:00  the player's clock was unset: set it (@time)"), "{frame}");
+        let buf = hosted_at(&mut page, 100, 30, WINDOW);
+        let y = (0..30).find(|y| row_of(&buf, *y).contains("clock was unset")).expect("the line");
+        let x = row_of(&buf, y).find("the player's").map(|at| row_of(&buf, y)[..at].chars().count());
+        assert_ne!(buf[(x.unwrap() as u16, y)].fg, th().gold, "a fact");
+
+        // Left as it was: in gold (the log's newest line, cut to its width).
+        ends.tell([line(Err(listen::TimeWhy::Rtc))]);
+        page.pump();
+        let buf = hosted_at(&mut page, 100, 30, WINDOW);
+        let gold = "00:00  the player's clock wasn't set: its clock chip didn't take the";
+        let y = (0..30).find(|y| row_of(&buf, *y).contains(gold));
+        let y = y.unwrap_or_else(|| panic!("{}", text_of(&buf)));
+        let x = row_of(&buf, y).find("the player's").map(|at| row_of(&buf, y)[..at].chars().count());
+        assert_eq!(buf[(x.unwrap() as u16, y)].fg, th().gold, "the clock left as it was, in gold");
+
+        ends.tell([Event::Board(clock_set(own, Some(-3_240)))]);
+        page.pump();
+        let fact = format!("Clock         set by this computer at {time} (it was 3.2 s off)");
+        assert!(window(&mut page).contains(&fact), "{}", window(&mut page));
+    }
+
     #[test]
     fn the_log_scrolls_under_the_wheel_and_follows_the_newest_line_otherwise() {
         let _en = english();
@@ -3949,6 +4467,228 @@ mod tests {
             Screen::wheel(&mut page, false, inside);
         }
         assert_eq!(page.log_scroll, 0, "back at the newest, and no further");
+    }
+
+    // ── Formatting (clause 59) ──────────────────────────────────────────────
+
+    /// A board whose firmware formats: 0.12.0's `cid=` and `clock=` in its
+    /// status, its status changed first.
+    fn formats(port: &str, fw: &str, change: impl FnOnce(&mut Status)) -> Board {
+        answering_with(port, fw, |s| {
+            (s.cid, s.clock) = (CardRoot::None, crate::device::board::Clock::Ok);
+            change(s);
+        })
+    }
+
+    /// `board` with its format at `state`, under way while it is.
+    fn at(mut board: Board, state: Format) -> Board {
+        let going = matches!(state, Format::Asking | Format::Waiting | Format::Restarting | Format::Running { .. });
+        board.work = if going { Work::Formatting } else { Work::Idle };
+        board.format = state;
+        board
+    }
+
+    fn exfat() -> Board {
+        formats("COM3", "v0.8.0", |s| s.card = CardKind::ExFat)
+    }
+
+    #[test]
+    fn a_card_the_player_cant_read_is_offered_its_format_as_the_primary_and_the_gate_asks_the_player() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![exfat()]));
+        let frame = window(&mut page);
+        let card = [
+            "           ╭────────────────────────────────────────────────────────────────────────────╮",
+            "           │                                                                            │",
+            "           │  M5Stack Core2                                                       COM3  │",
+            "           │                                                                            │",
+            "           │  Firmware      ✓ Up to date · v0.8.0                                       │",
+            "           │                                                                            │",
+            "           │  SD card       ! exFAT card · the player reads FAT32 only                  │",
+            "           │                Fix: format it as FAT32 in the player (below). That erases  │",
+            "           │                the whole card.                                             │",
+            "           │                                                                            │",
+            "           │                                                   ╭─────────────────────╮  │",
+            "           │  ▸ Details   Advanced…                            │  Format as FAT32 ▸  │  │",
+            "           │                                                   ╰─────────────────────╯  │",
+            "           │                                                                            │",
+            "           ╰────────────────────────────────────────────────────────────────────────────╯",
+        ];
+        assert_eq!(rows(&frame, 2, 15), card, "card 06 §4's frame, character for character:\n{frame}");
+        assert_eq!(page.hint(), "Enter format · o advanced · d details · Esc library", "f not named again");
+        press(&mut page, KeyCode::Enter);
+        assert!(ends.sent().is_empty(), "the gate first: nothing asked yet");
+        let frame = window(&mut page);
+        for words in [
+            "Format the card in COM3 as FAT32?",
+            "The player erases the whole card, 59.6 GB, every part of it, even",
+            "About 33 s for this card.",
+            "You confirm on the player's screen, in two steps; nothing is erased",
+            "Everything on the card is lost: today it holds one exFAT volume.",
+            "The player writes its device.txt at once: the first sync can use Opus",
+            "◂ Keep the card as it is",
+            "Ask the player",
+        ] {
+            assert!(frame.contains(words), "{words:?}:\n{frame}");
+        }
+        assert_eq!(page.hint(), "y ask the player · Enter or Esc keep the card as it is");
+        press(&mut page, KeyCode::Char('n'));
+        assert!(page.gate.is_none() && ends.sent().is_empty(), "kept as it is");
+        press(&mut page, KeyCode::Enter);
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [Cmd::Format { port: "COM3".into() }]);
+        assert!(page.gate.is_none() && !page.writing(), "nothing locked: the player confirms, the tab can be left");
+    }
+
+    #[test]
+    fn the_sd_row_follows_the_players_answer_its_restart_its_percent_and_its_end() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![exfat()]));
+        ends.tell([Event::Board(at(exfat(), Format::Waiting))]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("SD card       ▱▱▱▱▱▱▱▱▱▱ waiting for you to confirm on the player"), "{frame}");
+        assert!(frame.contains("Nothing is erased until you hold the red button there."), "{frame}");
+        assert!(frame.contains("COM3 asked to format its card: confirm on the player's screen."), "{frame}");
+        assert!(!frame.contains("Format as FAT32") && !frame.contains("Advanced…"), "nothing to start:\n{frame}");
+        assert_eq!(page.hint(), "d details · Esc library", "no Cancel: the player's own ends it");
+        press(&mut page, KeyCode::Char('f'));
+        assert!(page.gate.is_none(), "never twice at once");
+        let running = at(exfat(), Format::Running { pct: 41 });
+        ends.tell([Event::Board(at(exfat(), Format::Restarting)), Event::Board(running)]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("SD card       ▰▰▰▰▱▱▱▱▱▱ 41% formatting the card…"), "{frame}");
+        assert!(frame.contains("about 33 s left · leaving the tab doesn't stop it: the"), "{frame}");
+        assert!(!frame.contains("asked to format"), "the question's note went with it:\n{frame}");
+        // Done: the empty card as the board reports it, and where to fill it.
+        let empty = formats("COM3", "v0.8.0", |s| {
+            s.free = Free::Bytes(59_517_918_976);
+            s.tracks = Tracks::Count(0);
+        });
+        let took = Duration::from_secs(134);
+        let done = crate::device::board::Formatted { size: 59_617_918_976, free: 59_517_918_976, cluster: 32_768, took };
+        ends.tell([Event::Board(at(empty, Format::Done(done)))]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("0.1 of 59.6 GB used · no tracks"), "{frame}");
+        assert!(frame.contains("Formatted just now: put it in this computer's card reader"), "{frame}");
+        assert!(!frame.contains("Nothing from mStream on it yet"), "said once:\n{frame}");
+        assert!(frame.contains("COM3 formatted its card as FAT32 in 2 min 14 s."), "{frame}");
+        assert!(!frame.contains("Format as FAT32"), "the player's own card: Details only:\n{frame}");
+    }
+
+    #[test]
+    fn every_end_that_is_not_the_format_says_why_on_the_busy_line() {
+        let _en = english();
+        let (mut page, ends) = page_with(|e| e.boards(vec![exfat()]));
+        let said = |page: &mut Page, ends: &Ends, why: FormatWhy| {
+            ends.tell([Event::Board(at(exfat(), Format::Waiting)), Event::Board(at(exfat(), Format::Ended(why)))]);
+            page.pump();
+            let note = page.note.clone().expect("a note");
+            assert!(note.gold, "{}", note.text);
+            note.text
+        };
+        assert_eq!(said(&mut page, &ends, FormatWhy::Declined), "Not formatted: it was cancelled on COM3's screen.");
+        let timeout = said(&mut page, &ends, FormatWhy::TimedOut);
+        assert_eq!(timeout, "Not formatted: nobody confirmed on the player within a minute.");
+        let viz = said(&mut page, &ends, FormatWhy::NotAsked("viz".into()));
+        assert_eq!(viz, "Not asked: a computer drives COM3's dancer; end that first.");
+        assert!(page.note.as_ref().is_some_and(|n| n.until.is_some()), "a refusal at once passes");
+        let size = said(&mut page, &ends, FormatWhy::Refused("size".into()));
+        assert_eq!(size, "Not formatted: FAT32 can't take the card in COM3 (under 42 MB or 2 TB+).");
+        let write = said(&mut page, &ends, FormatWhy::Failed("write".into()));
+        assert_eq!(write, "Couldn't format the card in COM3: it refused a write. Try another card.");
+        let odd = said(&mut page, &ends, FormatWhy::Failed("brownout".into()));
+        assert_eq!(odd, "Couldn't format the card in COM3: brownout.", "a word this player doesn't know");
+        let lost = said(&mut page, &ends, FormatWhy::Lost);
+        assert!(lost.starts_with("Lost touch with COM3 during the format"), "{lost}");
+        let held = DeviceError::Busy { port: "COM3".into(), detail: "held".into() };
+        let busy = said(&mut page, &ends, FormatWhy::Port(held));
+        assert_eq!(busy, "COM3 is in use by another program (held)", "the port's own words");
+        // Declined, the card is offered its format again.
+        ends.tell([Event::Board(at(exfat(), Format::Ended(FormatWhy::Declined)))]);
+        page.pump();
+        assert!(window(&mut page).contains("Format as FAT32 ▸"));
+        // `@err 7 format`: the row says it can't, as for a board with no keys.
+        ends.tell([Event::Board(at(exfat(), Format::Ended(FormatWhy::Old)))]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("Fix: format it FAT32 (MBR) on a computer. That erases it."), "{frame}");
+        assert!(frame.contains("v0.8.0 can't format a card.") && !frame.contains("Format as FAT32 ▸"), "{frame}");
+    }
+
+    #[test]
+    fn firmware_that_cant_format_says_so_where_the_format_would_be_and_updating_lets_it_only_when_the_pin_can() {
+        let _en = english();
+        let (_, _, frame) = card_row(|s| s.card = CardKind::ExFat);
+        assert!(frame.contains("Fix: format it FAT32 (MBR) on a computer. That erases it."), "today's words:\n{frame}");
+        assert!(frame.contains("v0.8.0 can't format a card."), "{frame}");
+        assert!(!frame.contains("Updating lets it.") && !frame.contains("Format as FAT32"), "{frame}");
+        let (_, _, frame) = card_row(|s| s.card = CardKind::Other);
+        assert!(frame.contains("! Can't read this card") && frame.contains("Try it in a computer."), "{frame}");
+        assert!(frame.contains("v0.8.0 can't format a card."), "{frame}");
+        // A pin that formats: updating lets it, in the fix line's place.
+        let gpt = answering_with("COM3", "v0.7.0", |s| s.card = CardKind::Gpt);
+        let (mut page, ends) = page_with(|e| e.boards(vec![gpt.clone()]));
+        let formats_pin = Target { version: "v0.8.0".into(), answers_status: true, answers_format: true };
+        ends.tell([Event::Target(formats_pin)]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(frame.contains("v0.7.0 can't format a card. Updating lets it."), "{frame}");
+        assert!(!frame.contains("on a computer") && frame.contains("Update ▸"), "{frame}");
+    }
+
+    #[test]
+    fn behind_the_pin_damaged_or_the_players_own_card_the_format_is_a_dim_link_and_f() {
+        let _en = english();
+        // An update to make first: Update ▸ wins, the format is f and a link.
+        let behind = formats("COM3", "v0.7.0", |s| s.card = CardKind::Ntfs);
+        let (mut page, ends) = page_with(|e| e.boards(vec![behind.clone()]));
+        let frame = window(&mut page);
+        assert!(frame.contains("Fix: format it as FAT32 in the player (below)."), "{frame}");
+        assert!(frame.contains("               Format as FAT32…") && frame.contains("Update ▸"), "{frame}");
+        assert_eq!(page.hint(), "Enter update · o advanced · f format · d details · Esc library");
+        press(&mut page, KeyCode::Char('f'));
+        assert!(window(&mut page).contains("today it holds one NTFS volume."));
+        press(&mut page, KeyCode::Esc);
+        assert!(page.gate.is_none() && ends.sent().is_empty());
+        // A damaged card: a computer's disk check first, the format anyway.
+        let damaged = formats("COM3", "v0.8.0", |s| s.card = CardKind::Unreadable);
+        let (mut page, ends) = page_with(|e| e.boards(vec![damaged.clone()]));
+        let frame = window(&mut page);
+        assert!(frame.contains("SD card       ! Can't read this card"), "{frame}");
+        assert!(frame.contains("Try it in this computer's card reader first: a disk check"), "{frame}");
+        assert!(frame.contains("Format as FAT32 anyway…   erases the whole card"), "{frame}");
+        assert!(!frame.contains("Format as FAT32 ▸"), "never the primary:\n{frame}");
+        assert_eq!(page.hint(), "o advanced · f format · d details · Esc library");
+        press(&mut page, KeyCode::Enter);
+        assert!(page.gate.is_none(), "Enter has nothing to do");
+        press(&mut page, KeyCode::Char('f'));
+        assert!(window(&mut page).contains("today it holds what the player"));
+        press(&mut page, KeyCode::Char('y'));
+        assert_eq!(ends.sent(), [Cmd::Format { port: "COM3".into() }]);
+        // The player's own card: in Details only.
+        let own = formats("COM3", "v0.8.0", |_| {});
+        let (mut page, ends) = page_with(|e| e.boards(vec![own.clone()]));
+        assert!(!window(&mut page).contains("Format as FAT32"));
+        press(&mut page, KeyCode::Char('f'));
+        assert!(page.gate.is_none(), "f only with Details open, as w");
+        press(&mut page, KeyCode::Char('d'));
+        let frame = window(&mut page);
+        assert!(frame.contains("Format as FAT32…   erases the whole card"), "{frame}");
+        assert!(page.hint().contains("f format"), "{}", page.hint());
+        press(&mut page, KeyCode::Char('f'));
+        let frame = window(&mut page);
+        assert!(frame.contains("today it holds your music, 1,284"), "{frame}");
+        let _ = ends.sent();
+        // Its library still being indexed: the music is named all the same.
+        let indexing = formats("COM3", "v0.8.0", |s| s.tracks = Tracks::Building);
+        let (mut page, _ends) = page_with(|e| e.boards(vec![indexing.clone()]));
+        press(&mut page, KeyCode::Char('d'));
+        press(&mut page, KeyCode::Char('f'));
+        let lost = page.gate.as_ref().and_then(|g| g.format.as_ref()).map(|f| f.lost.as_str());
+        assert_eq!(lost, Some("your music, still being indexed, on one FAT32 volume"));
     }
 
     // ── Several boards ──────────────────────────────────────────────────────
@@ -4142,9 +4882,10 @@ mod tests {
         let _en = english();
         let (mut page, ends) = page_with(Ends::no_board);
         let frame = window(&mut page);
-        assert!(frame.contains("│  No player plugged in"), "{frame}");
-        assert!(frame.contains("Plug the M5Stack Core2 in over USB. It shows up here by itself."), "{frame}");
-        assert!(frame.contains("▱▱▱▱▱▱▱▱▱▱ watching the USB ports…"), "{frame}");
+        // The readers are watched too (clause 30): the words say both.
+        assert!(frame.contains("│  Nothing plugged in"), "{frame}");
+        assert!(frame.contains("Plug the Core2 in over USB, or put its SD card in this computer's card"), "{frame}");
+        assert!(frame.contains("▱▱▱▱▱▱▱▱▱▱ watching the USB ports and card readers…"), "{frame}");
         assert!(frame.contains("▸ Not showing up?"), "{frame}");
         assert!(!frame.contains("Look again") && !frame.contains("Close"), "the worker watches by itself");
         assert_eq!(page.hint(), "d not showing up? · Esc library");
@@ -4225,6 +4966,7 @@ mod tests {
             port: None,
             timing: crate::device::desk::tests::QUICK,
             firmware_first: false,
+            clock: Some(desk::wall_ms),
         };
         let (cmds, events) = desk::spawn(std::sync::Arc::new(fake), setup);
         let mut page = Page::with_channels(cmds, events, None);
@@ -4657,7 +5399,8 @@ mod tests {
         // first choice) and marks v0.8.0 as newer than this player, by the
         // target alone — whatever release this build pins.
         let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::old("COM3", "v0.6.0")]));
-        ends.tell([Event::Target(Target { version: "v0.7.0".into(), answers_status: false })]);
+        let older = Target { version: "v0.7.0".into(), answers_status: false, answers_format: false };
+        ends.tell([Event::Target(older)]);
         page.pump();
         press(&mut page, KeyCode::Char('o'));
         press(&mut page, KeyCode::Down);
@@ -5154,6 +5897,59 @@ mod tests {
         let mut refused = uncounted.clone();
         refused.count = Count::Refused { why: CountWhy::Playing, part_way: false };
         add("count refused", &|e| e.boards(vec![refused.clone()]), &[]);
+        // Formatting in the player (clause 59): its offers, its gates, the
+        // player's answer, the format and its ends.
+        let foreign = formats("COM3", "v0.8.0", |s| s.card = CardKind::ExFat);
+        add("format", &|e| e.boards(vec![foreign.clone()]), &[]);
+        add("format, the gate", &|e| e.boards(vec![foreign.clone()]), &[KeyCode::Enter]);
+        add("format, waiting", &|e| e.boards(vec![at(foreign.clone(), Format::Waiting)]), &[]);
+        add("format, restarting", &|e| e.boards(vec![at(foreign.clone(), Format::Restarting)]), &[]);
+        add("format, running", &|e| e.boards(vec![at(foreign.clone(), Format::Running { pct: 41 })]), &[]);
+        let took = Duration::from_secs(134);
+        let made = crate::device::board::Formatted { size: 59_617_918_976, free: 59_517_918_976, cluster: 32_768, took };
+        let empty = formats("COM3", "v0.8.0", |s| {
+            s.free = Free::Bytes(59_517_918_976);
+            s.tracks = Tracks::Count(0);
+        });
+        add("format, done", &|e| e.boards(vec![at(empty.clone(), Format::Done(made))]), &[]);
+        let ended = |why: FormatWhy| {
+            let (asked, ended) = (at(foreign.clone(), Format::Waiting), at(foreign.clone(), Format::Ended(why)));
+            move |e: &Ends| {
+                e.boards(vec![asked.clone()]);
+                e.tell([Event::Board(ended.clone())]);
+            }
+        };
+        add("format, failed", &ended(FormatWhy::Failed("check".into())), &[]);
+        add("format, refused at the second answer", &ended(FormatWhy::Refused("card".into())), &[]);
+        let behind = formats("COM3", "v0.7.0", |s| s.card = CardKind::Gpt);
+        add("format, behind the pin", &|e| e.boards(vec![behind.clone()]), &[]);
+        add("format, behind the pin, the gate", &|e| e.boards(vec![behind.clone()]), &[KeyCode::Char('f')]);
+        let damaged = formats("COM3", "v0.8.0", |s| s.card = CardKind::Other);
+        add("format, damaged", &|e| e.boards(vec![damaged.clone()]), &[]);
+        add("format, damaged, the gate", &|e| e.boards(vec![damaged.clone()]), &[KeyCode::Char('f')]);
+        let own = formats("COM3", "v0.8.0", |_| {});
+        add("format, the player's card", &|e| e.boards(vec![own.clone()]), &[KeyCode::Char('d')]);
+        let own_gate: &[KeyCode] = &[KeyCode::Char('d'), KeyCode::Char('f')];
+        add("format, the player's card, the gate", &|e| e.boards(vec![own.clone()]), own_gate);
+        let indexing = formats("COM3", "v0.8.0", |s| s.tracks = Tracks::Building);
+        add("format, its card indexing, the gate", &|e| e.boards(vec![indexing.clone()]), own_gate);
+        let cant = answering_with("COM3", "v0.8.0", |s| s.card = CardKind::Ntfs);
+        add("format, firmware that can't", &|e| e.boards(vec![cant.clone()]), &[]);
+        // The clock a listen set, and each way one is left as it was (clause 5).
+        let clocked = clock_set(formats("COM3", "v0.8.0", |_| {}), Some(-3_240));
+        let set = Ok(clocked.clock_set.clone().expect("set"));
+        let port = DeviceError::Gone { port: "COM3".into() };
+        use listen::TimeWhy::{NoAnswer, OurClock, Port, Range, Rtc, Syntax};
+        let ends = [set, Err(Range), Err(Rtc), Err(OurClock), Err(NoAnswer), Err(Syntax), Err(Port(port))];
+        let lines: Vec<Event> = ends
+            .iter()
+            .filter_map(desk::clock_line)
+            .map(|(text, kind)| Event::Log { port: Some("COM3".into()), text, kind })
+            .collect();
+        add("the clock set, details", &|e| {
+            e.boards(vec![clocked.clone()]);
+            e.tell(lines.clone());
+        }, &[KeyCode::Char('d')]);
         add("two", &Ends::two, &[]);
         add("two, the other", &Ends::two, &[KeyCode::Right]);
         let in_use = heard("COM5", Heard::InUse { detail: "busy".into() });
@@ -5276,7 +6072,95 @@ mod tests {
         for (name, (page, ends)) in more {
             states.push((name, page, ends));
         }
+        // The cards (clauses 25, 44–63): each state at rest, a sync, its
+        // gates and its sheet, alone and beside a board.
+        use crate::device::card::engine::Guard;
+        use crate::device::card::volume::{Fs, Table};
+        use crate::device::card::worker::{CardView, Ended, Next, Pause, Phase, Planned, Run, Server};
+        use crate::device::card::worker::fixtures as c;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let many: Vec<String> = (0..214).map(|i| format!("Velvet Static/Harbour Songs/{i:03} - Track.flac")).collect();
+        let plan = |view: &mut CardView, f: &dyn Fn(&mut Planned)| {
+            if let Next::Plan(plan) = &mut view.next {
+                f(plan);
+            }
+        };
+        let card_states: Vec<(&'static str, CardView, &[KeyCode])> = vec![
+            ("card, ready", c::ready("E:", now), &[]),
+            ("card, details", c::ready("E:", now), &[Char('d')]),
+            ("card, reading", c::reading("E:"), &[]),
+            ("card, new", c::new_card("F:"), &[]),
+            ("card, new with music", c::with(c::new_card("F:"), |v| c::facts(v).music.unlisted = 1_204), &[]),
+            ("card, set up", c::new_card("F:"), &[Enter]),
+            ("card, exfat", c::refused("G:", Fs::ExFat, Table::Mbr), &[]),
+            ("card, gpt", c::refused("G:", Fs::Fat32, Table::Gpt), &[]),
+            ("card, unknown server", c::with(c::ready("E:", now), |v| v.server = Server::Unknown("Home".into())), &[]),
+            ("card, no server", c::with(c::ready("E:", now), |v| v.server = Server::New(None)), &[]),
+            ("card, signed out", c::with(c::ready("E:", now), |v| v.next = Next::SignIn), &[]),
+            ("card, newer", c::with(c::ready("E:", now), |v| {
+                c::facts(v).newer = vec!["manifest.bin".into()];
+                c::facts(v).newer_major = Some(2);
+            }), &[]),
+            ("card, disk check", c::with(c::ready("E:", now), |v| c::facts(v).check = true), &[]),
+            ("card, copied", c::with(c::ready("E:", now), |v| c::facts(v).copied = true), &[]),
+            ("card, no device.txt", c::with(c::ready("E:", now), |v| c::facts(v).device.present = false), &[]),
+            ("card, syncing", c::syncing("E:", now), &[]),
+            ("card, paused", c::with(c::ready("E:", now), |v| {
+                let pause = Pause::Budget { until: now + 18_720, peer: "3".into(), days: 4, mb: 1_500 };
+                v.ended = Some(Ended::Paused { pause, at: 2_945, of: 4_812, bytes: (13_000_000_000, 21_300_000_000) });
+            }), &[]),
+            ("card, full", c::with(c::ready("E:", now), |v| v.ended = Some(Ended::Full { at: 3_980, of: 4_812 })), &[]),
+            ("card, taken out", c::with(c::ready("E:", now), |v| {
+                v.out = true;
+                v.ended = Some(Ended::Out { at: 1_204, of: 4_812 });
+            }), &[]),
+            ("card, done", c::with(c::ready("E:", now), |v| {
+                let skipped = vec![("a/b.flac".into(), "x".into())];
+                v.ended = Some(Ended::Done { tracks: 4_822, took: 1_680, skipped, plays: 37 });
+            }), &[]),
+            ("card, waiting its turn", c::with(c::ready("E:", now), |v| {
+                v.run = Some(Run { phase: Phase::Waiting, ..Run::default() });
+            }), &[]),
+            ("card, settings", c::ready("E:", now), &[Char('o')]),
+            ("card, settings, writing", c::ready("E:", now), &[Char('o'), Right]),
+            ("card, settings, into", c::ready("E:", now), &[Char('o'), Right, Down, Enter]),
+            ("card, removals gate", c::with(c::ready("E:", now), |v| {
+                plan(v, &|p| p.removals = many.clone());
+            }), &[Enter]),
+            ("card, half gate", c::with(c::ready("E:", now), |v| plan(v, &|p| {
+                p.removals = many.clone();
+                p.guards = vec![Guard::Removals { paths: many.clone(), strong: true }];
+                // Its count per library, as the look's dry run gives them.
+                p.removal_libs = (0..214).map(|i| if i < 200 { "Rock" } else { "Jazz" }.to_string()).collect();
+            })), &[Enter, Char('e')]),
+            ("card, adopt gate", c::with(c::ready("E:", now), |v| {
+                plan(v, &|p| p.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])]);
+            }), &[Enter]),
+        ];
+        for (name, card, keys) in card_states {
+            for with_board in [false, true] {
+                let (mut page, ends, _inbox, _fold) = if with_board {
+                    cards::with_cards(Ends::up_to_date, vec![card.clone()])
+                } else {
+                    cards::with_cards(|_| {}, vec![card.clone()])
+                };
+                if with_board {
+                    press(&mut page, Right);
+                }
+                for code in keys {
+                    press(&mut page, *code);
+                }
+                // The inbox goes with the state: a page that sends reaches
+                // nobody, as a worker gone would.
+                states.push((if with_board { name } else { leak(format!("{name}, alone")) }, page, ends));
+            }
+        }
         states
+    }
+
+    /// A state's name made at run time, for the floor's messages.
+    fn leak(name: String) -> &'static str {
+        Box::leak(name.into_boxed_str())
     }
 
     /// The labels the state's buttons wear — its primary, its gate's, the
@@ -5285,6 +6169,22 @@ mod tests {
         if let Some(gate) = &page.gate {
             let (keep, write) = gate_buttons(gate);
             return vec![keep, write];
+        }
+        if let Some(gate) = &page.card.gate {
+            let (keep, go) = card::gate_buttons_of(gate);
+            return std::iter::once(keep).chain(go).collect();
+        }
+        if let Some(sheet) = &page.card.sheet {
+            let (other, go) = if sheet.setup {
+                ("dev.card.btn_cancel", "dev.card.btn_do_setup")
+            } else {
+                ("dev.card.btn_defaults", "dev.card.btn_apply")
+            };
+            return vec![t!(other).to_string(), t!(go).to_string()];
+        }
+        if let Some(view) = page.open_card() {
+            let primary = card::primary(&view).filter(|_| page.lock.is_none());
+            return primary.map(|p| p.label()).into_iter().collect();
         }
         if page.sheet.is_some() {
             return vec![t!("dev.adv_defaults").to_string(), t!("dev.adv_apply").to_string()];
@@ -5299,6 +6199,7 @@ mod tests {
             Primary::Write => "dev.btn_write",
             Primary::Back => "dev.btn_back",
             Primary::Dio => "dev.btn_dio",
+            Primary::Format => "dev.card.btn_format",
         });
         vec![if page.writing() { word.to_string() } else { format!("{word} ▸") }]
     }
@@ -5330,6 +6231,9 @@ mod tests {
         }
     }
 
+    /// The hosted busy line's cells: the page's area less two each side.
+    const BUSY_W: usize = 96;
+
     /// The test below, by its full name, and the environment variable
     /// naming its locale.
     const FLOOR_TEST: &str = "device::page::tests::the_floor_in_this_processs_locale";
@@ -5348,6 +6252,44 @@ mod tests {
         let Ok(code) = std::env::var(FLOOR_LOCALE) else { return };
         rust_i18n::set_locale(&code);
         crate::kit::theme::pin_modern_terminal();
+        // Every end of a format the busy line can say, whole (clause 59).
+        let words = |word: &str| word.to_string();
+        let ends = [
+            FormatWhy::Declined,
+            FormatWhy::TimedOut,
+            FormatWhy::Old,
+            FormatWhy::NotAsked(words("ui")),
+            FormatWhy::NotAsked(words("screen")),
+            FormatWhy::NotAsked(words("viz")),
+            FormatWhy::NotAsked(words("busy")),
+            FormatWhy::NotAsked(words("card")),
+            FormatWhy::NotAsked(words("brownout")),
+            FormatWhy::Refused(words("card")),
+            FormatWhy::Refused(words("size")),
+            FormatWhy::Refused(words("busy")),
+            FormatWhy::Refused(words("brownout")),
+            FormatWhy::Failed(words("card")),
+            FormatWhy::Failed(words("size")),
+            FormatWhy::Failed(words("write")),
+            FormatWhy::Failed(words("mkfs")),
+            FormatWhy::Failed(words("check")),
+            FormatWhy::Failed(words("files")),
+            FormatWhy::Failed(words("brownout")),
+            FormatWhy::NoAnswer,
+            FormatWhy::Lost,
+        ];
+        // With the longest port the page names: a Mac's, 16 cells.
+        let port = short("/dev/cu.usbmodem14101");
+        assert_eq!(kit::width(&port), 16);
+        let mut said: Vec<String> = ends.iter().filter_map(|why| format_end(why, &port, Some("v0.12.0"))).collect();
+        let took = took_text(Duration::from_secs(134));
+        said.push(t!("dev.card.fmt_asked", port = port).to_string());
+        said.push(t!("dev.card.fmt_note", port = port, t = took).to_string());
+        for text in said {
+            assert!(!text.contains("dev."), "{code}: a key with no words: {text}");
+            let cells = kit::width(&text);
+            assert!(cells <= BUSY_W, "{code}: the busy line is {cells} cells: {text}");
+        }
         let banner = Rect { x: 0, y: 2, width: 100, height: 21 };
         for (name, mut page, _ends) in every_state() {
             for area in [FLOOR, banner] {
@@ -5370,11 +6312,16 @@ mod tests {
             }
             let hint = page.hint();
             assert!(kit::width(&hint) <= HINT_W, "{code}, {name}: the hint is {} cells: {hint}", kit::width(&hint));
+            if let Some(note) = &page.note {
+                let cells = kit::width(&note.text);
+                assert!(cells <= BUSY_W, "{code}, {name}: the busy line is {cells} cells: {}", note.text);
+            }
             assert!(!hint.contains("dev."), "{code}, {name}: a key with no words: {hint}");
             let all = alone(&mut page, 72, 24);
             assert!(!all.contains("dev."), "{code}, {name}: a key with no words:\n{all}");
-            // The console's gate is as wide as its card, and covers its corners.
-            if page.gate.is_none() {
+            // The console's gate is as wide as its card, and covers its
+            // corners; so do a card's gate and its sheet.
+            if page.gate.is_none() && page.card.gate.is_none() && page.card.sheet.is_none() {
                 let (tops, bottoms) = (all.matches('╭').count(), all.matches('╰').count());
                 assert_eq!(tops, bottoms, "{code}, {name} at 72×24: frames whole:\n{all}");
             }
@@ -5426,8 +6373,9 @@ mod tests {
                     .filter(|at| !area.contains(*at))
                     .all(|at| buf[(at.x, at.y)].symbol() == "#");
                 assert!(outside, "{name} in {area:?}: drawn outside its area:\n{all}");
-                // A gate as wide as the card covers its corners.
-                if page.gate.is_none() {
+                // A gate as wide as the card covers its corners; so do a
+                // card's gate and its sheet.
+                if page.gate.is_none() && page.card.gate.is_none() && page.card.sheet.is_none() {
                     let (tops, bottoms) = (all.matches('╭').count(), all.matches('╰').count());
                     assert_eq!(tops, bottoms, "{name} in {area:?}: frames whole:\n{all}");
                 }

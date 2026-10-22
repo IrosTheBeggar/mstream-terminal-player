@@ -30,6 +30,17 @@ fn int_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     })
 }
 
+/// A field added after its struct had callers: read when it has the shape
+/// expected, `None` when it has not, so an odd value costs that field and
+/// never the whole answer the older callers relied on.
+fn soft<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(serde_json::from_value(serde_json::Value::deserialize(d)?).ok())
+}
+
 /// The ping's `transcode` field is the server's defaults object when
 /// transcoding is on offer and the literal `false` when it is not — which
 /// is every fresh install for the ten-odd seconds its ffmpeg bootstrap
@@ -125,8 +136,29 @@ pub struct LayeredInfo {
     /// The server's own version, e.g. `"6.28.0"` — what the version floors
     /// of the auto-dj contract (clause 50) are judged against.
     pub server: Option<String>,
+    /// The server's stable id (a UUID it keeps across restarts, addresses
+    /// and renames). Absent on a server older than the card transfer's
+    /// batch of mStream changes, whose other additions (the `device` play
+    /// source among them) it so lacks too.
+    #[serde(rename = "instanceId", deserialize_with = "soft")]
+    pub instance_id: Option<String>,
     pub features: LayeredFeatures,
     pub user: LayeredUser,
+    /// Sent to an admin only, and only while the admin API answers (not
+    /// under `lockAdmin`): what says `admin/directories` can be asked.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(deserialize_with = "soft")]
+    pub admin: Option<LayeredAdmin>,
+}
+
+/// The admin block of `GET /api/`. Its presence is the fact; `platform`
+/// (Node's `process.platform`) says what shape the server's own paths
+/// take, for a terminal that reads its library folders beside it.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LayeredAdmin {
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -144,11 +176,35 @@ pub struct LayeredFeatures {
     pub discovery_p2p: bool,
     /// The Stats API's version, as the ping carries it.
     pub stats: Option<u32>,
+    /// The paged sync manifest (`POST /api/v1/sync/manifest`) exists. Like
+    /// the discovery flags, the key's presence is the version fact: an
+    /// older server omits it, and a client never probes for the route.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub sync: bool,
+    /// What the server's peer stream proxy passes on to the peer (the card
+    /// transfer's batch of mStream changes). Like `sync`, the key's
+    /// presence is the signal: a server whose proxy drops the copy header
+    /// leaves it out, as an older one does, and never says `purpose: false`.
+    #[serde(rename = "federationProxy", deserialize_with = "soft")]
+    pub federation_proxy: Option<FederationProxy>,
+}
+
+/// `features.federationProxy`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FederationProxy {
+    /// `X-mStream-Purpose` reaches the peer: a copy made through the proxy
+    /// is a declared one, which a key with copies off refuses.
+    pub purpose: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct LayeredUser {
+    /// The caller is an admin. Not the same as the admin API answering:
+    /// see [`LayeredInfo::admin`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub admin: bool,
     pub vpaths: Vec<String>,
     #[serde(rename = "noFileModify")]
     pub no_file_modify: bool,
@@ -331,6 +387,35 @@ pub struct TranscodeInfo {
     pub default_codec: Option<String>,
     #[serde(rename = "defaultBitrate")]
     pub default_bitrate: Option<String>,
+    /// What `/transcode` takes of each codec, by mStream's name for it
+    /// (`mp3`, `opus`, `aac`): MP3 reaches 320k there. Absent on a server
+    /// older than the card transfer's batch of mStream changes, which takes
+    /// 64k-192k of each: the key is the fact, never the version.
+    #[serde(deserialize_with = "soft")]
+    pub codecs: Option<std::collections::HashMap<String, CodecInfo>>,
+    /// `/transcode` takes `?bulk=1`, one file of a long job: kept out of
+    /// its cache and queued behind a server-wide cap. Absent on an older
+    /// server, which ignores the flag.
+    #[serde(deserialize_with = "soft")]
+    pub bulk: Option<BulkInfo>,
+}
+
+/// One codec's entry in [`TranscodeInfo::codecs`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CodecInfo {
+    /// `["64k", …, "320k"]`, as `?bitrate=` takes them.
+    pub bitrates: Vec<String>,
+}
+
+/// [`TranscodeInfo::bulk`]: how many bulk conversions the server runs at
+/// once (its `transcode.bulkConcurrency`), the rest waiting in its queue. A
+/// client gains nothing by opening more.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BulkInfo {
+    #[serde(deserialize_with = "soft")]
+    pub concurrency: Option<u32>,
 }
 
 /// Track metadata, as nested under `metadata` on library responses.
@@ -1452,6 +1537,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_layered_info_says_whether_the_manifest_and_the_admin_api_are_there() {
+        let info: LayeredInfo = serde_json::from_str(
+            r#"{"server":"6.31.1","features":{"sync":true,"transcode":{"defaultCodec":"opus",
+            "defaultBitrate":"96k"},"stats":2},"user":{"username":"u","admin":true,"vpaths":["lib"]},
+            "admin":{"uptime":5,"platform":"linux","dbSchemaVersion":80}}"#,
+        )
+        .unwrap();
+        assert!(info.features.sync && info.user.admin);
+        assert_eq!(info.admin.and_then(|a| a.platform).as_deref(), Some("linux"));
+
+        // An admin under lockAdmin gets no block, an older server no `sync`,
+        // and a block of an odd shape costs only itself.
+        let info: LayeredInfo =
+            serde_json::from_str(r#"{"features":{},"user":{"admin":true},"admin":"locked?"}"#).unwrap();
+        assert!(!info.features.sync && info.user.admin && info.admin.is_none());
+    }
+
+    #[test]
+    fn scan_status_reads_the_queue_and_each_passs_coverage() {
+        let status: ScanStatus = serde_json::from_str(
+            r#"{"queue":{"scanning":true,"activeTask":"scan","queued":["audioanalysis"]},
+            "totals":{"tracks":19410},"enrichment":[
+            {"pass":"audioanalysis","enabled":true,"state":"queued","progress":null,
+             "coverage":{"scope":"library","unit":"tracks","done":12000,"remaining":7410}},
+            {"pass":"discovery","state":"disabled","coverage":null},
+            {"pass":"albumart","state":"idle","coverage":{"scope":"library","done":"many"}}]}"#,
+        )
+        .unwrap();
+        let queue = status.queue.as_ref().expect("the queue block");
+        assert!(queue.scanning);
+        assert_eq!(queue.active_task.as_deref(), Some("scan"));
+        assert_eq!(queue.queued, ["audioanalysis"]);
+        assert_eq!(status.totals.as_ref().map(|t| t.tracks), Some(19410));
+        let bpm = status.pass("audioanalysis").expect("the BPM and key pass");
+        assert!(bpm.busy(), "queued is waiting its turn");
+        let coverage = bpm.coverage.as_ref().unwrap();
+        assert_eq!((coverage.scope.as_str(), coverage.done, coverage.remaining), ("library", 12000, 7410));
+        assert_eq!(coverage.unit.as_deref(), Some("tracks"));
+        assert!(!status.pass("discovery").unwrap().busy());
+        assert!(status.pass("albumart").unwrap().coverage.is_none(), "an odd count costs its block only");
+        assert!(status.pass("lyrics").is_none());
+
+        // What the older callers read still reads from the older shape.
+        let old: ScanStatus =
+            serde_json::from_str(r#"{"enrichment":[{"pass":"waveform","state":"running"}]}"#).unwrap();
+        assert!(old.queue.is_none() && old.enrichment[0].busy());
+    }
+
+    #[test]
     fn formats_durations() {
         assert_eq!(fmt_duration(0.0), "0:00");
         assert_eq!(fmt_duration(59.6), "1:00");
@@ -1772,7 +1906,46 @@ pub struct IrohStatus {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ScanStatus {
+    /// What holds the server's disk now (mStream's `scan.js`). A card
+    /// transfer reads it beside the manifest's own `scanning` bit.
+    /// `None` from a server older than the block.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(deserialize_with = "soft")]
+    pub queue: Option<ScanQueue>,
+    /// The caller's libraries' size, when the server could count it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(deserialize_with = "soft")]
+    pub totals: Option<ScanTotals>,
     pub enrichment: Vec<EnrichmentPass>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl ScanStatus {
+    /// One pass, by its kind: `audioanalysis` is BPM and key, `discovery`
+    /// the embeddings Auto DJ is built from.
+    pub fn pass(&self, kind: &str) -> Option<&EnrichmentPass> {
+        self.enrichment.iter().find(|p| p.pass == kind)
+    }
+}
+
+/// The scan queue's block: a file scan or a backup holding the disk (the
+/// same bit as the manifest's `scanning` and `db/status`'s `locked`), the
+/// task kind running and the kinds waiting. Kinds only, never a path.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScanQueue {
+    pub scanning: bool,
+    #[serde(rename = "activeTask")]
+    pub active_task: Option<String>,
+    pub queued: Vec<String>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScanTotals {
+    pub tracks: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1784,6 +1957,36 @@ pub struct EnrichmentPass {
     /// `idle` | `queued` | `running` | `disabled`.
     pub state: String,
     pub progress: Option<EnrichmentProgress>,
+    /// How far the pass has got over the library, from the database: it
+    /// survives a restart and means something with the pass switched off.
+    /// `None` where the server could not count it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(deserialize_with = "soft")]
+    pub coverage: Option<EnrichmentCoverage>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl EnrichmentPass {
+    /// Working now, or waiting its turn. `remaining` alone cannot say it:
+    /// tracks a pass failed on stay in it through their cooldown.
+    pub fn busy(&self) -> bool {
+        matches!(self.state.as_str(), "running" | "queued")
+    }
+}
+
+/// One pass's coverage. `scope` is `library` (counted over the caller's
+/// libraries) or `global` (hash-keyed passes, the same for everyone);
+/// `unit` is what is counted, tracks or albums.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EnrichmentCoverage {
+    pub scope: String,
+    pub unit: Option<String>,
+    /// Signed: the server subtracts, and a count that ran past its pool
+    /// is still an answer.
+    pub done: i64,
+    pub remaining: i64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

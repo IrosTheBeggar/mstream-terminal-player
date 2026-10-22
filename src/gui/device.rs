@@ -22,7 +22,19 @@
 //! sheet's groups, and while its path field has the keyboard the GUI keeps
 //! none of its letters and lifts the field's caret to its own surface, so
 //! the window's input method and paste work there.
+//!
+//! The tab also shows the SD cards in this computer's readers (clauses 3a,
+//! 25 and 44–67), over a transfer worker that is the GUI's, not the tab's
+//! ([`TransferHost`]): started at launch, its reports folded every frame
+//! whatever the screen, so a sync goes on when the tab is left and the top
+//! bar's MP3 Player tab wears its percentage (clauses 16, 55). The page
+//! borrows it for each visit. A quit during a sync asks first, then waits
+//! for the next save (clause 57); during a firmware write the write's rule
+//! wins (clauses 9–11).
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -32,8 +44,10 @@ use rust_i18n::t;
 
 use super::{Act, DJ_NAV, Gui, SONIC_NAV, Screen};
 use crate::admin::{Claim, HostedRoom, Screen as Hosted, drive_pointer};
-use crate::device::Page;
-use crate::tui::app::{Action, Capture, Focus, Tab};
+use crate::device::worker::{Event as CardEvent, Fold, Link, ServerLink};
+use crate::device::{Page, Transfer, worker};
+use crate::kit::theme::th;
+use crate::tui::app::{Action, Capture, Focus, Origin, Tab};
 
 /// How long the worker may take to let every port go once told: a listen
 /// lets go at once; a read under way finishes what is left of one rung of
@@ -45,6 +59,132 @@ const LET_GO: Duration = crate::device::LET_GO;
 /// A quit that waits longer than this says why on stderr: the terminal is
 /// the shell's again by then, and a pause with no word looks like a hang.
 const SAY_AFTER: Duration = Duration::from_secs(1);
+/// A quit during a sync waits this long at most for its next save (clause
+/// 57: "at most about 30 s").
+pub(crate) const SAVE_WITHIN: Duration = Duration::from_secs(30);
+
+/// The transfer worker, the GUI's own (clause 55): started at launch, its
+/// reports folded every frame whatever the screen; the tab's page borrows
+/// its link and its fold for a visit.
+pub(crate) struct TransferHost {
+    link: Link,
+    events: Receiver<CardEvent>,
+    fold: Rc<RefCell<Fold>>,
+}
+
+impl TransferHost {
+    /// The worker on this computer's readers and files.
+    #[cfg(not(test))]
+    pub(crate) fn spawn() -> TransferHost {
+        let (link, events) = worker::spawn(worker::Setup::system());
+        TransferHost { link, events, fold: Rc::new(RefCell::new(Fold::default())) }
+    }
+
+    /// A host whose worker is the test: its inbox, and the reports to tell.
+    #[cfg(test)]
+    pub(crate) fn quiet() -> (TransferHost, Receiver<worker::In>, std::sync::mpsc::Sender<CardEvent>) {
+        let (link, inbox) = Link::pair();
+        let (tell, events) = std::sync::mpsc::channel();
+        (TransferHost { link, events, fold: Rc::new(RefCell::new(Fold::default())) }, inbox, tell)
+    }
+
+    /// The worker's reports since the last frame, folded.
+    fn pump(&mut self) {
+        let mut fold = self.fold.borrow_mut();
+        while let Ok(event) = self.events.try_recv() {
+            fold.apply(event);
+        }
+    }
+
+    /// What a page borrows.
+    fn lend(&self) -> Transfer {
+        Transfer { link: self.link.clone(), fold: self.fold.clone() }
+    }
+
+    /// The fold, for the top bar and the mini player.
+    pub(crate) fn fold(&self) -> std::cell::Ref<'_, Fold> {
+        self.fold.borrow()
+    }
+}
+
+/// Starts the transfer worker (at launch, never under test: a test's GUI
+/// is given a quiet host of its own).
+pub(crate) fn start_transfer(gui: &mut Gui) {
+    #[cfg(not(test))]
+    {
+        gui.device.transfer = Some(TransferHost::spawn());
+    }
+    #[cfg(test)]
+    let _ = gui;
+}
+
+/// The servers saved on this computer as the GUI reaches them now (clause
+/// 3a): what a card's sync and look are made with. Peers are their
+/// parents' rows, not servers of a card's own.
+fn links(gui: &Gui) -> Vec<ServerLink> {
+    let session = gui.app.connected.then(|| gui.app.origin().server);
+    gui.app
+        .servers
+        .iter()
+        .filter(|k| k.peer.is_none())
+        .map(|k| {
+            let origin = Origin { server: k.id.clone(), peer: None };
+            let reach = gui.app.reach(&origin);
+            let relay = matches!(
+                gui.app.tunnels.get(&k.id),
+                Some(crate::tui::app::TunnelState::Up {
+                    path: Some(crate::quickconnect::TunnelPath::Relay),
+                    ..
+                })
+            );
+            let token = reach.as_ref().ok().and_then(|r| r.token.clone()).or_else(|| k.token.clone());
+            ServerLink {
+                id: k.id.clone(),
+                name: k.name.clone(),
+                base: reach.as_ref().map(|r| r.base.clone()).map_err(|e| e.clone()),
+                token,
+                self_signed: reach.as_ref().is_ok_and(|r| r.self_signed),
+                local_token: reach.as_ref().ok().and_then(|r| r.local_token.clone()),
+                relay,
+                session: session.as_deref() == Some(k.id.as_str()),
+            }
+        })
+        .collect()
+}
+
+/// The transfer worker's frame: its reports folded, and the servers told
+/// again when they changed.
+fn pump_transfer(gui: &mut Gui) {
+    let links = links(gui);
+    let Some(host) = gui.device.transfer.as_mut() else { return };
+    host.pump();
+    if host.fold.borrow().servers != links {
+        host.fold.borrow_mut().servers = links.clone();
+        host.link.send(worker::Cmd::Servers(links));
+    }
+}
+
+/// The card whose sync runs, or waits paused, its percentage, and whether
+/// it is paused: what the MP3 Player tab wears (clause 16).
+pub(crate) fn sync_mark(gui: &Gui) -> Option<(String, u8, bool)> {
+    let host = gui.device.transfer.as_ref()?;
+    let fold = host.fold();
+    let (card, pct, paused) = fold.sync_mark()?;
+    let name = card.name().unwrap_or_else(|| card.drive());
+    Some((name, pct, paused))
+}
+
+/// The percentage after the MP3 Player tab's name, or nothing.
+pub(crate) fn strip_mark(gui: &Gui) -> String {
+    sync_mark(gui).map(|(_, pct, _)| format!("{pct}%")).unwrap_or_default()
+}
+
+/// A sync runs (not one paused).
+fn syncing(gui: &Gui) -> Option<String> {
+    let host = gui.device.transfer.as_ref()?;
+    let fold = host.fold();
+    fold.syncing().map(|c| c.name().unwrap_or_else(|| c.drive()))
+}
 
 /// The screen's state: the page while the tab is up (or writing), the one
 /// it was left with while that one lets its ports go, and the page's area
@@ -67,6 +207,12 @@ pub(crate) struct DeviceUi {
     /// worker.
     #[cfg(test)]
     pub(crate) ends: Option<crate::device::Ends>,
+    /// The transfer worker, the GUI's (clause 55): none until launch.
+    pub(crate) transfer: Option<TransferHost>,
+    /// The quit's gold gate, while a sync runs (clause 57); and once its
+    /// yes is given, since when the quit waits for the next save.
+    pub(crate) quit_gate: bool,
+    pub(crate) quit_since: Option<Instant>,
 }
 
 /// The page is writing (contract clause 9): the GUI cannot leave the tab.
@@ -105,16 +251,20 @@ pub(crate) fn open(gui: &mut Gui) {
 }
 
 #[cfg(not(test))]
-fn build(_gui: &mut Gui) -> Page {
-    crate::device::hosted()
+fn build(gui: &mut Gui) -> Page {
+    crate::device::hosted(gui.device.transfer.as_ref().map(TransferHost::lend))
 }
 
 /// Under test the page rides channels the test holds: no worker, so no
-/// download and no serial port (the vizwin stand-in's way).
+/// download and no serial port (the vizwin stand-in's way); the transfer's
+/// host, when the test made one, is the test's too.
 #[cfg(test)]
 fn build(gui: &mut Gui) -> Page {
-    let (page, ends) = Page::quiet();
+    let (mut page, ends) = Page::quiet();
     gui.device.ends = Some(ends);
+    if let Some(host) = gui.device.transfer.as_ref() {
+        page.attach(host.lend());
+    }
     page
 }
 
@@ -210,9 +360,146 @@ pub(crate) fn tips(gui: &Gui) -> String {
 
 /// The mini player's line while the page writes out of sight: the write
 /// is under way and must not be cut — in place of the mini player's own
-/// request for a larger window.
+/// request for a larger window; while a sync runs, that it goes on (clause
+/// 55).
 pub(crate) fn unseen_line(gui: &Gui) -> Option<String> {
-    writing(gui).then(|| t!("dev.hint_working_unseen").to_string())
+    if writing(gui) {
+        return Some(t!("dev.hint_working_unseen").to_string());
+    }
+    let (card, pct, _) = sync_mark(gui)?;
+    Some(t!("dev.card.mini", card = card, pct = pct).to_string())
+}
+
+// ── Quitting during a sync (clause 57) ──────────────────────────────────────
+
+/// A quit asked for by a key or the GUI's own way (not Ctrl+C) while a sync
+/// runs and no firmware write does: the gold gate first. True when the
+/// gate took the quit.
+pub(crate) fn ask_before_quit(gui: &mut Gui) -> bool {
+    if writing(gui) || syncing(gui).is_none() || gui.device.quit_since.is_some() {
+        return false;
+    }
+    gui.device.quit_gate = true;
+    true
+}
+
+/// The quit gate is up.
+pub(crate) fn quit_gate_open(gui: &Gui) -> bool {
+    gui.device.quit_gate
+}
+
+/// The gate's answer: its yes stops the sync at its next save and the
+/// GUI quits once it has, or after [`SAVE_WITHIN`].
+pub(crate) fn quit_answer(gui: &mut Gui, yes: bool) {
+    gui.device.quit_gate = false;
+    if !yes {
+        return;
+    }
+    gui.device.quit_since = Some(Instant::now());
+    stop_syncs(gui);
+}
+
+/// The gate's keys: `y` stops and quits, Enter, Esc and `n` keep syncing.
+pub(crate) fn quit_gate_key(gui: &mut Gui, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('y') => quit_answer(gui, true),
+        KeyCode::Enter | KeyCode::Esc | KeyCode::Char('n') => quit_answer(gui, false),
+        _ => {}
+    }
+}
+
+/// The quit the gate's yes asked for may go: the sync saved and ended, or
+/// it took too long.
+pub(crate) fn quit_ready(gui: &Gui) -> bool {
+    let Some(since) = gui.device.quit_since else { return false };
+    syncing(gui).is_none() || since.elapsed() >= SAVE_WITHIN
+}
+
+/// The quit the gate's yes asked for, waiting for the next save.
+pub(crate) fn quit_waiting(gui: &Gui) -> bool {
+    gui.device.quit_since.is_some()
+}
+
+/// The quit's word to the transfer worker: the running sync stops at its
+/// next save, and a sync waiting its turn (clause 56) never starts — the
+/// quit waits for that one save alone, and the worker ends once nothing
+/// runs.
+fn stop_syncs(gui: &mut Gui) {
+    let Some(host) = gui.device.transfer.as_ref() else { return };
+    host.link.send(worker::Cmd::Quit);
+}
+
+/// The gold gate over the screen (clause 57).
+pub(crate) fn draw_quit_gate(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+    if !gui.device.quit_gate {
+        return;
+    }
+    let card = syncing(gui).unwrap_or_default();
+    let width = 74.min(area.width.saturating_sub(4));
+    if width < 24 || area.height < 8 {
+        return;
+    }
+    let text_w = usize::from(width.saturating_sub(4));
+    let gold = Style::default().fg(th().gold);
+    let mut lines: Vec<Option<Line<'static>>> = Vec::new();
+    let text = |lines: &mut Vec<Option<Line<'static>>>, words: String, style: Style| {
+        for line in crate::kit::wrap_words(&words, text_w) {
+            lines.push(Some(Line::from(Span::styled(line, style))));
+        }
+    };
+    text(&mut lines, t!("dev.card.quit_title", card = card).to_string(), gold.add_modifier(Modifier::BOLD));
+    lines.push(None);
+    let secs = SAVE_WITHIN.as_secs();
+    text(&mut lines, t!("dev.card.quit_body", s = secs).to_string(), Style::default());
+    lines.push(None);
+    text(&mut lines, t!("dev.card.quit_ctrl_c").to_string(), Style::default());
+    lines.push(None);
+    let height = (lines.len() + 3) as u16;
+    let inner = crate::kit::modal_frame_on(frame, &mut gui.ui, area, width, height, th().gold);
+    if inner.height == 0 {
+        return;
+    }
+    for (i, line) in lines.into_iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y + 1 >= inner.bottom() {
+            break;
+        }
+        if let Some(line) = line {
+            let at = Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 1 };
+            frame.render_widget(Paragraph::new(line), at);
+        }
+    }
+    let y = inner.bottom().saturating_sub(1);
+    let back = if crate::kit::theme::legacy_conhost() { "<" } else { "◂" };
+    let keep = format!("{back} {}", t!("dev.card.quit_keep"));
+    let go = t!("dev.card.quit_do").to_string();
+    let (keep_w, go_w) = (crate::kit::width(&keep) as u16 + 4, crate::kit::width(&go) as u16 + 4);
+    let x = inner.right().saturating_sub(keep_w + 2 + go_w).max(inner.x);
+    let at = Rect { x, y, width: inner.right() - x, height: 1 };
+    let kept = crate::kit::button(frame, &mut gui.ui, at, &keep, true, Act::QuitSync(false));
+    let go_x = kept.right() + 2;
+    if go_x < inner.right() {
+        let at = Rect { x: go_x, y, width: inner.right() - go_x, height: 1 };
+        crate::kit::button(frame, &mut gui.ui, at, &go, false, Act::QuitSync(true));
+    }
+}
+
+/// The gate's footer.
+pub(crate) fn quit_tips() -> String {
+    format!("{} · {}", t!("dev.card.hint_quit_do"), t!("dev.card.hint_quit_keep"))
+}
+
+/// The busy line while the quit waits for the next save: how long so far.
+pub(crate) fn quit_words(gui: &Gui) -> Option<String> {
+    let since = gui.device.quit_since?;
+    let card = syncing(gui)?;
+    let waited = since.elapsed().as_secs();
+    let mut words = t!("dev.card.quit_stderr", card = card).to_string();
+    words.push_str(&format!(" {waited} s"));
+    Some(words)
 }
 
 /// The pointer (clauses 9 and 14). Outside a write, the page's area is the
@@ -278,8 +565,11 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
 /// then whether it has ended. A page left behind is read too, until its
 /// ports are let go; then a visit that waited for it gets its own page.
 /// Returns whether the pointer is over one of the page's clickables, for
-/// the hand.
+/// the hand. The transfer worker's reports are folded first, whatever the
+/// screen (clause 55).
 pub(crate) fn frame(gui: &mut Gui) -> bool {
+    pump_transfer(gui);
+    take_wants(gui);
     // A page a screen change left behind without passing through `close`
     // goes now; a writing one stays, and the screen change was refused.
     if gui.screen != Screen::Device {
@@ -318,13 +608,50 @@ fn end_if_finished(gui: &mut Gui) {
     }
 }
 
+/// What the page asked of the GUI for a card: its add-server form, or a
+/// sign-in to the card's server (clause 3a).
+fn take_wants(gui: &mut Gui) {
+    let wants = gui.device.page.as_mut().and_then(Page::take_wants);
+    match wants {
+        Some(crate::device::Wants::AddServer) => gui.act(Act::SrvAdd),
+        // Signed in again to that server only: its own edit form.
+        Some(crate::device::Wants::SignIn(id)) => {
+            let at = id.and_then(|id| gui.config.servers.iter().position(|e| e.url == id));
+            gui.act(at.map_or(Act::SrvAdd, Act::SrvEdit))
+        }
+        None => false,
+    };
+}
+
 /// The player is quitting (clause 11): the page, and one left behind, let
 /// every port go first — a read under way restarts its board — the wait
 /// bounded, and said on stderr past a second; then they go with the GUI.
 /// No page, a page that never saw a board, or a write (which only the exit
-/// can cut short) waits for nothing.
+/// can cut short) waits for nothing. A sync is stopped at its next save
+/// and waited for (clause 57), saying so on stderr — but never past a
+/// write, whose rule wins: then the sync is cut where it stands and its
+/// next run recovers it (clause 10).
 pub(crate) fn quit(gui: &mut Gui) {
+    let wrote = writing(gui);
     let_go_within(gui, LET_GO);
+    if wrote {
+        return;
+    }
+    let waited = gui.device.quit_since.map_or(Duration::ZERO, |since| since.elapsed());
+    let Some(card) = syncing(gui) else { return };
+    stop_syncs(gui);
+    let t0 = Instant::now();
+    let mut said = false;
+    while syncing(gui).is_some() && waited + t0.elapsed() < SAVE_WITHIN {
+        if !said {
+            eprintln!("mstream-player: {}", t!("dev.card.quit_stderr", card = card));
+            said = true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        if let Some(host) = gui.device.transfer.as_mut() {
+            host.pump();
+        }
+    }
 }
 
 fn let_go_within(gui: &mut Gui, within: Duration) {
@@ -533,7 +860,7 @@ mod tests {
             gui.config.gui.key_hints = hints;
             ends(&gui).no_board();
             let buf = floor(&mut gui);
-            assert!(all(&buf).contains("No player plugged in"), "{}", all(&buf));
+            assert!(all(&buf).contains("Nothing plugged in"), "{}", all(&buf));
             assert_eq!(row(&buf, 23).trim(), "d not showing up? · Esc library", "the footer, in the tab's words");
             let mut gui = on_tab();
             gui.config.gui.key_hints = hints;
@@ -1202,5 +1529,162 @@ mod tests {
         click(&mut gui, lx + 1, 0);
         assert_eq!(gui.screen, Screen::Library);
         assert!(gui.device.page.is_none());
+    }
+
+    // ── The transfer worker (clauses 16, 55, 57) ────────────────────────────
+
+    /// Unix seconds now: the cards' times are said from it.
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    }
+
+    /// The test as the transfer worker: its inbox, and the reports it tells.
+    type Worker = (Receiver<worker::In>, std::sync::mpsc::Sender<CardEvent>);
+
+    /// The GUI on a quiet transfer host, the readers watched and a card told
+    /// syncing (6.1 of 21.3 GB, 28%), folded by a frame on the Library.
+    fn syncing_gui() -> (Gui, Worker) {
+        let mut gui = gui();
+        let (host, inbox, tell) = TransferHost::quiet();
+        gui.device.transfer = Some(host);
+        tell.send(CardEvent::Watched { failed: None }).unwrap();
+        tell.send(CardEvent::Card(Box::new(worker::fixtures::syncing("E:", unix_now())))).unwrap();
+        frame(&mut gui);
+        (gui, (inbox, tell))
+    }
+
+    /// The card told again, `change` made to the ready card.
+    fn tell_card(tell: &std::sync::mpsc::Sender<CardEvent>, change: impl FnOnce(&mut worker::CardView)) {
+        let card = worker::fixtures::with(worker::fixtures::ready("E:", unix_now()), change);
+        tell.send(CardEvent::Card(Box::new(card))).unwrap();
+    }
+
+    /// Its sync stopped at its save.
+    fn stopped(tell: &std::sync::mpsc::Sender<CardEvent>) {
+        tell_card(tell, |v| v.ended = Some(worker::Ended::Stopped { at: 1_204, of: 4_812 }));
+    }
+
+    /// A key through the GUI's own loop: what it left the loop to do.
+    fn key_in(gui: &mut Gui, code: KeyCode, modifiers: KeyModifiers) -> super::super::Flow {
+        let mut ctx = super::super::tests::quiet_ctx(gui);
+        let key = ratatui::crossterm::event::Event::Key(KeyEvent::new(code, modifiers));
+        super::super::input(gui, &mut ctx, key)
+    }
+
+    #[test]
+    fn a_sync_wears_its_percentage_on_the_mp3_player_tab_and_says_so_in_the_mini_player() {
+        let _en = english();
+        let (mut gui, (_inbox, tell)) = syncing_gui();
+        let buf = render_at(&mut gui, 100, 30);
+        let top = row(&buf, 0);
+        let x = col(&top, "MP3 Player 28%").unwrap_or_else(|| panic!("the tab's percentage: {top}"));
+        let pct = x + "MP3 Player ".len() as u16;
+        assert_eq!(buf[(pct, 0)].fg, th().accent, "in the accent: {top}");
+        let mini = unseen_line(&gui);
+        assert_eq!(mini.as_deref(), Some("syncing Car music 28% · it goes on while you listen"));
+
+        // Paused, the tab keeps its percentage, dim.
+        tell_card(&tell, |v| {
+            let bytes = (6_100_000_000, 21_300_000_000);
+            v.ended = Some(worker::Ended::Paused { pause: worker::Pause::SignIn, at: 1_204, of: 4_812, bytes });
+        });
+        frame(&mut gui);
+        let buf = render_at(&mut gui, 100, 30);
+        let top = row(&buf, 0);
+        assert_eq!(col(&top, "MP3 Player 28%"), Some(x), "{top}");
+        assert_ne!(buf[(pct, 0)].fg, th().accent, "dim while paused: {top}");
+
+        // Ended, the tab is its name again and the mini player its own.
+        stopped(&tell);
+        frame(&mut gui);
+        let top = row(&render_at(&mut gui, 100, 30), 0);
+        assert!(top.contains(" MP3 Player ") && !top.contains('%'), "{top}");
+        assert_eq!(unseen_line(&gui), None);
+    }
+
+    #[test]
+    fn the_tab_shows_the_card_the_worker_tells_and_leaving_it_leaves_the_sync_running() {
+        let _en = english();
+        let (mut gui, (inbox, _tell)) = syncing_gui();
+        assert!(!press(&mut gui, KeyCode::Char('K')));
+        ends(&gui).no_board();
+        frame(&mut gui);
+        let buf = render_at(&mut gui, 100, 30);
+        let text = all(&buf);
+        assert!(text.contains("Car music") && text.contains("1,204 of 4,812"), "the card's sync:\n{text}");
+        assert!(row(&buf, 0).contains("MP3 Player 28%"), "{text}");
+
+        // The worker is the GUI's, not the page's: leaving stops nothing.
+        gui.act(Act::Screen(Screen::Library));
+        frame(&mut gui);
+        let told = worker::sent(&inbox);
+        let stops = told.iter().any(|c| matches!(c, worker::Cmd::Stop { .. } | worker::Cmd::Quit));
+        assert!(!stops, "nothing stopped: {told:?}");
+        let mark = sync_mark(&gui).map(|(card, pct, _)| (card, pct));
+        assert_eq!(mark, Some(("Car music".to_string(), 28)));
+    }
+
+    #[test]
+    fn q_during_a_sync_asks_first_and_its_yes_stops_at_the_next_save_then_quits() {
+        let _en = english();
+        let (mut gui, (inbox, tell)) = syncing_gui();
+        let flow = key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(flow, super::super::Flow::Continue, "the gate, not the quit");
+        assert!(quit_gate_open(&gui));
+        let buf = render_at(&mut gui, 100, 30);
+        let text = all(&buf);
+        assert!(text.contains("Stop syncing Car music and quit?"), "{text}");
+        assert!(text.contains("Keep syncing") && text.contains("Stop and quit"), "{text}");
+        // With key hints on, the tips are the gate's.
+        gui.config.gui.key_hints = true;
+        let text = all(&render_at(&mut gui, 100, 30));
+        assert!(text.contains("y stop and quit · Enter or Esc keep syncing"), "{text}");
+
+        // Enter keeps syncing: nothing asked of the worker.
+        let flow = key_in(&mut gui, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(flow, super::super::Flow::Continue);
+        assert!(!quit_gate_open(&gui) && !quit_waiting(&gui));
+        assert!(worker::sent(&inbox).is_empty());
+
+        // A second card waits its turn (clause 56).
+        let waiting = worker::fixtures::with(worker::fixtures::ready("F:", unix_now()), |v| {
+            v.run = Some(worker::Run { phase: worker::Phase::Waiting, ..worker::Run::default() });
+        });
+        tell.send(CardEvent::Card(Box::new(waiting))).unwrap();
+        frame(&mut gui);
+
+        // y: the sync stops at its next save, and the quit waits for it.
+        // The worker is told to quit: the waiting card's sync never starts
+        // in the wait (its own tests: the queue cleared, nothing started).
+        key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        let flow = key_in(&mut gui, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(flow, super::super::Flow::Continue);
+        assert_eq!(worker::sent(&inbox), vec![worker::Cmd::Quit]);
+        assert!(quit_waiting(&gui) && !quit_ready(&gui));
+        stopped(&tell);
+        frame(&mut gui);
+        assert!(quit_ready(&gui), "the sync saved and ended: the quit goes");
+    }
+
+    #[test]
+    fn ctrl_c_during_a_sync_asks_nothing_and_the_way_out_stops_it_at_the_next_save() {
+        let _en = english();
+        let (mut gui, (inbox, tell)) = syncing_gui();
+        let flow = key_in(&mut gui, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(flow, super::super::Flow::Quit);
+        assert!(!quit_gate_open(&gui));
+        // The way out: the sync told to stop, its save waited for.
+        let worker = std::thread::spawn(move || {
+            let heard = inbox.recv_timeout(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(200));
+            stopped(&tell);
+            matches!(heard, Ok(worker::In::Cmd(worker::Cmd::Quit)))
+        });
+        let t0 = Instant::now();
+        quit(&mut gui);
+        let took = t0.elapsed();
+        assert!(worker.join().unwrap(), "the sync was told to stop at its next save");
+        let waited = took >= Duration::from_millis(150) && took < Duration::from_secs(5);
+        assert!(waited, "it waited for the save, no longer: {took:?}");
     }
 }

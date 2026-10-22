@@ -2,7 +2,7 @@
 
 `bash test/e2e/run.sh` drives the real binary through the real event
 loop with expect(1), against a **stateful fake mStream**
-(`fake_mstream.py`) — no Node, no real server, no audio files. Nine
+(`fake_mstream.py`) — no Node, no real server, no audio files. Ten
 scenarios, each on a fresh fake and a fresh `$HOME`:
 
 - **A** — the full English walk (folders → extras → login → Done), then
@@ -39,6 +39,14 @@ scenarios, each on a fresh fake and a fresh `$HOME`:
   written", `d` opens Details, Esc leaves. Then, without expect, `device
   list` on two fake boards, `--yes` writing a fresh board end to end, and a
   held port refused.
+- **J** — the SD-card transfer: the fake with `FAKE_LIBRARY=1` serves a
+  made-up library on the routes a card sync reads (the paged sync
+  manifest with its ETag and 304, `metadata/batch`, `/media` with Range
+  and HEAD, `/transcode`, album art, embeddings), checked without expect;
+  and the hidden `device card-sync` refuses a volume that isn't one. A
+  sync itself needs a card in a reader, which CI has none of: the Rust
+  tests run one end to end with a host folder as the card
+  (src/device/card/sync/tests.rs).
 
 ## The two harness laws (learned the hard way)
 
