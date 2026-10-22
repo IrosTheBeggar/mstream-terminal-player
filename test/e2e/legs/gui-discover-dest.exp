@@ -1,0 +1,109 @@
+#!/usr/bin/expect -f
+# The GUI player's Where files land against the fake server's destination
+# (test/e2e/fake_mstream.py, FAKE_TASTE=1 FAKE_PLUGINS=1; docs/ux-contracts/
+# discovery-page.md, clauses 105 and 142–148). At 100 × 30 with the queue
+# panel folded, `G` opens the room, → its Connected servers tab, ↓ lights
+# the strip's "Lanterns" from Attic and `c` opens Keep a copy in album
+# focus: LANDS IN copies › Attic Band › Lanterns, "the library's default".
+# `d` opens Where files land on that place (the hand on LIBRARY: the fake
+# offers copies and music); ↓ to FOLDER, "fr" typed, Tab completes it from
+# the library's own folders (the fake lists copies' from-peers), Esc closes
+# the list and Enter saves: Keep a copy reads copies › from-peers › Attic
+# Band › Lanterns, "saved for your account", the hand on Change…. Then the
+# destination moves behind the client's back (POST /_move_destination, as
+# another tab saving the library default), ↓ ↓ walks Cancel to Add album and
+# Enter starts — the fake answers 409 destination_changed and starts
+# nothing: LANDS IN redraws from the answer and one GOLD line says so.
+# Esc, q. run.sh replays the stream for the states that repaint in place
+# (check_dest.py) and asks the fake what was sent. Gates on first-paint
+# words only; each gate's braces span lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "Discover" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-DISCOVER-ROW" 2 }
+}
+drain 1
+# The queue panel folds: the room takes its 80 cells.
+send "\t"
+drain 1
+send "G"
+expect {
+    "based on songs you finished" {}
+    eof { puts "DIED-ON-ANSWER"; exit 8 }
+    timeout { fail "NO-ANSWER" 4 }
+}
+drain 1
+send "\x1b\[C"
+expect {
+    "Lanterns" {}
+    eof { puts "DIED-ON-SERVERS"; exit 9 }
+    timeout { fail "NO-PEER-ALBUM" 5 }
+}
+# The gate's two reads and the rows' lookup land.
+drain 2
+send "\x1b\[B"
+drain 1
+send "c"
+expect {
+    "Add album" {}
+    eof { puts "DIED-ON-C"; exit 12 }
+    timeout { fail "NO-KEEP-MODAL" 13 }
+}
+# Its own read of the destination lands.
+drain 1
+send "d"
+expect {
+    "Where files land" {}
+    eof { puts "DIED-ON-D"; exit 14 }
+    timeout { fail "NO-PICKER" 15 }
+}
+drain 1
+send "\x1b\[B"
+drain 1
+send "fr"
+# The library's folders, asked as it is typed, land; Tab completes.
+drain 1
+send "\t"
+drain 1
+send "\x1b"
+drain 1
+send "\r"
+expect {
+    "saved for your account" {}
+    eof { puts "DIED-ON-SAVE"; exit 16 }
+    timeout { fail "NO-SAVED" 17 }
+}
+drain 1
+# Another tab puts the library default back: the place shown is stale.
+exec curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "{\"destination\": null}" "$::env(FAKE_URL)/_move_destination"
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\r"
+expect {
+    "where files land changed" {}
+    eof { puts "DIED-ON-START"; exit 18 }
+    timeout { fail "NO-MOVED-LINE" 19 }
+}
+drain 1
+send "\x1b"
+drain 1
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 20 }
+}
+catch wait result
+exit [lindex $result 3]

@@ -235,6 +235,7 @@ s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert len(s['job_starts']) == 1, s['job_starts']
 start = s['job_starts'][0]
 assert start['scope'] == 'album', start
+assert start['destination'] == {'vpath': 'copies', 'base': '', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'}, start  # the place LANDS IN drew
 assert start['recommendation'] == {'artist': 'Attic Band', 'title': 'Ember', 'album': 'Lanterns', 'duration': 199,
     'similarity': 0.81, 'filepath': 'Music/ember.mp3', 'albumArt': 'attic-lanterns.png',
     'peer': {'id': 7, 'name': 'Attic'}, 'source': 'federation'}, start
@@ -245,6 +246,59 @@ import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert len(s['lookup_sizes']) >= 2 and all(0 < n <= 100 for n in s['lookup_sizes']), s['lookup_sizes']
 assert s['cancels'] == 0 and s['clears'] == 0, s
+"
+stop_fake
+
+# ── Scenario K2: Keep a copy against a server from before the pin ────────
+# The same leg against FAKE_NO_PIN=1: mStream before 2026-10-21, whose jobs
+# route's strict body refuses `destination` (Joi's 400). The start is asked
+# once more without the key and runs unpinned, as such a server runs every
+# copy (discovery-page clause 145) — the same states, the same Copies.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 FAKE_NO_PIN=1 start_fake K2)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-keep-no-pin gui-discover-keep.exp "$WORK/h16" "$WORK/gui-discover-keep-no-pin.out"
+if python3 "$E2E/check_keep.py" "$WORK/gui-discover-keep-no-pin.out" "$E2E/replay.py" 30 100; then
+  echo "PASS keep a copy on a server from before the pin"
+else
+  echo "FAIL keep a copy on a server from before the pin"; FAILS=$((FAILS+1))
+fi
+assert "the start was asked again without the destination, and ran" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert [('destination' in b) for b in s['job_starts']] == [True, False], s['job_starts']
+assert s['job_answers'] == [400, 202], s['job_answers']
+assert s['job_starts'][1]['scope'] == 'album' and s['job_starts'][1]['recommendation'] == s['job_starts'][0]['recommendation'], s['job_starts']
+assert [j['state'] for j in s['jobs']] == ['done'], s['jobs']
+"
+stop_fake
+
+# ── Scenario W: Where files land, the start's pinned destination ─────────
+# The same gate as K. `c` on the lit tile opens Keep a copy on the library's
+# default; `d` opens Where files land, Tab completes a folder from the
+# library's own (the file explorer), Enter saves it (PUT) and Keep a copy
+# reads the new place. The destination then moves behind the client's back
+# (the fake's /_move_destination, as another tab would), and Add album —
+# which sends the place Keep a copy showed — is answered 409
+# destination_changed: nothing starts, LANDS IN redraws from the answer
+# (docs/ux-contracts/discovery-page.md, clauses 105, 142-148). check_dest.py
+# replays the stream frame by frame for those states.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake W)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-dest gui-discover-dest.exp "$WORK/h15" "$WORK/gui-discover-dest.out" env FAKE_URL="http://127.0.0.1:$PORT"
+if python3 "$E2E/check_dest.py" "$WORK/gui-discover-dest.out" "$E2E/replay.py" 30 100; then
+  echo "PASS where files land: the default, the picker, saved, moved"
+else
+  echo "FAIL where files land: the default, the picker, saved, moved"; FAILS=$((FAILS+1))
+fi
+assert "the picker saved the completed folder, the start showed it, the moved destination started nothing" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['destination_puts'] == [{'destination': {'vpath': 'copies', 'base': 'from-peers', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'}}], s['destination_puts']
+assert '/copies' in s['folder_lists'], s['folder_lists']
+assert s['destination_gets'] == 3, s['destination_gets']  # the gate, the open, the 409's read again — never one a frame
+assert len(s['job_starts']) == 1, s['job_starts']
+assert s['job_starts'][0]['destination'] == {'vpath': 'copies', 'base': 'from-peers', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'}, s['job_starts'][0]
+assert s['job_answers'] == ['destination_changed'] and s['jobs'] == [], (s['job_answers'], s['jobs'])
 "
 stop_fake
 

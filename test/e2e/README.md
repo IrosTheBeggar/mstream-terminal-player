@@ -50,6 +50,21 @@ room against the taste route, is described in run.sh):
   replays the stream frame by frame for those states; the fake's
   `/_state` says what was sent (the row unchanged, scope album) and how
   the rows were looked up.
+- **K2** — the same leg against a server from before the pin
+  (`FAKE_NO_PIN=1`: the jobs route's strict body refuses `destination`
+  with Joi's 400): the start is asked once more without the key and the
+  copy runs unpinned — the same states, the same Copies; `/_state` says
+  both bodies and their answers (400, then 202).
+- **W** — Where files land (the same fake; its destination saved per
+  account as the server saves it, its libraries `copies` and `music`):
+  Keep a copy opens on the library's default, `d` opens the picker, Tab
+  completes a folder from the library's own (the file explorer) and Enter
+  saves it; Keep a copy reads the new place, saved for the account. The
+  fake's `/_move_destination` then puts the default back behind the
+  client's back, and Add album — which sends the place it showed — is
+  answered 409 `destination_changed`: nothing starts, LANDS IN redraws
+  from the answer with its GOLD line. `check_dest.py` replays the stream;
+  `/_state` says what was saved, read, listed and started.
 
 - **M** — Apple Terminal's mouse dialect (`TERM_PROGRAM=Apple_Terminal`
   in the spawned env, `FAKE_TASTE=1 FAKE_PLUGINS=1`): every click is sent

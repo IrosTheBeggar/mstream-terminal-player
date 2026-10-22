@@ -19,9 +19,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, ArtistAlbumRow, CancelAnswer, CollectionDestinationView, DirListing, DiscoveryPluginsResponse, Genre,
-    JobLookup, JobScope, JobStarted, JourneyStop, Ping, PluginJobList, PluginLink, PlaylistSummary,
-    SearchResults, SimilarArtist, TasteRequest, TasteResponse, Track,
+    Album, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
+    DiscoveryPluginsResponse, Genre, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, Ping, PluginJobList,
+    PluginLink, PlaylistSummary, SearchResults, SimilarArtist, TasteRequest, TasteResponse, Track,
 };
 use crate::api::{ApiError, Client, PluginFailure};
 use crate::discovery::DiscoveredServer;
@@ -235,9 +235,27 @@ pub enum ApiCmd {
     JobsLookup { seq: u64, generation: u64, recs: Vec<serde_json::Value> },
     /// The caller's jobs — the poll and the Copies modal (clause 112).
     Jobs { seq: u64, generation: u64 },
-    /// Start a copy of `rec`, sent unchanged, with `scope` (clause 103).
-    /// `ticket` comes back on the reply, so the Keep modal knows its own.
-    JobStart { ticket: u64, generation: u64, plugin: String, rec: Box<serde_json::Value>, scope: JobScope },
+    /// Start a copy of `rec`, sent unchanged, with `scope` (clause 103)
+    /// and the place LANDS IN showed (clause 145: `None` sends none,
+    /// `Some(None)` null). `ticket` comes back on the reply, so the Keep
+    /// modal knows its own.
+    JobStart {
+        ticket: u64,
+        generation: u64,
+        plugin: String,
+        rec: Box<serde_json::Value>,
+        scope: JobScope,
+        destination: Option<Option<CollectionDestination>>,
+    },
+    /// The destination read again — each Keep a copy modal that opens
+    /// asks (clause 105); `seq` comes back: the last read wins.
+    DestinationRead { seq: u64, generation: u64 },
+    /// Save where this account's copies land — the picker's Save (clause
+    /// 144): `None` goes back to the library default.
+    DestinationSave { seq: u64, generation: u64, destination: Option<CollectionDestination> },
+    /// The folders in `path` (`/{library}/{folder}`), for the picker's
+    /// completion (clause 143): the session's own server's listing.
+    DestinationFolders { seq: u64, generation: u64, path: String },
     /// Cancel job `id` (a 409 means it had already finished, clause 133).
     JobCancel { generation: u64, id: i64 },
     /// Drop the caller's finished jobs — the Copies modal's Clear finished.
@@ -332,6 +350,9 @@ impl ApiCmd {
             | ApiCmd::JobsLookup { .. }
             | ApiCmd::Jobs { .. }
             | ApiCmd::JobStart { .. }
+            | ApiCmd::DestinationRead { .. }
+            | ApiCmd::DestinationSave { .. }
+            | ApiCmd::DestinationFolders { .. }
             | ApiCmd::JobCancel { .. }
             | ApiCmd::JobsClear { .. }
             | ApiCmd::PluginLinks { .. }
@@ -688,6 +709,12 @@ pub enum Event {
     JobsLookup { seq: u64, generation: u64, answer: Result<Vec<JobLookup>, PluginFailure> },
     Jobs { seq: u64, generation: u64, answer: Result<Box<PluginJobList>, PluginFailure> },
     JobStarted { ticket: u64, generation: u64, answer: Result<Box<JobStarted>, PluginFailure> },
+    /// The destination as read again, or as a save left it — the view,
+    /// or why there is none (a failed read keeps what is drawn).
+    DestinationRead { seq: u64, generation: u64, answer: Result<Box<CollectionDestinationView>, PluginFailure> },
+    DestinationSaved { seq: u64, generation: u64, answer: Result<Box<CollectionDestinationView>, PluginFailure> },
+    /// The folder names in `path`, as asked.
+    DestinationFolders { seq: u64, generation: u64, path: String, answer: Result<Vec<String>, PluginFailure> },
     JobCancelled { generation: u64, id: i64, answer: Result<CancelAnswer, PluginFailure> },
     /// How many finished jobs went.
     JobsCleared { generation: u64, answer: Result<u64, PluginFailure> },
@@ -1401,8 +1428,16 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::KeepGate { generation } => crate::api::wait(keep_gate(c, generation)),
         ApiCmd::JobsLookup { seq, generation, recs } => crate::api::wait(jobs_lookup(c, seq, generation, &recs)),
         ApiCmd::Jobs { seq, generation } => crate::api::wait(jobs(c, seq, generation)),
-        ApiCmd::JobStart { ticket, generation, plugin, rec, scope } => {
-            crate::api::wait(job_start(c, ticket, generation, &plugin, &rec, scope))
+        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination } => {
+            let ask = JobStartAsk { plugin: &plugin, rec: &rec, scope, destination: destination.as_ref().map(Option::as_ref) };
+            crate::api::wait(job_start(c, ticket, generation, ask))
+        }
+        ApiCmd::DestinationRead { seq, generation } => crate::api::wait(destination_read(c, seq, generation)),
+        ApiCmd::DestinationSave { seq, generation, destination } => {
+            crate::api::wait(destination_save(c, seq, generation, destination.as_ref()))
+        }
+        ApiCmd::DestinationFolders { seq, generation, path } => {
+            crate::api::wait(destination_folders(c, seq, generation, path))
         }
         ApiCmd::JobCancel { generation, id } => crate::api::wait(job_cancel(c, generation, id)),
         ApiCmd::JobsClear { generation } => crate::api::wait(jobs_clear(c, generation)),
@@ -2371,16 +2406,47 @@ pub(crate) async fn jobs(client: &Client, seq: u64, generation: u64) -> Result<E
     Ok(Event::Jobs { seq, generation, answer: answer.map(Box::new) })
 }
 
-pub(crate) async fn job_start(
+/// What one start sends: the plug-in, the row unchanged, the scope and
+/// the place shown ([`ApiCmd::JobStart`]).
+pub(crate) struct JobStartAsk<'a> {
+    pub plugin: &'a str,
+    pub rec: &'a serde_json::Value,
+    pub scope: JobScope,
+    pub destination: Option<Option<&'a CollectionDestination>>,
+}
+
+/// A start; the server's 409 `destination_changed` is the room's failure
+/// to word (clause 146), the place in force now with it.
+pub(crate) async fn job_start(client: &Client, ticket: u64, generation: u64, ask: JobStartAsk<'_>) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_job_start_async(ask.plugin, ask.rec, Some(ask.scope), ask.destination).await)?;
+    let answer = answer.and_then(|started| match started {
+        JobStartAnswer::Started(started) => Ok(started),
+        JobStartAnswer::DestinationChanged(now) => Err(PluginFailure::DestinationChanged(now)),
+    });
+    Ok(Event::JobStarted { ticket, generation, answer })
+}
+
+pub(crate) async fn destination_read(client: &Client, seq: u64, generation: u64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.collection_destination_async().await)?;
+    Ok(Event::DestinationRead { seq, generation, answer: answer.map(Box::new) })
+}
+
+pub(crate) async fn destination_save(
     client: &Client,
-    ticket: u64,
+    seq: u64,
     generation: u64,
-    plugin: &str,
-    rec: &serde_json::Value,
-    scope: JobScope,
+    destination: Option<&CollectionDestination>,
 ) -> Result<Event, ApiError> {
-    let answer = plugin_result(client.plugin_job_start_async(plugin, rec, Some(scope)).await)?;
-    Ok(Event::JobStarted { ticket, generation, answer: answer.map(Box::new) })
+    let answer = plugin_result(client.collection_destination_save_async(destination).await)?;
+    Ok(Event::DestinationSaved { seq, generation, answer: answer.map(Box::new) })
+}
+
+/// A folder's own folders, by name in the server's order — a file is no
+/// place to land in.
+pub(crate) async fn destination_folders(client: &Client, seq: u64, generation: u64, path: String) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.file_explorer_async(&path).await)?;
+    let answer = answer.map(|listing| listing.directories.into_iter().map(|d| d.name).filter(|n| !n.is_empty()).collect());
+    Ok(Event::DestinationFolders { seq, generation, path, answer })
 }
 
 pub(crate) async fn job_cancel(client: &Client, generation: u64, id: i64) -> Result<Event, ApiError> {
@@ -2628,6 +2694,36 @@ mod tests {
         }
 
         #[test]
+        fn a_changed_destination_is_the_rooms_failure_and_the_folders_keep_their_names() {
+            let changed = json_reply("409 Conflict", serde_json::json!({ "error": "destination_changed", "message": "moved",
+                "destination": { "vpath": "music", "base": "", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "default" } }));
+            let (port, seen) = canned_server_bodies(vec![
+                changed,
+                json_reply("200 OK", serde_json::json!({ "path": "/copies/", "directories": [{ "name": "from-peers" }, { "name": "" }], "files": [{ "name": "x.mp3" }] })),
+                json_reply("200 OK", serde_json::json!({ "destination": null, "libraries": [] })),
+            ]);
+            let c = client(port);
+            let shown = CollectionDestination { vpath: "copies".into(), ..CollectionDestination::default() };
+            let ask = JobStartAsk { plugin: "federation-copy", rec: &serde_json::json!({ "title": "x" }), scope: JobScope::Song, destination: Some(Some(&shown)) };
+            match crate::api::wait(job_start(&c, 3, 4, ask)).unwrap() {
+                Event::JobStarted { ticket: 3, generation: 4, answer: Err(PluginFailure::DestinationChanged(Some(Some(now)))) } => assert_eq!(now.vpath, "music"),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(seen_json(&seen).1["destination"], serde_json::json!({ "vpath": "copies", "base": "", "layout": "" }));
+            match crate::api::wait(destination_folders(&c, 5, 4, "/copies".into())).unwrap() {
+                Event::DestinationFolders { seq: 5, path, answer: Ok(names), .. } => {
+                    assert_eq!((path.as_str(), names), ("/copies", vec!["from-peers".to_string()]), "folders only, named");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(seen_json(&seen).1["directory"], "/copies");
+            match crate::api::wait(destination_save(&c, 6, 4, None)).unwrap() {
+                Event::DestinationSaved { seq: 6, answer: Ok(view), .. } => assert!(view.destination.is_none()),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[test]
         fn a_401_is_the_sessions_and_every_other_failure_the_rooms() {
             let (port, _seen) = canned_server_bodies(vec![
                 json_reply("401 Unauthorized", serde_json::json!({ "error": "Authentication Error" })),
@@ -2698,7 +2794,17 @@ mod tests {
                 ApiCmd::KeepGate { generation: 1 },
                 ApiCmd::JobsLookup { seq: 1, generation: 1, recs: vec![] },
                 ApiCmd::Jobs { seq: 1, generation: 1 },
-                ApiCmd::JobStart { ticket: 1, generation: 1, plugin: "federation-copy".into(), rec: Box::new(serde_json::json!({})), scope: JobScope::Album },
+                ApiCmd::JobStart {
+                    ticket: 1,
+                    generation: 1,
+                    plugin: "federation-copy".into(),
+                    rec: Box::new(serde_json::json!({})),
+                    scope: JobScope::Album,
+                    destination: None,
+                },
+                ApiCmd::DestinationRead { seq: 1, generation: 1 },
+                ApiCmd::DestinationSave { seq: 1, generation: 1, destination: None },
+                ApiCmd::DestinationFolders { seq: 1, generation: 1, path: "/copies".into() },
                 ApiCmd::JobCancel { generation: 1, id: 2 },
                 ApiCmd::JobsClear { generation: 1 },
                 ApiCmd::PluginLinks { seq: 1, generation: 1, plugin: "links".into(), rec: Box::new(serde_json::json!({})) },

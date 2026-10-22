@@ -5675,7 +5675,10 @@ impl App {
             | Event::JobCancelled { .. }
             | Event::JobsCleared { .. }
             | Event::PluginLinks { .. }
-            | Event::KeepFacts { .. }) => self.consume_keep(event),
+            | Event::KeepFacts { .. }
+            | Event::DestinationRead { .. }
+            | Event::DestinationSaved { .. }
+            | Event::DestinationFolders { .. }) => self.consume_keep(event),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just

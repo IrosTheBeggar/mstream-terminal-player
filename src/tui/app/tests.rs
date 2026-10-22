@@ -8233,8 +8233,8 @@ mod keep {
 
     fn destination(vpath: Option<&str>) -> CollectionDestinationView {
         serde_json::from_value(serde_json::json!({
-            "destination": vpath.map(|v| serde_json::json!({ "vpath": v, "base": "", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "default" })),
-            "libraries": [{ "vpath": "copies" }], "defaultLayout": "{{ARTIST}}/{{ALBUM}}", "variables": ["ARTIST", "ALBUM"]
+            "destination": vpath.map(|v| serde_json::json!({ "vpath": v, "base": "", "layout": "{{ALBUMARTIST}}/{{ALBUM}}", "source": "default" })),
+            "libraries": [{ "vpath": "copies" }], "defaultLayout": "{{ALBUMARTIST}}/{{ALBUM}}", "variables": ["ARTIST", "ALBUM"]
         }))
         .unwrap()
     }
@@ -8737,7 +8737,7 @@ mod keep {
         };
         let facts = KeepFacts {
             album_songs: Some(3),
-            peer_albums: Some(vec![row("Borrowed Tapes", Some("Boukmanflow"))]),
+            peer_albums: Some(vec![crate::api::types::ArtistAlbumRow { year_min: Some(2017), ..row("Borrowed Tapes", Some("Boukmanflow")) }]),
             local_albums: Some(vec![row("One", None), row("Two", None), row("Three", None)]),
         };
         let generation = app.session_gen();
@@ -8750,7 +8750,10 @@ mod keep {
         let view = app.keep_view().unwrap();
         assert_eq!((view.choice, view.scope, view.missing), (KeepChoice::Artist, JobScope::ArtistMissing, Some((true, 1))));
         assert!(matches!(view.stage, KeepStage::Choose { verb: Some(KeepVerb::Missing(1)), .. }));
-        assert_eq!(view.landing("each album"), Some(vec!["copies".into(), "Boukmanflow".into(), "each album".into()]));
+        // The one album it would take is named where it lands (clause 105).
+        let landing = view.landing.as_ref().map(|l| (l.crumbs(), l.per_album));
+        assert_eq!(landing, Some((vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()], false)));
+        assert_eq!(view.one_missing, Some(("Borrowed Tapes".into(), Some(2017))), "its year from the listing");
         assert_eq!(starts(&app.keep_start())[0].2, JobScope::ArtistMissing);
         // Picking another radio unticks it.
         app.keep_close();
@@ -8943,6 +8946,313 @@ mod keep {
             Some("copies"),
         );
         assert!(bare.links_open(KeepTarget::Row { group: late.0, row: late.1 }).is_empty());
+    }
+
+    // ── Where files land (clauses 105, 142–148) ───────────────────────────
+
+    fn place(vpath: &str, base: &str, layout: &str, source: &str) -> crate::api::types::CollectionDestination {
+        crate::api::types::CollectionDestination {
+            vpath: vpath.into(),
+            base: base.into(),
+            layout: layout.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    fn view_of(destination: Option<crate::api::types::CollectionDestination>) -> CollectionDestinationView {
+        CollectionDestinationView {
+            destination,
+            libraries: serde_json::from_value(serde_json::json!([{ "vpath": "music", "template": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}" }, { "vpath": "copies" }])).unwrap(),
+            default_layout: Some("{{ALBUMARTIST}}/{{ALBUM}}".into()),
+            ..CollectionDestinationView::default()
+        }
+    }
+
+    fn reads(effects: &[Effect]) -> Vec<u64> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::DestinationRead { seq, .. }) => Some(*seq),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn start_places(effects: &[Effect]) -> Vec<Option<Option<crate::api::types::CollectionDestination>>> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::JobStart { destination, .. }) => Some(destination.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn landing_of(app: &App) -> Option<Vec<String>> {
+        app.keep_view().unwrap().landing.map(|l| l.crumbs())
+    }
+
+    #[test]
+    fn every_keep_a_copy_reads_its_destination_again_and_a_failed_read_keeps_what_is_drawn() {
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        let late = row_at(&app, "Late Train Verse");
+        let generation = app.session_gen();
+        let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        let first = reads(&opened);
+        assert_eq!(first.len(), 1, "read with the open: {opened:?}");
+        // The last place known draws meanwhile; the answer replaces it.
+        assert_eq!(landing_of(&app), Some(vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
+        let saved = place("copies", "from-peers", "{{ALBUMARTIST}}/{{ALBUM}}", "user");
+        app.apply_event(Event::DestinationRead { seq: first[0], generation, answer: Ok(Box::new(view_of(Some(saved.clone())))) });
+        assert_eq!(landing_of(&app), Some(vec!["copies".into(), "from-peers".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
+        assert_eq!(app.keep_view().unwrap().destination.and_then(|d| d.source).as_deref(), Some("user"));
+        // Closed and opened again: asked again, never once per visit.
+        app.keep_close();
+        let again = reads(&app.keep_open(KeepTarget::Row { group: late.0, row: late.1 }));
+        assert_eq!(again.len(), 1);
+        // A read that fails keeps what is drawn; an older one fills nothing.
+        app.apply_event(Event::DestinationRead { seq: again[0], generation, answer: Err(PluginFailure::Unreachable("down".into())) });
+        assert_eq!(app.keep_destination(), Some(&saved));
+        app.apply_event(Event::DestinationRead { seq: first[0], generation, answer: Ok(Box::new(view_of(None))) });
+        assert_eq!(app.keep_destination(), Some(&saved), "a read since replaced fills nothing");
+        // A read that finds nowhere: Nowhere, the gate closed.
+        app.keep_close();
+        let last = reads(&app.keep_open(KeepTarget::Row { group: late.0, row: late.1 }))[0];
+        app.apply_event(Event::DestinationRead { seq: last, generation, answer: Ok(Box::new(view_of(None))) });
+        assert_eq!(app.keep_view().unwrap().stage, KeepStage::Nowhere);
+        assert!(!app.keep_gate() && app.keep_start().is_empty());
+    }
+
+    #[test]
+    fn a_start_sends_the_place_shown_and_a_changed_one_is_refused_and_read_again() {
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        open_late(&mut app);
+        let shown = app.keep_destination().cloned();
+        let effects = app.keep_start();
+        assert_eq!(start_places(&effects), vec![Some(shown.clone())], "the place LANDS IN drew");
+        // Starting: LANDS IN reads the place the start sent.
+        assert_eq!(landing_of(&app), Some(vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
+        // 409 destination_changed: nothing started, LANDS IN from the answer at once, read again.
+        let music = place("music", "", "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", "default");
+        let landed = land_start(&mut app, &effects, Err(PluginFailure::DestinationChanged(Some(Some(music.clone())))));
+        assert_eq!(reads(&landed).len(), 1, "{landed:?}");
+        let view = app.keep_view().unwrap();
+        assert!(matches!(view.stage, KeepStage::Refused { failure: PluginFailure::DestinationChanged(_), verb: Some(KeepVerb::Song) }));
+        assert_eq!(view.landing.map(|l| l.crumbs()), Some(vec!["music".into(), "Boukmanflow".into(), "2019 - Borrowed Tapes".into()]));
+        assert!(app.taste.keep.book.jobs.is_empty(), "no job");
+        // Add again sends the place now drawn.
+        let effects = app.keep_start();
+        assert_eq!(start_places(&effects), vec![Some(Some(music))]);
+        // A 409 that names no place this client reads: what is drawn stays,
+        // the GOLD line stands and the view is read again — never Nowhere.
+        let landed = land_start(&mut app, &effects, Err(PluginFailure::DestinationChanged(None)));
+        assert_eq!(reads(&landed).len(), 1);
+        let view = app.keep_view().unwrap();
+        assert!(matches!(view.stage, KeepStage::Refused { failure: PluginFailure::DestinationChanged(None), verb: Some(KeepVerb::Song) }));
+        assert_eq!(view.landing.map(|l| l.crumbs()), Some(vec!["music".into(), "Boukmanflow".into(), "2019 - Borrowed Tapes".into()]));
+        assert!(app.keep_gate(), "the gate stays open");
+        // A 409 that says nowhere: Nowhere.
+        let effects = app.keep_start();
+        land_start(&mut app, &effects, Err(PluginFailure::DestinationChanged(Some(None))));
+        assert_eq!(app.keep_view().unwrap().stage, KeepStage::Nowhere);
+        // Another account's live copy is a 409 of its own words: the choice stays.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        open_late(&mut app);
+        let effects = app.keep_start();
+        let theirs = PluginFailure::Refused { status: 409, words: "someone else on this server is already getting this — try again in a moment".into() };
+        assert!(reads(&land_start(&mut app, &effects, Err(theirs.clone()))).is_empty(), "nothing to read again");
+        assert_eq!(app.keep_view().unwrap().stage, KeepStage::Refused { failure: theirs, verb: Some(KeepVerb::Song) });
+    }
+
+    #[test]
+    fn a_copy_reads_its_pinned_place_while_it_runs_and_where_it_landed_once_it_ended() {
+        let pinned = |mut job: PluginJob, place: Option<crate::api::types::CollectionDestination>| {
+            job.params.destination = Some(place);
+            job
+        };
+        let old = place("copies", "old", "{{ARTIST}}/{{ALBUM}}", "user");
+        // Running: the pinned place, whatever the account saved since.
+        let (mut app, effects) = ready_room();
+        let running = pinned(copy_job(60, "text:late train verse", None, "running", B, serde_json::Value::Null), Some(old.clone()));
+        answer_lookup(&mut app, &effects, &[running.clone()]);
+        open_late(&mut app);
+        assert_eq!(landing_of(&app), Some(vec!["copies".into(), "old".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
+        // Pinned to nowhere: no LANDS IN at all.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[pinned(running.clone(), None)]);
+        open_late(&mut app);
+        assert_eq!(landing_of(&app), None);
+        // Ended: where its file landed — never the account's place now.
+        let (mut app, effects) = ready_room();
+        let done = pinned(copy_job(61, "text:late train verse", None, "done", B,
+            serde_json::json!({ "copied": { "vpath": "copies", "filepath": "copies/old/Boukmanflow/Borrowed Tapes/02.mp3" } })), Some(old.clone()));
+        answer_lookup(&mut app, &effects, &[done]);
+        open_late(&mut app);
+        assert_eq!(landing_of(&app), Some(vec!["copies".into(), "old".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
+        // Ended with nothing landed: the place it ran with (its result's, else its pin).
+        let (mut app, effects) = ready_room();
+        let failed = pinned(copy_job(62, "text:late train verse", None, "failed", B, serde_json::Value::Null), Some(old.clone()));
+        answer_lookup(&mut app, &effects, &[failed.clone()]);
+        open_late(&mut app);
+        assert_eq!(landing_of(&app), Some(vec!["copies".into(), "old".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
+        // The account's place moved since: Retry lands there, and the modal
+        // says so under LANDS IN before the press (the webapp's retryPath) —
+        // then sends the place it said, so a stale one is the server's 409.
+        let now = app.keep_destination().cloned().expect("the account's place");
+        let again = |app: &App| app.keep_view().unwrap().again.map(|l| l.crumbs());
+        assert_eq!(again(&app), Some(vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
+        let effects = app.keep_again();
+        assert_eq!(start_places(&effects), vec![Some(Some(now.clone()))]);
+        assert_eq!(landing_of(&app), Some(vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]), "starting: the place sent");
+        // Pinned where the account still is: nothing more to say.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[pinned(failed.clone(), Some(now.clone()))]);
+        open_late(&mut app);
+        assert_eq!(again(&app), None);
+        // A running copy has no Retry to speak for.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[running.clone()]);
+        open_late(&mut app);
+        assert_eq!(again(&app), None);
+        // A job from before the pin with nothing known of where it ran: LANDS
+        // IN stays hidden — an ended copy never reads the account's place
+        // now — and the retry's place is said instead.
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[copy_job(63, "text:late train verse", None, "failed", B, serde_json::Value::Null)]);
+        open_late(&mut app);
+        assert_eq!(landing_of(&app), None, "an ended copy never reads the account's place now");
+        assert_eq!(again(&app), Some(vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
+        assert_eq!(start_places(&app.keep_again()), vec![Some(Some(now))]);
+    }
+
+    #[test]
+    fn a_copies_list_restart_sends_the_place_the_copy_ran_with() {
+        // From the Copies list, which shows no place: the pin; a job from
+        // before the pin, the place its result names (2 songs in copies/old,
+        // the account now on music: the server says 409, never a quiet
+        // landing in music — clause 145); else the account's place.
+        let old = place("copies", "old", "{{ARTIST}}/{{ALBUM}}", "user");
+        let result = serde_json::json!({ "scope": "album", "destination": { "vpath": "copies", "base": "old", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "user" },
+            "songs": { "total": 3, "copied": [{ "filepath": "copies/old/Boukmanflow/Borrowed Tapes/01.mp3" }, { "filepath": "copies/old/Boukmanflow/Borrowed Tapes/02.mp3" }],
+                "skipped": [], "failed": [{ "title": "Late Train Verse" }] },
+            "counts": { "total": 3, "copied": 2, "skipped": 0, "failed": 1 }, "stopped": null });
+        let restart = |job: PluginJob| {
+            let (mut app, effects) = ready_room();
+            answer_lookup(&mut app, &effects, std::slice::from_ref(&job));
+            let generation = app.session_gen();
+            let music = place("music", "", "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", "default");
+            let seq = reads(&app.keep_dest_read())[0];
+            app.apply_event(Event::DestinationRead { seq, generation, answer: Ok(Box::new(view_of(Some(music.clone())))) });
+            assert_eq!(app.keep_destination(), Some(&music));
+            start_places(&app.copies_act(job.id))
+        };
+        let pre_pin = copy_job(64, "album:boukmanflow|borrowed tapes", Some("album"), "done", B, result.clone());
+        assert_eq!(pre_pin.params.destination, None, "from before the pin");
+        assert_eq!(restart(pre_pin), vec![Some(Some(old.clone()))], "its result's place, checked");
+        let mut pinned = copy_job(65, "album:boukmanflow|borrowed tapes", Some("album"), "done", B, result);
+        pinned.params.destination = Some(Some(place("copies", "elsewhere", "{{ARTIST}}/{{ALBUM}}", "user")));
+        assert_eq!(restart(pinned).first().cloned().flatten().flatten().map(|d| d.base), Some("elsewhere".into()), "the pin first");
+        let unknown = copy_job(66, "text:late train verse", None, "failed", B, serde_json::Value::Null);
+        assert_eq!(restart(unknown).first().cloned().flatten().flatten().map(|d| d.vpath), Some("music".into()), "else the account's place");
+    }
+
+    #[test]
+    fn a_save_is_one_at_a_time_its_view_replaces_the_gates_and_its_answer_is_taken_once() {
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        open_late(&mut app);
+        let saved = place("copies", "from-peers", "{{ALBUMARTIST}}/{{ALBUM}}", "user");
+        let (effects, sent) = app.keep_dest_save(Some(saved.clone()));
+        let (seq, generation) = match effects.as_slice() {
+            [Effect::Api(ApiCmd::DestinationSave { seq, generation, destination })] => {
+                assert_eq!(destination.as_ref(), Some(&saved));
+                (*seq, *generation)
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!((sent, app.keep_dest_saving()), (Some(seq), Some(seq)), "the picker keeps its own");
+        let refusal = PluginFailure::Refused { status: 400, words: "destination base folder: That path cannot be used.".into() };
+        app.apply_event(Event::DestinationSaved { seq, generation, answer: Err(refusal.clone()) });
+        assert_eq!(app.keep_dest_saving(), None);
+        assert_eq!(app.keep_dest_take_saved(), Some((seq, Err(refusal))));
+        assert_eq!(app.keep_dest_take_saved(), None, "taken once");
+        assert_ne!(app.keep_destination(), Some(&saved), "a refusal changes nothing");
+        // Saved: the answer's view is the gate's — LANDS IN reads it.
+        let (effects, _) = app.keep_dest_save(None);
+        let Some(Effect::Api(ApiCmd::DestinationSave { seq, destination: None, .. })) = effects.first() else { panic!("{effects:?}") };
+        app.apply_event(Event::DestinationSaved { seq: *seq, generation, answer: Ok(Box::new(view_of(Some(saved.clone())))) });
+        assert_eq!(app.keep_dest_take_saved(), Some((*seq, Ok(()))));
+        assert_eq!(app.keep_destination(), Some(&saved));
+        assert_eq!(app.keep_dest_view().map(|v| v.libraries.len()), Some(2));
+        // A save sent while one is out (a picker opened again) supersedes
+        // it: the first one's refusal is no one's to say, its view still the
+        // server's word — and the second's answer is the one taken.
+        let first = app.keep_dest_save(Some(saved.clone())).1.unwrap();
+        let second = app.keep_dest_save(None).1.unwrap();
+        app.apply_event(Event::DestinationSaved { seq: first, generation, answer: Err(PluginFailure::Unreachable("down".into())) });
+        assert_eq!((app.keep_dest_take_saved(), app.keep_dest_saving()), (None, Some(second)));
+        let back = place("copies", "", "{{ALBUMARTIST}}/{{ALBUM}}", "default");
+        app.apply_event(Event::DestinationSaved { seq: second, generation, answer: Ok(Box::new(view_of(Some(back.clone())))) });
+        assert_eq!(app.keep_dest_take_saved(), Some((second, Ok(()))));
+        assert_eq!(app.keep_destination(), Some(&back));
+    }
+
+    #[test]
+    fn a_read_sent_before_a_save_never_puts_back_the_place_from_before_it() {
+        // A slow server: the open's read is still out when the picker saves,
+        // and the save answers first. The read's older view draws nothing,
+        // and neither does a gate asked before the save (clause 144).
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        let late = row_at(&app, "Late Train Verse");
+        let generation = app.session_gen();
+        let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        let read = reads(&opened)[0];
+        assert_eq!(gate_asks(&app.keep_ask_gate()), 1, "a new visit asks the gate again");
+        let saved = place("copies", "from-peers", "{{ALBUMARTIST}}/{{ALBUM}}", "user");
+        let seq = app.keep_dest_save(Some(saved.clone())).1.unwrap();
+        app.apply_event(Event::DestinationSaved { seq, generation, answer: Ok(Box::new(view_of(Some(saved.clone())))) });
+        assert_eq!(app.keep_destination(), Some(&saved));
+        let old = place("copies", "", "{{ARTIST}}/{{ALBUM}}", "default");
+        app.apply_event(Event::DestinationRead { seq: read, generation, answer: Ok(Box::new(view_of(Some(old.clone())))) });
+        assert_eq!(app.keep_destination(), Some(&saved), "the read from before the save draws nothing");
+        app.apply_event(Event::KeepGate { generation, plugins: Ok(Box::new(listing(true))), destination: Some(Ok(Box::new(view_of(Some(old.clone()))))) });
+        assert_eq!(app.keep_destination(), Some(&saved), "nor the gate asked before it");
+        assert!(app.keep_gate(), "its listing still lands");
+        // The next Add sends the place the save left, never a 409 for it.
+        app.keep_close();
+        let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        let effects = app.keep_start();
+        assert_eq!(start_places(&effects), vec![Some(Some(saved.clone()))]);
+        // A read sent after the save is news again: it draws.
+        app.apply_event(Event::DestinationRead { seq: reads(&opened)[0], generation, answer: Ok(Box::new(view_of(Some(old.clone())))) });
+        assert_eq!(app.keep_destination(), Some(&old));
+    }
+
+    #[test]
+    fn the_folders_are_asked_once_each_one_at_a_time_and_go_with_the_picker() {
+        let (mut app, effects) = ready_room();
+        answer_lookup(&mut app, &effects, &[]);
+        open_late(&mut app);
+        let generation = app.session_gen();
+        let asked = app.keep_dest_list("/copies");
+        let Some(Effect::Api(ApiCmd::DestinationFolders { seq, path, .. })) = asked.first() else { panic!("{asked:?}") };
+        assert_eq!(path, "/copies");
+        assert!(app.keep_dest_list("/copies").is_empty(), "once");
+        assert!(app.keep_dest_list("/copies/from-peers").is_empty(), "one at a time: it waits");
+        assert_eq!(app.keep_dest_folders("/copies"), Some(&crate::tui::app::keep::Folders::Asking));
+        let next = app.apply_event(Event::DestinationFolders { seq: *seq, generation, path: "/copies".into(), answer: Ok(vec!["from-peers".into()]) });
+        assert_eq!(app.keep_dest_folders("/copies"), Some(&crate::tui::app::keep::Folders::Listed(vec!["from-peers".into()])));
+        let Some(Effect::Api(ApiCmd::DestinationFolders { seq, path, .. })) = next.first() else { panic!("the one waiting: {next:?}") };
+        assert_eq!(path, "/copies/from-peers");
+        app.apply_event(Event::DestinationFolders { seq: *seq, generation, path: path.clone(), answer: Err(PluginFailure::Refused { status: 404, words: "nope".into() }) });
+        assert!(matches!(app.keep_dest_folders("/copies/from-peers"), Some(crate::tui::app::keep::Folders::Failed(_))));
+        app.keep_dest_forget();
+        assert_eq!(app.keep_dest_folders("/copies"), None);
+        assert_eq!(app.keep_dest_list("/copies").len(), 1, "asked again once the picker opens again");
     }
 
     #[test]

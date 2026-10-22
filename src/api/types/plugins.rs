@@ -249,6 +249,21 @@ impl JobState {
 pub struct JobParams {
     /// Absent for a song job.
     pub scope: Option<String>,
+    /// Where it lands, pinned when it was asked for (mStream since
+    /// 2026-10-21): `None` a job from before the pin — it lands where the
+    /// account's destination says; `Some(None)` there was nowhere to put
+    /// a file; else the place, whatever the account has saved since.
+    #[serde(deserialize_with = "pinned")]
+    pub destination: Option<Option<CollectionDestination>>,
+}
+
+/// A pinned destination: `null` is nowhere, an object the place — and a
+/// shape this client cannot read is no pin at all, never the whole job lost.
+fn pinned<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<CollectionDestination>>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => Some(None),
+        other => serde_json::from_value(other).ok().map(Some),
+    })
 }
 
 /// One plug-in job (mStream's `DiscoveryPluginJob`). `recommendation` is
@@ -768,6 +783,63 @@ impl CopyResult {
     pub fn many(&self) -> Option<ManyCounts> {
         self.is_many().then(|| ManyCounts::of(self))
     }
+
+    /// Where a finished copy's files are (the webapp's `landedPath`): the
+    /// folder they share — the copied ones; when nothing was copied and
+    /// nothing failed or stopped it, the ones it found already in the
+    /// library (already yours, a file at the target). `None` when nothing
+    /// landed (failed, cancelled before a song, refused, nothing to copy)
+    /// or the files share no library; a [`Landed`] with no library when
+    /// songs were copied but the result lists none (the counts say so):
+    /// the caller draws the destination the job ran with instead.
+    pub fn landed(&self) -> Option<Landed> {
+        let crumbs = |path: &str| -> Vec<String> { path.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect() };
+        let one_file = |path: Option<&String>| {
+            let c = crumbs(path?);
+            (c.len() >= 2).then(|| Landed { vpath: Some(c[0].clone()), dirs: c[1..c.len() - 1].to_vec(), file: c.last().cloned() })
+        };
+        if let Some(path) = self.copied.as_ref().and_then(|c| c.filepath.as_ref()) {
+            return one_file(Some(path));
+        }
+        match self.skipped.as_deref() {
+            Some("owned") => return one_file(self.existing.as_ref().and_then(|e| e.filepath.as_ref())),
+            Some("exists") => return one_file(self.filepath.as_ref()),
+            _ => {}
+        }
+        let n = self.many()?;
+        let songs = self.songs.clone().unwrap_or_default();
+        let found: Vec<&serde_json::Value> = if n.copied > 0 {
+            songs.copied.iter().filter_map(|s| s.get("filepath")).collect()
+        } else if self.stopped.is_none() && n.failed == 0 && n.albums_failed == 0 && n.skipped > 0 {
+            songs.skipped.iter().filter_map(|s| s.get("at")).collect()
+        } else {
+            return None;
+        };
+        let lists: Vec<Vec<String>> =
+            found.iter().filter_map(|p| p.as_str()).map(crumbs).filter(|c| c.len() >= 2).collect();
+        let Some(first) = lists.first() else {
+            return (n.copied > 0).then(Landed::default);
+        };
+        // The folders every file sits under, its own name left out.
+        let mut shared = first.len() - 1;
+        for c in &lists {
+            shared = shared.min(c.len() - 1);
+            if let Some(at) = (0..shared).find(|&i| c[i] != first[i]) {
+                shared = at;
+            }
+        }
+        (shared >= 1).then(|| Landed { vpath: Some(first[0].clone()), dirs: first[1..shared].to_vec(), file: None })
+    }
+}
+
+/// Where a finished copy's files are ([`CopyResult::landed`]): the library,
+/// the folders under it, and one song's file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Landed {
+    /// `None`: songs were copied, but the result names none of them.
+    pub vpath: Option<String>,
+    pub dirs: Vec<String>,
+    pub file: Option<String>,
 }
 
 /// A many-song result's numbers (the webapp's `manyCounts`): songs from
@@ -854,6 +926,18 @@ pub enum CancelAnswer {
     AlreadyFinished,
 }
 
+/// A start's answer: the job (new, or the live one covering it), or the
+/// server's 409 `destination_changed` — the place the client showed is no
+/// longer where files land, nothing started, and the one in force now as
+/// a pin reads (clause 146): `Some(None)` nowhere, `Some(Some(place))`,
+/// and `None` an answer that named none this client reads — what is drawn
+/// stays until the view is read again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobStartAnswer {
+    Started(Box<JobStarted>),
+    DestinationChanged(Option<Option<CollectionDestination>>),
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct JobRunner {
@@ -935,9 +1019,18 @@ pub struct JobLookupBatch {
 
 // ── The collection destination ──────────────────────────────────────────────
 
+/// The layout a library with no template of its own renders (mStream's
+/// `DEFAULT_LAYOUT`, the album's credit first since 2026-10-19), where the
+/// view names none.
+pub const DEFAULT_LAYOUT: &str = "{{ALBUMARTIST}}/{{ALBUM}}";
+
+/// The variables a layout may name (mStream's `LAYOUT_VARS`), where the
+/// view names none.
+pub const LAYOUT_VARS: [&str; 6] = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"];
+
 /// Where copies land: a library, a base folder in it, a layout rendered
 /// per song (torrent path-template syntax).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct CollectionDestination {
     #[serde(deserialize_with = "null_default")]
@@ -952,8 +1045,10 @@ pub struct CollectionDestination {
 
 /// `GET /api/v1/discovery/collection/destination` — the effective
 /// destination (`None`: this caller may not put files anywhere — uploads
-/// off, or no library) and what a picker would need. Read-only here in
-/// v1 (clause 105).
+/// off, or no library) and what the picker needs (clauses 105, 142): the
+/// libraries the account may upload to, in the server's order, each with
+/// its own template; the layout a library without one renders; the
+/// variables a layout may name. `PUT` answers the same view.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CollectionDestinationView {
@@ -974,6 +1069,73 @@ pub struct DestinationLibrary {
     pub template: Option<String>,
 }
 
+impl CollectionDestinationView {
+    /// The layout a library renders with nothing saved: its own template,
+    /// else the server's default layout (destination.js `destinationFor`).
+    pub fn layout_of(&self, vpath: &str) -> String {
+        let template = self.libraries.iter().find(|l| l.vpath == vpath).and_then(|l| l.template.clone());
+        template
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| self.default_layout.clone().filter(|l| !l.trim().is_empty()))
+            .unwrap_or_else(|| DEFAULT_LAYOUT.to_string())
+    }
+
+    /// The library default — where copies land with nothing saved: the
+    /// first library, no base folder, its layout. `None` with no library.
+    pub fn library_default(&self) -> Option<CollectionDestination> {
+        let first = self.libraries.first()?;
+        Some(CollectionDestination {
+            vpath: first.vpath.clone(),
+            base: String::new(),
+            layout: self.layout_of(&first.vpath),
+            source: Some("default".into()),
+        })
+    }
+
+    /// Whether a layout may name `name` (any case): the view's variables,
+    /// else the six every server knows.
+    pub fn knows(&self, name: &str) -> bool {
+        let name = name.to_ascii_uppercase();
+        if self.variables.is_empty() {
+            LAYOUT_VARS.contains(&name.as_str())
+        } else {
+            self.variables.iter().any(|v| v.eq_ignore_ascii_case(&name))
+        }
+    }
+}
+
+/// A base folder's names, as the server normalises it (`normalizeBase`):
+/// either separator, each name trimmed, empty ones gone.
+pub fn base_folders(base: &str) -> Vec<String> {
+    base.split(['/', '\\']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+}
+
+impl CollectionDestination {
+    /// The place as a start or a save sends it: its library, base folder and
+    /// layout — its `source` is the server's to say.
+    pub fn shown(&self) -> serde_json::Value {
+        serde_json::json!({ "vpath": self.vpath, "base": self.base, "layout": self.layout })
+    }
+
+    /// The same place, as the jobs route reckons it for a start's
+    /// `destination_changed` (destination.js `sameDestination`): the
+    /// library, the base folder as normalised, the layout character for
+    /// character; `source` is not compared.
+    pub fn same_place(&self, other: &CollectionDestination) -> bool {
+        self.vpath == other.vpath && base_folders(&self.base) == base_folders(&other.base) && self.layout == other.layout
+    }
+
+    /// Where a copy of these tags lands, as the modal's LANDS IN line
+    /// draws it (clause 105; [`Landing::of`]): the library, the base
+    /// folder's names, the rendered layout's — `copies › Boukmanflow ›
+    /// Borrowed Tapes`; an empty layout is the default one, as the server
+    /// would never keep one.
+    pub fn landing(&self, tags: &LayoutTags, by_album: bool) -> Landing {
+        let layout = if self.layout.trim().is_empty() { DEFAULT_LAYOUT } else { self.layout.as_str() };
+        Landing::of(&self.vpath, &self.base, layout, tags, by_album, &|_| true)
+    }
+}
+
 /// The tags a layout renders from (the server's `resolveTemplate`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LayoutTags {
@@ -986,9 +1148,8 @@ pub struct LayoutTags {
     pub peer: Option<String>,
 }
 
-/// The longest a rendered layout may be, and one folder name in it
-/// (mStream's path-template.js).
-const MAX_RESOLVED_LEN: usize = 500;
+/// The longest one folder name in a rendered layout may be (mStream's
+/// path-template.js).
 const MAX_SEGMENT_LEN: usize = 200;
 
 /// One folder name from a tag, as the server cleans it: path separators,
@@ -1023,29 +1184,28 @@ pub fn sanitize_segment(raw: Option<&str>) -> String {
     trimmed.chars().take(MAX_SEGMENT_LEN).collect()
 }
 
-/// A layout rendered from `tags`: `{{ARTIST}}/{{ALBUM}}` → `Boukmanflow/
-/// Borrowed Tapes` — a variable with no value drops its segment, blanks
-/// trim, empty segments go (the server's `resolveLayout`, which the
-/// webapp mirrors as discover-jobs.js does). The server renders the real
-/// path and has the last word; this is the line the modal shows before
-/// the first copy (clause 105).
-pub fn resolve_layout(layout: &str, tags: &LayoutTags) -> String {
-    let value = |name: &str| -> String {
-        match name {
-            "ARTIST" => sanitize_segment(tags.artist.as_deref()),
-            "ALBUM" => sanitize_segment(tags.album.as_deref()),
-            "YEAR" => sanitize_segment(tags.year.as_deref()),
-            "GENRE" => sanitize_segment(tags.genre.as_deref()),
-            "ALBUMARTIST" => sanitize_segment(
-                tags.album_artist.as_deref().filter(|a| !a.is_empty()).or(tags.artist.as_deref()),
-            ),
-            "PEER" => sanitize_segment(tags.peer.as_deref()),
-            _ => String::new(),
-        }
-    };
-    // The server's token: `{{`, blanks, a name (a letter or `_`, then
-    // letters, digits, `_`), blanks, `}}`. Anything else is text, scanned
-    // on from the next character, as a regex scan would.
+/// A song's file name as it lands (destination.js `safeFileName`): the
+/// path's last name, reserved and control characters `-`, blank runs one
+/// space, no leading or trailing dots and blanks; "track" when nothing is
+/// left — the picker's PREVIEW draws it under a song's folders.
+pub fn safe_file_name(path: &str) -> String {
+    let last = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or_default();
+    let name = sanitize_segment(Some(last));
+    if name.is_empty() || name == ".." { "track".to_string() } else { name }
+}
+
+/// One piece of a layout as the server's scanner reads it: its own text,
+/// or a variable — `{{`, blanks, a name (a letter or `_`, then letters,
+/// digits, `_`), blanks, `}}` — with the name and the token as typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Piece<'a> {
+    Text(&'a str),
+    Var { name: String, raw: &'a str },
+}
+
+/// A layout's pieces. Anything that is not a token is text, scanned on
+/// from the next character, as a regex scan would.
+fn pieces(layout: &str) -> Vec<Piece<'_>> {
     let token = |s: &str| -> Option<(String, usize)> {
         let inner = s.strip_prefix("{{")?;
         let start = inner.len() - inner.trim_start().len();
@@ -1058,41 +1218,135 @@ pub fn resolve_layout(layout: &str, tags: &LayoutTags) -> String {
         let len = 2 + start + name.len() + blanks + 2;
         after[blanks..].starts_with("}}").then_some((name, len))
     };
-    let mut substituted = String::new();
+    let mut out = Vec::new();
     let mut rest = layout;
     while let Some(open) = rest.find("{{") {
-        substituted.push_str(&rest[..open]);
         match token(&rest[open..]) {
             Some((name, len)) => {
-                substituted.push_str(&value(&name.to_ascii_uppercase()));
+                if open > 0 {
+                    out.push(Piece::Text(&rest[..open]));
+                }
+                out.push(Piece::Var { name: name.to_ascii_uppercase(), raw: &rest[open..open + len] });
                 rest = &rest[open + len..];
             }
             None => {
-                substituted.push('{');
+                out.push(Piece::Text(&rest[..open + 1]));
                 rest = &rest[open + 1..];
             }
         }
     }
-    substituted.push_str(rest);
-    let path = substituted
-        .split(['/', '\\'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("/");
-    path.chars().take(MAX_RESOLVED_LEN).collect()
+    if !rest.is_empty() {
+        out.push(Piece::Text(rest));
+    }
+    out
 }
 
-impl CollectionDestination {
-    /// Where a copy of these tags lands, as the modal's LANDS IN line
-    /// draws it (clause 105): the library, the base folder's names, then
-    /// the rendered layout's — `copies › Boukmanflow › Borrowed Tapes`.
-    pub fn crumbs(&self, tags: &LayoutTags) -> Vec<String> {
-        let mut out = vec![self.vpath.clone()];
-        let base = self.base.replace('\\', "/");
-        out.extend(base.split('/').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
-        let layout = if self.layout.trim().is_empty() { "{{ARTIST}}/{{ALBUM}}" } else { self.layout.as_str() };
-        out.extend(resolve_layout(layout, tags).split('/').filter(|s| !s.is_empty()).map(str::to_string));
+/// A variable's value for these tags, cleaned as the server cleans it; a
+/// name it has no tag for renders nothing.
+fn tag_value(name: &str, tags: &LayoutTags) -> String {
+    match name {
+        "ARTIST" => sanitize_segment(tags.artist.as_deref()),
+        "ALBUM" => sanitize_segment(tags.album.as_deref()),
+        "YEAR" => sanitize_segment(tags.year.as_deref()),
+        "GENRE" => sanitize_segment(tags.genre.as_deref()),
+        "ALBUMARTIST" => {
+            sanitize_segment(tags.album_artist.as_deref().filter(|a| !a.is_empty()).or(tags.artist.as_deref()))
+        }
+        "PEER" => sanitize_segment(tags.peer.as_deref()),
+        _ => String::new(),
+    }
+}
+
+/// A layout's folders as the server renders them (its `resolveLayout`,
+/// which the webapp mirrors as discover-jobs.js does): each a run of
+/// pieces with whether it is a variable `known` refuses — kept as typed,
+/// for the picker's PREVIEW to draw GOLD (clause 143; the server's words
+/// decide at Save). A variable with no value drops out, blanks trim, empty
+/// folders go: `{{ARTIST}}/{{ALBUM}}` → `Boukmanflow`, `Borrowed Tapes`.
+/// The server renders the real path and has the last word.
+pub fn layout_folders(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> bool) -> Vec<Vec<(String, bool)>> {
+    let mut folders: Vec<Vec<(String, bool)>> = vec![Vec::new()];
+    let push = |folders: &mut Vec<Vec<(String, bool)>>, text: &str, unknown: bool| {
+        if text.is_empty() {
+            return;
+        }
+        let folder = folders.last_mut().expect("a folder");
+        match folder.last_mut() {
+            Some((have, flag)) if *flag == unknown => have.push_str(text),
+            _ => folder.push((text.to_string(), unknown)),
+        }
+    };
+    for piece in pieces(layout) {
+        match piece {
+            Piece::Var { name, raw } if !known(&name) => push(&mut folders, raw, true),
+            Piece::Var { name, .. } => push(&mut folders, &tag_value(&name, tags), false),
+            Piece::Text(text) => {
+                for (i, part) in text.split(['/', '\\']).enumerate() {
+                    if i > 0 {
+                        folders.push(Vec::new());
+                    }
+                    push(&mut folders, part, false);
+                }
+            }
+        }
+    }
+    // Each folder trimmed at both ends, as the server trims a segment.
+    for folder in &mut folders {
+        if let Some((text, false)) = folder.first_mut() {
+            *text = text.trim_start().to_string();
+        }
+        if let Some((text, false)) = folder.last_mut() {
+            *text = text.trim_end().to_string();
+        }
+        folder.retain(|(text, _)| !text.is_empty());
+    }
+    folders.retain(|folder| !folder.is_empty());
+    folders
+}
+
+/// Where a copy lands, as the Keep modal's LANDS IN and the picker's
+/// PREVIEW draw it (the webapp's `scopeTarget`, clauses 105 and 143): the
+/// library, then its folders — the base folder's names, what the layout
+/// rendered — each a run of pieces ([`layout_folders`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Landing {
+    pub library: String,
+    pub folders: Vec<Vec<(String, bool)>>,
+    /// An artist copy lands album by album: "one folder per album" stands
+    /// after the folders.
+    pub per_album: bool,
+}
+
+impl Landing {
+    /// A place rendered for one copy's tags. `by_album` — an artist copy —
+    /// renders the layout up to its first folder naming `{{ALBUM}}` or
+    /// `{{YEAR}}` (each album has its own) and marks the rest
+    /// [`Landing::per_album`]; a layout naming no album folder adds
+    /// nothing (every album shares that folder).
+    pub fn of(vpath: &str, base: &str, layout: &str, tags: &LayoutTags, by_album: bool, known: &dyn Fn(&str) -> bool) -> Landing {
+        let mut folders: Vec<Vec<(String, bool)>> = base_folders(base).into_iter().map(|f| vec![(f, false)]).collect();
+        let raw: Vec<&str> = layout.split(['/', '\\']).collect();
+        let album_folder = |folder: &&str| {
+            pieces(folder).iter().any(|p| matches!(p, Piece::Var { name, .. } if name == "ALBUM" || name == "YEAR"))
+        };
+        let cut = if by_album { raw.iter().position(album_folder) } else { None };
+        let rendered = match cut {
+            Some(at) => raw[..at].join("/"),
+            None => layout.to_string(),
+        };
+        folders.extend(layout_folders(&rendered, tags, known));
+        Landing { library: vpath.to_string(), folders, per_album: cut.is_some() }
+    }
+
+    /// A finished copy's folder ([`CopyResult::landed`]).
+    pub fn landed(vpath: &str, dirs: &[String]) -> Landing {
+        Landing { library: vpath.to_string(), folders: dirs.iter().map(|d| vec![(d.clone(), false)]).collect(), per_album: false }
+    }
+
+    /// The library, then each folder as plain words.
+    pub fn crumbs(&self) -> Vec<String> {
+        let mut out = vec![self.library.clone()];
+        out.extend(self.folders.iter().map(|folder| folder.iter().map(|(text, _)| text.as_str()).collect::<String>()));
         out
     }
 }
@@ -1158,6 +1412,18 @@ pub struct ArtistAlbumRow {
     #[serde(deserialize_with = "int_bool")]
     pub compilation: bool,
     pub track_count: Option<f64>,
+    /// The album's year, and the earliest of its songs' (the V71
+    /// aggregate) — where a lone missing album lands names it.
+    pub year: Option<i32>,
+    pub year_min: Option<i32>,
+}
+
+impl ArtistAlbumRow {
+    /// Its year as the webapp's `missingOne` reads it: `year`, else
+    /// `year_min`; none for 0.
+    pub fn year_of(&self) -> Option<i32> {
+        self.year.filter(|y| *y > 0).or(self.year_min.filter(|y| *y > 0))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1202,19 +1468,36 @@ pub fn name_key(raw: Option<&str>) -> String {
 /// copied) and whose name the library lacks: what "Only the albums you
 /// don't have" copies (clause 107).
 pub fn artist_ownership(artist: &str, remote: &[ArtistAlbumRow], local: &[ArtistAlbumRow]) -> (usize, usize) {
+    let here = album_keys(local);
+    let owned = remote
+        .iter()
+        .filter(|a| a.name.as_deref().is_some_and(|n| !n.trim().is_empty()))
+        .filter(|a| here.contains(&name_key(a.name.as_deref())))
+        .count();
+    (owned, missing_albums(artist, remote, local).len())
+}
+
+/// The library's album names, folded.
+fn album_keys(local: &[ArtistAlbumRow]) -> std::collections::BTreeSet<String> {
+    local.iter().map(|a| name_key(a.name.as_deref())).filter(|k| !k.is_empty()).collect()
+}
+
+/// The other server's albums "Only the albums you don't have" copies
+/// ([`artist_ownership`]'s `missing`): the artist's own, named, the library
+/// lacking them — so a lone one is named where it lands, its year too
+/// (clause 105).
+pub fn missing_albums<'a>(artist: &str, remote: &'a [ArtistAlbumRow], local: &[ArtistAlbumRow]) -> Vec<&'a ArtistAlbumRow> {
     let who = name_key(Some(artist));
-    let here: std::collections::BTreeSet<String> =
-        local.iter().map(|a| name_key(a.name.as_deref())).filter(|k| !k.is_empty()).collect();
-    let named: Vec<&ArtistAlbumRow> =
-        remote.iter().filter(|a| a.name.as_deref().is_some_and(|n| !n.trim().is_empty())).collect();
+    let here = album_keys(local);
     let theirs = |a: &ArtistAlbumRow| {
         name_key(a.album_artist.as_deref()) == who
             || (!a.compilation && a.artists.iter().any(|n| name_key(Some(n)) == who))
     };
-    let owned = named.iter().filter(|a| here.contains(&name_key(a.name.as_deref()))).count();
-    let missing =
-        named.iter().filter(|a| theirs(a) && !here.contains(&name_key(a.name.as_deref()))).count();
-    (owned, missing)
+    remote
+        .iter()
+        .filter(|a| theirs(a) && !here.contains(&name_key(a.name.as_deref())))
+        .filter(|a| a.name.as_deref().is_some_and(|n| !n.trim().is_empty()))
+        .collect()
 }
 
 /// A finished artist or only-missing job as it speaks for ONE album — the
@@ -1542,6 +1825,20 @@ mod tests {
         assert_eq!(JobLookup::default().row_keys(), Vec::<String>::new());
     }
 
+    /// A layout rendered whole, `/` between its folders — the server's
+    /// `resolveLayout` path.
+    fn resolve_layout(layout: &str, tags: &LayoutTags) -> String {
+        layout_folders(layout, tags, &|_| true)
+            .iter()
+            .map(|folder| folder.iter().map(|(text, _)| text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn crumbs(place: &CollectionDestination, tags: &LayoutTags) -> Vec<String> {
+        place.landing(tags, false).crumbs()
+    }
+
     #[test]
     fn the_layout_renders_as_the_server_renders_it() {
         let tags = |artist: &str, album: &str| LayoutTags { artist: Some(artist.into()), album: Some(album.into()), ..LayoutTags::default() };
@@ -1556,12 +1853,73 @@ mod tests {
         // ALBUMARTIST falls back to the artist; PEER is the server it came from; lower case names work.
         let peer = LayoutTags { artist: Some("Kim".into()), peer: Some("Stage Peer B".into()), ..LayoutTags::default() };
         assert_eq!(resolve_layout("{{peer}}/{{ALBUMARTIST}}/{{ALBUM}}", &peer), "Stage Peer B/Kim");
-        // An unknown or malformed token is left as written; a lone brace too.
+        // An unknown name renders nothing; a malformed token is left as written; a lone brace too.
         assert_eq!(resolve_layout("{{NOPE}}/{{1x}}/{{ALBUM", &tags("A", "B")), "{{1x}}/{{ALBUM");
+        // A value's blanks stay inside its folder; the text around a dropped one trims.
+        assert_eq!(resolve_layout(" {{GENRE}} - {{ALBUM}} /x", &tags("A", "Borrowed Tapes")), "- Borrowed Tapes/x");
         let dest = CollectionDestination { vpath: "copies".into(), base: "From peers\\ ".into(), layout: "{{ARTIST}}/{{ALBUM}}".into(), source: None };
-        assert_eq!(dest.crumbs(&tags("Boukmanflow", "Borrowed Tapes")), ["copies", "From peers", "Boukmanflow", "Borrowed Tapes"]);
+        assert_eq!(crumbs(&dest, &tags("Boukmanflow", "Borrowed Tapes")), ["copies", "From peers", "Boukmanflow", "Borrowed Tapes"]);
         let bare = CollectionDestination { vpath: "demo".into(), ..CollectionDestination::default() };
-        assert_eq!(bare.crumbs(&tags("Boukmanflow", "each album")), ["demo", "Boukmanflow", "each album"], "an empty layout is the default one");
+        assert_eq!(crumbs(&bare, &tags("Boukmanflow", "Borrowed Tapes")), ["demo", "Boukmanflow", "Borrowed Tapes"], "an empty layout is the default one");
+    }
+
+    #[test]
+    fn an_artist_copy_lands_one_folder_per_album_and_a_preview_keeps_a_refused_variable() {
+        let artist = LayoutTags { artist: Some("Boukmanflow".into()), album_artist: Some("Boukmanflow".into()), ..LayoutTags::default() };
+        // The first folder naming the album or the year, and every folder
+        // after it, are each album's own (the webapp's scopeTarget).
+        let landing = Landing::of("copies", "from-peers", "{{ARTIST}}/{{YEAR}} - {{ ALBUM }}/disc", &artist, true, &|_| true);
+        assert_eq!((landing.crumbs(), landing.per_album), (vec!["copies".into(), "from-peers".into(), "Boukmanflow".into()], true));
+        let landing = Landing::of("copies", "", "{{ALBUMARTIST}}/{{album}}", &artist, true, &|_| true);
+        assert_eq!((landing.crumbs(), landing.per_album), (vec!["copies".into(), "Boukmanflow".into()], true));
+        // A layout naming no album folder adds nothing: every album shares it.
+        let landing = Landing::of("copies", "", "{{GENRE}}/{{ARTIST}}", &artist, true, &|_| true);
+        assert_eq!((landing.crumbs(), landing.per_album), (vec!["copies".into(), "Boukmanflow".into()], false));
+        // A variable the server would refuse stands as typed, flagged, in its own run.
+        let song = LayoutTags { artist: Some("Boukmanflow".into()), album: Some("Borrowed Tapes".into()), year: Some("2019".into()), ..LayoutTags::default() };
+        let known = |name: &str| LAYOUT_VARS.contains(&name);
+        let landing = Landing::of("copies", "", "{{ARTST}}/{{YEAR}} - {{ALBUM}}", &song, false, &known);
+        assert_eq!(landing.folders, vec![vec![("{{ARTST}}".to_string(), true)], vec![("2019 - Borrowed Tapes".to_string(), false)]]);
+        let landing = Landing::of("copies", "", "x {{ARTST}} y", &song, false, &known);
+        assert_eq!(landing.folders, vec![vec![("x ".to_string(), false), ("{{ARTST}}".to_string(), true), (" y".to_string(), false)]]);
+        // A finished copy's folder, as it landed.
+        assert_eq!(Landing::landed("copies", &["Boukmanflow".into()]).crumbs(), ["copies", "Boukmanflow"]);
+        assert_eq!(safe_file_name("peerlib/Boukmanflow/Borrowed Tapes/02 - Late: Train?.mp3"), "02 - Late- Train-.mp3");
+        assert_eq!(safe_file_name("peerlib/.."), "track");
+    }
+
+    #[test]
+    fn a_finished_copy_landed_where_its_files_share_a_folder() {
+        let result = |v: serde_json::Value| CopyResult::from_value(&v);
+        let landed = |vpath: &str, dirs: &[&str], file: Option<&str>| {
+            Some(Landed { vpath: Some(vpath.into()), dirs: dirs.iter().map(|d| d.to_string()).collect(), file: file.map(str::to_string) })
+        };
+        // One song: its own folder and file; already yours: where the library has it; a file in the way: its folder.
+        assert_eq!(result(serde_json::json!({ "copied": { "filepath": "copies/Boukmanflow/Borrowed Tapes/02.mp3" } })).landed(),
+            landed("copies", &["Boukmanflow", "Borrowed Tapes"], Some("02.mp3")));
+        assert_eq!(result(serde_json::json!({ "skipped": "owned", "existing": { "filepath": "music/Boukmanflow/02.mp3" } })).landed(),
+            landed("music", &["Boukmanflow"], Some("02.mp3")));
+        assert_eq!(result(serde_json::json!({ "skipped": "exists", "filepath": "copies/x/02.mp3" })).landed(), landed("copies", &["x"], Some("02.mp3")));
+        // Many: the folder the copied files share; the skipped ones' when nothing was copied and nothing failed.
+        let songs = |copied: serde_json::Value, skipped: serde_json::Value, failed: u64| serde_json::json!({ "scope": "album",
+            "songs": { "total": 3, "copied": copied, "skipped": skipped, "failed": [] }, "counts": { "total": 3, "copied": 9, "failed": failed }, "stopped": null });
+        let mut two = songs(serde_json::json!([{ "filepath": "copies/B/Tapes/1.mp3" }, { "filepath": "copies/B/Tapes/2.mp3" }]), serde_json::json!([]), 0);
+        two["counts"]["copied"] = serde_json::json!(2);
+        assert_eq!(result(two.clone()).landed(), landed("copies", &["B", "Tapes"], None));
+        two["songs"]["copied"][1]["filepath"] = serde_json::json!("copies/B/Other/2.mp3");
+        assert_eq!(result(two.clone()).landed(), landed("copies", &["B"], None), "their common folder");
+        two["songs"]["copied"][1]["filepath"] = serde_json::json!("music/2.mp3");
+        assert_eq!(result(two).landed(), None, "no library they share");
+        let mut owned = songs(serde_json::json!([]), serde_json::json!([{ "at": "music/B/Tapes/1.mp3" }]), 0);
+        owned["counts"] = serde_json::json!({ "total": 1, "copied": 0, "skipped": 1, "failed": 0 });
+        assert_eq!(result(owned.clone()).landed(), landed("music", &["B", "Tapes"], None));
+        owned["counts"]["failed"] = serde_json::json!(1);
+        assert_eq!(result(owned).landed(), None, "a failure: nothing claimed");
+        // Copied, but the lists name none (an older server): no library — the caller draws where it ran.
+        let counted = serde_json::json!({ "scope": "album", "counts": { "total": 2, "copied": 2, "skipped": 0, "failed": 0 }, "stopped": null });
+        assert_eq!(result(counted).landed(), Some(Landed::default()));
+        assert_eq!(result(serde_json::json!({ "scope": "album", "counts": { "total": 0, "copied": 0 } })).landed(), None);
+        assert_eq!(result(serde_json::json!({})).landed(), None);
     }
 
     #[test]
@@ -1576,6 +1934,41 @@ mod tests {
         assert_eq!(view.libraries.len(), 2);
         let none: CollectionDestinationView = serde_json::from_value(serde_json::json!({ "destination": null, "libraries": [] })).unwrap();
         assert!(none.destination.is_none());
+        assert_eq!(none.library_default(), None, "no library, no default");
+    }
+
+    #[test]
+    fn the_library_default_is_the_first_library_its_template_and_the_same_place_ignores_the_source() {
+        let view: CollectionDestinationView = serde_json::from_value(serde_json::json!({
+            "destination": { "vpath": "copies", "base": "from-peers", "layout": "{{ALBUMARTIST}}/{{ALBUM}}", "source": "user" },
+            "libraries": [{ "vpath": "music", "template": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}" }, { "vpath": "copies", "template": null }],
+            "defaultLayout": "{{ARTIST}}/{{ALBUM}}", "variables": ["ARTIST", "ALBUM", "YEAR"]
+        }))
+        .unwrap();
+        let default = view.library_default().unwrap();
+        assert_eq!((default.vpath.as_str(), default.base.as_str(), default.layout.as_str()), ("music", "", "{{ARTIST}}/{{YEAR}} - {{ALBUM}}"));
+        assert_eq!(view.layout_of("copies"), "{{ARTIST}}/{{ALBUM}}", "no template: the server's default layout");
+        assert!(view.knows("year") && !view.knows("PEER"), "the view's variables, any case");
+        assert!(CollectionDestinationView::default().knows("PEER"), "none listed: the six every server knows");
+        // The jobs route's test: the base as normalised, the layout exactly, the source not at all.
+        let place = view.destination.clone().unwrap();
+        let shown = CollectionDestination { base: " from-peers/ ".into(), source: None, ..place.clone() };
+        assert!(place.same_place(&shown));
+        assert!(!place.same_place(&CollectionDestination { layout: "{{ALBUMARTIST}}/{{ALBUM}} ".into(), ..place.clone() }));
+        assert_eq!(place.shown(), serde_json::json!({ "vpath": "copies", "base": "from-peers", "layout": "{{ALBUMARTIST}}/{{ALBUM}}" }));
+    }
+
+    #[test]
+    fn a_job_reads_its_pinned_destination_absent_null_or_the_place() {
+        let pinned = job(serde_json::json!({ "params": { "scope": "album", "destination": { "vpath": "copies", "base": "", "layout": "{{ARTIST}}/{{ALBUM}}" } } }));
+        assert_eq!(pinned.params.destination.clone().flatten().map(|d| d.vpath), Some("copies".into()));
+        assert_eq!(pinned.scope(), Some(JobScope::Album));
+        let nowhere = job(serde_json::json!({ "params": { "destination": null } }));
+        assert_eq!(nowhere.params.destination, Some(None), "pinned to nowhere");
+        assert_eq!(job(serde_json::json!({ "params": { "scope": "album" } })).params.destination, None, "from before the pin");
+        assert_eq!(job(serde_json::json!({ "params": null })).params.destination, None);
+        let odd = job(serde_json::json!({ "params": { "scope": "album", "destination": "copies" } }));
+        assert_eq!((odd.params.destination.clone(), odd.scope()), (None, Some(JobScope::Album)), "an odd pin is none, the job whole");
     }
 
     #[test]
@@ -1613,7 +2006,7 @@ mod tests {
             album_artist: album_artist.map(str::to_string),
             artists: artists.iter().map(|a| a.to_string()).collect(),
             compilation,
-            track_count: None,
+            ..ArtistAlbumRow::default()
         }
     }
 
@@ -1633,6 +2026,22 @@ mod tests {
             row("  ", Some("Boukmanflow"), &[], false),
         ];
         assert_eq!(artist_ownership("boukmanflow", &remote, &[]), (0, 1));
+    }
+
+    #[test]
+    fn the_albums_you_dont_have_carry_their_year_as_the_webapp_reads_it() {
+        // The listing's year, else its songs' earliest; 0 is none (the webapp's missingOne).
+        let rows: ArtistAlbumRows = serde_json::from_value(serde_json::json!({ "albums": [
+            { "name": "Second Shift", "album_artist": "Boukmanflow", "year": 2019, "year_min": 2018 },
+            { "name": "Night Bus", "album_artist": "Boukmanflow", "year": 0, "year_min": 2021 },
+            { "name": "Loose Ends", "album_artist": "Boukmanflow", "year": null, "year_min": 0 },
+            { "name": "Borrowed Tapes", "album_artist": "Boukmanflow", "year": 2020 }
+        ] }))
+        .unwrap();
+        let local = [row("borrowed tapes", None, &[], false)];
+        let missing: Vec<(&str, Option<i32>)> =
+            missing_albums("Boukmanflow", &rows.albums, &local).iter().map(|a| (a.name.as_deref().unwrap_or_default(), a.year_of())).collect();
+        assert_eq!(missing, vec![("Second Shift", Some(2019)), ("Night Bus", Some(2021)), ("Loose Ends", None)]);
     }
 
     fn walked(name: &str, copied: usize, skipped: usize, failed: usize, stopped: Option<&str>) -> serde_json::Value {

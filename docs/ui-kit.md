@@ -302,6 +302,21 @@ visible. A listing failure for the CURRENT dir-part
 renders in the modal in error gold ("could not list <dir>: <the
 server's words>") — silent emptiness reads as "no autocomplete";
 failures for dirs already typed past stay quiet.
+**A folder on a server** (the Discover room's Where files land,
+discovery-page clause 143) completes from THAT server's listing — the
+file explorer, asked on the worker one folder at a time, each once while
+the modal is open — never this machine's: the place is a library on the
+server. Up to 3 suggestions there (the modal's 22-row cap), and a typed
+name its parent does not list reads "not there yet · the first file
+creates it". Its keys are not the Path input's above, which suit a
+field whose Enter submits it: there Tab accepts a held suggestion or a
+lone match, Right at the end completes, Enter submits the text as typed
+and an empty input suggests nothing. Here Tab opens the list (an empty
+field lists the library root), extends the typed name to the names'
+common start, then cycles the held folder (Shift-Tab back); ↓ walks into
+the list and ↑ from its top back out; Enter on a held folder goes into
+it ("{folder}/{name}/", listing that one) — Enter elsewhere saves the
+modal; Right only moves the caret.
 
 ### Links
 fg LightBlue + `Modifier::UNDERLINED`; hover fg Cyan + BOLD. Click opens
@@ -323,7 +338,10 @@ One card per group, DarkGray UPPERCASE group label, one row per option:
 on/affirmative), `( )` fg DarkGray otherwise; chosen label BOLD; inline
 `— description` fg DarkGray. Exactly one chosen, always; choosing is not
 toggling (clicking the chosen row does nothing). Radios for 2–4 options;
-5+ becomes a list picker.
+5+ becomes a list picker. (One logged exception: Where files land's
+LAYOUT, whose fifth radio is a library's own template — discovery-page
+deviations, 2026-10-21. Its last radio, Custom, carries its line editor
+on the same row.)
 
 ### List cursor
 **Selection is the KEYBOARD cursor, nothing more** — in every list of

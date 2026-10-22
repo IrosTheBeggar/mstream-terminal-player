@@ -22,9 +22,9 @@ use super::taste::TastePeerAlbum;
 use super::*;
 use crate::api::PluginFailure;
 use crate::api::types::{
-    COPY_PLUGIN, CancelAnswer, CollectionDestination, DiscoveryPluginsResponse, JobAction, JobLookup, JobMark,
-    JobOutcome, JobParams, JobScope, JobStarted, JobState, LayoutTags, PluginJob, PluginJobList, PluginLink,
-    TasteLead, artist_ownership, job_for_album,
+    COPY_PLUGIN, CancelAnswer, CollectionDestination, CollectionDestinationView, DiscoveryPluginsResponse, JobAction,
+    JobLookup, JobMark, JobOutcome, JobParams, JobScope, JobStarted, JobState, Landed, Landing, LayoutTags, PluginJob,
+    PluginJobList, PluginLink, TasteLead, artist_ownership, job_for_album, missing_albums, safe_file_name,
 };
 use crate::tui::worker::{KeepFacts, KeepFactsAsk};
 
@@ -205,14 +205,15 @@ pub fn covered_view(job: &PluginJob, subject: &KeepSubject, scope: JobScope) -> 
     let view = match (scope, job.scope()?) {
         (JobScope::Album, JobScope::Artist | JobScope::ArtistMissing) if job.state == JobState::Done => {
             let one = job_for_album(job, subject.album.as_deref())?;
-            PluginJob { params: JobParams { scope: Some(JobScope::Album.as_str().to_string()) }, ..one }
+            let params = JobParams { scope: Some(JobScope::Album.as_str().to_string()), ..one.params.clone() };
+            PluginJob { params, ..one }
         }
         (JobScope::Song, JobScope::Album | JobScope::Artist | JobScope::ArtistMissing) if job.state == JobState::Done => {
             let from = subject.filepath.as_deref().filter(|p| !p.trim().is_empty())?;
             let one = job_for_album(job, subject.album.as_deref())?;
             let result = song_account(&one, from)?;
             PluginJob {
-                params: JobParams { scope: None },
+                params: JobParams { scope: None, ..one.params.clone() },
                 state: JobState::Done,
                 result: Some(result),
                 error: None,
@@ -271,9 +272,19 @@ pub struct JobsIndicator {
 pub struct KeepGate {
     /// The listing, once it answered.
     pub plugins: Option<DiscoveryPluginsResponse>,
-    /// The destination: `Some(None)` is the server's word that this
-    /// account may put files nowhere; `None` not asked or not answered.
-    pub destination: Option<Option<CollectionDestination>>,
+    /// The destination's view — read again with every Keep a copy modal,
+    /// replaced by a save's answer (clauses 105, 144): its `destination`
+    /// `None` is the server's word that this account may put files
+    /// nowhere; `None` not asked or not answered.
+    pub view: Option<CollectionDestinationView>,
+    /// The ask whose answer `view` is — the gate's, a read, a save, a
+    /// start's 409 — by its seq: an answer to an ask sent before it is
+    /// older news and draws nothing (a save's answer is newer than any
+    /// read sent before it; clauses 105, 144). Every answer lands on its
+    /// own thread, in any order.
+    view_seq: u64,
+    /// The gate's ask, by its seq, once sent.
+    asked: u64,
     /// The gate's ask is out.
     pub asking: bool,
     /// The last ask failed — every entry point stays hidden, and the next
@@ -303,6 +314,36 @@ pub struct JobBook {
     /// Starts out from the Copies list (Retry, Copy again, Start again):
     /// a refusal is said as a note there.
     starts: BTreeSet<u64>,
+}
+
+/// A folder's folders as the picker asked them (clause 143).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Folders {
+    Asking,
+    /// Their names, in the server's order.
+    Listed(Vec<String>),
+    Failed(PluginFailure),
+}
+
+/// The picker's asks (clauses 142–144) — "Where files land", the GUI's:
+/// the destination read again, the save, the library's folders.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DestState {
+    /// The read out: the last one wins.
+    reading: Option<u64>,
+    /// The last save sent, while it is out — a save sent after it (a
+    /// picker opened again meanwhile) supersedes it.
+    saving: Option<u64>,
+    /// How the last save went, by its seq, for the GUI to take once: its
+    /// view replaced the gate's, or the server's words — the picker that
+    /// sent it says so, or the status line once that picker is gone.
+    saved: Option<(u64, Result<(), PluginFailure>)>,
+    /// Each folder's folders as listed, by the path asked
+    /// (`/{library}/{folder}`), while the picker is open.
+    folders: BTreeMap<String, Folders>,
+    /// The listing out — one at a time — and the one wanted after it.
+    listing: Option<(u64, String)>,
+    wanted: Option<String>,
 }
 
 /// A thing the Copies modal or the room says once, then forgets.
@@ -498,6 +539,9 @@ pub struct KeepFlow {
     /// Its subject's jobs, merged as the room's rows are.
     pub jobs: RowJobs,
     pub phase: KeepPhase,
+    /// The place its last start sent ([`ApiCmd::JobStart`]'s): what LANDS
+    /// IN reads while the start is out.
+    sent: Option<Option<CollectionDestination>>,
 }
 
 impl KeepFlow {
@@ -554,6 +598,9 @@ pub enum KeepStage {
     Refused { failure: PluginFailure, verb: Option<KeepVerb> },
     /// A job of this flow's scope: its outcome, and the action it offers.
     Job { job: Box<PluginJob>, outcome: JobOutcome, action: Option<JobAction> },
+    /// The account may put files nowhere any more (a re-read, a start's
+    /// 409): one plain line and Close (clause 147).
+    Nowhere,
 }
 
 /// Everything the Keep modal draws, worked out (clauses 106–110).
@@ -566,31 +613,90 @@ pub struct KeepView {
     /// "Only the albums you don't have": `None` hidden — never grey — else
     /// whether it is ticked and how many albums it would add.
     pub missing: Option<(bool, usize)>,
+    /// The one album "Only the albums you don't have" would copy, when it
+    /// is one, and its year: where it lands names it.
+    pub one_missing: Option<(String, Option<i32>)>,
+    /// Where this account's copies land now (the gate's, as last read) —
+    /// what a start sends and the SOURCE row's word (clause 105).
     pub destination: Option<CollectionDestination>,
+    /// The LANDS IN line: the account's place while choosing, the place a
+    /// start sent while it is out, a copy's pinned place while it runs and
+    /// the folder its files landed in once it ended — never the account's
+    /// place now for a copy that stands (clause 105). `None` hides it.
+    pub landing: Option<Landing>,
+    /// Where Retry or Copy again would land — the account's place now —
+    /// where that is not the place the copy ran with (the webapp's
+    /// `retryPath`, clause 145): drawn under LANDS IN, so a press never
+    /// lands somewhere the modal did not show. `None` where it is the same.
+    pub again: Option<Landing>,
     pub stage: KeepStage,
 }
 
 impl KeepView {
-    /// The LANDS IN line's crumbs: the library, the base folder, the
-    /// layout rendered from the subject's tags — `each_album` standing for
-    /// the album of an artist copy, which lands album by album (clause
-    /// 105).
-    pub fn landing(&self, each_album: &str) -> Option<Vec<String>> {
-        let destination = self.destination.as_ref()?;
+    /// The tags a copy of `scope` renders the layout with (the webapp's
+    /// `dmScopeTags`), and whether it lands album by album: the song's own
+    /// for the song and its album — ALBUMARTIST its credit, so a
+    /// compilation stays in one folder; for the artist scopes the track
+    /// artist as ARTIST and ALBUMARTIST, never a compilation's credit, and
+    /// no album or year — each album has its own — unless only-missing
+    /// takes one album, which is named with its year (the webapp's
+    /// `scopeTarget` `oneAlbum`).
+    fn scope_tags(&self, scope: JobScope) -> (LayoutTags, bool) {
         let s = &self.subject;
-        let album = match self.scope {
-            JobScope::Artist | JobScope::ArtistMissing => Some(each_album.to_string()),
-            _ => s.album.clone(),
-        };
-        let tags = LayoutTags {
-            artist: s.track_artist.clone(),
-            album,
-            year: s.year.map(|y| y.to_string()),
-            genre: None,
-            album_artist: s.album_artist.clone(),
-            peer: Some(s.server.clone()),
-        };
-        Some(destination.crumbs(&tags))
+        let peer = Some(s.server.clone());
+        match scope {
+            JobScope::Artist | JobScope::ArtistMissing => {
+                let one = self.one_missing.clone().filter(|_| scope == JobScope::ArtistMissing);
+                let by_album = one.is_none();
+                let (album, year) = match one {
+                    Some((name, year)) => (Some(name), year.map(|y| y.to_string())),
+                    None => (None, None),
+                };
+                let tags = LayoutTags {
+                    artist: s.track_artist.clone(),
+                    album_artist: s.track_artist.clone(),
+                    album,
+                    year,
+                    peer,
+                    ..LayoutTags::default()
+                };
+                (tags, by_album)
+            }
+            _ => {
+                let tags = LayoutTags {
+                    artist: s.track_artist.clone(),
+                    album: s.album.clone(),
+                    year: s.year.filter(|y| *y > 0).map(|y| y.to_string()),
+                    genre: None,
+                    album_artist: s.album_artist.clone(),
+                    peer,
+                };
+                (tags, false)
+            }
+        }
+    }
+
+    /// Where a copy of `scope` lands at a place.
+    fn landing_at(&self, place: &CollectionDestination, scope: JobScope) -> Landing {
+        let (tags, by_album) = self.scope_tags(scope);
+        place.landing(&tags, by_album)
+    }
+
+    /// Where a copy of the chosen scope would land with the picker's
+    /// fields as typed — its PREVIEW (clause 143): a variable `known`
+    /// refuses kept as typed.
+    pub fn landing_for(&self, vpath: &str, base: &str, layout: &str, known: &dyn Fn(&str) -> bool) -> Landing {
+        let (tags, by_album) = self.scope_tags(self.scope);
+        Landing::of(vpath, base, layout, &tags, by_album, known)
+    }
+
+    /// The song's file as it would land — the PREVIEW's second row, a
+    /// song's alone.
+    pub fn file_name(&self) -> Option<String> {
+        if self.scope != JobScope::Song {
+            return None;
+        }
+        self.subject.filepath.as_deref().map(safe_file_name)
     }
 }
 
@@ -679,6 +785,8 @@ pub struct KeepState {
     pub book: JobBook,
     pub watch: KeepWatch,
     pub flow: Option<KeepFlow>,
+    /// The picker's asks.
+    pub dest: DestState,
     pub links: Option<LinksState>,
     pub note: Option<KeepNote>,
     /// Jobs seen live and now finished, oldest first, for the status line
@@ -781,6 +889,22 @@ pub fn copies_action(outcome: &JobOutcome) -> Option<JobAction> {
     }
 }
 
+/// Where Retry or Copy again would land (clause 145): the account's place
+/// now — what they send — for an ended copy that offers either, where that
+/// is not the place the copy ran with (its result's, else its pin) or no
+/// such place is known; `None` where it is the same.
+fn keep_again_landing(view: &KeepView) -> Option<Landing> {
+    let KeepStage::Job { job, action: Some(JobAction::Retry | JobAction::CopyAgain), .. } = &view.stage else {
+        return None;
+    };
+    let now = view.destination.as_ref().filter(|_| !job.live())?;
+    let ran = job.copy_result().destination.or_else(|| job.params.destination.clone().flatten());
+    if ran.is_some_and(|ran| ran.same_place(now)) {
+        return None;
+    }
+    Some(view.landing_at(now, job.scope().unwrap_or(view.scope)))
+}
+
 /// The poll's wait after `failures` failures in a row: the beat doubled
 /// each time, never past [`KEEP_POLL_MAX`].
 pub fn keep_backoff(beat: Duration, failures: u32) -> Duration {
@@ -810,7 +934,13 @@ impl App {
 
     /// Where copies land, while the server names somewhere.
     pub fn keep_destination(&self) -> Option<&CollectionDestination> {
-        self.taste.keep.gate.destination.as_ref()?.as_ref()
+        self.keep_dest_view()?.destination.as_ref()
+    }
+
+    /// The destination's view as last read — what the picker draws from:
+    /// the libraries, their templates, the variables (clause 142).
+    pub fn keep_dest_view(&self) -> Option<&CollectionDestinationView> {
+        self.taste.keep.gate.view.as_ref()
     }
 
     /// Open elsewhere's gate (clause 140): the flag and a links plug-in.
@@ -830,7 +960,10 @@ impl App {
         if self.taste.keep.gate.asking {
             return Vec::new();
         }
-        self.taste.keep.gate.asking = true;
+        let seq = self.taste.keep.next_seq();
+        let gate = &mut self.taste.keep.gate;
+        gate.asking = true;
+        gate.asked = seq;
         vec![Effect::Api(ApiCmd::KeepGate { generation: self.session_gen })]
     }
 
@@ -1141,15 +1274,18 @@ impl App {
     }
 
     /// A Copies row's action: Retry, Copy again and Start again start the
-    /// same copy again (an album or artist copy takes only the gaps); Play
-    /// your copy plays it; Cancel cancels.
+    /// same copy again (an album or artist copy takes only the gaps) where
+    /// it ran — the list shows no place, so one moved since is the server's
+    /// 409 to say, and Keep a copy's to show (clause 146); Play your copy
+    /// plays it; Cancel cancels.
     pub(crate) fn copies_act(&mut self, id: i64) -> Vec<Effect> {
         let Some(job) = self.taste.keep.job(id).cloned() else { return Vec::new() };
         match copies_action(&job.outcome()) {
             Some(JobAction::Cancel) => self.keep_cancel_job(id),
             Some(JobAction::Play) => self.keep_play_copy(&job, true),
             Some(JobAction::Retry | JobAction::CopyAgain | JobAction::StartAgain) => {
-                let (effects, ticket) = self.keep_restart(&job);
+                let place = self.keep_ran_with(&job);
+                let (effects, ticket) = self.keep_restart(&job, place);
                 if let Some(ticket) = ticket {
                     self.taste.keep.book.starts.insert(ticket);
                 }
@@ -1159,20 +1295,43 @@ impl App {
         }
     }
 
-    /// Start `job`'s copy again, as it was started. A job the other server
-    /// failed because it is no longer paired asks the room again instead —
-    /// the rows carry its new id then (clause 128).
-    fn keep_restart(&mut self, job: &PluginJob) -> (Vec<Effect>, Option<u64>) {
+    /// Start `job`'s copy again, as it was started, sending `destination`
+    /// as the place shown (clause 145). A job the other server failed
+    /// because it is no longer paired asks the room again instead — the
+    /// rows carry its new id then (clause 128).
+    fn keep_restart(
+        &mut self,
+        job: &PluginJob,
+        destination: Option<Option<CollectionDestination>>,
+    ) -> (Vec<Effect>, Option<u64>) {
         if job.unpaired() {
             return (self.taste_ask_again(), None);
         }
         let Some(scope) = job.scope().filter(|s| s.discover()) else { return (Vec::new(), None) };
-        let (effect, ticket) = self.keep_start_job(job.recommendation.clone(), scope);
+        let (effect, ticket) = self.keep_start_job(job.recommendation.clone(), scope, destination);
         (effect.into_iter().collect(), ticket)
     }
 
-    /// One start: the recommendation as given, the scope, a ticket.
-    fn keep_start_job(&mut self, rec: serde_json::Value, scope: JobScope) -> (Option<Effect>, Option<u64>) {
+    /// The place a copy ran with, as a restart from the Copies list sends
+    /// it: its pin; a job from before the pin, the place its result names;
+    /// else the account's place as last read — never no place at all, so
+    /// the server checks it (clause 145).
+    fn keep_ran_with(&self, job: &PluginJob) -> Option<Option<CollectionDestination>> {
+        job.params
+            .destination
+            .clone()
+            .or_else(|| job.copy_result().destination.map(Some))
+            .or_else(|| Some(self.keep_destination().cloned()))
+    }
+
+    /// One start: the recommendation as given, the scope, the place shown
+    /// (clause 145), a ticket.
+    fn keep_start_job(
+        &mut self,
+        rec: serde_json::Value,
+        scope: JobScope,
+        destination: Option<Option<CollectionDestination>>,
+    ) -> (Option<Effect>, Option<u64>) {
         if !self.keep_gate() || rec.is_null() || !scope.discover() {
             return (None, None);
         }
@@ -1183,6 +1342,7 @@ impl App {
             plugin: COPY_PLUGIN.to_string(),
             rec: Box::new(rec),
             scope,
+            destination,
         });
         (Some(effect), Some(ticket))
     }
@@ -1279,7 +1439,11 @@ impl App {
             lookup_seq,
             jobs,
             phase,
+            sent: None,
         });
+        // Where files land, read again with every open: the last place
+        // known draws meanwhile (clause 105).
+        effects.extend(self.keep_dest_read());
         effects
     }
 
@@ -1298,9 +1462,10 @@ impl App {
     }
 
     /// The Keep modal closed (Esc, `[X]`, Close, Cancel): the copy keeps
-    /// running on the server (clause 109).
+    /// running on the server (clause 109); the picker's folders go with it.
     pub(crate) fn keep_close(&mut self) {
         self.taste.keep.flow = None;
+        self.keep_dest_forget();
     }
 
     /// Pick a radio (Space, Enter, a click). Choosing is not toggling:
@@ -1341,10 +1506,14 @@ impl App {
         if verb.is_none() {
             return Vec::new();
         }
-        let (effect, ticket) = self.keep_start_job(view.subject.rec, view.scope);
+        // The place LANDS IN drew: one no longer in force is the server's
+        // 409, and nothing starts (clause 145).
+        let shown = Some(view.destination.clone());
+        let (effect, ticket) = self.keep_start_job(view.subject.rec, view.scope, shown.clone());
         let Some(ticket) = ticket else { return Vec::new() };
         if let Some(flow) = self.taste.keep.flow.as_mut() {
             flow.phase = KeepPhase::Starting { ticket };
+            flow.sent = shown;
         }
         effect.into_iter().collect()
     }
@@ -1360,8 +1529,10 @@ impl App {
     /// The finished copy's button (clause 110): Retry and Copy again start
     /// the same copy again (taking only the gaps) — a wider copy's account
     /// of the choice ([`covered_view`]) carries the choice's scope and the
-    /// modal's row, so it starts the choice's own copy — Start again brings
-    /// the choice back, Play your copy plays it.
+    /// modal's row, so it starts the choice's own copy — at the account's
+    /// place now, which the modal shows under LANDS IN where it is not the
+    /// one the copy ran with (`KeepView::again`, clause 145); Start again
+    /// brings the choice back, Play your copy plays it.
     pub(crate) fn keep_again(&mut self) -> Vec<Effect> {
         let Some(view) = self.keep_view() else { return Vec::new() };
         let KeepStage::Job { job, action, .. } = view.stage else { return Vec::new() };
@@ -1373,9 +1544,11 @@ impl App {
                 Vec::new()
             }
             Some(JobAction::Retry | JobAction::CopyAgain) => {
-                let (effects, ticket) = self.keep_restart(&job);
+                let shown = Some(view.destination.clone());
+                let (effects, ticket) = self.keep_restart(&job, shown.clone());
                 if let (Some(ticket), Some(flow)) = (ticket, self.taste.keep.flow.as_mut()) {
                     flow.phase = KeepPhase::Starting { ticket };
+                    flow.sent = shown;
                 }
                 effects
             }
@@ -1429,6 +1602,13 @@ impl App {
         let missing = (runs_missing && ((local > 0 && missing_count > 0) || held_missing))
             .then_some((flow.only_missing && flow.choice == KeepChoice::Artist, missing_count));
         let only_missing = missing.is_some_and(|(on, _)| on);
+        let one_missing = match (&facts.peer_albums, &facts.local_albums, s.track_artist.as_deref()) {
+            (Some(remote), Some(local), Some(artist)) => match missing_albums(artist, remote, local).as_slice() {
+                [one] => one.name.clone().map(|name| (name, one.year_of())),
+                _ => None,
+            },
+            _ => None,
+        };
         let scope = flow.choice.scope(only_missing);
         let verb = match scope {
             JobScope::Song => KeepVerb::Song,
@@ -1477,15 +1657,146 @@ impl App {
                 None => KeepStage::Choose { verb: other.is_none().then_some(verb), other },
             },
         };
-        Some(KeepView {
+        // Nowhere to put a file any more (a re-read, a start's 409): the
+        // choice gives way to one plain line (clause 147).
+        let destination = self.keep_destination().cloned();
+        let stage = match stage {
+            KeepStage::Choose { .. } | KeepStage::Refused { .. } if destination.is_none() => KeepStage::Nowhere,
+            stage => stage,
+        };
+        let mut view = KeepView {
             subject: s.clone(),
             choices,
             choice: flow.choice,
             scope,
             missing,
-            destination: self.keep_destination().cloned(),
+            one_missing,
+            destination,
+            landing: None,
+            again: None,
             stage,
-        })
+        };
+        view.landing = self.keep_landing(&view, &flow.sent);
+        view.again = keep_again_landing(&view);
+        Some(view)
+    }
+
+    /// The LANDS IN line for a view's stage (clause 105): the account's
+    /// place while choosing; the place a start sent while it is out; a
+    /// copy's pinned place while it runs (a job from before the pin: the
+    /// account's), and once it ended the folder its files landed in, else
+    /// the place its result or its pin names — never the account's place
+    /// now. A pin to nowhere hides it.
+    fn keep_landing(&self, view: &KeepView, sent: &Option<Option<CollectionDestination>>) -> Option<Landing> {
+        let current = view.destination.as_ref();
+        let pinned = |pin: &Option<Option<CollectionDestination>>, scope: JobScope| match pin {
+            Some(Some(place)) => Some(view.landing_at(place, scope)),
+            Some(None) => None,
+            None => current.map(|place| view.landing_at(place, scope)),
+        };
+        match &view.stage {
+            KeepStage::Choose { .. } | KeepStage::Refused { .. } => current.map(|place| view.landing_at(place, view.scope)),
+            KeepStage::Starting => pinned(sent, view.scope),
+            KeepStage::Nowhere => None,
+            KeepStage::Job { job, .. } => {
+                let scope = job.scope().unwrap_or(view.scope);
+                if job.live() {
+                    return pinned(&job.params.destination, scope);
+                }
+                let result = job.copy_result();
+                if let Some(Landed { vpath: Some(library), dirs, .. }) = result.landed() {
+                    return Some(Landing::landed(&library, &dirs));
+                }
+                let ran = result.destination.as_ref().or(match &job.params.destination {
+                    Some(Some(place)) => Some(place),
+                    _ => None,
+                });
+                ran.map(|place| view.landing_at(place, scope))
+            }
+        }
+    }
+
+    // ── Where files land (clauses 105, 142–148) ─────────────────────────────
+
+    /// Read the destination again — every Keep a copy modal that opens, and
+    /// after a start's 409: the last place known draws until it answers,
+    /// and a failed read keeps it.
+    pub(crate) fn keep_dest_read(&mut self) -> Vec<Effect> {
+        if !self.keep_listed() {
+            return Vec::new();
+        }
+        let seq = self.taste.keep.next_seq();
+        self.taste.keep.dest.reading = Some(seq);
+        vec![Effect::Api(ApiCmd::DestinationRead { seq, generation: self.session_gen })]
+    }
+
+    /// The picker's Save (clause 144): the place, or `None` — back to the
+    /// library default — and its seq, which the picker keeps to know its
+    /// own answer. A save sent while another is out supersedes it (the
+    /// picker that sent that one is gone); the answer is taken once
+    /// ([`App::keep_dest_take_saved`]).
+    pub(crate) fn keep_dest_save(&mut self, destination: Option<CollectionDestination>) -> (Vec<Effect>, Option<u64>) {
+        if !self.keep_listed() {
+            return (Vec::new(), None);
+        }
+        let seq = self.taste.keep.next_seq();
+        let dest = &mut self.taste.keep.dest;
+        dest.saving = Some(seq);
+        dest.saved = None;
+        (vec![Effect::Api(ApiCmd::DestinationSave { seq, generation: self.session_gen, destination })], Some(seq))
+    }
+
+    /// The save out, by its seq: its picker draws "saving…", no buttons.
+    pub fn keep_dest_saving(&self) -> Option<u64> {
+        self.taste.keep.dest.saving
+    }
+
+    /// How the last save went, once, by its seq: its view already
+    /// replaced the gate's, or the server's words.
+    pub(crate) fn keep_dest_take_saved(&mut self) -> Option<(u64, Result<(), PluginFailure>)> {
+        self.taste.keep.dest.saved.take()
+    }
+
+    /// Ask the folders of `path` (`/{library}/{folder}`) for the picker's
+    /// completion (clause 143): once per folder while the picker is open,
+    /// one ask at a time — a second waits for the first.
+    pub(crate) fn keep_dest_list(&mut self, path: &str) -> Vec<Effect> {
+        if !self.keep_listed() || self.taste.keep.dest.folders.contains_key(path) {
+            return Vec::new();
+        }
+        if self.taste.keep.dest.listing.is_some() {
+            self.taste.keep.dest.wanted = Some(path.to_string());
+            return Vec::new();
+        }
+        let seq = self.taste.keep.next_seq();
+        let dest = &mut self.taste.keep.dest;
+        dest.listing = Some((seq, path.to_string()));
+        dest.folders.insert(path.to_string(), Folders::Asking);
+        vec![Effect::Api(ApiCmd::DestinationFolders { seq, generation: self.session_gen, path: path.to_string() })]
+    }
+
+    /// The folders of `path` as asked, `None` not asked.
+    pub fn keep_dest_folders(&self, path: &str) -> Option<&Folders> {
+        self.taste.keep.dest.folders.get(path)
+    }
+
+    /// The picker closed: its folders go (the save, if one is out, still
+    /// folds in when it answers, and how it went is still said).
+    pub(crate) fn keep_dest_forget(&mut self) {
+        let dest = &mut self.taste.keep.dest;
+        dest.folders.clear();
+        dest.wanted = None;
+        dest.listing = None;
+    }
+
+    /// The destination's view from an answer to the ask sent as `seq`,
+    /// unless an answer to a later ask is already drawn.
+    fn keep_dest_fold(&mut self, seq: u64, view: CollectionDestinationView) {
+        let gate = &mut self.taste.keep.gate;
+        if seq > gate.view_seq {
+            gate.view = Some(view);
+            gate.view_seq = seq;
+        }
     }
 
     // ── Open elsewhere (clause 140) ─────────────────────────────────────────
@@ -1534,6 +1845,11 @@ impl App {
         keep.book.asking = None;
         keep.book.cancelling.clear();
         keep.book.starts.clear();
+        keep.dest.reading = None;
+        keep.dest.saving = None;
+        keep.dest.listing = None;
+        keep.dest.wanted = None;
+        keep.dest.folders.retain(|_, folders| *folders != Folders::Asking);
         if let Some(flow) = keep.flow.as_mut() {
             flow.facts_asking = false;
             flow.lookup_seq = None;
@@ -1552,7 +1868,10 @@ impl App {
             | Event::JobCancelled { generation, .. }
             | Event::JobsCleared { generation, .. }
             | Event::PluginLinks { generation, .. }
-            | Event::KeepFacts { generation, .. } => *generation,
+            | Event::KeepFacts { generation, .. }
+            | Event::DestinationRead { generation, .. }
+            | Event::DestinationSaved { generation, .. }
+            | Event::DestinationFolders { generation, .. } => *generation,
             _ => return Vec::new(),
         };
         if generation != self.session_gen {
@@ -1595,6 +1914,45 @@ impl App {
                 }
                 Vec::new()
             }
+            // A read the last one asked: its view replaces what is drawn —
+            // unless a save sent after it answered first; a failed one keeps
+            // what is drawn.
+            Event::DestinationRead { seq, answer, .. } => {
+                if self.taste.keep.dest.reading == Some(seq) {
+                    self.taste.keep.dest.reading = None;
+                    if let Ok(view) = answer {
+                        self.keep_dest_fold(seq, *view);
+                    }
+                }
+                Vec::new()
+            }
+            // A save's view is the server's word after it, whichever picker
+            // sent it; how it went is the last save's to say.
+            Event::DestinationSaved { seq, answer, .. } => {
+                let went = answer.map(|view| self.keep_dest_fold(seq, *view));
+                let dest = &mut self.taste.keep.dest;
+                if dest.saving == Some(seq) {
+                    dest.saving = None;
+                    dest.saved = Some((seq, went));
+                }
+                Vec::new()
+            }
+            Event::DestinationFolders { seq, path, answer, .. } => {
+                let dest = &mut self.taste.keep.dest;
+                if dest.listing.as_ref().is_none_or(|(asked, _)| *asked != seq) {
+                    return Vec::new();
+                }
+                dest.listing = None;
+                let folders = match answer {
+                    Ok(names) => Folders::Listed(names),
+                    Err(failure) => Folders::Failed(failure),
+                };
+                dest.folders.insert(path, folders);
+                match dest.wanted.take() {
+                    Some(next) => self.keep_dest_list(&next),
+                    None => Vec::new(),
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -1606,25 +1964,32 @@ impl App {
     ) -> Vec<Effect> {
         let gate = &mut self.taste.keep.gate;
         gate.asking = false;
+        // A read or a save answered since the gate was asked: its view is
+        // newer than this one, which draws nothing.
+        let fresh = gate.asked > gate.view_seq;
         match plugins {
             Ok(listing) => {
                 gate.failed = None;
                 gate.plugins = Some(*listing);
-                gate.destination = match destination {
-                    Some(Ok(view)) => Some(view.destination),
+                match destination {
+                    Some(Ok(view)) if fresh => gate.view = Some(*view),
+                    Some(Ok(_)) => {}
                     // Not asked (no copy plug-in), or not answered: no
                     // destination known — Keep a copy stays hidden.
                     Some(Err(failure)) => {
                         gate.failed = Some(failure);
-                        None
+                        if fresh {
+                            gate.view = None;
+                        }
                     }
-                    None => None,
-                };
+                    None => gate.view = None,
+                }
+                gate.view_seq = gate.view_seq.max(gate.asked);
             }
             Err(failure) => {
                 gate.failed = Some(failure);
                 gate.plugins = None;
-                gate.destination = None;
+                gate.view = None;
             }
         }
         // The gate open over rows already on screen: look them up, and ask
@@ -1745,12 +2110,28 @@ impl App {
                 if ended { self.keep_lookup_rows() } else { Vec::new() }
             }
             Err(failure) => {
+                // The place shown is no longer where files land: LANDS IN
+                // redraws from the answer's at once, and the view is read
+                // again (clause 146).
+                // An answer that names none this client reads keeps what is
+                // drawn until the read answers.
+                let mut effects = Vec::new();
+                if let PluginFailure::DestinationChanged(moved) = &failure {
+                    let gate = &mut self.taste.keep.gate;
+                    if let (Some(now), Some(view)) = (moved, gate.view.as_mut())
+                        && ticket > gate.view_seq
+                    {
+                        view.destination = now.clone();
+                        gate.view_seq = ticket;
+                    }
+                    effects = self.keep_dest_read();
+                }
                 if ours && let Some(flow) = self.taste.keep.flow.as_mut() {
                     flow.phase = KeepPhase::Refused(failure);
                 } else if from_list {
                     self.taste.keep.note = Some(KeepNote::StartFailed(failure));
                 }
-                Vec::new()
+                effects
             }
         }
     }
@@ -2122,19 +2503,50 @@ mod tests {
     }
 
     #[test]
-    fn the_landing_line_renders_the_destination() {
+    fn the_landing_line_renders_the_scopes_tags() {
+        let place = |layout: &str| CollectionDestination {
+            vpath: "copies".into(),
+            base: "from-peers".into(),
+            layout: layout.into(),
+            source: None,
+        };
         let view = KeepView {
             subject: subject(Some("Late Train Verse"), Some("Boukmanflow"), Some("Borrowed Tapes"), None),
             choices: Vec::new(),
             choice: KeepChoice::Song,
             scope: JobScope::Song,
             missing: None,
-            destination: Some(CollectionDestination { vpath: "copies".into(), base: String::new(), layout: "{{ARTIST}}/{{ALBUM}}".into(), source: None }),
+            one_missing: None,
+            destination: None,
+            landing: None,
+            again: None,
             stage: KeepStage::Starting,
         };
-        assert_eq!(view.landing("each album"), Some(vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
-        let artist = KeepView { scope: JobScope::Artist, ..view.clone() };
-        assert_eq!(artist.landing("each album"), Some(vec!["copies".into(), "Boukmanflow".into(), "each album".into()]));
-        assert_eq!(KeepView { destination: None, ..view }.landing("each album"), None);
+        let crumbs = |view: &KeepView, layout: &str, scope: JobScope| {
+            let landing = view.landing_at(&place(layout), scope);
+            (landing.crumbs(), landing.per_album)
+        };
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(crumbs(&view, "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", JobScope::Song), (names(&["copies", "from-peers", "Boukmanflow", "2019 - Borrowed Tapes"]), false));
+        assert_eq!(view.file_name().as_deref(), Some("02 - Late Train Verse.MP3"));
+        // The album's credit is its ALBUMARTIST: a compilation stays in one folder.
+        let comp = KeepView { subject: subject(Some("Kim Song"), Some("Peer Kim"), Some("Mixtape Vol 1"), Some("Various Artists")), ..view.clone() };
+        assert_eq!(crumbs(&comp, "{{ALBUMARTIST}}/{{ALBUM}}", JobScope::Album), (names(&["copies", "from-peers", "Various Artists", "Mixtape Vol 1"]), false));
+        // An artist copy: the track artist as both credits, then one folder per album.
+        assert_eq!(crumbs(&comp, "{{ALBUMARTIST}}/{{ALBUM}}", JobScope::Artist), (names(&["copies", "from-peers", "Peer Kim"]), true));
+        assert_eq!(crumbs(&view, "{{PEER}}/{{ARTIST}}", JobScope::Artist), (names(&["copies", "from-peers", "Stage Peer B", "Boukmanflow"]), false));
+        // Only the albums you don't have, taking one: that album, named —
+        // and its year, as the webapp's scopeTarget names it.
+        let one = KeepView { one_missing: Some(("Second Shift".into(), Some(2021))), ..view.clone() };
+        assert_eq!(crumbs(&one, "{{ARTIST}}/{{ALBUM}}", JobScope::ArtistMissing), (names(&["copies", "from-peers", "Boukmanflow", "Second Shift"]), false));
+        assert_eq!(
+            crumbs(&one, "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", JobScope::ArtistMissing),
+            (names(&["copies", "from-peers", "Boukmanflow", "2021 - Second Shift"]), false),
+            "the album's own year, never the song's"
+        );
+        let undated = KeepView { one_missing: Some(("Second Shift".into(), None)), ..view.clone() };
+        assert_eq!(crumbs(&undated, "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", JobScope::ArtistMissing), (names(&["copies", "from-peers", "Boukmanflow", "- Second Shift"]), false));
+        assert_eq!(crumbs(&one, "{{ARTIST}}/{{ALBUM}}", JobScope::Artist), (names(&["copies", "from-peers", "Boukmanflow"]), true), "every album: no name");
+        assert_eq!(KeepView { scope: JobScope::Album, ..view }.file_name(), None, "a song's file alone");
     }
 }

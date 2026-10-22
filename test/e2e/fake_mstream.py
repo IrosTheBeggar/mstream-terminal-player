@@ -34,8 +34,21 @@ server, and no audio files:
     the Copies list, Open elsewhere (discovery-page clauses 100–141). The
     ping adds `discoveryPlugins`; GET /discovery/plugins lists `links` and
     `federation-copy` (every scope) with jobs allowed; the destination is a
-    throwaway `copies` library; POST …/federation-copy/jobs queues a job
-    (409 for a recommendation titled "Taken", 429 for "Full") that walks
+    throwaway `copies` library (its default; `music` the account's other
+    library, its template ARTIST / YEAR - ALBUM; the server's default layout
+    ALBUMARTIST / ALBUM), saved per account by PUT …/collection/destination
+    as the server saves it — `null` back to the default; a library not
+    offered, a base folder that climbs out (`..`, `~`, a drive letter) or a
+    variable not known (quoted as typed) a 400 in the server's words;
+    POST /api/v1/file-explorer lists `copies` (from-peers)
+    and `copies/from-peers` (three servers' folders) for the picker;
+    POST /_move_destination {destination} saves one behind the client's
+    back, as another tab would, so the next start that shows the old one
+    is the server's 409 destination_changed; POST …/federation-copy/jobs
+    checks the destination a start shows as the jobs route does (409
+    destination_changed, with the one in force, and nothing started),
+    pins the one in force on the job, then queues it (409 for a
+    recommendation titled "Taken", 429 for "Full") that walks
     queued → running → done (a song copied, or an album's counts);
     …/cancel cancels a live one and answers 409 for a
     finished one; …/clear drops the finished; …/lookup/batch answers each
@@ -43,14 +56,21 @@ server, and no audio files:
     jobs under them; …/links/resolve two https links and one that is not.
     A job walks on the wall clock — queued for a second, running for six,
     then done — and every list, lookup, start and cancel sees it where its
-    age puts it.
-    /_state keeps the starts' bodies (`job_starts`), the lookups' sizes
-    (`lookup_sizes`), the cancels, clears and resolves.
+    age puts it. FAKE_NO_PIN=1 (with FAKE_PLUGINS) is a server from before
+    the start's destination (mStream before 2026-10-21): a start that
+    carries the key is Joi's 400 '"destination" is not allowed', and no
+    job is pinned.
+    /_state keeps the starts' bodies (`job_starts`) and how each was
+    answered (`job_answers`), the lookups' sizes (`lookup_sizes`), the
+    cancels, clears and resolves, the destination's reads
+    (`destination_gets`), saves (`destination_puts`) and listings
+    (`folder_lists`).
 
 Usage: fake_mstream.py PORT
 """
 import json
 import os
+import re
 import struct
 import time
 import sys
@@ -66,6 +86,9 @@ LOOP = os.environ.get("FAKE_LOOP", "") not in ("", "0")
 AUTH = os.environ.get("FAKE_AUTH", "") not in ("", "0")
 TASTE = os.environ.get("FAKE_TASTE", "") not in ("", "0")
 PLUGINS = TASTE and os.environ.get("FAKE_PLUGINS", "") not in ("", "0")
+# A server from before the start's destination (mStream before 2026-10-21):
+# its jobs route's strict body refuses the key, and no job is pinned.
+NO_PIN = PLUGINS and os.environ.get("FAKE_NO_PIN", "") not in ("", "0")
 
 # The room's answer, as the server words it (plan §3.1). The sources it was
 # not asked for come back null, as the real route's do.
@@ -138,7 +161,8 @@ STATUS_STEPS = [
 calls = {"n": 0, "s": 0}
 state = {"directories": {}, "users": [], "taste_asks": 0, "taste_body": None, "prefs_calls": 0, "art_gets": 0,
          "peer_asks": 0, "peer_art_gets": 0, "peer_art_paths": [],
-         "jobs": [], "job_starts": [], "lookup_sizes": [], "cancels": 0, "clears": 0, "resolves": 0}
+         "jobs": [], "job_starts": [], "job_answers": [], "lookup_sizes": [], "cancels": 0, "clears": 0, "resolves": 0,
+         "saved_destination": None, "destination_gets": 0, "destination_puts": [], "folder_lists": []}
 
 # The plug-in listing, the destination and the links (FAKE_PLUGINS).
 PLUGIN_LISTING = {
@@ -150,11 +174,78 @@ PLUGIN_LISTING = {
     ],
     "jobs": {"allowed": True},
 }
-DESTINATION = {
-    "destination": {"vpath": "copies", "base": "", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "default"},
-    "saved": None, "libraries": [{"vpath": "copies", "template": None}],
-    "defaultLayout": "{{ARTIST}}/{{ALBUM}}", "variables": ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"],
-}
+# The libraries this account may upload to, in the server's order: the
+# first is the default.
+LIBRARIES = [{"vpath": "copies", "template": None}, {"vpath": "music", "template": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}"}]
+DEFAULT_LAYOUT = "{{ALBUMARTIST}}/{{ALBUM}}"
+LAYOUT_VARS = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"]
+# The picker's folders, by the path the file explorer is asked.
+FOLDERS = {"/copies": ["from-peers"], "/copies/from-peers": ["2025 archive", "Stage Peer B", "Stage Peer C"]}
+
+
+def _base(base):
+    return "/".join(p.strip() for p in str(base or "").replace("\\", "/").split("/") if p.strip())
+
+
+def _effective():
+    """The destination in force (destination.js destinationFor): the saved
+    one, else the first library's default."""
+    saved = state["saved_destination"]
+    if saved:
+        return dict(saved, source="user")
+    lib = LIBRARIES[0]
+    return {"vpath": lib["vpath"], "base": "", "layout": lib["template"] or DEFAULT_LAYOUT, "source": "default"}
+
+
+def _view():
+    return {"destination": _effective(), "saved": state["saved_destination"], "libraries": LIBRARIES,
+            "defaultLayout": DEFAULT_LAYOUT, "variables": LAYOUT_VARS}
+
+
+def _same(shown, effective):
+    """The jobs route's sameDestination: null only null; the library, the
+    base as normalised, the layout exactly."""
+    if not shown or not effective:
+        return not shown and not effective
+    return (shown.get("vpath") == effective.get("vpath") and _base(shown.get("base")) == _base(effective.get("base"))
+            and shown.get("layout") == effective.get("layout"))
+
+
+def _path_refusal(path):
+    """Why a relative path would not do (path-template.js
+    validateResolvedPath), in the server's words — None when it would."""
+    if re.search(r"[\x00-\x1f]", path):
+        return "Resolved path cannot contain control characters"
+    if path.startswith("/") or path.startswith("\\"):
+        return "Resolved path cannot start with / or \\"
+    if re.match(r"^[a-zA-Z]:", path):
+        return "Resolved path cannot start with a drive letter"
+    if "~" in path or re.search(r"\$HOME\b|\$\{HOME\}", path):
+        return "Resolved path cannot contain ~ or $HOME (no shell-style expansion)"
+    for seg in re.split(r"[/\\]", path):
+        if seg == "..":
+            return "Resolved path cannot contain .. segments"
+        if re.match(r"^[a-zA-Z]:", seg):
+            return "Resolved path segments cannot start with a drive letter"
+    return None
+
+
+def _refusal(destination):
+    """Why a destination would not be kept (destination.js
+    validateDestination: the library, normalizeBase, the layout's tokens),
+    in the server's words — None when it would. An unknown variable is
+    quoted as typed, blanks and case kept (`t.raw`)."""
+    if destination.get("vpath") not in [l["vpath"] for l in LIBRARIES]:
+        return "destination: you cannot put files into library '%s'" % destination.get("vpath")
+    base = _base(destination.get("base"))
+    words = base and _path_refusal(base)
+    if words:
+        return "destination base folder: %s" % words
+    for m in re.finditer(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", destination.get("layout") or ""):
+        if m.group(1).upper() not in LAYOUT_VARS:
+            return "destination layout: Unknown variable %s. Supported: %s" % (
+                m.group(0), ", ".join("{{%s}}" % v for v in LAYOUT_VARS))
+    return None
 LINKS = {"links": [
     {"id": "mb-search", "label": "MusicBrainz", "url": "https://musicbrainz.org/search?query=x", "kind": "search"},
     {"id": "deezer", "label": "Deezer", "url": "https://www.deezer.com/search/x", "kind": "search"},
@@ -294,7 +385,8 @@ class Handler(BaseHTTPRequestHandler):
         if PLUGINS and self.path == "/api/v1/discovery/plugins":
             return self._json(PLUGIN_LISTING)
         if PLUGINS and self.path == "/api/v1/discovery/collection/destination":
-            return self._json(DESTINATION)
+            state["destination_gets"] += 1
+            return self._json(_view())
         if PLUGINS and self.path.split("?")[0] == "/api/v1/discovery/plugin-jobs":
             _walk_jobs()
             return self._json({"jobs": [_public(j) for j in sorted(state["jobs"], key=lambda j: -j["id"])],
@@ -345,21 +437,47 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(
                 {"token": "fake-token", "vpaths": sorted(state["directories"])}
             )
+        if PLUGINS and self.path == "/_move_destination":
+            state["saved_destination"] = body.get("destination")
+            return self._json(_view())
+        if PLUGINS and self.path == "/api/v1/file-explorer":
+            directory = "/" + "/".join(p for p in str(body.get("directory") or "").split("/") if p)
+            state["folder_lists"].append(directory)
+            return self._json({"path": directory + "/", "directories": [{"name": n} for n in FOLDERS.get(directory, [])],
+                               "files": []})
         if PLUGINS and self.path == "/api/v1/discovery/plugins/federation-copy/jobs":
             rec = body.get("recommendation") or {}
             state["job_starts"].append(body)
+            if NO_PIN and "destination" in body:
+                state["job_answers"].append(400)
+                return self._status(400, {"error": '"destination" is not allowed'})
             if rec.get("title") == "Taken":
+                state["job_answers"].append(409)
                 return self._status(409, {"error": "someone else on this server is already getting this — try again in a moment"})
             if rec.get("title") == "Full":
+                state["job_answers"].append(429)
                 return self._status(429, {"error": "you have 20 jobs queued or running — wait for some to finish (the limit is 20)"})
             scope = body.get("scope")
             key = _keys(rec)[scope or "song"] if (scope or "song") in _keys(rec) else None
             _walk_jobs()
             live = [j for j in state["jobs"] if j["key"] == key and j["state"] in ("queued", "running")]
+            # The destination the client showed, when it showed one: no
+            # longer the one in force is a 409 and nothing starts — unless
+            # a live job already covers this recommendation.
+            effective = _effective()
+            if not NO_PIN and "destination" in body and not _same(body["destination"], effective) and not live:
+                state["job_answers"].append("destination_changed")
+                return self._status(409, {"error": "destination_changed", "destination": effective,
+                                          "message": "your collection destination has changed — check where this will land and ask again"})
             if live:
+                state["job_answers"].append(200)
                 return self._json({"created": False, "job": _public(live[0])})
+            state["job_answers"].append(202)
+            params = {} if NO_PIN else {"destination": effective}
+            if scope:
+                params["scope"] = scope
             job = {"id": len(state["jobs"]) + 1, "plugin": "federation-copy", "key": key, "recommendation": rec,
-                   "params": {"scope": scope} if scope else None, "state": "queued", "progress": None,
+                   "params": params or None, "state": "queued", "progress": None,
                    "statusText": None, "result": None, "error": None, "attempts": 0, "cancelRequested": False,
                    "createdAt": 1760000000000 + len(state["jobs"]), "_born": time.time()}
             state["jobs"].append(job)
@@ -412,6 +530,18 @@ class Handler(BaseHTTPRequestHandler):
         if self._walled():
             return self._deny()
         body = self._body()
+        if PLUGINS and self.path == "/api/v1/discovery/collection/destination":
+            state["destination_puts"].append(body)
+            destination = body.get("destination")
+            if destination is None:
+                state["saved_destination"] = None
+                return self._json(_view())
+            words = _refusal(destination)
+            if words:
+                return self._status(400, {"error": words})
+            state["saved_destination"] = {"vpath": destination["vpath"], "base": _base(destination.get("base")),
+                                          "layout": destination["layout"]}
+            return self._json(_view())
         if self.path == "/api/v1/admin/directory":
             state["directories"][body.get("vpath", "?")] = body.get("directory", "?")
             return self._json({})

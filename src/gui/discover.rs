@@ -2380,6 +2380,7 @@ pub(crate) fn close_all(gui: &mut Gui) {
     gui.discover.tile_list = None;
     gui.discover.copies = None;
     gui.discover.keep.focus = None;
+    gui.discover.keep.dest = None;
     gui.app.keep_close();
 }
 
@@ -2859,9 +2860,14 @@ fn choose(gui: &mut Gui) {
 /// always show whole: over its list the wheel moves nothing, and not the
 /// table under it either.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
-    // The Keep a copy modal and the tile's list hold their rows whole; the
-    // Copies modal scrolls its own, a copy a notch.
-    if gui.app.taste.keep.flow.is_some() || gui.discover.tile_list.is_some() {
+    // The Keep a copy modal and the tile's list hold their rows whole —
+    // Where files land scrolls its folders; the Copies modal scrolls its
+    // own, a copy a notch.
+    if gui.app.taste.keep.flow.is_some() {
+        super::keep::dest_wheel(gui, delta);
+        return;
+    }
+    if gui.discover.tile_list.is_some() {
         return;
     }
     if gui.discover.copies.is_some() {

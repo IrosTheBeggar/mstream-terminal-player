@@ -237,8 +237,27 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         ApiCmd::Jobs { seq, generation } => {
             with_session(session, async |s| worker::jobs(&s.client, seq, generation).await).await
         }
-        ApiCmd::JobStart { ticket, generation, plugin, rec, scope } => {
-            with_session(session, async |s| worker::job_start(&s.client, ticket, generation, &plugin, &rec, scope).await)
+        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination } => {
+            with_session(session, async |s| {
+                let ask = worker::JobStartAsk {
+                    plugin: &plugin,
+                    rec: &rec,
+                    scope,
+                    destination: destination.as_ref().map(Option::as_ref),
+                };
+                worker::job_start(&s.client, ticket, generation, ask).await
+            })
+            .await
+        }
+        ApiCmd::DestinationRead { seq, generation } => {
+            with_session(session, async |s| worker::destination_read(&s.client, seq, generation).await).await
+        }
+        ApiCmd::DestinationSave { seq, generation, destination } => {
+            with_session(session, async |s| worker::destination_save(&s.client, seq, generation, destination.as_ref()).await)
+                .await
+        }
+        ApiCmd::DestinationFolders { seq, generation, path } => {
+            with_session(session, async |s| worker::destination_folders(&s.client, seq, generation, path.clone()).await)
                 .await
         }
         ApiCmd::JobCancel { generation, id } => {

@@ -8,8 +8,9 @@
 # panel folded (Tab: the 80-cell room the canvas draws), `G` opens the
 # room, → its Connected servers tab and ↓ lights the strip's one album,
 # "Lanterns" from Attic (no tips line: key hints are off by default). `c` opens
-# Keep a copy in album focus (Album preselected), ↓ ↓ ↓ walks Album,
-# Every album by and Cancel to the primary, Enter starts the album copy:
+# Keep a copy in album focus (Album preselected), ↓ ↓ ↓ ↓ walks Album,
+# Every album by, Change… and Cancel to the primary, Enter starts the album
+# copy:
 # the modal follows the job ("waiting for a free slot" — the fake keeps a
 # copy queued for a second, running for six). Esc closes it at once — the
 # copy keeps running, the tile's artist row wears its mark and the verbs
@@ -73,6 +74,8 @@ expect {
     eof { puts "DIED-ON-PRIMARY"; exit 14 }
     timeout { fail "NO-ADD-ALBUM" 15 }
 }
+drain 1
+send "\x1b\[B"
 drain 1
 send "\x1b\[B"
 drain 1
