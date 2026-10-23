@@ -6,7 +6,7 @@
 | **Server API** | **`POST /api/v1/discovery/taste`** (§3.1), stateless since 2026-10-14 — nothing is stored or cached between calls — `{window? (7 \| 30 \| 90 \| 0, default 30), pin? (≤ 12 — `PIN_CAP`, the seed cap, since 2026-10-14 — seed first), exclude? (seed hashes left out of THIS call only, ≤ 200), sources?, limit?, newArtistsOnly?, ignoreVPaths?}` (`remember`, `filter` and `staleDays` are a 400) → `{window, widenedFrom, seedSource, fallback, seeds: [{hash, filepath, metadata, outcome, lastPlayed, plays, pinned, analyzed}], excluded: [{hash, filepath, metadata}] (this call's `exclude` hashes that resolve), dropped, notAnalyzed, model, library: {tracks: [{filepath, similarity, seedHash, metadata, genreTags, playCount, lastPlayed}], albums: [{…Album, similarity, scopedTracks, playedTracks, lastPlayed, tracks: [path]}], capped}, network: {results: [p2p row + {source: 'p2p', seedHash}], searched: {peers, tracks}} \| null, peers: {peers: [{id, name, reachable, mismatched, lastSeen, results: [federation row + {source: 'federation', seedHash: null}]}], searched: {peers, unreachable, mismatched}} \| null}` — an account only (403 for a federation key or a guest), 403 `Discovery is disabled` when discovery is off or the index is unavailable; `network`/`peers` are `null` when the source is not advertised for the caller or a random seed is in use. The seeds are the pins, then a **random batch** of the account's finished songs in the window — a different batch on every call — widening window → all time → counters → one random library song (drawn afresh on every call, 2026-10-14; never one in `exclude`). The library half is the fixed rule "songs you haven't played lately" (never, or more than 90 days ago). *(`GET` / `PUT …/taste/prefs` are gone since 2026-10-14 — a 404.)* **The plug-in routes** (since 2026-10-19, clauses 100–141; mStream's `docs/openapi.yaml`), every one asked of the **user's own server** — never a connected server's, through the parent's proxy or over its own tunnel: `GET /api/v1/discovery/plugins` → `{plugins: [{name, title, description, capabilities, scope, scopes, settings, enabled, available}], jobs: {allowed}}`; `GET /api/v1/discovery/collection/destination` → `{destination: {vpath, base, layout, source: user \| default} \| null, saved, libraries: [{vpath, template}], defaultLayout, variables}` (`variables` the layout's names — `SERVERFOLDER` among them since mStream 2026-10-22, the folders a copied song sits in on the connected server) — asked with the gate and again with every Keep a copy (clause 105); `PUT /api/v1/discovery/collection/destination {destination: {vpath, base, layout} \| null}` (since 2026-10-21, clause 144: per account; `null` back to the library default) → the same view, a place the server will not take a 400 in its words (`destination layout: Unknown variable {{ARTST}}. Supported: …`); the picker's folders by `POST /api/v1/file-explorer {directory: "/{library}/{folder}"}` → `{directories: [{name}]}`; `POST /api/v1/discovery/plugins/federation-copy/jobs {recommendation, scope?, destination?}` (mStream 95f2205a: `destination` the place the client showed, `{vpath, base, layout}` or `null`, clause 145) → `202 {job, created: true}` or `200 {job, created: false}` (a live job already covers it — whatever place was shown), the job pinning `params.destination` at start and naming it in `result.destination`; **409 `{error: "destination_changed", message, destination}`** when the place shown is no longer the one in force — nothing starts, `destination` the one that is (or `null`, nowhere); refused otherwise with the server's words: 400 (a scope the row cannot fill), 403 (jobs not allowed, "Uploading Disabled"), 404 (the plug-in gone), 409 (another account's live job — its own words), 429 (the queue cap, 20); `GET /api/v1/discovery/plugin-jobs` → `{jobs, runner}`; `POST …/plugin-jobs/{id}/cancel` → `{job, outcome: cancelled \| requested}`, **409 = it had already finished**; `POST …/plugin-jobs/clear` → `{removed}`; `POST …/plugin-jobs/lookup/batch {recommendations}` (1–100 a call; chunked) → `{results: [{key, keys: {song, album, artist, artist-missing, folder}, jobs}]}` in input order; `POST /api/v1/discovery/plugins/links/resolve {recommendation}` → `{result: {links: [{id, label, url, kind: canonical \| search}]}}`; and, for the Keep modal's sizes, `POST /api/v1/db/album-songs {album, artist? \| album_artist?, year?}` and `POST /api/v1/db/artists-albums {artist}` on the connected server (through its reach) and on the user's own. A job is `{id, plugin, key, recommendation, params: {scope?, destination?}, state: queued \| running \| done \| failed \| cancelled, progress 0..1 \| null, statusText, result, error, cancelRequested, createdAt…}`; a song copy's `result` is `{copied: {vpath, filepath, title, artist, album, …}}` or `{skipped: owned \| exists, existing?, filepath?}`, an album or artist copy's `{scope, songs: {total, copied[], skipped[], failed[]} (each capped at 500), counts: {total, copied, skipped, failed}, albums?, skippedAlbums?: [{name, why: owned \| appearance}], stopped: null \| cancelled \| quota \| busy \| peer \| refused, peer, destination}`. The routes the player already spoke stay: the federation byte proxy `GET /api/v1/federation/peers/{id}/stream/…` and `POST /api/v1/stats/plays` with `peerId`, both through the queue as it is. **Gate**: the ping's `discovery === true && discoveryTaste >= 1` (§2.10) — here `capabilities.discovery && capabilities.discovery_taste >= 1`; the Connected servers source rides `federationDiscovery`; `discoveryPlugins` and `noUpload` gate the plug-ins (clause 101); `discoveryP2p` (the Network source) is parsed but read by nothing here — the later Explore room's. |
 | **Already in this repo** | The App/worker pair every room rides: `Effect::Api(ApiCmd::…)` drained onto the api thread, answered by `worker::answer` (and `src/web/api_worker.rs` in the browser build) as an `Event` that `App::apply_event` folds in, stale replies dropped by seq / node / session-generation guards. The **Sonic room's own row model** — `List::Sonic` maps to no App pane (`List::tab()` → `None`), its rows live in App state and its verbs call App methods that build the queue rows themselves (`src/gui/sonic.rs`), with `sonic::meter_glyph` for the one-cell match meter. The kit's **Tabs** (first consumer: the admin Discovery room), **Dropdown** (the header's server switcher, the stats page's period), **Table** (`table_view`, `scroll_list`, `ListView`), a list hung from a control (`frame_at` + `Surface::overlay`, the dropdown's own grammar) and **modals** (`modal_frame_on`). `Client::stats_history_async` (the one outcome-bearing history read — named so nobody reaches for it: the server picks the seeds, clause 10). `Client::random_song_async`; `gui::opener::open_target` (honours `MSTREAM_NO_OPEN`); `kit::clipboard::copy`; the track-actions sheet (`actions::Sheet { origin, track }`); the capture banner (`Capture`); `App::origin()` and `App::reach(&Origin)` for a peer origin (multi-server clauses 27, 30); `ApiCmd::DiscoveryProbe`; `GuiPrefs` (`[gui]`, unknown keys kept). **Missing**: `Ping.discovery_taste` / `discovery_plugins` and their `Capabilities` mirrors, the taste types and client calls, `ApiCmd::Taste` / `Event::Taste`, the App's taste state, `NavId::Discover`, `src/gui/discover.rs`, a capture for a seed pick, the `gui.discover.*` strings. **Added 2026-10-19 for clauses 100–141**: the plug-in types and their pure halves (`src/api/types/plugins.rs`: the listing, `PluginJob` and its `outcome()` — the webapp's `jobRowState` — `JobMark`, `CopyResult` / `ManyCounts`, `JobLookup`, the destination with `resolve_layout` (replaced 2026-10-21 by `Landing::of` / `layout_folders`), `PluginLink`, `ArtistAlbumRow`, `name_key`, `artist_ownership`, `job_for_album`), `Capabilities.uploads` (the ping's `noUpload` false; absent grants nothing), `TasteLead.album_artist`, the client calls (`Client::discovery_plugins_async` … `plugin_jobs_lookup_batch_async`, refused for a peer's client), `PluginFailure` (the server's words), the `ApiCmd`/`Event` pairs `KeepGate`, `JobsLookup`, `Jobs`, `JobStart`/`JobStarted`, `JobCancel`/`JobCancelled`, `JobsClear`/`JobsCleared`, `PluginLinks`, `KeepFacts` with their shapers (`worker::keep_gate` …, both workers), and the App's half (`src/tui/app/keep.rs`: the gate, the rows' jobs and marks, the poll, the Keep flow and its `KeepView`, the Copies rows, the links list). **Built 2026-10-20**: the drawing of the boards `TermRoom`, `TermEntryPoints`, `TermKeepModal` and `TermKeepStates` — `src/gui/keep.rs` (the Keep a copy modal in every state, the marks' glyphs and words, the status notes, the Copies modal's frame), the room's marks, indicator, `c` / `C`, the tile's list and tips in `src/gui/discover.rs`, the sheet's two rows and its badge row in `src/gui/actions.rs`, `MessageKind::Busy` / `Success` for the notes' tokens, and the `gui.act.*`, `gui.discover.keep.*` / `mark.*` / `copies.*` / `note.*` and `gui.tips.discover_*` strings in the ten locales. **Built 2026-10-20 (the second pass, the board `TermCopies`)**: the Copies modal's list (`gui::keep::draw_copies` over `App::copies_rows`, `CopiesUi` — the held copy by its job's id and a `ListView` in copies — `copies_key`, `copies_tips`, `copies_wheel`, the `DiscAct::Copies*` acts, `App::copies_action`: Copy again only where a gap is left), Open elsewhere's list (`gui::keep::draw_links`, `LinksUi` — its stop, viewport, its row's anchor from the sheet, and the opener's answers on a channel from `gui::opener::open_target`'s thread — `links_walk` / `links_enter` / `links_tips`, `DiscAct::Link*`), `MessageKind::Plain` (TEXT) for "opened …", the `gui.discover.copies.*` / `links.*` and `gui.tips.discover_copies_*` / `discover_links*` strings, and the e2e leg `test/e2e/legs/gui-discover-keep.exp` with `test/e2e/check_keep.py` (Scenario K). The temporary dead-code allows of the data layer are gone with it. **Built 2026-10-21 (Where files land, clauses 142–148)**: the destination's view, its save and the library's folders (`Client::collection_destination_save_async`, `ApiCmd::DestinationRead` / `DestinationSave` / `DestinationFolders` and their events, `App::keep_dest_*`, the view stamped by the ask that wrote it), the start's `destination` and its 409 (`JobStartAnswer`, `PluginFailure::DestinationChanged`, the job's `params.destination` pin, a server from before the key asked again without it), `Landing` / `layout_folders` / `CopyResult::landed` for LANDS IN and the PREVIEW, `KeepView::again` (the place Retry and Copy again send), the picker `gui::keep::DestUi` / `draw_dest` / `dest_key`, the `gui.discover.dest.*` and `gui.tips.discover_dest_*` strings in the ten locales, and the e2e legs `gui-discover-dest.exp` with `check_dest.py` (Scenario W) and Scenario K2 (`FAKE_NO_PIN`). **Built 2026-10-22 (a variable each song fills, clause 105)**: `SongTag`, `LayoutTags::slots`, `Run` (a landing's runs: words, a refused variable, a slot), `Landing::words` / `slots` / `one_song`, the server's `~` / `$HOME` / `${HOME}` fold in `sanitize_segment`, `TrackMetadata::artist_display` (the listing's `artist-display`), `KeepSong` on `KeepFacts::album_songs` (each song's ARTIST tag as written, its year, its one listed genre), `KeepView::album_songs` and the per-scope rule in `KeepView::scope_tags`, the slots and their note drawn by `gui::keep` (`slot_words`, `slot_note`, `path_tip`), the kit's tooltip wrap and box measured in cells (`wrap_tip`, `draw_tooltip`), the `gui.discover.dest.slot_*` strings in the ten locales. **Built 2026-10-22 (`{{SERVERFOLDER}}`, clauses 105 and 143)**: `SERVER_FOLDER`, `server_folder` and `sanitize_folders` (federation-copy.js `serverFolderOf`, path-template.js `sanitizeFolders`), `LayoutTags::server_folder`, `SongTag::ServerFolder`, a value of several folders in `layout_folders` and the artist scopes' cut at it in `Landing::of`, its rule per scope in `KeepView::scope_tags`, the picker's fourth preset (`Radio::ServerFolder`, offered by `presets` only where the view lists the variable), the blank above PREVIEW giving way in `dest_rows`, the variables row reaching to the labels' column, `slot_note`'s own and shared words, the `gui.discover.dest.preset_serverfolder` / `slot_server` / `slot_note_server` / `slot_note_mixed_*` strings in the ten locales, and the fake's seventh variable with Scenario W's check of the preset. |
 | **Target surface** | the GUI player (`mstream-player gui`, both flavours — the window host draws the same `render`) as a **TOOLS nav room**. **The TUI changes nothing**: its Discover tab (`Tab::Discover`, the explicit-seed lookup), the Now Playing panel's neighbours (`App.now_discover`) and `Capture::Discover` stay exactly as they are. The one shared change is a title: the Now Playing view's Discover tab becomes **Similar** (plan §2.12; docs/ux-contracts/now-playing.md) |
-| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11; the verbs line over the table and save as playlist 2026-10-16; the header's controls — no state line, no seeds line — 2026-10-16; Keep a copy, Open elsewhere and the Copies modal contracted 2026-10-19, their data layer built the same day; the room's marks and indicator, the ways in, the Keep a copy modal and the notes drawn 2026-10-20; the Copies modal's list, Open elsewhere's list and the Keep a copy e2e leg the same day; Where files land — the picker, the destination read with every Keep a copy, the start's pinned destination — contracted and built 2026-10-21, after the webapp's redesign (mStream 95f2205a, a7d4459f); `{{SERVERFOLDER}}` and "Same folders as the server" 2026-10-22 (the log) |
+| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11; the verbs line over the table and save as playlist 2026-10-16; the header's controls — no state line, no seeds line — 2026-10-16; Keep a copy, Open elsewhere and the Copies modal contracted 2026-10-19, their data layer built the same day; the room's marks and indicator, the ways in, the Keep a copy modal and the notes drawn 2026-10-20; the Copies modal's list, Open elsewhere's list and the Keep a copy e2e leg the same day; Where files land — the picker, the destination read with every Keep a copy, the start's pinned destination — contracted and built 2026-10-21, after the webapp's redesign (mStream 95f2205a, a7d4459f); `{{SERVERFOLDER}}` and "Same folders as the server" 2026-10-22 (the log); the picker redrawn after the phone's sheet and the webapp's editor — the preview first, the libraries as choices, Custom's own field, "Start from an existing folder…", no base folder, the validator — 2026-10-23 (the log) |
 
 ## Intent
 
@@ -896,9 +896,11 @@ with `{{ARTIST}}/{{ALBUM}}`.
      the 66-cell LANDS IN has no row for it, so the rows' tooltip holds
      it, after the whole path and " — " where the rows clip it. The same everywhere a place is drawn before its
      files land: LANDS IN while choosing, starting (the place sent) and
-     live (the pin), "retry adds to" / "copy again adds to", the
-     picker's PREVIEW; an ended copy's folder its files landed in is
-     real and carries none. **`{{SERVERFOLDER}}`** (mStream since
+     live (the pin), "retry adds to" / "copy again adds to" — and the
+     picker's PREVIEW, which draws the note as its own row (clause 143),
+     into the path's tooltip only where the row gave way at the floor;
+     an ended copy's folder its files landed in is real and carries
+     none. **`{{SERVERFOLDER}}`** (mStream since
      2026-10-22, the user's "copy the server's filepath"): the folders
      the song sits in on the connected server — its path there
      (`KeepSubject::filepath`, a listed song's `KeepSong::filepath`),
@@ -1298,7 +1300,7 @@ with `{{ARTIST}}/{{ALBUM}}`.
      buttons · Esc close" · "Enter copy again · …" · "Enter retry · …" ·
      "Enter start again · …" · "Enter close · Esc close" (already yours;
      nowhere, clause 147) · "↑ ↓ rows · Space or Enter pick · d where files
-     land · Esc close" (another server copying). Where files land's, by
+     land · Esc close" (another server copying). Where copies land's, by
      the hand: clause 143.
      The Copies modal, by the held row: "↑ ↓ rows · x cancel · X clear
      finished · Esc close" (running or waiting) · "↑ ↓ rows · Enter retry ·
@@ -1415,120 +1417,253 @@ with `{{ARTIST}}/{{ALBUM}}`.
      `MSTREAM_NO_OPEN` (the harness's seam) nothing opens and the note
      says "Deezer · {its url}", as the QR page's browser opens do.
 
-**Where files land (2026-10-21)**
+**Where copies land (2026-10-21; redrawn 2026-10-23)**
 
-The canvas's `TermDestination` board (after the webapp's `RecDestination`
-and its SPEC §9) draws every state here cell for cell; the sample is the
-board's: the account may upload to **music** (the library default, its
-template ARTIST / YEAR - ALBUM) and **copies** (saved, Album artist /
-Album). Built in `gui::keep` (`DestUi`, `draw_dest`, `dest_key`) over the
-App's `keep_dest_*` (the view, the save, the folders).
+The picker is the phone's destination sheet and the webapp's editor
+(mStream 48e5247c, `vp.js` `dm-dest`, `destination_sheet.dart`) in the
+terminal's grammar: the same rows in the same order, the same English
+words, no base folder of its own. The sample is the canvas's
+`TermDestination` board's: the account may upload to **music** (the
+library default, its template ARTIST / YEAR - ALBUM) and **copies**
+(saved, Artist / Album — the album's credit). Built in `gui::keep`
+(`DestUi`, `draw_dest`, `dest_key`) over the App's `keep_dest_*` (the
+view, the save, the folders) and the data layer's `fold_base`,
+`layout_lead`, `start_layout_at` and `validate_layout`.
 
 142. **The picker** — `[ Change… ]` or `d` (clause 105) opens **Where
-     files land** on the place in force: its own kit modal, ACCENT, 76
+     copies land** on the place in force: its own kit modal, ACCENT, 80
      cells wide (at most the area less 4), centred over the whole frame,
      anchored as if 22 rows (its top on row 4 at 100 × 30, row 1 at 100 ×
      24) and growing downward. Keep a copy is not drawn while it is open;
      the room beneath is inert, and the modal registers as an overlay, so
      the covers it touches draw as the mosaic. Esc (the folder list
-     closed), `[X]` (DIM, "Back — Esc") or Cancel go back to Keep a copy —
-     nothing saved, the hand on `[ Change… ]`.
+     closed) or `[X]` (DIM, "Back — Esc") go back to Keep a copy —
+     nothing saved, the hand on `[ Change… ]`. No Cancel button.
 143. **Its rows**, from its left border — labels col 2, values col 12
-     (two past a wider locale's label), the last content cell col 73:
-     the title **Where files land** ACCENT BOLD; a blank; **LIBRARY** —
-     `◂ copies ▸` (the arrows DIM, the name BOLD; ← → or a click step
-     through the server's order, a click on the name steps on, a click on
-     the label takes the hand), three cells, DIM "only libraries you may
-     upload to"; with one library its name BOLD and DIM "your only
-     library", no arrows and no stop (its label takes no click);
-     **FOLDER** — a line editor (tui-input) at cols 12–73: empty and
-     without the hand DIM "library root"; with the hand its label ACCENT
-     BOLD, the caret `▏` (legacy `│`), tail-scrolled behind a `…`; under
-     it 0–3 folders of the open list (DIM, the held one the selection
-     slab across cols 11–73 — not bold —, hover BRIGHT, the kit's bar
-     past three); the **hint** row: "in copies › from-peers · 3 folders"
-     while the list is open, GOLD "files would land in X › X" where the
-     base folder's last name is the layout's first rendered folder (case
-     folded), "not there yet · the first file creates it" where a typed
-     name is absent from its parent's listing, GOLD "couldn't list
-     {folder}: {the server's words}" for the folder being completed, else
-     "inside copies · leave it empty for the library root"; a blank;
-     **LAYOUT** — `(•)` OK / `( )` DIM at col 12, labels col 16: "Album
-     artist / Album" (`{{ALBUMARTIST}}/{{ALBUM}}`), "Artist / Album"
-     (`{{ARTIST}}/{{ALBUM}}`), "Server / Album artist / Album"
-     (`{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}`), **"Same folders as the
-     server"** (`{{SERVERFOLDER}}`, clause 105) only where the view's
-     `variables` list `SERVERFOLDER` — a server from before 2026-10-22
-     refuses it at Save, so it is never offered there (typed by hand it
-     draws GOLD, as any variable the view does not list) —
-     "{library}'s template" only where that library's template is none
-     of the presets, and "Custom",
-     whose field (cols 24–73) always shows the layout in force — DIM
-     unless Custom is chosen, TEXT with the caret under the hand. The
-     chosen radio is the preset the layout is, character for character,
-     else Custom (and Custom once picked). With the hand in the field the
-     **variables** row (col 24 — right-aligned to col 73 where a wider
-     locale's Custom label, or the seventh variable — the seven's 65
-     cells start at col 9 — would push them past it, as far left as the
-     labels' column, so none is lost) lists the view's variables joined
-     " · ", DIM text buttons — a click inserts `{{NAME}}` at the caret; a
-     blank;
-     **PREVIEW** — the copy Keep a copy has chosen rendered with the
-     fields as typed (clause 105's rules, its slots DIM included; the
-     library BOLD), a variable the view does not list drawn as typed in
-     GOLD, one row clipped from the left behind `…` (the whole path in
-     its tooltip, then a slot's note — the note alone where nothing is
-     clipped); then a song's
-     file name DIM (blank for an album or an artist); a blank; DIM
-     "Applies to every copy and download on your account" — a refusal's
-     GOLD rows in its place (clause 144) — and the buttons right-aligned
-     to col 73: DIM `[ Use the library default ]` only while the fields
-     differ from the default (the first library, no folder, its template
-     else the default layout; it refills the fields only, the hand on
-     LIBRARY), DIM `[ Cancel ]`, ACCENT BOLD `[ Save ]`. 18 rows, a row
-     more for "Same folders as the server", a library's template, the
-     variables row or each listed folder, two for a long refusal — the
-     list and the variables never stand together and every edit clears a
-     refusal, so with the fourth preset it passes 22 by one at most (the
-     template and the list; the template, the variables and a refusal);
-     there **the blank above PREVIEW gives way**, so it never passes 22 —
-     rows 1–22 at the 100 × 24 floor. **Keys**: ↑ ↓ walk LIBRARY › FOLDER › each radio › Custom's field
-     (only while Custom is chosen) › Use the library default › Cancel ›
-     Save; the hand opens on LIBRARY (FOLDER with one library). ← → step
-     the library and move between the buttons; Space or Enter pick a
-     radio (Custom's also moving the hand into its field) and press a
-     button, as Keep a copy's do; in a field
-     every printable key edits (Space too), ← → Home End and the ctrl
-     word ops move the caret. FOLDER: **Tab** opens the list on the
-     folder being completed (an empty field lists the library root),
-     extends the typed name to the names' common start, then cycles the
-     held folder; Shift-Tab cycles back; ↓ walks into the list, ↑ from its
-     top back to the field; Enter on a held folder fills "{folder}/{name}/"
-     and lists inside it; Esc closes the list. Enter in a field (the list
-     closed or nothing held) or on LIBRARY saves. A hand whose stop leaves
-     (a re-read drops a library's template) goes to the first stop, never
-     nowhere. Mouse: every stop, the arrows and the name, a folder, a
-     variable, a button; hover BRIGHT + BOLD on the radios, the arrows and
-     the name, a variable and a button, BRIGHT on a listed folder — a
-     field's row and the LIBRARY label take the hand without a hover
-     style; Apple Terminal's release echo swallowed as everywhere. **Folders** come from the user's own
+     (two past a wider locale's label), the radios' labels and Custom's
+     field col 16, the last content cell col 77. **The header**: "Where
+     copies land" ACCENT BOLD, then DIM "· yours" where the account's own
+     place is in force, else "· library default", and `[X]`; under it DIM
+     "One setting for your account · every copy uses it". **The preview
+     block** first, from col 2: DIM "{title} lands at" — the song by its
+     title (its file's name where it has none), "{album} lands at",
+     "Every album by {artist} lands at", "The albums you don't have land
+     at", or the one album only-missing takes by its name — then the path
+     the layout held renders for the copy Keep a copy has chosen (clause
+     105's rules): the library BOLD, the folders TEXT, `›` DIM, a slot DIM
+     inside its folder's words, an artist copy's "one folder per album"
+     DIM, a song's file DIM as the last crumb (the phone's preview) — one
+     row, clipped from the left behind `…` (the whole path then in its
+     tooltip, the file after it); under it, each on a row where there is
+     one, DIM and clipped at the border with the whole in its tooltip: the
+     slot's note (clause 105's words) and the missing-variables note, "No
+     value for this song, so left out of the path: {{YEAR}}" (the
+     variables this copy has no value for, each once in its braces; "The
+     song sits at the top of its server's library, so left out of the
+     path: {{SERVERFOLDER}}" for that one alone — the webapp's
+     `missingVars`, `Landing::missing`). While Custom's field is empty the
+     block is one DIM row, "Type a path to see where files land"; while
+     the layout would be refused, GOLD "Fix the layout to see where files
+     land"; while this item's path would pass 500 characters, GOLD "This
+     song's path would pass 500 characters, more than the server takes"
+     ("This path would pass …" for an album or an artist) — no fault of
+     the layout's: Save takes it; measured as the server's `renderTarget`
+     and the webapp's `previewTarget` measure it (`KeepView::
+     rendered_len_for`): the layout alone, rendered whole with this
+     copy's own values — never cut at an artist copy's album folder, a
+     slot or a value the copy lacks dropping out, a base folder set
+     elsewhere never counted — and the words whole in a tooltip where a
+     wider locale's clip at the border. A blank. **LIBRARY** — every library the
+     account may add files to, in the server's order, and the chosen one
+     when the server no longer lists it, side by side as `( ) music   (•)
+     copies`: the chosen `(•)` OK and its name BOLD, the others `( )` DIM
+     and plain; ← → choose the one before or after (wrapping), a click
+     chooses, a click on the label takes the hand (ACCENT BOLD under it);
+     with one choice its `(•)` alone and no stop (the chosen library the
+     server no longer lists is a choice: two drawn, a stop — left for a
+     listed one it is gone, the webapp's chips); where they would not all
+     fit, from the chosen one behind `…` — its cell a click that steps to
+     the one before — the last that has room for its dot, a space and a
+     cell of its name clipped at col 77, the rest ← →'s alone: never over
+     the border (gui/dj.rs's rule). A blank.
+     **LAYOUT** — `(•)` OK / `( )` DIM at col 12, labels col 16, the
+     layout each writes DIM and right-aligned to col 77 (its end behind a
+     leading `…`, two cells clear of the label, where a wider locale's
+     label leaves it less), in the webapp's order: "Artist / Album" (the
+     view's `defaultLayout`, else `{{ALBUMARTIST}}/{{ALBUM}}` — the
+     album's credit ahead of the album, so a compilation stays in one
+     folder), "Server / Artist / Album"
+     (`{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}`, unless that is the default),
+     **"Same folders as the server"** (`{{SERVERFOLDER}}`, clause 105)
+     only where the view's `variables` list `SERVERFOLDER` — a server
+     from before 2026-10-22 refuses it at Save, so it is never offered
+     there, and typed by hand it is the validator's "Unknown variable" —
+     and unless that is the default, "Library layout" only where the
+     chosen library's template is none of those, and "Custom" with DIM
+     "Type your own path". The chosen radio is Custom once picked, else
+     the preset the layout is, character for character — none where a
+     re-read dropped the held preset (below). **While Custom is chosen**,
+     under "Start from an existing folder…" — the webapp's order: the
+     radios, a preset's refusal, the folders button and its open list,
+     then Custom's own rows — at col 16: its **field** — a line editor
+     (tui-input) to col 77, EMPTY the first time, the hint DIM "e.g. From
+     friends or {{ARTIST}}/{{ALBUM}}" after the caret `▏` (legacy `│`),
+     tail-scrolled behind a `…`; what was typed stays in it while a preset
+     is chosen; under the field the **validator's words** GOLD, wrapped at
+     its 62 cells, three rows at most then `…` — the phone's and the
+     webapp's, by the server's own codes (`validate_layout`): "Unknown
+     variable {{ARTST}}. Use ARTIST, ALBUM, …" (the token as typed, the
+     variables the view lists), "A brace is out of place — variables are
+     written like {{ARTIST}}.", "A layout can't start with / — it begins
+     inside the library.", "A path can't contain .. folders.", "That
+     makes no folder — add a name or a variable.", "A path can't contain ~
+     or $HOME.", "A path can't use a drive letter like C:.", "A layout can
+     be at most 500 characters.", "A path can't contain tabs or other
+     control characters.", "That path can't be used." — none while it is
+     empty — or a refused save's words (clause 144); the **variables** row,
+     the view's variables joined " · ", DIM text buttons at col 16
+     (right-aligned to col 77, as far left as the labels' column, where
+     the seventh would pass it): a click inserts `{{NAME}}` at the caret
+     and hands the keyboard back to the field; under the hand ← → walk
+     them, the held one ACCENT BOLD, and Enter or Space inserts it, the
+     hand staying for the next — one with no room left in the 500 goes
+     nowhere; and the **help line** DIM, "Use / between folders. Variables
+     sort copies by artist, album…; a plain name puts every copy in the
+     same folder.", wrapped at 62 cells. The variables and the help stand
+     while the list is open (they give way only at the floor, below). A
+     refusal under a preset stands under the radios, at col 12, above the
+     folders button. **"Start from an existing folder…"** under the
+     radios at col 12, a DIM text button — ACCENT BOLD under the hand,
+     "Hide folders" while its list is open — the user's own server's file
+     explorer, repurposed: pressed, it lists the parent of the folder the
+     layout starts in (`DestUi::base`: Custom's leading folders that name
+     no variable, normalised; the library root for a preset, for none, or
+     for a lead the server would refuse) — under it the head DIM, "copies
+     › from-peers · 3 folders" ("1 folder"; the crumbs alone while it is
+     asked or empty), then up to three rows — "Up to {parent}" first
+     inside a folder, then the folders as listed (the held one the
+     selection slab across cols 11–77, not bold; hover BRIGHT; the folder
+     the layout starts in BOLD among its neighbours; the kit's bar at col
+     78 past three) — and one note where there is one: DIM "Looking up…"
+     while the listing is out, GOLD "couldn't list {folder}: {the
+     server's words}" where it failed with anything but a 404 (a 403, no
+     answer) — the server's 404 (`Cannot read directory … (ENOENT)`: a
+     typed lead two folders deep, none of them there) reads as the folder
+     not there yet, DIM, as the webapp's `dmBrowseMissing` reads a failed
+     listing — GOLD "“{folder}” has a brace in its
+     name, which a layout reads as a variable. Rename the folder to start
+     from it." for such a folder just pressed (nothing else changes), DIM
+     "This folder does not exist yet — it is created by the first file"
+     where the folder the layout starts in is absent from its parent's
+     listing, DIM "No folders in here" for an empty folder. **A row
+     pressed** (Enter, Space, a click) starts the layout there (the
+     webapp's `startLayoutAt`): Custom's leading folders become that
+     folder — from a preset the folder goes in front of it (`fold_base`)
+     — Custom is chosen, the caret at the end, a refusal's words go, and
+     the list goes inside the folder (Up: its parent, the layout starting
+     there); the library root from a preset changes nothing. A blank, and
+     **the buttons**, the webapp's footer: DIM `[ Use the library
+     default ]` at col 2 while the account's own place is in force or the
+     fields differ from the default (the first library, no folder, its
+     template else the default layout; it refills the fields only, the
+     hand on the first stop), and `[ Save ]` right-aligned to col 77 —
+     ACCENT BOLD while something changed
+     and the layout is valid (clause 144), else DIM with no click and a
+     tooltip saying why, "nothing changed yet" or "fix the layout first".
+     **Opened on a destination saved with a base folder** (older data — this
+     picker keeps none, the webapp's and the phone's rule): it opens
+     folded into Custom as "{base}/{layout}" (`fold_base`: the same files
+     in the same place), nothing dirty until edited, the preview drawn as
+     the server holds it — base folder and layout apart, so a folder
+     whose name has a brace reads as the folder it is — and for such a
+     folder the field's words "“{{PEER}}” is a folder set on another
+     device, but in a layout it reads as a variable. Rename it here, or
+     choose a layout." with Save off; a preset over it is an edit (the
+     server's name, not that folder). A library's own layout that leaves
+     with its library (← → to one without it) stays the layout, in
+     Custom's field; back with it untouched, its preset again and the
+     field as it was. **Rows**: 13 idle on a preset; a row more for "Same
+     folders as the server", a library's layout, the slot's note, the
+     missing-variables note, each of the validator's or a refusal's rows;
+     Custom adds its field, the variables and the help's two rows; the
+     open list its head, each of its rows (three at most) and its note.
+     Where they would pass the 22 — the 100 × 24 floor holds 22, and the
+     picker never grows past them whatever the terminal's height — they
+     **give way in order** until they fit (`give_way`): the blank under
+     LIBRARY, the blank above it, the blank above the buttons, the
+     missing-variables note, the slot's note (both into the path's
+     tooltip, after the whole path where it is clipped), the help line's
+     rows from the last up, the variables row, the list's rows from the
+     last down to one, a refusal's rows down to one — rows 1–22 at the
+     floor, never more. **Keys**: ↑ ↓, Tab and Shift-Tab walk LIBRARY ›
+     each radio › Start from an existing folder… › Custom's field › its
+     variables (both only while Custom is chosen) › Use the library
+     default › Save — the rows' order; the hand opens on the first stop.
+     ← → choose the library, walk the variables, move between the
+     buttons; Space or Enter pick a radio (Custom picked from the
+     keyboard keeps the hand on its radio — the field comes after it,
+     past the folders button; clicked, the field takes the keyboard, as
+     the phone's does), insert the held variable, open the list or go
+     into the held row, press a button; in the field every printable key
+     edits (Space too), ← → Home End and the ctrl word ops move the
+     caret, and Enter saves while Save is on (so does Enter on LIBRARY).
+     The list: ↓ walks into it and down it, ↑ from its top back to the
+     button; Esc closes it; so does a stop left by ↑ ↓ Tab, a radio
+     picked, Save, or a click on the field's row or the LIBRARY label —
+     a library, a variable, Use the library default, a folder row and the
+     wheel keep it open (a library or the default re-anchor it). A hand
+     whose stop leaves (a re-read drops a library's layout; a preset over
+     Custom's field) goes to the first stop, never nowhere. **The place
+     read again** while the picker is open (another tab or device saved
+     one; the webapp's `dmPickerSync`): nowhere, the picker goes — Keep a
+     copy's nowhere row (clause 147); moved, it is taken while nothing is
+     edited and no save is out, the fields refilled as on open, the hand,
+     the open list (re-anchored) and the held variable kept; an edit is
+     kept for Save or Esc to settle; a held preset the re-read dropped (a
+     library's template changed under an edit) marks no radio, as the
+     webapp marks none. Mouse: every stop, a library, a radio, a
+     variable, a folder row, the folders button, a button; hover BRIGHT +
+     BOLD on a library, a radio, a variable, the folders button and a
+     button, BRIGHT on a listed folder — the field's row and the LIBRARY
+     label take the hand without a hover style; Apple Terminal's release
+     echo swallowed as everywhere. **Folders** come from the user's own
      server's file explorer (`/{library}/{folder}`), asked on the worker
      one at a time, each once while the picker is open
-     (`App::keep_dest_list`). **Tips** by the hand: "↑ ↓ rows · ← →
-     library · Enter save · Esc back" · "type a folder · Tab folders · ↑ ↓
-     rows · Enter save · Esc back" · "↑ ↓ folders · Enter open · Tab
-     complete · Esc close the list" · "↑ ↓ rows · Space or Enter pick ·
-     Esc back" · "type a layout · ↑ ↓ rows · Enter save · Esc back" · "← →
-     buttons · Enter save|cancel|use the library default · Esc back" ·
-     "Esc back" while saving.
+     (`App::keep_dest_list`). **Tips** by the hand — the keys that work
+     and nothing else (clause 119): "← → library · ↑ ↓ rows · Esc back"
+     ("← → library · Enter save · ↑ ↓ rows · Esc back" while Save is on)
+     · "↑ ↓ rows · Space or Enter pick · Esc back" · "type a layout · ↑ ↓
+     rows · Esc back" ("type a layout · Enter save · ↑ ↓ rows · Esc back"
+     while Save is on) · "← → variable · Enter insert · ↑ ↓ rows · Esc
+     back" · "Enter folders · ↑ ↓ rows · Esc back" · "↑ ↓ folders · Enter
+     open · Esc close the list" · "← → buttons · Enter save|use the
+     library default · Esc back" ("← → buttons · Esc back" on Save while
+     it is off) · "Esc back" while saving.
 144. **Save** — `PUT …/collection/destination` (`ApiCmd::DestinationSave`)
-     with `{destination: {vpath, base (as typed, trimmed), layout}}`, or
-     `{destination: null}` where Use the library default was pressed while
-     the picker was open and the fields are the default at Save — a step
-     away and back, or a radio picked again, keeps it (the webapp's
-     `reset`). While it is out "saving…" (ACCENT) stands right-aligned in
-     the button row, no buttons, the hand down, the frame its height; Esc
-     still goes back and the answer still folds in. **The answer is its
+     with `{destination: {vpath, base: "", layout}}` — the layout the
+     picker holds, Custom's text or the preset, never a base folder (one
+     set elsewhere went into the layout as it opened; a preset chosen
+     over it leaves it behind) — or `{destination: null}` where Use the
+     library default was pressed while the picker was open and the fields
+     are the default at Save — a step away and back, or a radio picked
+     again, keeps it (the webapp's `reset`). **Save is on** only while
+     something changed (the webapp's `dmPickerDirty`: another library or
+     layout than the one it opened on — a base folder folded into the
+     layout as it opened is no edit; a preset over a folder a layout
+     reads as a variable is — or Use the library default pressed over a
+     place saved for the account), the layout passes the validator
+     (`validate_layout`, the server's `validateLayout` mirrored: empty,
+     over 500 characters, a stray brace, a variable the view does not
+     list, a control character, a leading separator, then the path the
+     server's sample renders — `..`, `~` or `$HOME`, a drive letter, no
+     folder at all) and the field holds no folder a layout cannot
+     (clause 143); the words stand under the field as it is typed, so a
+     layout the server would refuse never leaves here — the server's own
+     words come for what only it can know (a library the account lost).
+     While a save is out "Saving…" (ACCENT, the phone's word) stands
+     right-aligned in the button row, no buttons, the hand down, no click
+     or key edits, the frame its height; Esc still goes back and the
+     answer still folds in. **The answer is its
      own picker's** (by the save's seq, as the webapp's `m.picker === k`):
      a picker opened again meanwhile is no "saving…", its keys work, its
      Save supersedes the one out, and the old answer never closes or fills
@@ -1540,14 +1675,13 @@ App's `keep_dest_*` (the view, the save, the folders).
      replaces the gate's (`Event::DestinationSaved`, whichever picker sent
      it) and its picker closes onto Keep a copy — the new LANDS IN, "saved
      for your account", the hand on `[ Change… ]`. **A refusal** (400, 403,
-     any other): GOLD "couldn't save: {the server's words}" — "destination
-     layout: Unknown variable {{ARTST}}. Supported: {{ARTIST}}, …" —
-     wrapped at 72 cells, three rows at most, then `…`; no answer:
-     "couldn't save: your server didn't answer"; the fields, the hand (on
-     Save where it was nowhere) and Save stay. A base folder the server
-     refuses has its words too: "destination base folder: Resolved path
-     cannot contain .. segments". **No layout is checked here**: the
-     server's words decide.
+     any other): GOLD, the server's words as sent — no prefix, as the
+     webapp draws them — under the field (under the radios with a
+     preset, above the folders button) — "destination: you cannot put
+     files into library 'music'" — wrapped at the field's 62 cells (the
+     radios' 66), three rows at most, then `…`; no answer: "your server
+     didn't answer"; the fields, the hand (on Save where it was nowhere)
+     and Save stay; any edit clears the words.
 145. **A start sends the place it showed** — every `ApiCmd::JobStart`
      carries `destination` (`{vpath, base, layout}`, its `source`
      dropped): Keep a copy's Add the place LANDS IN drew; the modal's
@@ -1584,9 +1718,11 @@ App's `keep_dest_*` (the view, the save, the folders).
      this server · copies are off", a blank and `[ Close ]` (ACCENT BOLD,
      the primary) — 11 rows; tips "Enter close · Esc close"; the copy
      gate closes (clause 101), so every way in is hidden.
-148. **The legacy console**: the `+ - |` frame, `< >` for `◂ ▸`, `(*)`,
-     `>` for `›`, the caret `│`, "..." for `…` ("saving...", "[ Change...
-     ]"); covers as the mosaic.
+148. **The legacy console**: the `+ - |` frame, `(*)`, `>` for `›`, `<
+     >` around a slot's word, the caret `│`, "..." for `…` ("Saving...",
+     "[ Change... ]", "Start from an existing folder...", "Looking
+     up...", the help line's, the list's notes', the hint's); covers as
+     the mosaic.
 
 ## Wording
 
@@ -1694,10 +1830,10 @@ translations can be carried over). Plural families end `_*`.
 | Title · From · State (the header, uppercased in code) · every album by %{artist} · song · album · only the albums you don't have (a second row's opening word) · in your collection · skipped · nothing to copy · finished (the STATE words beside the marks' `waiting` · `failed` · `stopped` · `refused` · `cancelled` and the Keep modal's `yours` · `stopping`) · stopping after %{step} · you had it, nothing copied · you had them all, nothing copied · a file already sits at that path · %{count} songs failed, none copied · %{server} was too busy to send more (second rows, beside the Keep modal's `waiting` · `copying` · `copied_*` · `owned_*` · `failed_*` · `left_out_*` · `stopped_quota` · `stopped_peer` · `refused` · `cancelled` · `nothing_theirs` · `all_yours` · `failed_plain` · `finished`) · asking your server for copies… · couldn't load copies: %{words} · couldn't refresh: %{words} · next try in %{secs} s · Nothing copying. · Start one with c on a connected server's song or album. · Clear finished · Cancel this copy — x (the `[X]`'s tooltip) · %{title} had already finished, nothing to cancel · it had already finished, nothing to cancel · couldn't cancel: %{words} · couldn't clear: %{words} (a start refused from the list is the Keep modal's `refused_start`; Try again is `gui.discover.retry`; your server didn't answer is `gui.discover.keep.no_answer`) | `gui.discover.copies.col_title` · `col_from` · `col_state` · `every_album` · `kind_song` · `kind_album` · `kind_missing` · `kept` · `skipped` · `nothing` · `done` · `stopping_after` · `had_it` · `had_them` · `exists` · `failed_none_*` · `stopped_busy` · `asking` · `load_failed` · `refresh_failed` · `next_try` · `empty` · `empty_sub` · `clear` · `cancel_tip` · `too_late` · `too_late_plain` · `cancel_failed` · `clear_failed` |
 | Canonical · Search (the heads, uppercased in code) · no links for this song · couldn't get links: · opening %{label}… · opened %{label} · %{label}: no app took it (Open elsewhere's list and its notes; asking… is `gui.discover.asking`, Try again `gui.discover.retry`) | `gui.discover.links.canonical` · `search` · `none` · `failed` · `opening` · `opened` · `no_app` |
 | copying %{title}… · copying %{title} from %{server}… · copied %{title} · copied %{title} into %{library} · album copy finished · album copy: some songs failed · already yours · copy skipped: a file is in the way · nothing to copy · copy failed: %{words} · copy stopped: %{why} · transfer limit · %{server} reached its transfer limit · server too busy · %{server} is too busy right now · server went away · %{server} went away · ended early (an unknown stop word's) · %{server} refuses copies · copy cancelled (the status notes, clause 118: the short and the long form each — the long where the whole note fits) | `gui.discover.note.copying` · `copying_from` · `copied` · `copied_into` · `album_done` · `album_failed` · `yours` · `exists` · `nothing` · `failed` · `stopped` · `why_quota` · `why_quota_long` · `why_busy` · `why_busy_long` · `why_peer` · `why_peer_long` · `why_other` · `refuses` · `cancelled` |
-| Where files land (the picker's title) · Library · Folder · Layout · Preview (uppercased in code) · Back (its `[X]`'s tooltip) · only libraries you may upload to · your only library · library root · inside %{library} · leave it empty for the library root · in %{path} · %{count} folders · not there yet · the first file creates it · couldn't list %{path}: %{words} · files would land in %{path} (`›` between the names in code) · Album artist / Album · Artist / Album · Server / Album artist / Album · Same folders as the server · %{library}'s template · Custom · Applies to every copy and download on your account · Use the library default · Save · saving (`…` in code) · couldn't save: %{words} · save · cancel · use the library default (the button tip's verbs) | `gui.discover.dest.title` · `library` · `folder` · `layout` · `preview` · `back` · `lib_hint` · `only_library` · `root` · `base_hint` · `listing_*` · `not_there` · `list_failed` · `nested` · `preset_albumartist` · `preset_artist` · `preset_server` · `preset_serverfolder` · `preset_library` · `custom` · `applies` · `use_default` · `save` · `saving` · `save_failed` · `verb_save` · `verb_cancel` · `verb_default` |
+| Where copies land (the picker's title) · One setting for your account · every copy uses it · yours · library default · Library · Layout (uppercased in code) · Back (its `[X]`'s tooltip) · %{title} lands at · Every album by %{artist} lands at · The albums you don't have land at · Type a path to see where files land · Fix the layout to see where files land · This path would pass %{max} characters, more than the server takes · This song's path would pass %{max} characters, … · No value for this song, so left out of the path: %{vars} · The song sits at the top of its server's library, so left out of the path: %{vars} · Artist / Album · Server / Artist / Album · Same folders as the server · Library layout · Custom · Type your own path · e.g. From friends or %{example} · Use / between folders. Variables sort copies by artist, album…; a plain name puts every copy in the same folder. · the validator's words (Unknown variable %{name}. Use %{vars}. · A brace is out of place — … · A layout can't start with / — … · A path can't contain .. folders. · That makes no folder — … · A path can't contain ~ or $HOME. · A path can't use a drive letter like C:. · A layout can be at most %{max} characters. · A path can't contain tabs or other control characters. · That path can't be used. · “%{folder}” is a folder set on another device, …) · Start from an existing folder… · Hide folders · %{count} folders · Up to %{name} · No folders in here · Looking up… · This folder does not exist yet — it is created by the first file · “%{folder}” has a brace in its name, … · couldn't list %{path}: %{words} · Use the library default · Save · Saving… · couldn't save: %{words} (the status line's, for a picker gone; under the layout the server's words stand as sent) · nothing changed yet · fix the layout first (Save's tooltip while off) · save · use the library default (the button tip's verbs) — the phone's and the webapp's English, exactly | `gui.discover.dest.title` · `sub` · `tag_yours` · `tag_default` · `library` · `layout` · `back` · `lands_at` · `lands_at_artist` · `lands_at_missing` · `custom_empty` · `fix_layout` · `too_long` · `too_long_song` · `missing` · `missing_server` · `preset_artist_album` · `preset_server` · `preset_serverfolder` · `preset_library` · `custom` · `custom_sub` · `custom_hint` · `custom_help` · `err_unknown_var` · `err_braces` · `err_absolute` · `err_traversal` · `err_empty` · `err_home` · `err_drive` · `err_too_long` · `err_control` · `err_generic` · `err_base_braces` · `start_from` · `hide_folders` · `folder_count_*` · `up` · `no_folders` · `looking_up` · `will_create` · `folder_braces` · `list_failed` · `use_default` · `save` · `saving` · `save_failed` · `save_off_same` · `save_off_bad` · `verb_save` · `verb_default` |
 | saved for your account · the library's default · Change (`…` in code; Keep a copy's SOURCE row) · where files land changed · check the path above and add again · where files land changed — retry it from Keep a copy (the Copies note) · your account can't add files to this server · copies are off · one folder per album (an artist copy's LANDS IN; it replaced `keep.each_album`) · retry adds to · copy again adds to (the row under LANDS IN where the account's place moved, clause 105) | `gui.discover.dest.source_user` · `source_default` · `change` · `changed` · `changed_retry` · `nowhere` · `per_album` · `retry_adds_to` · `again_adds_to` |
-| artist · year · genre · server folder (a slot's word, `‹ ›` in code) · %{slots} comes from each song's own tags, so these songs can land in more than one folder. · %{slots} come from … (more than one slot, ", " between in code, in the path's order) · …more than one folder (a song with none leaves that folder out). (a genre among them) · %{slots} comes from the song's own tags (a song with none leaves that folder out). (a song's copy alone) · %{server} comes from where each song sits on the server, so these songs can land in more than one folder. (‹server folder› alone) · %{slots} comes / come from each song's own tags and %{server} from where it sits on the server, so these songs can land in more than one folder. (beside the tags' slots: `%{slots}` the tags alone, their number picking the verb; with a genre its parenthesis) — the note in LANDS IN's and the PREVIEW's tooltip, clause 105; the phone's words in every locale | `gui.discover.dest.slot_artist` · `slot_year` · `slot_genre` · `slot_server` · `slot_note_*` · `slot_note_genre_*` (the `_one` … `_other` family) · `slot_note_song` · `slot_note_server` · `slot_note_mixed_*` · `slot_note_mixed_genre_*` |
-| the tips of clause 119 | `gui.tips.discover_row_keep` · `discover_peer_tile_keep` · `discover_peer_tile_more` (a connected server's lit tile with the gate closed: its list stands) · `discover_sheet` (a connected server's song's sheet, no rating keys) · `discover_sheet_keep` · `discover_tile_list` · `discover_tile_list_keep` · `discover_copies` ("C copies", appended to a rest tip while the indicator stands and the line has the cells) · `discover_keep_choose` (`%{verb}` the primary's words) · `discover_keep_close` · `discover_keep_queued` · `discover_keep_running` · `discover_keep_play` · `discover_keep_again` · `discover_keep_retry` · `discover_keep_start_again` · `discover_keep_yours` · `discover_keep_other` (both with "d where files land", whose words `discover_keep_d` are what gives way where a line outgrows 99 cells) · the picker's `discover_dest_library` · `discover_dest_folder` · `discover_dest_list` · `discover_dest_radio` · `discover_dest_custom` · `discover_dest_button` (`%{verb}`) · `discover_dest_saving`; the Copies modal's parts, joined with ` · ` — `discover_copies_rows` (↑ ↓ rows) · `discover_copies_cancel` (x cancel) · `discover_copies_retry` · `discover_copies_again` · `discover_copies_start_again` · `discover_copies_play` (Enter …) · `discover_copies_clear` (X clear finished) · `discover_copies_esc` (Esc close); the links list's `discover_links` · `discover_links_failed` · `discover_links_wait` |
+| artist · year · genre · server folder (a slot's word, `‹ ›` in code) · %{slots} comes from each song's own tags, so these songs can land in more than one folder. · %{slots} come from … (more than one slot, ", " between in code, in the path's order) · …more than one folder (a song with none leaves that folder out). (a genre among them) · %{slots} comes from the song's own tags (a song with none leaves that folder out). (a song's copy alone) · %{server} comes from where each song sits on the server, so these songs can land in more than one folder. (‹server folder› alone) · %{slots} comes / come from each song's own tags and %{server} from where it sits on the server, so these songs can land in more than one folder. (beside the tags' slots: `%{slots}` the tags alone, their number picking the verb; with a genre its parenthesis) — the note in LANDS IN's tooltip and on the PREVIEW's own row (its tooltip where the row gave way), clause 105; the phone's words in every locale | `gui.discover.dest.slot_artist` · `slot_year` · `slot_genre` · `slot_server` · `slot_note_*` · `slot_note_genre_*` (the `_one` … `_other` family) · `slot_note_song` · `slot_note_server` · `slot_note_mixed_*` · `slot_note_mixed_genre_*` |
+| the tips of clause 119 | `gui.tips.discover_row_keep` · `discover_peer_tile_keep` · `discover_peer_tile_more` (a connected server's lit tile with the gate closed: its list stands) · `discover_sheet` (a connected server's song's sheet, no rating keys) · `discover_sheet_keep` · `discover_tile_list` · `discover_tile_list_keep` · `discover_copies` ("C copies", appended to a rest tip while the indicator stands and the line has the cells) · `discover_keep_choose` (`%{verb}` the primary's words) · `discover_keep_close` · `discover_keep_queued` · `discover_keep_running` · `discover_keep_play` · `discover_keep_again` · `discover_keep_retry` · `discover_keep_start_again` · `discover_keep_yours` · `discover_keep_other` (both with "d where files land", whose words `discover_keep_d` are what gives way where a line outgrows 99 cells) · the picker's `discover_dest_library` · `discover_dest_library_save` · `discover_dest_radio` · `discover_dest_custom` · `discover_dest_custom_save` · `discover_dest_vars` · `discover_dest_folders` · `discover_dest_list` · `discover_dest_button` (`%{verb}`) · `discover_dest_button_off` · `discover_dest_saving`; the Copies modal's parts, joined with ` · ` — `discover_copies_rows` (↑ ↓ rows) · `discover_copies_cancel` (x cancel) · `discover_copies_retry` · `discover_copies_again` · `discover_copies_start_again` · `discover_copies_play` (Enter …) · `discover_copies_clear` (X clear finished) · `discover_copies_esc` (Esc close); the links list's `discover_links` · `discover_links_failed` · `discover_links_wait` |
 
 Data is never translated: titles, artists, album and server names.
 
@@ -2076,7 +2212,7 @@ over a copy's own surface; any stop word on a done row a stop — a late
 `cancelled` cancelled, an unknown word "the copy stopped before it
 finished" with Retry — never in your collection.
 
-**Where files land (2026-10-21)**, clauses 105 and 142–148. The data
+**Where copies land (2026-10-21; redrawn 2026-10-23)**, clauses 105 and 142–148. The data
 layer (`api::types::plugins`, `api`): a job's pin read absent, `null`, a
 place or an odd shape (the job whole); `landedPath`'s cases (one song,
 already yours, a file in the way, the shared folder of many, none shared,
@@ -2108,40 +2244,96 @@ superseding it, its view the gate's; a read or the gate's ask sent
 before a save that answered drawing nothing, a read sent after it
 drawing; the lone missing album named with its year under
 `{{YEAR}}`; the folders asked once each, one at a time, forgotten with
-the picker. The drawing (`gui::keep`, against `TermDestination`): F1's
-SOURCE row and `[ Change… ]` (cols 53–63, the slab under the hand), F2
-cell for cell with its tokens, clicks and the inert room, Esc back on
-Change…, `d`; P1's template radio, P2's refill and the `null` save, a
-preset after it saving the place; F3 (the Custom field, the variables,
-the GOLD variable in the preview, "saving…", the server's words in three
-GOLD rows, an edit clearing them) and FL at the floor (rows 1–21); F4's
-folder list from the server (one ask at a time, the held slab, Enter in,
-Tab's common start and cycling, Shift-Tab, Esc, a click); P3's one
-library on FOLDER and "not there yet", the nested GOLD hint; F5a/F5b;
-F7's 409 (the start's body, LANDS IN redrawn, the GOLD line, the hand on
-the radio, Add again sending the new place); F6's nowhere (11 rows, the
-gate closed); F8's legacy glyphs; P4's tile, one folder per album, no
-file row, no answer; a variable clicked in at the caret, the list's bar
-and wheel; the Copies list's Retry sending the job's pin and its note;
-LANDS IN wrapped at a crumb (the library kept, ` ›` ending the first
-row, the second clipped at the right with the whole path its rows'
-tooltip); "retry adds to" and "copy again adds to" under it, DIM, the
-library BOLD, and the Retry sending that place; the variables row whole
-and inside the border in all ten locales; Space on the picker's
-buttons; one library's label no stop, a hand whose stop left on the
-first stop; a picker whose view went giving way to Keep a copy, Esc
-never swallowed; Use the library default standing until Save; a save's
-answer its own picker's (a reopened picker neither "saving…" nor closed
-by it, a refusal after its picker went the status line's, the base
-folder's refusal in two GOLD rows). The tips inside 99 cells in all ten
-locales ("d where files land" giving way first, never in English). **The e2e leg** `gui-discover-dest.exp`
-(run.sh's Scenario W): Keep a copy on the default, `d`, ↓, "fr", Tab, Esc,
-Enter — the folder completed from the fake's listing and saved —, the
-place moved behind the client's back (`/_move_destination`), ↓ ↓, Enter —
-the 409 — with `check_dest.py` replaying the four states and the fake's
-state for the one save, the reads (exactly three: the gate, the open,
-the 409's), the listing and the one start answered
-`destination_changed`, nothing started. **Scenario K2** runs the Keep a
+the picker. The drawing (`gui::keep`, against the phone's sheet and the webapp's
+editor, 2026-10-23): F1's SOURCE row and `[ Change… ]` (cols 53–63, the
+slab under the hand); the picker idle on the saved place cell for cell
+with its tokens, the library's default tagged so, clicks (a library, a
+radio, the folders button, `[X]`, Save off with its tooltip) and the
+inert room, Esc back on Change…, `d`; the LIBRARY row choosing by ← →
+and by click, a library's own layout joining the radios, following its
+library into Custom's field and back out untouched; Custom clicked
+empty with its hint, the preview asking for a path, every validator
+message as typed (GOLD under the field, the preview's "Fix the layout",
+Save off), a valid layout's path and Enter saving it with no base
+folder, Custom from the keyboard keeping the hand on its radio; a
+variable clicked in at the caret and inserted from the row by ← → Enter
+(the held one ACCENT BOLD), Tab and Shift-Tab walking; "Start from an
+existing folder…" listing the server's folders one ask at a time
+("Looking up…", the count, the held slab, Enter into a folder starting
+Custom there with the list above the field, the variables and the help
+standing and the blank under LIBRARY gone — 22 rows at most, whatever
+the height — Up, the
+wheel's bar, the folder the layout starts in BOLD, a click going in,
+Esc closing, Save sending the layout alone); the list's "does not exist
+yet" (absent from its parent's listing; the server's 404 two folders
+deep), a braced folder refused in GOLD, a failed listing's words (a
+403, no answer); a
+destination saved with a base folder opening folded into Custom with
+nothing dirty, an edit saving base `""`, a braced base folder drawn as
+the folder it is with the field's words and Save off, a preset over it
+dirty, Server / Artist / Album — the field's own text — over a braced
+base an edit; Use the library default refilling only, the button kept while
+the account's place is in force and gone under the default, Save then
+sending `null`, a preset after it an explicit place, away and back
+still `null`; "Saving…" with no buttons, the hand down and no click
+editing, saved
+landing back in Keep a copy with the new LANDS IN and the hand on
+Change…, a refusal's three GOLD rows — the server's words as sent —
+under the field (under the radios with a preset, above the folders
+button) with the hand back and an edit clearing them, the same
+rows at the floor (1–22); the 22-row picker at the floor (five radios,
+Custom with a slot's note), its blanks giving way to a refusal, a pick
+clearing the refusal with the list above the field, the three list
+rows standing with the variables and the help; the help and the
+variables giving way before the list at the floor (the tallest picker
+there is, the refusal and the list's note standing); `give_way`'s order
+on synthetic rows; the preview's missing-variables note ("No value for
+this song…", the server-folder words) and its row giving way last into
+the path's tooltip; the legacy console's glyphs; a tile's "Every album
+by … lands at" with one folder per album and no file; the variables row
+whole and inside the border and every radio's layout clear of its
+label in all ten locales; Space on the buttons, ← → between them; one
+library's row no stop with the hand on the first radio, a hand whose
+stop left on the first stop; a picker whose view went giving way to
+Keep a copy, Esc never swallowed; a save's answer its own picker's (a
+reopened picker neither "Saving…" nor closed by it, a refusal after its
+picker went the status line's); the LIBRARY row never over the border
+(a 58-cell name alone with the other reached by ←, a 50-cell one with
+the next clipped, the `…` stepping back); the too-long preview for a
+song, an album and an artist (the album folder dropping from an
+artist's measure, a slot dropping, a base folder never counted; a wider
+locale's words whole in a tooltip); the place read again taken while
+nothing is edited (the hand, the open list and the held variable kept),
+kept through an edit, nowhere closing the picker onto Keep a copy's
+nowhere row; the list closed by a radio, ↑ from its first row back to
+the button, re-anchored by a library switch, asked afresh by a reopened
+picker; a variable with no room going nowhere; the tips' "Enter save"
+only while Save is on, "← → buttons · Esc back" on Save off; every tip
+key asserted present (a missing key reads back as its path). The data layer (`api::types::plugins`,
+2026-10-23): `fold_base`, `braced_folder`, `layout_lead`,
+`start_layout_at` on the webapp's cases; `validate_layout` refusing
+what the server refuses, code by code, the sample's path cut never
+refused; `Landing::missing` (a slot no missing value, the server folder
+of a root song one, an unlisted name not counted, the artist cut's
+folders out) and `rendered_len`. The App: a song with no year leaving
+`{{YEAR}}` out and naming it. The tips inside 99 cells in all ten
+locales ("d where files land" giving way first, never in English). **The
+e2e leg** `gui-discover-dest.exp` (run.sh's Scenario W): a place saved
+with a base folder seeded first (`/_move_destination`: older data), Keep
+a copy on it, `d` (folded into Custom), Enter on LIBRARY (nothing dirty:
+no PUT), ↓ past the four radios to "Start from an existing folder…",
+Enter (the fake's root listed, the seeded folder not there yet), ↓
+Enter (from-peers picked: Custom starts there, the list inside it),
+Esc, ↓ ↓ ↓ ↓ Enter — the layout saved with base `""` —, the place moved
+behind the client's back (`/_move_destination`), ↓ ↓, Enter — the 409
+— with `check_dest.py` replaying the six states (the seeded place, the
+picker folded with its preview first, the libraries as choices and the
+folders button above the field, the list with its not-there-yet note,
+the folder picked, saved, moved) and the fake's state for the one save
+(base `""`, the seeded lead replaced), the two listings (the root, the
+picked folder), the reads (exactly three: the gate, the open, the
+409's) and the one start answered `destination_changed`, nothing
+started. **Scenario K2** runs the Keep a
 copy leg against `FAKE_NO_PIN` (a server from before the key): the same
 states, the start asked twice — with the place (400), then without it
 (202) — and the copy done. Each headline behaviour
@@ -2990,3 +3182,89 @@ every slot, the give-way at 22 rather than past it, the names untrimmed,
   - **Only-missing taking one album** draws `‹server folder›` as a slot:
     this client never reads that album's songs, so it cannot know their
     folder.
+- **2026-10-23 — The picker redrawn after the phone's sheet and the
+  webapp's editor** (the user, after the webapp's "where files land"
+  editor was rebuilt to match the phone, mStream 48e5247c: "This looks
+  good. Update the terminal UI to match this new UI/UX."). Clauses
+  142–144 and 148 are rewritten; the structure, the order and the
+  English words are the other two clients' (the phone's ARB
+  translations where they exist for the nine other locales). Where the
+  terminal parts from them, or from its own first cut:
+  - **No base folder field** — the one the terminal alone kept
+    (2026-10-21). A destination saved with one opens folded into
+    Custom as "{base}/{layout}" (`fold_base`, ported with
+    `braced_folder`, `layout_lead`, `start_layout_at`), nothing dirty
+    until edited; Save sends base `""` and the layout — the same files
+    in the same place.
+  - **The validator is here now** (`validate_layout`, the server's codes
+    mirrored, the view's variables as the known ones): the first cut
+    let the server speak (2026-10-21's "No layout is checked here");
+    the webapp and the phone validate as typed, and Save stays off until
+    the layout passes — so the server's 400 words come only for what
+    only it can know.
+  - **"Start from an existing folder…" replaces folder completion**: the
+    same file explorer listing, one folder at a time on the worker, but
+    a list of rows under a button (Up to the parent, the folders, the
+    kit's bar), a row picked starting Custom's layout there, as the
+    webapp's `startLayoutAt` — no Tab completion, no FOLDER field. The
+    webapp's "New folder…" is not drawn: a folder that does not exist
+    yet is typed into Custom's field, and the list says the first file
+    creates it.
+  - **80 cells wide, not 76**: "Server / Artist / Album" and its
+    `{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}` want 67 cells from the labels'
+    column; a wider locale's layout clips from the left behind `…`
+    instead of colliding with its label (the `the_variables_row…` sweep
+    pins it in all ten).
+  - **The libraries are `(•)` choices side by side** (the Auto DJ room's
+    idiom, docs/ui-kit.md), not the stepper and not chips — a terminal
+    has no chip; where they would not all fit the row starts at the
+    chosen one behind `…`.
+  - **Save is a modal primary that goes off** (DIM, no click, a tooltip
+    saying why) where the kit hides text buttons instead: the primary's
+    ACCENT tells it from an idle button, and a Save that vanished would
+    move the hand.
+  - **The preview's notes are rows**, not only the tooltip (2026-10-22's
+    deviation, withdrawn for the picker: it has the rows the 66-cell
+    LANDS IN has not), and the first to give way at the floor — into
+    the path's tooltip — after the three blanks; the 22-row cap holds by
+    `give_way`'s order (the list and a refusal shrink last).
+  - **Esc and `[X]` alone go back** — no Cancel button, as the webapp;
+    "Where copies land" is the title (the phone's: the terminal copies
+    and never downloads), while "d where files land" and "where files
+    land changed" keep naming the setting.
+  - **Custom from the keyboard keeps the hand on its radio** and the
+    pointer's pick moves it into the field — the webapp's two paths;
+    the first cut moved it on both.
+  - **The review pass, the same day** (the findings against the webapp,
+    each verified in `vp.js` first): the rows take the webapp's order
+    — "Start from an existing folder…" and its list under the radios,
+    Custom's field, problem, variables and help under them, the stops
+    walking the same way (the leg's ↓ count to Save grew by two); the
+    variables and the help stand while the list is open and give way
+    only at the floor, after the notes and before the list's rows; the
+    footer is the webapp's, Use the library default at the left edge
+    and Save at the right; the busy word is the phone's "Saving…"
+    (every locale's ARB, ellipsis in the string, `ell()` for the
+    console); a refusal stands as the server sent it, no "couldn't
+    save:" (the status line's form keeps it, where it needs the
+    context); the server's 404 for a listed folder reads as "This folder
+    does not exist yet" (the webapp's `dmBrowseMissing`), any other
+    failure keeps its GOLD words; the too-long check measures what the
+    server measures (the layout alone, whole, this copy's own values, no
+    base folder — a saved base of 60 cells no longer refuses a 460-cell
+    layout); the LIBRARY row never draws over the border (gui/dj.rs's
+    break rule), its `…` steps back, and its stop follows the choices
+    drawn (one the server no longer lists counts); the picker takes a
+    destination read again while nothing is edited (`dmPickerSync`),
+    closes on nowhere, and marks no radio for a preset a re-read
+    dropped; the tips say "Enter save" only while Save is on and "← →
+    buttons · Esc back" on Save off (three new keys, all ten locales);
+    the help line, the list's notes and the hint pass through `ell()`
+    on the legacy console; the too-long words go whole into a tooltip
+    where a wider locale clips them; French's "Use the library default"
+    is the phone's wording ("Utiliser le réglage par défaut de la
+    bibliothèque"), the terminal's `tu` register kept elsewhere; clause
+    105's note is a row of the picker's preview, not tooltip-only; the
+    stale tip keys in the all-locale width test are replaced and every
+    key is asserted present. Scenario W now opens on a place saved with
+    a base folder, proving the fold on open and base `""` at Save.

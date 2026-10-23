@@ -272,32 +272,37 @@ assert [j['state'] for j in s['jobs']] == ['done'], s['jobs']
 "
 stop_fake
 
-# ── Scenario W: Where files land, the start's pinned destination ─────────
-# The same gate as K. `c` on the lit tile opens Keep a copy on the library's
-# default; `d` opens Where files land, Tab completes a folder from the
-# library's own (the file explorer), Enter saves it (PUT) and Keep a copy
-# reads the new place. The destination then moves behind the client's back
-# (the fake's /_move_destination, as another tab would), and Add album —
-# which sends the place Keep a copy showed — is answered 409
+# ── Scenario W: Where copies land, the start's pinned destination ────────
+# The same gate as K, on a place seeded with a base folder (older data: the
+# leg's /_move_destination before the room opens). `c` on the lit tile
+# opens Keep a copy on it; `d` opens Where copies land folded into Custom
+# ("From friends/{{ALBUMARTIST}}/{{ALBUM}}", nothing dirty: Enter on
+# LIBRARY saves nothing), "Start from an existing folder…" lists the
+# library's own folders (the file explorer; the seeded folder is not among
+# them: created by the first file), a folder picked there starts Custom's
+# layout and Save keeps it (PUT, the layout with base '' — the one PUT);
+# Keep a copy reads the new place. The destination then moves behind the
+# client's back (the fake's /_move_destination, as another tab would), and
+# Add album — which sends the place Keep a copy showed — is answered 409
 # destination_changed: nothing starts, LANDS IN redraws from the answer
-# (docs/ux-contracts/discovery-page.md, clauses 105, 142-148). check_dest.py
-# replays the stream frame by frame for those states.
+# (docs/ux-contracts/discovery-page.md, clauses 105, 142-148).
+# check_dest.py replays the stream frame by frame for those states.
 PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake W)"
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-dest gui-discover-dest.exp "$WORK/h15" "$WORK/gui-discover-dest.out" env FAKE_URL="http://127.0.0.1:$PORT"
 if python3 "$E2E/check_dest.py" "$WORK/gui-discover-dest.out" "$E2E/replay.py" 30 100; then
-  echo "PASS where files land: the default, the picker, saved, moved"
+  echo "PASS where copies land: the seeded place, the picker folded, the list, a folder picked, saved, moved"
 else
-  echo "FAIL where files land: the default, the picker, saved, moved"; FAILS=$((FAILS+1))
+  echo "FAIL where copies land: the seeded place, the picker folded, the list, a folder picked, saved, moved"; FAILS=$((FAILS+1))
 fi
-assert "the picker saved the completed folder, the start showed it, the moved destination started nothing" "
+assert "the picker saved the layout started in the picked folder with no base folder, once; the start showed it; the moved destination started nothing" "
 import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
-assert s['destination_puts'] == [{'destination': {'vpath': 'copies', 'base': 'from-peers', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'}}], s['destination_puts']
-assert '/copies' in s['folder_lists'], s['folder_lists']
+assert s['destination_puts'] == [{'destination': {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}}], s['destination_puts']  # one PUT: the fold on open was no edit (Enter on LIBRARY sent nothing), the seeded base folder went into the layout, never sent as a base
+assert s['folder_lists'][-2:] == ['/copies', '/copies/from-peers'] and s['folder_lists'].count('/copies') == 1, s['folder_lists']  # after the Files pane's own: the root on opening the list, the picked folder, each once
 assert s['destination_gets'] == 3, s['destination_gets']  # the gate, the open, the 409's read again — never one a frame
 assert len(s['job_starts']) == 1, s['job_starts']
-assert s['job_starts'][0]['destination'] == {'vpath': 'copies', 'base': 'from-peers', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'}, s['job_starts'][0]
+assert s['job_starts'][0]['destination'] == {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}, s['job_starts'][0]
 assert s['job_answers'] == ['destination_changed'] and s['jobs'] == [], (s['job_answers'], s['jobs'])
 "
 stop_fake

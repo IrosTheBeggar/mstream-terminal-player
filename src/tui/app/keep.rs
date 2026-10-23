@@ -326,7 +326,7 @@ pub enum Folders {
     Failed(PluginFailure),
 }
 
-/// The picker's asks (clauses 142–144) — "Where files land", the GUI's:
+/// The picker's asks (clauses 142–144) — "Where copies land", the GUI's:
 /// the destination read again, the save, the library's folders.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DestState {
@@ -769,8 +769,20 @@ impl KeepView {
         Landing { one_song: self.scope == JobScope::Song, ..Landing::of(vpath, base, layout, &tags, by_album, known) }
     }
 
-    /// The song's file as it would land — the PREVIEW's second row, a
-    /// song's alone.
+    /// The layout's path for this copy as the server measures it against
+    /// its cap (destination.js `renderTarget`, the webapp's
+    /// `previewTarget`): the layout alone — never a base folder — rendered
+    /// whole, never cut at an artist copy's album folder, every variable
+    /// by this copy's own value (a slot's too, where it has one; none
+    /// drops out), in characters.
+    pub fn rendered_len_for(&self, layout: &str, known: &dyn Fn(&str) -> bool) -> usize {
+        let (mut tags, _) = self.scope_tags(self.scope);
+        tags.slots.clear();
+        Landing::of("", "", layout, &tags, false, known).rendered_len()
+    }
+
+    /// The song's file as it would land — the PREVIEW's last crumb (the
+    /// phone's), a song's alone.
     pub fn file_name(&self) -> Option<String> {
         if self.scope != JobScope::Song {
             return None;
@@ -1536,7 +1548,7 @@ impl App {
             phase,
             sent: None,
         });
-        // Where files land, read again with every open: the last place
+        // Where copies land, read again with every open: the last place
         // known draws meanwhile (clause 105).
         effects.extend(self.keep_dest_read());
         effects
@@ -1812,7 +1824,7 @@ impl App {
         }
     }
 
-    // ── Where files land (clauses 105, 142–148) ─────────────────────────────
+    // ── Where copies land (clauses 105, 142–148) ────────────────────────────
 
     /// Read the destination again — every Keep a copy modal that opens, and
     /// after a start's 409: the last place known draws until it answers,
@@ -2644,6 +2656,10 @@ mod tests {
         let undated = KeepView { one_missing: Some(("Second Shift".into(), None)), ..view.clone() };
         assert_eq!(crumbs(&undated, "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", JobScope::ArtistMissing), (names(&["copies", "from-peers", "Boukmanflow", "- Second Shift"]), false));
         assert_eq!(crumbs(&one, "{{ARTIST}}/{{ALBUM}}", JobScope::Artist), (names(&["copies", "from-peers", "Boukmanflow"]), true), "every album: no name");
+        // A song with no year leaves {{YEAR}} out, and the picker's preview
+        // names it (the webapp's missingVars).
+        let undated = KeepView { subject: KeepSubject { year: None, ..view.subject.clone() }, ..view.clone() };
+        assert_eq!(undated.landing_at(&place("{{ARTIST}}/{{YEAR}}/{{ALBUM}}"), JobScope::Song).missing, ["YEAR"]);
         assert_eq!(KeepView { scope: JobScope::Album, ..view }.file_name(), None, "a song's file alone");
     }
 

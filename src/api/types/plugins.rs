@@ -1035,6 +1035,19 @@ pub const LAYOUT_VARS: [&str; 6] = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMAR
 /// several folders.
 pub const SERVER_FOLDER: &str = "SERVERFOLDER";
 
+/// The picker's "Server / Artist / Album": each server's copies apart, by
+/// the album's credit too (the webapp's `PEER_LAYOUT`).
+pub const PEER_LAYOUT: &str = "{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}";
+
+/// The picker's "Same folders as the server": each song where it sits on
+/// the server it came from (the webapp's `SERVERFOLDER_LAYOUT`).
+pub const SERVERFOLDER_LAYOUT: &str = "{{SERVERFOLDER}}";
+
+/// The longest a layout may be, and the longest a path it renders may be
+/// (mStream's path-template.js): past either the server refuses it.
+pub const MAX_TEMPLATE_LEN: usize = 500;
+pub const MAX_RESOLVED_LEN: usize = 500;
+
 /// Where copies land: a library, a base folder in it, a layout rendered
 /// per song (torrent path-template syntax).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -1290,11 +1303,191 @@ pub fn server_folder(filepath: &str) -> String {
 /// A song's file name as it lands (destination.js `safeFileName`): the
 /// path's last name, reserved and control characters `-`, blank runs one
 /// space, no leading or trailing dots and blanks; "track" when nothing is
-/// left — the picker's PREVIEW draws it under a song's folders.
+/// left — the picker's preview draws it as the path's last crumb.
 pub fn safe_file_name(path: &str) -> String {
     let last = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or_default();
     let name = sanitize_segment(Some(last));
     if name.is_empty() || name == ".." { "track".to_string() } else { name }
+}
+
+/// `layout` with the base folder `base` in front of it (the webapp's and
+/// the phone's `foldBase`). The picker keeps no base folder of its own
+/// since 2026-10-23 (a destination saved with one — older data — opens
+/// as the start of the layout): the server files a song at base folder /
+/// rendered layout, and so files it at the same place from base `""` and
+/// this layout — except where a folder's name has a brace
+/// ([`braced_folder`]: a layout reads it as a variable, or refuses it),
+/// and past [`MAX_TEMPLATE_LEN`], where the layout is refused. No base
+/// folder: `layout` as it is.
+pub fn fold_base(base: &str, layout: &str) -> String {
+    let folders = base_folders(base);
+    if folders.is_empty() { layout.to_string() } else { format!("{}/{layout}", folders.join("/")) }
+}
+
+/// The first of `base`'s folders a layout cannot hold as that folder: one
+/// whose name has a brace (`{{PEER}}` files under the server's name).
+/// `None` when there is none.
+pub fn braced_folder(base: &str) -> Option<String> {
+    base_folders(base).into_iter().find(|folder| folder.contains(['{', '}']))
+}
+
+/// A layout's leading folders that name no variable — where every copy
+/// lands whatever its tags (`From friends/{{ARTIST}}` → `From friends`,
+/// each trimmed) — and the rest of it as typed (`{{ARTIST}}`): the
+/// webapp's `layoutLead`.
+pub fn layout_lead(layout: &str) -> (Vec<String>, String) {
+    let mut folders = Vec::new();
+    let mut start = 0;
+    let ends = layout.char_indices().filter(|(_, c)| *c == '/' || *c == '\\').map(|(i, _)| i).chain(std::iter::once(layout.len()));
+    for end in ends {
+        let segment = &layout[start..end];
+        if segment.contains(['{', '}']) {
+            return (folders, layout[start..].to_string());
+        }
+        let name = segment.trim();
+        if !name.is_empty() {
+            folders.push(name.to_string());
+        }
+        start = end + 1;
+    }
+    (folders, String::new())
+}
+
+/// `layout` starting in `folder` instead of its own leading folders (the
+/// picker's "Start from an existing folder…"; the webapp's
+/// `startLayoutAt`): the folder's names, then the rest of the layout as
+/// typed; an empty folder leaves the rest alone.
+pub fn start_layout_at(folder: &str, layout: &str) -> String {
+    let (_, rest) = layout_lead(layout);
+    let mut parts = vec![base_folders(folder).join("/")];
+    parts.push(rest);
+    parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("/")
+}
+
+/// Why the server would refuse a layout, or a path it renders (the
+/// server's own codes, path-template.js `validateLayout` and
+/// `validateResolvedPath`, as the webapp and the phone mirror them): the
+/// picker's words come from these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutProblem {
+    /// `empty_template`: nothing typed.
+    EmptyTemplate,
+    /// `template_too_long`: past [`MAX_TEMPLATE_LEN`].
+    TemplateTooLong,
+    /// `unbalanced_braces`: a brace outside a `{{NAME}}` token.
+    UnbalancedBraces,
+    /// `unknown_variable`: a token the view does not list, as typed.
+    UnknownVariable { token: String },
+    /// `invalid_chars`: a control character.
+    InvalidChars,
+    /// `absolute_template` / `absolute_path`: starts with a separator.
+    Absolute,
+    /// `empty_path`: the sample renders no folder.
+    EmptyPath,
+    /// `path_too_long`: the rendered path passes [`MAX_RESOLVED_LEN`].
+    PathTooLong,
+    /// `traversal`: a `..` folder.
+    Traversal,
+    /// `home_string`: `~`, `$HOME` or `${HOME}`.
+    Home,
+    /// `drive_letter` / `drive_letter_segment`: a folder like `C:`.
+    DriveLetter,
+}
+
+/// `$HOME` where no letter, digit or `_` follows it, or `${HOME}` — the
+/// server's `/\$HOME\b|\$\{HOME\}/`.
+fn names_home(text: &str) -> bool {
+    text.contains("${HOME}")
+        || text.match_indices("$HOME").any(|(at, _)| {
+            !text[at + "$HOME".len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+fn drive_letter(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.next() == Some(':')
+}
+
+/// Why the server would refuse `path`, a rendered path inside the library
+/// (path-template.js `validateResolvedPath`), or `Ok`.
+pub fn validate_resolved_path(path: &str) -> Result<(), LayoutProblem> {
+    if path.is_empty() {
+        return Err(LayoutProblem::EmptyPath);
+    }
+    if path.chars().count() > MAX_RESOLVED_LEN {
+        return Err(LayoutProblem::PathTooLong);
+    }
+    if path.chars().any(|c| (c as u32) < 0x20) {
+        return Err(LayoutProblem::InvalidChars);
+    }
+    if path.starts_with(['/', '\\']) {
+        return Err(LayoutProblem::Absolute);
+    }
+    if drive_letter(path) {
+        return Err(LayoutProblem::DriveLetter);
+    }
+    if path.contains('~') || names_home(path) {
+        return Err(LayoutProblem::Home);
+    }
+    for segment in path.split(['/', '\\']) {
+        if segment == ".." {
+            return Err(LayoutProblem::Traversal);
+        }
+        if drive_letter(segment) {
+            return Err(LayoutProblem::DriveLetter);
+        }
+    }
+    Ok(())
+}
+
+/// Why the server would refuse `layout` (path-template.js
+/// `validateLayout`), or `Ok`: empty or too long, a stray brace, a
+/// variable `known` refuses (the view's list, so an older server's refusal
+/// of `{{SERVERFOLDER}}` is said here), a control character, a leading
+/// separator, then the path the server's sample renders
+/// ([`validate_resolved_path`] over Pink Floyd's Dark Side on Sam's
+/// server, cut at [`MAX_RESOLVED_LEN`] as the server cuts it).
+pub fn validate_layout(layout: &str, known: &dyn Fn(&str) -> bool) -> Result<(), LayoutProblem> {
+    if layout.is_empty() {
+        return Err(LayoutProblem::EmptyTemplate);
+    }
+    if layout.chars().count() > MAX_TEMPLATE_LEN {
+        return Err(LayoutProblem::TemplateTooLong);
+    }
+    let pieces = pieces(layout);
+    let stripped: String = pieces.iter().filter_map(|p| if let Piece::Text(text) = p { Some(*text) } else { None }).collect();
+    if stripped.contains(['{', '}']) {
+        return Err(LayoutProblem::UnbalancedBraces);
+    }
+    for piece in &pieces {
+        if let Piece::Var { name, raw } = piece
+            && !known(name)
+        {
+            return Err(LayoutProblem::UnknownVariable { token: (*raw).to_string() });
+        }
+    }
+    if layout.chars().any(|c| (c as u32) < 0x20) {
+        return Err(LayoutProblem::InvalidChars);
+    }
+    if layout.starts_with(['/', '\\']) {
+        return Err(LayoutProblem::Absolute);
+    }
+    let sample = LayoutTags {
+        artist: Some("Pink Floyd".into()),
+        album: Some("The Dark Side of the Moon".into()),
+        year: Some("1973".into()),
+        genre: Some("Progressive Rock".into()),
+        album_artist: Some("Pink Floyd".into()),
+        peer: Some("Sam's server".into()),
+        server_folder: Some("Pink Floyd/The Dark Side of the Moon".into()),
+        slots: Vec::new(),
+    };
+    let rendered: Vec<String> = layout_folders(layout, &sample, known)
+        .iter()
+        .map(|folder| folder.iter().map(|(text, _)| text.as_str()).collect::<String>())
+        .collect();
+    let path: String = rendered.join("/").chars().take(MAX_RESOLVED_LEN).collect();
+    validate_resolved_path(&path)
 }
 
 /// One piece of a layout as the server's scanner reads it: its own text,
@@ -1431,8 +1624,27 @@ pub fn layout_folders(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> b
     folders
 }
 
+/// The variables of `layout` this copy has no value for — their folders
+/// drop out of the path (the webapp's `missingVars`): a variable `known`
+/// takes, that is no slot of these tags, whose value renders nothing; each
+/// once, in the layout's order, upper case.
+fn missing_vars(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for piece in pieces(layout) {
+        if let Piece::Var { name, .. } = piece
+            && known(&name)
+            && !SongTag::of(&name).is_some_and(|slot| tags.slots.contains(&slot))
+            && tag_value(&name, tags).is_empty()
+            && !out.contains(&name)
+        {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// Where a copy lands, as the Keep modal's LANDS IN and the picker's
-/// PREVIEW draw it (the webapp's `scopeTarget`, clauses 105 and 143): the
+/// preview draw it (the webapp's `scopeTarget`, clauses 105 and 143): the
 /// library, then its folders — the base folder's names, what the layout
 /// rendered — each a run of pieces ([`layout_folders`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1444,6 +1656,9 @@ pub struct Landing {
     pub per_album: bool,
     /// A song's copy alone: a slot's note speaks of the one song's tags.
     pub one_song: bool,
+    /// The variables this copy has no value for, left out of the path
+    /// ([`missing_vars`]): the picker's preview names them.
+    pub missing: Vec<String>,
 }
 
 impl Landing {
@@ -1466,14 +1681,22 @@ impl Landing {
             None => layout.to_string(),
         };
         folders.extend(layout_folders(&rendered, tags, known));
-        Landing { library: vpath.to_string(), folders, per_album: cut.is_some(), one_song: false }
+        let missing = missing_vars(&rendered, tags, known);
+        Landing { library: vpath.to_string(), folders, per_album: cut.is_some(), one_song: false, missing }
     }
 
     /// A finished copy's folder ([`CopyResult::landed`]): real folders,
     /// never a slot.
     pub fn landed(vpath: &str, dirs: &[String]) -> Landing {
         let folders = dirs.iter().map(|d| vec![(d.clone(), Run::Text)]).collect();
-        Landing { library: vpath.to_string(), folders, per_album: false, one_song: false }
+        Landing { library: vpath.to_string(), folders, per_album: false, one_song: false, missing: Vec::new() }
+    }
+
+    /// The path's length past the library, in characters, as the server
+    /// measures a rendered path against [`MAX_RESOLVED_LEN`] (a slot's
+    /// words standing in for its value).
+    pub fn rendered_len(&self) -> usize {
+        self.words(&|slot| format!("‹{}›", slot.name()))[1..].join("/").chars().count()
     }
 
     /// The library, then each folder as plain words, a slot `‹artist›` —
@@ -2059,6 +2282,79 @@ mod tests {
         assert_eq!(Landing::landed("copies", &["Boukmanflow".into()]).crumbs(), ["copies", "Boukmanflow"]);
         assert_eq!(safe_file_name("peerlib/Boukmanflow/Borrowed Tapes/02 - Late: Train?.mp3"), "02 - Late- Train-.mp3");
         assert_eq!(safe_file_name("peerlib/.."), "track");
+    }
+
+    #[test]
+    fn a_base_folder_folds_into_the_layout_and_a_layouts_lead_is_where_every_copy_lands() {
+        assert_eq!(fold_base("", "{{ARTIST}}/{{ALBUM}}"), "{{ARTIST}}/{{ALBUM}}");
+        assert_eq!(fold_base(" from-peers\\2025 archive ", "{{ARTIST}}"), "from-peers/2025 archive/{{ARTIST}}");
+        assert_eq!(braced_folder("from-peers/{{PEER}}/x"), Some("{{PEER}}".into()));
+        assert_eq!(braced_folder("a/b}c"), Some("b}c".into()));
+        assert_eq!(braced_folder("from-peers"), None);
+        let lead = |layout: &str| layout_lead(layout);
+        assert_eq!(lead("From friends/{{ARTIST}}/{{ALBUM}}"), (vec!["From friends".to_string()], "{{ARTIST}}/{{ALBUM}}".to_string()));
+        assert_eq!(lead(" a //b/{{X}}/c"), (vec!["a".to_string(), "b".to_string()], "{{X}}/c".to_string()));
+        assert_eq!(lead("{{ARTIST}}"), (Vec::new(), "{{ARTIST}}".to_string()));
+        assert_eq!(lead("plain/name"), (vec!["plain".to_string(), "name".to_string()], String::new()));
+        assert_eq!(lead(""), (Vec::new(), String::new()));
+        assert_eq!(start_layout_at("from-peers", "From friends/{{ARTIST}}"), "from-peers/{{ARTIST}}");
+        assert_eq!(start_layout_at("", "From friends/{{ARTIST}}"), "{{ARTIST}}");
+        assert_eq!(start_layout_at("x/y", "plain"), "x/y");
+        assert_eq!(start_layout_at("x", ""), "x");
+    }
+
+    #[test]
+    fn the_validator_refuses_what_the_server_refuses() {
+        let known = |name: &str| LAYOUT_VARS.contains(&name) || name == SERVER_FOLDER;
+        let check = |layout: &str| validate_layout(layout, &known);
+        assert_eq!(check("{{ARTIST}}/{{ALBUM}}"), Ok(()));
+        assert_eq!(check("From friends"), Ok(()));
+        assert_eq!(check("{{SERVERFOLDER}}"), Ok(()));
+        assert_eq!(check(""), Err(LayoutProblem::EmptyTemplate));
+        assert_eq!(check(&"x".repeat(501)), Err(LayoutProblem::TemplateTooLong));
+        assert_eq!(check("{{ARTIST}"), Err(LayoutProblem::UnbalancedBraces));
+        assert_eq!(check("a}b"), Err(LayoutProblem::UnbalancedBraces));
+        // An unknown variable as typed, blanks and case kept — and one the
+        // view does not list (an older server's `{{SERVERFOLDER}}`).
+        assert_eq!(check("{{ Artst }}/{{ALBUM}}"), Err(LayoutProblem::UnknownVariable { token: "{{ Artst }}".into() }));
+        let older = |name: &str| LAYOUT_VARS.contains(&name);
+        assert_eq!(validate_layout("{{SERVERFOLDER}}", &older), Err(LayoutProblem::UnknownVariable { token: "{{SERVERFOLDER}}".into() }));
+        assert_eq!(check("a\tb"), Err(LayoutProblem::InvalidChars));
+        assert_eq!(check("/x"), Err(LayoutProblem::Absolute));
+        assert_eq!(check("\\x"), Err(LayoutProblem::Absolute));
+        // The path the server's sample renders is checked last.
+        assert_eq!(check(" "), Err(LayoutProblem::EmptyPath));
+        assert_eq!(check("a/../b"), Err(LayoutProblem::Traversal));
+        assert_eq!(check("~/x"), Err(LayoutProblem::Home));
+        assert_eq!(check("x/$HOME"), Err(LayoutProblem::Home));
+        assert_eq!(check("x/${HOME}"), Err(LayoutProblem::UnbalancedBraces), "its braces are stray braces first, as the server reads them");
+        assert_eq!(validate_resolved_path("x/${HOME}"), Err(LayoutProblem::Home));
+        assert_eq!(check("$HOMEtown"), Ok(()), "a word that goes on is a name");
+        assert_eq!(check("C:/x"), Err(LayoutProblem::DriveLetter));
+        assert_eq!(check("x/d:y"), Err(LayoutProblem::DriveLetter));
+        // The sample's path is cut at the server's length, never refused for it.
+        assert_eq!(check(&"{{SERVERFOLDER}}/".repeat(29)), Ok(()));
+        assert_eq!(validate_resolved_path(&"x".repeat(501)), Err(LayoutProblem::PathTooLong));
+        assert_eq!(validate_resolved_path("a/b"), Ok(()));
+    }
+
+    #[test]
+    fn a_variable_with_no_value_is_named_as_missing_and_the_path_is_measured() {
+        let tags = LayoutTags { artist: Some("Boukmanflow".into()), album: Some("Borrowed Tapes".into()), ..LayoutTags::default() };
+        let landing = Landing::of("copies", "", "{{ARTIST}}/{{YEAR}}/{{ALBUM}}/{{GENRE}}", &tags, false, &|_| true);
+        assert_eq!(landing.crumbs(), ["copies", "Boukmanflow", "Borrowed Tapes"]);
+        assert_eq!(landing.missing, ["YEAR", "GENRE"]);
+        // A slot is no missing value; the server folder of a song at the
+        // library's root is; a name the view does not list is not counted;
+        // each once.
+        let slotted = LayoutTags { slots: vec![SongTag::Genre], server_folder: Some(String::new()), ..tags.clone() };
+        let landing = Landing::of("copies", "", "{{GENRE}}/{{SERVERFOLDER}}/{{NOPE}}/{{YEAR}}/{{YEAR}}", &slotted, false, &|name| name != "NOPE");
+        assert_eq!(landing.missing, ["SERVERFOLDER", "YEAR"]);
+        // An artist copy's cut keeps the album's folders out of the count.
+        let landing = Landing::of("copies", "", "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", &tags, true, &|_| true);
+        assert_eq!((landing.per_album, landing.missing.is_empty()), (true, true));
+        assert_eq!(Landing::of("copies", "base", "{{ARTIST}}/{{ALBUM}}", &tags, false, &|_| true).rendered_len(), "base/Boukmanflow/Borrowed Tapes".len());
+        assert!(Landing::landed("copies", &["a".into()]).missing.is_empty());
     }
 
     #[test]

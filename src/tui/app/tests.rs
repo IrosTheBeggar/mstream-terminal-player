@@ -8962,7 +8962,7 @@ mod keep {
         assert!(bare.links_open(KeepTarget::Row { group: late.0, row: late.1 }).is_empty());
     }
 
-    // ── Where files land (clauses 105, 142–148) ───────────────────────────
+    // ── Where copies land (clauses 105, 142–148) ──────────────────────────
 
     fn place(vpath: &str, base: &str, layout: &str, source: &str) -> crate::api::types::CollectionDestination {
         crate::api::types::CollectionDestination {

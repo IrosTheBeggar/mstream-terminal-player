@@ -145,7 +145,12 @@ banned.
   control stays honest.
 - **Text**: 1 row, fg DarkGray. Hover: fg Cyan + BOLD.
 - **Modal primary**: 1 row, label fg LightBlue BOLD (no frame — modals
-  are compact); the SAFE choice gets it.
+  are compact); the SAFE choice gets it. **One that goes off** (Where
+  copies land's Save until something changed and the layout is valid):
+  DIM, no click rect, no hover — the accent is what told it from an idle
+  button, so its absence reads — and, as the disabled primary below, a
+  tooltip saying why ("nothing changed yet", "fix the layout first"). The
+  hand may still rest on it; Enter does nothing there.
 - **Disabled**: the primary frame with border and label fg DarkGray, no
   `▸`, no click rect, no hover, no hand cursor — but it DOES register a
   tooltip whose text says why it's disabled ("Add a folder first"), the
@@ -302,21 +307,24 @@ visible. A listing failure for the CURRENT dir-part
 renders in the modal in error gold ("could not list <dir>: <the
 server's words>") — silent emptiness reads as "no autocomplete";
 failures for dirs already typed past stay quiet.
-**A folder on a server** (the Discover room's Where files land,
-discovery-page clause 143) completes from THAT server's listing — the
-file explorer, asked on the worker one folder at a time, each once while
-the modal is open — never this machine's: the place is a library on the
-server. Up to 3 suggestions there (the modal's 22-row cap), and a typed
-name its parent does not list reads "not there yet · the first file
-creates it". Its keys are not the Path input's above, which suit a
-field whose Enter submits it: there Tab accepts a held suggestion or a
-lone match, Right at the end completes, Enter submits the text as typed
-and an empty input suggests nothing. Here Tab opens the list (an empty
-field lists the library root), extends the typed name to the names'
-common start, then cycles the held folder (Shift-Tab back); ↓ walks into
-the list and ↑ from its top back out; Enter on a held folder goes into
-it ("{folder}/{name}/", listing that one) — Enter elsewhere saves the
-modal; Right only moves the caret.
+**A folder on a server** (the Discover room's Where copies land,
+discovery-page clause 143) is not completed but **listed under a
+button**, "Start from an existing folder…" ("Hide folders" while open):
+THAT server's file explorer, asked on the worker one folder at a time,
+each once while the modal is open — never this machine's: the place is
+a library on the server. Under the button a DIM head ("copies ›
+from-peers · 3 folders"), then up to 3 rows (the modal's 22-row cap; the
+kit's bar past them): "Up to {parent}" first inside a folder, then the
+folders — the held one the selection slab, hover BRIGHT, the folder the
+layout starts in BOLD — and one DIM note: "Looking up…", "No folders in
+here", "This folder does not exist yet — it is created by the first
+file" (the folder the layout starts in, typed, absent from its parent's
+listing), or GOLD for a listing that failed and for a folder whose name
+has a brace (a layout reads it as a variable). ↓ walks into the list and
+↑ from its top back to the button; Enter, Space or a click on a row goes
+into it and makes it the start of the layout (Custom's leading folders;
+the layout's own folders follow) — nothing is typed into a path field,
+and no Tab completes. Esc closes the list before it means Back.
 
 ### Links
 fg LightBlue + `Modifier::UNDERLINED`; hover fg Cyan + BOLD. Click opens
@@ -338,10 +346,21 @@ One card per group, DarkGray UPPERCASE group label, one row per option:
 on/affirmative), `( )` fg DarkGray otherwise; chosen label BOLD; inline
 `— description` fg DarkGray. Exactly one chosen, always; choosing is not
 toggling (clicking the chosen row does nothing). Radios for 2–4 options;
-5+ becomes a list picker. (One logged exception: Where files land's
-LAYOUT, whose fifth radio is a library's own template — discovery-page
-deviations, 2026-10-21. Its last radio, Custom, carries its line editor
-on the same row.)
+5+ becomes a list picker. (One logged exception: Where copies land's
+LAYOUT, whose fourth and fifth radios are "Same folders as the server"
+and a library's own layout — discovery-page deviations, 2026-10-21 and
+2026-10-22. Each radio carries the layout it writes DIM, right-aligned to
+the last cell; its last radio, Custom, opens its line editor on the row
+under it, EMPTY with a DIM hint after the caret, then its variables and
+a help line — the phone's sheet, 2026-10-23.) **Choices side by side**
+(`(•) music   ( ) copies`, the Auto DJ room's rows and Where copies
+land's LIBRARY): one row, three cells between, the chosen `(•)` OK and
+its name BOLD, ← → choose and a click chooses; where they would not all
+fit the row starts at the chosen one behind `…` (that cell a click that
+steps back), and only a choice with room for its dot, a space and a
+cell of its name is drawn — the last clipped at the last cell, the rest
+← →'s alone, never over the border (the Auto DJ room's `draw_choice`
+rule).
 
 ### List cursor
 **Selection is the KEYBOARD cursor, nothing more** — in every list of

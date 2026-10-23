@@ -2861,7 +2861,7 @@ fn choose(gui: &mut Gui) {
 /// table under it either.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
     // The Keep a copy modal and the tile's list hold their rows whole —
-    // Where files land scrolls its folders; the Copies modal scrolls its
+    // Where copies land scrolls its folders; the Copies modal scrolls its
     // own, a copy a notch.
     if gui.app.taste.keep.flow.is_some() {
         super::keep::dest_wheel(gui, delta);

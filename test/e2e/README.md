@@ -55,16 +55,20 @@ room against the taste route, is described in run.sh):
   with Joi's 400): the start is asked once more without the key and the
   copy runs unpinned — the same states, the same Copies; `/_state` says
   both bodies and their answers (400, then 202).
-- **W** — Where files land (the same fake; its destination saved per
-  account as the server saves it, its libraries `copies` and `music`):
-  Keep a copy opens on the library's default, `d` opens the picker, Tab
-  completes a folder from the library's own (the file explorer) and Enter
-  saves it; Keep a copy reads the new place, saved for the account. The
+- **W** — Where copies land (the same fake; its destination saved per
+  account as the server saves it, its libraries `copies` and `music`): a
+  place saved with a base folder (older data) is seeded first; Keep a
+  copy opens on it, `d` opens the picker folded into Custom with nothing
+  dirty (Enter on LIBRARY saves nothing), "Start from an existing
+  folder…" lists the library's own folders (the file explorer; the
+  seeded folder is not among them — created by the first file), a folder
+  picked there starts Custom's layout and Save keeps it with no base
+  folder; Keep a copy reads the new place, saved for the account. The
   fake's `/_move_destination` then puts the default back behind the
   client's back, and Add album — which sends the place it showed — is
   answered 409 `destination_changed`: nothing starts, LANDS IN redraws
   from the answer with its GOLD line. `check_dest.py` replays the stream;
-  `/_state` says what was saved, read, listed and started.
+  `/_state` says what was saved (once), read, listed and started.
 
 - **M** — Apple Terminal's mouse dialect (`TERM_PROGRAM=Apple_Terminal`
   in the spawned env, `FAKE_TASTE=1 FAKE_PLUGINS=1`): every click is sent
