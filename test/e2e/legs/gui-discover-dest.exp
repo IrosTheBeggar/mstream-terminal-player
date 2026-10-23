@@ -79,8 +79,10 @@ drain 1
 send "\x1b"
 drain 1
 send "\r"
+# The diff renderer leaves the blank before "account" where the picker's
+# row had one: the gate is the words it paints in one run.
 expect {
-    "saved for your account" {}
+    "saved for your" {}
     eof { puts "DIED-ON-SAVE"; exit 16 }
     timeout { fail "NO-SAVED" 17 }
 }

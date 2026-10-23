@@ -6,9 +6,10 @@ gui-discover-dest leg; docs/ux-contracts/discovery-page.md, clauses 105 and
 Frame-replays the stream at every synchronized-update end (ratatui's diff
 renderer emits only changed cells, so stream-grep lies about anything that
 repaints in place) and requires, in order: Keep a copy on the library's
-default; the picker on that place; Keep a copy on the saved place, saved for
-the account; the start refused for a moved destination — LANDS IN redrawn
-from the answer and its one GOLD line.
+default; the picker on that place — "Same folders as the server" under the
+Server preset, the fake's variables listing SERVERFOLDER; Keep a copy on the
+saved place, saved for the account; the start refused for a moved
+destination — LANDS IN redrawn from the answer and its one GOLD line.
 Usage: check_dest.py STREAM REPLAY_PY ROWS COLS
 """
 import subprocess
@@ -35,6 +36,12 @@ def frame(n):
     return out.split("\n")
 
 
+def below(text, upper, lower):
+    """`lower` on the row right under `upper`'s."""
+    rows = text.split("\n")
+    return any(upper in row and lower in under for row, under in zip(rows, rows[1:]))
+
+
 steps = ["default", "picker", "saved", "moved"]
 seen = []
 for n in ends:
@@ -43,7 +50,8 @@ for n in ends:
     if keep and "LANDS IN  copies › Attic Band › Lanterns" in text and "the library's default" in text \
             and "[ Change… ]" in text and "where files land changed" not in text:
         seen.append("default")
-    if "Where files land" in text and "LIBRARY   ◂ copies ▸" in text and "PREVIEW   copies › Attic Band › Lanterns" in text:
+    if "Where files land" in text and "LIBRARY   ◂ copies ▸" in text and "PREVIEW   copies › Attic Band › Lanterns" in text \
+            and below(text, "( ) Server / Album artist / Album", "( ) Same folders as the server"):
         seen.append("picker")
     if keep and "LANDS IN  copies › from-peers › Attic Band › Lanterns" in text and "saved for your account" in text:
         seen.append("saved")

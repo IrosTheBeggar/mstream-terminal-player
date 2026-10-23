@@ -36,7 +36,8 @@ server, and no audio files:
     `federation-copy` (every scope) with jobs allowed; the destination is a
     throwaway `copies` library (its default; `music` the account's other
     library, its template ARTIST / YEAR - ALBUM; the server's default layout
-    ALBUMARTIST / ALBUM), saved per account by PUT …/collection/destination
+    ALBUMARTIST / ALBUM; its variables mStream's seven, SERVERFOLDER
+    among them), saved per account by PUT …/collection/destination
     as the server saves it — `null` back to the default; a library not
     offered, a base folder that climbs out (`..`, `~`, a drive letter) or a
     variable not known (quoted as typed) a 400 in the server's words;
@@ -178,7 +179,9 @@ PLUGIN_LISTING = {
 # first is the default.
 LIBRARIES = [{"vpath": "copies", "template": None}, {"vpath": "music", "template": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}"}]
 DEFAULT_LAYOUT = "{{ALBUMARTIST}}/{{ALBUM}}"
-LAYOUT_VARS = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"]
+# The variables a layout may name, as mStream lists them since 2026-10-22:
+# SERVERFOLDER (the song's folders on the connected server) last.
+LAYOUT_VARS = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER", "SERVERFOLDER"]
 # The picker's folders, by the path the file explorer is asked.
 FOLDERS = {"/copies": ["from-peers"], "/copies/from-peers": ["2025 archive", "Stage Peer B", "Stage Peer C"]}
 

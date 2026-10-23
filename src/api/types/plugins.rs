@@ -1025,8 +1025,15 @@ pub struct JobLookupBatch {
 pub const DEFAULT_LAYOUT: &str = "{{ALBUMARTIST}}/{{ALBUM}}";
 
 /// The variables a layout may name (mStream's `LAYOUT_VARS`), where the
-/// view names none.
+/// view names none: the six every server knows. [`SERVER_FOLDER`] (mStream
+/// since 2026-10-22) counts only where the view lists it — an older server
+/// refuses it at Save.
 pub const LAYOUT_VARS: [&str; 6] = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"];
+
+/// `{{SERVERFOLDER}}`: the folders a copied song sits in on the connected
+/// server ([`server_folder`]) — the one variable whose value may be
+/// several folders.
+pub const SERVER_FOLDER: &str = "SERVERFOLDER";
 
 /// Where copies land: a library, a base folder in it, a layout rendered
 /// per song (torrent path-template syntax).
@@ -1146,21 +1153,28 @@ pub struct LayoutTags {
     pub album_artist: Option<String>,
     /// The connected server a copy comes from (`{{PEER}}`).
     pub peer: Option<String>,
+    /// The folders the song sits in on that server, inside its library
+    /// (`{{SERVERFOLDER}}`, [`server_folder`]): several, `/` between; none
+    /// for a song at the library's root.
+    pub server_folder: Option<String>,
     /// The variables that stand as a slot ([`SongTag`]) instead of a
     /// value: each song of the copy fills them from its own tags.
     pub slots: Vec<SongTag>,
 }
 
-/// A variable the server fills per song, from the copied file's own tags
-/// (destination.js `tagsForLayout`): where a copy's songs need not agree —
-/// a compilation's artists, an album's years, a genre this client cannot
-/// see — LANDS IN and the PREVIEW draw it as a slot, `‹artist›`, never a
-/// value that promises one folder.
+/// A variable the server fills per song — from the copied file's own tags
+/// (destination.js `tagsForLayout`), or from where the song sits on the
+/// connected server (`{{SERVERFOLDER}}`): where a copy's songs need not
+/// agree — a compilation's artists, an album's years, a genre this client
+/// cannot see, an album spread over folders — LANDS IN and the PREVIEW
+/// draw it as a slot, `‹artist›`, never a value that promises one folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SongTag {
     Artist,
     Year,
     Genre,
+    /// `{{SERVERFOLDER}}`: where the song sits, not one of its tags.
+    ServerFolder,
 }
 
 impl SongTag {
@@ -1170,6 +1184,7 @@ impl SongTag {
             "ARTIST" => Some(SongTag::Artist),
             "YEAR" => Some(SongTag::Year),
             "GENRE" => Some(SongTag::Genre),
+            SERVER_FOLDER => Some(SongTag::ServerFolder),
             _ => None,
         }
     }
@@ -1181,6 +1196,7 @@ impl SongTag {
             SongTag::Artist => "artist",
             SongTag::Year => "year",
             SongTag::Genre => "genre",
+            SongTag::ServerFolder => "server folder",
         }
     }
 }
@@ -1247,6 +1263,30 @@ fn fold_home(text: &str) -> String {
     out
 }
 
+/// A value that is a path of folders (`{{SERVERFOLDER}}`), as the server
+/// cleans it (path-template.js `sanitizeFolders`): split on either
+/// separator, each name cleaned as [`sanitize_segment`] cleans a tag, the
+/// ones left empty (`.` and `..` among them) gone, `/` between — it may add
+/// folders to a path, never climb out of it.
+pub fn sanitize_folders(raw: Option<&str>) -> String {
+    let Some(raw) = raw else { return String::new() };
+    raw.split(['/', '\\']).map(|name| sanitize_segment(Some(name))).filter(|name| !name.is_empty()).collect::<Vec<_>>().join("/")
+}
+
+/// A song's `{{SERVERFOLDER}}` (federation-copy.js `serverFolderOf`): the
+/// folders its file sits in on the connected server, by its path there as
+/// the copy knows it, inside that server's library — the path's names
+/// trimmed, the empty ones and `.` gone (`normalizePeerPath`), the file's
+/// name and the library's own (the first) dropped, the rest cleaned as
+/// [`sanitize_folders`] cleans them: `peerlib/Boukmanflow/Borrowed
+/// Tapes/02.mp3` → `Boukmanflow/Borrowed Tapes`; a song at the library's
+/// root has none (`""`), which drops it like any empty variable.
+pub fn server_folder(filepath: &str) -> String {
+    let names: Vec<&str> = filepath.split(['/', '\\']).map(str::trim).filter(|name| !name.is_empty() && *name != ".").collect();
+    let Some((_, dirs)) = names.split_last() else { return String::new() };
+    sanitize_folders(Some(&dirs.iter().skip(1).copied().collect::<Vec<_>>().join("/")))
+}
+
 /// A song's file name as it lands (destination.js `safeFileName`): the
 /// path's last name, reserved and control characters `-`, blank runs one
 /// space, no leading or trailing dots and blanks; "track" when nothing is
@@ -1304,8 +1344,9 @@ fn pieces(layout: &str) -> Vec<Piece<'_>> {
     out
 }
 
-/// A variable's value for these tags, cleaned as the server cleans it; a
-/// name it has no tag for renders nothing.
+/// A variable's value for these tags, cleaned as the server cleans it —
+/// `{{SERVERFOLDER}}` a run of folders, `/` between; a name it has no tag
+/// for renders nothing.
 fn tag_value(name: &str, tags: &LayoutTags) -> String {
     match name {
         "ARTIST" => sanitize_segment(tags.artist.as_deref()),
@@ -1316,6 +1357,7 @@ fn tag_value(name: &str, tags: &LayoutTags) -> String {
             sanitize_segment(tags.album_artist.as_deref().filter(|a| !a.is_empty()).or(tags.artist.as_deref()))
         }
         "PEER" => sanitize_segment(tags.peer.as_deref()),
+        SERVER_FOLDER => sanitize_folders(tags.server_folder.as_deref()),
         _ => String::new(),
     }
 }
@@ -1339,7 +1381,10 @@ pub enum Run {
 /// picker's PREVIEW to draw GOLD (clause 143), or a variable the tags hold
 /// as a slot ([`SongTag`]), which keeps its folder whatever a song brings. A
 /// variable with no value drops out, blanks trim, empty folders go:
-/// `{{ARTIST}}/{{ALBUM}}` → `Boukmanflow`, `Borrowed Tapes`. The server
+/// `{{ARTIST}}/{{ALBUM}}` → `Boukmanflow`, `Borrowed Tapes`; a value of
+/// several folders (`{{SERVERFOLDER}}`) opens a folder at each `/`, as the
+/// server splits the path once every variable is in — `Copy of
+/// {{SERVERFOLDER}}` → `Copy of Boukmanflow`, `Borrowed Tapes`. The server
 /// renders the real path and has the last word.
 pub fn layout_folders(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> bool) -> Vec<Vec<(String, Run)>> {
     let mut folders: Vec<Vec<(String, Run)>> = vec![Vec::new()];
@@ -1353,21 +1398,23 @@ pub fn layout_folders(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> b
             _ => folder.push((text.to_string(), run)),
         }
     };
+    // Words, a folder opened at each separator.
+    let words = |folders: &mut Vec<Vec<(String, Run)>>, text: &str| {
+        for (i, part) in text.split(['/', '\\']).enumerate() {
+            if i > 0 {
+                folders.push(Vec::new());
+            }
+            push(folders, part, Run::Text);
+        }
+    };
     for piece in pieces(layout) {
         match piece {
             Piece::Var { name, raw } if !known(&name) => push(&mut folders, raw, Run::Unknown),
             Piece::Var { name, .. } => match SongTag::of(&name).filter(|slot| tags.slots.contains(slot)) {
                 Some(slot) => push(&mut folders, &format!("‹{}›", slot.name()), Run::Slot(slot)),
-                None => push(&mut folders, &tag_value(&name, tags), Run::Text),
+                None => words(&mut folders, &tag_value(&name, tags)),
             },
-            Piece::Text(text) => {
-                for (i, part) in text.split(['/', '\\']).enumerate() {
-                    if i > 0 {
-                        folders.push(Vec::new());
-                    }
-                    push(&mut folders, part, Run::Text);
-                }
-            }
+            Piece::Text(text) => words(&mut folders, text),
         }
     }
     // Each folder trimmed at both ends, as the server trims a segment.
@@ -1401,15 +1448,17 @@ pub struct Landing {
 
 impl Landing {
     /// A place rendered for one copy's tags. `by_album` — an artist copy —
-    /// renders the layout up to its first folder naming `{{ALBUM}}` or
-    /// `{{YEAR}}` (each album has its own) and marks the rest
-    /// [`Landing::per_album`]; a layout naming no album folder adds
-    /// nothing (every album shares that folder).
+    /// renders the layout up to its first folder naming `{{ALBUM}}`,
+    /// `{{YEAR}}` or `{{SERVERFOLDER}}` (each album has its own) and marks
+    /// the rest [`Landing::per_album`]; a layout naming no album folder
+    /// adds nothing (every album shares that folder).
     pub fn of(vpath: &str, base: &str, layout: &str, tags: &LayoutTags, by_album: bool, known: &dyn Fn(&str) -> bool) -> Landing {
         let mut folders: Vec<Vec<(String, Run)>> = base_folders(base).into_iter().map(|f| vec![(f, Run::Text)]).collect();
         let raw: Vec<&str> = layout.split(['/', '\\']).collect();
         let album_folder = |folder: &&str| {
-            pieces(folder).iter().any(|p| matches!(p, Piece::Var { name, .. } if name == "ALBUM" || name == "YEAR"))
+            pieces(folder)
+                .iter()
+                .any(|p| matches!(p, Piece::Var { name, .. } if name == "ALBUM" || name == "YEAR" || name == SERVER_FOLDER))
         };
         let cut = if by_album { raw.iter().position(album_folder) } else { None };
         let rendered = match cut {
@@ -2050,6 +2099,76 @@ mod tests {
         // An artist copy's slot stands before its cut.
         let landing = Landing::of("copies", "", "{{GENRE}}/{{ARTIST}}/{{YEAR}}", &tags, true, &|_| true);
         assert_eq!((landing.crumbs(), landing.per_album), (vec!["copies".into(), "‹genre›".into(), "‹artist›".into()], true));
+    }
+
+    #[test]
+    fn a_songs_server_folder_is_its_path_inside_the_peers_library() {
+        // Its folders on the peer, the library's own name and the file's dropped.
+        assert_eq!(server_folder("peerlib/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.MP3"), "Boukmanflow/Borrowed Tapes");
+        assert_eq!(server_folder("peerlib/Mixes/x.mp3"), "Mixes");
+        // A song at the library's root has none; nor has no path.
+        assert_eq!(server_folder("peerlib/02.mp3"), "");
+        assert_eq!(server_folder("02.mp3"), "");
+        assert_eq!(server_folder(""), "");
+        // Each name cleaned as a tag is (reserved characters, `~`, dots and
+        // blanks); a name that cleans to nothing goes — `..` can never climb
+        // out of the library — as do empty names, `.` and a lead separator.
+        assert_eq!(server_folder("peerlib/AC:DC/ ..Live.. /~kim/x.mp3"), "AC-DC/Live/-kim");
+        assert_eq!(server_folder("peerlib/../../etc/x.mp3"), "etc");
+        assert_eq!(server_folder("/peerlib//a/./b\\c/x.mp3"), "a/b/c");
+        assert_eq!(server_folder("peerlib/  /x.mp3"), "");
+        // A `.` or a blank name before the library is no library: the
+        // library is the first real name (the server's normalizePeerPath).
+        assert_eq!(server_folder("./peerlib/a/x.mp3"), "a");
+        assert_eq!(server_folder(" /peerlib/a/x.mp3"), "a");
+        assert_eq!(server_folder("peerlib/a/x.mp3/ "), "a");
+        // The value as the layout takes it is cleaned again, folder by folder.
+        assert_eq!(sanitize_folders(Some("a\\b/../c:d/")), "a/b/c-d");
+        assert_eq!(sanitize_folders(None), "");
+    }
+
+    #[test]
+    fn the_server_folder_renders_as_many_folders_as_it_holds() {
+        let tags = LayoutTags {
+            album_artist: Some("Boukmanflow".into()),
+            album: Some("Borrowed Tapes".into()),
+            server_folder: Some("Boukmanflow/Borrowed Tapes".into()),
+            ..LayoutTags::default()
+        };
+        let place = |layout: &str| CollectionDestination { vpath: "copies".into(), base: "from-peers".into(), layout: layout.into(), source: None };
+        // The preset: the peer's own folders under the base.
+        assert_eq!(crumbs(&place("{{SERVERFOLDER}}"), &tags), ["copies", "from-peers", "Boukmanflow", "Borrowed Tapes"]);
+        assert_eq!(crumbs(&place("From friends/{{ serverfolder }}"), &tags), ["copies", "from-peers", "From friends", "Boukmanflow", "Borrowed Tapes"]);
+        // Inside a folder's literal words, its folders follow the words: the
+        // server substitutes first, then splits the path.
+        assert_eq!(resolve_layout("Copy of {{SERVERFOLDER}}", &tags), "Copy of Boukmanflow/Borrowed Tapes");
+        let landing = Landing::of("copies", "", "Copy of {{SERVERFOLDER}} (peer)/{{ALBUM}}", &tags, false, &|_| true);
+        assert_eq!(landing.crumbs(), ["copies", "Copy of Boukmanflow", "Borrowed Tapes (peer)", "Borrowed Tapes"]);
+        assert_eq!(landing.folders.len(), 3, "each its own folder");
+        // A song at the peer's root: empty, so it drops out like any empty variable.
+        let root = LayoutTags { server_folder: Some(String::new()), ..tags.clone() };
+        assert_eq!(crumbs(&place("{{SERVERFOLDER}}"), &root), ["copies", "from-peers"]);
+        assert_eq!(resolve_layout("From friends/{{SERVERFOLDER}}/x", &root), "From friends/x");
+        assert_eq!(resolve_layout("{{SERVERFOLDER}}", &LayoutTags::default()), "", "a download has no peer path");
+        // A value from anywhere is cleaned before it renders: never a `..`.
+        let odd = LayoutTags { server_folder: Some("../a//..\\b:c".into()), ..LayoutTags::default() };
+        assert_eq!(resolve_layout("{{SERVERFOLDER}}", &odd), "a/b-c");
+        // An album spread over folders: one slot, in its folder's words.
+        let spread = LayoutTags { slots: vec![SongTag::ServerFolder], ..tags.clone() };
+        let landing = Landing::of("copies", "", "Copy of {{SERVERFOLDER}}", &spread, false, &|_| true);
+        assert_eq!(landing.folders, vec![vec![("Copy of ".to_string(), Run::Text), ("‹server folder›".to_string(), Run::Slot(SongTag::ServerFolder))]]);
+        assert_eq!(landing.slots(), vec![SongTag::ServerFolder]);
+        // An artist copy: the first folder naming it is each album's own.
+        let landing = Landing::of("copies", "", "{{ALBUMARTIST}}/{{SERVERFOLDER}}/x", &tags, true, &|_| true);
+        assert_eq!((landing.crumbs(), landing.per_album), (vec!["copies".into(), "Boukmanflow".into()], true));
+        // The validator: a view that lists it knows it; the six every server
+        // knows do not include it.
+        let view = |vars: &[&str]| CollectionDestinationView { variables: vars.iter().map(|v| v.to_string()).collect(), ..Default::default() };
+        assert!(view(&["ARTIST", "SERVERFOLDER"]).knows("serverfolder"));
+        assert!(!view(&LAYOUT_VARS).knows(SERVER_FOLDER));
+        assert!(!view(&[]).knows(SERVER_FOLDER), "a view naming none: the six");
+        let refused = Landing::of("copies", "", "{{SERVERFOLDER}}", &tags, false, &|name| view(&LAYOUT_VARS).knows(name));
+        assert_eq!(refused.folders, vec![vec![("{{SERVERFOLDER}}".to_string(), Run::Unknown)]], "an older server's GOLD");
     }
 
     #[test]
