@@ -1146,42 +1146,105 @@ pub struct LayoutTags {
     pub album_artist: Option<String>,
     /// The connected server a copy comes from (`{{PEER}}`).
     pub peer: Option<String>,
+    /// The variables that stand as a slot ([`SongTag`]) instead of a
+    /// value: each song of the copy fills them from its own tags.
+    pub slots: Vec<SongTag>,
+}
+
+/// A variable the server fills per song, from the copied file's own tags
+/// (destination.js `tagsForLayout`): where a copy's songs need not agree —
+/// a compilation's artists, an album's years, a genre this client cannot
+/// see — LANDS IN and the PREVIEW draw it as a slot, `‹artist›`, never a
+/// value that promises one folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SongTag {
+    Artist,
+    Year,
+    Genre,
+}
+
+impl SongTag {
+    /// The variable a layout names it by, upper case.
+    fn of(name: &str) -> Option<SongTag> {
+        match name {
+            "ARTIST" => Some(SongTag::Artist),
+            "YEAR" => Some(SongTag::Year),
+            "GENRE" => Some(SongTag::Genre),
+            _ => None,
+        }
+    }
+
+    /// Its name in plain words — what the tests' `Landing::crumbs` writes
+    /// inside `‹ ›`; a surface draws the locale's word.
+    pub fn name(self) -> &'static str {
+        match self {
+            SongTag::Artist => "artist",
+            SongTag::Year => "year",
+            SongTag::Genre => "genre",
+        }
+    }
 }
 
 /// The longest one folder name in a rendered layout may be (mStream's
 /// path-template.js).
 const MAX_SEGMENT_LEN: usize = 200;
 
-/// One folder name from a tag, as the server cleans it: path separators,
-/// reserved and control characters become `-`, blank runs one space, no
-/// leading or trailing dots and blanks, at most 200 characters.
+/// One folder name from a tag, as the server cleans it (path-template.js
+/// `sanitizeSegment`): path separators, reserved and control characters
+/// become `-` a run at a time; `~`, `$HOME` and `${HOME}` each `-` (a tag
+/// is not a shell string, and the server refuses both in a rendered path);
+/// blank runs one space; no leading or trailing dots and blanks; at most
+/// 200 characters.
 pub fn sanitize_segment(raw: Option<&str>) -> String {
     let Some(raw) = raw else { return String::new() };
     let reserved = |c: char| matches!(c, '/' | '\\' | ':' | '*' | '?' | '<' | '>' | '|' | '"') || (c as u32) < 0x20;
-    let mut out = String::new();
+    let mut folded = String::new();
     let mut in_reserved = false;
-    let mut in_blank = false;
     for c in raw.chars() {
         if reserved(c) {
             if !in_reserved {
-                out.push('-');
+                folded.push('-');
             }
             in_reserved = true;
-            in_blank = false;
-        } else if c.is_whitespace() {
+        } else {
+            folded.push(c);
+            in_reserved = false;
+        }
+    }
+    let folded = fold_home(&folded);
+    let mut out = String::new();
+    let mut in_blank = false;
+    for c in folded.chars() {
+        if c.is_whitespace() {
             if !in_blank {
                 out.push(' ');
             }
             in_blank = true;
-            in_reserved = false;
         } else {
             out.push(c);
-            in_reserved = false;
             in_blank = false;
         }
     }
     let trimmed = out.trim_matches(|c: char| c == '.' || c.is_whitespace());
     trimmed.chars().take(MAX_SEGMENT_LEN).collect()
+}
+
+/// `${HOME}`, `$HOME` where no letter, digit or `_` follows it, and `~`,
+/// each one `-` — the server's `/\$\{HOME\}|\$HOME\b|~/g`.
+fn fold_home(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let home = rest.strip_prefix("$HOME").filter(|after| !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'));
+        if let Some(after) = rest.strip_prefix("${HOME}").or(home) {
+            out.push('-');
+            rest = after;
+        } else {
+            out.push(if c == '~' { '-' } else { c });
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
 }
 
 /// A song's file name as it lands (destination.js `safeFileName`): the
@@ -1257,45 +1320,62 @@ fn tag_value(name: &str, tags: &LayoutTags) -> String {
     }
 }
 
+/// What a run of a landing's folder is (clauses 105, 143).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run {
+    /// Words the folder's name holds as drawn.
+    Text,
+    /// A variable the view does not list, kept as typed — the PREVIEW's
+    /// GOLD (the server's words decide at Save).
+    Unknown,
+    /// A variable each song fills from its own tags ([`SongTag`]), written
+    /// `‹artist›`.
+    Slot(SongTag),
+}
+
 /// A layout's folders as the server renders them (its `resolveLayout`,
 /// which the webapp mirrors as discover-jobs.js does): each a run of
-/// pieces with whether it is a variable `known` refuses — kept as typed,
-/// for the picker's PREVIEW to draw GOLD (clause 143; the server's words
-/// decide at Save). A variable with no value drops out, blanks trim, empty
-/// folders go: `{{ARTIST}}/{{ALBUM}}` → `Boukmanflow`, `Borrowed Tapes`.
-/// The server renders the real path and has the last word.
-pub fn layout_folders(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> bool) -> Vec<Vec<(String, bool)>> {
-    let mut folders: Vec<Vec<(String, bool)>> = vec![Vec::new()];
-    let push = |folders: &mut Vec<Vec<(String, bool)>>, text: &str, unknown: bool| {
+/// pieces — words, a variable `known` refuses kept as typed for the
+/// picker's PREVIEW to draw GOLD (clause 143), or a variable the tags hold
+/// as a slot ([`SongTag`]), which keeps its folder whatever a song brings. A
+/// variable with no value drops out, blanks trim, empty folders go:
+/// `{{ARTIST}}/{{ALBUM}}` → `Boukmanflow`, `Borrowed Tapes`. The server
+/// renders the real path and has the last word.
+pub fn layout_folders(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> bool) -> Vec<Vec<(String, Run)>> {
+    let mut folders: Vec<Vec<(String, Run)>> = vec![Vec::new()];
+    let push = |folders: &mut Vec<Vec<(String, Run)>>, text: &str, run: Run| {
         if text.is_empty() {
             return;
         }
         let folder = folders.last_mut().expect("a folder");
         match folder.last_mut() {
-            Some((have, flag)) if *flag == unknown => have.push_str(text),
-            _ => folder.push((text.to_string(), unknown)),
+            Some((have, kind)) if *kind == run && !matches!(run, Run::Slot(_)) => have.push_str(text),
+            _ => folder.push((text.to_string(), run)),
         }
     };
     for piece in pieces(layout) {
         match piece {
-            Piece::Var { name, raw } if !known(&name) => push(&mut folders, raw, true),
-            Piece::Var { name, .. } => push(&mut folders, &tag_value(&name, tags), false),
+            Piece::Var { name, raw } if !known(&name) => push(&mut folders, raw, Run::Unknown),
+            Piece::Var { name, .. } => match SongTag::of(&name).filter(|slot| tags.slots.contains(slot)) {
+                Some(slot) => push(&mut folders, &format!("‹{}›", slot.name()), Run::Slot(slot)),
+                None => push(&mut folders, &tag_value(&name, tags), Run::Text),
+            },
             Piece::Text(text) => {
                 for (i, part) in text.split(['/', '\\']).enumerate() {
                     if i > 0 {
                         folders.push(Vec::new());
                     }
-                    push(&mut folders, part, false);
+                    push(&mut folders, part, Run::Text);
                 }
             }
         }
     }
     // Each folder trimmed at both ends, as the server trims a segment.
     for folder in &mut folders {
-        if let Some((text, false)) = folder.first_mut() {
+        if let Some((text, Run::Text)) = folder.first_mut() {
             *text = text.trim_start().to_string();
         }
-        if let Some((text, false)) = folder.last_mut() {
+        if let Some((text, Run::Text)) = folder.last_mut() {
             *text = text.trim_end().to_string();
         }
         folder.retain(|(text, _)| !text.is_empty());
@@ -1311,10 +1391,12 @@ pub fn layout_folders(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> b
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Landing {
     pub library: String,
-    pub folders: Vec<Vec<(String, bool)>>,
+    pub folders: Vec<Vec<(String, Run)>>,
     /// An artist copy lands album by album: "one folder per album" stands
     /// after the folders.
     pub per_album: bool,
+    /// A song's copy alone: a slot's note speaks of the one song's tags.
+    pub one_song: bool,
 }
 
 impl Landing {
@@ -1324,7 +1406,7 @@ impl Landing {
     /// [`Landing::per_album`]; a layout naming no album folder adds
     /// nothing (every album shares that folder).
     pub fn of(vpath: &str, base: &str, layout: &str, tags: &LayoutTags, by_album: bool, known: &dyn Fn(&str) -> bool) -> Landing {
-        let mut folders: Vec<Vec<(String, bool)>> = base_folders(base).into_iter().map(|f| vec![(f, false)]).collect();
+        let mut folders: Vec<Vec<(String, Run)>> = base_folders(base).into_iter().map(|f| vec![(f, Run::Text)]).collect();
         let raw: Vec<&str> = layout.split(['/', '\\']).collect();
         let album_folder = |folder: &&str| {
             pieces(folder).iter().any(|p| matches!(p, Piece::Var { name, .. } if name == "ALBUM" || name == "YEAR"))
@@ -1335,18 +1417,51 @@ impl Landing {
             None => layout.to_string(),
         };
         folders.extend(layout_folders(&rendered, tags, known));
-        Landing { library: vpath.to_string(), folders, per_album: cut.is_some() }
+        Landing { library: vpath.to_string(), folders, per_album: cut.is_some(), one_song: false }
     }
 
-    /// A finished copy's folder ([`CopyResult::landed`]).
+    /// A finished copy's folder ([`CopyResult::landed`]): real folders,
+    /// never a slot.
     pub fn landed(vpath: &str, dirs: &[String]) -> Landing {
-        Landing { library: vpath.to_string(), folders: dirs.iter().map(|d| vec![(d.clone(), false)]).collect(), per_album: false }
+        let folders = dirs.iter().map(|d| vec![(d.clone(), Run::Text)]).collect();
+        Landing { library: vpath.to_string(), folders, per_album: false, one_song: false }
     }
 
-    /// The library, then each folder as plain words.
+    /// The library, then each folder as plain words, a slot `‹artist›` —
+    /// the tests' words; a surface words its slots in its locale
+    /// ([`Landing::words`]).
+    #[cfg(test)]
     pub fn crumbs(&self) -> Vec<String> {
+        self.words(&|slot| format!("‹{}›", slot.name()))
+    }
+
+    /// The library, then each folder as plain words, a slot as `slot`
+    /// words it — a surface's own, in its locale.
+    pub fn words(&self, slot: &dyn Fn(SongTag) -> String) -> Vec<String> {
         let mut out = vec![self.library.clone()];
-        out.extend(self.folders.iter().map(|folder| folder.iter().map(|(text, _)| text.as_str()).collect::<String>()));
+        out.extend(self.folders.iter().map(|folder| {
+            folder
+                .iter()
+                .map(|(text, run)| match run {
+                    Run::Slot(s) => slot(*s),
+                    _ => text.clone(),
+                })
+                .collect::<String>()
+        }));
+        out
+    }
+
+    /// The slots the path shows, each once, in the order it shows them —
+    /// what the note with it names (the webapp's `scopeTarget` `slots`).
+    pub fn slots(&self) -> Vec<SongTag> {
+        let mut out: Vec<SongTag> = Vec::new();
+        for (_, run) in self.folders.iter().flatten() {
+            if let Run::Slot(slot) = run
+                && !out.contains(slot)
+            {
+                out.push(*slot);
+            }
+        }
         out
     }
 }
@@ -1850,6 +1965,15 @@ mod tests {
         assert_eq!(sanitize_segment(Some("a  \t  b")), "a - b");
         assert_eq!(sanitize_segment(None), "");
         assert_eq!(sanitize_segment(Some(&"x".repeat(300))).chars().count(), 200);
+        // A tag is not a shell string: `~`, `$HOME` and `${HOME}` fold to `-`,
+        // each on its own, after the reserved runs (path-template.js).
+        assert_eq!(sanitize_segment(Some("~/Mixes")), "--Mixes");
+        assert_eq!(sanitize_segment(Some("$HOME Tapes")), "- Tapes");
+        assert_eq!(sanitize_segment(Some("${HOME}~$HOME")), "---");
+        assert_eq!(sanitize_segment(Some("$HOMEtown $HOME_1 $HOMÉ")), "$HOMEtown $HOME_1 $HOMÉ", "a word that goes on is a name");
+        assert_eq!(sanitize_segment(Some("$HOME-made")), "--made");
+        assert_eq!(sanitize_segment(Some(" ~ ")), "-");
+        assert_eq!(resolve_layout("{{ARTIST}}/{{ALBUM}}", &tags("~kim", "${HOME}")), "-kim/-");
         // ALBUMARTIST falls back to the artist; PEER is the server it came from; lower case names work.
         let peer = LayoutTags { artist: Some("Kim".into()), peer: Some("Stage Peer B".into()), ..LayoutTags::default() };
         assert_eq!(resolve_layout("{{peer}}/{{ALBUMARTIST}}/{{ALBUM}}", &peer), "Stage Peer B/Kim");
@@ -1879,13 +2003,53 @@ mod tests {
         let song = LayoutTags { artist: Some("Boukmanflow".into()), album: Some("Borrowed Tapes".into()), year: Some("2019".into()), ..LayoutTags::default() };
         let known = |name: &str| LAYOUT_VARS.contains(&name);
         let landing = Landing::of("copies", "", "{{ARTST}}/{{YEAR}} - {{ALBUM}}", &song, false, &known);
-        assert_eq!(landing.folders, vec![vec![("{{ARTST}}".to_string(), true)], vec![("2019 - Borrowed Tapes".to_string(), false)]]);
+        assert_eq!(landing.folders, vec![vec![("{{ARTST}}".to_string(), Run::Unknown)], vec![("2019 - Borrowed Tapes".to_string(), Run::Text)]]);
         let landing = Landing::of("copies", "", "x {{ARTST}} y", &song, false, &known);
-        assert_eq!(landing.folders, vec![vec![("x ".to_string(), false), ("{{ARTST}}".to_string(), true), (" y".to_string(), false)]]);
+        assert_eq!(landing.folders, vec![vec![("x ".to_string(), Run::Text), ("{{ARTST}}".to_string(), Run::Unknown), (" y".to_string(), Run::Text)]]);
         // A finished copy's folder, as it landed.
         assert_eq!(Landing::landed("copies", &["Boukmanflow".into()]).crumbs(), ["copies", "Boukmanflow"]);
         assert_eq!(safe_file_name("peerlib/Boukmanflow/Borrowed Tapes/02 - Late: Train?.mp3"), "02 - Late- Train-.mp3");
         assert_eq!(safe_file_name("peerlib/.."), "track");
+    }
+
+    #[test]
+    fn a_slot_stands_for_a_variable_each_song_fills_inside_its_folders_own_words() {
+        let tags = LayoutTags {
+            artist: Some("Boukmanflow".into()),
+            album: Some("Night Market Sampler".into()),
+            year: Some("2024".into()),
+            album_artist: Some("Various Artists".into()),
+            slots: vec![SongTag::Artist, SongTag::Genre],
+            ..LayoutTags::default()
+        };
+        // The 2026-10-22 bug's layout: the artist is each song's, so no one folder is promised.
+        let landing = Landing::of("copies", "", "From friends/{{ARTIST}}", &tags, false, &|_| true);
+        assert_eq!(landing.folders, vec![vec![("From friends".to_string(), Run::Text)], vec![("‹artist›".to_string(), Run::Slot(SongTag::Artist))]]);
+        assert_eq!((landing.crumbs(), landing.slots()), (vec!["copies".into(), "From friends".into(), "‹artist›".into()], vec![SongTag::Artist]));
+        // The folder keeps its literal words around the slot; a slot is
+        // never trimmed, never dropped, never merged with its neighbour; the
+        // album and its credit stay values; a slot the layout does not name
+        // shows nowhere.
+        let landing = Landing::of("copies", "", " {{GENRE}}{{ARTIST}} - x/{{ALBUMARTIST}}/{{YEAR}} {{ALBUM}}", &tags, false, &|_| true);
+        assert_eq!(
+            landing.folders[0],
+            vec![("‹genre›".to_string(), Run::Slot(SongTag::Genre)), ("‹artist›".to_string(), Run::Slot(SongTag::Artist)), (" - x".to_string(), Run::Text)]
+        );
+        assert_eq!(landing.crumbs()[2..], ["Various Artists".to_string(), "2024 Night Market Sampler".into()]);
+        assert_eq!(landing.slots(), vec![SongTag::Genre, SongTag::Artist], "each once, in the path's order");
+        assert_eq!(Landing::of("copies", "", "{{ALBUM}}", &tags, false, &|_| true).slots(), vec![]);
+        // Two of one slot side by side stay two: each song writes its value twice.
+        let twice = Landing::of("copies", "", "{{ARTIST}}{{ARTIST}}/{{ARTIST}}", &tags, false, &|_| true);
+        let slot = ("‹artist›".to_string(), Run::Slot(SongTag::Artist));
+        assert_eq!(twice.folders, vec![vec![slot.clone(), slot.clone()], vec![slot]]);
+        assert_eq!((twice.crumbs()[1].as_str(), twice.slots()), ("‹artist›‹artist›", vec![SongTag::Artist]));
+        // A surface words a slot its own way; a refused variable stays as typed.
+        assert_eq!(landing.words(&|slot| format!("<{}>", slot.name().to_uppercase()))[1], "<GENRE><ARTIST> - x");
+        let refused = Landing::of("copies", "", "{{ARTIST}}/{{GENRE}}", &tags, false, &|name| name != "GENRE");
+        assert_eq!(refused.folders[1], vec![("{{GENRE}}".to_string(), Run::Unknown)]);
+        // An artist copy's slot stands before its cut.
+        let landing = Landing::of("copies", "", "{{GENRE}}/{{ARTIST}}/{{YEAR}}", &tags, true, &|_| true);
+        assert_eq!((landing.crumbs(), landing.per_album), (vec!["copies".into(), "‹genre›".into(), "‹artist›".into()], true));
     }
 
     #[test]

@@ -27,7 +27,7 @@ use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::types::{
     CollectionDestination, CollectionDestinationView, JobAction, JobMark, JobOutcome, JobScope, Landing, ManyCounts,
-    PluginJob, PluginLink, StopReason, base_folders,
+    PluginJob, PluginLink, Run, SongTag, StopReason, base_folders,
 };
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, dim, scroll_list, width};
@@ -174,20 +174,68 @@ fn crumb_sep() -> &'static str {
 
 /// A landing's crumbs in their tokens (clauses 105, 143): the library
 /// BOLD, each folder TEXT — a variable the server would refuse GOLD, as
-/// typed — and an artist copy's "one folder per album" DIM.
+/// typed; a variable each song fills from its own tags its slot DIM,
+/// `‹artist›`, inside the folder's own words — and an artist copy's "one
+/// folder per album" DIM: the slot and the stand-in are hints, never a
+/// folder's name.
 fn landing_crumbs(landing: &Landing) -> Vec<Vec<(String, Style)>> {
     let gold = Style::default().fg(th().gold);
     let mut out = vec![vec![(landing.library.clone(), Style::default().add_modifier(Modifier::BOLD))]];
-    out.extend(
-        landing
-            .folders
+    out.extend(landing.folders.iter().map(|folder| {
+        folder
             .iter()
-            .map(|folder| folder.iter().map(|(text, unknown)| (text.clone(), if *unknown { gold } else { Style::default() })).collect()),
-    );
+            .map(|(text, run)| match run {
+                Run::Text => (text.clone(), Style::default()),
+                Run::Unknown => (text.clone(), gold),
+                Run::Slot(slot) => (slot_words(*slot), dim()),
+            })
+            .collect()
+    }));
     if landing.per_album {
         out.push(vec![(t!("gui.discover.dest.per_album").to_string(), dim())]);
     }
     out
+}
+
+/// A slot as a path draws it: the locale's word inside `‹ ›` (legacy
+/// `< >`).
+fn slot_words(slot: SongTag) -> String {
+    let word = match slot {
+        SongTag::Artist => t!("gui.discover.dest.slot_artist"),
+        SongTag::Year => t!("gui.discover.dest.slot_year"),
+        SongTag::Genre => t!("gui.discover.dest.slot_genre"),
+    };
+    if legacy_conhost() { format!("<{word}>") } else { format!("‹{word}›") }
+}
+
+/// The note a path with a slot carries (clause 105; the webapp's and the
+/// phone's words): which variables come from each song's own tags, in the
+/// path's order, so the songs can land in more than one folder — and,
+/// with a genre, that a song with none leaves its folder out; a song's
+/// copy alone speaks of its own tags. `None` where the path shows no slot.
+fn slot_note(landing: &Landing) -> Option<String> {
+    let slots = landing.slots();
+    if slots.is_empty() {
+        return None;
+    }
+    let names = slots.iter().map(|slot| slot_words(*slot)).collect::<Vec<_>>().join(", ");
+    if landing.one_song {
+        return Some(t!("gui.discover.dest.slot_note_song", slots = names).to_string());
+    }
+    let stem = if slots.contains(&SongTag::Genre) { "gui.discover.dest.slot_note_genre" } else { "gui.discover.dest.slot_note" };
+    let key = format!("{stem}_{}", super::discover::plural_form(slots.len() as u64));
+    Some(t!(key.as_str(), slots = names).to_string())
+}
+
+/// A path's tooltip: the whole path where its rows clip it, the slot's
+/// note where it shows one — the 66-cell LANDS IN and the one-row PREVIEW
+/// have no row for the note, so it stands here.
+fn path_tip(landing: &Landing, clipped: bool) -> Option<String> {
+    let path = clipped.then(|| landing.words(&slot_words).join("/"));
+    match (path, slot_note(landing)) {
+        (Some(path), Some(note)) => Some(format!("{path} — {note}")),
+        (path, note) => path.or(note),
+    }
 }
 
 /// The cells LANDS IN's path has on a row: from the values' column to the
@@ -238,7 +286,7 @@ fn path_lows(lead: Option<String>, landing: &Landing) -> Vec<Low> {
     let first = lead.is_none();
     let lead = lead.map(|words| vec![(format!("{words} "), dim())]).unwrap_or_default();
     let rows = path_rows(lead, &landing_crumbs(landing), room);
-    let tip = rows.iter().any(|row| cells_of(row) > room).then(|| landing.crumbs().join("/"));
+    let tip = path_tip(landing, rows.iter().any(|row| cells_of(row) > room));
     rows.into_iter().enumerate().map(|(i, runs)| Low::Path { first: first && i == 0, runs, tip: tip.clone() }).collect()
 }
 
@@ -428,7 +476,7 @@ enum Low {
     /// folders, an artist copy's "one folder per album" (a hint, not a
     /// folder, so DIM), wrapped at a crumb onto a second row where they
     /// outgrow one ([`path_rows`]); `tip` the whole path where even that
-    /// is clipped.
+    /// is clipped, and a slot's note where one shows ([`path_tip`]).
     Path { first: bool, runs: Vec<(String, Style)>, tip: Option<String> },
     /// The SOURCE row under it: whose place it is (saved for the account,
     /// or the library's default) and `[ Change… ]` (clause 105).
@@ -952,9 +1000,10 @@ fn draw_low(frame: &mut Frame, gui: &mut Gui, view: &KeepView, inner: Rect, y: u
                 put(frame, x, y, &label("gui.discover.keep.lands_in"), dim());
             }
             // The library BOLD, the names TEXT, `›` DIM; an artist copy's
-            // "one folder per album" DIM — the canvas's hint, never a
+            // "one folder per album" and a slot DIM — hints, never a
             // folder's name. A row that still overflows is clipped at the
-            // right, the whole path in its tooltip.
+            // right, the whole path in its tooltip; a slot's note stands
+            // there too.
             let start = inner.x + value_col();
             let end = inner.right().saturating_sub(1);
             let mut at = start;
@@ -2230,8 +2279,9 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     }
                     runs.extend(crumb);
                 }
-                if put_tail(frame, value_x, y, &runs, room) {
-                    gui.ui.tip(Rect { x: value_x, y, width: room as u16, height: 1 }, landing.crumbs().join("/"));
+                let clipped = put_tail(frame, value_x, y, &runs, room);
+                if let Some(tip) = path_tip(&landing, clipped) {
+                    gui.ui.tip(Rect { x: value_x, y, width: room as u16, height: 1 }, tip);
                 }
             }
             DestRow::File => {
@@ -3633,8 +3683,15 @@ pub(crate) mod tests {
                 .map(|n| serde_json::from_value(json!({ "name": n, "album_artist": artist, "artists": [artist] })).unwrap())
                 .collect()
         };
+        // The album's songs tagged as the stage's row is: Boukmanflow, 2019.
+        let song = |i: usize| crate::tui::worker::KeepSong {
+            filepath: format!("peerlib/Boukmanflow/Borrowed Tapes/{i:02}.mp3"),
+            artist: Some("Boukmanflow".into()),
+            year: Some(2019),
+            genre: None,
+        };
         let facts = crate::tui::worker::KeepFacts {
-            album_songs: songs,
+            album_songs: songs.map(|n| (1..=n).map(song).collect()),
             peer_albums: Some(rows(remote, "Boukmanflow")),
             local_albums: Some(rows(local, "Boukmanflow")),
         };
@@ -4677,12 +4734,10 @@ pub(crate) mod tests {
         assert!(lower_rows(&rows).iter().any(|r| r.contains("[ Cancel ] [ Add album ]")), "{}", rows.join("\n"));
     }
 
-    #[test]
-    fn a_compilation_tile_copies_the_whole_album_by_its_row_unchanged() {
-        let _en = english();
-        // The user's 2026-10-19 decision: a row carrying albumArtist groups
-        // as one tile credited to it, offers Album alone (never "Every album
-        // by" the track artist) and sends the row unchanged.
+    /// The room on Connected servers with one compilation, Mixtape Vol 1
+    /// (credited to Various Artists): Peer Kim's song, its best row, and
+    /// Peer Lou's.
+    fn mixtape_gui() -> (Gui, Value) {
         let mut gui = plugin_gui();
         key(&mut gui, KeyCode::Char('G'));
         let (seq, generation) = pending_taste(&gui, TastePart::Main);
@@ -4710,6 +4765,16 @@ pub(crate) mod tests {
         );
         land_lookups(&mut gui, &[]);
         gui.act(Act::Disc(DiscAct::Tab(TasteTab::Servers)));
+        (gui, kim)
+    }
+
+    #[test]
+    fn a_compilation_tile_copies_the_whole_album_by_its_row_unchanged() {
+        let _en = english();
+        // The user's 2026-10-19 decision: a row carrying albumArtist groups
+        // as one tile credited to it, offers Album alone (never "Every album
+        // by" the track artist) and sends the row unchanged.
+        let (mut gui, kim) = mixtape_gui();
         let rows = draw(&mut gui, 100, 30);
         assert!(room(&rows, 11).starts_with("Mixtape Vol…") && room(&rows, 12).starts_with("Various Art…"), "one tile, its credit:\n{}", rows.join("\n"));
         assert!(!room(&rows, 11).contains("Mixtape Vol… Mixtape"), "never one per track artist");
@@ -4727,6 +4792,138 @@ pub(crate) mod tests {
         gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
         let sent = starts(&gui);
         assert_eq!(sent, vec![(kim, crate::api::types::JobScope::Album)], "the best row, unchanged, scope album");
+    }
+
+    /// The album's listing, landed with these songs' own tags.
+    fn land_songs(gui: &mut Gui, songs: &[(&str, &str)]) {
+        let ask = gui.pending.iter().rev().find_map(|e| match e {
+            Effect::Api(ApiCmd::KeepFacts { seq, generation, .. }) => Some((*seq, *generation)),
+            _ => None,
+        });
+        let Some((seq, generation)) = ask else { panic!("no facts ask in {:?}", gui.pending) };
+        let songs = songs
+            .iter()
+            .map(|(title, artist)| crate::tui::worker::KeepSong {
+                filepath: format!("peerlib/{artist}/Mixtape Vol 1/{title}.mp3"),
+                artist: Some(artist.to_string()),
+                year: Some(2019),
+                genre: None,
+            })
+            .collect();
+        let facts = crate::tui::worker::KeepFacts { album_songs: Some(songs), ..Default::default() };
+        apply(gui, Event::KeepFacts { seq, generation, facts: Box::new(facts) });
+    }
+
+    /// A place saved for the account with `layout`.
+    fn layout_view(layout: &str) -> Value {
+        let mut view = dest_view("", "user");
+        view["destination"]["layout"] = json!(layout);
+        view["saved"]["layout"] = json!(layout);
+        view
+    }
+
+    #[test]
+    fn a_compilations_album_draws_each_songs_artist_as_a_slot_with_its_note_in_the_tooltip() {
+        let _en = english();
+        // The 2026-10-22 bug: "copies › From friends › Boukmanflow" for an
+        // album whose songs the server files under each one's own artist.
+        let note = "‹artist› comes from each song's own tags, so these songs can land in more than one folder.";
+        let (mut gui, kim) = mixtape_gui();
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, KeepTarget::Tile(0));
+        land_read(&mut gui, layout_view("From friends/{{ARTIST}}"));
+        // Before the listing answers, and once it names two artists: the slot.
+        for listing in [None, Some(&[("Kim Song", "Peer Kim"), ("Lou Song", "Peer Lou")])] {
+            if let Some(songs) = listing {
+                land_songs(&mut gui, songs);
+            }
+            let buffer = buffer(&mut gui, 100, 30);
+            let rows = lines(&buffer);
+            let low = lower_rows(&rows);
+            assert_eq!(
+                low[1..4].to_vec(),
+                canvas(&[
+                    "│                                                                │",
+                    "│ LANDS IN  copies › From friends › ‹artist›                     │",
+                    "│           saved for your account                   [ Change… ] │",
+                ]),
+                "{}",
+                low.join("\n")
+            );
+            // DIM, as "one folder per album" — a hint, never a folder's name.
+            assert_eq!(fg(&buffer, at(&rows, "‹artist›")), th().dim);
+            assert_ne!(fg(&buffer, at(&rows, "From friends")), th().dim);
+            let y = at_row(&rows, "‹artist›");
+            assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == note), "{:?}", gui.ui.tips);
+        }
+        // The picker's PREVIEW draws the same, its note in its tooltip.
+        key(&mut gui, KeyCode::Char('d'));
+        land_folders(&mut gui);
+        let rows = draw(&mut gui, 100, 30);
+        let picker = picker_rows(&rows);
+        let preview = picker.iter().position(|r| r.contains("PREVIEW")).expect("PREVIEW");
+        assert_eq!(picker[preview..preview + 2].to_vec(), boxed(&["", " PREVIEW   copies › From friends › ‹artist›", ""])[2..4].to_vec());
+        let y = at_row(&rows, "PREVIEW");
+        assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == note), "{:?}", gui.ui.tips);
+        key(&mut gui, KeyCode::Esc);
+        // Starting and queued: the place sent, then the job's pin — the slot stands.
+        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!(lower_rows(&rows)[1], "│ LANDS IN  copies › From friends › ‹artist›                     │");
+        let ticket = gui.pending.iter().rev().find_map(|e| match e {
+            Effect::Api(ApiCmd::JobStart { ticket, .. }) => Some(*ticket),
+            _ => None,
+        });
+        let mut queued = job(92, &kim, Some("album"), "queued", json!({}));
+        queued.params.destination = Some(Some(serde_json::from_value(layout_view("From friends/{{ARTIST}}")["destination"].clone()).unwrap()));
+        let generation = gui.app.session_gen();
+        let answer = Ok(Box::new(crate::api::types::JobStarted { job: queued, created: true }));
+        apply(&mut gui, Event::JobStarted { ticket: ticket.expect("a start"), generation, answer });
+        let rows = draw(&mut gui, 100, 30);
+        let low = lower_rows(&rows);
+        assert_eq!(low[1], "│ LANDS IN  copies › From friends › ‹artist›                     │", "{}", low.join("\n"));
+        assert!(low.iter().any(|r| r.contains("waiting")), "{}", low.join("\n"));
+        // Every song by one artist: that folder, no slot and no note.
+        let (mut gui, _) = mixtape_gui();
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, KeepTarget::Tile(0));
+        land_read(&mut gui, layout_view("From friends/{{ARTIST}}"));
+        land_songs(&mut gui, &[("Kim Song", "Peer Kim"), ("Kim Two", "Peer Kim")]);
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!(lower_rows(&rows)[2], "│ LANDS IN  copies › From friends › Peer Kim                     │");
+        assert!(!gui.ui.tips.iter().any(|(_, tip)| tip.contains("own tags")), "{:?}", gui.ui.tips);
+    }
+
+    #[test]
+    fn retry_adds_to_draws_a_genre_slot_and_its_note_names_the_folder_a_song_leaves_out() {
+        let _en = english();
+        // An album copy pinned to the library default failed; the account
+        // has saved a layout by genre since — no song's genre is known here.
+        let mut gui = row_in("failed", Some("album"), json!({ "error": "Stage Peer B is unreachable" }));
+        land_read(&mut gui, layout_view("{{GENRE}}/{{ARTIST}} - {{YEAR}}"));
+        let rows = draw(&mut gui, 100, 30);
+        let low = lower_rows(&rows);
+        assert_eq!(
+            low[1..3].to_vec(),
+            canvas(&[
+                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
+                "│           retry adds to copies › ‹genre› › Boukmanflow - 2019  │",
+            ]),
+            "{}",
+            low.join("\n")
+        );
+        let note = "‹genre› comes from each song's own tags, so these songs can land in more than one folder (a song with none leaves that folder out).";
+        let y = at_row(&rows, "retry adds to");
+        assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == note), "{:?}", gui.ui.tips);
+        assert!(
+            !gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y: y - 1 }) && tip.contains("own tags")),
+            "the pinned place has no slot, so no note: {:?}",
+            gui.ui.tips
+        );
+        // The legacy console draws the slot in its own brackets.
+        let _legacy = crate::kit::theme::legacy_glyphs_here();
+        let rows = draw(&mut gui, 100, 30);
+        assert!(rows.iter().any(|r| r.contains("retry adds to copies > <genre> > Boukmanflow - 2019")), "{}", rows.join("\n"));
     }
 
     #[test]
@@ -5615,6 +5812,52 @@ pub(crate) mod tests {
         let whole = "copies/from-peers/2025 archive/the long weekend sessions/Stage Peer B/Boukmanflow/Borrowed Tapes";
         for y in [row - 1, row] {
             assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == whole), "row {y}: {:?}", gui.ui.tips);
+        }
+    }
+
+    #[test]
+    fn a_clipped_path_with_a_slot_tips_the_whole_path_then_its_note() {
+        let _en = english();
+        // A long base folder and a genre in the layout: the second row is
+        // clipped, so the tooltip is the whole path — the slot in its words —
+        // and then the note, on LANDS IN and on the PREVIEW alike.
+        let mut view = dest_view("from-peers/2025 archive/the long weekend sessions", "user");
+        view["destination"]["layout"] = json!("{{PEER}}/{{GENRE}}/{{ALBUMARTIST}}/{{ALBUM}}");
+        view["saved"]["layout"] = view["destination"]["layout"].clone();
+        let mut gui = keep_on(view);
+        let whole = "copies/from-peers/2025 archive/the long weekend sessions/Stage Peer B/‹genre›/Boukmanflow/Borrowed Tapes";
+        for (choice, note) in [
+            (crate::tui::app::keep::KeepChoice::Song, "‹genre› comes from the song's own tags (a song with none leaves that folder out)."),
+            (
+                crate::tui::app::keep::KeepChoice::Album,
+                "‹genre› comes from each song's own tags, so these songs can land in more than one folder (a song with none leaves that folder out).",
+            ),
+        ] {
+            gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(choice))));
+            let rows = draw(&mut gui, 100, 30);
+            let low = lower_rows(&rows);
+            let at = low.iter().position(|r| r.contains("LANDS IN")).expect("LANDS IN");
+            assert_eq!(
+                low[at..at + 2].to_vec(),
+                canvas(&[
+                    "│ LANDS IN  copies › from-peers › 2025 archive ›                 │",
+                    "│           the long weekend sessions › Stage Peer B › ‹genre› … │",
+                ]),
+                "{}",
+                low.join("\n")
+            );
+            let tip = format!("{whole} — {note}");
+            let row = at_row(&rows, "the long weekend sessions");
+            for y in [row - 1, row] {
+                assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y }) && *t == tip), "row {y}: {:?}", gui.ui.tips);
+            }
+            key(&mut gui, KeyCode::Char('d'));
+            land_folders(&mut gui);
+            let rows = draw(&mut gui, 100, 30);
+            let y = at_row(&rows, "PREVIEW");
+            assert!(rows[usize::from(y)].contains('…'), "the PREVIEW clipped: {}", rows[usize::from(y)]);
+            assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y }) && *t == tip), "PREVIEW: {:?}", gui.ui.tips);
+            key(&mut gui, KeyCode::Esc);
         }
     }
 

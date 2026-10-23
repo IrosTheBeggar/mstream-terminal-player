@@ -510,12 +510,50 @@ pub struct KeepFactsAsk {
 /// answer (DIM "…" until then; clause 106).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct KeepFacts {
-    /// The album's songs on the connected server.
-    pub album_songs: Option<usize>,
+    /// The album's songs on the connected server — how many, and the tags
+    /// each files under (clause 105).
+    pub album_songs: Option<Vec<KeepSong>>,
     /// The artist's albums on the connected server.
     pub peer_albums: Option<Vec<ArtistAlbumRow>>,
     /// The artist's albums in the user's own library.
     pub local_albums: Option<Vec<ArtistAlbumRow>>,
+}
+
+/// One song of the album's listing, with the tags a copy files it under
+/// that may differ from song to song (destination.js `tagsForLayout`):
+/// its artist, its year and its genre — what LANDS IN needs to know
+/// whether an album copy keeps to one folder (clause 105).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeepSong {
+    /// Its path on the connected server: the row's own song is found by it.
+    pub filepath: String,
+    /// The ARTIST tag as written ("A feat. B" — the copy files by it, not
+    /// by the primary artist the listing's `artist` names), else that name.
+    pub artist: Option<String>,
+    pub year: Option<i32>,
+    /// Its genre where the listing names exactly one: the library splits a
+    /// genre tag on `,` `;` `/` (the peer's scanner), the copy files by the
+    /// tag as the file has it — a "Hip-Hop/Rap" lists as two and lands in
+    /// "Hip-Hop-Rap" — so a song that lists two or more is unknown (the
+    /// webapp's `songGenre`).
+    pub genre: Option<String>,
+}
+
+impl KeepSong {
+    pub fn of(track: &Track) -> KeepSong {
+        let named = |v: &Option<String>| v.clone().filter(|s| !s.trim().is_empty());
+        let md = &track.metadata;
+        let genres: Vec<&String> = md.genres.iter().filter(|g| !g.trim().is_empty()).collect();
+        KeepSong {
+            filepath: track.filepath.clone(),
+            artist: named(&md.artist_display).or_else(|| named(&md.artist)),
+            year: md.year.filter(|y| *y > 0),
+            genre: match genres[..] {
+                [one] => Some(one.clone()),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// A position in the tag-based library hierarchy. Doubles as the request (what
@@ -2485,7 +2523,7 @@ pub(crate) async fn keep_facts(peer: Option<&Client>, local: &Client, ask: &Keep
             Some(credit) => peer.album_songs_by_async(album, None, Some(credit), ask.year).await,
             None => peer.album_songs_by_async(album, artist, None, ask.year).await,
         };
-        facts.album_songs = songs.ok().map(|tracks| tracks.len());
+        facts.album_songs = songs.ok().map(|tracks| tracks.iter().map(KeepSong::of).collect());
     }
     if let Some(artist) = artist {
         if let Some(peer) = peer {
@@ -2742,7 +2780,12 @@ mod tests {
             // A compilation: its songs by the album artist; the artist's
             // albums there and here.
             let (peer_port, peer_seen) = canned_server_bodies(vec![
-                json_reply("200 OK", serde_json::json!([{ "filepath": "a.mp3" }, { "filepath": "b.mp3" }])),
+                json_reply("200 OK", serde_json::json!([
+                    { "filepath": "a.mp3", "metadata": { "artist": "Peer Kim", "artist-display": "Peer Kim feat. Lou", "year": 2020, "genres": ["Hip-Hop"] } },
+                    { "filepath": "b.mp3", "metadata": { "artist": " ", "year": 0, "genres": [] } },
+                    { "filepath": "c.mp3", "metadata": { "artist": "Peer Kim", "artist-display": " ", "genres": ["Hip-Hop", "Rap"] } },
+                    { "filepath": "d.mp3", "metadata": { "artist-display": "Peer Lou", "genres": ["Rock", " "] } }
+                ])),
                 json_reply("200 OK", serde_json::json!({ "albums": [{ "name": "Mixtape Vol 1", "album_artist": "Various Artists", "artists": ["Peer Kim"], "compilation": 1 }] })),
             ]);
             let (own_port, own_seen) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!({ "albums": [] }))]);
@@ -2753,7 +2796,26 @@ mod tests {
                 year: Some(2020),
             };
             let facts = crate::api::wait(async { Ok::<_, ApiError>(keep_facts(Some(&client(peer_port)), &client(own_port), &ask).await) }).unwrap();
-            assert_eq!(facts.album_songs, Some(2));
+            // Each song's own tags, as a copy files it: the ARTIST tag as
+            // written ("feat." and all), else the primary artist; a genre only
+            // where the listing names one — a tag the library split in two
+            // ("Hip-Hop/Rap") lands under neither; a blank artist, a zero year
+            // and no genre are none.
+            let song = |filepath: &str, artist: Option<&str>, year: Option<i32>, genre: Option<&str>| KeepSong {
+                filepath: filepath.into(),
+                artist: artist.map(str::to_string),
+                year,
+                genre: genre.map(str::to_string),
+            };
+            assert_eq!(
+                facts.album_songs,
+                Some(vec![
+                    song("a.mp3", Some("Peer Kim feat. Lou"), Some(2020), Some("Hip-Hop")),
+                    song("b.mp3", None, None, None),
+                    song("c.mp3", Some("Peer Kim"), None, None),
+                    song("d.mp3", Some("Peer Lou"), None, Some("Rock")),
+                ])
+            );
             assert!(facts.peer_albums.as_ref().is_some_and(|a| a[0].compilation));
             assert_eq!(facts.local_albums.map(|a| a.len()), Some(0));
             let (line, body) = seen_json(&peer_seen);

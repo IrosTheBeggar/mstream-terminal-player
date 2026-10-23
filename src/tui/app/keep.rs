@@ -24,9 +24,10 @@ use crate::api::PluginFailure;
 use crate::api::types::{
     COPY_PLUGIN, CancelAnswer, CollectionDestination, CollectionDestinationView, DiscoveryPluginsResponse, JobAction,
     JobLookup, JobMark, JobOutcome, JobParams, JobScope, JobStarted, JobState, Landed, Landing, LayoutTags, PluginJob,
-    PluginJobList, PluginLink, TasteLead, artist_ownership, job_for_album, missing_albums, safe_file_name,
+    PluginJobList, PluginLink, SongTag, TasteLead, artist_ownership, job_for_album, missing_albums, safe_file_name,
+    sanitize_segment,
 };
-use crate::tui::worker::{KeepFacts, KeepFactsAsk};
+use crate::tui::worker::{KeepFacts, KeepFactsAsk, KeepSong};
 
 /// The jobs poll's beat while a Keep or Copies modal is open and a copy
 /// is live (clause 112; the webapp's 1.5 s).
@@ -619,6 +620,10 @@ pub struct KeepView {
     /// Where this account's copies land now (the gate's, as last read) —
     /// what a start sends and the SOURCE row's word (clause 105).
     pub destination: Option<CollectionDestination>,
+    /// The album's songs on the connected server with the tags each files
+    /// under, once the facts answer (`None` until then, or where the read
+    /// failed): whether an album copy keeps to one folder (clause 105).
+    pub album_songs: Option<Vec<KeepSong>>,
     /// The LANDS IN line: the account's place while choosing, the place a
     /// start sent while it is out, a copy's pinned place while it runs and
     /// the folder its files landed in once it ended — never the account's
@@ -634,16 +639,33 @@ pub struct KeepView {
 
 impl KeepView {
     /// The tags a copy of `scope` renders the layout with (the webapp's
-    /// `dmScopeTags`), and whether it lands album by album: the song's own
-    /// for the song and its album — ALBUMARTIST its credit, so a
-    /// compilation stays in one folder; for the artist scopes the track
-    /// artist as ARTIST and ALBUMARTIST, never a compilation's credit, and
-    /// no album or year — each album has its own — unless only-missing
-    /// takes one album, which is named with its year (the webapp's
-    /// `scopeTarget` `oneAlbum`).
+    /// `dmScopeTags`), and whether it lands album by album. The server
+    /// files each song by its own file's tags (destination.js
+    /// `tagsForLayout`), so a variable a copy's songs need not agree on is
+    /// a slot ([`SongTag`]), never one value promising one folder (the
+    /// 2026-10-22 Night Market Sampler: "copies › From friends ›
+    /// Boukmanflow" for three artists' songs):
+    ///
+    /// - **the song**: its own tags — ARTIST as its file has it where the
+    ///   album's listing has its row ([`KeepSong::artist`]), else the row's;
+    ///   GENRE its genre where that row names one, else a slot;
+    /// - **its album**: ALBUM, ALBUMARTIST (its credit — albumArtist, else
+    ///   the row's artist — so a compilation stays in one folder) and PEER
+    ///   as the row says; ARTIST and YEAR the value every song of the
+    ///   listing files under ([`agreed`]: a song with no artist under the
+    ///   credit, as the copy files it; one with no year under none, its
+    ///   folder dropped) — before the listing answers, the row's own unless
+    ///   it is a compilation — else a slot; GENRE a slot unless every song
+    ///   names the same one;
+    /// - **the artist scopes**: the track artist as ARTIST and ALBUMARTIST,
+    ///   never a compilation's credit, and no album or year — each album
+    ///   has its own — unless only-missing takes one album, which is named
+    ///   with its year (the webapp's `scopeTarget` `oneAlbum`); GENRE a
+    ///   slot.
     fn scope_tags(&self, scope: JobScope) -> (LayoutTags, bool) {
         let s = &self.subject;
         let peer = Some(s.server.clone());
+        let year = s.year.filter(|y| *y > 0).map(|y| y.to_string());
         match scope {
             JobScope::Artist | JobScope::ArtistMissing => {
                 let one = self.one_missing.clone().filter(|_| scope == JobScope::ArtistMissing);
@@ -658,18 +680,56 @@ impl KeepView {
                     album,
                     year,
                     peer,
+                    slots: vec![SongTag::Genre],
                     ..LayoutTags::default()
                 };
                 (tags, by_album)
             }
-            _ => {
+            JobScope::Album => {
+                let credit = s.album_credit().map(str::to_string);
+                let songs = self.album_songs.as_deref().filter(|songs| !songs.is_empty());
+                let (artist, year, genre) = match songs {
+                    // A listed song with no artist files under the credit the
+                    // listing was asked by (federation-copy `albumListing`'s
+                    // `fallbackArtist`); one with no year has none to fall
+                    // back to.
+                    Some(songs) => (
+                        agreed(songs.iter().map(|song| song.artist.clone().or_else(|| credit.clone()))),
+                        agreed(songs.iter().map(|song| song.year.map(|y| y.to_string()))),
+                        if songs.iter().all(|song| song.genre.is_some()) { agreed(songs.iter().map(|song| song.genre.clone())) } else { None },
+                    ),
+                    None if s.compilation() => (None, None, None),
+                    None => (Some(s.track_artist.clone()), Some(year), None),
+                };
+                let slots = [(&artist, SongTag::Artist), (&year, SongTag::Year), (&genre, SongTag::Genre)]
+                    .into_iter()
+                    .filter_map(|(value, slot)| value.is_none().then_some(slot))
+                    .collect();
                 let tags = LayoutTags {
-                    artist: s.track_artist.clone(),
+                    artist: artist.flatten(),
                     album: s.album.clone(),
-                    year: s.year.filter(|y| *y > 0).map(|y| y.to_string()),
-                    genre: None,
+                    year: year.flatten(),
+                    genre: genre.flatten(),
+                    album_artist: credit,
+                    peer,
+                    slots,
+                };
+                (tags, false)
+            }
+            _ => {
+                // The song's own row of the album's listing, where it
+                // answered: its artist as its file has it, and its genre.
+                let own = self.album_songs.iter().flatten().find(|song| s.filepath.as_deref() == Some(song.filepath.as_str()));
+                let genre = own.and_then(|song| song.genre.clone());
+                let slots = if genre.is_none() { vec![SongTag::Genre] } else { Vec::new() };
+                let tags = LayoutTags {
+                    artist: own.and_then(|song| song.artist.clone()).or_else(|| s.track_artist.clone()),
+                    album: s.album.clone(),
+                    year,
+                    genre,
                     album_artist: s.album_artist.clone(),
                     peer,
+                    slots,
                 };
                 (tags, false)
             }
@@ -679,7 +739,7 @@ impl KeepView {
     /// Where a copy of `scope` lands at a place.
     fn landing_at(&self, place: &CollectionDestination, scope: JobScope) -> Landing {
         let (tags, by_album) = self.scope_tags(scope);
-        place.landing(&tags, by_album)
+        Landing { one_song: scope == JobScope::Song, ..place.landing(&tags, by_album) }
     }
 
     /// Where a copy of the chosen scope would land with the picker's
@@ -687,7 +747,7 @@ impl KeepView {
     /// refuses kept as typed.
     pub fn landing_for(&self, vpath: &str, base: &str, layout: &str, known: &dyn Fn(&str) -> bool) -> Landing {
         let (tags, by_album) = self.scope_tags(self.scope);
-        Landing::of(vpath, base, layout, &tags, by_album, known)
+        Landing { one_song: self.scope == JobScope::Song, ..Landing::of(vpath, base, layout, &tags, by_album, known) }
     }
 
     /// The song's file as it would land — the PREVIEW's second row, a
@@ -698,6 +758,22 @@ impl KeepView {
         }
         self.subject.filepath.as_deref().map(safe_file_name)
     }
+}
+
+/// The one value every song files under — each cleaned as the server
+/// cleans a folder name, so two spellings of one folder agree — or `None`
+/// where any two differ (a slot). `Some(None)`: none of them has one, and
+/// the folder drops for all alike.
+fn agreed(values: impl Iterator<Item = Option<String>>) -> Option<Option<String>> {
+    let mut first: Option<Option<String>> = None;
+    for value in values {
+        match &first {
+            None => first = Some(value),
+            Some(have) if sanitize_segment(have.as_deref()) != sanitize_segment(value.as_deref()) => return None,
+            Some(_) => {}
+        }
+    }
+    first
 }
 
 /// Open elsewhere's list (clause 140).
@@ -1578,7 +1654,7 @@ impl App {
             .map(|&choice| {
                 let size = match choice {
                     KeepChoice::Song => ChoiceSize::Song { seconds: s.duration, format: s.format() },
-                    KeepChoice::Album => ChoiceSize::Album { songs: fact(facts.album_songs) },
+                    KeepChoice::Album => ChoiceSize::Album { songs: fact(facts.album_songs.as_ref().map(Vec::len)) },
                     KeepChoice::Artist => ChoiceSize::Artist {
                         albums: fact(facts.peer_albums.as_ref().map(Vec::len)),
                         have: fact(facts.local_albums.as_ref().map(Vec::len)),
@@ -1672,6 +1748,7 @@ impl App {
             missing,
             one_missing,
             destination,
+            album_songs: facts.album_songs.clone(),
             landing: None,
             again: None,
             stage,
@@ -2518,6 +2595,7 @@ mod tests {
             missing: None,
             one_missing: None,
             destination: None,
+            album_songs: None,
             landing: None,
             again: None,
             stage: KeepStage::Starting,
@@ -2548,5 +2626,154 @@ mod tests {
         assert_eq!(crumbs(&undated, "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", JobScope::ArtistMissing), (names(&["copies", "from-peers", "Boukmanflow", "- Second Shift"]), false));
         assert_eq!(crumbs(&one, "{{ARTIST}}/{{ALBUM}}", JobScope::Artist), (names(&["copies", "from-peers", "Boukmanflow"]), true), "every album: no name");
         assert_eq!(KeepView { scope: JobScope::Album, ..view }.file_name(), None, "a song's file alone");
+    }
+
+    #[test]
+    fn a_variable_each_song_fills_from_its_own_tags_is_a_slot_where_they_need_not_agree() {
+        let place = |layout: &str| CollectionDestination { vpath: "copies".into(), layout: layout.into(), ..CollectionDestination::default() };
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let song = |filepath: &str, artist: Option<&str>, year: Option<i32>, genre: Option<&str>| KeepSong {
+            filepath: filepath.into(),
+            artist: artist.map(str::to_string),
+            year,
+            genre: genre.map(str::to_string),
+        };
+        // The 2026-10-22 Night Market Sampler: a compilation whose row is
+        // Boukmanflow's song, its three songs by three artists.
+        let sampler = KeepView {
+            subject: KeepSubject {
+                filepath: Some("peerlib/Night Market Sampler/02.mp3".into()),
+                ..subject(Some("Lanmè"), Some("Boukmanflow"), Some("Night Market Sampler"), Some("Various Artists"))
+            },
+            choices: Vec::new(),
+            choice: KeepChoice::Album,
+            scope: JobScope::Album,
+            missing: None,
+            one_missing: None,
+            destination: None,
+            album_songs: None,
+            landing: None,
+            again: None,
+            stage: KeepStage::Starting,
+        };
+        let at = |view: &KeepView, layout: &str, scope: JobScope| {
+            let landing = view.landing_at(&place(layout), scope);
+            (landing.crumbs(), landing.slots())
+        };
+        let friends = "From friends/{{ARTIST}}";
+        // Before the listing answers: a compilation's ARTIST and YEAR are
+        // slots, its album and credit what the row says; GENRE always one.
+        assert_eq!(at(&sampler, friends, JobScope::Album), (names(&["copies", "From friends", "‹artist›"]), vec![SongTag::Artist]));
+        assert_eq!(
+            at(&sampler, "{{ALBUMARTIST}}/{{YEAR}} - {{ALBUM}}/{{GENRE}}", JobScope::Album),
+            (names(&["copies", "Various Artists", "‹year› - Night Market Sampler", "‹genre›"]), vec![SongTag::Year, SongTag::Genre])
+        );
+        // Not a compilation (no credit, or the credit is the row's artist): the row's own.
+        let own = KeepView { subject: KeepSubject { album_artist: None, ..sampler.subject.clone() }, ..sampler.clone() };
+        assert_eq!(at(&own, "{{ARTIST}}/{{YEAR}}", JobScope::Album), (names(&["copies", "Boukmanflow", "2019"]), vec![]));
+        let credited = KeepView { subject: KeepSubject { album_artist: Some("boukmanflow".into()), ..sampler.subject.clone() }, ..sampler.clone() };
+        assert_eq!(at(&credited, "{{ARTIST}}", JobScope::Album).0, names(&["copies", "Boukmanflow"]));
+        // The listing answered: three artists, so a slot; a song with no
+        // year has none to fall back to (its folder drops), so a slot too.
+        let three = KeepView {
+            album_songs: Some(vec![
+                song("peerlib/Night Market Sampler/01.mp3", Some("Color Out"), Some(2024), Some("Electronic")),
+                song("peerlib/Night Market Sampler/02.mp3", Some("Boukmanflow"), Some(2024), Some("Hip-Hop")),
+                song("peerlib/Night Market Sampler/03.mp3", Some("ALM"), None, Some("Electronic")),
+            ]),
+            subject: KeepSubject { year: Some(2024), ..sampler.subject.clone() },
+            ..sampler.clone()
+        };
+        assert_eq!(
+            at(&three, "{{ARTIST}}/{{YEAR}}/{{GENRE}}", JobScope::Album),
+            (names(&["copies", "‹artist›", "‹year›", "‹genre›"]), vec![SongTag::Artist, SongTag::Year, SongTag::Genre]),
+            "a song with no year never files under the row's"
+        );
+        // Every song agrees — folded as the server folds a folder name — so
+        // even a compilation keeps the value.
+        let agree = KeepView {
+            album_songs: Some(vec![
+                song("a.mp3", Some("AC/DC"), Some(1980), Some("Rock")),
+                song("b.mp3", Some("AC:DC"), Some(1980), Some("Rock")),
+                song("c.mp3", Some("AC-DC"), Some(1980), Some("Rock")),
+            ]),
+            subject: KeepSubject { track_artist: Some("AC-DC".into()), year: Some(1980), ..sampler.subject.clone() },
+            ..sampler.clone()
+        };
+        assert_eq!(at(&agree, "{{ARTIST}}/{{YEAR}}/{{GENRE}}", JobScope::Album), (names(&["copies", "AC-DC", "1980", "Rock"]), vec![]));
+        // No song has a year: the folder drops for every one alike, no slot.
+        let undated = KeepView {
+            album_songs: Some(vec![song("a.mp3", Some("AC-DC"), None, None), song("b.mp3", Some("AC-DC"), None, None)]),
+            ..agree.clone()
+        };
+        assert_eq!(at(&undated, "{{ARTIST}}/{{YEAR}}", JobScope::Album), (names(&["copies", "AC-DC"]), vec![]));
+        // A genre is known only where every song names one.
+        let unnamed = KeepView {
+            album_songs: Some(vec![song("a.mp3", Some("ALM"), None, Some("Rock")), song("b.mp3", Some("ALM"), None, None)]),
+            ..agree.clone()
+        };
+        assert_eq!(at(&unnamed, "{{GENRE}}", JobScope::Album), (names(&["copies", "‹genre›"]), vec![SongTag::Genre]));
+        // A listed song with no artist files under the album's credit, as the
+        // copy files it: a compilation's "Various Artists" is a second
+        // folder; an album credited to its row's artist keeps one.
+        let alm = |album_artist: Option<&str>| KeepView {
+            subject: KeepSubject { track_artist: Some("ALM".into()), album_artist: album_artist.map(str::to_string), ..sampler.subject.clone() },
+            album_songs: Some(vec![song("a.mp3", Some("ALM"), None, None), song("b.mp3", Some("ALM"), None, None), song("c.mp3", None, None, None)]),
+            ..sampler.clone()
+        };
+        assert_eq!(at(&alm(Some("Various Artists")), friends, JobScope::Album), (names(&["copies", "From friends", "‹artist›"]), vec![SongTag::Artist]));
+        assert_eq!(at(&alm(None), friends, JobScope::Album), (names(&["copies", "From friends", "ALM"]), vec![]));
+        // The listing as the peer sends it: a featured song's ARTIST tag as
+        // written ("artist-display") is its folder, not the primary artist
+        // its `artist` names; a genre tag the library split in two is no
+        // folder this client can name.
+        let listed = |filepath: &str, artist: &str, display: Option<&str>, genres: &[&str]| {
+            let track: crate::api::types::Track = serde_json::from_value(serde_json::json!({
+                "filepath": filepath, "metadata": { "artist": artist, "artist-display": display, "year": 2019, "genres": genres }
+            }))
+            .unwrap();
+            KeepSong::of(&track)
+        };
+        let feat = KeepView {
+            subject: KeepSubject { album_artist: None, album: Some("Borrowed Tapes".into()), ..sampler.subject.clone() },
+            album_songs: Some(vec![
+                listed("peerlib/Borrowed Tapes/01.mp3", "Boukmanflow", Some("Boukmanflow"), &["Hip-Hop"]),
+                listed("peerlib/Borrowed Tapes/02.mp3", "Boukmanflow", None, &["Hip-Hop", "Rap"]),
+                listed("peerlib/Night Market Sampler/02.mp3", "Boukmanflow", Some("Boukmanflow feat. ALM"), &["Hip-Hop", "Rap"]),
+            ]),
+            ..sampler.clone()
+        };
+        assert_eq!(
+            at(&feat, "From friends/{{ARTIST}}/{{GENRE}}", JobScope::Album),
+            (names(&["copies", "From friends", "‹artist›", "‹genre›"]), vec![SongTag::Artist, SongTag::Genre])
+        );
+        assert_eq!(at(&feat, friends, JobScope::Song), (names(&["copies", "From friends", "Boukmanflow feat. ALM"]), vec![]), "the song's own tag");
+        let one_genre = KeepView {
+            album_songs: Some(vec![listed("a.mp3", "ALM", None, &["Hip-Hop"]), listed("b.mp3", "ALM", None, &["Hip-Hop", " "])]),
+            ..feat.clone()
+        };
+        assert_eq!(at(&one_genre, "{{GENRE}}", JobScope::Album), (names(&["copies", "Hip-Hop"]), vec![]));
+        // The album's credit stays the album's whatever its songs' artists:
+        // no albumArtist, so the row's artist, never a slot.
+        assert_eq!(at(&feat, "{{ALBUMARTIST}}/{{ALBUM}}", JobScope::Album), (names(&["copies", "Boukmanflow", "Borrowed Tapes"]), vec![]));
+        // An empty listing knows nothing: the row's rule stands — a slot for a
+        // compilation, the row's own for an album that is none.
+        let empty = KeepView { album_songs: Some(Vec::new()), ..sampler.clone() };
+        assert_eq!(at(&empty, friends, JobScope::Album).1, vec![SongTag::Artist]);
+        let empty_own = KeepView { album_songs: Some(Vec::new()), ..own.clone() };
+        assert_eq!(at(&empty_own, "{{ARTIST}}/{{YEAR}}", JobScope::Album), (names(&["copies", "Boukmanflow", "2019"]), vec![]));
+        // The song: its own values; GENRE its listing row's, else a slot.
+        assert_eq!(at(&sampler, "{{ARTIST}}/{{YEAR}}/{{GENRE}}", JobScope::Song), (names(&["copies", "Boukmanflow", "2019", "‹genre›"]), vec![SongTag::Genre]));
+        assert_eq!(at(&three, "{{ARTIST}}/{{GENRE}}", JobScope::Song), (names(&["copies", "Boukmanflow", "Hip-Hop"]), vec![]));
+        // A song's landing says so, for its note; a wider copy's does not.
+        assert!(sampler.landing_at(&place("{{GENRE}}"), JobScope::Song).one_song);
+        assert!(!sampler.landing_at(&place("{{GENRE}}"), JobScope::Album).one_song);
+        assert!(KeepView { scope: JobScope::Song, ..sampler.clone() }.landing_for("copies", "", "{{GENRE}}", &|_| true).one_song);
+        // The artist scopes: today's rendering, GENRE before the cut a slot.
+        let bouk = KeepView { subject: KeepSubject { album_artist: None, ..sampler.subject.clone() }, choice: KeepChoice::Artist, ..three.clone() };
+        let landing = bouk.landing_at(&place("{{GENRE}}/{{ARTIST}}/{{YEAR}}/{{ALBUM}}"), JobScope::Artist);
+        assert_eq!((landing.crumbs(), landing.per_album, landing.slots()), (names(&["copies", "‹genre›", "Boukmanflow"]), true, vec![SongTag::Genre]));
+        // A layout naming none of them shows none.
+        assert_eq!(at(&sampler, "{{ALBUMARTIST}}/{{ALBUM}}", JobScope::Album), (names(&["copies", "Various Artists", "Night Market Sampler"]), vec![]));
     }
 }

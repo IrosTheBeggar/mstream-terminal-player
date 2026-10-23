@@ -8168,13 +8168,13 @@ mod keep {
     use crate::api::PluginFailure;
     use crate::api::types::{
         CancelAnswer, CollectionDestinationView, DiscoveryPluginsResponse, JobCancelled, JobLookup, JobMark,
-        JobScope, JobStarted, PluginJob, PluginJobList, PluginLink,
+        JobScope, JobStarted, PluginJob, PluginJobList, PluginLink, SongTag,
     };
     use crate::tui::app::keep::{
         ChoiceSize, CopyTitle, Fact, JobsIndicator, KEEP_POLL_MAX, KeepChoice, KeepNote, KeepPhase, KeepStage,
         KeepTarget, KeepVerb, KeepWatch, LinksStatus,
     };
-    use crate::tui::worker::{KeepFacts, KeepFactsAsk};
+    use crate::tui::worker::{KeepFacts, KeepFactsAsk, KeepSong};
 
     const B: i64 = 1;
     const C: i64 = 4;
@@ -8190,6 +8190,20 @@ mod keep {
             "filepath": format!("peerlib/{artist}/{album}/{title}.mp3"),
             "peer": { "id": peer, "name": name }, "source": "federation",
         })
+    }
+
+    /// Borrowed Tapes' three songs on Stage Peer B as its listing names
+    /// them: each tagged as the stage's row is, Boukmanflow and 2019.
+    fn tapes_songs() -> Vec<KeepSong> {
+        ["Late Train Verse", "Corner Store Loop", "Rooftop Cypher"]
+            .iter()
+            .map(|title| KeepSong {
+                filepath: format!("peerlib/Boukmanflow/Borrowed Tapes/{title}.mp3"),
+                artist: Some("Boukmanflow".into()),
+                year: Some(2019),
+                genre: None,
+            })
+            .collect()
     }
 
     /// The stage's sample (the canvas's): Stage Peer B holds Late Train
@@ -8736,7 +8750,7 @@ mod keep {
             ..Default::default()
         };
         let facts = KeepFacts {
-            album_songs: Some(3),
+            album_songs: Some(tapes_songs()),
             peer_albums: Some(vec![crate::api::types::ArtistAlbumRow { year_min: Some(2017), ..row("Borrowed Tapes", Some("Boukmanflow")) }]),
             local_albums: Some(vec![row("One", None), row("Two", None), row("Three", None)]),
         };
@@ -8765,7 +8779,7 @@ mod keep {
         answer_lookup(&mut app, &effects, &[]);
         let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
         let seq = opened.iter().find_map(|e| match e { Effect::Api(ApiCmd::KeepFacts { seq, .. }) => Some(*seq), _ => None }).unwrap();
-        let facts = KeepFacts { album_songs: Some(3), peer_albums: Some(vec![row("Borrowed Tapes", Some("Boukmanflow"))]), local_albums: Some(vec![row("borrowed  TAPES", None)]) };
+        let facts = KeepFacts { album_songs: Some(tapes_songs()), peer_albums: Some(vec![row("Borrowed Tapes", Some("Boukmanflow"))]), local_albums: Some(vec![row("borrowed  TAPES", None)]) };
         let generation = app.session_gen();
         app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(facts) });
         assert_eq!(app.keep_view().unwrap().missing, None);
@@ -9126,6 +9140,74 @@ mod keep {
         assert_eq!(landing_of(&app), None, "an ended copy never reads the account's place now");
         assert_eq!(again(&app), Some(vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()]));
         assert_eq!(start_places(&app.keep_again()), vec![Some(Some(now))]);
+    }
+
+    #[test]
+    fn an_album_copy_draws_a_slot_for_each_songs_own_artist_until_its_files_landed() {
+        // The 2026-10-22 bug: "copies › From friends › Boukmanflow" for a
+        // compilation whose songs the server files under three artists.
+        let friends = place("copies", "", "From friends/{{ARTIST}}", "user");
+        let slot = Some(vec!["copies".to_string(), "From friends".into(), "‹artist›".into()]);
+        let song = |title: &str, artist: &str| KeepSong {
+            filepath: format!("peerlib/{artist}/Mixtape Vol 1/{title}.mp3"),
+            artist: Some(artist.into()),
+            year: Some(2019),
+            genre: None,
+        };
+        let open_mixtape = |jobs: &[PluginJob]| {
+            let (mut app, effects) = ready_room();
+            answer_lookup(&mut app, &effects, jobs);
+            let comp = app.taste.peer_albums().iter().position(|a| a.album == "Mixtape Vol 1").unwrap();
+            let opened = app.keep_open(KeepTarget::Tile(comp));
+            let generation = app.session_gen();
+            app.apply_event(Event::DestinationRead { seq: reads(&opened)[0], generation, answer: Ok(Box::new(view_of(Some(friends.clone())))) });
+            let facts = opened.iter().find_map(|e| match e { Effect::Api(ApiCmd::KeepFacts { seq, .. }) => Some(*seq), _ => None }).unwrap();
+            (app, facts)
+        };
+        let land_songs = |app: &mut App, seq: u64, songs: Vec<KeepSong>| {
+            let generation = app.session_gen();
+            app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { album_songs: Some(songs), ..KeepFacts::default() }) });
+        };
+        // Before the album's listing answers: a compilation's artist is each song's.
+        let (mut app, facts) = open_mixtape(&[]);
+        assert_eq!(app.keep_view().unwrap().scope, JobScope::Album);
+        assert_eq!(landing_of(&app), slot);
+        // The listing: two artists, still a slot — named for the note under it.
+        land_songs(&mut app, facts, vec![song("Kim Song", "Peer Kim"), song("Lou Song", "Peer Lou")]);
+        assert_eq!(landing_of(&app), slot);
+        assert_eq!(app.keep_view().unwrap().landing.map(|l| l.slots()), Some(vec![SongTag::Artist]));
+        // Starting: the place the start sent, drawn the same.
+        let effects = app.keep_start();
+        assert_eq!(start_places(&effects), vec![Some(Some(friends.clone()))]);
+        assert_eq!(landing_of(&app), slot);
+        // Queued and running: its pin, drawn the same.
+        let mut job = copy_job(70, "album:various artists|mixtape vol 1", Some("album"), "queued", B, serde_json::Value::Null);
+        job.params.destination = Some(Some(friends.clone()));
+        land_start(&mut app, &effects, Ok(JobStarted { job, created: true }));
+        assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Job { .. }));
+        assert_eq!(landing_of(&app), slot);
+        // Every song by one artist: that artist's folder, compilation or not.
+        let (mut app, facts) = open_mixtape(&[]);
+        land_songs(&mut app, facts, vec![song("Kim Song", "Peer Kim"), song("Kim Two", "Peer Kim")]);
+        assert_eq!(landing_of(&app), Some(vec!["copies".into(), "From friends".into(), "Peer Kim".into()]));
+        // A failed copy pinned elsewhere: Retry adds to the account's place
+        // now, with its slot.
+        let old = place("copies", "old", "{{ALBUMARTIST}}/{{ALBUM}}", "user");
+        let mut failed = copy_job(71, "album:various artists|mixtape vol 1", Some("album"), "failed", B, serde_json::Value::Null);
+        failed.params.destination = Some(Some(old));
+        let (app, _) = open_mixtape(&[failed]);
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.landing.map(|l| l.crumbs()), Some(vec!["copies".into(), "old".into(), "Various Artists".into(), "Mixtape Vol 1".into()]));
+        assert_eq!(view.again.map(|l| l.crumbs()), slot);
+        // Ended with its files landed: the real folder they share — no slot.
+        let landed = serde_json::json!({ "scope": "album", "songs": { "total": 2, "skipped": [], "failed": [], "copied": [
+            { "filepath": "copies/From friends/Peer Kim/Kim Song.mp3" }, { "filepath": "copies/From friends/Peer Lou/Lou Song.mp3" }] } });
+        let mut done = copy_job(72, "album:various artists|mixtape vol 1", Some("album"), "done", B, landed);
+        done.params.destination = Some(Some(friends.clone()));
+        let (app, _) = open_mixtape(&[done]);
+        let view = app.keep_view().unwrap();
+        assert!(matches!(view.stage, KeepStage::Job { .. }), "{:?}", view.stage);
+        assert_eq!(view.landing.map(|l| (l.crumbs(), l.slots())), Some((vec!["copies".into(), "From friends".into()], vec![])));
     }
 
     #[test]

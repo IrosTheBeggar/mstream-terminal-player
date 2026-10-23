@@ -388,7 +388,14 @@ pub struct TranscodeInfo {
 #[serde(default)]
 pub struct TrackMetadata {
     pub title: Option<String>,
+    /// The primary artist's name (mStream V73), the one the library files
+    /// the track under.
     pub artist: Option<String>,
+    /// The ARTIST tag as written ("A feat. B") — what a copy of the file
+    /// files it under; a server before V73, or a row not rescanned since,
+    /// sends none.
+    #[serde(rename = "artist-display")]
+    pub artist_display: Option<String>,
     pub album: Option<String>,
     pub track: Option<u32>,
     pub disk: Option<u32>,

@@ -1406,27 +1406,34 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells. A word wider
-/// than the box (a file path) hard-breaks at the character level — the
-/// greedy wrap would emit it as one line wider than the box, which clips.
+/// than the box (a file path, a Japanese or Chinese sentence, which has no
+/// blanks to break at) hard-breaks between graphemes — the greedy wrap
+/// would emit it as one line wider than the box, which clips.
 pub fn wrap_tip(text: &str) -> Vec<String> {
     wrap_at(text, TIP_WRAP, true)
 }
 
 fn wrap_at(text: &str, width: usize, hard_break: bool) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        if hard_break && word.chars().count() > width {
+        if hard_break && self::width(word) > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
             }
-            let chars: Vec<char> = word.chars().collect();
-            for chunk in chars.chunks(width) {
-                if chunk.len() == width {
-                    lines.push(chunk.iter().collect());
-                } else {
-                    line = chunk.iter().collect();
+            // By cells, as the budget is: counting characters let a CJK
+            // line run to twice the box; a wide character that would
+            // straddle its edge starts the next line.
+            let mut cells = 0;
+            for grapheme in word.graphemes(true) {
+                let w = grapheme_cells(grapheme);
+                if cells + w > width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    cells = 0;
                 }
+                line.push_str(grapheme);
+                cells += w;
             }
             continue;
         }
@@ -1495,7 +1502,7 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) -> 
     if lines.is_empty() {
         return Rect::default();
     }
-    let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
+    let w = lines.iter().map(|l| width(l)).max().unwrap_or(0) as u16 + 4;
     let h = lines.len() as u16 + 2;
     let rect = tooltip_rect(area, target, w, h);
     frame.render_widget(Clear, rect);
@@ -1884,6 +1891,30 @@ mod tests {
         assert!(lines.iter().all(|l| width(l) <= 79), "{lines:?}");
         assert_eq!(lines.join(" "), text);
         assert_eq!(wrap_words("one two three", 7), vec!["one two", "three"], "a Latin line is as it was");
+    }
+
+    #[test]
+    fn a_tooltip_breaks_a_sentence_with_no_blanks_by_cells_and_its_box_fits_them() {
+        // Japanese has no blanks to break at: the sentence hard-breaks
+        // between characters at 40 cells — 20 of them, not 40.
+        let sentence = "は各曲のタグから決まるため、これらの曲は複数のフォルダーに入ることがあります。";
+        let lines = wrap_tip(&format!("‹アーティスト› {sentence}"));
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!((lines[0].as_str(), width(&lines[1])), ("‹アーティスト›", TIP_WRAP));
+        assert_eq!(lines[1..].concat(), sentence);
+        // A wide character never straddles the edge: one cell short, it goes down.
+        let odd = wrap_tip(&format!("a{}", "曲".repeat(25)));
+        assert_eq!((odd[0].as_str(), odd[1].as_str()), (format!("a{}", "曲".repeat(19)).as_str(), "曲曲曲曲曲曲"));
+        // A path is as it was.
+        let path = "x".repeat(50);
+        assert_eq!(wrap_tip(&path), vec!["x".repeat(40), "x".repeat(10)]);
+        // The box is the widest line's cells, the border and a blank each side.
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        let mut rect = Rect::default();
+        terminal
+            .draw(|f| rect = draw_tooltip(f, f.area(), Rect { x: 40, y: 2, width: 10, height: 1 }, &format!("‹アーティスト› {sentence}")))
+            .unwrap();
+        assert_eq!((rect.width, rect.height), (TIP_WRAP as u16 + 4, 5));
     }
 
     #[test]
