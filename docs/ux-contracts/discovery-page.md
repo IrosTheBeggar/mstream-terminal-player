@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Design of record** | mStream's plan, `docs/discovery-page-plan.md` @ `a6076a7a` (2026-10-05, plan v2 after its adversarial review) — §1 (the three sources and the verbs a row carries on every client), §2 (the decisions: seed rule 2.1, window and widening 2.2, pins and remembered exclusions 2.3, the library filter 2.5, albums before songs 2.6, source stamping 2.7, the random fallback 2.8, placement 2.9, flag-never-probe 2.10, naming 2.12, **2.13: where the plan departs from the canvas — the plan wins**), §3.1–§3.3 (the server contract), §4.3 (this surface). The canvas "mStream Discovery Page" (https://claude.ai/artifact/SgZVPShtC92MFhkrkJbLcA) — boards `Tui` (Library tab, pointer on a row), `TuiNetwork` (the `[⋯]` menu open), `TuiPeers` (keyboard cursor), `TuiEmpty` (nothing finished yet) and the notes `n_tui` / `n_tui_ill` — is the record **for visuals only**: layout, wording and order; where it and the plan disagree, the plan is followed and the difference is logged below. **Amended 2026-10-11: the PLAY-NOW page** — plan §2.13's 2026-10-11 lines (as built on the webapp, mStream `6b33af36` / `9a3e492f`) and the design canvas https://claude.ai/artifact/AyZ2yH6431ajvmWgxjZuxo: only songs you can play now, no counts, no percentages, no p2p network (see the log). **Amended 2026-10-14: the stateless page** — mStream `8dcfad0e` (the plan's §1, §2, §3.1 and §2.13's dated note): every call draws a new random batch of seeds, nothing is stored on the server, the library filter and the prefs routes are gone (see the log). **Amended 2026-10-19: Keep a copy, Open elsewhere and the Copies modal** — the design canvas "Discover plug-ins · phone & terminal" (artifact `46efba8d-dd1b-40be-b9aa-b5805a63cbcb`; boards `TermRoom`, `TermEntryPoints`, `TermKeepModal`, `TermKeepStates`, `TermCopies` and the shared model `Main`, approved by the user 2026-10-19: "the designs look good, start the work"), the webapp's side as built (mStream `71663032`: `webapp/alpha/discover-jobs.js` `jobRowState`, `discovery-page.js` `jobBadges` / `peerAlbumBadges` / `jobForAlbum`) and the user's decisions of that day (the room shows no counts or percentages; a compilation's album copy takes the whole album) — clauses 100–141 (see the log). |
-| **Server API** | **`POST /api/v1/discovery/taste`** (§3.1), stateless since 2026-10-14 — nothing is stored or cached between calls — `{window? (7 \| 30 \| 90 \| 0, default 30), pin? (≤ 12 — `PIN_CAP`, the seed cap, since 2026-10-14 — seed first), exclude? (seed hashes left out of THIS call only, ≤ 200), sources?, limit?, newArtistsOnly?, ignoreVPaths?}` (`remember`, `filter` and `staleDays` are a 400) → `{window, widenedFrom, seedSource, fallback, seeds: [{hash, filepath, metadata, outcome, lastPlayed, plays, pinned, analyzed}], excluded: [{hash, filepath, metadata}] (this call's `exclude` hashes that resolve), dropped, notAnalyzed, model, library: {tracks: [{filepath, similarity, seedHash, metadata, genreTags, playCount, lastPlayed}], albums: [{…Album, similarity, scopedTracks, playedTracks, lastPlayed, tracks: [path]}], capped}, network: {results: [p2p row + {source: 'p2p', seedHash}], searched: {peers, tracks}} \| null, peers: {peers: [{id, name, reachable, mismatched, lastSeen, results: [federation row + {source: 'federation', seedHash: null}]}], searched: {peers, unreachable, mismatched}} \| null}` — an account only (403 for a federation key or a guest), 403 `Discovery is disabled` when discovery is off or the index is unavailable; `network`/`peers` are `null` when the source is not advertised for the caller or a random seed is in use. The seeds are the pins, then a **random batch** of the account's finished songs in the window — a different batch on every call — widening window → all time → counters → one random library song (drawn afresh on every call, 2026-10-14; never one in `exclude`). The library half is the fixed rule "songs you haven't played lately" (never, or more than 90 days ago). *(`GET` / `PUT …/taste/prefs` are gone since 2026-10-14 — a 404.)* **The plug-in routes** (since 2026-10-19, clauses 100–141; mStream's `docs/openapi.yaml`), every one asked of the **user's own server** — never a connected server's, through the parent's proxy or over its own tunnel: `GET /api/v1/discovery/plugins` → `{plugins: [{name, title, description, capabilities, scope, scopes, settings, enabled, available}], jobs: {allowed}}`; `GET /api/v1/discovery/collection/destination` → `{destination: {vpath, base, layout, source: user \| default} \| null, saved, libraries: [{vpath, template}], defaultLayout, variables}` (`variables` the layout's names — `SERVERFOLDER` among them since mStream 2026-10-22, the folders a copied song sits in on the connected server) — asked with the gate and again with every Keep a copy (clause 105); `PUT /api/v1/discovery/collection/destination {destination: {vpath, base, layout} \| null}` (since 2026-10-21, clause 144: per account; `null` back to the library default) → the same view, a place the server will not take a 400 in its words (`destination layout: Unknown variable {{ARTST}}. Supported: …`); the picker's folders by `POST /api/v1/file-explorer {directory: "/{library}/{folder}"}` → `{directories: [{name}]}`; `POST /api/v1/discovery/plugins/federation-copy/jobs {recommendation, scope?, destination?}` (mStream 95f2205a: `destination` the place the client showed, `{vpath, base, layout}` or `null`, clause 145) → `202 {job, created: true}` or `200 {job, created: false}` (a live job already covers it — whatever place was shown), the job pinning `params.destination` at start and naming it in `result.destination`; **409 `{error: "destination_changed", message, destination}`** when the place shown is no longer the one in force — nothing starts, `destination` the one that is (or `null`, nowhere); refused otherwise with the server's words: 400 (a scope the row cannot fill), 403 (jobs not allowed, "Uploading Disabled"), 404 (the plug-in gone), 409 (another account's live job — its own words), 429 (the queue cap, 20); `GET /api/v1/discovery/plugin-jobs` → `{jobs, runner}`; `POST …/plugin-jobs/{id}/cancel` → `{job, outcome: cancelled \| requested}`, **409 = it had already finished**; `POST …/plugin-jobs/clear` → `{removed}`; `POST …/plugin-jobs/lookup/batch {recommendations}` (1–100 a call; chunked) → `{results: [{key, keys: {song, album, artist, artist-missing, folder}, jobs}]}` in input order; `POST /api/v1/discovery/plugins/links/resolve {recommendation}` → `{result: {links: [{id, label, url, kind: canonical \| search}]}}`; and, for the Keep modal's sizes, `POST /api/v1/db/album-songs {album, artist? \| album_artist?, year?}` and `POST /api/v1/db/artists-albums {artist}` on the connected server (through its reach) and on the user's own. A job is `{id, plugin, key, recommendation, params: {scope?, destination?}, state: queued \| running \| done \| failed \| cancelled, progress 0..1 \| null, statusText, result, error, cancelRequested, createdAt…}`; a song copy's `result` is `{copied: {vpath, filepath, title, artist, album, …}}` or `{skipped: owned \| exists, existing?, filepath?}`, an album or artist copy's `{scope, songs: {total, copied[], skipped[], failed[]} (each capped at 500), counts: {total, copied, skipped, failed}, albums?, skippedAlbums?: [{name, why: owned \| appearance}], stopped: null \| cancelled \| quota \| busy \| peer \| refused, peer, destination}`. The routes the player already spoke stay: the federation byte proxy `GET /api/v1/federation/peers/{id}/stream/…` and `POST /api/v1/stats/plays` with `peerId`, both through the queue as it is. **Gate**: the ping's `discovery === true && discoveryTaste >= 1` (§2.10) — here `capabilities.discovery && capabilities.discovery_taste >= 1`; the Connected servers source rides `federationDiscovery`; `discoveryPlugins` and `noUpload` gate the plug-ins (clause 101); `discoveryP2p` (the Network source) is parsed but read by nothing here — the later Explore room's. |
-| **Already in this repo** | The App/worker pair every room rides: `Effect::Api(ApiCmd::…)` drained onto the api thread, answered by `worker::answer` (and `src/web/api_worker.rs` in the browser build) as an `Event` that `App::apply_event` folds in, stale replies dropped by seq / node / session-generation guards. The **Sonic room's own row model** — `List::Sonic` maps to no App pane (`List::tab()` → `None`), its rows live in App state and its verbs call App methods that build the queue rows themselves (`src/gui/sonic.rs`), with `sonic::meter_glyph` for the one-cell match meter. The kit's **Tabs** (first consumer: the admin Discovery room), **Dropdown** (the header's server switcher, the stats page's period), **Table** (`table_view`, `scroll_list`, `ListView`), a list hung from a control (`frame_at` + `Surface::overlay`, the dropdown's own grammar) and **modals** (`modal_frame_on`). `Client::stats_history_async` (the one outcome-bearing history read — named so nobody reaches for it: the server picks the seeds, clause 10). `Client::random_song_async`; `gui::opener::open_target` (honours `MSTREAM_NO_OPEN`); `kit::clipboard::copy`; the track-actions sheet (`actions::Sheet { origin, track }`); the capture banner (`Capture`); `App::origin()` and `App::reach(&Origin)` for a peer origin (multi-server clauses 27, 30); `ApiCmd::DiscoveryProbe`; `GuiPrefs` (`[gui]`, unknown keys kept). **Missing**: `Ping.discovery_taste` / `discovery_plugins` and their `Capabilities` mirrors, the taste types and client calls, `ApiCmd::Taste` / `Event::Taste`, the App's taste state, `NavId::Discover`, `src/gui/discover.rs`, a capture for a seed pick, the `gui.discover.*` strings. **Added 2026-10-19 for clauses 100–141**: the plug-in types and their pure halves (`src/api/types/plugins.rs`: the listing, `PluginJob` and its `outcome()` — the webapp's `jobRowState` — `JobMark`, `CopyResult` / `ManyCounts`, `JobLookup`, the destination with `resolve_layout` (replaced 2026-10-21 by `Landing::of` / `layout_folders`), `PluginLink`, `ArtistAlbumRow`, `name_key`, `artist_ownership`, `job_for_album`), `Capabilities.uploads` (the ping's `noUpload` false; absent grants nothing), `TasteLead.album_artist`, the client calls (`Client::discovery_plugins_async` … `plugin_jobs_lookup_batch_async`, refused for a peer's client), `PluginFailure` (the server's words), the `ApiCmd`/`Event` pairs `KeepGate`, `JobsLookup`, `Jobs`, `JobStart`/`JobStarted`, `JobCancel`/`JobCancelled`, `JobsClear`/`JobsCleared`, `PluginLinks`, `KeepFacts` with their shapers (`worker::keep_gate` …, both workers), and the App's half (`src/tui/app/keep.rs`: the gate, the rows' jobs and marks, the poll, the Keep flow and its `KeepView`, the Copies rows, the links list). **Built 2026-10-20**: the drawing of the boards `TermRoom`, `TermEntryPoints`, `TermKeepModal` and `TermKeepStates` — `src/gui/keep.rs` (the Keep a copy modal in every state, the marks' glyphs and words, the status notes, the Copies modal's frame), the room's marks, indicator, `c` / `C`, the tile's list and tips in `src/gui/discover.rs`, the sheet's two rows and its badge row in `src/gui/actions.rs`, `MessageKind::Busy` / `Success` for the notes' tokens, and the `gui.act.*`, `gui.discover.keep.*` / `mark.*` / `copies.*` / `note.*` and `gui.tips.discover_*` strings in the ten locales. **Built 2026-10-20 (the second pass, the board `TermCopies`)**: the Copies modal's list (`gui::keep::draw_copies` over `App::copies_rows`, `CopiesUi` — the held copy by its job's id and a `ListView` in copies — `copies_key`, `copies_tips`, `copies_wheel`, the `DiscAct::Copies*` acts, `App::copies_action`: Copy again only where a gap is left), Open elsewhere's list (`gui::keep::draw_links`, `LinksUi` — its stop, viewport, its row's anchor from the sheet, and the opener's answers on a channel from `gui::opener::open_target`'s thread — `links_walk` / `links_enter` / `links_tips`, `DiscAct::Link*`), `MessageKind::Plain` (TEXT) for "opened …", the `gui.discover.copies.*` / `links.*` and `gui.tips.discover_copies_*` / `discover_links*` strings, and the e2e leg `test/e2e/legs/gui-discover-keep.exp` with `test/e2e/check_keep.py` (Scenario K). The temporary dead-code allows of the data layer are gone with it. **Built 2026-10-21 (Where files land, clauses 142–148)**: the destination's view, its save and the library's folders (`Client::collection_destination_save_async`, `ApiCmd::DestinationRead` / `DestinationSave` / `DestinationFolders` and their events, `App::keep_dest_*`, the view stamped by the ask that wrote it), the start's `destination` and its 409 (`JobStartAnswer`, `PluginFailure::DestinationChanged`, the job's `params.destination` pin, a server from before the key asked again without it), `Landing` / `layout_folders` / `CopyResult::landed` for LANDS IN and the PREVIEW, `KeepView::again` (the place Retry and Copy again send), the picker `gui::keep::DestUi` / `draw_dest` / `dest_key`, the `gui.discover.dest.*` and `gui.tips.discover_dest_*` strings in the ten locales, and the e2e legs `gui-discover-dest.exp` with `check_dest.py` (Scenario W) and Scenario K2 (`FAKE_NO_PIN`). **Built 2026-10-22 (a variable each song fills, clause 105)**: `SongTag`, `LayoutTags::slots`, `Run` (a landing's runs: words, a refused variable, a slot), `Landing::words` / `slots` / `one_song`, the server's `~` / `$HOME` / `${HOME}` fold in `sanitize_segment`, `TrackMetadata::artist_display` (the listing's `artist-display`), `KeepSong` on `KeepFacts::album_songs` (each song's ARTIST tag as written, its year, its one listed genre), `KeepView::album_songs` and the per-scope rule in `KeepView::scope_tags`, the slots and their note drawn by `gui::keep` (`slot_words`, `slot_note`, `path_tip`), the kit's tooltip wrap and box measured in cells (`wrap_tip`, `draw_tooltip`), the `gui.discover.dest.slot_*` strings in the ten locales. **Built 2026-10-22 (`{{SERVERFOLDER}}`, clauses 105 and 143)**: `SERVER_FOLDER`, `server_folder` and `sanitize_folders` (federation-copy.js `serverFolderOf`, path-template.js `sanitizeFolders`), `LayoutTags::server_folder`, `SongTag::ServerFolder`, a value of several folders in `layout_folders` and the artist scopes' cut at it in `Landing::of`, its rule per scope in `KeepView::scope_tags`, the picker's fourth preset (`Radio::ServerFolder`, offered by `presets` only where the view lists the variable), the blank above PREVIEW giving way in `dest_rows`, the variables row reaching to the labels' column, `slot_note`'s own and shared words, the `gui.discover.dest.preset_serverfolder` / `slot_server` / `slot_note_server` / `slot_note_mixed_*` strings in the ten locales, and the fake's seventh variable with Scenario W's check of the preset. |
+| **Design of record** | mStream's plan, `docs/discovery-page-plan.md` @ `a6076a7a` (2026-10-05, plan v2 after its adversarial review) — §1 (the three sources and the verbs a row carries on every client), §2 (the decisions: seed rule 2.1, window and widening 2.2, pins and remembered exclusions 2.3, the library filter 2.5, albums before songs 2.6, source stamping 2.7, the random fallback 2.8, placement 2.9, flag-never-probe 2.10, naming 2.12, **2.13: where the plan departs from the canvas — the plan wins**), §3.1–§3.3 (the server contract), §4.3 (this surface). The canvas "mStream Discovery Page" (https://claude.ai/artifact/SgZVPShtC92MFhkrkJbLcA) — boards `Tui` (Library tab, pointer on a row), `TuiNetwork` (the `[⋯]` menu open), `TuiPeers` (keyboard cursor), `TuiEmpty` (nothing finished yet) and the notes `n_tui` / `n_tui_ill` — is the record **for visuals only**: layout, wording and order; where it and the plan disagree, the plan is followed and the difference is logged below. **Amended 2026-10-11: the PLAY-NOW page** — plan §2.13's 2026-10-11 lines (as built on the webapp, mStream `6b33af36` / `9a3e492f`) and the design canvas https://claude.ai/artifact/AyZ2yH6431ajvmWgxjZuxo: only songs you can play now, no counts, no percentages, no p2p network (see the log). **Amended 2026-10-14: the stateless page** — mStream `8dcfad0e` (the plan's §1, §2, §3.1 and §2.13's dated note): every call draws a new random batch of seeds, nothing is stored on the server, the library filter and the prefs routes are gone (see the log). **Amended 2026-10-19: Keep a copy, Open elsewhere and the Copies modal** — the design canvas "Discover plug-ins · phone & terminal" (artifact `46efba8d-dd1b-40be-b9aa-b5805a63cbcb`; boards `TermRoom`, `TermEntryPoints`, `TermKeepModal`, `TermKeepStates`, `TermCopies` and the shared model `Main`, approved by the user 2026-10-19: "the designs look good, start the work"), the webapp's side as built (mStream `71663032`: `webapp/alpha/discover-jobs.js` `jobRowState`, `discovery-page.js` `jobBadges` / `peerAlbumBadges` / `jobForAlbum`) and the user's decisions of that day (the room shows no counts or percentages; a compilation's album copy takes the whole album) — clauses 100–141 (see the log). **Amended 2026-10-24: Keep a copy, calmer** — the lead designer's spec for the window (Direction A, "Quiet form", with its judges' grafts; the board review's amendments win over its earlier sections) and its two boards, "Keep a copy · recommended" (`Main`: the album and song idle at 100 × 30, the 100 × 24 floor, the give-way, copying → done, the Copies list) and "Keep a copy · every state" (`RecStates`), with the user's answers to its nine open questions (2026-10-24) — clauses 105–110, 116, 117, 119, 124, 142, 144, 146 and 147 (see the log). |
+| **Server API** | **`POST /api/v1/discovery/taste`** (§3.1), stateless since 2026-10-14 — nothing is stored or cached between calls — `{window? (7 \| 30 \| 90 \| 0, default 30), pin? (≤ 12 — `PIN_CAP`, the seed cap, since 2026-10-14 — seed first), exclude? (seed hashes left out of THIS call only, ≤ 200), sources?, limit?, newArtistsOnly?, ignoreVPaths?}` (`remember`, `filter` and `staleDays` are a 400) → `{window, widenedFrom, seedSource, fallback, seeds: [{hash, filepath, metadata, outcome, lastPlayed, plays, pinned, analyzed}], excluded: [{hash, filepath, metadata}] (this call's `exclude` hashes that resolve), dropped, notAnalyzed, model, library: {tracks: [{filepath, similarity, seedHash, metadata, genreTags, playCount, lastPlayed}], albums: [{…Album, similarity, scopedTracks, playedTracks, lastPlayed, tracks: [path]}], capped}, network: {results: [p2p row + {source: 'p2p', seedHash}], searched: {peers, tracks}} \| null, peers: {peers: [{id, name, reachable, mismatched, lastSeen, results: [federation row + {source: 'federation', seedHash: null}]}], searched: {peers, unreachable, mismatched}} \| null}` — an account only (403 for a federation key or a guest), 403 `Discovery is disabled` when discovery is off or the index is unavailable; `network`/`peers` are `null` when the source is not advertised for the caller or a random seed is in use. The seeds are the pins, then a **random batch** of the account's finished songs in the window — a different batch on every call — widening window → all time → counters → one random library song (drawn afresh on every call, 2026-10-14; never one in `exclude`). The library half is the fixed rule "songs you haven't played lately" (never, or more than 90 days ago). *(`GET` / `PUT …/taste/prefs` are gone since 2026-10-14 — a 404.)* **The plug-in routes** (since 2026-10-19, clauses 100–141; mStream's `docs/openapi.yaml`), every one asked of the **user's own server** — never a connected server's, through the parent's proxy or over its own tunnel: `GET /api/v1/discovery/plugins` → `{plugins: [{name, title, description, capabilities, scope, scopes, settings, enabled, available}], jobs: {allowed}}`; `GET /api/v1/discovery/collection/destination` → `{destination: {vpath, base, layout, source: user \| default} \| null, saved, libraries: [{vpath, template}], defaultLayout, variables}` (`variables` the layout's names — `SERVERFOLDER` among them since mStream 2026-10-22, the folders a copied song sits in on the connected server) — asked with the gate and again with every Keep a copy (clause 105); `PUT /api/v1/discovery/collection/destination {destination: {vpath, base, layout} \| null}` (since 2026-10-21, clause 144: per account; `null` back to the library default) → the same view, a place the server will not take a 400 in its words (`destination layout: Unknown variable {{ARTST}}. Supported: …`); the picker's folders by `POST /api/v1/file-explorer {directory: "/{library}/{folder}"}` → `{directories: [{name}]}`; `POST /api/v1/discovery/plugins/federation-copy/jobs {recommendation, scope?, destination?}` (mStream 95f2205a: `destination` the place the client showed, `{vpath, base, layout}` or `null`, clause 145) → `202 {job, created: true}` or `200 {job, created: false}` (a live job already covers it — whatever place was shown), the job pinning `params.destination` at start and naming it in `result.destination`; **409 `{error: "destination_changed", message, destination}`** when the place shown is no longer the one in force — nothing starts, `destination` the one that is (or `null`, nowhere); refused otherwise with the server's words: 400 (a scope the row cannot fill), 403 (jobs not allowed, "Uploading Disabled"), 404 (the plug-in gone), 409 (another account's live job — its own words), 429 (the queue cap, 20); `GET /api/v1/discovery/plugin-jobs` → `{jobs, runner}`; `POST …/plugin-jobs/{id}/cancel` → `{job, outcome: cancelled \| requested}`, **409 = it had already finished**; `POST …/plugin-jobs/clear` → `{removed}`; `POST …/plugin-jobs/lookup/batch {recommendations}` (1–100 a call; chunked) → `{results: [{key, keys: {song, album, artist, artist-missing, folder}, jobs}]}` in input order; `POST /api/v1/discovery/plugins/links/resolve {recommendation}` → `{result: {links: [{id, label, url, kind: canonical \| search}]}}`; and, for the counts in Keep a copy's primary and box, `POST /api/v1/db/album-songs {album, artist? \| album_artist?, year?}` and `POST /api/v1/db/artists-albums {artist}` on the connected server (through its reach) and on the user's own. A job is `{id, plugin, key, recommendation, params: {scope?, destination?}, state: queued \| running \| done \| failed \| cancelled, progress 0..1 \| null, statusText, result, error, cancelRequested, createdAt…}`; a song copy's `result` is `{copied: {vpath, filepath, title, artist, album, …}}` or `{skipped: owned \| exists, existing?, filepath?}`, an album or artist copy's `{scope, songs: {total, copied[], skipped[], failed[]} (each capped at 500), counts: {total, copied, skipped, failed}, albums?, skippedAlbums?: [{name, why: owned \| appearance}], stopped: null \| cancelled \| quota \| busy \| peer \| refused, peer, destination}`. The routes the player already spoke stay: the federation byte proxy `GET /api/v1/federation/peers/{id}/stream/…` and `POST /api/v1/stats/plays` with `peerId`, both through the queue as it is. **Gate**: the ping's `discovery === true && discoveryTaste >= 1` (§2.10) — here `capabilities.discovery && capabilities.discovery_taste >= 1`; the Connected servers source rides `federationDiscovery`; `discoveryPlugins` and `noUpload` gate the plug-ins (clause 101); `discoveryP2p` (the Network source) is parsed but read by nothing here — the later Explore room's. |
+| **Already in this repo** | The App/worker pair every room rides: `Effect::Api(ApiCmd::…)` drained onto the api thread, answered by `worker::answer` (and `src/web/api_worker.rs` in the browser build) as an `Event` that `App::apply_event` folds in, stale replies dropped by seq / node / session-generation guards. The **Sonic room's own row model** — `List::Sonic` maps to no App pane (`List::tab()` → `None`), its rows live in App state and its verbs call App methods that build the queue rows themselves (`src/gui/sonic.rs`), with `sonic::meter_glyph` for the one-cell match meter. The kit's **Tabs** (first consumer: the admin Discovery room), **Dropdown** (the header's server switcher, the stats page's period), **Table** (`table_view`, `scroll_list`, `ListView`), a list hung from a control (`frame_at` + `Surface::overlay`, the dropdown's own grammar) and **modals** (`modal_frame_on`). `Client::stats_history_async` (the one outcome-bearing history read — named so nobody reaches for it: the server picks the seeds, clause 10). `Client::random_song_async`; `gui::opener::open_target` (honours `MSTREAM_NO_OPEN`); `kit::clipboard::copy`; the track-actions sheet (`actions::Sheet { origin, track }`); the capture banner (`Capture`); `App::origin()` and `App::reach(&Origin)` for a peer origin (multi-server clauses 27, 30); `ApiCmd::DiscoveryProbe`; `GuiPrefs` (`[gui]`, unknown keys kept). **Missing**: `Ping.discovery_taste` / `discovery_plugins` and their `Capabilities` mirrors, the taste types and client calls, `ApiCmd::Taste` / `Event::Taste`, the App's taste state, `NavId::Discover`, `src/gui/discover.rs`, a capture for a seed pick, the `gui.discover.*` strings. **Added 2026-10-19 for clauses 100–141**: the plug-in types and their pure halves (`src/api/types/plugins.rs`: the listing, `PluginJob` and its `outcome()` — the webapp's `jobRowState` — `JobMark`, `CopyResult` / `ManyCounts`, `JobLookup`, the destination with `resolve_layout` (replaced 2026-10-21 by `Landing::of` / `layout_folders`), `PluginLink`, `ArtistAlbumRow`, `name_key`, `artist_ownership`, `job_for_album`), `Capabilities.uploads` (the ping's `noUpload` false; absent grants nothing), `TasteLead.album_artist`, the client calls (`Client::discovery_plugins_async` … `plugin_jobs_lookup_batch_async`, refused for a peer's client), `PluginFailure` (the server's words), the `ApiCmd`/`Event` pairs `KeepGate`, `JobsLookup`, `Jobs`, `JobStart`/`JobStarted`, `JobCancel`/`JobCancelled`, `JobsClear`/`JobsCleared`, `PluginLinks`, `KeepFacts` with their shapers (`worker::keep_gate` …, both workers), and the App's half (`src/tui/app/keep.rs`: the gate, the rows' jobs and marks, the poll, the Keep flow and its `KeepView`, the Copies rows, the links list). **Built 2026-10-20**: the drawing of the boards `TermRoom`, `TermEntryPoints`, `TermKeepModal` and `TermKeepStates` — `src/gui/keep.rs` (the Keep a copy modal in every state, the marks' glyphs and words, the status notes, the Copies modal's frame), the room's marks, indicator, `c` / `C`, the tile's list and tips in `src/gui/discover.rs`, the sheet's two rows and its badge row in `src/gui/actions.rs`, `MessageKind::Busy` / `Success` for the notes' tokens, and the `gui.act.*`, `gui.discover.keep.*` / `mark.*` / `copies.*` / `note.*` and `gui.tips.discover_*` strings in the ten locales. **Built 2026-10-20 (the second pass, the board `TermCopies`)**: the Copies modal's list (`gui::keep::draw_copies` over `App::copies_rows`, `CopiesUi` — the held copy by its job's id and a `ListView` in copies — `copies_key`, `copies_tips`, `copies_wheel`, the `DiscAct::Copies*` acts, `App::copies_action`: Copy again only where a gap is left), Open elsewhere's list (`gui::keep::draw_links`, `LinksUi` — its stop, viewport, its row's anchor from the sheet, and the opener's answers on a channel from `gui::opener::open_target`'s thread — `links_walk` / `links_enter` / `links_tips`, `DiscAct::Link*`), `MessageKind::Plain` (TEXT) for "opened …", the `gui.discover.copies.*` / `links.*` and `gui.tips.discover_copies_*` / `discover_links*` strings, and the e2e leg `test/e2e/legs/gui-discover-keep.exp` with `test/e2e/check_keep.py` (Scenario K). The temporary dead-code allows of the data layer are gone with it. **Built 2026-10-21 (Where files land, clauses 142–148)**: the destination's view, its save and the library's folders (`Client::collection_destination_save_async`, `ApiCmd::DestinationRead` / `DestinationSave` / `DestinationFolders` and their events, `App::keep_dest_*`, the view stamped by the ask that wrote it), the start's `destination` and its 409 (`JobStartAnswer`, `PluginFailure::DestinationChanged`, the job's `params.destination` pin, a server from before the key asked again without it), `Landing` / `layout_folders` / `CopyResult::landed` for LANDS IN and the PREVIEW, `KeepView::again` (the place Retry and Copy again send), the picker `gui::keep::DestUi` / `draw_dest` / `dest_key`, the `gui.discover.dest.*` and `gui.tips.discover_dest_*` strings in the ten locales, and the e2e legs `gui-discover-dest.exp` with `check_dest.py` (Scenario W) and Scenario K2 (`FAKE_NO_PIN`). **Built 2026-10-22 (a variable each song fills, clause 105)**: `SongTag`, `LayoutTags::slots`, `Run` (a landing's runs: words, a refused variable, a slot), `Landing::words` / `slots` / `one_song`, the server's `~` / `$HOME` / `${HOME}` fold in `sanitize_segment`, `TrackMetadata::artist_display` (the listing's `artist-display`), `KeepSong` on `KeepFacts::album_songs` (each song's ARTIST tag as written, its year, its one listed genre), `KeepView::album_songs` and the per-scope rule in `KeepView::scope_tags`, the slots and their note drawn by `gui::keep` (`slot_words`, `slot_note`, `path_tip`), the kit's tooltip wrap and box measured in cells (`wrap_tip`, `draw_tooltip`), the `gui.discover.dest.slot_*` strings in the ten locales. **Built 2026-10-22 (`{{SERVERFOLDER}}`, clauses 105 and 143)**: `SERVER_FOLDER`, `server_folder` and `sanitize_folders` (federation-copy.js `serverFolderOf`, path-template.js `sanitizeFolders`), `LayoutTags::server_folder`, `SongTag::ServerFolder`, a value of several folders in `layout_folders` and the artist scopes' cut at it in `Landing::of`, its rule per scope in `KeepView::scope_tags`, the picker's fourth preset (`Radio::ServerFolder`, offered by `presets` only where the view lists the variable), the blank above PREVIEW giving way in `dest_rows`, the variables row reaching to the labels' column, `slot_note`'s own and shared words, the `gui.discover.dest.preset_serverfolder` / `slot_server` / `slot_note_server` / `slot_note_mixed_*` strings in the ten locales, and the fake's seventh variable with Scenario W's check of the preset. **Built 2026-10-24 (Keep a copy, calmer)**: the window's place and its band (`gui::keep::window_rect`, shared with `draw_copies`; `open_window` blanks the band and registers it as the overlay and as `Act::Guard`), its title and way out on its borders (`draw_borders`, "Esc close" a `KeepAct::Close`), the two-row head with a 4 × 2 pixel cover or none (`draw_head`), the table rebuilt as `Low` (the blanks B1–B3, the choice, the box, the place with its lead word, the text rows, the bar, the key words, the action row) with its give-way (`fitted`), the key words (`KeyWord`) acting only where drawn (`key_words`), Enter the one primary (`press`), ↑ ↓ the choice itself (`walk`), `KeepUi.frozen` for Retrying…; in the App, the window's own action (`window_action`), `KeepView::choose_again` / `App::keep_choose_again`, `OtherCopy` and `App::keep_cancel_other`, `keep_play_album` over `CopyResult::kept_songs`, `KeepStage::Off(OffWhy)` / `KeepPhase::Off` with `keep_lost` (a right gone, a 403 by its words, the gate asked again), `KeepView::copied_from` / `borrowed`, `copies_action` none for a file in the way; `discover::draw_modals` passing the room and hiding the indicator while Keep a copy or Copies is open; the reworded `gui.discover.keep.*`, `dest.*` and `gui.tips.discover_keep_*` strings and the Copies list's own lowercase `copies.*` keys; the e2e legs re-pointed (Enter alone starts; the place line's words); after the review, the room inert beneath the window (`gui::render` and `discover::draw_modals` draw it without the pointer, `open_window` drops its registries, the hand by `gui::over_control`), `KeepUi.drawn` (a key acts only where the frame drew its word) and `last_own` (the cover's own footprint), `wrap_keeping`'s break by cells, `App::keep_take_landed` (a closed window's start, said on the status line), `names_folder` (a file in the way from a server that pinned no place), the Copies list's own `copies.stopping` / `copying` / `cancelled` / `stopped_quota`, and the e2e leg `gui-discover-keep-mouse.exp` with `check_keep_mouse.py` (Scenario KM: the window by the pointer in Apple Terminal's dialect). |
 | **Target surface** | the GUI player (`mstream-player gui`, both flavours — the window host draws the same `render`) as a **TOOLS nav room**. **The TUI changes nothing**: its Discover tab (`Tab::Discover`, the explicit-seed lookup), the Now Playing panel's neighbours (`App.now_discover`) and `Capture::Discover` stay exactly as they are. The one shared change is a title: the Now Playing view's Discover tab becomes **Similar** (plan §2.12; docs/ux-contracts/now-playing.md) |
-| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11; the verbs line over the table and save as playlist 2026-10-16; the header's controls — no state line, no seeds line — 2026-10-16; Keep a copy, Open elsewhere and the Copies modal contracted 2026-10-19, their data layer built the same day; the room's marks and indicator, the ways in, the Keep a copy modal and the notes drawn 2026-10-20; the Copies modal's list, Open elsewhere's list and the Keep a copy e2e leg the same day; Where files land — the picker, the destination read with every Keep a copy, the start's pinned destination — contracted and built 2026-10-21, after the webapp's redesign (mStream 95f2205a, a7d4459f); `{{SERVERFOLDER}}` and "Same folders as the server" 2026-10-22 (the log); the picker redrawn after the phone's sheet and the webapp's editor — the preview first, the libraries as choices, Custom's own field, "Start from an existing folder…", no base folder, the validator — 2026-10-23 (the log) |
+| **Status** | contract extracted 2026-10-05; built 2026-10-05; reworked into the play-now page 2026-10-11; the album strip 2026-10-11; the verbs line over the table and save as playlist 2026-10-16; the header's controls — no state line, no seeds line — 2026-10-16; Keep a copy, Open elsewhere and the Copies modal contracted 2026-10-19, their data layer built the same day; the room's marks and indicator, the ways in, the Keep a copy modal and the notes drawn 2026-10-20; the Copies modal's list, Open elsewhere's list and the Keep a copy e2e leg the same day; Where files land — the picker, the destination read with every Keep a copy, the start's pinned destination — contracted and built 2026-10-21, after the webapp's redesign (mStream 95f2205a, a7d4459f); `{{SERVERFOLDER}}` and "Same folders as the server" 2026-10-22 (the log); the picker redrawn after the phone's sheet and the webapp's editor — the preview first, the libraries as choices, Custom's own field, "Start from an existing folder…", no base folder, the validator — 2026-10-23 (the log); Keep a copy redrawn calmer — its title and its way out on its borders, centred in the room with its band, Enter always its one primary, the place line's lead words, every key a drawn key word, a right gone as one plain line — 2026-10-24 (the log) |
 
 ## Intent
 
@@ -717,13 +717,18 @@ answer and the visit (the session generation, clause 31).
 ### Keep a copy, Open elsewhere and the Copies modal (2026-10-19)
 
 The canvas "Discover plug-ins · phone & terminal" draws every surface
-here cell for cell (boards `TermRoom`, `TermEntryPoints`, `TermKeepModal`,
-`TermKeepStates`, `TermCopies`; the vocabulary on `Main`); these clauses
-are its rules. The sample data throughout is the stage's: Stage Peer B
-holds Boukmanflow's *Borrowed Tapes* (2019) — 01 Rooftop Cypher, 02 Late
-Train Verse, 03 Corner Store Loop — Stage Peer C holds Rooftop Cypher of
-it, the library three other Boukmanflow albums, the destination `copies`
-with `{{ARTIST}}/{{ALBUM}}`.
+here cell for cell (boards `TermRoom`, `TermEntryPoints`,
+`TermKeepModal`, `TermKeepStates`, `TermCopies`; the vocabulary on
+`Main`); these clauses are its rules. Since 2026-10-24 the Keep a copy
+window is the lead designer's "Keep a copy, calmer" (the boards "Keep a
+copy · recommended" and "Keep a copy · every state"), which supersedes
+`TermKeepModal`, `TermKeepStates` and the window on `TermEntryPoints`;
+the Copies list takes its place and its band, nothing else. The sample
+data throughout is the stage's: Stage Peer B holds Boukmanflow's
+*Borrowed Tapes* (2019) — 01 Rooftop Cypher, 02 Late Train Verse, 03
+Corner Store Loop — Stage Peer C holds Rooftop Cypher of it, the library
+three other Boukmanflow albums, the destination `copies` with
+`{{ARTIST}}/{{ALBUM}}`.
 
 **What it is, and whose**
 
@@ -836,271 +841,463 @@ with `{{ARTIST}}/{{ALBUM}}`.
      user's 2026-10-19 decision): a row carrying `albumArtist` sends it
      unchanged, and the server copies the whole compilation. Never Folder.
 105. **Where it lands — shown before the first copy, and changed here.**
-     The LANDS IN line reads the destination's library, its base folder's
-     names and the layout rendered from the subject's tags, `›` between —
+     **The place line** is one sentence: a DIM **lead word** saying
+     plan, pin or fact — "Files go to" while choosing and starting (the
+     account's place now, rendered for the chosen scope), "Into" while
+     the copy is queued, running or stopping (the place it is pinned
+     to), "In" once it ended where files landed (their folder; a song's
+     own file its last crumb, DIM) — then the crumbs: the destination's
+     library, its base folder's names and the layout rendered from the
+     subject's tags, `›` between —
      `copies › Boukmanflow › Borrowed Tapes` (`KeepView::landing`,
-     `Landing::of`, the server's `resolveLayout` mirrored: a variable with
-     no value drops its segment) — the library BOLD, the names TEXT, `›`
-     DIM — wrapped at a crumb onto a second row where it outgrows its 52
-     cells (` ›` ending the first; the second clipped at the right, the
-     whole path then the rows' tooltip; never cut from the left, so the
-     library always shows) — rendered per scope as the webapp's
-     `scopeTarget` does: the song
-     and the album by the song's tags (ALBUMARTIST the album's credit, so
-     a compilation stays in one folder); **an artist copy** with the track
-     artist as ARTIST and ALBUMARTIST, the first folder that names
-     `{{ALBUM}}` or `{{YEAR}}` and every folder after it becoming **one
-     folder per album** in DIM — a hint, not a folder (a layout with no
-     album folder adds nothing); only-missing taking exactly one album
-     names that album instead, with its year (the listing's `year`, else
-     its `year_min`). **A variable each song fills is a slot** (the
-     2026-10-22 rule, the same on the webapp and the phone): the server
-     files every song by its own file's tags (destination.js
-     `tagsForLayout`) — `{{ARTIST}}`, `{{YEAR}}` and `{{GENRE}}` per
-     song, `{{ALBUM}}`, `{{ALBUMARTIST}}` (the album's credit, its
-     albumArtist else its artist) and `{{PEER}}` the same for every song
-     of an album — so LANDS IN never promises one folder the songs will
-     not share (`KeepView::scope_tags`, `LayoutTags::slots`,
-     `Run::Slot`). Each song of the album's listing
+     `Landing::of`, the server's `resolveLayout` mirrored: a variable
+     with no value drops its segment) — the library BOLD, the names
+     TEXT, `›` DIM. **One row** while the sentence fits the window's 72
+     cells (62 on the row that carries `d change`); else it breaks
+     **before a crumb**, the first row ending ` ›` (DIM), the second at
+     inner col 3 (a two-cell hanging indent) in 70 cells (60 beside
+     `d change`), clipped at the right with `…` where it still outgrows
+     them — never cut from the left, so the library always shows — a
+     clipped row's tooltip the whole path (`a/b/c`); two rows at most,
+     one where the window gives way (clause 106). **No place where
+     nothing landed** and nothing will be retried elsewhere (failed with
+     the same place, refused or cancelled with nothing copied, nothing
+     to copy, a right gone): the line never claims files landed where
+     none did. Rendered per scope as the webapp's `scopeTarget` does:
+     the song and the album by the song's tags (ALBUMARTIST the album's
+     credit, so a compilation stays in one folder); **an artist copy**
+     with the track artist as ARTIST and ALBUMARTIST, the first folder
+     that names `{{ALBUM}}` or `{{YEAR}}` and every folder after it
+     becoming **one folder per album** in DIM — a hint, not a folder (a
+     layout with no album folder adds nothing); only-missing taking
+     exactly one album names that album instead, with its year (the
+     listing's `year`, else its `year_min`). **A variable each song
+     fills is a slot** (the 2026-10-22 rule, the same on the webapp and
+     the phone): the server files every song by its own file's tags
+     (destination.js `tagsForLayout`) — `{{ARTIST}}`, `{{YEAR}}` and
+     `{{GENRE}}` per song, `{{ALBUM}}`, `{{ALBUMARTIST}}` (the album's
+     credit, its albumArtist else its artist) and `{{PEER}}` the same
+     for every song of an album — so the place line never promises one
+     folder the songs will not share (`KeepView::scope_tags`,
+     `LayoutTags::slots`, `Run::Slot`). Each song of the album's listing
      (`KeepFacts::album_songs`, a `KeepSong` each) is read as the copy
      files it: its **artist the ARTIST tag as written** — the listing's
      `artist-display` ("Boukmanflow feat. ALM"), else its `artist` (the
      primary artist alone, mStream V73) — its year, and **its genre only
      where the listing names exactly one** (the peer's scanner splits a
-     tag on `,` `;` `/`, the copy files by the tag as the file has it:
-     a "Hip-Hop/Rap" lists as two and lands in "Hip-Hop-Rap"; the
-     webapp's `songGenre`). **The song**: its own values — ARTIST its
-     listing row's (found by its path) where the listing has it, else
-     the row's; GENRE that row's genre, else a slot. **The album**:
-     ARTIST and YEAR the value only where every song of the listing
-     files under the same one (cleaned as the server cleans a folder
-     name; a song with no artist under the album's credit — the
-     listing's `fallbackArtist`; a song with no year under none, its
-     folder dropped, never the row's year: the server's album songs
-     carry none to fall back to) — before the listing answers (or where
-     it failed, or is empty) only where the row is no compilation (no
-     albumArtist, or the row's artist by `name_key`), else a slot; GENRE
-     a slot unless every song names the same one; ALBUMARTIST the
-     credit (albumArtist, else the row's artist) whatever the songs'
-     artists. **The artist scopes**: as above, GENRE before the cut a
-     slot. A slot stands **inside its folder's own words** — DIM
-     `‹artist›`, `‹year›`, `‹genre›` (the locale's word, `< >` on the
-     legacy console), never trimmed, dropped or merged with its
-     neighbour — and the path's tooltip carries **one note**, the
-     webapp's and the phone's words: "‹artist› comes from each song's
-     own tags, so these songs can land in more than one folder." (the
-     slots it shows in the path's order, ", " between, "come" for more
-     than one; with a genre "…more than one folder (a song with none
-     leaves that folder out)."; a song's copy alone "‹genre› comes from
-     the song's own tags (a song with none leaves that folder out).") —
-     the 66-cell LANDS IN has no row for it, so the rows' tooltip holds
-     it, after the whole path and " — " where the rows clip it. The same everywhere a place is drawn before its
-     files land: LANDS IN while choosing, starting (the place sent) and
-     live (the pin), "retry adds to" / "copy again adds to" — and the
-     picker's PREVIEW, which draws the note as its own row (clause 143),
-     into the path's tooltip only where the row gave way at the floor;
-     an ended copy's folder its files landed in is real and carries
-     none. **`{{SERVERFOLDER}}`** (mStream since
-     2026-10-22, the user's "copy the server's filepath"): the folders
-     the song sits in on the connected server — its path there
+     tag on `,` `;` `/`, the copy files by the tag as the file has it: a
+     "Hip-Hop/Rap" lists as two and lands in "Hip-Hop-Rap"; the webapp's
+     `songGenre`). **The song**: its own values — ARTIST its listing
+     row's (found by its path) where the listing has it, else the row's;
+     GENRE that row's genre, else a slot. **The album**: ARTIST and YEAR
+     the value only where every song of the listing files under the same
+     one (cleaned as the server cleans a folder name; a song with no
+     artist under the album's credit — the listing's `fallbackArtist`; a
+     song with no year under none, its folder dropped, never the row's
+     year: the server's album songs carry none to fall back to) — before
+     the listing answers (or where it failed, or is empty) only where
+     the row is no compilation (no albumArtist, or the row's artist by
+     `name_key`), else a slot; GENRE a slot unless every song names the
+     same one; ALBUMARTIST the credit (albumArtist, else the row's
+     artist) whatever the songs' artists. **The artist scopes**: as
+     above, GENRE before the cut a slot. A slot stands **inside its
+     folder's own words** — DIM `‹artist›`, `‹year›`, `‹genre›` (the
+     locale's word, `< >` on the legacy console), never trimmed, dropped
+     or merged with its neighbour — and **its note stands on its own DIM
+     rows** under the place, at inner col 1, wrapped by words at 72
+     cells, two rows at most (then `…`, the whole note in the rows'
+     tooltip; one row where the window gives way) — the webapp's and the
+     phone's words: "‹artist› comes from each song's own tags, so these
+     songs can land in more than one folder." (the slots it shows in the
+     path's order, ", " between, "come" for more than one; with a genre
+     "…more than one folder (a song with none leaves that folder out).";
+     a song's copy alone "‹genre› comes from the song's own tags (a song
+     with none leaves that folder out)."). The same everywhere a place
+     is drawn before its files land: "Files go to" while choosing and
+     starting (the place sent), "Into" while live (the pin), "Retry adds
+     to" — and the picker's PREVIEW, which draws the note as its own row
+     (clause 143), into the path's tooltip only where the row gave way
+     at the floor; an ended copy's folder its files landed in is real
+     and carries none. **`{{SERVERFOLDER}}`** (mStream since 2026-10-22,
+     the user's "copy the server's filepath"): the folders the song sits
+     in on the connected server — its path there
      (`KeepSubject::filepath`, a listed song's `KeepSong::filepath`),
      the names trimmed, empty ones and `.` gone, the file's name and the
      peer library's own (the first) dropped, each left cleaned as a tag
      is and the ones cleaned to nothing (`..` among them) gone, `/`
      between (`server_folder`, federation-copy.js `serverFolderOf`;
      `sanitize_folders`, path-template.js `sanitizeFolders`): "peerlib/
-     Boukmanflow/Borrowed Tapes/02.mp3" → `Boukmanflow › Borrowed
-     Tapes`; a song at the library's root has none, which drops it like
-     any empty variable. **Several folders**: the server substitutes,
-     then splits the path, so inside a folder's words its folders follow
-     them — "Copy of {{SERVERFOLDER}}" → `Copy of Boukmanflow › Borrowed
-     Tapes`. Per scope: **the song** its own folder, never a slot; **the
-     album** the folder every song of the listing sits in (compared as
-     the peer's clean paths, so `AC/DC` two deep is not `AC-DC`), before
-     the listing answers (or where it is empty or failed) the row's —
-     else a slot, DIM `‹server folder›`; **the artist scopes** cut at
-     the first folder naming it, as at `{{ALBUM}}` / `{{YEAR}}` — each
-     album sits in its own — and only-missing taking one album draws
-     it a slot (its songs' folder is nowhere this client reads). Its
-     note: alone "‹server folder› comes from where each song sits on
-     the server, so these songs can land in more than one folder."; beside
-     the tags' slots one sentence, the tags first in the path's order —
-     their own number picking the verb — and the server folder after
-     them: "‹artist› comes from each song's own tags and ‹server folder›
-     from where it sits on the server, so these songs can land in more
-     than one folder." (with a genre "…(a song with none leaves that
-     folder out)."; the webapp's `slotNoteAndServer` and the phone's
-     `discoverKeepSlotNoteServerTags`). Under it the **SOURCE** row: DIM "saved
-     for your account" (`source: user`) or "the library's default", and
-     **`[ Change… ]`** right-aligned (cols 53–63; DIM, hover BRIGHT +
-     BOLD, the keyboard's stop the selection slab BOLD; tooltip "Where
-     files land — d"; legacy `[ Change... ]`), which — or `d` from
-     anywhere the choice stands, another server's copy beside it
-     included, Enter or Space on the stop, a click — opens **Where files
-     land** (clauses 142–148). **The destination is read again with every
-     Keep a copy that opens** (`App::keep_dest_read`, not once a visit):
-     the last place known draws at once and the answer replaces it; a
-     failed read keeps what is drawn. **In a job's stages** LANDS IN reads
-     the place the copy is pinned to — the start's while it is out, the
-     job's `params.destination` while it is live (a job from before the
-     pin: the account's; pinned to nowhere: no row) — and once it ended
-     the folder its files landed in (the webapp's `landedPath`: the folder
-     the copied files share, else where the library already had them),
-     else the place it ran with (`result.destination`, else its pin) —
-     **never the account's place now** (the 2026-10-21 incident: a window
-     showing a stale place put five stage test songs into the user's real
-     library). No SOURCE row and no Change… there. **Retry and Copy again
-     land at the account's place now** (clause 145): where that is not
-     the place the copy ran with (its `result.destination`, else its pin)
-     or no such place is known, the row under LANDS IN says so first —
-     DIM "retry adds to" / "copy again adds to" and the place, drawn and
-     wrapped as LANDS IN (the webapp's `retryPath`).
+     Boukmanflow/Borrowed Tapes/02.mp3" →
+     `Boukmanflow › Borrowed Tapes`; a song at the library's root has
+     none, which drops it like any empty variable. **Several folders**:
+     the server substitutes, then splits the path, so inside a folder's
+     words its folders follow them — "Copy of {{SERVERFOLDER}}" →
+     `Copy of Boukmanflow › Borrowed Tapes`. Per scope: **the song** its
+     own folder, never a slot; **the album** the folder every song of
+     the listing sits in (compared as the peer's clean paths, so `AC/DC`
+     two deep is not `AC-DC`), before the listing answers (or where it
+     is empty or failed) the row's — else a slot, DIM `‹server folder›`;
+     **the artist scopes** cut at the first folder naming it, as at
+     `{{ALBUM}}` / `{{YEAR}}` — each album sits in its own — and
+     only-missing taking one album draws it a slot (its songs' folder is
+     nowhere this client reads). Its note: alone "‹server folder› comes
+     from where each song sits on the server, so these songs can land in
+     more than one folder."; beside the tags' slots one sentence, the
+     tags first in the path's order — their own number picking the verb
+     — and the server folder after them: "‹artist› comes from each
+     song's own tags and ‹server folder› from where it sits on the
+     server, so these songs can land in more than one folder." (with a
+     genre "…(a song with none leaves that folder out)."; the webapp's
+     `slotNoteAndServer` and the phone's
+     `discoverKeepSlotNoteServerTags`). **Whose place it is** — "saved
+     for your account" / "the library's default", the SOURCE row until
+     2026-10-24 — is no longer said here: the picker's header says it
+     ("Where copies land · yours" / "· library default", clause 143),
+     and the path is the evidence of a save; the layout's name never
+     shows. **`d change`** — a key word (docs/ui-kit.md, Key word: DIM,
+     hover BRIGHT + BOLD, its eight cells a click) right-aligned to
+     inner col 72 on the place's **last** row in every choosing state
+     (idle, the sizes asked, refused, the 409, another server's copy
+     beside it), on the action row in the "a file in the way" outcome
+     (clause 110) — opens **Where copies land** (clauses 142–148), as
+     `d` does; it is drawn nowhere else and `d` works nowhere else: not
+     while queued, running or stopping (the place is pinned), not in
+     another outcome, not with a right gone; while a start is out it
+     stays drawn and inert (clause 108). **The destination is read again
+     with every Keep a copy that opens** (`App::keep_dest_read`, not
+     once a visit): the last place known draws at once and the answer
+     replaces it; a failed read keeps what is drawn. **In a job's
+     stages** the place line reads the place the copy is pinned to —
+     while a start is out still "Files go to" the place it sent; "Into"
+     the job's `params.destination` while it is live (a job from before
+     the pin: the account's; pinned to nowhere: no row) — and once it
+     ended "In" the folder its files landed in (the webapp's
+     `landedPath`: the folder the copied files share, else where the
+     library already had them), else the place it ran with
+     (`result.destination`, else its pin) — **never the account's place
+     now** (the 2026-10-21 incident: a window showing a stale place put
+     five stage test songs into the user's real library). **Retry lands
+     at the account's place now** (clause 145): where that is not the
+     place the copy ran with (its `result.destination`, else its pin) or
+     no such place is known, the row under "In" — alone where nothing
+     landed — says so first: DIM "Retry adds to" and the place, drawn
+     and wrapped as the place line, its slots' note under it (the
+     webapp's `retryPath`, `KeepView::again`).
 
-**The Keep a copy modal**
+**The Keep a copy window** (redrawn 2026-10-24)
 
-106. **The modal** — the kit's, ACCENT: 66 cells wide (at least 44, at
-     most the area less 2), centred, 16 rows (17 in its tallest common
-     state; it anchors as if 17 so its top holds — row 6 at 100 × 30,
-     row 3 at 100 × 24 — and it grows downward), under the 22-row cap at
-     100 × 24. Rows: the BOLD ACCENT title **Keep a copy**
-     with `[X]` (DIM, hover BRIGHT + BOLD, "Close — Esc"); a blank; the
-     header — a 6 × 3 pixel cover, the title BOLD (the song, or the album
-     in album focus), a DIM byline ("Boukmanflow · Borrowed Tapes · 2019 ·
-     from Stage Peer B"; a tile's "Boukmanflow · 2019 · from Stage Peer
-     B") and "• online"; a blank; the DIM label **WHAT** and the radios
-     with their DIM **sizes** (`ChoiceSize`): "0:08 · mp3" (the row's
-     length; the format by the file's extension), "3 songs" (the album's
-     songs on the connected server, asked with the copy's own selectors —
+106. **The window** — the kit's Modal with its title on its top border
+     and its way out on its bottom one (docs/ui-kit.md, Modal): **76
+     cells wide** (the Copies list's width: inner 74, the text in inner
+     cols 1–72, right-aligned items ending at col 72; an area narrower
+     than 80 shrinks it, to 44 at least), the frame ACCENT. **Centred in
+     the room** (`gui::content_rect`: x 17–96 at 100 columns with the
+     queue folded, so **x 19–94**) while the room is at least 80 cells
+     wide; with the queue panel open (a 47-cell room) centred over the
+     whole frame as before, x 12–87, with no band. **Anchored as if 17
+     rows** — its top on row 6 at 100 × 30, row 3 at 100 × 24 — its
+     height following its rows (8 for a plain line, 12 for an album tile
+     idle, 13 for a song row, 18 at its tallest) and growing downward to
+     **the room's last row** at most (the row above the seek line: the
+     player bar is never covered), then rising toward row 1 — never the
+     tab bar — only as the give-way's third step
+     (`gui::keep::window_rect`, shared with Copies). **The band**:
+     centred in the room, it first blanks the room's whole width on its
+     own rows (`kit::blank` over x 17–96), registers that band as the
+     overlay footprint and as `Act::Guard`, then draws the frame —
+     nothing of the room shows beside it (no LENGTH column, no lit
+     tile's slab; the strip covers it touches fall to the mosaic for a
+     frame, then are cleared); the rows above and below stay drawn; no
+     scrim and no dim. The room beneath is inert, its hover and tooltips
+     asleep: the frame beneath draws without the pointer (the tabs, the
+     nav, the room and the bar light nothing under it; the room's other
+     modals, the tile's list, too), `open_window` drops every rect it
+     registered before the window registers its own, so no tooltip,
+     context or click of the room's outlives it, and the OSC 22 hand
+     shows only over the window's own controls (`Act::Guard` is no
+     control, `gui::over_control`) — the Copies list and Where copies
+     land alike. **Rows**, top to bottom: **the top border**, "Keep a copy"
+     TEXT BOLD at inner col 2 (`╭─ Keep a copy ───╮`; no `[X]`, no title
+     row); **the head**, two rows — the item's title TEXT BOLD (the song
+     on a row, the album in album focus; clipped with `…` at 72 cells,
+     67 beside a cover), then a DIM byline, its parts joined ` · ` and
+     empty ones dropped: a row's "Boukmanflow · Borrowed Tapes · from
+     Stage Peer B", a tile's "Boukmanflow · 2019 · from Stage Peer B"
+     (the year only when above 0), a compilation's tile "Various Artists
+     · from Stage Peer B" — and **a 4 × 2 cover of real pixels** at
+     inner cols 69–72 only where the art is loaded and the terminal
+     draws pixels (`Slot::draw_paced`; the kit's one-frame mosaic under
+     a passing overlay), else **nothing** — no ▀ mosaic, no empty frame,
+     the words get all 72 cells; no "• online"; a blank (B1); **the
+     body**, the state's rows — the choice and a blank (B2), or progress
+     or an outcome and a blank (B2); the place line and "Retry adds to"
+     (clause 105); the slot note; the aside, a GOLD line or another
+     server's two lines; a blank (B3); **the action row** — key words
+     from inner col 1, three cells apart (docs/ui-kit.md, Key word), and
+     **the one primary** right-aligned to col 72, `[ label ]` ACCENT
+     BOLD, hover BRIGHT + BOLD (where the key words and the primary
+     would come closer than three cells the key words take the row
+     above, counted — not reached in English or German); **the bottom
+     border**, DIM "Esc close" ending at inner col 71, a space, one `─`
+     and `╯` — "Esc close · the copy keeps going" while this window's
+     copy is queued or running — "Esc close" a text button (hover BRIGHT
+     + BOLD, a click closes), the rest plain. **One ACCENT BOLD element
+     per state — the primary**: the chosen dot ACCENT and not bold, no
+     background fill anywhere, no selection slab. **The give-way**
+     (`fitted`, recomputed every frame, only while the rows pass the
+     rows available, so a state that shrinks gets its blanks and its
+     anchored top back): the blank rows B2, then B1, then B3; the place
+     capped at one row (`…` before `d change`, the whole path in its
+     tooltip); the top raised toward row 1; the slot note capped at one
+     row; a GOLD line or a headline capped at one row (the whole words
+     in its tooltip); last of all body rows — never the action row or a
+     border, and the action row always the last above the bottom border.
+     At 100 × 30 nothing gives way (the tallest stands on rows 6–23, the
+     limit 24); at 100 × 24 with key hints on the tallest drops its
+     three blanks and stands on rows 3–17, its primary on row 16.
+     **Tooltips** only where text is clipped: the place's rows (the
+     whole path), the slot note, a GOLD line or a headline; none on a
+     key word, the primary or the footer. **Keys**: ↑ ↓ move **the
+     choice itself** — the radios, then the box as their fourth stop
+     (clause 107), clamped at both ends — so the chosen dot is the
+     keyboard's place: **there is no hand and no slab**; **Enter always
+     presses the one primary** (inert while it is off); `d`, `x`, `a`
+     and `c` act only where their key word is drawn, and every key that
+     acts is drawn as one (`key_words`); Esc closes; Space, Tab, ← →,
+     other letters, `C` and the wheel do nothing; Ctrl-C quits the app.
+     A key word acts only where the frame drew it: where the give-way's
+     last resort took its row, its key is inert (`KeepUi.drawn`). The
+     head's pixel cover counts the window's own footprint, last frame's
+     too, as its own, so a window that grows or shrinks never drops it
+     to the ▀ mosaic. It opens with the dot on the preselected choice —
+     This song from a row, Album in album focus — so **Enter at once
+     starts it**; after
+     the picker, Add again, `c choose again`, a refused start or a 409
+     the dot is where it was. **Mouse**: a radio row's inner cols 1–72
+     pick it (the chosen one does nothing), the box's glyph and label
+     toggle it, a key word does its key's act, the primary presses, "Esc
+     close" closes — each with hover BRIGHT + BOLD; everything else, in
+     the window or out of it (the band and the room included), is
+     `Guard`; a right click inside does nothing; Apple Terminal's
+     release echo is swallowed before any of this. **The choice** stands
+     only where the subject offers two or more choices — `(•)` / `( )`
+     at inner cols 1–3, labels from col 5: the chosen `(•)` ACCENT and
+     its label TEXT BOLD, the others `( )` DIM with TEXT labels, hover
+     the label BRIGHT + BOLD; with one (a compilation's tile, a row with
+     no album) no radio and no B2, the primary naming it. **No sizes
+     beside the choices**: the counts that matter are in the primary and
+     the box. **The primary's words** follow the choice (`KeepVerb`,
+     `ChoiceSize`): "Add song"; "Add album · 3 songs" ("· 1 song"; "Add
+     album" while the album's songs are asked or unknown — the album's
+     songs on the connected server, asked with the copy's own selectors:
      a compilation by its album artist, else by its track artist and
-     year), "1 album · you have 3" (the connected server's albums of the
-     artist, the library's) — DIM `…` while they are asked (`Fact::Asking`),
-     each read optional (`ApiCmd::KeepFacts`); the checkbox (clause 107); a
-     blank; **LANDS IN** and its **SOURCE** row (clause 105); a blank (or
-     a refusal's GOLD rows, clause 108); the buttons bottom-right —
-     a DIM `[ Cancel ]` (it closes; nothing is copied before Add) and the
-     ACCENT BOLD primary, whose verb follows the choice: **Add song · Add
-     album · Add artist · Add 1 album** (`KeepVerb`). Focus opens on the
-     preselected radio — This song from a row, Album in album focus. **The
-     keyboard's stop**: a radio's or the checkbox's label ACCENT BOLD (the
-     chosen radio's `(•)` OK and its label BOLD where the hand is
-     elsewhere), a button the selection slab; where a job's outcome stands
-     the hand rests stowed and Enter means the primary. Keys:
-     ↑ ↓ walk the radios, the checkbox and the buttons (← → between the
-     buttons); Space or Enter picks a radio or ticks the checkbox; Enter on
-     the primary starts; `d` opens Where files land; Esc, `[X]` or Cancel
-     closes. The stops walk radios › checkbox › Change… › Cancel ›
-     primary. A locale whose WHAT
-     or LANDS IN outgrows the canvas's ten cells moves the values' column
-     right, two cells past the wider label. Mouse: click a radio, the checkbox or a button; hover BRIGHT
-     + BOLD. The room beneath is inert; the strip's covers the frame
-     touches redraw as the mosaic, the header's cover stays pixels.
-107. **"Only the albums you don't have"** (`[ ]` / `[✓]`) stands under
-     Every album by when the plug-in runs `artist-missing`, the library
-     holds some of the artist's albums and the connected server lists one
-     of the artist's own **that the library lacks by NAME** (folded as the
-     server folds them, `name_key`; an album counts as owned when any of
-     its songs is here; an album they only appear on is never theirs —
-     `artist_ownership`), never by comparing counts; or while such a copy
-     still wants the user (live, failed, stopped). Hidden otherwise —
-     including while the sizes are asked. Ticking it picks Every album by
-     (scope `artist-missing`) and the primary reads **Add 1 album**;
-     picking This song or Album unticks it. A partly kept album is
-     Album's to finish: it skips the songs already here.
-108. **Starting, and refused at start.** Add sends the job
-     (`ApiCmd::JobStart`) with **the place LANDS IN drew** (clause 145):
-     the WHAT block folds to one line ("WHAT  This
-     song · 0:08 · mp3"), the step row reads **starting…** (ACCENT) and no
-     button stands until it answers; the frame keeps its height. A refusal
-     brings the choice back with **"couldn't start: {the server's words}"**
-     in GOLD in the row above the buttons ("Uploading Disabled"; 409 "someone
-     else on this server is already getting this — try again in a
-     moment" and 429 "you have 20 jobs queued or running — wait for some
-     to finish (the limit is 20)" wrap to a second row); the choice stays
-     editable and Add stays (`KeepStage::Refused`). **A place no longer in
-     force** (409 `destination_changed`, clause 146) starts nothing:
-     LANDS IN redraws from the answer at once and one GOLD line reads
-     "where files land changed · check the path above and add again".
-     **Another server's
-     live copy** of the same album or artist (the start's `200 created:
-     false` naming another server, or one already held): the radios stay,
-     the primary is hidden — never grey — and two rows read "Stage Peer C
-     is already copying this album — you can add Stage Peer B's once it
-     ends"; the primary returns in their place when that copy ends
-     (`KeepStage::Choose { other }`).
+     year); Every album by "Add 2 albums" ("Add 1 album"; the connected
+     server's albums by the artist, the ones you already have included —
+     they are skipped at run time, as the webapp counts — "Add every
+     album" while unknown); the box ticked, "Add 1 album" / "Add 2
+     albums", the missing count. Each read is optional
+     (`ApiCmd::KeepFacts`); ` · ` and the count are composed in code,
+     the ` · {count}` dropped where the label would pass 34 cells.
+107. **"Only the 1 album you don't have"** (`[ ]` / `[✓]`, its label
+     carrying the missing count — "Only the 2 albums you don't have")
+     stands under Every album by, its glyph at inner cols 5–7 and its
+     label from col 9, when the plug-in runs `artist-missing`, the
+     library holds some of the artist's albums and the connected server
+     lists one of the artist's own **that the library lacks by NAME**
+     (folded as the server folds them, `name_key`; an album counts as
+     owned when any of its songs is here; an album they only appear on
+     is never theirs — `artist_ownership`), never by comparing counts;
+     or while such a copy of this server's still wants the user (live,
+     failed, stopped) — then, with none missing by name (or the sizes
+     unknown), with no count to say: **"Only the albums you don't have"**,
+     its primary **"Add the albums you don't have"**, never "the 0
+     albums". Hidden otherwise — including while the sizes are asked, a
+     copy held or not. **It is the
+     choice's fourth stop** (choice semantics, so ticked it is ACCENT —
+     `[✓]` and its label TEXT BOLD — not the kit checkbox's Green; the
+     log, 2026-10-24): ↓ from Every album by ticks it (scope
+     `artist-missing`, the dot staying on Every album by), ↑ from it
+     unticks it, a click toggles it; picking This song or Album, by key
+     or click, unticks it; a box that goes while ticked unticks, the
+     choice staying Every album by. Ticked, the place names the one
+     album it takes, with its year, or ends "› one folder per album" for
+     two or more, and the primary reads **Add 1 album** / **Add 2
+     albums**. A partly kept album is Album's to finish: it skips the
+     songs already here.
+108. **Starting, refused at start, another server's copy.** Add sends
+     the job (`ApiCmd::JobStart`) with **the place the line drew**
+     (clause 145), and **nothing moves**: the choice and the place line
+     stand as they were and the primary goes off — `[ Adding… ]` DIM, no
+     click, no hover (the kit's modal primary that goes off); ↑ ↓, `d`,
+     the clicks and Enter are inert until the server answers; Esc still
+     closes (the start still lands, and the status line says "copying
+     Borrowed Tapes…"). **A refusal** — 429, 400, another account's 409,
+     a 404, no answer — brings the choice back, editable, the dot where
+     it was and Add the primary (`KeepStage::Refused`), with one GOLD
+     line under the place: **"! Couldn't start: {the server's words}"**
+     ("your server didn't answer" for none), wrapped by words keeping a
+     server's name whole, its second row at inner col 3, two rows at
+     most — 429 "you have 20 jobs queued or running — wait for some to
+     finish (the limit is 20)", 409 "someone else on this server is
+     already getting this — try again in a moment"; Enter adds again. A
+     **404** reads so and asks the gate again: the window turns to the
+     plug-in's line once the gate confirms it gone (clause 147). **A 403
+     is a missing right, never a refusal** with Add still offered — the
+     uploads line where its words name uploading ("Uploading Disabled"),
+     the jobs line otherwise, and the gate asked again (clause 147). **A
+     place no longer in force** (409 `destination_changed`, clause 146)
+     starts nothing: the place line redraws from the answer at once and
+     one GOLD line under it reads "! Where files land changed · check
+     the path above and add again". **Another server's live copy** of
+     the chosen album or artist (the start's `200 created: false` naming
+     another server, or one already held; `KeepStage::Choose { other }`,
+     `OtherCopy`): the choice and the place line stay, and under them
+     two lines — TEXT BOLD "Copying from Stage Peer C", DIM "Add from
+     Stage Peer B returns when that copy ends" — with **`[ Close ]`**
+     the primary and the key word **"x cancel that copy"**, which
+     cancels Stage Peer C's job (`App::keep_cancel_other`, once; the
+     word hides while that cancel is out or the job is stopping);
+     picking a scope it does not cover (This song) brings Add back and
+     the two lines go; when that copy ends, Add returns. Reached by a
+     start's `created: false`, the choice stays the user's just as where
+     a lookup found that copy first (the phase back on Choose, the job in
+     its slot): ↑ ↓ and the clicks move it. A `created: false` that names
+     this server's own live job is followed (clause 109, `keep_cancel`
+     its cancel).
 109. **Following a copy** (`KeepStage::Job`). Once a job exists the
-     choice folds to one WHAT line (the scope in words and its size: "This
-     song · 0:08 · mp3", "Album · 3 songs", "Every album by Boukmanflow",
-     for only the missing ones "… · 1 album") and LANDS IN reads the
-     place the copy is pinned to, then where it landed (clause 105); then
-     the kit's
-     **three-line scan widget**: **queued** — "waiting for a free slot",
-     an all-DIM bar `▱▱▱▱▱▱▱▱▱▱` with no percentage (never a fake 0%),
-     "starts on its own when the copy ahead ends"; **running** — the
-     plug-in's step (`statusText`, "song 2 of 3 · Late Train Verse",
-     TEXT), the ten-cell bar (`▰` OK / `▱` DIM) with the percentage DIM
-     beside it, the DIM counts ("1 copied · 0 failed", from
-     `result.counts`, never the capped lists); a DIM **[ Cancel copy ]**
-     (stopping is not the way forward) — `x` or a click cancels
-     (`ApiCmd::JobCancel`); **stopping** — "stopping…", the bar holds, no
-     button until the job ends (a 409 on the cancel means it had
-     finished: the outcome replaces this, clause 133). **Esc or `[X]`
-     closes and the copy keeps running** on the server; the verbs line's
-     indicator opens it again. Polled about every 1.5 s while the modal is
-     open (clause 112). The modal opens straight onto this when the
+     choice goes — the head already names the subject — and the body is
+     **progress in two rows**, a blank and the place line "Into" the
+     place the copy is pinned to (clause 105). **The headline**: the
+     state word TEXT BOLD — "Waiting for a free slot" (queued),
+     "Copying" (running), "Stopping…" — then, while running and the
+     plug-in names one, ` · ` DIM and its step in TEXT (`statusText`,
+     "song 2 of 3 · Late Train Verse": the server's words, never
+     translated; one row, clipped with its tooltip). **The bar row**:
+     ten cells at inner cols 1–10, `▰` OK for round(p × 10) and `▱` DIM
+     for the rest, then the percentage in **TEXT** (" 52%"); with no
+     estimate ten `▱` and no percentage, never a fake 0%; queued, ten
+     `▱` and DIM " starts on its own"; stopping, the bar and the
+     percentage frozen. **No counts row** (the step already counts) and
+     no third line. **Queued or running**: the key word **"x cancel
+     copy"** (`x` or a click cancels, `ApiCmd::JobCancel`) and
+     `[ Close ]` the primary — Enter closes and the copy stays queued or
+     keeps running — and the bottom border reads **"Esc close · the copy
+     keeps going"**. **Stopping**: no key word, `[ Close ]`, the border
+     back to "Esc close" (a cancel still out reads so already); a 409 on
+     the cancel means it had finished, and the outcome replaces this
+     (clause 133). **Esc closes and the copy keeps running** on the
+     server; the verbs line's indicator, back once the window is closed,
+     opens the Copies list. Polled about every 1.5 s while the window is
+     open (clause 112). The window opens straight onto this when the
      preselected scope's copy from **this** server already stands (a
-     reopened row reads its copy's real state); another server's finished
-     copy is not this one's — the choice, idle. **A wider copy speaks too**
-     (the user's 2026-10-20 report: only-missing had copied the album and
-     Album still offered Add album): with no copy of its own that is live
-     or newer (finish, else update time; else id), the newest finished
-     wider copy from this server opens the choice on what it recorded for
-     it (`opening_phase`, `covered_view`, `KeepPhase::Covered`) — **Album**:
-     a done artist or only-missing copy read through `job_for_album`, and
-     only where that view marks the row ("in your collection · 1 copied",
-     "already yours"; nothing for a guest spot, an album never walked, a
-     failed or cancelled run); **This song**: a done album copy, or a done
-     artist copy's walk of the row's album, whose lists name the song's
-     file on its server (`from`) — copied (its landed file, Play your
-     copy), skipped `owned` (already yours), `exists` (a file in the way);
-     a song the lists do not name (they stop at 500), or one a failed or
+     reopened row reads its copy's real state); another server's
+     finished copy is not this one's — the choice, idle. **A wider copy
+     speaks too** (the user's 2026-10-20 report: only-missing had copied
+     the album and Album still offered Add album): with no copy of its
+     own that is live or newer (finish, else update time; else id), the
+     newest finished wider copy from this server opens the window on
+     what it recorded for it (`opening_phase`, `covered_view`,
+     `KeepPhase::Covered`), its sub saying whose copy spoke
+     (`KeepView::borrowed`: "3 copied · with your copy of Boukmanflow's
+     missing albums", "… · with your copy of every album by
+     Boukmanflow"; a song kept by an album copy, "With your album copy")
+     — **Album**: a done artist or only-missing copy read through
+     `job_for_album`, and only where that view marks the row ("✓ In your
+     collection" with Play your copy, "✓ Already yours" with Close;
+     nothing for a guest spot, an album never walked, a failed or
+     cancelled run); **This song**: a done album copy, or a done artist
+     copy's walk of the row's album, whose lists name the song's file on
+     its server (`from`) — copied (its landed file, Play your copy),
+     skipped `owned` (already yours), `exists` (a file in the way); a
+     song the lists do not name (they stop at 500), or one a failed or
      cancelled run names, is never claimed.
-110. **How it ended** — "done" is not "kept" (clause 120); each with its
-     buttons, the primary on the right:
-     - **one song copied** — "✓ in your collection" (OK) and the new
-       file's path (clipped from the left) · `[ Add to queue ] [ Play
-       your copy ]` — the user's own file, the session's origin;
-     - **an album or artist copied** — "✓ in your collection", the DIM
-       counts ("1 copied · 1 already yours · 1 failed · 2 albums left
-       out"; the failed part GOLD) and "Copy again takes only the gaps" ·
-       `[ Close ] [ Copy again ]`;
-     - **already yours** (nothing copied, all already here) — "✓ already
-       yours" (DIM) · "your library already has this song · nothing was
-       copied" · `[ Close ]`;
-     - **a file in the way** (`skipped: exists`) — "skipped · a file is
-       already at that path", the path, "nothing was overwritten" ·
-       `[ Close ] [ Retry ]`;
-     - **stopped** — the reason in GOLD ("Stage Peer B's transfer limit
-       stopped it" · "Stage Peer B is serving too many streams right now"
-       · "Stage Peer B went away") and DIM counts ("1 copied · 2 not
-       copied · try again later" / "… in a moment") · `[ Close ] [ Retry ]`
-       — Retry takes only the rest;
-     - **refused** — "Stage Peer B does not allow copies with your
-       server's key" (GOLD) · "nothing was copied · playing it still
-       works" · `[ Close ]` — no Retry: it would meet the same refusal;
-     - **failed** — "copy failed: {job.error}" (GOLD) · "nothing was
-       copied" · `[ Close ] [ Retry ]`;
-     - **cancelled** — "cancelled · 1 copied" (DIM) · "the other 2 stay on
-       Stage Peer B" · `[ Close ] [ Start again ]` — Start again brings the
-       radios back;
-     - **nothing to copy** — "✓ nothing to copy · you have it all" ·
-       `[ Close ]`; an artist who only appears on the connected server's
-       albums: "nothing of theirs to copy" · "Boukmanflow only appears on
-       other artists' albums there" · `[ Close ]`.
-     Retry and Copy again start the same copy again — the job's own
-     recommendation and scope (`App::keep_again`); where a wider copy
-     speaks for the choice (clause 109), the choice's own copy of the
-     modal's subject. Keys: Enter the
-     primary, ↑ ↓ the buttons, Esc closes.
+110. **How it ended** — "done" is not "kept" (clause 120). An outcome is
+     its **headline** (the glyph in code, the words in the locales; one
+     that wraps continues at inner col 3, two rows at most), an optional
+     DIM **sub**, an optional DIM **muted** line, a blank, the place
+     line "In" where files landed (and "Retry adds to" where Retry would
+     land elsewhere, clause 105), a blank and the action row with **the
+     window's own action** (`window_action` → `KeepStage::Job.action`;
+     the Copies list keeps its own, clause 117):
+     - **one song copied** — `✓ In your collection` (OK BOLD) · "In
+       copies › Boukmanflow › Borrowed Tapes › 02 - Late Train
+       Verse.mp3" (the file its last crumb, DIM) · `a add to queue`
+       `c choose again` · **Play your copy** (it plays next and closes;
+       `a` appends and closes) — the user's own file, the session's
+       origin; a song job that came from another server says so in its
+       sub, "Copied from Stage Peer C" (`KeepView::copied_from`), a song
+       kept by your album copy "With your album copy";
+     - **an album copied, no gap** — `✓ In your collection` · the counts
+       ("2 copied · 1 already yours") · In its folder · `c choose again`
+       · **Play your copy**: the album from your library — the songs the
+       copy put there and the ones already yours (`songs.skipped[]` with
+       why `owned` and an `at`, never a file in the way), in the album
+       listing's order (`KeepFacts::album_songs`, matched by each song's
+       file on its server; else the result's order), put in after the
+       playing track with the first one started (`App::keep_play_copy` →
+       `keep_play_album`, `CopyResult::kept_songs`); a result that names
+       no files offers `[ Close ]` instead;
+     - **every album by, or only the missing, copied with no gap** —
+       `✓ In your collection` · the counts · In their common folder ·
+       `c choose again` · **Close** (an artist's albums are no one
+       queue);
+     - **a gap** (done is not kept, made visible) — the GOLD BOLD
+       headline **"! 1 song didn't copy"** (songs failed or never
+       reached), else "! 1 album couldn't be listed" · the rest of the
+       counts DIM ("2 copied"; no GOLD inside them) · In … ·
+       `c choose again` · **Retry**, which takes only the gaps; the copy
+       is still kept (the room's "✓ kept");
+     - **already yours** (nothing copied, all already here) —
+       `✓ Already yours` (✓ DIM, the words TEXT BOLD) · "Your library
+       already has this song" / "… these songs" · In where the library
+       already has it · `c choose again` · **Close**;
+     - **a file in the way** (`skipped: exists`) — "! Skipped · a file
+       is already there" (GOLD BOLD) · "Nothing was overwritten" · In …
+       › the file · `d change` `c choose again` on the action row ·
+       **Close** — Retry would meet the same file — until the account's
+       place differs from the one the copy ran with (the picker saved,
+       clause 144): then "Retry adds to {the place now}" under In, and
+       **Retry**; a copy from a server that pinned no place (clause 145)
+       differs only where the place now renders another folder than the
+       one the file sits in — a slot, or no folder known, is no
+       difference (`names_folder`);
+     - **stopped** — the reason GOLD BOLD ("! Stage Peer B's transfer
+       limit stopped it" · "! Stage Peer B is serving too many streams
+       right now" · "! Stage Peer B went away" · "! The copy stopped
+       before it finished") · DIM counts ("1 copied · 2 not copied · try
+       again later" / "… in a moment") · In … where some copied ·
+       `c choose again` · **Retry**, which takes only the rest;
+     - **refused** — "! Stage Peer B does not allow copies with your
+       server's key" · "Nothing was copied · playing it still works"
+       (some copied first: "1 copied · playing it still works" and an In
+       row) · the muted "Only Stage Peer B's admin can change this." ·
+       no key word · **Close** — no Retry and no choose again: any scope
+       meets the same refusal;
+     - **failed** — "! Copy failed: {job.error}" ("! Copy failed" in no
+       words) · "Nothing was copied" (· "3 failed": copied 0 with
+       failures is failed, never already yours) · no place, unless Retry
+       would add elsewhere · `c choose again` · **Retry**;
+     - **cancelled** — `× Cancelled` (× DIM, the words TEXT BOLD) · "1
+       copied · the other 2 stay on Stage Peer B" / "Nothing was copied"
+       · In … where some copied · no key word · **Add again**, which
+       brings the choice back (it starts nothing);
+     - **nothing to copy** — "Nothing to copy" · "You have it all"; an
+       artist who only appears on the connected server's albums:
+       "Nothing of theirs to copy" · "Boukmanflow only appears on other
+       artists' albums there" · `c choose again` · **Close**;
+     - **a result this client cannot read** — "The copy finished" ·
+       **Close**.
+     **`c choose again`** (`App::keep_choose_again`,
+     `KeepView::choose_again`) stands only where the subject offers two
+     or more choices, and never after a refusal or a cancel: it brings
+     the choice back (phase Choose) with the dot on the scope the
+     outcome was for and the place line reading the account's place now.
+     **Retry** starts the same copy again — the job's own recommendation
+     and scope (`App::keep_again`); where a wider copy speaks for the
+     choice (clause 109), the choice's own copy of the window's subject.
+     **Retrying**: the outcome holds, its key words go (their keys
+     inert) and the primary goes off, `[ Retrying… ]` (`KeepUi.frozen`).
+     Keys: Enter the primary; the key words drawn; Esc closes.
 
 **Marks, lookups and the poll**
 
@@ -1166,49 +1363,63 @@ with `{{ARTIST}}/{{ALBUM}}`.
      where it was walked, nothing where its listing failed (unless the run
      stopped there), already yours where only-missing left it out, nothing
      for an album the artist only guests on or one the walk never reached.
-116. **The jobs indicator** — the right edge of the verbs line (it ends at
-     the room's right edge less its gutter: cell 96 at 100 columns), in
-     **words, never a count** (the 2026-10-19 log): **copying…** (ACCENT)
-     while a copy is live (queued, running, stopping), **· ! failed** (` ·
-     ` DIM, `! failed` GOLD) while one failed — its state failed, or it
-     copied nothing and something failed, and no newer job of it stands
-     (a stopped copy is done: its row and tile say "! stopped") — and
-     hidden when neither, or while the copy gate is closed; on both tabs.
-     **The squeeze**: the 47-cell room — the room whose table gives ALBUM
-     up, the queue open — draws the indicator as its glyphs in **every**
+116. **The jobs indicator** — the right edge of the verbs line (it ends
+     at the room's right edge less its gutter: cell 96 at 100 columns),
+     in **words, never a count** (the 2026-10-19 log): **copying…**
+     (ACCENT) while a copy is live (queued, running, stopping), **· !
+     failed** (` · ` DIM, `! failed` GOLD) while one failed — its state
+     failed, or it copied nothing and something failed, and no newer job
+     of it stands (a stopped copy is done: its row and tile say "!
+     stopped") — and hidden when neither, while the copy gate is closed,
+     and **while Keep a copy or the Copies list is open** — the window
+     is the copy's one voice (2026-10-24); on both tabs. **The
+     squeeze**: the 47-cell room — the room whose table gives ALBUM up,
+     the queue open — draws the indicator as its glyphs in **every**
      state, whatever the words would fit: **↓** while live, **↓ · !**
      live and failed, **!** failed only (legacy `v`, `v · !`, `!`); a
-     wider room draws the words, squeezed too where the verbs would leave
-     them too little; never clipped; the verbs give way from their tail
-     only if even the glyphs do not fit. Click it, or **`C`** anywhere in
-     the room while the copy gate holds, to open the Copies modal (`C`
-     stays the queue panel's clear while the queue has the keys); hover
-     brightens it whole; its tooltip "Copies — C" (squeezed: "copying… · !
-     failed — Copies — C"). `App::keep_indicator` → `JobsIndicator`.
+     wider room draws the words, squeezed too where the verbs would
+     leave them too little; never clipped; the verbs give way from their
+     tail only if even the glyphs do not fit. Click it, or **`C`**
+     anywhere in the room while the copy gate holds, to open the Copies
+     modal (`C` stays the queue panel's clear while the queue has the
+     keys); hover brightens it whole; its tooltip "Copies — C"
+     (squeezed: "copying… · ! failed — Copies — C").
+     `App::keep_indicator` → `JobsIndicator`.
 
 **The Copies modal**
 
-117. **Copies** — the terminal's jobs tray (`App::copies_rows`): the kit's
-     neutral modal, **76 cells wide**, centred over the whole frame, its
-     height following its rows up to **22** (it fits 100 × 24 with the tab
-     bar above and the tips below); the list scrolls in a `ListView` with
+117. **Copies** — the terminal's jobs tray (`App::copies_rows`): the
+     kit's neutral modal, **76 cells wide**, placed as Keep a copy is
+     (clause 106, `window_rect`, since 2026-10-24): centred in the room
+     with the band cleared (x 19–94 with the queue folded), over the
+     whole frame with the queue open; anchored as if 17 rows (row 6 at
+     100 × 30, row 3 at 100 × 24), growing down to the room's last row,
+     then rising toward row 1, its height following its rows up to
+     **22** — Keep a copy and Copies open in the same place at the same
+     width, no jump between them; the list scrolls in a `ListView` with
      `▲█▼` on its right border, the header, the rule and Clear finished
-     never scrolling. Title **Copies** and `[X]`; the kit table **TITLE**
-     31 · **FROM** 12 · **STATE** 20 · `[X]` 3. **Each copy takes two
-     rows**: TITLE (the song; the album; "every album by {artist}" —
-     `CopyTitle`), FROM (the server it copies from), STATE — the ten-cell
-     bar and % while running (all DIM, no %, before an estimate), else one
-     word: ◷ waiting · stopping… · ! failed · ! stopped · ! refused · ✓ in
-     your collection · ✓ already yours · skipped · nothing to copy · ×
-     cancelled — and `[X]` on a live row (DIM, DANGER on hover, "Cancel
-     this copy — x"; none while stopping); then a DIM second row opening
-     with "song" or "album" ("only the albums you don't have" for an
-     only-missing copy; an artist copy opens with neither), then the step,
-     the reason or the outcome, and at its right the row's action in
-     ACCENT text: **Retry · Copy again · Start again · Play your copy** —
-     none after a refusal. **Order**: running, then waiting in slot order,
-     then the GOLD rows (failed, stopped, refused), then the finished;
-     newest first in each; a finished copy that a newer one of the same
+     never scrolling. Title **Copies** and `[X]`; the kit table
+     **TITLE** 31 · **FROM** 12 · **STATE** 20 · `[X]` 3. **Each copy
+     takes two rows**: TITLE (the song; the album; "every album by
+     {artist}" — `CopyTitle`), FROM (the server it copies from), STATE —
+     the ten-cell bar and % while running (all DIM, no %, before an
+     estimate), else one word: ◷ waiting · stopping… · ! failed · !
+     stopped · ! refused · ✓ in your collection · ✓ already yours ·
+     skipped · nothing to copy · × cancelled — and `[X]` on a live row
+     (DIM, DANGER on hover, "Cancel this copy — x"; none while
+     stopping); then a DIM second row opening with "song" or "album"
+     ("only the albums you don't have" for an only-missing copy; an
+     artist copy opens with neither), then the step, the reason or the
+     outcome, and at its right the row's action in ACCENT text: **Retry
+     · Add again · Play your copy** — Retry for a failure, a stop or a
+     gap (one word since 2026-10-24: a gap's Retry takes only the gaps),
+     Add again after a cancel; none after a refusal, and **none for a
+     file in the way** (`App::copies_action`: its Retry would send the
+     place the copy ran with and meet the same file — Keep a copy's "a
+     file in the way", clause 110, is the way to change the place and
+     retry). **Order**: running, then waiting in slot order, then the
+     GOLD rows (failed, stopped, refused), then the finished; newest
+     first in each; a finished copy that a newer one of the same
      plug-in, key, scope and server supersedes leaves (a retried failure
      is old news); the same album from two servers is two rows, FROM
      telling them apart. **Only Discover's copies**: the copy plug-in's
@@ -1216,52 +1427,57 @@ with `{{ARTIST}}/{{ALBUM}}`.
      browser, listed by the same `GET …/plugin-jobs`) or a scope this
      client does not know never lists, lights the indicator, keeps the
      poll going or words a note: nothing here could retry it (never
-     Folder, clause 104), and no action stands that would do nothing. **Clear finished** — a DIM text button
-     bottom-right, hidden while no row is finished — drops the finished
-     rows on the server (`ApiCmd::JobsClear`); live rows stay. **Keys**: ↑ ↓
-     rows (the wheel scrolls), Enter the held row's action, `x` cancels
-     the held running or waiting copy, `X` clears finished, Esc closes —
-     copies keep running. **States**: asking — "asking your server for
-     copies…" (ACCENT) under the header; the first ask failed —
-     "couldn't load copies: your server didn't answer" (GOLD) with `[ Try
-     again ]` (Enter); a refresh failed — the last rows stay, "couldn't
-     refresh: your server didn't answer · next try in 8 s" (GOLD;
+     Folder, clause 104), and no action stands that would do nothing.
+     **Clear finished** — a DIM text button bottom-right, hidden while
+     no row is finished — drops the finished rows on the server
+     (`ApiCmd::JobsClear`); live rows stay. **Keys**: ↑ ↓ rows (the
+     wheel scrolls), Enter the held row's action, `x` cancels the held
+     running or waiting copy, `X` clears finished, Esc closes — copies
+     keep running. **States**: asking — "asking your server for copies…"
+     (ACCENT) under the header; the first ask failed — "couldn't load
+     copies: your server didn't answer" (GOLD) with `[ Try again ]`
+     (Enter); a refresh failed — the last rows stay, "couldn't refresh:
+     your server didn't answer · next try in 8 s" (GOLD;
      `App::keep_next_try`) with Try again beside Clear finished; empty —
      "Nothing copying." / "Start one with c on a connected server's song
-     or album."; **a cancel that lost the race** — the list refreshes, the
-     row shows its outcome and a TEXT note bottom-left says "Borrowed Tapes
-     had already finished, nothing to cancel" (`KeepNote::TooLate`), gone
-     on the next key.
-     **As built** (`gui::keep::draw_copies`, 2026-10-20): the title's
-     `[X]` stands over the rows' `[X]` column, a cell in from the border;
-     the header and its rule DIM; a running copy's STATE is the kit's bar
-     (▰ OK, ▱ and the % DIM; the legacy console says "52% done" / "no
-     estimate yet"), a copy whose cancel was asked — the server's
+     or album."; **a cancel that lost the race** — the list refreshes,
+     the row shows its outcome and a TEXT note bottom-left says
+     "Borrowed Tapes had already finished, nothing to cancel"
+     (`KeepNote::TooLate`), gone on the next key. **As built**
+     (`gui::keep::draw_copies`, 2026-10-20): the title's `[X]` stands
+     over the rows' `[X]` column, a cell in from the border; the header
+     and its rule DIM; a running copy's STATE is the kit's bar (▰ OK, ▱
+     and the % DIM; the legacy console says "52% done" / "no estimate
+     yet"), a copy whose cancel was asked — the server's
      `cancelRequested` or this player's ask still out — "stopping…" with
-     no `[X]` and its second row "stopping after {step}"; a copy's second
-     row by its outcome — the step (or "copying…"), "waiting for a free
-     slot", where a song landed by its folder ("copies › Color Out › Peer
-     Sessions"), a many-song copy's counts from `result.counts` (copied ·
-     already yours · failed · albums left out, DIM), "you had it, nothing
-     copied" ("you had them all, …" for many), "a file already sits at
-     that path", "nothing of theirs to copy" / "you have it all", the
-     server's error words or "{n} songs failed, none copied" in GOLD, the
-     stop's reason in GOLD ("{server}'s transfer limit stopped it", "…
-     was too busy to send more", "… went away") then "· {n} copied" DIM,
-     the refusal in GOLD, "cancelled · {n} copied"; the action words
-     right-aligned to the table's 72nd cell. **Copy again** stands only
-     where a gap is left — a song failed, an album's listing failed, songs
-     not reached (`App::copies_action`); a many-song copy that took
-     everything offers none. The held copy wears the selection slab across
-     both rows and every word in it; ↓ or ↑ picks the hand up on the first
-     copy and the list reveals it; the wheel and the bar's arrows scroll a
-     copy a notch; a click on an action or an `[X]` acts and the room
+     no `[X]` and its second row "stopping after {step}"; a copy's
+     second row by its outcome — the step (or "copying…"), "waiting for
+     a free slot", where a song landed by its folder ("copies › Color
+     Out › Peer Sessions"), a many-song copy's counts from
+     `result.counts` (copied · already yours · failed · albums left out,
+     DIM), "you had it, nothing copied" ("you had them all, …" for
+     many), "a file already sits at that path", "nothing of theirs to
+     copy" / "you have it all", the server's error words or "{n} songs
+     failed, none copied" in GOLD, the stop's reason in GOLD
+     ("{server}'s transfer limit stopped it", "… was too busy to send
+     more", "… went away") then "· {n} copied" DIM, the refusal in GOLD,
+     "cancelled · {n} copied"; the action words right-aligned to the
+     table's 72nd cell. **A gap's Retry** stands only where a gap is
+     left — a song failed, an album's listing failed, songs not reached
+     (`App::copies_action`); a many-song copy that took everything
+     offers none. The held copy wears the selection slab across both
+     rows and every word in it; ↓ or ↑ picks the hand up on the first
+     copy and the list reveals it; the wheel and the bar's arrows scroll
+     a copy a notch; a click on an action or an `[X]` acts and the room
      beneath is inert. Enter with nothing held after a failed ask asks
-     again. A refused Retry, a cancel or a clear the server refused leave
-     their words GOLD in the same bottom-left slot ("couldn't start: …",
-     "couldn't cancel: …", "couldn't clear: …"). "· next try in N s"
-     follows a refresh's error only while a copy is live — the poll runs
-     only then.
+     again. A refused Retry, a cancel or a clear the server refused
+     leave their words GOLD in the same bottom-left slot ("couldn't
+     start: …", "couldn't cancel: …", "couldn't clear: …"). "· next try
+     in N s" follows a refresh's error only while a copy is live — the
+     poll runs only then. The verbs line's indicator is hidden while the
+     list is open (clause 116). Its title row and `[X]` stay: the list
+     takes Keep a copy's place and band, not its chrome (the log,
+     2026-10-24).
 
 **Notes and tips**
 
@@ -1278,60 +1494,73 @@ with `{{ARTIST}}/{{ALBUM}}`.
      whole note fits; server words that still overflow clip with `…` (a
      trailing space trimmed first) and stay whole in the Copies list and
      the Keep modal. The next note replaces it, as every App message does.
+     **A start whose window closed before it answered** (Esc on
+     `[ Adding… ]` or `[ Retrying… ]`) lands all the same, and the note
+     says what came of it (`App::keep_take_landed`): its copy live,
+     "copying Borrowed Tapes…"; refused, "couldn't start: {the server's
+     words}" (GOLD; a 403's too — the gate is asked again, clause 147);
+     its end, later, as any copy's.
 119. **Tips** name a key only where it works: `c` only on a connected
-     server's row, tile or sheet while the copy gate holds, `C` only while
-     the indicator stands. Held connected-server row: "Enter play from
-     here · a queue · N next · P play now · c keep a copy · m actions ·
-     Esc done" ("← → tabs" gives way, so the line stays inside 99 cells;
-     ← → still switch tabs). Lit connected-server tile: "← → albums · Enter
-     play the album · + a queue · c keep a copy · m more · ↓ songs · Esc
-     done" — with the copy gate closed the same without "c keep a copy"
-     (the tile's list stands whatever the gate). The sheet on a connected
-     server's song: "↑ ↓ rows · Enter
-     choose · c keep a copy · Esc close" (no rating keys). The tile's list:
-     "↑ ↓ rows · Enter pick · a queue · c keep a copy · Esc close". At rest
-     with the indicator standing: "↓ pick an album · ← → tabs · w window ·
-     e more options · G new seeds · C copies". The Keep modal: "↑ ↓ rows ·
-     Space or Enter pick · Enter on Add song starts · d where files land ·
-     Esc close" (the choice; the verb follows it; where a locale's line
-     outgrows 99 cells, "· d where files land" gives way first) · "Esc close" (starting, stopping, a
-     refusal, nothing to copy) · "x cancel the copy · Esc close — it stays
-     queued" / "… — the copy keeps running" · "Enter play your copy · ↑ ↓
-     buttons · Esc close" · "Enter copy again · …" · "Enter retry · …" ·
-     "Enter start again · …" · "Enter close · Esc close" (already yours;
-     nowhere, clause 147) · "↑ ↓ rows · Space or Enter pick · d where files
-     land · Esc close" (another server copying). Where copies land's, by
-     the hand: clause 143.
-     The Copies modal, by the held row: "↑ ↓ rows · x cancel · X clear
-     finished · Esc close" (running or waiting) · "↑ ↓ rows · Enter retry ·
-     X clear finished · Esc close" (failed or stopped) · "↑ ↓ rows · Enter
-     play your copy · X clear finished · Esc close" (a kept song) · "↑ ↓
-     rows · X clear finished · Esc close" (refused) · "Esc close"
-     (asking, an error, empty) — composed of its parts (`gui.tips.
-     discover_copies_*`), the verb only for the held row's action and "X
-     clear finished" only while a finished copy is listed. Open
-     elsewhere's list: "↑ ↓ rows · Enter open · Esc back" over links,
-     "Enter try again · Esc back" after a failure, "Esc back" while it
-     asks or has none. With the copy gate closed every tip reads as
-     before.
+     server's row, tile or sheet while the copy gate holds, `C` only
+     while the indicator stands. Held connected-server row: "Enter play
+     from here · a queue · N next · P play now · c keep a copy · m
+     actions · Esc done" ("← → tabs" gives way, so the line stays inside
+     99 cells; ← → still switch tabs). Lit connected-server tile: "← →
+     albums · Enter play the album · + a queue · c keep a copy · m more
+     · ↓ songs · Esc done" — with the copy gate closed the same without
+     "c keep a copy" (the tile's list stands whatever the gate). The
+     sheet on a connected server's song: "↑ ↓ rows · Enter choose · c
+     keep a copy · Esc close" (no rating keys). The tile's list: "↑ ↓
+     rows · Enter pick · a queue · c keep a copy · Esc close". At rest
+     with the indicator standing: "↓ pick an album · ← → tabs · w window
+     · e more options · G new seeds · C copies". Keep a copy, by its
+     state (2026-10-24): choosing with two or more choices — a refused
+     start and the 409 included — "↑ ↓ choose · Enter starts · d where
+     files land · Esc close"; with one choice "Enter starts · d where
+     files land · Esc close"; another server copying "↑ ↓ choose · x
+     cancel that copy · d where files land · Esc close" ("↑ ↓ choose"
+     only with two or more choices, "x cancel that copy" only while its
+     word stands); starting and retrying "Esc close"; queued or running
+     "Enter close · x cancel the copy · Esc close — the copy keeps
+     going"; stopping and a right gone (clause 147) "Enter close · Esc
+     close"; ended, composed — "Enter {verb}" (play your copy · retry ·
+     close · add again), then the key words as drawn, then "Esc close",
+     joined " · ": "Enter play your copy · a add to queue · c choose
+     again · Esc close"; where a locale's line outgrows 99 cells "d
+     where files land" gives way first, then "c choose again". Where
+     copies land's, by the hand: clause 143. The Copies modal, by the
+     held row: "↑ ↓ rows · x cancel · X clear finished · Esc close"
+     (running or waiting) · "↑ ↓ rows · Enter retry · X clear finished ·
+     Esc close" (failed, stopped, or a gap left) · "↑ ↓ rows · Enter add
+     again · X clear finished · Esc close" (cancelled) · "↑ ↓ rows ·
+     Enter play your copy · X clear finished · Esc close" (a kept song)
+     · "↑ ↓ rows · X clear finished · Esc close" (refused) · "Esc close"
+     (asking, an error, empty) — composed of its parts
+     (`gui.tips. discover_copies_*`), the verb only for the held row's
+     action and "X clear finished" only while a finished copy is listed.
+     Open elsewhere's list: "↑ ↓ rows · Enter open · Esc back" over
+     links, "Enter try again · Esc back" after a failure, "Esc back"
+     while it asks or has none. With the copy gate closed every tip
+     reads as before.
 
 **Rules every surface here keeps**
 
 120. **"Done" is not "kept"** (`PluginJob::outcome` → `JobOutcome`, the
-     webapp's `jobRowState` with its 2026-10-19 fixes). In your collection
-     only when something was copied: a song's `result.copied`, or an album
-     or artist copy's `counts.copied > 0` with `stopped` null. A done many-
-     song copy with `stopped` quota / busy / peer is **stopped** with its
-     reason (Retry), with `refused` **refused** (no Retry), with
-     `cancelled` (the cancel that landed as the run ended) **cancelled**
-     (Start again), and with a word this client does not know **stopped**
-     in neutral words ("the copy stopped before it finished", Retry) —
-     **any** stop word keeps it out of your collection; **copied 0 with
-     a failure is failed**, never "already yours"; copied 0 with skips (or
-     its albums left out as owned) is **already yours**; nothing at all is
-     **nothing to copy** — an artist who only guests there says so. A song
-     copy that failed "does not allow copies" is **refused**. Every number
-     comes from `result.counts`, never the per-song lists (capped at 500).
+     webapp's `jobRowState` with its 2026-10-19 fixes). In your
+     collection only when something was copied: a song's
+     `result.copied`, or an album or artist copy's `counts.copied > 0`
+     with `stopped` null. A done many- song copy with `stopped` quota /
+     busy / peer is **stopped** with its reason (Retry), with `refused`
+     **refused** (no Retry), with `cancelled` (the cancel that landed as
+     the run ended) **cancelled** (Add again), and with a word this
+     client does not know **stopped** in neutral words ("the copy
+     stopped before it finished", Retry) — **any** stop word keeps it
+     out of your collection; **copied 0 with a failure is failed**,
+     never "already yours"; copied 0 with skips (or its albums left out
+     as owned) is **already yours**; nothing at all is **nothing to
+     copy** — an artist who only guests there says so. A song copy that
+     failed "does not allow copies" is **refused**. Every number comes
+     from `result.counts`, never the per-song lists (capped at 500).
 121. **Another server's copy** — clause 115's: album and artist keys
      ignore the server; the room and the modal never take one server's
      album or artist copy for another's.
@@ -1341,16 +1570,20 @@ with `{{ARTIST}}/{{ALBUM}}`.
 123. **A kept song or album stays** on the Connected servers tab for up to
      a minute (the server's novelty cache), marked ✓ (clause 113), until
      an ask no longer lists it.
-124. **Glyphs** live in code behind `legacy_conhost`, the words in the ten
-     locales. On the legacy console: the LEAD's `>` for `▸`, `v` for `↓`,
-     `~` for `◷`, `+` for `✓`, `x` for `×`, `»` for a clipped cell's `…`
-     and "..." for a word's; the tile words "~ waiting", "copying...",
-     "stopping...", "+ kept", "+ yours", "x cancelled"; the indicator keeps
-     its words ("copying... · ! failed", squeezed "v · !"); the verbs
-     line's `⇄` drops; the modals' `+ - |` frame, `(*)` radios, `[x]`
-     checked, `>` for `›`, `*` for `•`, the header cover as the ▀ mosaic,
-     and the bar row in words ("52% done"; "no estimate yet" while
-     queued).
+124. **Glyphs** live in code behind `legacy_conhost`, the words in the
+     ten locales. On the legacy console: the LEAD's `>` for `▸`, `v` for
+     `↓`, `~` for `◷`, `+` for `✓`, `x` for `×`, `»` for a clipped
+     cell's `…` and "..." for a word's; the tile words "~ waiting",
+     "copying...", "stopping...", "+ kept", "+ yours", "x cancelled";
+     the indicator keeps its words ("copying... · ! failed", squeezed "v
+     · !"); the verbs line's `⇄` drops; the modals' `+ - |` frame — Keep
+     a copy's title and footer on it (`+- Keep a copy ---+`,
+     `+--- Esc close -+`) — `(*)` radios, `[x]` ticked, ` > ` between
+     crumbs, `<artist>` around a slot's word, `*` for `•`, `+` for a
+     headline's ✓ and `x` for its ×, "..." for every `…` ("[ Adding...
+     ]", "Stopping..."), no cover in Keep a copy, and the bar row in
+     words ("52% done"; "no estimate yet"; queued "no estimate yet ·
+     starts on its own").
 125. **Over pixels**: every new overlay — the Keep and Copies modals, the
      tile's list, the links list — registers its footprint, so a cover it
      touches draws as the mosaic (docs/ui-kit.md, Modal).
@@ -1430,15 +1663,18 @@ library default, its template ARTIST / YEAR - ALBUM) and **copies**
 view, the save, the folders) and the data layer's `fold_base`,
 `layout_lead`, `start_layout_at` and `validate_layout`.
 
-142. **The picker** — `[ Change… ]` or `d` (clause 105) opens **Where
-     copies land** on the place in force: its own kit modal, ACCENT, 80
-     cells wide (at most the area less 4), centred over the whole frame,
-     anchored as if 22 rows (its top on row 4 at 100 × 30, row 1 at 100 ×
-     24) and growing downward. Keep a copy is not drawn while it is open;
-     the room beneath is inert, and the modal registers as an overlay, so
-     the covers it touches draw as the mosaic. Esc (the folder list
-     closed) or `[X]` (DIM, "Back — Esc") go back to Keep a copy —
-     nothing saved, the hand on `[ Change… ]`. No Cancel button.
+142. **The picker** — `d` or a click on the key word `d change` (clause
+     105), in exactly the states that draw it (every choosing state and
+     the "a file in the way" outcome), opens **Where copies land** on
+     the place in force: its own kit modal, ACCENT, 80 cells wide (at
+     most the area less 4), centred over the whole frame, anchored as if
+     22 rows (its top on row 4 at 100 × 30, row 1 at 100 × 24) and
+     growing downward. Keep a copy — its band and its window — is not
+     drawn while it is open; the room beneath is inert, and the modal
+     registers as an overlay, so the covers it touches draw as the
+     mosaic. Esc (the folder list closed) or `[X]` (DIM, "Back — Esc")
+     go back to Keep a copy as it was — nothing saved, the dot where it
+     was. No Cancel button.
 143. **Its rows**, from its left border — labels col 2, values col 12
      (two past a wider locale's label), the radios' labels and Custom's
      field col 16, the last content cell col 77. **The header**: "Where
@@ -1639,42 +1875,48 @@ view, the save, the folders) and the data layer's `fold_base`,
      open · Esc close the list" · "← → buttons · Enter save|use the
      library default · Esc back" ("← → buttons · Esc back" on Save while
      it is off) · "Esc back" while saving.
-144. **Save** — `PUT …/collection/destination` (`ApiCmd::DestinationSave`)
-     with `{destination: {vpath, base: "", layout}}` — the layout the
-     picker holds, Custom's text or the preset, never a base folder (one
-     set elsewhere went into the layout as it opened; a preset chosen
-     over it leaves it behind) — or `{destination: null}` where Use the
-     library default was pressed while the picker was open and the fields
-     are the default at Save — a step away and back, or a radio picked
-     again, keeps it (the webapp's `reset`). **Save is on** only while
-     something changed (the webapp's `dmPickerDirty`: another library or
-     layout than the one it opened on — a base folder folded into the
-     layout as it opened is no edit; a preset over a folder a layout
-     reads as a variable is — or Use the library default pressed over a
-     place saved for the account), the layout passes the validator
-     (`validate_layout`, the server's `validateLayout` mirrored: empty,
-     over 500 characters, a stray brace, a variable the view does not
-     list, a control character, a leading separator, then the path the
-     server's sample renders — `..`, `~` or `$HOME`, a drive letter, no
-     folder at all) and the field holds no folder a layout cannot
-     (clause 143); the words stand under the field as it is typed, so a
-     layout the server would refuse never leaves here — the server's own
-     words come for what only it can know (a library the account lost).
-     While a save is out "Saving…" (ACCENT, the phone's word) stands
-     right-aligned in the button row, no buttons, the hand down, no click
-     or key edits, the frame its height; Esc still goes back and the
-     answer still folds in. **The answer is its
-     own picker's** (by the save's seq, as the webapp's `m.picker === k`):
-     a picker opened again meanwhile is no "saving…", its keys work, its
-     Save supersedes the one out, and the old answer never closes or fills
-     it; a refusal whose picker is gone is the status line's, Error,
-     "couldn't save: {the server's words}" fitted to its slot. **Order**:
-     every answer lands on its own thread, so the gate's view is stamped
-     by the ask that wrote it — a read, the gate's ask or a start's 409
-     sent before a save that answered draws nothing. **200**: its view
-     replaces the gate's (`Event::DestinationSaved`, whichever picker sent
-     it) and its picker closes onto Keep a copy — the new LANDS IN, "saved
-     for your account", the hand on `[ Change… ]`. **A refusal** (400, 403,
+144. **Save** — `PUT …/collection/destination`
+     (`ApiCmd::DestinationSave`) with
+     `{destination: {vpath, base: "", layout}}` — the layout the picker
+     holds, Custom's text or the preset, never a base folder (one set
+     elsewhere went into the layout as it opened; a preset chosen over
+     it leaves it behind) — or `{destination: null}` where Use the
+     library default was pressed while the picker was open and the
+     fields are the default at Save — a step away and back, or a radio
+     picked again, keeps it (the webapp's `reset`). **Save is on** only
+     while something changed (the webapp's `dmPickerDirty`: another
+     library or layout than the one it opened on — a base folder folded
+     into the layout as it opened is no edit; a preset over a folder a
+     layout reads as a variable is — or Use the library default pressed
+     over a place saved for the account), the layout passes the
+     validator (`validate_layout`, the server's `validateLayout`
+     mirrored: empty, over 500 characters, a stray brace, a variable the
+     view does not list, a control character, a leading separator, then
+     the path the server's sample renders — `..`, `~` or `$HOME`, a
+     drive letter, no folder at all) and the field holds no folder a
+     layout cannot (clause 143); the words stand under the field as it
+     is typed, so a layout the server would refuse never leaves here —
+     the server's own words come for what only it can know (a library
+     the account lost). While a save is out "Saving…" (ACCENT, the
+     phone's word) stands right-aligned in the button row, no buttons,
+     the hand down, no click or key edits, the frame its height; Esc
+     still goes back and the answer still folds in. **The answer is its
+     own picker's** (by the save's seq, as the webapp's
+     `m.picker === k`): a picker opened again meanwhile is no "saving…",
+     its keys work, its Save supersedes the one out, and the old answer
+     never closes or fills it; a refusal whose picker is gone is the
+     status line's, Error, "couldn't save: {the server's words}" fitted
+     to its slot. **Order**: every answer lands on its own thread, so
+     the gate's view is stamped by the ask that wrote it — a read, the
+     gate's ask or a start's 409 sent before a save that answered draws
+     nothing. **200**: its view replaces the gate's
+     (`Event::DestinationSaved`, whichever picker sent it) and its
+     picker closes onto Keep a copy, the place line redrawn from the
+     saved place for the chosen scope — nothing else announces the save:
+     the path is the evidence (whose place it is is the picker's
+     header's to say, clause 105); in "a file in the way" (clause 110) a
+     saved place that differs from the one the copy ran with turns Close
+     into Retry, "Retry adds to …" under In. **A refusal** (400, 403,
      any other): GOLD, the server's words as sent — no prefix, as the
      webapp draws them — under the field (under the radios with a
      preset, above the folders button) — "destination: you cannot put
@@ -1684,15 +1926,15 @@ view, the save, the folders) and the data layer's `fold_base`,
      and Save stay; any edit clears the words.
 145. **A start sends the place it showed** — every `ApiCmd::JobStart`
      carries `destination` (`{vpath, base, layout}`, its `source`
-     dropped): Keep a copy's Add the place LANDS IN drew; the modal's
-     Retry and Copy again the account's place now, which the modal shows
-     first where it is not where the copy ran ("retry adds to …", clause
-     105 — the webapp's Retry and Add again); the Copies list's Retry,
-     Copy again and Start again, which show no place, the place the copy
-     ran with — its `params.destination`, else (a job from before the
-     pin) its `result.destination`, else the account's place — so a place
-     moved since is the server's 409, never a quiet landing somewhere the
-     list never showed. Never no place. The server pins it on the job; a
+     dropped): Keep a copy's Add the place its place line drew; the
+     window's Retry the account's place now, which the window shows
+     first where it is not where the copy ran ("Retry adds to …", clause
+     105 — the webapp's Retry and Add again); the Copies list's Retry
+     and Add again, which show no place, the place the copy ran with —
+     its `params.destination`, else (a job from before the pin) its
+     `result.destination`, else the account's place — so a place moved
+     since is the server's 409, never a quiet landing somewhere the list
+     never showed. Never no place. The server pins it on the job; a
      covering live job still answers `200 created: false` and is
      followed. **A server from before the key** (mStream before
      2026-10-21, its jobs route's strict body: Joi's 400 '"destination"
@@ -1702,27 +1944,52 @@ view, the save, the folders) and the data layer's `fold_base`,
      (`PluginFailure::DestinationChanged`, its `destination` the one in
      force) starts nothing: the gate's destination becomes the answer's
      at once (unless an answer to a later ask is drawn) and the view is
-     read again — a body with no `destination`, or one this client cannot
-     read, keeps what is drawn until the read answers (only an explicit
-     `null` is nowhere, clause 147); Keep a copy comes back on the
-     choice (`KeepStage::Refused`) with LANDS IN redrawn and one GOLD line
-     above the buttons, "where files land changed · check the path above
-     and add again"; Add stays, the hand back on the chosen radio. From
-     the Copies list the note reads "couldn't start: where files land
-     changed — retry it from Keep a copy" (on the spacer row while the
-     buttons would cut it) — where the modal's Retry says the place it
-     sends and starts at once. **Another account's 409** keeps its own words
-     (clause 108).
-147. **Nowhere** — a re-read or a 409 whose destination is `null`: Keep a
-     copy's choice gives way to TEXT "your account can't add files to
-     this server · copies are off", a blank and `[ Close ]` (ACCENT BOLD,
-     the primary) — 11 rows; tips "Enter close · Esc close"; the copy
-     gate closes (clause 101), so every way in is hidden.
-148. **The legacy console**: the `+ - |` frame, `(*)`, `>` for `›`, `<
-     >` around a slot's word, the caret `│`, "..." for `…` ("Saving...",
-     "[ Change... ]", "Start from an existing folder...", "Looking
-     up...", the help line's, the list's notes', the hint's); covers as
-     the mosaic.
+     read again — a body with no `destination`, or one this client
+     cannot read, keeps what is drawn until the read answers (only an
+     explicit `null` is nowhere, clause 147); Keep a copy comes back on
+     the choice (`KeepStage::Refused`) with the place line redrawn and
+     one GOLD line under it, "! Where files land changed · check the
+     path above and add again" (the phone's and the webapp's words, in
+     their sentence case since 2026-10-24); Add stays the primary, the
+     dot where it was. From the Copies list the note reads "couldn't
+     start: where files land changed — retry it from Keep a copy" (on
+     the spacer row while the buttons would cut it) — where the window's
+     Retry says the place it sends ("Retry adds to …") and starts at
+     once. **Another account's 409** keeps its own words (clause 108).
+147. **A right gone — one plain line** (`KeepStage::Off(OffWhy)`, since
+     2026-10-24; it was "Nowhere"). In the open window a right that goes
+     missing is never a GOLD refusal with Add still offered: the choice
+     gives way to one TEXT line, a blank and `[ Close ]` (the primary;
+     Enter or Esc closes) — 8 rows; tips "Enter close · Esc close" — the
+     line naming the first part of the gate (clause 101) that no longer
+     holds, the webapp's and the phone's three lines: **uploads**
+     (`OffWhy::Uploads` — the upload right gone, a re-read or a 409
+     whose destination is `null`, a 403 at start whose words name
+     uploading, "Uploading Disabled", ASCII, any case) "Your account
+     can't add files to this server · copies are off"; **jobs** (`Jobs`
+     — the listing's `jobs.allowed` false, any other 403 at start) "Your
+     account can't start copies on this server"; **the plug-in**
+     (`Plugin` — the listing no longer names the copy plug-in or the
+     chosen scope, or failed to load) "Copies from connected servers are
+     off on this server right now". A 403 or a 404 at start asks the
+     gate again (`keep_ask_gate`) — from the Copies list too — and a 404
+     reads as a refusal (clause 108) until the answer confirms the
+     plug-in gone. The check (`keep_lost`: the upload right, jobs, the
+     plug-in and its scope, a destination that names a place, in that
+     order) runs on every view and replaces the choosing stages — the
+     choice, a refusal, a 403's line — and **an ended copy whose primary
+     would start a copy again** (Retry, Add again: it would start
+     nothing now); a live copy keeps showing, and so does an ended one
+     whose primary plays or closes; a gate answer that holds again
+     brings a gate's line back to the choice or the outcome, a 403's
+     line stays. A gate that no
+     longer holds hides every way in (clause 101); a 403's line, which
+     the gate's answer need not confirm, is this window's alone.
+148. **The legacy console**: the `+ - |` frame, `(*)`, `>` for `›`,
+     `< >` around a slot's word, the caret `│`, "..." for `…`
+     ("Saving...", "Start from an existing folder...", "Looking up...",
+     the help line's, the list's notes', the hint's); covers as the
+     mosaic.
 
 ## Wording
 
@@ -1808,32 +2075,37 @@ translations can be carried over). Plural families end `_*`.
 
 | String | Key |
 |---|---|
-| Keep a copy… · Open elsewhere… (the sheet's rows; the DIM `c` after the first is code) · from %{server} · online (its badge row, the Keep modal's header) | `gui.act.keep_copy` · `open_elsewhere` · `from_server` · `online` |
+| Keep a copy… · Open elsewhere… (the sheet's rows; the DIM `c` after the first is code) · from %{server} · online (its badge row; "from %{server}" also ends Keep a copy's byline) | `gui.act.keep_copy` · `open_elsewhere` · `from_server` · `online` |
 | Play album · Queue album · Open on %{server} (the tile's list; Keep a copy… is `gui.act.keep_copy`) | `gui.discover.tile_play` · `tile_queue` · `tile_open_on` |
-| Keep a copy (the modal's title) · What · Lands in (uppercased in code) | `gui.discover.keep.title` · `what` · `lands_in` |
-| This song · Album · Every album by %{artist} · Only the albums you don't have | `gui.discover.keep.song` · `album` · `artist` · `only_missing` |
-| %{count} songs · %{count} albums · you have %{count} (the sizes) | `gui.discover.keep.songs_*` · `albums_*` · `you_have_*` |
-| Add song · Add album · Add artist · Add %{count} albums · Cancel · Close · Cancel copy · Retry · Copy again · Start again · Add to queue · Play your copy | `gui.discover.keep.add_song` · `add_album` · `add_artist` · `add_missing_*` · `cancel` · `close` · `cancel_copy` · `retry` · `copy_again` · `start_again` · `add_to_queue` · `play_copy` |
-| starting… · couldn't start: %{words} · your server didn't answer (a start's words when it did not) | `gui.discover.keep.starting` · `refused_start` · `no_answer` |
-| %{other} is already copying this album — you can add %{server}'s once it ends · … these albums … (an artist copy) | `gui.discover.keep.other_album` · `other_artist` |
-| waiting for a free slot · starts on its own when the copy ahead ends · copying… (a running copy's step when the plug-in names none) · stopping… · no estimate yet · %{pct}% done (the legacy console's bar row) | `gui.discover.keep.waiting` · `waiting_sub` · `copying` · `stopping` · `no_estimate` · `pct_done` |
+| Keep a copy (the border title) · Esc close · Esc close · the copy keeps going (the bottom border; the second while this window's copy is queued or running — it begins with the first, whose cells are the button) | `gui.discover.keep.title` · `esc_close` · `esc_close_going` |
+| This song · Album · Every album by %{artist} · Only the %{count} album(s) you don't have (the box, its count) · Only the albums you don't have (the box where only a copy of it that still wants the user keeps it: no count to say, clause 107) | `gui.discover.keep.song` · `album` · `artist` · `only_missing_*` · `only_missing` |
+| Files go to · Into · In (the place line's lead words, clause 105; Retry adds to is `gui.discover.dest.retry_adds_to`) | `gui.discover.keep.goes_to` · `into` · `in_place` |
+| Add song · Add album · %{count} songs (composed "Add album · 3 songs" in code) · Add %{count} album(s) · Add every album · Add the albums you don't have (the box ticked with no count to say — the phone's `discoverKeepAddMissing`; es, fr, pt and ru say "the missing albums", their phone wording passing the primary's 34 cells, de as the phone) · Close · Retry · Add again · Play your copy · Adding… · Retrying… (the one primary; the last two while it is off) | `gui.discover.keep.add_song` · `add_album` · `songs_*` · `add_albums_*` · `add_every` · `add_missing` · `close` · `retry` · `add_again` · `play_copy` · `adding` · `retrying` |
+| d change · a add to queue · c choose again · x cancel copy · x cancel that copy (the key words: each begins with its key, which never translates) | `gui.discover.keep.key_change` · `key_queue` · `key_choose` · `key_cancel` · `key_cancel_other` |
+| Couldn't start: %{words} · your server didn't answer (a start's words when it did not) · Only %{server}'s admin can change this. (a refusal's muted line) | `gui.discover.keep.refused_start` · `no_answer` · `refused_admin` |
+| Copying from %{server} · Add from %{server} returns when that copy ends (another server's live copy, clause 108) | `gui.discover.keep.other_title` · `other_sub` |
+| Waiting for a free slot · starts on its own (the queued bar's tail) · Copying (the headline, the step after it when the plug-in names one) · Stopping… · no estimate yet · %{pct}% done (the legacy console's bar row) | `gui.discover.keep.waiting` · `waiting_sub` · `copying` · `stopping` · `no_estimate` · `pct_done` |
 | %{count} copied · %{count} already yours · %{count} failed · %{count} not copied · %{count} albums left out | `gui.discover.keep.copied_*` · `owned_*` · `failed_*` · `not_copied_*` · `left_out_*` |
-| in your collection · Copy again takes only the gaps · already yours · your library already has this song · … these songs · nothing was copied | `gui.discover.keep.kept` · `gaps` · `yours` · `yours_song` · `yours_many` · `nothing_copied` |
-| skipped · a file is already at that path · nothing was overwritten | `gui.discover.keep.exists` · `exists_sub` |
-| %{server}'s transfer limit stopped it · %{server} is serving too many streams right now · %{server} went away · the copy stopped before it finished (a stop word this client does not know, clause 120) · try again later · try again in a moment | `gui.discover.keep.stopped_quota` · `stopped_busy` · `stopped_peer` · `stopped_other` · `later` · `moment` |
+| In your collection · %{count} song(s) didn't copy · %{count} album(s) couldn't be listed (a gap's headline) · Copied from %{server} · with your album copy · with your copy of every album by %{artist} · with your copy of %{artist}'s missing albums (the subs that say whose copy spoke, all three written to follow another sub after ` · `; the code raises the first letter where one stands alone — "With your album copy") | `gui.discover.keep.kept` · `gap_songs_*` · `gap_albums_*` · `copied_from` · `with_album` · `with_artist` · `with_missing` |
+| Already yours · Your library already has this song · … these songs · Nothing was copied | `gui.discover.keep.yours` · `yours_song` · `yours_many` · `nothing_copied` |
+| Skipped · a file is already there · Nothing was overwritten | `gui.discover.keep.exists` · `exists_sub` |
+| %{server}'s transfer limit stopped it · %{server} is serving too many streams right now · %{server} went away · The copy stopped before it finished (a stop word this client does not know, clause 120) · try again later · try again in a moment | `gui.discover.keep.stopped_quota` · `stopped_busy` · `stopped_peer` · `stopped_other` · `later` · `moment` |
 | %{server} does not allow copies with your server's key · playing it still works | `gui.discover.keep.refused` · `refused_sub` |
-| copy failed: %{words} · the copy failed (a copy that failed in no words) | `gui.discover.keep.failed` · `failed_plain` |
-| cancelled · the other %{count} stay on %{server} | `gui.discover.keep.cancelled` · `stay_*` |
-| nothing to copy · you have it all · nothing of theirs to copy · %{artist} only appears on other artists' albums there · the copy finished (a result this client cannot read) | `gui.discover.keep.nothing` · `all_yours` · `nothing_theirs` · `appearances` · `finished` |
+| Copy failed: %{words} · Copy failed (a copy that failed in no words) | `gui.discover.keep.failed` · `failed_plain` |
+| Cancelled · the other %{count} stay on %{server} | `gui.discover.keep.cancelled` · `stay_*` |
+| Nothing to copy · You have it all · Nothing of theirs to copy · %{artist} only appears on other artists' albums there · The copy finished (a result this client cannot read) | `gui.discover.keep.nothing` · `all_yours` · `nothing_theirs` · `appearances` · `finished` |
+| Your account can't start copies on this server · Copies from connected servers are off on this server right now (a right gone, clause 147; the uploads line is `gui.discover.dest.nowhere`) · play your copy · retry · close · add again (the ended tips' verbs, clause 119) | `gui.discover.keep.off_jobs` · `off_plugin` · `tip_play` · `tip_retry` · `tip_close` · `tip_add_again` |
+| *(retired — deleted from the ten locale files — since 2026-10-24, Keep a copy calmer: `gui.discover.keep.what`, `lands_in`, `albums_*`, `you_have_*`, `add_artist`, `add_missing_*` (now `add_albums_*`), `cancel`, `cancel_copy`, `copy_again`, `start_again`, `add_to_queue`, `starting`, `other_album`, `other_artist`, `gaps`; `gui.discover.dest.source_user`, `source_default`, `change`, `again_adds_to`; the tips `discover_keep_queued`, `discover_keep_running`, `discover_keep_play`, `discover_keep_again`, `discover_keep_retry`, `discover_keep_start_again` and `discover_copies_again`)* | — |
 | waiting · copying… · stopping… · kept · yours · failed · stopped · refused · cancelled (the tile's state words and the LEAD's tooltip; the glyphs are code) | `gui.discover.mark.waiting` · `copying` · `stopping` · `kept` · `yours` · `failed` · `stopped` · `refused` · `cancelled` |
 | Copies (the modal's title) · copying… · failed (the indicator's words) · Copies — C (its tooltip) | `gui.discover.copies.title` · `live` · `failed` · `tip` |
-| Title · From · State (the header, uppercased in code) · every album by %{artist} · song · album · only the albums you don't have (a second row's opening word) · in your collection · skipped · nothing to copy · finished (the STATE words beside the marks' `waiting` · `failed` · `stopped` · `refused` · `cancelled` and the Keep modal's `yours` · `stopping`) · stopping after %{step} · you had it, nothing copied · you had them all, nothing copied · a file already sits at that path · %{count} songs failed, none copied · %{server} was too busy to send more (second rows, beside the Keep modal's `waiting` · `copying` · `copied_*` · `owned_*` · `failed_*` · `left_out_*` · `stopped_quota` · `stopped_peer` · `refused` · `cancelled` · `nothing_theirs` · `all_yours` · `failed_plain` · `finished`) · asking your server for copies… · couldn't load copies: %{words} · couldn't refresh: %{words} · next try in %{secs} s · Nothing copying. · Start one with c on a connected server's song or album. · Clear finished · Cancel this copy — x (the `[X]`'s tooltip) · %{title} had already finished, nothing to cancel · it had already finished, nothing to cancel · couldn't cancel: %{words} · couldn't clear: %{words} (a start refused from the list is the Keep modal's `refused_start`; Try again is `gui.discover.retry`; your server didn't answer is `gui.discover.keep.no_answer`) | `gui.discover.copies.col_title` · `col_from` · `col_state` · `every_album` · `kind_song` · `kind_album` · `kind_missing` · `kept` · `skipped` · `nothing` · `done` · `stopping_after` · `had_it` · `had_them` · `exists` · `failed_none_*` · `stopped_busy` · `asking` · `load_failed` · `refresh_failed` · `next_try` · `empty` · `empty_sub` · `clear` · `cancel_tip` · `too_late` · `too_late_plain` · `cancel_failed` · `clear_failed` |
+| stopping… (a stopping copy's STATE and second row) · copying… (a running copy's second row before the plug-in names a step) · cancelled (a cancelled copy's second row) · %{server}'s transfer limit stopped it (a quota stop's second row) — the list's own, as the window's `keep.stopping` / `copying` / `cancelled` / `stopped_quota` read before they went sentence case (since 2026-10-24; the marks' words and the indicator's `live` are shorter forms) | `gui.discover.copies.stopping` · `copying` · `cancelled` · `stopped_quota` |
+| Title · From · State (the header, uppercased in code) · every album by %{artist} · song · album · only the albums you don't have (a second row's opening word) · in your collection · skipped · nothing to copy · finished (the STATE words beside the marks' `waiting` · `failed` · `stopped` · `refused` · `cancelled` and the list's own `yours` and `stopping`) · stopping after %{step} · you had it, nothing copied · you had them all, nothing copied · a file already sits at that path · %{count} songs failed, none copied · %{server} was too busy to send more (second rows, beside the list's own `waiting` · `live` · `nothing_theirs` · `all_yours` · `failed_plain` · `finished` · `stopped_other` — lowercase, as they read before Keep a copy's went sentence case on 2026-10-24 — and the window's `copied_*` · `owned_*` · `failed_*` · `left_out_*` · `stopped_peer` · `refused`; the actions Retry · Add again · Play your copy are the window's `retry` · `add_again` · `play_copy`) · asking your server for copies… · couldn't load copies: %{words} · couldn't refresh: %{words} · next try in %{secs} s · Nothing copying. · Start one with c on a connected server's song or album. · Clear finished · Cancel this copy — x (the `[X]`'s tooltip) · %{title} had already finished, nothing to cancel · it had already finished, nothing to cancel · couldn't cancel: %{words} · couldn't clear: %{words} (a start refused from the list is the list's own `refused_start`, "couldn't start: %{words}"; Try again is `gui.discover.retry`; your server didn't answer is `gui.discover.keep.no_answer`) | `gui.discover.copies.col_title` · `col_from` · `col_state` · `every_album` · `kind_song` · `kind_album` · `kind_missing` · `kept` · `skipped` · `nothing` · `done` · `stopping_after` · `had_it` · `had_them` · `exists` · `failed_none_*` · `stopped_busy` · `asking` · `load_failed` · `refresh_failed` · `next_try` · `empty` · `empty_sub` · `clear` · `cancel_tip` · `too_late` · `too_late_plain` · `cancel_failed` · `clear_failed` · `waiting` · `yours` · `nothing_theirs` · `all_yours` · `failed_plain` · `finished` · `stopped_other` · `refused_start` |
 | Canonical · Search (the heads, uppercased in code) · no links for this song · couldn't get links: · opening %{label}… · opened %{label} · %{label}: no app took it (Open elsewhere's list and its notes; asking… is `gui.discover.asking`, Try again `gui.discover.retry`) | `gui.discover.links.canonical` · `search` · `none` · `failed` · `opening` · `opened` · `no_app` |
 | copying %{title}… · copying %{title} from %{server}… · copied %{title} · copied %{title} into %{library} · album copy finished · album copy: some songs failed · already yours · copy skipped: a file is in the way · nothing to copy · copy failed: %{words} · copy stopped: %{why} · transfer limit · %{server} reached its transfer limit · server too busy · %{server} is too busy right now · server went away · %{server} went away · ended early (an unknown stop word's) · %{server} refuses copies · copy cancelled (the status notes, clause 118: the short and the long form each — the long where the whole note fits) | `gui.discover.note.copying` · `copying_from` · `copied` · `copied_into` · `album_done` · `album_failed` · `yours` · `exists` · `nothing` · `failed` · `stopped` · `why_quota` · `why_quota_long` · `why_busy` · `why_busy_long` · `why_peer` · `why_peer_long` · `why_other` · `refuses` · `cancelled` |
 | Where copies land (the picker's title) · One setting for your account · every copy uses it · yours · library default · Library · Layout (uppercased in code) · Back (its `[X]`'s tooltip) · %{title} lands at · Every album by %{artist} lands at · The albums you don't have land at · Type a path to see where files land · Fix the layout to see where files land · This path would pass %{max} characters, more than the server takes · This song's path would pass %{max} characters, … · No value for this song, so left out of the path: %{vars} · The song sits at the top of its server's library, so left out of the path: %{vars} · Artist / Album · Server / Artist / Album · Same folders as the server · Library layout · Custom · Type your own path · e.g. From friends or %{example} · Use / between folders. Variables sort copies by artist, album…; a plain name puts every copy in the same folder. · the validator's words (Unknown variable %{name}. Use %{vars}. · A brace is out of place — … · A layout can't start with / — … · A path can't contain .. folders. · That makes no folder — … · A path can't contain ~ or $HOME. · A path can't use a drive letter like C:. · A layout can be at most %{max} characters. · A path can't contain tabs or other control characters. · That path can't be used. · “%{folder}” is a folder set on another device, …) · Start from an existing folder… · Hide folders · %{count} folders · Up to %{name} · No folders in here · Looking up… · This folder does not exist yet — it is created by the first file · “%{folder}” has a brace in its name, … · couldn't list %{path}: %{words} · Use the library default · Save · Saving… · couldn't save: %{words} (the status line's, for a picker gone; under the layout the server's words stand as sent) · nothing changed yet · fix the layout first (Save's tooltip while off) · save · use the library default (the button tip's verbs) — the phone's and the webapp's English, exactly | `gui.discover.dest.title` · `sub` · `tag_yours` · `tag_default` · `library` · `layout` · `back` · `lands_at` · `lands_at_artist` · `lands_at_missing` · `custom_empty` · `fix_layout` · `too_long` · `too_long_song` · `missing` · `missing_server` · `preset_artist_album` · `preset_server` · `preset_serverfolder` · `preset_library` · `custom` · `custom_sub` · `custom_hint` · `custom_help` · `err_unknown_var` · `err_braces` · `err_absolute` · `err_traversal` · `err_empty` · `err_home` · `err_drive` · `err_too_long` · `err_control` · `err_generic` · `err_base_braces` · `start_from` · `hide_folders` · `folder_count_*` · `up` · `no_folders` · `looking_up` · `will_create` · `folder_braces` · `list_failed` · `use_default` · `save` · `saving` · `save_failed` · `save_off_same` · `save_off_bad` · `verb_save` · `verb_default` |
-| saved for your account · the library's default · Change (`…` in code; Keep a copy's SOURCE row) · where files land changed · check the path above and add again · where files land changed — retry it from Keep a copy (the Copies note) · your account can't add files to this server · copies are off · one folder per album (an artist copy's LANDS IN; it replaced `keep.each_album`) · retry adds to · copy again adds to (the row under LANDS IN where the account's place moved, clause 105) | `gui.discover.dest.source_user` · `source_default` · `change` · `changed` · `changed_retry` · `nowhere` · `per_album` · `retry_adds_to` · `again_adds_to` |
-| artist · year · genre · server folder (a slot's word, `‹ ›` in code) · %{slots} comes from each song's own tags, so these songs can land in more than one folder. · %{slots} come from … (more than one slot, ", " between in code, in the path's order) · …more than one folder (a song with none leaves that folder out). (a genre among them) · %{slots} comes from the song's own tags (a song with none leaves that folder out). (a song's copy alone) · %{server} comes from where each song sits on the server, so these songs can land in more than one folder. (‹server folder› alone) · %{slots} comes / come from each song's own tags and %{server} from where it sits on the server, so these songs can land in more than one folder. (beside the tags' slots: `%{slots}` the tags alone, their number picking the verb; with a genre its parenthesis) — the note in LANDS IN's tooltip and on the PREVIEW's own row (its tooltip where the row gave way), clause 105; the phone's words in every locale | `gui.discover.dest.slot_artist` · `slot_year` · `slot_genre` · `slot_server` · `slot_note_*` · `slot_note_genre_*` (the `_one` … `_other` family) · `slot_note_song` · `slot_note_server` · `slot_note_mixed_*` · `slot_note_mixed_genre_*` |
-| the tips of clause 119 | `gui.tips.discover_row_keep` · `discover_peer_tile_keep` · `discover_peer_tile_more` (a connected server's lit tile with the gate closed: its list stands) · `discover_sheet` (a connected server's song's sheet, no rating keys) · `discover_sheet_keep` · `discover_tile_list` · `discover_tile_list_keep` · `discover_copies` ("C copies", appended to a rest tip while the indicator stands and the line has the cells) · `discover_keep_choose` (`%{verb}` the primary's words) · `discover_keep_close` · `discover_keep_queued` · `discover_keep_running` · `discover_keep_play` · `discover_keep_again` · `discover_keep_retry` · `discover_keep_start_again` · `discover_keep_yours` · `discover_keep_other` (both with "d where files land", whose words `discover_keep_d` are what gives way where a line outgrows 99 cells) · the picker's `discover_dest_library` · `discover_dest_library_save` · `discover_dest_radio` · `discover_dest_custom` · `discover_dest_custom_save` · `discover_dest_vars` · `discover_dest_folders` · `discover_dest_list` · `discover_dest_button` (`%{verb}`) · `discover_dest_button_off` · `discover_dest_saving`; the Copies modal's parts, joined with ` · ` — `discover_copies_rows` (↑ ↓ rows) · `discover_copies_cancel` (x cancel) · `discover_copies_retry` · `discover_copies_again` · `discover_copies_start_again` · `discover_copies_play` (Enter …) · `discover_copies_clear` (X clear finished) · `discover_copies_esc` (Esc close); the links list's `discover_links` · `discover_links_failed` · `discover_links_wait` |
+| Where files land changed · check the path above and add again (the 409's GOLD line, the phone's and the webapp's words) · where files land changed — retry it from Keep a copy (the Copies note) · Your account can't add files to this server · copies are off (a right gone: uploads, clause 147) · one folder per album (an artist copy's place line; it replaced `keep.each_album`) · Retry adds to (the lead of the row under "In" where the account's place moved, clause 105) | `gui.discover.dest.changed` · `changed_retry` · `nowhere` · `per_album` · `retry_adds_to` |
+| artist · year · genre · server folder (a slot's word, `‹ ›` in code) · %{slots} comes from each song's own tags, so these songs can land in more than one folder. · %{slots} come from … (more than one slot, ", " between in code, in the path's order) · …more than one folder (a song with none leaves that folder out). (a genre among them) · %{slots} comes from the song's own tags (a song with none leaves that folder out). (a song's copy alone) · %{server} comes from where each song sits on the server, so these songs can land in more than one folder. (‹server folder› alone) · %{slots} comes / come from each song's own tags and %{server} from where it sits on the server, so these songs can land in more than one folder. (beside the tags' slots: `%{slots}` the tags alone, their number picking the verb; with a genre its parenthesis) — the note on its own rows under Keep a copy's place line and the PREVIEW's (into the tooltip where its rows gave way), clause 105; the phone's words in every locale | `gui.discover.dest.slot_artist` · `slot_year` · `slot_genre` · `slot_server` · `slot_note_*` · `slot_note_genre_*` (the `_one` … `_other` family) · `slot_note_song` · `slot_note_server` · `slot_note_mixed_*` · `slot_note_mixed_genre_*` |
+| the tips of clause 119 | `gui.tips.discover_row_keep` · `discover_peer_tile_keep` · `discover_peer_tile_more` (a connected server's lit tile with the gate closed: its list stands) · `discover_sheet` (a connected server's song's sheet, no rating keys) · `discover_sheet_keep` · `discover_tile_list` · `discover_tile_list_keep` · `discover_copies` ("C copies", appended to a rest tip while the indicator stands and the line has the cells) · Keep a copy's `discover_keep_choose` (no placeholder since 2026-10-24) · `discover_keep_one` · `discover_keep_other` (the three with "d where files land", whose words `discover_keep_d` give way first where a line outgrows 99 cells; `discover_keep_other` drops its `discover_keep_arrows`, "↑ ↓ choose", with one choice, and its cancel's key word while that cancel is out) · `discover_keep_close` (starting, retrying) · `discover_keep_live` (queued, running) · `discover_keep_yours` (stopping, a right gone) · the ended line composed of `discover_keep_enter` ("Enter %{verb}", the verb `keep.tip_*`), the key words' own strings and `discover_keep_esc` · the picker's `discover_dest_library` · `discover_dest_library_save` · `discover_dest_radio` · `discover_dest_custom` · `discover_dest_custom_save` · `discover_dest_vars` · `discover_dest_folders` · `discover_dest_list` · `discover_dest_button` (`%{verb}`) · `discover_dest_button_off` · `discover_dest_saving`; the Copies modal's parts, joined with ` · ` — `discover_copies_rows` (↑ ↓ rows) · `discover_copies_cancel` (x cancel) · `discover_copies_retry` (a failure's, a stop's and a gap's) · `discover_copies_start_again` ("Enter add again") · `discover_copies_play` (Enter …) · `discover_copies_clear` (X clear finished) · `discover_copies_esc` (Esc close); the links list's `discover_links` · `discover_links_failed` · `discover_links_wait` |
 
 Data is never translated: titles, artists, album and server names.
 
@@ -1905,7 +2177,7 @@ Data is never translated: titles, artists, album and server names.
 | Relative ages ("8 months ago") | The seeds modal's only: computed on the local clock from the seed's ISO `lastPlayed`; plural families (Wording) |
 | Section skeletons while asking | Four DIM `░` rows in the table's own columns (clause 32) |
 | Glyphs | `[▸] [»] [+] [⋯]` → `[>] [^] [+] [.]`, `•` → `*`, `▾` → `v`, the skeleton's `░` → `·`, `[✓]` → `[x]`, `—` → `-`, the refresh's `↻` → nothing (its words stand) on `legacy_conhost()` |
-| The webapp's recommendation window for a connected server's row, its Keep card and its album focus (mStream `vp.js` `dmKeepChoices` / `dmKeepScope` / `dmKeepStart`, `dmLoadPeerFacts`, `dmArtistOwnership`) | The **Keep a copy** modal (clauses 106–110): `App::keep_open(KeepTarget)` freezes its subject (`KeepSubject`: the row's raw JSON or the tile's best row), asks the sizes (`ApiCmd::KeepFacts`) and, when its rows had no lookup yet, a lookup of its own; `App::keep_view()` works out everything the modal draws (`KeepView`: the choices and their `ChoiceSize`, the checkbox, the scope, the destination, the `KeepStage`); `keep_pick`, `keep_set_missing`, `keep_start`, `keep_cancel`, `keep_again`, `keep_close` are its keys |
+| The webapp's recommendation window for a connected server's row, its Keep card and its album focus (mStream `vp.js` `dmKeepChoices` / `dmKeepScope` / `dmKeepStart`, `dmLoadPeerFacts`, `dmArtistOwnership`) | The **Keep a copy** window (clauses 105–110): `App::keep_open(KeepTarget)` freezes its subject (`KeepSubject`: the row's raw JSON or the tile's best row), asks the sizes (`ApiCmd::KeepFacts`) and, when its rows had no lookup yet, a lookup of its own; `App::keep_view()` works out everything the modal draws (`KeepView`: the choices and their `ChoiceSize`, the checkbox, the scope, the destination, the `KeepStage`); `keep_pick`, `keep_set_missing`, `keep_start`, `keep_cancel`, `keep_cancel_other`, `keep_again`, `keep_choose_again`, `keep_play_copy`, `keep_close` are its keys, and `window_action` its one primary per outcome |
 | The webapp's `DISCOVERJOBS.jobRowState` / `manyCounts` (discover-jobs.js) | `PluginJob::outcome()` → `JobOutcome` with `action()`, `mark()`, `kept()`, `troubled()`; `CopyResult` read one field at a time; `ManyCounts` from `result.counts` (src/api/types/plugins.rs), with the webapp's cases as its tests |
 | The play page's badges (`DISCOVERYPAGE.jobBadges`, `badgeOf`, `peerAlbumBadges`, `jobForAlbum`, `otherPeerJob`, `nameKey`) | Glyphs and words, no numbers: `RowJobs` (a row's keys and newest copy per scope), `row_mark` / `tile_mark` → `JobMark` with the canvas's precedence (clauses 113–115); `job_for_album`, `PluginJob::other_peer`, `name_key` ported with their cases |
 | The webapp's batch lookup (`lookupChunks`) and its strip's poll (1.5 s / 4 s, ×2 to 60 s on failures) | `Client::plugin_jobs_lookup_batch_async` (chunks of 100, padded back to the rows' order); `App::keep_tick` on the App's tick, its beat from `KeepWatch`, which the GUI sets each frame (clauses 111–112) |
@@ -2187,9 +2459,10 @@ fitting their cells (STATE 20, FROM 12, the table's 72, the list's 28)
 and every composed tips line inside 99 cells in all ten locales. **The
 e2e leg** `gui-discover-keep.exp` (run.sh's Scenario K, `FAKE_TASTE=1
 FAKE_PLUGINS=1`): the real binary at 100 × 30 with the queue folded —
-`G`, →, ↓, `c`, ↓ ↓ ↓ ↓ (the hand walks Change… since 2026-10-21), Enter,
-Esc, `C` — with `check_keep.py` replaying
-the stream frame by frame for the Keep modal's LANDS IN line, the tile's
+`G`, →, ↓, `c`, Enter (the one primary since 2026-10-24; ↓ ↓ ↓ ↓ walked
+the hand to it before), Esc, `C` — with `check_keep.py` replaying the
+stream frame by frame for the Keep a copy window's place line ("Files go
+to copies › Attic Band › Lanterns") beside "[ Add album ]", the tile's
 live mark with the verbs line's "copying…", the tile's "✓ kept" with the
 row's ✓ LEAD, and the Copies modal's row; the fake's state for the one
 start (the row unchanged, scope album) and the lookups (≤ 100 a call,
@@ -2325,8 +2598,9 @@ no PUT), ↓ past the four radios to "Start from an existing folder…",
 Enter (the fake's root listed, the seeded folder not there yet), ↓
 Enter (from-peers picked: Custom starts there, the list inside it),
 Esc, ↓ ↓ ↓ ↓ Enter — the layout saved with base `""` —, the place moved
-behind the client's back (`/_move_destination`), ↓ ↓, Enter — the 409
-— with `check_dest.py` replaying the six states (the seeded place, the
+behind the client's back (`/_move_destination`), Enter alone (the one
+primary since 2026-10-24) — the 409 — with `check_dest.py` replaying
+the six states (the seeded place with `d change` at its end, the
 picker folded with its preview first, the libraries as choices and the
 folders button above the field, the list with its not-there-yet note,
 the folder picked, saved, moved) and the fake's state for the one save
@@ -2403,6 +2677,77 @@ after the Server one, the blank's give-way, the variables row's reach;
 then the server folder back among the tags' words, the verb counted by
 every slot, the give-way at 22 rather than past it, the names untrimmed,
 `.` kept) failed its tests; each restored exactly.
+
+**Keep a copy, calmer (2026-10-24)**, render tests in `src/gui/keep.rs`
+against the spec's frames cell for cell (`board()`, each state built by
+`keep_in(id)`): the album tile and the song row idle at x 19–94 from row
+6 (12 and 13 rows; the band clearing x 17–96 on the window's rows,
+registered as the overlay and as `Guard`; the hit-tests of each radio,
+the box, `d change`, the primary and "Esc close"; one ACCENT BOLD
+element; no fill), the sizes asked, Every album by and the box ticked
+with their counts in the primary, a compilation's tile and row (its
+slot's note on its own rows), a long place wrapped at a crumb and
+clipped with its tooltip, starting (`[ Adding… ]`, every key and click
+inert but Esc), the refusals (two GOLD rows, Enter adding again), the
+409's line, the three missing rights (a 403 by its words, a 404 that
+turns into the plug-in's line once the gate confirms it), another
+server's copy (`[ Close ]`, `x` cancelling that job once, its word gone
+while the cancel is out, Add back for a scope it does not cover),
+queued, running, no estimate and stopping (the footer's "· the copy
+keeps going" only while live), and every outcome of the window's action
+table with its tips — the gap's GOLD headline and Retry, a file in the
+way offering Close, then Retry and "Retry adds to" once the picker saved
+another place, Play your copy after an album playing it from the library
+in the album's order, `c choose again` back on the choice where it
+stood, Add again, Retrying… with its key words gone; the keys (↓ through
+the choices to the box as the fourth stop, clamped; a pick unticking it;
+Space, Tab, ← → and unused letters inert; Enter starting at once; no key
+acting without its word); the give-way (B2, B1, B3, then the place, the
+top, the note, the GOLD line) and the tallest state at 100 × 24 with key
+hints on (rows 3–17, the primary on row 16); the queue-open placement (x
+12–87, no band); the cover 4 × 2 pixels or nothing; the legacy console
+(`+ - |` with the title and the footer on it, `(*)`, `[x]`, the bar in
+words); the indicator not drawn while Keep a copy or Copies is open; the
+Copies list at the shared geometry (x 19, rows 3–24; rows 1–18 at the
+floor), Retry and Add again, no action for a file in the way; every
+locale's primary (≤ 34 cells with a two-digit count) and widest action
+row (≤ 72) fitting. In `tui::app::keep`: the window's action table row
+by row, choose again's rule, a 403's words naming the right, the album's
+songs in the listing's order and else the result's, another server's
+copy and its cancel, whose copy spoke, a right gone by the first part of
+the gate that no longer holds, a file in the way offering Retry only
+once the place moved; in plugins.rs, `CopyResult::kept_songs` (what a
+many-song copy copied and found already there, never a file in the way).
+After the review (2026-10-24): the room under the window neither lighting
+nor ripening a tooltip — the clipped place's own tooltip whole by the
+real dwell, none on the footer, the band or the header, the row below
+unlit — and the hand only over the window's controls, the Copies list
+alike; the box a copy alone keeps with no count, hidden while the sizes
+are asked; a clipped step's tooltip whole; Japanese and Chinese notes
+filling their rows; the cover's pixels held as the window grows and its
+title clipped short of it; a key inert where the frame did not draw its
+word; the ended tips giving `d` way before `c`; the give-way one step at
+a time (the place capped under the anchored top, before the top rises,
+the note before the GOLD line, the action row last of all); Esc on
+`[ Adding… ]` said on the status line; an ended copy's Retry turning the
+plain line once a right went; in the App, `created: false` leaving the
+choice movable, a file in the way from a server that pinned no place
+retrying only into another folder, the queued album appended, both
+rights gone naming uploads, a failed re-ask the plug-in's line.
+**The e2e legs**: Scenarios K and K2 press Enter alone after `c`
+(`check_keep.py` gating on the window's title on its border, "Files go
+to copies › Attic Band › Lanterns" and "[ Add album ]"); Scenario W
+reads the seeded place with `d change` on its row, the saved place on
+the place line after Save — its gate the saved folder, after what the
+picker painted is let go — and, on the 409, the GOLD "! Where files land
+changed · check the path above and add again" under the redrawn place
+with Add album still the primary; Scenario KM (`gui-discover-keep-mouse.exp`,
+`check_keep_mouse.py`) opens the window from the tile's list and clicks
+every control it draws in Apple Terminal's dialect, each press pair with
+its echo — the echoes landing on the window's corner, a live window's
+`[ Close ]` and `d change` act on nothing — while resting on the band and
+the footer ripens no tooltip of the room's and its row under the window
+lights nothing; the fake counts one start, one cancel and no save.
 
 ## Deviations log
 
@@ -3268,3 +3613,167 @@ every slot, the give-way at 22 rather than past it, the names untrimmed,
     stale tip keys in the all-locale width test are replaced and every
     key is asserted present. Scenario W now opens on a place saved with
     a base folder, proving the fold on open and base `""` at Save.
+- **2026-10-24 — Keep a copy, calmer** (the user, on the lead designer's
+  spec and its two boards: "Start the terminal build for the calmer Keep
+  a copy design"). The window is the spec's Direction A, "Quiet form",
+  with its judges' grafts and the board review's amendments (which win
+  over its earlier sections); clauses 105–110, 116, 117, 119, 124, 142,
+  144, 146 and 147 are rewritten, 120, 145 and 148 follow in their
+  words, and the Wording table with them. Measured on the album tile at
+  100 × 30, the window had 16 rows, two UPPERCASE labels (WHAT, LANDS
+  IN), four bracketed buttons (`[X]`, `[ Change… ]`, `[ Cancel ]`, the
+  primary), three ACCENT BOLD focal points, five left edges and 41 room
+  cells showing beside it, and an album copy took ↓ ↓ ↓ ↓ ↓ Enter; it
+  has 12 rows, none, one, one, two and none, and takes Enter. The user's
+  answers to the spec's nine open questions (2026-10-24), as built, then
+  where the window parts from the other clients, from its own first cut
+  or from the spec's letter:
+  1. **The partial copy's headline is the terminal's own**: "! 1 song
+     didn't copy" (GOLD BOLD) over "2 copied" (DIM) and Retry — the
+     webapp's A8 and the phone say "In your collection · 2 songs copied
+     · 1 failed" (the webapp with Play your copy beside Retry); they are
+     not changed now. The room's tile still says "✓ kept": done is not
+     kept, made visible in the window only.
+  2. **No kit-wide dim**: only the band — Keep a copy's and the Copies
+     list's — clears the room beside the window, with the kit's own
+     `Clear` (no scrim: a terminal has no alpha, and pixels cannot be
+     dimmed).
+  3. **The picker keeps its name, "Where copies land"** — the spec's
+     premise was wrong: the phone and the webapp title their picker so
+     too — and all three say "Where files land changed …" for the 409's
+     line (sentence case here now, as theirs); the e2e's gate on "Where
+     copies land" stands.
+  4. **Whose place it is leaves Keep a copy**: no SOURCE row ("saved for
+     your account" / "the library's default") — the webapp keeps it in
+     its path bar; here the picker's header alone says it ("· yours" /
+     "· library default"), and the path on the place line is the save's
+     evidence.
+  5. **Play your copy after an album plays the whole album from your
+     library** — what the copy put there and what was already yours, in
+     the album listing's order, after the playing track — matched by
+     each song's file on its server rather than by title as the spec
+     says (the already-yours entries carry no title, nor does
+     `KeepSong`; the same match `song_account` makes). "Already yours"
+     stays `[ Close ]` as drawn (the webapp's S9 / A10 offer Play
+     there).
+  6. **The sizes moved into the primary** ("Add album · 3 songs", "Add 2
+     albums") and the box ("Only the 1 album you don't have"); "Add 2
+     albums" counts the connected server's albums by the artist, the
+     ones already yours included (skipped at run time), as the webapp
+     counts. "0:08 · mp3" and "you have 3" are gone.
+  7. **"c choose again"** as drawn — also right after a copy finishes in
+     the same window; never after a refusal or a cancel.
+  8. **The Copies list takes the shared geometry and band only** (76
+     wide, centred in the room, anchored as if 17: the two windows open
+     in one place) — not the title-on-border chrome: its title row and
+     `[X]` stay.
+  9. **No confirm step for many albums**: the explicit ↓ to Every album
+     by, the primary's count and "one folder per album" say it (the
+     phone asks "Copy 2 albums from Stage Peer B?").
+  - **No cover without graphics**: a 4 × 2 pixel cover in the head's
+    corner, or nothing — no ▀ mosaic, no empty frame (the 6 × 3 cover
+    and its frame were three rows and, without pixels, 18 cells of
+    colour noise); the phone and the webapp always have their art.
+  - **Copy again is gone from the window**: a complete album offers Play
+    your copy, an artist copy Close, a gap Retry (the window's own
+    action table, `window_action`; `JobOutcome::action()` stays the
+    Copies list's). Retry on a file in the way stands only once the
+    account's place differs — it would meet the same file — and the
+    Copies list offers no action there at all (its Retry sends the place
+    the copy ran with).
+  - **The box ticked in ACCENT**, not the kit checkbox's Green: it is
+    the choice's fourth stop, choice semantics (docs/ui-kit.md, Radio
+    group).
+  - **The band** clears the room's width on the window's rows (docs/
+    ui-kit.md, Modal: a room's modal); with the queue open the window
+    centres over the frame with none, as before.
+  - **A 403 at start is a missing right**, one plain line and
+    `[ Close ]` chosen by its words ("upload" the uploads line, else the
+    jobs line), the gate asked again; a 404 reads as a GOLD refusal
+    until the gate confirms the plug-in gone — the webapp's and the
+    phone's three lines, where the first cut showed every 403 as a
+    refusal with Add still offered.
+  - **`d change` stands on the action row in "a file in the way"** (the
+    board review's amendment), on the place's last row everywhere else
+    it stands; while a start is out it stays drawn with every key but
+    Esc inert (nothing moves, as the spec's C9 draws it).
+  - **Choices the spec left open, made here**: a running copy's step on
+    one row, clipped with its tooltip; the give-way's one-row place
+    clipped mid-crumb and a one-row note mid-word; the gap's headline
+    counting the songs failed or never reached
+    (`max(failed, total − copied − skipped)`) before failed album
+    listings; "with your copy of …" raised in code where it stands
+    alone; `discover_keep_arrows` ("↑ ↓ choose") its own fragment, so
+    another server's tips drop it with one choice; a 403's line sticking
+    where a gate's line comes back to the choice once the gate holds
+    again; a copy already following its job keeping it whatever the gate
+    (clause 147).
+  - **Withdrawn with the labels**: WHAT's and LANDS IN's value column
+    moving right for a wider locale (2026-10-20), LANDS IN's 52-cell
+    wrap (now the place line's 72 / 62 cells and the second row's 70 /
+    60), and the slot's note as LANDS IN's tooltip alone (2026-10-22) —
+    a row of its own now, as the picker's PREVIEW has had since
+    2026-10-23.
+  - **The Copies list keeps its words as they were** through its own keys
+    (`copies.waiting`, `yours`, `nothing_theirs`, `all_yours`,
+    `failed_plain`, `finished`, `stopped_other`, `refused_start`, and
+    `copies.stopping`, `copying`, `cancelled`, `stopped_quota` — each the
+    window's word as it read before 2026-10-24, so "wird angehalten…"
+    never becomes the mark's "stoppt…" nor "das Transferlimit …" the
+    headline's capital), so the window's sentence case does not recase
+    the list, which is kept as it was; its actions read Retry and Add
+    again.
+  - **The board review's E5b** samples "In copies › Boukmanflow" for an
+    artist copy that copied one album (its other album's listing
+    failed); the window says the copied files' common folder, as §5.4
+    words it — one album copied, that album's folder: "In copies ›
+    Boukmanflow › Borrowed Tapes".
+  - **Clause 105's notes are the phone's words in every locale** (§12.3:
+    `dest.slot_*` unchanged) — the first cut shortened seven locales'
+    genre and server-folder notes to keep two whole rows; where the
+    phone's words outgrow two rows the note keeps its own cap, its second
+    row clipped and the whole note both rows' tooltip, as the board's G5
+    draws German. Japanese and Chinese, whose sentences have no blank,
+    break by cells between grapheme clusters (`wrap_keeping`), so their
+    notes fill both rows instead of standing the slot alone on the first.
+  - **"with your album copy"** is written lowercase in every cased
+    locale, as its two siblings are: it follows "Your library already
+    has this song · " where an album copy skipped the song as owned, and
+    the code raises it where it stands alone. French's and Italian's 409
+    line says "ajoute à nouveau" / "aggiungi di nuovo" (add again, the
+    button under it), as the phone's do, not "réessaie" / "riprova".
+  - **The box with no count**: where only a copy of it that still wants
+    the user keeps it offered (none missing by name, or the sizes
+    unknown) it reads "Only the albums you don't have" and its primary
+    "Add the albums you don't have" (the phone's
+    `discoverKeepAddMissing`; Spanish, French, Portuguese and Russian say
+    "the missing albums", the phone's words passing the primary's 34
+    cells) — never "the 0 albums" — and it is hidden while the sizes are
+    asked, a copy held or not.
+  - **Found after the build, by the review** (2026-10-24): the room's
+    tooltips ripened through the band and over the window, and its rows
+    lit under the pointer, until the frame beneath drew without the
+    pointer and `open_window` dropped its registries (the kit's Modal,
+    now as written); the hand showed over the whole frame (a `Guard`
+    counted as a control); a clipped step's tooltip repeated the clipped
+    row; the cover fell to the mosaic for a frame whenever the window's
+    height changed; `created: false` with another server's copy froze the
+    choice; an ended copy kept a Retry that started nothing once a right
+    was gone (now the plain line); a file in the way from a server that
+    pinned no place offered a Retry into the same file; Esc on
+    `[ Adding… ]` left the start's answer unsaid (now the status line's,
+    clause 118). Scenario KM drives the window by the pointer in Apple
+    Terminal's dialect.
+  - **A failed gate re-ask** — the network, not the server's word — reads
+    as the plug-in's line ("Copies from connected servers are off on this
+    server right now"): a listing that failed lists nothing, and every
+    way in hides with it (clause 101); kept, pinned by a test, rather than
+    a fourth line of its own.
+  - **The e2e legs**: Scenarios K and K2 press Enter alone after `c` — a
+    ↓ would move the choice to Every album by and start an artist copy;
+    Scenario W's Save gate reads the saved folder on the place line,
+    after letting go of what the picker painted (its list and its field
+    carry the same word), and its 409 gate the capitalised "Where files
+    land changed"; run.sh's K / K2 / W semantics — one start, its
+    destination the place drawn, one PUT, three destination reads, the
+    409 starting nothing — are unchanged.

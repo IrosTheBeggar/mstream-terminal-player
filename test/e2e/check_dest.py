@@ -5,17 +5,17 @@ gui-discover-dest leg; docs/ux-contracts/discovery-page.md, clauses 105 and
 
 Frame-replays the stream at every synchronized-update end (ratatui's diff
 renderer emits only changed cells, so stream-grep lies about anything that
-repaints in place) and requires, in order: Keep a copy on the place seeded
-with a base folder (older data), saved for the account; the picker on that
-place folded into Custom — the preview first ("Lanterns lands at", the path
-as the server holds it), the libraries as choices, "Same folders as the
-server" under the Server preset (the fake's variables list SERVERFOLDER),
-"Start from an existing folder…" above the field; the list open on the
-library root, the folder the layout starts in not there yet; a folder
-picked from the server's own list starting Custom's layout, the list gone
-inside it; Keep a copy on the saved place, saved for the account; the start
-refused for a moved destination — LANDS IN redrawn from the answer and its
-one GOLD line.
+repaints in place) and requires, in order: Keep a copy's place line on the
+place seeded with a base folder (older data), "d change" at its end; the
+picker on that place folded into Custom — the preview first ("Lanterns
+lands at", the path as the server holds it), the libraries as choices,
+"Same folders as the server" under the Server preset (the fake's variables
+list SERVERFOLDER), "Start from an existing folder…" above the field; the
+list open on the library root, the folder the layout starts in not there
+yet; a folder picked from the server's own list starting Custom's layout,
+the list gone inside it; Keep a copy's place line on the saved place; the
+start refused for a moved destination — the place line redrawn from the
+answer, its one GOLD line under it and Add album still the primary.
 Usage: check_dest.py STREAM REPLAY_PY ROWS COLS
 """
 import subprocess
@@ -48,13 +48,18 @@ def below(text, upper, lower):
     return any(upper in row and lower in under for row, under in zip(rows, rows[1:]))
 
 
+def beside(text, left, right):
+    """`right` on `left`'s own row, after it."""
+    return any(left in row and right in row[row.index(left) + len(left):] for row in text.split("\n"))
+
+
 steps = ["seeded", "picker", "listed", "picked", "saved", "moved"]
 seen = []
 for n in ends:
     text = "\n".join(frame(n))
-    keep = "Keep a copy" in text and "LANDS IN" in text
-    if keep and "LANDS IN  copies › From friends › Attic Band › Lanterns" in text and "saved for your account" in text \
-            and "[ Change… ]" in text and "where files land changed" not in text:
+    keep = "─ Keep a copy ─" in text and "Files go to" in text
+    if keep and beside(text, "Files go to copies › From friends › Attic Band › Lanterns", "d change") \
+            and "Where files land changed" not in text:
         seen.append("seeded")
     picker = "Where copies land · yours" in text and "LIBRARY   (•) copies   ( ) music" in text
     if picker and below(text, "Lanterns lands at", "copies › From friends › Attic Band › Lanterns") \
@@ -69,10 +74,10 @@ for n in ends:
     if picker and "(•) Custom" in text and "from-peers/{{ALBUMARTIST}}/{{ALBUM}}" in text and "Hide folders" in text \
             and below(text, "Lanterns lands at", "copies › from-peers › Attic Band › Lanterns") and "Up to copies" in text:
         seen.append("picked")
-    if keep and "LANDS IN  copies › from-peers › Attic Band › Lanterns" in text and "saved for your account" in text:
+    if keep and beside(text, "Files go to copies › from-peers › Attic Band › Lanterns", "d change"):
         seen.append("saved")
-    if keep and "LANDS IN  copies › Attic Band › Lanterns" in text and "the library's default" in text \
-            and "where files land changed · check the path above and add again" in text and "[ Add album ]" in text:
+    if keep and below(text, "Files go to copies › Attic Band › Lanterns", "! Where files land changed · check the path above and add again") \
+            and "[ Add album ]" in text:
         seen.append("moved")
 order = []
 for step in seen:

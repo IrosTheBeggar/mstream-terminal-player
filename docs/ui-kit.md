@@ -150,7 +150,10 @@ banned.
   DIM, no click rect, no hover — the accent is what told it from an idle
   button, so its absence reads — and, as the disabled primary below, a
   tooltip saying why ("nothing changed yet", "fix the layout first"). The
-  hand may still rest on it; Enter does nothing there.
+  hand may still rest on it; Enter does nothing there. Keep a copy's
+  primary goes off while the press it sent is out, its words saying so
+  (`[ Adding… ]`, `[ Retrying… ]`) and no tooltip: it comes back on its
+  own when the server answers.
 - **Disabled**: the primary frame with border and label fg DarkGray, no
   `▸`, no click rect, no hover, no hand cursor — but it DOES register a
   tooltip whose text says why it's disabled ("Add a folder first"), the
@@ -160,6 +163,21 @@ banned.
 - Every clickable registers a click rect, participates in hover, and
   joins the OSC 22 hand-cursor set (see the pointer contract under
   Behavioral rules).
+
+### Key word
+A text button whose first word is its key — "x cancel copy", "d change",
+"c choose again", "a add to queue": 1 row, fg DarkGray, hover fg Cyan +
+BOLD, its click rect its own cells (the key letter included), and a
+click does what the key does. **Drawn only where its key works, and the
+key works only where it is drawn** — a modal names every key that acts
+in it, and no key acts unseen (the one pause: while a press is out the
+words stay and every key but Esc waits, as nothing else moves). The
+letter never translates ("x Kopie abbrechen"); the words do. A row of
+them stands from the left, three cells apart; beside a modal primary
+they share its row, and take the row above where the two would come
+closer than three cells. No tooltip (self-evident). Like a text button
+it hides rather than going grey. First consumer: Keep a copy's window
+(discovery-page clauses 105–110).
 
 ### Tabs
 One row, under the screen's state line (or first, on a page with none): the ACTIVE tab is a 1-row filled
@@ -352,7 +370,14 @@ and a library's own layout — discovery-page deviations, 2026-10-21 and
 2026-10-22. Each radio carries the layout it writes DIM, right-aligned to
 the last cell; its last radio, Custom, opens its line editor on the row
 under it, EMPTY with a DIM hint after the caret, then its variables and
-a help line — the phone's sheet, 2026-10-23.) **Choices side by side**
+a help line — the phone's sheet, 2026-10-23.) (Another: Keep a copy's
+choice — discovery-page clauses 106–107, deviations 2026-10-24 — has no
+card and no group label, the radios saying what they are, and its
+checkbox, "Only the 1 album you don't have", standing under the last
+radio, is **the group's fourth stop**: choice semantics, so ticked it is
+`[✓]` fg LightBlue with its label BOLD, not the checkbox's Green; ↓ from
+the radio above ticks it and ↑ unticks it, a click toggles it, and
+picking another radio unticks it.) **Choices side by side**
 (`(•) music   ( ) copies`, the Auto DJ room's rows and Where copies
 land's LIBRARY): one row, three cells between, the chosen `(•)` OK and
 its name BOLD, ← → choose and a click chooses; where they would not all
@@ -544,7 +569,10 @@ warning. First line: BOLD title in the intent color. Buttons bottom-right
 **A modal makes the screen beneath INERT**: background clicks hit
 nothing, background hover and tooltips sleep, the hand cursor follows
 only the modal's own controls — the base draw sees no pointer and its
-rect registries are dropped before the modal draws.
+rect registries are dropped before the modal draws (the first tooltip
+registered under the pointer is the one that ripens, so a base layer's
+left standing wins over the modal's own). The GUI's hand follows what a
+click would press: a modal's `Guard` over the screen is no control.
 Dismissable pickers (path entry, the server browser) carry a `[X]`
 close on the title row, right edge: DIM, hover BRIGHT + BOLD —
 dismissal is neutral; red stays reserved for the destructive row
@@ -553,14 +581,35 @@ gates (the public-mode modal) get NO `[X]` — they force an explicit
 choice. A gate may name its safe choice for what it keeps rather than
 "Cancel" (the MP3 Player page's "◂ Keep v0.8.0"); it is still first and
 still the modal primary.
+A modal may instead carry **its title on its top border** (TEXT BOLD,
+`╭─ Keep a copy ───╮`, no title row) and **its way out on its bottom
+border** — DIM "Esc close" right-aligned, a text button (hover BRIGHT +
+BOLD, a click closes), "Esc close · the copy keeps going" where closing
+leaves work running — and then no `[X]` (the Discover room's Keep a
+copy, discovery-page clause 106). **A room's modal** centres in the
+room, not the frame, while the room has its width and four cells more,
+and first clears the room's whole width on its own rows — **the band**:
+`kit::blank`, registered as the overlay footprint and as the inert
+`Guard`, the covers it touches falling to the mosaic (Over pixels, below)
+and then cleared — so nothing of the room shows beside it, while the
+rows above and below stay drawn. Not a scrim and not a dim: the kit's
+own `Clear`, wider (Keep a copy and Copies, clauses 106 and 117; a
+narrower room's modal centres over the frame as before). Its bottom
+never covers the player bar; it rises toward row 1 only when it must.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
 **Keyboard stops** in a modal of radios, checkboxes and 1-row buttons
-(the Discover room's Keep a copy, discovery-page clause 106): a radio's or
-a checkbox's label wears ACCENT BOLD under the hand (the chosen radio's
-label BOLD, its `(•)` OK), a `[ button ]` the selection slab; where the
-modal's only way forward is its primary the hand may rest stowed and
-Enter presses it. On the legacy console that modal's frame is `+ - |`.
+(the Discover room's Where copies land, discovery-page clause 143): a
+radio's or a checkbox's label wears ACCENT BOLD under the hand (the
+chosen radio's label BOLD, its `(•)` OK), a `[ button ]` the selection
+slab. **A choosing modal with one way forward** (Keep a copy, clause
+106) has **no hand and no slab**: ↑ ↓ move the chosen radio itself,
+clamped — the chosen `(•)` LightBlue and its label BOLD are the
+keyboard's place — a checkbox under the last radio its fourth stop
+(Radio group); **Enter always presses the one primary**, which may go
+off while its press is out; every other control is a key word (Key
+word); Space does nothing. On the legacy console both frames are
+`+ - |`, a border's title and way out on it.
 **A list in a modal** (the Discover room's Copies, discovery-page clause
 117): the kit table under the title — its DIM header and rule never
 scroll — items of one or two rows (the held one's slab across all of
@@ -619,6 +668,14 @@ DarkGray; all-dim cells when the step carries no estimate — never a fake
 0%), and the DarkGray detail counts (`210 of 300, more queued`). It
 narrates the file scan, then each enrichment pass from
 `/api/v1/scan/status`, and "complete" means everything is idle.
+
+**Keep a copy's progress is TWO lines** (discovery-page clause 109): the
+headline — the state word BOLD (`Copying`, `Waiting for a free slot`,
+`Stopping…`), then ` · ` DarkGray and the server's step in default fg
+(`song 2 of 3 · Late Train Verse`) — and the bar, its percentage in
+**default fg**, not DarkGray (the window's one live number); queued, ten
+`▱` and DarkGray `starts on its own`; no counts line (the step already
+counts), and the same never-a-fake-0% rule.
 
 ## Screen chrome
 

@@ -5,11 +5,13 @@ gui-discover-keep leg; docs/ux-contracts/discovery-page.md, clauses
 
 Frame-replays the stream at every synchronized-update end (ratatui's diff
 renderer emits only changed cells, so stream-grep lies about anything that
-repaints in place) and requires, in order: the Keep a copy modal naming
-where the copy lands; the room with the copy live — the tile's artist row
-a live mark and the verbs line's indicator; the copy kept — the tile's
-"✓ kept" and the row's ✓ LEAD; the Copies modal listing it. No frame of
-the room may show a number for the copy (clause 126).
+repaints in place) and requires, in order: the Keep a copy window — its
+title on its top border — saying where the files go ("Files go to …")
+beside its one primary, Add album; the room with the copy live — the
+window closed, the tile's artist row a live mark and the verbs line's
+indicator; the copy kept — the tile's "✓ kept" and the row's ✓ LEAD; the
+Copies modal listing it. No frame of the room may show a number for the
+copy (clause 126).
 Usage: check_keep.py STREAM REPLAY_PY ROWS COLS
 """
 import subprocess
@@ -50,8 +52,8 @@ numbers = []
 for n in ends:
     lines = frame(n)
     text = "\n".join(lines)
-    modal = "LANDS IN" in text or "Copies" in text and "TITLE" in text
-    if "LANDS IN  copies › Attic Band › Lanterns" in text and "[ Add album ]" in text:
+    modal = "─ Keep a copy ─" in text or "Copies" in text and "TITLE" in text
+    if "Files go to copies › Attic Band › Lanterns" in text and "[ Add album ]" in text:
         seen.append("modal")
     word = tile_word(lines)
     verbs = next((l for l in lines if "▸ play · + queue all" in l), "")

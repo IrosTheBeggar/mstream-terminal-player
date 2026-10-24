@@ -1921,8 +1921,10 @@ fn draw_verbs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, narrow: b
     // narrow room (`narrow`: its table gives ALBUM up, the queue-open
     // room's), and anywhere the verbs leave the words too little. Never
     // clipped; the verbs give way from their tail only when even the
-    // glyphs would not fit.
-    let indicator = gui.app.keep_indicator();
+    // glyphs would not fit. Not while Keep a copy or the Copies list is up:
+    // the window is the copy's one voice.
+    let speaks = gui.app.taste.keep.flow.is_some() || gui.discover.copies.is_some();
+    let indicator = gui.app.keep_indicator().filter(|_| !speaks);
     let room_for = |verbs: &[(String, DiscAct, &str)]| -> u16 {
         let used = width_of(verbs);
         let gap = if verbs.is_empty() { 0 } else { HEAD_GAP };
@@ -2079,6 +2081,13 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if gui.screen != Screen::Library || gui.active != super::DISCOVER_NAV {
         return;
     }
+    // Keep a copy and the Copies list stand over whatever else the room has
+    // up (the tile's list): that draws without the pointer too.
+    let pointer = gui.ui.pointer;
+    let window = gui.app.taste.keep.flow.is_some() || gui.discover.copies.is_some();
+    if window {
+        gui.ui.pointer = None;
+    }
     if let Some(Menu::Window(cursor)) = gui.discover.menu {
         let current = gui.app.taste.shown_window().unwrap_or(WINDOW_DEFAULT);
         let rows: Vec<(String, bool, DiscAct)> =
@@ -2092,11 +2101,15 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if gui.discover.tile_list.is_some() {
         draw_tile_list(frame, gui, area);
     }
+    // Keep a copy and the Copies list centre in the room and clear its
+    // width on their rows (the band).
+    gui.ui.pointer = pointer;
+    let room = super::content_rect(area.width, area.height, gui.queue_open, gui.footer());
     if gui.app.taste.keep.flow.is_some() {
-        super::keep::draw(frame, gui, area);
+        super::keep::draw(frame, gui, area, room);
     }
     if gui.discover.copies.is_some() {
-        super::keep::draw_copies(frame, gui, area);
+        super::keep::draw_copies(frame, gui, area, room);
     }
 }
 
@@ -2379,7 +2392,7 @@ pub(crate) fn close_all(gui: &mut Gui) {
     gui.discover.seeds = None;
     gui.discover.tile_list = None;
     gui.discover.copies = None;
-    gui.discover.keep.focus = None;
+    gui.discover.keep.frozen = None;
     gui.discover.keep.dest = None;
     gui.app.keep_close();
 }

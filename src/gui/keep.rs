@@ -1,22 +1,27 @@
-//! The Discover room's Keep a copy modal (docs/ux-contracts/discovery-page.md,
-//! clauses 106–110; the canvas's TermKeepModal and TermKeepStates boards),
-//! the room's job marks' glyphs and words (clauses 113–114, 124), the
-//! Copies modal and Open elsewhere's list (clauses 117, 140–141; the
-//! canvas's TermCopies board), and the status line's copy and link notes
-//! (clauses 118, 141) — the GUI half of the App's `tui::app::keep`, which
-//! holds every fact drawn here.
+//! The Discover room's Keep a copy window (docs/ux-contracts/discovery-page.md,
+//! clauses 106–110; the "Keep a copy, calmer" boards), the room's job
+//! marks' glyphs and words (clauses 113–114, 124), the Copies list and
+//! Open elsewhere's list (clauses 117, 140–141; the canvas's TermCopies
+//! board), and the status line's copy and link notes (clauses 118, 141) —
+//! the GUI half of the App's `tui::app::keep`, which holds every fact drawn
+//! here.
 //!
-//! The modal is the kit's, ACCENT, 66 cells wide, anchored as if 17 rows
-//! tall so its top holds while its lower region changes: the title and
-//! `[X]`, a blank, the header (a 6 × 3 pixel cover, the title BOLD, a DIM
-//! byline, "• online"), a blank, then the lower region — the choice (WHAT,
-//! the radios and their sizes, "Only the albums you don't have"), LANDS IN,
-//! whose place it is with `[ Change… ]`, and the buttons; once a job exists
-//! the choice folds to one WHAT line and the kit's three-line scan widget
-//! follows the copy to its outcome. `[ Change… ]` (or `d`) opens **Where
-//! copies land** in its place (clauses 142–148; the phone's destination
-//! sheet and the webapp's editor in the terminal's grammar): the account's
-//! destination, edited and saved on the server.
+//! The window is the kit's Modal, 76 cells wide and centred in the room,
+//! whose width it clears on its own rows (the band); anchored as if 17 rows
+//! tall, so its top holds while its body changes, it grows downward and
+//! never past the room's last row — at the floor its blanks give way
+//! first. Its title rides the top border, its way out the bottom ("Esc
+//! close"). Under the head (the item's title BOLD, a DIM byline, a 4 × 2
+//! pixel cover where the terminal draws pixels) each state is one table of
+//! rows: the choice — its radios, and "Only the 1 album you don't have" as
+//! their fourth stop; the place in one sentence ("Files go to …", "Into
+//! …", "In …", "Retry adds to …"); the copy's two-line progress or its
+//! outcome; and the action row — DIM key words at the left, each drawn only
+//! where its key works, and the one bracketed primary at the right, which
+//! Enter always presses. `d` (or `d change`) opens **Where copies land** in
+//! its place (clauses 142–148; the phone's destination sheet and the
+//! webapp's editor in the terminal's grammar): the account's destination,
+//! edited and saved on the server.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
@@ -36,7 +41,7 @@ use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, dim, scroll_list, width};
 use crate::tui::app::keep::{
     ChoiceSize, CopyRow, CopyTitle, Fact, Folders, KeepChoice, KeepNote, KeepPhase, KeepStage, KeepVerb, KeepView,
-    LinksStatus,
+    LinksStatus, OffWhy,
 };
 use crate::tui::app::MessageKind;
 
@@ -45,40 +50,120 @@ use super::discover::DiscAct;
 use super::opener::{HandOff, open_target};
 use super::{Act, Gui, accent, bright_bold, put, sel};
 
-/// The modal's width (clause 106): at least 44, at most the area less 2.
-pub(crate) const KEEP_W: u16 = 66;
-/// The height it anchors as: its tallest common state, so the top holds.
+/// The window's width (clause 106) — the Copies list's: its text in inner
+/// cols 1–72, the last inner cell blank before the right border. An area
+/// narrower than it and four more takes it down to the area less 4, never
+/// under 44.
+pub(crate) const KEEP_W: u16 = 76;
+/// The height it anchors as: its top stands where a 17-row window's would
+/// (row 6 at 30 rows, row 3 at 24), and it grows downward.
 const KEEP_ANCHOR: u16 = 17;
-/// The header's rows above the lower region: the title, a blank, three
-/// header rows and a blank.
-const HEAD_ROWS: u16 = 6;
-/// Where the radios (and the folded WHAT, the crumbs) and the sizes stand,
-/// from the inner rect's left — the canvas's columns; a locale whose WHAT
-/// or LANDS IN is wider moves the values right ([`value_col`]).
-const RADIO_X: u16 = 11;
-const SIZE_X: u16 = 43;
+/// The head under the title on the top border: the item's title and its
+/// byline. The blank under them (B1) is the table's — the give-way may
+/// drop it.
+const HEAD_ROWS: u16 = 2;
+/// From the text's column (inner col 1): a radio's label and the box's
+/// glyph, the box's label, and where a wrapped row (a place, a GOLD line, a
+/// headline) continues.
+const LABEL_X: u16 = 4;
+const BOX_LABEL_X: u16 = 8;
+const CONT_X: u16 = 2;
+/// The primary's cells at most, its brackets in: past them its count drops.
+const PRIMARY_MAX: usize = 34;
+/// The cells between key words, and between them and the primary at least.
+const KEY_GAP: usize = 3;
+/// The cells between a place's last crumb and `d change` at least.
+const CHANGE_GAP: usize = 2;
 
-/// The values' column: the canvas's, or two cells past the wider label.
-fn value_col() -> u16 {
-    let label = |key: &str| width(&t!(key).to_uppercase()) as u16 + 2;
-    RADIO_X.max(label("gui.discover.keep.what")).max(label("gui.discover.keep.lands_in"))
+// ── Geometry (shared with the Copies list) ──────────────────────────────────
+
+/// The top a window anchored as if [`KEEP_ANCHOR`] rows tall stands at.
+fn anchored_top(area: Rect) -> u16 {
+    area.y + area.height.saturating_sub(KEEP_ANCHOR) / 2
+}
+
+/// The rows a room's window has from its anchored top down to the room's
+/// last row (the one above the player bar's seek line, which no window
+/// covers).
+fn rows_anchored(area: Rect, room: Rect) -> u16 {
+    room.bottom().saturating_sub(anchored_top(area))
+}
+
+/// The rows it has once it rises toward row 1 — never row 0, the tab bar.
+fn rows_risen(area: Rect, room: Rect) -> u16 {
+    room.bottom().saturating_sub(area.y + 1)
+}
+
+/// Whether a window `w` wide centres in the room with its band — the room
+/// at least four cells wider — or over the whole frame (the queue panel
+/// open), no band.
+fn banded(room: Rect, w: u16) -> bool {
+    room.width >= w + 4
+}
+
+/// The window's width in this frame: `w`, or the area less 4 where the area
+/// is narrower, never under 44.
+fn window_width(area: Rect, room: Rect, w: u16) -> u16 {
+    if banded(room, w) { w } else { w.min(area.width.saturating_sub(4)).max(44).min(area.width) }
+}
+
+/// Where a room's window stands (clauses 106, 117) and its band: `w` wide,
+/// centred in the room and the room's width cleared on its rows — or
+/// centred over the whole frame where the room is too narrow, no band; its
+/// top where a [`KEEP_ANCHOR`]-row window's would be, rising toward row 1
+/// only as far as its `h` rows need, its bottom border never under the
+/// room's last row. Keep a copy and the Copies list open in the same place.
+pub(crate) fn window_rect(area: Rect, room: Rect, w: u16, h: u16) -> (Rect, Option<Rect>) {
+    let w = window_width(area, room, w);
+    let x = if banded(room, w) { room.x + (room.width - w) / 2 } else { area.x + area.width.saturating_sub(w) / 2 };
+    let h = h.min(rows_risen(area, room));
+    let top = anchored_top(area).min(room.bottom().saturating_sub(h)).max(area.y + 1);
+    let rect = Rect { x, y: top, width: w, height: h };
+    let band = banded(room, w).then_some(Rect { x: room.x, y: top, width: room.width, height: h });
+    (rect, band)
+}
+
+/// Clear a window's footprint — the band where it has one — register it as
+/// the overlay the room's covers stand down under (Over pixels) and as
+/// inert, the whole frame inert beneath (the kit's Modal: what drew before
+/// it registered is dropped first, so no tooltip, context or click of the
+/// room's outlives it — the room drew without the pointer); its frame then
+/// drawn inside. The overlay registered is returned: what a pixel cover
+/// inside the window asks about ([`Slot`]'s one-frame mosaic).
+fn open_window(frame: &mut Frame, gui: &mut Gui, area: Rect, rect: Rect, band: Option<Rect>) -> (Rect, Rect) {
+    gui.ui.clear_registries();
+    gui.ui.click(area, Act::Guard);
+    let own = band.unwrap_or(rect);
+    gui.ui.overlay(own);
+    gui.ui.modal_over();
+    if let Some(band) = band {
+        crate::kit::blank(frame, band);
+    }
+    let inner = modal_box(frame, rect);
+    gui.ui.click(own, Act::Guard);
+    (inner, own)
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
 
-/// The modal's own state: the keyboard's stop and the header's cover.
-/// Everything it shows is the App's flow ([`crate::tui::app::keep::KeepFlow`]).
+/// The window's own state: the outcome Retry was pressed on, the head's
+/// cover and what the last frame drew. Everything it shows is the App's
+/// flow ([`crate::tui::app::keep::KeepFlow`]).
 #[derive(Default)]
 pub(crate) struct KeepUi {
-    /// The keyboard's stop; `None` is stowed (Enter then means the
-    /// primary, as the tips say).
-    pub focus: Option<Stop>,
-    /// A start was out last frame: when the choice comes back (a refusal,
-    /// another server's copy) the hand comes back to its radio.
-    starting: bool,
-    /// The header cover's slot: pixels while the modal is the top layer.
+    /// Retry pressed: the outcome it was pressed on, drawn — its key words
+    /// gone, `[ Retrying… ]` — while the start it sent is out (E20).
+    pub frozen: Option<KeepView>,
+    /// The head's cover's slot: pixels while the window is the top layer.
     slot: Option<Slot>,
-    /// "Where copies land" while it is open over the modal (clause 142).
+    /// The window's footprint last frame: its own, never another overlay
+    /// over its cover, when its height or its top changed since.
+    last_own: Option<Rect>,
+    /// The key words the last frame drew, for the view it drew them for:
+    /// a key acts only where its word stood on screen — the give-way's
+    /// last resort may have taken its row (§3.6, §6.2).
+    drawn: Option<(KeepView, Shown, Vec<KeyWord>)>,
+    /// "Where copies land" while it is open over the window (clause 142).
     pub dest: Option<DestUi>,
 }
 
@@ -90,73 +175,99 @@ impl KeepUi {
     }
 }
 
-/// One keyboard stop of the modal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stop {
-    Choice(KeepChoice),
-    /// "Only the albums you don't have".
-    Missing,
-    /// `[ Change… ]` on the SOURCE row: Where copies land.
-    Change,
-    /// The left button: Cancel, Close, Add to queue or Cancel copy.
-    Secondary,
-    /// The right one, ACCENT BOLD: Add …, Retry, Copy again, Start again,
-    /// Play your copy, or Close where nothing else is offered.
-    Primary,
-}
-
-/// What the modal's pointer and keys do.
+/// What the window's pointer and keys do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeepAct {
-    /// Esc, `[X]`, Cancel, Close: the copy keeps running (clause 109).
+    /// Esc, "Esc close" on the bottom border, `[ Close ]`: the copy keeps
+    /// running (clause 109).
     Close,
-    /// A radio, clicked.
+    /// A choice's row, clicked.
     Pick(KeepChoice),
-    /// The checkbox, clicked.
+    /// The box, clicked.
     Missing,
-    /// `[ Change… ]`, clicked: Where copies land.
-    Change,
-    Secondary,
+    /// The primary, clicked — Enter presses it too.
     Primary,
+    /// A key word, clicked — its key does the same.
+    Key(KeyWord),
     /// The picker's controls (clauses 142–144).
     Dest(DestAct),
 }
 
-/// A button of the modal.
+/// A key word (the window's other controls, §4.8): a DIM text button whose
+/// first word is its key, drawn only where that key works — and the key
+/// works only where it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Button {
+pub(crate) enum KeyWord {
+    /// `d change`: Where copies land.
+    Change,
+    /// `a add to queue`: the copied song at the queue's end.
+    Queue,
+    /// `c choose again`: back to the choice.
+    Choose,
+    /// `x cancel copy`: this window's copy.
     Cancel,
-    Close,
-    CancelCopy,
-    AddToQueue,
-    Add(KeepVerb),
-    Again(JobAction),
+    /// `x cancel that copy`: the other server's.
+    CancelOther,
 }
 
-impl Button {
-    fn label(self) -> String {
+impl KeyWord {
+    /// Its key — the words' first letter in English, never translated.
+    fn key(self) -> char {
         match self {
-            Button::Cancel => t!("gui.discover.keep.cancel").to_string(),
-            Button::Close => t!("gui.discover.keep.close").to_string(),
-            Button::CancelCopy => t!("gui.discover.keep.cancel_copy").to_string(),
-            Button::AddToQueue => t!("gui.discover.keep.add_to_queue").to_string(),
-            Button::Add(verb) => verb_label(verb),
-            Button::Again(JobAction::Retry) => t!("gui.discover.keep.retry").to_string(),
-            Button::Again(JobAction::CopyAgain) => t!("gui.discover.keep.copy_again").to_string(),
-            Button::Again(JobAction::StartAgain) => t!("gui.discover.keep.start_again").to_string(),
-            Button::Again(JobAction::Play) => t!("gui.discover.keep.play_copy").to_string(),
-            Button::Again(JobAction::Cancel) => t!("gui.discover.keep.cancel_copy").to_string(),
+            KeyWord::Change => 'd',
+            KeyWord::Queue => 'a',
+            KeyWord::Choose => 'c',
+            KeyWord::Cancel | KeyWord::CancelOther => 'x',
+        }
+    }
+
+    fn words(self) -> String {
+        match self {
+            KeyWord::Change => t!("gui.discover.keep.key_change"),
+            KeyWord::Queue => t!("gui.discover.keep.key_queue"),
+            KeyWord::Choose => t!("gui.discover.keep.key_choose"),
+            KeyWord::Cancel => t!("gui.discover.keep.key_cancel"),
+            KeyWord::CancelOther => t!("gui.discover.keep.key_cancel_other"),
+        }
+        .to_string()
+    }
+
+    /// Its words in an ended copy's tips line (§6.4): `d` names the picker
+    /// there, the others as drawn.
+    fn tip(self) -> String {
+        match self {
+            KeyWord::Change => t!("gui.tips.discover_keep_d").to_string(),
+            other => other.words(),
         }
     }
 }
 
-/// The primary's words, which follow the choice (clause 106).
-fn verb_label(verb: KeepVerb) -> String {
-    match verb {
-        KeepVerb::Song => t!("gui.discover.keep.add_song").to_string(),
-        KeepVerb::Album => t!("gui.discover.keep.add_album").to_string(),
-        KeepVerb::Artist => t!("gui.discover.keep.add_artist").to_string(),
-        KeepVerb::Missing(n) => plural("gui.discover.keep.add_missing", n as u64),
+/// What the primary does when pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Press {
+    /// Add …: start the chosen copy.
+    Add,
+    /// An ended copy's own: Retry, Play your copy, Add again.
+    Again(JobAction),
+    Close,
+}
+
+/// The one bracketed button: its words, and what Enter or a click does —
+/// `None` while a start it sent is out (`[ Adding… ]`, `[ Retrying… ]`:
+/// DIM, no click, no hover, the kit's modal primary that goes off).
+#[derive(Debug, Clone, PartialEq)]
+struct Primary {
+    words: String,
+    press: Option<Press>,
+}
+
+impl Primary {
+    fn close() -> Primary {
+        Primary { words: t!("gui.discover.keep.close").to_string(), press: Some(Press::Close) }
+    }
+
+    fn label(&self) -> String {
+        format!("[ {} ]", self.words)
     }
 }
 
@@ -171,8 +282,17 @@ fn tick() -> &'static str {
     if legacy_conhost() { "+" } else { "✓" }
 }
 
+fn cross() -> &'static str {
+    if legacy_conhost() { "x" } else { "×" }
+}
+
 fn crumb_sep() -> &'static str {
     if legacy_conhost() { " > " } else { " › " }
+}
+
+/// The mark a clipped text ends with — the kit's clip's.
+fn clip_mark() -> &'static str {
+    if legacy_conhost() { "»" } else { "…" }
 }
 
 /// A landing's crumbs in their tokens (clauses 105, 143): the library
@@ -245,21 +365,12 @@ fn slot_note(landing: &Landing) -> Option<String> {
     Some(t!(key.as_str(), slots = names, server = server.unwrap_or_default()).to_string())
 }
 
-/// A path's tooltip: the whole path where its rows clip it, the slot's
-/// note where it shows one — the 66-cell LANDS IN and the one-row PREVIEW
-/// have no row for the note, so it stands here.
-fn path_tip(landing: &Landing, clipped: bool) -> Option<String> {
-    let path = clipped.then(|| landing.words(&slot_words).join("/"));
-    match (path, slot_note(landing)) {
-        (Some(path), Some(note)) => Some(format!("{path} — {note}")),
-        (path, note) => path.or(note),
-    }
-}
-
-/// The cells LANDS IN's path has on a row: from the values' column to the
-/// last content cell of the 66-cell modal.
-fn lands_room() -> usize {
-    usize::from((KEEP_W - 3).saturating_sub(value_col()))
+/// A place's whole path, as its tooltip says it where a row clips it
+/// (§4.10): `a/b/c`, a slot in its words, a done song's file last.
+fn whole_path(landing: &Landing, file: Option<&str>) -> String {
+    let mut words = landing.words(&slot_words);
+    words.extend(file.map(str::to_string));
+    words.join("/")
 }
 
 /// The cells a row of runs takes.
@@ -267,11 +378,35 @@ fn cells_of(runs: &[(String, Style)]) -> usize {
     runs.iter().map(|(text, _)| width(text)).sum()
 }
 
+/// Runs cut to `room` cells, the clip's mark in the last cell where they
+/// outgrow it (the kit's clip, across runs) — and whether they were cut.
+fn clip_runs(runs: &[(String, Style)], room: usize) -> (Vec<(String, Style)>, bool) {
+    if cells_of(runs) <= room {
+        return (runs.to_vec(), false);
+    }
+    let mut out = Vec::new();
+    let mut used = 0;
+    for (text, style) in runs {
+        let w = width(text);
+        if used + w < room {
+            out.push((text.clone(), *style));
+            used += w;
+            continue;
+        }
+        // The run that reaches the edge gives its last cell to the mark —
+        // one that ends exactly there too, since more runs follow it.
+        let left = room - used;
+        let padded = if w <= left { format!("{text} ") } else { text.clone() };
+        out.push((super::bar::clip(&padded, left).into_owned(), *style));
+        break;
+    }
+    (out, true)
+}
+
 /// A path's runs in rows of `room` cells (clause 105): after `lead`, the
 /// crumbs with `›` DIM between them; where they outgrow the first row
 /// they break before a crumb, ` ›` ending it, and the rest stands on a
-/// second — clipped at the right there, never cut from the left, so the
-/// library always shows.
+/// second.
 fn path_rows(lead: Vec<(String, Style)>, crumbs: &[Vec<(String, Style)>], room: usize) -> Vec<Vec<(String, Style)>> {
     let sep = crumb_sep();
     let cont = sep.trim_end();
@@ -295,17 +430,6 @@ fn path_rows(lead: Vec<(String, Style)>, crumbs: &[Vec<(String, Style)>], room: 
         placed = true;
     }
     rows
-}
-
-/// A landing as the modal's rows: LANDS IN's (no `lead`), or the "retry
-/// adds to" words and the place, under it.
-fn path_lows(lead: Option<String>, landing: &Landing) -> Vec<Low> {
-    let room = lands_room();
-    let first = lead.is_none();
-    let lead = lead.map(|words| vec![(format!("{words} "), dim())]).unwrap_or_default();
-    let rows = path_rows(lead, &landing_crumbs(landing), room);
-    let tip = path_tip(landing, rows.iter().any(|row| cells_of(row) > room));
-    rows.into_iter().enumerate().map(|(i, runs)| Low::Path { first: first && i == 0, runs, tip: tip.clone() }).collect()
 }
 
 /// A plural family's words for `count` (`_one`, `_few`, `_many`, `_other`).
@@ -333,13 +457,7 @@ pub(crate) fn mark_glyph(mark: JobMark) -> &'static str {
         }
         JobMark::Kept | JobMark::Yours => tick(),
         JobMark::Failed | JobMark::Stopped | JobMark::Refused => "!",
-        JobMark::Cancelled => {
-            if legacy {
-                "x"
-            } else {
-                "×"
-            }
-        }
+        JobMark::Cancelled => cross(),
     }
 }
 
@@ -371,12 +489,29 @@ pub(crate) fn mark_word(mark: JobMark) -> String {
     }
 }
 
-/// A count's words in the modal: "3 songs", "1 copied".
+/// A count's words in the windows: "3 songs", "1 copied".
 fn count(stem: &str, n: u64) -> String {
     plural(stem, n)
 }
 
-/// A choice's name, as its radio and the folded WHAT line say it.
+/// A many-song copy's counts as the Copies list's runs (clause 117):
+/// copied, already yours, failed (GOLD), albums left out — what the
+/// result's counts hold.
+fn many_runs(n: &ManyCounts, base: Style) -> Vec<(String, Style)> {
+    let mut runs = vec![(count("gui.discover.keep.copied", n.copied), base)];
+    if n.skipped > 0 {
+        runs.push((count("gui.discover.keep.owned", n.skipped), base));
+    }
+    if n.failed > 0 {
+        runs.push((count("gui.discover.keep.failed", n.failed), Style::default().fg(th().gold)));
+    }
+    if n.albums_left_out > 0 {
+        runs.push((count("gui.discover.keep.left_out", n.albums_left_out as u64), base));
+    }
+    runs
+}
+
+/// A choice's name, as its radio says it.
 fn choice_name(choice: KeepChoice, view: &KeepView) -> String {
     match choice {
         KeepChoice::Song => t!("gui.discover.keep.song").to_string(),
@@ -388,36 +523,37 @@ fn choice_name(choice: KeepChoice, view: &KeepView) -> String {
     }
 }
 
-/// A choice's size, DIM beside its radio (clause 106): `…` while asked,
-/// nothing when unknown.
-fn size_words(size: &ChoiceSize) -> Option<String> {
-    let dots = || ell("…");
-    match size {
-        ChoiceSize::Song { seconds, format } => {
-            let parts: Vec<String> = seconds
-                .filter(|s| *s > 0.0)
-                .map(super::bar::fmt_time)
-                .into_iter()
-                .chain(format.clone())
-                .collect();
-            (!parts.is_empty()).then(|| parts.join(" · "))
+/// The primary's words while choosing (§4.8) — the size lives here: Add
+/// song · "Add album · 3 songs" · "Add 2 albums" (the connected server's
+/// albums by the artist) · "Add 1 album" (only the missing; "Add the albums
+/// you don't have" where a copy of them keeps the box with none missing by
+/// name) — a count only once it is known ("Add album", "Add every album"
+/// meanwhile), and dropped where the label would pass [`PRIMARY_MAX`]
+/// cells.
+fn add_words(verb: KeepVerb, view: &KeepView) -> String {
+    let size = |choice: KeepChoice| view.choices.iter().find(|(c, _)| *c == choice).map(|(_, size)| size);
+    match verb {
+        KeepVerb::Song => t!("gui.discover.keep.add_song").to_string(),
+        KeepVerb::Album => {
+            let add = t!("gui.discover.keep.add_album").to_string();
+            match size(KeepChoice::Album) {
+                Some(ChoiceSize::Album { songs: Fact::Known(n) }) => {
+                    let whole = format!("{add} · {}", count("gui.discover.keep.songs", *n as u64));
+                    if width(&whole) + 4 <= PRIMARY_MAX { whole } else { add }
+                }
+                _ => add,
+            }
         }
-        ChoiceSize::Album { songs } => match songs {
-            Fact::Asking => Some(dots()),
-            Fact::Known(n) => Some(count("gui.discover.keep.songs", *n as u64)),
-            Fact::Unknown => None,
+        KeepVerb::Artist => match size(KeepChoice::Artist) {
+            Some(ChoiceSize::Artist { albums: Fact::Known(n), .. }) if *n > 0 => {
+                count("gui.discover.keep.add_albums", *n as u64)
+            }
+            _ => t!("gui.discover.keep.add_every").to_string(),
         },
-        ChoiceSize::Artist { albums, have } => match (albums, have) {
-            (Fact::Asking, _) | (_, Fact::Asking) => Some(dots()),
-            (Fact::Known(a), Fact::Known(h)) if *h > 0 => Some(format!(
-                "{} · {}",
-                count("gui.discover.keep.albums", *a as u64),
-                count("gui.discover.keep.you_have", *h as u64)
-            )),
-            (Fact::Known(a), _) => Some(count("gui.discover.keep.albums", *a as u64)),
-            (Fact::Unknown, Fact::Known(h)) if *h > 0 => Some(count("gui.discover.keep.you_have", *h as u64)),
-            _ => None,
-        },
+        // Kept by a copy that still wants the user, none missing by name:
+        // no count to say.
+        KeepVerb::Missing(0) => t!("gui.discover.keep.add_missing").to_string(),
+        KeepVerb::Missing(n) => count("gui.discover.keep.add_albums", n as u64),
     }
 }
 
@@ -434,8 +570,12 @@ fn failure_words(failure: &crate::api::PluginFailure) -> String {
 }
 
 /// Greedy wrap at `width` cells that keeps each of `keep` (a server's name)
-/// whole on one line.
+/// whole on one line. A token wider than a row — a sentence with no blank
+/// in it (Japanese, Chinese), a long path — fills the row it starts on and
+/// breaks between grapheme clusters, by cells, as the kit's tooltip wrap
+/// does: no row outgrows `width`.
 pub(crate) fn wrap_keeping(text: &str, width_cells: usize, keep: &[&str]) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
     // Tokens: words, the kept phrases glued into one.
     let words: Vec<&str> = text.split(' ').filter(|w| !w.is_empty()).collect();
     let phrases: Vec<Vec<&str>> =
@@ -462,6 +602,23 @@ pub(crate) fn wrap_keeping(text: &str, width_cells: usize, keep: &[&str]) -> Vec
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     for token in tokens {
+        if width(&token) > width_cells {
+            let mut cells = width(&line);
+            if !line.is_empty() {
+                line.push(' ');
+                cells += 1;
+            }
+            for grapheme in token.graphemes(true) {
+                let w = crate::kit::grapheme_cells(grapheme);
+                if cells + w > width_cells && cells > 0 {
+                    lines.push(std::mem::take(&mut line).trim_end().to_string());
+                    cells = 0;
+                }
+                line.push_str(grapheme);
+                cells += w;
+            }
+            continue;
+        }
         let need = if line.is_empty() { width(&token) } else { width(&line) + 1 + width(&token) };
         if need > width_cells && !line.is_empty() {
             lines.push(std::mem::take(&mut line));
@@ -477,125 +634,432 @@ pub(crate) fn wrap_keeping(text: &str, width_cells: usize, keep: &[&str]) -> Vec
     lines
 }
 
-// ── The lower region, worked out ────────────────────────────────────────────
+/// Words in the window's rows (§4.6–4.7, §9): wrapped at `room` keeping
+/// each of `keep` (a server's name) whole, the rows after the first `hang`
+/// cells in; two rows at most — the second clipped where words are left —
+/// or one where the give-way asks (`one`), cut at a word. The whole words
+/// are the rows' tooltip wherever they were cut — a row that would still
+/// outgrow its cells is clipped there too.
+fn wrap_rows(text: &str, room: usize, hang: usize, keep: &[&str], one: bool) -> (Vec<String>, Option<String>) {
+    let lines = wrap_keeping(text, room, keep);
+    let tip = Some(text.to_string());
+    match lines.as_slice() {
+        [] => return (lines, None),
+        [only] if width(only) <= room => return (lines, None),
+        [only] => return (vec![super::bar::clip(only, room).into_owned()], tip),
+        _ => {}
+    }
+    if one {
+        let cut = format!("{}{}", lines[0], clip_mark());
+        let shown = if width(&cut) <= room { cut } else { super::bar::clip(text, room).into_owned() };
+        return (vec![shown], tip);
+    }
+    let room = room.saturating_sub(hang);
+    // The words after the first row as they run: a row broken inside a
+    // token (a sentence with no blank) carries on where it broke.
+    let flat = text.split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    let rest = match flat.strip_prefix(lines[0].as_str()) {
+        Some(rest) => rest.trim_start().to_string(),
+        None => lines[1..].join(" "),
+    };
+    match wrap_keeping(&rest, room, keep).as_slice() {
+        [second] if width(second) <= room => (vec![lines[0].clone(), second.clone()], None),
+        _ => (vec![lines[0].clone(), super::bar::clip(&rest, room).into_owned()], tip),
+    }
+}
 
-/// One row of the modal's lower region.
+/// A right gone, as its one plain line says it (clause 147).
+fn off_words(why: OffWhy) -> String {
+    match why {
+        OffWhy::Uploads => t!("gui.discover.dest.nowhere"),
+        OffWhy::Jobs => t!("gui.discover.keep.off_jobs"),
+        OffWhy::Plugin => t!("gui.discover.keep.off_plugin"),
+    }
+    .to_string()
+}
+
+/// Its first letter raised — a sub that starts with words written to
+/// follow another's (" · with your copy of …").
+fn raised(words: &str) -> String {
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+// ── The table, worked out ───────────────────────────────────────────────────
+
+/// A blank row the give-way may drop (§3.6), by where it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    /// Under the head.
+    B1,
+    /// Under the choice, or under the progress or the outcome, where more
+    /// of the body follows.
+    B2,
+    /// Above the action row.
+    B3,
+}
+
+/// One row of the window under its head (§3.3).
 #[derive(Debug, Clone, PartialEq)]
 enum Low {
-    Blank,
-    /// A radio: its choice, its size, whether it is the first (WHAT).
-    Choice(KeepChoice, Option<String>, bool),
-    /// "Only the albums you don't have", ticked or not.
-    Missing(bool),
-    /// The folded choice: WHAT and the copy's scope in words, its size.
-    Folded(String, Option<String>),
-    /// A row of where a copy lands (clause 105): LANDS IN's — the label on
-    /// its `first` row — or "retry adds to …" under it: the library, its
-    /// folders, an artist copy's "one folder per album" (a hint, not a
-    /// folder, so DIM), wrapped at a crumb onto a second row where they
-    /// outgrow one ([`path_rows`]); `tip` the whole path where even that
-    /// is clipped, and a slot's note where one shows ([`path_tip`]).
-    Path { first: bool, runs: Vec<(String, Style)>, tip: Option<String> },
-    /// The SOURCE row under it: whose place it is (saved for the account,
-    /// or the library's default) and `[ Change… ]` (clause 105).
-    Source(bool),
-    /// One row of words in a token.
-    Text(String, Style),
-    /// Runs of words in their tokens, ` · ` between them DIM.
-    Runs(Vec<(String, Style)>),
-    /// The scan widget's bar: the progress, `None` with no estimate.
-    Bar(Option<f64>),
-    /// The buttons, bottom-right: the secondary and the primary.
-    Buttons(Option<Button>, Option<Button>),
+    Blank(Gap),
+    /// A radio (shown where the subject offers two choices or more).
+    Choice(KeepChoice),
+    /// "Only the N albums you don't have" under Every album by: ticked or
+    /// not, its count — 0 for none to say ("Only the albums you don't
+    /// have").
+    Missing { on: bool, count: usize },
+    /// A row of the place (§4.4): its lead DIM and its crumbs, at col 3
+    /// where it continues a first; `change` stands `d change` at its end;
+    /// `tip` the whole path where a row clips it.
+    Place { runs: Vec<(String, Style)>, cont: bool, change: bool, tip: Option<String> },
+    /// A row of words in their tokens — a headline, a sub, the slot note, a
+    /// GOLD line, a plain line — at col 3 where it continues a headline or
+    /// a GOLD line; `tip` the whole words where they were cut.
+    Text { runs: Vec<(String, Style)>, cont: bool, tip: Option<String> },
+    /// The progress bar (§4.7): `None` with no estimate; `tail` its DIM
+    /// words after it ("starts on its own").
+    Bar { progress: Option<f64>, tail: Option<String> },
+    /// The key words on their own row, where they would crowd the primary.
+    Keys(Vec<KeyWord>),
+    /// The key words at the left, the primary at the right.
+    Action { keys: Vec<KeyWord>, primary: Primary },
 }
 
-/// The scope a folded WHAT line names, and its size.
-fn folded(view: &KeepView, scope: JobScope) -> Low {
-    let size_of = |choice: KeepChoice| {
-        view.choices.iter().find(|(c, _)| *c == choice).and_then(|(_, size)| match size {
-            ChoiceSize::Artist { .. } => None,
-            other => size_words(other).filter(|w| w != &ell("…")),
-        })
+/// How far the give-way went (§3.6). Each step only while the window is
+/// still too tall for the rows it has; the top's rise (step 3) is the
+/// geometry's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Fit {
+    /// Step 1: the blanks dropped, B2 first, then B1, then B3 (0–3).
+    blanks: u8,
+    /// Step 2: the place on one row.
+    place: bool,
+    /// Step 4: the slot note on one row.
+    note: bool,
+    /// Step 5: a GOLD line, a headline and a sub on one row each.
+    lines: bool,
+}
+
+impl Fit {
+    fn drops(self, gap: Gap) -> bool {
+        match gap {
+            Gap::B2 => self.blanks >= 1,
+            Gap::B1 => self.blanks >= 2,
+            Gap::B3 => self.blanks >= 3,
+        }
+    }
+}
+
+/// What a frame shows besides the App's view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Shown {
+    /// The view is the outcome Retry was pressed on, held while its start
+    /// is out (E20): its key words gone, the primary off.
+    retrying: bool,
+    /// The followed copy's cancel is out: it reads as stopping until the
+    /// server says so.
+    cancel_out: bool,
+}
+
+/// The view a frame draws and what it shows besides: the outcome Retry
+/// was pressed on while its start is out, else the App's own.
+fn shown_of(gui: &Gui) -> Option<(KeepView, Shown)> {
+    let view = gui.app.keep_view()?;
+    if matches!(view.stage, KeepStage::Starting)
+        && let Some(frozen) = &gui.discover.keep.frozen
+    {
+        return Some((frozen.clone(), Shown { retrying: true, cancel_out: false }));
+    }
+    let cancel_out = match &view.stage {
+        KeepStage::Job { job, .. } if job.live() => gui.app.copies_rows().iter().any(|r| r.job.id == job.id && r.cancelling),
+        _ => false,
     };
-    match scope {
-        JobScope::Song => Low::Folded(choice_name(KeepChoice::Song, view), size_of(KeepChoice::Song)),
-        JobScope::Album => Low::Folded(choice_name(KeepChoice::Album, view), size_of(KeepChoice::Album)),
-        // Only the albums you don't have: how many it takes.
-        JobScope::ArtistMissing => Low::Folded(
-            choice_name(KeepChoice::Artist, view),
-            view.missing.map(|(_, n)| count("gui.discover.keep.albums", n as u64)),
-        ),
-        _ => Low::Folded(choice_name(KeepChoice::Artist, view), None),
+    Some((view, Shown { retrying: false, cancel_out }))
+}
+
+/// Whether a copy reads as stopping: the server says its cancel was asked,
+/// or this window's cancel is out.
+fn stopping(outcome: &JobOutcome, shown: Shown) -> bool {
+    matches!(outcome, JobOutcome::Running { stopping: true, .. }) || (outcome.live() && shown.cancel_out)
+}
+
+/// Whether the window's own copy is queued or running — the footer says
+/// it keeps going (§4.9).
+fn going(view: &KeepView, shown: Shown) -> bool {
+    !shown.retrying && matches!(&view.stage, KeepStage::Job { outcome, .. } if outcome.live() && !stopping(outcome, shown))
+}
+
+/// The place line (§4.4): `lead` DIM, then the crumbs — a done song's file
+/// DIM last — on one row where the sentence fits (ten cells fewer where
+/// `d change` ends it); else broken before a crumb, ` ›` ending the first
+/// row and the rest on a second at col 3, which is clipped at the right
+/// where it still outgrows its cells — the library always shows — the whole
+/// path then both rows' tooltip. `one`: the give-way's step 2 — one row,
+/// clipped before `d change`.
+fn place_lows(lead: &str, landing: &Landing, file: Option<&str>, change: bool, room: usize, one: bool) -> Vec<Low> {
+    let mut crumbs = landing_crumbs(landing);
+    if let Some(file) = file {
+        crumbs.push(vec![(file.to_string(), dim())]);
+    }
+    let lead = vec![(format!("{lead} "), dim())];
+    let mut whole = lead.clone();
+    for (i, crumb) in crumbs.iter().enumerate() {
+        if i > 0 {
+            whole.push((crumb_sep().to_string(), dim()));
+        }
+        whole.extend(crumb.iter().cloned());
+    }
+    let beside = if change { width(&KeyWord::Change.words()) + CHANGE_GAP } else { 0 };
+    let first = room.saturating_sub(beside);
+    let tip = |clipped: bool| clipped.then(|| whole_path(landing, file));
+    if cells_of(&whole) <= first || one || crumbs.len() < 2 {
+        let (runs, clipped) = clip_runs(&whole, first);
+        return vec![Low::Place { runs, cont: false, change, tip: tip(clipped) }];
+    }
+    let mut rows = path_rows(lead.clone(), &crumbs, room);
+    if rows.len() == 1 {
+        // The sentence fits the row only where `d change` does not stand:
+        // its last crumb goes down beside it.
+        let (head, last) = crumbs.split_at(crumbs.len() - 1);
+        let mut top = path_rows(lead, head, room).remove(0);
+        top.push((crumb_sep().trim_end().to_string(), dim()));
+        rows = vec![top, last[0].clone()];
+    }
+    let (top, top_cut) = clip_runs(&rows[0], room);
+    let (rest, rest_cut) = clip_runs(&rows[1], room.saturating_sub(usize::from(CONT_X) + beside));
+    let tip = tip(top_cut || rest_cut);
+    vec![
+        Low::Place { runs: top, cont: false, change: false, tip: tip.clone() },
+        Low::Place { runs: rest, cont: true, change, tip },
+    ]
+}
+
+/// A place's slot note (§4.5): its own DIM rows under the place, two at
+/// most (one where the give-way asks), the whole note the tooltip where cut.
+fn note_lows(low: &mut Vec<Low>, landing: &Landing, room: usize, one: bool) {
+    if let Some(note) = slot_note(landing) {
+        lines(low, &note, dim(), room, 0, &[], one);
     }
 }
 
-/// A many-song copy's counts as runs (clause 110): copied, already yours,
-/// failed (GOLD), albums left out — what the result's counts hold.
-fn many_runs(n: &ManyCounts, base: Style) -> Vec<(String, Style)> {
-    let mut runs = vec![(count("gui.discover.keep.copied", n.copied), base)];
-    if n.skipped > 0 {
-        runs.push((count("gui.discover.keep.owned", n.skipped), base));
+/// Words as rows of one token at col 1 — a hanging `hang` after the first
+/// (a headline, a GOLD line).
+fn lines(low: &mut Vec<Low>, text: &str, style: Style, room: usize, hang: u16, keep: &[&str], one: bool) {
+    let (rows, tip) = wrap_rows(text, room, usize::from(hang), keep, one);
+    for (i, row) in rows.into_iter().enumerate() {
+        low.push(Low::Text { runs: vec![(row, style)], cont: i > 0 && hang > 0, tip: tip.clone() });
     }
-    if n.failed > 0 {
-        runs.push((count("gui.discover.keep.failed", n.failed), Style::default().fg(th().gold)));
+}
+
+/// An outcome's headline (§4.7): its glyph in code, its words the locale's
+/// — `✓ In your collection` OK BOLD; `! …` GOLD BOLD; a neutral end's
+/// glyph DIM and its words TEXT BOLD — wrapped at col 3, two rows at most.
+fn headline(low: &mut Vec<Low>, glyph: Option<(&str, Style)>, words: &str, style: Style, room: usize, keep: &[&str], one: bool) {
+    let text = match glyph {
+        Some((glyph, _)) => format!("{glyph} {words}"),
+        None => words.to_string(),
+    };
+    let (rows, tip) = wrap_rows(&text, room, usize::from(CONT_X), keep, one);
+    for (i, row) in rows.into_iter().enumerate() {
+        let runs = match glyph {
+            Some((glyph, glyph_style)) if i == 0 && row.starts_with(glyph) => {
+                vec![(glyph.to_string(), glyph_style), (row[glyph.len()..].to_string(), style)]
+            }
+            _ => vec![(row, style)],
+        };
+        low.push(Low::Text { runs, cont: i > 0, tip: tip.clone() });
+    }
+}
+
+/// The action row (§4.8): the key words from col 1, [`KEY_GAP`] apart,
+/// the primary right-aligned — the key words on the row above where the
+/// two would come closer than that.
+fn action(low: &mut Vec<Low>, keys: Vec<KeyWord>, primary: Primary, room: usize) {
+    let keys_w: usize =
+        keys.iter().map(|k| width(&k.words())).sum::<usize>() + KEY_GAP * keys.len().saturating_sub(1);
+    if !keys.is_empty() && keys_w + KEY_GAP + width(&primary.label()) > room {
+        low.push(Low::Keys(keys));
+        low.push(Low::Action { keys: Vec::new(), primary });
+    } else {
+        low.push(Low::Action { keys, primary });
+    }
+}
+
+/// A choosing state's rows (§5.1–5.2): the radios and the box where the
+/// subject offers two choices or more, then — after a blank — the place
+/// with `d change`, its slot note and `aside` (a refusal, a moved place,
+/// another server's copy); the key words and the primary. Starting draws
+/// the same, its primary off and its controls inert ([`draw_low`]).
+fn choosing(low: &mut Vec<Low>, view: &KeepView, room: usize, fit: Fit, aside: Vec<Low>, keys: Vec<KeyWord>, primary: Primary) {
+    let radios = view.choices.len() >= 2;
+    if radios {
+        for (choice, _) in &view.choices {
+            low.push(Low::Choice(*choice));
+            if *choice == KeepChoice::Artist
+                && let Some((on, count)) = view.missing
+            {
+                low.push(Low::Missing { on, count });
+            }
+        }
+    }
+    let mut body = Vec::new();
+    if let Some(landing) = &view.landing {
+        body.extend(place_lows(&t!("gui.discover.keep.goes_to"), landing, None, true, room, fit.place));
+        note_lows(&mut body, landing, room, fit.note);
+    }
+    body.extend(aside);
+    if radios && !body.is_empty() {
+        low.push(Low::Blank(Gap::B2));
+    }
+    low.extend(body);
+    low.push(Low::Blank(Gap::B3));
+    action(low, keys, primary, room);
+}
+
+/// Whose wider copy speaks for this choice (§5.4), as its sub says it: a
+/// song your album copy kept; an album your copy of the artist's albums,
+/// or of their missing ones, walked.
+fn borrowed_words(view: &KeepView) -> Option<String> {
+    let artist = view.subject.track_artist.clone().unwrap_or_default();
+    match view.borrowed? {
+        JobScope::Album => Some(t!("gui.discover.keep.with_album").to_string()),
+        JobScope::Artist => Some(t!("gui.discover.keep.with_artist", artist = artist).to_string()),
+        JobScope::ArtistMissing => Some(t!("gui.discover.keep.with_missing", artist = artist).to_string()),
+        _ => None,
+    }
+}
+
+/// A sub with whose copy spoke after it (" · with your copy of …") — or
+/// alone, its first letter raised.
+fn with_borrowed(sub: Option<String>, view: &KeepView) -> Option<String> {
+    match (sub, borrowed_words(view)) {
+        (Some(sub), Some(whose)) => Some(format!("{sub} · {whose}")),
+        (None, Some(whose)) => Some(raised(&whose)),
+        (sub, None) => sub,
+    }
+}
+
+/// A many-song copy's counts as its sub says them (§5.4): copied, already
+/// yours, albums left out, zeros dropped — the gap is the headline's.
+fn kept_counts(n: &ManyCounts) -> Option<String> {
+    let mut parts = Vec::new();
+    if n.copied > 0 {
+        parts.push(count("gui.discover.keep.copied", n.copied));
+    }
+    if n.skipped > 0 {
+        parts.push(count("gui.discover.keep.owned", n.skipped));
     }
     if n.albums_left_out > 0 {
-        runs.push((count("gui.discover.keep.left_out", n.albums_left_out as u64), base));
+        parts.push(count("gui.discover.keep.left_out", n.albums_left_out as u64));
     }
-    runs
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// The copy's three scan rows and its buttons (clauses 109–110).
-fn job_rows(view: &KeepView, job: &PluginJob, outcome: &JobOutcome, action: Option<JobAction>) -> (Vec<Low>, Option<Button>, Option<Button>) {
-    let gold = Style::default().fg(th().gold);
-    let ok = Style::default().fg(th().ok);
-    let server = job.peer_name().unwrap_or_else(|| view.subject.server.clone());
-    let wrap = |text: String, style: Style| -> Vec<Low> {
-        wrap_keeping(&text, usize::from(KEEP_W - 4), &[server.as_str()]).into_iter().map(|line| Low::Text(line, style)).collect()
-    };
-    let mut rows: Vec<Low> = Vec::new();
+/// A many-song copy's gap as its headline says it (done ≠ kept, made
+/// visible): the songs that did not copy — failed or never reached — else
+/// the albums whose listing failed.
+fn gap_words(n: &ManyCounts) -> Option<String> {
+    let songs = n.failed.max(n.total.saturating_sub(n.copied + n.skipped));
+    if songs > 0 {
+        return Some(count("gui.discover.keep.gap_songs", songs));
+    }
+    (n.albums_failed > 0).then(|| count("gui.discover.keep.gap_albums", n.albums_failed as u64))
+}
+
+/// "1 copied", or "Nothing was copied".
+fn copied_words(copied: u64) -> String {
+    if copied > 0 { count("gui.discover.keep.copied", copied) } else { t!("gui.discover.keep.nothing_copied").to_string() }
+}
+
+/// Whether an ended copy left files where its "In" row would say (§4.4):
+/// whatever it copied; what it found already there, or in the way, where
+/// the result names the folder. Failed, refused or cancelled before a
+/// song, nothing to copy, a result this client cannot read: no row claims
+/// files landed.
+fn landed_any(job: &PluginJob, outcome: &JobOutcome) -> bool {
+    let copied = |many: &Option<ManyCounts>| many.is_some_and(|n| n.copied > 0);
     match outcome {
-        JobOutcome::Queued => {
-            rows.push(Low::Text(t!("gui.discover.keep.waiting").to_string(), Style::default()));
-            rows.push(Low::Bar(None));
-            rows.push(Low::Text(t!("gui.discover.keep.waiting_sub").to_string(), dim()));
-        }
-        JobOutcome::Running { progress, step, stopping } => {
-            let step = if *stopping {
-                ell(&t!("gui.discover.keep.stopping"))
-            } else {
-                step.clone().unwrap_or_else(|| ell(&t!("gui.discover.keep.copying")))
+        JobOutcome::Copied { .. } | JobOutcome::CopiedMany(_) => true,
+        JobOutcome::Owned { .. } | JobOutcome::Exists { .. } => job.copy_result().landed().is_some_and(|l| l.vpath.is_some()),
+        JobOutcome::Stopped { many, .. } => many.copied > 0,
+        JobOutcome::Refused { many } | JobOutcome::Cancelled { many } | JobOutcome::Failed { many, .. } => copied(many),
+        _ => false,
+    }
+}
+
+/// A copy's rows (§5.3–5.4): its two-line progress, or its outcome's
+/// headline and subs; then — after a blank — where it lands ("Into" its
+/// pinned place while it runs, "In" where its files landed, a song's file
+/// its last crumb), "Retry adds to" where Retry would land elsewhere, a
+/// slot's note; the key words and the primary of the window's own table.
+#[allow(clippy::too_many_arguments)]
+fn job_lows(
+    low: &mut Vec<Low>,
+    view: &KeepView,
+    job: &PluginJob,
+    outcome: &JobOutcome,
+    act: Option<JobAction>,
+    shown: Shown,
+    room: usize,
+    fit: Fit,
+) {
+    let server = job.peer_name().unwrap_or_else(|| view.subject.server.clone());
+    let keep = [server.as_str(), view.subject.server.as_str()];
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let ok = Style::default().fg(th().ok).add_modifier(Modifier::BOLD);
+    let gold = Style::default().fg(th().gold).add_modifier(Modifier::BOLD);
+    let quiet = Some((tick(), dim()));
+    let live = outcome.live();
+    let halting = stopping(outcome, shown);
+    let one = fit.lines;
+    // The headline, and the DIM lines under it.
+    let mut subs: Vec<String> = Vec::new();
+    match outcome {
+        JobOutcome::Queued | JobOutcome::Running { .. } => {
+            let (head, step, progress, tail) = match outcome {
+                JobOutcome::Running { progress, .. } if halting => (t!("gui.discover.keep.stopping"), None, *progress, None),
+                JobOutcome::Running { progress, step, .. } => (t!("gui.discover.keep.copying"), step.clone(), *progress, None),
+                _ if halting => (t!("gui.discover.keep.stopping"), None, None, None),
+                _ => (t!("gui.discover.keep.waiting"), None, None, Some(t!("gui.discover.keep.waiting_sub").to_string())),
             };
-            rows.push(Low::Text(step, Style::default()));
-            rows.push(Low::Bar(*progress));
-            match job.copy_result().many() {
-                Some(n) => rows.push(Low::Runs(vec![
-                    (count("gui.discover.keep.copied", n.copied), dim()),
-                    (count("gui.discover.keep.failed", n.failed), dim()),
-                ])),
-                None => rows.push(Low::Blank),
+            // One row: the server's step stays its words, clipped — the
+            // whole of them the row's tooltip.
+            let mut runs = vec![(ell(&head), bold)];
+            if let Some(step) = step {
+                runs.push((" · ".to_string(), dim()));
+                runs.push((step, Style::default()));
             }
+            let whole: String = runs.iter().map(|(t, _)| t.as_str()).collect();
+            let (runs, clipped) = clip_runs(&runs, room);
+            let tip = clipped.then_some(whole);
+            low.push(Low::Text { runs, cont: false, tip });
+            low.push(Low::Bar { progress, tail });
         }
-        JobOutcome::Copied { filepath, .. } => {
-            rows.push(Low::Runs(vec![(format!("{} {}", tick(), t!("gui.discover.keep.kept")), ok)]));
-            rows.push(Low::Text(super::clip_lead(filepath, usize::from(KEEP_W - 4)), dim()));
+        JobOutcome::Copied { .. } => {
+            headline(low, Some((tick(), ok)), &t!("gui.discover.keep.kept"), ok, room, &keep, one);
+            let from = view.copied_from.as_ref().map(|server| t!("gui.discover.keep.copied_from", server = server).to_string());
+            subs.extend(with_borrowed(from, view));
         }
         JobOutcome::CopiedMany(n) => {
-            rows.push(Low::Runs(vec![(format!("{} {}", tick(), t!("gui.discover.keep.kept")), ok)]));
-            rows.push(Low::Runs(many_runs(n, ok)));
-            rows.push(Low::Text(t!("gui.discover.keep.gaps").to_string(), dim()));
+            let gap = gap_words(n).filter(|_| act == Some(JobAction::Retry));
+            match &gap {
+                Some(gap) => headline(low, Some(("!", gold)), gap, gold, room, &keep, one),
+                None => headline(low, Some((tick(), ok)), &t!("gui.discover.keep.kept"), ok, room, &keep, one),
+            }
+            subs.extend(with_borrowed(kept_counts(n), view));
         }
         JobOutcome::Owned { many, .. } => {
-            rows.push(Low::Runs(vec![(format!("{} {}", tick(), t!("gui.discover.keep.yours")), ok)]));
+            headline(low, quiet, &t!("gui.discover.keep.yours"), bold, room, &keep, one);
             let has = if many.is_some() { t!("gui.discover.keep.yours_many") } else { t!("gui.discover.keep.yours_song") };
-            rows.push(Low::Text(format!("{has} · {}", t!("gui.discover.keep.nothing_copied")), dim()));
+            subs.extend(with_borrowed(Some(has.to_string()), view));
         }
-        JobOutcome::Exists { filepath } => {
-            rows.push(Low::Text(t!("gui.discover.keep.exists").to_string(), gold));
-            if let Some(path) = filepath {
-                rows.push(Low::Text(super::clip_lead(path, usize::from(KEEP_W - 4)), dim()));
-            }
-            rows.push(Low::Text(t!("gui.discover.keep.exists_sub").to_string(), dim()));
+        JobOutcome::Exists { .. } => {
+            headline(low, Some(("!", gold)), &t!("gui.discover.keep.exists"), gold, room, &keep, one);
+            subs.push(t!("gui.discover.keep.exists_sub").to_string());
         }
         JobOutcome::Stopped { why, many } => {
             let reason = match why {
@@ -604,220 +1068,264 @@ fn job_rows(view: &KeepView, job: &PluginJob, outcome: &JobOutcome, action: Opti
                 StopReason::Peer | StopReason::Refused => t!("gui.discover.keep.stopped_peer", server = server),
                 StopReason::Other => t!("gui.discover.keep.stopped_other"),
             };
-            rows.extend(wrap(reason.to_string(), gold));
+            headline(low, Some(("!", gold)), &reason, gold, room, &keep, one);
             let not = many.total.saturating_sub(many.copied + many.skipped);
-            let mut runs = vec![(count("gui.discover.keep.copied", many.copied), dim())];
+            let mut parts = Vec::new();
+            if many.copied > 0 {
+                parts.push(count("gui.discover.keep.copied", many.copied));
+            }
             if not > 0 {
-                runs.push((count("gui.discover.keep.not_copied", not), dim()));
+                parts.push(count("gui.discover.keep.not_copied", not));
+            }
+            if parts.is_empty() {
+                parts.push(t!("gui.discover.keep.nothing_copied").to_string());
             }
             match why {
-                StopReason::Quota => runs.push((t!("gui.discover.keep.later").to_string(), dim())),
-                StopReason::Busy => runs.push((t!("gui.discover.keep.moment").to_string(), dim())),
+                StopReason::Quota => parts.push(t!("gui.discover.keep.later").to_string()),
+                StopReason::Busy => parts.push(t!("gui.discover.keep.moment").to_string()),
                 _ => {}
             }
-            rows.push(Low::Runs(runs));
+            subs.push(parts.join(" · "));
         }
         JobOutcome::Refused { many } => {
-            rows.extend(wrap(t!("gui.discover.keep.refused", server = server).to_string(), gold));
+            headline(low, Some(("!", gold)), &t!("gui.discover.keep.refused", server = server), gold, room, &keep, one);
             let copied = many.map(|n| n.copied).unwrap_or(0);
-            let head = if copied > 0 {
-                count("gui.discover.keep.copied", copied)
-            } else {
-                t!("gui.discover.keep.nothing_copied").to_string()
-            };
-            rows.push(Low::Text(format!("{head} · {}", t!("gui.discover.keep.refused_sub")), dim()));
+            subs.push(format!("{} · {}", copied_words(copied), t!("gui.discover.keep.refused_sub")));
+            subs.push(t!("gui.discover.keep.refused_admin", server = server).to_string());
         }
         JobOutcome::Failed { error, many } => {
-            let words = error.clone().unwrap_or_else(|| t!("gui.discover.keep.failed_plain").to_string());
-            let line = match error {
-                Some(_) => t!("gui.discover.keep.failed", words = words).to_string(),
-                None => words,
+            let words = match error {
+                Some(words) => t!("gui.discover.keep.failed", words = words).to_string(),
+                None => t!("gui.discover.keep.failed_plain").to_string(),
             };
-            rows.extend(wrap(line, gold));
-            let mut runs = vec![(t!("gui.discover.keep.nothing_copied").to_string(), dim())];
+            headline(low, Some(("!", gold)), &words, gold, room, &keep, one);
+            let mut parts = vec![copied_words(many.map(|n| n.copied).unwrap_or(0))];
             if let Some(n) = many.filter(|n| n.failed > 0) {
-                runs.push((count("gui.discover.keep.failed", n.failed), dim()));
+                parts.push(count("gui.discover.keep.failed", n.failed));
             }
-            rows.push(Low::Runs(runs));
+            subs.push(parts.join(" · "));
         }
         JobOutcome::Cancelled { many } => {
-            let mut head = t!("gui.discover.keep.cancelled").to_string();
-            if let Some(n) = many.filter(|n| n.copied > 0) {
-                head = format!("{head} · {}", count("gui.discover.keep.copied", n.copied));
-            }
-            rows.push(Low::Text(head, dim()));
-            match many {
-                Some(n) => {
+            headline(low, Some((cross(), dim())), &t!("gui.discover.keep.cancelled"), bold, room, &keep, one);
+            let sub = match many {
+                // What it took, and what it left there: the rest of the album.
+                Some(n) if n.copied > 0 => {
                     let rest = n.total.saturating_sub(n.copied + n.skipped);
+                    let mut parts = vec![count("gui.discover.keep.copied", n.copied)];
                     if rest > 0 {
                         let key = format!("gui.discover.keep.stay_{}", super::discover::plural_form(rest));
-                        rows.push(Low::Text(t!(key.as_str(), count = rest, server = server).to_string(), dim()));
+                        parts.push(t!(key.as_str(), count = rest, server = server).to_string());
                     }
+                    parts.join(" · ")
                 }
-                None => rows.push(Low::Text(t!("gui.discover.keep.nothing_copied").to_string(), dim())),
-            }
+                _ => t!("gui.discover.keep.nothing_copied").to_string(),
+            };
+            subs.push(sub);
         }
         JobOutcome::Nothing { appearances, .. } => {
             if *appearances > 0 {
-                rows.push(Low::Text(t!("gui.discover.keep.nothing_theirs").to_string(), dim()));
+                headline(low, None, &t!("gui.discover.keep.nothing_theirs"), bold, room, &keep, one);
                 let artist = view.subject.track_artist.clone().unwrap_or_default();
-                rows.push(Low::Text(t!("gui.discover.keep.appearances", artist = artist).to_string(), dim()));
+                subs.push(t!("gui.discover.keep.appearances", artist = artist).to_string());
             } else {
-                let words = format!("{} {} · {}", tick(), t!("gui.discover.keep.nothing"), t!("gui.discover.keep.all_yours"));
-                rows.push(Low::Runs(vec![(words, ok)]));
+                headline(low, None, &t!("gui.discover.keep.nothing"), bold, room, &keep, one);
+                subs.push(t!("gui.discover.keep.all_yours").to_string());
             }
         }
         JobOutcome::Done | JobOutcome::Unknown => {
-            rows.push(Low::Text(t!("gui.discover.keep.finished").to_string(), dim()));
+            headline(low, None, &t!("gui.discover.keep.finished"), bold, room, &keep, one);
         }
     }
-    // The buttons the outcome offers, the primary on the right.
-    let (secondary, primary) = match (outcome, action) {
-        (JobOutcome::Running { stopping: true, .. }, _) => (None, None),
-        (_, Some(JobAction::Cancel)) => (Some(Button::CancelCopy), None),
-        (_, Some(JobAction::Play)) => (Some(Button::AddToQueue), Some(Button::Again(JobAction::Play))),
-        (_, Some(again)) => (Some(Button::Close), Some(Button::Again(again))),
-        (_, None) => (None, Some(Button::Close)),
+    for sub in &subs {
+        lines(low, sub, dim(), room, 0, &keep, one);
+    }
+    // Where it lands, and where Retry would.
+    let mut body = Vec::new();
+    if live {
+        if let Some(landing) = &view.landing {
+            body.extend(place_lows(&t!("gui.discover.keep.into"), landing, None, false, room, fit.place));
+            note_lows(&mut body, landing, room, fit.note);
+        }
+    } else {
+        if let Some(landing) = view.landing.as_ref().filter(|_| landed_any(job, outcome)) {
+            // A song's own file is the place's last crumb.
+            let file = match outcome {
+                JobOutcome::Copied { .. } | JobOutcome::Exists { .. } | JobOutcome::Owned { many: None, .. } => {
+                    job.copy_result().landed().and_then(|l| l.file)
+                }
+                _ => None,
+            };
+            body.extend(place_lows(&t!("gui.discover.keep.in_place"), landing, file.as_deref(), false, room, fit.place));
+        }
+        if let Some(again) = &view.again {
+            body.extend(place_lows(&t!("gui.discover.dest.retry_adds_to"), again, None, false, room, fit.place));
+            note_lows(&mut body, again, room, fit.note);
+        }
+    }
+    if !body.is_empty() {
+        low.push(Low::Blank(Gap::B2));
+    }
+    low.extend(body);
+    low.push(Low::Blank(Gap::B3));
+    // The key words and the primary (§5.4): what works, and only that.
+    let (keys, primary) = if shown.retrying {
+        (Vec::new(), Primary { words: ell(&t!("gui.discover.keep.retrying")), press: None })
+    } else if live {
+        let keys = if act == Some(JobAction::Cancel) && !halting { vec![KeyWord::Cancel] } else { Vec::new() };
+        (keys, Primary::close())
+    } else {
+        let mut keys = Vec::new();
+        if matches!(outcome, JobOutcome::Exists { .. }) && view.destination.is_some() {
+            keys.push(KeyWord::Change);
+        }
+        if matches!(outcome, JobOutcome::Copied { .. }) && act == Some(JobAction::Play) {
+            keys.push(KeyWord::Queue);
+        }
+        if view.choose_again() {
+            keys.push(KeyWord::Choose);
+        }
+        let primary = match act {
+            Some(JobAction::Play) => Primary { words: t!("gui.discover.keep.play_copy").to_string(), press: Some(Press::Again(JobAction::Play)) },
+            Some(again @ (JobAction::Retry | JobAction::CopyAgain)) => {
+                Primary { words: t!("gui.discover.keep.retry").to_string(), press: Some(Press::Again(again)) }
+            }
+            Some(JobAction::StartAgain) => {
+                Primary { words: t!("gui.discover.keep.add_again").to_string(), press: Some(Press::Again(JobAction::StartAgain)) }
+            }
+            Some(JobAction::Cancel) | None => Primary::close(),
+        };
+        (keys, primary)
     };
-    (rows, secondary, primary)
+    action(low, keys, primary, room);
 }
 
-/// The whole lower region for a view (clauses 106–110, 147).
-fn lower(view: &KeepView) -> Vec<Low> {
-    let mut low: Vec<Low> = Vec::new();
-    let lands = |low: &mut Vec<Low>| {
-        if let Some(landing) = &view.landing {
-            low.extend(path_lows(None, landing));
-        }
-        // Retry and Copy again land at the account's place now: where that
-        // is not where this copy ran, the modal says so first (clause 145).
-        if let (Some(again), KeepStage::Job { action: Some(action), .. }) = (&view.again, &view.stage) {
-            let key = if *action == JobAction::Retry { "gui.discover.dest.retry_adds_to" } else { "gui.discover.dest.again_adds_to" };
-            low.extend(path_lows(Some(t!(key).to_string()), again));
-        }
-    };
-    let choice_block = |low: &mut Vec<Low>| {
-        for (i, (choice, size)) in view.choices.iter().enumerate() {
-            low.push(Low::Choice(*choice, size_words(size), i == 0));
-            if *choice == KeepChoice::Artist
-                && let Some((on, _)) = view.missing
-            {
-                low.push(Low::Missing(on));
-            }
-        }
-        low.push(Low::Blank);
-        lands(low);
-        let saved = view.destination.as_ref().is_some_and(|d| d.source.as_deref() == Some("user"));
-        low.push(Low::Source(saved));
-    };
+/// The window's rows under its head for a view (§3.3, §4, §5), as far as
+/// the give-way went: B1, the body, B3, the action row.
+fn lower(view: &KeepView, shown: Shown, room: usize, fit: Fit) -> Vec<Low> {
+    let mut low = vec![Low::Blank(Gap::B1)];
+    let server = view.subject.server.clone();
     match &view.stage {
         KeepStage::Choose { verb, other } => {
-            choice_block(&mut low);
-            match (verb, other) {
+            let (aside, keys, primary) = match (verb, other) {
+                // Another server's live copy covers the choice: whose, and
+                // its cancel — the primary Close until it ends.
                 (_, Some(other)) => {
-                    low.push(Low::Blank);
-                    let key = if matches!(view.scope, JobScope::Artist | JobScope::ArtistMissing) {
-                        "gui.discover.keep.other_artist"
-                    } else {
-                        "gui.discover.keep.other_album"
-                    };
-                    let words = t!(key, other = other, server = view.subject.server).to_string();
-                    let keep = [other.as_str(), view.subject.server.as_str()];
-                    for line in wrap_keeping(&words, usize::from(KEEP_W - 4), &keep) {
-                        low.push(Low::Text(line, accent()));
-                    }
+                    let mut aside = Vec::new();
+                    let title = t!("gui.discover.keep.other_title", server = other.server);
+                    lines(&mut aside, &title, Style::default().add_modifier(Modifier::BOLD), room, 0, &[other.server.as_str()], fit.lines);
+                    let sub = t!("gui.discover.keep.other_sub", server = server);
+                    lines(&mut aside, &sub, dim(), room, 0, &[server.as_str()], fit.lines);
+                    let keys = if other.cancelling { Vec::new() } else { vec![KeyWord::CancelOther] };
+                    (aside, keys, Primary::close())
                 }
                 (Some(verb), None) => {
-                    low.push(Low::Blank);
-                    low.push(Low::Buttons(Some(Button::Cancel), Some(Button::Add(*verb))));
+                    (Vec::new(), Vec::new(), Primary { words: add_words(*verb, view), press: Some(Press::Add) })
                 }
-                (None, None) => {}
-            }
+                (None, None) => (Vec::new(), Vec::new(), Primary::close()),
+            };
+            choosing(&mut low, view, room, fit, aside, keys, primary);
         }
         KeepStage::Refused { failure, verb } => {
-            choice_block(&mut low);
-            // A place no longer in force has its own line: LANDS IN above
+            // A place no longer in force has its own line: the place above
             // already reads the one that is (clause 146).
             let words = match failure {
                 crate::api::PluginFailure::DestinationChanged(_) => t!("gui.discover.dest.changed").to_string(),
                 failure => t!("gui.discover.keep.refused_start", words = failure_words(failure)).to_string(),
             };
-            for line in wrap_keeping(&words, usize::from(KEEP_W - 4), &[view.subject.server.as_str()]) {
-                low.push(Low::Text(line, Style::default().fg(th().gold)));
-            }
-            low.push(Low::Buttons(Some(Button::Cancel), verb.map(Button::Add)));
+            let mut aside = Vec::new();
+            let gold = Style::default().fg(th().gold);
+            lines(&mut aside, &format!("! {words}"), gold, room, CONT_X, &[server.as_str()], fit.lines);
+            let primary = match verb {
+                Some(verb) => Primary { words: add_words(*verb, view), press: Some(Press::Add) },
+                None => Primary::close(),
+            };
+            choosing(&mut low, view, room, fit, aside, Vec::new(), primary);
         }
-        // Nowhere to put a file: one plain line and Close (clause 147).
-        KeepStage::Nowhere => {
-            for line in wrap_keeping(&t!("gui.discover.dest.nowhere"), usize::from(KEEP_W - 4), &[]) {
-                low.push(Low::Text(line, Style::default()));
-            }
-            low.push(Low::Blank);
-            low.push(Low::Buttons(None, Some(Button::Close)));
-        }
+        // Enter pressed: nothing moves but the primary, off until the
+        // server answers.
         KeepStage::Starting => {
-            low.push(folded(view, view.scope));
-            lands(&mut low);
-            low.push(Low::Blank);
-            low.push(Low::Text(ell(&t!("gui.discover.keep.starting")), accent()));
-            low.extend([Low::Blank, Low::Blank, Low::Blank, Low::Blank]);
+            let primary = Primary { words: ell(&t!("gui.discover.keep.adding")), press: None };
+            choosing(&mut low, view, room, fit, Vec::new(), Vec::new(), primary);
         }
-        KeepStage::Job { job, outcome, action } => {
-            low.push(folded(view, job.scope().unwrap_or(view.scope)));
-            lands(&mut low);
-            low.push(Low::Blank);
-            let (rows, secondary, primary) = job_rows(view, job, outcome, *action);
-            let n = rows.len();
-            low.extend(rows);
-            // The scan widget keeps its three rows, the frame its height.
-            for _ in n..3 {
-                low.push(Low::Blank);
-            }
-            low.push(Low::Blank);
-            if secondary.is_some() || primary.is_some() {
-                low.push(Low::Buttons(secondary, primary));
-            } else {
-                low.push(Low::Blank);
-            }
+        // A right gone: one plain line and Close (clause 147).
+        KeepStage::Off(why) => {
+            lines(&mut low, &off_words(*why), Style::default(), room, 0, &[], fit.lines);
+            low.push(Low::Blank(Gap::B3));
+            action(&mut low, Vec::new(), Primary::close(), room);
         }
+        KeepStage::Job { job, outcome, action } => job_lows(&mut low, view, job, outcome, *action, shown, room, fit),
+    }
+    low.retain(|line| !matches!(line, Low::Blank(gap) if fit.drops(*gap)));
+    low
+}
+
+/// The window's rows in the rows it has (§3.6): as they are where they fit
+/// under the anchored top; else the blanks go — B2, B1, B3 — and the place
+/// keeps one row; then the top rises toward row 1; then the slot note, and
+/// the GOLD line or the headline, keep one row each. Where even that is too
+/// tall the body's last rows above the action row go, so the action row
+/// and both borders always stand.
+fn fitted(view: &KeepView, shown: Shown, room: usize, anchored: u16, risen: u16) -> Vec<Low> {
+    let fits = |low: &[Low], rows: u16| HEAD_ROWS + 2 + low.len() as u16 <= rows;
+    let tight = Fit { blanks: 3, place: true, ..Fit::default() };
+    let under = [0, 1, 2, 3].map(|blanks| Fit { blanks, ..Fit::default() });
+    for fit in under.into_iter().chain([tight]) {
+        let low = lower(view, shown, room, fit);
+        if fits(&low, anchored) {
+            return low;
+        }
+    }
+    let tightest = Fit { note: true, lines: true, ..tight };
+    for fit in [tight, Fit { note: true, ..tight }, tightest] {
+        let low = lower(view, shown, room, fit);
+        if fits(&low, risen) {
+            return low;
+        }
+    }
+    let mut low = lower(view, shown, room, tightest);
+    while !fits(&low, risen) && low.len() > 1 {
+        low.remove(low.len() - 2);
     }
     low
 }
 
-/// The keyboard's stops in this frame's lower region, in walking order.
-fn stops_of(low: &[Low]) -> Vec<Stop> {
+/// The primary a table stands, if any.
+fn primary_of(low: &[Low]) -> Option<&Primary> {
+    low.iter().find_map(|line| match line {
+        Low::Action { primary, .. } => Some(primary),
+        _ => None,
+    })
+}
+
+/// The key words a table draws — and so the keys that work (§6.2): its
+/// action row's and their own row's, and `d change` on the place while
+/// nothing is starting.
+fn key_words(low: &[Low], view: &KeepView) -> Vec<KeyWord> {
+    let starting = matches!(view.stage, KeepStage::Starting);
     let mut out = Vec::new();
     for line in low {
         match line {
-            Low::Choice(choice, _, _) => out.push(Stop::Choice(*choice)),
-            Low::Missing(_) => out.push(Stop::Missing),
-            Low::Source(_) => out.push(Stop::Change),
-            Low::Buttons(secondary, primary) => {
-                if secondary.is_some() {
-                    out.push(Stop::Secondary);
-                }
-                if primary.is_some() {
-                    out.push(Stop::Primary);
-                }
-            }
+            Low::Place { change: true, .. } if !starting => out.push(KeyWord::Change),
+            Low::Keys(keys) | Low::Action { keys, .. } => out.extend(keys.iter().copied()),
             _ => {}
         }
     }
     out
 }
 
-fn buttons_of(low: &[Low]) -> (Option<Button>, Option<Button>) {
-    low.iter()
-        .find_map(|line| match line {
-            Low::Buttons(s, p) => Some((*s, *p)),
-            _ => None,
-        })
-        .unwrap_or((None, None))
-}
-
-/// The modal's height for a lower region.
-fn height_of(low: &[Low]) -> u16 {
-    HEAD_ROWS + low.len() as u16 + 2
+/// The key words that act now (§6.2): those the view's table draws — and,
+/// where the last frame drew this very view, only those it drew there (the
+/// give-way's last resort may have taken their row).
+fn acting_keys(gui: &Gui, view: &KeepView, shown: Shown) -> Vec<KeyWord> {
+    let low = lower(view, shown, usize::from(KEEP_W - 4), Fit::default());
+    let mut keys = key_words(&low, view);
+    if let Some((drawn_view, drawn_shown, drawn)) = &gui.discover.keep.drawn
+        && drawn_view == view
+        && *drawn_shown == shown
+    {
+        keys.retain(|key| drawn.contains(key));
+    }
+    keys
 }
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
@@ -849,9 +1357,11 @@ fn modal_box(frame: &mut Frame, rect: Rect) -> Rect {
     inner
 }
 
-/// The Keep a copy modal, drawn (and registered) over everything — or
-/// Where copies land in its place while that is open (clause 142).
-pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+/// The Keep a copy window, drawn (and registered) over everything — or
+/// Where copies land in its place while that is open (clause 142). `room`
+/// is the room's content rect: the window centres in it and clears its
+/// width (the band).
+pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Rect) {
     // A picker whose view went (the gate's ask failed), or whose place is
     // nowhere any more (a re-read's `null`: nothing to edit, as the
     // webapp's `dmPickerSync` closes it), gives way to Keep a copy:
@@ -863,232 +1373,253 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         draw_dest(frame, gui, area);
         return;
     }
-    let Some(view) = gui.app.keep_view() else { return };
+    // Retry's outcome holds only while its start is out.
+    if !gui.app.keep_view().is_some_and(|view| matches!(view.stage, KeepStage::Starting)) {
+        gui.discover.keep.frozen = None;
+    }
+    let Some((view, shown)) = shown_of(gui) else { return };
     // Its subject's cover, asked through its own server once.
     let fetch = gui.app.keep_cover();
     gui.pend(fetch.into_iter().collect());
-    let low = lower(&view);
-    let stops = stops_of(&low);
-    // A stop that left (a start answered, a copy ended) is the keyboard's
-    // no longer: its hand goes down — and back on the chosen radio when a
-    // start came back refused.
-    if gui.discover.keep.focus.is_some_and(|f| !stops.contains(&f)) {
-        gui.discover.keep.focus = None;
-    }
-    let choosing = matches!(view.stage, KeepStage::Choose { .. } | KeepStage::Refused { .. });
-    if gui.discover.keep.starting && choosing && gui.discover.keep.focus.is_none() {
-        gui.discover.keep.focus = Some(Stop::Choice(view.choice));
-    }
-    if !matches!(view.stage, KeepStage::Starting) {
-        gui.discover.keep.starting = false;
-    }
-    let focus = gui.discover.keep.focus;
-    // The room beneath is inert (the kit's Modal).
-    gui.ui.click(area, Act::Guard);
-    let h = height_of(&low);
-    let w = KEEP_W.min(area.width.saturating_sub(2)).max(44);
-    let rect = crate::kit::modal_rect(area, w, h, KEEP_ANCHOR.max(h));
-    gui.ui.overlay(rect);
-    gui.ui.modal_over();
-    let inner = modal_box(frame, rect);
-    gui.ui.click(rect, Act::Guard);
-    put(frame, inner.x + 1, inner.y, &t!("gui.discover.keep.title"), accent().add_modifier(Modifier::BOLD));
-    crate::kit::modal_close(frame, &mut gui.ui, inner, Act::Disc(DiscAct::Keep(KeepAct::Close)));
-
-    draw_header(frame, gui, &view, inner, rect);
-
+    let w = window_width(area, room, KEEP_W);
+    let text = usize::from(w.saturating_sub(4));
+    let low = fitted(&view, shown, text, rows_anchored(area, room), rows_risen(area, room));
+    let (rect, band) = window_rect(area, room, KEEP_W, HEAD_ROWS + 2 + low.len() as u16);
+    let (inner, own) = open_window(frame, gui, area, rect, band);
+    let footer = if going(&view, shown) { t!("gui.discover.keep.esc_close_going") } else { t!("gui.discover.keep.esc_close") };
+    draw_borders(frame, gui, rect, &t!("gui.discover.keep.title"), &footer);
+    draw_head(frame, gui, &view, inner, own);
+    gui.discover.keep.last_own = Some(own);
+    let starting = matches!(view.stage, KeepStage::Starting);
     for (y, line) in (inner.y + HEAD_ROWS..inner.bottom()).zip(low.iter()) {
-        draw_low(frame, gui, &view, inner, y, line, focus);
+        draw_low(frame, gui, &view, inner, y, line, starting);
     }
+    let keys = key_words(&low, &view);
+    gui.discover.keep.drawn = Some((view, shown, keys));
 }
 
-/// The header (clause 106): the cover, the title BOLD, the byline DIM and
-/// "• online".
-fn draw_header(frame: &mut Frame, gui: &mut Gui, view: &KeepView, inner: Rect, own: Rect) {
+/// The title on the top border, TEXT BOLD after one `─`; the way out on
+/// the bottom border, DIM, ending one `─` before the corner — "Esc close"
+/// a text button that closes, its tail ("· the copy keeps going") plain.
+fn draw_borders(frame: &mut Frame, gui: &mut Gui, rect: Rect, title: &str, footer: &str) {
+    // TEXT, never the border's ACCENT carried over: the window's own text
+    // colour — the scheme's where it paints the ground, else the terminal's.
+    let owned = th().ground.is_some() && crate::kit::theme::ground_owned();
+    let text = if owned { th().text } else { ratatui::style::Color::Reset };
+    put(frame, rect.x + 2, rect.y, &format!(" {title} "), Style::default().fg(text).add_modifier(Modifier::BOLD));
+    let bottom = rect.bottom().saturating_sub(1);
+    let end = rect.right().saturating_sub(3);
+    let start = end.saturating_sub(width(footer) as u16);
+    put(frame, start.saturating_sub(1), bottom, &format!(" {footer} "), dim());
+    let esc = t!("gui.discover.keep.esc_close").to_string();
+    let button = if footer.starts_with(esc.as_str()) { esc } else { footer.to_string() };
+    let at = Rect { x: start, y: bottom, width: width(&button) as u16, height: 1 };
+    if gui.ui.hovers(at) {
+        put(frame, start, bottom, &button, bright_bold());
+    }
+    gui.ui.click(at, Act::Disc(DiscAct::Keep(KeepAct::Close)));
+}
+
+/// The head (§4.2): the item's title TEXT BOLD, the byline DIM — and the
+/// cover, 4 × 2 cells of real pixels at the head's right end, only where
+/// the art is loaded and the terminal draws pixels (the kit's one-frame
+/// mosaic under an overlay passing over it); otherwise nothing, and the
+/// words take the whole row.
+fn draw_head(frame: &mut Frame, gui: &mut Gui, view: &KeepView, inner: Rect, own: Rect) {
     let s = &view.subject;
-    let cover = Rect { x: inner.x + 1, y: inner.y + 2, width: 6, height: 3 };
+    let x = inner.x + 1;
+    let mut room = usize::from(inner.width.saturating_sub(2));
     {
         let Gui { app, discover, ui, hot, .. } = &mut *gui;
-        let art = s.art.as_deref().and_then(|file| app.art.get(file)).and_then(|a| a.as_ref());
-        match art {
-            Some(art) => {
-                let slot = discover.keep.slot.get_or_insert_with(|| Slot::new(app.graphics.fork()));
-                // Pixels while the modal is the top layer; the mosaic
-                // under a tooltip, and on the legacy console always.
-                if legacy_conhost() || ui.covered_last_frame_by_another(cover, own) {
-                    slot.draw_mosaic(frame, cover, art);
-                } else {
-                    let pace = Pace::frame();
-                    slot.draw_paced(frame, cover, art, &pace);
-                    if pace.starved() {
-                        *hot = true;
-                    }
+        let pixels = !legacy_conhost() && (app.graphics.protocol().is_some() || app.graphics.is_hosted());
+        let art = s.art.as_deref().and_then(|file| app.art.get(file)).and_then(|a| a.as_ref()).filter(|_| pixels);
+        if let Some(art) = art {
+            let cover = Rect { x: x + room as u16 - 4, y: inner.y, width: 4, height: 2 };
+            // Its own footprint, this frame's and last frame's — the
+            // window grows and shrinks with its rows — is never another.
+            let owns: Vec<Rect> = [Some(own), discover.keep.last_own].into_iter().flatten().collect();
+            let slot = discover.keep.slot.get_or_insert_with(|| Slot::new(app.graphics.fork()));
+            if ui.covered_last_frame_by_other_than(cover, &owns) {
+                slot.draw_mosaic(frame, cover, art);
+            } else {
+                let pace = Pace::frame();
+                slot.draw_paced(frame, cover, art, &pace);
+                if pace.starved() {
+                    *hot = true;
                 }
             }
-            None => super::bar::cover_slot(frame, cover.x, cover.y, cover.width, cover.height),
+            room = room.saturating_sub(5);
         }
     }
-    let tx = inner.x + 8;
-    let room = usize::from(inner.right().saturating_sub(tx + 1));
     let title = match &s.title {
         Some(title) => title.clone(),
         None => s.album.clone().unwrap_or_default(),
     };
-    put(frame, tx, inner.y + 2, &super::bar::clip(&title, room), Style::default().add_modifier(Modifier::BOLD));
-    let year = s.year.filter(|y| *y > 0).map(|y| y.to_string());
+    put(frame, x, inner.y, &super::bar::clip(&title, room), Style::default().add_modifier(Modifier::BOLD));
     let from = t!("gui.act.from_server", server = s.server).to_string();
     let parts: Vec<String> = if s.album_focus() {
+        let year = s.year.filter(|y| *y > 0).map(|y| y.to_string());
         [s.album_credit().map(str::to_string), year, Some(from)].into_iter().flatten().collect()
     } else {
-        [s.track_artist.clone(), s.album.clone(), year, Some(from)].into_iter().flatten().filter(|p| !p.trim().is_empty()).collect()
+        [s.track_artist.clone(), s.album.clone(), Some(from)].into_iter().flatten().filter(|p| !p.trim().is_empty()).collect()
     };
-    put(frame, tx, inner.y + 3, &super::bar::clip(&parts.join(" · "), room), dim());
-    put(frame, tx, inner.y + 4, super::bullet_glyph(), Style::default().fg(th().ok));
-    put(frame, tx + 2, inner.y + 4, &t!("gui.act.online"), dim());
+    put(frame, x, inner.y + 1, &super::bar::clip(&parts.join(" · "), room), dim());
 }
 
-/// One row of the lower region.
-#[allow(clippy::too_many_arguments)]
-fn draw_low(frame: &mut Frame, gui: &mut Gui, view: &KeepView, inner: Rect, y: u16, line: &Low, focus: Option<Stop>) {
-    let x = inner.x + 1;
-    let room = usize::from(inner.width.saturating_sub(2));
-    let label = |key: &str| t!(key).to_uppercase();
-    match line {
-        Low::Blank => {}
-        Low::Choice(choice, size, first) => {
-            if *first {
-                put(frame, x, y, &label("gui.discover.keep.what"), dim());
-            }
-            let col = value_col();
-            let label_x = col + 4;
-            let row = Rect { x: inner.x + col, y, width: inner.width.saturating_sub(col + 1), height: 1 };
-            let chosen = view.choice == *choice;
-            let focused = focus == Some(Stop::Choice(*choice));
-            let hover = gui.ui.hovers(row);
-            let (on, off) = if legacy_conhost() { ("(*)", "( )") } else { ("(•)", "( )") };
-            let glyph_style = if chosen { Style::default().fg(th().ok) } else { dim() };
-            put(frame, inner.x + col, y, if chosen { on } else { off }, glyph_style);
-            let name_style = match (focused, hover, chosen) {
-                (true, _, _) => accent().add_modifier(Modifier::BOLD),
-                (false, true, _) => bright_bold(),
-                (false, false, true) => Style::default().add_modifier(Modifier::BOLD),
-                (false, false, false) => Style::default(),
-            };
-            // The name keeps a cell before its size, or the row's rest.
-            let name_room = match size {
-                Some(_) => usize::from(SIZE_X.saturating_sub(label_x + 1)),
-                None => room.saturating_sub(usize::from(label_x)),
-            };
-            put(frame, inner.x + label_x, y, &super::bar::clip(&choice_name(*choice, view), name_room), name_style);
-            if let Some(size) = size {
-                let size_room = usize::from(inner.width.saturating_sub(SIZE_X + 1));
-                put(frame, inner.x + SIZE_X, y, &super::bar::clip(size, size_room), dim());
-            }
-            gui.ui.click(row, Act::Disc(DiscAct::Keep(KeepAct::Pick(*choice))));
+/// Runs drawn from `x`, clipped at `end`; the cell after the last.
+fn put_runs(frame: &mut Frame, x: u16, y: u16, runs: &[(String, Style)], end: u16) -> u16 {
+    let mut at = x;
+    for (text, style) in runs {
+        let left = usize::from(end.saturating_sub(at));
+        if left == 0 {
+            break;
         }
-        Low::Missing(on) => {
-            let (check_on, check_off) = super::check_glyphs();
-            let label_x = value_col() + 4;
-            let text_w = 4 + width(&t!("gui.discover.keep.only_missing")) as u16;
-            let row = Rect { x: inner.x + label_x, y, width: text_w.min(inner.width.saturating_sub(label_x + 1)), height: 1 };
-            let focused = focus == Some(Stop::Missing);
-            let hover = gui.ui.hovers(row);
-            put(frame, row.x, y, if *on { check_on } else { check_off }, if *on { Style::default().fg(th().ok) } else { dim() });
-            let style = match (focused, hover) {
-                (true, _) => accent().add_modifier(Modifier::BOLD),
-                (false, true) => bright_bold(),
+        let shown = super::bar::clip(text, left).into_owned();
+        put(frame, at, y, &shown, *style);
+        at += width(&shown) as u16;
+    }
+    at
+}
+
+/// A key word at `x` (§4.8): DIM, BRIGHT BOLD under the pointer, a click
+/// doing what its key does — none of it while the window is starting
+/// (`live` false). Its width.
+fn draw_key(frame: &mut Frame, gui: &mut Gui, word: KeyWord, x: u16, y: u16, live: bool) -> u16 {
+    let words = word.words();
+    let at = Rect { x, y, width: width(&words) as u16, height: 1 };
+    let style = if live && gui.ui.hovers(at) { bright_bold() } else { dim() };
+    put(frame, x, y, &words, style);
+    if live {
+        gui.ui.click(at, Act::Disc(DiscAct::Keep(KeepAct::Key(word))));
+    }
+    at.width
+}
+
+/// One row of the table. Nothing in it takes the pointer while a start is
+/// out (`starting`): the room under it is inert as ever.
+fn draw_low(frame: &mut Frame, gui: &mut Gui, view: &KeepView, inner: Rect, y: u16, line: &Low, starting: bool) {
+    let x = inner.x + 1;
+    let room = inner.width.saturating_sub(2);
+    let end = x + room;
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    match line {
+        Low::Blank(_) => {}
+        Low::Choice(choice) => {
+            // The keyboard's place is the chosen dot: ACCENT, its label
+            // BOLD; the pointer lights a label, never the dot.
+            let row = Rect { x, y, width: room, height: 1 };
+            let chosen = view.choice == *choice;
+            let hover = !starting && gui.ui.hovers(row);
+            let (on, off) = if legacy_conhost() { ("(*)", "( )") } else { ("(•)", "( )") };
+            put(frame, x, y, if chosen { on } else { off }, if chosen { accent() } else { dim() });
+            let style = match (hover, chosen) {
+                (true, _) => bright_bold(),
+                (false, true) => bold,
                 (false, false) => Style::default(),
             };
-            let words = super::bar::clip(&t!("gui.discover.keep.only_missing"), room.saturating_sub(usize::from(label_x + 4))).into_owned();
-            put(frame, row.x + 4, y, &words, style);
-            gui.ui.click(row, Act::Disc(DiscAct::Keep(KeepAct::Missing)));
-        }
-        Low::Folded(name, size) => {
-            put(frame, x, y, &label("gui.discover.keep.what"), dim());
-            let at = inner.x + value_col();
-            let name_room = room.saturating_sub(usize::from(value_col() - 1));
-            let shown = super::bar::clip(name, name_room).into_owned();
-            put(frame, at, y, &shown, Style::default());
-            if let Some(size) = size {
-                let after = at + width(&shown) as u16;
-                let left = usize::from(inner.right().saturating_sub(after + 1));
-                put(frame, after, y, &super::bar::clip(&format!(" · {size}"), left), dim());
+            let name = choice_name(*choice, view);
+            put(frame, x + LABEL_X, y, &super::bar::clip(&name, usize::from(room - LABEL_X)), style);
+            if !starting {
+                gui.ui.click(row, Act::Disc(DiscAct::Keep(KeepAct::Pick(*choice))));
             }
         }
-        Low::Path { first, runs, tip } => {
-            if *first {
-                put(frame, x, y, &label("gui.discover.keep.lands_in"), dim());
-            }
-            // The library BOLD, the names TEXT, `›` DIM; an artist copy's
-            // "one folder per album" and a slot DIM — hints, never a
-            // folder's name. A row that still overflows is clipped at the
-            // right, the whole path in its tooltip; a slot's note stands
-            // there too.
-            let start = inner.x + value_col();
-            let end = inner.right().saturating_sub(1);
-            let mut at = start;
-            for (text, style) in runs {
-                let left = usize::from(end.saturating_sub(at));
-                if left == 0 {
-                    break;
-                }
-                let shown = super::bar::clip(text, left).into_owned();
-                put(frame, at, y, &shown, *style);
-                at += width(&shown) as u16;
-            }
-            if let Some(tip) = tip {
-                gui.ui.tip(Rect { x: start, y, width: end.saturating_sub(start), height: 1 }, tip.clone());
-            }
-        }
-        Low::Source(saved) => {
-            let words = if *saved { t!("gui.discover.dest.source_user") } else { t!("gui.discover.dest.source_default") };
-            let change = format!("[ {} ]", ell(&format!("{}…", t!("gui.discover.dest.change"))));
-            let w = width(&change) as u16;
-            let right = inner.right().saturating_sub(1);
-            let rect = Rect { x: right.saturating_sub(w), y, width: w, height: 1 };
-            let at = inner.x + value_col();
-            put(frame, at, y, &super::bar::clip(&words, usize::from(rect.x.saturating_sub(at + 1))), dim());
-            let style = if focus == Some(Stop::Change) {
-                sel().add_modifier(Modifier::BOLD)
-            } else if gui.ui.hovers(rect) {
-                bright_bold()
-            } else {
-                dim()
+        Low::Missing { on, count } => {
+            // The choice's fourth stop: ticked ACCENT, its label BOLD — its
+            // count where one is known: a copy of it that still wants the
+            // user keeps it with none missing by name, and says none.
+            let (check_on, check_off) = super::check_glyphs();
+            let words = match count {
+                0 => t!("gui.discover.keep.only_missing").to_string(),
+                n => plural("gui.discover.keep.only_missing", *n as u64),
             };
-            put(frame, rect.x, y, &change, style);
-            gui.ui.click(rect, Act::Disc(DiscAct::Keep(KeepAct::Change)));
-            gui.ui.tip_keyed(rect, format!("{} — d", t!("gui.discover.dest.title")));
-        }
-        Low::Text(text, style) => {
-            put(frame, x, y, &super::bar::clip(text, room), *style);
-        }
-        Low::Runs(runs) => {
-            let mut at = x;
-            let end = inner.right().saturating_sub(1);
-            for (i, (text, style)) in runs.iter().enumerate() {
-                let piece = if i == 0 { text.clone() } else { format!(" · {text}") };
-                let left = usize::from(end.saturating_sub(at));
-                if left == 0 {
-                    break;
-                }
-                // The separator in the run's own token: the canvas's
-                // "· 1 failed" in GOLD.
-                let shown = super::bar::clip(&piece, left).into_owned();
-                put(frame, at, y, &shown, *style);
-                at += width(&shown) as u16;
+            let words = super::bar::clip(&words, usize::from(room - BOX_LABEL_X)).into_owned();
+            let at = Rect { x: x + LABEL_X, y, width: BOX_LABEL_X - LABEL_X + width(&words) as u16, height: 1 };
+            let hover = !starting && gui.ui.hovers(at);
+            put(frame, at.x, y, if *on { check_on } else { check_off }, if *on { accent() } else { dim() });
+            let style = match (hover, *on) {
+                (true, _) => bright_bold(),
+                (false, true) => bold,
+                (false, false) => Style::default(),
+            };
+            put(frame, x + BOX_LABEL_X, y, &words, style);
+            if !starting {
+                gui.ui.click(at, Act::Disc(DiscAct::Keep(KeepAct::Missing)));
             }
         }
-        Low::Bar(progress) => draw_bar(frame, x, y, *progress),
-        Low::Buttons(secondary, primary) => {
-            draw_buttons(frame, gui, inner, y, *secondary, *primary, focus);
+        Low::Place { runs, cont, change, tip } => {
+            let at = if *cont { x + CONT_X } else { x };
+            let words = KeyWord::Change.words();
+            let text_end = if *change { end.saturating_sub(width(&words) as u16 + CHANGE_GAP as u16) } else { end };
+            put_runs(frame, at, y, runs, text_end);
+            if let Some(tip) = tip {
+                gui.ui.tip(Rect { x: at, y, width: text_end.saturating_sub(at), height: 1 }, tip.clone());
+            }
+            if *change {
+                draw_key(frame, gui, KeyWord::Change, end.saturating_sub(width(&words) as u16), y, !starting);
+            }
+        }
+        Low::Text { runs, cont, tip } => {
+            let at = if *cont { x + CONT_X } else { x };
+            put_runs(frame, at, y, runs, end);
+            if let Some(tip) = tip {
+                gui.ui.tip(Rect { x: at, y, width: end.saturating_sub(at), height: 1 }, tip.clone());
+            }
+        }
+        Low::Bar { progress, tail } => draw_progress(frame, x, y, *progress, tail.as_deref()),
+        Low::Keys(keys) => {
+            let mut at = x;
+            for word in keys {
+                at += draw_key(frame, gui, *word, at, y, true) + KEY_GAP as u16;
+            }
+        }
+        Low::Action { keys, primary } => {
+            let mut at = x;
+            for word in keys {
+                at += draw_key(frame, gui, *word, at, y, true) + KEY_GAP as u16;
+            }
+            // The one primary, ACCENT BOLD — or off, DIM and inert, while
+            // a start it sent is out.
+            let label = primary.label();
+            let rect = Rect { x: end.saturating_sub(width(&label) as u16), y, width: width(&label) as u16, height: 1 };
+            match primary.press {
+                Some(_) => {
+                    let style = if gui.ui.hovers(rect) { bright_bold() } else { accent().add_modifier(Modifier::BOLD) };
+                    put(frame, rect.x, y, &label, style);
+                    gui.ui.click(rect, Act::Disc(DiscAct::Keep(KeepAct::Primary)));
+                }
+                None => put(frame, rect.x, y, &label, dim()),
+            }
         }
     }
 }
 
-/// The scan widget's bar (the kit's Status, progress): ten cells, `▰` OK
-/// filled and `▱` DIM, the percentage DIM beside them; all DIM with no
-/// percentage while there is no estimate — never a fake 0%. The legacy
-/// console says it in words.
+/// The copy's bar (the kit's Status, progress): ten cells, `▰` OK filled
+/// and `▱` DIM, the percentage TEXT beside them; all DIM with no
+/// percentage while there is no estimate — never a fake 0% — and `tail`
+/// DIM after it. The legacy console says it in words.
+fn draw_progress(frame: &mut Frame, x: u16, y: u16, progress: Option<f64>, tail: Option<&str>) {
+    if legacy_conhost() {
+        let (words, style) = match progress {
+            Some(p) => (t!("gui.discover.keep.pct_done", pct = (p * 100.0).round() as u32).to_string(), Style::default()),
+            None => (t!("gui.discover.keep.no_estimate").to_string(), dim()),
+        };
+        put(frame, x, y, &words, style);
+        if let Some(tail) = tail {
+            put(frame, x + width(&words) as u16, y, &format!(" · {tail}"), dim());
+        }
+        return;
+    }
+    let filled = progress.map_or(0, |p| ((p * 10.0).round() as usize).min(10));
+    put(frame, x, y, &"▰".repeat(filled), Style::default().fg(th().ok));
+    put(frame, x + filled as u16, y, &"▱".repeat(10 - filled), dim());
+    match (progress, tail) {
+        (Some(p), _) => put(frame, x + 11, y, &format!("{}%", (p * 100.0).round() as u32), Style::default()),
+        (None, Some(tail)) => put(frame, x + 11, y, tail, dim()),
+        (None, None) => {}
+    }
+}
+
+/// The Copies list's bar: [`draw_progress`]'s, its percentage DIM.
 fn draw_bar(frame: &mut Frame, x: u16, y: u16, progress: Option<f64>) {
     if legacy_conhost() {
         let words = match progress {
@@ -1106,65 +1637,21 @@ fn draw_bar(frame: &mut Frame, x: u16, y: u16, progress: Option<f64>) {
     }
 }
 
-/// The buttons, bottom-right (the kit's Modal): `[ label ]`, the primary
-/// ACCENT BOLD, the others DIM; hover BRIGHT + BOLD; the keyboard's stop
-/// the selection slab.
-#[allow(clippy::too_many_arguments)]
-fn draw_buttons(
-    frame: &mut Frame,
-    gui: &mut Gui,
-    inner: Rect,
-    y: u16,
-    secondary: Option<Button>,
-    primary: Option<Button>,
-    focus: Option<Stop>,
-) {
-    let mut right = inner.right().saturating_sub(1);
-    let mut place = |frame: &mut Frame, gui: &mut Gui, button: Button, stop: Stop, act: KeepAct, lead: bool| {
-        let text = format!("[ {} ]", button.label());
-        let w = width(&text) as u16;
-        let x = right.saturating_sub(w);
-        let rect = Rect { x, y, width: w, height: 1 };
-        let hover = gui.ui.hovers(rect);
-        let style = if focus == Some(stop) {
-            sel().add_modifier(Modifier::BOLD)
-        } else if hover {
-            bright_bold()
-        } else if lead {
-            accent().add_modifier(Modifier::BOLD)
-        } else {
-            dim()
-        };
-        put(frame, x, y, &text, style);
-        gui.ui.click(rect, Act::Disc(DiscAct::Keep(act)));
-        right = x.saturating_sub(1);
-    };
-    // The primary is the rightmost; Close stands alone as the primary
-    // where nothing else is offered.
-    if let Some(button) = primary {
-        place(frame, gui, button, Stop::Primary, KeepAct::Primary, true);
-    }
-    if let Some(button) = secondary {
-        place(frame, gui, button, Stop::Secondary, KeepAct::Secondary, false);
-    }
-}
-
 // ── Acting ──────────────────────────────────────────────────────────────────
 
-/// Open Keep a copy on a target (clauses 102–103): the App's flow, the
-/// keyboard on the preselected radio.
+/// Open Keep a copy on a target (clauses 102–103): the App's flow, the dot
+/// on the preselected choice.
 pub(crate) fn open(gui: &mut Gui, target: crate::tui::app::keep::KeepTarget) {
     let effects = gui.app.keep_open(target);
     gui.pend(effects);
-    gui.discover.keep.starting = false;
+    gui.discover.keep.frozen = None;
     gui.discover.keep.dest = None;
-    gui.discover.keep.focus = gui.app.keep_view().map(|v| Stop::Choice(v.choice)).filter(|_| {
-        gui.app.taste.keep.flow.as_ref().is_some_and(|f| matches!(f.phase, KeepPhase::Choose))
-    });
+    gui.discover.keep.last_own = None;
+    gui.discover.keep.drawn = None;
 }
 
-/// Close the modal; a copy still moving says so on the status line, since
-/// the modal that spoke for it is gone (clause 118).
+/// Close the window; a copy still moving says so on the status line, since
+/// the window that spoke for it is gone (clause 118).
 pub(crate) fn close(gui: &mut Gui) {
     if let Some(view) = gui.app.keep_view()
         && let KeepStage::Job { job, .. } = &view.stage
@@ -1174,175 +1661,207 @@ pub(crate) fn close(gui: &mut Gui) {
         set_note(gui, note);
     }
     gui.app.keep_close();
-    gui.discover.keep.focus = None;
+    gui.discover.keep.frozen = None;
     gui.discover.keep.dest = None;
+    gui.discover.keep.last_own = None;
+    gui.discover.keep.drawn = None;
 }
 
-/// The modal's acts.
+/// The window's acts — a click, or the key that does the same.
 pub(crate) fn act(gui: &mut Gui, act: KeepAct) {
-    let Some(view) = gui.app.keep_view() else { return };
-    let low = lower(&view);
-    let (secondary, primary) = buttons_of(&low);
+    let Some((view, shown)) = shown_of(gui) else { return };
     match act {
         KeepAct::Close => close(gui),
-        KeepAct::Change => open_dest(gui),
         KeepAct::Dest(act) => dest_act(gui, act),
-        KeepAct::Pick(choice) => {
-            gui.app.keep_pick(choice);
-            gui.discover.keep.focus = Some(Stop::Choice(choice));
-        }
+        KeepAct::Pick(choice) => gui.app.keep_pick(choice),
         KeepAct::Missing => {
             let on = view.missing.is_some_and(|(on, _)| on);
             gui.app.keep_set_missing(!on);
-            gui.discover.keep.focus = Some(Stop::Missing);
         }
-        KeepAct::Secondary => match secondary {
-            Some(Button::Cancel | Button::Close) => close(gui),
-            Some(Button::CancelCopy) => {
-                let effects = gui.app.keep_cancel();
-                gui.pend(effects);
+        KeepAct::Primary => press(gui, &view, shown),
+        KeepAct::Key(word) => {
+            // A key word works only where it is drawn.
+            if !acting_keys(gui, &view, shown).contains(&word) {
+                return;
             }
-            Some(Button::AddToQueue) => {
-                if let KeepStage::Job { job, .. } = &view.stage {
-                    let effects = gui.app.keep_play_copy(job, false);
-                    gui.pend(effects);
-                    close(gui);
-                }
-            }
-            _ => {}
-        },
-        KeepAct::Primary => match primary {
-            Some(Button::Add(_)) => {
-                let effects = gui.app.keep_start();
-                gui.pend(effects);
-                gui.discover.keep.focus = None;
-                gui.discover.keep.starting = true;
-            }
-            Some(Button::Close) => close(gui),
-            Some(Button::Again(again)) => {
-                let unpaired = matches!(&view.stage, KeepStage::Job { job, .. } if job.unpaired());
-                let effects = gui.app.keep_again();
-                gui.pend(effects);
-                match again {
-                    // Played: the modal has said what it had to.
-                    JobAction::Play => close(gui),
-                    // The choice comes back, the keyboard on its radio.
-                    JobAction::StartAgain => gui.discover.keep.focus = Some(Stop::Choice(view.choice)),
-                    // A server no longer paired: the room is asked again
-                    // and its rows carry the new id (clause 128) — this
-                    // modal's subject is gone with them.
-                    _ if unpaired => close(gui),
-                    _ => {
-                        gui.discover.keep.focus = None;
-                        gui.discover.keep.starting = true;
+            match word {
+                KeyWord::Change => open_dest(gui),
+                KeyWord::Queue => {
+                    if let KeepStage::Job { job, .. } = &view.stage {
+                        let effects = gui.app.keep_play_copy(job, false);
+                        gui.pend(effects);
+                        close(gui);
                     }
                 }
+                KeyWord::Choose => gui.app.keep_choose_again(),
+                KeyWord::Cancel => {
+                    let effects = gui.app.keep_cancel();
+                    gui.pend(effects);
+                }
+                KeyWord::CancelOther => {
+                    let effects = gui.app.keep_cancel_other();
+                    gui.pend(effects);
+                }
             }
-            _ => {}
-        },
+        }
     }
 }
 
-/// The modal's keys (clause 106): ↑ ↓ walk the stops, Space or Enter pick
-/// a radio or press a button, Enter with nothing held presses the primary,
-/// `x` cancels the copy, Esc closes — the copy keeps running.
+/// The primary, pressed (Enter, or a click): Add starts the chosen copy;
+/// Retry starts it again — its outcome held, the primary off, until the
+/// server answers; Add again brings the choice back; Play your copy plays
+/// it and closes; Close closes. Off, it does nothing.
+fn press(gui: &mut Gui, view: &KeepView, shown: Shown) {
+    let low = lower(view, shown, usize::from(KEEP_W - 4), Fit::default());
+    let Some(press) = primary_of(&low).and_then(|p| p.press) else { return };
+    match press {
+        Press::Close => close(gui),
+        Press::Add => {
+            let effects = gui.app.keep_start();
+            gui.pend(effects);
+        }
+        Press::Again(again) => {
+            let unpaired = matches!(&view.stage, KeepStage::Job { job, .. } if job.unpaired());
+            let effects = gui.app.keep_again();
+            gui.pend(effects);
+            match again {
+                // Played: the window has said what it had to.
+                JobAction::Play => close(gui),
+                // A server no longer paired: the room is asked again and
+                // its rows carry the new id (clause 128) — this window's
+                // subject is gone with them.
+                _ if unpaired => close(gui),
+                // Its start is out: the outcome holds until it answers.
+                JobAction::Retry | JobAction::CopyAgain
+                    if gui.app.keep_view().is_some_and(|v| matches!(v.stage, KeepStage::Starting)) =>
+                {
+                    gui.discover.keep.frozen = Some(view.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// ↑ ↓ (§6.1): the choice itself moves — This song › Album › Every album
+/// by › the box, its fourth stop — clamped at both ends. ↓ from Every album
+/// by ticks the box (the dot stays); ↑ from it unticks it; picking This
+/// song or Album unticks it.
+fn walk(gui: &mut Gui, view: &KeepView, delta: i64) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Stop {
+        Choice(KeepChoice),
+        Box,
+    }
+    let mut stops = Vec::new();
+    for (choice, _) in &view.choices {
+        stops.push(Stop::Choice(*choice));
+        if *choice == KeepChoice::Artist && view.missing.is_some() {
+            stops.push(Stop::Box);
+        }
+    }
+    let here = if view.missing.is_some_and(|(on, _)| on) { Stop::Box } else { Stop::Choice(view.choice) };
+    let Some(at) = stops.iter().position(|s| *s == here) else { return };
+    let to = (at as i64 + delta).clamp(0, stops.len() as i64 - 1) as usize;
+    match (here, stops[to]) {
+        (_, Stop::Box) => gui.app.keep_set_missing(true),
+        (Stop::Box, Stop::Choice(KeepChoice::Artist)) => gui.app.keep_set_missing(false),
+        (_, Stop::Choice(choice)) => gui.app.keep_pick(choice),
+    }
+}
+
+/// The window's keys (§6.2): ↑ ↓ move the choice, Enter presses the
+/// primary, `d` `x` `a` `c` only where their words are drawn, Esc closes —
+/// the copy keeps running. Everything else — Space, Tab, ← →, other
+/// letters, `C` — does nothing.
 pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) {
-    // Where copies land, while it is open over the modal, has every key.
+    // Where copies land, while it is open over the window, has every key.
     if gui.discover.keep.dest.is_some() {
         dest_key(gui, key);
         return;
     }
-    let Some(view) = gui.app.keep_view() else { return };
-    let low = lower(&view);
-    let stops = stops_of(&low);
-    let focus = gui.discover.keep.focus.filter(|f| stops.contains(f));
-    let walk = |delta: i64| -> Option<Stop> {
-        if stops.is_empty() {
-            return None;
-        }
-        match focus.and_then(|f| stops.iter().position(|s| *s == f)) {
-            // A stowed hand shows where it rests and moves nothing: the
-            // chosen radio in the choice, else the primary.
-            None => {
-                let rest = stops
-                    .iter()
-                    .copied()
-                    .find(|s| *s == Stop::Choice(view.choice))
-                    .or_else(|| stops.iter().copied().find(|s| *s == Stop::Primary))
-                    .unwrap_or(stops[0]);
-                Some(rest)
-            }
-            Some(at) => Some(stops[(at as i64 + delta).clamp(0, stops.len() as i64 - 1) as usize]),
-        }
-    };
+    let Some((view, shown)) = shown_of(gui) else { return };
+    let choosing = matches!(view.stage, KeepStage::Choose { .. } | KeepStage::Refused { .. }) && view.choices.len() >= 2;
     match key.code {
         KeyCode::Esc => close(gui),
-        KeyCode::Down if !stops.is_empty() => gui.discover.keep.focus = walk(1),
-        KeyCode::Up if !stops.is_empty() => gui.discover.keep.focus = walk(-1),
-        // ← → between the buttons only, once the hand is on them.
-        KeyCode::Right if matches!(focus, Some(Stop::Secondary)) => gui.discover.keep.focus = walk(1),
-        KeyCode::Left if matches!(focus, Some(Stop::Primary)) && stops.contains(&Stop::Secondary) => {
-            gui.discover.keep.focus = walk(-1)
+        KeyCode::Down if choosing => walk(gui, &view, 1),
+        KeyCode::Up if choosing => walk(gui, &view, -1),
+        KeyCode::Enter => press(gui, &view, shown),
+        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            if let Some(word) = acting_keys(gui, &view, shown).into_iter().find(|w| w.key() == c) {
+                act(gui, KeepAct::Key(word));
+            }
         }
-        KeyCode::Char('x') => {
-            let effects = gui.app.keep_cancel();
-            gui.pend(effects);
-        }
-        // Where copies land, from anywhere the choice stands (clause 142).
-        KeyCode::Char('d') if stops.contains(&Stop::Change) => open_dest(gui),
-        KeyCode::Char(' ') | KeyCode::Enter => match focus {
-            Some(Stop::Choice(choice)) => act(gui, KeepAct::Pick(choice)),
-            Some(Stop::Missing) => act(gui, KeepAct::Missing),
-            Some(Stop::Change) => act(gui, KeepAct::Change),
-            Some(Stop::Secondary) => act(gui, KeepAct::Secondary),
-            Some(Stop::Primary) => act(gui, KeepAct::Primary),
-            None if key.code == KeyCode::Enter && stops.contains(&Stop::Primary) => act(gui, KeepAct::Primary),
-            None => {}
-        },
         _ => {}
     }
 }
 
-/// The tips line's cells (the footer's 99 at 100 columns): a choice's line
-/// that outgrows them gives up "d where files land" first (clause 119).
+/// The tips line's cells (the footer's 99 at 100 columns): a line that
+/// outgrows them gives up its `drops`, in order (clause 119).
 const TIPS_CELLS: usize = 99;
 
-fn fit_tips(line: String, d: &str) -> String {
-    if width(&line) <= TIPS_CELLS {
-        return line;
+fn fit_tips(line: String, drops: &[String]) -> String {
+    let mut line = line;
+    for drop in drops {
+        if width(&line) <= TIPS_CELLS {
+            break;
+        }
+        line = line.replace(&format!(" · {drop}"), "");
     }
-    line.replace(&format!(" · {d}"), "")
+    line
 }
 
-/// The tips line while the modal is up (clause 119): the keys that work in
-/// its state, and nothing else.
+/// The tips line while the window is up (§6.4, clause 119): the keys that
+/// work in its state, and nothing else.
 pub(crate) fn tips(gui: &Gui) -> String {
     if let Some(ui) = &gui.discover.keep.dest {
         return dest_tips(gui, ui);
     }
-    let Some(view) = gui.app.keep_view() else { return String::new() };
-    let low = lower(&view);
-    let (_, primary) = buttons_of(&low);
-    let d = t!("gui.tips.discover_keep_d");
+    let Some((view, shown)) = shown_of(gui) else { return String::new() };
+    let d = t!("gui.tips.discover_keep_d").to_string();
+    let one = view.choices.len() < 2;
     match &view.stage {
-        KeepStage::Choose { other: Some(_), .. } => fit_tips(t!("gui.tips.discover_keep_other").to_string(), &d),
-        KeepStage::Choose { .. } | KeepStage::Refused { .. } => match primary {
-            Some(button) => fit_tips(t!("gui.tips.discover_keep_choose", verb = button.label()).to_string(), &d),
-            None => fit_tips(t!("gui.tips.discover_keep_other").to_string(), &d),
-        },
-        KeepStage::Nowhere => t!("gui.tips.discover_keep_yours").to_string(),
+        KeepStage::Choose { other: Some(other), .. } => {
+            let mut line = t!("gui.tips.discover_keep_other").to_string();
+            if other.cancelling {
+                line = line.replace(&format!(" · {}", KeyWord::CancelOther.words()), "");
+            }
+            if one {
+                line = line.replace(&format!("{} · ", t!("gui.tips.discover_keep_arrows")), "");
+            }
+            fit_tips(line, &[d])
+        }
+        KeepStage::Choose { .. } | KeepStage::Refused { .. } => {
+            let key = if one { "gui.tips.discover_keep_one" } else { "gui.tips.discover_keep_choose" };
+            fit_tips(t!(key).to_string(), &[d])
+        }
         KeepStage::Starting => t!("gui.tips.discover_keep_close").to_string(),
-        KeepStage::Job { outcome, action, .. } => match (outcome, action) {
-            (JobOutcome::Queued, _) => t!("gui.tips.discover_keep_queued").to_string(),
-            (JobOutcome::Running { stopping: false, .. }, _) => t!("gui.tips.discover_keep_running").to_string(),
-            (_, Some(JobAction::Play)) => t!("gui.tips.discover_keep_play").to_string(),
-            (_, Some(JobAction::CopyAgain)) => t!("gui.tips.discover_keep_again").to_string(),
-            (_, Some(JobAction::Retry)) => t!("gui.tips.discover_keep_retry").to_string(),
-            (_, Some(JobAction::StartAgain)) => t!("gui.tips.discover_keep_start_again").to_string(),
-            (JobOutcome::Owned { .. }, _) => t!("gui.tips.discover_keep_yours").to_string(),
-            _ => t!("gui.tips.discover_keep_close").to_string(),
-        },
+        KeepStage::Off(_) => t!("gui.tips.discover_keep_yours").to_string(),
+        KeepStage::Job { .. } if shown.retrying => t!("gui.tips.discover_keep_close").to_string(),
+        KeepStage::Job { outcome, .. } if outcome.live() => {
+            let key = if stopping(outcome, shown) { "gui.tips.discover_keep_yours" } else { "gui.tips.discover_keep_live" };
+            t!(key).to_string()
+        }
+        KeepStage::Job { action, .. } => {
+            let verb = match action {
+                Some(JobAction::Play) => t!("gui.discover.keep.tip_play"),
+                Some(JobAction::Retry | JobAction::CopyAgain) => t!("gui.discover.keep.tip_retry"),
+                Some(JobAction::StartAgain) => t!("gui.discover.keep.tip_add_again"),
+                Some(JobAction::Cancel) | None => t!("gui.discover.keep.tip_close"),
+            };
+            ended_tips(&verb, &acting_keys(gui, &view, shown))
+        }
     }
+}
+
+/// An ended copy's tips line (§6.4): Enter's verb, the key words as drawn,
+/// Esc — where it outgrows the footer, "d where files land" gives way
+/// first, then "c choose again".
+fn ended_tips(verb: &str, keys: &[KeyWord]) -> String {
+    let mut parts = vec![t!("gui.tips.discover_keep_enter", verb = verb).to_string()];
+    parts.extend(keys.iter().map(|k| k.tip()));
+    parts.push(t!("gui.tips.discover_keep_esc").to_string());
+    fit_tips(parts.join(" · "), &[KeyWord::Change.tip(), KeyWord::Choose.tip()])
 }
 
 // ── Where copies land (clauses 142–148) ─────────────────────────────────────
@@ -2095,8 +2614,9 @@ fn put_tail(frame: &mut Frame, x: u16, y: u16, runs: &[(String, Style)], room: u
     total > room
 }
 
-/// Open Where copies land (clause 142) on the place in force: `[ Change… ]`,
-/// `d`, from the choice. Keep a copy gives way until it closes.
+/// Open Where copies land (clause 142) on the place in force: `d change`
+/// or `d`, from the choice or a file in the way. Keep a copy gives way
+/// until it closes.
 pub(crate) fn open_dest(gui: &mut Gui) {
     let Some(view) = gui.app.keep_dest_view() else { return };
     let Some(place) = view.destination.as_ref() else { return };
@@ -2121,12 +2641,11 @@ fn dest_saving(gui: &Gui) -> bool {
     gui.discover.keep.dest.as_ref().is_some_and(|ui| ui.sent.is_some() && ui.sent == out)
 }
 
-/// Back to Keep a copy — Esc, `[X]`, or a save that landed — the hand on
-/// `[ Change… ]`.
+/// Back to Keep a copy — Esc, `[X]`, or a save that landed — as it was,
+/// the dot where it was; a save's place is its evidence (§7).
 fn close_dest(gui: &mut Gui) {
     gui.discover.keep.dest = None;
     gui.app.keep_dest_forget();
-    gui.discover.keep.focus = Some(Stop::Change);
 }
 
 /// A save's answer, folded in once a frame (clause 144) by the picker that
@@ -2483,6 +3002,9 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let listed = rows.iter().filter(|r| matches!(r, DestRow::Listed(_))).count();
     let window = ui.list.as_mut().map(|list| list.view.window(tree.len(), list.held, listed));
     let ui = ui.clone();
+    // The room beneath inert, as under Keep a copy (the kit's Modal): what
+    // it registered goes before the picker registers its own.
+    gui.ui.clear_registries();
     gui.ui.click(area, Act::Guard);
     let h = rows.len() as u16 + 2;
     let rect = crate::kit::modal_rect(area, DEST_W, h, DEST_ANCHOR.max(h));
@@ -2821,9 +3343,10 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 
 // ── The Copies modal (clause 117) ───────────────────────────────────────────
 
-/// The modal's width, and the height it never grows past: 22 rows fit the
-/// 100 × 24 floor with the tab bar above and the tips line below.
-const COPIES_W: u16 = 76;
+/// The list's width — Keep a copy's, the two opening in the same place
+/// ([`window_rect`]) — and the height it never grows past: past it, or past
+/// the rows down to the room's last, its list scrolls.
+const COPIES_W: u16 = KEEP_W;
 const COPIES_MAX_H: u16 = 22;
 /// The rows above the list: the title, a blank, the header, its rule.
 const COPIES_HEAD: u16 = 4;
@@ -2899,7 +3422,7 @@ fn state_cell(row: &CopyRow) -> StateCell {
         // A cancel asked — the server's flag, or this player's ask still
         // out: winding down, no `[X]` left to press.
         JobOutcome::Running { .. } if row.job.stopping() || row.cancelling => {
-            StateCell::Word(ell(&t!("gui.discover.keep.stopping")), dim())
+            StateCell::Word(ell(&t!("gui.discover.copies.stopping")), dim())
         }
         JobOutcome::Running { progress, .. } => StateCell::Bar(*progress),
         JobOutcome::Queued => StateCell::Word(glyphed(JobMark::Waiting, "gui.discover.mark.waiting"), dim()),
@@ -2907,7 +3430,7 @@ fn state_cell(row: &CopyRow) -> StateCell {
         JobOutcome::Copied { .. } | JobOutcome::CopiedMany(_) => {
             StateCell::Word(format!("{} {}", tick(), t!("gui.discover.copies.kept")), ok)
         }
-        JobOutcome::Owned { .. } => StateCell::Word(format!("{} {}", tick(), t!("gui.discover.keep.yours")), dim()),
+        JobOutcome::Owned { .. } => StateCell::Word(format!("{} {}", tick(), t!("gui.discover.copies.yours")), dim()),
         JobOutcome::Exists { .. } => StateCell::Word(t!("gui.discover.copies.skipped").to_string(), dim()),
         JobOutcome::Failed { .. } => StateCell::Word(glyphed(JobMark::Failed, "gui.discover.mark.failed"), gold),
         JobOutcome::Stopped { .. } => StateCell::Word(glyphed(JobMark::Stopped, "gui.discover.mark.stopped"), gold),
@@ -2961,13 +3484,13 @@ fn copy_detail(row: &CopyRow) -> Vec<(String, Style)> {
     };
     let mut runs: Vec<(String, Style)> = Vec::new();
     match &row.outcome {
-        JobOutcome::Queued => runs.push((t!("gui.discover.keep.waiting").to_string(), dim())),
+        JobOutcome::Queued => runs.push((t!("gui.discover.copies.waiting").to_string(), dim())),
         JobOutcome::Running { step, stopping, .. } => {
             let words = match (step, *stopping || row.cancelling) {
                 (Some(step), true) => t!("gui.discover.copies.stopping_after", step = step).to_string(),
-                (None, true) => ell(&t!("gui.discover.keep.stopping")),
+                (None, true) => ell(&t!("gui.discover.copies.stopping")),
                 (Some(step), false) => step.clone(),
-                (None, false) => ell(&t!("gui.discover.keep.copying")),
+                (None, false) => ell(&t!("gui.discover.copies.copying")),
             };
             runs.push((words, dim()));
         }
@@ -2979,7 +3502,7 @@ fn copy_detail(row: &CopyRow) -> Vec<(String, Style)> {
         }
         JobOutcome::Exists { .. } => runs.push((t!("gui.discover.copies.exists").to_string(), dim())),
         JobOutcome::Nothing { appearances, .. } => {
-            let key = if *appearances > 0 { "gui.discover.keep.nothing_theirs" } else { "gui.discover.keep.all_yours" };
+            let key = if *appearances > 0 { "gui.discover.copies.nothing_theirs" } else { "gui.discover.copies.all_yours" };
             runs.push((t!(key).to_string(), dim()));
         }
         JobOutcome::Failed { error: Some(error), many } => {
@@ -2989,13 +3512,13 @@ fn copy_detail(row: &CopyRow) -> Vec<(String, Style)> {
         JobOutcome::Failed { error: None, many: Some(n) } if n.failed > 0 => {
             runs.push((plural("gui.discover.copies.failed_none", n.failed), gold));
         }
-        JobOutcome::Failed { error: None, .. } => runs.push((t!("gui.discover.keep.failed_plain").to_string(), gold)),
+        JobOutcome::Failed { error: None, .. } => runs.push((t!("gui.discover.copies.failed_plain").to_string(), gold)),
         JobOutcome::Stopped { why, many } => {
             let reason = match why {
-                StopReason::Quota => t!("gui.discover.keep.stopped_quota", server = server),
+                StopReason::Quota => t!("gui.discover.copies.stopped_quota", server = server),
                 StopReason::Busy => t!("gui.discover.copies.stopped_busy", server = server),
                 StopReason::Peer | StopReason::Refused => t!("gui.discover.keep.stopped_peer", server = server),
-                StopReason::Other => t!("gui.discover.keep.stopped_other"),
+                StopReason::Other => t!("gui.discover.copies.stopped_other"),
             };
             runs.push((reason.to_string(), gold));
             runs.extend(copied(Some(*many)));
@@ -3005,23 +3528,23 @@ fn copy_detail(row: &CopyRow) -> Vec<(String, Style)> {
             runs.extend(copied(*many));
         }
         JobOutcome::Cancelled { many } => {
-            runs.push((t!("gui.discover.keep.cancelled").to_string(), dim()));
+            runs.push((t!("gui.discover.copies.cancelled").to_string(), dim()));
             runs.extend(copied(*many));
         }
-        JobOutcome::Done => runs.push((t!("gui.discover.keep.finished").to_string(), dim())),
+        JobOutcome::Done => runs.push((t!("gui.discover.copies.finished").to_string(), dim())),
         JobOutcome::Unknown => {}
     }
     runs
 }
 
 /// A row's action, in the words its second row ends with (clause 117) —
-/// a live copy's is its `[X]`, not words.
+/// a live copy's is its `[X]`, not words. A copy with gaps reads Retry (it
+/// takes only the gaps), a cancelled one Add again — the window's words.
 fn action_words(action: JobAction) -> Option<String> {
     match action {
         JobAction::Cancel => None,
-        JobAction::Retry => Some(t!("gui.discover.keep.retry").to_string()),
-        JobAction::CopyAgain => Some(t!("gui.discover.keep.copy_again").to_string()),
-        JobAction::StartAgain => Some(t!("gui.discover.keep.start_again").to_string()),
+        JobAction::Retry | JobAction::CopyAgain => Some(t!("gui.discover.keep.retry").to_string()),
+        JobAction::StartAgain => Some(t!("gui.discover.keep.add_again").to_string()),
         JobAction::Play => Some(t!("gui.discover.keep.play_copy").to_string()),
     }
 }
@@ -3041,21 +3564,24 @@ fn copies_note_words(note: &KeepNote) -> (String, Style) {
         KeepNote::TooLate { title: None } => (t!("gui.discover.copies.too_late_plain").to_string(), Style::default()),
         KeepNote::CancelFailed(f) => (t!("gui.discover.copies.cancel_failed", words = failure_words(f)).to_string(), gold),
         KeepNote::ClearFailed(f) => (t!("gui.discover.copies.clear_failed", words = failure_words(f)).to_string(), gold),
-        KeepNote::StartFailed(f) => (t!("gui.discover.keep.refused_start", words = failure_words(f)).to_string(), gold),
+        KeepNote::StartFailed(f) => (t!("gui.discover.copies.refused_start", words = failure_words(f)).to_string(), gold),
     }
 }
 
 /// The Copies modal (clause 117; the canvas's TermCopies board): the kit's
-/// neutral modal, 76 wide, centred, its height following its rows up to
-/// 22 — the list scrolls past that, `▲█▼` on its right border.
-pub(crate) fn draw_copies(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+/// neutral modal where Keep a copy opens ([`window_rect`]: 76 wide,
+/// centred in the room with its band, anchored as if 17 rows), its height
+/// following its rows down to the room's last row, then rising toward row
+/// 1, never past 22 — the list scrolls past that, `▲█▼` on its right
+/// border.
+pub(crate) fn draw_copies(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Rect) {
     if let Some(note) = gui.app.keep_take_note()
         && let Some(ui) = gui.discover.copies.as_mut()
     {
         ui.note = Some(note);
     }
     let (body, refresh) = copies_body(&gui.app);
-    let cap = COPIES_MAX_H.min(area.height.saturating_sub(2));
+    let cap = COPIES_MAX_H.min(rows_risen(area, room));
     // Room for the list: the head, the spacer (or the refresh's error line)
     // and the footer row, inside the border.
     let avail = cap.saturating_sub(COPIES_HEAD + 4);
@@ -3070,13 +3596,9 @@ pub(crate) fn draw_copies(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         CopiesBody::Rows(_) => 2 * n.min(fits) as u16,
     };
     let h = 2 + COPIES_HEAD + list_h + 2;
-    // The room beneath is inert (the kit's Modal; no scrim).
-    gui.ui.click(area, Act::Guard);
-    let rect = crate::kit::modal_rect(area, COPIES_W, h, COPIES_MAX_H);
-    gui.ui.overlay(rect);
-    gui.ui.modal_over();
-    let inner = modal_box(frame, rect);
-    gui.ui.click(rect, Act::Guard);
+    // The room beneath is inert (the kit's Modal; no scrim — the band).
+    let (rect, band) = window_rect(area, room, COPIES_W, h);
+    let (inner, _) = open_window(frame, gui, area, rect, band);
     put(frame, inner.x + 1, inner.y, &t!("gui.discover.copies.title"), accent().add_modifier(Modifier::BOLD));
     // Its `[X]` stands over the rows' `[X]` column, a cell in from the border.
     let close_in = Rect { width: inner.width.saturating_sub(1), ..inner };
@@ -3374,8 +3896,7 @@ pub(crate) fn copies_tips(gui: &Gui) -> String {
     let mut parts = vec![t!("gui.tips.discover_copies_rows").to_string()];
     let verb = held.and_then(|row| match row.action {
         Some(JobAction::Cancel) if cancellable(row) => Some("gui.tips.discover_copies_cancel"),
-        Some(JobAction::Retry) => Some("gui.tips.discover_copies_retry"),
-        Some(JobAction::CopyAgain) => Some("gui.tips.discover_copies_again"),
+        Some(JobAction::Retry | JobAction::CopyAgain) => Some("gui.tips.discover_copies_retry"),
         Some(JobAction::StartAgain) => Some("gui.tips.discover_copies_start_again"),
         Some(JobAction::Play) => Some("gui.tips.discover_copies_play"),
         _ => None,
@@ -3733,6 +4254,14 @@ fn job_title(job: &PluginJob) -> String {
     }
 }
 
+/// A start refused after its window closed: "couldn't start: {the server's
+/// words}", as a start the Copies list sent says it — a 403's too: the gate
+/// is asked again, and the room's ways in follow its answer (clause 147).
+fn refused_note(failure: &crate::api::PluginFailure, room: usize) -> (String, MessageKind) {
+    let words = t!("gui.discover.copies.refused_start", words = failure_words(failure)).to_string();
+    (fit_note(&words, None, room), MessageKind::Error)
+}
+
 /// "copying Borrowed Tapes…" — a copy still moving.
 fn busy_note(job: &PluginJob, room: usize) -> (String, MessageKind) {
     let title = job_title(job);
@@ -3771,11 +4300,11 @@ pub(crate) fn news_note(job: &PluginJob, room: usize) -> Option<(String, Message
         }
         JobOutcome::Nothing { appearances, .. } => {
             let head = t!("gui.discover.note.nothing").to_string();
-            let wide = if appearances > 0 { tail(head.clone()) } else { format!("{head} · {}", t!("gui.discover.keep.all_yours")) };
+            let wide = if appearances > 0 { tail(head.clone()) } else { format!("{head} · {}", t!("gui.discover.copies.all_yours")) };
             (head, Some(wide), MessageKind::Info)
         }
         JobOutcome::Failed { error, .. } => {
-            let words = error.unwrap_or_else(|| t!("gui.discover.keep.failed_plain").to_string());
+            let words = error.unwrap_or_else(|| t!("gui.discover.copies.failed_plain").to_string());
             (t!("gui.discover.note.failed", words = words).to_string(), None, MessageKind::Error)
         }
         JobOutcome::Stopped { why: StopReason::Other, .. } => {
@@ -3836,6 +4365,20 @@ pub(crate) fn frame_tick(gui: &mut Gui) {
     dest_landed(gui);
     // Open elsewhere's hand-offs that answered since (clause 141).
     links_landed(gui);
+    let room = note_room(gui);
+    // A start whose window closed before it answered (Esc on `[ Adding…
+    // ]`): the copy it started, or why it did not — the window that would
+    // have said so is gone.
+    for landed in gui.app.keep_take_landed() {
+        let note = match landed {
+            Ok(job) if job.live() => Some(busy_note(&job, room)),
+            Ok(job) => news_note(&job, room),
+            Err(failure) => Some(refused_note(&failure, room)),
+        };
+        if let Some(note) = note {
+            set_note(gui, note);
+        }
+    }
     let news = gui.app.keep_take_news();
     if news.is_empty() {
         return;
@@ -3844,7 +4387,6 @@ pub(crate) fn frame_tick(gui: &mut Gui) {
         KeepPhase::Following(id) => Some(id),
         _ => None,
     });
-    let room = note_room(gui);
     for job in news.iter().filter(|j| Some(j.id) != followed) {
         if let Some(note) = news_note(job, room) {
             set_note(gui, note);
@@ -4219,75 +4761,376 @@ pub(crate) mod tests {
         land_jobs(gui, jobs);
     }
 
-    /// The Keep modal's own rows (16 rows from the 7th at 100×30).
+    /// The window's own rows, 76 wide, from its top border (its title on
+    /// it) to its bottom border (its way out on it). A row holds one
+    /// character per cell, a wide character's second cell blank — so the
+    /// title is looked for that way too.
     pub(crate) fn modal_rows(rows: &[String]) -> Vec<String> {
-        let top = rows.iter().position(|r| r.contains("Keep a copy") && r.contains("[X]")).expect("the modal") - 1;
-        let bottom = (top + 1..rows.len()).find(|&y| rows[y].chars().nth(17) == Some('╰') || rows[y].chars().nth(17) == Some('+')).unwrap_or(rows.len() - 1);
-        rows[top..=bottom].iter().map(|r| r.chars().skip(17).take(66).collect()).collect()
+        let title: String = rust_i18n::t!("gui.discover.keep.title")
+            .chars()
+            .flat_map(|c| if crate::kit::width(&c.to_string()) == 2 { vec![c, ' '] } else { vec![c] })
+            .collect();
+        let top = rows
+            .iter()
+            .position(|r| r.contains(&format!("─ {title} ─")) || r.contains(&format!("- {title} -")))
+            .expect("the window");
+        let x = rows[top].chars().position(|c| c == '╭' || c == '+').expect("its corner");
+        let bottom = (top + 1..rows.len()).find(|&y| matches!(rows[y].chars().nth(x), Some('╰' | '+'))).unwrap_or(rows.len() - 1);
+        rows[top..=bottom].iter().map(|r| r.chars().skip(x).take(76).collect()).collect()
     }
 
-    /// `cargo test dump_keep_states -- --ignored --nocapture`: every state.
+    fn late() -> Value {
+        fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0))
+    }
+
+    /// The boards' facts (SPEC §5): Borrowed Tapes' three songs on Stage
+    /// Peer B, which holds Second Shift too; the library's three Boukmanflow
+    /// albums, Second Shift among them — so Borrowed Tapes is the one album
+    /// missing by name.
+    fn board_facts(gui: &mut Gui) {
+        land_facts(gui, Some(3), &["Borrowed Tapes", "Second Shift"], &["Kite Days", "Night Bus", "Second Shift"]);
+    }
+
+    /// Keep a copy open on `target` — Late Train Verse's row, Borrowed
+    /// Tapes' tile — with the boards' facts.
+    fn opened(target: KeepTarget) -> Gui {
+        let mut gui = canvas_gui(&[]);
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, target);
+        board_facts(&mut gui);
+        gui
+    }
+
+    /// The choice of `scope`, by the pointer.
+    fn choose(gui: &mut Gui, scope: Option<&str>) {
+        let act = match scope {
+            Some("album") => super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Album),
+            Some("artist") => super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Artist),
+            Some("artist-missing") => super::KeepAct::Missing,
+            _ => super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Song),
+        };
+        gui.act(Act::Disc(DiscAct::Keep(act)));
+    }
+
+    /// The window on `target` with a copy of `scope` started, the server
+    /// answering it with a job in `state`, then polled through `more`.
+    fn copying(target: KeepTarget, scope: Option<&str>, state: &str, extra: Value, more: &[(&str, Value)]) -> Gui {
+        let mut gui = opened(target);
+        choose(&mut gui, scope);
+        start(&mut gui, Ok(job(91, &late(), scope, state, extra)));
+        for (state, extra) in more {
+            poll(&mut gui, &[job(91, &late(), scope, state, extra.clone())]);
+        }
+        gui
+    }
+
+    const TILE: KeepTarget = KeepTarget::Tile(0);
+
+    /// An album copy's result as federation-copy sends it: its counts out of
+    /// three, the songs it copied (their landed files in copies) and found
+    /// already in music, its stop word.
+    fn album_result(copied: u64, owned: u64, failed: u64, stopped: Option<&str>) -> Value {
+        let from = |i: u64| format!("peerlib/Boukmanflow/Borrowed Tapes/{i:02}.mp3");
+        let copied_songs: Vec<Value> = (1..=copied)
+            .map(|i| json!({ "from": from(i), "vpath": "copies", "filepath": format!("copies/Boukmanflow/Borrowed Tapes/{i:02}.mp3"), "title": format!("Song {i}") }))
+            .collect();
+        let owned_songs: Vec<Value> = (copied + 1..=copied + owned)
+            .map(|i| json!({ "from": from(i), "why": "owned", "at": format!("music/Boukmanflow/Borrowed Tapes/{i:02}.mp3") }))
+            .collect();
+        json!({ "result": { "scope": "album", "songs": { "total": 3, "copied": copied_songs, "skipped": owned_songs, "failed": [] },
+            "counts": { "total": 3, "copied": copied, "skipped": owned, "failed": failed }, "stopped": stopped } })
+    }
+
+    /// Late Train Verse copied, at its landed file.
+    fn song_copied() -> Value {
+        json!({ "result": { "copied": { "vpath": "copies", "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3" } } })
+    }
+
+    /// Stage Peer B's tile with an artist copy that walked its albums
+    /// (`albums`, `left` out) — the boards' E17.
+    fn walked(albums: Value, left: Value) -> Gui {
+        let late = late();
+        let songs: Vec<Value> = (1..=3)
+            .map(|i| json!({ "from": format!("peerlib/Boukmanflow/Borrowed Tapes/{i:02}.mp3"), "vpath": "copies",
+                "filepath": format!("copies/Boukmanflow/Borrowed Tapes/{i:02}.mp3"), "title": format!("Song {i}") }))
+            .collect();
+        let songs = json!({ "total": 3, "skipped": [], "failed": [], "copied": songs });
+        let albums = albums.as_array().map(|a| a.iter().map(|album| { let mut album = album.clone(); album["songs"] = songs.clone(); album }).collect::<Vec<_>>());
+        let walk = job(80, &late, Some("artist-missing"), "done", json!({ "result": { "scope": "artist-missing",
+            "albums": albums, "skippedAlbums": left, "songs": songs, "counts": { "total": 3, "copied": 3, "skipped": 0, "failed": 0 },
+            "stopped": null, "peer": { "id": B, "name": "Stage Peer B" } } }));
+        let mut gui = canvas_gui(&[walk]);
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, TILE);
+        board_facts(&mut gui);
+        gui
+    }
+
+    /// A place saved for the account: `base` under copies, `layout`.
+    fn place_view(base: &str, layout: &str) -> Value {
+        let mut view = dest_view(base, "user");
+        view["destination"]["layout"] = json!(layout);
+        view["saved"]["layout"] = json!(layout);
+        view
+    }
+
+    /// The window in one of the boards' states (SPEC §5, RecStates), by its
+    /// id — what the dump draws and the tests read.
+    fn keep_in(id: &str) -> Gui {
+        let late = late();
+        let quota = album_result(1, 0, 0, Some("quota"));
+        let running = json!({ "progress": 0.52, "statusText": "song 2 of 3 · Late Train Verse",
+            "result": { "scope": "album", "counts": { "total": 3, "copied": 1, "skipped": 0, "failed": 0 } } });
+        let failed = json!({ "error": "Stage Peer B is unreachable" });
+        match id {
+            "C1b" => opened(TILE),
+            "C2" => {
+                let mut gui = canvas_gui(&[]);
+                draw(&mut gui, 100, 30);
+                super::open(&mut gui, TILE);
+                gui
+            }
+            "C3" => {
+                let mut gui = opened(TILE);
+                choose(&mut gui, Some("artist"));
+                gui
+            }
+            "C4" => {
+                let mut gui = opened(TILE);
+                choose(&mut gui, Some("artist-missing"));
+                gui
+            }
+            "C5" => opened(LATE),
+            "C6" => {
+                let (mut gui, _) = mixtape_gui();
+                draw(&mut gui, 100, 30);
+                super::open(&mut gui, TILE);
+                land_facts(&mut gui, Some(2), &[], &[]);
+                gui
+            }
+            "C7" => {
+                let (mut gui, _) = mixtape_gui();
+                draw(&mut gui, 100, 30);
+                super::open(&mut gui, KeepTarget::Row { group: 0, row: 0 });
+                land_read(&mut gui, layout_view("From friends/{{ARTIST}}"));
+                land_songs(&mut gui, &[("Kim Song", "Peer Kim"), ("Lou Song", "Peer Lou")]);
+                choose(&mut gui, Some("album"));
+                gui
+            }
+            "C8" | "C8b" => {
+                let base = if id == "C8" { "from-peers/2025 archive" } else { "from-peers/2025 archive/the long weekend sessions" };
+                let mut gui = opened(TILE);
+                land_read(&mut gui, place_view(base, "{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}"));
+                gui
+            }
+            "C9" => {
+                let mut gui = opened(TILE);
+                key(&mut gui, KeyCode::Enter);
+                gui
+            }
+            "R1" => {
+                let mut gui = opened(LATE);
+                let words = "you have 20 jobs queued or running — wait for some to finish (the limit is 20)";
+                start(&mut gui, Err(crate::api::PluginFailure::Refused { status: 429, words: words.into() }));
+                gui
+            }
+            "R2" => {
+                let mut gui = opened(TILE);
+                let music: crate::api::types::CollectionDestination =
+                    serde_json::from_value(json!({ "vpath": "music", "base": "", "layout": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", "source": "default" })).unwrap();
+                start(&mut gui, Err(crate::api::PluginFailure::DestinationChanged(Some(Some(music)))));
+                gui
+            }
+            "R3" => {
+                let mut gui = opened(TILE);
+                land_read(&mut gui, json!({ "destination": null, "libraries": [] }));
+                gui
+            }
+            "R3b" | "R4" => {
+                let words = if id == "R3b" { "Uploading Disabled" } else { "Not allowed for your account" };
+                let mut gui = opened(TILE);
+                start(&mut gui, Err(crate::api::PluginFailure::Refused { status: 403, words: words.into() }));
+                gui
+            }
+            "R5" => {
+                let mut gui = opened(TILE);
+                let mut gone = listing(true);
+                gone["plugins"].as_array_mut().expect("plugins").retain(|p| p["name"] != "federation-copy");
+                let generation = gui.app.session_gen();
+                apply(&mut gui, Event::KeepGate { generation, plugins: Ok(Box::new(serde_json::from_value(gone).unwrap())), destination: None });
+                gui
+            }
+            "O1" | "O1d" | "O1b" => {
+                let rooftop = fed(C, "Rooftop Cypher", "Boukmanflow", "Borrowed Tapes", 0.6, Some(12.0));
+                let scope = if id == "O1b" { "artist" } else { "album" };
+                let theirs = job(40, &rooftop, Some(scope), "running", json!({ "progress": 0.3 }));
+                let mut gui = canvas_gui(&[theirs]);
+                draw(&mut gui, 100, 30);
+                super::open(&mut gui, TILE);
+                board_facts(&mut gui);
+                if id == "O1b" {
+                    choose(&mut gui, Some("artist"));
+                }
+                if id == "O1d" {
+                    key(&mut gui, KeyCode::Char('x'));
+                }
+                gui
+            }
+            "L1" => copying(TILE, Some("album"), "queued", json!({}), &[]),
+            "L2" => copying(TILE, Some("album"), "queued", json!({}), &[("running", running)]),
+            "L3" => copying(TILE, Some("artist"), "running", json!({ "progress": 0.38, "statusText": "album 1 of 2 · Borrowed Tapes · song 2 of 3",
+                "result": { "scope": "artist", "counts": { "total": 6, "copied": 1, "skipped": 0, "failed": 0 } } }), &[]),
+            "L4" => copying(LATE, None, "running", json!({}), &[]),
+            "L5" => {
+                let mut gui = copying(TILE, Some("album"), "running", running, &[]);
+                key(&mut gui, KeyCode::Char('x'));
+                gui
+            }
+            "E1" => copying(LATE, None, "done", song_copied(), &[]),
+            "E2" => {
+                let rooftop_late = fed(C, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.7, Some(8.0));
+                let mut gui = canvas_gui(&[job(95, &rooftop_late, None, "done", song_copied())]);
+                draw(&mut gui, 100, 30);
+                super::open(&mut gui, LATE);
+                board_facts(&mut gui);
+                gui
+            }
+            "E3" => copying(TILE, Some("album"), "done", album_result(2, 1, 0, None), &[]),
+            "E4" => {
+                let songs: Vec<Value> = ["Borrowed Tapes", "Second Shift", "Second Shift"].iter().enumerate()
+                    .map(|(i, album)| json!({ "from": format!("peerlib/Boukmanflow/{album}/{i:02}.mp3"), "vpath": "copies",
+                        "filepath": format!("copies/Boukmanflow/{album}/{i:02}.mp3") }))
+                    .collect();
+                copying(TILE, Some("artist"), "done", json!({ "result": { "scope": "artist", "albums": [{ "name": "Borrowed Tapes" }, { "name": "Second Shift" }],
+                    "songs": { "total": 6, "copied": songs, "skipped": [], "failed": [] },
+                    "counts": { "total": 6, "copied": 3, "skipped": 3, "failed": 0 }, "stopped": null } }), &[])
+            }
+            "E5" => copying(TILE, Some("album"), "done", album_result(2, 0, 1, None), &[]),
+            "E5b" => {
+                let songs: Vec<Value> = (1..=3)
+                    .map(|i| json!({ "from": format!("peerlib/Boukmanflow/Borrowed Tapes/{i:02}.mp3"), "vpath": "copies",
+                        "filepath": format!("copies/Boukmanflow/Borrowed Tapes/{i:02}.mp3") }))
+                    .collect();
+                copying(TILE, Some("artist"), "done", json!({ "result": { "scope": "artist",
+                    "albums": [{ "name": "Borrowed Tapes" }, { "name": "Second Shift", "error": "listing timed out" }],
+                    "songs": { "total": 3, "copied": songs, "skipped": [], "failed": [] },
+                    "counts": { "total": 3, "copied": 3, "skipped": 0, "failed": 0 }, "stopped": null } }), &[])
+            }
+            "E6" => copying(LATE, None, "done", json!({ "result": { "skipped": "owned",
+                "existing": { "filepath": "music/Boukmanflow/Borrowed Tapes/02 Late Train Verse.mp3" } } }), &[]),
+            "E7" | "E8" => {
+                let mut gui = copying(LATE, None, "done", json!({ "result": { "skipped": "exists",
+                    "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3" } }), &[]);
+                if id == "E8" {
+                    land_read(&mut gui, dest_view("from-peers", "user"));
+                }
+                gui
+            }
+            "E9" | "E9b" | "E20" => {
+                let mut gui = copying(TILE, Some("album"), "failed", failed, &[]);
+                if id == "E9b" {
+                    land_read(&mut gui, dest_view("from-peers", "user"));
+                }
+                if id == "E20" {
+                    key(&mut gui, KeyCode::Enter);
+                }
+                gui
+            }
+            "E10" => copying(TILE, Some("album"), "done", album_result(0, 0, 3, None), &[]),
+            "E11" => copying(TILE, Some("album"), "done", quota, &[]),
+            "E11b" => copying(TILE, Some("album"), "done", album_result(1, 0, 0, Some("busy")), &[]),
+            "E11c" => copying(TILE, Some("album"), "done", album_result(1, 0, 0, Some("maintenance")), &[]),
+            "E12" => copying(TILE, Some("album"), "done", album_result(0, 0, 0, Some("refused")), &[]),
+            "E12b" => copying(TILE, Some("album"), "done", album_result(1, 0, 0, Some("refused")), &[]),
+            "E13" => copying(TILE, Some("album"), "cancelled", album_result(1, 0, 0, None), &[]),
+            "E14" => copying(TILE, Some("album"), "cancelled", album_result(0, 0, 0, None), &[]),
+            "E15" => copying(TILE, Some("album"), "done", json!({ "result": { "scope": "album",
+                "counts": { "total": 0, "copied": 0, "skipped": 0, "failed": 0 } } }), &[]),
+            "E16" => copying(TILE, Some("artist"), "done", json!({ "result": { "scope": "artist", "albums": [],
+                "skippedAlbums": [{ "name": "Comp", "why": "appearance" }], "counts": { "total": 0, "copied": 0, "skipped": 0, "failed": 0 }, "stopped": null } }), &[]),
+            "E17" => walked(json!([{ "name": "Borrowed Tapes", "stopped": null }]), json!([])),
+            "E17b" => walked(json!([]), json!([{ "name": "Borrowed Tapes", "why": "owned" }])),
+            "E18" => {
+                let songs = json!({ "total": 3, "skipped": [], "failed": [], "copied": [{ "from": late["filepath"], "vpath": "copies",
+                    "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3", "title": "Late Train Verse" }] });
+                let album = job(81, &late, Some("album"), "done", json!({ "result": { "scope": "album", "songs": songs,
+                    "counts": { "total": 3, "copied": 3, "skipped": 0, "failed": 0 }, "stopped": null, "peer": { "id": B, "name": "Stage Peer B" } } }));
+                let mut gui = canvas_gui(&[album]);
+                draw(&mut gui, 100, 30);
+                super::open(&mut gui, LATE);
+                board_facts(&mut gui);
+                gui
+            }
+            "E19" => {
+                let mut gui = copying(TILE, Some("album"), "done", album_result(1, 0, 0, Some("peer")), &[]);
+                land_read(&mut gui, dest_view("from-peers", "user"));
+                gui
+            }
+            "E19b" => {
+                let mut gui = copying(TILE, Some("album"), "done", album_result(2, 0, 1, None), &[]);
+                land_read(&mut gui, place_view("", "{{GENRE}}/{{ALBUMARTIST}}/{{YEAR}} - {{ALBUM}}"));
+                gui
+            }
+            "E21" => copying(TILE, Some("album"), "done", json!({ "result": {} }), &[]),
+            "T1" => {
+                let mut gui = opened(LATE);
+                land_read(&mut gui, place_view("from-peers/the long weekend sessions", "{{PEER}}/{{GENRE}}/{{ALBUMARTIST}}/{{YEAR}} - {{ALBUM}}"));
+                choose(&mut gui, Some("album"));
+                let busy = "someone else on this server is already getting this — try again in a moment";
+                start(&mut gui, Err(crate::api::PluginFailure::Refused { status: 409, words: busy.into() }));
+                gui
+            }
+            other => panic!("no state {other}"),
+        }
+    }
+
+    /// Every state the boards draw, in their order.
+    const STATES: &[&str] = &[
+        "C1b", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C8b", "C9", "R1", "R2", "R3", "R3b", "R4", "R5", "O1", "O1b", "O1d", "L1",
+        "L2", "L3", "L4", "L5", "E1", "E2", "E3", "E4", "E5", "E5b", "E6", "E7", "E8", "E9", "E9b", "E10", "E11", "E11b", "E11c",
+        "E12", "E12b", "E13", "E14", "E15", "E16", "E17", "E17b", "E18", "E19", "E19b", "E20", "E21", "T1",
+    ];
+
+    /// `cargo test dump_keep_states -- --ignored --nocapture`: every state
+    /// at 100 × 30 — `KEEP_DUMP_ROWS=24` for the floor, `KEEP_DUMP_HINTS=1`
+    /// with the tips line on, `KEEP_DUMP_LOCALE=de` in another language —
+    /// then the room around two of them, and the legacy console's.
     #[test]
     #[ignore]
     fn dump_keep_states() {
-        let _en = english();
-        let late = fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0));
-        let show = |gui: &mut Gui, what: &str| {
-            let rows = draw(gui, 100, 30);
-            println!("── {what} · tips: {}", super::super::discover::tips(gui));
-            println!("{}", modal_rows(&rows).join("\n"));
+        let locale = std::env::var("KEEP_DUMP_LOCALE").unwrap_or_else(|_| "en".to_string());
+        let _locale = crate::setup::tests::in_locale(&locale);
+        let height = std::env::var("KEEP_DUMP_ROWS").ok().and_then(|h| h.parse().ok()).unwrap_or(30);
+        let hints = std::env::var("KEEP_DUMP_HINTS").is_ok_and(|h| h == "1");
+        let show = |id: &str, gui: &mut Gui, hints: bool| {
+            gui.config.gui.key_hints = hints;
+            gui.ui.key_hints = hints;
+            let rows = draw(gui, 100, height);
+            let window = modal_rows(&rows);
+            let top = rows.iter().position(|r| r.contains(&window[0])).unwrap_or(0);
+            println!("── {id} · {} rows · rows {top}–{} · tips: {}", window.len(), top + window.len() - 1, super::super::discover::tips(gui));
+            println!("{}", window.join("\n"));
         };
-        let row = crate::tui::app::keep::KeepTarget::Row { group: 0, row: 2 };
-        let mut gui = canvas_gui(&[]);
-        super::open(&mut gui, row);
-        show(&mut gui, "loading facts");
-        stage_facts(&mut gui);
-        show(&mut gui, "idle");
-        let refused = crate::api::PluginFailure::Refused { status: 403, words: "Uploading Disabled".into() };
-        start(&mut gui, Err(refused));
-        show(&mut gui, "refused 403");
-        let busy = crate::api::PluginFailure::Refused { status: 409, words: "someone else on this server is already getting this — try again in a moment".into() };
-        start(&mut gui, Err(busy));
-        show(&mut gui, "refused 409");
-        let states: Vec<(&str, &str, Value)> = vec![
-            ("done one song", "done", json!({ "result": { "copied": { "vpath": "copies", "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3" } } })),
-            ("already yours", "done", json!({ "result": { "skipped": "owned", "existing": { "filepath": "music/x.mp3" } } })),
-            ("exists", "done", json!({ "result": { "skipped": "exists", "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3" } })),
-            ("failed", "failed", json!({ "error": "Stage Peer B is unreachable" })),
-            ("refused", "failed", json!({ "error": "Stage Peer B does not allow copies with your server's key" })),
-            ("cancelled", "cancelled", json!({})),
-        ];
-        for (what, state, extra) in states {
-            let mut gui = canvas_gui(&[]);
-            super::open(&mut gui, row);
-            stage_facts(&mut gui);
-            start(&mut gui, Ok(job(90, &late, None, state, extra)));
-            show(&mut gui, what);
+        let mut seen = std::collections::BTreeSet::new();
+        for &id in STATES {
+            if !seen.insert(id) {
+                continue;
+            }
+            show(id, &mut keep_in(id), hints);
         }
-        // From the tile: album focus, and the copy's life.
-        let tile = crate::tui::app::keep::KeepTarget::Tile(0);
-        let mut gui = canvas_gui(&[]);
-        super::open(&mut gui, tile);
-        stage_facts(&mut gui);
-        show(&mut gui, "tile idle");
-        let album = |state: &str, extra: Value| job(91, &late, Some("album"), state, extra);
-        start(&mut gui, Ok(album("queued", json!({}))));
-        show(&mut gui, "tile queued");
-        poll(&mut gui, &[album("running", json!({ "progress": 0.52, "statusText": "song 2 of 3 · Late Train Verse",
-            "result": { "scope": "album", "counts": { "total": 3, "copied": 1, "skipped": 0, "failed": 0 } } }))]);
-        show(&mut gui, "tile running");
-        poll(&mut gui, &[album("running", json!({ "progress": 0.52, "cancelRequested": true,
-            "result": { "scope": "album", "counts": { "total": 3, "copied": 1, "skipped": 0, "failed": 0 } } }))]);
-        show(&mut gui, "tile stopping");
-        for (what, state, extra) in [
-            ("tile quota", "done", json!({ "result": { "scope": "album", "counts": { "total": 3, "copied": 1, "skipped": 0, "failed": 0 }, "stopped": "quota" } })),
-            ("tile cancelled", "cancelled", json!({ "result": { "scope": "album", "counts": { "total": 3, "copied": 1, "skipped": 0, "failed": 0 } } })),
-            ("tile nothing", "done", json!({ "result": { "scope": "album", "counts": { "total": 0, "copied": 0, "skipped": 0, "failed": 0 } } })),
-        ] {
-            poll(&mut gui, &[album(state, extra)]);
-            show(&mut gui, what);
+        show("T1 · key hints on", &mut keep_in("T1"), true);
+        println!("── the room, album tile idle, 100 × {height}");
+        println!("{}", draw(&mut keep_in("C1b"), 100, height).join("\n"));
+        println!("── the room, copying, 100 × {height}");
+        println!("{}", draw(&mut keep_in("L2"), 100, height).join("\n"));
+        let mut gui = keep_in("C1b");
+        gui.queue_open = true;
+        println!("── the queue open, 100 × {height}");
+        println!("{}", draw(&mut gui, 100, height).join("\n"));
+        let _legacy = crate::kit::theme::legacy_glyphs_here();
+        for id in ["C1b", "C9", "L1", "L2", "L5", "E1"] {
+            show(&format!("{id} · legacy console"), &mut keep_in(id), hints);
         }
-        let _ = C;
     }
 
     /// `cargo test dump_keep -- --ignored --nocapture` to eyeball the room,
@@ -4676,553 +5519,2200 @@ pub(crate) mod tests {
         );
     }
 
-    // ── The Keep a copy modal (clauses 106–110) ─────────────────────────
+    // ── The Keep a copy window (clauses 106–110; SPEC "calmer") ─────────
 
-    /// The modal's rows from WHAT down to its bottom border, 66 wide.
+    /// The window's rows from B1, the head's next row, down to its bottom
+    /// border, 76 wide.
     fn lower_rows(rows: &[String]) -> Vec<String> {
-        let all = modal_rows(rows);
-        let what = all.iter().position(|r| r.contains("WHAT")).expect("WHAT");
-        all[what..].to_vec()
+        modal_rows(rows)[3..].to_vec()
     }
 
     fn canvas(rows: &[&str]) -> Vec<String> {
         rows.iter().map(|r| r.to_string()).collect()
     }
 
+    /// A board's frame as SPEC §5 prints it, a row a line.
+    fn board(frame: &str) -> Vec<String> {
+        frame.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+    }
+
+    /// The pointer's act at a cell.
+    fn hit_at(gui: &Gui, x: u16, y: u16) -> Option<Act> {
+        gui.ui.hit(Position { x, y })
+    }
+
+    fn keep_act(act: super::KeepAct) -> Option<Act> {
+        Some(Act::Disc(DiscAct::Keep(act)))
+    }
+
+    /// C5, the song row idle: its words, tokens, cells and controls, as
+    /// the boards draw them (SPEC §5.1, §3.7, §6.3).
     #[test]
     fn the_modal_from_a_row_opens_on_the_song_where_the_canvas_draws_it() {
         let _en = english();
-        let mut gui = canvas_gui(&canvas_jobs());
+        let mut gui = canvas_gui(&[]);
         draw(&mut gui, 100, 30);
         super::open(&mut gui, LATE);
-        // Loading facts: DIM … for the sizes, no checkbox yet.
+        // The sizes still asked: no box, the primary without its count.
         let rows = draw(&mut gui, 100, 30);
         assert_eq!(
-            lower_rows(&rows),
-            canvas(&[
-                "│ WHAT      (•) This song                   0:08 · mp3           │",
-                "│           ( ) Album                       …                    │",
-                "│           ( ) Every album by Boukmanflow  …                    │",
-                "│                                                                │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│           the library's default                    [ Change… ] │",
-                "│                                                                │",
-                "│                                        [ Cancel ] [ Add song ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])
+            modal_rows(&rows),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ (•) This song                                                            │
+                │ ( ) Album                                                                │
+                │ ( ) Every album by Boukmanflow                                           │
+                │                                                                          │
+                │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+                │                                                                          │
+                │                                                             [ Add song ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
         );
-        stage_facts(&mut gui);
+        board_facts(&mut gui);
         let buffer = buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
-        // 66 wide, centred, its top on row 6 (anchored as if 17 rows).
-        assert_eq!(rows[6].chars().nth(17), Some('╭'));
-        assert_eq!(rows[6].chars().nth(82), Some('╮'));
-        let modal = modal_rows(&rows);
-        assert_eq!(modal.len(), 17, "{}", modal.join("\n"));
-        assert_eq!(modal[1], "│ Keep a copy                                                 [X]│");
-        assert!(modal[3].ends_with("Late Train Verse                                        │"));
-        assert!(modal[4].ends_with("Boukmanflow · Borrowed Tapes · 2019 · from Stage Peer B │"));
-        assert!(modal[5].ends_with("• online                                                │"));
+        // 76 wide at x 19–94, centred in the room; its top on row 6, 13 rows.
+        assert_eq!((rows[6].chars().nth(19), rows[6].chars().nth(94)), (Some('╭'), Some('╮')), "{}", rows.join("\n"));
+        assert_eq!(rows[18].chars().nth(19), Some('╰'));
         assert_eq!(
-            lower_rows(&rows),
-            canvas(&[
-                "│ WHAT      (•) This song                   0:08 · mp3           │",
-                "│           ( ) Album                       3 songs              │",
-                "│           ( ) Every album by Boukmanflow  1 album · you have 3 │",
-                "│               [ ] Only the albums you don't have               │",
-                "│                                                                │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│           the library's default                    [ Change… ] │",
-                "│                                                                │",
-                "│                                        [ Cancel ] [ Add song ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])
+            modal_rows(&rows),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ (•) This song                                                            │
+                │ ( ) Album                                                                │
+                │ ( ) Every album by Boukmanflow                                           │
+                │     [ ] Only the 1 album you don't have                                  │
+                │                                                                          │
+                │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+                │                                                                          │
+                │                                                             [ Add song ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
         );
-        // The tokens (the canvas's TermKeepModal): the frame and the title
-        // ACCENT, [X] DIM, the title BOLD, the byline DIM, the dot OK; WHAT
-        // DIM, the picked radio OK and its focused label ACCENT BOLD, the
-        // sizes DIM; LANDS IN DIM, the library BOLD, `›` DIM; whose place
-        // it is DIM and `[ Change… ]` DIM (TermDestination F1); Cancel DIM,
-        // the primary ACCENT BOLD.
+        // The runs (§5.1): the frame ACCENT, its title TEXT BOLD; the item's
+        // title BOLD, the byline DIM; the chosen dot ACCENT and its label
+        // BOLD, the others DIM and TEXT; the box DIM, its label TEXT; "Files
+        // go to" DIM, the library BOLD, `›` DIM, the folders TEXT; `d change`
+        // DIM; the one primary ACCENT BOLD; "Esc close" DIM.
         let cell = |x: u16, y: u16| Position { x, y };
-        assert_eq!(fg(&buffer, cell(17, 6)), th().accent);
-        assert_eq!((fg(&buffer, cell(19, 7)), bold(&buffer, cell(19, 7))), (th().accent, true));
-        assert_eq!(fg(&buffer, cell(79, 7)), th().dim);
-        assert!(bold(&buffer, cell(26, 9)));
-        assert_eq!(fg(&buffer, cell(26, 10)), th().dim);
-        assert_eq!(fg(&buffer, cell(26, 11)), th().ok);
-        assert_eq!(fg(&buffer, cell(19, 13)), th().dim);
-        assert_eq!(fg(&buffer, cell(30, 13)), th().ok);
-        assert_eq!((fg(&buffer, cell(33, 13)), bold(&buffer, cell(33, 13))), (th().accent, true));
-        assert_eq!(fg(&buffer, cell(61, 13)), th().dim);
-        assert_eq!(fg(&buffer, cell(29, 14)), th().dim);
-        assert_eq!(fg(&buffer, cell(33, 16)), th().dim);
-        assert_eq!(fg(&buffer, cell(19, 18)), th().dim);
-        assert!(bold(&buffer, cell(29, 18)));
-        assert_eq!(fg(&buffer, cell(36, 18)), th().dim);
-        let change = at(&rows, "[ Change… ]");
-        assert_eq!((change.x, change.y), (70, 19), "cols 53–63 of the modal");
-        assert_eq!((fg(&buffer, change), bold(&buffer, change)), (th().dim, false));
-        assert_eq!(fg(&buffer, at(&rows, "the library's default")), th().dim);
-        assert_eq!(fg(&buffer, cell(58, 21)), th().dim);
-        assert_eq!((fg(&buffer, cell(69, 21)), bold(&buffer, cell(69, 21))), (th().accent, true));
-        assert_eq!(
-            super::super::discover::tips(&gui),
-            "↑ ↓ rows · Space or Enter pick · Enter on Add song starts · d where files land · Esc close"
-        );
-        // The room beneath is inert; the controls take their clicks.
-        assert_eq!(gui.ui.hit(Position { x: 40, y: 25 }), Some(Act::Guard));
-        assert_eq!(gui.ui.hit(Position { x: 80, y: 7 }), Some(Act::Disc(DiscAct::Keep(super::KeepAct::Close))));
-        assert_eq!(gui.ui.hit(Position { x: 35, y: 14 }), Some(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Album)))));
-        assert_eq!(gui.ui.hit(Position { x: 75, y: 19 }), Some(Act::Disc(DiscAct::Keep(super::KeepAct::Change))));
-        assert_eq!(gui.ui.hit(Position { x: 72, y: 21 }), Some(Act::Disc(DiscAct::Keep(super::KeepAct::Primary))));
-        // The strip's covers under the frame draw as the mosaic next frame
-        // (Over pixels): its footprint is registered.
-        assert!(gui.ui.overlays_moved() || gui.ui.covered_last_frame(ratatui::layout::Rect { x: 17, y: 6, width: 12, height: 5 }));
+        let text = |at: Position| (fg(&buffer, at), bold(&buffer, at));
+        assert_eq!(fg(&buffer, cell(19, 6)), th().accent);
+        assert_eq!(text(cell(22, 6)), (Color::Reset, true), "the title on the border, TEXT BOLD");
+        assert_eq!(text(cell(21, 7)), (Color::Reset, true));
+        assert_eq!(fg(&buffer, cell(21, 8)), th().dim);
+        assert_eq!(text(cell(22, 10)), (th().accent, false), "the chosen dot ACCENT, never bold");
+        assert_eq!(text(cell(25, 10)), (Color::Reset, true));
+        assert_eq!(fg(&buffer, cell(22, 11)), th().dim);
+        assert_eq!(text(cell(25, 11)), (Color::Reset, false));
+        assert_eq!(fg(&buffer, cell(26, 13)), th().dim);
+        assert_eq!(text(cell(29, 13)), (Color::Reset, false));
+        assert_eq!(fg(&buffer, cell(21, 15)), th().dim);
+        assert_eq!(text(cell(33, 15)), (Color::Reset, true), "the library BOLD");
+        assert_eq!(fg(&buffer, cell(40, 15)), th().dim, "› DIM");
+        assert_eq!(text(cell(42, 15)), (Color::Reset, false));
+        assert_eq!(at(&rows, "d change"), cell(85, 15));
+        assert_eq!(text(cell(85, 15)), (th().dim, false));
+        assert_eq!(at(&rows, "[ Add song ]"), cell(81, 17));
+        assert_eq!(text(cell(81, 17)), (th().accent, true), "the one ACCENT BOLD element");
+        assert_eq!(at(&rows, "Esc close"), cell(83, 18));
+        assert_eq!(text(cell(83, 18)), (th().dim, false));
+        // Nothing is filled: no slab anywhere in the window, the ground its
+        // own.
+        let ground = bg(&buffer, cell(40, 9));
+        for y in 6..=18 {
+            for x in 19..=94 {
+                assert_eq!(bg(&buffer, cell(x, y)), ground, "a fill at ({x}, {y})");
+            }
+        }
+        assert_eq!(super::super::discover::tips(&gui), "↑ ↓ choose · Enter starts · d where files land · Esc close");
+        // The pointer: a choice's row picks it, the box toggles, `d change`
+        // opens the picker, the primary presses, "Esc close" closes; every
+        // other cell — the window's, the band's, the room's — is inert.
+        use crate::tui::app::keep::KeepChoice;
+        assert_eq!(hit_at(&gui, 21, 10), keep_act(super::KeepAct::Pick(KeepChoice::Song)));
+        assert_eq!(hit_at(&gui, 60, 11), keep_act(super::KeepAct::Pick(KeepChoice::Album)));
+        assert_eq!(hit_at(&gui, 92, 12), keep_act(super::KeepAct::Pick(KeepChoice::Artist)));
+        assert_eq!(hit_at(&gui, 26, 13), keep_act(super::KeepAct::Missing));
+        assert_eq!(hit_at(&gui, 59, 13), keep_act(super::KeepAct::Missing));
+        assert_eq!(hit_at(&gui, 70, 13), Some(Act::Guard));
+        assert_eq!(hit_at(&gui, 88, 15), keep_act(super::KeepAct::Key(super::KeyWord::Change)));
+        assert_eq!(hit_at(&gui, 50, 15), Some(Act::Guard), "the place is words, not a control");
+        assert_eq!(hit_at(&gui, 85, 17), keep_act(super::KeepAct::Primary));
+        assert_eq!(hit_at(&gui, 40, 17), Some(Act::Guard));
+        assert_eq!(hit_at(&gui, 87, 18), keep_act(super::KeepAct::Close));
+        assert_eq!(hit_at(&gui, 93, 18), Some(Act::Guard));
+        assert_eq!(hit_at(&gui, 18, 10), Some(Act::Guard), "the band");
+        assert_eq!(hit_at(&gui, 40, 25), Some(Act::Guard), "the room beneath");
+        // The pointer lights one target, BRIGHT BOLD: a choice's label (its
+        // dot keeps DIM, the chosen keeps its own), the primary, `d change`,
+        // "Esc close".
+        for (pointer, lit) in [(cell(60, 11), cell(25, 11)), (cell(85, 17), cell(81, 17)), (cell(88, 15), cell(85, 15)), (cell(85, 18), cell(83, 18))] {
+            gui.ui.pointer = Some(pointer);
+            let buffer = super::tests::buffer(&mut gui, 100, 30);
+            assert_eq!((fg(&buffer, lit), bold(&buffer, lit)), (th().bright, true), "lit at {lit:?}");
+            assert_eq!(fg(&buffer, cell(22, 11)), th().dim);
+            assert_eq!((fg(&buffer, cell(22, 10)), bold(&buffer, cell(25, 10))), (th().accent, true));
+        }
+        // Its footprint, the band, is registered: the room's covers draw as
+        // the mosaic under it.
+        assert!(gui.ui.covered_last_frame(ratatui::layout::Rect { x: 17, y: 6, width: 80, height: 13 }));
+    }
+
+    /// The window's rows, drawn.
+    fn window_of(gui: &mut Gui) -> Vec<String> {
+        modal_rows(&draw(gui, 100, 30))
     }
 
     #[test]
     fn the_keys_walk_the_choice_and_add_starts_with_the_row_unchanged() {
         let _en = english();
-        let mut gui = canvas_gui(&canvas_jobs());
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        draw(&mut gui, 100, 30);
-        // ↓ walks to Album, Space picks it: the primary follows.
+        let mut gui = opened(LATE);
+        let shown = |gui: &mut Gui| {
+            let low = lower_rows(&draw(gui, 100, 30));
+            (low[1..5].to_vec(), low[6].clone(), low[8].clone())
+        };
+        // ↓ moves the choice itself: Album, its primary counting its songs.
         key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Char(' '));
-        let rows = draw(&mut gui, 100, 30);
-        assert!(lower_rows(&rows)[8].ends_with("[ Cancel ] [ Add album ] │"), "{}", lower_rows(&rows).join("\n"));
-        // Every album by lands album by album.
+        let (choice, place, action) = shown(&mut gui);
+        assert_eq!(choice[1], "│ (•) Album                                                                │");
+        assert_eq!(place, "│ Files go to copies › Boukmanflow › Borrowed Tapes               d change │");
+        assert_eq!(action, "│                                                  [ Add album · 3 songs ] │");
+        // Every album by: the server's albums by the artist, album by album.
         key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Enter);
-        let low = lower_rows(&draw(&mut gui, 100, 30));
-        assert_eq!(low[5], "│ LANDS IN  copies › Boukmanflow › one folder per album          │");
-        // Ticking "Only the albums you don't have" picks Every album by —
-        // and the one album it takes is named where it lands.
+        let (choice, place, action) = shown(&mut gui);
+        assert_eq!(choice[2], "│ (•) Every album by Boukmanflow                                           │");
+        assert_eq!(place, "│ Files go to copies › Boukmanflow › one folder per album         d change │");
+        assert_eq!(action, "│                                                         [ Add 2 albums ] │");
+        // The box is the fourth stop: ↓ ticks it, the dot stays — and the one
+        // album it takes is named where it lands.
         key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Enter);
-        let rows = draw(&mut gui, 100, 30);
-        let low = lower_rows(&rows);
-        assert_eq!(low[2], "│           (•) Every album by Boukmanflow  1 album · you have 3 │");
-        assert_eq!(low[3], "│               [✓] Only the albums you don't have               │");
-        assert_eq!(low[5], "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │");
-        assert!(low[8].ends_with("[ Cancel ] [ Add 1 album ] │"), "{}", low.join("\n"));
-        // Picking a radio again unticks it.
+        let (choice, place, action) = shown(&mut gui);
+        assert_eq!(choice[2..4], ["│ (•) Every album by Boukmanflow                                           │", "│     [✓] Only the 1 album you don't have                                  │"]);
+        assert_eq!(place, "│ Files go to copies › Boukmanflow › Borrowed Tapes               d change │");
+        assert_eq!(action, "│                                                          [ Add 1 album ] │");
+        // Clamped: ↓ again moves nothing.
+        key(&mut gui, KeyCode::Down);
+        assert_eq!(shown(&mut gui).0[3], "│     [✓] Only the 1 album you don't have                                  │");
+        // ↑ unticks it, the dot still on Every album by; ↑ ↑ back to This
+        // song, clamped there.
         key(&mut gui, KeyCode::Up);
-        key(&mut gui, KeyCode::Up);
+        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((false, 1)) && v.scope == crate::api::types::JobScope::Artist));
+        for _ in 0..3 {
+            key(&mut gui, KeyCode::Up);
+        }
+        assert_eq!(shown(&mut gui).0[0], "│ (•) This song                                                            │");
+        // Three ↓ from This song reach the box; picking Album by the pointer
+        // unticks it.
+        for _ in 0..3 {
+            key(&mut gui, KeyCode::Down);
+        }
+        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((true, 1))));
+        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Song))));
+        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((false, 1)) && v.scope == crate::api::types::JobScope::Song));
+        // Space, Tab, ← → and the letters no word names do nothing.
+        let before = window_of(&mut gui);
+        for code in [KeyCode::Char(' '), KeyCode::Tab, KeyCode::Left, KeyCode::Right, KeyCode::Char('x'), KeyCode::Char('a'), KeyCode::Char('c'), KeyCode::Char('C')] {
+            key(&mut gui, code);
+        }
+        assert_eq!(window_of(&mut gui), before);
+        assert!(starts(&gui).is_empty() && gui.discover.copies.is_none() && gui.discover.keep.dest.is_none(), "{:?}", gui.pending);
+        // Enter starts at once — the row exactly as the taste route sent it
+        // (clause 100) — and nothing moves but the primary, which goes off.
         key(&mut gui, KeyCode::Enter);
-        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((false, 1))), "the album unticks it");
-        // Enter with the hand on the primary starts — the row exactly as
-        // the taste route sent it (clause 100); the hand walks the
-        // checkbox, Change…, Cancel on the way.
-        key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Enter);
-        key(&mut gui, KeyCode::Down);
-        assert_eq!(gui.discover.keep.focus, Some(super::Stop::Change));
-        key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Enter);
-        let sent = starts(&gui);
-        assert_eq!(sent.len(), 1, "{:?}", gui.pending);
-        assert_eq!(sent[0].0, fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0)), "unchanged");
-        assert_eq!(sent[0].1, crate::api::types::JobScope::ArtistMissing);
+        assert_eq!(starts(&gui), vec![(late(), crate::api::types::JobScope::Song)]);
         let rows = draw(&mut gui, 100, 30);
         assert_eq!(
-            lower_rows(&rows),
+            lower_rows(&rows)[8..],
             canvas(&[
-                "│ WHAT      Every album by Boukmanflow · 1 album                 │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ starting…                                                      │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                                                │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])
+                "│                                                              [ Adding… ] │",
+                "╰────────────────────────────────────────────────────────────── Esc close ─╯",
+            ])[..]
         );
+        assert_eq!(fg(&buffer(&mut gui, 100, 30), at(&rows, "[ Adding… ]")), th().dim);
         assert_eq!(super::super::discover::tips(&gui), "Esc close");
-        // Esc closes; nothing else goes out.
+        // ↑ ↓, `d`, Enter and the pointer wait for the server's answer.
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Char('d'));
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(starts(&gui).len(), 1, "one start");
+        assert!(gui.discover.keep.dest.is_none());
+        assert_eq!(window_of(&mut gui)[4], "│ (•) This song                                                            │");
+        assert_eq!(hit_at(&gui, 40, 11), Some(Act::Guard));
+        assert_eq!(hit_at(&gui, 88, 15), Some(Act::Guard), "d change drawn, inert");
+        assert_eq!(hit_at(&gui, 85, 17), Some(Act::Guard), "the primary off");
+        assert_eq!(hit_at(&gui, 87, 18), keep_act(super::KeepAct::Close));
+        // Esc closes; the start still lands.
         key(&mut gui, KeyCode::Esc);
         assert!(gui.app.taste.keep.flow.is_none());
-    }
-
-    /// Open on Late Train Verse with the stage's facts, and start a copy
-    /// the server answers with a job in `state`.
-    fn row_in(state: &str, scope: Option<&str>, extra: Value) -> Gui {
-        let mut gui = canvas_gui(&[]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        let late = fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0));
-        if let Some(scope) = scope {
-            let choice = if scope == "album" { crate::tui::app::keep::KeepChoice::Album } else { crate::tui::app::keep::KeepChoice::Artist };
-            gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(choice))));
-        }
-        start(&mut gui, Ok(job(90, &late, scope, state, extra)));
-        gui
-    }
-
-    /// Open on the tile of Borrowed Tapes from Stage Peer B and follow an
-    /// album copy through `states`.
-    fn tile_in(states: &[(&str, Value)]) -> Gui {
-        let mut gui = canvas_gui(&[]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        stage_facts(&mut gui);
-        let late = fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0));
-        let album = |state: &str, extra: &Value| job(91, &late, Some("album"), state, extra.clone());
-        start(&mut gui, Ok(album(states[0].0, &states[0].1)));
-        for (state, extra) in &states[1..] {
-            poll(&mut gui, &[album(state, extra)]);
-        }
-        gui
-    }
-
-    fn counts(copied: u64, skipped: u64, failed: u64, stopped: Option<&str>) -> Value {
-        json!({ "result": { "scope": "album", "counts": { "total": 3, "copied": copied, "skipped": skipped, "failed": failed }, "stopped": stopped } })
     }
 
     #[test]
     fn every_state_reads_as_the_canvas_draws_it() {
         let _en = english();
-        let copied = json!({ "result": { "copied": { "vpath": "copies", "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3" } } });
-        let running = json!({ "progress": 0.52, "statusText": "song 2 of 3 · Late Train Verse",
-            "result": { "scope": "album", "counts": { "total": 3, "copied": 1, "skipped": 0, "failed": 0 } } });
-        let stopping = json!({ "progress": 0.52, "cancelRequested": true,
-            "result": { "scope": "album", "counts": { "total": 3, "copied": 1, "skipped": 0, "failed": 0 } } });
-        let many = json!({ "result": { "scope": "artist", "albums": [{ "name": "Borrowed Tapes" }],
-            "skippedAlbums": [{ "name": "A", "why": "owned" }, { "name": "B", "why": "owned" }],
-            "counts": { "total": 3, "copied": 1, "skipped": 1, "failed": 1 }, "stopped": null } });
-        let theirs = json!({ "result": { "scope": "artist", "albums": [], "skippedAlbums": [{ "name": "Comp", "why": "appearance" }],
-            "counts": { "total": 0, "copied": 0, "skipped": 0, "failed": 0 }, "stopped": null } });
-        let cases: Vec<(&str, Gui, Vec<&str>, &str)> = vec![
-            ("done, one song", row_in("done", None, copied), vec![
-                "│ WHAT      This song · 0:08 · mp3                               │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ ✓ in your collection                                           │",
-                "│ copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3    │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                            [ Add to queue ] [ Play your copy ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter play your copy · ↑ ↓ buttons · Esc close"),
-            ("done, many", row_in("done", Some("artist"), many), vec![
-                "│ WHAT      Every album by Boukmanflow                           │",
-                "│ LANDS IN  copies › Boukmanflow › one folder per album          │",
-                "│                                                                │",
-                "│ ✓ in your collection                                           │",
-                "│ 1 copied · 1 already yours · 1 failed · 2 albums left out      │",
-                "│ Copy again takes only the gaps                                 │",
-                "│                                                                │",
-                "│                                       [ Close ] [ Copy again ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter copy again · ↑ ↓ buttons · Esc close"),
-            // Already yours: LANDS IN reads where the library has it.
-            ("already yours", row_in("done", None, json!({ "result": { "skipped": "owned", "existing": { "filepath": "music/Boukmanflow/Borrowed Tapes/02.mp3" } } })), vec![
-                "│ WHAT      This song · 0:08 · mp3                               │",
-                "│ LANDS IN  music › Boukmanflow › Borrowed Tapes                 │",
-                "│                                                                │",
-                "│ ✓ already yours                                                │",
-                "│ your library already has this song · nothing was copied        │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                                      [ Close ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter close · Esc close"),
-            ("a file exists", row_in("done", None, json!({ "result": { "skipped": "exists", "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3" } })), vec![
-                "│ WHAT      This song · 0:08 · mp3                               │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ skipped · a file is already at that path                       │",
-                "│ copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3    │",
-                "│ nothing was overwritten                                        │",
-                "│                                                                │",
-                "│                                            [ Close ] [ Retry ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter retry · ↑ ↓ buttons · Esc close"),
-            ("failed", row_in("failed", None, json!({ "error": "Stage Peer B is unreachable" })), vec![
-                "│ WHAT      This song · 0:08 · mp3                               │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ copy failed: Stage Peer B is unreachable                       │",
-                "│ nothing was copied                                             │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                            [ Close ] [ Retry ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter retry · ↑ ↓ buttons · Esc close"),
-            ("nothing of theirs", row_in("done", Some("artist"), theirs), vec![
-                "│ WHAT      Every album by Boukmanflow                           │",
-                "│ LANDS IN  copies › Boukmanflow › one folder per album          │",
-                "│                                                                │",
-                "│ nothing of theirs to copy                                      │",
-                "│ Boukmanflow only appears on other artists' albums there        │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                                      [ Close ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Esc close"),
-            ("queued", tile_in(&[("queued", json!({}))]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ waiting for a free slot                                        │",
-                "│ ▱▱▱▱▱▱▱▱▱▱                                                     │",
-                "│ starts on its own when the copy ahead ends                     │",
-                "│                                                                │",
-                "│                                                [ Cancel copy ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "x cancel the copy · Esc close — it stays queued"),
-            ("running", tile_in(&[("queued", json!({})), ("running", running.clone())]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ song 2 of 3 · Late Train Verse                                 │",
-                "│ ▰▰▰▰▰▱▱▱▱▱ 52%                                                 │",
-                "│ 1 copied · 0 failed                                            │",
-                "│                                                                │",
-                "│                                                [ Cancel copy ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "x cancel the copy · Esc close — the copy keeps running"),
-            ("stopping", tile_in(&[("running", running.clone()), ("running", stopping)]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ stopping…                                                      │",
-                "│ ▰▰▰▰▰▱▱▱▱▱ 52%                                                 │",
-                "│ 1 copied · 0 failed                                            │",
-                "│                                                                │",
-                "│                                                                │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Esc close"),
-            ("stopped, transfer limit", tile_in(&[("running", running.clone()), ("done", counts(1, 0, 0, Some("quota")))]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ Stage Peer B's transfer limit stopped it                       │",
-                "│ 1 copied · 2 not copied · try again later                      │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                            [ Close ] [ Retry ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter retry · ↑ ↓ buttons · Esc close"),
-            ("stopped, busy", tile_in(&[("running", running.clone()), ("done", counts(1, 0, 0, Some("busy")))]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ Stage Peer B is serving too many streams right now             │",
-                "│ 1 copied · 2 not copied · try again in a moment                │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                            [ Close ] [ Retry ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter retry · ↑ ↓ buttons · Esc close"),
-            ("stopped, went away", tile_in(&[("running", running.clone()), ("done", counts(1, 0, 0, Some("peer")))]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ Stage Peer B went away                                         │",
-                "│ 1 copied · 2 not copied                                        │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                            [ Close ] [ Retry ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter retry · ↑ ↓ buttons · Esc close"),
-            ("stopped, refused", tile_in(&[("running", running.clone()), ("done", counts(0, 0, 0, Some("refused")))]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ Stage Peer B does not allow copies with your server's key      │",
-                "│ nothing was copied · playing it still works                    │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                                      [ Close ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Esc close"),
-            ("cancelled", tile_in(&[("running", running.clone()), ("cancelled", counts(1, 0, 0, None))]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ cancelled · 1 copied                                           │",
-                "│ the other 2 stay on Stage Peer B                               │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                      [ Close ] [ Start again ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Enter start again · ↑ ↓ buttons · Esc close"),
-            ("nothing to copy", tile_in(&[("running", running), ("done", json!({ "result": { "scope": "album", "counts": { "total": 0, "copied": 0, "skipped": 0, "failed": 0 } } }))]), vec![
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ ✓ nothing to copy · you have it all                            │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                                                      [ Close ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ], "Esc close"),
+        let cases: Vec<(&str, &str, &str)> = vec![
+            ("L1", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ Waiting for a free slot                                                  │
+                │ ▱▱▱▱▱▱▱▱▱▱ starts on its own                                             │
+                │                                                                          │
+                │ Into copies › Boukmanflow › Borrowed Tapes                               │
+                │                                                                          │
+                │ x cancel copy                                                  [ Close ] │
+                ╰─────────────────────────────────────── Esc close · the copy keeps going ─╯
+            ", "Enter close · x cancel the copy · Esc close — the copy keeps going"),
+            ("L2", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ Copying · song 2 of 3 · Late Train Verse                                 │
+                │ ▰▰▰▰▰▱▱▱▱▱ 52%                                                           │
+                │                                                                          │
+                │ Into copies › Boukmanflow › Borrowed Tapes                               │
+                │                                                                          │
+                │ x cancel copy                                                  [ Close ] │
+                ╰─────────────────────────────────────── Esc close · the copy keeps going ─╯
+            ", "Enter close · x cancel the copy · Esc close — the copy keeps going"),
+            ("L3", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ Copying · album 1 of 2 · Borrowed Tapes · song 2 of 3                    │
+                │ ▰▰▰▰▱▱▱▱▱▱ 38%                                                           │
+                │                                                                          │
+                │ Into copies › Boukmanflow › one folder per album                         │
+                │                                                                          │
+                │ x cancel copy                                                  [ Close ] │
+                ╰─────────────────────────────────────── Esc close · the copy keeps going ─╯
+            ", "Enter close · x cancel the copy · Esc close — the copy keeps going"),
+            ("L4", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ Copying                                                                  │
+                │ ▱▱▱▱▱▱▱▱▱▱                                                               │
+                │                                                                          │
+                │ Into copies › Boukmanflow › Borrowed Tapes                               │
+                │                                                                          │
+                │ x cancel copy                                                  [ Close ] │
+                ╰─────────────────────────────────────── Esc close · the copy keeps going ─╯
+            ", "Enter close · x cancel the copy · Esc close — the copy keeps going"),
+            ("L5", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ Stopping…                                                                │
+                │ ▰▰▰▰▰▱▱▱▱▱ 52%                                                           │
+                │                                                                          │
+                │ Into copies › Boukmanflow › Borrowed Tapes                               │
+                │                                                                          │
+                │                                                                [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · Esc close"),
+            ("E1", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ ✓ In your collection                                                     │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes › 02 - Late Train Verse.mp3     │
+                │                                                                          │
+                │ a add to queue   c choose again                       [ Play your copy ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter play your copy · a add to queue · c choose again · Esc close"),
+            ("E2", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ ✓ In your collection                                                     │
+                │ Copied from Stage Peer C                                                 │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes › 02 - Late Train Verse.mp3     │
+                │                                                                          │
+                │ a add to queue   c choose again                       [ Play your copy ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter play your copy · a add to queue · c choose again · Esc close"),
+            ("E3", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ✓ In your collection                                                     │
+                │ 2 copied · 1 already yours                                               │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │ c choose again                                        [ Play your copy ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter play your copy · c choose again · Esc close"),
+            ("E4", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ✓ In your collection                                                     │
+                │ 3 copied · 3 already yours                                               │
+                │                                                                          │
+                │ In copies › Boukmanflow                                                  │
+                │                                                                          │
+                │ c choose again                                                 [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · c choose again · Esc close"),
+            ("E5", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! 1 song didn't copy                                                     │
+                │ 2 copied                                                                 │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E5b", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! 1 album couldn't be listed                                             │
+                │ 3 copied                                                                 │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E6", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ ✓ Already yours                                                          │
+                │ Your library already has this song                                       │
+                │                                                                          │
+                │ In music › Boukmanflow › Borrowed Tapes › 02 Late Train Verse.mp3        │
+                │                                                                          │
+                │ c choose again                                                 [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · c choose again · Esc close"),
+            ("E7", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ ! Skipped · a file is already there                                      │
+                │ Nothing was overwritten                                                  │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes › 02 - Late Train Verse.mp3     │
+                │                                                                          │
+                │ d change   c choose again                                      [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · d where files land · c choose again · Esc close"),
+            ("E8", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ ! Skipped · a file is already there                                      │
+                │ Nothing was overwritten                                                  │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes › 02 - Late Train Verse.mp3     │
+                │ Retry adds to copies › from-peers › Boukmanflow › Borrowed Tapes         │
+                │                                                                          │
+                │ d change   c choose again                                      [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · d where files land · c choose again · Esc close"),
+            ("E9", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Copy failed: Stage Peer B is unreachable                               │
+                │ Nothing was copied                                                       │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E9b", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Copy failed: Stage Peer B is unreachable                               │
+                │ Nothing was copied                                                       │
+                │                                                                          │
+                │ Retry adds to copies › from-peers › Boukmanflow › Borrowed Tapes         │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E10", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Copy failed                                                            │
+                │ Nothing was copied · 3 failed                                            │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E11", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Stage Peer B's transfer limit stopped it                               │
+                │ 1 copied · 2 not copied · try again later                                │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E11b", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Stage Peer B is serving too many streams right now                     │
+                │ 1 copied · 2 not copied · try again in a moment                          │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E11c", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! The copy stopped before it finished                                    │
+                │ 1 copied · 2 not copied                                                  │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E12", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Stage Peer B does not allow copies with your server's key              │
+                │ Nothing was copied · playing it still works                              │
+                │ Only Stage Peer B's admin can change this.                               │
+                │                                                                          │
+                │                                                                [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · Esc close"),
+            ("E12b", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Stage Peer B does not allow copies with your server's key              │
+                │ 1 copied · playing it still works                                        │
+                │ Only Stage Peer B's admin can change this.                               │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │                                                                [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · Esc close"),
+            ("E13", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ × Cancelled                                                              │
+                │ 1 copied · the other 2 stay on Stage Peer B                              │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │                                                            [ Add again ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter add again · Esc close"),
+            ("E14", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ × Cancelled                                                              │
+                │ Nothing was copied                                                       │
+                │                                                                          │
+                │                                                            [ Add again ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter add again · Esc close"),
+            ("E15", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ Nothing to copy                                                          │
+                │ You have it all                                                          │
+                │                                                                          │
+                │ c choose again                                                 [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · c choose again · Esc close"),
+            ("E16", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ Nothing of theirs to copy                                                │
+                │ Boukmanflow only appears on other artists' albums there                  │
+                │                                                                          │
+                │ c choose again                                                 [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · c choose again · Esc close"),
+            ("E18", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ ✓ In your collection                                                     │
+                │ With your album copy                                                     │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes › 02 - Late Train Verse.mp3     │
+                │                                                                          │
+                │ a add to queue   c choose again                       [ Play your copy ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter play your copy · a add to queue · c choose again · Esc close"),
+            ("E19", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Stage Peer B went away                                                 │
+                │ 1 copied · 2 not copied                                                  │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │ Retry adds to copies › from-peers › Boukmanflow › Borrowed Tapes         │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E19b", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! 1 song didn't copy                                                     │
+                │ 2 copied                                                                 │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │ Retry adds to copies › ‹genre› › Boukmanflow › 2019 - Borrowed Tapes     │
+                │ ‹genre› comes from each song's own tags, so these songs can land in more │
+                │ than one folder (a song with none leaves that folder out).               │
+                │                                                                          │
+                │ c choose again                                                 [ Retry ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter retry · c choose again · Esc close"),
+            ("E20", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ! Copy failed: Stage Peer B is unreachable                               │
+                │ Nothing was copied                                                       │
+                │                                                                          │
+                │                                                            [ Retrying… ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Esc close"),
+            ("E21", "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ The copy finished                                                        │
+                │                                                                          │
+                │                                                                [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+            ", "Enter close · Esc close"),
         ];
-        for (what, mut gui, want, tips) in cases {
+        for (id, frame, tips) in cases {
+            let mut gui = keep_in(id);
             let rows = draw(&mut gui, 100, 30);
-            assert_eq!(lower_rows(&rows), canvas(&want), "{what}:\n{}", modal_rows(&rows).join("\n"));
-            assert_eq!(super::super::discover::tips(&gui), tips, "{what}");
+            assert_eq!(modal_rows(&rows), board(frame), "{id}:\n{}", modal_rows(&rows).join("\n"));
+            assert_eq!(rows[6].chars().nth(19), Some('╭'), "{id}: the top holds on row 6");
+            assert_eq!(super::super::discover::tips(&gui), tips, "{id}");
         }
+        // The tokens (§4.7): a kept headline OK BOLD, glyph and words; a
+        // trouble's GOLD BOLD, its sub DIM; a neutral end's glyph DIM, its
+        // words TEXT BOLD; a glyph-less one TEXT BOLD; the step TEXT after a
+        // DIM ` · `, the bar's ▰ OK and ▱ DIM, its % TEXT.
+        let cell = |x: u16, y: u16| Position { x, y };
+        let tokens = |id: &str, cells: &[(u16, u16, Color, bool)]| {
+            let mut gui = keep_in(id);
+            let buffer = buffer(&mut gui, 100, 30);
+            for &(x, y, color, heavy) in cells {
+                assert_eq!((fg(&buffer, cell(x, y)), bold(&buffer, cell(x, y))), (color, heavy), "{id} at ({x}, {y})");
+            }
+        };
+        tokens("E1", &[(21, 10, th().ok, true), (23, 10, th().ok, true), (21, 12, th().dim, false), (24, 12, Color::Reset, true), (64, 12, th().dim, false), (21, 14, th().dim, false), (75, 14, th().accent, true)]);
+        tokens("E5", &[(21, 10, th().gold, true), (23, 10, th().gold, true), (21, 11, th().dim, false)]);
+        tokens("E6", &[(21, 10, th().dim, false), (23, 10, Color::Reset, true)]);
+        tokens("E13", &[(21, 10, th().dim, false), (23, 10, Color::Reset, true)]);
+        tokens("E15", &[(21, 10, Color::Reset, true)]);
+        tokens("E12", &[(21, 12, th().dim, false)]);
+        tokens("L2", &[(21, 10, Color::Reset, true), (29, 10, th().dim, false), (31, 10, Color::Reset, false), (21, 11, th().ok, false), (26, 11, th().dim, false), (32, 11, Color::Reset, false), (21, 13, th().dim, false)]);
+        tokens("E20", &[(80, 13, th().dim, false)]);
+        // The footer: only "Esc close" is a button; its tail is plain.
+        let gui = {
+            let mut gui = keep_in("L2");
+            draw(&mut gui, 100, 30);
+            gui
+        };
+        assert_eq!(hit_at(&gui, 61, 16), keep_act(super::KeepAct::Close));
+        assert_eq!(hit_at(&gui, 75, 16), Some(Act::Guard));
+        assert_eq!(hit_at(&gui, 23, 15), keep_act(super::KeepAct::Key(super::KeyWord::Cancel)));
     }
 
     #[test]
     fn a_refusal_brings_the_choice_back_with_the_servers_words_in_gold() {
         let _en = english();
-        let mut gui = canvas_gui(&[]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        start(&mut gui, Err(crate::api::PluginFailure::Refused { status: 403, words: "Uploading Disabled".into() }));
+        let mut gui = keep_in("R1");
         let buffer = buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
-        let low = lower_rows(&rows);
-        assert_eq!(low[6], "│           the library's default                    [ Change… ] │");
-        assert_eq!(low[7], "│ couldn't start: Uploading Disabled                             │");
-        assert_eq!(low[8], "│                                        [ Cancel ] [ Add song ] │");
-        let words = at(&rows, "couldn't start");
-        assert_eq!(fg(&buffer, words), th().gold);
-        // The hand is back on the chosen radio (the canvas: ACCENT BOLD).
-        let song = at(&rows, "This song");
-        assert_eq!((fg(&buffer, song), bold(&buffer, song)), (th().accent, true));
-        // 409 wraps to a second row; the choice stays editable, Add stays.
+        assert_eq!(
+            modal_rows(&rows),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │                                                                          │
+                │ (•) This song                                                            │
+                │ ( ) Album                                                                │
+                │ ( ) Every album by Boukmanflow                                           │
+                │     [ ] Only the 1 album you don't have                                  │
+                │                                                                          │
+                │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+                │ ! Couldn't start: you have 20 jobs queued or running — wait for some to  │
+                │   finish (the limit is 20)                                               │
+                │                                                                          │
+                │                                                             [ Add song ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
+        );
+        // GOLD, not bold, its second row at col 3; the dot where it was.
+        let words = at(&rows, "! Couldn't start");
+        assert_eq!((fg(&buffer, words), bold(&buffer, words)), (th().gold, false));
+        assert_eq!(fg(&buffer, Position { x: 23, y: 17 }), th().gold);
+        assert_eq!(fg(&buffer, at(&rows, "(•) This song")), th().accent);
+        assert_eq!(super::super::discover::tips(&gui), "↑ ↓ choose · Enter starts · d where files land · Esc close");
+        // A busy 409 and a server that did not answer, in their words.
         let busy = "someone else on this server is already getting this — try again in a moment";
         start(&mut gui, Err(crate::api::PluginFailure::Refused { status: 409, words: busy.into() }));
         let low = lower_rows(&draw(&mut gui, 100, 30));
-        assert_eq!(low[7], "│ couldn't start: someone else on this server is already getting │");
-        assert_eq!(low[8], "│ this — try again in a moment                                   │");
-        assert_eq!(low[9], "│                                        [ Cancel ] [ Add song ] │");
-        // A server that did not answer reads so, never a bare error.
+        assert_eq!(low[7..9], ["│ ! Couldn't start: someone else on this server is already getting this —  │", "│   try again in a moment                                                  │"]);
         start(&mut gui, Err(crate::api::PluginFailure::Unreachable("connection refused".into())));
         let low = lower_rows(&draw(&mut gui, 100, 30));
-        assert_eq!(low[7], "│ couldn't start: your server didn't answer                      │");
+        assert_eq!(low[7], "│ ! Couldn't start: your server didn't answer                              │");
+        // The choice stays editable and Enter adds again.
+        key(&mut gui, KeyCode::Down);
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(starts(&gui), vec![(late(), crate::api::types::JobScope::Album)]);
     }
 
     #[test]
     fn the_tile_opens_album_focus_and_sends_its_best_row_with_scope_album() {
         let _en = english();
-        let mut gui = canvas_gui(&[]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        stage_facts(&mut gui);
+        let mut gui = keep_in("C2");
+        assert_eq!(
+            window_of(&mut gui),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ (•) Album                                                                │
+                │ ( ) Every album by Boukmanflow                                           │
+                │                                                                          │
+                │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+                │                                                                          │
+                │                                                            [ Add album ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
+        );
+        board_facts(&mut gui);
         let rows = draw(&mut gui, 100, 30);
-        let modal = modal_rows(&rows);
-        assert_eq!(modal.len(), 16, "16 rows, anchored as if 17: {}", modal.join("\n"));
-        assert_eq!(rows[6].chars().nth(17), Some('╭'), "the top holds on row 6");
-        assert!(modal[3].ends_with("Borrowed Tapes                                          │"));
-        assert!(modal[4].ends_with("Boukmanflow · 2019 · from Stage Peer B                  │"));
         assert_eq!(
-            lower_rows(&rows),
-            canvas(&[
-                "│ WHAT      (•) Album                       3 songs              │",
-                "│           ( ) Every album by Boukmanflow  1 album · you have 3 │",
-                "│               [ ] Only the albums you don't have               │",
-                "│                                                                │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│           the library's default                    [ Change… ] │",
-                "│                                                                │",
-                "│                                       [ Cancel ] [ Add album ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])
+            modal_rows(&rows),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ (•) Album                                                                │
+                │ ( ) Every album by Boukmanflow                                           │
+                │     [ ] Only the 1 album you don't have                                  │
+                │                                                                          │
+                │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+                │                                                                          │
+                │                                                  [ Add album · 3 songs ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
         );
-        // Enter on the held radio picks it; the primary starts — the
-        // tile's best row with scope album, never a song job.
+        // §3.7's cells: rows 6–17, the primary at x 70–92 on row 16.
+        assert_eq!((rows[6].chars().nth(19), rows[17].chars().nth(19)), (Some('╭'), Some('╰')));
+        assert_eq!(at(&rows, "[ Add album · 3 songs ]"), Position { x: 70, y: 16 });
+        assert_eq!(at(&rows, "Only the 1 album"), Position { x: 29, y: 12 });
+        // Enter starts at once: the tile's best row with scope album, never a
+        // song job — no ↓ first.
         key(&mut gui, KeyCode::Enter);
-        assert!(starts(&gui).is_empty(), "Enter on a radio picks, it never starts");
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
-        let sent = starts(&gui);
-        assert_eq!(
-            sent,
-            vec![(fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0)), crate::api::types::JobScope::Album)]
-        );
+        assert_eq!(starts(&gui), vec![(late(), crate::api::types::JobScope::Album)]);
     }
 
     #[test]
     fn a_choice_an_only_missing_copy_already_kept_reads_its_state_never_add() {
         let _en = english();
         // The user's 2026-10-20 report: "Only the albums you don't have"
-        // copied Borrowed Tapes; the tile and the row then read that.
-        let late = fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0));
-        let landed = "copies/Boukmanflow/Borrowed Tapes/Late Train Verse.mp3";
-        let songs = json!({ "total": 1, "skipped": [], "failed": [],
-            "copied": [{ "from": late["filepath"], "vpath": "copies", "filepath": landed, "title": "Late Train Verse" }] });
-        let walk = |albums: Value, left: Value| {
-            job(80, &late, Some("artist-missing"), "done", json!({ "result": { "scope": "artist-missing",
-                "albums": albums, "skippedAlbums": left, "songs": songs, "counts": { "total": 1, "copied": 1, "skipped": 0, "failed": 0 },
-                "stopped": null, "peer": { "id": B, "name": "Stage Peer B" } } }))
+        // copied Borrowed Tapes; the tile reads that — and says whose copy.
+        let mut gui = keep_in("E17");
+        assert_eq!(
+            window_of(&mut gui),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ ✓ In your collection                                                     │
+                │ 3 copied · with your copy of Boukmanflow's missing albums                │
+                │                                                                          │
+                │ In copies › Boukmanflow › Borrowed Tapes                                 │
+                │                                                                          │
+                │ c choose again                                        [ Play your copy ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
+        );
+        // Play your copy plays the album from the library, in its order, and
+        // the window has said what it had to.
+        key(&mut gui, KeyCode::Enter);
+        let queued: Vec<&str> = gui.app.queue.items.iter().map(|q| q.filepath.as_str()).collect();
+        assert_eq!(queued, ["copies/Boukmanflow/Borrowed Tapes/01.mp3", "copies/Boukmanflow/Borrowed Tapes/02.mp3", "copies/Boukmanflow/Borrowed Tapes/03.mp3"]);
+        assert_eq!(gui.app.queue.current, Some(0));
+        assert!(gui.app.taste.keep.flow.is_none());
+        // Left out as already yours: the songs are yours; no In row — the
+        // walk names the album, not its folder; Close.
+        let mut gui = keep_in("E17b");
+        assert_eq!(
+            lower_rows(&draw(&mut gui, 100, 30)),
+            canvas(&[
+                "│                                                                          │",
+                "│ ✓ Already yours                                                          │",
+                "│ Your library already has these songs · with your copy of Boukmanflow's   │",
+                "│ missing albums                                                           │",
+                "│                                                                          │",
+                "│ c choose again                                                 [ Close ] │",
+                "╰────────────────────────────────────────────────────────────── Esc close ─╯",
+            ])
+        );
+        // A guest spot claims nothing: the choice, Add album.
+        let mut gui = walked(json!([]), json!([{ "name": "Borrowed Tapes", "why": "appearance" }]));
+        assert_eq!(window_of(&mut gui)[10], "│                                                  [ Add album · 3 songs ] │");
+    }
+
+    #[test]
+    fn a_compilation_tile_copies_the_whole_album_by_its_row_unchanged() {
+        let _en = english();
+        // The user's 2026-10-19 decision: a row carrying albumArtist groups
+        // as one tile credited to it, offers Album alone — no radio, the
+        // primary names it — and sends the row unchanged.
+        let (mut gui, kim) = mixtape_gui();
+        let rows = draw(&mut gui, 100, 30);
+        assert!(room(&rows, 11).starts_with("Mixtape Vol…") && room(&rows, 12).starts_with("Various Art…"), "one tile, its credit:\n{}", rows.join("\n"));
+        assert!(!room(&rows, 11).contains("Mixtape Vol… Mixtape"), "never one per track artist");
+        let mut gui = keep_in("C6");
+        assert_eq!(
+            window_of(&mut gui),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Mixtape Vol 1                                                            │
+                │ Various Artists · 2019 · from Stage Peer B                               │
+                │                                                                          │
+                │ Files go to copies › Various Artists › Mixtape Vol 1            d change │
+                │                                                                          │
+                │                                                  [ Add album · 2 songs ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
+        );
+        assert_eq!(super::super::discover::tips(&gui), "Enter starts · d where files land · Esc close");
+        // ↑ ↓ have no choice to move; Enter adds the album.
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(starts(&gui), vec![(kim, crate::api::types::JobScope::Album)], "the best row, unchanged, scope album");
+    }
+
+    /// The words under the place: its note's rows joined, down to the next
+    /// blank.
+    fn under_place(low: &[String]) -> String {
+        let place = low.iter().rposition(|r| r.contains("d change") || r.contains("Into ") || r.contains("adds to")).expect("the place");
+        low[place + 1..]
+            .iter()
+            .take_while(|r| r.chars().skip(1).take(74).any(|c| c != ' '))
+            .map(|r| r.chars().skip(1).take(74).collect::<String>().trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn a_compilations_album_draws_each_songs_artist_as_a_slot_with_its_note_on_its_own_rows() {
+        let _en = english();
+        // The 2026-10-22 bug: "copies › From friends › Boukmanflow" for an
+        // album whose songs the server files under each one's own artist —
+        // the slot, its note on its own DIM rows, never only in a tooltip.
+        let note = "‹artist› comes from each song's own tags, so these songs can land in more than one folder.";
+        let mut gui = keep_in("C7");
+        let buffer = buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(
+            modal_rows(&rows),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Kim Song                                                                 │
+                │ Peer Kim · Mixtape Vol 1 · from Stage Peer B                             │
+                │                                                                          │
+                │ ( ) This song                                                            │
+                │ (•) Album                                                                │
+                │ ( ) Every album by Peer Kim                                              │
+                │                                                                          │
+                │ Files go to copies › From friends › ‹artist›                    d change │
+                │ ‹artist› comes from each song's own tags, so these songs can land in     │
+                │ more than one folder.                                                    │
+                │                                                                          │
+                │                                                  [ Add album · 2 songs ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
+        );
+        // The slot DIM, as "one folder per album" — a hint, never a folder's
+        // name; the note DIM; nothing clipped, so no tooltip.
+        assert_eq!(fg(&buffer, at(&rows, "‹artist›")), th().dim);
+        assert_eq!(fg(&buffer, at(&rows, "comes from each")), th().dim);
+        assert_ne!(fg(&buffer, at(&rows, "From friends")), th().dim);
+        assert!(!gui.ui.tips.iter().any(|(_, tip)| tip.contains("own tags") || tip.contains("From friends")), "{:?}", gui.ui.tips);
+        // From the tile, before the listing answers and once it names two
+        // artists: the slot and the note.
+        let (mut gui, kim) = mixtape_gui();
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, TILE);
+        land_read(&mut gui, layout_view("From friends/{{ARTIST}}"));
+        for listing in [None, Some(&[("Kim Song", "Peer Kim"), ("Lou Song", "Peer Lou")])] {
+            if let Some(songs) = listing {
+                land_songs(&mut gui, songs);
+            }
+            let low = lower_rows(&draw(&mut gui, 100, 30));
+            assert_eq!(low[1], "│ Files go to copies › From friends › ‹artist›                    d change │", "{}", low.join("\n"));
+            assert_eq!(under_place(&low), note);
+        }
+        // The picker's preview draws the same, its note on the row under the
+        // path (clipped at the border, whole in its tooltip).
+        key(&mut gui, KeyCode::Char('d'));
+        let rows = draw(&mut gui, 100, 30);
+        let picker = picker_rows(&rows);
+        let path = picker.iter().position(|r| r.contains("copies › From friends › ‹artist›")).expect("the preview");
+        assert_eq!(picker[path..path + 2].to_vec(), boxed(&["", " copies › From friends › ‹artist›", " ‹artist› comes from each song's own tags, so these songs can land in more t…"])[2..4].to_vec(), "{}", picker.join("\n"));
+        let y = at_row(&rows, "‹artist› comes from");
+        assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == note), "{:?}", gui.ui.tips);
+        key(&mut gui, KeyCode::Esc);
+        // Starting and queued: the place sent, then the job's pin — "Into" —
+        // the slot and its note stand.
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(lower_rows(&draw(&mut gui, 100, 30))[1], "│ Files go to copies › From friends › ‹artist›                    d change │");
+        let ticket = gui.pending.iter().rev().find_map(|e| match e {
+            Effect::Api(ApiCmd::JobStart { ticket, .. }) => Some(*ticket),
+            _ => None,
+        });
+        let mut queued = job(92, &kim, Some("album"), "queued", json!({}));
+        queued.params.destination = Some(Some(serde_json::from_value(layout_view("From friends/{{ARTIST}}")["destination"].clone()).unwrap()));
+        let generation = gui.app.session_gen();
+        let answer = Ok(Box::new(crate::api::types::JobStarted { job: queued, created: true }));
+        apply(&mut gui, Event::JobStarted { ticket: ticket.expect("a start"), generation, answer });
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[4], "│ Into copies › From friends › ‹artist›                                    │", "{}", low.join("\n"));
+        assert_eq!(under_place(&low), note);
+        // Every song by one artist: that folder, no slot and no note.
+        let (mut gui, _) = mixtape_gui();
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, TILE);
+        land_read(&mut gui, layout_view("From friends/{{ARTIST}}"));
+        land_songs(&mut gui, &[("Kim Song", "Peer Kim"), ("Kim Two", "Peer Kim")]);
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[1..3], ["│ Files go to copies › From friends › Peer Kim                    d change │", "│                                                                          │"]);
+    }
+
+    #[test]
+    fn retry_adds_to_draws_a_genre_slot_and_its_note_names_the_folder_a_song_leaves_out() {
+        let _en = english();
+        // An album copy pinned to the library default failed — nothing
+        // landed, so no In row; the account has saved a layout by genre since.
+        let mut gui = copying(TILE, Some("album"), "failed", json!({ "error": "Stage Peer B is unreachable" }), &[]);
+        land_read(&mut gui, layout_view("{{GENRE}}/{{ARTIST}} - {{YEAR}}"));
+        let rows = draw(&mut gui, 100, 30);
+        let low = lower_rows(&rows);
+        assert_eq!(
+            low[3..7].to_vec(),
+            canvas(&[
+                "│                                                                          │",
+                "│ Retry adds to copies › ‹genre› › Boukmanflow - 2019                      │",
+                "│ ‹genre› comes from each song's own tags, so these songs can land in more │",
+                "│ than one folder (a song with none leaves that folder out).               │",
+            ]),
+            "{}",
+            low.join("\n")
+        );
+        assert!(!gui.ui.tips.iter().any(|(_, tip)| tip.contains("own tags")), "the note is on screen, not in a tooltip: {:?}", gui.ui.tips);
+        // The legacy console draws the slot in its own brackets.
+        let _legacy = crate::kit::theme::legacy_glyphs_here();
+        let rows = draw(&mut gui, 100, 30);
+        assert!(rows.iter().any(|r| r.contains("Retry adds to copies > <genre> > Boukmanflow - 2019")), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn an_album_spread_over_the_servers_folders_draws_a_slot_with_its_own_note() {
+        let _en = english();
+        // Mixtape Vol 1 on Stage Peer B sits in each artist's own folder.
+        let keep = |layout: &str, songs: Option<&[(&str, &str)]>| {
+            let (mut gui, _) = mixtape_gui();
+            draw(&mut gui, 100, 30);
+            super::open(&mut gui, TILE);
+            land_read(&mut gui, layout_view(layout));
+            if let Some(songs) = songs {
+                land_songs(&mut gui, songs);
+            }
+            gui
         };
-        let kept = walk(json!([{ "name": "Borrowed Tapes", "songs": songs, "stopped": null }]), json!([]));
-        let mut gui = canvas_gui(&[kept]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        stage_facts(&mut gui);
+        let place = |text: &str| format!("│ {text:<62}  d change │");
+        let lands = |gui: &mut Gui| {
+            let low = lower_rows(&draw(gui, 100, 30));
+            (low[1].clone(), under_place(&low))
+        };
+        let two = [("Kim Song", "Peer Kim"), ("Lou Song", "Peer Lou")];
+        // Before the listing answers: the tile's row's own folders.
+        let mut gui = keep("From friends/{{SERVERFOLDER}}", None);
+        assert_eq!(lands(&mut gui), (place("Files go to copies › From friends › Peer Kim › Mixtape Vol 1"), String::new()));
+        // The listing puts its songs in two folders: the slot, DIM, and its
+        // note on its own rows.
+        let mut gui = keep("From friends/{{SERVERFOLDER}}", Some(&two[..]));
+        let note = "‹server folder› comes from where each song sits on the server, so these songs can land in more than one folder.";
+        assert_eq!(lands(&mut gui), (place("Files go to copies › From friends › ‹server folder›"), note.to_string()));
+        let buffer = buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(fg(&buffer, at(&rows, "‹server folder›")), th().dim);
+        // Beside the tags' slots one sentence names both: the tags first, in
+        // the path's order, their number picking the verb, then the server
+        // folder; with a genre, the folder a song with none leaves out.
+        let mut gui = keep("{{SERVERFOLDER}}/{{ARTIST}}", Some(&two[..]));
+        let note = "‹artist› comes from each song's own tags and ‹server folder› from where it sits on the server, so these songs can land in more than one folder.";
+        assert_eq!(lands(&mut gui), (place("Files go to copies › ‹server folder› › ‹artist›"), note.to_string()));
+        assert!(!gui.ui.tips.iter().any(|(_, tip)| tip == note), "two whole rows: no tooltip");
+        // Longer: two rows at most, the second clipped, the whole note both
+        // rows' tooltip.
+        for (layout, path, note) in [
+            ("{{GENRE}}/{{SERVERFOLDER}}", "Files go to copies › ‹genre› › ‹server folder›",
+                "‹genre› comes from each song's own tags and ‹server folder› from where it sits on the server, so these songs can land in more than one folder (a song with none leaves that folder out)."),
+            ("{{ARTIST}}/{{SERVERFOLDER}}/{{GENRE}}", "Files go to copies › ‹artist› › ‹server folder› › ‹genre›",
+                "‹artist›, ‹genre› come from each song's own tags and ‹server folder› from where it sits on the server, so these songs can land in more than one folder (a song with none leaves that folder out)."),
+        ] {
+            let mut gui = keep(layout, Some(&two[..]));
+            let rows = draw(&mut gui, 100, 30);
+            let low = lower_rows(&rows);
+            assert_eq!(low[1], place(path), "{layout}");
+            assert!(low[3].ends_with("… │") && low[4] == format!("│{}│", " ".repeat(74)), "{layout}: {}", low.join("\n"));
+            for y in [at_row(&rows, path) + 1, at_row(&rows, path) + 2] {
+                assert_eq!(tip_at(&gui, Position { x: 40, y }).as_deref(), Some(note), "{layout}: row {y}");
+            }
+        }
+        // The phone's words in another locale, its plural picked by the
+        // tags — past two rows there: the note's own cap, the second row
+        // clipped and the whole note both rows' tooltip (§4.5).
+        {
+            struct English;
+            impl Drop for English {
+                fn drop(&mut self) {
+                    rust_i18n::set_locale("en");
+                }
+            }
+            let _back = English;
+            rust_i18n::set_locale("pl");
+            let mut gui = keep("{{SERVERFOLDER}}/{{ARTIST}}", Some(&two[..]));
+            let note = "‹wykonawca› pochodzi ze znaczników każdego utworu, a ‹folder z serwera› z miejsca, w którym leży on na serwerze, więc te utwory mogą trafić do więcej niż jednego folderu.";
+            let rows = draw(&mut gui, 100, 30);
+            let y = at_row(&rows, "‹wykonawca› pochodzi");
+            let text = |y: u16| rows[usize::from(y)].chars().skip(20).take(74).collect::<String>().trim().to_string();
+            assert!(text(y + 1).ends_with('…') && text(y + 2).is_empty(), "{}", rows.join("\n"));
+            assert!(note.starts_with(&format!("{} {}", text(y), text(y + 1).trim_end_matches('…'))), "{}", rows.join("\n"));
+            for y in [y, y + 1] {
+                assert_eq!(tip_at(&gui, Position { x: 40, y }).as_deref(), Some(note), "row {y}");
+            }
+        }
+        // Every song in one folder: that folder, no note.
+        let mut gui = keep("From friends/{{SERVERFOLDER}}", Some(&[("Kim Song", "Peer Kim"), ("Kim Two", "Peer Kim")][..]));
+        assert_eq!(lands(&mut gui), (place("Files go to copies › From friends › Peer Kim › Mixtape Vol 1"), String::new()));
+        // The song: its own folders, inside the folder's words — never a slot.
+        let mut gui = keep_on(layout_view("Copy of {{SERVERFOLDER}}"));
         let rows = draw(&mut gui, 100, 30);
+        assert!(rows.iter().any(|r| r.contains("Files go to copies › Copy of Boukmanflow › Borrowed Tapes")), "{}", rows.join("\n"));
+        assert!(!rows.iter().any(|r| r.contains("comes from")));
+        // The legacy console's brackets.
+        let _legacy = crate::kit::theme::legacy_glyphs_here();
+        let mut gui = keep("{{SERVERFOLDER}}", Some(&two[..]));
+        assert!(draw(&mut gui, 100, 30).iter().any(|r| r.contains("Files go to copies > <server folder>")));
+    }
+
+    #[test]
+    fn another_servers_live_copy_hides_the_primary_never_greys_it() {
+        let _en = english();
+        // Stage Peer C copies Borrowed Tapes; Stage Peer B's tile reads so:
+        // whose, when Add returns, and the cancel named for it.
+        let mut gui = keep_in("O1");
+        let buffer = buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
         assert_eq!(
-            lower_rows(&rows),
-            canvas(&[
-                "│ WHAT      Album · 3 songs                                      │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ ✓ in your collection                                           │",
-                "│ 1 copied                                                       │",
-                "│ Copy again takes only the gaps                                 │",
-                "│                                                                │",
-                "│                                       [ Close ] [ Copy again ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])
+            modal_rows(&rows),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ (•) Album                                                                │
+                │ ( ) Every album by Boukmanflow                                           │
+                │     [ ] Only the 1 album you don't have                                  │
+                │                                                                          │
+                │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+                │ Copying from Stage Peer C                                                │
+                │ Add from Stage Peer B returns when that copy ends                        │
+                │                                                                          │
+                │ x cancel that copy                                             [ Close ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
         );
-        // Copy again: the album's copy of the tile's row, never the artist copy again.
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
-        assert_eq!(starts(&gui), vec![(late.clone(), crate::api::types::JobScope::Album)]);
-        // The row: This song in your collection, its landed file.
-        super::close(&mut gui);
+        let title = at(&rows, "Copying from");
+        assert_eq!((fg(&buffer, title), bold(&buffer, title)), (Color::Reset, true));
+        assert_eq!(fg(&buffer, at(&rows, "Add from Stage Peer B")), th().dim);
+        assert_eq!(super::super::discover::tips(&gui), "↑ ↓ choose · x cancel that copy · d where files land · Esc close");
+        // `x` cancels Stage Peer C's copy, once; the word hides while that
+        // cancel is out (O1d) and `x` with it.
+        key(&mut gui, KeyCode::Char('x'));
+        key(&mut gui, KeyCode::Char('x'));
+        let cancels: Vec<i64> = gui.pending.iter().filter_map(|e| match e {
+            Effect::Api(ApiCmd::JobCancel { id, .. }) => Some(*id),
+            _ => None,
+        }).collect();
+        assert_eq!(cancels, [40]);
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[9], "│                                                                [ Close ] │");
+        assert_eq!(super::super::discover::tips(&gui), "↑ ↓ choose · d where files land · Esc close");
+        assert!(starts(&gui).is_empty(), "no start while it covers the choice");
+        // A scope it does not cover brings Add back, the two lines gone.
+        key(&mut gui, KeyCode::Down);
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[5..8], [
+            "│ Files go to copies › Boukmanflow › one folder per album         d change │",
+            "│                                                                          │",
+            "│                                                         [ Add 2 albums ] │",
+        ]);
+        // Enter on Close closes; the tile itself wears none of Stage Peer C's
+        // copy.
+        key(&mut gui, KeyCode::Up);
+        key(&mut gui, KeyCode::Enter);
+        assert!(gui.app.taste.keep.flow.is_none());
+        let rows = draw(&mut gui, 100, 30);
+        assert!(room(&rows, 12).starts_with("Boukmanflow"), "{}", rows[12]);
+    }
+
+    #[test]
+    fn the_modal_at_the_floor_is_centred_with_every_row() {
+        let _en = english();
+        // F3: the album tile idle at the 100 × 24 floor — rows 3–14, the
+        // player bar and its seek line untouched.
+        let mut gui = keep_in("C1b");
+        let rows = draw(&mut gui, 100, 24);
+        assert_eq!((rows[3].chars().nth(19), rows[14].chars().nth(19)), (Some('╭'), Some('╰')), "{}", rows.join("\n"));
+        assert_eq!(modal_rows(&rows), modal_rows(&draw(&mut gui, 100, 30)), "nothing gives way");
+        assert!(rows[19].starts_with(" 0:00 "), "the seek line: {}", rows[19]);
+        // T2: the tallest choosing state with key hints on — 15 rows to
+        // have, so B2, B1 and B3 go; rows 3–17, the primary on row 16, the
+        // tips line on row 23.
+        let mut gui = keep_in("T1");
+        gui.config.gui.key_hints = true;
+        gui.ui.key_hints = true;
+        let rows = draw(&mut gui, 100, 24);
+        assert_eq!(
+            modal_rows(&rows),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Late Train Verse                                                         │
+                │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+                │ ( ) This song                                                            │
+                │ (•) Album                                                                │
+                │ ( ) Every album by Boukmanflow                                           │
+                │     [ ] Only the 1 album you don't have                                  │
+                │ Files go to copies › from-peers › the long weekend sessions ›            │
+                │   Stage Peer B › ‹genre› › Boukmanflow › 2019 - Borrowed Tapes  d change │
+                │ ‹genre› comes from each song's own tags, so these songs can land in more │
+                │ than one folder (a song with none leaves that folder out).               │
+                │ ! Couldn't start: someone else on this server is already getting this —  │
+                │   try again in a moment                                                  │
+                │                                                  [ Add album · 3 songs ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
+        );
+        assert_eq!((rows[3].chars().nth(19), rows[17].chars().nth(19)), (Some('╭'), Some('╰')));
+        assert_eq!(at(&rows, "[ Add album").y, 16);
+        assert!(rows[18].starts_with(" 0:00 "), "the seek line whole: {}", rows[18]);
+        assert!(rows[23].starts_with(" ↑ ↓ choose · Enter starts · d where files land · Esc close"), "the tips row: {}", rows[23]);
+        // At 100 × 30 nothing gives way: rows 6–23, the blanks back.
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!((rows[6].chars().nth(19), rows[23].chars().nth(19)), (Some('╭'), Some('╰')), "{}", rows.join("\n"));
+        assert_eq!(modal_rows(&rows).len(), 18);
+    }
+
+    #[test]
+    fn the_give_way_caps_the_place_rises_then_caps_the_note_and_the_gold_line() {
+        let _en = english();
+        // T1's 18 rows in 10 under the anchored top, 12 risen (§3.6 steps
+        // 2–5): the blanks go, the place keeps one row clipped before `d
+        // change`, the top rises, the note and the GOLD line one row each —
+        // each clipped row its whole words' tooltip.
+        let gui = keep_in("T1");
+        let view = gui.app.keep_view().expect("the window");
+        let low = super::fitted(&view, super::Shown::default(), 72, 10, 12);
+        assert_eq!(super::HEAD_ROWS + 2 + low.len() as u16, 12, "{low:#?}");
+        let text = |line: &super::Low| match line {
+            super::Low::Place { runs, tip, .. } | super::Low::Text { runs, tip, .. } => {
+                (runs.iter().map(|(t, _)| t.as_str()).collect::<String>(), tip.clone())
+            }
+            other => panic!("not words: {other:?}"),
+        };
+        assert!(matches!(low[0], super::Low::Choice(_)) && matches!(low[3], super::Low::Missing { .. }), "{low:#?}");
+        let (place, tip) = text(&low[4]);
+        assert_eq!(place, "Files go to copies › from-peers › the long weekend sessions ›…");
+        assert_eq!(tip.as_deref(), Some("copies/from-peers/the long weekend sessions/Stage Peer B/‹genre›/Boukmanflow/2019 - Borrowed Tapes"));
+        assert!(matches!(&low[4], super::Low::Place { change: true, .. }), "d change stays on the row");
+        let (note, tip) = text(&low[5]);
+        assert_eq!(note, "‹genre› comes from each song's own tags, so these songs can land in mor…");
+        assert!(tip.is_some_and(|t| t.ends_with("leaves that folder out).")));
+        let (gold, tip) = text(&low[6]);
+        assert_eq!(gold, "! Couldn't start: someone else on this server is already getting this —…");
+        assert!(tip.is_some_and(|t| t.ends_with("try again in a moment")));
+        assert!(matches!(low[7], super::Low::Action { .. }));
+        // Rows to spare: the steps not taken — under the anchored top, the
+        // blanks dropped only as far as needed: B2 alone.
+        let low = super::fitted(&view, super::Shown::default(), 72, 17, 19);
+        assert_eq!(low.len(), 13, "{low:#?}");
+        assert!(matches!(low[0], super::Low::Blank(super::Gap::B1)) && matches!(low[low.len() - 2], super::Low::Blank(super::Gap::B3)));
+        assert!(!low.iter().any(|l| matches!(l, super::Low::Blank(super::Gap::B2))));
+        // Each step only where the one before it is not enough, in §3.6's
+        // order — by the rows each part keeps: the place's, the note's (DIM)
+        // and the GOLD line's.
+        let kept = |low: &[super::Low]| {
+            let places = low.iter().filter(|l| matches!(l, super::Low::Place { .. })).count();
+            let words = |colour| {
+                low.iter().filter(|l| matches!(l, super::Low::Text { runs, .. } if runs[0].1.fg == Some(colour))).count()
+            };
+            (places, words(th().dim), words(th().gold))
+        };
+        let rows = |low: &[super::Low]| super::HEAD_ROWS + 2 + low.len() as u16;
+        // The place capped fits under the anchored top: nothing rises.
+        let low = super::fitted(&view, super::Shown::default(), 72, 14, 15);
+        assert_eq!((rows(&low), kept(&low)), (14, (1, 2, 2)), "{low:#?}");
+        // Not even that: the place is capped before the top rises.
+        let low = super::fitted(&view, super::Shown::default(), 72, 13, 15);
+        assert_eq!((rows(&low), kept(&low)), (14, (1, 2, 2)), "{low:#?}");
+        // Risen, the note gives way before the GOLD line.
+        let low = super::fitted(&view, super::Shown::default(), 72, 10, 13);
+        assert_eq!((rows(&low), kept(&low)), (13, (1, 1, 2)), "{low:#?}");
+        // Too tall even at the tightest: the body's rows go from the bottom
+        // up — never the action row, always the last.
+        let low = super::fitted(&view, super::Shown::default(), 72, 6, 6);
+        assert!(rows(&low) <= 6, "{low:#?}");
+        assert!(matches!(low.last(), Some(super::Low::Action { .. })), "{low:#?}");
+        assert!(matches!(low[0], super::Low::Choice(_)), "{low:#?}");
+    }
+
+    #[test]
+    fn the_legacy_console_frames_the_modal_in_ascii_and_says_the_bar_in_words() {
+        let _en = english();
+        let _legacy = crate::kit::theme::legacy_glyphs_here();
+        let cases = [
+            ("C1b", "
+                +- Keep a copy ------------------------------------------------------------+
+                | Borrowed Tapes                                                           |
+                | Boukmanflow · 2019 · from Stage Peer B                                   |
+                |                                                                          |
+                | (*) Album                                                                |
+                | ( ) Every album by Boukmanflow                                           |
+                |     [ ] Only the 1 album you don't have                                  |
+                |                                                                          |
+                | Files go to copies > Boukmanflow > Borrowed Tapes               d change |
+                |                                                                          |
+                |                                                  [ Add album · 3 songs ] |
+                +-------------------------------------------------------------- Esc close -+
+            "),
+            ("L2", "
+                +- Keep a copy ------------------------------------------------------------+
+                | Borrowed Tapes                                                           |
+                | Boukmanflow · 2019 · from Stage Peer B                                   |
+                |                                                                          |
+                | Copying · song 2 of 3 · Late Train Verse                                 |
+                | 52% done                                                                 |
+                |                                                                          |
+                | Into copies > Boukmanflow > Borrowed Tapes                               |
+                |                                                                          |
+                | x cancel copy                                                  [ Close ] |
+                +--------------------------------------- Esc close · the copy keeps going -+
+            "),
+            ("L1", "
+                +- Keep a copy ------------------------------------------------------------+
+                | Borrowed Tapes                                                           |
+                | Boukmanflow · 2019 · from Stage Peer B                                   |
+                |                                                                          |
+                | Waiting for a free slot                                                  |
+                | no estimate yet · starts on its own                                      |
+                |                                                                          |
+                | Into copies > Boukmanflow > Borrowed Tapes                               |
+                |                                                                          |
+                | x cancel copy                                                  [ Close ] |
+                +--------------------------------------- Esc close · the copy keeps going -+
+            "),
+            ("C9", "
+                +- Keep a copy ------------------------------------------------------------+
+                | Borrowed Tapes                                                           |
+                | Boukmanflow · 2019 · from Stage Peer B                                   |
+                |                                                                          |
+                | (*) Album                                                                |
+                | ( ) Every album by Boukmanflow                                           |
+                |     [ ] Only the 1 album you don't have                                  |
+                |                                                                          |
+                | Files go to copies > Boukmanflow > Borrowed Tapes               d change |
+                |                                                                          |
+                |                                                            [ Adding... ] |
+                +-------------------------------------------------------------- Esc close -+
+            "),
+            ("L5", "
+                +- Keep a copy ------------------------------------------------------------+
+                | Borrowed Tapes                                                           |
+                | Boukmanflow · 2019 · from Stage Peer B                                   |
+                |                                                                          |
+                | Stopping...                                                              |
+                | 52% done                                                                 |
+                |                                                                          |
+                | Into copies > Boukmanflow > Borrowed Tapes                               |
+                |                                                                          |
+                |                                                                [ Close ] |
+                +-------------------------------------------------------------- Esc close -+
+            "),
+        ];
+        for (id, frame) in cases {
+            let mut gui = keep_in(id);
+            assert_eq!(window_of(&mut gui), board(frame), "{id}");
+        }
+        let mut gui = keep_in("C4");
+        assert_eq!(window_of(&mut gui)[6], "|     [x] Only the 1 album you don't have                                  |");
+        let mut gui = keep_in("E1");
+        let shown = window_of(&mut gui);
+        assert_eq!(shown[4], "| + In your collection                                                     |");
+        assert!(shown[6].contains("In copies > Boukmanflow > Borrowed Tapes > 02 - Late Train Verse.mp3"));
+    }
+
+    #[test]
+    fn a_start_sends_the_place_lands_in_drew_and_a_changed_one_starts_nothing() {
+        let _en = english();
+        let mut gui = opened(TILE);
+        land_read(&mut gui, dest_view("", "user"));
+        draw(&mut gui, 100, 30);
+        key(&mut gui, KeyCode::Enter);
+        let (ticket, shown) = gui
+            .pending
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::JobStart { ticket, destination, .. }) => Some((*ticket, destination.clone())),
+                _ => None,
+            })
+            .expect("a start");
+        let shown = shown.flatten().expect("the place shown");
+        assert_eq!((shown.vpath.as_str(), shown.base.as_str(), shown.layout.as_str()), ("copies", "", "{{ALBUMARTIST}}/{{ALBUM}}"));
+        // 409 destination_changed (R2): the place redrawn from the answer,
+        // one GOLD line, nothing started; the view is read again.
         gui.pending.clear();
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        let rows = draw(&mut gui, 100, 30);
+        let music: crate::api::types::CollectionDestination =
+            serde_json::from_value(json!({ "vpath": "music", "base": "", "layout": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", "source": "default" })).unwrap();
+        let generation = gui.app.session_gen();
+        apply(&mut gui, Event::JobStarted { ticket, generation, answer: Err(crate::api::PluginFailure::DestinationChanged(Some(Some(music)))) });
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::DestinationRead { .. }))), "read again");
+        let buffer = buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
         assert_eq!(
-            lower_rows(&rows),
-            canvas(&[
-                "│ WHAT      This song · 0:08 · mp3                               │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│                                                                │",
-                "│ ✓ in your collection                                           │",
-                "│ copies/Boukmanflow/Borrowed Tapes/Late Train Verse.mp3         │",
-                "│                                                                │",
-                "│                                                                │",
-                "│                            [ Add to queue ] [ Play your copy ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])
+            modal_rows(&rows),
+            board(
+                "
+                ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+                │ Borrowed Tapes                                                           │
+                │ Boukmanflow · 2019 · from Stage Peer B                                   │
+                │                                                                          │
+                │ (•) Album                                                                │
+                │ ( ) Every album by Boukmanflow                                           │
+                │     [ ] Only the 1 album you don't have                                  │
+                │                                                                          │
+                │ Files go to music › Boukmanflow › 2019 - Borrowed Tapes         d change │
+                │ ! Where files land changed · check the path above and add again          │
+                │                                                                          │
+                │                                                  [ Add album · 3 songs ] │
+                ╰────────────────────────────────────────────────────────────── Esc close ─╯
+                "
+            )
         );
-        // Add to queue queues the user's own file.
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Secondary)));
-        assert_eq!(gui.app.queue.items.last().map(|q| q.filepath.as_str()), Some(landed));
-        // Left out as already here: already yours, Close alone.
-        let owned = walk(json!([]), json!([{ "name": "Borrowed Tapes", "why": "owned" }]));
-        let mut gui = canvas_gui(&[owned]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        stage_facts(&mut gui);
+        assert_eq!(fg(&buffer, at(&rows, "! Where files land changed")), th().gold);
+        assert_eq!(fg(&buffer, at(&rows, "(•) Album")), th().accent, "the dot where it was");
+        assert!(matches!(gui.app.keep_view().unwrap().stage, crate::tui::app::keep::KeepStage::Refused { .. }));
+        // Enter adds to the place now drawn.
+        key(&mut gui, KeyCode::Enter);
+        let again = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::JobStart { destination, .. }) => destination.clone().flatten(),
+            _ => None,
+        });
+        assert_eq!(again.map(|d| d.vpath), Some("music".into()));
+    }
+
+    /// The board's one-plain-line frame (R3–R5), its `line` the state's.
+    fn right_gone(line: &str) -> Vec<String> {
+        canvas(&[
+            "╭─ Keep a copy ────────────────────────────────────────────────────────────╮",
+            "│ Borrowed Tapes                                                           │",
+            "│ Boukmanflow · 2019 · from Stage Peer B                                   │",
+            "│                                                                          │",
+            &format!("│ {line:<72} │"),
+            "│                                                                          │",
+            "│                                                                [ Close ] │",
+            "╰────────────────────────────────────────────────────────────── Esc close ─╯",
+        ])
+    }
+
+    #[test]
+    fn nowhere_to_put_a_file_leaves_one_plain_line_and_close() {
+        let _en = english();
+        // R3: a re-read that names nowhere — one TEXT line and Close, 8 rows,
+        // the top holding on row 6; every way in leaves the room.
+        let mut gui = keep_in("R3");
+        let buffer = buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(modal_rows(&rows), right_gone("Your account can't add files to this server · copies are off"));
+        assert_eq!(rows[6].chars().nth(19), Some('╭'), "the top holds");
+        let line = at(&rows, "Your account");
+        assert_eq!((fg(&buffer, line), bold(&buffer, line)), (Color::Reset, false));
+        let close = at(&rows, "[ Close ]");
+        assert_eq!((fg(&buffer, close), bold(&buffer, close)), (th().accent, true));
+        assert_eq!(super::super::discover::tips(&gui), "Enter close · Esc close");
+        assert!(!gui.app.keep_gate(), "the copy gate closed: every way in hidden");
+        for code in [KeyCode::Char('d'), KeyCode::Char('x'), KeyCode::Char('c'), KeyCode::Up] {
+            key(&mut gui, code);
+        }
+        assert!(gui.discover.keep.dest.is_none() && gui.pending.iter().all(|e| !matches!(e, Effect::Api(ApiCmd::JobCancel { .. }))));
+        key(&mut gui, KeyCode::Enter);
+        assert!(gui.app.taste.keep.flow.is_none());
+        // A 403 at start is a right lost, never a refusal with Add still
+        // offered: its words name uploading (R3), or the right to start
+        // copies is gone (R4); a gate asked again that no longer lists the
+        // plug-in (R5).
+        for (id, line) in [
+            ("R3b", "Your account can't add files to this server · copies are off"),
+            ("R4", "Your account can't start copies on this server"),
+            ("R5", "Copies from connected servers are off on this server right now"),
+        ] {
+            let mut gui = keep_in(id);
+            assert_eq!(window_of(&mut gui), right_gone(line), "{id}");
+            assert_eq!(super::super::discover::tips(&gui), "Enter close · Esc close", "{id}");
+        }
+        // A 404 first reads as a refusal in the server's words; the gate's
+        // answer that the plug-in went turns it R5.
+        let mut gui = opened(TILE);
+        start(&mut gui, Err(crate::api::PluginFailure::Refused { status: 404, words: "no such plug-in: federation-copy".into() }));
+        assert_eq!(lower_rows(&draw(&mut gui, 100, 30))[6], format!("│ {:<72} │", "! Couldn't start: no such plug-in: federation-copy"));
+        let mut gone = listing(true);
+        gone["plugins"].as_array_mut().expect("plugins").retain(|p| p["name"] != "federation-copy");
+        let generation = gui.app.session_gen();
+        apply(&mut gui, Event::KeepGate { generation, plugins: Ok(Box::new(serde_json::from_value(gone).unwrap())), destination: None });
+        assert_eq!(window_of(&mut gui), right_gone("Copies from connected servers are off on this server right now"));
+        // An ended copy whose Retry would start nothing now — the gate asked
+        // again finds jobs not allowed: the plain line and Close, never a
+        // dead Retry; Enter closes and nothing starts.
+        let mut gui = keep_in("E9");
+        let generation = gui.app.session_gen();
+        apply(&mut gui, Event::KeepGate { generation, plugins: Ok(Box::new(serde_json::from_value(listing(false)).unwrap())), destination: None });
+        assert_eq!(window_of(&mut gui), right_gone("Your account can't start copies on this server"));
+        assert_eq!(super::super::discover::tips(&gui), "Enter close · Esc close");
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Char('c'));
+        key(&mut gui, KeyCode::Enter);
+        assert!(gui.app.taste.keep.flow.is_none() && starts(&gui).is_empty());
+    }
+
+    #[test]
+    fn lands_in_wraps_a_long_place_at_a_crumb_the_library_always_showing() {
+        let _en = english();
+        // C8: the Server preset under a base folder of its own — broken
+        // before a crumb, ` ›` ending the first row, the rest at col 3 with
+        // `d change`; nothing cut, no tooltip.
+        let mut gui = keep_in("C8");
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[5..7], [
+            "│ Files go to copies › from-peers › 2025 archive › Stage Peer B ›          │",
+            "│   Boukmanflow › Borrowed Tapes                                  d change │",
+        ], "{}", low.join("\n"));
+        assert!(!gui.ui.tips.iter().any(|(_, tip)| tip.contains("2025 archive")), "nothing cut: no tooltip");
+        // C8b: longer still — the second row clipped at the right, never the
+        // library, and the whole path both rows' tooltip.
+        let mut gui = keep_in("C8b");
         let rows = draw(&mut gui, 100, 30);
-        let lower = lower_rows(&rows);
-        assert_eq!(lower[3], "│ ✓ already yours                                                │", "{}", lower.join("\n"));
-        assert_eq!(lower[lower.len() - 2], "│                                                      [ Close ] │");
-        // A guest spot: nothing claimed — Add album.
-        let guest = walk(json!([]), json!([{ "name": "Borrowed Tapes", "why": "appearance" }]));
-        let mut gui = canvas_gui(&[guest]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        stage_facts(&mut gui);
+        let low = lower_rows(&rows);
+        assert_eq!(low[5..7], [
+            "│ Files go to copies › from-peers › 2025 archive ›                         │",
+            "│   the long weekend sessions › Stage Peer B › Boukmanflow › Bo…  d change │",
+        ], "{}", low.join("\n"));
+        let row = at_row(&rows, "the long weekend sessions");
+        let whole = "copies/from-peers/2025 archive/the long weekend sessions/Stage Peer B/Boukmanflow/Borrowed Tapes";
+        for y in [row - 1, row] {
+            assert_eq!(tip_at(&gui, Position { x: 40, y }).as_deref(), Some(whole), "row {y}");
+        }
+        assert_eq!(tip_at(&gui, Position { x: 88, y: row }), None, "none on d change");
+    }
+
+    #[test]
+    fn a_clipped_path_with_a_slot_tips_the_whole_path_and_its_note_has_its_rows() {
+        let _en = english();
+        // A long base folder and a genre in the layout: the second row is
+        // clipped, so its tooltip is the whole path — the slot in its words;
+        // the note stands on its own rows, on the place and the PREVIEW.
+        let mut view = dest_view("from-peers/2025 archive/the long weekend sessions", "user");
+        view["destination"]["layout"] = json!("{{PEER}}/{{GENRE}}/{{ALBUMARTIST}}/{{ALBUM}}");
+        view["saved"]["layout"] = view["destination"]["layout"].clone();
+        let mut gui = keep_on(view);
+        let whole = "copies/from-peers/2025 archive/the long weekend sessions/Stage Peer B/‹genre›/Boukmanflow/Borrowed Tapes";
+        for (choice, note) in [
+            (crate::tui::app::keep::KeepChoice::Song, "‹genre› comes from the song's own tags (a song with none leaves that folder out)."),
+            (
+                crate::tui::app::keep::KeepChoice::Album,
+                "‹genre› comes from each song's own tags, so these songs can land in more than one folder (a song with none leaves that folder out).",
+            ),
+        ] {
+            gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(choice))));
+            let rows = draw(&mut gui, 100, 30);
+            let low = lower_rows(&rows);
+            let at = low.iter().position(|r| r.contains("Files go to")).expect("the place");
+            assert_eq!(low[at..at + 2], [
+                "│ Files go to copies › from-peers › 2025 archive ›                         │",
+                "│   the long weekend sessions › Stage Peer B › ‹genre› › Boukma…  d change │",
+            ], "{}", low.join("\n"));
+            let row = at_row(&rows, "the long weekend sessions");
+            for y in [row - 1, row] {
+                assert_eq!(tip_at(&gui, Position { x: 40, y }).as_deref(), Some(whole), "row {y}");
+            }
+            assert_eq!(under_place(&low), note);
+            // The picker's preview: the base folder folded into Custom's
+            // field, the path drawn as the server holds it and clipped
+            // from the left — the whole path its tooltip (a song's file
+            // after it), the note on its own row with its own.
+            key(&mut gui, KeyCode::Char('d'));
+            let rows = draw(&mut gui, 100, 30);
+            let y = at_row(&rows, "‹genre› › Boukmanflow › Borrowed Tapes");
+            assert!(rows[usize::from(y)].contains('…'), "the preview clipped: {}", rows[usize::from(y)]);
+            let file = if choice == crate::tui::app::keep::KeepChoice::Song { "/Late Train Verse.mp3" } else { "" };
+            let path_tip = format!("{whole}{file}");
+            assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y }) && *t == path_tip), "preview: {:?}", gui.ui.tips);
+            assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y: y + 1 }) && *t == note), "the note: {:?}", gui.ui.tips);
+            key(&mut gui, KeyCode::Esc);
+        }
+    }
+
+    #[test]
+    fn a_moved_place_says_where_retry_adds_before_the_press_and_retry_sends_it() {
+        let _en = english();
+        // E9b: a copy pinned to the library root failed; the account has
+        // saved copies › from-peers since (another tab).
+        let mut gui = keep_in("E9b");
+        let buffer = buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(fg(&buffer, at(&rows, "Retry adds to")), th().dim);
+        assert!(bold(&buffer, at(&rows, "copies › from-peers")), "the library BOLD");
+        drop(buffer);
+        // Retry sends the place it said — a stale one is the server's 409 —
+        // and the outcome holds, its key words gone, the primary off (E20).
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        let sent = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::JobStart { destination, ticket, .. }) => Some((*ticket, destination.clone())),
+            _ => None,
+        });
+        let (ticket, sent) = sent.expect("a retry");
+        let sent = sent.flatten().expect("a place");
+        assert_eq!((sent.vpath.as_str(), sent.base.as_str()), ("copies", "from-peers"));
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[1..8], [
+            "│ ! Copy failed: Stage Peer B is unreachable                               │",
+            "│ Nothing was copied                                                       │",
+            "│                                                                          │",
+            "│ Retry adds to copies › from-peers › Boukmanflow › Borrowed Tapes         │",
+            "│                                                                          │",
+            "│                                                            [ Retrying… ] │",
+            "╰────────────────────────────────────────────────────────────── Esc close ─╯",
+        ], "{}", low.join("\n"));
+        assert_eq!(super::super::discover::tips(&gui), "Esc close");
+        key(&mut gui, KeyCode::Char('c'));
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(starts(&gui).len(), 1, "inert while it is out");
+        // The server answers: the copy, "Into" the place sent.
+        let mut queued = job(93, &late(), Some("album"), "queued", json!({}));
+        queued.params.destination = Some(Some(sent));
+        let generation = gui.app.session_gen();
+        apply(&mut gui, Event::JobStarted { ticket, generation, answer: Ok(Box::new(crate::api::types::JobStarted { job: queued, created: true })) });
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[4], "│ Into copies › from-peers › Boukmanflow › Borrowed Tapes                  │", "{}", low.join("\n"));
+        assert!(!low.iter().any(|r| r.contains("Retry adds to")));
+        // Where it has not moved, nothing more is said.
+        let mut gui = keep_in("E9");
+        land_read(&mut gui, destination());
+        assert!(!draw(&mut gui, 100, 30).iter().any(|r| r.contains("adds to")));
+        // An album copy with a gap says it the same way.
+        let mut gui = keep_in("E5");
+        land_read(&mut gui, dest_view("from-peers", "user"));
+        assert!(draw(&mut gui, 100, 30).iter().any(|r| r.contains("│ Retry adds to copies › from-peers ›")));
+    }
+
+    #[test]
+    fn one_folder_per_album_stands_dim_in_lands_in_the_library_bold_the_names_text() {
+        let _en = english();
+        // A running artist copy reads its pinned place, album by album.
+        let mut gui = copying(TILE, Some("artist"), "running", json!({ "progress": 0.2 }), &[]);
+        let buffer = buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        let crumbs = at(&rows, "copies › Boukmanflow › one folder per album");
+        let cell = |dx: u16| Position { x: crumbs.x + dx, y: crumbs.y };
+        assert!(bold(&buffer, cell(0)), "the library BOLD");
+        assert_eq!(fg(&buffer, cell(7)), th().dim, "› DIM");
+        assert!(fg(&buffer, cell(9)) != th().dim && !bold(&buffer, cell(9)), "the artist TEXT");
+        for dx in 23..43 {
+            assert_eq!(fg(&buffer, cell(dx)), th().dim, "one folder per album DIM at +{dx}");
+        }
+        // An album copy's real album stays TEXT.
+        let mut gui = keep_in("E3");
+        let buffer = super::tests::buffer(&mut gui, 100, 30);
+        let crumbs = at(&lines(&buffer), "copies › Boukmanflow › Borrowed Tapes");
+        let album = Position { x: crumbs.x + 23, y: crumbs.y };
+        assert!(fg(&buffer, album) != th().dim && !bold(&buffer, album), "Borrowed Tapes TEXT");
+    }
+
+    #[test]
+    fn the_band_clears_the_rooms_width_on_the_windows_rows() {
+        let _en = english();
+        // Nothing of the room shows beside the window: the band clears x
+        // 17–96 on its rows; the rows above and below stay the room's.
+        let mut gui = canvas_gui(&canvas_jobs());
+        let before = draw(&mut gui, 100, 30);
+        super::open(&mut gui, TILE);
+        board_facts(&mut gui);
         let rows = draw(&mut gui, 100, 30);
-        assert!(lower_rows(&rows).iter().any(|r| r.contains("[ Cancel ] [ Add album ]")), "{}", rows.join("\n"));
+        let modal = modal_rows(&rows);
+        for (i, y) in (6..6 + modal.len()).enumerate() {
+            let band: String = rows[y].chars().skip(17).take(80).collect();
+            assert_eq!(band, format!("  {}  ", modal[i]), "row {y}");
+        }
+        let below = 6 + modal.len();
+        assert_eq!(rows[5], before[5], "the row above is the room's");
+        assert_eq!(rows[below], before[below], "and the row below");
+        assert_eq!(hit_at(&gui, 17, 10), Some(Act::Guard));
+        assert_eq!(hit_at(&gui, 96, 10), Some(Act::Guard));
+        // The queue open leaves the room too narrow: the window centres over
+        // the frame, x 12–87, and no band.
+        gui.queue_open = true;
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!((rows[6].chars().nth(12), rows[6].chars().nth(87)), (Some('╭'), Some('╮')), "{}", rows.join("\n"));
+        assert!(rows[7].starts_with("   Artists  │"), "the nav beside it: {}", rows[7]);
+    }
+
+    #[test]
+    fn the_indicator_is_not_drawn_while_keep_a_copy_or_the_copies_list_is_open() {
+        let _en = english();
+        // A tall window: the verbs line stands above the window's rows.
+        let mut gui = canvas_gui(&canvas_jobs());
+        gui.ui.key_hints = true;
+        let rows = draw(&mut gui, 100, 60);
+        let verbs = rows.iter().position(|r| r.trim_end().ends_with("copying… · ! failed")).expect("the indicator");
+        let indicated = |gui: &Gui| gui.ui.tips.iter().any(|(_, tip)| tip == "Copies — C");
+        assert!(indicated(&gui));
+        // Keep a copy speaks for the copy alone.
+        super::open(&mut gui, KeepTarget::Row { group: 0, row: 1 });
+        let rows = draw(&mut gui, 100, 60);
+        let top = rows.iter().position(|r| r.contains("─ Keep a copy ─")).expect("the window");
+        assert!(top > verbs, "the window under the verbs line");
+        assert!(!rows[verbs].contains("copying…") && !rows[verbs].contains("failed"), "{}", rows[verbs]);
+        assert!(!indicated(&gui));
+        // `C` does nothing while Keep a copy is open.
+        key(&mut gui, KeyCode::Char('C'));
+        assert!(gui.discover.copies.is_none());
+        key(&mut gui, KeyCode::Esc);
+        // Nor while the Copies list is.
+        gui.act(Act::Disc(DiscAct::Copies));
+        let rows = draw(&mut gui, 100, 60);
+        assert!(!rows[verbs].contains("copying…"), "{}", rows[verbs]);
+        assert!(!indicated(&gui));
+        gui.act(Act::Disc(DiscAct::CopiesClose));
+        assert!(draw(&mut gui, 100, 60)[verbs].trim_end().ends_with("copying… · ! failed"));
+    }
+
+    #[test]
+    fn no_key_acts_without_its_word() {
+        let _en = english();
+        // Each state's letters: only the ones its words name do anything.
+        for (id, dead) in [
+            ("L2", "dac"),
+            ("L5", "xdac"),
+            ("E3", "adx"),
+            ("E12", "cadx"),
+            ("E13", "cadx"),
+            ("E21", "cadx"),
+            ("E9", "adx"),
+            ("O1d", "xac"),
+            ("R3", "dxac"),
+        ] {
+            let mut gui = keep_in(id);
+            let before = window_of(&mut gui);
+            gui.pending.clear();
+            for c in dead.chars() {
+                key(&mut gui, KeyCode::Char(c));
+            }
+            for code in [KeyCode::Char(' '), KeyCode::Tab, KeyCode::Left, KeyCode::Right, KeyCode::Char('C')] {
+                key(&mut gui, code);
+            }
+            assert!(gui.app.taste.keep.flow.is_some(), "{id}: still open");
+            assert_eq!(window_of(&mut gui), before, "{id}");
+            let acted = gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::JobCancel { .. } | ApiCmd::JobStart { .. } | ApiCmd::DestinationSave { .. })));
+            assert!(!acted && gui.discover.keep.dest.is_none() && gui.discover.copies.is_none(), "{id}: {:?}", gui.pending);
+        }
+        // And the ones they name do: `x` cancels the copy, `c` goes back to
+        // the choice, `a` queues the song, `d` opens the picker.
+        let mut gui = keep_in("L2");
+        key(&mut gui, KeyCode::Char('x'));
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::JobCancel { id: 91, .. }))));
+        let mut gui = keep_in("E7");
+        key(&mut gui, KeyCode::Char('d'));
+        assert!(gui.discover.keep.dest.is_some());
+        let mut gui = keep_in("E1");
+        key(&mut gui, KeyCode::Char('a'));
+        assert_eq!(gui.app.queue.items.last().map(|q| q.filepath.as_str()), Some("copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3"));
+        assert!(gui.app.taste.keep.flow.is_none(), "queued, closed");
+    }
+
+    #[test]
+    fn a_file_in_the_way_offers_close_then_retry_once_the_place_changed() {
+        let _en = english();
+        // E7: Retry would meet the same file — Close; `d change` on the action
+        // row opens Where copies land.
+        let mut gui = keep_in("E7");
+        land_read(&mut gui, dest_view("", "user"));
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!(modal_rows(&rows), modal_rows(&draw(&mut keep_in("E7"), 100, 30)), "the same place: still E7");
+        assert_eq!(gui.ui.hit(at(&rows, "d change")), keep_act(super::KeepAct::Key(super::KeyWord::Change)));
+        key(&mut gui, KeyCode::Char('d'));
+        land_folders(&mut gui);
+        // Saved elsewhere (the Server preset): E8 — Retry, and where it adds.
+        dest_act(&mut gui, super::DestAct::Pick(super::Radio::Server));
+        dest_act(&mut gui, super::DestAct::Save);
+        land_save(&mut gui, Ok(place_view("", "{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}")));
+        draw(&mut gui, 100, 30);
+        assert!(gui.discover.keep.dest.is_none(), "saved: back in Keep a copy");
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[4..9], [
+            "│ In copies › Boukmanflow › Borrowed Tapes › 02 - Late Train Verse.mp3     │",
+            "│ Retry adds to copies › Stage Peer B › Boukmanflow › Borrowed Tapes       │",
+            "│                                                                          │",
+            "│ d change   c choose again                                      [ Retry ] │",
+            "╰────────────────────────────────────────────────────────────── Esc close ─╯",
+        ], "{}", low.join("\n"));
+        // Retry sends the place it says.
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        let sent = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::JobStart { destination, .. }) => destination.clone().flatten(),
+            _ => None,
+        });
+        assert_eq!(sent.map(|d| d.layout), Some("{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}".into()));
+        // E7's Enter closes: nothing to retry into.
+        let mut gui = keep_in("E7");
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        assert!(gui.app.taste.keep.flow.is_none() && starts(&gui).is_empty());
+    }
+
+    #[test]
+    fn a_gap_is_the_headline_and_retry_takes_it() {
+        let _en = english();
+        // Done ≠ kept, made visible: GOLD BOLD "! 1 song didn't copy" over
+        // DIM counts with no GOLD in them.
+        let mut gui = keep_in("E5");
+        let buffer = buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        for x in 21..29 {
+            assert_eq!(fg(&buffer, Position { x, y: 11 }), th().dim, "the counts DIM at {x}");
+        }
+        assert_eq!(at(&rows, "! 1 song didn't copy").y, 10);
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(starts(&gui), vec![(late(), crate::api::types::JobScope::Album)], "Retry: the album's copy again");
+    }
+
+    #[test]
+    fn play_your_copy_after_an_album_plays_the_album_from_the_library() {
+        let _en = english();
+        // E3: two copied, one already yours — the whole album from the
+        // library, in the album's order, the first started; the window closes.
+        let mut gui = keep_in("E3");
+        key(&mut gui, KeyCode::Enter);
+        let queued: Vec<&str> = gui.app.queue.items.iter().map(|q| q.filepath.as_str()).collect();
+        assert_eq!(queued, ["copies/Boukmanflow/Borrowed Tapes/01.mp3", "copies/Boukmanflow/Borrowed Tapes/02.mp3", "music/Boukmanflow/Borrowed Tapes/03.mp3"]);
+        assert_eq!(gui.app.queue.current, Some(0));
+        assert!(gui.app.queue.items.iter().all(|q| q.origin.peer.is_none()), "the user's own library");
+        assert!(gui.app.taste.keep.flow.is_none());
+        // Every album by is no one queue: Close.
+        let mut gui = keep_in("E4");
+        key(&mut gui, KeyCode::Enter);
+        assert!(gui.app.queue.items.is_empty() && gui.app.taste.keep.flow.is_none());
+    }
+
+    #[test]
+    fn c_choose_again_returns_to_the_choice_where_it_stood() {
+        let _en = english();
+        // E1 → `c`: the song's choice, the dot on This song, the place the
+        // account's now — C5.
+        let mut gui = keep_in("E1");
+        key(&mut gui, KeyCode::Char('c'));
+        assert_eq!(window_of(&mut gui), modal_rows(&draw(&mut keep_in("C5"), 100, 30)));
+        assert_eq!(super::super::discover::tips(&gui), "↑ ↓ choose · Enter starts · d where files land · Esc close");
+        // E3 → a click on the words: the tile's choice, the dot on Album.
+        let mut gui = keep_in("E3");
+        let rows = draw(&mut gui, 100, 30);
+        let words = at(&rows, "c choose again");
+        assert_eq!(gui.ui.hit(words), keep_act(super::KeepAct::Key(super::KeyWord::Choose)));
+        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Key(super::KeyWord::Choose))));
+        assert_eq!(window_of(&mut gui), modal_rows(&draw(&mut keep_in("C1b"), 100, 30)));
+        // Add again after a cancel brings the choice back too, and starts nothing.
+        let mut gui = keep_in("E13");
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(window_of(&mut gui), modal_rows(&draw(&mut keep_in("C1b"), 100, 30)));
+        assert!(starts(&gui).is_empty());
+    }
+
+    #[test]
+    fn the_cover_is_four_by_two_pixels_or_nothing() {
+        use ratatui_image::picker::ProtocolType;
+        let _en = english();
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let art = crate::tui::art::decode(&bytes.into_inner()).unwrap();
+        let with_art = |pixels: bool| {
+            let mut gui = keep_in("C1b");
+            if pixels {
+                gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+            }
+            gui.app.art.insert("bt.jpg".into(), Some(art.clone()));
+            if let Some(flow) = gui.app.taste.keep.flow.as_mut() {
+                flow.subject.art = Some("bt.jpg".into());
+            }
+            gui
+        };
+        // Pixels where the terminal draws them: inner cols 69–72 of the
+        // head's two rows (x 89–92, rows 7–8).
+        let mut gui = with_art(true);
+        let buffer = buffer(&mut gui, 100, 30);
+        // Found by its top-left cell, which carries the picture's
+        // placeholders (a kitty cell's symbol defeats string positions).
+        let pixel = |x: u16, y: u16| buffer[(x, y)].symbol().contains('\u{10EEEE}');
+        assert!(pixel(89, 7), "the cover is pixels: {:?}", buffer[(89, 7)].symbol());
+        assert!(!pixel(88, 7) && !pixel(89, 9), "4 × 2, at the head's right end");
+        assert_eq!(lines(&buffer)[7].chars().skip(21).take(14).collect::<String>(), "Borrowed Tapes");
+        // Otherwise nothing: no mosaic, no empty frame — the words have the
+        // whole row.
+        let mut gui = with_art(false);
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!(rows[7].chars().skip(84).take(11).collect::<String>(), "          │", "{}", rows[7]);
+        assert_eq!(rows[8].chars().skip(84).take(11).collect::<String>(), "          │");
+        assert!(gui.discover.keep.slot.is_none(), "no slot drawn at all");
+    }
+
+    #[test]
+    fn key_words_that_would_crowd_the_primary_take_the_row_above() {
+        let _en = english();
+        // Not reached in English or German at 76 (§4.8); a narrower room
+        // shows the rule.
+        let mut low = Vec::new();
+        let primary = super::Primary { words: "Play your copy".into(), press: Some(super::Press::Again(crate::api::types::JobAction::Play)) };
+        super::action(&mut low, vec![super::KeyWord::Queue, super::KeyWord::Choose], primary.clone(), 50);
+        assert_eq!(low, vec![
+            super::Low::Keys(vec![super::KeyWord::Queue, super::KeyWord::Choose]),
+            super::Low::Action { keys: Vec::new(), primary: primary.clone() },
+        ]);
+        let mut low = Vec::new();
+        super::action(&mut low, vec![super::KeyWord::Queue, super::KeyWord::Choose], primary.clone(), 72);
+        assert_eq!(low, vec![super::Low::Action { keys: vec![super::KeyWord::Queue, super::KeyWord::Choose], primary }]);
+    }
+
+    #[test]
+    fn the_window_and_the_copies_list_open_in_the_same_place() {
+        let _en = english();
+        let late = late();
+        let mut gui = copies_gui(&[job(40, &late, Some("album"), "running", json!({ "progress": 0.52 }))]);
+        let rows = draw(&mut gui, 100, 30);
+        let x = rows[6].chars().position(|c| c == '╭');
+        assert_eq!(x, Some(19), "{}", rows.join("\n"));
+        assert_eq!(rows[6].chars().nth(94), Some('╮'));
+        let band: String = rows[8].chars().skip(17).take(2).chain(rows[8].chars().skip(95).take(2)).collect();
+        assert_eq!(band, "    ", "the band: {}", rows[8]);
+        assert_eq!(hit_at(&gui, 17, 8), Some(Act::Guard));
+    }
+
+    /// The tooltip that ripens with the pointer resting at `at`: the frame
+    /// drawn, the dwell ticked and aged past the delay — the shell's own
+    /// order, which takes the first tip registered under the pointer.
+    fn ripe(gui: &mut Gui, at: Position) -> Option<String> {
+        gui.ui.pointer = Some(at);
+        draw(gui, 100, 30);
+        gui.ui.dwell_tick();
+        gui.ui.dwell_backdate(crate::kit::TIP_DELAY);
+        let tip = gui.ui.ripe_tooltip().map(|(_, text)| text.to_string());
+        gui.ui.pointer = None;
+        tip
+    }
+
+    #[test]
+    fn the_room_under_the_window_neither_lights_nor_tips_and_takes_no_hand() {
+        let _en = english();
+        // C8b: the pointer on the clipped place ripens the place's own
+        // tooltip, the whole path — never a tip the room drew beneath it.
+        let mut gui = keep_in("C8b");
+        let rows = draw(&mut gui, 100, 30);
+        let row = at_row(&rows, "Files go to copies › from-peers");
+        let whole = "copies/from-peers/2025 archive/the long weekend sessions/Stage Peer B/Boukmanflow/Borrowed Tapes";
+        for x in [25, 40, 60] {
+            assert_eq!(ripe(&mut gui, Position { x, y: row }).as_deref(), Some(whole), "x {x}");
+        }
+        // The footer, a blank row, the band and the header above: none.
+        let foot = at(&rows, "Esc close");
+        for at in [Position { x: foot.x + 2, y: foot.y }, Position { x: 40, y: row + 2 }, Position { x: 18, y: row }, at(&rows, "Last 30 days")] {
+            assert_eq!(ripe(&mut gui, at), None, "{at:?}");
+        }
+        // The header's dropdown, under the pointer, stays unlit.
+        let header = at(&rows, "Last 30 days");
+        gui.ui.pointer = Some(header);
+        let buffer = buffer(&mut gui, 100, 30);
+        assert_ne!(fg(&buffer, header), th().bright, "the room beneath sees no pointer");
+        // C1b: a table row below the window keeps its columns under the
+        // pointer — no hover verbs — and the hand is an arrow there (and on
+        // the band), the hand on the window's own controls.
+        let mut gui = canvas_gui(&[]);
+        gui.ui.pointer = Some(Position { x: 40, y: 20 });
+        let before = draw(&mut gui, 100, 30);
+        assert!(before[20].contains("[⋯]"), "the row lights without the window: {}", before[20]);
+        super::open(&mut gui, TILE);
+        board_facts(&mut gui);
+        let rows = draw(&mut gui, 100, 30);
+        assert!(!rows[20].contains("[⋯]") && !rows[20].contains("[▸]"), "{}", rows[20]);
+        assert!(!super::super::over_control(&gui), "no hand over the room");
+        gui.ui.pointer = Some(Position { x: 18, y: 10 });
+        draw(&mut gui, 100, 30);
+        assert!(!super::super::over_control(&gui), "no hand over the band");
+        gui.ui.pointer = Some(at(&rows, "[ Add album"));
+        draw(&mut gui, 100, 30);
+        assert!(super::super::over_control(&gui), "the hand on the primary");
+        // The Copies list: the same.
+        let mut gui = copies_gui(&copies_jobs());
+        gui.ui.pointer = Some(Position { x: 18, y: 10 });
+        draw(&mut gui, 100, 30);
+        assert!(!super::super::over_control(&gui));
+        assert_eq!(ripe(&mut gui, Position { x: 18, y: 10 }), None);
+    }
+
+    #[test]
+    fn the_box_kept_by_a_copy_alone_says_no_count() {
+        let _en = english();
+        // A failed only-missing copy of this server still wants the user, so
+        // the box stays offered — not while the sizes are asked, and, with
+        // nothing missing by name, with no count: never "the 0 albums".
+        let failed = job(80, &late(), Some("artist-missing"), "failed", json!({ "error": "Stage Peer B is unreachable" }));
+        let mut gui = canvas_gui(&[failed]);
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, TILE);
+        let window = window_of(&mut gui);
+        assert!(!window.iter().any(|r| r.contains("Only the")), "{}", window.join("\n"));
+        land_facts(&mut gui, Some(3), &["Borrowed Tapes"], &["Borrowed Tapes", "Kite Days"]);
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[3], "│     [ ] Only the albums you don't have                                   │", "{}", low.join("\n"));
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Down);
+        let window = window_of(&mut gui);
+        assert!(window.iter().any(|r| r.contains("[✓] Only the albums you don't have")), "{}", window.join("\n"));
+        assert!(window.iter().any(|r| r.ends_with("[ Add the albums you don't have ] │")), "{}", window.join("\n"));
+        assert!(!window.iter().any(|r| r.contains(" 0 ")), "{}", window.join("\n"));
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(starts(&gui), vec![(late(), crate::api::types::JobScope::ArtistMissing)]);
+    }
+
+    #[test]
+    fn a_clipped_step_tips_its_whole_words() {
+        let _en = english();
+        // A running copy's step is the server's words, on one row: clipped,
+        // the row's tooltip is all of them — never the clipped row again.
+        let step = "album 1 of 2 · The Extremely Long Album Title Of The Night Sessions · song 12 of 14 · Late Train Verse";
+        let mut gui = copying(TILE, Some("artist"), "running", json!({ "progress": 0.3, "statusText": step }), &[]);
+        let rows = draw(&mut gui, 100, 30);
+        let y = at_row(&rows, "Copying · album 1 of 2");
+        assert!(rows[usize::from(y)].contains("Night Se…"), "{}", rows[usize::from(y)]);
+        assert_eq!(tip_at(&gui, Position { x: 40, y }), Some(format!("Copying · {step}")));
+        assert_eq!(ripe(&mut gui, Position { x: 40, y }), Some(format!("Copying · {step}")));
+    }
+
+    #[test]
+    fn a_japanese_or_chinese_note_fills_its_rows() {
+        // Their sentences have no blank to break at: the note's first row
+        // carries on after the slot, by cells, and the whole note stands
+        // on its two rows — or, cut, is their tooltip.
+        for code in ["ja", "zh"] {
+            let _locale = crate::setup::tests::in_locale(code);
+            let mut gui = keep_on(place_view("", "{{GENRE}}/{{ALBUMARTIST}}/{{ALBUM}}"));
+            choose(&mut gui, Some("album"));
+            let view = gui.app.keep_view().expect("the window");
+            let note = super::slot_note(view.landing.as_ref().expect("a place")).expect("a slot's note");
+            let low = super::lower(&view, super::Shown::default(), 72, super::Fit::default());
+            let rows: Vec<(String, Option<String>)> = low
+                .iter()
+                .filter_map(|line| match line {
+                    super::Low::Text { runs, tip, .. } => Some((runs.iter().map(|(t, _)| t.as_str()).collect(), tip.clone())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rows.len(), 2, "{code}: {rows:?}");
+            let slot = format!("‹{}›", rust_i18n::t!("gui.discover.dest.slot_genre"));
+            assert!(crate::kit::width(&rows[0].0) > crate::kit::width(&slot) + 2, "{code}: the first row filled: {rows:?}");
+            assert!(rows.iter().all(|(row, _)| crate::kit::width(row) <= 72), "{code}: {rows:?}");
+            match &rows[0].1 {
+                None => assert_eq!(format!("{}{}", rows[0].0, rows[1].0).replace(' ', ""), note.replace(' ', ""), "{code}"),
+                Some(tip) => assert!(tip == &note && rows[1].0.ends_with('…'), "{code}: {rows:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn esc_while_adding_still_says_how_the_start_went() {
+        let _en = english();
+        // C9 → Esc: the start lands all the same, and the status line says
+        // what came of it, the window that would have being gone (clause
+        // 118).
+        let answered = |answer: Result<PluginJob, crate::api::PluginFailure>| {
+            let mut gui = keep_in("C9");
+            let ticket = gui.pending.iter().rev().find_map(|e| match e {
+                Effect::Api(ApiCmd::JobStart { ticket, .. }) => Some(*ticket),
+                _ => None,
+            });
+            key(&mut gui, KeyCode::Esc);
+            assert!(gui.app.taste.keep.flow.is_none(), "Esc closes while it is out");
+            draw(&mut gui, 100, 30);
+            assert!(gui.app.message.is_none(), "nothing yet: {:?}", gui.app.message);
+            let generation = gui.app.session_gen();
+            let answer = answer.map(|job| Box::new(crate::api::types::JobStarted { job, created: true }));
+            apply(&mut gui, Event::JobStarted { ticket: ticket.expect("a start"), generation, answer });
+            draw(&mut gui, 100, 30);
+            gui.app.message.clone().map(|m| (m.text, m.kind))
+        };
+        use crate::tui::app::MessageKind;
+        assert_eq!(answered(Ok(job(92, &late(), Some("album"), "queued", json!({})))), Some(("copying Borrowed Tapes…".into(), MessageKind::Busy)));
+        // Refused — in the server's words, as a start from the Copies list
+        // is; the note's cells clip them, the window being gone.
+        assert_eq!(
+            answered(Err(crate::api::PluginFailure::Refused { status: 429, words: "too many".into() })),
+            Some(("couldn't start: too many".into(), MessageKind::Error))
+        );
+        assert_eq!(
+            answered(Err(crate::api::PluginFailure::Refused { status: 403, words: "you have 20 jobs queued or running".into() })),
+            Some(("couldn't start: you have 20 j…".into(), MessageKind::Error))
+        );
+    }
+
+    #[test]
+    fn the_cover_holds_its_pixels_while_the_window_grows_and_its_title_stops_short_of_it() {
+        use ratatui_image::picker::ProtocolType;
+        let _en = english();
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let art = crate::tui::art::decode(&bytes.into_inner()).unwrap();
+        // C2 → C1b: the sizes land and the window grows a row; its own
+        // footprint, last frame's too, is never an overlay over the cover —
+        // no ▀ frame between.
+        let mut gui = canvas_gui(&[]);
+        draw(&mut gui, 100, 30);
+        super::open(&mut gui, TILE);
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        gui.app.art.insert("bt.jpg".into(), Some(art));
+        let long = "The Extremely Long Album Title Of The Night Sessions And The Morning After";
+        if let Some(flow) = gui.app.taste.keep.flow.as_mut() {
+            flow.subject.art = Some("bt.jpg".into());
+            flow.subject.album = Some(long.into());
+        }
+        let pixel = |buffer: &Buffer| buffer[(89, 7)].symbol().contains('\u{10EEEE}');
+        let first = buffer(&mut gui, 100, 30);
+        assert!(pixel(&first), "pixels: {:?}", first[(89, 7)].symbol());
+        let height = modal_rows(&lines(&first)).len();
+        board_facts(&mut gui);
+        let grown = buffer(&mut gui, 100, 30);
+        assert_eq!(modal_rows(&lines(&grown)).len(), height + 1, "the box came in");
+        assert!(pixel(&grown), "still pixels after the window grew: {:?}", grown[(89, 7)].symbol());
+        // Beside the cover the title has 67 cells: clipped at x 87, a blank
+        // before the picture.
+        assert_eq!((grown[(87, 7)].symbol(), grown[(88, 7)].symbol()), ("…", " "));
+        assert_eq!(grown[(21, 7)].symbol(), "T");
+    }
+
+    #[test]
+    fn a_key_acts_only_where_the_frame_drew_its_word() {
+        let _en = english();
+        // E7 drew `d change` and `c choose again`. A frame that drew one of
+        // them only (the give-way's last resort took the other's row) leaves
+        // the other inert, its tip gone too.
+        let mut gui = keep_in("E7");
+        draw(&mut gui, 100, 30);
+        let (view, shown, keys) = gui.discover.keep.drawn.clone().expect("the frame drew");
+        assert_eq!(keys, [super::KeyWord::Change, super::KeyWord::Choose]);
+        gui.discover.keep.drawn = Some((view, shown, vec![super::KeyWord::Choose]));
+        assert_eq!(super::super::discover::tips(&gui), "Enter close · c choose again · Esc close");
+        key(&mut gui, KeyCode::Char('d'));
+        assert!(gui.discover.keep.dest.is_none(), "d's word was not drawn");
+        key(&mut gui, KeyCode::Char('c'));
+        assert!(matches!(gui.app.keep_view().unwrap().stage, super::KeepStage::Choose { .. }));
+        // A view the frame did not draw (the state moved since): the table's
+        // own words.
+        let mut gui = keep_in("E7");
+        draw(&mut gui, 100, 30);
+        let stale = keep_in("E1").app.keep_view().unwrap();
+        gui.discover.keep.drawn = Some((stale, super::Shown::default(), Vec::new()));
+        key(&mut gui, KeyCode::Char('d'));
+        assert!(gui.discover.keep.dest.is_some());
+    }
+
+    #[test]
+    fn another_servers_copy_a_start_answered_with_leaves_the_choice_movable() {
+        let _en = english();
+        // Add album answered `200 created: false` with Stage Peer C's live
+        // copy: O1, as a lookup that found it first draws it — and ↓ to a
+        // scope it does not cover brings Add back, the two lines gone.
+        let mut gui = opened(TILE);
+        let rooftop = fed(C, "Rooftop Cypher", "Boukmanflow", "Borrowed Tapes", 0.6, Some(12.0));
+        let theirs = job(40, &rooftop, Some("album"), "running", json!({ "progress": 0.3 }));
+        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
+        let ticket = gui.pending.iter().rev().find_map(|e| match e {
+            Effect::Api(ApiCmd::JobStart { ticket, .. }) => Some(*ticket),
+            _ => None,
+        });
+        let generation = gui.app.session_gen();
+        let answer = Ok(Box::new(crate::api::types::JobStarted { job: theirs, created: false }));
+        apply(&mut gui, Event::JobStarted { ticket: ticket.expect("a start"), generation, answer });
+        assert_eq!(window_of(&mut gui), modal_rows(&draw(&mut keep_in("O1"), 100, 30)));
+        key(&mut gui, KeyCode::Down);
+        let low = lower_rows(&draw(&mut gui, 100, 30));
+        assert_eq!(low[5..8], [
+            "│ Files go to copies › Boukmanflow › one folder per album         d change │",
+            "│                                                                          │",
+            "│                                                         [ Add 2 albums ] │",
+        ], "{}", low.join("\n"));
+        key(&mut gui, KeyCode::Up);
+        assert!(window_of(&mut gui).iter().any(|r| r.contains("Copying from Stage Peer C")));
+    }
+
+    #[test]
+    fn under_where_copies_land_no_tooltip_of_the_rooms_stands() {
+        let _en = english();
+        // The picker in Keep a copy's place: every tooltip registered is
+        // its own, inside its frame — none of the room's to ripen first.
+        let mut gui = keep_in("C1b");
+        key(&mut gui, KeyCode::Char('d'));
+        land_folders(&mut gui);
+        let rows = draw(&mut gui, 100, 30);
+        let top = rows.iter().position(|r| r.contains("Where copies land") && r.contains("[X]")).expect("the picker") as u16 - 1;
+        let frame = ratatui::layout::Rect { x: 10, y: top, width: super::DEST_W, height: picker_rows(&rows).len() as u16 };
+        assert!(gui.ui.tips.iter().all(|(rect, _)| frame.contains(Position { x: rect.x, y: rect.y })), "{:?}", gui.ui.tips);
+        assert_eq!(ripe(&mut gui, Position { x: 2, y: 9 }), None, "the nav beneath");
+    }
+
+    #[test]
+    fn whose_copy_spoke_follows_a_sub_lowercase_and_stands_alone_raised() {
+        let _en = english();
+        let mut view = keep_in("E18").app.keep_view().expect("the window");
+        assert_eq!(view.borrowed, Some(crate::api::types::JobScope::Album));
+        assert_eq!(super::with_borrowed(None, &view).as_deref(), Some("With your album copy"));
+        assert_eq!(
+            super::with_borrowed(Some("Your library already has this song".into()), &view).as_deref(),
+            Some("Your library already has this song · with your album copy")
+        );
+        view.borrowed = Some(crate::api::types::JobScope::ArtistMissing);
+        assert_eq!(super::with_borrowed(Some("3 copied".into()), &view).as_deref(), Some("3 copied · with your copy of Boukmanflow's missing albums"));
+    }
+
+    #[test]
+    fn an_ended_tips_line_gives_d_way_before_c() {
+        let _en = english();
+        let keys = [super::KeyWord::Change, super::KeyWord::Choose];
+        assert_eq!(super::ended_tips("close", &keys), "Enter close · d where files land · c choose again · Esc close");
+        // Past the footer's 99 cells: d goes first…
+        let line = super::ended_tips(&"x".repeat(60), &keys);
+        assert!(line.contains("c choose again") && !line.contains("d where files land"), "{line}");
+        // …then c.
+        let line = super::ended_tips(&"x".repeat(75), &keys);
+        assert!(!line.contains("c choose again") && !line.contains("d where files land"), "{line}");
+    }
+
+    fn counts(copied: u64, skipped: u64, failed: u64, stopped: Option<&str>) -> Value {
+        json!({ "result": { "scope": "album", "counts": { "total": 3, "copied": copied, "skipped": skipped, "failed": failed }, "stopped": stopped } })
     }
 
     /// The room on Connected servers with one compilation, Mixtape Vol 1
@@ -5259,32 +7749,6 @@ pub(crate) mod tests {
         (gui, kim)
     }
 
-    #[test]
-    fn a_compilation_tile_copies_the_whole_album_by_its_row_unchanged() {
-        let _en = english();
-        // The user's 2026-10-19 decision: a row carrying albumArtist groups
-        // as one tile credited to it, offers Album alone (never "Every album
-        // by" the track artist) and sends the row unchanged.
-        let (mut gui, kim) = mixtape_gui();
-        let rows = draw(&mut gui, 100, 30);
-        assert!(room(&rows, 11).starts_with("Mixtape Vol…") && room(&rows, 12).starts_with("Various Art…"), "one tile, its credit:\n{}", rows.join("\n"));
-        assert!(!room(&rows, 11).contains("Mixtape Vol… Mixtape"), "never one per track artist");
-        super::open(&mut gui, KeepTarget::Tile(0));
-        land_facts(&mut gui, Some(2), &[], &[]);
-        let rows = draw(&mut gui, 100, 30);
-        let modal = modal_rows(&rows);
-        assert!(modal[4].contains("Various Artists · 2019 · from Stage Peer B"), "{}", modal.join("\n"));
-        let low = lower_rows(&rows);
-        assert_eq!(low[0], "│ WHAT      (•) Album                       2 songs              │");
-        assert!(!low.iter().any(|r| r.contains("Every album by")), "no artist copy from a compilation's tile");
-        // The server's default layout files it by the album's credit: the
-        // compilation stays in one folder.
-        assert_eq!(low[2], "│ LANDS IN  copies › Various Artists › Mixtape Vol 1             │");
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
-        let sent = starts(&gui);
-        assert_eq!(sent, vec![(kim, crate::api::types::JobScope::Album)], "the best row, unchanged, scope album");
-    }
-
     /// The album's listing, landed with these songs' own tags.
     fn land_songs(gui: &mut Gui, songs: &[(&str, &str)]) {
         let ask = gui.pending.iter().rev().find_map(|e| match e {
@@ -5311,276 +7775,6 @@ pub(crate) mod tests {
         view["destination"]["layout"] = json!(layout);
         view["saved"]["layout"] = json!(layout);
         view
-    }
-
-    #[test]
-    fn a_compilations_album_draws_each_songs_artist_as_a_slot_with_its_note_in_the_tooltip() {
-        let _en = english();
-        // The 2026-10-22 bug: "copies › From friends › Boukmanflow" for an
-        // album whose songs the server files under each one's own artist.
-        let note = "‹artist› comes from each song's own tags, so these songs can land in more than one folder.";
-        let (mut gui, kim) = mixtape_gui();
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        land_read(&mut gui, layout_view("From friends/{{ARTIST}}"));
-        // Before the listing answers, and once it names two artists: the slot.
-        for listing in [None, Some(&[("Kim Song", "Peer Kim"), ("Lou Song", "Peer Lou")])] {
-            if let Some(songs) = listing {
-                land_songs(&mut gui, songs);
-            }
-            let buffer = buffer(&mut gui, 100, 30);
-            let rows = lines(&buffer);
-            let low = lower_rows(&rows);
-            assert_eq!(
-                low[1..4].to_vec(),
-                canvas(&[
-                    "│                                                                │",
-                    "│ LANDS IN  copies › From friends › ‹artist›                     │",
-                    "│           saved for your account                   [ Change… ] │",
-                ]),
-                "{}",
-                low.join("\n")
-            );
-            // DIM, as "one folder per album" — a hint, never a folder's name.
-            assert_eq!(fg(&buffer, at(&rows, "‹artist›")), th().dim);
-            assert_ne!(fg(&buffer, at(&rows, "From friends")), th().dim);
-            let y = at_row(&rows, "‹artist›");
-            assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == note), "{:?}", gui.ui.tips);
-        }
-        // The picker's preview draws the same, its note on the row under
-        // the path (clipped at the border, whole in its tooltip).
-        key(&mut gui, KeyCode::Char('d'));
-        let rows = draw(&mut gui, 100, 30);
-        let picker = picker_rows(&rows);
-        let path = picker.iter().position(|r| r.contains("copies › From friends › ‹artist›")).expect("the preview");
-        assert_eq!(picker[path..path + 2].to_vec(), boxed(&["", " copies › From friends › ‹artist›", " ‹artist› comes from each song's own tags, so these songs can land in more t…"])[2..4].to_vec(), "{}", picker.join("\n"));
-        let y = at_row(&rows, "‹artist› comes from");
-        assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == note), "{:?}", gui.ui.tips);
-        key(&mut gui, KeyCode::Esc);
-        // Starting and queued: the place sent, then the job's pin — the slot stands.
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
-        let rows = draw(&mut gui, 100, 30);
-        assert_eq!(lower_rows(&rows)[1], "│ LANDS IN  copies › From friends › ‹artist›                     │");
-        let ticket = gui.pending.iter().rev().find_map(|e| match e {
-            Effect::Api(ApiCmd::JobStart { ticket, .. }) => Some(*ticket),
-            _ => None,
-        });
-        let mut queued = job(92, &kim, Some("album"), "queued", json!({}));
-        queued.params.destination = Some(Some(serde_json::from_value(layout_view("From friends/{{ARTIST}}")["destination"].clone()).unwrap()));
-        let generation = gui.app.session_gen();
-        let answer = Ok(Box::new(crate::api::types::JobStarted { job: queued, created: true }));
-        apply(&mut gui, Event::JobStarted { ticket: ticket.expect("a start"), generation, answer });
-        let rows = draw(&mut gui, 100, 30);
-        let low = lower_rows(&rows);
-        assert_eq!(low[1], "│ LANDS IN  copies › From friends › ‹artist›                     │", "{}", low.join("\n"));
-        assert!(low.iter().any(|r| r.contains("waiting")), "{}", low.join("\n"));
-        // Every song by one artist: that folder, no slot and no note.
-        let (mut gui, _) = mixtape_gui();
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        land_read(&mut gui, layout_view("From friends/{{ARTIST}}"));
-        land_songs(&mut gui, &[("Kim Song", "Peer Kim"), ("Kim Two", "Peer Kim")]);
-        let rows = draw(&mut gui, 100, 30);
-        assert_eq!(lower_rows(&rows)[2], "│ LANDS IN  copies › From friends › Peer Kim                     │");
-        assert!(!gui.ui.tips.iter().any(|(_, tip)| tip.contains("own tags")), "{:?}", gui.ui.tips);
-    }
-
-    #[test]
-    fn retry_adds_to_draws_a_genre_slot_and_its_note_names_the_folder_a_song_leaves_out() {
-        let _en = english();
-        // An album copy pinned to the library default failed; the account
-        // has saved a layout by genre since — no song's genre is known here.
-        let mut gui = row_in("failed", Some("album"), json!({ "error": "Stage Peer B is unreachable" }));
-        land_read(&mut gui, layout_view("{{GENRE}}/{{ARTIST}} - {{YEAR}}"));
-        let rows = draw(&mut gui, 100, 30);
-        let low = lower_rows(&rows);
-        assert_eq!(
-            low[1..3].to_vec(),
-            canvas(&[
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│           retry adds to copies › ‹genre› › Boukmanflow - 2019  │",
-            ]),
-            "{}",
-            low.join("\n")
-        );
-        let note = "‹genre› comes from each song's own tags, so these songs can land in more than one folder (a song with none leaves that folder out).";
-        let y = at_row(&rows, "retry adds to");
-        assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == note), "{:?}", gui.ui.tips);
-        assert!(
-            !gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y: y - 1 }) && tip.contains("own tags")),
-            "the pinned place has no slot, so no note: {:?}",
-            gui.ui.tips
-        );
-        // The legacy console draws the slot in its own brackets.
-        let _legacy = crate::kit::theme::legacy_glyphs_here();
-        let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("retry adds to copies > <genre> > Boukmanflow - 2019")), "{}", rows.join("\n"));
-    }
-
-    #[test]
-    fn an_album_spread_over_the_servers_folders_draws_a_slot_with_its_own_note() {
-        let _en = english();
-        // Mixtape Vol 1 on Stage Peer B sits in each artist's own folder.
-        let keep = |layout: &str, songs: Option<&[(&str, &str)]>| {
-            let (mut gui, _) = mixtape_gui();
-            draw(&mut gui, 100, 30);
-            super::open(&mut gui, KeepTarget::Tile(0));
-            land_read(&mut gui, layout_view(layout));
-            if let Some(songs) = songs {
-                land_songs(&mut gui, songs);
-            }
-            gui
-        };
-        let lands = |gui: &mut Gui| {
-            let rows = draw(gui, 100, 30);
-            let low = lower_rows(&rows);
-            low.iter().find(|r| r.contains("LANDS IN")).cloned().unwrap_or_else(|| panic!("no LANDS IN: {}", low.join("\n")))
-        };
-        let tip_at = |gui: &Gui, y: u16| gui.ui.tips.iter().find(|(rect, _)| rect.contains(Position { x: 40, y })).map(|(_, tip)| tip.clone());
-        let two = [("Kim Song", "Peer Kim"), ("Lou Song", "Peer Lou")];
-        // Before the listing answers: the tile's row's own folders.
-        let mut gui = keep("From friends/{{SERVERFOLDER}}", None);
-        assert_eq!(lands(&mut gui), format!("│{:<64}│", " LANDS IN  copies › From friends › Peer Kim › Mixtape Vol 1"));
-        // The listing puts its songs in two folders: the slot, DIM, and its
-        // note in the path's tooltip.
-        let mut gui = keep("From friends/{{SERVERFOLDER}}", Some(&two[..]));
-        assert_eq!(lands(&mut gui), format!("│{:<64}│", " LANDS IN  copies › From friends › ‹server folder›"));
-        let buffer = buffer(&mut gui, 100, 30);
-        let rows = lines(&buffer);
-        assert_eq!(fg(&buffer, at(&rows, "‹server folder›")), th().dim);
-        let note = "‹server folder› comes from where each song sits on the server, so these songs can land in more than one folder.";
-        assert_eq!(tip_at(&gui, at_row(&rows, "LANDS IN")).as_deref(), Some(note));
-        // Beside the tags' slots one sentence names both: the tags first, in
-        // the path's order, their number picking the verb, then the server
-        // folder; with a genre, the folder a song with none leaves out.
-        let mut gui = keep("{{SERVERFOLDER}}/{{ARTIST}}", Some(&two[..]));
-        assert_eq!(lands(&mut gui), format!("│{:<64}│", " LANDS IN  copies › ‹server folder› › ‹artist›"));
-        let rows = draw(&mut gui, 100, 30);
-        let note = "‹artist› comes from each song's own tags and ‹server folder› from where it sits on the server, so these songs can land in more than one folder.";
-        assert_eq!(tip_at(&gui, at_row(&rows, "LANDS IN")).as_deref(), Some(note));
-        let mut gui = keep("{{GENRE}}/{{SERVERFOLDER}}", Some(&two[..]));
-        let rows = draw(&mut gui, 100, 30);
-        let note = "‹genre› comes from each song's own tags and ‹server folder› from where it sits on the server, so these songs can land in more than one folder (a song with none leaves that folder out).";
-        assert_eq!(tip_at(&gui, at_row(&rows, "LANDS IN")).as_deref(), Some(note));
-        let mut gui = keep("{{ARTIST}}/{{SERVERFOLDER}}/{{GENRE}}", Some(&two[..]));
-        let rows = draw(&mut gui, 100, 30);
-        let note = "‹artist›, ‹genre› come from each song's own tags and ‹server folder› from where it sits on the server, so these songs can land in more than one folder (a song with none leaves that folder out).";
-        assert_eq!(tip_at(&gui, at_row(&rows, "LANDS IN")).as_deref(), Some(note));
-        // The phone's words in another locale, its plural picked by the tags.
-        {
-            struct English;
-            impl Drop for English {
-                fn drop(&mut self) {
-                    rust_i18n::set_locale("en");
-                }
-            }
-            let _back = English;
-            rust_i18n::set_locale("pl");
-            let mut gui = keep("{{SERVERFOLDER}}/{{ARTIST}}", Some(&two[..]));
-            let rows = draw(&mut gui, 100, 30);
-            let note = "‹wykonawca› pochodzi ze znaczników każdego utworu, a ‹folder z serwera› z miejsca, w którym leży on na serwerze, więc te utwory mogą trafić do więcej niż jednego folderu.";
-            assert_eq!(tip_at(&gui, at_row(&rows, "TRAFI DO")).as_deref(), Some(note));
-        }
-        // Every song in one folder: that folder, no note.
-        let mut gui = keep("From friends/{{SERVERFOLDER}}", Some(&[("Kim Song", "Peer Kim"), ("Kim Two", "Peer Kim")][..]));
-        assert_eq!(lands(&mut gui), format!("│{:<64}│", " LANDS IN  copies › From friends › Peer Kim › Mixtape Vol 1"));
-        let rows = draw(&mut gui, 100, 30);
-        assert_eq!(tip_at(&gui, at_row(&rows, "LANDS IN")), None);
-        // The song: its own folders, inside the folder's words — never a slot.
-        let mut gui = keep_on(layout_view("Copy of {{SERVERFOLDER}}"));
-        let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("LANDS IN  copies › Copy of Boukmanflow › Borrowed Tapes")), "{}", rows.join("\n"));
-        assert_eq!(tip_at(&gui, at_row(&rows, "LANDS IN")), None);
-        // The legacy console's brackets.
-        let _legacy = crate::kit::theme::legacy_glyphs_here();
-        let mut gui = keep("{{SERVERFOLDER}}", Some(&two[..]));
-        assert!(draw(&mut gui, 100, 30).iter().any(|r| r.contains("LANDS IN  copies > <server folder>")));
-    }
-
-    #[test]
-    fn another_servers_live_copy_hides_the_primary_never_greys_it() {
-        let _en = english();
-        // Stage Peer C copies Borrowed Tapes; Stage Peer B's tile reads so.
-        let rooftop = fed(C, "Rooftop Cypher", "Boukmanflow", "Borrowed Tapes", 0.6, Some(12.0));
-        let theirs = job(40, &rooftop, Some("album"), "running", json!({ "progress": 0.3 }));
-        let mut gui = canvas_gui(&[theirs]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        stage_facts(&mut gui);
-        let buffer = buffer(&mut gui, 100, 30);
-        let rows = lines(&buffer);
-        assert_eq!(
-            lower_rows(&rows),
-            canvas(&[
-                "│ WHAT      (•) Album                       3 songs              │",
-                "│           ( ) Every album by Boukmanflow  1 album · you have 3 │",
-                "│               [ ] Only the albums you don't have               │",
-                "│                                                                │",
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│           the library's default                    [ Change… ] │",
-                "│                                                                │",
-                "│ Stage Peer C is already copying this album — you can add       │",
-                "│ Stage Peer B's once it ends                                    │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])
-        );
-        assert_eq!(fg(&buffer, at(&rows, "Stage Peer C is already")), th().accent);
-        assert_eq!(super::super::discover::tips(&gui), "↑ ↓ rows · Space or Enter pick · d where files land · Esc close");
-        key(&mut gui, KeyCode::Enter);
-        assert!(starts(&gui).is_empty(), "no primary, no start");
-        // The tile itself wears none of Stage Peer C's copy.
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Close)));
-        let rows = draw(&mut gui, 100, 30);
-        assert!(room(&rows, 12).starts_with("Boukmanflow"), "{}", rows[12]);
-    }
-
-    #[test]
-    fn the_modal_at_the_floor_is_centred_with_every_row() {
-        let _en = english();
-        let mut gui = canvas_gui(&[]);
-        gui.config.gui.key_hints = true;
-        gui.ui.key_hints = true;
-        draw(&mut gui, 100, 24);
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        let rows = draw(&mut gui, 100, 24);
-        // 17 rows, its top on row 3 (anchored as if 17: TermDestination's
-        // floor), its bottom over the bar's seek row.
-        assert_eq!(rows[3].chars().nth(17), Some('╭'), "{}", rows.join("\n"));
-        assert_eq!(rows[19].chars().nth(17), Some('╰'), "{}", rows.join("\n"));
-        assert!(rows[23].starts_with(" ↑ ↓ rows · Space or Enter pick · Enter on Add song starts · d where files land · Esc close"), "the tips row");
-    }
-
-    #[test]
-    fn the_legacy_console_frames_the_modal_in_ascii_and_says_the_bar_in_words() {
-        let _en = english();
-        let _legacy = crate::kit::theme::legacy_glyphs_here();
-        let mut gui = canvas_gui(&[]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Missing)));
-        let rows = draw(&mut gui, 100, 30);
-        let modal: Vec<String> = rows[6..23].iter().map(|r| r.chars().skip(17).take(66).collect()).collect();
-        assert_eq!(modal[0], "+----------------------------------------------------------------+");
-        assert_eq!(modal[1], "| Keep a copy                                                 [X]|");
-        assert!(modal[5].ends_with("* online                                                |"));
-        assert_eq!(modal[7], "| WHAT      ( ) This song                   0:08 · mp3           |");
-        assert_eq!(modal[9], "|           (*) Every album by Boukmanflow  1 album · you have 3 |");
-        assert_eq!(modal[10], "|               [x] Only the albums you don't have               |");
-        assert_eq!(modal[12], "| LANDS IN  copies > Boukmanflow > Borrowed Tapes                |");
-        assert_eq!(modal[13], "|           the library's default                  [ Change... ] |");
-        assert_eq!(modal[15], "|                                     [ Cancel ] [ Add 1 album ] |");
-        assert_eq!(modal[16], "+----------------------------------------------------------------+");
-        // The running copy's bar row says its percentage in words.
-        let late = fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0));
-        let mut gui = canvas_gui(&[]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, KeepTarget::Tile(0));
-        stage_facts(&mut gui);
-        start(&mut gui, Ok(job(91, &late, Some("album"), "running", json!({ "progress": 0.52, "statusText": "song 2 of 3 · Late Train Verse" }))));
-        let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("| 52% done ")), "{}", rows.join("\n"));
     }
 
     // ── Status notes (clause 118) ───────────────────────────────────────
@@ -5792,92 +7986,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_start_sends_the_place_lands_in_drew_and_a_changed_one_starts_nothing() {
-        let _en = english();
-        let mut gui = canvas_gui(&[]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        land_read(&mut gui, dest_view("", "user"));
-        draw(&mut gui, 100, 30);
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
-        let (ticket, shown) = gui
-            .pending
-            .iter()
-            .find_map(|e| match e {
-                Effect::Api(ApiCmd::JobStart { ticket, destination, .. }) => Some((*ticket, destination.clone())),
-                _ => None,
-            })
-            .expect("a start");
-        let shown = shown.flatten().expect("the place shown");
-        assert_eq!((shown.vpath.as_str(), shown.base.as_str(), shown.layout.as_str()), ("copies", "", "{{ALBUMARTIST}}/{{ALBUM}}"));
-        // 409 destination_changed (F7): LANDS IN redrawn from the answer, one
-        // GOLD line, nothing started; the view is read again.
-        gui.pending.clear();
-        let music: crate::api::types::CollectionDestination =
-            serde_json::from_value(json!({ "vpath": "music", "base": "", "layout": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", "source": "default" })).unwrap();
-        let generation = gui.app.session_gen();
-        apply(&mut gui, Event::JobStarted { ticket, generation, answer: Err(crate::api::PluginFailure::DestinationChanged(Some(Some(music)))) });
-        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::DestinationRead { .. }))), "read again");
-        let buffer = buffer(&mut gui, 100, 30);
-        let rows = lines(&buffer);
-        assert_eq!(
-            lower_rows(&rows)[4..],
-            canvas(&[
-                "│                                                                │",
-                "│ LANDS IN  music › Boukmanflow › 2019 - Borrowed Tapes          │",
-                "│           the library's default                    [ Change… ] │",
-                "│ where files land changed · check the path above and add again  │",
-                "│                                        [ Cancel ] [ Add song ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])[..]
-        );
-        assert_eq!(fg(&buffer, at(&rows, "where files land changed")), th().gold);
-        let song = at(&rows, "This song");
-        assert_eq!((fg(&buffer, song), bold(&buffer, song)), (th().accent, true), "the hand back on the chosen radio");
-        assert!(matches!(gui.app.keep_view().unwrap().stage, crate::tui::app::keep::KeepStage::Refused { .. }));
-        // Add again sends the place now drawn.
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
-        let again = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::JobStart { destination, .. }) => destination.clone().flatten(),
-            _ => None,
-        });
-        assert_eq!(again.map(|d| d.vpath), Some("music".into()));
-    }
-
-    #[test]
-    fn nowhere_to_put_a_file_leaves_one_plain_line_and_close() {
-        let _en = english();
-        let mut gui = canvas_gui(&[]);
-        draw(&mut gui, 100, 30);
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        land_read(&mut gui, json!({ "destination": null, "libraries": [] }));
-        let buffer = buffer(&mut gui, 100, 30);
-        let rows = lines(&buffer);
-        let modal = modal_rows(&rows);
-        assert_eq!(modal.len(), 11, "{}", modal.join("\n"));
-        assert_eq!(rows[6].chars().nth(17), Some('╭'), "the top holds");
-        assert_eq!(
-            modal[7..].to_vec(),
-            canvas(&[
-                "│ your account can't add files to this server · copies are off   │",
-                "│                                                                │",
-                "│                                                      [ Close ] │",
-                "╰────────────────────────────────────────────────────────────────╯",
-            ])
-        );
-        let close = at(&rows, "[ Close ]");
-        assert_eq!((fg(&buffer, close), bold(&buffer, close)), (th().accent, true));
-        assert_eq!(super::super::discover::tips(&gui), "Enter close · Esc close");
-        assert!(!gui.app.keep_gate(), "the copy gate closed: every way in hidden");
-        key(&mut gui, KeyCode::Char('d'));
-        assert!(gui.discover.keep.dest.is_none(), "nowhere to change");
-        key(&mut gui, KeyCode::Enter);
-        assert!(gui.app.taste.keep.flow.is_none());
-    }
-
-    #[test]
     fn a_copies_retry_sends_its_own_pin_and_a_moved_destination_is_its_note() {
         let _en = english();
         let late = fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(8.0));
@@ -5913,151 +8021,9 @@ pub(crate) mod tests {
         gui
     }
 
-    #[test]
-    fn lands_in_wraps_a_long_place_at_a_crumb_the_library_always_showing() {
-        let _en = english();
-        // The Server preset under a base folder of its own: 80 cells of path
-        // in a row of 52 — the second row takes the rest, ` ›` ending the first.
-        let mut view = dest_view("from-peers/2025 archive", "user");
-        view["destination"]["layout"] = json!("{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}");
-        let mut gui = keep_on(view.clone());
-        let rows = draw(&mut gui, 100, 30);
-        let low = lower_rows(&rows);
-        let at = low.iter().position(|r| r.contains("LANDS IN")).expect("LANDS IN");
-        assert_eq!(
-            low[at..at + 3].to_vec(),
-            canvas(&[
-                "│ LANDS IN  copies › from-peers › 2025 archive › Stage Peer B ›  │",
-                "│           Boukmanflow › Borrowed Tapes                         │",
-                "│           saved for your account                   [ Change… ] │",
-            ]),
-            "{}",
-            low.join("\n")
-        );
-        assert!(!gui.ui.tips.iter().any(|(_, tip)| tip.contains("2025 archive")), "nothing cut: no tooltip");
-        // Longer still: the second row is clipped at the right — never the
-        // library — and the whole path is the rows' tooltip.
-        view["destination"]["base"] = json!("from-peers/2025 archive/the long weekend sessions");
-        super::close(&mut gui);
-        super::open(&mut gui, LATE);
-        stage_facts(&mut gui);
-        land_read(&mut gui, view);
-        let rows = draw(&mut gui, 100, 30);
-        let low = lower_rows(&rows);
-        let at = low.iter().position(|r| r.contains("LANDS IN")).expect("LANDS IN");
-        assert_eq!(low[at], "│ LANDS IN  copies › from-peers › 2025 archive ›                 │");
-        assert_eq!(low[at + 1], "│           the long weekend sessions › Stage Peer B › Boukmanf… │");
-        let row = at_row(&rows, "the long weekend sessions");
-        let whole = "copies/from-peers/2025 archive/the long weekend sessions/Stage Peer B/Boukmanflow/Borrowed Tapes";
-        for y in [row - 1, row] {
-            assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == whole), "row {y}: {:?}", gui.ui.tips);
-        }
-    }
-
-    #[test]
-    fn a_clipped_path_with_a_slot_tips_the_whole_path_then_its_note() {
-        let _en = english();
-        // A long base folder and a genre in the layout: the second row is
-        // clipped, so the tooltip is the whole path — the slot in its words —
-        // and then the note, on LANDS IN and on the PREVIEW alike.
-        let mut view = dest_view("from-peers/2025 archive/the long weekend sessions", "user");
-        view["destination"]["layout"] = json!("{{PEER}}/{{GENRE}}/{{ALBUMARTIST}}/{{ALBUM}}");
-        view["saved"]["layout"] = view["destination"]["layout"].clone();
-        let mut gui = keep_on(view);
-        let whole = "copies/from-peers/2025 archive/the long weekend sessions/Stage Peer B/‹genre›/Boukmanflow/Borrowed Tapes";
-        for (choice, note) in [
-            (crate::tui::app::keep::KeepChoice::Song, "‹genre› comes from the song's own tags (a song with none leaves that folder out)."),
-            (
-                crate::tui::app::keep::KeepChoice::Album,
-                "‹genre› comes from each song's own tags, so these songs can land in more than one folder (a song with none leaves that folder out).",
-            ),
-        ] {
-            gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(choice))));
-            let rows = draw(&mut gui, 100, 30);
-            let low = lower_rows(&rows);
-            let at = low.iter().position(|r| r.contains("LANDS IN")).expect("LANDS IN");
-            assert_eq!(
-                low[at..at + 2].to_vec(),
-                canvas(&[
-                    "│ LANDS IN  copies › from-peers › 2025 archive ›                 │",
-                    "│           the long weekend sessions › Stage Peer B › ‹genre› … │",
-                ]),
-                "{}",
-                low.join("\n")
-            );
-            let tip = format!("{whole} — {note}");
-            let row = at_row(&rows, "the long weekend sessions");
-            for y in [row - 1, row] {
-                assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y }) && *t == tip), "row {y}: {:?}", gui.ui.tips);
-            }
-            // The picker's preview: the base folder folded into Custom's
-            // field, the path drawn as the server holds it and clipped
-            // from the left — the whole path its tooltip (a song's file
-            // after it), the note on its own row with its own.
-            key(&mut gui, KeyCode::Char('d'));
-            let rows = draw(&mut gui, 100, 30);
-            let y = at_row(&rows, "‹genre› › Boukmanflow › Borrowed Tapes");
-            assert!(rows[usize::from(y)].contains('…'), "the preview clipped: {}", rows[usize::from(y)]);
-            let file = if choice == crate::tui::app::keep::KeepChoice::Song { "/Late Train Verse.mp3" } else { "" };
-            let path_tip = format!("{whole}{file}");
-            assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y }) && *t == path_tip), "preview: {:?}", gui.ui.tips);
-            assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y: y + 1 }) && *t == note), "the note: {:?}", gui.ui.tips);
-            key(&mut gui, KeyCode::Esc);
-        }
-    }
-
     /// The row a text stands on.
     fn at_row(rows: &[String], text: &str) -> u16 {
         at(rows, text).y
-    }
-
-    #[test]
-    fn a_moved_place_says_where_retry_adds_before_the_press_and_retry_sends_it() {
-        let _en = english();
-        // A copy pinned to the library root failed; the account has saved
-        // copies › from-peers since (another tab).
-        let mut gui = row_in("failed", None, json!({ "error": "Stage Peer B is unreachable" }));
-        land_read(&mut gui, dest_view("from-peers", "user"));
-        let rows = draw(&mut gui, 100, 30);
-        let low = lower_rows(&rows);
-        assert_eq!(
-            low[1..4].to_vec(),
-            canvas(&[
-                "│ LANDS IN  copies › Boukmanflow › Borrowed Tapes                │",
-                "│           retry adds to copies › from-peers › Boukmanflow ›    │",
-                "│           Borrowed Tapes                                       │",
-            ]),
-            "{}",
-            low.join("\n")
-        );
-        let buffer = buffer(&mut gui, 100, 30);
-        let rows = lines(&buffer);
-        assert_eq!(fg(&buffer, at(&rows, "retry adds to")), th().dim);
-        assert!(bold(&buffer, at(&rows, "copies › from-peers")), "the library BOLD");
-        drop(buffer);
-        // Retry sends the place it said — a stale one is the server's 409.
-        gui.pending.clear();
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Primary)));
-        let sent = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::JobStart { destination, .. }) => Some(destination.clone()),
-            _ => None,
-        });
-        let sent = sent.expect("a retry").flatten().expect("a place");
-        assert_eq!((sent.vpath.as_str(), sent.base.as_str()), ("copies", "from-peers"));
-        // Starting: LANDS IN reads that place, and the line has said its piece.
-        let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("LANDS IN  copies › from-peers › Boukmanflow")), "{}", rows.join("\n"));
-        assert!(!rows.iter().any(|r| r.contains("retry adds to")));
-        // Where it has not moved, nothing more is said.
-        let mut gui = row_in("failed", None, json!({ "error": "Stage Peer B is unreachable" }));
-        land_read(&mut gui, destination());
-        let rows = draw(&mut gui, 100, 30);
-        assert!(!rows.iter().any(|r| r.contains("adds to")), "{}", rows.join("\n"));
-        // An album copy with gaps: Copy again says it in its own words.
-        let mut gui = row_in("done", Some("album"), counts(2, 0, 1, None));
-        land_read(&mut gui, dest_view("from-peers", "user"));
-        let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("copy again adds to copies ›")), "{}", rows.join("\n"));
     }
 
     #[test]
@@ -6151,15 +8117,14 @@ pub(crate) mod tests {
         draw(&mut gui, 100, 30);
         super::open(&mut gui, LATE);
         stage_facts(&mut gui);
-        // Opening read the destination again: the answer redraws LANDS IN.
+        // Opening read the destination again: the answer redraws the place
+        // — and only the place: whose it is is the picker's to say (§7).
         land_read(&mut gui, dest_view("", "user"));
         let low = lower_rows(&draw(&mut gui, 100, 30));
-        assert_eq!(low[6], "│           saved for your account                   [ Change… ] │", "{}", low.join("\n"));
-        for _ in 0..4 {
-            key(&mut gui, KeyCode::Down);
-        }
-        assert_eq!(gui.discover.keep.focus, Some(super::Stop::Change));
-        key(&mut gui, KeyCode::Enter);
+        assert_eq!(low[6], "│ Files go to copies › Boukmanflow › Borrowed Tapes               d change │", "{}", low.join("\n"));
+        assert!(!low.iter().any(|r| r.contains("saved for your account")));
+        // No stop to walk to: `d` opens it.
+        key(&mut gui, KeyCode::Char('d'));
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         assert_eq!(picker_rows(&rows), idle("yours"), "{}", rows.join("\n"));
@@ -6203,13 +8168,17 @@ pub(crate) mod tests {
         assert_eq!(gui.ui.hit(cell("[ Save ]")), Some(Act::Guard));
         assert_eq!(tip_at(&gui, cell("[ Save ]")).as_deref(), Some("nothing changed yet"));
         assert_eq!(gui.ui.hit(Position { x: 5, y: 25 }), Some(Act::Guard));
-        // Esc goes back, nothing saved, the hand on Change….
+        // Esc goes back, nothing saved: Keep a copy as it was, the dot where
+        // it was.
         key(&mut gui, KeyCode::Esc);
         assert!(gui.discover.keep.dest.is_none() && saves(&gui).is_empty());
-        assert_eq!(gui.discover.keep.focus, Some(super::Stop::Change));
-        assert!(lower_rows(&draw(&mut gui, 100, 30)).iter().any(|r| r.contains("saved for your account")));
-        // `d` opens it from the choice too; the library's default is tagged so.
-        key(&mut gui, KeyCode::Char('d'));
+        let rows = draw(&mut gui, 100, 30);
+        assert_eq!(lower_rows(&rows), low, "{}", rows.join("\n"));
+        // A click on `d change` opens it too; the library's default is
+        // tagged so.
+        let change = at(&rows, "d change");
+        assert_eq!(gui.ui.hit(change), Some(Act::Disc(DiscAct::Keep(super::KeepAct::Key(super::KeyWord::Change)))));
+        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Key(super::KeyWord::Change))));
         assert!(gui.discover.keep.dest.is_some());
         let mut gui = dest_gui_on(dest_view("", "default"));
         let rows = draw(&mut gui, 100, 30);
@@ -6753,17 +8722,25 @@ pub(crate) mod tests {
         dest_act(&mut gui, super::DestAct::Folders);
         let held = ui(&gui);
         assert!(held.custom && held.vpath == "copies" && held.text.value() == "From friends/{{ARTIST}}/{{ALBUM}}" && held.list.is_none(), "nothing edits while the save is out");
-        // Saved: Keep a copy shows the new place, saved for the account, the
-        // hand on Change….
+        // Saved: Keep a copy, the place redrawn from the saved one — its
+        // evidence, nothing else announces it — `d change` beside its last
+        // crumb, which the row no longer holds with it.
         let mut saved = dest_view("", "user");
         saved["destination"]["layout"] = json!("From friends/{{ARTIST}}/{{ALBUM}}");
         land_save(&mut gui, Ok(saved));
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let low = lower_rows(&lines(&buffer));
-        assert_eq!(low[5], "│ LANDS IN  copies › From friends › Boukmanflow › Borrowed Tapes │");
-        assert_eq!(low[6], "│           saved for your account                   [ Change… ] │");
+        assert_eq!(
+            low[6..8].to_vec(),
+            canvas(&[
+                "│ Files go to copies › From friends › Boukmanflow ›                        │",
+                "│   Borrowed Tapes                                                d change │",
+            ]),
+            "{}",
+            low.join("\n")
+        );
+        assert!(!low.iter().any(|r| r.contains("saved for your account")));
         assert!(gui.discover.keep.dest.is_none());
-        assert_eq!(gui.discover.keep.focus, Some(super::Stop::Change));
         // Refused: the server's words as sent (no prefix, as the webapp
         // draws them) GOLD under the field, three rows at most, the fields
         // as they were, the hand back in the field; an edit clears them.
@@ -7339,7 +9316,7 @@ pub(crate) mod tests {
         assert!(gui.discover.keep.dest.is_some(), "never closed by another picker's answer");
         key(&mut gui, KeyCode::Esc);
         let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("LANDS IN  music › Boukmanflow ›")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("Files go to music › Boukmanflow ›")), "{}", rows.join("\n"));
     }
 
     /// The destination read again (another tab saved one), answered as
@@ -7682,13 +9659,10 @@ pub(crate) mod tests {
             "gui.tips.discover_tile_list",
             "gui.tips.discover_tile_list_keep",
             "gui.tips.discover_keep_close",
-            "gui.tips.discover_keep_queued",
-            "gui.tips.discover_keep_running",
-            "gui.tips.discover_keep_play",
-            "gui.tips.discover_keep_again",
-            "gui.tips.discover_keep_retry",
-            "gui.tips.discover_keep_start_again",
+            "gui.tips.discover_keep_live",
             "gui.tips.discover_keep_yours",
+            "gui.tips.discover_keep_choose",
+            "gui.tips.discover_keep_one",
             "gui.tips.discover_keep_other",
             "gui.tips.discover_dest_library",
             "gui.tips.discover_dest_library_save",
@@ -7711,18 +9685,35 @@ pub(crate) mod tests {
                 let line = rust_i18n::t!(key, locale = code).to_string();
                 assert!(crate::kit::width(&line) <= 99, "{code}: {key} is {} cells: {line}", crate::kit::width(&line));
             }
-            // The choice's tip with each verb: "d where files land" gives
-            // way first where the line would outgrow the footer — never in
-            // English.
+            // The choice's lines carry their fragments whole in every locale,
+            // for the code finds them by their words — "d where files land"
+            // gives way first where a line outgrows the footer (never in
+            // English), `x cancel that copy` while its cancel is out, "↑ ↓
+            // choose" with one choice.
             let d = rust_i18n::t!("gui.tips.discover_keep_d", locale = code).to_string();
-            for verb in ["add_song", "add_album", "add_artist"] {
-                let key = format!("gui.discover.keep.{verb}");
-                let verb = rust_i18n::t!(key.as_str(), locale = code).to_string();
-                let whole = rust_i18n::t!("gui.tips.discover_keep_choose", locale = code, verb = verb).to_string();
-                assert!(whole.contains(&format!(" · {d} · ")), "{code}: the fragment stands whole: {whole}");
-                let line = super::fit_tips(whole.clone(), &d);
+            let arrows = rust_i18n::t!("gui.tips.discover_keep_arrows", locale = code).to_string();
+            let x = rust_i18n::t!("gui.discover.keep.key_cancel_other", locale = code).to_string();
+            for key in ["gui.tips.discover_keep_choose", "gui.tips.discover_keep_one", "gui.tips.discover_keep_other"] {
+                let whole = rust_i18n::t!(key, locale = code).to_string();
+                assert!(whole.contains(&format!(" · {d} · ")), "{code}: d stands whole: {whole}");
+                let line = super::fit_tips(whole.clone(), std::slice::from_ref(&d));
                 assert!(crate::kit::width(&line) <= 99, "{code}: {} cells: {line}", crate::kit::width(&line));
                 assert!(code != "en" || line == whole, "English keeps d: {line}");
+            }
+            let other = rust_i18n::t!("gui.tips.discover_keep_other", locale = code).to_string();
+            assert!(other.starts_with(&format!("{arrows} · ")) && other.contains(&format!(" · {x} · ")), "{code}: {other}");
+            // An ended copy's composed line, its widest: Enter's verb, every
+            // key word an outcome draws, Esc.
+            let keys = ["gui.tips.discover_keep_d", "gui.discover.keep.key_queue", "gui.discover.keep.key_choose"];
+            for verb in ["tip_play", "tip_retry", "tip_close", "tip_add_again"] {
+                let key = format!("gui.discover.keep.{verb}");
+                let verb = rust_i18n::t!(key.as_str(), locale = code).to_string();
+                let mut parts = vec![rust_i18n::t!("gui.tips.discover_keep_enter", locale = code, verb = verb).to_string()];
+                parts.extend(keys.iter().map(|k| rust_i18n::t!(*k, locale = code).to_string()));
+                parts.push(rust_i18n::t!("gui.tips.discover_keep_esc", locale = code).to_string());
+                let drops = [d.clone(), rust_i18n::t!("gui.discover.keep.key_choose", locale = code).to_string()];
+                let line = super::fit_tips(parts.join(" · "), &drops);
+                assert!(crate::kit::width(&line) <= 99, "{code}: {line}");
             }
             for verb in ["verb_save", "verb_default"] {
                 let key = format!("gui.discover.dest.{verb}");
@@ -7745,6 +9736,101 @@ pub(crate) mod tests {
                 rust_i18n::t!("gui.tips.discover_copies", locale = code)
             );
             assert!(crate::kit::width(&rest) <= 99, "{code}: {rest}");
+        }
+    }
+
+    #[test]
+    fn every_locales_primary_and_action_row_fit_the_window() {
+        // §9: every primary at most 34 cells with a 2-digit count (past that
+        // the album's count would drop), every action row the window draws
+        // in the text's 72 (past that its key words would take the row
+        // above).
+        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+            let t = |key: &str| rust_i18n::t!(key, locale = code).to_string();
+            let keep = |key: &str| t(&format!("gui.discover.keep.{key}"));
+            let cells = |text: &str| crate::kit::width(text);
+            let mut primaries: Vec<String> =
+                ["add_song", "add_every", "add_missing", "adding", "retrying", "retry", "play_copy", "add_again", "close"].map(keep).to_vec();
+            for form in ["one", "few", "many", "other"] {
+                let key = format!("gui.discover.keep.songs_{form}");
+                let songs = rust_i18n::t!(key.as_str(), locale = code, count = 12).to_string();
+                primaries.push(format!("{} · {songs}", keep("add_album")));
+                let key = format!("gui.discover.keep.add_albums_{form}");
+                primaries.push(rust_i18n::t!(key.as_str(), locale = code, count = 12).to_string());
+            }
+            for words in &primaries {
+                let label = format!("[ {words} ]");
+                assert!(cells(&label) <= super::PRIMARY_MAX, "{code}: {label} is {} cells", cells(&label));
+            }
+            // §5.4's widest: a kept song, a gap, a file in the way before and
+            // after the place moved, a copy running here or on another server.
+            for (keys, primary) in [
+                (&["key_queue", "key_choose"][..], "play_copy"),
+                (&["key_change", "key_choose"], "retry"),
+                (&["key_change", "key_choose"], "close"),
+                (&["key_cancel"], "close"),
+                (&["key_cancel_other"], "close"),
+            ] {
+                let mut parts: Vec<String> = keys.iter().map(|key| keep(key)).collect();
+                parts.push(format!("[ {} ]", keep(primary)));
+                let row = parts.join("   ");
+                assert!(cells(&row) <= 72, "{code}: {row} is {} cells", cells(&row));
+            }
+            // The key words open with their key, never translated.
+            for (key, letter) in [("key_change", "d "), ("key_queue", "a "), ("key_choose", "c "), ("key_cancel", "x "), ("key_cancel_other", "x ")] {
+                assert!(keep(key).starts_with(letter), "{code}: {key} is {}", keep(key));
+            }
+            for key in ["gui.discover.keep.esc_close", "gui.discover.keep.esc_close_going"] {
+                assert!(cells(&t(key)) <= 50, "{code}: {key}");
+                assert!(t(key).starts_with(&t("gui.discover.keep.esc_close")), "{code}: {key} opens with the button's words");
+            }
+            assert!(cells(&t("gui.discover.keep.title")) <= 40, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_slot_note_of_one_variable_keeps_its_two_rows_in_every_locale() {
+        // §4.5: the note stands on its own two rows in clause 105's words —
+        // the phone's — and past them the second is clipped with `…`, the
+        // whole note both rows' tooltip; no row passes the text's 72 cells.
+        // English keeps every note of one tag variable, of the server
+        // folder, or of one of each whole (three variables, or the genre
+        // with the server folder, are cut in English too). Japanese and
+        // Chinese, whose sentences have no blank to break at, fill their
+        // rows grapheme by grapheme: their plain note stands whole.
+        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+            let t = |key: &str| rust_i18n::t!(key, locale = code).to_string();
+            let slot = |name: &str| format!("‹{}›", t(&format!("gui.discover.dest.slot_{name}")));
+            let note = |key: &str, slots: &str| {
+                let key = format!("gui.discover.dest.{key}");
+                rust_i18n::t!(key.as_str(), locale = code, slots = slots, server = slot("server")).to_string()
+            };
+            for (key, slots) in [
+                ("slot_note_one", slot("artist")),
+                ("slot_note_one", slot("year")),
+                ("slot_note_genre_one", slot("genre")),
+                ("slot_note_song", slot("genre")),
+                ("slot_note_server", String::new()),
+                ("slot_note_mixed_one", slot("artist")),
+            ] {
+                let words = note(key, &slots);
+                let (rows, cut) = super::wrap_rows(&words, 72, 0, &[], false);
+                assert!(rows.len() <= 2, "{code}: {key}: {rows:?}");
+                assert!(rows.iter().all(|row| crate::kit::width(row) <= 72), "{code}: {key} outgrows its row: {rows:?}");
+                let bare = |text: &str| text.replace(' ', "");
+                match &cut {
+                    // Whole: every word of it on screen.
+                    None => assert_eq!(bare(&rows.concat()), bare(&words), "{code}: {key}"),
+                    // Cut: the second row's `…`, the whole words the tooltip.
+                    Some(tip) => {
+                        assert_eq!(tip, &words, "{code}: {key}");
+                        assert!(rows.len() == 2 && rows[1].ends_with('…'), "{code}: {key}: {rows:?}");
+                    }
+                }
+                if code == "en" || (matches!(code, "ja" | "zh") && key == "slot_note_one") {
+                    assert!(cut.is_none(), "{code}: {key} needs more than two rows: {rows:?}");
+                }
+            }
         }
     }
 
@@ -7866,9 +9952,11 @@ pub(crate) mod tests {
         let buffer = buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let all = rows.join("\n");
-        // 76 wide, centred over the frame, 22 tall from row 4: seven copies
-        // of eight, the list's bar on the right border.
-        let shown: Vec<String> = (4..26).map(|y| rows[y].chars().skip(12).take(76).collect()).collect();
+        // 76 wide where Keep a copy opens — x 19–94, centred in the room —
+        // 22 tall: anchored as if 17 rows, it grows to the room's last row
+        // and rises to row 3. Seven copies of eight, the list's bar on the
+        // right border.
+        let shown: Vec<String> = (3..25).map(|y| rows[y].chars().skip(19).take(76).collect()).collect();
         assert_eq!(
             shown,
             rows76(&[
@@ -7890,7 +9978,7 @@ pub(crate) mod tests {
                 "│ Peer Sessions                    Stage Peer B  ✓ in your collection      █",
                 "│   album · 2 copied · 1 already yours                                     █",
                 "│ Free Instrumentals Vol. 9        Stage Peer B  × cancelled               │",
-                "│   album · cancelled · 1 copied                               Start again ▼",
+                "│   album · cancelled · 1 copied                                 Add again ▼",
                 "│                                                                          │",
                 "│                                                           Clear finished │",
                 "╰──────────────────────────────────────────────────────────────────────────╯",
@@ -7899,40 +9987,41 @@ pub(crate) mod tests {
         );
         // The tokens, run by run (the canvas's titles).
         let at = |x: u16, y: u16| Position { x, y };
-        assert_eq!((fg(&buffer, at(12, 4)), fg(&buffer, at(14, 5)), bold(&buffer, at(14, 5))), (th().accent, th().accent, true));
-        assert_eq!(fg(&buffer, at(83, 5)), th().dim, "the close DIM");
-        assert_eq!((fg(&buffer, at(14, 7)), fg(&buffer, at(14, 8))), (th().dim, th().dim), "the header and its rule DIM");
-        assert_eq!((fg(&buffer, at(61, 9)), fg(&buffer, at(66, 9)), fg(&buffer, at(72, 9))), (th().ok, th().dim, th().dim), "▰ OK, ▱ and % DIM");
-        assert_eq!(fg(&buffer, at(83, 9)), th().dim, "a live row's [X] DIM");
-        assert_eq!(fg(&buffer, at(16, 10)), th().dim, "the second row DIM");
-        assert_eq!((fg(&buffer, at(61, 11)), fg(&buffer, at(62, 11))), (th().dim, th().dim), "◷ waiting DIM");
+        assert_eq!((fg(&buffer, at(19, 3)), fg(&buffer, at(21, 4)), bold(&buffer, at(21, 4))), (th().accent, th().accent, true));
+        assert_eq!(fg(&buffer, at(90, 4)), th().dim, "the close DIM");
+        assert_eq!((fg(&buffer, at(21, 6)), fg(&buffer, at(21, 7))), (th().dim, th().dim), "the header and its rule DIM");
+        assert_eq!((fg(&buffer, at(68, 8)), fg(&buffer, at(73, 8)), fg(&buffer, at(79, 8))), (th().ok, th().dim, th().dim), "▰ OK, ▱ and % DIM");
+        assert_eq!(fg(&buffer, at(90, 8)), th().dim, "a live row's [X] DIM");
+        assert_eq!(fg(&buffer, at(23, 9)), th().dim, "the second row DIM");
+        assert_eq!((fg(&buffer, at(68, 10)), fg(&buffer, at(69, 10))), (th().dim, th().dim), "◷ waiting DIM");
         // The held row: both rows in the selection's colours.
-        for x in [14, 40, 61, 85] {
-            assert_eq!((bg(&buffer, at(x, 13)), bg(&buffer, at(x, 14))), (th().accent, th().accent), "held at {x}");
+        for x in [21, 47, 68, 92] {
+            assert_eq!((bg(&buffer, at(x, 12)), bg(&buffer, at(x, 13))), (th().accent, th().accent), "held at {x}");
         }
         assert_eq!(
-            (fg(&buffer, at(83, 14)), bg(&buffer, at(83, 14)), bold(&buffer, at(83, 14))),
+            (fg(&buffer, at(90, 13)), bg(&buffer, at(90, 13)), bold(&buffer, at(90, 13))),
             (th().on_accent, th().accent, false),
             "the held copy's Retry: the plain slab, never bold"
         );
-        assert_eq!(fg(&buffer, at(61, 15)), th().gold, "! refused GOLD");
-        assert_eq!((fg(&buffer, at(16, 16)), fg(&buffer, at(23, 16))), (th().dim, th().gold), "song · DIM, the server's words GOLD");
-        assert_eq!((fg(&buffer, at(61, 17)), fg(&buffer, at(63, 17))), (th().ok, th().ok), "✓ in your collection OK");
-        assert_eq!(fg(&buffer, at(72, 18)), th().accent, "Play your copy ACCENT");
-        assert_eq!(fg(&buffer, at(61, 21)), th().dim, "× cancelled DIM");
-        assert_eq!(fg(&buffer, at(75, 22)), th().accent, "Start again ACCENT");
-        assert_eq!(fg(&buffer, at(72, 24)), th().dim, "Clear finished DIM");
+        assert_eq!(fg(&buffer, at(68, 14)), th().gold, "! refused GOLD");
+        assert_eq!((fg(&buffer, at(23, 15)), fg(&buffer, at(30, 15))), (th().dim, th().gold), "song · DIM, the server's words GOLD");
+        assert_eq!((fg(&buffer, at(68, 16)), fg(&buffer, at(70, 16))), (th().ok, th().ok), "✓ in your collection OK");
+        assert_eq!(fg(&buffer, at(79, 17)), th().accent, "Play your copy ACCENT");
+        assert_eq!(fg(&buffer, at(68, 20)), th().dim, "× cancelled DIM");
+        assert_eq!(fg(&buffer, at(84, 21)), th().accent, "Add again ACCENT");
+        assert_eq!(fg(&buffer, at(79, 23)), th().dim, "Clear finished DIM");
         // No numbers outside the modal: the room's indicator says words.
         assert_eq!(super::super::discover::tips(&gui), "↑ ↓ rows · Enter retry · X clear finished · Esc close");
         // The pointer on a live [X]: DANGER, its tooltip names `x`.
-        gui.ui.pointer = Some(at(84, 11));
+        gui.ui.pointer = Some(at(91, 10));
         let buffer = super::tests::buffer(&mut gui, 100, 30);
-        assert_eq!((fg(&buffer, at(83, 11)), bold(&buffer, at(83, 11))), (th().danger, true));
-        assert_eq!(gui.ui.hit(at(84, 11)), Some(Act::Disc(DiscAct::CopiesCancel(41))));
-        assert_eq!(gui.ui.hit(at(82, 14)), Some(Act::Disc(DiscAct::CopiesAct(39))), "Retry");
-        assert_eq!(gui.ui.hit(at(80, 24)), Some(Act::Disc(DiscAct::CopiesClear)));
-        assert_eq!(gui.ui.hit(at(84, 5)), Some(Act::Disc(DiscAct::CopiesClose)));
-        assert_eq!(gui.ui.hit(at(5, 15)), Some(Act::Guard), "the room beneath is inert");
+        assert_eq!((fg(&buffer, at(90, 10)), bold(&buffer, at(90, 10))), (th().danger, true));
+        assert_eq!(gui.ui.hit(at(91, 10)), Some(Act::Disc(DiscAct::CopiesCancel(41))));
+        assert_eq!(gui.ui.hit(at(89, 13)), Some(Act::Disc(DiscAct::CopiesAct(39))), "Retry");
+        assert_eq!(gui.ui.hit(at(87, 23)), Some(Act::Disc(DiscAct::CopiesClear)));
+        assert_eq!(gui.ui.hit(at(91, 4)), Some(Act::Disc(DiscAct::CopiesClose)));
+        assert_eq!(gui.ui.hit(at(12, 14)), Some(Act::Guard), "the room beneath is inert");
+        assert_eq!(gui.ui.hit(at(17, 14)), Some(Act::Guard), "and the band");
     }
 
     #[test]
@@ -7940,19 +10029,24 @@ pub(crate) mod tests {
         let _en = english();
         let mut gui = copies_gui(&copies_jobs());
         let rows = draw(&mut gui, 100, 24);
-        // 22 rows, the cap: the tab bar above and the tips line below stay.
-        assert_eq!(rows[1].chars().nth(12), Some('╭'), "{}", rows.join("\n"));
-        assert_eq!(rows[22].chars().nth(12), Some('╰'));
-        assert_eq!((rows[6].chars().nth(87), rows[19].chars().nth(87)), (Some('▲'), Some('▼')));
-        assert!(rows[18].contains("Free Instrumentals Vol. 9"), "{}", rows.join("\n"));
-        assert!(!rows.join("\n").contains("Static Lullaby"), "the eighth below the fold");
+        // The rows down to the room's last, risen to row 1: 18 at the floor
+        // — five copies — the tab bar above and the seek line below whole.
+        assert_eq!(rows[1].chars().nth(19), Some('╭'), "{}", rows.join("\n"));
+        assert_eq!(rows[18].chars().nth(19), Some('╰'));
+        assert!(rows[19].starts_with(" 0:00 "), "{}", rows[19]);
+        assert_eq!((rows[6].chars().nth(94), rows[15].chars().nth(94)), (Some('▲'), Some('▼')));
+        assert!(rows[14].contains("Afterimage"), "{}", rows.join("\n"));
+        assert!(!rows.iter().any(|r| r.contains("│ Peer Sessions ")), "the sixth below the fold");
         // The wheel scrolls a copy a notch; the head and Clear finished stay.
         gui.ui.pointer = Some(Position { x: 40, y: 10 });
         super::super::discover::wheel(&mut gui, 1);
         let rows = draw(&mut gui, 100, 24);
         assert!(rows[6].contains("every album by Boukmanflow"), "{}", rows.join("\n"));
-        assert!(rows[4].contains("TITLE") && rows[21].contains("Clear finished"));
+        assert!(rows[4].contains("TITLE") && rows[17].contains("Clear finished"));
         // The eighth copy: the owned song — "✓ already yours", DIM.
+        super::super::discover::wheel(&mut gui, 1);
+        super::super::discover::wheel(&mut gui, 1);
+        let rows = draw(&mut gui, 100, 24);
         let at = at(&rows, "Static Lullaby");
         assert!(rows[at.y as usize].contains("✓ already yours"));
         assert!(rows[at.y as usize + 1].contains("song · you had it, nothing copied"));
@@ -8128,7 +10222,9 @@ pub(crate) mod tests {
             "│   album · Stage Peer C does not allow copies with your server's key      │", blank,
             "│                                                           Clear finished │",
         ]));
-        // Finished: Copy again only where gaps are left.
+        // Finished: Retry only where gaps are left — Copy again no more — and
+        // none for a file in the way (Keep a copy is where the place
+        // changes); Add again after a cancel.
         let glass = rec_on(B, "Glass Hours", "Color Out", "Peer Sessions");
         let after = rec_on(B, "Afterimage", "Color Out", "Peer Sessions");
         let owl = rec_on(B, "Static Lullaby", "Night Owl Radio", "First Transmission");
@@ -8150,15 +10246,15 @@ pub(crate) mod tests {
             "│ Peer Sessions                    Stage Peer B  ✓ in your collection      │",
             "│   album · 2 copied · 1 already yours                                     │",
             "│ every album by Boukmanflow       Stage Peer B  ✓ in your collection      │",
-            "│   2 copied · 1 already yours · 1 failed · 2 albums left out   Copy again │",
+            "│   2 copied · 1 already yours · 1 failed · 2 albums left out        Retry │",
             "│ Rooftop Cypher                   Stage Peer C  ✓ already yours           │",
             "│   song · you had it, nothing copied                                      │",
             "│ Glass Hours                      Stage Peer B  skipped                   │",
-            "│   song · a file already sits at that path                          Retry │",
+            "│   song · a file already sits at that path                                │",
             "│ every album by Night Owl Radio   Stage Peer B  nothing to copy           │",
             "│   nothing of theirs to copy                                              │",
             "│ Free Instrumentals Vol. 9        Stage Peer B  × cancelled               │",
-            "│   album · cancelled · 1 copied                               Start again │", blank,
+            "│   album · cancelled · 1 copied                                 Add again │", blank,
             "│                                                           Clear finished │",
         ]));
         // A refresh that failed keeps its rows: GOLD, when the poll tries
@@ -8177,7 +10273,7 @@ pub(crate) mod tests {
         ])[5..9]);
         assert!(shown[9].starts_with("│ couldn't refresh: your server didn't answer · next try in "), "{}", shown[9]);
         assert_eq!(shown[10], "│                                               Try again   Clear finished │");
-        assert_eq!(gui.ui.hit(Position { x: 12 + 50, y: 4 + 10 }), Some(Act::Disc(DiscAct::CopiesTryAgain)));
+        assert_eq!(gui.ui.hit(Position { x: 19 + 50, y: 6 + 10 }), Some(Act::Disc(DiscAct::CopiesTryAgain)));
         // A cancel that lost its race: the list asked again, the outcome,
         // and a TEXT note bottom-left — gone on the next key.
         let mut gui = copies_gui(std::slice::from_ref(&running));
@@ -8394,11 +10490,11 @@ pub(crate) mod tests {
             // The STATE column's words with their glyph: 20 cells.
             for key in [
                 "gui.discover.copies.kept",
-                "gui.discover.keep.yours",
+                "gui.discover.copies.yours",
                 "gui.discover.copies.skipped",
                 "gui.discover.copies.nothing",
                 "gui.discover.copies.done",
-                "gui.discover.keep.stopping",
+                "gui.discover.copies.stopping",
                 "gui.discover.mark.waiting",
                 "gui.discover.mark.failed",
                 "gui.discover.mark.stopped",
@@ -8427,7 +10523,7 @@ pub(crate) mod tests {
             let rows = t("gui.tips.discover_copies_rows");
             let clear = t("gui.tips.discover_copies_clear");
             let esc = t("gui.tips.discover_copies_esc");
-            for verb in ["cancel", "retry", "again", "start_again", "play"] {
+            for verb in ["cancel", "retry", "start_again", "play"] {
                 let key = format!("gui.tips.discover_copies_{verb}");
                 let line = [rows.clone(), t(&key), clear.clone(), esc.clone()].join(" · ");
                 assert!(crate::kit::width(&line) <= 99, "{code}: {line}");
@@ -8535,29 +10631,6 @@ pub(crate) mod tests {
             let buffer = super::tests::buffer(&mut gui, 100, 30);
             assert_eq!((fg(&buffer, Position { x: 63, y: 14 }), bold(&buffer, Position { x: 63, y: 14 })), (th().bright, true));
         }
-    }
-
-    #[test]
-    fn one_folder_per_album_stands_dim_in_lands_in_the_library_bold_the_names_text() {
-        let _en = english();
-        // A running artist copy reads its pinned place, album by album.
-        let mut gui = row_in("running", Some("artist"), json!({ "progress": 0.2 }));
-        let buffer = buffer(&mut gui, 100, 30);
-        let rows = lines(&buffer);
-        let crumbs = at(&rows, "copies › Boukmanflow › one folder per album");
-        let cell = |dx: u16| Position { x: crumbs.x + dx, y: crumbs.y };
-        assert!(bold(&buffer, cell(0)), "the library BOLD");
-        assert_eq!(fg(&buffer, cell(7)), th().dim, "› DIM");
-        assert!(fg(&buffer, cell(9)) != th().dim && !bold(&buffer, cell(9)), "the artist TEXT");
-        for dx in 23..43 {
-            assert_eq!(fg(&buffer, cell(dx)), th().dim, "one folder per album DIM at +{dx}");
-        }
-        // An album copy's real album stays TEXT.
-        let mut gui = row_in("done", Some("album"), counts(3, 0, 0, None));
-        let buffer = super::tests::buffer(&mut gui, 100, 30);
-        let crumbs = at(&lines(&buffer), "copies › Boukmanflow › Borrowed Tapes");
-        let album = Position { x: crumbs.x + 23, y: crumbs.y };
-        assert!(fg(&buffer, album) != th().dim && !bold(&buffer, album), "Borrowed Tapes TEXT");
     }
 
     /// A peers answer: Stage Peer B's rows (title, artist, album, match),

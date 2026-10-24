@@ -439,6 +439,13 @@ impl<A: Clone> Surface<A> {
         self.covered.iter().any(|over| *over != own && over.intersects(rect))
     }
 
+    /// [`Self::covered_last_frame_by_another`] for a modal whose footprint
+    /// moves — its height follows its rows, its top may rise: none of `own`
+    /// (this frame's footprint and last frame's) counts as another.
+    pub fn covered_last_frame_by_other_than(&self, rect: Rect, own: &[Rect]) -> bool {
+        self.covered.iter().any(|over| !own.contains(over) && over.intersects(rect))
+    }
+
     /// Drop every registered rect — the modal-inertness move: a screen
     /// clears the base layer's registries before drawing the layer on
     /// top, so only the top layer's controls exist.

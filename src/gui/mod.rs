@@ -1524,6 +1524,15 @@ fn clip_lead(text: &str, max: usize) -> String {
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
+    // A Discover modal makes the screen beneath inert (the kit's Modal): the
+    // tabs, the nav, the room and the bar draw without the pointer, so
+    // nothing of them lights or ripens a tooltip under it; the modals get it
+    // back as they draw.
+    let pointer = gui.ui.pointer;
+    let inert = gui.screen == Screen::Library && gui.active == DISCOVER_NAV && discover::modal_open(gui);
+    if inert {
+        gui.ui.pointer = None;
+    }
     // The Discover room's copies: the poll's beat from what shows, and the
     // copies that ended since, worded on the status line (discovery-page
     // clauses 112, 118).
@@ -1757,6 +1766,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     // Overlays draw (and register) last, so their rects win the pointer.
+    if inert {
+        gui.ui.pointer = pointer;
+    }
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
     discover::draw_modals(frame, gui, area);
@@ -1773,6 +1785,14 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         gui.ui.overlay(footprint);
     }
 
+}
+
+/// Whether the pointer rests on something a click would press — where the
+/// OSC 22 hand shows: a modal's guard over the screen beneath is no
+/// control, so only the modal's own controls take the hand (the kit's
+/// Modal).
+fn over_control(gui: &Gui) -> bool {
+    gui.ui.pointer.is_some_and(|at| !matches!(gui.ui.hit(at), None | Some(Act::Guard)))
 }
 
 /// Whether the playing track's cover is decoded and waiting in the cache.
@@ -2956,7 +2976,7 @@ where
     let device_over = device::frame(gui);
     // The visualizer window's host: the child's exit, the next texture.
     vizwin::tick(gui);
-    let over = gui.ui.hovering_clickable() || stats_over || admin_over || device_over;
+    let over = over_control(gui) || stats_over || admin_over || device_over;
     if over != ctx.hand {
         ctx.hand = over;
         host.pointer(ctx.hand);

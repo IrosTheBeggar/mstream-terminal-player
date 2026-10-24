@@ -45,11 +45,12 @@ room against the taste route, is described in run.sh):
   destination, jobs that walk queued → running → done on the wall clock):
   the GUI at 100 × 30 with the queue folded opens the Discover room's
   Connected servers tab, lights the peer's album, `c` opens Keep a copy,
-  Add album starts the copy, Esc leaves it running, the room's poll sees
-  it live and kept, `C` lists it in the Copies modal. `check_keep.py`
-  replays the stream frame by frame for those states; the fake's
-  `/_state` says what was sent (the row unchanged, scope album) and how
-  the rows were looked up.
+  Enter alone presses its one primary, Add album, and starts the copy (a
+  ↓ would move the choice itself), Esc leaves it running, the room's
+  poll sees it live and kept, `C` lists it in the Copies modal.
+  `check_keep.py` replays the stream frame by frame for those states; the
+  fake's `/_state` says what was sent (the row unchanged, scope album)
+  and how the rows were looked up.
 - **K2** — the same leg against a server from before the pin
   (`FAKE_NO_PIN=1`: the jobs route's strict body refuses `destination`
   with Joi's 400): the start is asked once more without the key and the
@@ -63,12 +64,13 @@ room against the taste route, is described in run.sh):
   folder…" lists the library's own folders (the file explorer; the
   seeded folder is not among them — created by the first file), a folder
   picked there starts Custom's layout and Save keeps it with no base
-  folder; Keep a copy reads the new place, saved for the account. The
-  fake's `/_move_destination` then puts the default back behind the
-  client's back, and Add album — which sends the place it showed — is
-  answered 409 `destination_changed`: nothing starts, LANDS IN redraws
-  from the answer with its GOLD line. `check_dest.py` replays the stream;
-  `/_state` says what was saved (once), read, listed and started.
+  folder; Keep a copy's place line ("Files go to …") reads the new
+  place. The fake's `/_move_destination` then puts the default back
+  behind the client's back, and Enter alone presses Add album — which
+  sends the place it showed — answered 409 `destination_changed`:
+  nothing starts, the place line redraws from the answer with its GOLD
+  line under it. `check_dest.py` replays the stream; `/_state` says what
+  was saved (once), read, listed and started.
 
 - **M** — Apple Terminal's mouse dialect (`TERM_PROGRAM=Apple_Terminal`
   in the spawned env, `FAKE_TASTE=1 FAKE_PLUGINS=1`): every click is sent
@@ -81,6 +83,18 @@ room against the taste route, is described in run.sh):
   (`@@ECHO:list@@`, …); `check_echo.py` cuts them out and replays every
   frame between them. The same events with any other `TERM_PROGRAM` close
   the list and the sheet — the bug the dialect's filter fixes.
+- **KM** — Keep a copy by the pointer alone, in the same dialect and
+  against the same fake: the tile's list opens the window, and every
+  control it draws is clicked, each press pair followed by its echo —
+  Every album by, Album, `d change` (the picker; Esc folds it), the
+  primary (the copy starts; its echo lands on the live window's
+  `[ Close ]`), "x cancel copy", Add again (its echo lands on
+  `d change`), "Esc close" — while the room beneath stays inert: resting
+  on the band where the verbs line drew "⇄ shuffle", and on the footer,
+  ripens no tooltip of the room's; its row under the window lights
+  nothing. `check_keep_mouse.py` replays the stream at the leg's
+  `@@KM:…@@` marks; `/_state` says each click acted once (one start, one
+  cancel, no save).
 
 ## The two harness laws (learned the hard way)
 

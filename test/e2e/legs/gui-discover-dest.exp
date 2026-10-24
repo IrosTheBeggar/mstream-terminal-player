@@ -7,8 +7,8 @@
 # copies, base "From friends", layout {{ALBUMARTIST}}/{{ALBUM}}). At
 # 100 × 30 with the queue panel folded, `G` opens the room, → its Connected
 # servers tab, ↓ lights the strip's "Lanterns" from Attic and `c` opens
-# Keep a copy in album focus: LANDS IN copies › From friends › Attic Band ›
-# Lanterns, "saved for your account". `d` opens Where copies land on that
+# Keep a copy in album focus: "Files go to copies › From friends › Attic
+# Band › Lanterns", "d change" at its end. `d` opens Where copies land on that
 # place, folded into Custom as "From friends/{{ALBUMARTIST}}/{{ALBUM}}"
 # (the hand on LIBRARY: the fake offers copies and music); Enter there
 # saves nothing — nothing is dirty until edited (run.sh counts one PUT).
@@ -21,15 +21,15 @@
 # Custom reads from-peers/{{ALBUMARTIST}}/{{ALBUM}} and the list goes
 # inside it. Esc closes the list, ↓ ↓ ↓ ↓ walks the field, the variables
 # and Use the library default to Save and Enter saves — the layout with no
-# base folder: Keep a copy reads copies › from-peers › Attic Band ›
-# Lanterns, "saved for your account", the hand on Change…. Then the
+# base folder: Keep a copy's place line reads "Files go to copies ›
+# from-peers › Attic Band › Lanterns", the dot where it was. Then the
 # destination moves behind the client's back (POST /_move_destination, as
-# another tab saving the library default), ↓ ↓ walks Cancel to Add album
-# and Enter starts — the fake answers 409 destination_changed and starts
-# nothing: LANDS IN redraws from the answer and one GOLD line says so. Esc,
-# q. run.sh replays the stream for the states that repaint in place
-# (check_dest.py) and asks the fake what was sent. Gates on first-paint
-# words only; each gate's braces span lines.
+# another tab saving the library default) and Enter alone presses Add
+# album, the one primary — the fake answers 409 destination_changed and
+# starts nothing: the place line redraws from the answer and one GOLD line
+# says so. Esc, q. run.sh replays the stream for the states that repaint
+# in place (check_dest.py) and asks the fake what was sent. Gates on
+# first-paint words only; each gate's braces span lines.
 set timeout 20
 set env(TERM) xterm-256color
 set env(MSTREAM_SETUP_LANG) en
@@ -125,24 +125,24 @@ send "\x1b\[B"
 drain 1
 send "\x1b\[B"
 drain 1
+# What the picker painted so far goes: its list and its field carry
+# "from-peers" too, so the gate after Save reads only what came after.
+expect -re ".*"
 send "\r"
-# The diff renderer leaves the blank before "account" where the picker's
-# row had one: the gate is the words it paints in one run.
+# Keep a copy back on the saved place: its place line's folder, painted in
+# one run over the picker's row.
 expect {
-    "saved for your" {}
+    "from-peers" {}
     eof { puts "DIED-ON-SAVE"; exit 16 }
     timeout { fail "NO-SAVED" 17 }
 }
 drain 1
 # Another tab puts the library default back: the place shown is stale.
 exec curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "{\"destination\": null}" "$::env(FAKE_URL)/_move_destination"
-send "\x1b\[B"
-drain 1
-send "\x1b\[B"
-drain 1
+# Enter presses the one primary wherever the dot is: no walk to it.
 send "\r"
 expect {
-    "where files land changed" {}
+    "Where files land changed" {}
     eof { puts "DIED-ON-START"; exit 18 }
     timeout { fail "NO-MOVED-LINE" 19 }
 }

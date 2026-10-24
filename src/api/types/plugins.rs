@@ -550,11 +550,12 @@ impl JobOutcome {
         matches!(self, JobOutcome::Copied { .. } | JobOutcome::CopiedMany(_))
     }
 
-    /// What a finished job offers (the canvas's buttons, the Copies list's
-    /// row action): Retry after a failure, a stop or a file in the way;
-    /// Copy again after a many-song copy (it takes only the gaps); Start
-    /// again after a cancel; Play your copy after a song landed; nothing
-    /// after a refusal — the server would refuse again.
+    /// What a finished job offers (the Copies list's row action, and the
+    /// Keep a copy window's wherever its own table agrees —
+    /// `keep::window_action`): Retry after a failure, a stop or a file in
+    /// the way; Copy again after a many-song copy (it takes only the gaps);
+    /// Start again after a cancel; Play your copy after a song landed;
+    /// nothing after a refusal — the server would refuse again.
     pub fn action(&self) -> Option<JobAction> {
         match self {
             JobOutcome::Queued => Some(JobAction::Cancel),
@@ -830,6 +831,45 @@ impl CopyResult {
         }
         (shared >= 1).then(|| Landed { vpath: Some(first[0].clone()), dirs: first[1..shared].to_vec(), file: None })
     }
+
+    /// The songs a many-song copy left in the user's own library, as its
+    /// lists name them (Play your copy after an album): the ones it copied,
+    /// by their landed files, then the ones it found already there
+    /// (skipped `owned`, where the library has each) — never a file in the
+    /// way, which may be another song. The lists stop at 500, so this is
+    /// what they name; empty where they name none (a result that carries
+    /// only counts).
+    pub fn kept_songs(&self) -> Vec<KeptSong> {
+        let Some(songs) = self.songs.as_ref() else { return Vec::new() };
+        let copied = songs.copied.iter().filter_map(|entry| {
+            Some(KeptSong {
+                from: text(entry, "from"),
+                filepath: text(entry, "filepath")?,
+                title: text(entry, "title"),
+                artist: text(entry, "artist"),
+                album: text(entry, "album"),
+            })
+        });
+        let owned = songs.skipped.iter().filter(|entry| text(entry, "why").as_deref() == Some("owned")).filter_map(|entry| {
+            Some(KeptSong { from: text(entry, "from"), filepath: text(entry, "at")?, title: None, artist: None, album: None })
+        });
+        copied.chain(owned).collect()
+    }
+}
+
+/// One song a many-song copy left in the user's library
+/// ([`CopyResult::kept_songs`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeptSong {
+    /// The song's file on the server it came from — what the album's
+    /// listing names it by.
+    pub from: Option<String>,
+    /// Its file in the user's library, vpath form.
+    pub filepath: String,
+    /// A copied song's tags as it landed; a song already there names none.
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
 }
 
 /// Where a finished copy's files are ([`CopyResult::landed`]): the library,
@@ -2499,6 +2539,31 @@ mod tests {
         assert_eq!(result(counted).landed(), Some(Landed::default()));
         assert_eq!(result(serde_json::json!({ "scope": "album", "counts": { "total": 0, "copied": 0 } })).landed(), None);
         assert_eq!(result(serde_json::json!({})).landed(), None);
+    }
+
+    #[test]
+    fn a_many_song_copy_keeps_what_it_copied_and_what_it_found_already_there_never_a_file_in_the_way() {
+        let result = CopyResult::from_value(&serde_json::json!({ "scope": "album", "stopped": null,
+            "songs": { "total": 5,
+                "copied": [{ "from": "peerlib/B/Tapes/2.mp3", "vpath": "copies", "filepath": "copies/B/Tapes/2.mp3", "title": "Two", "artist": "B", "album": "Tapes" },
+                    { "from": "peerlib/B/Tapes/4.mp3", "title": "a copied song naming no file" }],
+                "skipped": [{ "from": "peerlib/B/Tapes/1.mp3", "why": "owned", "at": "music/B/Tapes/1.mp3" },
+                    { "from": "peerlib/B/Tapes/3.mp3", "why": "exists", "at": "copies/B/Tapes/3.mp3" }],
+                "failed": [{ "from": "peerlib/B/Tapes/5.mp3", "error": "gone" }] } }));
+        let kept = result.kept_songs();
+        let two = KeptSong {
+            from: Some("peerlib/B/Tapes/2.mp3".into()),
+            filepath: "copies/B/Tapes/2.mp3".into(),
+            title: Some("Two".into()),
+            artist: Some("B".into()),
+            album: Some("Tapes".into()),
+        };
+        let one = KeptSong { from: Some("peerlib/B/Tapes/1.mp3".into()), filepath: "music/B/Tapes/1.mp3".into(), ..KeptSong::default() };
+        assert_eq!(kept, vec![two, one], "copied first, then already there; the file in the way may be another song");
+        // A song result, or a many-song one that carries counts alone, names none.
+        assert!(CopyResult::from_value(&serde_json::json!({ "copied": { "filepath": "copies/x.mp3" } })).kept_songs().is_empty());
+        let counted = serde_json::json!({ "scope": "album", "counts": { "total": 2, "copied": 2, "skipped": 0, "failed": 0 } });
+        assert!(CopyResult::from_value(&counted).kept_songs().is_empty());
     }
 
     #[test]

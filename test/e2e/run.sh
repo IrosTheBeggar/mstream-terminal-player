@@ -217,9 +217,10 @@ stop_fake
 # The five-part gate open (the ping's `discoveryPlugins` and `noUpload:
 # false`, `federation-copy` listed with jobs allowed, a throwaway `copies`
 # destination): `c` on the Connected servers tab's lit tile opens Keep a
-# copy, Add album starts the copy with the row unchanged, the tile and the
-# verbs line say so while the room's poll walks it to done, `C` lists it in
-# the Copies modal (docs/ux-contracts/discovery-page.md, clauses 100-141).
+# copy, Enter alone presses its one primary, Add album, and starts the copy
+# with the row unchanged, the tile and the verbs line say so while the
+# room's poll walks it to done, `C` lists it in the Copies modal
+# (docs/ux-contracts/discovery-page.md, clauses 100-141).
 # check_keep.py replays the stream frame by frame for those states.
 PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake K)"
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
@@ -235,7 +236,7 @@ s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert len(s['job_starts']) == 1, s['job_starts']
 start = s['job_starts'][0]
 assert start['scope'] == 'album', start
-assert start['destination'] == {'vpath': 'copies', 'base': '', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'}, start  # the place LANDS IN drew
+assert start['destination'] == {'vpath': 'copies', 'base': '', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'}, start  # the place "Files go to" drew
 assert start['recommendation'] == {'artist': 'Attic Band', 'title': 'Ember', 'album': 'Lanterns', 'duration': 199,
     'similarity': 0.81, 'filepath': 'Music/ember.mp3', 'albumArt': 'attic-lanterns.png',
     'peer': {'id': 7, 'name': 'Attic'}, 'source': 'federation'}, start
@@ -281,11 +282,12 @@ stop_fake
 # library's own folders (the file explorer; the seeded folder is not among
 # them: created by the first file), a folder picked there starts Custom's
 # layout and Save keeps it (PUT, the layout with base '' — the one PUT);
-# Keep a copy reads the new place. The destination then moves behind the
-# client's back (the fake's /_move_destination, as another tab would), and
-# Add album — which sends the place Keep a copy showed — is answered 409
-# destination_changed: nothing starts, LANDS IN redraws from the answer
-# (docs/ux-contracts/discovery-page.md, clauses 105, 142-148).
+# Keep a copy's place line reads the new place. The destination then moves
+# behind the client's back (the fake's /_move_destination, as another tab
+# would), and Enter presses Add album — which sends the place Keep a copy
+# showed — answered 409 destination_changed: nothing starts, the place line
+# redraws from the answer (docs/ux-contracts/discovery-page.md, clauses
+# 105, 142-148).
 # check_dest.py replays the stream frame by frame for those states.
 PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake W)"
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
@@ -325,6 +327,33 @@ if python3 "$E2E/check_echo.py" "$WORK/gui-discover-echo.out" "$E2E/replay.py" 3
 else
   echo "FAIL the release echo: the tile's list and the sheet stay, nothing pressed"; FAILS=$((FAILS+1))
 fi
+stop_fake
+
+# ── Scenario KM: Keep a copy by the pointer, in Apple Terminal's dialect ──
+# The same dialect as M: the tile's list opens Keep a copy, and every
+# control the window draws is clicked, each press pair followed by its
+# echo — the choices, `d change`, the primary, "x cancel copy", Add again,
+# "Esc close" — while the room beneath stays inert: no tooltip of its
+# ripens over the band or the footer, its row under the window lights
+# nothing (docs/ui-kit.md, Modal; docs/ux-contracts/discovery-page.md,
+# clauses 106–110). check_keep_mouse.py replays the stream at the leg's
+# marks; the fake says each click acted once.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake KM)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-keep-mouse gui-discover-keep-mouse.exp "$WORK/h17" "$WORK/gui-discover-keep-mouse.out"
+if python3 "$E2E/check_keep_mouse.py" "$WORK/gui-discover-keep-mouse.out" "$E2E/replay.py" 30 100; then
+  echo "PASS keep a copy by the pointer: every click once, its echo nothing, the room inert"
+else
+  echo "FAIL keep a copy by the pointer: every click once, its echo nothing, the room inert"; FAILS=$((FAILS+1))
+fi
+assert "the pointer's clicks sent one start, one cancel and no save" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert len(s['job_starts']) == 1 and s['job_starts'][0]['scope'] == 'album', s['job_starts']
+assert s['cancels'] == 1, s['cancels']
+assert s.get('destination_puts', []) == [], s.get('destination_puts')
+assert [j['state'] for j in s['jobs']] == ['cancelled'], s['jobs']
+"
 stop_fake
 
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
