@@ -1855,6 +1855,9 @@ fn run_tui(mut wizard: Wizard) -> i32 {
     // Announce the arrow base — without this, terminals keep their text
     // beam until the pointer first crosses a clickable.
     set_pointer_shape(false, mouse_on);
+    // The terminal's mouse dialect: Apple Terminal's release echo is the
+    // wizard's surface's to swallow ([`input`]); the window never sets it.
+    wizard.ui.set_echo_dialect(crate::kit::apple_dialect());
     let outcome = event_loop(&mut terminal, &mut wizard, mouse_on, &to_worker, &from_worker);
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -2007,6 +2010,11 @@ pub(crate) fn input(wizard: &mut Wizard, event: TermEvent) -> Option<Outcome> {
         }
         TermEvent::Mouse(mouse) => {
             let at = Position { x: mouse.column, y: mouse.row };
+            // Apple Terminal's release echo, dropped whole before the
+            // press or the release reads it (the kit's `EchoFilter`).
+            if wizard.ui.swallow_echo(mouse.kind, at) {
+                return None;
+            }
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     return press(wizard, at);
@@ -5331,6 +5339,34 @@ pub(crate) mod tests {
         wizard.ui.pointer = Some(Position { x: 0, y: 29 });
         frame_once(&mut wizard, &wires, &mut asked);
         assert_eq!(asked, [true, false]);
+    }
+
+    /// The wizard in Apple Terminal (the kit's `EchoFilter`): a card's
+    /// click comes as an instant pair and toggles it, and the release's
+    /// echo pair on the same card toggles nothing back; outside the
+    /// dialect the same events are two clicks.
+    #[test]
+    fn in_apple_terminal_a_cards_click_toggles_it_once() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for apple in [true, false] {
+            let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+            wizard.screen = Screen::Extras;
+            wizard.ui.set_echo_dialect(apple);
+            draw_100x30(&mut wizard);
+            let card = click_rect(&wizard, Act::Toggle(1));
+            let at = Position { x: card.x + 1, y: card.y };
+            let event = |kind| {
+                TermEvent::Mouse(ratatui::crossterm::event::MouseEvent { kind, column: at.x, row: at.y, modifiers: KeyModifiers::NONE })
+            };
+            let was = wizard.extras[1];
+            for _ in 0..2 {
+                assert!(input(&mut wizard, event(MouseEventKind::Down(MouseButton::Left))).is_none());
+                assert!(input(&mut wizard, event(MouseEventKind::Up(MouseButton::Left))).is_none());
+                draw_100x30(&mut wizard);
+            }
+            let want = if apple { !was } else { was };
+            assert_eq!(wizard.extras[1], want, "apple {apple}: the pair, then its echo");
+        }
     }
 
     /// The scan's progress is re-asked every PROGRESS_EVERY on the

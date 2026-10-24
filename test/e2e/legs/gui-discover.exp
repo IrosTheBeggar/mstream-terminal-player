@@ -1,0 +1,59 @@
+#!/usr/bin/expect -f
+# The GUI player's Discover room under a pty with no server saved at all:
+# the room rides the ping's `discoveryTaste` (docs/ux-contracts/
+# discovery-page.md, clauses 1 and 3), so with no session its row is
+# absent and `G` is as dead as the row — no room paints, and the Library
+# screen keeps the keys: `0` still opens Now Playing, whose per-song tab
+# is not on the strip without a server either. Esc comes back, q quits.
+# The fake server has no taste route, so the room's own first paint is
+# the render tests' to pin (src/gui/discover.rs); this leg pins the gate
+# on the real binary. Gates on first-paint words only, and the absence
+# check drains for its whole window rather than sleeping. Each gate's
+# braces span lines: expect reads a braced list on one line as a single
+# pattern, which never matches and lets the leg run on past a screen that
+# never painted.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(MSTREAM_GUI_DEMO) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+spawn {*}$argv
+exec stty rows 34 columns 120 < $spawn_out(slave,name)
+expect {
+    "Add a server" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-LIBRARY-SCREEN" 2 }
+}
+drain 1
+send "G"
+expect {
+    -timeout 2
+    "Discover" { fail "ROOM-WITHOUT-ITS-GATE" 3 }
+    eof { puts "DIED-ON-G"; exit 7 }
+    timeout {}
+}
+send "0"
+expect {
+    "1:Queue" {}
+    eof { puts "DIED-ON-0"; exit 8 }
+    timeout { fail "G-TOOK-THE-KEYS" 4 }
+}
+drain 1
+send "\x1b"
+expect {
+    "Add a server" {}
+    timeout { fail "NO-WAY-BACK" 5 }
+}
+drain 1
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 9 }
+}
+catch wait result
+exit [lindex $result 3]

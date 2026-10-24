@@ -1,0 +1,123 @@
+#!/usr/bin/expect -f
+# The GUI player in Apple Terminal's mouse dialect, against the fake
+# server's plug-ins (test/e2e/fake_mstream.py, FAKE_TASTE=1 FAKE_PLUGINS=1;
+# docs/ui-kit.md, behavioral rules — the release echo; docs/ux-contracts/
+# discovery-page.md, clauses 48, 102 and 103). The player is spawned with
+# TERM_PROGRAM=Apple_Terminal, so its surface swallows the echo, and every
+# click is sent the way that terminal sends one (probed, 470.2): the press
+# as an INSTANT pair (SGR M then m in one write), then — while the frame
+# shows what the click opened — the physical release as the same pair
+# again where the hand let go. At 100 × 30 with the queue panel folded (Tab), `G` opens
+# the room and → its Connected servers tab: the strip's one tile,
+# "Lanterns" from Attic (x 17–28, its artist on row 12), and the table's
+# one row, "Ember" (row 17). The pointer comes to rest on the tile (a plain
+# move, SGR 35): its `[⋯]` stands at the artist line's end (x 26–28). A
+# click on it hangs the tile's list under the tile — and the echo, landing
+# on the list's own catcher, must not close it; the leg marks the moment
+# (@@ECHO:list@@). Esc folds the list; the pointer rests on the row, whose
+# `[⋯]` stands at its right (x 92–94); a click on it opens the
+# track-actions sheet, whose 66 cells end left of the `[⋯]` — the echo,
+# landing outside the sheet, must not close it nor press what it drew
+# (@@ECHO:sheet@@). Esc closes the sheet, Tab opens the queue panel: it is
+# empty and nothing plays (@@ECHO:queue@@); q quits. check_echo.py replays
+# the stream frame by frame between the marks (the README's first law).
+# Gates on first-paint words only; each gate's braces span lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(TERM_PROGRAM) Apple_Terminal
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+# A sub-second drain: whatever the player writes is read meanwhile, never
+# a bare sleep with the pty's buffer filling under a frame.
+proc drain_ms {ms} {
+    set end [expr {[clock milliseconds] + $ms}]
+    while {[clock milliseconds] < $end} {
+        expect -timeout 0 -re ".+" {} timeout {}
+        after 5
+    }
+}
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+# The pointer comes to rest at cell (x, y), 1-based as SGR counts.
+proc hover {x y} { send "\x1b\[<35;${x};${y}M" }
+# Apple Terminal's press at (x, y): the instant pair, SGR M then m in one
+# write. Its click is this pair, then — once the frame shows what it
+# opened and the hand has been down a moment more — the same pair again
+# where the hand let go: the release's echo.
+proc pair {x y} { send "\x1b\[<0;${x};${y}M\x1b\[<0;${x};${y}m" }
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "Discover" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-DISCOVER-ROW" 2 }
+}
+drain 1
+# The queue panel folds: the room takes its 80 cells.
+send "\t"
+drain 1
+send "G"
+expect {
+    "based on songs you finished" {}
+    eof { puts "DIED-ON-ANSWER"; exit 7 }
+    timeout { fail "NO-ANSWER" 3 }
+}
+drain 1
+send "\x1b\[C"
+expect {
+    "Lanterns" {}
+    eof { puts "DIED-ON-SERVERS"; exit 8 }
+    timeout { fail "NO-PEER-ALBUM" 4 }
+}
+# The gate's two reads and the rows' lookup land.
+drain 2
+# The tile: rest on its cover, then the `[⋯]` at its artist line's end.
+hover 21 9
+drain 1
+hover 28 13
+drain 1
+pair 28 13
+# The list's own row: the `[⋯]`'s tooltip, ripe while the hand rested on
+# it, already carries "Play album · Queue album · Keep a" — its line ends
+# there, so "Keep a copy" in one run is the list's paint alone.
+expect {
+    "Keep a copy" {}
+    eof { puts "DIED-ON-TILE-DOTS"; exit 9 }
+    timeout { fail "NO-TILE-LIST" 10 }
+}
+drain_ms 120
+pair 28 13
+drain 2
+puts "@@ECHO:list@@"
+send "\x1b"
+drain 1
+# The row: rest on it, then its `[⋯]`.
+hover 31 18
+drain 1
+hover 94 18
+drain 1
+pair 94 18
+expect {
+    "elsewhere" {}
+    eof { puts "DIED-ON-ROW-DOTS"; exit 11 }
+    timeout { fail "NO-SHEET" 12 }
+}
+drain_ms 120
+pair 94 18
+drain 2
+puts "@@ECHO:sheet@@"
+send "\x1b"
+drain 1
+send "\t"
+drain 2
+puts "@@ECHO:queue@@"
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 20 }
+}
+catch wait result
+exit [lindex $result 3]

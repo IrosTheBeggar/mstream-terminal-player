@@ -1351,6 +1351,7 @@ mod tests {
             self_signed: false,
             peer: None,
             local_token: None,
+            compressed_art: false,
         };
         for base in [
             "http://localhost:3000",

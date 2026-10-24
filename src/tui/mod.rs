@@ -594,6 +594,25 @@ pub(crate) fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> V
     }
 }
 
+/// A mouse event as the loop takes it: Apple Terminal's release echo — the
+/// second click pair its physical release sends after every click — is
+/// dropped whole first (the kit's `EchoFilter`, on only in that terminal),
+/// so a click on the bar seeks once, where it was pressed, as it does in
+/// every other terminal; then [`on_mouse`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn take_mouse(
+    app: &mut App,
+    echo: &mut crate::kit::EchoFilter,
+    mouse: event::MouseEvent,
+    area: Rect,
+) -> Vec<Effect> {
+    let at = ratatui::layout::Position { x: mouse.column, y: mouse.row };
+    if echo.swallow(mouse.kind, at) {
+        return Vec::new();
+    }
+    on_mouse(app, mouse, area)
+}
+
 /// Write preferences and where we were, on the way out. Saving here rather
 /// than on every keystroke keeps a volume nudge from becoming a disk write.
 #[cfg(not(target_arch = "wasm32"))]
@@ -641,6 +660,8 @@ fn event_loop(
     let mut title = String::new();
     let mut spun = Instant::now();
     let mut saver = QueueSaver::new(app);
+    // The terminal's mouse dialect (Apple Terminal's release echo).
+    let mut echo = crate::kit::EchoFilter::new(crate::kit::apple_dialect());
     loop {
         // A save changes what the book knows — a peer just reconciled, a
         // token just signed in for — and the queue's rows resolve against it.
@@ -693,7 +714,7 @@ fn event_loop(
                     TermEvent::Mouse(mouse) => {
                         let size = terminal.size()?;
                         let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
-                        pending.extend(on_mouse(app, mouse, area));
+                        pending.extend(take_mouse(app, &mut echo, mouse, area));
                     }
                     // A resize is also how a tmux reattach announces a new
                     // terminal behind the same tty — one whose image store
@@ -1080,6 +1101,30 @@ mod tests {
 
         // Moving the pointer about is not an event worth an effect.
         assert!(on_mouse(&mut app, mouse_at(MouseEventKind::Moved, 10, 10), area).is_empty());
+    }
+
+    #[test]
+    fn in_apple_terminal_a_click_on_the_bar_seeks_once() {
+        let area = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        app.status.duration = 300.0;
+        app.status.source = "http://host/a.mp3".into();
+        let bar = ui::progress_area(&app, area);
+        // Apple Terminal's click: the instant pair, then the same again at
+        // the physical release (the kit's EchoFilter).
+        let click = [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)];
+        let seeks = |app: &mut App, echo: &mut crate::kit::EchoFilter| -> usize {
+            click
+                .iter()
+                .chain(click.iter())
+                .map(|kind| take_mouse(app, echo, mouse_at(*kind, bar.x + 20, bar.y), area).len())
+                .sum()
+        };
+        assert_eq!(seeks(&mut app, &mut crate::kit::EchoFilter::new(true)), 1, "the echo seeks nothing");
+        // Every other terminal's events are left as they come: there, the
+        // same events are two clicks.
+        assert_eq!(seeks(&mut app, &mut crate::kit::EchoFilter::new(false)), 2);
     }
 
     #[test]
