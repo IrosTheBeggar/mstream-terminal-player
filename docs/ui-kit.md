@@ -330,15 +330,18 @@ discovery-page clause 143) is not completed but **listed under a
 button**, "Start from an existing folder…" ("Hide folders" while open):
 THAT server's file explorer, asked on the worker one folder at a time,
 each once while the modal is open — never this machine's: the place is
-a library on the server. Under the button a DIM head ("copies ›
-from-peers · 3 folders"), then up to 3 rows (the modal's 22-row cap; the
-kit's bar past them): "Up to {parent}" first inside a folder, then the
-folders — the held one the selection slab, hover BRIGHT, the folder the
-layout starts in BOLD — and one DIM note: "Looking up…", "No folders in
-here", "This folder does not exist yet — it is created by the first
-file" (the folder the layout starts in, typed, absent from its parent's
-listing), or GOLD for a listing that failed and for a folder whose name
-has a brace (a layout reads it as a variable). ↓ walks into the list and
+a library on the server. Under the button, two cells in, a DIM head of
+crumbs alone ("copies › from-peers": the rows and the bar say how
+many), then up to 3 rows (the modal's 22-row cap; the kit's bar past
+them): "Up to {parent}" first inside a folder, then the folders — the
+held one the selection slab, hover BRIGHT, the folder the layout starts
+in BOLD — and one DIM note: "Looking up…", "No folders in here",
+"“{folder}” isn't there yet · the first file creates it" (by its name:
+the folder the layout starts in, typed, absent from its parent's
+listing), or GOLD for a listing that failed ("Couldn't list this
+folder: …", the head naming it) and for a folder whose name has a brace
+("“{folder}” has a brace, so a layout can't start in it") — each
+tooltipped only where clipped. ↓ walks into the list and
 ↑ from its top back to the button; Enter, Space or a click on a row goes
 into it and makes it the start of the layout (Custom's leading folders;
 the layout's own folders follow) — nothing is typed into a path field,
@@ -365,12 +368,14 @@ on/affirmative), `( )` fg DarkGray otherwise; chosen label BOLD; inline
 `— description` fg DarkGray. Exactly one chosen, always; choosing is not
 toggling (clicking the chosen row does nothing). Radios for 2–4 options;
 5+ becomes a list picker. (One logged exception: Where copies land's
-LAYOUT, whose fourth and fifth radios are "Same folders as the server"
+layouts, whose fourth and fifth radios are "Same folders as the server"
 and a library's own layout — discovery-page deviations, 2026-10-21 and
-2026-10-22. Each radio carries the layout it writes DIM, right-aligned to
-the last cell; its last radio, Custom, opens its line editor on the row
-under it, EMPTY with a DIM hint after the caret, then its variables and
-a help line — the phone's sheet, 2026-10-23.) (Another: Keep a copy's
+2026-10-22. It has no card and no group label since 2026-10-24 — the
+names say what they are, and a radio carries no layout beside it (the
+path above it shows what a preset makes); its last radio, Custom, opens
+its line editor under the folders button, EMPTY with a DIM hint after
+the caret, then its variables — no help line: the phone's sheet,
+2026-10-23, trimmed 2026-10-24.) (Another: Keep a copy's
 choice — discovery-page clauses 106–107, deviations 2026-10-24 — has no
 card and no group label, the radios saying what they are, and its
 checkbox, "Only the 1 album you don't have", standing under the last
@@ -379,7 +384,8 @@ radio, is **the group's fourth stop**: choice semantics, so ticked it is
 the radio above ticks it and ↑ unticks it, a click toggles it, and
 picking another radio unticks it.) **Choices side by side**
 (`(•) music   ( ) copies`, the Auto DJ room's rows and Where copies
-land's LIBRARY): one row, three cells between, the chosen `(•)` OK and
+land's libraries — no label there, the hand showing on the chosen name
+ACCENT BOLD): one row, three cells between, the chosen `(•)` OK and
 its name BOLD, ← → choose and a click chooses; where they would not all
 fit the row starts at the chosen one behind `…` (that cell a click that
 steps back), and only a choice with room for its dot, a space and a

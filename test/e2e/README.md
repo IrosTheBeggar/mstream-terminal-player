@@ -60,12 +60,13 @@ room against the taste route, is described in run.sh):
   account as the server saves it, its libraries `copies` and `music`): a
   place saved with a base folder (older data) is seeded first; Keep a
   copy opens on it, `d` opens the picker folded into Custom with nothing
-  dirty (Enter on LIBRARY saves nothing), "Start from an existing
-  folder…" lists the library's own folders (the file explorer; the
-  seeded folder is not among them — created by the first file), a folder
-  picked there starts Custom's layout and Save keeps it with no base
-  folder; Keep a copy's place line ("Files go to …") reads the new
-  place. The fake's `/_move_destination` then puts the default back
+  dirty (Enter on the libraries saves nothing) — its title on the border,
+  "Files go to …" its first row and none of the words the trim of
+  2026-10-24 took out — "Start from an existing folder…" lists the
+  library's own folders (the file explorer; the seeded folder is not
+  among them — the first file creates it), a folder picked there starts
+  Custom's layout and Save keeps it with no base folder; Keep a copy's
+  place line ("Files go to …") reads the new place. The fake's `/_move_destination` then puts the default back
   behind the client's back, and Enter alone presses Add album — which
   sends the place it showed — answered 409 `destination_changed`:
   nothing starts, the place line redraws from the answer with its GOLD

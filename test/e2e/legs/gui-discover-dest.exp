@@ -9,15 +9,18 @@
 # servers tab, ↓ lights the strip's "Lanterns" from Attic and `c` opens
 # Keep a copy in album focus: "Files go to copies › From friends › Attic
 # Band › Lanterns", "d change" at its end. `d` opens Where copies land on that
-# place, folded into Custom as "From friends/{{ALBUMARTIST}}/{{ALBUM}}"
-# (the hand on LIBRARY: the fake offers copies and music); Enter there
-# saves nothing — nothing is dirty until edited (run.sh counts one PUT).
+# place — its title on the top border, its first row the same "Files go
+# to …" — folded into Custom as "From friends/{{ALBUMARTIST}}/{{ALBUM}}"
+# (the hand on the libraries: the fake offers copies and music); Enter
+# there saves nothing — nothing is dirty until edited (run.sh counts one
+# PUT).
 # ↓ walks the radios — Artist / Album, Server / Artist / Album, Same
 # folders as the server (the fake lists SERVERFOLDER), Custom — to "Start
 # from an existing folder…", Enter opens the list on the library root (the
 # parent of the folder the layout starts in; the fake lists copies'
-# from-peers, and "From friends" is not there: the list says the first
-# file creates it), ↓ holds from-peers and Enter starts the layout there:
+# from-peers, and "From friends" is not there: the list says, by its
+# name, the first file creates it), ↓ holds from-peers and Enter starts
+# the layout there:
 # Custom reads from-peers/{{ALBUMARTIST}}/{{ALBUM}} and the list goes
 # inside it. Esc closes the list, ↓ ↓ ↓ ↓ walks the field, the variables
 # and Use the library default to Save and Enter saves — the layout with no
@@ -84,8 +87,8 @@ expect {
     timeout { fail "NO-PICKER" 15 }
 }
 drain 1
-# Enter on LIBRARY saves only while Save is on: nothing is dirty as it
-# opened (the fold is no edit) — run.sh counts the PUTs.
+# Enter on the libraries saves only while Save is on: nothing is dirty as
+# it opened (the fold is no edit) — run.sh counts the PUTs.
 send "\r"
 drain 1
 # ↓ past the four radios to "Start from an existing folder…".
@@ -100,11 +103,12 @@ drain 1
 send "\x1b\[B"
 drain 1
 # Enter opens the list; the library's folders, asked of the fake, land —
-# the head's count is painted in one run ("Looking up…" leaves the name's
-# cells half in place for the diff renderer).
+# the note under them ("“From friends” isn't there yet · …") is painted in
+# one run (the row "from-peers" shares a cell with "Looking up…", which the
+# diff renderer leaves in place).
 send "\r"
 expect {
-    "1 folder" {}
+    "there yet" {}
     eof { puts "DIED-ON-LIST"; exit 21 }
     timeout { fail "NO-FOLDER-LIST" 22 }
 }

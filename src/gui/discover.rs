@@ -588,7 +588,8 @@ fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
 }
 
-fn dash() -> &'static str {
+/// The kit's mark for a missing value (`-` on the legacy console).
+pub(crate) fn dash() -> &'static str {
     if legacy_conhost() { "-" } else { "—" }
 }
 

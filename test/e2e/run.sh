@@ -277,12 +277,14 @@ stop_fake
 # The same gate as K, on a place seeded with a base folder (older data: the
 # leg's /_move_destination before the room opens). `c` on the lit tile
 # opens Keep a copy on it; `d` opens Where copies land folded into Custom
-# ("From friends/{{ALBUMARTIST}}/{{ALBUM}}", nothing dirty: Enter on
-# LIBRARY saves nothing), "Start from an existing folder…" lists the
-# library's own folders (the file explorer; the seeded folder is not among
-# them: created by the first file), a folder picked there starts Custom's
-# layout and Save keeps it (PUT, the layout with base '' — the one PUT);
-# Keep a copy's place line reads the new place. The destination then moves
+# ("From friends/{{ALBUMARTIST}}/{{ALBUM}}", nothing dirty: Enter on the
+# libraries saves nothing) — trimmed since 2026-10-24: the title on its
+# border, "Files go to …" its first row, no header, labels, templates or
+# help — "Start from an existing folder…" lists the library's own folders
+# (the file explorer; the seeded folder is not among them: the first file
+# creates it), a folder picked there starts Custom's layout and Save keeps
+# it (PUT, the layout with base '' — the one PUT); Keep a copy's place line
+# reads the new place. The destination then moves
 # behind the client's back (the fake's /_move_destination, as another tab
 # would), and Enter presses Add album — which sends the place Keep a copy
 # showed — answered 409 destination_changed: nothing starts, the place line
@@ -300,7 +302,7 @@ fi
 assert "the picker saved the layout started in the picked folder with no base folder, once; the start showed it; the moved destination started nothing" "
 import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
-assert s['destination_puts'] == [{'destination': {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}}], s['destination_puts']  # one PUT: the fold on open was no edit (Enter on LIBRARY sent nothing), the seeded base folder went into the layout, never sent as a base
+assert s['destination_puts'] == [{'destination': {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}}], s['destination_puts']  # one PUT: the fold on open was no edit (Enter on the libraries sent nothing), the seeded base folder went into the layout, never sent as a base
 assert s['folder_lists'][-2:] == ['/copies', '/copies/from-peers'] and s['folder_lists'].count('/copies') == 1, s['folder_lists']  # after the Files pane's own: the root on opening the list, the picked folder, each once
 assert s['destination_gets'] == 3, s['destination_gets']  # the gate, the open, the 409's read again — never one a frame
 assert len(s['job_starts']) == 1, s['job_starts']

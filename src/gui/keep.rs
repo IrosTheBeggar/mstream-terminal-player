@@ -34,8 +34,8 @@ use tui_input::backend::crossterm::EventHandler;
 use crate::api::types::{
     CollectionDestination, CollectionDestinationView, DEFAULT_LAYOUT, JobAction, JobMark, JobOutcome, JobScope, Landing,
     LayoutProblem, MAX_RESOLVED_LEN, MAX_TEMPLATE_LEN, ManyCounts, PEER_LAYOUT, PluginJob, PluginLink, Run, SERVER_FOLDER,
-    SERVERFOLDER_LAYOUT, SongTag, StopReason, base_folders, braced_folder, fold_base, layout_lead, safe_file_name,
-    sanitize_segment, start_layout_at, validate_layout, validate_resolved_path,
+    SERVERFOLDER_LAYOUT, SongTag, StopReason, base_folders, braced_folder, fold_base, layout_lead, sanitize_segment,
+    start_layout_at, validate_layout, validate_resolved_path,
 };
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, dim, scroll_list, width};
@@ -1357,6 +1357,20 @@ fn modal_box(frame: &mut Frame, rect: Rect) -> Rect {
     inner
 }
 
+/// A wide glyph of the room's just left of `rect` spans `rect`'s left
+/// border, and a terminal never draws the cell a wide glyph spans: a blank
+/// in its place on each of `rect`'s rows.
+fn clear_spill(frame: &mut Frame, rect: Rect) {
+    let Some(x) = rect.x.checked_sub(1) else { return };
+    let buffer = frame.buffer_mut();
+    for y in rect.top()..rect.bottom() {
+        let cell = &mut buffer[(x, y)];
+        if width(cell.symbol()) > 1 {
+            cell.set_symbol(" ");
+        }
+    }
+}
+
 /// The Keep a copy window, drawn (and registered) over everything — or
 /// Where copies land in its place while that is open (clause 142). `room`
 /// is the room's content rect: the window centres in it and clears its
@@ -1387,7 +1401,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Rect) {
     let (rect, band) = window_rect(area, room, KEEP_W, HEAD_ROWS + 2 + low.len() as u16);
     let (inner, own) = open_window(frame, gui, area, rect, band);
     let footer = if going(&view, shown) { t!("gui.discover.keep.esc_close_going") } else { t!("gui.discover.keep.esc_close") };
-    draw_borders(frame, gui, rect, &t!("gui.discover.keep.title"), &footer);
+    draw_borders(frame, gui, rect, &t!("gui.discover.keep.title"), &footer, Act::Disc(DiscAct::Keep(KeepAct::Close)));
     draw_head(frame, gui, &view, inner, own);
     gui.discover.keep.last_own = Some(own);
     let starting = matches!(view.stage, KeepStage::Starting);
@@ -1400,8 +1414,9 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Rect) {
 
 /// The title on the top border, TEXT BOLD after one `─`; the way out on
 /// the bottom border, DIM, ending one `─` before the corner — "Esc close"
-/// a text button that closes, its tail ("· the copy keeps going") plain.
-fn draw_borders(frame: &mut Frame, gui: &mut Gui, rect: Rect, title: &str, footer: &str) {
+/// a text button doing what Esc does (`close`), its tail ("· the copy
+/// keeps going") plain. Keep a copy's, and Where copies land's.
+fn draw_borders(frame: &mut Frame, gui: &mut Gui, rect: Rect, title: &str, footer: &str, close: Act) {
     // TEXT, never the border's ACCENT carried over: the window's own text
     // colour — the scheme's where it paints the ground, else the terminal's.
     let owned = th().ground.is_some() && crate::kit::theme::ground_owned();
@@ -1417,7 +1432,7 @@ fn draw_borders(frame: &mut Frame, gui: &mut Gui, rect: Rect, title: &str, foote
     if gui.ui.hovers(at) {
         put(frame, start, bottom, &button, bright_bold());
     }
-    gui.ui.click(at, Act::Disc(DiscAct::Keep(KeepAct::Close)));
+    gui.ui.click(at, close);
 }
 
 /// The head (§4.2): the item's title TEXT BOLD, the byline DIM — and the
@@ -1872,35 +1887,22 @@ fn ended_tips(verb: &str, keys: &[KeyWord]) -> String {
 /// ([`give_way`]).
 const DEST_W: u16 = 80;
 const DEST_ANCHOR: u16 = 22;
-/// Its columns from the left border: the labels and the preview block,
-/// the values (the radios' dots, the folders button and its list), the
-/// radios' labels and Custom's field, the last content cell.
-const DEST_LABEL: u16 = 2;
-const DEST_VALUE: u16 = 12;
-const DEST_FIELD: u16 = 16;
+/// Its columns from the left border — no labels column, the names saying
+/// what they are: the text (the preview and its notes, the libraries, the
+/// radios' dots, the folders button, a refusal under a preset, Use the
+/// library default), the open folder list's two-cell hang, the radios'
+/// labels and Custom's field (its GOLD lines and its variables), the last
+/// content cell.
+const DEST_TEXT: u16 = 2;
+const DEST_TREE: u16 = 4;
+const DEST_FIELD: u16 = 6;
 const DEST_LAST: u16 = 77;
 /// The rows the folder list shows at once; more scroll.
 const DEST_LIST: usize = 3;
 /// A refusal's, or the validator's, GOLD rows at most.
 const DEST_ERROR_ROWS: usize = 3;
 
-/// The values' column: the board's, or two cells past the widest label
-/// (a locale's "BIBLIOTHÈQUE").
-fn dest_value_col() -> u16 {
-    let widest = ["gui.discover.dest.library", "gui.discover.dest.layout"]
-        .iter()
-        .map(|key| width(&t!(*key).to_uppercase()) as u16)
-        .max()
-        .unwrap_or(0);
-    DEST_VALUE.max(DEST_LABEL + widest + 2)
-}
-
-/// The radios' labels and Custom's field: four past the dots.
-fn dest_field_col() -> u16 {
-    DEST_FIELD.max(dest_value_col() + 4)
-}
-
-/// A LAYOUT radio (clause 143), in the webapp's order.
+/// A layout radio (clause 143), in the webapp's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Radio {
     /// "Artist / Album": the server's default layout — the album's credit
@@ -1950,7 +1952,7 @@ fn is_preset(view: &CollectionDestinationView, vpath: &str, layout: &str) -> boo
 /// the webapp's: the radios, the folders button, then Custom's own rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DestStop {
-    /// The LIBRARY row — a stop with a choice of libraries.
+    /// The libraries' row — a stop with a choice of libraries.
     Library,
     Radio(Radio),
     /// "Start from an existing folder…" — and its list, while it is open.
@@ -1966,9 +1968,10 @@ pub(crate) enum DestStop {
 /// What the picker's pointer and keys do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DestAct {
-    /// `[X]`, Esc: back to Keep a copy, nothing saved.
+    /// Esc, "Esc close" on the bottom border: the open folder list
+    /// closes, else back to Keep a copy, nothing saved.
     Back,
-    /// ← → on LIBRARY: the library before, the one after.
+    /// ← → on the libraries' row: the library before, the one after.
     Step(i8),
     /// A library clicked, by its place in the row.
     Library(usize),
@@ -2124,7 +2127,8 @@ impl DestUi {
         view.library_default().is_some_and(|d| d.same_place(&self.place()))
     }
 
-    /// The account's own place is in force: the header's "yours".
+    /// The account's own place is in force: Use the library default
+    /// stands.
     fn mine(view: &CollectionDestinationView) -> bool {
         view.destination.as_ref().is_some_and(|d| d.source.as_deref() == Some("user"))
     }
@@ -2155,21 +2159,21 @@ impl DestUi {
     }
 
     /// Custom's field's problem (the webapp's `dmPickerCustomProblem`): the
-    /// validator's words as typed — none while it is empty: the preview
-    /// asks for a path — or the folder it holds as it opened that a layout
-    /// reads as a variable.
+    /// validator's words as typed — none while it is empty: its hint
+    /// stands — or the folder it holds as it opened that a layout reads as
+    /// a variable.
     fn problem(&self, view: &CollectionDestinationView) -> Option<String> {
         if !self.custom || self.text.value().is_empty() {
             return None;
         }
         if let Err(problem) = validate_layout(self.text.value(), &|name| view.knows(name)) {
-            return Some(problem_words(&problem, view));
+            return Some(problem_words(&problem));
         }
         self.held_braces().map(|folder| t!("gui.discover.dest.err_base_braces", folder = folder).to_string())
     }
 
-    /// The stops in walking order, the rows': LIBRARY (with a choice of
-    /// libraries — the row's, so one the server no longer lists counts),
+    /// The stops in walking order, the rows': the libraries (with a choice
+    /// of them — the row's, so one the server no longer lists counts),
     /// each radio, the folders button, Custom's field and its variables
     /// while Custom is chosen, the buttons.
     fn stops(&self, view: &CollectionDestinationView) -> Vec<DestStop> {
@@ -2301,13 +2305,11 @@ fn var_token(name: &str) -> String {
 
 /// The validator's refusal in words (the webapp's `dmPickerProblem`, the
 /// phone's words): an unknown variable named as it was typed, in its
-/// braces, with the variables the view lists.
-fn problem_words(problem: &LayoutProblem, view: &CollectionDestinationView) -> String {
+/// braces — the variables row right under the words lists the known ones.
+fn problem_words(problem: &LayoutProblem) -> String {
     let example = var_token("ARTIST");
     match problem {
-        LayoutProblem::UnknownVariable { token } => {
-            t!("gui.discover.dest.err_unknown_var", name = token, vars = variables(view).join(", ")).to_string()
-        }
+        LayoutProblem::UnknownVariable { token } => t!("gui.discover.dest.err_unknown_var", name = token).to_string(),
         LayoutProblem::UnbalancedBraces => t!("gui.discover.dest.err_braces", example = example).to_string(),
         LayoutProblem::Absolute => t!("gui.discover.dest.err_absolute").to_string(),
         LayoutProblem::Traversal => t!("gui.discover.dest.err_traversal").to_string(),
@@ -2320,15 +2322,17 @@ fn problem_words(problem: &LayoutProblem, view: &CollectionDestinationView) -> S
     }
 }
 
-/// What the preview block shows (the webapp's `dmPickerPreview` and
+/// What the preview row shows (the webapp's `dmPickerPreview` and
 /// `dmPickerUnseen`): the path the layout held renders for the copy Keep a
 /// copy has chosen — the layout as it opened drawn as the server holds it,
-/// base folder and all, so a folder set elsewhere reads as LANDS IN reads
-/// it, whatever a layout would make of its name — or why there is none.
+/// base folder and all, so a folder set elsewhere reads as Keep a copy's
+/// place line reads it, whatever a layout would make of its name — or no
+/// path.
 enum Preview {
-    /// Custom's field is empty: "Type a path to see where files land".
+    /// Custom's field is empty: "Files go to —", its hint says the rest.
     Empty,
-    /// The layout would be refused: "Fix the layout to see where files land".
+    /// The layout would be refused: "Files go to —", the GOLD words under
+    /// the field say why.
     Invalid,
     /// This item's path is longer than the server takes — no fault of the
     /// layout's: Save takes it. Measured as the server measures it
@@ -2354,30 +2358,10 @@ fn preview(ui: &DestUi, view: &KeepView, dview: &CollectionDestinationView) -> P
     Preview::Path(view.landing_for(&ui.vpath, &base, &layout, &known))
 }
 
-/// The preview's first line, what lands there (the webapp's
-/// `dmPickerLandsAt`): the song by its title, the album, every album of
-/// the artist, or the albums the library lacks (the one it lacks by name).
-fn lands_at(view: &KeepView) -> String {
-    let s = &view.subject;
-    let title = |name: Option<&str>| t!("gui.discover.dest.lands_at", title = name.unwrap_or_default()).to_string();
-    match view.scope {
-        JobScope::Album => title(s.album.as_deref()),
-        JobScope::Artist => t!("gui.discover.dest.lands_at_artist", artist = s.track_artist.clone().unwrap_or_default()).to_string(),
-        JobScope::ArtistMissing => match &view.one_missing {
-            Some((name, _)) => title(Some(name)),
-            None => t!("gui.discover.dest.lands_at_missing").to_string(),
-        },
-        JobScope::Song | JobScope::Folder => {
-            let file = s.filepath.as_deref().map(safe_file_name);
-            title(s.title.as_deref().filter(|t| !t.trim().is_empty()).or(file.as_deref()))
-        }
-    }
-}
-
 /// The preview's note for a variable with no value for this item, left
 /// out of the path and named in its braces (the webapp's
-/// `dmPickerMissing`): a song at the top of its server's library sits in
-/// no folder there — the tags' words are for tags. `None` with none.
+/// `dmPickerMissing`): an item at the top of its server's library sits in
+/// no folder there. `None` with none.
 fn missing_words(landing: &Landing) -> Option<String> {
     if landing.missing.is_empty() {
         return None;
@@ -2421,61 +2405,59 @@ fn tree_rows(app: &crate::tui::app::App, ui: &DestUi) -> Vec<TreeRow> {
 }
 
 /// The one note under the open list, and whether it is GOLD: a folder
-/// pressed whose name has a brace, "Looking up…" while it is asked, the
-/// folder the layout starts in not there yet (the first file creates it;
-/// the webapp's `dmBrowseMissing`) — absent from its parent's listing, or
-/// the server's 404 for the folder listed (`Cannot read directory …
-/// (ENOENT)`: a typed lead two folders deep, none of them there) — any
-/// other failure in the server's words, or no folders in here. `None`
-/// with nothing to say.
+/// pressed whose name has a brace, "Looking up…" while it is asked, a
+/// folder not there yet, by its name (the first file creates it; the
+/// webapp's `dmBrowseMissing`) — the one the layout starts in, absent from
+/// its parent's listing, or the folder listed, the server's 404 for it
+/// (`Cannot read directory … (ENOENT)`: a typed lead two folders deep,
+/// none of them there) — any other failure in the server's words (the
+/// head above names the folder; a library's own 404 among them: no file
+/// creates a library), or no folders in here. `None` with nothing to say.
 fn tree_note(app: &crate::tui::app::App, ui: &DestUi) -> Option<(String, bool)> {
     let list = ui.list.as_ref()?;
     if let Some(folder) = &list.braced {
         return Some((t!("gui.discover.dest.folder_braces", folder = folder).to_string(), true));
     }
+    let not_yet = |folder: &str| Some((t!("gui.discover.dest.will_create", folder = folder).to_string(), false));
     match app.keep_dest_folders(&folder_path(&ui.vpath, &list.dir)) {
         None | Some(Folders::Asking) => Some((t!("gui.discover.dest.looking_up").to_string(), false)),
-        Some(Folders::Failed(crate::api::PluginFailure::Refused { status: 404, .. })) => {
-            Some((t!("gui.discover.dest.will_create").to_string(), false))
-        }
-        Some(Folders::Failed(failure)) => {
-            let words = t!("gui.discover.dest.list_failed", path = folder_words(&ui.vpath, &list.dir), words = failure_words(failure));
-            Some((words.to_string(), true))
-        }
+        Some(Folders::Failed(failure)) => match (failure, list.dir.last()) {
+            (crate::api::PluginFailure::Refused { status: 404, .. }, Some(folder)) => not_yet(folder),
+            _ => Some((t!("gui.discover.dest.list_failed", words = failure_words(failure)).to_string(), true)),
+        },
         Some(Folders::Listed(names)) => {
             let base = ui.base();
             if let Some((last, parent)) = base.split_last()
                 && parent == list.dir.as_slice()
                 && !names.contains(last)
             {
-                return Some((t!("gui.discover.dest.will_create").to_string(), false));
+                return not_yet(last);
             }
             names.is_empty().then(|| (t!("gui.discover.dest.no_folders").to_string(), false))
         }
     }
 }
 
-/// One row of the picker, top to bottom.
+/// One row of the picker under its top border, top to bottom.
 #[derive(Debug, Clone, PartialEq)]
 enum DestRow {
-    Title,
-    Sub,
-    /// The preview's first line: what lands there, or why no path shows.
-    Lands,
-    Path,
-    /// A slot's note, and the variables this item has no value for.
-    Note,
+    /// "Files go to" and the path, "—" where none shows, or the GOLD
+    /// words of a path the server would not take.
+    Preview,
+    /// A slot's note's rows (two at most), and the variables this item has
+    /// no value for.
+    Note(usize),
     Missing,
-    Blank,
+    /// B1 under the preview, B2 under the libraries, B3 above the buttons.
+    Blank(Gap),
+    /// The libraries, with a choice of them.
     Library,
-    Radio(Radio, bool),
+    Radio(Radio),
     /// Custom's field.
     Field,
     /// A GOLD row: the validator's words, or a refusal's.
     Problem(String),
     Vars,
-    /// A row of the help line under the variables.
-    Help(String),
     /// "Start from an existing folder…" / "Hide folders".
     Folders,
     /// The open list's head, its rows by their place in the list's
@@ -2487,29 +2469,34 @@ enum DestRow {
 }
 
 /// The picker's rows (clause 143), before [`give_way`] fits them to the
-/// floor, in the webapp's order: the header, the preview block, a blank,
-/// LIBRARY, a blank, the radios — a refusal's words under them with a
-/// preset — the folders button and its open list, then Custom's own rows
-/// while it is chosen: its field, its problem (or the refusal's words),
-/// its variables and the help line; a blank, the buttons.
+/// floor, in the webapp's order: the preview and its notes, a blank, the
+/// libraries and a blank where there is a choice of them, the radios — a
+/// refusal's words under them with a preset — the folders button and its
+/// open list, then Custom's own rows while it is chosen: its field, its
+/// problem (or the refusal's words) and its variables; a blank, the
+/// buttons.
 fn dest_rows(ui: &DestUi, dview: &CollectionDestinationView, shown: &Preview, tree: usize, note: Option<&(String, bool)>) -> Vec<DestRow> {
-    let mut rows = vec![DestRow::Title, DestRow::Sub, DestRow::Lands];
+    let wide = usize::from(DEST_LAST + 1 - DEST_TEXT);
+    let mut rows = vec![DestRow::Preview];
     if let Preview::Path(landing) = shown {
-        rows.push(DestRow::Path);
-        if slot_note(landing).is_some() {
-            rows.push(DestRow::Note);
+        if let Some(words) = slot_note(landing) {
+            let (lines, _) = wrap_rows(&words, wide, 0, &[], false);
+            rows.extend((0..lines.len()).map(DestRow::Note));
         }
         if !landing.missing.is_empty() {
             rows.push(DestRow::Missing);
         }
     }
-    rows.extend([DestRow::Blank, DestRow::Library, DestRow::Blank]);
-    rows.extend(ui.radios(dview).into_iter().enumerate().map(|(i, r)| DestRow::Radio(r, i == 0)));
-    let field_room = usize::from(DEST_LAST + 1 - dest_field_col());
+    rows.push(DestRow::Blank(Gap::B1));
+    if ui.chips(dview).len() > 1 {
+        rows.extend([DestRow::Library, DestRow::Blank(Gap::B2)]);
+    }
+    rows.extend(ui.radios(dview).into_iter().map(DestRow::Radio));
+    let field_room = usize::from(DEST_LAST + 1 - DEST_FIELD);
     // The server's words as sent, as the webapp draws them.
     let refusal = ui.error.as_ref().map(failure_words);
     if !ui.custom && let Some(words) = &refusal {
-        rows.extend(error_lines(words, usize::from(DEST_LAST + 1 - dest_value_col())).into_iter().map(DestRow::Problem));
+        rows.extend(error_lines(words, wide).into_iter().map(DestRow::Problem));
     }
     rows.push(DestRow::Folders);
     if ui.list.is_some() {
@@ -2525,48 +2512,36 @@ fn dest_rows(ui: &DestUi, dview: &CollectionDestinationView, shown: &Preview, tr
             rows.extend(error_lines(&words, field_room).into_iter().map(DestRow::Problem));
         }
         rows.push(DestRow::Vars);
-        rows.extend(crate::kit::wrap_words(&t!("gui.discover.dest.custom_help"), field_room).into_iter().map(DestRow::Help));
     }
-    rows.extend([DestRow::Blank, DestRow::Buttons]);
+    rows.extend([DestRow::Blank(Gap::B3), DestRow::Buttons]);
     rows
 }
 
 /// Where the rows would pass the 22 the 100 × 24 floor holds, they give
-/// way in this order until they fit: the blank under LIBRARY, the blank
-/// above it, the blank above the buttons, the preview's missing-variables
-/// note, its slot note (both into the path's tooltip), the help line's
-/// rows from the last up, the variables row, the list's rows from the
-/// last down to one, a long refusal's rows down to one.
+/// way in this order until they fit: the blank under the libraries (B2),
+/// the one under the preview (B1), the one above the buttons (B3); the
+/// missing-variables note; the slot note's second row (the first then
+/// clipped, the whole note its tooltip), then the slot note (into the
+/// path's tooltip, with the missing note); the variables row; the list's
+/// rows from the last down to one; a GOLD block's rows down to one.
 fn give_way(rows: &mut Vec<DestRow>) {
     let over = |rows: &[DestRow]| rows.len() + 2 > usize::from(DEST_ANCHOR);
-    let blank_after = |rows: &[DestRow], what: DestRow| {
-        rows.iter().position(|r| *r == what).map(|i| i + 1).filter(|&i| rows.get(i) == Some(&DestRow::Blank))
-    };
-    let blank_before = |rows: &[DestRow], what: DestRow| {
-        rows.iter().position(|r| *r == what).and_then(|i| i.checked_sub(1)).filter(|&i| rows[i] == DestRow::Blank)
-    };
-    let first = |rows: &[DestRow], what: DestRow| rows.iter().position(|r| *r == what);
-    for step in 0..5 {
+    let steps = [
+        DestRow::Blank(Gap::B2),
+        DestRow::Blank(Gap::B1),
+        DestRow::Blank(Gap::B3),
+        DestRow::Missing,
+        DestRow::Note(1),
+        DestRow::Note(0),
+        DestRow::Vars,
+    ];
+    for what in steps {
         if !over(rows) {
             return;
         }
-        let at = match step {
-            0 => blank_after(rows, DestRow::Library),
-            1 => blank_before(rows, DestRow::Library),
-            2 => blank_before(rows, DestRow::Buttons),
-            3 => first(rows, DestRow::Missing),
-            _ => first(rows, DestRow::Note),
-        };
-        if let Some(at) = at {
+        if let Some(at) = rows.iter().position(|r| *r == what) {
             rows.remove(at);
         }
-    }
-    while over(rows) {
-        let Some(at) = rows.iter().rposition(|r| matches!(r, DestRow::Help(_))) else { break };
-        rows.remove(at);
-    }
-    if over(rows) && let Some(at) = first(rows, DestRow::Vars) {
-        rows.remove(at);
     }
     let last = |rows: &[DestRow], pick: fn(&DestRow) -> bool| {
         let n = rows.iter().filter(|r| pick(r)).count();
@@ -2583,8 +2558,9 @@ fn give_way(rows: &mut Vec<DestRow>) {
 }
 
 /// Runs of words in their tokens at `x`, in `room` cells: whole where they
-/// fit, else their tail behind a leading `…` (the picker's preview, so the
-/// folders that differ stay in view). True when it was clipped.
+/// fit, else their tail behind a leading `…` touching the words it cut
+/// into (the picker's preview, so the folders that differ stay in view).
+/// True when it was clipped.
 fn put_tail(frame: &mut Frame, x: u16, y: u16, runs: &[(String, Style)], room: usize) -> bool {
     use unicode_segmentation::UnicodeSegmentation;
     let total: usize = runs.iter().map(|(text, _)| width(text)).sum();
@@ -2598,15 +2574,23 @@ fn put_tail(frame: &mut Frame, x: u16, y: u16, runs: &[(String, Style)], room: u
     }
     for (text, style) in runs {
         let mut shown = String::new();
+        let mut cut = false;
         for grapheme in text.graphemes(true) {
             let w = crate::kit::grapheme_cells(grapheme);
             // A wide one the cut lands inside goes whole: a cell short,
             // never over.
             if skip > 0 {
                 skip = skip.saturating_sub(w);
+                cut = true;
                 continue;
             }
             shown.push_str(grapheme);
+        }
+        // A blank the cut lands on inside a name goes too, so the `…`
+        // touches the words — never a separator's blank before a whole
+        // crumb.
+        if cut && !shown.trim().is_empty() {
+            shown = shown.trim_start().to_string();
         }
         put(frame, at, y, &shown, *style);
         at += width(&shown) as u16;
@@ -2641,7 +2625,7 @@ fn dest_saving(gui: &Gui) -> bool {
     gui.discover.keep.dest.as_ref().is_some_and(|ui| ui.sent.is_some() && ui.sent == out)
 }
 
-/// Back to Keep a copy — Esc, `[X]`, or a save that landed — as it was,
+/// Back to Keep a copy — Esc, "Esc close", or a save that landed — as it was,
 /// the dot where it was; a save's place is its evidence (§7).
 fn close_dest(gui: &mut Gui) {
     gui.discover.keep.dest = None;
@@ -2700,8 +2684,16 @@ fn dest_save(gui: &mut Gui) {
 /// The picker's acts (clauses 142–144).
 pub(crate) fn dest_act(gui: &mut Gui, act: DestAct) {
     let Some(view) = gui.app.keep_dest_view().cloned() else { return };
+    // What Esc does — while a save is out too: the open list closes, else
+    // back to Keep a copy.
     if act == DestAct::Back {
-        close_dest(gui);
+        if gui.discover.keep.dest.as_ref().is_some_and(|ui| ui.list.is_some()) {
+            if let Some(ui) = gui.discover.keep.dest.as_mut() {
+                ui.list = None;
+            }
+        } else {
+            close_dest(gui);
+        }
         return;
     }
     if dest_saving(gui) {
@@ -2721,7 +2713,11 @@ pub(crate) fn dest_act(gui: &mut Gui, act: DestAct) {
             ui.hand = Some(DestStop::Library);
         }
         DestAct::Library(at) => {
-            if let Some(name) = ui.chips(&view).get(at).cloned() {
+            // The name already chosen only takes the hand: a refusal's
+            // words, the open list and the layout stay.
+            if let Some(name) = ui.chips(&view).get(at).cloned()
+                && name != ui.vpath
+            {
                 ui.choose_library(&view, &name);
             }
             ui.hand = Some(DestStop::Library);
@@ -2877,7 +2873,6 @@ fn dest_key(gui: &mut Gui, key: KeyEvent) {
     let var = ui.var.min(vars.saturating_sub(1));
     let shift_tab = key.code == KeyCode::BackTab || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
     match (ui.hand, key.code) {
-        (_, KeyCode::Esc) if ui.list.is_some() => ui.list = None,
         (_, KeyCode::Esc) => dest_act(gui, DestAct::Back),
         // The open list: ↓ into it and down it, ↑ up it and back to the
         // button from its top; Enter or Space on a held row goes there.
@@ -2937,7 +2932,7 @@ fn dest_key(gui: &mut Gui, key: KeyEvent) {
 }
 
 /// The tips line while the picker is up (clause 143), by the hand — the
-/// keys that work and nothing else (clause 119): "Enter save" on LIBRARY,
+/// keys that work and nothing else (clause 119): "Enter save" on the libraries,
 /// in the field and on Save only while Save is on.
 fn dest_tips(gui: &Gui, ui: &DestUi) -> String {
     if dest_saving(gui) {
@@ -2967,8 +2962,9 @@ fn dest_tips(gui: &Gui, ui: &DestUi) -> String {
 /// Where copies land, drawn (and registered) over everything — Keep a copy
 /// is not drawn while it is open (clause 142): the kit's modal, ACCENT, 80
 /// wide, centred over the whole frame and anchored as if 22 rows, so its
-/// top holds as the list, the variables and a refusal come and go. The
-/// room beneath is inert.
+/// top holds as the list, the variables and a refusal come and go; its
+/// title on the top border, "Esc close" on the bottom (Keep a copy's
+/// [`draw_borders`]). The room beneath is inert.
 fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let (Some(view), Some(dview)) = (gui.app.keep_view(), gui.app.keep_dest_view().cloned()) else { return };
     dest_ask(gui);
@@ -3011,59 +3007,65 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ui.overlay(rect);
     gui.ui.modal_over();
     let inner = modal_box(frame, rect);
+    // No band: the room's nav reaches the box's left border.
+    clear_spill(frame, rect);
     gui.ui.click(rect, Act::Guard);
     let dest = |act: DestAct| Act::Disc(DiscAct::Keep(KeepAct::Dest(act)));
-    let label_x = rect.x + DEST_LABEL;
-    let value_x = rect.x + dest_value_col();
-    let field_x = rect.x + dest_field_col();
+    // "Esc close" does what Esc does: the open list closes first.
+    draw_borders(frame, gui, rect, &t!("gui.discover.dest.title"), &t!("gui.discover.keep.esc_close"), dest(DestAct::Back));
+    let text_x = rect.x + DEST_TEXT;
+    let tree_x = rect.x + DEST_TREE;
+    let field_x = rect.x + DEST_FIELD;
     let end = rect.x + DEST_LAST + 1;
-    let wide = usize::from(end.saturating_sub(label_x));
-    let room = usize::from(end.saturating_sub(value_x));
+    let wide = usize::from(end.saturating_sub(text_x));
+    let tree_room = usize::from(end.saturating_sub(tree_x));
     let field_room = usize::from(end.saturating_sub(field_x));
     let gold = Style::default().fg(th().gold);
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let label = |key: &str, hand: bool| {
-        let style = if hand { accent().add_modifier(Modifier::BOLD) } else { dim() };
-        (t!(key).to_uppercase(), style)
-    };
     let chosen = ui.chosen(&dview);
     let names = variables(&dview);
     let can_save = ui.can_save(&dview);
-    let note_shown = rows.contains(&DestRow::Note);
+    // The slot's note on the rows the give-way left it — two, one clipped
+    // with its whole words the tooltip, or none: then into the path's.
+    let slot = match &shown {
+        Preview::Path(landing) => slot_note(landing),
+        _ => None,
+    };
+    let note_rows = rows.iter().filter(|r| matches!(r, DestRow::Note(_))).count();
+    let (note_lines, note_tip) = slot.as_deref().map(|words| wrap_rows(words, wide, 0, &[], note_rows < 2)).unwrap_or_default();
     let missing_shown = rows.contains(&DestRow::Missing);
     let (dot_on, dot_off) = if legacy_conhost() { ("(*)", "( )") } else { ("(•)", "( )") };
+    // Words clipped at the border: whole in their tooltip, and only then.
+    let tip_clipped = |gui: &mut Gui, x: u16, y: u16, room: usize, words: &str| {
+        if width(words) > room {
+            gui.ui.tip(Rect { x, y, width: room as u16, height: 1 }, words.to_string());
+        }
+    };
     for (i, row) in rows.iter().enumerate() {
         let y = inner.y + i as u16;
         match row {
-            DestRow::Blank => {}
-            DestRow::Title => {
-                let title = t!("gui.discover.dest.title");
-                put(frame, label_x, y, &title, accent().add_modifier(Modifier::BOLD));
-                let tag = if DestUi::mine(&dview) { t!("gui.discover.dest.tag_yours") } else { t!("gui.discover.dest.tag_default") };
-                put(frame, label_x + width(&title) as u16 + 1, y, &format!("· {tag}"), dim());
-                let x = crate::kit::modal_close_plain(frame, &mut gui.ui, inner, dest(DestAct::Back));
-                gui.ui.tip_keyed(x, format!("{} — Esc", t!("gui.discover.dest.back")));
-            }
-            DestRow::Sub => put(frame, label_x, y, &super::bar::clip(&t!("gui.discover.dest.sub"), wide), dim()),
-            DestRow::Lands => {
-                let (words, style) = match &shown {
-                    Preview::Empty => (t!("gui.discover.dest.custom_empty").to_string(), dim()),
-                    Preview::Invalid => (t!("gui.discover.dest.fix_layout").to_string(), gold),
-                    Preview::TooLong if view.scope == JobScope::Song => {
-                        (t!("gui.discover.dest.too_long_song", max = MAX_RESOLVED_LEN).to_string(), gold)
-                    }
-                    Preview::TooLong => (t!("gui.discover.dest.too_long", max = MAX_RESOLVED_LEN).to_string(), gold),
-                    Preview::Path(_) => (lands_at(&view), dim()),
-                };
-                let words = ell(&words);
-                put(frame, label_x, y, &super::bar::clip(&words, wide), style);
-                // Clipped (a wider locale's too-long words): whole in its tooltip.
-                if width(&words) > wide {
-                    gui.ui.tip(Rect { x: label_x, y, width: wide as u16, height: 1 }, words);
+            DestRow::Blank(_) => {}
+            DestRow::Preview => {
+                // A path past the server's 500: its GOLD words in the row's
+                // place — no fault of the layout's, Save takes it.
+                if matches!(shown, Preview::TooLong) {
+                    let words = t!("gui.discover.dest.too_long", max = MAX_RESOLVED_LEN).to_string();
+                    put(frame, text_x, y, &super::bar::clip(&words, wide), gold);
+                    tip_clipped(gui, text_x, y, wide, &words);
+                    continue;
                 }
-            }
-            DestRow::Path => {
-                let Preview::Path(landing) = &shown else { continue };
+                // Keep a copy's words for the same line, DIM; then the path,
+                // clipped from the left — or the kit's DIM `—` while the
+                // field is empty or the layout would be refused, so the
+                // field never moves under the caret.
+                let lead = format!("{} ", t!("gui.discover.keep.goes_to"));
+                put(frame, text_x, y, &super::bar::clip(&lead, wide), dim());
+                let x = text_x + (width(&lead) as u16).min(wide as u16);
+                let room = wide.saturating_sub(width(&lead));
+                let Preview::Path(landing) = &shown else {
+                    put(frame, x, y, &super::bar::clip(super::discover::dash(), room), dim());
+                    continue;
+                };
                 let mut runs: Vec<(String, Style)> = Vec::new();
                 for (i, crumb) in landing_crumbs(landing).into_iter().enumerate() {
                     if i > 0 {
@@ -3071,48 +3073,42 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     }
                     runs.extend(crumb);
                 }
-                // The song's file is the path's last crumb, as the phone draws it.
-                let file = view.file_name();
-                if let Some(file) = &file {
-                    runs.push((crumb_sep().to_string(), dim()));
-                    runs.push((file.clone(), dim()));
-                }
-                let clipped = put_tail(frame, label_x, y, &runs, wide);
+                let clipped = put_tail(frame, x, y, &runs, room);
                 // The tooltip: the whole path where the row clips it, and the
                 // notes the rows had no room for.
                 let mut tip: Vec<String> = Vec::new();
                 if clipped {
-                    let mut words = landing.words(&slot_words);
-                    words.extend(file);
-                    tip.push(words.join("/"));
+                    tip.push(whole_path(landing, None));
                 }
-                if !note_shown {
-                    tip.extend(slot_note(landing));
+                if note_rows == 0 {
+                    tip.extend(slot.clone());
                 }
                 if !missing_shown {
                     tip.extend(missing_words(landing));
                 }
                 if !tip.is_empty() {
-                    gui.ui.tip(Rect { x: label_x, y, width: wide as u16, height: 1 }, tip.join(" — "));
+                    gui.ui.tip(Rect { x: text_x, y, width: wide as u16, height: 1 }, tip.join(" — "));
                 }
             }
-            DestRow::Note | DestRow::Missing => {
+            DestRow::Note(n) => {
+                let Some(line) = note_lines.get(*n) else { continue };
+                put(frame, text_x, y, line, dim());
+                if let Some(tip) = &note_tip {
+                    gui.ui.tip(Rect { x: text_x, y, width: wide as u16, height: 1 }, tip.clone());
+                }
+            }
+            DestRow::Missing => {
                 let Preview::Path(landing) = &shown else { continue };
-                let words = if *row == DestRow::Note { slot_note(landing) } else { missing_words(landing) };
-                if let Some(words) = words {
-                    put(frame, label_x, y, &super::bar::clip(&words, wide), dim());
-                    gui.ui.tip(Rect { x: label_x, y, width: wide as u16, height: 1 }, words);
+                if let Some(words) = missing_words(landing) {
+                    put(frame, text_x, y, &super::bar::clip(&words, wide), dim());
+                    tip_clipped(gui, text_x, y, wide, &words);
                 }
             }
             DestRow::Library => {
+                // The hand on the row shows on the chosen name, ACCENT BOLD
+                // — no label to take it.
                 let hand = ui.hand == Some(DestStop::Library);
-                let (words, style) = label("gui.discover.dest.library", hand);
-                put(frame, label_x, y, &words, style);
                 let chips = ui.chips(&dview);
-                // The label takes the hand where LIBRARY is a stop.
-                if chips.len() > 1 {
-                    gui.ui.click(Rect { x: label_x, y, width: value_x - label_x, height: 1 }, dest(DestAct::Hand(DestStop::Library)));
-                }
                 // Every library in the server's order, the chosen one marked
                 // — from the chosen one behind `…` where they would not all
                 // fit (the mark steps to the one before), the last that has
@@ -3122,12 +3118,12 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 let cells = |name: &str| 4 + width(name) as u16;
                 let total: u16 = chips.iter().map(|name| cells(name) + 3).sum::<u16>().saturating_sub(3);
                 let at = chips.iter().position(|name| *name == ui.vpath).unwrap_or(0);
-                let (first, mut x) = if usize::from(total) <= room || at == 0 {
-                    (0, value_x)
+                let (first, mut x) = if usize::from(total) <= wide || at == 0 {
+                    (0, text_x)
                 } else {
-                    put(frame, value_x, y, if legacy_conhost() { "»" } else { "…" }, dim());
-                    gui.ui.click(Rect { x: value_x, y, width: 1, height: 1 }, dest(DestAct::Step(-1)));
-                    (at, value_x + 2)
+                    put(frame, text_x, y, clip_mark(), dim());
+                    gui.ui.click(Rect { x: text_x, y, width: 1, height: 1 }, dest(DestAct::Step(-1)));
+                    (at, text_x + 2)
                 };
                 for (n, name) in chips.iter().enumerate().skip(first) {
                     if x + 5 > end {
@@ -3139,6 +3135,7 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     let hover = gui.ui.hovers(cell);
                     put(frame, x, y, if on { dot_on } else { dot_off }, if on { Style::default().fg(th().ok) } else { dim() });
                     let style = match (hover, on) {
+                        (_, true) if hand => accent().add_modifier(Modifier::BOLD),
                         (true, _) => bright_bold(),
                         (false, true) => bold,
                         (false, false) => Style::default(),
@@ -3148,21 +3145,20 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     x += w + 3;
                 }
             }
-            DestRow::Radio(radio, first) => {
-                if *first {
-                    put(frame, label_x, y, &t!("gui.discover.dest.layout").to_uppercase(), dim());
-                }
+            DestRow::Radio(radio) => {
                 let on = chosen == Some(*radio);
-                put(frame, value_x, y, if on { dot_on } else { dot_off }, if on { Style::default().fg(th().ok) } else { dim() });
-                let (words, sub) = match radio {
-                    Radio::Custom => (t!("gui.discover.dest.custom").to_string(), t!("gui.discover.dest.custom_sub").to_string()),
+                put(frame, text_x, y, if on { dot_on } else { dot_off }, if on { Style::default().fg(th().ok) } else { dim() });
+                // Its name alone: the path above shows what it makes, and
+                // Custom's field the layout it holds.
+                let words = match radio {
+                    Radio::Custom => t!("gui.discover.dest.custom").to_string(),
                     preset => presets(&dview, &ui.vpath)
                         .into_iter()
                         .find(|(r, _, _)| r == preset)
-                        .map(|(_, key, layout)| (t!(key).to_string(), layout))
+                        .map(|(_, key, _)| t!(key).to_string())
                         .unwrap_or_default(),
                 };
-                let pick = Rect { x: value_x, y, width: end - value_x, height: 1 };
+                let pick = Rect { x: text_x, y, width: end - text_x, height: 1 };
                 let hover = gui.ui.hovers(pick);
                 let style = match (ui.hand == Some(DestStop::Radio(*radio)), hover, on) {
                     (true, _, _) => accent().add_modifier(Modifier::BOLD),
@@ -3170,16 +3166,7 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     (false, false, true) => bold,
                     (false, false, false) => Style::default(),
                 };
-                let label_w = width(&words) as u16;
                 put(frame, field_x, y, &super::bar::clip(&words, field_room), style);
-                // The layout it writes, DIM, right-aligned to the last cell;
-                // where the label leaves it less than its own cells (a wider
-                // locale), its end behind a leading `…`, two cells clear.
-                let sub_room = usize::from(end.saturating_sub(field_x + label_w + 2));
-                if sub_room > 1 {
-                    let shown = super::clip_lead(&sub, sub_room);
-                    put(frame, end - width(&shown) as u16, y, &shown, dim());
-                }
                 gui.ui.click(pick, dest(DestAct::Pick(*radio)));
             }
             DestRow::Field => {
@@ -3200,16 +3187,15 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 gui.ui.click(cell, dest(DestAct::Hand(DestStop::Field)));
             }
             DestRow::Problem(line) => {
-                let x = if ui.custom { field_x } else { value_x };
+                let x = if ui.custom { field_x } else { text_x };
                 put(frame, x, y, line, gold);
             }
             DestRow::Vars => {
                 // Under Custom's field where they fit, else right-aligned to
-                // the last cell, as far left as the labels' column: a wider
-                // locale's column, or the seventh (SERVERFOLDER), never
-                // loses one.
+                // the last cell, as far left as the text's column: a server
+                // that lists more never loses one.
                 let total = names.iter().map(|n| width(n)).sum::<usize>() + 3 * names.len().saturating_sub(1);
-                let mut x = field_x.min(end.saturating_sub(total as u16)).max(label_x);
+                let mut x = field_x.min(end.saturating_sub(total as u16)).max(text_x);
                 let held = (ui.hand == Some(DestStop::Vars)).then_some(ui.var.min(names.len().saturating_sub(1)));
                 for (at, name) in names.iter().enumerate() {
                     let w = width(name) as u16;
@@ -3234,11 +3220,10 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     x += w;
                 }
             }
-            DestRow::Help(line) => put(frame, field_x, y, &ell(line), dim()),
             DestRow::Folders => {
                 let open = ui.list.is_some();
                 let words = ell(&t!(if open { "gui.discover.dest.hide_folders" } else { "gui.discover.dest.start_from" }));
-                let cell = Rect { x: value_x, y, width: (width(&words) as u16).min(end - value_x), height: 1 };
+                let cell = Rect { x: text_x, y, width: (width(&words) as u16).min(end - text_x), height: 1 };
                 let style = if ui.hand == Some(DestStop::Folders) {
                     accent().add_modifier(Modifier::BOLD)
                 } else if gui.ui.hovers(cell) {
@@ -3246,18 +3231,13 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 } else {
                     dim()
                 };
-                put(frame, value_x, y, &super::bar::clip(&words, room), style);
+                put(frame, text_x, y, &super::bar::clip(&words, wide), style);
                 gui.ui.click(cell, dest(DestAct::Folders));
             }
             DestRow::TreeHead => {
+                // Where the list is; its rows and its bar say how many.
                 let Some(list) = ui.list.as_ref() else { continue };
-                let mut words = folder_words(&ui.vpath, &list.dir);
-                let folders = tree.iter().filter(|r| matches!(r, TreeRow::Folder(_))).count();
-                if folders > 0 {
-                    let key = format!("gui.discover.dest.folder_count_{}", super::discover::plural_form(folders as u64));
-                    words = format!("{words} · {}", t!(key.as_str(), count = folders));
-                }
-                put(frame, value_x, y, &super::bar::clip(&words, room), dim());
+                put(frame, tree_x, y, &super::bar::clip(&folder_words(&ui.vpath, &list.dir), tree_room), dim());
             }
             DestRow::Listed(n) => {
                 let Some(list) = ui.list.as_ref() else { continue };
@@ -3276,7 +3256,7 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                         (name.clone(), path == base)
                     }
                 };
-                let slab = Rect { x: value_x - 1, y, width: end - (value_x - 1), height: 1 };
+                let slab = Rect { x: tree_x - 1, y, width: end - (tree_x - 1), height: 1 };
                 let held = list.held == Some(at);
                 if held {
                     frame.buffer_mut().set_style(slab, sel());
@@ -3287,7 +3267,7 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     (false, false, true) => bold,
                     (false, false, false) => dim(),
                 };
-                put(frame, value_x, y, &super::bar::clip(&words, room), style);
+                put(frame, tree_x, y, &super::bar::clip(&words, tree_room), style);
                 gui.ui.click(slab, dest(DestAct::Folder(at)));
                 if *n == 0 && tree.len() > visible {
                     let bar = Rect { x: end, y, width: 1, height: visible as u16 };
@@ -3298,24 +3278,27 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             }
             DestRow::TreeNote(words, is_gold) => {
                 let words = ell(words);
-                put(frame, value_x, y, &super::bar::clip(&words, room), if *is_gold { gold } else { dim() });
-                gui.ui.tip(Rect { x: value_x, y, width: room as u16, height: 1 }, words);
+                put(frame, tree_x, y, &super::bar::clip(&words, tree_room), if *is_gold { gold } else { dim() });
+                tip_clipped(gui, tree_x, y, tree_room, &words);
             }
             DestRow::Buttons => {
+                // Saving: `[ Saving… ]` DIM where Save stands, no click — the
+                // kit's modal primary that goes off — and Use the library
+                // default not drawn.
                 if saving {
-                    let words = ell(&t!("gui.discover.dest.saving"));
-                    put(frame, end.saturating_sub(width(&words) as u16), y, &words, accent());
+                    let words = format!("[ {} ]", ell(&t!("gui.discover.dest.saving")));
+                    put(frame, end.saturating_sub(width(&words) as u16), y, &words, dim());
                     continue;
                 }
                 // The webapp's footer: Use the library default at the left
-                // edge (the labels' column), Save at the right.
+                // edge (the text's column), Save at the right.
                 for stop in ui.buttons(&dview) {
                     let text = match stop {
                         DestStop::UseDefault => format!("[ {} ]", t!("gui.discover.dest.use_default")),
                         _ => format!("[ {} ]", t!("gui.discover.dest.save")),
                     };
                     let w = width(&text) as u16;
-                    let x = if stop == DestStop::UseDefault { label_x } else { end.saturating_sub(w) };
+                    let x = if stop == DestStop::UseDefault { text_x } else { end.saturating_sub(w) };
                     let cell = Rect { x, y, width: w, height: 1 };
                     let on = stop != DestStop::Save || can_save;
                     let style = if ui.hand == Some(stop) {
@@ -6441,15 +6424,20 @@ pub(crate) mod tests {
             assert_eq!(low[1], "│ Files go to copies › From friends › ‹artist›                    d change │", "{}", low.join("\n"));
             assert_eq!(under_place(&low), note);
         }
-        // The picker's preview draws the same, its note on the row under the
-        // path (clipped at the border, whole in its tooltip).
+        // The picker's preview draws the same words, its note whole on its
+        // own two rows under the path, as Keep a copy draws it — no tooltip.
         key(&mut gui, KeyCode::Char('d'));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        let path = picker.iter().position(|r| r.contains("copies › From friends › ‹artist›")).expect("the preview");
-        assert_eq!(picker[path..path + 2].to_vec(), boxed(&["", " copies › From friends › ‹artist›", " ‹artist› comes from each song's own tags, so these songs can land in more t…"])[2..4].to_vec(), "{}", picker.join("\n"));
+        let path = picker.iter().position(|r| r.contains("Files go to copies › From friends › ‹artist›")).expect("the preview");
+        let preview = [
+            " Files go to copies › From friends › ‹artist›",
+            " ‹artist› comes from each song's own tags, so these songs can land in more",
+            " than one folder.",
+        ];
+        assert_eq!(picker[path..path + 3].to_vec(), boxed(&preview)[1..4].to_vec(), "{}", picker.join("\n"));
         let y = at_row(&rows, "‹artist› comes from");
-        assert!(gui.ui.tips.iter().any(|(rect, tip)| rect.contains(Position { x: 40, y }) && tip == note), "{:?}", gui.ui.tips);
+        assert!(!gui.ui.tips.iter().any(|(rect, _)| rect.contains(Position { x: 40, y })), "{:?}", gui.ui.tips);
         key(&mut gui, KeyCode::Esc);
         // Starting and queued: the place sent, then the job's pin — "Into" —
         // the slot and its note stand.
@@ -7051,16 +7039,16 @@ pub(crate) mod tests {
             assert_eq!(under_place(&low), note);
             // The picker's preview: the base folder folded into Custom's
             // field, the path drawn as the server holds it and clipped
-            // from the left — the whole path its tooltip (a song's file
-            // after it), the note on its own row with its own.
+            // from the left after "Files go to" — the whole path its
+            // tooltip, no file — the note whole on its own rows, no tooltip.
             key(&mut gui, KeyCode::Char('d'));
             let rows = draw(&mut gui, 100, 30);
             let y = at_row(&rows, "‹genre› › Boukmanflow › Borrowed Tapes");
-            assert!(rows[usize::from(y)].contains('…'), "the preview clipped: {}", rows[usize::from(y)]);
-            let file = if choice == crate::tui::app::keep::KeepChoice::Song { "/Late Train Verse.mp3" } else { "" };
-            let path_tip = format!("{whole}{file}");
-            assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y }) && *t == path_tip), "preview: {:?}", gui.ui.tips);
-            assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y: y + 1 }) && *t == note), "the note: {:?}", gui.ui.tips);
+            assert!(rows[usize::from(y)].contains("│ Files go to …"), "the preview clipped after its lead: {}", rows[usize::from(y)]);
+            assert!(gui.ui.tips.iter().any(|(rect, t)| rect.contains(Position { x: 40, y }) && t.as_str() == whole), "preview: {:?}", gui.ui.tips);
+            let shown: Vec<String> = [y + 1, y + 2].iter().map(|&y| rows[usize::from(y)].chars().skip(12).take(76).collect::<String>().trim().to_string()).collect();
+            assert_eq!(shown.join(" "), note, "{}", rows.join("\n"));
+            assert!(!gui.ui.tips.iter().any(|(rect, _)| rect.contains(Position { x: 40, y: y + 1 })), "the note whole: {:?}", gui.ui.tips);
             key(&mut gui, KeyCode::Esc);
         }
     }
@@ -7678,7 +7666,7 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Char('d'));
         land_folders(&mut gui);
         let rows = draw(&mut gui, 100, 30);
-        let top = rows.iter().position(|r| r.contains("Where copies land") && r.contains("[X]")).expect("the picker") as u16 - 1;
+        let top = rows.iter().position(|r| r.contains("─ Where copies land ─")).expect("the picker") as u16;
         let frame = ratatui::layout::Rect { x: 10, y: top, width: super::DEST_W, height: picker_rows(&rows).len() as u16 };
         assert!(gui.ui.tips.iter().all(|(rect, _)| frame.contains(Position { x: rect.x, y: rect.y })), "{:?}", gui.ui.tips);
         assert_eq!(ripe(&mut gui, Position { x: 2, y: 9 }), None, "the nav beneath");
@@ -7934,9 +7922,10 @@ pub(crate) mod tests {
         gui
     }
 
-    /// The picker's own rows, 80 wide, from its top border.
+    /// The picker's own rows, 80 wide, from its top border — its title on
+    /// it — to its bottom.
     fn picker_rows(rows: &[String]) -> Vec<String> {
-        let top = rows.iter().position(|r| r.contains("Where copies land") && r.contains("[X]")).expect("the picker") - 1;
+        let top = rows.iter().position(|r| r.contains("─ Where copies land ─") || r.contains("- Where copies land -")).expect("the picker");
         let bottom = (top + 1..rows.len()).find(|&y| matches!(rows[y].chars().nth(10), Some('╰' | '+'))).expect("its bottom");
         rows[top..=bottom].iter().map(|r| r.chars().skip(10).take(80).collect()).collect()
     }
@@ -7963,11 +7952,12 @@ pub(crate) mod tests {
         apply(gui, Event::DestinationSaved { seq, generation, answer });
     }
 
-    /// The picker's frame around `lines`, 80 wide.
+    /// The picker's frame around `lines`, 80 wide: its title on the top
+    /// border, "Esc close" on the bottom.
     fn boxed(lines: &[&str]) -> Vec<String> {
-        let mut out = vec![format!("╭{}╮", "─".repeat(78))];
+        let mut out = vec![format!("╭─ Where copies land {}╮", "─".repeat(58))];
         out.extend(lines.iter().map(|l| format!("│{l:<78}│")));
-        out.push(format!("╰{}╯", "─".repeat(78)));
+        out.push(format!("╰{} Esc close ─╯", "─".repeat(66)));
         out
     }
 
@@ -8059,11 +8049,6 @@ pub(crate) mod tests {
         draw(gui, 100, 30);
     }
 
-    /// The title row: the tag after the title, `[X]` at the last cell.
-    fn titled(tag: &str) -> String {
-        format!("{:<75}[X]", format!(" Where copies land · {tag}"))
-    }
-
     /// The picker's hit at a cell, as the pointer's act.
     fn dest_hit(gui: &Gui, at: Position) -> Option<super::DestAct> {
         match gui.ui.hit(at) {
@@ -8081,33 +8066,61 @@ pub(crate) mod tests {
         gui.discover.keep.dest.as_ref().expect("the picker")
     }
 
-    /// The picker on the saved place, the hand on LIBRARY (the editor idle
-    /// on a preset).
-    const IDLE: [&str; 13] = [
+    /// The picker on the saved place, the hand on the libraries (the
+    /// editor idle on a preset): where this song lands, the choices, the
+    /// buttons — no header, no labels, no templates.
+    const IDLE: [&str; 10] = [
+        " Files go to copies › Boukmanflow › Borrowed Tapes",
         "",
-        " One setting for your account · every copy uses it",
-        " Late Train Verse lands at",
-        " copies › Boukmanflow › Borrowed Tapes › Late Train Verse.mp3",
+        " ( ) music   (•) copies",
         "",
-        " LIBRARY   ( ) music   (•) copies",
-        "",
-        " LAYOUT    (•) Artist / Album                       {{ALBUMARTIST}}/{{ALBUM}}",
-        "           ( ) Server / Artist / Album     {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}",
-        "           ( ) Custom                                      Type your own path",
-        "           Start from an existing folder…",
+        " (•) Artist / Album",
+        " ( ) Server / Artist / Album",
+        " ( ) Custom",
+        " Start from an existing folder…",
         "",
         FOOT,
     ];
 
-    /// The buttons' row: Use the library default at the labels' column,
+    /// The buttons' row: Use the library default at the text's column,
     /// Save at the right (the webapp's footer).
     const FOOT: &str = " [ Use the library default ]                                         [ Save ]";
 
-    /// `IDLE` with its title row, tagged.
-    fn idle(tag: &str) -> Vec<String> {
-        let mut rows: Vec<String> = IDLE.iter().map(|r| r.to_string()).collect();
-        rows[0] = titled(tag);
-        boxed(&rows.iter().map(String::as_str).collect::<Vec<_>>())
+    fn idle() -> Vec<String> {
+        boxed(&IDLE)
+    }
+
+    /// The words the trim took out of the picker (2026-10-24): none of
+    /// them stands in any of its states.
+    const CUT: [&str; 21] = [
+        "· yours",
+        "· library default",
+        "[X]",
+        "One setting for your account",
+        "lands at",
+        "land at",
+        "Type a path to see",
+        "Fix the layout to see",
+        "LIBRARY",
+        "LAYOUT",
+        "Type your own path",
+        "Use / between folders",
+        "a plain name puts every copy",
+        ".mp3",
+        "· 1 folder",
+        "· 3 folders",
+        "· 4 folders",
+        "would pass",
+        "so left out of the path",
+        "does not exist yet",
+        "Use ARTIST",
+    ];
+
+    /// The cut words absent from the picker's rows.
+    fn none_cut(picker: &[String]) {
+        for words in CUT {
+            assert!(!picker.iter().any(|r| r.contains(words)), "{words:?} still stands:\n{}", picker.join("\n"));
+        }
     }
 
     #[test]
@@ -8118,55 +8131,73 @@ pub(crate) mod tests {
         super::open(&mut gui, LATE);
         stage_facts(&mut gui);
         // Opening read the destination again: the answer redraws the place
-        // — and only the place: whose it is is the picker's to say (§7).
+        // — and only the place: whose it is is said nowhere (§7).
         land_read(&mut gui, dest_view("", "user"));
         let low = lower_rows(&draw(&mut gui, 100, 30));
         assert_eq!(low[6], "│ Files go to copies › Boukmanflow › Borrowed Tapes               d change │", "{}", low.join("\n"));
         assert!(!low.iter().any(|r| r.contains("saved for your account")));
-        // No stop to walk to: `d` opens it.
+        // No stop to walk to: `d` opens it — its first row the words of the
+        // line it was opened from.
         key(&mut gui, KeyCode::Char('d'));
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
-        assert_eq!(picker_rows(&rows), idle("yours"), "{}", rows.join("\n"));
+        assert_eq!(picker_rows(&rows), idle(), "{}", rows.join("\n"));
+        none_cut(&picker_rows(&rows));
+        assert!(!rows.iter().any(|r| r.contains("{{ALBUMARTIST}}/{{ALBUM}}")), "no layout beside a preset: {}", rows.join("\n"));
         // 80 wide, centred over the whole frame, its top on row 4 (as if 22
         // rows); Keep a copy is not drawn while it is open.
         assert_eq!((rows[4].chars().nth(10), rows[4].chars().nth(89)), (Some('╭'), Some('╮')));
         assert!(!rows.iter().any(|r| r.contains("Keep a copy")), "{}", rows.join("\n"));
-        // The tokens: the title ACCENT BOLD, its tag and [X] DIM, the hand's
-        // label ACCENT BOLD, the chosen library BOLD with its dot OK, the
-        // other plain, the chosen radio BOLD, its layout DIM, the folders
-        // button DIM, the quiet button DIM — and Save DIM: nothing changed.
+        assert_eq!(at(&rows, "Files go to copies › Boukmanflow › Borrowed Tapes"), Position { x: 12, y: 5 });
+        // The tokens: the frame ACCENT, the title on it TEXT BOLD, "Esc
+        // close" DIM; "Files go to" DIM, the library BOLD; the hand on the
+        // libraries shows on the chosen name, ACCENT BOLD, its dot OK, the
+        // other plain; the dots at the text's column, the chosen radio's
+        // name BOLD at col 5; the folders button DIM, the quiet button DIM
+        // — and Save DIM: nothing changed.
         let cell = |text: &str| at(&rows, text);
-        assert_eq!((fg(&buffer, cell("Where copies land")), bold(&buffer, cell("Where copies land"))), (th().accent, true));
-        assert_eq!(fg(&buffer, cell("· yours")), th().dim);
-        assert_eq!(fg(&buffer, Position { x: 86, y: 5 }), th().dim);
-        assert_eq!(fg(&buffer, cell("Late Train Verse lands at")), th().dim);
-        assert!(bold(&buffer, cell("copies › Boukmanflow")));
-        assert_eq!(fg(&buffer, cell("Late Train Verse.mp3")), th().dim);
-        assert_eq!((fg(&buffer, cell("LIBRARY   (")), bold(&buffer, cell("LIBRARY   ("))), (th().accent, true));
-        assert_eq!(fg(&buffer, cell("(•) copies")), th().ok);
-        assert!(bold(&buffer, Position { x: cell("(•) copies").x + 4, y: cell("(•) copies").y }));
-        assert!(!bold(&buffer, Position { x: cell("( ) music").x + 4, y: cell("( ) music").y }));
-        assert!(bold(&buffer, cell("Artist / Album    ")));
-        assert_eq!(fg(&buffer, cell("{{ALBUMARTIST}}/{{ALBUM}}")), th().dim);
-        assert_eq!(fg(&buffer, cell("Type your own path")), th().dim);
+        let text = |at: Position| (fg(&buffer, at), bold(&buffer, at));
+        assert_eq!(fg(&buffer, Position { x: 10, y: 4 }), th().accent, "the frame ACCENT");
+        assert_eq!(cell("Where copies land"), Position { x: 13, y: 4 });
+        assert_eq!(text(cell("Where copies land")), (Color::Reset, true), "the title on the border, TEXT BOLD");
+        assert_eq!(cell("Esc close"), Position { x: 78, y: 15 });
+        assert_eq!(text(cell("Esc close")), (th().dim, false));
+        assert_eq!(fg(&buffer, cell("Files go to")), th().dim);
+        assert_eq!(text(cell("copies › Boukmanflow")), (Color::Reset, true), "the library BOLD");
+        let copies = cell("(•) copies");
+        assert_eq!(fg(&buffer, copies), th().ok);
+        assert_eq!(text(Position { x: copies.x + 4, y: copies.y }), (th().accent, true), "the hand on the chosen name");
+        let music = cell("( ) music");
+        assert_eq!(music.x, 12, "no labels column");
+        assert_eq!(text(Position { x: music.x + 4, y: music.y }), (Color::Reset, false));
+        let chosen = cell("(•) Artist / Album");
+        assert_eq!(chosen.x, 12, "the dots at the text's column");
+        assert_eq!(text(Position { x: 16, y: chosen.y }), (Color::Reset, true), "the names at col 5");
         assert_eq!(fg(&buffer, cell("Start from an existing")), th().dim);
         assert_eq!(fg(&buffer, cell("[ Use the library default ]")), th().dim);
-        assert_eq!((fg(&buffer, cell("[ Save ]")), bold(&buffer, cell("[ Save ]"))), (th().dim, false));
-        assert_eq!(super::super::discover::tips(&gui), "← → library · ↑ ↓ rows · Esc back");
-        // The pointer: a library chooses, a radio picks, the folders button
-        // opens the list, [X] goes back; Save off takes no click but says
-        // why; the room beneath is inert.
-        assert_eq!(dest_hit(&gui, cell("( ) music")), Some(super::DestAct::Library(0)));
-        assert_eq!(dest_hit(&gui, cell("(•) copies")), Some(super::DestAct::Library(1)));
-        assert_eq!(dest_hit(&gui, cell("LIBRARY   (")), Some(super::DestAct::Hand(super::DestStop::Library)));
-        assert_eq!(dest_hit(&gui, cell("Server / Artist")), Some(super::DestAct::Pick(super::Radio::Server)));
-        assert_eq!(dest_hit(&gui, cell("Type your own path")), Some(super::DestAct::Pick(super::Radio::Custom)));
+        assert_eq!(text(cell("[ Save ]")), (th().dim, false));
+        assert_eq!(super::super::discover::tips(&gui), "← → library · ↑ ↓ rows · Esc close");
+        // The pointer: a library chooses, a radio's whole row picks, the
+        // folders button opens the list, "Esc close" goes back; Save off
+        // takes no click but says why; no `[X]`, the preview's row inert,
+        // and no tooltip where nothing is clipped; the room beneath inert.
+        assert_eq!(dest_hit(&gui, music), Some(super::DestAct::Library(0)));
+        assert_eq!(dest_hit(&gui, copies), Some(super::DestAct::Library(1)));
+        let server = cell("( ) Server / Artist");
+        assert_eq!(dest_hit(&gui, server), Some(super::DestAct::Pick(super::Radio::Server)));
+        assert_eq!(dest_hit(&gui, Position { x: 87, y: server.y }), Some(super::DestAct::Pick(super::Radio::Server)));
+        assert_eq!(dest_hit(&gui, cell("( ) Custom")), Some(super::DestAct::Pick(super::Radio::Custom)));
         assert_eq!(dest_hit(&gui, cell("Start from an existing")), Some(super::DestAct::Folders));
-        assert_eq!(dest_hit(&gui, Position { x: 87, y: 5 }), Some(super::DestAct::Back));
+        assert_eq!(dest_hit(&gui, cell("Esc close")), Some(super::DestAct::Back));
+        assert_eq!(dest_hit(&gui, Position { x: 86, y: 15 }), Some(super::DestAct::Back));
+        assert_eq!(gui.ui.hit(Position { x: 87, y: 15 }), Some(Act::Guard));
+        assert_eq!(gui.ui.hit(Position { x: 87, y: 5 }), Some(Act::Guard), "no [X]");
+        assert_eq!(gui.ui.hit(cell("Files go to")), Some(Act::Guard));
         assert_eq!(dest_hit(&gui, cell("[ Use the library default ]")), Some(super::DestAct::UseDefault));
         assert_eq!(gui.ui.hit(cell("[ Save ]")), Some(Act::Guard));
         assert_eq!(tip_at(&gui, cell("[ Save ]")).as_deref(), Some("nothing changed yet"));
+        assert_eq!(tip_at(&gui, cell("Files go to")), None, "whole on its row: no tooltip");
+        assert_eq!(tip_at(&gui, cell("Esc close")), None);
         assert_eq!(gui.ui.hit(Position { x: 5, y: 25 }), Some(Act::Guard));
         // Esc goes back, nothing saved: Keep a copy as it was, the dot where
         // it was.
@@ -8174,74 +8205,82 @@ pub(crate) mod tests {
         assert!(gui.discover.keep.dest.is_none() && saves(&gui).is_empty());
         let rows = draw(&mut gui, 100, 30);
         assert_eq!(lower_rows(&rows), low, "{}", rows.join("\n"));
-        // A click on `d change` opens it too; the library's default is
-        // tagged so.
+        // A click on `d change` opens it too, and a click on "Esc close"
+        // goes back as Esc does.
         let change = at(&rows, "d change");
         assert_eq!(gui.ui.hit(change), Some(Act::Disc(DiscAct::Keep(super::KeepAct::Key(super::KeyWord::Change)))));
         gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Key(super::KeyWord::Change))));
         assert!(gui.discover.keep.dest.is_some());
+        let rows = draw(&mut gui, 100, 30);
+        gui.act(gui.ui.hit(at(&rows, "Esc close")).expect("Esc close"));
+        assert!(gui.discover.keep.dest.is_none() && saves(&gui).is_empty());
+        // Whose place it is is said nowhere: on the library's default the
+        // picker reads as on the account's own — Use the library default
+        // stands only where pressing it would change something.
         let mut gui = dest_gui_on(dest_view("", "default"));
         let rows = draw(&mut gui, 100, 30);
-        assert_eq!(picker_rows(&rows)[1], format!("│{:<78}│", titled("library default")), "{}", rows.join("\n"));
+        assert_eq!(picker_rows(&rows), idle(), "{}", rows.join("\n"));
     }
 
     #[test]
     fn the_library_row_chooses_with_arrows_and_clicks_and_a_librarys_own_layout_follows_it() {
         let _en = english();
         let mut gui = dest_gui("");
-        // ← to music: its own layout joins the radios, Save turns on.
+        // ← to music: its own layout joins the radios by its name alone,
+        // Save turns on.
         key(&mut gui, KeyCode::Left);
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         assert_eq!(
             picker_rows(&rows),
             boxed(&[
-                &titled("yours"),
-                " One setting for your account · every copy uses it",
-                " Late Train Verse lands at",
-                " music › Boukmanflow › Borrowed Tapes › Late Train Verse.mp3",
+                " Files go to music › Boukmanflow › Borrowed Tapes",
                 "",
-                " LIBRARY   (•) music   ( ) copies",
+                " (•) music   ( ) copies",
                 "",
-                " LAYOUT    (•) Artist / Album                       {{ALBUMARTIST}}/{{ALBUM}}",
-                "           ( ) Server / Artist / Album     {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}",
-                "           ( ) Library layout                 {{ARTIST}}/{{YEAR}} - {{ALBUM}}",
-                "           ( ) Custom                                      Type your own path",
-                "           Start from an existing folder…",
+                " (•) Artist / Album",
+                " ( ) Server / Artist / Album",
+                " ( ) Library layout",
+                " ( ) Custom",
+                " Start from an existing folder…",
                 "",
                 FOOT,
             ]),
             "{}",
             rows.join("\n")
         );
+        assert!(!rows.iter().any(|r| r.contains("{{ARTIST}}/{{YEAR}} - {{ALBUM}}")), "no template beside it: {}", rows.join("\n"));
         let save = at(&rows, "[ Save ]");
         assert_eq!((fg(&buffer, save), bold(&buffer, save)), (th().accent, true));
         assert_eq!(dest_hit(&gui, save), Some(super::DestAct::Save));
-        // Save on: the tips say Enter saves from LIBRARY (clause 119).
-        assert_eq!(super::super::discover::tips(&gui), "← → library · Enter save · ↑ ↓ rows · Esc back");
+        // Save on: the tips say Enter saves from the libraries (clause 119).
+        assert_eq!(super::super::discover::tips(&gui), "← → library · Enter save · ↑ ↓ rows · Esc close");
         // Its layout picked: the preview follows; → back to copies takes
         // the layout along, into Custom's field — under "Start from an
         // existing folder…", the webapp's order — a library's own layout
         // that leaves with it stays the layout.
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Template));
         let rows = draw(&mut gui, 100, 30);
-        assert_eq!(picker_rows(&rows)[4], format!("│{:<78}│", " music › Boukmanflow › 2019 - Borrowed Tapes › Late Train Verse.mp3"));
+        assert_eq!(picker_rows(&rows)[1], format!("│{:<78}│", " Files go to music › Boukmanflow › 2019 - Borrowed Tapes"));
         dest_act(&mut gui, super::DestAct::Step(1));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[10], format!("│{:<78}│", "           (•) Custom                                      Type your own path"), "{}", picker.join("\n"));
-        assert_eq!(picker[11], format!("│{:<78}│", "           Start from an existing folder…"));
-        assert_eq!(picker[12], format!("│{:<78}│", "               {{ARTIST}}/{{YEAR}} - {{ALBUM}}"));
-        assert_eq!(picker[4], format!("│{:<78}│", " copies › Boukmanflow › 2019 - Borrowed Tapes › Late Train Verse.mp3"));
+        assert_eq!(picker[7], format!("│{:<78}│", " (•) Custom"), "{}", picker.join("\n"));
+        assert_eq!(picker[8], format!("│{:<78}│", " Start from an existing folder…"));
+        assert_eq!(picker[9], format!("│{:<78}│", "     {{ARTIST}}/{{YEAR}} - {{ALBUM}}"));
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to copies › Boukmanflow › 2019 - Borrowed Tapes"));
         // ← back to music with it untouched: its preset again, Custom's
         // field as it was — empty.
         dest_act(&mut gui, super::DestAct::Step(-1));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[10], format!("│{:<78}│", "           (•) Library layout                 {{ARTIST}}/{{YEAR}} - {{ALBUM}}"), "{}", picker.join("\n"));
+        assert_eq!(picker[7], format!("│{:<78}│", " (•) Library layout"), "{}", picker.join("\n"));
         assert!(!ui(&gui).custom && ui(&gui).text.value().is_empty());
-        // A click chooses a library as the arrows do.
-        dest_act(&mut gui, super::DestAct::Library(1));
+        // A click chooses a library as the arrows do, and gives the row the
+        // hand.
+        dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Save));
+        let rows = draw(&mut gui, 100, 30);
+        gui.act(gui.ui.hit(at(&rows, "( ) copies")).expect("copies"));
         assert_eq!(ui(&gui).vpath, "copies");
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Library));
     }
@@ -8251,79 +8290,75 @@ pub(crate) mod tests {
         let _en = english();
         let mut gui = dest_gui("");
         // Custom clicked: its field takes the keyboard, empty, the hint
-        // after the caret; the preview asks for a path; Save is off.
+        // after the caret; the preview holds its row with the kit's DIM `—`
+        // so the field does not move on the first key; Save is off.
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Field));
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
-        assert_eq!(
-            picker_rows(&rows),
-            boxed(&[
-                &titled("yours"),
-                " One setting for your account · every copy uses it",
-                " Type a path to see where files land",
-                "",
-                " LIBRARY   ( ) music   (•) copies",
-                "",
-                " LAYOUT    ( ) Artist / Album                       {{ALBUMARTIST}}/{{ALBUM}}",
-                "           ( ) Server / Artist / Album     {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}",
-                "           (•) Custom                                      Type your own path",
-                "           Start from an existing folder…",
-                "               ▏e.g. From friends or {{ARTIST}}/{{ALBUM}}",
-                "               ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER",
-                "               Use / between folders. Variables sort copies by artist,",
-                "               album…; a plain name puts every copy in the same folder.",
-                "",
-                FOOT,
-            ]),
-            "{}",
-            rows.join("\n")
-        );
-        assert_eq!(fg(&buffer, at(&rows, "Type a path to see")), th().dim);
+        let empty = boxed(&[
+            " Files go to —",
+            "",
+            " ( ) music   (•) copies",
+            "",
+            " ( ) Artist / Album",
+            " ( ) Server / Artist / Album",
+            " (•) Custom",
+            " Start from an existing folder…",
+            "     ▏e.g. From friends or {{ARTIST}}/{{ALBUM}}",
+            "     ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER",
+            "",
+            FOOT,
+        ]);
+        assert_eq!(picker_rows(&rows), empty, "{}", rows.join("\n"));
+        none_cut(&picker_rows(&rows));
+        assert_eq!(fg(&buffer, at(&rows, "Files go to —")), th().dim);
+        assert_eq!(at(&rows, "Files go to —"), Position { x: 12, y: 5 });
+        assert_eq!(fg(&buffer, Position { x: 24, y: 5 }), th().dim, "the kit's `—` DIM");
         assert_eq!(fg(&buffer, at(&rows, "e.g. From friends")), th().dim);
         assert_eq!(fg(&buffer, at(&rows, "ARTIST · ALBUM")), th().dim);
-        assert_eq!(fg(&buffer, at(&rows, "Use / between folders")), th().dim);
-        assert_eq!(super::super::discover::tips(&gui), "type a layout · ↑ ↓ rows · Esc back");
-        // An unknown variable: the preview says to fix the layout, GOLD;
-        // the validator's words under the field, GOLD, wrapped; Save off.
+        assert_eq!(super::super::discover::tips(&gui), "type a layout · ↑ ↓ rows · Esc close");
+        // An unknown variable: the preview's `—` stays DIM; the validator's
+        // words under the field, GOLD — the typo named, the variables right
+        // under them the known ones; Save off.
         typed(&mut gui, "{{ARTST}}/{{YEAR}} - {{ALBUM}}");
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " Fix the layout to see where files land"), "{}", picker.join("\n"));
-        assert_eq!(picker[10], format!("│{:<78}│", "           Start from an existing folder…"));
-        assert_eq!(picker[11], format!("│{:<78}│", "               {{ARTST}}/{{YEAR}} - {{ALBUM}}▏"));
-        assert_eq!(picker[12], format!("│{:<78}│", "               Unknown variable {{ARTST}}. Use ARTIST, ALBUM, YEAR, GENRE,"));
-        assert_eq!(picker[13], format!("│{:<78}│", "               ALBUMARTIST, PEER."));
-        assert_eq!(fg(&buffer, at(&rows, "Fix the layout")), th().gold);
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to —"), "{}", picker.join("\n"));
+        assert_eq!(picker[8], format!("│{:<78}│", " Start from an existing folder…"));
+        assert_eq!(picker[9], format!("│{:<78}│", "     {{ARTST}}/{{YEAR}} - {{ALBUM}}▏"));
+        assert_eq!(picker[10], format!("│{:<78}│", "     Unknown variable {{ARTST}}."));
+        assert_eq!(picker[11], format!("│{:<78}│", "     ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER"));
+        assert_eq!(fg(&buffer, at(&rows, "Files go to —")), th().dim);
         assert_eq!(fg(&buffer, at(&rows, "Unknown variable")), th().gold);
         assert_eq!(tip_at(&gui, at(&rows, "[ Save ]")).as_deref(), Some("fix the layout first"));
+        none_cut(&picker);
         key(&mut gui, KeyCode::Enter);
         assert!(saves(&gui).is_empty(), "Enter saves nothing while Save is off");
-        // Each refusal in the phone's words, as typed.
+        // Each refusal in the phone's words, as typed, on its one row.
         let problem = |gui: &mut Gui, text: &str| {
             ctrl(gui, 'u');
             typed(gui, text);
             let rows = draw(gui, 100, 30);
             let picker = picker_rows(&rows);
-            picker[12..].iter().take_while(|r| !r.contains("ARTIST · ALBUM")).map(|r| r.trim_matches('│').trim().to_string()).collect::<Vec<_>>().join(" ")
+            picker[10..].iter().take_while(|r| !r.contains("ARTIST · ALBUM")).map(|r| r.trim_matches('│').trim().to_string()).collect::<Vec<_>>()
         };
-        assert_eq!(problem(&mut gui, "/x"), "A layout can't start with / — it begins inside the library.");
-        assert_eq!(problem(&mut gui, "a/../b"), "A path can't contain .. folders.");
-        assert_eq!(problem(&mut gui, "~/x"), "A path can't contain ~ or $HOME.");
-        assert_eq!(problem(&mut gui, "C:/x"), "A path can't use a drive letter like C:.");
-        assert_eq!(problem(&mut gui, "{{ARTIST}"), "A brace is out of place — variables are written like {{ARTIST}}.");
-        assert_eq!(problem(&mut gui, " "), "That makes no folder — add a name or a variable.");
+        assert_eq!(problem(&mut gui, "/x"), ["A layout can't start with / — it begins inside the library."]);
+        assert_eq!(problem(&mut gui, "a/../b"), ["A path can't contain .. folders."]);
+        assert_eq!(problem(&mut gui, "~/x"), ["A path can't contain ~ or $HOME."]);
+        assert_eq!(problem(&mut gui, "C:/x"), ["A path can't use a drive letter like C:."]);
+        assert_eq!(problem(&mut gui, "{{ARTIST}"), ["A brace is out of place — variables are written like {{ARTIST}}."]);
+        assert_eq!(problem(&mut gui, " "), ["That makes no folder — add a name or a variable."]);
         // A valid layout: the path, Save on, Enter saves it with no base folder.
         ctrl(&mut gui, 'u');
         typed(&mut gui, "From friends/{{ARTIST}}/{{ALBUM}}");
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " Late Train Verse lands at"), "{}", picker.join("\n"));
-        assert_eq!(picker[4], format!("│{:<78}│", " copies › From friends › Boukmanflow › Borrowed Tapes › Late Train Verse.mp3"));
-        assert_eq!(picker[12], format!("│{:<78}│", "               From friends/{{ARTIST}}/{{ALBUM}}▏"));
-        assert_eq!(picker[13], format!("│{:<78}│", "               ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER"));
-        assert_eq!(super::super::discover::tips(&gui), "type a layout · Enter save · ↑ ↓ rows · Esc back", "Save on: Enter saves from the field");
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to copies › From friends › Boukmanflow › Borrowed Tapes"), "{}", picker.join("\n"));
+        assert_eq!(picker[9], format!("│{:<78}│", "     From friends/{{ARTIST}}/{{ALBUM}}▏"));
+        assert_eq!(picker[10], format!("│{:<78}│", "     ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER"));
+        assert_eq!(super::super::discover::tips(&gui), "type a layout · Enter save · ↑ ↓ rows · Esc close", "Save on: Enter saves from the field");
         key(&mut gui, KeyCode::Enter);
         let place = saves(&gui)[0].clone().expect("a place");
         assert_eq!((place.vpath.as_str(), place.base.as_str(), place.layout.as_str()), ("copies", "", "From friends/{{ARTIST}}/{{ALBUM}}"));
@@ -8339,6 +8374,17 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Down);
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Folders));
         key(&mut gui, KeyCode::Down);
+        assert_eq!(ui(&gui).hand, Some(super::DestStop::Field));
+        // A click on the field's row gives it the keys; a click on Custom's
+        // radio from any cell of its row picks it.
+        let mut gui = dest_gui("");
+        let rows = draw(&mut gui, 100, 30);
+        let custom = at(&rows, "( ) Custom");
+        gui.act(gui.ui.hit(Position { x: 60, y: custom.y }).expect("Custom's row"));
+        assert!(ui(&gui).custom && ui(&gui).hand == Some(super::DestStop::Field));
+        dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Library));
+        let rows = draw(&mut gui, 100, 30);
+        gui.act(gui.ui.hit(Position { x: 30, y: at_row(&rows, "e.g. From friends") }).expect("the field"));
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Field));
     }
 
@@ -8360,7 +8406,7 @@ pub(crate) mod tests {
         // ↓ to the row, → → to YEAR, Enter inserts it at the caret; the hand
         // stays on the row, its variable ACCENT BOLD.
         key(&mut gui, KeyCode::Down);
-        assert_eq!(super::super::discover::tips(&gui), "← → variable · Enter insert · ↑ ↓ rows · Esc back");
+        assert_eq!(super::super::discover::tips(&gui), "← → variable · Enter insert · ↑ ↓ rows · Esc close");
         key(&mut gui, KeyCode::Right);
         key(&mut gui, KeyCode::Right);
         let buffer = super::tests::buffer(&mut gui, 100, 30);
@@ -8390,9 +8436,10 @@ pub(crate) mod tests {
             key(&mut gui, KeyCode::Down);
         }
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Folders));
-        assert_eq!(super::super::discover::tips(&gui), "Enter folders · ↑ ↓ rows · Esc back");
+        assert_eq!(super::super::discover::tips(&gui), "Enter folders · ↑ ↓ rows · Esc close");
         // Enter opens the list on the library root, asked of the session's
-        // own server once: "Looking up…" until it answers.
+        // own server once: "Looking up…" until it answers; the head and the
+        // rows hang two cells in, the button's own.
         key(&mut gui, KeyCode::Enter);
         let asked = |gui: &Gui| -> Vec<String> {
             gui.pending
@@ -8406,53 +8453,54 @@ pub(crate) mod tests {
         assert_eq!(asked(&gui), vec!["/copies".to_string()]);
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[11], format!("│{:<78}│", "           Hide folders"), "{}", picker.join("\n"));
-        assert_eq!(picker[12], format!("│{:<78}│", "           copies"));
-        assert_eq!(picker[13], format!("│{:<78}│", "           Looking up…"));
+        assert_eq!(picker[8], format!("│{:<78}│", " Hide folders"), "{}", picker.join("\n"));
+        assert_eq!(picker[9], format!("│{:<78}│", "   copies"));
+        assert_eq!(picker[10], format!("│{:<78}│", "   Looking up…"));
         assert_eq!(super::super::discover::tips(&gui), "↑ ↓ folders · Enter open · Esc close the list");
+        // Answered: the head names where the list is, no count — its rows
+        // say it.
         land_folders(&mut gui);
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[12], format!("│{:<78}│", "           copies · 1 folder"), "{}", picker.join("\n"));
-        assert_eq!(picker[13], format!("│{:<78}│", "           from-peers"));
-        assert_eq!(picker.len(), 17);
-        // ↓ holds the folder (the slab across cols 11–77, not bold); Enter
+        assert_eq!(picker[9], format!("│{:<78}│", "   copies"), "{}", picker.join("\n"));
+        assert_eq!(picker[10], format!("│{:<78}│", "   from-peers"));
+        assert_eq!(picker.len(), 14);
+        none_cut(&picker);
+        // ↓ holds the folder (the slab across cols 13–87, not bold); Enter
         // starts Custom there and lists inside it: the list under the
-        // button, then Custom's field, variables and help (the webapp's
-        // order) — 21 rows, so the blank under LIBRARY gives way (the
-        // picker never passes 22, whatever the terminal's height).
+        // button, then Custom's field and variables (the webapp's order).
         key(&mut gui, KeyCode::Down);
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let held = at(&rows, "from-peers");
+        assert_eq!(held.x, 14);
         assert_eq!((bg(&buffer, held), bold(&buffer, held)), (th().accent, false));
-        assert_eq!(bg(&buffer, Position { x: 21, y: held.y }), th().accent);
+        assert_eq!((bg(&buffer, Position { x: 13, y: held.y }), bg(&buffer, Position { x: 87, y: held.y })), (th().accent, th().accent));
+        assert_ne!(bg(&buffer, Position { x: 12, y: held.y }), th().accent);
         key(&mut gui, KeyCode::Enter);
         assert_eq!(asked(&gui), vec!["/copies/from-peers".to_string()]);
         land_folders(&mut gui);
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
+        let bar = |text: &str, glyph: char| format!("{text:<77}{glyph}");
+        let (up, archive, peer) = (bar("   Up to copies", '▲'), bar("   2025 archive", '█'), bar("   Stage Peer B", '▼'));
         assert_eq!(
             picker_rows(&rows),
             boxed(&[
-                &titled("yours"),
-                " One setting for your account · every copy uses it",
-                " Late Train Verse lands at",
-                " copies › from-peers › Boukmanflow › Borrowed Tapes › Late Train Verse.mp3",
+                " Files go to copies › from-peers › Boukmanflow › Borrowed Tapes",
                 "",
-                " LIBRARY   ( ) music   (•) copies",
-                " LAYOUT    ( ) Artist / Album                       {{ALBUMARTIST}}/{{ALBUM}}",
-                "           ( ) Server / Artist / Album     {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}",
-                "           (•) Custom                                      Type your own path",
-                "           Hide folders",
-                "           copies › from-peers · 3 folders",
-                "           Up to copies                                                      ▲",
-                "           2025 archive                                                      █",
-                "           Stage Peer B                                                      ▼",
-                "               from-peers/{{ALBUMARTIST}}/{{ALBUM}}",
-                "               ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER",
-                "               Use / between folders. Variables sort copies by artist,",
-                "               album…; a plain name puts every copy in the same folder.",
+                " ( ) music   (•) copies",
+                "",
+                " ( ) Artist / Album",
+                " ( ) Server / Artist / Album",
+                " (•) Custom",
+                " Hide folders",
+                "   copies › from-peers",
+                &up,
+                &archive,
+                &peer,
+                "     from-peers/{{ALBUMARTIST}}/{{ALBUM}}",
+                "     ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER",
                 "",
                 FOOT,
             ]),
@@ -8460,7 +8508,7 @@ pub(crate) mod tests {
             rows.join("\n")
         );
         assert!(ui(&gui).custom);
-        assert_eq!(fg(&buffer, at(&rows, "copies › from-peers · 3")), th().dim);
+        assert_eq!(fg(&buffer, Position { x: 14, y: at_row(&rows, "Up to copies") - 1 }), th().dim, "the head DIM");
         // ↓ ↓ ↓ Enter goes into Stage Peer B: nothing in it, Up to its
         // parent; the layout starts there.
         for _ in 0..3 {
@@ -8471,29 +8519,27 @@ pub(crate) mod tests {
         assert_eq!(ui(&gui).text.value(), "from-peers/Stage Peer B/{{ALBUMARTIST}}/{{ALBUM}}");
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[12], format!("│{:<78}│", "           copies › from-peers › Stage Peer B"), "{}", picker.join("\n"));
-        assert_eq!(picker[13], format!("│{:<78}│", "           Up to from-peers"));
-        assert_eq!(picker[14], format!("│{:<78}│", "           No folders in here"));
+        assert_eq!(picker[9], format!("│{:<78}│", "   copies › from-peers › Stage Peer B"), "{}", picker.join("\n"));
+        assert_eq!(picker[10], format!("│{:<78}│", "   Up to from-peers"));
+        assert_eq!(picker[11], format!("│{:<78}│", "   No folders in here"));
         // Up: the parent again, the layout starting there; the wheel scrolls
         // the list (four rows, three shown).
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Enter);
         assert_eq!(ui(&gui).text.value(), "from-peers/{{ALBUMARTIST}}/{{ALBUM}}");
         let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("copies › from-peers · 3 folders")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("│   copies › from-peers   ")), "{}", rows.join("\n"));
         super::super::discover::wheel(&mut gui, 1);
         let rows = draw(&mut gui, 100, 30);
         assert!(rows.iter().any(|r| r.contains("Stage Peer C")), "the wheel scrolls the list: {}", rows.join("\n"));
-        // Esc closes the list, the blank back, the hand on the button;
-        // opened again it lists the folder the layout starts in among its
-        // neighbours, that one BOLD; a click on a row goes in as Enter
-        // does.
+        // Esc closes the list, the hand on the button; opened again it
+        // lists the folder the layout starts in among its neighbours, that
+        // one BOLD; a click on a row goes in as Enter does.
         key(&mut gui, KeyCode::Esc);
         assert!(ui(&gui).list.is_none());
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Folders));
         let rows = draw(&mut gui, 100, 30);
         assert!(rows.iter().any(|r| r.contains("Start from an existing folder…")) && rows.iter().any(|r| r.contains("ARTIST · ALBUM")), "{}", rows.join("\n"));
-        assert_eq!(picker_rows(&rows)[7], format!("│{:<78}│", ""), "{}", rows.join("\n"));
         dest_act(&mut gui, super::DestAct::Folders);
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
@@ -8512,7 +8558,8 @@ pub(crate) mod tests {
     fn the_list_says_a_folder_not_there_yet_and_one_a_layout_cannot_start_from() {
         let _en = english();
         // Custom typed with a folder the root does not list: the list opens
-        // on the root, and says the folder is created by the first file.
+        // on the root, and says that folder, by its name, is created by the
+        // first file — whole on its row, no tooltip.
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
         typed(&mut gui, "From friends/{{ARTIST}}");
@@ -8520,18 +8567,24 @@ pub(crate) mod tests {
         land_folders(&mut gui);
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[11], format!("│{:<78}│", "           Hide folders"), "{}", picker.join("\n"));
-        assert_eq!(picker[12], format!("│{:<78}│", "           copies · 1 folder"));
-        assert_eq!(picker[13], format!("│{:<78}│", "           from-peers"));
-        assert_eq!(picker[14], format!("│{:<78}│", "           This folder does not exist yet — it is created by the first file"));
+        assert_eq!(picker[8], format!("│{:<78}│", " Hide folders"), "{}", picker.join("\n"));
+        assert_eq!(picker[9], format!("│{:<78}│", "   copies"));
+        assert_eq!(picker[10], format!("│{:<78}│", "   from-peers"));
+        assert_eq!(picker[11], format!("│{:<78}│", "   “From friends” isn't there yet · the first file creates it"));
+        assert_eq!(tip_at(&gui, at(&rows, "“From friends” isn't there yet")), None);
+        none_cut(&picker);
         // Two folders deep, none of them there: the list anchors on the
-        // first, the server answers 404 — not there yet, DIM, as the
-        // webapp's dmBrowseMissing reads a failed listing; any other
-        // failure (403) keeps the server's words in GOLD.
-        let mut gui = dest_gui("");
-        dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
-        typed(&mut gui, "New/Sub/{{ARTIST}}");
-        dest_act(&mut gui, super::DestAct::Folders);
+        // first, the server answers 404 — that folder not there yet, DIM, as
+        // the webapp's dmBrowseMissing reads a failed listing; any other
+        // failure (403) keeps the server's words in GOLD, after the head
+        // that names the folder.
+        let typed_deep = || {
+            let mut gui = dest_gui("");
+            dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
+            typed(&mut gui, "New/Sub/{{ARTIST}}");
+            dest_act(&mut gui, super::DestAct::Folders);
+            gui
+        };
         let failed = |gui: &mut Gui, status: u16, words: &str| {
             let ask = gui.pending.iter().find_map(|e| match e {
                 Effect::Api(ApiCmd::DestinationFolders { seq, generation, path }) => Some((*seq, *generation, path.clone())),
@@ -8543,25 +8596,51 @@ pub(crate) mod tests {
             let failure = crate::api::PluginFailure::Refused { status, words: words.into() };
             apply(gui, Event::DestinationFolders { seq, generation, path, answer: Err(failure) });
         };
+        let mut gui = typed_deep();
         failed(&mut gui, 404, "Cannot read directory \"/copies/New\" (ENOENT)");
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[12], format!("│{:<78}│", "           copies › New"), "{}", picker.join("\n"));
-        assert_eq!(picker[13], format!("│{:<78}│", "           Up to copies"));
-        assert_eq!(picker[14], format!("│{:<78}│", "           This folder does not exist yet — it is created by the first file"));
-        assert_eq!(fg(&buffer, at(&rows, "This folder does not exist yet")), th().dim);
-        assert!(!rows.iter().any(|r| r.contains("couldn't list")), "{}", rows.join("\n"));
-        let mut gui = dest_gui("");
-        dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
-        typed(&mut gui, "New/Sub/{{ARTIST}}");
-        dest_act(&mut gui, super::DestAct::Folders);
+        assert_eq!(picker[9], format!("│{:<78}│", "   copies › New"), "{}", picker.join("\n"));
+        assert_eq!(picker[10], format!("│{:<78}│", "   Up to copies"));
+        assert_eq!(picker[11], format!("│{:<78}│", "   “New” isn't there yet · the first file creates it"));
+        assert_eq!(fg(&buffer, at(&rows, "“New” isn't there yet")), th().dim);
+        assert!(!rows.iter().any(|r| r.contains("Couldn't list")), "{}", rows.join("\n"));
+        let mut gui = typed_deep();
         failed(&mut gui, 403, "Forbidden");
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
-        assert_eq!(fg(&buffer, at(&rows, "couldn't list copies › New: Forbidden")), th().gold, "{}", rows.join("\n"));
+        let note = at(&rows, "Couldn't list this folder: Forbidden");
+        assert_eq!(fg(&buffer, note), th().gold, "{}", rows.join("\n"));
+        assert_eq!(tip_at(&gui, note), None, "whole: no tooltip");
+        // The library's own root a 404 (one the server no longer lists): no
+        // file creates a library — the server's words, GOLD.
+        let mut gui = dest_gui("");
+        dest_act(&mut gui, super::DestAct::Folders);
+        let ask = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::DestinationFolders { seq, generation, path }) => Some((*seq, *generation, path.clone())),
+            _ => None,
+        });
+        let (seq, generation, path) = ask.expect("the root asked");
+        assert_eq!(path, "/copies");
+        gui.pending.retain(|e| !matches!(e, Effect::Api(ApiCmd::DestinationFolders { .. })));
+        let failure = crate::api::PluginFailure::Refused { status: 404, words: "Cannot read directory \"/copies\" (ENOENT)".into() };
+        apply(&mut gui, Event::DestinationFolders { seq, generation, path, answer: Err(failure) });
+        let buffer = super::tests::buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        let note = at(&rows, "Couldn't list this folder: Cannot read directory");
+        assert_eq!(fg(&buffer, note), th().gold, "{}", rows.join("\n"));
+        assert!(!rows.iter().any(|r| r.contains("isn't there yet")), "{}", rows.join("\n"));
+        // Words past the row: clipped at the border, whole in the tooltip.
+        let mut gui = typed_deep();
+        let long = "EACCES: permission denied, scandir '/srv/copies/New' — the server's account may not read it";
+        failed(&mut gui, 500, long);
+        let rows = draw(&mut gui, 100, 30);
+        let note = at(&rows, "Couldn't list this folder: EACCES");
+        assert!(rows[usize::from(note.y)].chars().nth(87) == Some('…'), "{}", rows[usize::from(note.y)]);
+        assert_eq!(tip_at(&gui, note), Some(format!("Couldn't list this folder: {long}")));
         // A folder whose name has a brace: pressed, the list says so, GOLD,
-        // and nothing changes; a listing that fails says the server's words.
+        // and nothing changes.
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Folders);
         land_listing(&mut gui, "/copies", &["{{PEER}}", "plain"]);
@@ -8569,10 +8648,11 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Enter);
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
-        let note = at(&rows, "“{{PEER}}” has a brace");
+        let note = at(&rows, "“{{PEER}}” has a brace, so a layout can't start in it");
         assert_eq!(fg(&buffer, note), th().gold);
         assert!(!ui(&gui).custom, "nothing started there");
-        assert_eq!(tip_at(&gui, note).as_deref(), Some("“{{PEER}}” has a brace in its name, which a layout reads as a variable. Rename the folder to start from it."));
+        assert_eq!(tip_at(&gui, note), None, "whole on its row: no tooltip");
+        // A listing that went unanswered says so.
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Folders);
         let ask = gui.pending.iter().find_map(|e| match e {
@@ -8583,7 +8663,7 @@ pub(crate) mod tests {
         apply(&mut gui, Event::DestinationFolders { seq, generation, path, answer: Err(crate::api::PluginFailure::Unreachable("down".into())) });
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
-        assert_eq!(fg(&buffer, at(&rows, "couldn't list copies: your server didn't answer")), th().gold, "{}", rows.join("\n"));
+        assert_eq!(fg(&buffer, at(&rows, "Couldn't list this folder: your server didn't answer")), th().gold, "{}", rows.join("\n"));
     }
 
     #[test]
@@ -8595,31 +8675,27 @@ pub(crate) mod tests {
         assert_eq!(
             picker_rows(&rows),
             boxed(&[
-                &titled("yours"),
-                " One setting for your account · every copy uses it",
-                " Late Train Verse lands at",
-                " copies › from-peers › Boukmanflow › Borrowed Tapes › Late Train Verse.mp3",
+                " Files go to copies › from-peers › Boukmanflow › Borrowed Tapes",
                 "",
-                " LIBRARY   ( ) music   (•) copies",
+                " ( ) music   (•) copies",
                 "",
-                " LAYOUT    ( ) Artist / Album                       {{ALBUMARTIST}}/{{ALBUM}}",
-                "           ( ) Server / Artist / Album     {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}",
-                "           (•) Custom                                      Type your own path",
-                "           Start from an existing folder…",
-                "               from-peers/{{ALBUMARTIST}}/{{ALBUM}}",
-                "               ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER",
-                "               Use / between folders. Variables sort copies by artist,",
-                "               album…; a plain name puts every copy in the same folder.",
+                " ( ) Artist / Album",
+                " ( ) Server / Artist / Album",
+                " (•) Custom",
+                " Start from an existing folder…",
+                "     from-peers/{{ALBUMARTIST}}/{{ALBUM}}",
+                "     ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER",
                 "",
                 FOOT,
             ]),
             "{}",
             rows.join("\n")
         );
+        none_cut(&picker_rows(&rows));
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Library));
         assert_eq!(fg(&buffer, at(&rows, "[ Save ]")), th().dim, "nothing dirty until edited");
         assert_eq!(tip_at(&gui, at(&rows, "[ Save ]")).as_deref(), Some("nothing changed yet"));
-        assert_eq!(super::super::discover::tips(&gui), "← → library · ↑ ↓ rows · Esc back", "Save off: no Enter save");
+        assert_eq!(super::super::discover::tips(&gui), "← → library · ↑ ↓ rows · Esc close", "Save off: no Enter save");
         // An edit: Save sends base '' and the layout — the same files in the
         // same place.
         dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Field));
@@ -8629,16 +8705,16 @@ pub(crate) mod tests {
         assert_eq!((place.vpath.as_str(), place.base.as_str(), place.layout.as_str()), ("copies", "", "from-peers/{{ALBUMARTIST}}/{{ALBUM}}/{{YEAR}}"));
         // A base folder whose name a layout reads as a variable: the preview
         // draws it as the server holds it — a folder — the field's problem
-        // names it, Save stays off; a preset over it is an edit.
+        // names it on one row, Save stays off; a preset over it is an edit.
         let mut gui = dest_gui("{{PEER}}");
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[4], format!("│{:<78}│", " copies › {{PEER}} › Boukmanflow › Borrowed Tapes › Late Train Verse.mp3"), "{}", picker.join("\n"));
-        assert_eq!(picker[12], format!("│{:<78}│", "               {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}"));
-        assert_eq!(picker[13], format!("│{:<78}│", "               “{{PEER}}” is a folder set on another device, but in a layout"));
-        assert_eq!(picker[14], format!("│{:<78}│", "               it reads as a variable. Rename it here, or choose a layout."));
-        assert_eq!(fg(&buffer, at(&rows, "“{{PEER}}” is a folder")), th().gold);
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to copies › {{PEER}} › Boukmanflow › Borrowed Tapes"), "{}", picker.join("\n"));
+        assert_eq!(picker[9], format!("│{:<78}│", "     {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}"));
+        assert_eq!(picker[10], format!("│{:<78}│", "     “{{PEER}}” would read as a variable · rename it, or choose a layout"));
+        assert_eq!(picker[11], format!("│{:<78}│", "     ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER"));
+        assert_eq!(fg(&buffer, at(&rows, "“{{PEER}}” would read")), th().gold);
         assert_eq!(fg(&buffer, at(&rows, "[ Save ]")), th().dim);
         // Server / Artist / Album — the very text the field holds — over it
         // is the edit that proves the rule: the server's name, not that
@@ -8662,12 +8738,12 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Char(' '));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[4], format!("│{:<78}│", " music › Boukmanflow › 2019 - Borrowed Tapes › Late Train Verse.mp3"), "{}", picker.join("\n"));
-        assert_eq!(picker[6], format!("│{:<78}│", " LIBRARY   (•) music   ( ) copies"));
-        assert_eq!(picker[10], format!("│{:<78}│", "           (•) Library layout                 {{ARTIST}}/{{YEAR}} - {{ALBUM}}"));
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to music › Boukmanflow › 2019 - Borrowed Tapes"), "{}", picker.join("\n"));
+        assert_eq!(picker[3], format!("│{:<78}│", " (•) music   ( ) copies"));
+        assert_eq!(picker[7], format!("│{:<78}│", " (•) Library layout"));
         // The button stays while the account's own place is in force; the
         // hand moves to the first stop; nothing is saved yet.
-        assert_eq!(picker[14], format!("│{:<78}│", FOOT));
+        assert_eq!(picker[11], format!("│{:<78}│", FOOT));
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Library));
         assert!(saves(&gui).is_empty());
         // Save sends null: back to the library default, nothing kept.
@@ -8689,7 +8765,8 @@ pub(crate) mod tests {
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Template));
         dest_act(&mut gui, super::DestAct::Save);
         assert_eq!(saves(&gui), vec![None], "null: back to the library default");
-        // Under the library's default already, the button is not offered.
+        // Under the library's default already, the button is not offered:
+        // its absence is the one trace of whose place is in force.
         let mut view = dest_view("", "default");
         view["destination"] = json!({ "vpath": "music", "base": "", "layout": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", "source": "default" });
         view["saved"] = Value::Null;
@@ -8697,6 +8774,7 @@ pub(crate) mod tests {
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
         assert_eq!(picker[picker.len() - 2], format!("│{:>77} │", "[ Save ]"), "{}", picker.join("\n"));
+        none_cut(&picker);
     }
 
     #[test]
@@ -8706,13 +8784,20 @@ pub(crate) mod tests {
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
         typed(&mut gui, "From friends/{{ARTIST}}/{{ALBUM}}");
         key(&mut gui, KeyCode::Enter);
-        // Saving: the field without its caret, no buttons — "Saving…", the
-        // phone's word — the hand down; no key but Esc, no click edits.
-        let rows = draw(&mut gui, 100, 30);
+        // Saving: the field without its caret, `[ Saving… ]` DIM where Save
+        // stands — the kit's modal primary that goes off, the phone's word —
+        // Use the library default not drawn, the hand down; no key but Esc,
+        // no click edits.
+        let buffer = super::tests::buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[12], format!("│{:<78}│", "               From friends/{{ARTIST}}/{{ALBUM}}"), "{}", picker.join("\n"));
-        assert_eq!(picker[17], format!("│{:>77} │", "Saving…"));
-        assert_eq!(super::super::discover::tips(&gui), "Esc back");
+        assert_eq!(picker[9], format!("│{:<78}│", "     From friends/{{ARTIST}}/{{ALBUM}}"), "{}", picker.join("\n"));
+        assert_eq!(picker[12], format!("│{:>77} │", "[ Saving… ]"));
+        let busy = at(&rows, "[ Saving… ]");
+        assert_eq!((busy.x, fg(&buffer, busy), bold(&buffer, busy)), (77, th().dim, false));
+        assert_eq!(gui.ui.hit(busy), Some(Act::Guard), "no click");
+        assert!(!picker.iter().any(|r| r.contains("Use the library default")), "{}", picker.join("\n"));
+        assert_eq!(super::super::discover::tips(&gui), "Esc close");
         assert!(ui(&gui).hand.is_none());
         key(&mut gui, KeyCode::Down);
         assert!(ui(&gui).hand.is_none(), "no key but Esc while saving");
@@ -8744,7 +8829,7 @@ pub(crate) mod tests {
         // Refused: the server's words as sent (no prefix, as the webapp
         // draws them) GOLD under the field, three rows at most, the fields
         // as they were, the hand back in the field; an edit clears them.
-        // The same rows at the floor, 1–22.
+        // The same rows at the floor, from row 1.
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
         typed(&mut gui, "From friends/{{ARTIST}}/{{ALBUM}}");
@@ -8752,24 +8837,19 @@ pub(crate) mod tests {
         let words = "destination layout: Unknown variable {{ARTST}}. Supported: {{ARTIST}}, {{ALBUM}}, {{YEAR}}, {{GENRE}}, {{ALBUMARTIST}}, {{PEER}}, {{SERVERFOLDER}}";
         land_save(&mut gui, Err(crate::api::PluginFailure::Refused { status: 400, words: words.into() }));
         let refused = boxed(&[
-            &titled("yours"),
-            " One setting for your account · every copy uses it",
-            " Late Train Verse lands at",
-            " copies › From friends › Boukmanflow › Borrowed Tapes › Late Train Verse.mp3",
+            " Files go to copies › From friends › Boukmanflow › Borrowed Tapes",
             "",
-            " LIBRARY   ( ) music   (•) copies",
+            " ( ) music   (•) copies",
             "",
-            " LAYOUT    ( ) Artist / Album                       {{ALBUMARTIST}}/{{ALBUM}}",
-            "           ( ) Server / Artist / Album     {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}",
-            "           (•) Custom                                      Type your own path",
-            "           Start from an existing folder…",
-            "               From friends/{{ARTIST}}/{{ALBUM}}▏",
-            "               destination layout: Unknown variable {{ARTST}}. Supported:",
-            "               {{ARTIST}}, {{ALBUM}}, {{YEAR}}, {{GENRE}}, {{ALBUMARTIST}},",
-            "               {{PEER}}, {{SERVERFOLDER}}",
-            "               ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER",
-            "               Use / between folders. Variables sort copies by artist,",
-            "               album…; a plain name puts every copy in the same folder.",
+            " ( ) Artist / Album",
+            " ( ) Server / Artist / Album",
+            " (•) Custom",
+            " Start from an existing folder…",
+            "     From friends/{{ARTIST}}/{{ALBUM}}▏",
+            "     destination layout: Unknown variable {{ARTST}}. Supported: {{ARTIST}},",
+            "     {{ALBUM}}, {{YEAR}}, {{GENRE}}, {{ALBUMARTIST}}, {{PEER}},",
+            "     {{SERVERFOLDER}}",
+            "     ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER",
             "",
             FOOT,
         ]);
@@ -8780,100 +8860,118 @@ pub(crate) mod tests {
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Field));
         let rows = draw(&mut gui, 100, 24);
         assert_eq!(rows[1].chars().nth(10), Some('╭'), "{}", rows.join("\n"));
-        assert_eq!(rows[22].chars().nth(10), Some('╰'), "{}", rows.join("\n"));
+        assert_eq!(rows[17].chars().nth(10), Some('╰'), "{}", rows.join("\n"));
         assert_eq!(picker_rows(&rows), refused);
         key(&mut gui, KeyCode::Backspace);
         let rows = draw(&mut gui, 100, 30);
         assert!(!rows.iter().any(|r| r.contains("Unknown variable {{ARTST}}")));
-        // A refusal under a preset stands under the radios, above the
-        // folders button.
+        // A refusal under a preset stands under the radios, at the text's
+        // column, above the folders button.
         let mut gui = dest_gui("");
         key(&mut gui, KeyCode::Left);
         dest_act(&mut gui, super::DestAct::Save);
         land_save(&mut gui, Err(crate::api::PluginFailure::Refused { status: 403, words: "destination: you cannot put files into library 'music'".into() }));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[12], format!("│{:<78}│", "           destination: you cannot put files into library 'music'"), "{}", picker.join("\n"));
-        assert_eq!(picker[13], format!("│{:<78}│", "           Start from an existing folder…"));
+        assert_eq!(picker[8], format!("│{:<78}│", " ( ) Custom"), "{}", picker.join("\n"));
+        assert_eq!(picker[9], format!("│{:<78}│", " destination: you cannot put files into library 'music'"));
+        assert_eq!(picker[10], format!("│{:<78}│", " Start from an existing folder…"));
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Library));
+        // A click on the name already chosen only gives the row the hand:
+        // the words stand; the other name chosen, they go.
+        dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Save));
+        dest_act(&mut gui, super::DestAct::Library(0));
+        let rows = draw(&mut gui, 100, 30);
+        let picker = picker_rows(&rows);
+        assert_eq!(picker[9], format!("│{:<78}│", " destination: you cannot put files into library 'music'"), "{}", picker.join("\n"));
+        assert_eq!(ui(&gui).hand, Some(super::DestStop::Library));
+        dest_act(&mut gui, super::DestAct::Library(1));
+        let rows = draw(&mut gui, 100, 30);
+        assert!(!rows.iter().any(|r| r.contains("you cannot put files")), "{}", rows.join("\n"));
     }
 
     #[test]
     fn the_tallest_picker_gives_its_blanks_way_at_the_floor_and_its_notes_into_the_tooltip() {
         let _en = english();
-        // Five radios, Custom valid with a slot in it: 22 rows exactly, the
-        // floor's whole height — the picker stands whole between the tab
-        // bar and the tips line, its blanks in place, the note on its row
-        // (clipped at the border, whole in its tooltip).
+        // Five radios, Custom valid with a slot in it: the note whole on its
+        // two rows (the phone's words, never clipped to one), no tooltip on
+        // it or on the path; 18 rows, the same box at 100 × 24 (rows 1–18)
+        // and 100 × 30 (from row 4).
         let mut gui = dest_gui_on(dest_view_folders("", "user"));
         key(&mut gui, KeyCode::Left);
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
         typed(&mut gui, "{{ARTIST}}/{{GENRE}}");
-        let note = "‹genre› comes from the song's own tags (a song with none leaves that folder out).";
         let tall = boxed(&[
-            &titled("yours"),
-            " One setting for your account · every copy uses it",
-            " Late Train Verse lands at",
-            " music › Boukmanflow › ‹genre› › Late Train Verse.mp3",
-            " ‹genre› comes from the song's own tags (a song with none leaves that folder…",
+            " Files go to music › Boukmanflow › ‹genre›",
+            " ‹genre› comes from the song's own tags (a song with none leaves that folder",
+            " out).",
             "",
-            " LIBRARY   (•) music   ( ) copies",
+            " (•) music   ( ) copies",
             "",
-            " LAYOUT    ( ) Artist / Album                       {{ALBUMARTIST}}/{{ALBUM}}",
-            "           ( ) Server / Artist / Album     {{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}",
-            "           ( ) Same folders as the server                    {{SERVERFOLDER}}",
-            "           ( ) Library layout                 {{ARTIST}}/{{YEAR}} - {{ALBUM}}",
-            "           (•) Custom                                      Type your own path",
-            "           Start from an existing folder…",
-            "               {{ARTIST}}/{{GENRE}}▏",
-            "            ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER · SERVERFOLDER",
-            "               Use / between folders. Variables sort copies by artist,",
-            "               album…; a plain name puts every copy in the same folder.",
+            " ( ) Artist / Album",
+            " ( ) Server / Artist / Album",
+            " ( ) Same folders as the server",
+            " ( ) Library layout",
+            " (•) Custom",
+            " Start from an existing folder…",
+            "     {{ARTIST}}/{{GENRE}}▏",
+            "     ARTIST · ALBUM · YEAR · GENRE · ALBUMARTIST · PEER · SERVERFOLDER",
             "",
             FOOT,
         ]);
         let buffer = super::tests::buffer(&mut gui, 100, 24);
         let rows = lines(&buffer);
         assert_eq!(rows[1].chars().nth(10), Some('╭'), "{}", rows.join("\n"));
-        assert_eq!(rows[22].chars().nth(10), Some('╰'), "{}", rows.join("\n"));
+        assert_eq!(rows[18].chars().nth(10), Some('╰'), "{}", rows.join("\n"));
         assert_eq!(picker_rows(&rows), tall, "{}", rows.join("\n"));
-        assert_eq!(fg(&buffer, at(&rows, "‹genre› ›")), th().dim);
-        assert_eq!(tip_at(&gui, at(&rows, "‹genre› comes from")).as_deref(), Some(note), "the note whole in its tooltip");
-        assert_eq!(tip_at(&gui, at(&rows, "music › Boukmanflow › ‹genre›")), None, "nothing clipped, the note on its row");
-        // At 100 × 30 the same rows, the top where it always is.
+        none_cut(&picker_rows(&rows));
+        assert_eq!(fg(&buffer, at(&rows, "‹genre›")), th().dim, "the slot DIM");
+        assert_eq!(fg(&buffer, at(&rows, "‹genre› comes from")), th().dim);
+        assert_eq!(tip_at(&gui, at(&rows, "‹genre› comes from")), None, "whole: no tooltip");
+        assert_eq!(tip_at(&gui, at(&rows, "out).")), None);
+        assert_eq!(tip_at(&gui, at(&rows, "music › Boukmanflow › ‹genre›")), None, "nothing clipped, the note on its rows");
         let rows = draw(&mut gui, 100, 30);
         assert_eq!(rows[4].chars().nth(10), Some('╭'));
         assert_eq!(picker_rows(&rows), tall);
-        // A three-row refusal on top: every blank gives way and the picker
-        // is 22 rows still, the note on its row.
+        // A three-row refusal on top: 21 rows, every blank in place.
         dest_act(&mut gui, super::DestAct::Save);
         let words = "destination layout: Unknown variable {{ARTST}}. Supported: {{ARTIST}}, {{ALBUM}}, {{YEAR}}, {{GENRE}}, {{ALBUMARTIST}}, {{PEER}}, {{SERVERFOLDER}}";
         land_save(&mut gui, Err(crate::api::PluginFailure::Refused { status: 400, words: words.into() }));
+        let blank = format!("│{:<78}│", "");
         let rows = draw(&mut gui, 100, 24);
         let picker = picker_rows(&rows);
-        assert_eq!(picker.len(), 22, "{}", picker.join("\n"));
-        assert!(!picker.iter().any(|r| r == &format!("│{:<78}│", "")), "no blank left: {}", picker.join("\n"));
-        assert!(picker.iter().any(|r| r.contains("‹genre› comes from")), "{}", picker.join("\n"));
-        // The list opened and a folder picked: the pick is an edit, the
-        // refusal goes, the list stands under the five radios, above the
-        // field, the variables and the help — which stay while the rows
-        // fit — inside 22 rows.
+        assert_eq!(picker.len(), 21, "{}", picker.join("\n"));
+        assert_eq!(picker.iter().filter(|r| **r == blank).count(), 3, "{}", picker.join("\n"));
+        // The list opened on the library's root: 22 rows would pass — the
+        // blank under the libraries gives way, the one under the preview and
+        // the one above the buttons stand, and so do the note's two rows.
         dest_act(&mut gui, super::DestAct::Folders);
         land_folders(&mut gui);
+        for h in [24, 30] {
+            let rows = draw(&mut gui, 100, h);
+            let picker = picker_rows(&rows);
+            assert_eq!(picker.len(), 22, "{}", picker.join("\n"));
+            assert_eq!((&picker[4], &picker[5], &picker[6]), (&blank, &format!("│{:<78}│", " (•) music   ( ) copies"), &format!("│{:<78}│", " ( ) Artist / Album")), "{}", picker.join("\n"));
+            assert_eq!(picker[picker.len() - 3], blank);
+            assert!(picker.iter().any(|r| r.contains("out).")) && picker.iter().any(|r| r.contains("Unknown variable {{ARTST}}")), "{}", picker.join("\n"));
+        }
+        // A folder picked: the pick is an edit, the refusal goes, the
+        // blanks come back — the list under the five radios, above the
+        // field and the variables.
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Enter);
         land_folders(&mut gui);
         let rows = draw(&mut gui, 100, 24);
         let picker = picker_rows(&rows);
-        assert!(picker.len() <= 22, "{}", picker.join("\n"));
+        assert_eq!(picker.len(), 21, "{}", picker.join("\n"));
         assert!(!picker.iter().any(|r| r.contains("Unknown variable {{ARTST}}")), "{}", picker.join("\n"));
         assert_eq!(ui(&gui).text.value(), "from-peers/{{ARTIST}}/{{GENRE}}");
         let up = at_row(&picker, "Up to music");
-        assert!(picker.iter().any(|r| r.contains("ARTIST · ALBUM")) && picker[usize::from(up) + 2].contains("from-peers/{{ARTIST}}/{{GENRE}}"), "{}", picker.join("\n"));
+        assert!(picker[usize::from(up) + 1].contains("No folders in here") && picker[usize::from(up) + 2].contains("from-peers/{{ARTIST}}/{{GENRE}}"), "{}", picker.join("\n"));
         // Back in copies the open list re-anchors on its root; into
-        // from-peers (three folders): the three list rows, the field, the
-        // variables and the help's two rows stand together in the 22 — the
-        // three blanks gone, whatever the terminal's height.
+        // from-peers (three folders): the three list rows, the field and
+        // the variables stand together with every blank, whatever the
+        // terminal's height.
         dest_act(&mut gui, super::DestAct::Library(1));
         land_folders(&mut gui);
         dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Folders));
@@ -8883,22 +8981,24 @@ pub(crate) mod tests {
         for h in [24, 30] {
             let rows = draw(&mut gui, 100, h);
             let picker = picker_rows(&rows);
-            assert_eq!(picker.len(), 22, "{}", picker.join("\n"));
-            assert!(!picker.iter().any(|r| r == &format!("│{:<78}│", "")), "no blank left: {}", picker.join("\n"));
-            assert!(picker.iter().any(|r| r.contains("ARTIST · ALBUM")) && picker.iter().any(|r| r.contains("album…; a plain name")), "{}", picker.join("\n"));
+            assert_eq!(picker.len(), 21, "{}", picker.join("\n"));
+            assert_eq!(picker.iter().filter(|r| **r == blank).count(), 3, "{}", picker.join("\n"));
+            assert!(picker.iter().any(|r| r.contains("ARTIST · ALBUM")), "{}", picker.join("\n"));
             assert_eq!(picker.iter().filter(|r| r.contains("2025 archive") || r.contains("Stage Peer B") || r.contains("Up to copies")).count(), 3, "{}", picker.join("\n"));
         }
     }
 
     #[test]
-    fn the_help_and_the_variables_give_way_before_the_list_at_the_floor() {
+    fn the_notes_give_way_before_the_variables_and_the_list_at_the_floor() {
         let _en = english();
         // The tallest picker there is: music's five radios, a slot's note
         // and a missing-variables note, a three-row refusal, the list open
         // inside a folder with three folders and the folder the layout
-        // starts in not there yet. The blanks, the notes, then the help's
-        // two rows and the variables go, then the list's last row — 22
-        // rows, the refusal and the list's note standing.
+        // starts in not there yet. The blanks, the missing note, then the
+        // slot note's second row go — 22 rows: the note's first row clipped
+        // (its whole words its tooltip), the missing note in the path's
+        // tooltip; the variables, the list's three rows, the refusal and
+        // the list's note stand.
         let mut gui = undated_gui(dest_view_folders("", "user"));
         dest_act(&mut gui, super::DestAct::Library(0));
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
@@ -8914,79 +9014,85 @@ pub(crate) mod tests {
         assert_eq!(rows[1].chars().nth(10), Some('╭'), "{}", rows.join("\n"));
         assert_eq!(rows[22].chars().nth(10), Some('╰'), "{}", rows.join("\n"));
         let has = |text: &str| picker.iter().filter(|r| r.contains(text)).count();
-        assert_eq!((has("ARTIST · ALBUM"), has("Use / between"), has("album…; a plain")), (0, 0, 0), "{}", picker.join("\n"));
-        assert_eq!((has("Up to music"), has("│           a "), has("│           b "), has("│           c ")), (1, 1, 0, 0), "{}", picker.join("\n"));
-        assert_eq!((has("Unknown variable {{ARTST}}"), has("{{PEER}}, {{SERVERFOLDER}}"), has("does not exist yet")), (1, 1, 1), "{}", picker.join("\n"));
-        assert_eq!((has("‹genre› comes from"), has("No value for this song")), (0, 0), "{}", picker.join("\n"));
-        assert_eq!(
-            tip_at(&gui, at(&rows, "music › from-peers › Nope")).as_deref(),
-            Some("‹genre› comes from the song's own tags (a song with none leaves that folder out). — No value for this song, so left out of the path: {{YEAR}}")
-        );
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to music › from-peers › Nope › Peer Kim › ‹genre›"), "{}", picker.join("\n"));
+        let note = "‹genre› comes from the song's own tags (a song with none leaves that folder out).";
+        assert_eq!(picker[2], format!("│{:<78}│", " ‹genre› comes from the song's own tags (a song with none leaves that folder…"));
+        assert_eq!(tip_at(&gui, at(&rows, "‹genre› comes from")).as_deref(), Some(note));
+        assert_eq!((has("out)."), has("No value for")), (0, 0), "{}", picker.join("\n"));
+        assert_eq!(tip_at(&gui, at(&rows, "music › from-peers › Nope")).as_deref(), Some("No value for {{YEAR}}"));
+        assert_eq!(has("ARTIST · ALBUM"), 1, "{}", picker.join("\n"));
+        assert_eq!((has("Up to music"), has("│   a "), has("│   b "), has("│   c ")), (1, 1, 1, 0), "{}", picker.join("\n"));
+        assert_eq!((has("Unknown variable {{ARTST}}"), has("{{SERVERFOLDER}}"), has("“Nope” isn't there yet")), (1, 1, 1), "{}", picker.join("\n"));
+        assert!(!picker.iter().any(|r| r == &format!("│{:<78}│", "")), "no blank left: {}", picker.join("\n"));
     }
 
     #[test]
     fn the_rows_give_way_in_order_until_the_picker_fits_the_floor() {
         use super::DestRow::*;
+        use super::Gap::{B1, B2, B3};
         let base = |listed: usize, problems: usize| -> Vec<super::DestRow> {
-            let mut rows = vec![Title, Sub, Lands, Path, Note, Missing, Blank, Library, Blank];
-            rows.extend([Radio(super::Radio::ArtistAlbum, true), Radio(super::Radio::Custom, false), Folders, TreeHead]);
+            let mut rows = vec![Preview, Note(0), Note(1), Missing, Blank(B1), Library, Blank(B2)];
+            rows.extend([Radio(super::Radio::ArtistAlbum), Radio(super::Radio::Custom), Folders, TreeHead]);
             rows.extend((0..listed).map(Listed));
             rows.push(Field);
             rows.extend((0..problems).map(|i| Problem(format!("p{i}"))));
-            rows.extend([Blank, Buttons]);
+            rows.extend([Vars, Blank(B3), Buttons]);
             rows
         };
-        let help = |n: usize| (0..n).map(|i| Help(format!("h{i}"))).collect::<Vec<_>>();
         let count = |rows: &[super::DestRow], pick: fn(&super::DestRow) -> bool| rows.iter().filter(|r| pick(r)).count();
-        // 20 rows fit as they are.
-        let mut rows = base(3, 1);
+        // 20 rows fit as they are, the borders making 22.
+        let mut rows = base(3, 2);
         assert_eq!(rows.len(), 20);
         let kept = rows.clone();
         super::give_way(&mut rows);
         assert_eq!(rows, kept);
-        // One over: the blank under LIBRARY alone.
-        let mut rows = base(3, 2);
-        assert_eq!(rows.len(), 21);
-        super::give_way(&mut rows);
-        assert_eq!(rows.len(), 20);
-        assert_eq!(rows[6..9], [Blank, Library, Radio(super::Radio::ArtistAlbum, true)]);
-        // Five over: the three blanks, the missing note, the slot note —
-        // the variables and the help stand.
+        // One over: the blank under the libraries alone; two: the one under
+        // the preview too; three: the one above the buttons.
         let mut rows = base(3, 3);
-        rows.extend([Vars]);
-        rows.extend(help(2));
-        assert_eq!(rows.len(), 25);
         super::give_way(&mut rows);
         assert_eq!(rows.len(), 20);
-        assert!(!rows.contains(&Blank) && !rows.contains(&Missing) && !rows.contains(&Note));
-        assert_eq!((count(&rows, |r| matches!(r, Listed(_))), count(&rows, |r| matches!(r, Help(_))), rows.contains(&Vars)), (3, 2, true));
-        // Past that the help's rows go from the last up.
-        let mut rows = base(3, 3);
-        rows.extend([Vars]);
-        rows.extend(help(5));
-        assert_eq!(rows.len(), 28);
+        assert_eq!(rows[3..7], [Missing, Blank(B1), Library, Radio(super::Radio::ArtistAlbum)]);
+        let mut rows = base(3, 4);
+        super::give_way(&mut rows);
+        assert_eq!(rows[3..6], [Missing, Library, Radio(super::Radio::ArtistAlbum)]);
+        assert!(rows.contains(&Blank(B3)));
+        let mut rows = base(3, 5);
         super::give_way(&mut rows);
         assert_eq!(rows.len(), 20);
-        assert_eq!((count(&rows, |r| matches!(r, Help(_))), rows.contains(&Vars), count(&rows, |r| matches!(r, Listed(_)))), (2, true, 3));
-        assert!(rows.contains(&Help("h0".into())) && rows.contains(&Help("h1".into())));
-        // Then the variables, then the list from its last row down to one,
-        // then a refusal's rows from the last down to one.
+        assert!(!rows.iter().any(|r| matches!(r, Blank(_))) && rows.contains(&Missing));
+        // Then the missing note, then the slot note's second row, then its
+        // first — the variables and the list stand.
+        let mut rows = base(3, 6);
+        super::give_way(&mut rows);
+        assert_eq!(rows.len(), 20);
+        assert!(!rows.contains(&Missing) && rows.contains(&Note(0)) && rows.contains(&Note(1)));
+        let mut rows = base(3, 7);
+        super::give_way(&mut rows);
+        assert_eq!(rows.len(), 20);
+        assert_eq!(rows[..2], [Preview, Note(0)]);
         let mut rows = base(3, 8);
-        rows.extend([Vars]);
-        rows.extend(help(2));
-        assert_eq!(rows.len(), 30);
         super::give_way(&mut rows);
         assert_eq!(rows.len(), 20);
-        assert_eq!((count(&rows, |r| matches!(r, Help(_))), rows.contains(&Vars), count(&rows, |r| matches!(r, Listed(_)))), (0, false, 1));
-        assert_eq!(count(&rows, |r| matches!(r, Problem(_))), 8);
-        let mut rows = base(3, 10);
-        rows.extend([Vars]);
-        rows.extend(help(2));
-        assert_eq!(rows.len(), 32);
+        assert!(!rows.iter().any(|r| matches!(r, Note(_))));
+        assert_eq!((rows.contains(&Vars), count(&rows, |r| matches!(r, Listed(_)))), (true, 3));
+        // Then the variables, then the list from its last row down to one,
+        // then a GOLD block's rows from the last down to one.
+        let mut rows = base(3, 9);
         super::give_way(&mut rows);
         assert_eq!(rows.len(), 20);
-        assert_eq!((count(&rows, |r| matches!(r, Listed(_))), count(&rows, |r| matches!(r, Problem(_)))), (1, 8));
-        assert!(rows.contains(&Listed(0)) && rows.contains(&Problem("p0".into())) && rows.contains(&Problem("p7".into())) && !rows.contains(&Problem("p8".into())));
+        assert_eq!((rows.contains(&Vars), count(&rows, |r| matches!(r, Listed(_)))), (false, 3));
+        let mut rows = base(3, 11);
+        super::give_way(&mut rows);
+        assert_eq!(rows.len(), 20);
+        assert_eq!((count(&rows, |r| matches!(r, Listed(_))), count(&rows, |r| matches!(r, Problem(_)))), (1, 11));
+        assert!(rows.contains(&Listed(0)));
+        let mut rows = base(3, 13);
+        super::give_way(&mut rows);
+        assert_eq!(rows.len(), 20);
+        assert_eq!((count(&rows, |r| matches!(r, Listed(_))), count(&rows, |r| matches!(r, Problem(_)))), (1, 11));
+        assert!(rows.contains(&Problem("p0".into())) && rows.contains(&Problem("p10".into())) && !rows.contains(&Problem("p11".into())));
+        // The preview, the field and the buttons never give way.
+        assert!(rows.contains(&Preview) && rows.contains(&Field) && rows.contains(&Buttons));
     }
 
     /// Keep a copy on a song with no year, at the top of its server's
@@ -9033,42 +9139,43 @@ pub(crate) mod tests {
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " Bare Song lands at"), "{}", picker.join("\n"));
-        assert_eq!(picker[4], format!("│{:<78}│", " copies › Peer Kim › Loose Ends › Bare Song.mp3"));
-        assert_eq!(picker[5], format!("│{:<78}│", " No value for this song, so left out of the path: {{YEAR}}"));
-        assert_eq!(fg(&buffer, at(&rows, "No value for this song")), th().dim);
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to copies › Peer Kim › Loose Ends"), "{}", picker.join("\n"));
+        assert_eq!(picker[2], format!("│{:<78}│", " No value for {{YEAR}}"));
+        assert_eq!(fg(&buffer, at(&rows, "No value for")), th().dim);
+        assert_eq!(tip_at(&gui, at(&rows, "No value for")), None, "whole: no tooltip");
+        none_cut(&picker);
         // A song at the top of its server's library sits in no folder there.
         ctrl(&mut gui, 'u');
         typed(&mut gui, "{{SERVERFOLDER}}");
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[4], format!("│{:<78}│", " copies › Bare Song.mp3"), "{}", picker.join("\n"));
-        assert_eq!(picker[5], format!("│{:<78}│", " The song sits at the top of its server's library, so left out of the path: …"));
-        assert_eq!(tip_at(&gui, at(&rows, "The song sits at the top")).as_deref(), Some("The song sits at the top of its server's library, so left out of the path: {{SERVERFOLDER}}"));
-        // Both notes under music's five radios and a three-row refusal: the
-        // blanks go, then the missing note — into the path's tooltip, after
-        // the slot's note — and the picker holds 22 rows.
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to copies"), "{}", picker.join("\n"));
+        assert_eq!(picker[2], format!("│{:<78}│", " No value for {{SERVERFOLDER}} · it sits in no folder on its server"));
+        assert_eq!(tip_at(&gui, at(&rows, "No value for")), None);
+        // Both notes under music's five radios and a three-row refusal: 22
+        // rows exactly, nothing gives way; the list opened on top, the
+        // blanks under the libraries and the preview go — both notes stand.
         dest_act(&mut gui, super::DestAct::Library(0));
         dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Field));
         ctrl(&mut gui, 'u');
         typed(&mut gui, "{{ARTIST}}/{{GENRE}}/{{YEAR}}");
-        let rows = draw(&mut gui, 100, 24);
-        let picker = picker_rows(&rows);
-        assert_eq!(picker.len(), 22, "{}", picker.join("\n"));
-        assert!(picker.iter().any(|r| r.contains("‹genre› comes from")) && picker.iter().any(|r| r.contains("No value for this song")), "{}", picker.join("\n"));
         dest_act(&mut gui, super::DestAct::Save);
         let words = "destination layout: Unknown variable {{ARTST}}. Supported: {{ARTIST}}, {{ALBUM}}, {{YEAR}}, {{GENRE}}, {{ALBUMARTIST}}, {{PEER}}, {{SERVERFOLDER}}";
         land_save(&mut gui, Err(crate::api::PluginFailure::Refused { status: 400, words: words.into() }));
+        let blank = format!("│{:<78}│", "");
         let rows = draw(&mut gui, 100, 24);
         let picker = picker_rows(&rows);
         assert_eq!(picker.len(), 22, "{}", picker.join("\n"));
-        assert!(picker.iter().any(|r| r.contains("‹genre› comes from")) && !picker.iter().any(|r| r.contains("No value for this song")), "{}", picker.join("\n"));
-        assert_eq!(
-            tip_at(&gui, at(&rows, "music › Peer Kim › ‹genre›")).as_deref(),
-            Some("No value for this song, so left out of the path: {{YEAR}}"),
-            "{:?}",
-            gui.ui.tips
-        );
+        assert_eq!(picker.iter().filter(|r| **r == blank).count(), 3, "{}", picker.join("\n"));
+        assert_eq!(picker[4], format!("│{:<78}│", " No value for {{YEAR}}"), "{}", picker.join("\n"));
+        dest_act(&mut gui, super::DestAct::Folders);
+        land_folders(&mut gui);
+        let rows = draw(&mut gui, 100, 24);
+        let picker = picker_rows(&rows);
+        assert_eq!(picker.len(), 22, "{}", picker.join("\n"));
+        assert_eq!(picker.iter().filter(|r| **r == blank).count(), 1, "{}", picker.join("\n"));
+        assert!(picker.iter().any(|r| r.contains("‹genre› comes from")) && picker.iter().any(|r| r.contains("No value for {{YEAR}}")), "{}", picker.join("\n"));
+        assert_eq!(tip_at(&gui, at(&rows, "music › Peer Kim › ‹genre›")), None, "{:?}", gui.ui.tips);
     }
 
     #[test]
@@ -9078,19 +9185,19 @@ pub(crate) mod tests {
         let mut gui = dest_gui("");
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[0], format!("+{}+", "-".repeat(78)));
-        assert_eq!(picker[1], format!("|{:<78}|", titled("yours")));
-        assert_eq!(picker[4], format!("|{:<78}|", " copies > Boukmanflow > Borrowed Tapes > Late Train Verse.mp3"));
-        assert_eq!(picker[6], format!("|{:<78}|", " LIBRARY   ( ) music   (*) copies"));
-        assert_eq!(picker[8], format!("|{:<78}|", " LAYOUT    (*) Artist / Album                       {{ALBUMARTIST}}/{{ALBUM}}"));
-        assert_eq!(picker[11], format!("|{:<78}|", "           Start from an existing folder..."));
-        assert_eq!(picker[14], format!("+{}+", "-".repeat(78)));
-        // Custom chosen: the help line's dots in the console's own; the
-        // open list's "Looking up..." too.
+        assert_eq!(picker[0], format!("+- Where copies land {}+", "-".repeat(58)));
+        assert_eq!(picker[1], format!("|{:<78}|", " Files go to copies > Boukmanflow > Borrowed Tapes"));
+        assert_eq!(picker[3], format!("|{:<78}|", " ( ) music   (*) copies"));
+        assert_eq!(picker[5], format!("|{:<78}|", " (*) Artist / Album"));
+        assert_eq!(picker[8], format!("|{:<78}|", " Start from an existing folder..."));
+        assert_eq!(picker[11], format!("+{} Esc close -+", "-".repeat(66)));
+        // Custom chosen: the preview's missing path the kit's `-`, the
+        // hint's dots and the open list's "Looking up..." in the console's
+        // own.
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert!(picker.iter().any(|r| r.contains("album...; a plain name puts every copy in the same folder.")), "{}", picker.join("\n"));
+        assert_eq!(picker[1], format!("|{:<78}|", " Files go to -"), "{}", picker.join("\n"));
         assert!(!picker.iter().any(|r| r.contains('…')), "{}", picker.join("\n"));
         dest_act(&mut gui, super::DestAct::Folders);
         land_folders(&mut gui);
@@ -9098,17 +9205,45 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Enter);
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert!(picker.iter().any(|r| r.contains("|           Looking up...")), "{}", picker.join("\n"));
+        assert!(picker.iter().any(|r| r.starts_with("|   Looking up...")), "{}", picker.join("\n"));
         assert!(!picker.iter().any(|r| r.contains('…')), "{}", picker.join("\n"));
         key(&mut gui, KeyCode::Esc);
         dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Field));
         // The caret and Saving's dots in the console's own.
         typed(&mut gui, "x");
         let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("|               from-peersx│")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("|     from-peersx│")), "{}", rows.join("\n"));
         key(&mut gui, KeyCode::Enter);
         let rows = draw(&mut gui, 100, 30);
-        assert!(rows.iter().any(|r| r.contains("Saving... |")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("[ Saving... ] |")), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn a_wide_glyph_left_of_the_picker_never_hides_its_left_border() {
+        let _en = english();
+        struct English;
+        impl Drop for English {
+            fn drop(&mut self) {
+                rust_i18n::set_locale("en");
+            }
+        }
+        let _back = English;
+        // The room's nav beside the picker in a wide locale: a CJK glyph
+        // across cols 9–10 would hide the border at col 10 (a terminal
+        // never draws the cell a wide glyph spans) — col 9 is a blank there.
+        for code in ["ja", "zh"] {
+            rust_i18n::set_locale(code);
+            let mut gui = dest_gui("");
+            dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
+            let buffer = super::tests::buffer(&mut gui, 100, 30);
+            let all = lines(&buffer).join("\n");
+            let top = (0..30).find(|&y| buffer[(10, y)].symbol() == "╭").unwrap_or_else(|| panic!("{code}: the picker\n{all}"));
+            let bottom = (top..30).find(|&y| buffer[(10, y)].symbol() == "╰").unwrap_or_else(|| panic!("{code}: its bottom\n{all}"));
+            for y in top..=bottom {
+                assert!(crate::kit::width(buffer[(9, y)].symbol()) <= 1, "{code}: row {y} spills onto the border\n{all}");
+                assert!(matches!(buffer[(10, y)].symbol(), "╭" | "│" | "╰"), "{code}: row {y}\n{all}");
+            }
+        }
     }
 
     #[test]
@@ -9123,15 +9258,15 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Char('d'));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " Every album by Boukmanflow lands at"), "{}", picker.join("\n"));
-        assert_eq!(picker[4], format!("│{:<78}│", " copies › Boukmanflow › one folder per album"));
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to copies › Boukmanflow › one folder per album"), "{}", picker.join("\n"));
+        none_cut(&picker);
         // No answer to a save: the words GOLD under the radios.
         key(&mut gui, KeyCode::Left);
         dest_act(&mut gui, super::DestAct::Save);
         land_save(&mut gui, Err(crate::api::PluginFailure::Unreachable("connection refused".into())));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[12], format!("│{:<78}│", "           your server didn't answer"), "{}", picker.join("\n"));
+        assert_eq!(picker[9], format!("│{:<78}│", " your server didn't answer"), "{}", picker.join("\n"));
     }
 
     #[test]
@@ -9146,8 +9281,8 @@ pub(crate) mod tests {
         let _back = English;
         let six = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"];
         let seven = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER", "SERVERFOLDER"];
-        // The six, and the seven of a server that lists SERVERFOLDER: 65
-        // cells, right-aligned to the last cell, never one lost.
+        // The six, and the seven of a server that lists SERVERFOLDER (65
+        // cells): under Custom's field from col 5, never one lost.
         for (view, names) in [(dest_view("", "user"), &six[..]), (dest_view_folders("", "user"), &seven[..])] {
             for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
                 rust_i18n::set_locale(code);
@@ -9166,19 +9301,17 @@ pub(crate) mod tests {
                     assert!(at + name.len() as u16 - 1 <= 87, "{code}: {name} past the last cell");
                 }
                 assert!(!cells.trim_end().ends_with('·'), "{code}: no stray separator: {cells:?}");
-                // Every radio's words whole, its layout after them — whole
-                // where it fits, else its end behind a leading `…` — two
-                // cells clear of the label (a wide locale's cells hold a
+                assert!(cells.starts_with("     ARTIST · "), "{code}: under the field: {cells:?}");
+                // Every radio's words whole at col 5 and nothing after them:
+                // no layout beside a preset (a wide locale's cells hold a
                 // blank after each CJK glyph in the buffer: compared without).
-                for (_, key, layout) in super::presets(&serde_json::from_value(view.clone()).unwrap(), "copies") {
+                for (_, key, _) in super::presets(&serde_json::from_value(view.clone()).unwrap(), "copies") {
                     let words = rust_i18n::t!(key).to_string();
                     let packed = words.replace(' ', "");
                     let y = (0..30).find(|&y| row(y).replace(' ', "").contains(&packed)).unwrap_or_else(|| panic!("{code}: {words} missing"));
                     let shown = row(y);
-                    let tail = shown.trim_end();
-                    let sub = tail.rsplit("  ").next().unwrap_or_default();
-                    let end: String = layout.chars().rev().take(9).collect::<Vec<_>>().into_iter().rev().collect();
-                    assert!(sub == layout || (sub.starts_with('…') && sub.ends_with(&end)), "{code}: {shown:?}");
+                    assert!(shown.starts_with(" ( ) "), "{code}: {shown:?}");
+                    assert!(shown.trim_end().replace(' ', "").ends_with(&packed) && !shown.contains("{{"), "{code}: {shown:?}");
                 }
             }
         }
@@ -9203,15 +9336,15 @@ pub(crate) mod tests {
         dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Save));
         key(&mut gui, KeyCode::Left);
         assert_eq!(ui(&gui).hand, Some(super::DestStop::UseDefault));
-        assert_eq!(super::super::discover::tips(&gui), "← → buttons · Enter use the library default · Esc back");
+        assert_eq!(super::super::discover::tips(&gui), "← → buttons · Enter use the library default · Esc close");
         key(&mut gui, KeyCode::Right);
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Save));
-        assert_eq!(super::super::discover::tips(&gui), "← → buttons · Esc back", "Save off: Enter does nothing");
+        assert_eq!(super::super::discover::tips(&gui), "← → buttons · Esc close", "Save off: Enter does nothing");
         key(&mut gui, KeyCode::Enter);
         assert!(saves(&gui).is_empty());
         dest_act(&mut gui, super::DestAct::Library(0));
         dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Save));
-        assert_eq!(super::super::discover::tips(&gui), "← → buttons · Enter save · Esc back");
+        assert_eq!(super::super::discover::tips(&gui), "← → buttons · Enter save · Esc close");
         let mut gui = dest_gui("");
         for _ in 0..10 {
             key(&mut gui, KeyCode::Tab);
@@ -9226,33 +9359,51 @@ pub(crate) mod tests {
     #[test]
     fn with_one_library_its_row_is_no_stop_and_a_hand_whose_stop_left_lands_on_the_first() {
         let _en = english();
+        // One library to add files to: no row for it — the path names it —
+        // and no blank under it; the hand on the first radio.
         let mut view = dest_view("", "user");
         view["libraries"] = json!([{ "vpath": "copies", "template": null }]);
         let mut gui = keep_on(view);
         key(&mut gui, KeyCode::Char('d'));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[6], format!("│{:<78}│", " LIBRARY   (•) copies"), "{}", picker.join("\n"));
-        assert_eq!(gui.ui.hit(at(&rows, "LIBRARY")), Some(Act::Guard), "no stop to take the hand");
+        assert_eq!(
+            picker,
+            boxed(&[
+                " Files go to copies › Boukmanflow › Borrowed Tapes",
+                "",
+                " (•) Artist / Album",
+                " ( ) Server / Artist / Album",
+                " ( ) Custom",
+                " Start from an existing folder…",
+                "",
+                FOOT,
+            ]),
+            "{}",
+            picker.join("\n")
+        );
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Radio(super::Radio::ArtistAlbum)), "the first radio instead");
+        assert_eq!(super::super::discover::tips(&gui), "↑ ↓ rows · Space or Enter pick · Esc close");
         // One listed library and a chosen one the server no longer lists:
-        // two choices drawn, so the row is a stop — ← → reach both and the
-        // label takes the hand.
+        // two choices drawn, so the row is a stop — ← → reach both, a click
+        // on either takes the hand.
         let mut view = dest_view("", "user");
         view["libraries"] = json!([{ "vpath": "music", "template": null }]);
         let mut gui = keep_on(view);
         key(&mut gui, KeyCode::Char('d'));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[6], format!("│{:<78}│", " LIBRARY   ( ) music   (•) copies"), "{}", picker.join("\n"));
+        assert_eq!(picker[3], format!("│{:<78}│", " ( ) music   (•) copies"), "{}", picker.join("\n"));
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Library));
-        assert_eq!(dest_hit(&gui, at(&rows, "LIBRARY   (")), Some(super::DestAct::Hand(super::DestStop::Library)));
+        assert_eq!(dest_hit(&gui, at(&rows, "(•) copies")), Some(super::DestAct::Library(1)));
         key(&mut gui, KeyCode::Left);
         assert_eq!(ui(&gui).vpath, "music");
         // Left behind, the unlisted library is gone from the row (the
-        // webapp's chips): one choice, no stop, the hand on the first radio.
+        // webapp's chips): one choice, no row, the hand on the first radio.
         let rows = draw(&mut gui, 100, 30);
-        assert_eq!(picker_rows(&rows)[6], format!("│{:<78}│", " LIBRARY   (•) music"), "{}", rows.join("\n"));
+        let picker = picker_rows(&rows);
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to music › Boukmanflow › Borrowed Tapes"), "{}", picker.join("\n"));
+        assert_eq!(picker[3], format!("│{:<78}│", " (•) Artist / Album"), "{}", picker.join("\n"));
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Radio(super::Radio::ArtistAlbum)));
         // music's own layout held, then a read without it: the hand goes
         // to the first stop, and the tips say its keys — Enter saves, the
@@ -9270,11 +9421,12 @@ pub(crate) mod tests {
         apply(&mut gui, Event::DestinationRead { seq: seq.unwrap(), generation, answer: Ok(Box::new(serde_json::from_value(plain).unwrap())) });
         let rows = draw(&mut gui, 100, 30);
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Library));
-        assert_eq!(super::super::discover::tips(&gui), "← → library · Enter save · ↑ ↓ rows · Esc back");
+        assert_eq!(super::super::discover::tips(&gui), "← → library · Enter save · ↑ ↓ rows · Esc close");
         // The held layout is no preset any more and Custom was never picked:
         // no radio is marked, as the webapp marks none.
         let picker = picker_rows(&rows);
-        assert!(!picker.iter().any(|r| r.contains("(•)") && !r.contains("LIBRARY")), "{}", picker.join("\n"));
+        assert_eq!(picker[3], format!("│{:<78}│", " (•) music   ( ) copies"), "{}", picker.join("\n"));
+        assert!(!picker.iter().skip(4).any(|r| r.contains("(•)")), "{}", picker.join("\n"));
     }
 
     #[test]
@@ -9292,7 +9444,7 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Char('d'));
         let rows = draw(&mut gui, 100, 30);
         assert!(!rows.iter().any(|r| r.contains("saving")), "{}", rows.join("\n"));
-        assert_eq!(super::super::discover::tips(&gui), "← → library · ↑ ↓ rows · Esc back");
+        assert_eq!(super::super::discover::tips(&gui), "← → library · ↑ ↓ rows · Esc close");
         key(&mut gui, KeyCode::Down);
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Radio(super::Radio::ArtistAlbum)));
         land_save(&mut gui, Err(refusal()));
@@ -9346,35 +9498,36 @@ pub(crate) mod tests {
             key(&mut gui, KeyCode::Char('d'));
             gui
         };
-        // The chosen library 58 cells wide: the other has no room for a dot,
+        // The chosen library 67 cells wide: the other has no room for a dot,
         // a space and a cell of its name, so it is not drawn — the border
         // stands, nothing lands on the room beneath — and ← still reaches
         // it; from there the row starts at the chosen one behind `…`, whose
         // cell steps back to the one before.
-        let long = "a".repeat(58);
+        let long = "a".repeat(67);
         let mut gui = on(&long);
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[6], format!("│{:<78}│", format!(" LIBRARY   (•) {long}")), "{}", picker.join("\n"));
-        let y = at_row(&rows, "LIBRARY");
-        assert_eq!(rows[usize::from(y)].chars().nth(89), Some('│'));
-        assert!(!rows[usize::from(y)].contains("( )") && !rows[usize::from(y)][90..].contains('…'), "{}", rows[usize::from(y)]);
+        assert_eq!(picker[3], format!("│{:<78}│", format!(" (•) {long}")), "{}", picker.join("\n"));
+        let y = usize::from(at_row(&rows, "(•) aaa"));
+        assert_eq!(rows[y].chars().nth(89), Some('│'));
+        assert!(!rows[y].contains("( )") && !rows[y].chars().skip(90).any(|c| c == '…'), "{}", rows[y]);
         key(&mut gui, KeyCode::Left);
         assert_eq!(ui(&gui).vpath, "copies");
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[6], format!("│{:<78}│", " LIBRARY   … (•) copies"), "{}", picker.join("\n"));
+        assert_eq!(picker[3], format!("│{:<78}│", " … (•) copies"), "{}", picker.join("\n"));
         let mark = at(&rows, "… (•) copies");
+        assert_eq!(mark.x, 12);
         assert_eq!(dest_hit(&gui, mark), Some(super::DestAct::Step(-1)));
         gui.act(gui.ui.hit(mark).expect("the mark"));
         assert_eq!(ui(&gui).vpath, long);
-        // 50 cells: the second has room for its dot and four cells of its
+        // 60 cells: the second has room for its dot and four cells of its
         // name, clipped at the last cell — never over the border.
-        let long = "a".repeat(50);
+        let long = "a".repeat(60);
         let mut gui = on(&long);
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[6], format!("│{:<78}│", format!(" LIBRARY   (•) {long}   ( ) copi…")), "{}", picker.join("\n"));
+        assert_eq!(picker[3], format!("│{:<78}│", format!(" (•) {long}   ( ) copi…")), "{}", picker.join("\n"));
         assert_eq!(dest_hit(&gui, at(&rows, "( ) copi…")), Some(super::DestAct::Library(1)));
     }
 
@@ -9382,8 +9535,10 @@ pub(crate) mod tests {
     fn a_path_longer_than_the_server_takes_is_said_for_the_song_the_album_and_the_artist() {
         let _en = english();
         // A 490-character folder and the album: the layout passes the
-        // validator (500 at most; the sample's path is cut), the song's path
-        // would not — GOLD, no path, Save on: the server takes the layout.
+        // validator (500 at most), the song's path would not — GOLD words in
+        // the preview row's place, no path; Save on: the server takes the
+        // layout.
+        let too_long = format!("│{:<78}│", " Too long for the server · over 500 characters");
         let long = "x".repeat(490);
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
@@ -9391,13 +9546,15 @@ pub(crate) mod tests {
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " This song's path would pass 500 characters, more than the server takes"), "{}", picker.join("\n"));
-        assert_eq!(picker[4], format!("│{:<78}│", ""));
-        assert_eq!(fg(&buffer, at(&rows, "This song's path")), th().gold);
+        assert_eq!(picker[1], too_long, "{}", picker.join("\n"));
+        assert_eq!(picker[2], format!("│{:<78}│", ""));
+        assert_eq!(fg(&buffer, at(&rows, "Too long for the server")), th().gold);
         assert_eq!(fg(&buffer, at(&rows, "[ Save ]")), th().accent);
-        assert_eq!(tip_at(&gui, at(&rows, "This song's path")), None, "whole on its row: no tooltip");
+        assert_eq!(tip_at(&gui, at(&rows, "Too long for the server")), None, "whole on its row: no tooltip");
+        none_cut(&picker);
         // An album's copy, and every album of an artist — rendered whole,
-        // never cut at the album folder, as the server measures it.
+        // never cut at the album folder, as the server measures it: the same
+        // words for every copy.
         let mut gui = canvas_gui(&[]);
         draw(&mut gui, 100, 30);
         super::open(&mut gui, KeepTarget::Tile(0));
@@ -9408,7 +9565,7 @@ pub(crate) mod tests {
         typed(&mut gui, &format!("{long}/{{{{ALBUM}}}}"));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " This path would pass 500 characters, more than the server takes"), "{}", picker.join("\n"));
+        assert_eq!(picker[1], too_long, "{}", picker.join("\n"));
         // Every album by the artist: the album's folder is each album's
         // own and drops from the measure (no value, as the webapp's
         // `previewTarget` renders it), so 488 cells after the artist's 11
@@ -9424,27 +9581,26 @@ pub(crate) mod tests {
         typed(&mut gui, &format!("{{{{ARTIST}}}}/{}", "x".repeat(488)));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " Every album by Boukmanflow lands at"), "{}", picker.join("\n"));
-        assert!(picker[4].starts_with("│ …xxxx"), "{}", picker.join("\n"));
+        assert!(picker[1].starts_with("│ Files go to …xxxx"), "the lead stands, the path clipped after it: {}", picker.join("\n"));
         typed(&mut gui, "x");
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " This path would pass 500 characters, more than the server takes"), "{}", picker.join("\n"));
+        assert_eq!(picker[1], too_long, "{}", picker.join("\n"));
         // A slot has no value of its own and drops from the measure, as
         // the webapp's previewTarget renders it: the song's artist and
         // album, its genre's slot and 469 cells are 496 — a path (the
-        // slot's own words would pass the 500).
+        // slot's own words would pass the 500), its note whole under it.
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
         typed(&mut gui, &format!("{{{{ARTIST}}}}/{{{{ALBUM}}}}/{{{{GENRE}}}}/{}", "x".repeat(469)));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " Late Train Verse lands at"), "{}", picker.join("\n"));
-        assert!(picker[4].starts_with("│ …xxxx"), "{}", picker.join("\n"));
-        assert_eq!(picker[5], format!("│{:<78}│", " ‹genre› comes from the song's own tags (a song with none leaves that folder…"));
+        assert!(picker[1].starts_with("│ Files go to …xxxx"), "{}", picker.join("\n"));
+        assert_eq!(picker[2], format!("│{:<78}│", " ‹genre› comes from the song's own tags (a song with none leaves that folder"));
+        assert_eq!(picker[3], format!("│{:<78}│", " out)."));
         // A base folder set elsewhere is not measured (the server never
         // files by it): 29 cells of it and a layout whose path is 477 — a
-        // path, clipped from the left.
+        // path, clipped from the left, whole in its tooltip.
         let layout = format!("{}/{{{{ARTIST}}}}/{{{{ALBUM}}}}", "y".repeat(450));
         let mut view = dest_view(&"b".repeat(29), "user");
         view["destination"]["layout"] = json!(layout);
@@ -9453,26 +9609,66 @@ pub(crate) mod tests {
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[3], format!("│{:<78}│", " Late Train Verse lands at"), "{}", picker.join("\n"));
-        assert!(picker[4].starts_with("│ …") && picker[4].contains("› Boukmanflow › Borrowed Tapes › Late Train Verse.mp3"), "{}", picker.join("\n"));
+        assert!(picker[1].starts_with("│ Files go to …") && picker[1].ends_with("› Boukmanflow › Borrowed Tapes │"), "{}", picker.join("\n"));
+        assert_eq!(
+            tip_at(&gui, at(&rows, "Files go to …")),
+            Some(format!("copies/{}/{}/Boukmanflow/Borrowed Tapes", "b".repeat(29), "y".repeat(450)))
+        );
         assert_eq!(fg(&buffer, at(&rows, "[ Save ]")), th().dim, "nothing dirty");
-        // A wider locale's words clipped at the border: whole in the tooltip.
-        struct English;
-        impl Drop for English {
-            fn drop(&mut self) {
-                rust_i18n::set_locale("en");
-            }
+        // Every locale's words hold the row whole.
+        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+            let words = rust_i18n::t!("gui.discover.dest.too_long", locale = code, max = 500).to_string();
+            assert!(crate::kit::width(&words) <= 76, "{code}: {words}");
+            let lead = rust_i18n::t!("gui.discover.keep.goes_to", locale = code).to_string();
+            assert!(crate::kit::width(&lead) <= 24, "{code}: the lead leaves the path its cells: {lead}");
         }
-        let _back = English;
-        rust_i18n::set_locale("de");
-        let mut gui = dest_gui("");
-        dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
-        typed(&mut gui, &format!("{long}/{{{{ALBUM}}}}"));
-        let rows = draw(&mut gui, 100, 30);
-        let words = rust_i18n::t!("gui.discover.dest.too_long_song", max = 500).to_string();
-        assert!(crate::kit::width(&words) > 76, "{words}");
-        let title = rust_i18n::t!("gui.discover.dest.title").to_string();
-        assert_eq!(tip_at(&gui, Position { x: 12, y: at_row(&rows, &title) + 2 }).as_deref(), Some(words.as_str()), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn the_previews_clip_touches_the_words_it_cut_into() {
+        let _en = english();
+        let shown = |parts: &[&str], room: usize| {
+            use ratatui::{Terminal, backend::TestBackend};
+            let runs: Vec<(String, ratatui::style::Style)> = parts.iter().map(|p| (p.to_string(), ratatui::style::Style::default())).collect();
+            let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    super::put_tail(frame, 0, 0, &runs, room);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..40).map(|x| buffer[(x, 0)].symbol()).collect::<String>().trim_end().to_string()
+        };
+        // A blank inside a name the cut lands on goes, a cell short.
+        assert_eq!(shown(&["copies", " › ", "that keeps going"], 13), "…keeps going");
+        // A separator's blank before a whole crumb stays, as the cut at
+        // the separator itself does.
+        assert_eq!(shown(&["copies", " › ", "Lanterns"], 10), "… Lanterns");
+        assert_eq!(shown(&["copies", " › ", "Lanterns"], 12), "… › Lanterns");
+        // Whole where it fits.
+        assert_eq!(shown(&["copies", " › ", "Lanterns"], 17), "copies › Lanterns");
+    }
+
+    #[test]
+    fn the_pickers_one_row_notes_fit_their_rows_in_every_locale() {
+        let _en = english();
+        // The rows' cells: the text's from col 1, the open list's note's
+        // from col 3, the GOLD lines' under Custom's field from col 5 — all
+        // to col 76.
+        let wide = usize::from(super::DEST_LAST + 1 - super::DEST_TEXT);
+        let tree = usize::from(super::DEST_LAST + 1 - super::DEST_TREE);
+        let field = usize::from(super::DEST_LAST + 1 - super::DEST_FIELD);
+        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+            // An item at its server's top under Same folders as the server.
+            let words = rust_i18n::t!("gui.discover.dest.missing_server", locale = code, vars = "{{SERVERFOLDER}}").to_string();
+            assert!(crate::kit::width(&words) <= wide, "{code}: {words}");
+            // A folder of 16 characters with a brace, pressed in the list.
+            let words = rust_i18n::t!("gui.discover.dest.folder_braces", locale = code, folder = "{{odd}} mixtapes").to_string();
+            assert!(crate::kit::width(&words) <= tree, "{code}: {words}");
+            // A base folder set elsewhere that reads as a variable: one row.
+            let words = rust_i18n::t!("gui.discover.dest.err_base_braces", locale = code, folder = "{{PEER}}").to_string();
+            assert!(crate::kit::width(&words) <= field, "{code}: {words}");
+        }
     }
 
     #[test]
@@ -9490,8 +9686,8 @@ pub(crate) mod tests {
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         let rows = lines(&buffer);
         let picker = picker_rows(&rows);
-        assert_eq!(picker[4], format!("│{:<78}│", " copies › From friends › Boukmanflow › Late Train Verse.mp3"), "{}", picker.join("\n"));
-        assert!(picker[10].contains("(•) Custom") && picker[12].contains("From friends/{{ARTIST}}"), "{}", picker.join("\n"));
+        assert_eq!(picker[1], format!("│{:<78}│", " Files go to copies › From friends › Boukmanflow"), "{}", picker.join("\n"));
+        assert!(picker[7].contains("(•) Custom") && picker[9].contains("From friends/{{ARTIST}}"), "{}", picker.join("\n"));
         assert_eq!(ui(&gui).hand, Some(super::DestStop::Radio(super::Radio::ArtistAlbum)));
         assert_eq!(fg(&buffer, at(&rows, "[ Save ]")), th().dim, "nothing dirty: the place is the new one");
         // An edit is kept for Save or Esc to settle: music chosen, then the
@@ -9536,8 +9732,9 @@ pub(crate) mod tests {
                 .collect()
         };
         // A radio clicked with the list open closes it; so does a click on
-        // the field's row or the LIBRARY label (the hand moves) — a library
-        // chosen, a variable or Use the library default keep it open.
+        // the field's row (the hand moves), and one on "Esc close", which
+        // closes the list alone — a library chosen, a variable or Use the
+        // library default keep it open.
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Folders);
         land_folders(&mut gui);
@@ -9552,8 +9749,12 @@ pub(crate) mod tests {
         dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Field));
         assert!(ui(&gui).list.is_none(), "a click on the field's row closes it");
         dest_act(&mut gui, super::DestAct::Folders);
-        dest_act(&mut gui, super::DestAct::Hand(super::DestStop::Library));
-        assert!(ui(&gui).list.is_none(), "a click on the LIBRARY label closes it");
+        let rows = draw(&mut gui, 100, 30);
+        gui.act(gui.ui.hit(at(&rows, "Esc close")).expect("Esc close"));
+        assert!(gui.discover.keep.dest.is_some() && ui(&gui).list.is_none(), "\"Esc close\" closes the list first");
+        let rows = draw(&mut gui, 100, 30);
+        gui.act(gui.ui.hit(at(&rows, "Esc close")).expect("Esc close"));
+        assert!(gui.discover.keep.dest.is_none() && saves(&gui).is_empty(), "then goes back, nothing saved");
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Folders);
         land_folders(&mut gui);
@@ -9601,47 +9802,136 @@ pub(crate) mod tests {
         assert_eq!(ui(&gui).text.value(), format!("{}{{{{PEER}}}}", "x".repeat(490)));
     }
 
+    #[test]
+    fn every_control_the_trim_kept_works_by_its_click_and_by_its_key() {
+        let _en = english();
+        let click = |gui: &mut Gui, text: &str| {
+            let rows = draw(gui, 100, 30);
+            let act = gui.ui.hit(at(&rows, text)).unwrap_or_else(|| panic!("{text:?}: nothing to click"));
+            assert_ne!(act, Act::Guard, "{text:?} takes no click");
+            gui.act(act);
+        };
+        // By the pointer: a library by its name, a radio by its name, Custom
+        // by its row — the field takes the keys — every variable by its
+        // name at the caret, the folders button and a folder's row, "Hide
+        // folders", Use the library default and Save.
+        let mut gui = dest_gui("");
+        click(&mut gui, "( ) music");
+        assert_eq!((ui(&gui).vpath.as_str(), ui(&gui).hand), ("music", Some(super::DestStop::Library)));
+        click(&mut gui, "( ) Server / Artist / Album");
+        assert_eq!((ui(&gui).custom, ui(&gui).layout().as_str()), (false, "{{PEER}}/{{ALBUMARTIST}}/{{ALBUM}}"));
+        click(&mut gui, "( ) Library layout");
+        assert_eq!(ui(&gui).layout(), "{{ARTIST}}/{{YEAR}} - {{ALBUM}}");
+        click(&mut gui, "( ) Custom");
+        assert!(ui(&gui).custom && ui(&gui).hand == Some(super::DestStop::Field));
+        // (A genre's slot brings its note: the rows below move down.)
+        let mut x = 16;
+        for (i, name) in ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"].iter().enumerate() {
+            let rows = draw(&mut gui, 100, 30);
+            let y = at_row(&rows, "ARTIST · ALBUM");
+            let act = gui.ui.hit(Position { x, y }).expect("a variable");
+            assert_eq!(act, Act::Disc(DiscAct::Keep(super::KeepAct::Dest(super::DestAct::Var(i)))), "{name} at {x}");
+            gui.act(act);
+            x += name.len() as u16 + 3;
+        }
+        assert_eq!(ui(&gui).text.value(), "{{ARTIST}}{{ALBUM}}{{YEAR}}{{GENRE}}{{ALBUMARTIST}}{{PEER}}");
+        assert_eq!(ui(&gui).hand, Some(super::DestStop::Field), "the keys back in the field");
+        ctrl(&mut gui, 'u');
+        click(&mut gui, "Start from an existing folder…");
+        land_folders(&mut gui);
+        assert!(ui(&gui).list.is_some());
+        click(&mut gui, "from-peers");
+        land_folders(&mut gui);
+        assert_eq!(ui(&gui).list.as_ref().map(|l| l.dir.clone()), Some(vec!["from-peers".to_string()]));
+        assert!(ui(&gui).text.value().starts_with("from-peers"), "{}", ui(&gui).text.value());
+        click(&mut gui, "Hide folders");
+        assert!(ui(&gui).list.is_none());
+        click(&mut gui, "[ Use the library default ]");
+        assert_eq!((ui(&gui).vpath.as_str(), ui(&gui).custom), ("music", false));
+        click(&mut gui, "[ Save ]");
+        assert_eq!(saves(&gui), vec![None]);
+        // By the keyboard, the same stops in the same order: ← → the
+        // libraries, ↓ the radios and Space, the folders button and Enter,
+        // the field, the variables and Enter, the buttons and Enter.
+        let mut gui = dest_gui("");
+        key(&mut gui, KeyCode::Left);
+        assert_eq!(ui(&gui).vpath, "music");
+        key(&mut gui, KeyCode::Right);
+        let walked: Vec<_> = (0..4)
+            .map(|_| {
+                key(&mut gui, KeyCode::Down);
+                ui(&gui).hand
+            })
+            .collect();
+        use super::{DestStop, Radio};
+        assert_eq!(walked, [Some(DestStop::Radio(Radio::ArtistAlbum)), Some(DestStop::Radio(Radio::Server)), Some(DestStop::Radio(Radio::Custom)), Some(DestStop::Folders)]);
+        key(&mut gui, KeyCode::Enter);
+        land_folders(&mut gui);
+        assert!(ui(&gui).list.is_some());
+        key(&mut gui, KeyCode::Esc);
+        assert!(ui(&gui).list.is_none() && gui.discover.keep.dest.is_some(), "Esc closes the list first");
+        key(&mut gui, KeyCode::Up);
+        key(&mut gui, KeyCode::Char(' '));
+        assert!(ui(&gui).custom);
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Down);
+        typed(&mut gui, "Mine/");
+        key(&mut gui, KeyCode::Down);
+        assert_eq!(ui(&gui).hand, Some(DestStop::Vars));
+        key(&mut gui, KeyCode::Right);
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!(ui(&gui).text.value(), "Mine/{{ALBUM}}");
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Down);
+        assert_eq!(ui(&gui).hand, Some(DestStop::Save));
+        key(&mut gui, KeyCode::Enter);
+        let place = saves(&gui)[0].clone().expect("a place");
+        assert_eq!((place.vpath.as_str(), place.layout.as_str()), ("copies", "Mine/{{ALBUM}}"));
+        key(&mut gui, KeyCode::Esc);
+        assert!(gui.discover.keep.dest.is_none(), "Esc goes back while saving");
+    }
+
     /// `cargo test dump_dest -- --ignored --nocapture`: the picker's states.
     #[test]
     #[ignore]
     fn dump_dest() {
         let _en = english();
-        let show = |gui: &mut Gui, what: &str, h: u16| {
-            let rows = draw(gui, 100, h);
-            println!("── {what} · tips: {}", super::super::discover::tips(gui));
-            println!("{}", picker_rows(&rows).join("\n"));
+        let show = |gui: &mut Gui, what: &str| {
+            for h in [30, 24] {
+                let rows = draw(gui, 100, h);
+                println!("── {what} · 100 × {h} · tips: {}", super::super::discover::tips(gui));
+                println!("{}", picker_rows(&rows).join("\n"));
+            }
         };
         let mut gui = dest_gui("");
-        show(&mut gui, "idle on the saved place", 30);
+        show(&mut gui, "idle on the saved place");
         key(&mut gui, KeyCode::Left);
-        show(&mut gui, "music: its own layout", 30);
+        show(&mut gui, "music: its own layout");
         key(&mut gui, KeyCode::Right);
         dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
-        show(&mut gui, "custom empty", 30);
+        show(&mut gui, "custom empty");
         typed(&mut gui, "{{ARTST}}/{{YEAR}} - {{ALBUM}}");
-        show(&mut gui, "custom invalid", 30);
+        show(&mut gui, "custom invalid");
         ctrl(&mut gui, 'u');
         typed(&mut gui, "From friends/{{ARTIST}}/{{ALBUM}}");
-        show(&mut gui, "custom typed", 30);
-        key(&mut gui, KeyCode::Down);
+        show(&mut gui, "custom typed");
+        dest_act(&mut gui, super::DestAct::Folders);
+        land_folders(&mut gui);
+        show(&mut gui, "the list open");
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Enter);
         land_folders(&mut gui);
-        show(&mut gui, "the list open", 30);
-        key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Enter);
-        land_folders(&mut gui);
-        show(&mut gui, "into from-peers", 24);
+        show(&mut gui, "into from-peers");
         key(&mut gui, KeyCode::Esc);
         dest_act(&mut gui, super::DestAct::Save);
-        show(&mut gui, "saving", 30);
+        show(&mut gui, "saving");
         let words = "destination layout: Unknown variable {{ARTST}}. Supported: {{ARTIST}}, {{ALBUM}}, {{YEAR}}, {{GENRE}}, {{ALBUMARTIST}}, {{PEER}}, {{SERVERFOLDER}}";
         land_save(&mut gui, Err(crate::api::PluginFailure::Refused { status: 400, words: words.into() }));
-        show(&mut gui, "refused", 24);
+        show(&mut gui, "refused");
         let mut gui = dest_gui("from-peers");
-        show(&mut gui, "a folded base", 30);
+        show(&mut gui, "a folded base");
         dest_act(&mut gui, super::DestAct::UseDefault);
-        show(&mut gui, "use the library default", 30);
+        show(&mut gui, "use the library default");
     }
 
     // ── Words in every locale (clause 119) ──────────────────────────────

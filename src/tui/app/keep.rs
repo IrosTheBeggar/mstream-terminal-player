@@ -24,8 +24,8 @@ use crate::api::PluginFailure;
 use crate::api::types::{
     COPY_PLUGIN, CancelAnswer, CollectionDestination, CollectionDestinationView, DiscoveryPluginsResponse, JobAction,
     JobLookup, JobMark, JobOutcome, JobParams, JobScope, JobStarted, JobState, Landed, Landing, LayoutTags, PluginJob,
-    PluginJobList, PluginLink, Run, SongTag, TasteLead, artist_ownership, job_for_album, missing_albums, safe_file_name,
-    sanitize_segment, server_folder,
+    PluginJobList, PluginLink, Run, SongTag, TasteLead, artist_ownership, job_for_album, missing_albums, sanitize_segment,
+    server_folder,
 };
 use crate::tui::worker::{KeepFacts, KeepFactsAsk, KeepSong};
 
@@ -847,15 +847,6 @@ impl KeepView {
         let (mut tags, _) = self.scope_tags(self.scope);
         tags.slots.clear();
         Landing::of("", "", layout, &tags, false, known).rendered_len()
-    }
-
-    /// The song's file as it would land — the PREVIEW's last crumb (the
-    /// phone's), a song's alone.
-    pub fn file_name(&self) -> Option<String> {
-        if self.scope != JobScope::Song {
-            return None;
-        }
-        self.subject.filepath.as_deref().map(safe_file_name)
     }
 }
 
@@ -2950,7 +2941,6 @@ mod tests {
         };
         let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(crumbs(&view, "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", JobScope::Song), (names(&["copies", "from-peers", "Boukmanflow", "2019 - Borrowed Tapes"]), false));
-        assert_eq!(view.file_name().as_deref(), Some("02 - Late Train Verse.MP3"));
         // The album's credit is its ALBUMARTIST: a compilation stays in one folder.
         let comp = KeepView { subject: subject(Some("Kim Song"), Some("Peer Kim"), Some("Mixtape Vol 1"), Some("Various Artists")), ..view.clone() };
         assert_eq!(crumbs(&comp, "{{ALBUMARTIST}}/{{ALBUM}}", JobScope::Album), (names(&["copies", "from-peers", "Various Artists", "Mixtape Vol 1"]), false));
@@ -2973,7 +2963,6 @@ mod tests {
         // names it (the webapp's missingVars).
         let undated = KeepView { subject: KeepSubject { year: None, ..view.subject.clone() }, ..view.clone() };
         assert_eq!(undated.landing_at(&place("{{ARTIST}}/{{YEAR}}/{{ALBUM}}"), JobScope::Song).missing, ["YEAR"]);
-        assert_eq!(KeepView { scope: JobScope::Album, ..view }.file_name(), None, "a song's file alone");
     }
 
     #[test]

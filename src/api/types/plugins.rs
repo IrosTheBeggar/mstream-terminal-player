@@ -1340,16 +1340,6 @@ pub fn server_folder(filepath: &str) -> String {
     sanitize_folders(Some(&dirs.iter().skip(1).copied().collect::<Vec<_>>().join("/")))
 }
 
-/// A song's file name as it lands (destination.js `safeFileName`): the
-/// path's last name, reserved and control characters `-`, blank runs one
-/// space, no leading or trailing dots and blanks; "track" when nothing is
-/// left — the picker's preview draws it as the path's last crumb.
-pub fn safe_file_name(path: &str) -> String {
-    let last = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or_default();
-    let name = sanitize_segment(Some(last));
-    if name.is_empty() || name == ".." { "track".to_string() } else { name }
-}
-
 /// `layout` with the base folder `base` in front of it (the webapp's and
 /// the phone's `foldBase`). The picker keeps no base folder of its own
 /// since 2026-10-23 (a destination saved with one — older data — opens
@@ -2320,8 +2310,6 @@ mod tests {
         assert_eq!(landing.folders, vec![vec![("x ".to_string(), Run::Text), ("{{ARTST}}".to_string(), Run::Unknown), (" y".to_string(), Run::Text)]]);
         // A finished copy's folder, as it landed.
         assert_eq!(Landing::landed("copies", &["Boukmanflow".into()]).crumbs(), ["copies", "Boukmanflow"]);
-        assert_eq!(safe_file_name("peerlib/Boukmanflow/Borrowed Tapes/02 - Late: Train?.mp3"), "02 - Late- Train-.mp3");
-        assert_eq!(safe_file_name("peerlib/.."), "track");
     }
 
     #[test]
