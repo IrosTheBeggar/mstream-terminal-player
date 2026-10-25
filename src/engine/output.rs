@@ -256,12 +256,13 @@ mod tests {
     #[test]
     fn the_alsa_walk_writes_to_dev_null_and_gives_fd_2_back() {
         let before = stderr_file();
-        let null = std::fs::metadata("/dev/null").map(|m| {
+        let null = {
             use std::os::unix::fs::MetadataExt;
+            let m = std::fs::metadata("/dev/null").expect("/dev/null");
             (m.dev(), m.ino())
-        });
+        };
         let inside = quiet_alsa(stderr_file);
-        assert_eq!(Ok(inside), null, "the walk's fd 2 is /dev/null");
+        assert_eq!(inside, null, "the walk's fd 2 is /dev/null");
         assert_eq!(stderr_file(), before, "and fd 2 is the screen's again after");
         // A panicking walk puts it back too.
         let _ = std::panic::catch_unwind(|| quiet_alsa(|| panic!("the walk failed")));
