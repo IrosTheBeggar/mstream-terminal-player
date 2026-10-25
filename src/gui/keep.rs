@@ -1759,9 +1759,10 @@ fn press(gui: &mut Gui, view: &KeepView, shown: Shown) {
 }
 
 /// ↑ ↓ (§6.1): the choice itself moves — This song › Album › Every album
-/// by › the box, its fourth stop — clamped at both ends. ↓ from Every album
-/// by ticks the box (the dot stays); ↑ from it unticks it; picking This
-/// song or Album unticks it.
+/// by › the box, its fourth stop — clamped at both ends. The box keeps its
+/// own tick (ticked from the start), so Every album by is reached on the
+/// box while it is ticked; ↑ from the box unticks it (the dot stays), ↓
+/// from Every album by ticks it again.
 fn walk(gui: &mut Gui, view: &KeepView, delta: i64) {
     #[derive(Clone, Copy, PartialEq)]
     enum Stop {
@@ -1775,7 +1776,8 @@ fn walk(gui: &mut Gui, view: &KeepView, delta: i64) {
             stops.push(Stop::Box);
         }
     }
-    let here = if view.missing.is_some_and(|(on, _)| on) { Stop::Box } else { Stop::Choice(view.choice) };
+    let on_box = view.choice == KeepChoice::Artist && view.missing.is_some_and(|(on, _)| on);
+    let here = if on_box { Stop::Box } else { Stop::Choice(view.choice) };
     let Some(at) = stops.iter().position(|s| *s == here) else { return };
     let to = (at as i64 + delta).clamp(0, stops.len() as i64 - 1) as usize;
     match (here, stops[to]) {
@@ -4786,13 +4788,25 @@ pub(crate) mod tests {
 
     /// The choice of `scope`, by the pointer.
     fn choose(gui: &mut Gui, scope: Option<&str>) {
-        let act = match scope {
-            Some("album") => super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Album),
-            Some("artist") => super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Artist),
-            Some("artist-missing") => super::KeepAct::Missing,
-            _ => super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Song),
+        use crate::tui::app::keep::KeepChoice;
+        let choice = match scope {
+            Some("album") => KeepChoice::Album,
+            Some("artist" | "artist-missing") => KeepChoice::Artist,
+            _ => KeepChoice::Song,
         };
-        gui.act(Act::Disc(DiscAct::Keep(act)));
+        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(choice))));
+        // The box keeps its own tick (ticked from the start): the artist
+        // scopes set it, where it is offered; the others leave it be.
+        let want = match scope {
+            Some("artist") => Some(false),
+            Some("artist-missing") => Some(true),
+            _ => None,
+        };
+        if let Some(want) = want
+            && gui.app.keep_view().and_then(|v| v.missing).is_some_and(|(on, _)| on != want)
+        {
+            gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Missing)));
+        }
     }
 
     /// The window on `target` with a copy of `scope` started, the server
@@ -5574,7 +5588,7 @@ pub(crate) mod tests {
                 │ (•) This song                                                            │
                 │ ( ) Album                                                                │
                 │ ( ) Every album by Boukmanflow                                           │
-                │     [ ] Only the 1 album you don't have                                  │
+                │     [✓] Only the 1 album you don't have                                  │
                 │                                                                          │
                 │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
                 │                                                                          │
@@ -5598,8 +5612,8 @@ pub(crate) mod tests {
         assert_eq!(text(cell(25, 10)), (Color::Reset, true));
         assert_eq!(fg(&buffer, cell(22, 11)), th().dim);
         assert_eq!(text(cell(25, 11)), (Color::Reset, false));
-        assert_eq!(fg(&buffer, cell(26, 13)), th().dim);
-        assert_eq!(text(cell(29, 13)), (Color::Reset, false));
+        assert_eq!(fg(&buffer, cell(26, 13)), th().accent, "the box ticked from the start, ACCENT");
+        assert_eq!(text(cell(29, 13)), (Color::Reset, true), "a ticked box's words BOLD");
         assert_eq!(fg(&buffer, cell(21, 15)), th().dim);
         assert_eq!(text(cell(33, 15)), (Color::Reset, true), "the library BOLD");
         assert_eq!(fg(&buffer, cell(40, 15)), th().dim, "› DIM");
@@ -5671,14 +5685,9 @@ pub(crate) mod tests {
         assert_eq!(choice[1], "│ (•) Album                                                                │");
         assert_eq!(place, "│ Files go to copies › Boukmanflow › Borrowed Tapes               d change │");
         assert_eq!(action, "│                                                  [ Add album · 3 songs ] │");
-        // Every album by: the server's albums by the artist, album by album.
-        key(&mut gui, KeyCode::Down);
-        let (choice, place, action) = shown(&mut gui);
-        assert_eq!(choice[2], "│ (•) Every album by Boukmanflow                                           │");
-        assert_eq!(place, "│ Files go to copies › Boukmanflow › one folder per album         d change │");
-        assert_eq!(action, "│                                                         [ Add 2 albums ] │");
-        // The box is the fourth stop: ↓ ticks it, the dot stays — and the one
-        // album it takes is named where it lands.
+        // Every album by, the box ticked from the start: ↓ lands on the box,
+        // the dot on Every album by — the one album it takes named where it
+        // lands.
         key(&mut gui, KeyCode::Down);
         let (choice, place, action) = shown(&mut gui);
         assert_eq!(choice[2..4], ["│ (•) Every album by Boukmanflow                                           │", "│     [✓] Only the 1 album you don't have                                  │"]);
@@ -5687,20 +5696,23 @@ pub(crate) mod tests {
         // Clamped: ↓ again moves nothing.
         key(&mut gui, KeyCode::Down);
         assert_eq!(shown(&mut gui).0[3], "│     [✓] Only the 1 album you don't have                                  │");
-        // ↑ unticks it, the dot still on Every album by; ↑ ↑ back to This
-        // song, clamped there.
+        // ↑ unticks it, the dot still on Every album by: the server's albums
+        // by the artist, album by album.
         key(&mut gui, KeyCode::Up);
+        let (choice, place, action) = shown(&mut gui);
+        assert_eq!(choice[2..4], ["│ (•) Every album by Boukmanflow                                           │", "│     [ ] Only the 1 album you don't have                                  │"]);
+        assert_eq!(place, "│ Files go to copies › Boukmanflow › one folder per album         d change │");
+        assert_eq!(action, "│                                                         [ Add 2 albums ] │");
         assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((false, 1)) && v.scope == crate::api::types::JobScope::Artist));
-        for _ in 0..3 {
+        // ↓ ticks it again; ↑ ↑ ↑ back to This song, clamped there.
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((true, 1)) && v.scope == crate::api::types::JobScope::ArtistMissing));
+        for _ in 0..4 {
             key(&mut gui, KeyCode::Up);
         }
         assert_eq!(shown(&mut gui).0[0], "│ (•) This song                                                            │");
-        // Three ↓ from This song reach the box; picking Album by the pointer
-        // unticks it.
-        for _ in 0..3 {
-            key(&mut gui, KeyCode::Down);
-        }
-        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((true, 1))));
+        // Picking a radio leaves the box's tick as it was: it counts only
+        // under Every album by.
         gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Song))));
         assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((false, 1)) && v.scope == crate::api::types::JobScope::Song));
         // Space, Tab, ← → and the letters no word names do nothing.
@@ -6192,7 +6204,7 @@ pub(crate) mod tests {
                 │ (•) This song                                                            │
                 │ ( ) Album                                                                │
                 │ ( ) Every album by Boukmanflow                                           │
-                │     [ ] Only the 1 album you don't have                                  │
+                │     [✓] Only the 1 album you don't have                                  │
                 │                                                                          │
                 │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
                 │ ! Couldn't start: you have 20 jobs queued or running — wait for some to  │
@@ -6258,7 +6270,7 @@ pub(crate) mod tests {
                 │                                                                          │
                 │ (•) Album                                                                │
                 │ ( ) Every album by Boukmanflow                                           │
-                │     [ ] Only the 1 album you don't have                                  │
+                │     [✓] Only the 1 album you don't have                                  │
                 │                                                                          │
                 │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
                 │                                                                          │
@@ -6602,7 +6614,7 @@ pub(crate) mod tests {
                 │                                                                          │
                 │ (•) Album                                                                │
                 │ ( ) Every album by Boukmanflow                                           │
-                │     [ ] Only the 1 album you don't have                                  │
+                │     [✓] Only the 1 album you don't have                                  │
                 │                                                                          │
                 │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
                 │ Copying from Stage Peer C                                                │
@@ -6630,16 +6642,18 @@ pub(crate) mod tests {
         assert_eq!(low[9], "│                                                                [ Close ] │");
         assert_eq!(super::super::discover::tips(&gui), "↑ ↓ choose · d where files land · Esc close");
         assert!(starts(&gui).is_empty(), "no start while it covers the choice");
-        // A scope it does not cover brings Add back, the two lines gone.
+        // A scope it does not cover brings Add back, the two lines gone:
+        // Every album by, the box ticked from the start, takes the missing one.
         key(&mut gui, KeyCode::Down);
         let low = lower_rows(&draw(&mut gui, 100, 30));
         assert_eq!(low[5..8], [
-            "│ Files go to copies › Boukmanflow › one folder per album         d change │",
+            "│ Files go to copies › Boukmanflow › Borrowed Tapes               d change │",
             "│                                                                          │",
-            "│                                                         [ Add 2 albums ] │",
+            "│                                                          [ Add 1 album ] │",
         ]);
         // Enter on Close closes; the tile itself wears none of Stage Peer C's
-        // copy.
+        // copy. (↑ unticks the box, ↑ again is Album.)
+        key(&mut gui, KeyCode::Up);
         key(&mut gui, KeyCode::Up);
         key(&mut gui, KeyCode::Enter);
         assert!(gui.app.taste.keep.flow.is_none());
@@ -6674,7 +6688,7 @@ pub(crate) mod tests {
                 │ ( ) This song                                                            │
                 │ (•) Album                                                                │
                 │ ( ) Every album by Boukmanflow                                           │
-                │     [ ] Only the 1 album you don't have                                  │
+                │     [✓] Only the 1 album you don't have                                  │
                 │ Files go to copies › from-peers › the long weekend sessions ›            │
                 │   Stage Peer B › ‹genre› › Boukmanflow › 2019 - Borrowed Tapes  d change │
                 │ ‹genre› comes from each song's own tags, so these songs can land in more │
@@ -6771,7 +6785,7 @@ pub(crate) mod tests {
                 |                                                                          |
                 | (*) Album                                                                |
                 | ( ) Every album by Boukmanflow                                           |
-                |     [ ] Only the 1 album you don't have                                  |
+                |     [x] Only the 1 album you don't have                                  |
                 |                                                                          |
                 | Files go to copies > Boukmanflow > Borrowed Tapes               d change |
                 |                                                                          |
@@ -6811,7 +6825,7 @@ pub(crate) mod tests {
                 |                                                                          |
                 | (*) Album                                                                |
                 | ( ) Every album by Boukmanflow                                           |
-                |     [ ] Only the 1 album you don't have                                  |
+                |     [x] Only the 1 album you don't have                                  |
                 |                                                                          |
                 | Files go to copies > Boukmanflow > Borrowed Tapes               d change |
                 |                                                                          |
@@ -6881,7 +6895,7 @@ pub(crate) mod tests {
                 │                                                                          │
                 │ (•) Album                                                                │
                 │ ( ) Every album by Boukmanflow                                           │
-                │     [ ] Only the 1 album you don't have                                  │
+                │     [✓] Only the 1 album you don't have                                  │
                 │                                                                          │
                 │ Files go to music › Boukmanflow › 2019 - Borrowed Tapes         d change │
                 │ ! Where files land changed · check the path above and add again          │
@@ -7475,7 +7489,7 @@ pub(crate) mod tests {
         assert!(!window.iter().any(|r| r.contains("Only the")), "{}", window.join("\n"));
         land_facts(&mut gui, Some(3), &["Borrowed Tapes"], &["Borrowed Tapes", "Kite Days"]);
         let low = lower_rows(&draw(&mut gui, 100, 30));
-        assert_eq!(low[3], "│     [ ] Only the albums you don't have                                   │", "{}", low.join("\n"));
+        assert_eq!(low[3], "│     [✓] Only the albums you don't have                                   │", "{}", low.join("\n"));
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Down);
         let window = window_of(&mut gui);
@@ -7649,10 +7663,11 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Down);
         let low = lower_rows(&draw(&mut gui, 100, 30));
         assert_eq!(low[5..8], [
-            "│ Files go to copies › Boukmanflow › one folder per album         d change │",
+            "│ Files go to copies › Boukmanflow › Borrowed Tapes               d change │",
             "│                                                                          │",
-            "│                                                         [ Add 2 albums ] │",
+            "│                                                          [ Add 1 album ] │",
         ], "{}", low.join("\n"));
+        key(&mut gui, KeyCode::Up);
         key(&mut gui, KeyCode::Up);
         assert!(window_of(&mut gui).iter().any(|r| r.contains("Copying from Stage Peer C")));
     }
@@ -9254,7 +9269,7 @@ pub(crate) mod tests {
         super::open(&mut gui, KeepTarget::Tile(0));
         stage_facts(&mut gui);
         land_read(&mut gui, dest_view("", "user"));
-        gui.act(Act::Disc(DiscAct::Keep(super::KeepAct::Pick(crate::tui::app::keep::KeepChoice::Artist))));
+        choose(&mut gui, Some("artist"));
         key(&mut gui, KeyCode::Char('d'));
         let rows = draw(&mut gui, 100, 30);
         let picker = picker_rows(&rows);

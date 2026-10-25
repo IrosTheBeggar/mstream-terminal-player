@@ -380,9 +380,10 @@ choice — discovery-page clauses 106–107, deviations 2026-10-24 — has no
 card and no group label, the radios saying what they are, and its
 checkbox, "Only the 1 album you don't have", standing under the last
 radio, is **the group's fourth stop**: choice semantics, so ticked it is
-`[✓]` fg LightBlue with its label BOLD, not the checkbox's Green; ↓ from
-the radio above ticks it and ↑ unticks it, a click toggles it, and
-picking another radio unticks it.) **Choices side by side**
+`[✓]` fg LightBlue with its label BOLD, not the checkbox's Green; it is
+ticked from the start and keeps its own tick whatever the choice, so ↓
+onto the radio above lands on it while ticked, ↑ unticks it, ↓ ticks it
+again and a click toggles it.) **Choices side by side**
 (`(•) music   ( ) copies`, the Auto DJ room's rows and Where copies
 land's libraries — no label there, the hand showing on the chosen name
 ACCENT BOLD): one row, three cells between, the chosen `(•)` OK and

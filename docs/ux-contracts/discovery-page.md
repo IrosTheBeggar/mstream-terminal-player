@@ -1116,11 +1116,14 @@ three other Boukmanflow albums, the destination `copies` with
      copy held or not. **It is the
      choice's fourth stop** (choice semantics, so ticked it is ACCENT —
      `[✓]` and its label TEXT BOLD — not the kit checkbox's Green; the
-     log, 2026-10-24): ↓ from Every album by ticks it (scope
-     `artist-missing`, the dot staying on Every album by), ↑ from it
-     unticks it, a click toggles it; picking This song or Album, by key
-     or click, unticks it; a box that goes while ticked unticks, the
-     choice staying Every album by. Ticked, the place names the one
+     log, 2026-10-24): it is **ticked from the start**, as on the
+     webapp and the phone, and keeps its own tick whatever the choice —
+     it counts only under Every album by (scope `artist-missing`). So ↓
+     from Album reaches Every album by on the box while it is ticked (the
+     dot on Every album by), ↑ from it unticks it (scope `artist`, the
+     dot staying), ↓ from Every album by ticks it again, a click toggles
+     it (ticking it picks Every album by); picking another radio leaves
+     the tick as it was. Ticked, the place names the one
      album it takes, with its year, or ends "› one folder per album" for
      two or more, and the primary reads **Add 1 album** / **Add 2
      albums**. A partly kept album is Album's to finish: it skips the
@@ -3909,3 +3912,10 @@ counts, and K, K2, W and KM's semantics, are unchanged.
     the hand, a library root's 404 reads in the server's words (no file
     creates a library), and a wide glyph of the room's nav just left of
     the box no longer hides its left border (ja, zh).
+- **2026-10-24 — Only the albums you don't have, ticked from the start**
+  (the user: "Make the checkbox that copying only the albums you don't
+  have checked by default"). Clause 107's box opens ticked, as the
+  webapp's and the phone's do, and keeps its own tick across choices;
+  it still counts only under Every album by and only while offered. ↓
+  onto Every album by therefore lands on the box (only the missing
+  albums); ↑ from there unticks it for every album by the artist.

@@ -9023,7 +9023,7 @@ mod keep {
         let view = app.keep_view().unwrap();
         assert_eq!(view.choices[1].1, ChoiceSize::Album { songs: Fact::Known(3) });
         assert_eq!(view.choices[2].1, ChoiceSize::Artist { albums: Fact::Known(1), have: Fact::Known(3) });
-        assert_eq!(view.missing, Some((false, 1)), "one of theirs missing by name, three of the artist's here");
+        assert_eq!(view.missing, Some((true, 1)), "one of theirs missing by name, three of the artist's here: ticked from the start");
         app.keep_set_missing(true);
         let view = app.keep_view().unwrap();
         assert_eq!((view.choice, view.scope, view.missing), (KeepChoice::Artist, JobScope::ArtistMissing, Some((true, 1))));
@@ -9033,11 +9033,13 @@ mod keep {
         assert_eq!(landing, Some((vec!["copies".into(), "Boukmanflow".into(), "Borrowed Tapes".into()], false)));
         assert_eq!(view.one_missing, Some(("Borrowed Tapes".into(), Some(2017))), "its year from the listing");
         assert_eq!(starts(&app.keep_start())[0].2, JobScope::ArtistMissing);
-        // Picking another radio unticks it.
+        // Hidden until the sizes land: nothing to tick, and the tick it keeps
+        // counts for nothing — the song's own scope.
         app.keep_close();
         app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
         app.keep_set_missing(true);
-        assert!(!app.taste.keep.flow.as_ref().unwrap().only_missing, "hidden until the sizes land: nothing to tick");
+        let view = app.keep_view().unwrap();
+        assert_eq!((view.missing, view.choice, view.scope), (None, KeepChoice::Song, JobScope::Song), "hidden until the sizes land: nothing to tick");
         // Everything of theirs here by name: no checkbox.
         let (mut app, effects) = ready_room();
         answer_lookup(&mut app, &effects, &[]);
@@ -9056,10 +9058,10 @@ mod keep {
         let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
         assert_eq!(app.keep_view().unwrap().missing, None, "the sizes asked: hidden, a copy held or not");
         app.keep_set_missing(true);
-        assert!(!app.taste.keep.flow.as_ref().unwrap().only_missing);
+        assert_eq!(app.keep_view().unwrap().choice, KeepChoice::Song, "hidden: the box moves nothing");
         let seq = opened.iter().find_map(|e| match e { Effect::Api(ApiCmd::KeepFacts { seq, .. }) => Some(*seq), _ => None }).unwrap();
         app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(facts) });
-        assert_eq!(app.keep_view().unwrap().missing, Some((false, 0)));
+        assert_eq!(app.keep_view().unwrap().missing, Some((true, 0)));
         app.keep_set_missing(true);
         assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Choose { verb: Some(KeepVerb::Missing(0)), .. }));
         // A stale facts answer (an older open) fills nothing.

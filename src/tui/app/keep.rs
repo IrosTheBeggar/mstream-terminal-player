@@ -588,11 +588,39 @@ impl KeepFlow {
     /// A covered choice looks again whenever its jobs change: its own copy
     /// started since (live, or newer) takes over, and a wider copy that no
     /// longer speaks for it gives the choice back.
-    fn resettle(&mut self) {
+    fn resettle(&mut self, gate: &KeepGate) {
         if matches!(self.phase, KeepPhase::Covered(_)) {
-            self.phase = opening_phase(&self.jobs, &self.subject, self.choice.scope(self.only_missing))
-                .unwrap_or(KeepPhase::Choose);
+            self.phase = opening_phase(&self.jobs, &self.subject, self.scope(gate)).unwrap_or(KeepPhase::Choose);
         }
+    }
+
+    /// "Only the albums you don't have" (clause 107), offered with its
+    /// count: with the artist choice, where the plug-in runs it, the
+    /// library holds some of the artist's albums and the other server one
+    /// it lacks by name — or where such a copy still wants the user; never
+    /// while the sizes are asked, a copy held or not. Kept by that copy
+    /// alone, nothing missing by name (or the sizes unknown), its count is
+    /// 0: the window says none.
+    fn missing_box(&self, gate: &KeepGate) -> Option<usize> {
+        let runs = gate.plugins.as_ref().is_some_and(|p| p.copies(JobScope::ArtistMissing))
+            && self.choices.contains(&KeepChoice::Artist);
+        let held = self.jobs.slot(JobScope::ArtistMissing).filter(|j| !j.other_peer(Some(self.subject.peer))).is_some_and(|j| {
+            let o = j.outcome();
+            o.live() || o.troubled()
+        });
+        let facts = &self.facts;
+        let local = facts.local_albums.as_ref().map(Vec::len).unwrap_or(0);
+        let missing = match (&facts.peer_albums, &facts.local_albums, self.subject.track_artist.as_deref()) {
+            (Some(remote), Some(local), Some(artist)) => artist_ownership(artist, remote, local).1,
+            _ => 0,
+        };
+        (runs && !self.facts_asking && ((local > 0 && missing > 0) || held)).then_some(missing)
+    }
+
+    /// The scope the chosen radio sends: Every album by takes the box's
+    /// tick only while the box is offered.
+    fn scope(&self, gate: &KeepGate) -> JobScope {
+        self.choice.scope(self.only_missing && self.missing_box(gate).is_some())
     }
 }
 
@@ -1001,7 +1029,7 @@ impl KeepState {
         }
         if let Some(flow) = self.flow.as_mut() {
             flow.jobs.merge(job);
-            flow.resettle();
+            flow.resettle(&self.gate);
         }
         if job.live() {
             self.book.seen_live.insert(job.id);
@@ -1720,7 +1748,9 @@ impl App {
             subject,
             choices,
             choice,
-            only_missing: false,
+            // Ticked from the start, as on the webapp and the phone: it
+            // counts once Every album by is chosen and the box is offered.
+            only_missing: true,
             facts: KeepFacts::default(),
             facts_asking: true,
             facts_seq,
@@ -1760,15 +1790,12 @@ impl App {
         self.keep_dest_forget();
     }
 
-    /// Pick a radio (Space, Enter, a click). Choosing is not toggling:
-    /// the album or the song clear "only the albums you don't have".
+    /// Pick a radio (Space, Enter, a click). "Only the albums you don't
+    /// have" keeps its own tick: it counts only under Every album by.
     pub(crate) fn keep_pick(&mut self, choice: KeepChoice) {
         let Some(flow) = self.taste.keep.flow.as_mut() else { return };
         if !flow.choices.contains(&choice) || !matches!(flow.phase, KeepPhase::Choose | KeepPhase::Refused(_)) {
             return;
-        }
-        if flow.choice != choice {
-            flow.only_missing = false;
         }
         flow.choice = choice;
     }
@@ -1888,10 +1915,6 @@ impl App {
             None if flow.facts_asking => Fact::Asking,
             None => Fact::Unknown,
         };
-        let ownership = match (&facts.peer_albums, &facts.local_albums, s.track_artist.as_deref()) {
-            (Some(remote), Some(local), Some(artist)) => Some(artist_ownership(artist, remote, local)),
-            _ => None,
-        };
         let choices = flow
             .choices
             .iter()
@@ -1907,23 +1930,10 @@ impl App {
                 (choice, size)
             })
             .collect();
-        // "Only the albums you don't have" (clause 107): with the artist
-        // choice, where the plug-in runs it, the library holds some of the
-        // artist's albums and the other server one it lacks by name — or
-        // where such a copy still wants the user; never while the sizes
-        // are asked, a copy held or not. Kept by that copy alone, nothing
-        // missing by name (or the sizes unknown), its count is 0: the
-        // window says none.
-        let runs_missing = self.taste.keep.gate.plugins.as_ref().is_some_and(|p| p.copies(JobScope::ArtistMissing))
-            && flow.choices.contains(&KeepChoice::Artist);
-        let held_missing = flow.jobs.slot(JobScope::ArtistMissing).filter(|j| !j.other_peer(Some(s.peer))).is_some_and(|j| {
-            let o = j.outcome();
-            o.live() || o.troubled()
-        });
-        let local = facts.local_albums.as_ref().map(Vec::len).unwrap_or(0);
-        let missing_count = ownership.map(|(_, missing)| missing).unwrap_or(0);
-        let missing = (runs_missing && !flow.facts_asking && ((local > 0 && missing_count > 0) || held_missing))
-            .then_some((flow.only_missing && flow.choice == KeepChoice::Artist, missing_count));
+        // "Only the albums you don't have" (clause 107): drawn with its own
+        // tick whatever the choice; it counts only under Every album by.
+        let missing = flow.missing_box(&self.taste.keep.gate).map(|count| (flow.only_missing, count));
+        let missing_count = missing.map(|(_, count)| count).unwrap_or(0);
         let only_missing = missing.is_some_and(|(on, _)| on);
         let one_missing = match (&facts.peer_albums, &facts.local_albums, s.track_artist.as_deref()) {
             (Some(remote), Some(local), Some(artist)) => match missing_albums(artist, remote, local).as_slice() {
@@ -2387,12 +2397,12 @@ impl App {
                     jobs.merge(job);
                 }
                 if flow.phase == KeepPhase::Choose
-                    && let Some(phase) = opening_phase(&jobs, &flow.subject, flow.choice.scope(flow.only_missing))
+                    && let Some(phase) = opening_phase(&jobs, &flow.subject, flow.scope(&self.taste.keep.gate))
                 {
                     flow.phase = phase;
                 }
                 flow.jobs = jobs;
-                flow.resettle();
+                flow.resettle(&self.taste.keep.gate);
             }
             return self.keep_seen(answer.as_deref().unwrap_or(&[]));
         }
