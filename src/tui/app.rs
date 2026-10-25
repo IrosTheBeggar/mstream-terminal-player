@@ -55,6 +55,13 @@ const PAGE_STEP: isize = 10;
 /// every frame.
 const ART_CACHE_CAP: usize = 256;
 
+/// How long a cover whose fetch went unanswered (a dropped connection, or
+/// a federation art proxy's 502/504/401) waits before it is asked again.
+/// The slot is given back so the cover is not lost for the session, but
+/// the GUI claims covers on every draw (ten a second), and without a pause
+/// a failing hop was asked again on every frame for every visible tile.
+pub(crate) const ART_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// A side effect for the run loop to dispatch to a worker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -275,7 +282,10 @@ impl NowTab {
         match self {
             NowTab::Queue => "Queue",
             NowTab::Lyrics => "Lyrics",
-            NowTab::Discover => "Discover",
+            // "Similar" since 2026-10-05: "Discover" names the GUI's
+            // history-seeded room now, and this tab is the per-song lens
+            // (mStream's discovery-page plan §2.12; now-playing log).
+            NowTab::Discover => "Similar",
             NowTab::AutoDj => "Auto-DJ",
             NowTab::Visualizer => "Visualizer",
         }
@@ -681,6 +691,24 @@ pub struct Reach {
     /// Over a tunnel bridge: the loopback token every request there must
     /// carry as `__lt=…` (the shared tunnel client's gate).
     pub local_token: Option<String>,
+    /// A federated peer's, however it is reached — through the parent
+    /// (`peer`) or over its own tunnel (`peer` is `None` then): its covers
+    /// ask the peer's compressed rendition, so they do not change size
+    /// when the peer's tunnel comes up (`Client::with_compressed_art`).
+    pub compressed_art: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Reach {
+    /// The client this reach aims: the worker's `client_for` builds every
+    /// row's client through here.
+    pub fn client(&self) -> Result<crate::api::Client, crate::api::ApiError> {
+        Ok(crate::api::Client::new_with(&self.base, self.self_signed)?
+            .with_token(self.token.clone())
+            .with_peer(self.peer)
+            .with_local_token(self.local_token.clone())
+            .with_compressed_art(self.compressed_art))
+    }
 }
 
 /// A tunnel as the api worker last reported it — the registry the queue's
@@ -1068,6 +1096,15 @@ impl Queue {
 pub enum MessageKind {
     Info,
     Error,
+    /// Something is under way — "copying Borrowed Tapes…" (the kit's busy
+    /// line, LightBlue: the GUI's Discover copies, discovery-page clause
+    /// 118).
+    Busy,
+    /// Something landed — "copied Late Train Verse" (Green).
+    Success,
+    /// A plain fact in the text colour — "opened Deezer" (the GUI's Open
+    /// elsewhere, discovery-page clause 141).
+    Plain,
 }
 
 #[derive(Debug, Clone)]
@@ -1091,12 +1128,19 @@ pub(crate) mod entries;
 mod nav;
 mod session;
 mod sonic;
+pub(crate) mod taste;
+pub(crate) mod keep;
 
 // The row builders moved out whole (audit #61); the app and its tests
 // go on naming them exactly as they did.
 use entries::*;
 pub use nav::Drill;
 pub use session::{CONNECT_METHODS, ConnectForm, ConnectStage, Session};
+// The GUI's Discover room names these; the browser shell has no room yet.
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
+pub use taste::{
+    TASTE_MAX_PINS, TasteLatch, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb,
+};
 
 /// How many recent tracks to keep for anchoring and cooldown. The sonic
 /// centroid takes at most 8 (the server's cap), the artist cooldown at most
@@ -1273,6 +1317,10 @@ pub enum Capture {
     /// Auto DJ's opening song, chosen from the library (auto-dj contract,
     /// clause 4): the DJ switches on when the row lands, not before.
     DjSeed,
+    /// A song for the GUI's Discover room to start from (discovery-page
+    /// contract, clauses 14 and 21) — its own, never `Discover`, which is
+    /// the TUI's.
+    TasteSeed,
 }
 
 impl Capture {
@@ -1282,6 +1330,7 @@ impl Capture {
             Capture::Sonic(side) => side.shout(),
             Capture::Discover => "SEED",
             Capture::DjSeed => "OPENER",
+            Capture::TasteSeed => "SEED",
         }
     }
 }
@@ -1701,6 +1750,13 @@ pub struct App {
     pub capture: Option<Capture>,
     /// The playlist name being typed, when the save prompt is up.
     pub sonic_playlist_name: Option<String>,
+    /// The songs the save prompt writes when a room other than the sonic
+    /// path opened it — the GUI Discover room's library songs (discovery-
+    /// page clause 64); `None` saves the sonic path's stops.
+    pub playlist_save_files: Option<Vec<String>>,
+    /// The GUI's Discover room: its own row model (docs/ux-contracts/
+    /// discovery-page.md), apart from the TUI's Discover tab above.
+    pub taste: taste::TasteState,
     /// Tracks played recently, newest first. Feeds both the sonic anchor and
     /// the artist cooldown, so the session anchors on where it has been
     /// rather than only on the song currently sounding.
@@ -1798,6 +1854,9 @@ pub struct App {
     pub art: HashMap<String, Option<Art>>,
     /// The cache's insertion order, oldest first: what goes when it fills.
     art_order: VecDeque<String>,
+    /// Covers whose last fetch went unanswered, and when: not asked again
+    /// until [`ART_RETRY`] has passed.
+    pub(crate) art_retry: HashMap<String, crate::clock::Instant>,
     /// Track shapes fetched this session, keyed by filepath. `None` records
     /// both "asked, nothing there" and "asked, still waiting" — the bar draws
     /// the same either way, and the entry is what stops a second request.
@@ -1942,7 +2001,9 @@ impl App {
             sonic_pane: Pane::default(),
             sonic_stack: Drill::new(SonicNode::Root),
             capture: None,
+            taste: taste::TasteState::default(),
             sonic_playlist_name: None,
+            playlist_save_files: None,
             autodj_recent: Vec::new(),
             status: PlayerStatus::default(),
             starting: None,
@@ -1969,6 +2030,7 @@ impl App {
             now_playing: None,
             art: HashMap::new(),
             art_order: VecDeque::new(),
+            art_retry: HashMap::new(),
             waveforms: HashMap::new(),
             waveform_order: VecDeque::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
@@ -2306,6 +2368,10 @@ impl App {
             self.sonic.probe = false;
             self.refresh_sonic_rows();
         }
+        // The Discover room's probe and its parts, for the same reason —
+        // and its plug-ins' asks.
+        self.clear_taste_waits();
+        self.clear_keep_waits();
         // So does the full-screen Discover panel. Its wait is only ever
         // cleared by a matching reply, and `refresh_now_discover` will not
         // re-ask while an entry for this seed exists — so an error left it
@@ -2475,6 +2541,9 @@ impl App {
                             self.info("Auto DJ stays off");
                             Vec::new()
                         }
+                        // The room is the GUI's; it goes back there itself
+                        // (discovery-page clause 14).
+                        Capture::TasteSeed => Vec::new(),
                     };
                 }
                 // The guaranteed way out of the settings value rows, where
@@ -4080,6 +4149,7 @@ impl App {
                 self_signed: if direct { false } else { self.session.self_signed },
                 peer: if direct { None } else { origin.peer },
                 local_token: self.session_local_token(),
+                compressed_art: origin.peer.is_some(),
             });
         }
         if let Some(id) = origin.peer {
@@ -4095,12 +4165,13 @@ impl App {
                     self_signed: false,
                     peer: None,
                     local_token: Some(local_token.clone()),
+                    compressed_art: true,
                 });
             }
             // …and rides its parent's proxies otherwise, however the parent
             // is reached.
             let parent = self.reach(&Origin { server: origin.server.clone(), peer: None })?;
-            return Ok(Reach { peer: Some(id), ..parent });
+            return Ok(Reach { peer: Some(id), compressed_art: true, ..parent });
         }
         let shown = crate::quickconnect::display_server(&origin.server);
         let known = self
@@ -4116,6 +4187,7 @@ impl App {
                     self_signed: false,
                     peer: None,
                     local_token: Some(local_token.clone()),
+                    compressed_art: false,
                 }),
                 Some(TunnelState::Dialling) => {
                     Err(format!("{shown} is still connecting — its tunnel is being dialled"))
@@ -4132,6 +4204,7 @@ impl App {
             self_signed: known.self_signed,
             peer: None,
             local_token: None,
+            compressed_art: false,
         })
     }
 
@@ -4506,6 +4579,9 @@ impl App {
         effects.extend(self.reconcile_tunnels(now));
         effects.extend(self.probe_stall(now));
         effects.extend(self.stats_flush_due(now));
+        // The Discover room's copies, polled while one is live and shown
+        // (discovery-page clause 112).
+        effects.extend(self.keep_tick(now));
         effects
     }
 
@@ -5013,6 +5089,12 @@ impl App {
         if self.art.contains_key(file) {
             return None;
         }
+        if let Some(failed) = self.art_retry.get(file) {
+            if failed.elapsed() < ART_RETRY {
+                return None;
+            }
+            self.art_retry.remove(file);
+        }
         if self.art.len() >= ART_CACHE_CAP {
             // The oldest cover nothing on screen needs goes — never the
             // playing track's or a queued row's; the wall's page is the
@@ -5438,6 +5520,7 @@ impl App {
                 if connected {
                     self.stats.retry_at = None;
                     self.stats.flush_wanted = true;
+                    self.taste_reconnected();
                 }
                 effects
             }
@@ -5576,7 +5659,26 @@ impl App {
                     Vec::new()
                 }
             },
-            Event::DiscoveryProbe { available } => self.consume_discovery_probe(available),
+            Event::DiscoveryProbe { available, taste } => {
+                let mut effects = self.consume_discovery_probe(available);
+                effects.extend(self.consume_taste_probe(taste));
+                effects
+            }
+            // The GUI's Discover room keeps its own replies (clause 31's
+            // guards live there).
+            event @ (Event::Taste { .. } | Event::TasteAlbum { .. }) => self.consume_taste(event),
+            // Its plug-ins too (clauses 100–149): never an `Event::Error`.
+            event @ (Event::KeepGate { .. }
+            | Event::JobsLookup { .. }
+            | Event::Jobs { .. }
+            | Event::JobStarted { .. }
+            | Event::JobCancelled { .. }
+            | Event::JobsCleared { .. }
+            | Event::PluginLinks { .. }
+            | Event::KeepFacts { .. }
+            | Event::DestinationRead { .. }
+            | Event::DestinationSaved { .. }
+            | Event::DestinationFolders { .. }) => self.consume_keep(event),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just
@@ -5585,10 +5687,19 @@ impl App {
                 // instead — the waveform's rule, learned here the hard
                 // way: a fetch that died with the wifi used to leave the
                 // album coverless for the rest of the session.
+                // Given back, but not at once: the GUI claims covers every
+                // frame, so a hop that keeps failing (a peer gone behind
+                // the federation proxy) would otherwise be asked again ten
+                // times a second for every tile in view.
                 if settled {
+                    self.art_retry.remove(&file);
                     self.art.insert(file, art);
                 } else {
                     self.art.remove(&file);
+                    if self.art_retry.len() >= ART_CACHE_CAP {
+                        self.art_retry.retain(|_, failed| failed.elapsed() < ART_RETRY);
+                    }
+                    self.art_retry.insert(file, crate::clock::Instant::now());
                 }
                 Vec::new()
             }

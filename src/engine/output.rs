@@ -99,7 +99,46 @@ fn name_of(device: &cpal::Device) -> String {
 
 /// The identity of whatever the system calls the default output right now.
 fn default_identity() -> Option<String> {
-    identity(&cpal::default_host().default_output_device()?)
+    quiet_alsa(|| identity(&cpal::default_host().default_output_device()?))
+}
+
+/// Run `f` with fd 2 pointed at /dev/null, then put it back. libasound
+/// writes its configuration complaints from C, straight to fd 2 — on a box
+/// with no sound card every device walk prints "ALSA lib confmisc.c:…
+/// cannot find card '0'" and friends onto the TUI's screen, past the
+/// recorder that keeps cpal's own errors off it. Process-wide for the
+/// few milliseconds of the walk; nothing else may write to the screen's
+/// stderr while the TUI owns it anyway.
+#[cfg(target_os = "linux")]
+fn quiet_alsa<T>(f: impl FnOnce() -> T) -> T {
+    use std::os::fd::AsRawFd;
+    let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") else {
+        return f();
+    };
+    // SAFETY: dup/dup2/close on fd 2 and descriptors this function owns;
+    // the saved copy is put back on fd 2 and closed whatever `f` does.
+    let saved = unsafe { libc::dup(libc::STDERR_FILENO) };
+    if saved < 0 {
+        return f();
+    }
+    struct Restore(i32);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe {
+                libc::dup2(self.0, libc::STDERR_FILENO);
+                libc::close(self.0);
+            }
+        }
+    }
+    let _restore = Restore(saved);
+    unsafe { libc::dup2(null.as_raw_fd(), libc::STDERR_FILENO) };
+    f()
+}
+
+/// Elsewhere the backend keeps its own counsel: nothing to quiet.
+#[cfg(not(target_os = "linux"))]
+fn quiet_alsa<T>(f: impl FnOnce() -> T) -> T {
+    f()
 }
 
 /// How many backend-specific stream errors one stream may report before
@@ -120,7 +159,13 @@ const BACKEND_ERROR_LIMIT: u32 = 5;
 /// onto the TUI's alternate screen (the raw "no longer available. For
 /// example, it has been unplugged." a pulled headphone jack used to
 /// smear across the UI), and because the tripwires have to ride along.
+/// libasound's own complaints during the walk stay off the screen too
+/// ([`quiet_alsa`]).
 pub(crate) fn open() -> Result<Output, String> {
+    quiet_alsa(open_walk)
+}
+
+fn open_walk() -> Result<Output, String> {
     let host = cpal::default_host();
     let default_device = host.default_output_device();
     let default_at_open = default_device.as_ref().and_then(identity);
@@ -195,4 +240,32 @@ pub(crate) fn open() -> Result<Output, String> {
         }
     }
     Err(first_err.unwrap_or_else(|| "no output device found".to_string()))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::quiet_alsa;
+
+    /// fd 2's (device, inode), to tell which file it is.
+    fn stderr_file() -> (u64, u64) {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(libc::STDERR_FILENO, &mut st) }, 0);
+        (st.st_dev as u64, st.st_ino as u64)
+    }
+
+    #[test]
+    fn the_alsa_walk_writes_to_dev_null_and_gives_fd_2_back() {
+        let before = stderr_file();
+        let null = {
+            use std::os::unix::fs::MetadataExt;
+            let m = std::fs::metadata("/dev/null").expect("/dev/null");
+            (m.dev(), m.ino())
+        };
+        let inside = quiet_alsa(stderr_file);
+        assert_eq!(inside, null, "the walk's fd 2 is /dev/null");
+        assert_eq!(stderr_file(), before, "and fd 2 is the screen's again after");
+        // A panicking walk puts it back too.
+        let _ = std::panic::catch_unwind(|| quiet_alsa(|| panic!("the walk failed")));
+        assert_eq!(stderr_file(), before);
+    }
 }

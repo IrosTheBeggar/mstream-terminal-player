@@ -1,0 +1,165 @@
+#!/usr/bin/expect -f
+# Keep a copy by the pointer alone, in Apple Terminal's mouse dialect,
+# against the fake server's plug-ins (test/e2e/fake_mstream.py,
+# FAKE_TASTE=1 FAKE_PLUGINS=1; docs/ui-kit.md, Modal and behavioral rules —
+# the release echo; docs/ux-contracts/discovery-page.md, clauses 106–110).
+# The player is spawned with TERM_PROGRAM=Apple_Terminal and every click is
+# sent the way that terminal sends one: the press an INSTANT pair (SGR M
+# then m in one write), then — once the frame shows what it did — the
+# physical release as the same pair again where the hand let go. At 100 ×
+# 30 with the queue panel folded (Tab), `G` opens the room and → its
+# Connected servers tab: the strip's one tile, "Lanterns" from Attic, and
+# the table's one row, "Ember" (row 17). The tile's `[⋯]` hangs its list;
+# its "Keep a copy…" row opens the window — the sizes unanswered (the fake
+# answers none), so its 11 rows stand on rows 6–16: "(•) Album" row 10,
+# "Every album by" row 11, the place row 13 ("d change" at x 85–92), "[ Add
+# album ]" row 15, "Esc close" on the bottom border (row 16, x 83–91); the
+# band clears x 17–96 on those rows. The echo of that click lands on the
+# window's corner (@@KM:open@@). The pointer then rests a while on the
+# band's row where the room's verbs line drew "⇄ shuffle" (x 40–48, row 14)
+# and on the footer — no tooltip of the room's ripens (@@KM:place@@,
+# @@KM:footer@@) — and on the room's row below the window, which lights
+# nothing (@@KM:row@@).
+# Clicks, each with its echo: Every album by (@@KM:artist@@), Album
+# (@@KM:album@@), `d change` (the picker, @@KM:picker@@; Esc folds it), the
+# primary (the copy starts; its echo lands on the live window's `[ Close ]`
+# and must close nothing, @@KM:live@@), "x cancel copy" (@@KM:cancel@@: ×
+# Cancelled, 9 rows, "[ Add again ]" on row 13), Add again (the choice
+# back; its echo lands on `d change`, @@KM:again@@), and "Esc close"
+# (@@KM:closed@@); q quits. check_keep_mouse.py replays the stream at each
+# mark (the README's first law); run.sh asks the fake what was sent: one
+# start, one cancel, no save. Gates on first-paint words only; each gate's
+# braces span lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(TERM_PROGRAM) Apple_Terminal
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+# A sub-second drain: whatever the player writes is read meanwhile, never
+# a bare sleep with the pty's buffer filling under a frame.
+proc drain_ms {ms} {
+    set end [expr {[clock milliseconds] + $ms}]
+    while {[clock milliseconds] < $end} {
+        expect -timeout 0 -re ".+" {} timeout {}
+        after 5
+    }
+}
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+# The pointer comes to rest at cell (x, y), 1-based as SGR counts.
+proc hover {x y} { send "\x1b\[<35;${x};${y}M" }
+# Apple Terminal's press at (x, y): the instant pair, SGR M then m in one
+# write; the release's echo is the same pair again.
+proc pair {x y} { send "\x1b\[<0;${x};${y}M\x1b\[<0;${x};${y}m" }
+# A click and, a moment after the frame answered it, its echo.
+proc click {x y} {
+    hover $x $y
+    drain_ms 150
+    pair $x $y
+    drain_ms 300
+    pair $x $y
+    drain 1
+}
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "Discover" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-DISCOVER-ROW" 2 }
+}
+drain 1
+# The queue panel folds: the room takes its 80 cells.
+send "\t"
+drain 1
+send "G"
+expect {
+    "based on songs you finished" {}
+    eof { puts "DIED-ON-ANSWER"; exit 7 }
+    timeout { fail "NO-ANSWER" 3 }
+}
+drain 1
+send "\x1b\[C"
+expect {
+    "Lanterns" {}
+    eof { puts "DIED-ON-SERVERS"; exit 8 }
+    timeout { fail "NO-PEER-ALBUM" 4 }
+}
+# The gate's two reads and the rows' lookup land.
+drain 2
+# The tile's `[⋯]` hangs its list; its "Keep a copy…" row opens the window.
+hover 21 9
+drain 1
+click 28 13
+hover 20 17
+drain_ms 300
+pair 20 17
+expect {
+    "Add album" {}
+    eof { puts "DIED-ON-KEEP"; exit 9 }
+    timeout { fail "NO-KEEP-WINDOW" 10 }
+}
+drain_ms 300
+pair 20 17
+drain 1
+puts "@@KM:open@@"
+# Rest on the band where the room's verbs line drew "⇄ shuffle", then on
+# the footer: each long past the tooltip's delay.
+hover 42 15
+drain 2
+puts "@@KM:place@@"
+hover 87 17
+drain 2
+puts "@@KM:footer@@"
+# The room's row under the window.
+hover 32 18
+drain 1
+puts "@@KM:row@@"
+click 28 12
+puts "@@KM:artist@@"
+click 28 11
+puts "@@KM:album@@"
+hover 89 14
+drain_ms 150
+pair 89 14
+expect {
+    "Where copies land" {}
+    eof { puts "DIED-ON-CHANGE"; exit 11 }
+    timeout { fail "NO-PICKER" 12 }
+}
+drain_ms 300
+pair 89 14
+drain 1
+puts "@@KM:picker@@"
+send "\x1b"
+drain 1
+# The primary: the copy starts — its echo lands on the live window's
+# `[ Close ]`.
+hover 86 16
+drain_ms 150
+pair 86 16
+expect {
+    -re "(Waiting|Copying)" {}
+    eof { puts "DIED-ON-ADD"; exit 13 }
+    timeout { fail "NO-COPY" 14 }
+}
+drain_ms 300
+pair 86 16
+drain 1
+puts "@@KM:live@@"
+click 26 16
+drain 1
+puts "@@KM:cancel@@"
+click 87 14
+puts "@@KM:again@@"
+click 86 17
+puts "@@KM:closed@@"
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 20 }
+}
+catch wait result
+exit [lindex $result 3]

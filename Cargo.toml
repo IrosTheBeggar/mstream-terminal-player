@@ -344,6 +344,10 @@ objc2-foundation = { version = "0.3.2", optional = true, default-features = fals
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+# fd 2 pointed at /dev/null around the ALSA device walk (engine/output.rs:
+# libasound writes its config complaints straight onto the TUI). Already in
+# the tree through cpal and alsa.
+libc = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ratzilla = "0.3.1"

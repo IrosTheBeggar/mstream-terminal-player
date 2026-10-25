@@ -307,6 +307,9 @@ pub(crate) fn run_tui_as<S: Screen>(screen: &mut S, title: &str) -> i32 {
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
     }
     set_pointer_shape(false, mouse_on);
+    // The terminal's mouse dialect: Apple Terminal's release echo is the
+    // page's surface's to swallow ([`drive_pointer`]).
+    screen.ui().set_echo_dialect(crate::kit::apple_dialect());
     let outcome = event_loop(&mut terminal, screen, mouse_on);
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -382,16 +385,23 @@ fn event_loop<S: Screen>(
     }
 }
 
-/// One mouse event, the way the hub's loop takes it. A left press is
-/// first asked whether it is real (Apple Terminal's phantom re-click is
-/// swallowed whole), then dispatched to what it hit, then allowed to arm
-/// a scrollbar; motion moves the hover; a drag moves the hover and the
+/// One mouse event, the way the hub's loop takes it. Apple Terminal's
+/// release echo is dropped whole first (the kit's `EchoFilter`, on only
+/// where the hub's own terminal speaks that dialect); a left press is then
+/// asked whether it is real (the phantom re-click of a bar press is
+/// swallowed whole), dispatched to what it hit, then allowed to arm a
+/// scrollbar; motion moves the hover; a drag moves the hover and the
 /// thumb it holds; a release ends the capture; the wheel sets the pointer
 /// before the page decides which list scrolls. The GUI player's hosted
-/// pages ride the same routine, so there is one copy of it. `Some` when an
-/// action ended the page.
+/// pages ride the same routine, so there is one copy of it — their
+/// surfaces never set the dialect, since the GUI's own surface swallowed
+/// the echo before it handed them the event. `Some` when an action ended
+/// the page.
 pub(crate) fn drive_pointer<S: Screen>(screen: &mut S, mouse: MouseEvent) -> Option<Outcome> {
     let at = Position { x: mouse.column, y: mouse.row };
+    if screen.ui().swallow_echo(mouse.kind, at) {
+        return None;
+    }
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             if !screen.ui().begin_press(at) {
@@ -1151,6 +1161,24 @@ mod tests {
         assert_eq!(row(&buf, 2), format!("{}beta{}", "·".repeat(94), "··"));
         assert_eq!(buf[(94, 2)].fg, crate::kit::theme::th().gold);
         assert!(outside(&buf, WINDOW, true).is_empty());
+    }
+
+    /// The hub in Apple Terminal (the kit's `EchoFilter`): a click comes as
+    /// an instant pair and its release as the same pair again, which acts
+    /// on nothing, wherever it lands; the next click is real.
+    #[test]
+    fn in_apple_terminal_drive_pointer_swallows_a_clicks_echo() {
+        let mut probe = drawn();
+        probe.ui.set_echo_dialect(true);
+        let left = |kind: fn(MouseButton) -> MouseEventKind, x, y| mouse(kind(MouseButton::Left), x, y);
+        // A click and its echo where the hand let go, then a click and its
+        // echo in place.
+        for (x, y) in [(2, 0), (9, 3), (2, 0), (2, 0)] {
+            assert_eq!(drive_pointer(&mut probe, left(MouseEventKind::Down, x, y)), None);
+            drive_pointer(&mut probe, left(MouseEventKind::Up, x, y));
+        }
+        assert_eq!(probe.acts, vec![CLICK, CLICK], "each click acted once, its echo nothing");
+        assert_eq!(drive_pointer(&mut probe, left(MouseEventKind::Down, 1, 1)), Some(Outcome::Quit), "the next click is real");
     }
 
     #[test]

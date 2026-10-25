@@ -36,6 +36,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
+use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -59,14 +60,162 @@ pub const ARROW_REPEAT: Duration = Duration::from_millis(60);
 /// millisecond), sends motion-while-held as plain Moved, and re-clicks
 /// at the physical release — holds are invisible to it. A phantom
 /// release downgrades the capture to a SOFT one instead of ending it.
+/// In the dialect ([`EchoFilter`]) a release this soon after ANY left
+/// press makes the press an instant pair, whose release echo is due.
 pub const PHANTOM_RELEASE: Duration = Duration::from_millis(150);
 /// The caret's blink: half a second on, half a second off (the desktop
 /// editors' rate), counted from the last key or click so a caret that just
 /// moved is always seen.
 pub const CARET_BLINK: Duration = Duration::from_millis(500);
 /// The soft capture holds while motion stays within this many cells of
-/// the press; travelling beyond it resumes normal hover.
+/// the press; travelling beyond it resumes normal hover. The release echo
+/// (below) is swallowed whenever it lands this near its click.
 pub const SOFT_RADIUS: u16 = 2;
+/// How long Apple Terminal's release echo is awaited ANYWHERE on the
+/// screen once a click arrived as an instant pair. The echo comes at the
+/// physical release, wherever the hand has gone meanwhile (the motion of
+/// a held button arrives as plain moves), so a press that wandered off
+/// its control, or a drag the dialect cannot report, ends far from where
+/// it began. A click is held for a fraction of a second, a hesitant one
+/// for under one, so two seconds covers every release a hand makes as
+/// part of a click while bounding what a lost echo (the focus left
+/// mid-hold, the terminal dropped it) can cost: at most the one click it
+/// mistakes for the echo, within this wait or within [`SOFT_RADIUS`] of
+/// the press. Near the press the echo is swallowed however late it comes:
+/// a press held in place for a long while is still one click.
+pub const ECHO_WAIT: Duration = Duration::from_secs(2);
+
+/// Whether this process's terminal speaks Apple Terminal's mouse dialect
+/// (the [`EchoFilter`]'s gate): `TERM_PROGRAM=Apple_Terminal`, the mark
+/// Terminal.app sets for the programs it runs, mapped by the launcher
+/// log's own host naming ([`crate::instance::host_from_env`]) and read
+/// once. ssh does not forward the variable and a multiplexer writes its
+/// own name over it, so the dialect is assumed only where Terminal.app
+/// itself reports the mouse to the player. A native window is never in
+/// it, whatever terminal started it: its shell leaves the flag off.
+pub fn apple_dialect() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| dialect_from_env(|name| std::env::var(name).ok()))
+}
+
+/// [`apple_dialect`]'s answer for a given environment, so a test can ask
+/// it of each terminal without setting variables every test would see.
+pub fn dialect_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
+    crate::instance::host_from_env(get) == "apple-terminal"
+}
+
+/// Apple Terminal's release echo, swallowed whole. That terminal reports a
+/// left press as an INSTANT click pair (the press and its release in the
+/// same millisecond), the motion of the still-held button as plain moves,
+/// and the PHYSICAL release as a second click pair where the hand let go
+/// (probed, 470.2). Taken as it comes, every click there is two: a row's
+/// `[⋯]` opens its sheet and the echo then clicks whatever the sheet drew
+/// under the pointer; a list hung from a click is closed by the echo's
+/// press on its own catcher. In the dialect a host asks this filter first
+/// about every mouse event, before any page owner, grip or surface reads
+/// it, and drops the ones it claims.
+///
+/// The rule: a left press passes and is watched; its release passing
+/// within [`PHANTOM_RELEASE`] makes it an instant pair, and the pair now
+/// awaits its echo. The next left press is that echo when it lands within
+/// [`SOFT_RADIUS`] of the pair (at any time) or anywhere within
+/// [`ECHO_WAIT`] — it is swallowed, and so is the release that follows it.
+/// A press far away after the wait is a real one. After the echo the next
+/// pair is real again: two quick clicks are pair, echo, pair, echo, and
+/// each acts once. A press whose release came late (an honest terminal's
+/// slow click) awaits nothing. Nothing else is ever claimed — moves, the
+/// wheel, the other buttons pass untouched.
+///
+/// Off (every other terminal, and the native window), it claims nothing:
+/// a trackpad tap in iTerm2 or Ghostty can be a near-instant pair with NO
+/// echo, and a second click or a double click after it is real.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EchoFilter {
+    on: bool,
+    state: EchoState,
+}
+
+/// Where the [`EchoFilter`] stands between events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum EchoState {
+    /// No click awaits anything.
+    #[default]
+    Idle,
+    /// A left press passed, at `at` when `since`: its release says whether
+    /// it was an instant pair.
+    Pressed { at: Position, since: Instant },
+    /// An instant pair passed: the hand is still down, and its release's
+    /// echo pair is due.
+    Awaiting { at: Position, since: Instant },
+    /// The echo's press was swallowed; its release will be too.
+    Swallowing,
+}
+
+impl EchoFilter {
+    /// A filter in the dialect (`on`), or one that claims nothing.
+    pub fn new(on: bool) -> Self {
+        EchoFilter { on, state: EchoState::Idle }
+    }
+
+    /// Whether `kind` at `at` is the release echo's press or its release:
+    /// `true` means the host drops the event, whole, before anything else
+    /// reads it.
+    pub fn swallow(&mut self, kind: MouseEventKind, at: Position) -> bool {
+        if !self.on {
+            return false;
+        }
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let EchoState::Awaiting { at: origin, since } = self.state {
+                    let near = at.x.abs_diff(origin.x) <= SOFT_RADIUS && at.y.abs_diff(origin.y) <= SOFT_RADIUS;
+                    if near || since.elapsed() < ECHO_WAIT {
+                        self.state = EchoState::Swallowing;
+                        return true;
+                    }
+                }
+                // Anything else is a real press, watched for its pair.
+                self.state = EchoState::Pressed { at, since: Instant::now() };
+                false
+            }
+            MouseEventKind::Up(MouseButton::Left) => match self.state {
+                EchoState::Swallowing => {
+                    self.state = EchoState::Idle;
+                    true
+                }
+                EchoState::Pressed { at: origin, since } => {
+                    self.state = if since.elapsed() < PHANTOM_RELEASE {
+                        EchoState::Awaiting { at: origin, since: Instant::now() }
+                    } else {
+                        EchoState::Idle
+                    };
+                    false
+                }
+                EchoState::Idle | EchoState::Awaiting { .. } => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether a click's echo is due — a test's view of the state.
+    #[cfg(test)]
+    pub fn awaiting(&self) -> bool {
+        matches!(self.state, EchoState::Awaiting { .. })
+    }
+
+    /// Age the filter's clock, so a test sees a slow release or a long
+    /// wait without sleeping through either.
+    #[cfg(test)]
+    pub fn backdate(&mut self, by: Duration) {
+        match &mut self.state {
+            EchoState::Pressed { since, .. } | EchoState::Awaiting { since, .. } => {
+                if let Some(earlier) = since.checked_sub(by) {
+                    *since = earlier;
+                }
+            }
+            EchoState::Idle | EchoState::Swallowing => {}
+        }
+    }
+}
 
 // ── Styles ───────────────────────────────────────────────────────────────────
 
@@ -150,6 +299,14 @@ pub struct Surface<A> {
     /// A soft capture left behind by a phantom release: hover stays
     /// suppressed near this press until the pointer genuinely leaves.
     soft_origin: Option<Position>,
+    /// Apple Terminal's release echo, swallowed before anything reads it
+    /// (off unless the host's terminal speaks the dialect).
+    echo: EchoFilter,
+    /// The soft capture's release re-click was already swallowed as the
+    /// echo: a press near the bar after it is a real press, never a
+    /// second phantom. Only the echo filter sets it, so outside the
+    /// dialect the soft capture swallows as it always did.
+    reclick_echoed: bool,
     /// The footprints of everything drawn OVER the base layer this frame —
     /// modal frames, the header dropdown, the tooltip — and last frame's.
     /// A pixel surface beneath (a cover) consults last frame's, because
@@ -214,6 +371,8 @@ impl<A> Default for Surface<A> {
             arrow_hold: None,
             armed: None,
             soft_origin: None,
+            echo: EchoFilter::default(),
+            reclick_echoed: false,
             overlays: Vec::new(),
             covered: Vec::new(),
             overlay_watch: None,
@@ -278,6 +437,13 @@ impl<A: Clone> Surface<A> {
     /// (a tooltip, a second modal) makes its picture stand down.
     pub fn covered_last_frame_by_another(&self, rect: Rect, own: Rect) -> bool {
         self.covered.iter().any(|over| *over != own && over.intersects(rect))
+    }
+
+    /// [`Self::covered_last_frame_by_another`] for a modal whose footprint
+    /// moves — its height follows its rows, its top may rise: none of `own`
+    /// (this frame's footprint and last frame's) counts as another.
+    pub fn covered_last_frame_by_other_than(&self, rect: Rect, own: &[Rect]) -> bool {
+        self.covered.iter().any(|over| !own.contains(over) && over.intersects(rect))
     }
 
     /// Drop every registered rect — the modal-inertness move: a screen
@@ -444,18 +610,47 @@ impl<A: Clone> Surface<A> {
     /// the original press (inside the soft radius) but off every bar —
     /// the screen must swallow it entirely. A press on a bar, or beyond
     /// the radius, is a real interaction and ends the soft capture.
+    ///
+    /// In Apple Terminal's dialect the re-click never reaches here: the
+    /// echo filter ([`Self::swallow_echo`]) took it first, so a press near
+    /// the bar after it is a real one and ends the soft capture.
     pub fn begin_press(&mut self, at: Position) -> bool {
         if let Some(origin) = self.soft_origin {
             let near = at.x.abs_diff(origin.x) <= SOFT_RADIUS
                 && at.y.abs_diff(origin.y) <= SOFT_RADIUS;
             let on_bar = self.bars.iter().any(|b| b.rect.contains(at));
-            if near && !on_bar {
+            if near && !on_bar && !self.reclick_echoed {
                 return false;
             }
             self.soft_origin = None;
         }
         self.pointer = Some(at);
         true
+    }
+
+    /// Speak Apple Terminal's mouse dialect, or not: the host's terminal
+    /// says ([`apple_dialect`]), so the terminal shells set it and the
+    /// native window never does. Off by default.
+    pub fn set_echo_dialect(&mut self, on: bool) {
+        self.echo = EchoFilter::new(on);
+    }
+
+    /// Whether this mouse event is the release echo's press or release
+    /// ([`EchoFilter`]): the host asks it first, before any page owner,
+    /// grip or the surface's own press reads the event, and drops the
+    /// event whole on `true`. Always `false` outside the dialect.
+    pub fn swallow_echo(&mut self, kind: MouseEventKind, at: Position) -> bool {
+        let swallowed = self.echo.swallow(kind, at);
+        if swallowed && matches!(kind, MouseEventKind::Down(_)) {
+            self.reclick_echoed = true;
+        }
+        swallowed
+    }
+
+    /// Age the echo filter's clock (see [`EchoFilter::backdate`]).
+    #[cfg(test)]
+    pub fn echo_backdate(&mut self, by: Duration) {
+        self.echo.backdate(by);
     }
 
     /// A press on a scrollbar arms its interaction: endcap rows arm
@@ -495,6 +690,7 @@ impl<A: Clone> Surface<A> {
         if let Some((origin, when)) = self.armed.take() {
             if when.elapsed() < PHANTOM_RELEASE {
                 self.soft_origin = Some(origin);
+                self.reclick_echoed = false;
             }
         }
         self.drag = None;
@@ -1217,27 +1413,34 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells. A word wider
-/// than the box (a file path) hard-breaks at the character level — the
-/// greedy wrap would emit it as one line wider than the box, which clips.
+/// than the box (a file path, a Japanese or Chinese sentence, which has no
+/// blanks to break at) hard-breaks between graphemes — the greedy wrap
+/// would emit it as one line wider than the box, which clips.
 pub fn wrap_tip(text: &str) -> Vec<String> {
     wrap_at(text, TIP_WRAP, true)
 }
 
 fn wrap_at(text: &str, width: usize, hard_break: bool) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        if hard_break && word.chars().count() > width {
+        if hard_break && self::width(word) > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
             }
-            let chars: Vec<char> = word.chars().collect();
-            for chunk in chars.chunks(width) {
-                if chunk.len() == width {
-                    lines.push(chunk.iter().collect());
-                } else {
-                    line = chunk.iter().collect();
+            // By cells, as the budget is: counting characters let a CJK
+            // line run to twice the box; a wide character that would
+            // straddle its edge starts the next line.
+            let mut cells = 0;
+            for grapheme in word.graphemes(true) {
+                let w = grapheme_cells(grapheme);
+                if cells + w > width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    cells = 0;
                 }
+                line.push_str(grapheme);
+                cells += w;
             }
             continue;
         }
@@ -1306,7 +1509,7 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) -> 
     if lines.is_empty() {
         return Rect::default();
     }
-    let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
+    let w = lines.iter().map(|l| width(l)).max().unwrap_or(0) as u16 + 4;
     let h = lines.len() as u16 + 2;
     let rect = tooltip_rect(area, target, w, h);
     frame.render_widget(Clear, rect);
@@ -1695,6 +1898,30 @@ mod tests {
         assert!(lines.iter().all(|l| width(l) <= 79), "{lines:?}");
         assert_eq!(lines.join(" "), text);
         assert_eq!(wrap_words("one two three", 7), vec!["one two", "three"], "a Latin line is as it was");
+    }
+
+    #[test]
+    fn a_tooltip_breaks_a_sentence_with_no_blanks_by_cells_and_its_box_fits_them() {
+        // Japanese has no blanks to break at: the sentence hard-breaks
+        // between characters at 40 cells — 20 of them, not 40.
+        let sentence = "は各曲のタグから決まるため、これらの曲は複数のフォルダーに入ることがあります。";
+        let lines = wrap_tip(&format!("‹アーティスト› {sentence}"));
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!((lines[0].as_str(), width(&lines[1])), ("‹アーティスト›", TIP_WRAP));
+        assert_eq!(lines[1..].concat(), sentence);
+        // A wide character never straddles the edge: one cell short, it goes down.
+        let odd = wrap_tip(&format!("a{}", "曲".repeat(25)));
+        assert_eq!((odd[0].as_str(), odd[1].as_str()), (format!("a{}", "曲".repeat(19)).as_str(), "曲曲曲曲曲曲"));
+        // A path is as it was.
+        let path = "x".repeat(50);
+        assert_eq!(wrap_tip(&path), vec!["x".repeat(40), "x".repeat(10)]);
+        // The box is the widest line's cells, the border and a blank each side.
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        let mut rect = Rect::default();
+        terminal
+            .draw(|f| rect = draw_tooltip(f, f.area(), Rect { x: 40, y: 2, width: 10, height: 1 }, &format!("‹アーティスト› {sentence}")))
+            .unwrap();
+        assert_eq!((rect.width, rect.height), (TIP_WRAP as u16 + 4, 5));
     }
 
     #[test]
@@ -2382,5 +2609,279 @@ mod tests {
         assert_eq!(s.hit(Position { x: 5, y: 0 }), Some(2), "the overlay wins");
         assert_eq!(s.hit(Position { x: 1, y: 0 }), Some(1));
         assert_eq!(s.hit(Position { x: 50, y: 0 }), None);
+    }
+
+    // ── Apple Terminal's release echo ────────────────────────────────────
+
+    const LEFT_DOWN: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+    const LEFT_UP: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+
+    fn pos(x: u16, y: u16) -> Position {
+        Position { x, y }
+    }
+
+    /// A host's mouse routine in miniature, in the GUI's order: the echo
+    /// filter first, then a left press asks [`Surface::begin_press`],
+    /// dispatches its hit (recorded in `acted`) and arms the bars; a
+    /// release ends the capture; a move moves the hover.
+    fn drive(s: &mut Surface<i32>, kind: MouseEventKind, at: Position, acted: &mut Vec<i32>) {
+        if s.swallow_echo(kind, at) {
+            return;
+        }
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !s.begin_press(at) {
+                    return;
+                }
+                if let Some(act) = s.hit(at) {
+                    acted.push(act);
+                }
+                s.arm_bars(at);
+            }
+            MouseEventKind::Up(_) => s.release(),
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => s.motion(at),
+            _ => {}
+        }
+    }
+
+    /// Apple Terminal's report of one press: the instant pair (and, later,
+    /// the same again where the hand lets go — the echo).
+    fn pair(s: &mut Surface<i32>, at: Position, acted: &mut Vec<i32>) {
+        drive(s, LEFT_DOWN, at, acted);
+        drive(s, LEFT_UP, at, acted);
+    }
+
+    /// A button at the top left and, far from it, a sheet's item.
+    fn buttons(apple: bool) -> Surface<i32> {
+        let mut s: Surface<i32> = Surface::new();
+        s.set_echo_dialect(apple);
+        s.click(Rect { x: 0, y: 0, width: 10, height: 1 }, 1);
+        s.click(Rect { x: 40, y: 10, width: 20, height: 5 }, 2);
+        s
+    }
+
+    #[test]
+    fn the_dialect_is_apple_terminals_alone() {
+        let env = |value: Option<&'static str>| move |name: &str| (name == "TERM_PROGRAM").then_some(value).flatten().map(str::to_string);
+        assert!(dialect_from_env(env(Some("Apple_Terminal"))));
+        for other in ["iTerm.app", "ghostty", "WezTerm", "tmux", "vscode"] {
+            assert!(!dialect_from_env(env(Some(other))), "{other}");
+        }
+        assert!(!dialect_from_env(env(None)), "ssh and the rest name no terminal");
+        assert!(!dialect_from_env(|name| (name == "WT_SESSION").then(|| "x".to_string())), "Windows Terminal");
+    }
+
+    #[test]
+    fn in_apple_terminal_a_clicks_echo_is_swallowed_press_and_release() {
+        let mut s = buttons(true);
+        let press = pos(3, 0);
+        assert!(!s.swallow_echo(LEFT_DOWN, press), "the click's own press is real");
+        assert!(!s.swallow_echo(LEFT_UP, press), "and its instant release");
+        assert!(s.echo.awaiting(), "the instant pair awaits its echo");
+        assert!(!s.swallow_echo(MouseEventKind::Moved, pos(4, 0)), "the held button's motion passes");
+        assert!(s.swallow_echo(LEFT_DOWN, pos(4, 0)), "the echo's press is swallowed");
+        assert!(s.swallow_echo(LEFT_UP, pos(4, 0)), "and so is its release");
+        assert!(!s.echo.awaiting());
+        // The next click is real again.
+        assert!(!s.swallow_echo(LEFT_DOWN, press));
+        assert!(!s.swallow_echo(LEFT_UP, press));
+        // Through a host: the click acts once.
+        let mut acted = Vec::new();
+        let mut s = buttons(true);
+        pair(&mut s, press, &mut acted);
+        pair(&mut s, press, &mut acted);
+        assert_eq!(acted, [1], "the echo fires nothing");
+    }
+
+    #[test]
+    fn the_echo_near_the_press_is_swallowed_however_late_it_comes() {
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        s.echo_backdate(ECHO_WAIT + Duration::from_secs(5));
+        let near = pos(3 + SOFT_RADIUS, SOFT_RADIUS);
+        assert!(s.swallow_echo(LEFT_DOWN, near), "a press held in place a long while is one click");
+        assert!(s.swallow_echo(LEFT_UP, near));
+        assert_eq!(acted, [1]);
+    }
+
+    #[test]
+    fn the_echo_far_from_the_press_within_the_wait_is_swallowed() {
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        // The hand wandered onto the sheet's item before it let go.
+        assert!(s.swallow_echo(LEFT_DOWN, pos(45, 12)), "the release is no click on what it ended over");
+        assert!(s.swallow_echo(LEFT_UP, pos(45, 12)));
+        assert_eq!(acted, [1]);
+    }
+
+    #[test]
+    fn a_press_far_away_after_the_wait_is_real() {
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        s.echo_backdate(ECHO_WAIT + Duration::from_millis(10));
+        assert!(!s.swallow_echo(LEFT_DOWN, pos(45, 12)), "a lost echo costs no click after the wait");
+        assert!(!s.swallow_echo(LEFT_UP, pos(45, 12)));
+        assert!(s.echo.awaiting(), "and that click awaits its own echo");
+        // Through a host: both clicks act.
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        s.echo_backdate(ECHO_WAIT + Duration::from_millis(10));
+        pair(&mut s, pos(45, 12), &mut acted);
+        assert_eq!(acted, [1, 2]);
+    }
+
+    #[test]
+    fn two_quick_clicks_act_exactly_twice() {
+        // On one control: pair, echo, pair, echo.
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        for _ in 0..2 {
+            pair(&mut s, pos(3, 0), &mut acted);
+            pair(&mut s, pos(3, 0), &mut acted);
+        }
+        assert_eq!(acted, [1, 1]);
+        // And on two: each acts once, its echo nothing.
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        pair(&mut s, pos(3, 0), &mut acted);
+        pair(&mut s, pos(45, 12), &mut acted);
+        pair(&mut s, pos(45, 12), &mut acted);
+        assert_eq!(acted, [1, 2]);
+    }
+
+    #[test]
+    fn a_slow_press_awaits_no_echo() {
+        // A real terminal's click: the release comes after a human pause.
+        let mut s = buttons(true);
+        assert!(!s.swallow_echo(LEFT_DOWN, pos(3, 0)));
+        s.echo_backdate(PHANTOM_RELEASE + Duration::from_millis(10));
+        assert!(!s.swallow_echo(LEFT_UP, pos(3, 0)));
+        assert!(!s.echo.awaiting(), "a slow press is no instant pair");
+        assert!(!s.swallow_echo(LEFT_DOWN, pos(3, 0)), "the next press is real");
+    }
+
+    #[test]
+    fn only_the_left_buttons_press_and_release_are_ever_claimed() {
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollUp,
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+        ] {
+            assert!(!s.swallow_echo(kind, pos(3, 0)), "{kind:?}");
+        }
+        assert!(s.echo.awaiting(), "none of them is the echo");
+        assert!(s.swallow_echo(LEFT_DOWN, pos(3, 0)));
+    }
+
+    #[test]
+    fn outside_apple_terminal_nothing_is_swallowed() {
+        // A trackpad tap in iTerm2 or Ghostty: a near-instant pair with no
+        // echo. The second tap of a double click is real.
+        let mut s = buttons(false);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        for kind in [LEFT_DOWN, LEFT_UP] {
+            assert!(!s.swallow_echo(kind, pos(3, 0)), "{kind:?}");
+        }
+        let mut s = buttons(false);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        pair(&mut s, pos(3, 0), &mut acted);
+        pair(&mut s, pos(45, 12), &mut acted);
+        assert_eq!(acted, [1, 1, 2], "every tap acts");
+        // The filter on its own, off by default.
+        let mut filter = EchoFilter::default();
+        assert!(!filter.swallow(LEFT_DOWN, pos(0, 0)) && !filter.swallow(LEFT_UP, pos(0, 0)));
+        assert!(!filter.swallow(LEFT_DOWN, pos(0, 0)) && !filter.swallow(LEFT_UP, pos(0, 0)));
+    }
+
+    /// A list's rows with its bar beside them, the way `scroll_list` draws
+    /// one: the rows' click (7), then the bar's own cells (▲ -1, the
+    /// track's jump 100 + row, ▼ 1), then the bar.
+    fn list_with_bar(apple: bool) -> (Surface<i32>, Rect) {
+        let mut s: Surface<i32> = Surface::new();
+        s.set_echo_dialect(apple);
+        let bar = Rect { x: 10, y: 5, width: 1, height: 6 };
+        s.click(Rect { x: 0, y: 5, width: 10, height: 6 }, 7);
+        s.click(Rect { x: 10, y: 5, width: 1, height: 1 }, -1);
+        s.click(Rect { x: 10, y: 6, width: 1, height: 4 }, 100);
+        s.click(Rect { x: 10, y: 10, width: 1, height: 1 }, 1);
+        s.register_bar(bar, 9, -1, 1, Box::new(|p| p as i32 + 100));
+        (s, bar)
+    }
+
+    #[test]
+    fn the_bar_soft_capture_is_the_same_in_apple_terminal_and_out_of_it() {
+        for apple in [false, true] {
+            let (mut s, _) = list_with_bar(apple);
+            let mut acted = Vec::new();
+            let up = pos(10, 5);
+            // ▲ as an instant pair: one step, and a soft capture — no hold.
+            pair(&mut s, up, &mut acted);
+            assert_eq!(acted, [-1], "apple {apple}");
+            assert!(!s.holding_bar() && s.hold_action().is_none(), "holds cannot repeat (apple {apple})");
+            // Tremor near the press: hover stays pinned.
+            drive(&mut s, MouseEventKind::Moved, pos(9, 6), &mut acted);
+            assert_eq!(s.pointer, Some(up), "soft capture pins hover (apple {apple})");
+            // The release re-click beside the bar: swallowed whole.
+            pair(&mut s, pos(9, 6), &mut acted);
+            assert_eq!(acted, [-1], "the re-click acts on nothing (apple {apple})");
+            drive(&mut s, MouseEventKind::Moved, pos(9, 6), &mut acted);
+            assert_eq!(s.pointer, Some(up), "and the pin holds (apple {apple})");
+            // A press beyond the radius is a real one, and ends it.
+            pair(&mut s, pos(20, 5), &mut acted);
+            drive(&mut s, MouseEventKind::Moved, pos(9, 6), &mut acted);
+            assert_eq!(s.pointer, Some(pos(9, 6)), "the far press ended it (apple {apple})");
+            pair(&mut s, pos(20, 5), &mut acted); // its release's echo
+            // Travelling away resumes hover, for good.
+            pair(&mut s, up, &mut acted);
+            pair(&mut s, pos(9, 6), &mut acted); // the echo, beside the bar
+            drive(&mut s, MouseEventKind::Moved, pos(20, 5), &mut acted);
+            assert_eq!(s.pointer, Some(pos(20, 5)), "hover resumes on travel (apple {apple})");
+            drive(&mut s, MouseEventKind::Moved, pos(11, 5), &mut acted);
+            assert_eq!(s.pointer, Some(pos(11, 5)), "soft capture ended for good (apple {apple})");
+            assert_eq!(acted, [-1, -1], "apple {apple}");
+            // An honest hold (the release comes late) leaves no soft capture.
+            drive(&mut s, LEFT_DOWN, up, &mut acted);
+            std::thread::sleep(PHANTOM_RELEASE + Duration::from_millis(20));
+            drive(&mut s, LEFT_UP, up, &mut acted);
+            drive(&mut s, MouseEventKind::Moved, pos(9, 6), &mut acted);
+            assert_eq!(s.pointer, Some(pos(9, 6)), "apple {apple}");
+        }
+    }
+
+    /// Where the two dialects part on a bar: in Apple Terminal the echo is
+    /// the filter's, so a click on ▲ steps once — not twice, as a re-click
+    /// landing back on the bar did — and a press beside the bar after the
+    /// echo is a real press, which the soft capture alone took for a
+    /// second phantom.
+    #[test]
+    fn in_apple_terminal_a_bar_click_steps_once_and_the_press_after_its_echo_is_real() {
+        let (mut s, _) = list_with_bar(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(10, 5), &mut acted);
+        pair(&mut s, pos(10, 5), &mut acted);
+        assert_eq!(acted, [-1], "one click, one step");
+        pair(&mut s, pos(9, 6), &mut acted);
+        assert_eq!(acted, [-1, 7], "the row beside the bar takes its click");
+        // Out of the dialect, as it always was.
+        let (mut s, _) = list_with_bar(false);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(10, 5), &mut acted);
+        pair(&mut s, pos(10, 5), &mut acted);
+        pair(&mut s, pos(9, 6), &mut acted);
+        assert_eq!(acted, [-1, -1], "a press on the bar steps; one beside it inside the radius is a phantom");
     }
 }

@@ -197,11 +197,85 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         ApiCmd::DiscoveryProbe => {
+            with_session(session, async |s| s.client.ping_async().await.map(|ping| worker::probe_event(&ping)))
+                .await
+        }
+
+        // The Discover room: the native worker's shapers, so both builds
+        // land the same events with the same words.
+        ApiCmd::Taste { seq, generation, part, body } => {
+            with_session(session, async |s| worker::taste(&s.client, seq, generation, part, &body).await).await
+        }
+        // The browser build has one client, the session's: a connected
+        // server's album is not asked of its server here, and the App
+        // queues the rows that matched instead.
+        ApiCmd::TasteAlbum { name, artist, album_artist, generation, peer: Some(peer), play, .. } => {
+            Some(Event::TasteAlbum { generation, tracks: None, name, artist, album_artist, peer: Some(peer), play })
+        }
+        ApiCmd::TasteAlbum { name, artist, album_artist, generation, play, .. } => {
             with_session(session, async |s| {
-                s.client
-                    .ping_async()
-                    .await
-                    .map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+                let ask = worker::TasteAlbumAsk {
+                    name: name.clone(),
+                    artist: artist.clone(),
+                    album_artist: album_artist.clone(),
+                    peer: None,
+                    play,
+                };
+                worker::taste_album(&s.client, ask, generation).await
+            })
+            .await
+        }
+
+        // The room's plug-ins (discovery-page clauses 100–149): the native
+        // worker's shapers, against the page's own server — the session.
+        ApiCmd::KeepGate { generation } => {
+            with_session(session, async |s| worker::keep_gate(&s.client, generation).await).await
+        }
+        ApiCmd::JobsLookup { seq, generation, recs } => {
+            with_session(session, async |s| worker::jobs_lookup(&s.client, seq, generation, &recs).await).await
+        }
+        ApiCmd::Jobs { seq, generation } => {
+            with_session(session, async |s| worker::jobs(&s.client, seq, generation).await).await
+        }
+        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination } => {
+            with_session(session, async |s| {
+                let ask = worker::JobStartAsk {
+                    plugin: &plugin,
+                    rec: &rec,
+                    scope,
+                    destination: destination.as_ref().map(Option::as_ref),
+                };
+                worker::job_start(&s.client, ticket, generation, ask).await
+            })
+            .await
+        }
+        ApiCmd::DestinationRead { seq, generation } => {
+            with_session(session, async |s| worker::destination_read(&s.client, seq, generation).await).await
+        }
+        ApiCmd::DestinationSave { seq, generation, destination } => {
+            with_session(session, async |s| worker::destination_save(&s.client, seq, generation, destination.as_ref()).await)
+                .await
+        }
+        ApiCmd::DestinationFolders { seq, generation, path } => {
+            with_session(session, async |s| worker::destination_folders(&s.client, seq, generation, path.clone()).await)
+                .await
+        }
+        ApiCmd::JobCancel { generation, id } => {
+            with_session(session, async |s| worker::job_cancel(&s.client, generation, id).await).await
+        }
+        ApiCmd::JobsClear { generation } => {
+            with_session(session, async |s| worker::jobs_clear(&s.client, generation).await).await
+        }
+        ApiCmd::PluginLinks { seq, generation, plugin, rec } => {
+            with_session(session, async |s| worker::plugin_links(&s.client, seq, generation, &plugin, &rec).await)
+                .await
+        }
+        // One client, the session's: the connected server's sizes are not
+        // asked from here, the user's own library's are.
+        ApiCmd::KeepFacts { seq, generation, ask, .. } => {
+            with_session(session, async |s| {
+                let facts = worker::keep_facts(None, &s.client, &ask).await;
+                Ok(Event::KeepFacts { seq, generation, facts: Box::new(facts) })
             })
             .await
         }

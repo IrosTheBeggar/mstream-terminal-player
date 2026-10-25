@@ -3730,6 +3730,7 @@ dependencies = [
  "image",
  "iroh",
  "iroh-tickets",
+ "libc",
  "mdns-sd",
  "memmap2",
  "mstream-iroh-tunnel",
