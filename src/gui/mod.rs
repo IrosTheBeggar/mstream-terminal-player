@@ -3123,6 +3123,13 @@ where
 
     let wait = next_wait(gui);
     ctx.side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
+    // Brisk only where a pass that finds nothing skips its draw (the
+    // terminal): the window draws every pass, so waking every few
+    // milliseconds for an answer redrew the whole player a hundred times
+    // a second, a second at a time, where main's window drew ten.
+    if !ctx.gate {
+        return Ok(wait);
+    }
     Ok(ctx.side.wait(ctx.asked.wait(wait)))
 }
 
@@ -4481,6 +4488,30 @@ mod tests {
         let mut ctx = quiet_ctx(gui);
         let mut terminal = Terminal::new(IoTest(TestBackend::new(w, h))).unwrap();
         frame(&mut terminal, gui, &mut ctx, &mut NoHost).unwrap()
+    }
+
+    /// A request out keeps the terminal's loop brisk for its answer
+    /// (performance audit #86), where a pass that finds nothing skips its
+    /// draw. The window draws every pass, so there it waits as it would
+    /// have: brisk, a smoke counted 289 window frames in 12 s against 121,
+    /// with the same 5 frames changing anything.
+    #[test]
+    fn only_a_loop_that_skips_idle_draws_waits_briskly_for_an_answer() {
+        for gate in [false, true] {
+            let mut gui = test_gui();
+            let mut ctx = quiet_ctx(&gui);
+            ctx.gate = gate;
+            let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+            frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+            gui.pend(vec![Effect::Api(worker::ApiCmd::Browse("lib".into()))]);
+            let wait = frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+            if gate {
+                assert!(wait <= crate::kit::pace::BRISK, "the terminal: brisk, not {wait:?}");
+            } else {
+                assert_eq!(wait, next_wait(&gui), "the window: its own wait");
+                assert!(wait > crate::kit::pace::BRISK, "and not a brisk one: {wait:?}");
+            }
+        }
     }
 
     /// The GUI as the window's face answers the host's reads from the Gui

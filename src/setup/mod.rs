@@ -2081,6 +2081,11 @@ where
     if wizard.graphics.is_hosted() && wizard.ui.overlays_moved() {
         return Ok(Duration::ZERO);
     }
+    // Brisk only where a pass that finds nothing skips its draw (the
+    // terminal): the window draws every pass, as the GUI's does.
+    if !wizard.gate {
+        return Ok(POLL);
+    }
     Ok(wizard.checks.wait(wizard.flight.wait(POLL)))
 }
 
@@ -5607,10 +5612,14 @@ pub(crate) mod tests {
         wizard.last_poll = overdue();
         assert_eq!(frame_once(&mut wizard, &wires, &mut asked), Duration::ZERO);
         assert_eq!(wizard.queued, Some(Op::PollProgress));
-        // In flight, the wait is brisk for its answer (`kit::pace`), and
-        // no second ask goes.
-        assert!(frame_once(&mut wizard, &wires, &mut asked) <= crate::kit::pace::BRISK, "in flight: brisk");
-        assert_eq!(wizard.queued, None, "in flight: no second ask");
+        // In flight, no second ask goes. The window (no gate: it draws
+        // every pass) waits its poll; the terminal, whose idle passes skip
+        // their draw, waits briskly for the answer (`kit::pace`).
+        assert_eq!(frame_once(&mut wizard, &wires, &mut asked), POLL, "in flight: no second ask");
+        wizard.gate = true;
+        assert!(frame_once(&mut wizard, &wires, &mut asked) <= crate::kit::pace::BRISK, "the terminal: brisk");
+        wizard.gate = false;
+        assert_eq!(wizard.queued, None, "still no second ask");
         let (_, job) = wires.jobs.try_recv().expect("the frame after sent it");
         assert!(matches!(job, Job::Plain(Op::PollProgress)));
         assert!(wires.jobs.try_recv().is_err(), "and only the one");

@@ -4124,3 +4124,16 @@ window, the MP3 player page, the Discover room, rust-i18n 4). What the merge cha
 - Main paused a failed cover for a flat 15 s. That pause is #89's ladder now, and the play path
   waits out its rung too, as main's did. The Discover room's tiles and the Keep modal claim
   through `App::claim_art`.
+- The brisk wait (#86) applies only where idle passes skip their draw, which is the terminal.
+  The window draws every pass, so brisk there meant redrawing the whole player every few ms
+  for a second after each request. The GUI's window drew 289 frames in a 12 s scripted run
+  against 121 without it, with the same 5 frames changing anything, and used ~30% more CPU.
+  The wizard's window drew 600 frames against 438.
+
+Smokes after the merge (debug builds, the e2e fake, volume 0, scratch config):
+- The terminal GUI idles at 7–8 ms/s CPU against 27–32 with the gate off (#102). A server
+  answer is drawn 8–9 ms after the key against 105–107 (#82, #86).
+- The Admin tab's Libraries room shows the server's library and the MP3 tab lists two fake
+  boards. With `absorb` taken out of `after_frame`, the library never shows.
+- The window and its wizard page connect, switch rooms, add folders and quit cleanly under
+  `MSTREAM_WINDOW_SCRIPT`.
