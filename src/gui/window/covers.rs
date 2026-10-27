@@ -121,6 +121,10 @@ pub(crate) struct Board {
 struct Inner {
     /// This frame's covers, in drawing order.
     placed: Vec<Placed>,
+    /// The covers on screen before this frame began: put back by
+    /// [`Board::end_frame`] when the face skipped its draw, since nothing
+    /// was taken off the screen.
+    before: Vec<Placed>,
     /// The art the post-processor has a texture for, or is being handed
     /// one: the first sighting of anything else carries its pixels.
     known: HashSet<u64>,
@@ -140,7 +144,26 @@ impl Board {
     /// A frame is about to draw: last frame's covers are forgotten, so a
     /// cover that is no longer drawn is no longer painted.
     pub(super) fn begin_frame(&self) {
-        self.lock().placed.clear();
+        let mut inner = self.lock();
+        inner.before = std::mem::take(&mut inner.placed);
+    }
+
+    /// The frame is over. A face that skipped its draw (nothing new,
+    /// `gui::Ctx::gate`) placed nothing and presented nothing, so the
+    /// screen still holds last frame's covers: they stay on the board,
+    /// where the next draw's comparison and the script's dump read them.
+    pub(super) fn end_frame(&self, drew: bool) {
+        let mut inner = self.lock();
+        let before = std::mem::take(&mut inner.before);
+        if !drew {
+            inner.placed = before;
+        }
+    }
+
+    /// A resample the worker finished waits for a present: the next frame
+    /// must draw, though the player may have nothing new.
+    pub(super) fn has_news(&self) -> bool {
+        !self.lock().decoded.is_empty()
     }
 
     /// Something was drawn over the base layer this frame — told by the
@@ -913,6 +936,41 @@ mod tests {
         }
         board.begin_frame();
         assert!(board.lock().placed.is_empty(), "a frame starts with no covers");
+    }
+
+    /// A pass whose face skipped its draw presented nothing, so the covers
+    /// on screen are last frame's and stay on the board; a pass that drew
+    /// has the covers it placed, none when it placed none. A resample the
+    /// worker finished is news until a present takes it.
+    #[test]
+    fn a_skipped_draw_keeps_last_frames_covers_and_a_drawn_one_its_own() {
+        let board = Board::default();
+        let art = Art::from_rgb(1, 1, vec![9, 9, 9]).unwrap();
+        let grid = Rect::new(0, 0, 100, 30);
+        let shown = Rect::new(2, 2, 6, 3);
+        board.begin_frame();
+        board.place(shown, grid, &art);
+        board.end_frame(true);
+
+        board.begin_frame();
+        board.end_frame(false);
+        assert_eq!(board.placed_rects(), (vec![shown], 0), "skipped: the screen still shows it");
+
+        board.begin_frame();
+        board.end_frame(true);
+        assert_eq!(board.placed_rects(), (vec![], 0), "drawn without it: gone");
+
+        assert!(!board.has_news());
+        board.lock().decoded.push(Pixels {
+            art: art.id(),
+            width: 1,
+            height: 1,
+            rgba: vec![9, 9, 9, 255],
+            native: true,
+            source: None,
+            crisp: false,
+        });
+        assert!(board.has_news(), "a resample waits for a present");
     }
 
     /// A modal registered after covers were placed stands down the ones it

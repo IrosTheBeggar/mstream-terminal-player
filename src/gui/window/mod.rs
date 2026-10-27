@@ -251,6 +251,7 @@ pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
         quit_flushed: false,
         min_surface: PhysicalSize::new(1, 1),
         shown: false,
+        cleared: false,
         opened_at: None,
         stats,
         instance,
@@ -476,6 +477,10 @@ struct App {
     /// the GPU's setup is never seen; elsewhere it is visible from its
     /// creation, as winit makes it, and this is true from `open`.
     shown: bool,
+    /// The backend was cleared (a resize, the window shown) since the face
+    /// last drew: the next frame must draw though the player has nothing
+    /// new, or the surface stays as the clear left it.
+    cleared: bool,
     /// When the window was made: the deadline a hidden one is shown by
     /// counts from here.
     opened_at: Option<Instant>,
@@ -729,12 +734,18 @@ impl Gpu {
 struct WindowHost<'a> {
     window: &'a Window,
     hand: &'a mut bool,
+    /// This frame must draw whatever the player holds (`redraw_inner`).
+    must_draw: bool,
 }
 
 impl Host for WindowHost<'_> {
     fn pointer(&mut self, hand: bool) {
         *self.hand = hand;
         self.window.set_cursor(if hand { CursorIcon::Pointer } else { CursorIcon::Default });
+    }
+
+    fn must_draw(&self) -> bool {
+        self.must_draw
     }
 }
 
@@ -1056,6 +1067,7 @@ impl App {
     fn repaint_all(&mut self) {
         if let Some(terminal) = self.terminal.as_mut() {
             let _ = terminal.clear();
+            self.cleared = true;
         }
         self.ask_redraw();
     }
@@ -1102,15 +1114,30 @@ impl App {
         if self.frames == 0 {
             self.lap.mark(&mut self.stats, "to_first_frame");
         }
-        self.board.begin_frame();
         // An owed present this frame's flush makes is a present though no
         // cell changed: the stats lever counts it as one.
         let owed = terminal.backend().owes_present();
-        let framed =
-            self.face.frame(terminal, &mut WindowHost { window, hand: &mut self.hand });
+        // A face whose pass finds nothing new skips its draw (gui::Ctx's
+        // gate). What the surface needs regardless, it is told: drawn
+        // until the window is first shown, after a clear, for a present
+        // owed, for a cover the worker resampled since.
+        let must_draw = !self.shown || self.cleared || owed || self.board.has_news();
+        self.board.begin_frame();
+        let _ = terminal.backend_mut().take_drew();
+        let framed = self
+            .face
+            .frame(terminal, &mut WindowHost { window, hand: &mut self.hand, must_draw });
+        let drew = terminal.backend_mut().take_drew();
+        self.board.end_frame(drew);
+        if drew {
+            self.cleared = false;
+        }
         let (cells, flush) = terminal.backend_mut().take_cells();
         let repaid = owed && !terminal.backend().owes_present();
         if let (Some(stats), Some(started)) = (self.stats.as_mut(), started) {
+            if !drew {
+                stats.skipped();
+            }
             stats.frame(cells, repaid, flush, started.elapsed());
         }
         match framed {
@@ -1499,6 +1526,7 @@ impl App {
             (side(size.width, self.min_surface.width), side(size.height, self.min_surface.height));
         terminal.backend_mut().resize(width, height);
         let _ = terminal.clear();
+        self.cleared = true;
         let Ok(grid) = terminal.backend_mut().size() else { return };
         self.feed(event_loop, TermEvent::Resize(grid.width, grid.height));
     }

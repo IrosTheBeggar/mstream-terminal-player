@@ -2938,9 +2938,10 @@ struct Ctx {
     /// drawn. With `gate` on, a pass with nothing new skips its draw
     /// (performance audit #102): a paused GUI redrew the same frame ten
     /// times a second, thirty with the visualizer window open, each a full
-    /// render and a diff of every cell. Only the terminal's loop sets
-    /// `gate`; a window draws every frame it is asked for, since what
-    /// it shows may have been covered or exposed.
+    /// render and a diff of every cell. Both loops set `gate`, the
+    /// terminal's and the window's; what a window's surface needs drawn
+    /// though the player is unchanged (cleared, or owed a present) its host
+    /// says ([`Host::must_draw`]).
     dirty: bool,
     drawn: Instant,
     gate: bool,
@@ -2963,11 +2964,20 @@ impl Ctx {
     }
 }
 
-/// Whatever shows the GUI, for the one thing the loop asks of it beyond
-/// drawing: the pointer's shape over something clickable. The terminal
-/// writes the OSC 22 shape; a native window sets its own cursor.
+/// Whatever shows the GUI, for what the loop asks of it beyond drawing:
+/// the pointer's shape over something clickable (the terminal writes the
+/// OSC 22 shape; a native window sets its own cursor), and whether this
+/// pass must draw though nothing in the player changed.
 pub(crate) trait Host {
     fn pointer(&mut self, hand: bool);
+
+    /// The host needs this pass drawn whatever the player holds: a
+    /// window's surface just cleared (a resize, the window shown), a
+    /// present it owes, a cover decoded since. A terminal's screen keeps
+    /// what was written to it, so it never does.
+    fn must_draw(&self) -> bool {
+        false
+    }
 }
 
 /// The terminal as a [`Host`]: the shape escape goes out only while the
@@ -3075,7 +3085,7 @@ where
         refresh_book(gui);
         ctx.dirty = true;
     }
-    if !ctx.gate || ctx.dirty || moving(gui) || ctx.drawn.elapsed() >= REDRAW_ANYWAY {
+    if !ctx.gate || ctx.dirty || host.must_draw() || moving(gui) || ctx.drawn.elapsed() >= REDRAW_ANYWAY {
         terminal.draw(|frame| render(frame, gui))?;
         // The kitty pictures this frame stopped drawing — a queue row's
         // slot let go, a wall slot past the page — leave the terminal's
@@ -3123,10 +3133,10 @@ where
 
     let wait = next_wait(gui);
     ctx.side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
-    // Brisk only where a pass that finds nothing skips its draw (the
-    // terminal): the window draws every pass, so waking every few
-    // milliseconds for an answer redrew the whole player a hundred times
-    // a second, a second at a time, where main's window drew ten.
+    // Brisk only where a pass that finds nothing skips its draw
+    // (`Ctx::gate`): a loop that draws every pass, waking every few
+    // milliseconds for an answer, redrew the whole player a hundred times a
+    // second, a second at a time, where a poll's pace drew ten.
     if !ctx.gate {
         return Ok(wait);
     }
@@ -3867,7 +3877,10 @@ impl GuiFace {
     /// it either way, and its clocks start only the event loop's few
     /// milliseconds sooner.
     fn new(gui: Gui, channels: Channels) -> Self {
-        let ctx = Ctx::new(&gui.app, channels);
+        let mut ctx = Ctx::new(&gui.app, channels);
+        // A window pass with nothing new skips its draw too; the window
+        // says when its surface needs one anyway (`Host::must_draw`).
+        ctx.gate = true;
         GuiFace { gui, ctx }
     }
 }
@@ -3886,7 +3899,9 @@ impl window::face::Face for GuiFace {
         frame(terminal, &mut self.gui, &mut self.ctx, host)
     }
 
+    /// Any input is news for the next pass, as in the terminal's loop.
     fn input(&mut self, event: TermEvent) -> Flow {
+        self.ctx.dirty = true;
         input(&mut self.gui, &mut self.ctx, event)
     }
 
@@ -4490,11 +4505,11 @@ mod tests {
         frame(&mut terminal, gui, &mut ctx, &mut NoHost).unwrap()
     }
 
-    /// A request out keeps the terminal's loop brisk for its answer
-    /// (performance audit #86), where a pass that finds nothing skips its
-    /// draw. The window draws every pass, so there it waits as it would
-    /// have: brisk, a smoke counted 289 window frames in 12 s against 121,
-    /// with the same 5 frames changing anything.
+    /// A request out keeps a gated loop brisk for its answer (performance
+    /// audit #86), since a pass that finds nothing skips its draw. A loop
+    /// without the gate draws every pass, so it waits as it would have:
+    /// brisk, a smoke counted 289 window frames in 12 s against 121, with
+    /// the same 5 frames changing anything (before the window was gated).
     #[test]
     fn only_a_loop_that_skips_idle_draws_waits_briskly_for_an_answer() {
         for gate in [false, true] {
@@ -4512,6 +4527,47 @@ mod tests {
                 assert!(wait > crate::kit::pace::BRISK, "and not a brisk one: {wait:?}");
             }
         }
+    }
+
+    /// A gated pass with nothing new skips its draw unless its host says
+    /// the surface needs one (a window cleared or owed a present, a cover
+    /// decoded): then it draws, though nothing in the player changed.
+    #[test]
+    fn a_gated_pass_draws_when_its_host_must_have_a_frame() {
+        struct MustHost;
+        impl Host for MustHost {
+            fn pointer(&mut self, _hand: bool) {}
+            fn must_draw(&self) -> bool {
+                true
+            }
+        }
+        let mut gui = test_gui();
+        let mut ctx = quiet_ctx(&gui);
+        ctx.gate = true;
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        let first = ctx.drawn;
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        assert_eq!(ctx.drawn, first, "nothing new: the pass skipped its draw");
+        frame(&mut terminal, &mut gui, &mut ctx, &mut MustHost).unwrap();
+        assert!(ctx.drawn > first, "the host needed a frame: drawn");
+    }
+
+    /// The window's face gates its passes as the terminal's loop does, and
+    /// any input it is handed is news for the next one.
+    #[cfg(feature = "window")]
+    #[test]
+    fn the_window_face_is_gated_and_an_input_is_news() {
+        use crate::gui::window::face::Face;
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (audio_tx, _) = std::sync::mpsc::channel();
+        let (api_tx, _) = std::sync::mpsc::channel();
+        let mut face =
+            GuiFace::new(test_gui(), Channels { event_rx, audio_tx, api_tx, event_tx, control: None });
+        assert!(face.ctx.gate);
+        face.ctx.dirty = false;
+        face.input(TermEvent::Resize(100, 30));
+        assert!(face.ctx.dirty);
     }
 
     /// The GUI as the window's face answers the host's reads from the Gui

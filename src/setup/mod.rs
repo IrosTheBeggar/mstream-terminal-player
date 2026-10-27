@@ -2082,7 +2082,7 @@ where
         return Ok(Duration::ZERO);
     }
     // Brisk only where a pass that finds nothing skips its draw (the
-    // terminal): the window draws every pass, as the GUI's does.
+    // terminal): the wizard's window draws every pass.
     if !wizard.gate {
         return Ok(POLL);
     }
