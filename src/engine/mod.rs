@@ -2737,14 +2737,24 @@ mod tests {
         let entry = QueueEntry { path: stalled_url(), duration_hint: None };
         let started = Instant::now();
         let mut asked = 0;
+        let mut said_yes = None;
         let outcome = open_entry_unless(&entry, &mut || {
             asked += 1;
-            started.elapsed() > Duration::from_millis(200)
+            let yes = started.elapsed() > Duration::from_millis(200);
+            if yes && said_yes.is_none() {
+                said_yes = Some(Instant::now());
+            }
+            yes
         });
         let waited = started.elapsed();
         assert!(matches!(outcome, Err(OpenError::Superseded(Some(_)))), "given up, not failed");
         assert!(waited < START_TIMEOUT / 2, "took {waited:?}");
-        assert!(asked >= 5, "asked every poll while it waited ({asked} times)");
+        // At once is from the yes, however far apart a loaded machine's
+        // polls fall: a macOS runner's 20 ms polls once came ~100 ms apart,
+        // and a count of them failed a wait that ended on time.
+        let after = said_yes.expect("asked past the 200 ms").elapsed();
+        assert!(after < Duration::from_millis(50), "walked away {after:?} after the yes");
+        assert!(asked >= 2, "asked while it waited, not once at the end ({asked} times)");
 
         // Nobody superseding: the deadline still ends it, as before.
         let started = Instant::now();
