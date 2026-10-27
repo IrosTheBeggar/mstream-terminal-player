@@ -33,7 +33,8 @@ pointer needs to drive the view: the transport under the cover.
   **With a shape**: the band is the mirrored waveform, the played part in
   the accent.
 - **Tabs**: Queue, Auto-DJ and Visualizer always; Lyrics while the track
-  has them; Discover while the server has discovery. The tab kept comes
+  has them; Similar (titled Discover before 2026-10-05, the log) while the
+  server has discovery. The tab kept comes
   back; a tab that left with its track falls back to the Queue.
 - **The App's `fullscreen` flag is up while the screen is** and down when
   it leaves, so the App's full-screen semantics apply to every key here
@@ -155,8 +156,25 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
   top bar and hosts the stats page the same way this screen hosts the
   TUI's view (the stats-screen contract); `T` opens it from anywhere as
   `0` opens this one, and from here too.
+- **2026-10-02 — The Admin tab.** Admin stands third on the top bar and
+  hosts the admin rooms (the admin-screen contract); `M` opens it from
+  here, beside `T`, after the keyword field and the sources picker have
+  had their keys, as `T` does.
 - **2026-09-26 — The follow-ups.** The note on the keys row stops short
   of the modes readout wherever the view put it (clause 9), instead of
   forty fixed cells. An e2e leg (`test/e2e/legs/gui-now.exp`) drives the
   screen under a pty with the demo seat and no server: `0`, a digit
   picking a tab, Esc, `q`.
+- **2026-10-05 — The Discover tab is retitled Similar** (mStream's
+  discovery-page plan, decision 12): "Discover" now names the
+  history-seeded room (docs/ux-contracts/discovery-page.md), and this tab
+  is the per-song lens — the playing track's neighbours, unchanged — as
+  the webapp's panel and the mobile screen become "More like this".
+  "Similar" fits the tab strip. The title is the App's `NowTab::title`,
+  so the TUI's own full-screen view reads "Similar" too — the one change
+  the TUI sees, because this view is the two shells' one view (clause 1);
+  it stays English with the view's other words. Its digit, its place
+  between Lyrics and Auto-DJ, its keys and its gate are unchanged, and so
+  are `gui.tips.now` (it names no tab) and the TUI keymap's key-4 line,
+  which names the TUI browser's own Discover tab — a different thing that
+  keeps its name.

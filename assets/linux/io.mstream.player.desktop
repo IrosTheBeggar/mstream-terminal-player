@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=mStream Player
+GenericName=Music Player
+Comment=Play music from your mStream server
+Exec=mstream-player
+Icon=io.mstream.player
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=mStream;music;audio;player;stream;playlist;
+StartupNotify=true
+StartupWMClass=io.mstream.player

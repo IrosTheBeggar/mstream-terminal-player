@@ -380,6 +380,9 @@ impl App {
         self.genre_list = None;
         self.library.set(Vec::new());
         self.library_stack = super::nav::Drill::new(crate::tui::worker::LibraryNode::Root);
+        // The Discover room's answer, pins and prefs were the old server's
+        // (discovery-page clause 31).
+        self.reset_taste();
     }
 
     pub(super) fn handle_connect_action(&mut self, action: Action) -> Vec<Effect> {

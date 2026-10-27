@@ -94,7 +94,14 @@ pub(super) fn cover_rect(area: Rect, footer: bool) -> Rect {
 /// Where the screen's note (or an armed pick's banner) goes: the bottom
 /// row, between the volume group and the card.
 pub(super) fn note_rect(area: Rect, footer: bool) -> Rect {
-    Rect { x: NOTE_X, y: top(area, footer) + 4, width: card_x(area).saturating_sub(NOTE_X + 2), height: 1 }
+    Rect { x: NOTE_X, y: top(area, footer) + 4, width: note_width(area.width), height: 1 }
+}
+
+/// The note's cells in a window `width` wide, for words fitted before
+/// they are drawn (a path clipped at its front). Saturating, since a
+/// window under the minimum draws the mini player and no note at all.
+pub(super) fn note_width(width: u16) -> u16 {
+    width.saturating_sub(CARD_W).saturating_sub(NOTE_X + 2)
 }
 
 // ── Pure geometry ───────────────────────────────────────────────────────────
@@ -370,7 +377,7 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
     let dj_w = tall_compact(frame, s, DJ_X, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj);
     let (prev, play, next) = play_glyphs(v.paused);
     let group = [repeat, prev, play, next, shuffle];
-    let group_w: u16 = group.iter().map(|l| l.chars().count() as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);
+    let group_w: u16 = group.iter().map(|l| crate::kit::width(l) as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);
     let free_from = DJ_X + dj_w + 1;
     let free_to = card_x(area).saturating_sub(1);
     let mut x = free_from + free_to.saturating_sub(free_from).saturating_sub(group_w) / 2;
@@ -424,17 +431,20 @@ pub(super) fn clip(text: &str, max: usize) -> Cow<'_, str> {
     if crate::kit::width(text) <= max {
         return Cow::Borrowed(text);
     }
-    // Keep what fits before the mark's own cell.
+    // Keep what fits before the mark's own cell, whole graphemes at the
+    // cells ratatui draws them in: cut per character, ❤️ kept its ❤ at one
+    // cell and its VS16 free, and drew two, past the label's budget.
+    use unicode_segmentation::UnicodeSegmentation;
     let room = max.saturating_sub(1);
     let mut kept = 0;
     let mut cut = 0;
-    for (i, c) in text.char_indices() {
-        let w = crate::kit::char_width(c);
+    for (i, grapheme) in text.grapheme_indices(true) {
+        let w = crate::kit::grapheme_cells(grapheme);
         if kept + w > room {
             break;
         }
         kept += w;
-        cut = i + c.len_utf8();
+        cut = i + grapheme.len();
     }
     let mut out = String::with_capacity(cut + 3);
     out.push_str(&text[..cut]);
@@ -447,6 +457,55 @@ pub(super) fn clip(text: &str, max: usize) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clipped label takes no more than its budget in the cells ratatui draws it in, and no
+    /// fewer than a cell short of it (a two-cell cluster that does not fit beside the mark):
+    /// cut per character, ❤️ and 1️⃣ ran a cell past the budget into the label after it, and a
+    /// ZWJ family was counted six cells for its two and left out where it fit.
+    #[test]
+    fn a_clipped_label_stays_inside_its_cells() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let clusters = [
+            "\u{2764}\u{FE0F}",
+            "1\u{FE0F}\u{20E3}",
+            "\u{1F1FA}\u{1F1F8}",
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "\u{1F44D}\u{1F3FD}",
+            "\u{D55C}",
+            "\u{304B}",
+            "\u{65E5}",
+            "e\u{301}",
+            "music",
+        ];
+        let mut labels: Vec<String> = clusters.iter().map(|c| c.repeat(12)).collect();
+        labels.extend(clusters.iter().map(|c| format!("ab{c}cd{c}ef{c}gh{c}")));
+        labels.push(clusters.concat());
+        for label in &labels {
+            for max in 1..30usize {
+                let shown = clip(label, max);
+                let cells = crate::kit::width(&shown);
+                assert!(cells <= max, "{shown:?} is {cells} cells, over {max}");
+                if crate::kit::width(label) > max {
+                    assert!(cells + 1 >= max, "{shown:?} is {cells} cells, wasting {max}");
+                }
+                let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let buffer = frame.buffer_mut();
+                        for x in 0..40 {
+                            buffer[(x, 0)].set_symbol("#");
+                        }
+                        buffer.set_stringn(0, 0, &shown, usize::MAX, Style::default());
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                for x in max as u16..40 {
+                    assert_eq!(buffer[(x, 0)].symbol(), "#", "{shown:?} in {max} wrote cell {x}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn times_read_like_a_transport() {

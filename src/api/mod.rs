@@ -55,9 +55,22 @@ fn daemon_ceiling() -> Option<std::time::Duration> {
 }
 /// A discovery snapshot download: the server answers once the transfer is
 /// verified, and a cross-network pull can take minutes (its own ceiling
-/// is ten).
+/// is ten). The server's logs download shares it: the zip is built while
+/// it streams, and a server that writes large log files sends minutes of
+/// it over a slow link.
 #[cfg(not(target_arch = "wasm32"))]
 const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The logs download's ceiling, [`FETCH_TIMEOUT`]; the browser build has
+/// no per-request timeout to set.
+#[cfg(not(target_arch = "wasm32"))]
+fn download_ceiling() -> Option<std::time::Duration> {
+    Some(FETCH_TIMEOUT)
+}
+#[cfg(target_arch = "wasm32")]
+fn download_ceiling() -> Option<std::time::Duration> {
+    None
+}
 
 /// The torrent routes' ceiling: a seed check hashes the torrent's files
 /// on the server's disk and auto-detect may reach for tags, both slower
@@ -114,6 +127,53 @@ impl fmt::Display for ApiError {
 }
 
 impl std::error::Error for ApiError {}
+
+/// Why a discovery plug-in call has no answer, as the Discover room words
+/// it (discovery-page clause 130): the server's own words for a refusal —
+/// never a bare code — apart from a server that did not answer. A 401 is
+/// not here: it is the session's problem, the same as for any read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginFailure {
+    /// The server answered no (400, 403, 404, 409, 429, …), in its words —
+    /// "Uploading Disabled", "your queue is full".
+    Refused { status: u16, words: String },
+    /// The server could not be reached: "your server didn't answer".
+    Unreachable(String),
+    /// It answered, but not in a shape this client reads.
+    Failed(String),
+    /// A start's 409 `destination_changed` (discovery-page clause 146): the
+    /// place the client showed is no longer where files land and nothing
+    /// started — with the one in force now as a pin reads: `Some(None)`
+    /// nowhere, `None` an answer that named none this client reads.
+    DestinationChanged(Option<Option<CollectionDestination>>),
+}
+
+impl PluginFailure {
+    pub fn of(error: &ApiError) -> PluginFailure {
+        match error {
+            ApiError::Forbidden(words) => PluginFailure::Refused { status: 403, words: words.clone() },
+            ApiError::NotFound(words) => PluginFailure::Refused { status: 404, words: words.clone() },
+            ApiError::Server { status, message } => PluginFailure::Refused { status: *status, words: message.clone() },
+            ApiError::Network(e) => PluginFailure::Unreachable(e.clone()),
+            other => PluginFailure::Failed(other.to_string()),
+        }
+    }
+
+    /// The words to show after "<what failed>: " — a changed destination
+    /// carries the server's code alone: the room words it.
+    pub fn words(&self) -> &str {
+        match self {
+            PluginFailure::Refused { words, .. } => words,
+            PluginFailure::Unreachable(e) | PluginFailure::Failed(e) => e,
+            PluginFailure::DestinationChanged(_) => "destination_changed",
+        }
+    }
+
+    /// The server did not answer at all.
+    pub fn unreachable(&self) -> bool {
+        matches!(self, PluginFailure::Unreachable(_))
+    }
+}
 
 /// The discovery catalog's one-argument peer actions — each is
 /// `POST api/v1/admin/discovery/p2p/<route> {endpointId}`.
@@ -383,6 +443,11 @@ pub struct Client {
     /// parent's browse proxy, art onto its art proxy (contract clause 27).
     /// `base` and `token` are then the parent's.
     peer: Option<i64>,
+    /// A federated peer's client however the peer is reached: its covers
+    /// ask the peer's `l` rendition ([`urls::PEER_ART_COMPRESS`]). Implied
+    /// by `peer`; set on its own for a peer over its own tunnel, whose
+    /// `/album-art` is asked directly.
+    compressed_art: bool,
     /// Aimed at a tunnel's loopback bridge: the token every request must
     /// carry as `__lt=…`, or the shared tunnel client drops the connection.
     local_token: Option<String>,
@@ -443,6 +508,7 @@ impl Client {
             base,
             token: None,
             peer: None,
+            compressed_art: false,
             local_token: None,
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
@@ -464,6 +530,14 @@ impl Client {
 
     pub fn peer(&self) -> Option<i64> {
         self.peer
+    }
+
+    /// Mark this client as a federated peer's even when it is not aimed
+    /// through the parent — a peer over its own tunnel — so its covers ask
+    /// the same compressed rendition the parent's art proxy is asked for.
+    pub fn with_compressed_art(mut self, on: bool) -> Self {
+        self.compressed_art = on;
+        self
     }
 
     /// Every request to a tunnel bridge carries its loopback token as
@@ -581,6 +655,53 @@ impl Client {
         body: Option<serde_json::Value>,
         longest: Option<std::time::Duration>,
     ) -> Result<T, ApiError> {
+        self.send_request(method, path, body, longest, false).await
+    }
+
+    /// A discovery plug-in route: the user's OWN server always — never a
+    /// peer's, through the parent's proxy or over the peer's own tunnel
+    /// (discovery-page clause 100: a copy lands on the session's server,
+    /// and a peer's plug-ins are not the user's) — with a 404's words kept.
+    async fn send_plugin<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, ApiError> {
+        self.own_server()?;
+        self.send_request(method, path, body, None, true).await
+    }
+
+    /// The plug-in routes' guard: this client aims at the user's own
+    /// server (discovery-page clause 100).
+    fn own_server(&self) -> Result<(), ApiError> {
+        if self.peer.is_some() || self.compressed_art {
+            return Err(ApiError::Config("the plug-in routes are asked of your own server, not a connected one".into()));
+        }
+        Ok(())
+    }
+
+    async fn send_request<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        longest: Option<std::time::Duration>,
+        words_on_404: bool,
+    ) -> Result<T, ApiError> {
+        let req = self.request(method, path, body, longest)?;
+        self.finish_with(req, path, words_on_404).await
+    }
+
+    /// A request to `path` built as every read builds one: the endpoint,
+    /// the request's own ceiling, the token, a JSON body.
+    fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        longest: Option<std::time::Duration>,
+    ) -> Result<reqwest::RequestBuilder, ApiError> {
         let url = self.endpoint(path)?;
         #[allow(unused_mut)]
         let mut req = self.http.request(method, url);
@@ -599,7 +720,42 @@ impl Client {
                     .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?,
             );
         }
-        self.finish(req, path).await
+        Ok(req)
+    }
+
+    /// A GET whose body stays bytes: [`Client::send_within`]'s URL, header
+    /// and ceiling, and [`Client::finish`]'s status mapping, read from the
+    /// body as lossy text only when it is a refusal. The browser build
+    /// ignores `longest`, as `send_within` does.
+    async fn get_bytes(
+        &self,
+        path: &str,
+        longest: Option<std::time::Duration>,
+    ) -> Result<Vec<u8>, ApiError> {
+        let url = self.endpoint(path)?;
+        #[allow(unused_mut)]
+        let mut req = self.http.get(url);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(longest) = longest {
+            req = req.timeout(longest);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = longest;
+        if let Some(token) = &self.token {
+            req = req.header("x-access-token", token);
+        }
+
+        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let refusal = || extract_error(&String::from_utf8_lossy(&bytes));
+        match status {
+            StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
+            StatusCode::FORBIDDEN => Err(ApiError::Forbidden(refusal())),
+            StatusCode::NOT_FOUND => Err(ApiError::NotFound(path.to_string())),
+            s if !s.is_success() => Err(ApiError::Server { status: s.as_u16(), message: refusal() }),
+            _ => Ok(bytes.to_vec()),
+        }
     }
 
     /// Send a built request and map the answer: only 401 is a session
@@ -610,24 +766,21 @@ impl Client {
         req: reqwest::RequestBuilder,
         path: &str,
     ) -> Result<T, ApiError> {
-        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
-        let status = resp.status();
-        let text = resp.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        self.finish_with(req, path, false).await
+    }
 
-        match status {
-            StatusCode::UNAUTHORIZED => return Err(ApiError::Unauthorized),
-            StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(extract_error(&text))),
-            StatusCode::NOT_FOUND => return Err(ApiError::NotFound(path.to_string())),
-            s if !s.is_success() => {
-                return Err(ApiError::Server { status: s.as_u16(), message: extract_error(&text) });
-            }
-            _ => {}
-        }
-
-        serde_json::from_str(&text).map_err(|e| ApiError::Decode {
-            endpoint: path.to_string(),
-            message: e.to_string(),
-        })
+    /// [`Client::finish`], where a 404 may carry the server's words: the
+    /// plug-in routes answer 404 for an unknown or switched-off plug-in or
+    /// job, and those words are shown as they are (discovery-page clause
+    /// 130) — `ApiError::NotFound` then carries them instead of the path.
+    async fn finish_with<T: DeserializeOwned>(
+        &self,
+        req: reqwest::RequestBuilder,
+        path: &str,
+        words_on_404: bool,
+    ) -> Result<T, ApiError> {
+        let (status, text) = read_answer(req).await?;
+        answer_of(status, &text, path, words_on_404)
     }
 
     /// A multipart POST — the torrent routes' shape, the user's and the
@@ -961,6 +1114,195 @@ impl Client {
 
     // No sync twin: its only callers (worker::discover) drive the async
     // version through `wait` themselves. Same for `journey_async` below.
+
+    // ── The Discover page (discovery-page contract) ─────────────────────────
+    //
+    // No sync twins: the worker's shared shapers drive these through `wait`.
+    // Unlike the similar routes above, a 403 is NOT folded into `Ok(None)`:
+    // the room has to tell "switched off" and "scan pending" apart, and it
+    // does so by re-pinging after an `ApiError::Forbidden` (clause 82).
+
+    /// `POST /api/v1/discovery/taste` — one half of the room's answer (plan
+    /// §3.1; the App asks the library and the peers apart, clause 30). The
+    /// route is stateless: nothing is stored between calls.
+    pub async fn taste_async(&self, body: &TasteRequest) -> Result<TasteResponse, ApiError> {
+        let body = serde_json::to_value(body)
+            .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
+        self.post("api/v1/discovery/taste", body).await
+    }
+
+    // ── Discovery plug-ins: Keep a copy, Open elsewhere ────────────────────
+    //
+    // discovery-page clauses 100–149. Every call goes to the user's own
+    // server ([`Client::send_plugin`]) and keeps the server's words for a
+    // refusal; no sync twins — the worker's shapers drive these through
+    // `wait`, the browser build awaits them.
+
+    /// `GET /api/v1/discovery/plugins` — the plug-ins switched on for this
+    /// caller and whether it may start jobs: the gate's listing half.
+    pub async fn discovery_plugins_async(&self) -> Result<DiscoveryPluginsResponse, ApiError> {
+        self.send_plugin(Method::GET, "api/v1/discovery/plugins", None).await
+    }
+
+    /// `GET /api/v1/discovery/collection/destination` — where copies land,
+    /// and what the picker needs (clauses 105, 142).
+    pub async fn collection_destination_async(&self) -> Result<CollectionDestinationView, ApiError> {
+        self.send_plugin(Method::GET, "api/v1/discovery/collection/destination", None).await
+    }
+
+    /// `PUT /api/v1/discovery/collection/destination {destination}` — save
+    /// where this account's copies land (`None`: back to the library
+    /// default), answered with the new view; a place the server will not
+    /// take is a 400 in its words (clause 144).
+    pub async fn collection_destination_save_async(
+        &self,
+        destination: Option<&CollectionDestination>,
+    ) -> Result<CollectionDestinationView, ApiError> {
+        let body = serde_json::json!({ "destination": destination.map(CollectionDestination::shown) });
+        self.send_plugin(Method::PUT, "api/v1/discovery/collection/destination", Some(body)).await
+    }
+
+    /// `POST /api/v1/discovery/plugins/{plugin}/jobs {recommendation,
+    /// scope?, destination?}` — start a job on `recommendation`, sent
+    /// exactly as given (a taste row as it arrived, clause 103). A song job
+    /// sends no scope (the server's default). `destination` is the place
+    /// the client showed (clause 145): `None` sends none (no check),
+    /// `Some(None)` null — it showed nowhere; a server from before the key
+    /// is asked again without it. `202` and `200` (a live job already
+    /// covers it) both answer [`JobStartAnswer::Started`]; the server's 409
+    /// `destination_changed` is an answer too — nothing started, and where
+    /// files land now.
+    pub async fn plugin_job_start_async(
+        &self,
+        plugin: &str,
+        recommendation: &serde_json::Value,
+        scope: Option<JobScope>,
+        destination: Option<Option<&CollectionDestination>>,
+    ) -> Result<JobStartAnswer, ApiError> {
+        self.own_server()?;
+        let mut body = serde_json::json!({ "recommendation": recommendation });
+        if let Some(scope) = scope.filter(|s| *s != JobScope::Song) {
+            body["scope"] = serde_json::Value::String(scope.as_str().to_string());
+        }
+        if let Some(shown) = destination {
+            body["destination"] = shown.map(CollectionDestination::shown).unwrap_or(serde_json::Value::Null);
+        }
+        let path = format!("api/v1/discovery/plugins/{}/jobs", urlencode(plugin));
+        let (mut status, mut text) = read_answer(self.request(Method::POST, &path, Some(body.clone()), None)?).await?;
+        // A server that has no pin refuses the key: asked once more without
+        // it, it lands where the account's destination says at run time —
+        // its jobs read as from before the pin (clause 145).
+        if destination.is_some() && destination_unknown(status, &text) {
+            if let Some(fields) = body.as_object_mut() {
+                fields.remove("destination");
+            }
+            (status, text) = read_answer(self.request(Method::POST, &path, Some(body), None)?).await?;
+        }
+        if status == StatusCode::CONFLICT
+            && let Some(changed) = destination_changed(&text)
+        {
+            return Ok(changed);
+        }
+        answer_of(status, &text, &path, true).map(|started| JobStartAnswer::Started(Box::new(started)))
+    }
+
+    /// `GET /api/v1/discovery/plugin-jobs?state=&limit=` — the caller's
+    /// jobs, newest first.
+    pub async fn plugin_jobs_async(&self, state: Option<JobState>, limit: Option<u32>) -> Result<PluginJobList, ApiError> {
+        let mut query: Vec<String> = Vec::new();
+        if let Some(state) = state.filter(|s| *s != JobState::Unknown) {
+            query.push(format!("state={}", state.as_str()));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={}", limit.clamp(1, 500)));
+        }
+        let path = if query.is_empty() {
+            "api/v1/discovery/plugin-jobs".to_string()
+        } else {
+            format!("api/v1/discovery/plugin-jobs?{}", query.join("&"))
+        };
+        self.send_plugin(Method::GET, &path, None).await
+    }
+
+    /// `POST /api/v1/discovery/plugin-jobs/{id}/cancel` — a queued job is
+    /// cancelled at once, a running one flagged; the server's 409 is its
+    /// word that the job had already finished (clause 133), an answer, not
+    /// a failure.
+    pub async fn plugin_job_cancel_async(&self, id: i64) -> Result<CancelAnswer, ApiError> {
+        let path = format!("api/v1/discovery/plugin-jobs/{id}/cancel");
+        match self.send_plugin::<JobCancelled>(Method::POST, &path, Some(serde_json::json!({}))).await {
+            Ok(answer) => Ok(CancelAnswer::Cancelled(Box::new(answer))),
+            Err(ApiError::Server { status: 409, .. }) => Ok(CancelAnswer::AlreadyFinished),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `POST /api/v1/discovery/plugin-jobs/clear` — drop the caller's
+    /// finished jobs (live ones stay; files are never touched).
+    pub async fn plugin_jobs_clear_async(&self) -> Result<JobsCleared, ApiError> {
+        self.send_plugin(Method::POST, "api/v1/discovery/plugin-jobs/clear", Some(serde_json::json!({}))).await
+    }
+
+    /// `POST /api/v1/discovery/plugin-jobs/lookup/batch` — each
+    /// recommendation's keys and the caller's jobs under them, in input
+    /// order, asked [`LOOKUP_BATCH_MAX`] at a time and put back together
+    /// (clause 111). An answer short of its chunk is padded with empty
+    /// lookups so every row keeps its place.
+    pub async fn plugin_jobs_lookup_batch_async(&self, recommendations: &[serde_json::Value]) -> Result<Vec<JobLookup>, ApiError> {
+        let mut out = Vec::with_capacity(recommendations.len());
+        for chunk in recommendations.chunks(LOOKUP_BATCH_MAX) {
+            let body = serde_json::json!({ "recommendations": chunk });
+            let answer: JobLookupBatch =
+                self.send_plugin(Method::POST, "api/v1/discovery/plugin-jobs/lookup/batch", Some(body)).await?;
+            let mut results = answer.results;
+            results.resize_with(chunk.len(), JobLookup::default);
+            out.extend(results);
+        }
+        Ok(out)
+    }
+
+    /// `POST /api/v1/discovery/plugins/{plugin}/resolve` on a `links`
+    /// plug-in: its links for `recommendation`, https only (clause 140).
+    pub async fn plugin_links_async(&self, plugin: &str, recommendation: &serde_json::Value) -> Result<Vec<PluginLink>, ApiError> {
+        let path = format!("api/v1/discovery/plugins/{}/resolve", urlencode(plugin));
+        let answer: PluginResolveResponse =
+            self.send_plugin(Method::POST, &path, Some(serde_json::json!({ "recommendation": recommendation }))).await?;
+        Ok(answer.result.map(|r| r.links).unwrap_or_default().into_iter().filter(PluginLink::is_web).collect())
+    }
+
+    /// `POST /api/v1/db/artists-albums` with the credit facts the Keep
+    /// modal reckons "Only the albums you don't have" from (clause 107) —
+    /// asked of whichever server this client is aimed at: a connected
+    /// server's through its reach, the user's own through the session.
+    pub async fn artist_album_rows_async(&self, artist: &str) -> Result<Vec<ArtistAlbumRow>, ApiError> {
+        let rows: ArtistAlbumRows =
+            self.post("api/v1/db/artists-albums", serde_json::json!({ "artist": artist })).await?;
+        Ok(rows.albums)
+    }
+
+    /// `POST /api/v1/db/album-songs` with every selector it takes: the
+    /// album's name, its TRACK artist, its album artist and a year inside
+    /// its range — what an album copy itself asks a connected server for,
+    /// so the Keep modal's song count matches what the copy takes.
+    pub async fn album_songs_by_async(
+        &self,
+        album: &str,
+        artist: Option<&str>,
+        album_artist: Option<&str>,
+        year: Option<i32>,
+    ) -> Result<Vec<Track>, ApiError> {
+        let mut body = serde_json::json!({ "album": album });
+        if let Some(artist) = artist {
+            body["artist"] = serde_json::Value::String(artist.to_string());
+        }
+        if let Some(album_artist) = album_artist {
+            body["album_artist"] = serde_json::Value::String(album_artist.to_string());
+        }
+        if let Some(year) = year {
+            body["year"] = serde_json::Value::from(year);
+        }
+        self.post("api/v1/db/album-songs", body).await
+    }
 
     /// A journey from one track to another through the embedding space.
     ///
@@ -1334,16 +1676,12 @@ impl Client {
     /// server's 256 px copy instead of the original (see
     /// [`urls::album_art_url`]).
     ///
-    /// This is the one non-JSON GET in the client, so it does its own small
+    /// This is one of the client's two non-JSON GETs (the logs download is
+    /// the other), so it does its own small
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
     pub async fn album_art_async(&self, file: &str, small: bool) -> Result<Vec<u8>, ApiError> {
-        let url = match self.peer {
-            Some(peer) => urls::peer_art_url(&self.server(), peer, file, small),
-            None => urls::album_art_url(&self.server(), file, small),
-        }
-        .map_err(ApiError::Config)?;
-        let url = urls::with_local_token(url, self.local_token.as_deref());
+        let url = self.art_url(file, small)?;
         let mut req = self.http.get(&url);
         if let Some(token) = &self.token {
             req = req.header("x-access-token", token);
@@ -1362,6 +1700,24 @@ impl Client {
             }),
             _ => Ok(bytes.to_vec()),
         }
+    }
+
+    /// Where [`Client::album_art_async`] asks for `file`: the server's own
+    /// `/album-art/<file>`; aimed at a federated peer, the parent's art
+    /// proxy, `/api/v1/federation/peers/{id}/art/<file>?compress=l`
+    /// ([`urls::peer_art_url`]); a peer over its own tunnel, its own
+    /// `/album-art/<file>?compress=l` ([`urls::direct_peer_art_url`]). A
+    /// peer's cover is its 256 px rendition either way. The server's own
+    /// cover is its 256 px copy when `small` asks (a wall cell, a queue row:
+    /// performance audit #92), else the original.
+    pub fn art_url(&self, file: &str, small: bool) -> Result<String, ApiError> {
+        let url = match self.peer {
+            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
+            None if self.compressed_art => urls::direct_peer_art_url(&self.server(), file),
+            None => urls::album_art_url(&self.server(), file, small),
+        }
+        .map_err(ApiError::Config)?;
+        Ok(urls::with_local_token(url, self.local_token.as_deref()))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1636,6 +1992,31 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn admin_discovery_activity(&self, since: u64) -> Result<DiscoveryActivity, ApiError> {
         wait(self.admin_discovery_activity_async(since))
+    }
+
+    /// The server's main log ring past `since` (0 = everything it holds).
+    /// The route has no level or limit parameter, so the player filters.
+    pub async fn admin_logs_recent_async(&self, since: u64) -> Result<LogTail, ApiError> {
+        self.get(&format!("api/v1/admin/logs/recent?since={since}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_logs_recent(&self, since: u64) -> Result<LogTail, ApiError> {
+        wait(self.admin_logs_recent_async(since))
+    }
+
+    /// The server's log files as one zip, the bytes exactly as they came.
+    /// mStream streams the archive after its headers are out, so a 200
+    /// can still end short: the caller checks the zip's shape before it
+    /// trusts it. A server that writes no log files answers an empty zip,
+    /// and one older than the route answers 404.
+    pub async fn admin_logs_download_async(&self) -> Result<Vec<u8>, ApiError> {
+        self.get_bytes("api/v1/admin/logs/download", download_ceiling()).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_logs_download(&self) -> Result<Vec<u8>, ApiError> {
+        wait(self.admin_logs_download_async())
     }
 
     /// Join the discovery network, optionally opening the federation
@@ -2635,6 +3016,61 @@ impl Multipart {
     }
 }
 
+/// Send a built request and read its answer whole: the status and the
+/// body as text.
+async fn read_answer(req: reqwest::RequestBuilder) -> Result<(StatusCode, String), ApiError> {
+    let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
+    Ok((status, text))
+}
+
+/// An answer mapped: only 401 is a session problem, the other failures
+/// carry the server's words as [`extract_error`] reads them out of the
+/// body — a 404's too on the plug-in routes (`words_on_404`).
+fn answer_of<T: DeserializeOwned>(status: StatusCode, text: &str, path: &str, words_on_404: bool) -> Result<T, ApiError> {
+    match status {
+        StatusCode::UNAUTHORIZED => return Err(ApiError::Unauthorized),
+        StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(extract_error(text))),
+        StatusCode::NOT_FOUND if words_on_404 => return Err(ApiError::NotFound(extract_error(text))),
+        StatusCode::NOT_FOUND => return Err(ApiError::NotFound(path.to_string())),
+        s if !s.is_success() => {
+            return Err(ApiError::Server { status: s.as_u16(), message: extract_error(text) });
+        }
+        _ => {}
+    }
+
+    serde_json::from_str(text).map_err(|e| ApiError::Decode {
+        endpoint: path.to_string(),
+        message: e.to_string(),
+    })
+}
+
+/// A start's 409 that says the destination it showed is no longer the one
+/// in force (`{error: "destination_changed", destination}`): the one that
+/// is — only an explicit `null` is nowhere; no `destination` key, or one
+/// this client cannot read, names none (the webapp's `'destination' in
+/// body`): what is drawn stays, and the view is read again. Any other 409
+/// is no such answer.
+fn destination_changed(text: &str) -> Option<JobStartAnswer> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    if v.get("error").and_then(serde_json::Value::as_str) != Some("destination_changed") {
+        return None;
+    }
+    let now = match v.get("destination") {
+        Some(serde_json::Value::Null) => Some(None),
+        Some(d) => serde_json::from_value(d.clone()).ok().map(Some),
+        None => None,
+    };
+    Some(JobStartAnswer::DestinationChanged(now))
+}
+
+/// A server from before the start's `destination` (mStream before
+/// 2026-10-21, its jobs route's body strict): Joi's 400 for the key.
+fn destination_unknown(status: StatusCode, text: &str) -> bool {
+    status == StatusCode::BAD_REQUEST && extract_error(text).contains("\"destination\" is not allowed")
+}
+
 /// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a
 /// trimmed excerpt of whatever was actually returned. The torrent routes'
 /// shape — `{ ok: false, error: <code>, message: <words> }` — reads as the
@@ -2657,7 +3093,7 @@ fn extract_error(body: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -2852,5 +3288,396 @@ mod tests {
         let asked = |path: &str| heads.iter().find(|h| h.contains(path)).cloned().unwrap_or_default();
         assert!(asked("/api/v1/ping").contains("accept-encoding: gzip"), "{heads:?}");
         assert!(!asked("/media/a.wav").contains("accept-encoding"), "{heads:?}");
+    }
+
+    /// A server on a loopback port that answers each of `replies` to one
+    /// connection in turn, and hands back every request's head.
+    fn canned_server(replies: Vec<Vec<u8>>) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 512];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&byte[..n]),
+                    }
+                }
+                let _ = seen_tx.send(String::from_utf8_lossy(&head).to_string());
+                let _ = sock.write_all(&reply);
+            }
+        });
+        (port, seen_rx)
+    }
+
+    pub(crate) fn reply(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn the_logs_download_keeps_the_body_as_bytes_and_maps_refusals() {
+        // Not UTF-8 anywhere: read as text, it would come back changed.
+        let zip: Vec<u8> = vec![b'P', b'K', 3, 4, 0xff, 0xfe, 0x00, 0x80, 0xc3];
+        let (port, seen) = canned_server(vec![
+            reply("200 OK", "application/zip", &zip),
+            reply("404 Not Found", "text/html", b"<pre>Cannot GET</pre>"),
+            reply("403 Forbidden", "application/json", br#"{"error":"Admin access required"}"#),
+            reply("405 Method Not Allowed", "application/json", br#"{"error":"not here"}"#),
+        ]);
+        let client =
+            Client::new(&format!("http://127.0.0.1:{port}")).unwrap().with_token(Some("tok".into()));
+
+        assert_eq!(client.admin_logs_download().expect("the zip"), zip);
+        let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(head.starts_with("GET /api/v1/admin/logs/download HTTP/1.1\r\n"), "{head}");
+        assert!(head.to_ascii_lowercase().contains("x-access-token: tok\r\n"), "{head}");
+
+        match client.admin_logs_download() {
+            Err(ApiError::NotFound(path)) => assert_eq!(path, "api/v1/admin/logs/download"),
+            other => panic!("a server without the route: {other:?}"),
+        }
+        match client.admin_logs_download() {
+            Err(ApiError::Forbidden(words)) => assert_eq!(words, "Admin access required"),
+            other => panic!("a refused download: {other:?}"),
+        }
+        match client.admin_logs_download() {
+            Err(ApiError::Server { status, message }) => {
+                assert_eq!(status, 405);
+                assert_eq!(message, "not here");
+            }
+            other => panic!("any other refusal: {other:?}"),
+        }
+    }
+
+    /// [`canned_server`], handing back every request whole — its head and
+    /// its body (read to its Content-Length).
+    pub(crate) fn canned_server_bodies(replies: Vec<Vec<u8>>) -> (u16, std::sync::mpsc::Receiver<(String, String)>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<(String, String)>();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut data = Vec::new();
+                let mut byte = [0u8; 4096];
+                let split = loop {
+                    if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                    match sock.read(&mut byte) {
+                        Ok(0) | Err(_) => break data.len(),
+                        Ok(n) => data.extend_from_slice(&byte[..n]),
+                    }
+                };
+                let head = String::from_utf8_lossy(&data[..split]).to_string();
+                let length = head
+                    .lines()
+                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                    .unwrap_or(0);
+                while data.len() < split + length {
+                    match sock.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => data.extend_from_slice(&byte[..n]),
+                    }
+                }
+                let body = String::from_utf8_lossy(&data[split..]).to_string();
+                let _ = seen_tx.send((head, body));
+                let _ = sock.write_all(&reply);
+            }
+        });
+        (port, seen_rx)
+    }
+
+    pub(crate) fn json_reply(status: &str, body: serde_json::Value) -> Vec<u8> {
+        reply(status, "application/json", body.to_string().as_bytes())
+    }
+
+    pub(crate) fn seen_json(seen: &std::sync::mpsc::Receiver<(String, String)>) -> (String, serde_json::Value) {
+        let (head, body) = seen.recv_timeout(Duration::from_secs(5)).expect("a request");
+        let line = head.lines().next().unwrap_or_default().to_string();
+        (line, if body.is_empty() { serde_json::Value::Null } else { serde_json::from_str(&body).expect("a JSON body") })
+    }
+
+    #[test]
+    fn a_copy_starts_with_the_row_unchanged_and_the_servers_refusals_keep_their_words() {
+        let row = serde_json::json!({ "artist": "Boukmanflow", "title": "Late Train Verse", "album": "Borrowed Tapes",
+            "filepath": "peerlib/Boukmanflow/Borrowed Tapes/02.mp3", "peer": { "id": 1, "name": "Stage Peer B" },
+            "source": "federation", "albumArt": "c0ffee.jpg", "similarity": 0.9, "seedHash": null });
+        let job = serde_json::json!({ "id": 7, "plugin": "federation-copy", "state": "queued", "key": "text:x", "params": null });
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("202 Accepted", serde_json::json!({ "created": true, "job": job })),
+            json_reply("200 OK", serde_json::json!({ "created": false, "job": job })),
+            json_reply("403 Forbidden", serde_json::json!({ "error": "Uploading Disabled" })),
+            json_reply("409 Conflict", serde_json::json!({ "error": "someone else on this server is already getting this — try again in a moment" })),
+            json_reply("429 Too Many Requests", serde_json::json!({ "error": "you have 20 jobs queued or running — wait for some to finish (the limit is 20)" })),
+            json_reply("404 Not Found", serde_json::json!({ "error": "Unknown plug-in: federation-copy" })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap().with_token(Some("tok".into()));
+        let started = |r: Result<JobStartAnswer, ApiError>| match r.unwrap() {
+            JobStartAnswer::Started(started) => started,
+            other => panic!("{other:?}"),
+        };
+        let first = started(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Song), None)));
+        assert!(first.created && first.job.id == 7);
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/discovery/plugins/federation-copy/jobs "), "{line}");
+        assert_eq!(body, serde_json::json!({ "recommendation": row }), "the row exactly as it came, no scope for a song");
+        let again = started(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::ArtistMissing), None)));
+        assert!(!again.created, "a live job already covers it");
+        assert_eq!(seen_json(&seen).1["scope"], "artist-missing");
+        let words = |r: Result<JobStartAnswer, ApiError>| PluginFailure::of(&r.unwrap_err());
+        assert_eq!(words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None))), PluginFailure::Refused { status: 403, words: "Uploading Disabled".into() });
+        // Another account's live copy is a 409 of its own words, never a changed destination.
+        assert_eq!(
+            words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None))).words(),
+            "someone else on this server is already getting this — try again in a moment"
+        );
+        assert!(matches!(words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None))), PluginFailure::Refused { status: 429, .. }));
+        // A 404's words are kept on the plug-in routes (never the path).
+        assert_eq!(
+            words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None))),
+            PluginFailure::Refused { status: 404, words: "Unknown plug-in: federation-copy".into() }
+        );
+        // A server that is not there: "your server didn't answer".
+        let gone = Client::new("http://127.0.0.1:9").unwrap();
+        assert!(PluginFailure::of(&wait(gone.discovery_plugins_async()).unwrap_err()).unreachable());
+    }
+
+    #[test]
+    fn a_start_sends_the_place_it_showed_and_a_changed_one_is_an_answer() {
+        // discovery-page clauses 145–146 (mStream 95f2205a): the body
+        // carries the destination LANDS IN drew — its source dropped — or
+        // null; the server's 409 destination_changed names the one in force.
+        let row = serde_json::json!({ "artist": "Boukmanflow", "title": "Late Train Verse", "peer": { "id": 1 } });
+        let job = serde_json::json!({ "id": 8, "plugin": "federation-copy", "state": "queued",
+            "params": { "destination": { "vpath": "copies", "base": "from-peers", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "user" } } });
+        let music = serde_json::json!({ "vpath": "music", "base": "", "layout": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}", "source": "default" });
+        let changed = |now: serde_json::Value| {
+            json_reply("409 Conflict", serde_json::json!({ "error": "destination_changed",
+                "message": "your collection destination has changed — check where this will land and ask again", "destination": now }))
+        };
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("202 Accepted", serde_json::json!({ "created": true, "job": job })),
+            changed(music.clone()),
+            changed(serde_json::Value::Null),
+            json_reply("409 Conflict", serde_json::json!({ "error": "someone else on this server is already getting this — try again in a moment" })),
+            // No destination named, and one this client cannot read.
+            json_reply("409 Conflict", serde_json::json!({ "error": "destination_changed", "message": "moved" })),
+            changed(serde_json::json!("copies")),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let shown = CollectionDestination {
+            vpath: "copies".into(),
+            base: "from-peers".into(),
+            layout: "{{ARTIST}}/{{ALBUM}}".into(),
+            source: Some("user".into()),
+        };
+        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)))).unwrap() {
+            JobStartAnswer::Started(started) => {
+                assert_eq!(started.job.params.destination, Some(Some(CollectionDestination { source: Some("user".into()), ..shown.clone() })), "pinned");
+            }
+            other => panic!("{other:?}"),
+        }
+        let body = seen_json(&seen).1;
+        assert_eq!(body["destination"], serde_json::json!({ "vpath": "copies", "base": "from-peers", "layout": "{{ARTIST}}/{{ALBUM}}" }), "its source dropped");
+        assert_eq!(body["scope"], "album");
+        let now: CollectionDestination = serde_json::from_value(music).unwrap();
+        assert_eq!(
+            wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)))).unwrap(),
+            JobStartAnswer::DestinationChanged(Some(Some(now))),
+            "nothing started: where files land now"
+        );
+        seen_json(&seen);
+        assert_eq!(
+            wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(None))).unwrap(),
+            JobStartAnswer::DestinationChanged(Some(None)),
+            "an explicit null: nowhere"
+        );
+        assert_eq!(seen_json(&seen).1["destination"], serde_json::Value::Null, "it showed nowhere");
+        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)))) {
+            Err(ApiError::Server { status: 409, message }) => assert!(message.starts_with("someone else"), "{message}"),
+            other => panic!("another account's copy keeps its words: {other:?}"),
+        }
+        // A body that names no place, or one this client cannot read, is
+        // never nowhere: what is drawn stays until the view is read again.
+        for _ in 0..2 {
+            assert_eq!(
+                wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)))).unwrap(),
+                JobStartAnswer::DestinationChanged(None)
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_from_before_the_pin_is_asked_again_without_the_destination() {
+        // mStream before 2026-10-21 (v6.31.1, its master): the jobs route's
+        // Joi body is strict — a 400 in its words for the key, no pin.
+        let row = serde_json::json!({ "artist": "Boukmanflow", "title": "Late Train Verse", "peer": { "id": 1 } });
+        let job = serde_json::json!({ "id": 9, "plugin": "federation-copy", "state": "queued", "params": { "scope": "album" } });
+        let strict = || json_reply("400 Bad Request", serde_json::json!({ "error": "\"destination\" is not allowed" }));
+        let (port, seen) = canned_server_bodies(vec![
+            strict(),
+            json_reply("202 Accepted", serde_json::json!({ "created": true, "job": job })),
+            json_reply("400 Bad Request", serde_json::json!({ "error": "\"scope\" must be one of [album, artist]" })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let shown = CollectionDestination { vpath: "copies".into(), layout: "{{ALBUMARTIST}}/{{ALBUM}}".into(), ..CollectionDestination::default() };
+        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)))).unwrap() {
+            JobStartAnswer::Started(started) => assert_eq!(started.job.params.destination, None, "it reads as from before the pin"),
+            other => panic!("{other:?}"),
+        }
+        assert!(seen_json(&seen).1.get("destination").is_some(), "asked with the place first");
+        let again = seen_json(&seen).1;
+        assert_eq!(again, serde_json::json!({ "recommendation": row, "scope": "album" }), "then without it, nothing else changed");
+        // Any other 400 keeps its words, asked once.
+        assert_eq!(
+            PluginFailure::of(&wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)))).unwrap_err()),
+            PluginFailure::Refused { status: 400, words: "\"scope\" must be one of [album, artist]".into() }
+        );
+    }
+
+    #[test]
+    fn a_save_puts_the_place_or_null_and_a_refusal_keeps_the_servers_words() {
+        let view = serde_json::json!({
+            "destination": { "vpath": "copies", "base": "from-peers", "layout": "{{ALBUMARTIST}}/{{ALBUM}}", "source": "user" },
+            "saved": { "vpath": "copies", "base": "from-peers", "layout": "{{ALBUMARTIST}}/{{ALBUM}}" },
+            "libraries": [{ "vpath": "music", "template": "{{ARTIST}}/{{YEAR}} - {{ALBUM}}" }, { "vpath": "copies", "template": null }],
+            "defaultLayout": "{{ARTIST}}/{{ALBUM}}", "variables": ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"]
+        });
+        let refusal = "destination layout: Unknown variable {{ARTST}}. Supported: {{ARTIST}}, {{ALBUM}}, {{YEAR}}, {{GENRE}}, {{ALBUMARTIST}}, {{PEER}}";
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", view),
+            json_reply("200 OK", serde_json::json!({ "destination": null, "libraries": [] })),
+            json_reply("400 Bad Request", serde_json::json!({ "error": refusal })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let place = CollectionDestination {
+            vpath: "copies".into(),
+            base: "from-peers".into(),
+            layout: "{{ALBUMARTIST}}/{{ALBUM}}".into(),
+            source: Some("user".into()),
+        };
+        let saved = wait(client.collection_destination_save_async(Some(&place))).unwrap();
+        assert_eq!(saved.destination.and_then(|d| d.source).as_deref(), Some("user"));
+        assert_eq!(saved.libraries.len(), 2);
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("PUT /api/v1/discovery/collection/destination "), "{line}");
+        assert_eq!(body, serde_json::json!({ "destination": { "vpath": "copies", "base": "from-peers", "layout": "{{ALBUMARTIST}}/{{ALBUM}}" } }));
+        assert!(wait(client.collection_destination_save_async(None)).unwrap().destination.is_none());
+        assert_eq!(seen_json(&seen).1, serde_json::json!({ "destination": null }), "back to the library default");
+        let bad = CollectionDestination { layout: "{{ARTST}}/{{YEAR}} - {{ALBUM}}".into(), ..place };
+        assert_eq!(
+            PluginFailure::of(&wait(client.collection_destination_save_async(Some(&bad))).unwrap_err()),
+            PluginFailure::Refused { status: 400, words: refusal.into() }
+        );
+        // Never a connected server's.
+        let peer = Client::new("http://127.0.0.1:9").unwrap().with_peer(Some(3));
+        assert!(matches!(wait(peer.collection_destination_save_async(None)), Err(ApiError::Config(_))));
+        assert!(matches!(wait(peer.plugin_job_start_async(COPY_PLUGIN, &serde_json::json!({}), None, None)), Err(ApiError::Config(_))));
+    }
+
+    #[test]
+    fn the_plugin_routes_are_never_asked_of_a_connected_server() {
+        // Through the parent's proxy, or over the peer's own tunnel: refused
+        // before any request (discovery-page clause 100).
+        for client in [
+            Client::new("http://127.0.0.1:9").unwrap().with_peer(Some(3)),
+            Client::new("http://127.0.0.1:9").unwrap().with_compressed_art(true),
+        ] {
+            assert!(matches!(wait(client.discovery_plugins_async()), Err(ApiError::Config(_))));
+            assert!(matches!(wait(client.plugin_jobs_async(None, None)), Err(ApiError::Config(_))));
+            assert!(matches!(wait(client.plugin_jobs_lookup_batch_async(&[serde_json::json!({})])), Err(ApiError::Config(_))));
+        }
+    }
+
+    #[test]
+    fn lookups_go_a_hundred_at_a_time_and_come_back_in_order() {
+        let results = |n: usize, from: usize| {
+            serde_json::json!({ "results": (0..n).map(|i| serde_json::json!({ "key": format!("text:{}", from + i), "keys": {}, "jobs": [] })).collect::<Vec<_>>() })
+        };
+        // The last chunk answers short: padded, so every row keeps its place.
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", results(100, 0)),
+            json_reply("200 OK", results(100, 100)),
+            json_reply("200 OK", results(20, 200)),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let recs: Vec<serde_json::Value> = (0..230).map(|i| serde_json::json!({ "title": format!("t{i}"), "source": "federation" })).collect();
+        let found = wait(client.plugin_jobs_lookup_batch_async(&recs)).unwrap();
+        assert_eq!(found.len(), 230);
+        assert_eq!(found[150].key.as_deref(), Some("text:150"));
+        assert_eq!((found[219].key.as_deref(), found[229].key.as_deref()), (Some("text:219"), None));
+        let sizes: Vec<usize> = (0..3)
+            .map(|_| {
+                let (line, body) = seen_json(&seen);
+                assert!(line.starts_with("POST /api/v1/discovery/plugin-jobs/lookup/batch "), "{line}");
+                body["recommendations"].as_array().unwrap().len()
+            })
+            .collect();
+        assert_eq!(sizes, vec![100, 100, 30]);
+    }
+
+    #[test]
+    fn the_jobs_list_cancel_clear_destination_and_links_read_their_answers() {
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", serde_json::json!({ "jobs": [{ "id": 3, "plugin": "federation-copy", "state": "running", "progress": 0.5 }], "runner": { "running": 1, "active": true } })),
+            json_reply("200 OK", serde_json::json!({ "outcome": "requested", "job": { "id": 3, "state": "running", "cancelRequested": true } })),
+            json_reply("409 Conflict", serde_json::json!({ "error": "job 3 has already finished" })),
+            json_reply("200 OK", serde_json::json!({ "removed": 4 })),
+            json_reply("200 OK", serde_json::json!({ "destination": { "vpath": "demo", "base": "", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "default" }, "libraries": [{ "vpath": "demo" }] })),
+            json_reply("200 OK", serde_json::json!({ "result": { "links": [
+                { "id": "mb", "label": "MusicBrainz", "url": "https://musicbrainz.org/search?q=x", "kind": "search" },
+                { "id": "odd", "label": "Odd", "url": "javascript:alert(1)", "kind": "search" }
+            ] } })),
+            json_reply("200 OK", serde_json::json!({ "plugins": [{ "name": "federation-copy", "capabilities": ["acquire"], "scopes": ["song", "album"] }], "jobs": { "allowed": true } })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let list = wait(client.plugin_jobs_async(Some(JobState::Running), Some(900))).unwrap();
+        assert_eq!((list.jobs.len(), list.runner.map(|r| r.running)), (1, Some(1)));
+        assert!(seen_json(&seen).0.starts_with("GET /api/v1/discovery/plugin-jobs?state=running&limit=500 "));
+        match wait(client.plugin_job_cancel_async(3)).unwrap() {
+            CancelAnswer::Cancelled(c) => assert!(c.job.unwrap().cancel_requested && c.outcome.as_deref() == Some("requested")),
+            other => panic!("{other:?}"),
+        }
+        assert!(seen_json(&seen).0.starts_with("POST /api/v1/discovery/plugin-jobs/3/cancel "));
+        assert_eq!(wait(client.plugin_job_cancel_async(3)).unwrap(), CancelAnswer::AlreadyFinished, "a 409 is an answer");
+        seen_json(&seen);
+        assert_eq!(wait(client.plugin_jobs_clear_async()).unwrap().removed, 4);
+        assert!(seen_json(&seen).0.starts_with("POST /api/v1/discovery/plugin-jobs/clear "));
+        let dest = wait(client.collection_destination_async()).unwrap();
+        assert_eq!(dest.destination.map(|d| d.vpath), Some("demo".into()));
+        assert!(seen_json(&seen).0.starts_with("GET /api/v1/discovery/collection/destination "));
+        let links = wait(client.plugin_links_async("links", &serde_json::json!({ "title": "x" }))).unwrap();
+        assert_eq!(links.iter().map(|l| l.label.as_str()).collect::<Vec<_>>(), vec!["MusicBrainz"], "https only");
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/discovery/plugins/links/resolve "), "{line}");
+        assert_eq!(body, serde_json::json!({ "recommendation": { "title": "x" } }));
+        let listing = wait(client.discovery_plugins_async()).unwrap();
+        assert!(listing.copies(JobScope::Album) && !listing.copies(JobScope::Artist));
+    }
+
+    #[test]
+    fn a_tunnel_client_carries_its_loopback_token_on_the_download() {
+        let (port, seen) = canned_server(vec![reply("200 OK", "application/zip", b"PK\x05\x06")]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}"))
+            .unwrap()
+            .with_local_token(Some("bridge".into()));
+        assert_eq!(client.admin_logs_download().expect("the zip"), b"PK\x05\x06");
+        let head = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        let request = head.lines().next().unwrap_or_default();
+        assert!(request.starts_with("GET /api/v1/admin/logs/download?__lt=bridge "), "{request}");
     }
 }

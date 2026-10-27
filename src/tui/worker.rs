@@ -19,10 +19,11 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults, SimilarArtist,
-    Track,
+    Album, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
+    DiscoveryPluginsResponse, Genre, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, Ping, PluginJobList,
+    PluginLink, PlaylistSummary, SearchResults, SimilarArtist, TasteRequest, TasteResponse, Track,
 };
-use crate::api::{ApiError, Client};
+use crate::api::{ApiError, Client, PluginFailure};
 use crate::discovery::DiscoveredServer;
 use crate::dj;
 #[cfg(not(target_arch = "wasm32"))]
@@ -207,6 +208,80 @@ pub enum ApiCmd {
     DiscoveryProbe,
     /// Fill a Discover view. `seed` is the track it all hangs off.
     Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
+    /// Ask the GUI's Discover room for one part of its answer
+    /// (discovery-page contract, clause 30) — a destination on the command,
+    /// not a second command (the D7 habit). `seq` and `generation` come
+    /// back on [`Event::Taste`]: last ask wins, and a reply from a server
+    /// the session has left fills nothing (clause 31). The session's own
+    /// server always: the room is hidden in a peer session (clause 1).
+    Taste { seq: u64, generation: u64, part: TastePart, body: Box<TasteRequest> },
+    /// An album row's `[+]` (clause 61): the album's songs by its name — the
+    /// Albums room's ask — for the App to append to the queue. A connected
+    /// server's album on the strip (the 2026-10-11 strip log) names its
+    /// `peer`, its track `artist`, and the `reach` through the parent's
+    /// federation proxy; `play` replaces the queue and plays instead of
+    /// appending.
+    TasteAlbum {
+        name: String,
+        artist: Option<String>,
+        /// A compilation's album artist (the rows' `albumArtist`): its songs
+        /// are asked by it rather than by a track artist (the 2026-10-19
+        /// log).
+        album_artist: Option<String>,
+        generation: u64,
+        peer: Option<i64>,
+        reach: Option<crate::tui::app::Reach>,
+        play: bool,
+    },
+    // The Discover room's plug-ins — Keep a copy, the Copies modal, Open
+    // elsewhere (discovery-page clauses 100–149). Every one asks the
+    // session's OWN server (the room is hidden in a peer session, and a
+    // copy lands on the user's server), each stamped with the session
+    // generation: a reply from a server the session left fills nothing.
+    /// The gate's two reads: the plug-in listing, then — only when the copy
+    /// plug-in is listed and jobs are allowed — the collection destination
+    /// (clause 101).
+    KeepGate { generation: u64 },
+    /// The jobs a set of connected-server rows already have, for their
+    /// marks: each row's raw taste JSON, unchanged, chunked at 100 by the
+    /// client (clause 111). `seq` comes back: the last lookup wins.
+    JobsLookup { seq: u64, generation: u64, recs: Vec<serde_json::Value> },
+    /// The caller's jobs — the poll and the Copies modal (clause 112).
+    Jobs { seq: u64, generation: u64 },
+    /// Start a copy of `rec`, sent unchanged, with `scope` (clause 103)
+    /// and the place LANDS IN showed (clause 145: `None` sends none,
+    /// `Some(None)` null). `ticket` comes back on the reply, so the Keep
+    /// modal knows its own.
+    JobStart {
+        ticket: u64,
+        generation: u64,
+        plugin: String,
+        rec: Box<serde_json::Value>,
+        scope: JobScope,
+        destination: Option<Option<CollectionDestination>>,
+    },
+    /// The destination read again — each Keep a copy modal that opens
+    /// asks (clause 105); `seq` comes back: the last read wins.
+    DestinationRead { seq: u64, generation: u64 },
+    /// Save where this account's copies land — the picker's Save (clause
+    /// 144): `None` goes back to the library default.
+    DestinationSave { seq: u64, generation: u64, destination: Option<CollectionDestination> },
+    /// The folders in `path` (`/{library}/{folder}`), for the picker's
+    /// completion (clause 143): the session's own server's listing.
+    DestinationFolders { seq: u64, generation: u64, path: String },
+    /// Cancel job `id` (a 409 means it had already finished, clause 133).
+    JobCancel { generation: u64, id: i64 },
+    /// Drop the caller's finished jobs — the Copies modal's Clear finished.
+    JobsClear { generation: u64 },
+    /// Open elsewhere: the `links` plug-in `plugin`'s links for `rec`,
+    /// asked only when the list opens (clause 140).
+    PluginLinks { seq: u64, generation: u64, plugin: String, rec: Box<serde_json::Value> },
+    /// The Keep modal's sizes (clause 106): the album's songs and the
+    /// artist's albums on the connected server — through `reach`, its peer
+    /// reach — and the artist's albums in the user's own library, through
+    /// the session. Every read optional: a missing answer leaves its size
+    /// unknown.
+    KeepFacts { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach>, ask: Box<KeepFactsAsk> },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -265,13 +340,18 @@ impl ApiCmd {
             | ApiCmd::AddToPlaylist { reach, .. }
             | ApiCmd::TrackInfo { reach, .. }
             | ApiCmd::Genres { reach }
-            | ApiCmd::PlaylistNames { reach } => reach.as_ref(),
+            | ApiCmd::PlaylistNames { reach }
+            // A connected server's album asks THAT server, through the proxy.
+            | ApiCmd::TasteAlbum { reach, .. } => reach.as_ref(),
             // The DJ's turns go to ITS server (auto-dj contract, clause 19).
             ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
             // A play goes to its row's server, a peer's to the parent.
             ApiCmd::ReportPlays { reach, .. } | ApiCmd::Scrobble { reach, .. } => Some(reach),
             // Its reach is the parent's and its arm builds the client itself.
+            // The Keep modal's facts read the connected server AND the
+            // session: its arm builds the peer's client from its reach.
             ApiCmd::DirectAccess { .. }
+            | ApiCmd::KeepFacts { .. }
             | ApiCmd::Connect { .. }
             | ApiCmd::Login { .. }
             | ApiCmd::TunnelOpen { .. }
@@ -286,6 +366,18 @@ impl ApiCmd {
             | ApiCmd::SonicRandom { .. }
             | ApiCmd::DiscoveryProbe
             | ApiCmd::Discover { .. }
+            | ApiCmd::Taste { .. }
+            // The plug-in routes are the user's own server's (clause 100).
+            | ApiCmd::KeepGate { .. }
+            | ApiCmd::JobsLookup { .. }
+            | ApiCmd::Jobs { .. }
+            | ApiCmd::JobStart { .. }
+            | ApiCmd::DestinationRead { .. }
+            | ApiCmd::DestinationSave { .. }
+            | ApiCmd::DestinationFolders { .. }
+            | ApiCmd::JobCancel { .. }
+            | ApiCmd::JobsClear { .. }
+            | ApiCmd::PluginLinks { .. }
             | ApiCmd::SavePlaylist { .. }
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
@@ -399,6 +491,92 @@ pub enum DiscoverDest {
     Browser,
     /// The Discover tab of the full-screen view.
     NowPlaying,
+}
+
+/// Which part of the Discover room's answer an ask fills (discovery-page
+/// contract, clauses 30 and 65). The App keeps a seq per slot, so a part
+/// says which slots its reply may fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TastePart {
+    /// Ask A: `library` — the seeds, the header facts and the library's
+    /// lists. Never `network`: the play-now room shows only what plays.
+    Main,
+    /// Ask B: the connected (federated) servers, only while
+    /// `federationDiscovery` is advertised.
+    Peers,
+}
+
+/// Why a taste ask has no answer. A 401 is not here: it is the session's
+/// problem and goes out as [`Event::Unauthorized`] like any read's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TasteFailure {
+    /// 403: switched off, or the index is not there yet — the route says
+    /// both the same way, so the App re-pings before naming one (clause
+    /// 82).
+    Forbidden,
+    /// Transport or server failure, in the server's words (clause 83).
+    Failed(String),
+}
+
+/// What the Keep modal's sizes are asked about (clause 106): the row's or
+/// the tile's album, its track artist, its album artist and its year — the
+/// album copy's own selectors, so the count matches what it takes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeepFactsAsk {
+    pub album: Option<String>,
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub year: Option<i32>,
+}
+
+/// The Keep modal's sizes; `None` where a read was not asked or did not
+/// answer (DIM "…" until then; clause 106).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeepFacts {
+    /// The album's songs on the connected server — how many, and the tags
+    /// each files under (clause 105).
+    pub album_songs: Option<Vec<KeepSong>>,
+    /// The artist's albums on the connected server.
+    pub peer_albums: Option<Vec<ArtistAlbumRow>>,
+    /// The artist's albums in the user's own library.
+    pub local_albums: Option<Vec<ArtistAlbumRow>>,
+}
+
+/// One song of the album's listing, with the tags a copy files it under
+/// that may differ from song to song (destination.js `tagsForLayout`):
+/// its artist, its year and its genre — what LANDS IN needs to know
+/// whether an album copy keeps to one folder (clause 105).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeepSong {
+    /// Its path on the connected server: the row's own song is found by it.
+    pub filepath: String,
+    /// The ARTIST tag as written ("A feat. B" — the copy files by it, not
+    /// by the primary artist the listing's `artist` names), else that name.
+    pub artist: Option<String>,
+    pub year: Option<i32>,
+    /// Its genre where the listing names exactly one: the library splits a
+    /// genre tag on `,` `;` `/` (the peer's scanner), the copy files by the
+    /// tag as the file has it — a "Hip-Hop/Rap" lists as two and lands in
+    /// "Hip-Hop-Rap" — so a song that lists two or more is unknown (the
+    /// webapp's `songGenre`).
+    pub genre: Option<String>,
+}
+
+impl KeepSong {
+    pub fn of(track: &Track) -> KeepSong {
+        let named = |v: &Option<String>| v.clone().filter(|s| !s.trim().is_empty());
+        let md = &track.metadata;
+        let genres: Vec<&String> = md.genres.iter().filter(|g| !g.trim().is_empty()).collect();
+        KeepSong {
+            filepath: track.filepath.clone(),
+            artist: named(&md.artist_display).or_else(|| named(&md.artist)),
+            year: md.year.filter(|y| *y > 0),
+            genre: match genres[..] {
+                [one] => Some(one.clone()),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// A position in the tag-based library hierarchy. Doubles as the request (what
@@ -546,8 +724,10 @@ pub enum Event {
     /// The random pick for one Sonic Path end — `None` when the library
     /// answered empty.
     SonicRandom { side: crate::tui::app::SonicSide, track: Option<Box<Track>> },
-    /// The ping's discovery-path flag, fetched to explain a 403.
-    DiscoveryProbe { available: bool },
+    /// The ping's discovery flags, fetched to explain a 403: `available`
+    /// is the sonic path's (`discoveryPath`), `taste` the Discover room's
+    /// gate (`discovery && discoveryTaste >= 1`, discovery-page clause 82).
+    DiscoveryProbe { available: bool, taste: bool },
     /// A Discover view's contents, tagged with the node they belong to.
     /// `seed` is the filepath it was asked about. The browser tab tells a
     /// stale reply by its node; the now-playing panel follows the speakers,
@@ -559,6 +739,48 @@ pub enum Event {
         dest: DiscoverDest,
         seed: String,
     },
+    /// One part of the Discover room's answer, or why there is none —
+    /// never an [`Event::Error`], which would clear every other wait: the
+    /// failed half says so in its own panes and the other stands (clause
+    /// 83).
+    Taste { seq: u64, generation: u64, part: TastePart, answer: Result<Box<TasteResponse>, TasteFailure> },
+    /// An album row's songs to queue: `None` when the ask failed.
+    /// `name`, `artist`, `peer` and `play` as the ask carried them.
+    TasteAlbum {
+        generation: u64,
+        tracks: Option<Vec<Track>>,
+        name: String,
+        artist: Option<String>,
+        album_artist: Option<String>,
+        peer: Option<i64>,
+        play: bool,
+    },
+    // The Discover room's plug-ins (clauses 100–149): every reply carries
+    // its session generation and, where several may be out, its seq, and
+    // never turns into an [`Event::Error`] — the room says each failure in
+    // its own place, with the server's words.
+    /// The gate's listing and — asked only behind the copy plug-in —
+    /// its destination.
+    KeepGate {
+        generation: u64,
+        plugins: Result<Box<DiscoveryPluginsResponse>, PluginFailure>,
+        destination: Option<Result<Box<CollectionDestinationView>, PluginFailure>>,
+    },
+    /// One lookup per row asked, in the order asked.
+    JobsLookup { seq: u64, generation: u64, answer: Result<Vec<JobLookup>, PluginFailure> },
+    Jobs { seq: u64, generation: u64, answer: Result<Box<PluginJobList>, PluginFailure> },
+    JobStarted { ticket: u64, generation: u64, answer: Result<Box<JobStarted>, PluginFailure> },
+    /// The destination as read again, or as a save left it — the view,
+    /// or why there is none (a failed read keeps what is drawn).
+    DestinationRead { seq: u64, generation: u64, answer: Result<Box<CollectionDestinationView>, PluginFailure> },
+    DestinationSaved { seq: u64, generation: u64, answer: Result<Box<CollectionDestinationView>, PluginFailure> },
+    /// The folder names in `path`, as asked.
+    DestinationFolders { seq: u64, generation: u64, path: String, answer: Result<Vec<String>, PluginFailure> },
+    JobCancelled { generation: u64, id: i64, answer: Result<CancelAnswer, PluginFailure> },
+    /// How many finished jobs went.
+    JobsCleared { generation: u64, answer: Result<u64, PluginFailure> },
+    PluginLinks { seq: u64, generation: u64, answer: Result<Vec<PluginLink>, PluginFailure> },
+    KeepFacts { seq: u64, generation: u64, facts: Box<KeepFacts> },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
@@ -1343,10 +1565,7 @@ fn client_for(reach: &crate::tui::app::Reach) -> Option<Arc<Client>> {
     if let Some((_, client)) = kept.iter().find(|(known, _)| known == reach) {
         return Some(client.clone());
     }
-    let client = Client::new_with(&reach.base, reach.self_signed)
-        .ok()
-        .map(|c| c.with_token(reach.token.clone()).with_peer(reach.peer).with_local_token(reach.local_token.clone()))
-        .map(Arc::new)?;
+    let client = reach.client().ok().map(Arc::new)?;
     if kept.len() >= SHELF {
         kept.remove(0);
     }
@@ -1543,6 +1762,17 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             .is_ok();
         return Event::Reachable { server, reachable };
     }
+    // The Keep modal's facts ask the connected server through its reach
+    // and the user's own library through the session (clause 106).
+    if let ApiCmd::KeepFacts { seq, generation, reach, ask } = cmd {
+        let peer = reach.as_ref().and_then(client_for);
+        let facts = match client {
+            Some(session) => crate::api::wait(async { Ok(keep_facts(peer.as_deref(), session, &ask).await) })
+                .unwrap_or_default(),
+            None => KeepFacts::default(),
+        };
+        return Event::KeepFacts { seq, generation, facts: Box::new(facts) };
+    }
     // A row's own server when it is not the session's (contract clause 30):
     // its cover and its shape come from a client built for the reach the
     // App resolved — a tunnel's loopback with its token, a saved server
@@ -1601,8 +1831,32 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::SonicRandom { side } => c
             .random_song(&crate::api::types::RandomSongRequest::default())
             .map(|r| Event::SonicRandom { side, track: r.songs.into_iter().next().map(Box::new) }),
-        ApiCmd::DiscoveryProbe => {
-            c.ping().map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+        ApiCmd::DiscoveryProbe => c.ping().map(|ping| probe_event(&ping)),
+        ApiCmd::Taste { seq, generation, part, body } => {
+            crate::api::wait(taste(c, seq, generation, part, &body))
+        }
+        ApiCmd::TasteAlbum { name, artist, album_artist, generation, peer, play, .. } => {
+            crate::api::wait(taste_album(c, TasteAlbumAsk { name, artist, album_artist, peer, play }, generation))
+        }
+        // The plug-ins answer through the shapers both workers share.
+        ApiCmd::KeepGate { generation } => crate::api::wait(keep_gate(c, generation)),
+        ApiCmd::JobsLookup { seq, generation, recs } => crate::api::wait(jobs_lookup(c, seq, generation, &recs)),
+        ApiCmd::Jobs { seq, generation } => crate::api::wait(jobs(c, seq, generation)),
+        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination } => {
+            let ask = JobStartAsk { plugin: &plugin, rec: &rec, scope, destination: destination.as_ref().map(Option::as_ref) };
+            crate::api::wait(job_start(c, ticket, generation, ask))
+        }
+        ApiCmd::DestinationRead { seq, generation } => crate::api::wait(destination_read(c, seq, generation)),
+        ApiCmd::DestinationSave { seq, generation, destination } => {
+            crate::api::wait(destination_save(c, seq, generation, destination.as_ref()))
+        }
+        ApiCmd::DestinationFolders { seq, generation, path } => {
+            crate::api::wait(destination_folders(c, seq, generation, path))
+        }
+        ApiCmd::JobCancel { generation, id } => crate::api::wait(job_cancel(c, generation, id)),
+        ApiCmd::JobsClear { generation } => crate::api::wait(jobs_clear(c, generation)),
+        ApiCmd::PluginLinks { seq, generation, plugin, rec } => {
+            crate::api::wait(plugin_links(c, seq, generation, &plugin, &rec))
         }
         // A failed ask is `None`: nothing about the saved peers changes.
         ApiCmd::FederationPeers { parent } => {
@@ -1659,6 +1913,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         | ApiCmd::TunnelClose { .. }
         | ApiCmd::TunnelCredential { .. }
         | ApiCmd::DirectAccess { .. }
+        | ApiCmd::KeepFacts { .. }
         | ApiCmd::Retarget { .. }
         | ApiCmd::Probe { .. }
         | ApiCmd::ArtWithdraw { .. }
@@ -1840,6 +2095,16 @@ fn establish(
     Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
 }
 
+/// The session's client aimed at what `identity` names: through the
+/// parent's proxies for `peer`, and — for a peer session, the one over the
+/// peer's own tunnel included, whose Connect carries no `peer` — asking the
+/// peer's compressed covers, as [`client_for`] does for a peer's row.
+#[cfg(not(target_arch = "wasm32"))]
+fn aim_session(c: Client, identity: &str, peer: Option<i64>) -> Client {
+    let is_peer = peer.is_some() || crate::config::peer_identity_parts(identity).is_some();
+    c.with_peer(peer).with_compressed_art(is_peer)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn connect(
     client: &mut Option<Arc<Client>>,
@@ -1851,7 +2116,7 @@ fn connect(
     local_token: Option<String>,
 ) -> Option<Event> {
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Ok(c) => aim_session(c.with_token(token.clone()), id, peer).with_local_token(local_token),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     // Taken before the client moves; it is the address that was reached,
@@ -1892,7 +2157,7 @@ fn login(
     // the peer through the parent's proxies, exactly as before the token
     // expired — a plain client here listed the parent's library under the
     // peer's name (the review's finding).
-    let c = c.with_peer(peer);
+    let c = aim_session(c, id, peer);
     match establish(client, c, id, Some(username.to_string()), Some(token)) {
         Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),
@@ -1914,7 +2179,7 @@ fn retarget(
 ) -> Event {
     let failed = |why: String| Event::RetargetFailed { identity: identity.to_string(), why };
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Ok(c) => aim_session(c.with_token(token.clone()), identity, peer).with_local_token(local_token),
         Err(e) => return failed(e.to_string()),
     };
     if let Err(e) = c.ping_via_info() {
@@ -2448,6 +2713,204 @@ pub(crate) async fn dj_probe(client: &Client) -> Option<DjServerInfo> {
     }
 }
 
+// ── The Discover room (discovery-page contract) ─────────────────────────────
+
+/// The probe's reading of a ping: the sonic path's flag and the Discover
+/// room's gate, both from one GET.
+pub(crate) fn probe_event(ping: &Ping) -> Event {
+    let caps = crate::api::types::Capabilities::from(ping);
+    Event::DiscoveryProbe { available: ping.discovery_path, taste: caps.taste() }
+}
+
+/// One part of the room's answer. Only a 401 fails as an error (the
+/// session is no good); a 403 and every other failure are the answer's.
+pub(crate) async fn taste(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    part: TastePart,
+    body: &TasteRequest,
+) -> Result<Event, ApiError> {
+    let answer = match client.taste_async(body).await {
+        Ok(response) => Ok(Box::new(response)),
+        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+        Err(ApiError::Forbidden(_)) => Err(TasteFailure::Forbidden),
+        Err(e) => Err(TasteFailure::Failed(e.to_string())),
+    };
+    Ok(Event::Taste { seq, generation, part, answer })
+}
+
+/// What a [`ApiCmd::TasteAlbum`] asks, carried back on its event.
+pub(crate) struct TasteAlbumAsk {
+    pub name: String,
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub peer: Option<i64>,
+    pub play: bool,
+}
+
+/// An album row's `[+]` (clause 61): its songs, asked by name alone as the
+/// Albums room asks (the 2026-10-05 log). A connected server's album asks
+/// by name and its track artist through a client aimed at that server, and
+/// any failure there — a 401 among them, which is the peer's word and not
+/// the session's — is `None`: the App queues the rows that matched.
+pub(crate) async fn taste_album(client: &Client, ask: TasteAlbumAsk, generation: u64) -> Result<Event, ApiError> {
+    let TasteAlbumAsk { name, artist, album_artist, peer, play } = ask;
+    let answer = match (&peer, &album_artist) {
+        // A connected server's compilation: by its album artist alone, so
+        // every song of it comes back whoever sings it (the 2026-10-19 log).
+        (Some(_), Some(credit)) => client.album_songs_by_async(&name, None, Some(credit), None).await,
+        _ => {
+            let asked = if peer.is_some() { artist.clone() } else { None };
+            let node = LibraryNode::Album { name: name.clone(), artist: asked };
+            match load_library(client, &node).await {
+                Ok(LibraryData::Tracks(tracks)) => Ok(tracks),
+                Ok(_) => Err(ApiError::Config("not an album listing".into())),
+                Err(e) => Err(e),
+            }
+        }
+    };
+    let tracks = match answer {
+        Ok(tracks) => Some(tracks),
+        Err(ApiError::Unauthorized) if peer.is_none() => return Err(ApiError::Unauthorized),
+        Err(_) => None,
+    };
+    Ok(Event::TasteAlbum { generation, tracks, name, artist, album_artist, peer, play })
+}
+
+// ── The Discover room's plug-ins (discovery-page clauses 100–149) ──────────
+//
+// The shapers both workers share: a 401 is the session's (it goes out as
+// `Event::Unauthorized` like any read's); every other failure is the
+// room's, in the server's words (`PluginFailure`).
+
+fn plugin_result<T>(result: Result<T, ApiError>) -> Result<Result<T, PluginFailure>, ApiError> {
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+        Err(e) => Ok(Err(PluginFailure::of(&e))),
+    }
+}
+
+/// The gate's two reads (clause 101): the listing, then the destination —
+/// asked only when the copy plug-in is listed and jobs are allowed, since
+/// nothing else reads it.
+pub(crate) async fn keep_gate(client: &Client, generation: u64) -> Result<Event, ApiError> {
+    let plugins = plugin_result(client.discovery_plugins_async().await)?;
+    let destination = match &plugins {
+        Ok(listing) if listing.copies(JobScope::Song) => {
+            Some(plugin_result(client.collection_destination_async().await)?.map(Box::new))
+        }
+        _ => None,
+    };
+    Ok(Event::KeepGate { generation, plugins: plugins.map(Box::new), destination })
+}
+
+pub(crate) async fn jobs_lookup(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    recs: &[serde_json::Value],
+) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_jobs_lookup_batch_async(recs).await)?;
+    Ok(Event::JobsLookup { seq, generation, answer })
+}
+
+pub(crate) async fn jobs(client: &Client, seq: u64, generation: u64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_jobs_async(None, None).await)?;
+    Ok(Event::Jobs { seq, generation, answer: answer.map(Box::new) })
+}
+
+/// What one start sends: the plug-in, the row unchanged, the scope and
+/// the place shown ([`ApiCmd::JobStart`]).
+pub(crate) struct JobStartAsk<'a> {
+    pub plugin: &'a str,
+    pub rec: &'a serde_json::Value,
+    pub scope: JobScope,
+    pub destination: Option<Option<&'a CollectionDestination>>,
+}
+
+/// A start; the server's 409 `destination_changed` is the room's failure
+/// to word (clause 146), the place in force now with it.
+pub(crate) async fn job_start(client: &Client, ticket: u64, generation: u64, ask: JobStartAsk<'_>) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_job_start_async(ask.plugin, ask.rec, Some(ask.scope), ask.destination).await)?;
+    let answer = answer.and_then(|started| match started {
+        JobStartAnswer::Started(started) => Ok(started),
+        JobStartAnswer::DestinationChanged(now) => Err(PluginFailure::DestinationChanged(now)),
+    });
+    Ok(Event::JobStarted { ticket, generation, answer })
+}
+
+pub(crate) async fn destination_read(client: &Client, seq: u64, generation: u64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.collection_destination_async().await)?;
+    Ok(Event::DestinationRead { seq, generation, answer: answer.map(Box::new) })
+}
+
+pub(crate) async fn destination_save(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    destination: Option<&CollectionDestination>,
+) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.collection_destination_save_async(destination).await)?;
+    Ok(Event::DestinationSaved { seq, generation, answer: answer.map(Box::new) })
+}
+
+/// A folder's own folders, by name in the server's order — a file is no
+/// place to land in.
+pub(crate) async fn destination_folders(client: &Client, seq: u64, generation: u64, path: String) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.file_explorer_async(&path).await)?;
+    let answer = answer.map(|listing| listing.directories.into_iter().map(|d| d.name).filter(|n| !n.is_empty()).collect());
+    Ok(Event::DestinationFolders { seq, generation, path, answer })
+}
+
+pub(crate) async fn job_cancel(client: &Client, generation: u64, id: i64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_job_cancel_async(id).await)?;
+    Ok(Event::JobCancelled { generation, id, answer })
+}
+
+pub(crate) async fn jobs_clear(client: &Client, generation: u64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_jobs_clear_async().await)?;
+    Ok(Event::JobsCleared { generation, answer: answer.map(|cleared| cleared.removed) })
+}
+
+pub(crate) async fn plugin_links(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    plugin: &str,
+    rec: &serde_json::Value,
+) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_links_async(plugin, rec).await)?;
+    Ok(Event::PluginLinks { seq, generation, answer })
+}
+
+/// The Keep modal's sizes (clause 106), each read optional: the album's
+/// songs on the connected server asked with the copy's own selectors (a
+/// compilation by its album artist, else by its track artist and year),
+/// the artist's albums there, and the artist's albums in the user's own
+/// library. `peer` is `None` where the connected server cannot be reached
+/// from here (the browser build): its sizes stay unknown.
+pub(crate) async fn keep_facts(peer: Option<&Client>, local: &Client, ask: &KeepFactsAsk) -> KeepFacts {
+    let artist = ask.artist.as_deref().filter(|a| !a.trim().is_empty());
+    let album = ask.album.as_deref().filter(|a| !a.trim().is_empty());
+    let mut facts = KeepFacts::default();
+    if let (Some(peer), Some(album)) = (peer, album) {
+        let songs = match ask.album_artist.as_deref() {
+            Some(credit) => peer.album_songs_by_async(album, None, Some(credit), ask.year).await,
+            None => peer.album_songs_by_async(album, artist, None, ask.year).await,
+        };
+        facts.album_songs = songs.ok().map(|tracks| tracks.iter().map(KeepSong::of).collect());
+    }
+    if let Some(artist) = artist {
+        if let Some(peer) = peer {
+            facts.peer_albums = peer.artist_album_rows_async(artist).await.ok();
+        }
+        facts.local_albums = local.artist_album_rows_async(artist).await.ok();
+    }
+    facts
+}
+
 /// How many neighbours a Discover view asks for. Deep enough to browse,
 /// short enough that the tail is still relevant rather than noise.
 const DISCOVER_LIMIT: u32 = 40;
@@ -2607,6 +3070,214 @@ pub(crate) fn journey_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The Discover room's plug-ins (discovery-page clauses 100–149) ──────
+
+    mod keep {
+        use super::*;
+        use crate::api::tests::{canned_server_bodies, json_reply, seen_json};
+        use crate::api::types::JobScope;
+
+        fn client(port: u16) -> Client {
+            Client::new(&format!("http://127.0.0.1:{port}")).unwrap()
+        }
+
+        #[test]
+        fn the_gate_asks_the_destination_only_behind_the_copy_plugin() {
+            let listing = |allowed: bool| {
+                json_reply("200 OK", serde_json::json!({ "plugins": [{ "name": "federation-copy", "capabilities": ["acquire"] }], "jobs": { "allowed": allowed } }))
+            };
+            let (port, seen) = canned_server_bodies(vec![
+                listing(true),
+                json_reply("200 OK", serde_json::json!({ "destination": null, "libraries": [] })),
+                listing(false),
+            ]);
+            let c = client(port);
+            match crate::api::wait(keep_gate(&c, 4)).unwrap() {
+                Event::KeepGate { generation: 4, plugins: Ok(p), destination: Some(Ok(d)) } => {
+                    assert!(p.copies(JobScope::Song));
+                    assert!(d.destination.is_none(), "the server's word: nowhere to copy to");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(seen_json(&seen).0.starts_with("GET /api/v1/discovery/plugins "));
+            assert!(seen_json(&seen).0.starts_with("GET /api/v1/discovery/collection/destination "));
+            match crate::api::wait(keep_gate(&c, 4)).unwrap() {
+                Event::KeepGate { plugins: Ok(_), destination: None, .. } => {}
+                other => panic!("jobs refused: no destination asked: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_changed_destination_is_the_rooms_failure_and_the_folders_keep_their_names() {
+            let changed = json_reply("409 Conflict", serde_json::json!({ "error": "destination_changed", "message": "moved",
+                "destination": { "vpath": "music", "base": "", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "default" } }));
+            let (port, seen) = canned_server_bodies(vec![
+                changed,
+                json_reply("200 OK", serde_json::json!({ "path": "/copies/", "directories": [{ "name": "from-peers" }, { "name": "" }], "files": [{ "name": "x.mp3" }] })),
+                json_reply("200 OK", serde_json::json!({ "destination": null, "libraries": [] })),
+            ]);
+            let c = client(port);
+            let shown = CollectionDestination { vpath: "copies".into(), ..CollectionDestination::default() };
+            let ask = JobStartAsk { plugin: "federation-copy", rec: &serde_json::json!({ "title": "x" }), scope: JobScope::Song, destination: Some(Some(&shown)) };
+            match crate::api::wait(job_start(&c, 3, 4, ask)).unwrap() {
+                Event::JobStarted { ticket: 3, generation: 4, answer: Err(PluginFailure::DestinationChanged(Some(Some(now)))) } => assert_eq!(now.vpath, "music"),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(seen_json(&seen).1["destination"], serde_json::json!({ "vpath": "copies", "base": "", "layout": "" }));
+            match crate::api::wait(destination_folders(&c, 5, 4, "/copies".into())).unwrap() {
+                Event::DestinationFolders { seq: 5, path, answer: Ok(names), .. } => {
+                    assert_eq!((path.as_str(), names), ("/copies", vec!["from-peers".to_string()]), "folders only, named");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(seen_json(&seen).1["directory"], "/copies");
+            match crate::api::wait(destination_save(&c, 6, 4, None)).unwrap() {
+                Event::DestinationSaved { seq: 6, answer: Ok(view), .. } => assert!(view.destination.is_none()),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_401_is_the_sessions_and_every_other_failure_the_rooms() {
+            let (port, _seen) = canned_server_bodies(vec![
+                json_reply("401 Unauthorized", serde_json::json!({ "error": "Authentication Error" })),
+                json_reply("500 Internal Server Error", serde_json::json!({ "error": "boom" })),
+            ]);
+            let c = client(port);
+            assert!(matches!(crate::api::wait(jobs(&c, 1, 2)), Err(ApiError::Unauthorized)));
+            match crate::api::wait(jobs(&c, 1, 2)).unwrap() {
+                Event::Jobs { seq: 1, generation: 2, answer: Err(PluginFailure::Refused { status: 500, words }) } => assert_eq!(words, "boom"),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn the_sizes_are_asked_with_the_copys_own_selectors() {
+            // A compilation: its songs by the album artist; the artist's
+            // albums there and here.
+            let (peer_port, peer_seen) = canned_server_bodies(vec![
+                json_reply("200 OK", serde_json::json!([
+                    { "filepath": "a.mp3", "metadata": { "artist": "Peer Kim", "artist-display": "Peer Kim feat. Lou", "year": 2020, "genres": ["Hip-Hop"] } },
+                    { "filepath": "b.mp3", "metadata": { "artist": " ", "year": 0, "genres": [] } },
+                    { "filepath": "c.mp3", "metadata": { "artist": "Peer Kim", "artist-display": " ", "genres": ["Hip-Hop", "Rap"] } },
+                    { "filepath": "d.mp3", "metadata": { "artist-display": "Peer Lou", "genres": ["Rock", " "] } }
+                ])),
+                json_reply("200 OK", serde_json::json!({ "albums": [{ "name": "Mixtape Vol 1", "album_artist": "Various Artists", "artists": ["Peer Kim"], "compilation": 1 }] })),
+            ]);
+            let (own_port, own_seen) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!({ "albums": [] }))]);
+            let ask = KeepFactsAsk {
+                album: Some("Mixtape Vol 1".into()),
+                artist: Some("Peer Kim".into()),
+                album_artist: Some("Various Artists".into()),
+                year: Some(2020),
+            };
+            let facts = crate::api::wait(async { Ok::<_, ApiError>(keep_facts(Some(&client(peer_port)), &client(own_port), &ask).await) }).unwrap();
+            // Each song's own tags, as a copy files it: the ARTIST tag as
+            // written ("feat." and all), else the primary artist; a genre only
+            // where the listing names one — a tag the library split in two
+            // ("Hip-Hop/Rap") lands under neither; a blank artist, a zero year
+            // and no genre are none.
+            let song = |filepath: &str, artist: Option<&str>, year: Option<i32>, genre: Option<&str>| KeepSong {
+                filepath: filepath.into(),
+                artist: artist.map(str::to_string),
+                year,
+                genre: genre.map(str::to_string),
+            };
+            assert_eq!(
+                facts.album_songs,
+                Some(vec![
+                    song("a.mp3", Some("Peer Kim feat. Lou"), Some(2020), Some("Hip-Hop")),
+                    song("b.mp3", None, None, None),
+                    song("c.mp3", Some("Peer Kim"), None, None),
+                    song("d.mp3", Some("Peer Lou"), None, Some("Rock")),
+                ])
+            );
+            assert!(facts.peer_albums.as_ref().is_some_and(|a| a[0].compilation));
+            assert_eq!(facts.local_albums.map(|a| a.len()), Some(0));
+            let (line, body) = seen_json(&peer_seen);
+            assert!(line.starts_with("POST /api/v1/db/album-songs "), "{line}");
+            assert_eq!(body, serde_json::json!({ "album": "Mixtape Vol 1", "album_artist": "Various Artists", "year": 2020 }));
+            assert_eq!(seen_json(&peer_seen).1, serde_json::json!({ "artist": "Peer Kim" }));
+            assert_eq!(seen_json(&own_seen).1, serde_json::json!({ "artist": "Peer Kim" }));
+            // No connected server to ask (the browser build): its sizes stay unknown.
+            let (own_port, _) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!({ "albums": [{ "name": "One" }] }))]);
+            let facts = crate::api::wait(async { Ok::<_, ApiError>(keep_facts(None, &client(own_port), &ask).await) }).unwrap();
+            assert_eq!((facts.album_songs, facts.peer_albums.is_none(), facts.local_albums.map(|a| a.len())), (None, true, Some(1)));
+        }
+
+        #[test]
+        fn a_compilations_album_is_queued_by_its_album_artist() {
+            let (port, seen) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!([{ "filepath": "a.mp3" }]))]);
+            let ask = TasteAlbumAsk { name: "Mixtape Vol 1".into(), artist: None, album_artist: Some("Various Artists".into()), peer: Some(3), play: true };
+            match crate::api::wait(taste_album(&client(port), ask, 9)).unwrap() {
+                Event::TasteAlbum { tracks: Some(tracks), album_artist: Some(credit), peer: Some(3), play: true, .. } => {
+                    assert_eq!((tracks.len(), credit.as_str()), (1, "Various Artists"));
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(seen_json(&seen).1, serde_json::json!({ "album": "Mixtape Vol 1", "album_artist": "Various Artists" }));
+        }
+
+        #[test]
+        fn every_plugin_command_asks_the_session_and_the_facts_build_their_own() {
+            let reach = crate::tui::app::Reach {
+                base: "http://parent:3000".into(),
+                token: None,
+                self_signed: false,
+                peer: Some(3),
+                local_token: None,
+                compressed_art: true,
+            };
+            for cmd in [
+                ApiCmd::KeepGate { generation: 1 },
+                ApiCmd::JobsLookup { seq: 1, generation: 1, recs: vec![] },
+                ApiCmd::Jobs { seq: 1, generation: 1 },
+                ApiCmd::JobStart {
+                    ticket: 1,
+                    generation: 1,
+                    plugin: "federation-copy".into(),
+                    rec: Box::new(serde_json::json!({})),
+                    scope: JobScope::Album,
+                    destination: None,
+                },
+                ApiCmd::DestinationRead { seq: 1, generation: 1 },
+                ApiCmd::DestinationSave { seq: 1, generation: 1, destination: None },
+                ApiCmd::DestinationFolders { seq: 1, generation: 1, path: "/copies".into() },
+                ApiCmd::JobCancel { generation: 1, id: 2 },
+                ApiCmd::JobsClear { generation: 1 },
+                ApiCmd::PluginLinks { seq: 1, generation: 1, plugin: "links".into(), rec: Box::new(serde_json::json!({})) },
+                ApiCmd::KeepFacts { seq: 1, generation: 1, reach: Some(reach), ask: Box::new(KeepFactsAsk::default()) },
+            ] {
+                assert_eq!(cmd.reach(), None, "{cmd:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_probe_reads_both_rooms_flags_off_one_ping() {
+        let ping = Ping { discovery: true, discovery_path: true, discovery_taste: 1, ..Ping::default() };
+        assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: true }));
+        let ping = Ping { discovery: true, discovery_path: true, ..Ping::default() };
+        assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: false }));
+    }
+
+    /// A peer session's covers are the peer's compressed rendition over
+    /// either transport: the direct Connect names the peer only by its
+    /// identity, so that is what marks it (the review's direct-tunnel gap).
+    #[test]
+    fn a_peer_sessions_covers_ask_the_compressed_rendition_over_either_transport() {
+        let pid = crate::config::peer_identity("http://parent:3000", 7);
+        // Through the parent's proxies.
+        let proxied = aim_session(Client::new("http://parent:3000").unwrap(), &pid, Some(7));
+        assert_eq!(proxied.art_url("c.jpg", true).unwrap(), "http://parent:3000/api/v1/federation/peers/7/art/c.jpg?compress=l");
+        // Over the peer's own tunnel: no `peer`, the bridge's token after.
+        let direct = aim_session(Client::new("http://127.0.0.1:5000").unwrap(), &pid, None).with_local_token(Some("lt".into()));
+        assert_eq!(direct.art_url("c.jpg", true).unwrap(), "http://127.0.0.1:5000/album-art/c.jpg?compress=l&__lt=lt");
+        // A server of the user's own keeps its full-size cover.
+        let own = aim_session(Client::new("http://parent:3000").unwrap(), "http://parent:3000", None);
+        assert_eq!(own.art_url("c.jpg", false).unwrap(), "http://parent:3000/album-art/c.jpg");
+    }
 
     fn play(url: &str) -> AudioCmd {
         AudioCmd::Play { url: url.to_string(), duration_hint: None }
@@ -3192,6 +3863,7 @@ mod tests {
             self_signed: false,
             peer: None,
             local_token: None,
+            compressed_art: false,
         };
         api.send(ApiCmd::DirectAccess { parent: parent.clone(), id: peer.id, reach, refresh: false }).unwrap();
         let answer = wait("DirectAccess", &|e| matches!(e, Event::DirectAccess { .. }));
@@ -3486,6 +4158,7 @@ mod tests {
             self_signed: false,
             peer: None,
             local_token: None,
+            compressed_art: false,
         };
         tx.send(ApiCmd::AlbumArt { file: "far.jpg".into(), reach: Some(reach), small: true }).unwrap();
 

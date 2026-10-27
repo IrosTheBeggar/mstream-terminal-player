@@ -13,13 +13,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Both products from one tree (Cargo.toml's [features]): the terminal
+  # flavour (no features; every release but the desktop one) and the
+  # desktop flavour (`--features desktop`, the GUI's own window). Linux and
+  # Windows test both, one after the other in one job, so the dependencies
+  # the two share (all but three crates) build once and one cache holds
+  # both; macOS tests the desktop flavour, whose offscreen render tests get
+  # Metal there.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
 
@@ -38,26 +45,116 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Test
+      # The terminal flavour ships no GUI window: the window's crates must
+      # not be in its tree at all, on any target.
+      - name: Flavour guard (terminal)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          # On its own line, so a cargo failure fails the step rather than
+          # reading as an empty, passing list.
+          tree=$(cargo tree --locked --target all -e normal --prefix none -f '{p}')
+          # grep's 1 is "no match", the pass case; any other failure in the
+          # pipeline must fail the step rather than pass it with an empty list.
+          found=$(echo "$tree" | { grep -E '^(ratatui-wgpu|arboard) ' || [ $? -eq 1 ]; } | sort -u)
+          if [ -n "$found" ]; then
+            echo "::error::the terminal flavour pulls in the GUI window's crates:"
+            echo "$found"
+            exit 1
+          fi
+
+      - name: Test (terminal)
+        if: runner.os != 'macOS'
         run: cargo test
 
-      # The binary itself, which `cargo test` never builds: its
-      # #[cfg(not(test))] code and the real link, Windows' included. The
-      # dev profile, not --release: nothing in the tree differs by profile,
-      # and thin LTO over one codegen unit made this step 9-21 minutes of
-      # the crate alone on every push (performance audit #128). The
-      # release workflow builds that profile, and guards it, per target.
-      - name: Build
+      # After the terminal tests, so they run as they always have: lavapipe
+      # gives the desktop flavour's offscreen render tests a Vulkan adapter
+      # (without one they skip, through frame_or_skip; with it they must
+      # pass).
+      - name: Install a software Vulkan driver (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y mesa-vulkan-drivers
+
+      - name: Test (desktop)
+        run: cargo test --features desktop
+
+      # The visualizer brought a GPU stack, and the desktop flavour adds the
+      # GUI's window on the same one; both must open their drivers at run
+      # time, never link them, or the binary stops starting on headless
+      # boxes. See the script. Each flavour is checked on Linux, since each
+      # ships there; Windows keeps its one build of the terminal flavour, as
+      # before (the desktop one's test build above compiles the same code).
+      # The dev profile, not --release (performance audit #128): nothing
+      # checked here differs by profile — the same crates, features and -l
+      # flags decide NEEDED, and without LTO the debug link keeps every
+      # reference the release one does — and thin LTO over one codegen unit
+      # made each release build minutes of the crate alone on every push.
+      # The release workflow builds that profile, and guards it, per target.
+      - name: Build (terminal)
+        if: runner.os != 'macOS'
         run: cargo build
 
-      # The visualizer brought a GPU stack; it must open its drivers at run
-      # time, never link them, or the binary stops starting on headless
-      # boxes. See the script. The debug link is as good a witness as the
-      # release one: the same crates, features and -l flags decide NEEDED,
-      # and without LTO it keeps every reference the release link does.
-      - name: Linkage guard (Linux)
+      - name: Linkage guard (Linux, terminal)
         if: runner.os == 'Linux'
         run: sh test/linkage.sh target/debug/mstream-player
+
+      # The terminal releases have no page windows: `qr --window` is clap's
+      # usage error there (2), as `gui --window` is. Checked on this build,
+      # before the desktop build below replaces the binary.
+      - name: No page windows (Linux, terminal)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          code=0
+          target/debug/mstream-player qr --window --server http://127.0.0.1:9 || code=$?
+          echo "qr --window: exit $code"
+          test "$code" -eq 2
+
+      # The terminal flavour's --version is one line: no features line at all,
+      # so a launcher reading line 2 sees nothing and keeps its terminal route.
+      - name: One version line (Linux, terminal)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          target/debug/mstream-player --version
+          test "$(target/debug/mstream-player --version | wc -l)" -eq 1
+
+      - name: Build (desktop)
+        if: runner.os == 'Linux'
+        run: cargo build --features desktop
+
+      - name: Linkage guard (Linux, desktop)
+        if: runner.os == 'Linux'
+        run: sh test/linkage.sh target/debug/mstream-player
+
+      # The pages' windows with no display to open one on: `setup --window`
+      # and `qr --window` exit 3 (window/mod.rs's NO_WINDOW) before any
+      # network, GPU or terminal work, which is the code mStream's launcher
+      # falls back to another route on.
+      - name: Page windows with no display (Linux, desktop)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for page in setup qr; do
+            code=0
+            env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+              target/debug/mstream-player "$page" --window --server http://127.0.0.1:9 \
+              || code=$?
+            echo "$page --window: exit $code"
+            test "$code" -eq 3
+          done
+
+      # The desktop flavour's second line, exactly: mStream's launcher gates
+      # its routes on these words (`window` for the player's window,
+      # `window-pages` for the wizard and Quick Connect in theirs), and
+      # release.yml never reads --version, so this and the main.rs unit test
+      # are the only gates on the line.
+      - name: The features line (Linux, desktop)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          target/debug/mstream-player --version
+          test "$(target/debug/mstream-player --version | sed -n 2p)" = 'features: window window-pages'
 
   # The browser build has no test runner, but it has a type system: a plain
   # check catches the native-only import or the unhandled worker command that
@@ -81,6 +178,11 @@ jobs:
 
       - name: Check
         run: cargo check --target wasm32-unknown-unknown
+
+      # The browser build has no gui, so the desktop feature must change
+      # nothing here (gui is cfg(not(wasm32)) in main.rs).
+      - name: Check (desktop feature)
+        run: cargo check --target wasm32-unknown-unknown --features desktop
 
   e2e:
     name: E2E (${{ matrix.os }})

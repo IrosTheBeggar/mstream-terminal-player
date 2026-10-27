@@ -29,6 +29,10 @@ use crate::tui::app::Effect;
 
 use super::{Act, Gui, SettingsRoom, accent, bright_bold, put, sel};
 
+/// The mark a password field draws for each character of its value, and of
+/// an input method's composition in it.
+const MASK: char = '•';
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 /// What a background probe has said about one saved server so far.
@@ -623,6 +627,12 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
         entry.last_path.clone(),
     );
     gui.pend(effects);
+    // The Stats page and the Admin rooms were the old server's: they stand
+    // down now, not when the new one answers, so a switch that never lands
+    // leaves nothing that reads or changes the old server under the new
+    // one's name. Its Connected opens them again on the new server.
+    super::stats::reopen(gui);
+    super::admin::reopen(gui);
     gui.servers.switching = Some(entry.url.clone());
     let shown = config::display_name(&entry);
     gui.note = Some((t!("gui.srv.reaching", server = shown).to_string(), false));
@@ -1429,9 +1439,10 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // missing peers do not count (contract clause 12).
     let many = gui.config.servers.iter().filter(|e| config::selectable(e)).count() > 1;
     let chevron = if legacy_conhost() { " v" } else { " ▾" };
-    let label = if many { format!("{server}{chevron}") } else { server };
-    let width = label.chars().count() as u16;
-    let x = plus.x.saturating_sub(width + 1);
+    let mark = if many { chevron } else { "" };
+    let strip_end = super::top_strip_end();
+    let Some((x, label)) = header_label(&server, mark, strip_end, plus.x) else { return };
+    let width = crate::kit::width(&label) as u16;
     let rect = Rect { x, y: 0, width, height: 1 };
     let hover = many && gui.ui.hovers(rect);
     put(frame, x, 0, &label, if hover { bright_bold() } else { dim() });
@@ -1440,6 +1451,29 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // opens and sat on top of the first rows.
         gui.ui.click(rect, Act::SrvMenu);
     }
+}
+
+/// Where the header's server label stands, and what it says: right-aligned
+/// a blank cell short of `[+]` at `plus`, and starting at least a blank cell
+/// past the top bar's strip, which ends at `strip_end` — the label must
+/// never cover the strip, whose clicks it would take (mp3-player-screen
+/// contract, clause 16). A name longer than the room between is cut short
+/// with the kit's mark, the menu `mark` kept after it. Cells, not
+/// characters. None when not even two cells of the name fit.
+pub(super) fn header_label(
+    server: &str,
+    mark: &str,
+    strip_end: u16,
+    plus: u16,
+) -> Option<(u16, String)> {
+    let room = plus.saturating_sub(1).saturating_sub(strip_end + 1) as usize;
+    let fits = room.saturating_sub(crate::kit::width(mark));
+    if fits < 2 {
+        return None;
+    }
+    let label = format!("{}{mark}", super::bar::clip(server, fits));
+    let width = crate::kit::width(&label) as u16;
+    Some((plus.saturating_sub(width + 1), label))
 }
 
 /// What a room shows while no session is up, `gap` rows under `content`'s
@@ -2084,11 +2118,18 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let body = block.inner(rect);
         frame.render_widget(block, rect);
         let shown: String =
-            if mask { value.chars().map(|_| '•').collect() } else { value.to_string() };
+            if mask { value.chars().map(|_| MASK).collect() } else { value.to_string() };
         let text_style = if enabled { Style::default() } else { dim() };
         if focused && enabled {
             let cursor = shown.chars().count();
-            super::text_field(frame, &mut gui.ui, body.x + 1, body.y, &shown, cursor, body.width.saturating_sub(2), text_style);
+            let (x, w) = (body.x + 1, body.width.saturating_sub(2));
+            if mask {
+                // A composition (the window's input method) is masked too.
+                let ui = &mut gui.ui;
+                super::masked_field(frame, ui, x, body.y, &shown, cursor, w, text_style, MASK);
+            } else {
+                super::text_field(frame, &mut gui.ui, x, body.y, &shown, cursor, w, text_style);
+            }
         } else {
             put(
                 frame,
@@ -2543,6 +2584,59 @@ mod tests {
         switch_to(&mut gui, 0);
         assert!(gui.pending.is_empty());
         assert!(gui.servers.switching.is_none());
+    }
+
+    #[test]
+    fn a_switch_stands_the_stats_page_and_the_admin_rooms_down_until_the_new_server_answers() {
+        use super::super::{Screen, admin, stats};
+        // A switch that never lands has no Connected to rebuild them by, so
+        // the page and the rooms go at the switch: nothing goes on reading,
+        // or changing, the server being left while the header names the
+        // new one. Unresolvable hosts, so nothing a test opens reaches out.
+        let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        let scratch = Scratch::new("gui-switch-screens");
+        let _ = &scratch;
+        for screen in [Screen::Stats, Screen::Admin] {
+            let attic = "http://attic.invalid:3000";
+            let config = Config {
+                servers: vec![entry(attic, Some("paul")), entry("http://office.invalid:3000", None)],
+                ..Config::default()
+            };
+            config::save(&config).unwrap();
+            let mut gui = Gui::new(config, false, App::new(Some(attic.into()), None, None));
+            gui.app.connected = true;
+            gui.act(Act::Screen(screen));
+            let up = |gui: &Gui| match screen {
+                Screen::Stats => gui.stats.page.is_some(),
+                _ => gui.admin.room.is_some() && gui.admin.log.running(),
+            };
+            assert!(up(&gui), "{screen:?} opens on the first server");
+
+            switch_to(&mut gui, 1);
+            assert!(!up(&gui), "{screen:?} stands down at the switch");
+            let why = match screen {
+                Screen::Stats => t!("gui.stats.no_session"),
+                _ => t!("gui.admin.no_session"),
+            };
+            let all = draw(&mut gui).join("\n");
+            assert!(all.contains(&*why), "{screen:?} says why:\n{all}");
+
+            // The new server answers, and the loop opens it there.
+            let connected = Event::Connected {
+                server: "http://office.invalid:3000".into(),
+                id: "http://office.invalid:3000".into(),
+                username: None,
+                token: None,
+                ping: Box::default(),
+            };
+            observe(&mut gui, &connected);
+            let effects = gui.app.apply_event(connected);
+            gui.pend(effects);
+            stats::reopen(&mut gui);
+            admin::reopen(&mut gui);
+            assert!(up(&gui), "{screen:?} opens again on the new server");
+        }
     }
 
     #[test]

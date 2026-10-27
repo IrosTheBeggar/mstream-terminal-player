@@ -9,13 +9,15 @@ routing in the header, `// param:` tunables, and title/author/license lines.
 **Source:** [`IrosTheBeggar/mstream_music`](https://github.com/IrosTheBeggar/mstream_music)
 `assets/shaders/`, at `4ae3dec` — the last commit to touch that directory on
 `master` (2026-06-17). Re-vendor by copying the directory over and re-applying
-the local edit below; `cmp` against the source should then show only that file.
+the local edits below; `cmp` against the source should then show only those
+files.
 
 ## Local edits
 
 | File | Edit | Why |
 |---|---|---|
 | `06-4d-beats.glsl` | `mat2(vec4)` → `mat2` from four scalars (one line) | naga builds an invalid Compose for a `mat2` from a single `vec4`. Valid GLSL ES either way, and the same edit the Flutter port made — it belongs upstream, and this row goes when it lands there. |
+| `09-mountainbytes.glsl` | `texture(sampler, p)` → `textureLod(sampler, p, 0.)` in `hf` (one line) | FXC, the HLSL compiler on Windows's DX12 path, refuses an implicit-LOD sample inside `rayMarch`'s loop: it has to unroll a loop that needs derivatives, and it cannot unroll this one (X3511), so the preset fell back to 01. Every texture the visualizer samples has one mip level and one linear filter for minifying and magnifying alike, so level 0 is the only answer an implicit LOD could reach: the same pixels on every backend, a Vulkan frame identical byte for byte. Valid GLSL ES 3.0, so it can go upstream too; `src/shader/matrix.rs` puts every pass through FXC on Windows. |
 
 Everything else naga needs is done at load time by `src/shader/glsl.rs`, so the
 files stay the mobile app's.

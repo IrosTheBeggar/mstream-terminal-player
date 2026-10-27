@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block;
 use rust_i18n::t;
@@ -722,7 +722,7 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
 fn draw_status(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, forward: &str) {
     let armed = gui.app.dj_armed();
     let label = if armed { t!("gui.dj.stop").to_string() } else { format!("{} {forward}", t!("gui.dj.start")) };
-    let bw = label.chars().count() as u16 + 6;
+    let bw = crate::kit::tall_width(&label);
     let at = Rect { x: (x + w).saturating_sub(bw), y, width: bw, height: 3 };
     let rect = if armed {
         tall_danger(frame, &mut gui.ui, at, &label, Act::DjStartStop)
@@ -1238,8 +1238,13 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let query = dj.filter.value().to_string();
     let fy = inner.y + 2;
     let field_w = inner.width.saturating_sub(2);
-    if query.is_empty() {
+    // Empty, the filter shows its placeholder and no caret, yet every
+    // key the modal does not claim is the filter's: it says it has the
+    // keyboard all the same, so the window's input method and paste are
+    // on for its first key. A composition draws through the field.
+    if query.is_empty() && ui.composition().is_empty() {
         put(frame, inner.x + 1, fy, &super::bar::clip(&t!("gui.dj.search_genres"), field_w as usize), dim());
+        ui.note_caret(Position { x: inner.x + 1, y: fy });
     } else {
         let cursor = dj.filter.cursor();
         super::text_field(frame, ui, inner.x + 1, fy, &query, cursor, field_w, Style::default());
@@ -1401,7 +1406,12 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         }
         return Some(false);
     }
-    if gui.app.capture == Some(Capture::DjSeed) && key.code == KeyCode::Esc {
+    // Not on the MP3 Player tab, whose Esc is the page's (mp3-player-screen
+    // contract, clause 12); entering the tab lets the pick go anyway.
+    if gui.app.capture == Some(Capture::DjSeed)
+        && key.code == KeyCode::Esc
+        && gui.screen != Screen::Device
+    {
         gui.forward(Action::Cancel);
         return Some(false);
     }
@@ -1825,6 +1835,47 @@ mod tests {
         assert_eq!(gui.app.dj.empty_queue, EmptyQueueStart::Random, "remembered");
     }
 
+    #[test]
+    fn the_keyboard_belongs_to_a_field_in_the_top_layer_only() {
+        // The search box has it while it takes text...
+        let mut gui = session_gui();
+        gui.act(Act::Nav(super::super::SEARCH_NAV));
+        for c in "a b".chars() {
+            key(&mut gui, KeyCode::Char(c));
+        }
+        let rows = draw(&mut gui);
+        let at = gui.ui.caret_at().expect("the focused search box has the keyboard");
+        assert!(rows[at.y as usize].contains("a b"), "{}", rows.join("\n"));
+        // ...and not under the chooser, whose keys are its own (Space plays):
+        // the window's paste and input method stand down for it.
+        gui.act(Act::AutoDj);
+        let all = draw(&mut gui).join("\n");
+        assert!(gui.app.dj_chooser.is_some() && all.contains("Start Auto DJ with what?"), "{all}");
+        assert_eq!(gui.ui.caret_at(), None);
+    }
+
+    #[test]
+    fn the_empty_genre_filter_has_the_keyboard_behind_its_placeholder() {
+        let mut gui = room_gui();
+        gui.app.servers.push(known(HOST, "host"));
+        gui.app.queue.items = vec![queued("a.mp3", None)];
+        gui.act(Act::AutoDj);
+        gui.act(Act::DjPickGenres);
+        let effects = gui.app.apply_event(Event::Genres(vec![Genre { name: "Techno".into(), track_count: Some(9) }]));
+        gui.pend(effects);
+        let rows = draw_tall(&mut gui);
+        let at = gui.ui.caret_at().expect("the empty filter takes the first key");
+        let placeholder = rust_i18n::t!("gui.dj.search_genres").to_string();
+        assert!(rows[at.y as usize].contains(&placeholder), "{}", rows.join("\n"));
+        assert!(!rows[at.y as usize].contains('▏'), "the placeholder shows as it did, no caret");
+        // A composition draws in the field from the first key.
+        gui.ui.set_composition("て");
+        let rows = draw_tall(&mut gui);
+        let line = &rows[at.y as usize];
+        assert!(line.contains('て') && line.contains('▏') && !line.contains(&placeholder), "{line}");
+        assert_eq!(gui.ui.caret_at(), Some(Position { x: at.x + 2, y: at.y }));
+    }
+
     /// `cargo test dump_dj -- --ignored --nocapture` to eyeball the chooser,
     /// the armed empty queue, and the room in both states.
     #[test]
@@ -1890,11 +1941,12 @@ mod tests {
     fn the_nav_row_opens_the_room_and_esc_only_stows_the_cursor() {
         let mut gui = session_gui();
         let rows = draw(&mut gui);
-        // The TOOLS group under Search: Auto DJ, then the sonic room's slot.
-        assert!(rows[14].contains("TOOLS"), "the group:\n{}", rows[14]);
+        // The TOOLS group under the play lists (row 13 since the Discover
+        // room joined it): Auto DJ, then the sonic room's slot.
+        assert!(rows[13].contains("TOOLS"), "the group:\n{}", rows[13]);
         assert_eq!(hit_text(&gui, &rows, "Auto DJ"), Some(Act::Nav(DJ_NAV)));
         let nav = |r: &String| r.chars().take(15).collect::<String>();
-        assert!(!nav(&rows[15]).contains('•'), "off: the row wears no state dot:\n{}", rows[15]);
+        assert!(!nav(&rows[14]).contains('•'), "off: the row wears no state dot:\n{}", rows[14]);
         assert!(!rows.iter().any(|r| r.contains("LISTEN")), "Settings has no doorway any more");
         gui.act(Act::Nav(DJ_NAV));
         assert_eq!(gui.active, DJ_NAV);
@@ -1926,13 +1978,13 @@ mod tests {
         assert!(gui.app.dj_armed());
         gui.act(Act::Nav(FILES_NAV));
         let rows = draw(&mut gui);
-        assert!(rows[15].contains("Auto DJ •"), "the dot while armed:\n{}", rows[15]);
+        assert!(rows[14].contains("Auto DJ •"), "the dot while armed:\n{}", rows[14]);
         assert_eq!(hit_text(&gui, &rows, "Auto DJ •"), Some(Act::Nav(DJ_NAV)), "one click target with its dot");
         gui.act(Act::Nav(DJ_NAV));
         gui.act(Act::DjStartStop);
         let rows = draw(&mut gui);
         let nav = |r: &String| r.chars().take(15).collect::<String>();
-        assert!(!nav(&rows[15]).contains('•'), "off again, no dot:\n{}", rows[15]);
+        assert!(!nav(&rows[14]).contains('•'), "off again, no dot:\n{}", rows[14]);
     }
 
     #[test]
@@ -2146,6 +2198,9 @@ mod tests {
 
     #[test]
     fn a_failed_genres_load_says_so_in_the_picker_instead_of_loading_forever() {
+        // It reads English: hold the locale against the tests that switch it.
+        let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
         let mut gui = room_gui();
         gui.act(Act::DjPickGenres);
         let all = draw_tall(&mut gui).join("\n");

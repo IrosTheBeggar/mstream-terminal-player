@@ -19,14 +19,26 @@
 //! Frames reach the terminal through [`frames`]: whole, in one write, and
 //! shown at once. Every full-screen page starts with its `init`, and waits
 //! between frames at the pace [`pace`] sets.
+//!
+//! A press-drag that means something other than moving a thumb (marking a
+//! run of log lines) goes through a drag region ([`Surface::drag_region`]):
+//! it is told the press, every move while the button is held and the
+//! release, wherever the pointer lands, and holds the pointer the way a
+//! thumb drag does, so hover never wanders onto what the hand passes over.
+//! Text leaves through [`clipboard`], whose routes follow where the player
+//! runs; [`os`] names that place as data a test can hand in.
 
+pub mod clipboard;
 pub mod frames;
+pub mod os;
 pub mod pace;
 pub mod theme;
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
+use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -50,14 +62,162 @@ pub const ARROW_REPEAT: Duration = Duration::from_millis(60);
 /// millisecond), sends motion-while-held as plain Moved, and re-clicks
 /// at the physical release — holds are invisible to it. A phantom
 /// release downgrades the capture to a SOFT one instead of ending it.
+/// In the dialect ([`EchoFilter`]) a release this soon after ANY left
+/// press makes the press an instant pair, whose release echo is due.
 pub const PHANTOM_RELEASE: Duration = Duration::from_millis(150);
 /// The caret's blink: half a second on, half a second off (the desktop
 /// editors' rate), counted from the last key or click so a caret that just
 /// moved is always seen.
 pub const CARET_BLINK: Duration = Duration::from_millis(500);
 /// The soft capture holds while motion stays within this many cells of
-/// the press; travelling beyond it resumes normal hover.
+/// the press; travelling beyond it resumes normal hover. The release echo
+/// (below) is swallowed whenever it lands this near its click.
 pub const SOFT_RADIUS: u16 = 2;
+/// How long Apple Terminal's release echo is awaited ANYWHERE on the
+/// screen once a click arrived as an instant pair. The echo comes at the
+/// physical release, wherever the hand has gone meanwhile (the motion of
+/// a held button arrives as plain moves), so a press that wandered off
+/// its control, or a drag the dialect cannot report, ends far from where
+/// it began. A click is held for a fraction of a second, a hesitant one
+/// for under one, so two seconds covers every release a hand makes as
+/// part of a click while bounding what a lost echo (the focus left
+/// mid-hold, the terminal dropped it) can cost: at most the one click it
+/// mistakes for the echo, within this wait or within [`SOFT_RADIUS`] of
+/// the press. Near the press the echo is swallowed however late it comes:
+/// a press held in place for a long while is still one click.
+pub const ECHO_WAIT: Duration = Duration::from_secs(2);
+
+/// Whether this process's terminal speaks Apple Terminal's mouse dialect
+/// (the [`EchoFilter`]'s gate): `TERM_PROGRAM=Apple_Terminal`, the mark
+/// Terminal.app sets for the programs it runs, mapped by the launcher
+/// log's own host naming ([`crate::instance::host_from_env`]) and read
+/// once. ssh does not forward the variable and a multiplexer writes its
+/// own name over it, so the dialect is assumed only where Terminal.app
+/// itself reports the mouse to the player. A native window is never in
+/// it, whatever terminal started it: its shell leaves the flag off.
+pub fn apple_dialect() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| dialect_from_env(|name| std::env::var(name).ok()))
+}
+
+/// [`apple_dialect`]'s answer for a given environment, so a test can ask
+/// it of each terminal without setting variables every test would see.
+pub fn dialect_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
+    crate::instance::host_from_env(get) == "apple-terminal"
+}
+
+/// Apple Terminal's release echo, swallowed whole. That terminal reports a
+/// left press as an INSTANT click pair (the press and its release in the
+/// same millisecond), the motion of the still-held button as plain moves,
+/// and the PHYSICAL release as a second click pair where the hand let go
+/// (probed, 470.2). Taken as it comes, every click there is two: a row's
+/// `[⋯]` opens its sheet and the echo then clicks whatever the sheet drew
+/// under the pointer; a list hung from a click is closed by the echo's
+/// press on its own catcher. In the dialect a host asks this filter first
+/// about every mouse event, before any page owner, grip or surface reads
+/// it, and drops the ones it claims.
+///
+/// The rule: a left press passes and is watched; its release passing
+/// within [`PHANTOM_RELEASE`] makes it an instant pair, and the pair now
+/// awaits its echo. The next left press is that echo when it lands within
+/// [`SOFT_RADIUS`] of the pair (at any time) or anywhere within
+/// [`ECHO_WAIT`] — it is swallowed, and so is the release that follows it.
+/// A press far away after the wait is a real one. After the echo the next
+/// pair is real again: two quick clicks are pair, echo, pair, echo, and
+/// each acts once. A press whose release came late (an honest terminal's
+/// slow click) awaits nothing. Nothing else is ever claimed — moves, the
+/// wheel, the other buttons pass untouched.
+///
+/// Off (every other terminal, and the native window), it claims nothing:
+/// a trackpad tap in iTerm2 or Ghostty can be a near-instant pair with NO
+/// echo, and a second click or a double click after it is real.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EchoFilter {
+    on: bool,
+    state: EchoState,
+}
+
+/// Where the [`EchoFilter`] stands between events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum EchoState {
+    /// No click awaits anything.
+    #[default]
+    Idle,
+    /// A left press passed, at `at` when `since`: its release says whether
+    /// it was an instant pair.
+    Pressed { at: Position, since: Instant },
+    /// An instant pair passed: the hand is still down, and its release's
+    /// echo pair is due.
+    Awaiting { at: Position, since: Instant },
+    /// The echo's press was swallowed; its release will be too.
+    Swallowing,
+}
+
+impl EchoFilter {
+    /// A filter in the dialect (`on`), or one that claims nothing.
+    pub fn new(on: bool) -> Self {
+        EchoFilter { on, state: EchoState::Idle }
+    }
+
+    /// Whether `kind` at `at` is the release echo's press or its release:
+    /// `true` means the host drops the event, whole, before anything else
+    /// reads it.
+    pub fn swallow(&mut self, kind: MouseEventKind, at: Position) -> bool {
+        if !self.on {
+            return false;
+        }
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let EchoState::Awaiting { at: origin, since } = self.state {
+                    let near = at.x.abs_diff(origin.x) <= SOFT_RADIUS && at.y.abs_diff(origin.y) <= SOFT_RADIUS;
+                    if near || since.elapsed() < ECHO_WAIT {
+                        self.state = EchoState::Swallowing;
+                        return true;
+                    }
+                }
+                // Anything else is a real press, watched for its pair.
+                self.state = EchoState::Pressed { at, since: Instant::now() };
+                false
+            }
+            MouseEventKind::Up(MouseButton::Left) => match self.state {
+                EchoState::Swallowing => {
+                    self.state = EchoState::Idle;
+                    true
+                }
+                EchoState::Pressed { at: origin, since } => {
+                    self.state = if since.elapsed() < PHANTOM_RELEASE {
+                        EchoState::Awaiting { at: origin, since: Instant::now() }
+                    } else {
+                        EchoState::Idle
+                    };
+                    false
+                }
+                EchoState::Idle | EchoState::Awaiting { .. } => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether a click's echo is due — a test's view of the state.
+    #[cfg(test)]
+    pub fn awaiting(&self) -> bool {
+        matches!(self.state, EchoState::Awaiting { .. })
+    }
+
+    /// Age the filter's clock, so a test sees a slow release or a long
+    /// wait without sleeping through either.
+    #[cfg(test)]
+    pub fn backdate(&mut self, by: Duration) {
+        match &mut self.state {
+            EchoState::Pressed { since, .. } | EchoState::Awaiting { since, .. } => {
+                if let Some(earlier) = since.checked_sub(by) {
+                    *since = earlier;
+                }
+            }
+            EchoState::Idle | EchoState::Swallowing => {}
+        }
+    }
+}
 
 // ── Styles ───────────────────────────────────────────────────────────────────
 
@@ -74,12 +234,37 @@ pub fn bold() -> Style {
 // ── The interaction surface ──────────────────────────────────────────────────
 
 /// A registered scrollbar: geometry plus the actions its parts emit.
+/// `above` is how many clicks were registered before it, its own cells
+/// among them, so a press can tell a click drawn over it (a menu's
+/// catcher, a modal's guard), which takes the press instead, as a drag
+/// region's mark does.
 struct BarReg<A> {
     rect: Rect,
+    above: usize,
     max_scroll: usize,
     step_back: A,
     step_fwd: A,
     jump: Box<dyn Fn(usize) -> A>,
+}
+
+/// What a drag region is told: the press that took it, each move while
+/// the button is held (wherever the pointer is by then), and the release
+/// (wherever that lands, inside the region or not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grip {
+    Press,
+    Drag,
+    Release,
+}
+
+/// A registered drag region. `above` is how many clicks were registered
+/// before it, so a press can tell the clicks drawn under it (the focus
+/// click it shares the rows with) from those drawn over it (a menu's
+/// catcher, a modal), which take the press instead.
+struct RegionReg<A> {
+    rect: Rect,
+    above: usize,
+    act: Rc<dyn Fn(Grip, Position) -> A>,
 }
 
 /// The per-screen interaction state. Rebuild the registries every frame
@@ -102,6 +287,13 @@ pub struct Surface<A> {
     bars: Vec<BarReg<A>>,
     /// An active thumb drag: index into this frame's `bars`.
     drag: Option<usize>,
+    /// This frame's drag regions, rebuilt each frame like `bars`.
+    regions: Vec<RegionReg<A>>,
+    /// The region a press took, held until the release. It keeps its own
+    /// handle on the region's act rather than an index, because the drag
+    /// outlives the frame it began in and the next frame may not draw the
+    /// region at all.
+    gripped: Option<Rc<dyn Fn(Grip, Position) -> A>>,
     /// A held ▲/▼ endcap: (bar index, direction, when the next step fires).
     arrow_hold: Option<(usize, i8, Instant)>,
     /// Where and when the current bar interaction was armed.
@@ -109,6 +301,14 @@ pub struct Surface<A> {
     /// A soft capture left behind by a phantom release: hover stays
     /// suppressed near this press until the pointer genuinely leaves.
     soft_origin: Option<Position>,
+    /// Apple Terminal's release echo, swallowed before anything reads it
+    /// (off unless the host's terminal speaks the dialect).
+    echo: EchoFilter,
+    /// The soft capture's release re-click was already swallowed as the
+    /// echo: a press near the bar after it is a real press, never a
+    /// second phantom. Only the echo filter sets it, so outside the
+    /// dialect the soft capture swallows as it always did.
+    reclick_echoed: bool,
     /// The footprints of everything drawn OVER the base layer this frame —
     /// modal frames, the header dropdown, the tooltip — and last frame's.
     /// A pixel surface beneath (a cover) consults last frame's, because
@@ -119,6 +319,15 @@ pub struct Surface<A> {
     /// resets what it covers. Covers an overlay never touches stay pixels.
     overlays: Vec<Rect>,
     covered: Vec<Rect>,
+    /// Told of each overlay the moment it registers, while the frame is
+    /// still drawing: the GUI window's cover board, which paints its
+    /// pictures after the cells and so can stand one down on the very frame
+    /// a modal opens over it, where the rule above leaves it painted over
+    /// the modal for that frame. The order is the point: a cover placed
+    /// before an overlay is under it, one placed after (the actions sheet's
+    /// own header) is in it. `None` everywhere else, the terminal included,
+    /// where nothing changes.
+    overlay_watch: Option<Box<dyn Fn(Rect)>>,
     /// What a right click means where — a row's context verb (the
     /// track-actions contract's sheet). Rebuilt each frame like `clicks`.
     contexts: Vec<(Rect, A)>,
@@ -137,6 +346,20 @@ pub struct Surface<A> {
     /// When the last frame began — what [`Surface::stale`] measures the
     /// clocks above against.
     drawn_at: Option<Instant>,
+    /// The cell the focused field drew its caret in this frame (blinked
+    /// off or not), cleared with the registries like the frame's mark and
+    /// again by every modal laid over the page (see [`Self::modal_over`]):
+    /// it marks the field that has the keyboard, so a shell turns its
+    /// input method and its paste on for it and floats the method's
+    /// candidate list here. A field under a modal may still draw its caret
+    /// (and keep the blink's clock), but the modal owns the keys.
+    caret_at: Option<Position>,
+    /// What an input method is composing for the focused field and has
+    /// not committed. Only a shell that receives composition outside the
+    /// key stream sets it — the GUI's own window; a terminal composes in
+    /// its own UI and sends the commit as keys — so it stays empty, and
+    /// changes nothing, everywhere else (see [`input_display_composing`]).
+    composition: String,
 }
 
 impl<A> Default for Surface<A> {
@@ -148,16 +371,23 @@ impl<A> Default for Surface<A> {
             dwell: None,
             bars: Vec::new(),
             drag: None,
+            regions: Vec::new(),
+            gripped: None,
             arrow_hold: None,
             armed: None,
             soft_origin: None,
+            echo: EchoFilter::default(),
+            reclick_echoed: false,
             overlays: Vec::new(),
             covered: Vec::new(),
+            overlay_watch: None,
             contexts: Vec::new(),
             key_hints: true,
             caret_since: None,
             caret_drawn: false,
             drawn_at: None,
+            caret_at: None,
+            composition: String::new(),
         }
     }
 }
@@ -210,12 +440,32 @@ impl<A: Clone> Surface<A> {
     /// overlay registers after the base layer's controls are dropped.
     pub fn overlay(&mut self, rect: Rect) {
         self.overlays.push(rect);
+        if let Some(watch) = &self.overlay_watch {
+            watch(rect);
+        }
+    }
+
+    /// Have `watch` told of every overlay as it registers (see
+    /// `overlay_watch`). Only the GUI's window watches.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn watch_overlays(&mut self, watch: impl Fn(Rect) + 'static) {
+        self.overlay_watch = Some(Box::new(watch));
     }
 
     /// Whether an overlay stood over any part of `rect` LAST frame — the
     /// question a pixel surface asks before drawing pixels there.
     pub fn covered_last_frame(&self, rect: Rect) -> bool {
         self.covered.iter().any(|over| over.intersects(rect))
+    }
+
+    /// Whether this frame's overlays stand anywhere other than last
+    /// frame's did: one opened, closed or moved. A pixel surface drew this
+    /// frame by last frame's footprints, so a cover under a modal that just
+    /// opened is still a picture painted over it, until the next frame
+    /// draws it as text; a shell that sees this asks for that frame soon
+    /// rather than at its idle poll.
+    pub fn overlays_moved(&self) -> bool {
+        self.overlays != self.covered
     }
 
     /// Whether an overlay OTHER than `own` stood over any part of `rect`
@@ -226,6 +476,13 @@ impl<A: Clone> Surface<A> {
         self.covered.iter().any(|over| *over != own && over.intersects(rect))
     }
 
+    /// [`Self::covered_last_frame_by_another`] for a modal whose footprint
+    /// moves — its height follows its rows, its top may rise: none of `own`
+    /// (this frame's footprint and last frame's) counts as another.
+    pub fn covered_last_frame_by_other_than(&self, rect: Rect, own: &[Rect]) -> bool {
+        self.covered.iter().any(|over| !own.contains(over) && over.intersects(rect))
+    }
+
     /// Drop every registered rect — the modal-inertness move: a screen
     /// clears the base layer's registries before drawing the layer on
     /// top, so only the top layer's controls exist.
@@ -233,8 +490,10 @@ impl<A: Clone> Surface<A> {
         self.clicks.clear();
         self.tips.clear();
         self.bars.clear();
+        self.regions.clear();
         self.contexts.clear();
         self.caret_drawn = false;
+        self.caret_at = None;
     }
 
     /// A field took a key or a click: the caret shows solid from now.
@@ -260,6 +519,46 @@ impl<A: Clone> Surface<A> {
         let elapsed = self.caret_since.map_or(0, |since| since.elapsed().as_millis());
         let into = elapsed % CARET_BLINK.as_millis();
         Some(Duration::from_millis((CARET_BLINK.as_millis() - into) as u64))
+    }
+
+    /// The focused field says where it drew its caret this frame — or
+    /// where it would, for a field that shows a placeholder until the
+    /// first key yet takes the keys all the same.
+    pub fn note_caret(&mut self, at: Position) {
+        self.caret_at = Some(at);
+    }
+
+    /// The cell of the field with the keyboard this frame, if one has it:
+    /// a field drawn in the topmost layer. None while a modal with no
+    /// field of its own is up over a page's focused field.
+    // The GUI window places its IME box here, and the GUI's Admin tab
+    // lifts a hosted room's onto its own surface in every build.
+    pub fn caret_at(&self) -> Option<Position> {
+        self.caret_at
+    }
+
+    /// A modal is laid over what drew so far: the keys are the modal's
+    /// from here, so a field beneath stops counting as having them; one
+    /// drawn inside the modal (after its frame) notes its caret again.
+    /// The blink's flag stays, so a caret still showing beside the modal
+    /// keeps its rhythm.
+    pub fn modal_over(&mut self) {
+        self.caret_at = None;
+    }
+
+    /// The input method's uncommitted text, or none (empty).
+    // Only the GUI window has an input method to report (and the tests);
+    // the GUI's Admin tab hands the GUI's on to a hosted room in every
+    // build, where it is always empty but in the window.
+    pub fn set_composition(&mut self, text: &str) {
+        if self.composition != text {
+            self.composition.clear();
+            self.composition.push_str(text);
+        }
+    }
+
+    pub fn composition(&self) -> &str {
+        &self.composition
     }
 
     /// Age the blink clock, so a test can see the other phase.
@@ -339,8 +638,10 @@ impl<A: Clone> Surface<A> {
     /// must not retarget hover onto whatever sits beside the 1-cell bar.
     /// A SOFT capture (after a phantom release) suppresses hover only
     /// near the press, until the pointer genuinely travels away.
+    /// A drag region's grip captures too: the hand sweeping across the
+    /// page must not light up every control it passes over.
     pub fn motion(&mut self, at: Position) {
-        if self.drag.is_some() || self.arrow_hold.is_some() {
+        if self.drag.is_some() || self.arrow_hold.is_some() || self.gripped.is_some() {
             return;
         }
         if let Some(origin) = self.soft_origin {
@@ -359,12 +660,16 @@ impl<A: Clone> Surface<A> {
     /// the original press (inside the soft radius) but off every bar —
     /// the screen must swallow it entirely. A press on a bar, or beyond
     /// the radius, is a real interaction and ends the soft capture.
+    ///
+    /// In Apple Terminal's dialect the re-click never reaches here: the
+    /// echo filter ([`Self::swallow_echo`]) took it first, so a press near
+    /// the bar after it is a real one and ends the soft capture.
     pub fn begin_press(&mut self, at: Position) -> bool {
         if let Some(origin) = self.soft_origin {
             let near = at.x.abs_diff(origin.x) <= SOFT_RADIUS
                 && at.y.abs_diff(origin.y) <= SOFT_RADIUS;
             let on_bar = self.bars.iter().any(|b| b.rect.contains(at));
-            if near && !on_bar {
+            if near && !on_bar && !self.reclick_echoed {
                 return false;
             }
             self.soft_origin = None;
@@ -373,12 +678,46 @@ impl<A: Clone> Surface<A> {
         true
     }
 
+    /// Speak Apple Terminal's mouse dialect, or not: the host's terminal
+    /// says ([`apple_dialect`]), so the terminal shells set it and the
+    /// native window never does. Off by default.
+    pub fn set_echo_dialect(&mut self, on: bool) {
+        self.echo = EchoFilter::new(on);
+    }
+
+    /// Whether this mouse event is the release echo's press or release
+    /// ([`EchoFilter`]): the host asks it first, before any page owner,
+    /// grip or the surface's own press reads the event, and drops the
+    /// event whole on `true`. Always `false` outside the dialect.
+    pub fn swallow_echo(&mut self, kind: MouseEventKind, at: Position) -> bool {
+        let swallowed = self.echo.swallow(kind, at);
+        if swallowed && matches!(kind, MouseEventKind::Down(_)) {
+            self.reclick_echoed = true;
+        }
+        swallowed
+    }
+
+    /// Age the echo filter's clock (see [`EchoFilter::backdate`]).
+    #[cfg(test)]
+    pub fn echo_backdate(&mut self, by: Duration) {
+        self.echo.backdate(by);
+    }
+
     /// A press on a scrollbar arms its interaction: endcap rows arm
     /// hold-to-repeat (the press itself already stepped via the cell's
     /// registered act), track rows arm a thumb drag. Call after the hit
-    /// was dispatched.
+    /// was dispatched. The bar is the last drawn under the press, as the
+    /// hit is the last drawn click; a click registered after it over the
+    /// same point took the press instead (an open menu's catcher, a
+    /// modal's guard), and nothing arms: a press that closes a modal, or
+    /// that a modal swallows, never starts the list beneath it scrolling,
+    /// for every screen at once.
     pub fn arm_bars(&mut self, at: Position) {
-        let Some(i) = self.bars.iter().position(|b| b.rect.contains(at)) else { return };
+        let Some(i) = self.bars.iter().rposition(|b| b.rect.contains(at)) else { return };
+        let over = self.clicks.get(self.bars[i].above..).unwrap_or_default();
+        if over.iter().any(|(rect, _)| rect.contains(at)) {
+            return;
+        }
         self.armed = Some((at, Instant::now()));
         let rect = self.bars[i].rect;
         if at.y == rect.y {
@@ -394,20 +733,79 @@ impl<A: Clone> Surface<A> {
     /// within [`PHANTOM_RELEASE`] of arming is Apple Terminal's instant
     /// click — the physical hold is still going, so a SOFT capture keeps
     /// hover pinned near the press (repeat and drag stay off: with holds
-    /// invisible, a repeat could never be stopped).
+    /// invisible, a repeat could never be stopped). A drag region's grip
+    /// ends here too, untold, so a host that only ever calls this never
+    /// leaves one behind; [`Self::release_at`] is the call that tells it.
     pub fn release(&mut self) {
         if let Some((origin, when)) = self.armed.take() {
             if when.elapsed() < PHANTOM_RELEASE {
                 self.soft_origin = Some(origin);
+                self.reclick_echoed = false;
             }
         }
         self.drag = None;
         self.arrow_hold = None;
+        self.gripped = None;
     }
 
-    /// The action a drag at `at` means (the thumb following the hand),
-    /// if a drag is active.
+    /// Register a drag region: a rect where a press-drag means something
+    /// of the screen's own, told through `act` (see [`Grip`]). Registered
+    /// every frame, like a scrollbar. It is transparent to clicks: [`Self::hit`]
+    /// still returns the click under it, so the rows it covers can keep a
+    /// click of their own (the one that focuses them).
+    pub fn drag_region(&mut self, rect: Rect, act: impl Fn(Grip, Position) -> A + 'static) {
+        self.regions.push(RegionReg { rect, above: self.clicks.len(), act: Rc::new(act) });
+    }
+
+    /// A press on a drag region takes it: the region is told the press and
+    /// holds the pointer until the release. Call after the hit was
+    /// dispatched, like [`Self::arm_bars`]. A click registered after the
+    /// region over the same point wins instead (an open menu's catcher, a
+    /// modal), and the answer is `None`. A region never arms the phantom
+    /// soft capture: its drag is a gesture of the hand, not a hold to
+    /// repeat, so a quick click on it leaves hover free.
+    pub fn arm_region(&mut self, at: Position) -> Option<A> {
+        let region = self.regions.iter().rev().find(|r| r.rect.contains(at))?;
+        let over = self.clicks.get(region.above..).unwrap_or_default();
+        if over.iter().any(|(rect, _)| rect.contains(at)) {
+            return None;
+        }
+        let act = Rc::clone(&region.act);
+        let press = act(Grip::Press, at);
+        self.gripped = Some(act);
+        Some(press)
+    }
+
+    /// Whether a drag region holds the pointer — the host's cue to keep
+    /// every other pointer owner out until the release.
+    pub fn gripping(&self) -> bool {
+        self.gripped.is_some()
+    }
+
+    /// Whether a scrollbar interaction holds the pointer: an endcap held
+    /// for its repeat, or the thumb dragged. A host that hands the pointer
+    /// to a page of its own (the GUI's Admin room) keeps it from that page
+    /// meanwhile, as it does while [`Self::gripping`], so the release comes
+    /// back to the surface that armed the bar wherever the hand lets go.
+    pub fn holding_bar(&self) -> bool {
+        self.drag.is_some() || self.arrow_hold.is_some()
+    }
+
+    /// The button lifted at `at`: the gripped region is told the release,
+    /// wherever it landed, and every capture ends as with [`Self::release`].
+    /// `None` when no region was gripped.
+    pub fn release_at(&mut self, at: Position) -> Option<A> {
+        let act = self.gripped.take().map(|f| f(Grip::Release, at));
+        self.release();
+        act
+    }
+
+    /// The action a drag at `at` means: a gripped region told the move, or
+    /// the thumb following the hand, if either is active.
     pub fn drag_action(&mut self, at: Position) -> Option<A> {
+        if let Some(f) = &self.gripped {
+            return Some(f(Grip::Drag, at));
+        }
         let bar = self.bars.get(self.drag?)?;
         Some((bar.jump)(bar_jump(bar.rect, bar.max_scroll, at.y)))
     }
@@ -454,6 +852,17 @@ impl<A: Clone> Surface<A> {
         self.dwell = None;
     }
 
+    /// Age the tooltip dwell, so a test can see a ripe tooltip without
+    /// waiting out [`TIP_DELAY`].
+    #[cfg(test)]
+    pub fn dwell_backdate(&mut self, by: Duration) {
+        if let Some((_, _, since)) = &mut self.dwell
+            && let Some(earlier) = since.checked_sub(by)
+        {
+            *since = earlier;
+        }
+    }
+
     fn register_bar(
         &mut self,
         rect: Rect,
@@ -462,7 +871,7 @@ impl<A: Clone> Surface<A> {
         step_fwd: A,
         jump: Box<dyn Fn(usize) -> A>,
     ) {
-        self.bars.push(BarReg { rect, max_scroll, step_back, step_fwd, jump });
+        self.bars.push(BarReg { rect, above: self.clicks.len(), max_scroll, step_back, step_fwd, jump });
     }
 }
 
@@ -508,6 +917,14 @@ pub fn tall_secondary<A: Clone>(
     tall_frame(frame, s, at, label, 2, tone, Some(act))
 }
 
+/// The cells a [`tall_button`] or [`tall_secondary`] takes across for
+/// `label` (two of padding a side and the border's two), measured as the
+/// frame measures itself, so a caller anchoring one to a right edge puts
+/// its x where the frame will end, not where a character count says.
+pub fn tall_width(label: &str) -> u16 {
+    width(label) as u16 + 6
+}
+
 /// The 3-row frame every tall control shares: the label with `pad` spaces
 /// a side, a Rounded border and the label in one color, the label BOLD or
 /// not — `tone` picks both from whether the pointer is in the frame — and
@@ -540,7 +957,9 @@ pub fn tall_frame_bordered<A: Clone>(
     act: Option<A>,
 ) -> Rect {
     let text = format!("{:pad$}{label}{:pad$}", "", "");
-    let width = (text.chars().count() as u16 + 2).min(at.width);
+    // In cells, as the label is drawn: counting characters framed the
+    // wizard's Japanese "続ける ▸" in eleven cells and cut it to "続け".
+    let width = (self::width(&text) as u16 + 2).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
     let hovered = act.is_some() && s.hovers(rect);
     let (color, bold) = tone(hovered);
@@ -582,7 +1001,9 @@ pub fn button<A: Clone>(
     act: A,
 ) -> Rect {
     let text = format!("  {label}  ");
-    let width = (text.chars().count() as u16).min(at.width);
+    // In cells, so a CJK label keeps its tail and a button chained off
+    // this rect's right edge never lands on it.
+    let width = (self::width(&text) as u16).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 1 };
     let hovered = s.hovers(rect);
     let style = match (primary, hovered) {
@@ -633,16 +1054,24 @@ pub fn modal_frame_anchored_on<A: Clone>(
     title_color: Color,
 ) -> Rect {
     s.overlay(modal_rect(area, width, height, max_height));
+    s.modal_over();
     modal_frame_anchored(frame, area, width, height, max_height, title_color)
 }
 
-/// Where a modal of this size sits: centred, and vertically as if
-/// `max_height` tall, so one that grows keeps its top edge.
+/// Where a modal of this size sits: centred in `area` — wherever the area
+/// starts, so a room hosted under another shell's bar keeps its modals
+/// inside its own rect — and vertically as if `max_height` tall, so one
+/// that grows keeps its top edge.
 pub fn modal_rect(area: Rect, width: u16, height: u16, max_height: u16) -> Rect {
     let width = width.min(area.width.saturating_sub(4));
     let height = height.min(area.height.saturating_sub(2));
     let max_height = max_height.max(height).min(area.height.saturating_sub(2));
-    Rect { x: (area.width - width) / 2, y: (area.height - max_height) / 2, width, height }
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - max_height) / 2,
+        width,
+        height,
+    }
 }
 
 /// Like [`modal_frame`], but vertically positioned as if the modal were
@@ -658,6 +1087,21 @@ pub fn modal_frame_anchored(
     title_color: Color,
 ) -> Rect {
     frame_at(frame, modal_rect(area, width, height, max_height), title_color)
+}
+
+/// Wipe `rect` back to bare ground: `Clear`, then the fixed scheme's
+/// ground repainted where the window's ground is owned — the first two
+/// steps of [`frame_at`], without the border. A shell hosting another
+/// page's drawing calls it over whatever that page must not have touched,
+/// so a row the page wrote past its area never reaches the screen.
+pub fn blank(frame: &mut Frame, rect: Rect) {
+    frame.render_widget(Clear, rect);
+    if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(ground).fg(th().text)),
+            rect,
+        );
+    }
 }
 
 /// A frame where the caller puts it — a dropdown under its control, a
@@ -721,15 +1165,39 @@ pub fn bar_jump(bar: Rect, max_scroll: usize, y: u16) -> usize {
     (rel * max_scroll + (span - 1) / 2) / (span - 1)
 }
 
-/// Display width in cells — what ratatui spends, so budgets and cut points
-/// agree with the drawing: a CJK character is two cells, not one.
+/// Display width in cells — exactly what ratatui spends drawing `text`, so
+/// budgets and cut points agree with the drawing: a CJK character is two
+/// cells, ❤️ and 1️⃣ are two (their VS16 widens them), and a ZWJ family or
+/// a skin-toned thumb is two, not the six or four its characters add up to.
+///
+/// The rule is ratatui's own (`Buffer::set_stringn`, ratatui-core 0.1):
+/// the text is cut into extended graphemes, each takes its
+/// [`grapheme_cells`], and the sum is the cells the buffer fills. Summing
+/// per character instead counted ❤️ one cell narrower than it is drawn,
+/// so a field or a clipped label ran a cell past its edge, and a family
+/// four cells wider, so it was left out where it fit. One rule for both
+/// flavours: the terminal paints by graphemes as the window does.
 pub fn width(text: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(text)
+    use unicode_segmentation::UnicodeSegmentation;
+    if text.is_ascii() {
+        // Every ASCII character is a grapheme of one cell, but for the
+        // controls ratatui drops ("\r\n" is one grapheme, and dropped too).
+        return text.bytes().filter(|b| !b.is_ascii_control()).count();
+    }
+    text.graphemes(true).map(grapheme_cells).sum()
 }
 
-/// One character's cells (zero for a combining mark).
-pub fn char_width(c: char) -> usize {
-    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+/// One grapheme's cells, as ratatui's `set_stringn` takes them: a grapheme
+/// holding a control character is dropped (no cells), and any other is its
+/// `CellWidth` — `UnicodeWidthStr::width` (unicode-width 0.2) plus a cell
+/// for each halfwidth (han)dakuten. A grapheme of no cells (a stray
+/// combining mark at the start of the text) ratatui drops too.
+pub fn grapheme_cells(grapheme: &str) -> usize {
+    use ratatui::buffer::CellWidth;
+    if grapheme.contains(char::is_control) {
+        return 0;
+    }
+    usize::from(grapheme.cell_width())
 }
 
 /// A list viewport: given the row count, a row to reveal (a moved
@@ -805,7 +1273,8 @@ impl ListView {
 /// The kit scrollbar, fully live: endcaps step (and hold-repeat), track
 /// cells jump proportionally, a track press arms a thumb drag, and the
 /// bar brightens under the pointer. Draws only on overflow; registers
-/// every cell and the bar geometry with the surface.
+/// every cell and the bar geometry with the surface. The thumb is sized
+/// by the bar's own rows, each of which is one of the list's.
 #[allow(clippy::too_many_arguments)]
 pub fn scroll_list<A: Clone>(
     frame: &mut Frame,
@@ -818,11 +1287,50 @@ pub fn scroll_list<A: Clone>(
     step_fwd: A,
     jump: impl Fn(usize) -> A + 'static,
 ) {
+    scroll_bar(frame, s, bar, len, visible, first, bar.height as usize, step_back, step_fwd, jump);
+}
+
+/// The kit scrollbar over items that may take more than one row each
+/// (the Admin log's wrapped lines): [`scroll_list`] in every way, but the
+/// thumb is sized by `visible` items of `len`, where a list's is sized by
+/// the bar's rows. Its positions are items too, so a host that cannot
+/// afford to count every item's rows keeps its bar in items.
+#[allow(clippy::too_many_arguments)]
+pub fn scroll_items<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    bar: Rect,
+    len: usize,
+    visible: usize,
+    first: usize,
+    step_back: A,
+    step_fwd: A,
+    jump: impl Fn(usize) -> A + 'static,
+) {
+    scroll_bar(frame, s, bar, len, visible, first, visible, step_back, step_fwd, jump);
+}
+
+/// The scrollbar both faces draw: `viewport` is what ratatui sizes the
+/// thumb by, against the `len - visible` positions past the first.
+#[allow(clippy::too_many_arguments)]
+fn scroll_bar<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    bar: Rect,
+    len: usize,
+    visible: usize,
+    first: usize,
+    viewport: usize,
+    step_back: A,
+    step_fwd: A,
+    jump: impl Fn(usize) -> A + 'static,
+) {
     if len <= visible || visible == 0 {
         return;
     }
     let max_scroll = len - visible;
-    let mut state = ScrollbarState::new(max_scroll + 1).position(first);
+    let mut state =
+        ScrollbarState::new(max_scroll + 1).position(first).viewport_content_length(viewport);
     let bar_hover = s.hovers(bar);
     let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
     let thumb = if bar_hover {
@@ -955,31 +1463,40 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells. A word wider
-/// than the box (a file path) hard-breaks at the character level — the
-/// greedy wrap would emit it as one line wider than the box, which clips.
+/// than the box (a file path, a Japanese or Chinese sentence, which has no
+/// blanks to break at) hard-breaks between graphemes — the greedy wrap
+/// would emit it as one line wider than the box, which clips.
 pub fn wrap_tip(text: &str) -> Vec<String> {
     wrap_at(text, TIP_WRAP, true)
 }
 
 fn wrap_at(text: &str, width: usize, hard_break: bool) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        if hard_break && word.chars().count() > width {
+        if hard_break && self::width(word) > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
             }
-            let chars: Vec<char> = word.chars().collect();
-            for chunk in chars.chunks(width) {
-                if chunk.len() == width {
-                    lines.push(chunk.iter().collect());
-                } else {
-                    line = chunk.iter().collect();
+            // By cells, as the budget is: counting characters let a CJK
+            // line run to twice the box; a wide character that would
+            // straddle its edge starts the next line.
+            let mut cells = 0;
+            for grapheme in word.graphemes(true) {
+                let w = grapheme_cells(grapheme);
+                if cells + w > width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    cells = 0;
                 }
+                line.push_str(grapheme);
+                cells += w;
             }
             continue;
         }
-        let need = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
+        // Measured in cells, as the budget is: counting characters let a
+        // Japanese line run to twice the width it was given.
+        let need = if line.is_empty() { self::width(word) } else { self::width(&line) + 1 + self::width(word) };
         if need > width && !line.is_empty() {
             lines.push(std::mem::take(&mut line));
         }
@@ -1042,7 +1559,7 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) -> 
     if lines.is_empty() {
         return Rect::default();
     }
-    let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
+    let w = lines.iter().map(|l| width(l)).max().unwrap_or(0) as u16 + 4;
     let h = lines.len() as u16 + 2;
     let rect = tooltip_rect(area, target, w, h);
     frame.render_widget(Clear, rect);
@@ -1077,6 +1594,10 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) -> 
 /// fonts and draw as '?' - CP437's own `│` and `»` stand in, same single
 /// cell, so the windowing math is identical (found live: the rename and
 /// directory-modal carets rendered as question marks).
+// No field draws through this since the wizard's moved to `field_display`
+// beside the admin rooms' and the GUI's; it stays as the line those draw
+// while nothing is composing, which the tests hold them to.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
     input_display_blink(value, cursor, width, true)
 }
@@ -1084,13 +1605,99 @@ pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
 /// [`input_display`] with the caret drawn or withheld — its cell stays
 /// reserved either way, so the line never shifts as it blinks. A shell
 /// asks [`Surface::caret`] for the phase.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn input_display_blink(value: &str, cursor: usize, width: u16, on: bool) -> String {
-    let (caret, clip) = if crate::kit::theme::legacy_conhost() {
+    let (caret, clip) = input_marks();
+    input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
+}
+
+/// The caret and clip marks this terminal can draw (see [`input_display`]).
+fn input_marks() -> (char, char) {
+    if crate::kit::theme::legacy_conhost() {
         ('│', '»')
     } else {
         ('▏', '…')
+    }
+}
+
+/// [`input_display_blink`] for the focused field, with an input method's
+/// uncommitted text spliced in at the cursor and the caret after it — the
+/// way every editor shows a composition in place, so にほん sits in the
+/// field while it is typed and becomes the value only on commit. While
+/// composing the caret holds solid: the keys are landing, as after any
+/// key. Also the caret's offset from the line's start, in cells, for a
+/// shell that places a candidate list by it. With no composition the
+/// line is exactly [`input_display_blink`]'s.
+///
+/// A masked field (a password) hands its value in masked already, and
+/// its mark as `mask`: the composition is drawn as that mark, one per
+/// character, like the value around it — never in clear beside a row of
+/// bullets.
+pub fn input_display_composing(
+    value: &str,
+    cursor: usize,
+    width: u16,
+    on: bool,
+    composition: &str,
+    mask: Option<char>,
+) -> (String, u16) {
+    let (caret, clip) = input_marks();
+    let (line, at) = if composition.is_empty() {
+        input_window(value, cursor, width, if on { caret } else { ' ' }, clip)
+    } else {
+        let cursor = cursor.min(value.chars().count());
+        let byte = value.char_indices().nth(cursor).map_or(value.len(), |(i, _)| i);
+        let composition: String = match mask {
+            Some(mark) => composition.chars().map(|_| mark).collect(),
+            None => composition.to_string(),
+        };
+        let spliced = format!("{}{composition}{}", &value[..byte], &value[byte..]);
+        input_window(&spliced, cursor + composition.chars().count(), width, caret, clip)
     };
-    input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
+    // The cells before the caret, by the rule the line is drawn by.
+    let before: String = line.chars().take(at).collect();
+    (line, u16::try_from(self::width(&before)).unwrap_or(u16::MAX))
+}
+
+/// The focused field of a page that draws on a surface of its own (an
+/// admin room, hosted in the GUI's Admin tab or not): the line
+/// [`input_display_composing`] draws, with the surface's composition and
+/// the caret held steady, and the caret's cell noted on the surface
+/// ([`Surface::note_caret`]), `x` and `y` being the cell the line starts
+/// in. A host lifts the note onto its own surface, which is how the GUI's
+/// window knows the room's field has the keyboard and turns its paste and
+/// its input method on for it, the candidate list at the caret, as it
+/// does for the GUI's own fields (`gui::text_field`). Everywhere else the
+/// note goes unread and the composition stays empty, so the line is the
+/// one [`input_display`] draws. A masked field hands its value in masked
+/// already and its mark as `mask`. The caret does not blink here: a host
+/// times its frames by its own surface's blink clock, not the page's.
+pub fn field_display<A: Clone>(
+    ui: &mut Surface<A>,
+    x: u16,
+    y: u16,
+    value: &str,
+    cursor: usize,
+    width: u16,
+    mask: Option<char>,
+) -> String {
+    let (line, caret) = field_line(ui, value, cursor, width, mask);
+    ui.note_caret(Position { x: x.saturating_add(caret), y });
+    line
+}
+
+/// [`field_display`]'s line and the caret's offset in it, in cells,
+/// noting nothing: for a field whose line is placed only once it has been
+/// measured (a filter right-aligned with what follows it), which notes
+/// its caret itself when it knows where the line starts.
+pub fn field_line<A: Clone>(
+    ui: &Surface<A>,
+    value: &str,
+    cursor: usize,
+    width: u16,
+    mask: Option<char>,
+) -> (String, u16) {
+    input_display_composing(value, cursor, width, true, ui.composition(), mask)
 }
 
 /// Pure core - unit-tested with explicit marks so the assertions hold on
@@ -1100,27 +1707,104 @@ fn input_display_with_fancy(value: &str, cursor: usize, width: u16) -> String {
     input_display_with(value, cursor, width, '▏', '…')
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, clip: char) -> String {
+    input_window(value, cursor, width, caret, clip).0
+}
+
+/// The windowed line, and the caret's index in it, in characters. The
+/// clip marks never land on the caret: a window that starts past the
+/// value's start keeps the caret at least one in, and one that stops short
+/// of its end keeps it at least one short.
+///
+/// The window is measured in cells, not characters: `width` is the cells
+/// the field has, and a wide character (kana, hanzi, hangul) takes two of
+/// them. Counting characters let a line of CJK run to twice the field's
+/// width, past its border, and put the caret's cell outside the field.
+/// That was wrong in a terminal as much as in the GUI's window, so this is
+/// a correctness fix both share; for text of narrow characters only, the
+/// window is what it always was. A wide character that does not fit
+/// beside a clip mark is left out whole, so a line may come up a cell
+/// short of `width`, never over it.
+///
+/// And it walks graphemes, not characters, each at its [`grapheme_cells`]:
+/// the clusters ratatui fills its cells by, so a cluster shows whole or not
+/// at all and the line's cells are the cells drawn. Walking characters, the
+/// characters that extend a grapheme (a flag's tags, a combining mark,
+/// VS16, a ZWJ) took no cells: the walk back took them for free and stopped
+/// on their base when it did not fit, so the line began with the tail of a
+/// cluster whose base was cut (ratatui hangs it on the clip mark's cell,
+/// which the window drew as a box), ❤️ counted a cell short and ran past
+/// the field, and a ZWJ family counted six cells for its two. The caret is
+/// a character of its own in the line it is cut from; a caret inside a
+/// cluster (the cursor counts characters, so Left steps into a flag's tags)
+/// splits it there, and the window keeps the caret's own cluster.
+fn input_window(
+    value: &str,
+    cursor: usize,
+    width: u16,
+    caret: char,
+    clip: char,
+) -> (String, usize) {
+    use unicode_segmentation::UnicodeSegmentation;
     let w = width as usize;
     if w < 3 {
-        return clip.to_string();
+        return (clip.to_string(), 0);
     }
     let mut chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
     chars.insert(cursor, caret);
-    let total = chars.len();
-    if total <= w {
-        return chars.into_iter().collect();
+    let line: String = chars.iter().collect();
+    // Each cluster's first character, and the cells before it (a prefix
+    // sum, so a run's cells are one subtraction): `starts[i]..starts[i + 1]`
+    // are cluster i's characters, `before[j] - before[i]` the cells of
+    // clusters i..j.
+    let mut starts = vec![0];
+    let mut before = vec![0];
+    for grapheme in line.graphemes(true) {
+        starts.push(starts[starts.len() - 1] + grapheme.chars().count());
+        before.push(before[before.len() - 1] + grapheme_cells(grapheme));
     }
-    let start = cursor.saturating_sub(w.saturating_sub(2)).min(total - w);
-    let mut out: Vec<char> = chars[start..start + w].to_vec();
+    let n = starts.len() - 1;
+    let cells = |from: usize, to: usize| before[to] - before[from];
+    if cells(0, n) <= w {
+        return (line, cursor);
+    }
+    // The caret's cluster: the caret itself, or a cluster it begins (a
+    // combining mark after it hangs on it).
+    let at = starts.iter().rposition(|&s| s <= cursor).unwrap_or(0).min(n - 1);
+    // The window is clusters start..end between the clip marks it needs: one
+    // before when it starts past the value's start, one after when it
+    // stops short of its end.
+    let fits = |start: usize, end: usize| {
+        cells(start, end) + usize::from(start > 0) + usize::from(end < n) <= w
+    };
+    // The caret is the window's last cluster before the trailing clip —
+    // unless what follows it would take no more than the clip's own cell,
+    // when it shows instead — and the window reaches back from there as
+    // far as fits. One that reaches the value's start has room left after
+    // the caret, which the text after it takes.
+    let mut end = at + 1;
+    if cells(end, n) <= 1 {
+        end = n;
+    }
+    let mut start = end;
+    while start > 0 && fits(start - 1, end) {
+        start -= 1;
+    }
+    while start == 0 && end < n && fits(0, end + 1) {
+        end += 1;
+    }
+    let (from, to) = (starts[start], starts[end]);
+    let mut out = String::new();
     if start > 0 {
-        out[0] = clip;
+        out.push(clip);
     }
-    if start + w < total {
-        out[w - 1] = clip;
+    out.extend(&chars[from..to]);
+    if end < n {
+        out.push(clip);
     }
-    out.into_iter().collect()
+    (out, cursor - from + usize::from(start > 0))
 }
 
 // ── The pointer contract (OSC 22) ────────────────────────────────────────────
@@ -1191,6 +1875,54 @@ mod tests {
         assert!(!s.covered_last_frame(inside), "and the frame after it leaves is clear");
     }
 
+    /// The footprints moving is what a shell watches to bring the next
+    /// frame forward: the frame an overlay opens on, the frame it closes on
+    /// and the frame it moves on, never a frame that repeats the last.
+    #[test]
+    fn the_overlays_moving_is_told_on_the_frame_they_move() {
+        let mut s: Surface<u8> = Surface::new();
+        let modal = Rect { x: 0, y: 0, width: 10, height: 10 };
+        s.begin_frame();
+        assert!(!s.overlays_moved(), "nothing then nothing");
+        s.overlay(modal);
+        assert!(s.overlays_moved(), "the frame a modal opens on");
+        s.begin_frame();
+        s.overlay(modal);
+        assert!(!s.overlays_moved(), "the same modal again is still");
+        s.begin_frame();
+        s.overlay(Rect { x: 1, ..modal });
+        assert!(s.overlays_moved(), "a moved one");
+        s.begin_frame();
+        assert!(s.overlays_moved(), "the frame it closes on");
+        s.begin_frame();
+        assert!(!s.overlays_moved());
+    }
+
+    /// A watcher hears every overlay as it registers, in order, the modal
+    /// frame's among them, and changes nothing the surface itself answers.
+    #[test]
+    fn an_overlay_watcher_is_told_each_footprint_as_it_registers() {
+        use std::sync::{Arc, Mutex};
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mut s: Surface<u8> = Surface::new();
+        let ear = heard.clone();
+        s.watch_overlays(move |rect| ear.lock().unwrap().push(rect));
+        let tip = Rect { x: 1, y: 1, width: 4, height: 1 };
+        s.begin_frame();
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                modal_frame_on(frame, &mut s, frame.area(), 20, 6, Color::White);
+            })
+            .unwrap();
+        s.overlay(tip);
+        let modal = modal_rect(Rect::new(0, 0, 40, 12), 20, 6, 6);
+        assert_eq!(*heard.lock().unwrap(), [modal, tip]);
+        s.begin_frame();
+        assert!(s.covered_last_frame(modal) && s.covered_last_frame(tip));
+    }
+
     #[test]
     fn pointer_shapes_speak_both_name_families_and_reset_is_empty() {
         assert_eq!(pointer_shape_seq(true), "\x1b]22;hand2\x1b\\\x1b]22;pointer\x1b\\");
@@ -1206,6 +1938,40 @@ mod tests {
         assert!(two.iter().all(|l| l.chars().count() <= TIP_WRAP));
         assert_eq!(two.join(" "), "This folder's name in mStream — click to rename");
         assert!(wrap_tip("   ").is_empty());
+    }
+
+    #[test]
+    fn sentences_wrap_by_cells_so_a_wide_script_keeps_inside_its_budget() {
+        let text = "最初のユーザーがログインを有効にします — ウェブアプリ、アプリ、そしてこのプレイヤーで。";
+        let lines = wrap_words(text, 79);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().all(|l| width(l) <= 79), "{lines:?}");
+        assert_eq!(lines.join(" "), text);
+        assert_eq!(wrap_words("one two three", 7), vec!["one two", "three"], "a Latin line is as it was");
+    }
+
+    #[test]
+    fn a_tooltip_breaks_a_sentence_with_no_blanks_by_cells_and_its_box_fits_them() {
+        // Japanese has no blanks to break at: the sentence hard-breaks
+        // between characters at 40 cells — 20 of them, not 40.
+        let sentence = "は各曲のタグから決まるため、これらの曲は複数のフォルダーに入ることがあります。";
+        let lines = wrap_tip(&format!("‹アーティスト› {sentence}"));
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!((lines[0].as_str(), width(&lines[1])), ("‹アーティスト›", TIP_WRAP));
+        assert_eq!(lines[1..].concat(), sentence);
+        // A wide character never straddles the edge: one cell short, it goes down.
+        let odd = wrap_tip(&format!("a{}", "曲".repeat(25)));
+        assert_eq!((odd[0].as_str(), odd[1].as_str()), (format!("a{}", "曲".repeat(19)).as_str(), "曲曲曲曲曲曲"));
+        // A path is as it was.
+        let path = "x".repeat(50);
+        assert_eq!(wrap_tip(&path), vec!["x".repeat(40), "x".repeat(10)]);
+        // The box is the widest line's cells, the border and a blank each side.
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        let mut rect = Rect::default();
+        terminal
+            .draw(|f| rect = draw_tooltip(f, f.area(), Rect { x: 40, y: 2, width: 10, height: 1 }, &format!("‹アーティスト› {sentence}")))
+            .unwrap();
+        assert_eq!((rect.width, rect.height), (TIP_WRAP as u16 + 4, 5));
     }
 
     #[test]
@@ -1299,6 +2065,200 @@ mod tests {
         assert_eq!(input_display_with_fancy("123456789", 4, 10), "1234▏56789");
     }
 
+    /// The window counts cells: wide text fits the field it is drawn in,
+    /// in a terminal and in the window alike, and the caret's cell the
+    /// composing line reports stays inside it. Counting characters, ten
+    /// kana in a ten-cell field drew twenty cells and put the caret at 20.
+    #[test]
+    fn wide_text_windows_by_cells_and_keeps_the_caret_in_the_field() {
+        let w = |line: &str| width(line);
+        let kana = "あいうえおかきくけこ";
+        // At the end: the clip, as many kana as fit, the caret.
+        assert_eq!(input_display_with_fancy(kana, 10, 10), "…きくけこ▏");
+        // At the start: the caret, the kana that fit, the clip.
+        assert_eq!(input_display_with_fancy(kana, 0, 10), "▏あいうえ…");
+        // Mid-value: the caret one short of the trailing clip. A fourth
+        // kana before it would make eleven cells, so the line is nine.
+        assert_eq!(input_display_with_fancy(kana, 6, 10), "…えおか▏…");
+        // Narrow and wide together, cursor anywhere: never past the field.
+        let mixed = "ab日本cd語ef한국gh";
+        for width in 3..20u16 {
+            for cursor in 0..=mixed.chars().count() {
+                let shown = input_display_with_fancy(mixed, cursor, width);
+                assert!(w(&shown) <= width as usize, "{shown:?} at {cursor} in {width}");
+                assert!(shown.contains('▏'), "the caret always shows: {shown:?}");
+            }
+        }
+        // A composition of kana: the caret's reported cell is in the field.
+        for width in [6u16, 10, 15] {
+            let (line, at) = input_display_composing("東京", 2, width, true, "にほんご", None);
+            assert!(w(&line) <= width as usize, "{line:?} in {width}");
+            assert!(at < width, "the caret's cell {at} is past a {width}-cell field: {line:?}");
+            assert!(line.ends_with('▏'), "the caret follows the composition: {line:?}");
+        }
+    }
+
+    /// A field never shows part of a cluster at its clipped ends. England's flag is 🏴 and six
+    /// tag characters that take no cells; with the caret at the end of a value that scrolls,
+    /// the line's left clip fell between 🏴 (two cells, which did not fit) and its tags (free),
+    /// so the line began `…` and the tags, which ratatui hangs on the clip's cell and the
+    /// window drew as a box. Every line, at every caret between clusters and every width, is
+    /// whole clusters of the value between its marks.
+    #[test]
+    fn a_clipped_field_shows_a_cluster_whole_or_not_at_all() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let england = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+        // The reported case: the base does not fit beside the clip, the tags would.
+        let value = format!("aaaa{england}bbbbbbbbbb");
+        let end = value.chars().count();
+        assert_eq!(input_display_with_fancy(&value, end, 13), "…bbbbbbbbbb▏");
+        assert_eq!(input_display_with_fancy(&value, end, 14), format!("…{england}bbbbbbbbbb▏"));
+        // And at the other end, the window reaching right from the value's start: a ZWJ
+        // family whose man fits and whose woman does not was cut after the joiner. It is
+        // one cluster of two cells, ratatui's width for it: left out whole where those two
+        // cells and the clip do not fit, shown whole where they do (counted per character,
+        // its six cells kept it out of a line with room for it).
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(input_display_with_fancy(&format!("aa{family}bb"), 0, 5), "▏aa…");
+        let shown = input_display_with_fancy(&format!("aa{family}bb"), 0, 6);
+        assert_eq!(shown, format!("▏aa{family}…"));
+        let w = |line: &str| width(line);
+        let clusters = [
+            england,
+            "e\u{301}",
+            "\u{2764}\u{FE0F}",
+            "\u{1F1FA}\u{1F1F8}",
+            family,
+            "\u{1F44D}\u{1F3FD}",
+        ];
+        for cluster in clusters {
+            let value = format!("ab{cluster}cd{cluster}ef");
+            let mut bounds = vec![0];
+            for grapheme in value.graphemes(true) {
+                bounds.push(bounds[bounds.len() - 1] + grapheme.chars().count());
+            }
+            let chars: Vec<char> = value.chars().collect();
+            for &cursor in &bounds {
+                for width in 3..24u16 {
+                    let shown = input_display_with_fancy(&value, cursor, width);
+                    assert!(w(&shown) <= width as usize, "{shown:?} at {cursor} in {width}");
+                    let text: String = shown.chars().filter(|&c| c != '▏' && c != '…').collect();
+                    let shown_chars = text.chars().count();
+                    let found = (0..=chars.len() - shown_chars).find(|&from| {
+                        chars[from..from + shown_chars].iter().copied().eq(text.chars())
+                            && bounds.contains(&from)
+                            && bounds.contains(&(from + shown_chars))
+                    });
+                    assert!(found.is_some(), "{shown:?} at {cursor} in {width} cuts a cluster");
+                }
+            }
+        }
+    }
+
+    /// The clusters the width rule is held to ratatui on: an emoji with VS16, a keycap, a flag of
+    /// regional indicators, a subdivision flag of tags, a ZWJ family, a skin tone, hangul, kana,
+    /// a hanzi, a decomposed é, a plain word, and a mixed string of them.
+    const PARITY: [&str; 12] = [
+        "\u{2764}\u{FE0F}",
+        "1\u{FE0F}\u{20E3}",
+        "\u{1F1FA}\u{1F1F8}",
+        "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        "\u{1F44D}\u{1F3FD}",
+        "\u{D55C}",
+        "\u{304B}",
+        "\u{65E5}",
+        "e\u{301}",
+        "music",
+        concat!(
+            "a\u{2764}\u{FE0F}b1\u{FE0F}\u{20E3}\u{1F1FA}\u{1F1F8}c",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{1F44D}\u{1F3FD}",
+            "\u{D55C}\u{304B}\u{65E5}e\u{301}",
+        ),
+    ];
+
+    /// The cells ratatui fills setting `text` into a buffer wide enough for it: the cursor's
+    /// advance, which counts each grapheme's cell and the cells its width hides.
+    fn ratatui_cells(text: &str) -> usize {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 200, 1));
+        let (x, _) = buffer.set_stringn(0, 0, text, usize::MAX, Style::default());
+        x as usize
+    }
+
+    /// The row `line` leaves in a 40-cell `TestBackend` filled with `#`, set from column 0
+    /// the way the GUI's `put` sets it: with the buffer's edge as its only budget.
+    fn drawn_over_sentinels(line: &str) -> Vec<String> {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                let buffer = frame.buffer_mut();
+                for x in 0..40 {
+                    buffer[(x, 0)].set_symbol("#");
+                }
+                buffer.set_stringn(0, 0, line, usize::MAX, Style::default());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..40).map(|x| buffer[(x, 0)].symbol().to_string()).collect()
+    }
+
+    /// One width rule, ratatui's: the kit measures every cluster at the cells ratatui fills
+    /// with it. Summing per character, ❤️ and 1️⃣ were a cell short (their VS16 widens them),
+    /// a ZWJ family four cells over and a skin tone two.
+    #[test]
+    fn the_width_rule_is_the_cells_ratatui_draws() {
+        use unicode_width::UnicodeWidthChar;
+        let per_char = |text: &str| text.chars().filter_map(UnicodeWidthChar::width).sum::<usize>();
+        for text in PARITY {
+            assert_eq!(width(text), ratatui_cells(text), "{text:?}: the kit's against ratatui's");
+            let graphemes: usize = unicode_segmentation::UnicodeSegmentation::graphemes(text, true)
+                .map(grapheme_cells)
+                .sum();
+            assert_eq!(graphemes, width(text), "{text:?}: grapheme by grapheme");
+            eprintln!("{text:?}: {} cells, {} summed per character", width(text), per_char(text));
+        }
+        for cluster in &PARITY[..10] {
+            assert!(width(cluster) <= 2, "{cluster:?} is one cluster of at most two cells");
+        }
+        // The controls ratatui drops, and a mark with no base, take no cells.
+        for text in ["a\tb", "a\r\nb", "\u{301}a", "a\u{7}"] {
+            assert_eq!(width(text), ratatui_cells(text), "{text:?}");
+        }
+        // Halfwidth katakana's sound mark: its own cell, as ratatui counts it.
+        assert_eq!(width("\u{FF76}\u{FF9E}"), ratatui_cells("\u{FF76}\u{FF9E}"));
+    }
+
+    /// A field N cells wide never writes past its Nth cell, whatever clusters it holds and
+    /// wherever its caret: the cell after it keeps the `#` it had. And the caret's reported
+    /// cell is where ratatui draws the caret.
+    #[test]
+    fn a_field_of_any_cluster_stays_inside_its_cells() {
+        use unicode_segmentation::UnicodeSegmentation;
+        for cluster in PARITY {
+            let values = [cluster.repeat(9), format!("ab{cluster}cd{cluster}ef{cluster}gh")];
+            for value in values {
+                let mut bounds = vec![0];
+                for grapheme in value.graphemes(true) {
+                    bounds.push(bounds[bounds.len() - 1] + grapheme.chars().count());
+                }
+                for &cursor in &bounds {
+                    for n in 3..30u16 {
+                        let (line, at) = input_display_composing(&value, cursor, n, true, "", None);
+                        let row = drawn_over_sentinels(&line);
+                        assert_eq!(width(&line), ratatui_cells(&line), "{line:?}");
+                        assert!(width(&line) <= n as usize, "{line:?} at {cursor} over {n} cells");
+                        for (x, cell) in row.iter().enumerate().skip(n as usize) {
+                            assert_eq!(cell, "#", "{line:?} at {cursor} in {n} wrote cell {x}");
+                        }
+                        let caret = (0..40).find(|&x| row[x].contains(input_marks().0));
+                        assert_eq!(caret, Some(at as usize), "{line:?}: the caret's cell");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_caret_withheld_leaves_its_cell_so_the_line_never_shifts() {
         assert_eq!(input_display_blink("1234", 2, 10, false), "12 34");
@@ -1311,6 +2271,117 @@ mod tests {
             on.chars().zip(off.chars()).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
         assert_eq!(differ.len(), 1, "one cell blinks, the rest stand: {on} / {off}");
         assert_eq!(off.chars().nth(differ[0]), Some(' '));
+    }
+
+    #[test]
+    fn a_composition_splices_in_at_the_cursor_with_the_caret_after_it() {
+        // No composition: the very line the blinking caret draws, either
+        // phase, and the caret's cell after the text before it.
+        for on in [true, false] {
+            let (line, at) = input_display_composing("abcd", 2, 20, on, "", None);
+            assert_eq!(line, input_display_blink("abcd", 2, 20, on));
+            assert_eq!(at, 2);
+        }
+        // Composing at the end, mid-value and at the start: the text goes
+        // in at the cursor and the caret follows it, solid even in the
+        // blink's off phase. Kana are two cells each.
+        let caret = input_display_blink("", 0, 5, true);
+        let shown = input_display_composing("", 0, 20, false, "にほん", None);
+        assert_eq!(shown, (format!("にほん{caret}"), 6));
+        let shown = input_display_composing("ab", 1, 20, true, "x", None);
+        assert_eq!(shown, (format!("ax{caret}b"), 2));
+        let shown = input_display_composing("ab", 0, 20, false, "日", None);
+        assert_eq!(shown, (format!("日{caret}ab"), 2));
+        // The value itself is not touched; a cursor past the end is the
+        // end; a long composition windows around the caret like any text.
+        assert_eq!(input_display_composing("ab", 9, 20, true, "c", None).0, format!("abc{caret}"));
+        let (line, at) = input_display_composing("0123456789", 10, 8, true, "abcdef", None);
+        assert_eq!(line.chars().count(), 8);
+        assert!(line.ends_with(&format!("cdef{caret}")), "{line}");
+        assert_eq!(at, 7);
+    }
+
+    /// A masked field's composition is drawn as its mark, one per
+    /// character: nothing an input method composes for a password shows in
+    /// clear. The value comes in masked already, as the field draws it.
+    #[test]
+    fn a_masked_fields_composition_is_drawn_masked() {
+        let caret = input_display_blink("", 0, 5, true);
+        let (line, at) = input_display_composing("••", 2, 20, true, "にほ", Some('•'));
+        assert_eq!((line.as_str(), at), (format!("••••{caret}").as_str(), 4));
+        assert!(!line.contains('に') && !line.contains('ほ'), "{line}");
+        // Mid-value too, and an unmasked field is untouched.
+        let (line, _) = input_display_composing("•••", 1, 20, false, "pw", Some('•'));
+        assert_eq!(line, format!("•••{caret}••"));
+        let plain = input_display_composing("ab", 2, 20, true, "pw", None).0;
+        assert_eq!(plain, format!("abpw{caret}"));
+    }
+
+    #[test]
+    fn the_surface_keeps_the_caret_cell_for_a_frame_and_the_composition_until_told() {
+        let mut s: Surface<i32> = Surface::new();
+        assert_eq!((s.caret_at(), s.composition()), (None, ""));
+        s.note_caret(Position { x: 7, y: 3 });
+        s.set_composition("にほ");
+        assert_eq!(s.caret_at(), Some(Position { x: 7, y: 3 }));
+        s.begin_frame();
+        assert_eq!(s.caret_at(), None, "a frame that draws no field has no caret");
+        assert_eq!(s.composition(), "にほ", "the input method's text outlives frames");
+        s.set_composition("");
+        assert_eq!(s.composition(), "");
+    }
+
+    /// A hosted page's focused field ([`field_display`]): while nothing is
+    /// composing the line is the one [`input_display`] draws, and the cell
+    /// noted holds the caret wherever the window over a long value stands;
+    /// a composition goes in before the caret, a masked field's as marks.
+    #[test]
+    fn a_hosted_field_notes_the_cell_its_caret_is_drawn_in_however_the_value_is_windowed() {
+        let caret = input_display_blink("", 0, 5, true).chars().next().unwrap();
+        let mut s: Surface<i32> = Surface::new();
+        let value = "0123456789abcdefghij";
+        // The cursor at the end, mid-value and at the start of a value
+        // twice the field's width.
+        for cursor in [20, 10, 0] {
+            let line = field_display(&mut s, 30, 4, value, cursor, 10, None);
+            assert_eq!(line, input_display(value, cursor, 10));
+            let at = s.caret_at().expect("the field noted its caret");
+            assert_eq!(at.y, 4);
+            assert_eq!(line.chars().nth(usize::from(at.x - 30)), Some(caret), "cursor {cursor}: {line:?}");
+        }
+        // Kana are two cells each: the caret's cell counts them so.
+        s.set_composition("にほ");
+        let line = field_display(&mut s, 30, 4, value, 20, 10, None);
+        let before: String = line.chars().take_while(|c| *c != caret).collect();
+        assert!(before.ends_with("にほ"), "the composition before the caret: {line:?}");
+        assert_eq!(s.caret_at(), Some(Position { x: 30 + width(&before) as u16, y: 4 }));
+        let line = field_display(&mut s, 30, 4, "••", 2, 10, Some('•'));
+        assert_eq!(line, format!("••••{caret}"), "a masked field's composition is marks");
+        // The bare line notes nothing, for a field placed once measured.
+        s.begin_frame();
+        assert_eq!(field_line(&s, "ab", 2, 10, None), (format!("abにほ{caret}"), 6));
+        assert_eq!(s.caret_at(), None);
+    }
+
+    #[test]
+    fn a_modal_takes_the_keyboard_from_the_field_beneath_it() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut s: Surface<i32> = Surface::new();
+        terminal
+            .draw(|frame| {
+                // The page's field, then a modal with none: the field's
+                // caret still blinks beside it, but it has no keyboard.
+                s.caret();
+                s.note_caret(Position { x: 3, y: 1 });
+                modal_frame_on(frame, &mut s, frame.area(), 20, 5, Color::Reset);
+                assert_eq!(s.caret_at(), None);
+                assert!(s.caret_next_flip().is_some(), "the blink keeps its clock");
+                // A field drawn inside the modal has it again.
+                s.note_caret(Position { x: 12, y: 5 });
+            })
+            .unwrap();
+        assert_eq!(s.caret_at(), Some(Position { x: 12, y: 5 }));
     }
 
     #[test]
@@ -1445,6 +2516,191 @@ mod tests {
         assert_eq!(s.pointer, Some(Position { x: 9, y: 6 }));
     }
 
+    /// A modal's guard drawn after a list's bar takes every press over it:
+    /// no held arrow, no thumb's drag and no soft capture arm beneath it,
+    /// while the bar's cells beside the guard, and a bar drawn inside the
+    /// modal over the list's, arm as ever.
+    #[test]
+    fn a_click_registered_over_a_bar_after_it_takes_the_press() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut s: Surface<i32> = Surface::new();
+        // The list's bar: ▲ on 2, the track on 3-6, ▼ on 7. The modal's
+        // guard covers rows 5-10, registered after the bar the way an
+        // overlay draws after the screen beneath; the modal's own list
+        // draws its bar inside, on 6-9, over the list's.
+        let list = Rect { x: 10, y: 2, width: 1, height: 6 };
+        let guard = Rect { x: 4, y: 5, width: 12, height: 6 };
+        let inside = Rect { x: 10, y: 6, width: 1, height: 4 };
+        let mut terminal = Terminal::new(TestBackend::new(20, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                s.begin_frame();
+                scroll_list(frame, &mut s, list, 20, 6, 0, -1, 1, |p| p as i32 + 100);
+                s.click(guard, 77);
+                scroll_list(frame, &mut s, inside, 20, 4, 0, -2, 2, |p| p as i32 + 200);
+            })
+            .unwrap();
+
+        // The list's track under the guard: the guard has the press.
+        let covered = Position { x: 10, y: 5 };
+        assert!(s.begin_press(covered));
+        assert_eq!(s.hit(covered), Some(77));
+        s.arm_bars(covered);
+        assert!(!s.holding_bar(), "the guard drawn after the bar wins");
+        assert_eq!(s.drag_action(Position { x: 10, y: 3 }), None, "no thumb follows the hand");
+        assert_eq!(s.hold_action(), None);
+        s.release();
+        s.motion(Position { x: 9, y: 5 });
+        assert_eq!(s.pointer, Some(Position { x: 9, y: 5 }), "and the instant release left no soft capture");
+
+        // Where the modal's own bar stands over the list's, the press is
+        // the modal's bar's: its track jumps and its thumb follows.
+        let modal_track = Position { x: 10, y: 7 };
+        assert_eq!(s.hit(modal_track), Some(200 + bar_jump(inside, 16, 7) as i32));
+        s.arm_bars(modal_track);
+        assert!(s.holding_bar());
+        assert_eq!(s.drag_action(Position { x: 10, y: 8 }), Some(200 + bar_jump(inside, 16, 8) as i32));
+        s.release();
+
+        // Beside the guard the list's bar is its own: ▲ holds, the track
+        // drags.
+        let up = Position { x: 10, y: 2 };
+        assert_eq!(s.hit(up), Some(-1));
+        s.arm_bars(up);
+        assert!(s.holding_bar(), "the endcap the guard leaves bare arms");
+        s.release();
+        s.arm_bars(Position { x: 10, y: 3 });
+        assert_eq!(s.drag_action(Position { x: 10, y: 4 }), Some(100 + bar_jump(list, 14, 4) as i32));
+        s.release();
+    }
+
+    /// The acts a test region emits: what it was told, and where.
+    fn told(g: Grip, at: Position) -> (Grip, u16, u16) {
+        (g, at.x, at.y)
+    }
+
+    #[test]
+    fn a_drag_region_arms_on_a_press_follows_the_hand_and_ends_on_the_release_anywhere() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 2, y: 3, width: 20, height: 5 };
+        s.drag_region(rows, told);
+        assert_eq!(s.arm_region(Position { x: 40, y: 3 }), None, "a press beside the region takes nothing");
+        assert!(!s.gripping());
+        assert_eq!(s.arm_region(Position { x: 5, y: 4 }), Some((Grip::Press, 5, 4)));
+        assert!(s.gripping());
+        assert_eq!(s.drag_action(Position { x: 6, y: 6 }), Some((Grip::Drag, 6, 6)));
+        assert_eq!(s.drag_action(Position { x: 70, y: 0 }), Some((Grip::Drag, 70, 0)), "the hand may leave the region");
+        assert_eq!(s.release_at(Position { x: 70, y: 30 }), Some((Grip::Release, 70, 30)), "and let go anywhere");
+        assert!(!s.gripping());
+        assert_eq!(s.drag_action(Position { x: 6, y: 6 }), None, "nothing follows the hand after the release");
+        assert_eq!(s.release_at(Position { x: 6, y: 6 }), None, "a second release tells nobody");
+    }
+
+    #[test]
+    fn a_grip_holds_the_pointer_like_a_thumb_drag() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        s.drag_region(Rect { x: 0, y: 0, width: 10, height: 4 }, told);
+        let press = Position { x: 3, y: 1 };
+        assert!(s.begin_press(press));
+        s.arm_region(press);
+        s.motion(Position { x: 30, y: 9 });
+        assert_eq!(s.pointer, Some(press), "hover stays at the press while gripping");
+        s.release_at(Position { x: 30, y: 9 });
+        s.motion(Position { x: 30, y: 9 });
+        assert_eq!(s.pointer, Some(Position { x: 30, y: 9 }), "free after the release");
+    }
+
+    #[test]
+    fn a_click_registered_over_a_region_after_it_takes_the_press() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 0, y: 0, width: 20, height: 6 };
+        let focus = (Grip::Release, 99, 99);
+        s.click(rows, focus);
+        s.drag_region(rows, told);
+        let catcher = (Grip::Release, 77, 77);
+        s.click(Rect { x: 10, y: 2, width: 10, height: 4 }, catcher);
+        let under_menu = Position { x: 12, y: 3 };
+        assert_eq!(s.hit(under_menu), Some(catcher));
+        assert_eq!(s.arm_region(under_menu), None, "the catcher drawn after the region wins");
+        assert!(!s.gripping());
+        let on_a_line = Position { x: 4, y: 3 };
+        assert_eq!(s.hit(on_a_line), Some(focus), "the region is transparent to the click drawn before it");
+        assert_eq!(s.arm_region(on_a_line), Some((Grip::Press, 4, 3)));
+    }
+
+    #[test]
+    fn regions_clear_with_the_registries_and_a_grip_outlives_its_frame() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        let rows = Rect { x: 0, y: 0, width: 20, height: 6 };
+        s.begin_frame();
+        s.drag_region(rows, told);
+        s.arm_region(Position { x: 1, y: 1 });
+        s.begin_frame();
+        assert_eq!(s.drag_action(Position { x: 2, y: 2 }), Some((Grip::Drag, 2, 2)), "the grip keeps its own act");
+        assert_eq!(s.arm_region(Position { x: 1, y: 1 }), None, "the next frame drew no region");
+        s.release();
+        assert!(!s.gripping(), "the plain release drops the grip");
+        assert_eq!(s.drag_action(Position { x: 2, y: 2 }), None);
+    }
+
+    #[test]
+    fn a_quick_click_on_a_region_leaves_no_soft_capture() {
+        let mut s: Surface<(Grip, u16, u16)> = Surface::new();
+        s.drag_region(Rect { x: 0, y: 0, width: 20, height: 6 }, told);
+        let press = Position { x: 5, y: 2 };
+        assert!(s.begin_press(press));
+        s.arm_region(press);
+        s.release_at(press);
+        assert!(s.begin_press(Position { x: 6, y: 2 }), "a press one cell away is a press, not a phantom");
+        s.motion(Position { x: 6, y: 3 });
+        assert_eq!(s.pointer, Some(Position { x: 6, y: 3 }), "hover is free at once");
+    }
+
+    #[test]
+    fn a_modal_centres_in_its_area_wherever_the_area_starts() {
+        let origin = Rect { x: 0, y: 0, width: 100, height: 30 };
+        assert_eq!(
+            modal_rect(origin, 60, 10, 10),
+            Rect { x: 20, y: 10, width: 60, height: 10 },
+            "an area at the origin puts the modal exactly where it always sat"
+        );
+        assert_eq!(modal_rect(origin, 60, 6, 10), Rect { x: 20, y: 10, width: 60, height: 6 }, "a growing modal keeps its top edge");
+        let hosted = Rect { x: 17, y: 1, width: 83, height: 23 };
+        let r = modal_rect(hosted, 60, 10, 10);
+        assert_eq!(r, Rect { x: 17 + 11, y: 1 + 6, width: 60, height: 10 });
+        assert!(hosted.contains(Position { x: r.x, y: r.y }) && r.right() <= hosted.right() && r.bottom() <= hosted.bottom());
+        let short = Rect { x: 17, y: 1, width: 83, height: 17 };
+        let r = modal_rect(short, 84, 22, 22);
+        assert_eq!(r, Rect { x: 19, y: 2, width: 79, height: 15 }, "a form taller and wider than the area clamps inside it");
+    }
+
+    #[test]
+    fn blank_clears_the_rect_and_nothing_else() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        let rect = Rect { x: 4, y: 2, width: 6, height: 3 };
+        terminal
+            .draw(|frame| {
+                let all = frame.area();
+                for y in all.top()..all.bottom() {
+                    for x in all.left()..all.right() {
+                        frame.buffer_mut()[(x, y)].set_symbol("x");
+                    }
+                }
+                blank(frame, rect);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..8 {
+            for x in 0..20 {
+                let want = if rect.contains(Position { x, y }) { " " } else { "x" };
+                assert_eq!(buffer[(x, y)].symbol(), want, "cell ({x}, {y})");
+            }
+        }
+    }
+
     #[test]
     fn hits_prefer_the_last_drawn_rect() {
         let mut s: Surface<i32> = Surface::new();
@@ -1453,5 +2709,279 @@ mod tests {
         assert_eq!(s.hit(Position { x: 5, y: 0 }), Some(2), "the overlay wins");
         assert_eq!(s.hit(Position { x: 1, y: 0 }), Some(1));
         assert_eq!(s.hit(Position { x: 50, y: 0 }), None);
+    }
+
+    // ── Apple Terminal's release echo ────────────────────────────────────
+
+    const LEFT_DOWN: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+    const LEFT_UP: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+
+    fn pos(x: u16, y: u16) -> Position {
+        Position { x, y }
+    }
+
+    /// A host's mouse routine in miniature, in the GUI's order: the echo
+    /// filter first, then a left press asks [`Surface::begin_press`],
+    /// dispatches its hit (recorded in `acted`) and arms the bars; a
+    /// release ends the capture; a move moves the hover.
+    fn drive(s: &mut Surface<i32>, kind: MouseEventKind, at: Position, acted: &mut Vec<i32>) {
+        if s.swallow_echo(kind, at) {
+            return;
+        }
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !s.begin_press(at) {
+                    return;
+                }
+                if let Some(act) = s.hit(at) {
+                    acted.push(act);
+                }
+                s.arm_bars(at);
+            }
+            MouseEventKind::Up(_) => s.release(),
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => s.motion(at),
+            _ => {}
+        }
+    }
+
+    /// Apple Terminal's report of one press: the instant pair (and, later,
+    /// the same again where the hand lets go — the echo).
+    fn pair(s: &mut Surface<i32>, at: Position, acted: &mut Vec<i32>) {
+        drive(s, LEFT_DOWN, at, acted);
+        drive(s, LEFT_UP, at, acted);
+    }
+
+    /// A button at the top left and, far from it, a sheet's item.
+    fn buttons(apple: bool) -> Surface<i32> {
+        let mut s: Surface<i32> = Surface::new();
+        s.set_echo_dialect(apple);
+        s.click(Rect { x: 0, y: 0, width: 10, height: 1 }, 1);
+        s.click(Rect { x: 40, y: 10, width: 20, height: 5 }, 2);
+        s
+    }
+
+    #[test]
+    fn the_dialect_is_apple_terminals_alone() {
+        let env = |value: Option<&'static str>| move |name: &str| (name == "TERM_PROGRAM").then_some(value).flatten().map(str::to_string);
+        assert!(dialect_from_env(env(Some("Apple_Terminal"))));
+        for other in ["iTerm.app", "ghostty", "WezTerm", "tmux", "vscode"] {
+            assert!(!dialect_from_env(env(Some(other))), "{other}");
+        }
+        assert!(!dialect_from_env(env(None)), "ssh and the rest name no terminal");
+        assert!(!dialect_from_env(|name| (name == "WT_SESSION").then(|| "x".to_string())), "Windows Terminal");
+    }
+
+    #[test]
+    fn in_apple_terminal_a_clicks_echo_is_swallowed_press_and_release() {
+        let mut s = buttons(true);
+        let press = pos(3, 0);
+        assert!(!s.swallow_echo(LEFT_DOWN, press), "the click's own press is real");
+        assert!(!s.swallow_echo(LEFT_UP, press), "and its instant release");
+        assert!(s.echo.awaiting(), "the instant pair awaits its echo");
+        assert!(!s.swallow_echo(MouseEventKind::Moved, pos(4, 0)), "the held button's motion passes");
+        assert!(s.swallow_echo(LEFT_DOWN, pos(4, 0)), "the echo's press is swallowed");
+        assert!(s.swallow_echo(LEFT_UP, pos(4, 0)), "and so is its release");
+        assert!(!s.echo.awaiting());
+        // The next click is real again.
+        assert!(!s.swallow_echo(LEFT_DOWN, press));
+        assert!(!s.swallow_echo(LEFT_UP, press));
+        // Through a host: the click acts once.
+        let mut acted = Vec::new();
+        let mut s = buttons(true);
+        pair(&mut s, press, &mut acted);
+        pair(&mut s, press, &mut acted);
+        assert_eq!(acted, [1], "the echo fires nothing");
+    }
+
+    #[test]
+    fn the_echo_near_the_press_is_swallowed_however_late_it_comes() {
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        s.echo_backdate(ECHO_WAIT + Duration::from_secs(5));
+        let near = pos(3 + SOFT_RADIUS, SOFT_RADIUS);
+        assert!(s.swallow_echo(LEFT_DOWN, near), "a press held in place a long while is one click");
+        assert!(s.swallow_echo(LEFT_UP, near));
+        assert_eq!(acted, [1]);
+    }
+
+    #[test]
+    fn the_echo_far_from_the_press_within_the_wait_is_swallowed() {
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        // The hand wandered onto the sheet's item before it let go.
+        assert!(s.swallow_echo(LEFT_DOWN, pos(45, 12)), "the release is no click on what it ended over");
+        assert!(s.swallow_echo(LEFT_UP, pos(45, 12)));
+        assert_eq!(acted, [1]);
+    }
+
+    #[test]
+    fn a_press_far_away_after_the_wait_is_real() {
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        s.echo_backdate(ECHO_WAIT + Duration::from_millis(10));
+        assert!(!s.swallow_echo(LEFT_DOWN, pos(45, 12)), "a lost echo costs no click after the wait");
+        assert!(!s.swallow_echo(LEFT_UP, pos(45, 12)));
+        assert!(s.echo.awaiting(), "and that click awaits its own echo");
+        // Through a host: both clicks act.
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        s.echo_backdate(ECHO_WAIT + Duration::from_millis(10));
+        pair(&mut s, pos(45, 12), &mut acted);
+        assert_eq!(acted, [1, 2]);
+    }
+
+    #[test]
+    fn two_quick_clicks_act_exactly_twice() {
+        // On one control: pair, echo, pair, echo.
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        for _ in 0..2 {
+            pair(&mut s, pos(3, 0), &mut acted);
+            pair(&mut s, pos(3, 0), &mut acted);
+        }
+        assert_eq!(acted, [1, 1]);
+        // And on two: each acts once, its echo nothing.
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        pair(&mut s, pos(3, 0), &mut acted);
+        pair(&mut s, pos(45, 12), &mut acted);
+        pair(&mut s, pos(45, 12), &mut acted);
+        assert_eq!(acted, [1, 2]);
+    }
+
+    #[test]
+    fn a_slow_press_awaits_no_echo() {
+        // A real terminal's click: the release comes after a human pause.
+        let mut s = buttons(true);
+        assert!(!s.swallow_echo(LEFT_DOWN, pos(3, 0)));
+        s.echo_backdate(PHANTOM_RELEASE + Duration::from_millis(10));
+        assert!(!s.swallow_echo(LEFT_UP, pos(3, 0)));
+        assert!(!s.echo.awaiting(), "a slow press is no instant pair");
+        assert!(!s.swallow_echo(LEFT_DOWN, pos(3, 0)), "the next press is real");
+    }
+
+    #[test]
+    fn only_the_left_buttons_press_and_release_are_ever_claimed() {
+        let mut s = buttons(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollUp,
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+        ] {
+            assert!(!s.swallow_echo(kind, pos(3, 0)), "{kind:?}");
+        }
+        assert!(s.echo.awaiting(), "none of them is the echo");
+        assert!(s.swallow_echo(LEFT_DOWN, pos(3, 0)));
+    }
+
+    #[test]
+    fn outside_apple_terminal_nothing_is_swallowed() {
+        // A trackpad tap in iTerm2 or Ghostty: a near-instant pair with no
+        // echo. The second tap of a double click is real.
+        let mut s = buttons(false);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        for kind in [LEFT_DOWN, LEFT_UP] {
+            assert!(!s.swallow_echo(kind, pos(3, 0)), "{kind:?}");
+        }
+        let mut s = buttons(false);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(3, 0), &mut acted);
+        pair(&mut s, pos(3, 0), &mut acted);
+        pair(&mut s, pos(45, 12), &mut acted);
+        assert_eq!(acted, [1, 1, 2], "every tap acts");
+        // The filter on its own, off by default.
+        let mut filter = EchoFilter::default();
+        assert!(!filter.swallow(LEFT_DOWN, pos(0, 0)) && !filter.swallow(LEFT_UP, pos(0, 0)));
+        assert!(!filter.swallow(LEFT_DOWN, pos(0, 0)) && !filter.swallow(LEFT_UP, pos(0, 0)));
+    }
+
+    /// A list's rows with its bar beside them, the way `scroll_list` draws
+    /// one: the rows' click (7), then the bar's own cells (▲ -1, the
+    /// track's jump 100 + row, ▼ 1), then the bar.
+    fn list_with_bar(apple: bool) -> (Surface<i32>, Rect) {
+        let mut s: Surface<i32> = Surface::new();
+        s.set_echo_dialect(apple);
+        let bar = Rect { x: 10, y: 5, width: 1, height: 6 };
+        s.click(Rect { x: 0, y: 5, width: 10, height: 6 }, 7);
+        s.click(Rect { x: 10, y: 5, width: 1, height: 1 }, -1);
+        s.click(Rect { x: 10, y: 6, width: 1, height: 4 }, 100);
+        s.click(Rect { x: 10, y: 10, width: 1, height: 1 }, 1);
+        s.register_bar(bar, 9, -1, 1, Box::new(|p| p as i32 + 100));
+        (s, bar)
+    }
+
+    #[test]
+    fn the_bar_soft_capture_is_the_same_in_apple_terminal_and_out_of_it() {
+        for apple in [false, true] {
+            let (mut s, _) = list_with_bar(apple);
+            let mut acted = Vec::new();
+            let up = pos(10, 5);
+            // ▲ as an instant pair: one step, and a soft capture — no hold.
+            pair(&mut s, up, &mut acted);
+            assert_eq!(acted, [-1], "apple {apple}");
+            assert!(!s.holding_bar() && s.hold_action().is_none(), "holds cannot repeat (apple {apple})");
+            // Tremor near the press: hover stays pinned.
+            drive(&mut s, MouseEventKind::Moved, pos(9, 6), &mut acted);
+            assert_eq!(s.pointer, Some(up), "soft capture pins hover (apple {apple})");
+            // The release re-click beside the bar: swallowed whole.
+            pair(&mut s, pos(9, 6), &mut acted);
+            assert_eq!(acted, [-1], "the re-click acts on nothing (apple {apple})");
+            drive(&mut s, MouseEventKind::Moved, pos(9, 6), &mut acted);
+            assert_eq!(s.pointer, Some(up), "and the pin holds (apple {apple})");
+            // A press beyond the radius is a real one, and ends it.
+            pair(&mut s, pos(20, 5), &mut acted);
+            drive(&mut s, MouseEventKind::Moved, pos(9, 6), &mut acted);
+            assert_eq!(s.pointer, Some(pos(9, 6)), "the far press ended it (apple {apple})");
+            pair(&mut s, pos(20, 5), &mut acted); // its release's echo
+            // Travelling away resumes hover, for good.
+            pair(&mut s, up, &mut acted);
+            pair(&mut s, pos(9, 6), &mut acted); // the echo, beside the bar
+            drive(&mut s, MouseEventKind::Moved, pos(20, 5), &mut acted);
+            assert_eq!(s.pointer, Some(pos(20, 5)), "hover resumes on travel (apple {apple})");
+            drive(&mut s, MouseEventKind::Moved, pos(11, 5), &mut acted);
+            assert_eq!(s.pointer, Some(pos(11, 5)), "soft capture ended for good (apple {apple})");
+            assert_eq!(acted, [-1, -1], "apple {apple}");
+            // An honest hold (the release comes late) leaves no soft capture.
+            drive(&mut s, LEFT_DOWN, up, &mut acted);
+            std::thread::sleep(PHANTOM_RELEASE + Duration::from_millis(20));
+            drive(&mut s, LEFT_UP, up, &mut acted);
+            drive(&mut s, MouseEventKind::Moved, pos(9, 6), &mut acted);
+            assert_eq!(s.pointer, Some(pos(9, 6)), "apple {apple}");
+        }
+    }
+
+    /// Where the two dialects part on a bar: in Apple Terminal the echo is
+    /// the filter's, so a click on ▲ steps once — not twice, as a re-click
+    /// landing back on the bar did — and a press beside the bar after the
+    /// echo is a real press, which the soft capture alone took for a
+    /// second phantom.
+    #[test]
+    fn in_apple_terminal_a_bar_click_steps_once_and_the_press_after_its_echo_is_real() {
+        let (mut s, _) = list_with_bar(true);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(10, 5), &mut acted);
+        pair(&mut s, pos(10, 5), &mut acted);
+        assert_eq!(acted, [-1], "one click, one step");
+        pair(&mut s, pos(9, 6), &mut acted);
+        assert_eq!(acted, [-1, 7], "the row beside the bar takes its click");
+        // Out of the dialect, as it always was.
+        let (mut s, _) = list_with_bar(false);
+        let mut acted = Vec::new();
+        pair(&mut s, pos(10, 5), &mut acted);
+        pair(&mut s, pos(10, 5), &mut acted);
+        pair(&mut s, pos(9, 6), &mut acted);
+        assert_eq!(acted, [-1, -1], "a press on the bar steps; one beside it inside the radius is a phantom");
     }
 }

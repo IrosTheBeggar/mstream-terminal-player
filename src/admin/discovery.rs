@@ -30,7 +30,7 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, age_text, copy_to_clipboard, draw_bottom, draw_header, fmt_bytes, fmt_count,
+    Claim, Outcome, Screen, age_text, body_column, draw_foot, draw_header, fmt_bytes, fmt_count,
     frame_ground, gate_message, host_of, iso_unix, printable, short_id, unix_now,
 };
 #[cfg(test)]
@@ -40,6 +40,7 @@ use crate::api::types::{
     FederationParams, FederationRequest,
 };
 use crate::api::{ApiError, Client, DiscoverySetting, PeerAction};
+use crate::kit::clipboard::Copied;
 use crate::kit::theme::th;
 use crate::kit::{self, Surface, accent, bold, dim};
 use crate::setup::g;
@@ -348,6 +349,9 @@ pub(crate) struct Room {
     activity_seq: u64,
     /// The Activity pane's wheel offset from the newest line.
     ascroll: usize,
+    /// Where the last frame drew the tabs' pane, if it drew one: the wheel
+    /// walks the log only over it, wherever a host put the room.
+    pane_at: Option<Rect>,
     pub tab: Tab,
     /// The KEYBOARD cursor over the VISIBLE rows — `None` until ↑/↓.
     pub sel: Option<usize>,
@@ -392,6 +396,7 @@ impl Room {
             activity: Vec::new(),
             activity_seq: 0,
             ascroll: 0,
+            pane_at: None,
             tab: Tab::Stats,
             sel: None,
             filter: Input::default(),
@@ -659,11 +664,12 @@ impl Room {
             }
             Act::CopyTicket => {
                 if let Some(ticket) = self.status.as_ref().and_then(|s| s.ticket.clone()) {
-                    let ok = copy_to_clipboard(&ticket);
-                    self.note = Some((
-                        if ok { t!("p2p.copied") } else { t!("p2p.copy_failed") }.to_string(),
-                        false,
-                    ));
+                    let said = match kit::clipboard::copy(&ticket) {
+                        Copied::Clipboard => t!("p2p.copied_clipboard"),
+                        Copied::Terminal => t!("p2p.copied"),
+                        Copied::Failed => t!("p2p.copy_failed"),
+                    };
+                    self.note = Some((said.to_string(), false));
                 }
             }
             Act::ToggleIncompatible => {
@@ -1090,12 +1096,34 @@ impl Screen for Room {
             return;
         }
         // Over the Activity pane the wheel walks the log; anywhere else it
-        // is the table's.
-        if self.tab == Tab::Activity && (6..6 + PANE_ROWS).contains(&at.y) {
+        // is the table's. Only the rows are asked: the pane spans the
+        // column, and the column is all the room has across.
+        let over_pane = self.pane_at.is_some_and(|p| (p.y..p.bottom()).contains(&at.y));
+        if self.tab == Tab::Activity && over_pane {
             self.ascroll = if up { self.ascroll.saturating_add(1) } else { self.ascroll.saturating_sub(1) };
         } else {
             self.tscroll = if up { self.tscroll.saturating_sub(1) } else { self.tscroll.saturating_add(1) };
         }
+    }
+
+    fn render_hosted(&mut self, frame: &mut Frame, area: Rect) {
+        self.ui.begin_frame();
+        draw(frame, self, area, true);
+    }
+
+    fn hint(&self) -> String {
+        footer_hint(self)
+    }
+
+    fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
+    /// Every key while a modal is up, and while the filter or the befriend
+    /// box has the caret: a typed `L` is a letter of the ticket, not the
+    /// host's.
+    fn claim(&self) -> Claim {
+        if self.modal_open() || self.filter_focus || self.ticket_focus { Claim::All } else { Claim::Open }
     }
 }
 
@@ -1377,6 +1405,16 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, room: &mut Room) {
     room.ui.begin_frame();
     let Some(area) = frame_ground(frame, MIN_W, MIN_H) else { return };
+    draw(frame, room, area, false);
+}
+
+/// The room inside `area`. Standalone it owns the window, header and tips
+/// row included. Hosted, the host's bar names the server and its footer
+/// carries the tips, so the room draws neither and keeps only its note on
+/// the area's last row; below its minimum it draws what fits, and the
+/// table is what gets shorter.
+fn draw(frame: &mut Frame, room: &mut Room, area: Rect, hosted: bool) {
+    room.pane_at = None;
 
     // A modal makes the room beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
@@ -1386,8 +1424,10 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = None;
     }
 
-    draw_header(frame, area, &t!("p2p.title"), &host_of(&room.client));
-    let column = Rect { x: 2, y: 2, width: area.width.saturating_sub(4), height: area.height.saturating_sub(5) };
+    if !hosted {
+        draw_header(frame, area, &t!("p2p.title"), &host_of(&room.client));
+    }
+    let column = body_column(area, hosted);
     // Lent to the draw and put back, not copied every frame (performance
     // audit #110): nothing the page draws reads it off the room.
     let status = room.status.take();
@@ -1397,7 +1437,7 @@ fn render(frame: &mut Frame, room: &mut Room) {
         Some(s) => draw_on(frame, room, column, s),
     }
     room.status = status;
-    draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
+    draw_foot(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room), hosted);
 
     if modal_open {
         room.ui.pointer = live_pointer;
@@ -1588,7 +1628,11 @@ fn draw_on(frame: &mut Frame, room: &mut Room, column: Rect, s: &DiscoveryStatus
     let mut x = column.x;
     for tab in Tab::ALL {
         let label = format!(" {} ", tab.label());
-        let rect = Rect { x, y: tabs_y, width: label.chars().count() as u16, height: 1 };
+        // In cells, as the kit draws the label, and clamped to the column:
+        // counted by characters a Japanese tab got a rect half its width,
+        // so the label was cut there, its click covered only what was left,
+        // and the next tab started inside it.
+        let rect = Rect { x, y: tabs_y, width: (kit::width(&label) as u16).min(column.right().saturating_sub(x)), height: 1 };
         let hover = room.ui.pointer.is_some_and(|p| rect.contains(p));
         let style = if tab == room.tab {
             Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD)
@@ -1609,6 +1653,7 @@ fn draw_on(frame: &mut Frame, room: &mut Room, column: Rect, s: &DiscoveryStatus
     }
 
     let pane = Rect { x: column.x, y: tabs_y + 2, width: column.width, height: PANE_ROWS };
+    room.pane_at = Some(pane);
     match room.tab {
         Tab::Stats => draw_stats(frame, room, pane, s),
         Tab::Activity => draw_activity(frame, room, pane),
@@ -1722,7 +1767,7 @@ fn draw_invite(frame: &mut Frame, room: &mut Room, pane: Rect, s: &DiscoveryStat
     );
     if let Some(ticket) = &s.ticket {
         let copy = t!("p2p.invite_copy").to_string();
-        let w = copy.chars().count() as u16 + 4;
+        let w = kit::width(&copy) as u16 + 4;
         kit::button(
             frame,
             &mut room.ui,
@@ -1752,7 +1797,8 @@ fn draw_invite(frame: &mut Frame, room: &mut Room, pane: Rect, s: &DiscoveryStat
     let inner = card.inner(field);
     frame.render_widget(card, field);
     let shown = if room.ticket_focus {
-        kit::input_display(room.ticket.value(), room.ticket.cursor(), inner.width.saturating_sub(2))
+        let w = inner.width.saturating_sub(2);
+        kit::field_display(&mut room.ui, inner.x + 1, inner.y, room.ticket.value(), room.ticket.cursor(), w, None)
     } else {
         room.ticket.value().to_string()
     };
@@ -1775,7 +1821,7 @@ fn draw_config(frame: &mut Frame, room: &mut Room, pane: Rect, s: &DiscoveryStat
         spans.push(Span::raw(format!(" — {}", printable(&s.server_description, DESCRIPTION_MAX))));
     }
     let edit = t!("p2p.config_edit").to_string();
-    let edit_w = edit.chars().count() as u16 + 4;
+    let edit_w = kit::width(&edit) as u16 + 4;
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
         Rect { x: pane.x, y: pane.y, width: pane.width.saturating_sub(edit_w + 1), height: 1 },
@@ -1866,9 +1912,12 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     // The right side of the section line: the filter (live text while it
     // is on), the hidden-incompatible toggle and the blocked count.
     let mut parts: Vec<Span> = Vec::new();
+    let mut caret = None;
     if room.filter_on {
         let shown = if room.filter_focus {
-            kit::input_display(room.filter.value(), room.filter.cursor(), 30)
+            let (line, at) = kit::field_line(&room.ui, room.filter.value(), room.filter.cursor(), 30, None);
+            caret = Some(at);
+            line
         } else {
             room.filter.value().to_string()
         };
@@ -1895,7 +1944,9 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
         parts.push(Span::styled(" · ", dim()));
         parts.push(Span::styled(t!("p2p.blocked_manage").to_string(), dim()));
     }
-    let right_w: usize = parts.iter().map(|p| p.content.chars().count()).sum();
+    // Measured in cells, as the line is drawn: a composition in the
+    // filter, or a translation, of wide characters takes two each.
+    let right_w: usize = parts.iter().map(|p| kit::width(&p.content)).sum();
     let right = Rect {
         x: table.right().saturating_sub(right_w as u16),
         y,
@@ -1904,6 +1955,10 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     };
     frame.render_widget(Paragraph::new(Line::from(parts)), right);
     room.ui.click(right, Act::FilterOpen);
+    // The filter's caret, now that its line has a place: after `/ `.
+    if let Some(at) = caret {
+        room.ui.note_caret(Position { x: right.x.saturating_add(2 + at), y });
+    }
     y += 1;
 
     // Columns: the fixed ones from the right, SERVER takes the rest —
@@ -2161,7 +2216,8 @@ fn draw_compose(frame: &mut Frame, room: &mut Room, area: Rect, c: &Compose) {
     let field_inner = card.inner(field);
     frame.render_widget(card, field);
     let shown = if focused {
-        kit::input_display(c.message.value(), c.message.cursor(), field_inner.width.saturating_sub(2))
+        let (x, w) = (field_inner.x + 1, field_inner.width.saturating_sub(2));
+        kit::field_display(&mut room.ui, x, field_inner.y, c.message.value(), c.message.cursor(), w, None)
     } else {
         c.message.value().to_string()
     };
@@ -2196,7 +2252,7 @@ fn draw_compose(frame: &mut Frame, room: &mut Room, area: Rect, c: &Compose) {
         );
     }
     let label = t!("p2p.compose_send").to_string();
-    let x = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &label, c.loaded, Act::ComposeSend);
 }
 
@@ -2218,7 +2274,7 @@ fn modal_field<A: Clone>(
     let inner = card.inner(field);
     frame.render_widget(card, field);
     let shown = if focused {
-        kit::input_display(input.value(), input.cursor(), inner.width.saturating_sub(2))
+        kit::field_display(ui, inner.x + 1, inner.y, input.value(), input.cursor(), inner.width.saturating_sub(2), None)
     } else {
         let w = inner.width.saturating_sub(2) as usize;
         let v = input.value();
@@ -2263,7 +2319,7 @@ fn draw_identity(frame: &mut Frame, room: &mut Room, area: Rect, d: &IdentityDra
         frame.render_widget(Paragraph::new(Span::styled(err.clone(), Style::default().fg(th().gold))), line(inner.y + 14));
     }
     let label = t!("p2p.identity_save").to_string();
-    let x = inner.right().saturating_sub(label.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&label) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &label, true, Act::IdentitySave);
 }
 
@@ -2300,7 +2356,7 @@ fn draw_setting(frame: &mut Frame, room: &mut Room, area: Rect, d: &SettingDraft
         frame.render_widget(Paragraph::new(Span::styled(err.clone(), Style::default().fg(th().gold))), line(inner.y + 12));
     }
     let save = t!("p2p.setting_save").to_string();
-    let x = inner.right().saturating_sub(save.chars().count() as u16 + 4);
+    let x = inner.right().saturating_sub(kit::width(&save) as u16 + 4);
     kit::button(frame, &mut room.ui, Rect { x, y: inner.bottom().saturating_sub(1), width: inner.width, height: 1 }, &save, true, Act::SettingSave);
 }
 
@@ -2316,8 +2372,8 @@ fn draw_gate(frame: &mut Frame, room: &mut Room, area: Rect, title: String, body
         Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: inner.height.saturating_sub(2) },
     );
     let y = inner.bottom().saturating_sub(1);
-    let go_w = go.0.chars().count() as u16 + 4;
-    let safe_w = safe.0.chars().count() as u16 + 4;
+    let go_w = kit::width(&go.0) as u16 + 4;
+    let safe_w = kit::width(&safe.0) as u16 + 4;
     let safe_x = inner.right().saturating_sub(go_w + 2 + safe_w);
     let safe_rect = kit::button(frame, &mut room.ui, Rect { x: safe_x, y, width: inner.width, height: 1 }, &safe.0, true, safe.1);
     kit::button(frame, &mut room.ui, Rect { x: safe_rect.right() + 2, y, width: inner.width, height: 1 }, &go.0, false, go.1);
@@ -2672,6 +2728,30 @@ mod tests {
         assert_eq!(room.relation(&hex("c4a8f0e19d")), Relation::Theirs);
         assert_eq!(room.relation(&hex("05d6e8f2ac")), Relation::Sent);
         assert_eq!(room.relation(&hex("7e11aa93b0")), Relation::None);
+    }
+
+    /// Every tab label draws whole in Japanese at 100×30, its click rect
+    /// as wide as it in cells, and each tab starts past the one before.
+    /// Counted by characters ' 概要 ' got a 4-cell rect for 6 cells of text,
+    /// so it drew as ' 概 ', the next tab started two cells into it, and
+    /// each click covered only what was left. Drawn under the process-wide
+    /// locale (the room reads its labels through `t!`), held for the test.
+    #[test]
+    fn every_tab_label_draws_whole_in_japanese() {
+        let _ja = crate::setup::tests::in_locale("ja");
+        let mut room = on();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut room)).unwrap();
+        let tabs: Vec<(Tab, String)> = Tab::ALL.iter().map(|t| (*t, format!(" {} ", t.label()))).collect();
+        let buffer = terminal.backend().buffer().clone();
+        let mut end = 0;
+        for (tab, label) in tabs {
+            let rect = room.ui.clicks.iter().find(|(_, a)| *a == Act::Tab(tab)).map(|(r, _)| *r).unwrap_or_else(|| panic!("{label:?}"));
+            assert_eq!(crate::setup::tests::cells_text(&buffer, rect.y, rect.x, rect.right()), label, "drawn whole");
+            assert_eq!(usize::from(rect.width), kit::width(&label), "{label:?}: its click covers it");
+            assert!(rect.x >= end, "{label:?} starts past the tab before it");
+            end = rect.right();
+        }
     }
 
     #[test]
@@ -3075,5 +3155,196 @@ mod tests {
         if !peer.payload.description.trim().is_empty() {
             assert!(frame.contains(&format!("jazz-corner · {}", printable(&peer.payload.description, DESCRIPTION_MAX))), "{frame}");
         }
+    }
+
+    // ── Hosted in the GUI player's Admin tab ─────────────────────────────
+
+    use crate::admin::drive_pointer;
+    use crate::admin::hosting::{self, DOCKED, FLOOR, WINDOW};
+    use ratatui::buffer::Buffer;
+    use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+
+    /// The cells `from..to` of row `y`, as text.
+    fn cells(buf: &Buffer, y: u16, from: u16, to: u16) -> String {
+        (from..to).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// The whole buffer as text, a row a line.
+    fn text_of(buf: &Buffer) -> String {
+        (buf.area.top()..buf.area.bottom()).map(|y| hosting::row(buf, y)).collect::<Vec<_>>().join("\n")
+    }
+
+    /// A wheel turn at (x, y), through the hub's own pointer routine.
+    fn wheel_at(room: &mut Room, up: bool, x: u16, y: u16) {
+        let kind = if up { MouseEventKind::ScrollUp } else { MouseEventKind::ScrollDown };
+        drive_pointer(room, MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+
+    #[test]
+    fn hosted_the_room_draws_inside_its_area_with_no_header_and_its_note_last() {
+        let _en = english();
+        for (size, area) in [((100, 30), WINDOW), ((176, 46), DOCKED)] {
+            let mut room = on();
+            room.note = Some(("the mesh answered".into(), false));
+            let buf = hosting::draw_hosted(&mut room, size, area);
+            let text = text_of(&buf);
+            assert_eq!(hosting::outside(&buf, area, true), Vec::<(u16, u16)>::new(), "{size:?}\n{text}");
+            assert!(!text.contains(&*t!("p2p.title")) && !text.contains("home.mstream.example"), "no header\n{text}");
+            assert!(!text.contains(&*t!("p2p.hint_rows")), "the tips are the host's\n{text}");
+            assert_eq!(cells(&buf, area.y, area.x, area.right()), "·".repeat(area.width as usize), "the first row is the host's");
+            assert!(cells(&buf, area.y + 1, area.x + 2, area.right()).starts_with(&*t!("p2p.state_connected")), "{text}");
+            assert!(cells(&buf, area.bottom() - 1, area.x + 2, area.right()).starts_with("the mesh answered"), "{text}");
+            assert!(text.contains("snapshots held") && text.contains("Basement Archive"), "{text}");
+        }
+    }
+
+    #[test]
+    fn hosted_a_modal_centres_in_the_rooms_area() {
+        let _en = english();
+        let mut room = on();
+        room.modal = Modal::Leave;
+        let buf = hosting::draw_hosted(&mut room, (100, 30), WINDOW);
+        // The leave gate is 68 by 8: a title, a blank, two lines, the buttons.
+        let at = kit::modal_rect(WINDOW, 68, 8, 8);
+        assert_eq!((at.x, at.y), (24, 8));
+        assert_eq!(buf[(at.x, at.y)].symbol(), "╭");
+        assert_eq!(buf[(at.right() - 1, at.bottom() - 1)].symbol(), "╯");
+        assert_eq!(hosting::outside(&buf, WINDOW, true), Vec::<(u16, u16)>::new());
+    }
+
+    #[test]
+    fn hosted_at_the_floor_it_keeps_its_pane_and_shortens_the_table() {
+        let _en = english();
+        let mut room = on();
+        let text = text_of(&hosting::draw_hosted(&mut room, (100, 30), WINDOW));
+        assert!(text.contains("Basement Archive"), "the table has rows in the window\n{text}");
+
+        let mut room = on();
+        let buf = hosting::draw_hosted(&mut room, (100, 24), FLOOR);
+        let text = text_of(&buf);
+        assert_eq!(hosting::outside(&buf, FLOOR, false), Vec::<(u16, u16)>::new(), "{text}");
+        assert_eq!(room.pane_at, Some(Rect { x: 19, y: 6, width: 79, height: PANE_ROWS }));
+        assert!(text.contains("snapshots held") && text.contains("servers known"), "the pane keeps its rows\n{text}");
+        assert!(!text.contains("Basement Archive"), "the table gives way first\n{text}");
+        assert!(!text.contains(&*t!("resize")), "{text}");
+    }
+
+    #[test]
+    fn the_activity_wheel_follows_the_drawn_pane_wherever_the_room_sits() {
+        let _en = english();
+        let lower = Rect { y: 9, ..WINDOW };
+        for (size, area) in [((100, 30), WINDOW), ((100, 40), lower)] {
+            let mut room = on();
+            room.tab = Tab::Activity;
+            hosting::draw_hosted(&mut room, size, area);
+            let pane = room.pane_at.expect("the pane was drawn");
+            assert_eq!(pane.y, area.y + 5, "state row, bar, tabs, gap: {area:?}");
+            wheel_at(&mut room, true, 40, pane.y);
+            wheel_at(&mut room, true, 40, pane.bottom() - 1);
+            assert_eq!((room.ascroll, room.tscroll), (2, 0), "{area:?}");
+            wheel_at(&mut room, false, 40, pane.bottom());
+            wheel_at(&mut room, false, 40, pane.y - 1);
+            assert_eq!((room.ascroll, room.tscroll), (2, 2), "{area:?}");
+        }
+        // Sitting lower, the rows a standalone pane would hold are above
+        // this one: the wheel there is the table's.
+        let mut room = on();
+        room.tab = Tab::Activity;
+        hosting::draw_hosted(&mut room, (100, 40), lower);
+        wheel_at(&mut room, false, 40, 6);
+        assert_eq!((room.ascroll, room.tscroll), (0, 1));
+    }
+
+    #[test]
+    fn the_wheel_over_the_activity_pane_still_walks_the_log_standalone() {
+        let _en = english();
+        let mut room = on();
+        room.tab = Tab::Activity;
+        draw(&mut room);
+        assert_eq!(room.pane_at, Some(Rect { x: 2, y: 6, width: 96, height: PANE_ROWS }));
+        wheel_at(&mut room, true, 40, 6);
+        wheel_at(&mut room, true, 40, 6 + PANE_ROWS - 1);
+        assert_eq!((room.ascroll, room.tscroll), (2, 0));
+        wheel_at(&mut room, false, 40, 6 + PANE_ROWS);
+        assert_eq!((room.ascroll, room.tscroll), (2, 1));
+        room.tab = Tab::Stats;
+        wheel_at(&mut room, false, 40, 7);
+        assert_eq!((room.ascroll, room.tscroll), (2, 2), "only the Activity pane walks the log");
+    }
+
+    #[test]
+    fn it_claims_every_key_while_filtering_or_befriending() {
+        let _en = english();
+        let mut room = on();
+        assert_eq!(room.claim(), Claim::Open);
+        handle_key(&mut room, key(KeyCode::Char('/')));
+        assert_eq!(room.claim(), Claim::All, "the filter has the caret");
+        handle_key(&mut room, key(KeyCode::Enter));
+        assert_eq!(room.claim(), Claim::Open);
+        handle_key(&mut room, key(KeyCode::Char('j')));
+        assert!(room.ticket_focus);
+        assert_eq!(room.claim(), Claim::All, "the befriend box has the caret");
+        handle_key(&mut room, key(KeyCode::Char('L')));
+        assert_eq!(room.ticket.value(), "L", "a capital L is a letter of the ticket");
+        handle_key(&mut room, key(KeyCode::Esc));
+        assert_eq!(room.claim(), Claim::Open);
+        room.modal = Modal::Leave;
+        assert!(room.modal_open());
+        assert_eq!(room.claim(), Claim::All);
+        assert_eq!(room.hint(), t!("p2p.hint_leave"));
+    }
+
+    /// The cell a focused field notes is the caret's however the field's
+    /// window over a long value stands (hosted, it is where the GUI's window
+    /// floats the input method's candidates, and what turns its paste on).
+    /// The filter is right-aligned with what follows it, so it notes its
+    /// caret only once its line is measured and placed.
+    #[test]
+    fn the_filter_the_ticket_box_and_the_forms_field_note_the_cell_their_caret_is_drawn_in() {
+        let _en = english();
+        let mut room = on();
+        handle_key(&mut room, key(KeyCode::Char('/')));
+        type_text(&mut room, &format!("{}end", "z".repeat(40)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "zzzend", " · ");
+        handle_key(&mut room, key(KeyCode::Home));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "/ ", "zzz");
+        handle_key(&mut room, key(KeyCode::Enter));
+        draw(&mut room);
+        assert_eq!(room.ui.caret_at(), None, "the filter let go of the keys");
+
+        handle_key(&mut room, key(KeyCode::Char('j')));
+        type_text(&mut room, &format!("node{}end", "a".repeat(120)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "aaaend", "");
+        handle_key(&mut room, key(KeyCode::Esc));
+        draw(&mut room);
+        assert_eq!(room.ui.caret_at(), None, "the box let go of the keys");
+
+        // The name's 64 characters, past its field's 60 cells.
+        handle_key(&mut room, key(KeyCode::Char('e')));
+        type_text(&mut room, &format!(" {}-end", "d".repeat(48)));
+        super::super::assert_caret_between(&draw(&mut room), &room.ui, "ddd-end", "");
+    }
+
+    /// `y` hands the invite's ticket to the kit's clipboard and the note
+    /// says which way it went: on the clipboard, handed to the terminal
+    /// (which may refuse it), or nowhere.
+    #[test]
+    fn y_on_the_invite_copies_the_ticket_and_says_how() {
+        use crate::kit::clipboard::{Copied, catch, caught};
+        let _en = english();
+        let mut room = on();
+        room.switch_tab(Tab::Invite);
+        let ticket = room.status.as_ref().and_then(|s| s.ticket.clone()).expect("a ticket");
+        for (answer, said) in [
+            (Copied::Clipboard, t!("p2p.copied_clipboard")),
+            (Copied::Terminal, t!("p2p.copied")),
+            (Copied::Failed, t!("p2p.copy_failed")),
+        ] {
+            catch(answer);
+            room.note = None;
+            handle_key(&mut room, key(KeyCode::Char('y')));
+            assert_eq!(room.note, Some((said.to_string(), false)), "{answer:?}");
+        }
+        assert_eq!(caught(), [ticket.clone(), ticket.clone(), ticket]);
     }
 }

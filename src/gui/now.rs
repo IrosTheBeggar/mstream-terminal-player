@@ -15,12 +15,9 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 
 use super::bar::{TallKind, play_glyphs, tall_compact};
 use super::{Act, Gui, Screen, put};
-use crate::kit::dim;
-use crate::kit::theme::th;
 use crate::tui::app::Action;
 use crate::tui::ui::{NowExtras, now_regions, render_now_view};
 
@@ -90,7 +87,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     let spare = layout.spare;
     if spare.height >= air + 3 {
         let (prev, play, next) = play_glyphs(gui.bar_paused());
-        let group_w: u16 = [prev, play, next].iter().map(|l| l.chars().count() as u16 + 4).sum::<u16>() + 2;
+        let group_w: u16 = [prev, play, next].iter().map(|l| crate::kit::width(l) as u16 + 4).sum::<u16>() + 2;
         let y = spare.y + air;
         let mut x = spare.x + spare.width.saturating_sub(group_w) / 2;
         x += tall_compact(frame, &mut gui.ui, x, y, prev, TallKind::Strong, Act::Prev) + 1;
@@ -107,11 +104,10 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
 
     // The screen's note, where the TUI's key hints would be (clause 9): the
     // GUI names its keys on the footer, and the row's right is the modes.
-    if let Some((text, is_err)) = gui.note_words() {
+    if let Some((text, style)) = gui.note_words() {
         // Up to the modes readout, whatever it is wearing: a fixed forty
         // cells let a long note run into a wide readout.
         let room = layout.modes.x.saturating_sub(regions.keys.x + 1) as usize;
-        let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, regions.keys.x, regions.keys.y, &super::bar::clip(&text, room), style);
     }
 }
@@ -149,6 +145,10 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Esc | KeyCode::Char('0') => return gui.act(Act::Screen(Screen::Library)),
         // The Stats screen, from anywhere (stats-screen contract, entry 2).
         KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
+        // The Admin tab, from anywhere (admin-screen contract, clause 1).
+        KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
+        // The MP3 Player tab (mp3-player-screen contract, entry 2).
+        KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Device)),
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The strip's numbers pick its tabs — a digit past the strip does
         // nothing, the App bounds-checks — and Tab, Shift-Tab cycle them.

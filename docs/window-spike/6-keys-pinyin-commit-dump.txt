@@ -1,0 +1,31 @@
+  Library   Stats   Visualizer                                         https://demo.mstream.io [+]  
+                                                                                                    
+   Files       │ ╭─────────────────────────────────────────────╮  │ QUEUE                           
+ ▸ Search      │ │ 中国                                        │  │ ─────────────────────────────── 
+               │ ╰─────────────────────────────────────────────╯  │ (nothing queued yet)            
+ LIBRARY       │ Artists  Albums  Titles  Files  Lyrics           │                                 
+   Albums      │                                                  │                                 
+   Artists     │                                                  │                                 
+   Genres      │                                                  │                                 
+   Recent      │                                                  │                                 
+   Playlists   │                                                  │                                 
+   Last played │                                                  │                                 
+   Most played │                                                  │                                 
+               │                                                  │                                 
+ TOOLS         │                                                  │                                 
+   Auto DJ     │                                                  │                                 
+   Sonic path  │                                                  │                                 
+               │                                                  │                                 
+               │                                                  │                                 
+               │                                                  │                                 
+               │                                                  │                                 
+               │                                                  │                                 
+               │                                                  │                                 
+               │                                                  │                                 
+   Settings    │                                                  │                                 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+    ╭─────────╮    ╭───╮ ╭────╮ ┏━━━━┓ ╭────╮ ╭───╮     ╭──────╮  (nothing playing)              ▾  
+    │ auto-dj │    │ ↻ │ │ ◂◂ │ ┃ ▮▮ ┃ │ ▸▸ │ │ ⇄ │     │      │                                    
+    ╰─────────╯    ╰───╯ ╰────╯ ┗━━━━┛ ╰────╯ ╰───╯     │      │                                    
+ - ▱▱▱▱▱▱▱▱▱▱ +   0%    connected to https://demo.mst…  ╰──────╯                                    
+-- pointer 0,0 at 0.0,0.0 px; surface 1600×960 px; cursor default; preedit ""

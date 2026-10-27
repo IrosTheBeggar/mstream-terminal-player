@@ -4,7 +4,15 @@
 # there picks one of its tabs rather than a nav room (the review's
 # key-routing bug, which needed no server to show), Esc comes back to the
 # Library screen, q quits clean. Gates on first-paint words only: the
-# strip's `1:Queue` and the visualizer tab's own line.
+# strip's `1:Queue` and its selected `[3:Visualizer]` marker, which the
+# restyling repaints whole and the gate matches exactly (in a glob the
+# brackets would be a character class, and a lone letter would pass). A
+# sentence painted over an earlier frame can reach the pty in pieces, since
+# the diff renderer skips every cell that did not change, even a letter
+# inside a word: the visualizer's sentence does, so its gate is the marker.
+# Every gate's braces span lines: expect reads a one-line braced list as a
+# single pattern that never matches, so such a gate waits out its timeout
+# and lets the leg run on past a screen that never painted.
 set timeout 20
 set env(TERM) xterm-256color
 set env(MSTREAM_SETUP_LANG) en

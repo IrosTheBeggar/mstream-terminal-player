@@ -66,6 +66,16 @@ impl Slot {
     /// The cover, pixels where the terminal draws them and the budget
     /// allows, the ▀-mosaic otherwise.
     pub(super) fn draw_paced(&mut self, frame: &mut Frame, rect: Rect, art: &Art, pace: &Pace) {
+        // The GUI's window draws covers itself (`Graphics::hosted`): a draw
+        // there only records the cover, microseconds, so there is no warm
+        // cache to keep and no encode for the budget to ration — and a
+        // slot the budget turned away would show the mosaic for nothing.
+        if self.graphics.is_hosted() {
+            if !self.graphics.draw(frame, rect, art) {
+                self.draw_mosaic(frame, rect, art);
+            }
+            return;
+        }
         let want = (art.id(), rect.width, rect.height);
         if self.key == Some(want) {
             // Warm: drawing is the cached protocol entry, microseconds.
@@ -95,10 +105,19 @@ impl Slot {
     /// them would never land. The encoded picture stays good for the
     /// frame the overlay leaves: drawing it again is the warm cache.
     pub(super) fn draw_mosaic(&mut self, frame: &mut Frame, rect: Rect, art: &Art) {
-        let mut canvas = crate::tui::canvas::Canvas::new(rect);
-        if !canvas.is_empty() {
+        self.draw_mosaic_cut(frame, rect, rect, art);
+    }
+
+    /// The ▀-mosaic of a cover whose box the view cuts at its right edge
+    /// (the Discover strip's last tile, the cut that says there is more):
+    /// drawn at the box's whole `size` and shown in `shown`, its left part —
+    /// cut, never squeezed. A picture cannot be cut (its cells go to the
+    /// terminal whole), so a cut box is always the mosaic.
+    pub(super) fn draw_mosaic_cut(&mut self, frame: &mut Frame, size: Rect, shown: Rect, art: &Art) {
+        let mut canvas = crate::tui::canvas::Canvas::new(size);
+        if !canvas.is_empty() && !shown.is_empty() {
             self.pane.draw(&mut canvas, art);
-            frame.render_widget(&canvas, rect);
+            frame.render_widget(&canvas, shown);
         }
     }
 }

@@ -11,7 +11,7 @@ hold-repeat, generic over each screen's action enum), the widgets as
 free functions (`tall_button` and `tall_secondary` over one
 `tall_frame`, `tall_frame_bordered` for the thick border, `button`,
 `cursor_ring`, `modal_frame(_anchored)`,
-`modal_close`, `scroll_list`, `letter_strip`, `draw_tooltip`,
+`modal_close`, `scroll_list` and `scroll_items`, `letter_strip`, `draw_tooltip`,
 `input_display`), the pure geometry (`table_view` and the `ListView`
 that carries a list's offset, its reveal flag and whether the keyboard
 holds its cursor across frames, `letter_index`,
@@ -145,7 +145,15 @@ banned.
   control stays honest.
 - **Text**: 1 row, fg DarkGray. Hover: fg Cyan + BOLD.
 - **Modal primary**: 1 row, label fg LightBlue BOLD (no frame — modals
-  are compact); the SAFE choice gets it.
+  are compact); the SAFE choice gets it. **One that goes off** (Where
+  copies land's Save until something changed and the layout is valid):
+  DIM, no click rect, no hover — the accent is what told it from an idle
+  button, so its absence reads — and, as the disabled primary below, a
+  tooltip saying why ("nothing changed yet", "fix the layout first"). The
+  hand may still rest on it; Enter does nothing there. Keep a copy's
+  primary goes off while the press it sent is out, its words saying so
+  (`[ Adding… ]`, `[ Retrying… ]`) and no tooltip: it comes back on its
+  own when the server answers.
 - **Disabled**: the primary frame with border and label fg DarkGray, no
   `▸`, no click rect, no hover, no hand cursor — but it DOES register a
   tooltip whose text says why it's disabled ("Add a folder first"), the
@@ -156,6 +164,21 @@ banned.
   joins the OSC 22 hand-cursor set (see the pointer contract under
   Behavioral rules).
 
+### Key word
+A text button whose first word is its key — "x cancel copy", "d change",
+"c choose again", "a add to queue": 1 row, fg DarkGray, hover fg Cyan +
+BOLD, its click rect its own cells (the key letter included), and a
+click does what the key does. **Drawn only where its key works, and the
+key works only where it is drawn** — a modal names every key that acts
+in it, and no key acts unseen (the one pause: while a press is out the
+words stay and every key but Esc waits, as nothing else moves). The
+letter never translates ("x Kopie abbrechen"); the words do. A row of
+them stands from the left, three cells apart; beside a modal primary
+they share its row, and take the row above where the two would come
+closer than three cells. No tooltip (self-evident). Like a text button
+it hides rather than going grey. First consumer: Keep a copy's window
+(discovery-page clauses 105–110).
+
 ### Tabs
 One row, under the screen's state line (or first, on a page with none): the ACTIVE tab is a 1-row filled
 slab (bg LightBlue, fg Black BOLD, one cell of padding each side) — the
@@ -165,7 +188,11 @@ BOLD), two cells apart. `←`/`→` and clicks switch; the pane beneath keeps
 one fixed height whatever the tab, so nothing below it moves. The tab
 row's right edge may carry the active pane's one-line note (the log's
 "newest first"), dropped when the row is too narrow. First consumer:
-the admin panel's Discovery room.
+the admin panel's Discovery room. The MP3 Player page's port tabs are the
+second: each tab wears its board's mark after the name (✓ ok, ! and ✗
+gold, ? and … DarkGray, a write's percentage in the accent; on the slab
+the mark takes the slab's colours), and the right edge carries a count or
+a text button (Update all).
 
 ### Dropdown
 A choice among many that has one home on the screen: the current value
@@ -181,6 +208,34 @@ closes the list; Enter picks the cursor; Esc, the key again, or a click
 anywhere else closes and keeps — the whole screen registers that close
 under the rows. No title bar, no `[X]`. Consumers: the GUI header's
 server switcher, the stats page's period.
+
+### Context list
+The verbs a thing has beyond its one hover verb, hung from the thing
+itself — the Discover room's connected-server tile (its list: Play album ·
+Queue album · Keep a copy… · Open on {server}; discovery-page clause 103).
+The Dropdown's frame and grammar: a Rounded frame (`frame_at`: `Clear`,
+ground, border in the accent) from the thing's first cell, one row under
+it, kept inside the room, `Surface::overlay`-registered so the covers it
+touches draw as the mosaic; no title bar, no `[X]`. Rows are verbs, not
+values — no `•` — each a text row with its key DIM after the label where
+it has one (`Queue album  a`, `Keep a copy…  c`); the keyboard cursor
+wears the accent slab, hover BRIGHT + BOLD. A **right click** on the
+thing, or `m` with the hand on it, opens it; ↑ ↓ walk, Enter or a click
+picks and closes, the rows' own keys act from inside it too; Esc, `m`
+again or a click anywhere else closes and keeps. A row whose verb is not
+on offer is not drawn (hidden, never grey). The track-actions sheet stays
+the modal for a song's verbs; a context list is for a thing that is not a
+song row.
+**Hung from a modal's row** (Open elsewhere's links from the
+track-actions sheet, discovery-page clause 140): the same frame and
+grammar inside the modal — its last line level with its row, rising over
+the rows above (never past the modal's title row, scrolling past that
+with the kit's bar on its right border), clear of the `[X]`; DIM
+UPPERCASE heads between groups, the items indented under them, the held
+one in the plain selection colours and the hovered one BRIGHT — neither
+bold (the board `TermCopies` G); the row
+it hangs from gives up its slab and wears ACCENT BOLD while the list
+holds the keyboard's; Esc or ← folds it and the modal stays.
 
 ### State line
 One row under the header, on rooms that watch a live thing: `• word` in
@@ -270,6 +325,27 @@ visible. A listing failure for the CURRENT dir-part
 renders in the modal in error gold ("could not list <dir>: <the
 server's words>") — silent emptiness reads as "no autocomplete";
 failures for dirs already typed past stay quiet.
+**A folder on a server** (the Discover room's Where copies land,
+discovery-page clause 143) is not completed but **listed under a
+button**, "Start from an existing folder…" ("Hide folders" while open):
+THAT server's file explorer, asked on the worker one folder at a time,
+each once while the modal is open — never this machine's: the place is
+a library on the server. Under the button, two cells in, a DIM head of
+crumbs alone ("copies › from-peers": the rows and the bar say how
+many), then up to 3 rows (the modal's 22-row cap; the kit's bar past
+them): "Up to {parent}" first inside a folder, then the folders — the
+held one the selection slab, hover BRIGHT, the folder the layout starts
+in BOLD — and one DIM note: "Looking up…", "No folders in here",
+"“{folder}” isn't there yet · the first file creates it" (by its name:
+the folder the layout starts in, typed, absent from its parent's
+listing), or GOLD for a listing that failed ("Couldn't list this
+folder: …", the head naming it) and for a folder whose name has a brace
+("“{folder}” has a brace, so a layout can't start in it") — each
+tooltipped only where clipped. ↓ walks into the list and
+↑ from its top back to the button; Enter, Space or a click on a row goes
+into it and makes it the start of the layout (Custom's leading folders;
+the layout's own folders follow) — nothing is typed into a path field,
+and no Tab completes. Esc closes the list before it means Back.
 
 ### Links
 fg LightBlue + `Modifier::UNDERLINED`; hover fg Cyan + BOLD. Click opens
@@ -291,7 +367,32 @@ One card per group, DarkGray UPPERCASE group label, one row per option:
 on/affirmative), `( )` fg DarkGray otherwise; chosen label BOLD; inline
 `— description` fg DarkGray. Exactly one chosen, always; choosing is not
 toggling (clicking the chosen row does nothing). Radios for 2–4 options;
-5+ becomes a list picker.
+5+ becomes a list picker. (One logged exception: Where copies land's
+layouts, whose fourth and fifth radios are "Same folders as the server"
+and a library's own layout — discovery-page deviations, 2026-10-21 and
+2026-10-22. It has no card and no group label since 2026-10-24 — the
+names say what they are, and a radio carries no layout beside it (the
+path above it shows what a preset makes); its last radio, Custom, opens
+its line editor under the folders button, EMPTY with a DIM hint after
+the caret, then its variables — no help line: the phone's sheet,
+2026-10-23, trimmed 2026-10-24.) (Another: Keep a copy's
+choice — discovery-page clauses 106–107, deviations 2026-10-24 — has no
+card and no group label, the radios saying what they are, and its
+checkbox, "Only the 1 album you don't have", standing under the last
+radio, is **the group's fourth stop**: choice semantics, so ticked it is
+`[✓]` fg LightBlue with its label BOLD, not the checkbox's Green; it is
+ticked from the start and keeps its own tick whatever the choice, so ↓
+onto the radio above lands on it while ticked, ↑ unticks it, ↓ ticks it
+again and a click toggles it.) **Choices side by side**
+(`(•) music   ( ) copies`, the Auto DJ room's rows and Where copies
+land's libraries — no label there, the hand showing on the chosen name
+ACCENT BOLD): one row, three cells between, the chosen `(•)` OK and
+its name BOLD, ← → choose and a click chooses; where they would not all
+fit the row starts at the chosen one behind `…` (that cell a click that
+steps back), and only a choice with room for its dot, a space and a
+cell of its name is drawn — the last clipped at the last cell, the rest
+← →'s alone, never over the border (the Auto DJ room's `draw_choice`
+rule).
 
 ### List cursor
 **Selection is the KEYBOARD cursor, nothing more** — in every list of
@@ -344,11 +445,21 @@ bar is live**: endcaps step one row and HOLD-REPEAT while pressed
 proportionally to the clicked position, a track press arms a THUMB
 DRAG (ridden on mouse-drag, released on mouse-up), the wheel scrolls,
 and the bar brightens under the pointer (thumb and endcaps → Cyan)
-like every clickable. **A bar interaction CAPTURES the pointer**:
+like every clickable. **A click registered over the bar after it takes
+the press**, as over a drag region (below), so a modal's guard or an
+open menu's catcher never arms the bar beneath it: the press that
+closes a modal holds no arrow and drags no thumb under it.
+**A bar interaction CAPTURES the pointer**:
 while an arrow is held or the thumb dragged, sub-cell hand tremor must
 not retarget hover onto whatever sits beside the 1-cell bar — and
 terminals differ on whether mid-press motion arrives as Drag or plain
-Moved, so BOTH honor the capture. Hover resumes on release.
+Moved, so BOTH honor the capture. Hover resumes on release. A host that
+hands the pointer to a hosted page keeps it from that page while
+`Surface::holding_bar`, as while a drag region grips (below), so the
+release comes back to the bar wherever the hand lets go.
+`scroll_list` sizes the thumb by the bar's rows, one per list row;
+`scroll_items` sizes it by items, for a list whose items take more than
+one row each (the Log tail's wrapped lines).
 **The phantom-release dialect** (Apple Terminal, probed 470.2): a press
 reports as an INSTANT click pair, motion-while-held arrives as plain
 Moved, and the physical release emits a SECOND click pair at wherever
@@ -358,7 +469,16 @@ within 150ms of arming downgrades the capture to a SOFT one: hover
 stays pinned within 2 cells of the press until the pointer genuinely
 travels away or a real press lands, and an off-bar press inside that
 radius is swallowed as the release re-click. Honest terminals release
-late and never enter the soft path. Empty state:
+late and never enter the soft path. In Apple Terminal itself the
+re-click — after a bar press as after any click — is the release
+echo's, swallowed whole before the bar sees it (the behavioral rule
+below), so there an endcap click steps once and a press beside the bar
+after the echo is a real one; the soft capture keeps its hover pin and
+its end on travel or a real press either way. A page the GUI hosts (an
+Admin room, the Stats page, the MP3 Player page) sees no echo either —
+the GUI's surface took it — but its own surface is never told, so after
+a click on one of its bars an off-bar press inside the radius is still
+swallowed as the re-click, as it was before the echo filter. Empty state:
 **Every added folder is validated LOCALLY, on the worker** (a stat can
 hang on a dead mount): exists / is a folder / readable, plus
 canonicalization for truth-telling — another SPELLING of a chosen
@@ -375,6 +495,79 @@ it. A fresh add scrolls its row into view but does not select it.
 add actions; rows with the cursor stowed → how to pick it up, plus
 continue; a row under the cursor → the full set.
 
+### Log tail
+A server's log, read as it grows: one header row, then the lines, the
+newest at the bottom. The header is the follow state as the state line's
+word — `•` and `following` in Green BOLD while the view rides the newest
+line, `• paused` DarkGray once it is scrolled up (the word a target that
+resumes) — then its controls (below), with what the layout's own key
+does here dim at the row's right while keyboard hints are on. It shows
+EVERY line the server holds, whatever its level — http, verbose, debug
+and silly beside info, warn and error — and has no level filter. A line
+is the local time `HH:MM:SS` DarkGray, two cells, then the whole
+message, never cut: each of its lines wrapped by words in cells at the
+log's width less the clock's ten (a line's indentation kept on its first
+row, a word wider than a row broken at the row's last cell, a blank line
+between two kept), the rows after the first set in ten cells with no
+clock. Every level but two reads in the text colour on every row of the
+line (nothing is dimmed), warn Yellow, error the danger red. The view
+scrolls by lines, the bottom line whole and the top one showing its last
+rows; a line taller than the view goes by rows, and the top of the log
+shows the oldest line from its clock. Scrolling up pauses and holds the
+view still while lines arrive under it; End, `f`, a click on the paused
+word or scrolling back to the bottom resume. **The scroll bar**: the
+Table's bar (above) on the log's last column beside the lines' rows,
+only while the lines do not all fit whole at the log's width — two lines
+or more, and three rows or more for its arrows and a track — and the
+lines wrap a cell narrower beside it. It counts LINES, not rows
+(`scroll_items`): counting rows would wrap the whole ring every frame,
+so the thumb stands where the oldest line shown from its clock stands
+among all the lines, its length the share the view shows whole — at the
+bottom while following, at the top at the top of the log. Its endcaps
+are ↑ and ↓ (hold-repeat as ever), a track press moves the bottom line
+to its place (the first track cell the top of the log, the last
+following) and arms the thumb's drag, and the wheel is the wheel. With
+nothing to show, one DarkGray sentence (waiting, the ring off, no lines
+yet), or the failure in Yellow. Polling is the log's own thread, never
+two requests at once, slower after a failure and stopped on a refusal.
+**The highlight**: a press-drag across the lines (a drag region, below,
+never over the bar's column) highlights whole lines from the press's
+line to the pointer's (any row of a wrapped line is that line), every
+row of each filled across the lines' width in the selection colours (bg
+ACCENT fg ON-ACCENT, its level colour set aside), held by the lines'
+sequence numbers so arrivals never move it; a drag past either end stops
+at the last line drawn, and a plain click or Esc clears it. It is text
+to copy, NOT the list cursor below: no row verb reads it and no key
+moves it, so the list-cursor law ("the pointer never highlights a row")
+stands. `y` copies the highlight, or every line shown, through the kit's
+clipboard (the behavioral rule below). **The header's controls**: after
+the follow state, ` · copy` and ` · download` as text buttons, each
+drawn whole or not at all, the first that does not fit ending the row,
+and the dim key hint at the right gives way before them; while a
+download runs its word is the busy word (`downloading…` fg LightBlue, no
+click). First consumer: the GUI's Admin tab
+(docs/ux-contracts/admin-screen.md, `src/gui/server_log.rs`).
+
+### Drag region
+A press-drag that means something other than moving a thumb — marking a
+run of log lines — registers a drag region over its rows each frame
+(`Surface::drag_region`), told the press, every move while the button is
+held and the release, wherever each lands. It CAPTURES the pointer as a
+thumb drag does: hover stays put and nothing else takes the release, so
+a host that routes events to a hosted room skips it while
+`Surface::gripping` holds. It is transparent to clicks — a click under it
+still answers — and a click registered AFTER it over the press's cell (an
+overlay, a modal's catcher) takes the press instead. A region never
+enters the phantom-release soft capture, so in Apple Terminal, whose
+press is an instant click pair, a press is a plain click (its release's
+echo swallowed, behavioral rules) and no drag begins. The host keeps a grip honest: after `Surface::release_at` it
+runs `Surface::motion` at the release's cell, so the control under it
+lights at once; a press arriving while a grip stands means the terminal
+lost the release (some drop it when the focus leaves mid-drag), so the
+grip is released at that cell first and the press then goes on as any
+press; and a grip whose region the last frame did not draw (its screen
+left, its pane hidden) is let go before the next event is read.
+
 ### Modal
 Centered, `Clear` beneath (no scrim — terminals have no alpha; the
 border carries the weight). Border = intent: LightBlue neutral, Yellow
@@ -383,17 +576,57 @@ warning. First line: BOLD title in the intent color. Buttons bottom-right
 **A modal makes the screen beneath INERT**: background clicks hit
 nothing, background hover and tooltips sleep, the hand cursor follows
 only the modal's own controls — the base draw sees no pointer and its
-rect registries are dropped before the modal draws.
+rect registries are dropped before the modal draws (the first tooltip
+registered under the pointer is the one that ripens, so a base layer's
+left standing wins over the modal's own). The GUI's hand follows what a
+click would press: a modal's `Guard` over the screen is no control.
 Dismissable pickers (path entry, the server browser) carry a `[X]`
 close on the title row, right edge: DIM, hover BRIGHT + BOLD —
 dismissal is neutral; red stays reserved for the destructive row
 remove. Its tooltip names the keyboard path ("Close — Esc"). Warning
 gates (the public-mode modal) get NO `[X]` — they force an explicit
-choice.
+choice. A gate may name its safe choice for what it keeps rather than
+"Cancel" (the MP3 Player page's "◂ Keep v0.8.0"); it is still first and
+still the modal primary.
+A modal may instead carry **its title on its top border** (TEXT BOLD,
+`╭─ Keep a copy ───╮`, no title row) and **its way out on its bottom
+border** — DIM "Esc close" right-aligned, a text button (hover BRIGHT +
+BOLD, a click closes), "Esc close · the copy keeps going" where closing
+leaves work running — and then no `[X]` (the Discover room's Keep a
+copy, discovery-page clause 106). **A room's modal** centres in the
+room, not the frame, while the room has its width and four cells more,
+and first clears the room's whole width on its own rows — **the band**:
+`kit::blank`, registered as the overlay footprint and as the inert
+`Guard`, the covers it touches falling to the mosaic (Over pixels, below)
+and then cleared — so nothing of the room shows beside it, while the
+rows above and below stay drawn. Not a scrim and not a dim: the kit's
+own `Clear`, wider (Keep a copy and Copies, clauses 106 and 117; a
+narrower room's modal centres over the frame as before). Its bottom
+never covers the player bar; it rises toward row 1 only when it must.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
-**Over pixels**: on a screen that draws real pixels (the queue's and the
-wall's covers), every overlay — a modal frame (`modal_frame_on`), the
+**Keyboard stops** in a modal of radios, checkboxes and 1-row buttons
+(the Discover room's Where copies land, discovery-page clause 143): a
+radio's or a checkbox's label wears ACCENT BOLD under the hand (the
+chosen radio's label BOLD, its `(•)` OK), a `[ button ]` the selection
+slab. **A choosing modal with one way forward** (Keep a copy, clause
+106) has **no hand and no slab**: ↑ ↓ move the chosen radio itself,
+clamped — the chosen `(•)` LightBlue and its label BOLD are the
+keyboard's place — a checkbox under the last radio its fourth stop
+(Radio group); **Enter always presses the one primary**, which may go
+off while its press is out; every other control is a key word (Key
+word); Space does nothing. On the legacy console both frames are
+`+ - |`, a border's title and way out on it.
+**A list in a modal** (the Discover room's Copies, discovery-page clause
+117): the kit table under the title — its DIM header and rule never
+scroll — items of one or two rows (the held one's slab across all of
+them, plain — its action too, never bold), a `ListView` counted in items, the kit's bar (`scroll_items`) on
+the modal's right border; the footer row's text buttons bottom-right (a
+quiet one DIM, Try again ACCENT; hover BRIGHT + BOLD) and a one-off note
+bottom-left. Its height follows its rows up to a cap, anchored as if at
+the cap so the top holds.
+**Over pixels**: on a screen that draws real pixels (the queue's, the
+wall's and the Discover strip's covers), every overlay — a modal frame (`modal_frame_on`), the
 header dropdown, the tooltip — registers its footprint with the surface
 (`Surface::overlay`), and a cover the footprint touched LAST frame draws
 as the ▀-mosaic for that frame. The terminal writer skips a picture's
@@ -443,6 +676,14 @@ DarkGray; all-dim cells when the step carries no estimate — never a fake
 narrates the file scan, then each enrichment pass from
 `/api/v1/scan/status`, and "complete" means everything is idle.
 
+**Keep a copy's progress is TWO lines** (discovery-page clause 109): the
+headline — the state word BOLD (`Copying`, `Waiting for a free slot`,
+`Stopping…`), then ` · ` DarkGray and the server's step in default fg
+(`song 2 of 3 · Late Train Verse`) — and the bar, its percentage in
+**default fg**, not DarkGray (the window's one live number); queued, ten
+`▱` and DarkGray `starts on its own`; no counts line (the step already
+counts), and the same never-a-fake-0% rule.
+
 ## Screen chrome
 
 Top: content starts at the top (no app header); a `N / 4` step counter
@@ -454,21 +695,65 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
-**The GUI player's top bar**: two tabs at the left — Library, Stats —
-worn as the kit's tab slab for the screen that is up and dim text for
-the other (Now Playing, on `0`, has no tab and lights none while it is
-up), the Visualizer item after them, and the session's server label with
-`[+]` at the right. The
+**The GUI player's top bar**: four tabs at the left — Library, Stats,
+Admin, MP3 Player — worn as the kit's tab slab for the screen that is up
+and dim text for the others (Now Playing, on `0`, has no tab and lights
+none while it is up), the Visualizer item after them, and the session's
+server label with `[+]` at the right. The label never covers the strip —
+drawn over a tab it would take its clicks — so it starts at least a blank
+cell past the Visualizer item, cut short with the kit's mark (its menu
+mark kept) where it would not; at the 100-column floor a local server's
+label stands whole in every locale. While the MP3 Player tab's page
+writes, the strip is inert: no tab lights or answers a click. The
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
 Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok
-colour while the DJ is armed, and the capability-gated Sonic path),
-Settings on the column's last row; fourteen rows, the 24-row minimum's
-worth with the footer on. Now Playing is the TUI's full-screen view,
+colour while the DJ is armed, the capability-gated Sonic path, and
+Discover on row 16, gated by the server's `discoveryTaste` —
+docs/ux-contracts/discovery-page.md), Settings on the column's last row;
+fifteen rows, the 24-row minimum's worth with the footer on, Discover and
+Settings never on one row. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);
-the queue panel and the bar stand under the Library only.
+the queue panel stands under the Library only, and the bar under the
+Library and Admin.
+
+**The hallway** (the GUI's Admin tab, the "Admin GUI Hybrid" canvas): a
+nav column of rooms that are each a whole page, in the Library column's
+look — DarkGray UPPERCASE groups at x 1 (SERVER, NETWORK, WATCH), the
+rooms at x 3, the open one `▸ label` at x 1 in the accent BOLD, the
+others dim and BRIGHT + BOLD under the pointer — with its rule at x 16,
+DarkGray, turning the accent while the focus is in the room beside it.
+The keyboard cursor wears the slab across the column only while the
+column has the focus: the hallway, the room and a docked log are three
+focus targets on Tab and BackTab, and the footer names the keys of the
+one that holds it. A row may carry a dim count after its label (` · 12
+new`), which yields its cells first.
+
+**Hosted rooms.** A page built as its own command (an admin room, the
+stats page, the MP3 player's firmware page) can be hosted inside another
+screen's area. The room draws
+its body and its note row and nothing else: no header (the host's bar
+names the server), no tips row (the host's footer carries the room's
+hint, and the room's base hint must say what its keys do THERE — Esc
+back, not q quit), its first row blank for the host, its beta chip at
+the right of the body's first row. It never prints the resize line;
+below its minimum it draws what fits. Its modals centre in its area,
+not the window (`modal_rect` honours the area's origin). The host
+blanks anything the room drew outside its area before drawing its own
+parts — the spill guard — so a tall form cannot land on the bar. What
+the host may take from a focused room is set by the room's claim:
+everything is the room's while a modal or a text field is open; Tab is
+the room's where Tab means something to it; otherwise the host takes
+Tab, BackTab and its one layout key. The host never takes a digit, `q`
+or Esc from a room — those are the room's flags, tabs and way back. A
+hosted room's focused field draws through `kit::field_display`, which
+notes the caret's cell on the room's surface and draws the surface's
+composition before the caret; the host hands its own composition down
+before the room draws and lifts the room's caret onto its own surface
+after, so to a shell with a paste and an input method of its own (the
+GUI's window) the room's field is its field.
 
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints
@@ -589,6 +874,44 @@ owned `String`s so they translate like everything else.
   query dialect, and their I-beams persist even under mouse reporting —
   so their pointers cannot be changed by any escape, which is why the
   pointer is enhancement, never signal.
+- **Apple Terminal's release echo is swallowed whole.** That terminal
+  (probed, 470.2) reports a left press as an INSTANT click pair — the
+  press and its release in the same millisecond — the still-held
+  button's motion as plain Moved, and the PHYSICAL release as a second
+  click pair wherever the hand let go. Taken as it comes, every click
+  there is two: a row's `[⋯]` opens the track-actions sheet and the echo
+  clicks whatever the sheet drew under the pointer, or closes it; a list
+  hung from a click is closed again by the echo's press on its own
+  catcher. So every host asks `Surface::swallow_echo` (the kit's
+  `EchoFilter`) FIRST about every mouse event — before a hosted page, a
+  grip or the surface's own press reads it — and drops the events it
+  claims. **The rule**: a left press passes and is watched; its release
+  arriving within `PHANTOM_RELEASE` (150ms) makes it an instant pair,
+  which now awaits its echo. The next left press is that echo when it
+  lands within `SOFT_RADIUS` (2 cells) of the pair at any time, or
+  anywhere within `ECHO_WAIT` (2s: a click is held for well under a
+  second, so the wait covers a press that wandered off its control or a
+  drag the dialect cannot report, and bounds what a lost echo can cost
+  to the one click it mistakes for it); that press and the release after
+  it are swallowed, whole, whatever they land on — a sheet, a list, a
+  modal opened by the click. A press far away after the wait is real.
+  After the echo the next pair is real again: two quick clicks are pair,
+  echo, pair, echo, and each acts once. A press whose release came late
+  awaits nothing; moves, the wheel and the other buttons are never
+  claimed. **The gate**: only Apple Terminal — `TERM_PROGRAM=
+  Apple_Terminal` (the launcher log's `apple-terminal` host,
+  `instance::host_from_env`), read once by `kit::apple_dialect` and set
+  on the surface by each TERMINAL shell (`Surface::set_echo_dialect`):
+  the GUI player, the admin hub and its pages, the setup wizard and the
+  classic TUI's loop (its own `EchoFilter`, for the one click it takes,
+  the seek bar). A native window never sets it, whatever terminal
+  started it, and nor does a page the GUI hosts (the GUI's own surface
+  already swallowed the echo). Every other terminal is untouched: a
+  trackpad tap in iTerm2 or Ghostty can be a near-instant pair with NO
+  echo, and a second click or a double click after it is real. ssh does
+  not forward `TERM_PROGRAM` and a multiplexer writes its own name over
+  it, so Terminal.app behind tmux or ssh still clicks twice — the known
+  gap.
 - **The UI never blocks.** Network calls and native dialogs run on a
   worker thread; results fold back between draws (see `src/setup/mod.rs`,
   the Job/Done pattern).
@@ -596,3 +919,21 @@ owned `String`s so they translate like everything else.
   NSOpenPanel never fronts from a terminal process), rfd on Windows,
   ashpd (default-features off) on Linux, with the in-TUI LOCAL browser
   as the universal fallback (same filesystem as the picker).
+- **The clipboard is the kit's.** Every copy goes through
+  `kit::clipboard::copy`, never an escape written by hand, and the route
+  follows where the player runs. In the desktop window: the system
+  pasteboard (arboard), then the platform's tool — never OSC 52, which a
+  window launched from a shell would write into that shell. In a
+  terminal over SSH (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set):
+  OSC 52 alone, because the far machine's clipboard is not the user's.
+  In a local terminal: the pasteboard where the build links one (the
+  desktop flavour), then the tool, then OSC 52. The tools are `pbcopy`
+  (given a UTF-8 locale), `clip.exe` (fed UTF-16), and `wl-copy` under
+  Wayland or `xclip` then `xsel` under X11; a tool that exits non-zero or
+  takes more than a second is passed over, and text over 1 MiB never goes
+  as OSC 52. The answer is one of three, and the caller's note says
+  which: **Clipboard** (it is there), **Terminal** (handed over as OSC 52,
+  which Apple Terminal ignores and iTerm2 gates behind a setting, so the
+  note says "if it allows it"), **Failed** (nothing took it; the note
+  offers another way out). Tests never reach the system clipboard: under
+  test `copy` answers from a per-thread catcher.

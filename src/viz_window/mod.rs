@@ -34,7 +34,7 @@ use crate::shader::library::BUILTIN;
 use crate::shader::render::{self, Gpu, Offscreen, Scene};
 
 pub mod controls;
-mod overlay;
+pub(crate) mod overlay;
 pub mod pipe;
 mod prefetch;
 
@@ -61,6 +61,21 @@ pub struct WindowArgs {
 }
 
 pub fn run(args: WindowArgs) -> i32 {
+    // A crash in the graphics driver ends this process with its code, not
+    // behind WER's dialog, so the player hears the window is gone, in either
+    // flavour. A player's children inherit the mode, but an older player may
+    // be the one that started this, so it is set here too (gpu_pick.rs).
+    #[cfg(windows)]
+    crate::gpu_pick::quiet_native_crashes();
+    // And the crash known to come from a long executable path is named
+    // before the device is made: on stderr, which the player keeps in its
+    // log as `[viz-window] …` and, as this process's last line when the
+    // driver ends it, in its "visualizer failed" note. The terminal flavour
+    // has no window host to have said it already.
+    #[cfg(windows)]
+    if let Some(line) = crate::gpu_pick::this_long_path_warning("viz-window") {
+        eprintln!("{line}");
+    }
     // The controls speak the player's language: the same detection, so the
     // same answer.
     crate::setup::boot_language();
@@ -205,19 +220,44 @@ impl App {
         let window = Arc::new(
             event_loop.create_window(attributes).map_err(|e| format!("the window would not open: {e}"))?,
         );
-        // The display handle goes in with the instance: on Wayland and X11
-        // the backend needs it before a surface can exist.
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())));
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|e| format!("the window has no drawing surface: {e}"))?;
+        // The instance by the rule the player's own window follows
+        // (`gpu_pick`: on Windows DX12 or Vulkan alone, never GL, whose
+        // presence in a process froze its window on a keyboard-layout
+        // change), a surface on the window from it, and an adapter that can
+        // present to that. The display handle goes in with the instance: on
+        // Wayland and X11 the backend needs it before a surface can exist.
+        // The last failure is kept to say why, when no instance would do.
+        let mut failed = None;
+        // Low-power unless WGPU_POWER_PREF says otherwise (performance
+        // audit #121).
         let power_preference = render::power_preference();
-        let options =
-            wgpu::RequestAdapterOptions { power_preference, compatible_surface: Some(&surface), ..Default::default() };
-        let adapter = match block_on(instance.request_adapter(&options)) {
-            Ok(Ok(adapter)) => adapter,
-            Ok(Err(e)) => return Err(format!("no GPU would draw the window: {e}")),
-            Err(e) => return Err(e.to_string()),
+        let choice = crate::gpu_pick::choose(Some(Box::new(window.clone())), |instance| {
+            let surface = match instance.create_surface(window.clone()) {
+                Ok(surface) => surface,
+                Err(e) => {
+                    failed = Some(format!("the window has no drawing surface: {e}"));
+                    return None;
+                }
+            };
+            let options = wgpu::RequestAdapterOptions {
+                power_preference,
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            };
+            match block_on(instance.request_adapter(&options)) {
+                Ok(Ok(adapter)) => Some((adapter, surface)),
+                Ok(Err(e)) => {
+                    failed = Some(format!("no GPU would draw the window: {e}"));
+                    None
+                }
+                Err(e) => {
+                    failed = Some(e.to_string());
+                    None
+                }
+            }
+        });
+        let Some((adapter, surface)) = choice.found else {
+            return Err(failed.unwrap_or_else(|| "no GPU would draw the window".to_string()));
         };
         // Which GPU, in the player's log: "why is the fan on" and "why is
         // 09 slow" start here.

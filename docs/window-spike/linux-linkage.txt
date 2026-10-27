@@ -1,0 +1,8 @@
+NEEDED by /build/release/mstream-player:
+  libasound.so.2
+  libgcc_s.so.1
+  libm.so.6
+  libc.so.6
+GUARD_EXIT=0
+-rwxr-xr-x 2 root root 45066952 Sep 30 04:23 /build/release/mstream-player
+aarch64

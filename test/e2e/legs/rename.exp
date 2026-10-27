@@ -1,4 +1,7 @@
 #!/usr/bin/expect -f
+# Every gate's braces span lines: expect reads a one-line braced list as a
+# single pattern that never matches, so such a gate waits out its timeout
+# and lets the leg run on past a screen that never painted.
 set timeout 20
 set env(TERM) xterm-256color
 set env(MSTREAM_SETUP_LANG) en

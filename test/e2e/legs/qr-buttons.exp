@@ -2,6 +2,9 @@
 # The Done page's button list from the keyboard: Up from nothing selects
 # the LAST button (the admin panel); under the MSTREAM_NO_OPEN seam its
 # note carries the /admin URL instead of popping a browser.
+# Every gate's braces span lines: expect reads a one-line braced list as a
+# single pattern that never matches, so such a gate waits out its timeout
+# and lets the leg run on past a screen that never painted.
 set timeout 20
 set env(TERM) xterm-256color
 set env(MSTREAM_SETUP_LANG) en

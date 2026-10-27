@@ -1,0 +1,22 @@
+gui --window: script /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/script.txt with 120 steps
+gui --window: ★☆✓ from /System/Library/Fonts/Menlo.ttc
+gui --window: 32 px type at scale 2, cell 16×32 px, opened at 100×30 cells; sizing to 100×30, 1600×960 px
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/01.txt
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/02.txt
+2026-09-30 19:37:08.106 mstream-player[25739:18299179] error messaging the mach port for IMKCFRunLoopWakeUpReliable
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/03.txt
+gui --window: preedit "n"
+gui --window: preedit "に"
+gui --window: preedit "にh"
+gui --window: preedit "にほ"
+gui --window: preedit "にほn"
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/04.txt
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/05.txt
+gui --window: preedit "にほん"
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/06.txt
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/07.txt
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/08.txt
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/09.txt
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/10.txt
+gui --window: preedit ""
+gui --window: script dumped /private/tmp/claude-501/-Users-sherika-code-mstream-terminal-player--claude-worktrees-iroh-quick-connect-timeout-058f95/99c8dd5b-5caa-46f0-9dbe-9f26b09ddae4/scratchpad/keycheck/ime-ja-probe/dumps/11.txt

@@ -3,7 +3,12 @@
 // own icon group, and without one every surface shows the generic binary
 // glyph. winresource also stamps default VersionInfo from the Cargo metadata
 // while it's in there (consumers that re-stamp VersionInfo, like mStream's
-// bundler, simply replace it).
+// bundler, simply replace it). Every bin of the package gets the same
+// resource: on msvc winresource links the compiled .res with
+// `cargo:rustc-link-arg`, which cargo passes to every binary's link (the
+// desktop flavour's launcher stub, src/bin/launch.rs, included), and on gnu
+// with a whole-archive `rustc-link-lib`, which with no library target
+// reaches each bin as well.
 //
 // Resource compilation needs a Windows resource compiler (rc.exe). The
 // release CI builds win32 on a windows runner where that always holds; a
@@ -13,16 +18,21 @@
 // CI must never silently ship an iconless exe again.
 fn main() {
     println!("cargo:rerun-if-changed=assets/mstream-logo.ico");
-    // The wizard and admin copy is embedded at compile time (the locale
-    // table below): a locale-only edit must rebuild, or the binary keeps
-    // rendering yesterday's strings.
+    // The wizard and admin copy is embedded at compile time (rust_i18n::i18n!),
+    // and the macro leaves no trace cargo can see: a locale-only edit must
+    // still rebuild, or the binary keeps rendering yesterday's strings.
     println!("cargo:rerun-if-changed=locales");
-    write_locale_table();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/mstream-logo.ico");
+    // The desktop flavour is an app: Task Manager, the taskbar's jump list
+    // and "Open with" name a program by its FileDescription, which defaults
+    // to the package name. The terminal flavour keeps that default.
+    if std::env::var_os("CARGO_FEATURE_DESKTOP").is_some() {
+        res.set("FileDescription", "mStream Player");
+    }
     match res.compile() {
         Ok(()) => {}
         Err(e) if !cfg!(windows) => {
@@ -30,40 +40,4 @@ fn main() {
         }
         Err(e) => panic!("failed to embed the windows icon: {e}"),
     }
-}
-
-// The locale table as one sorted static (src/locale_table.rs says why the
-// i18n! macro no longer builds it). Read through the macro's own loader, so
-// the key flattening and order are exactly what `i18n!("locales")` produced;
-// a BTreeMap iterates keys in byte order, which the backend's binary search
-// relies on.
-//
-// The browser build carries English alone (performance audit #126). Its
-// shell never sets a locale, and everything that does — the wizard's
-// language picker, the admin rooms, the viz window — is native-only, so t!()
-// there always lands on the fallback; the other nine were ~570 KB of strings
-// in every download.
-fn write_locale_table() {
-    // main.rs's `i18n!(.., fallback = "en", ..)`.
-    const FALLBACK: &str = "en";
-    let dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
-    let locales = rust_i18n_support::load_locales(&format!("{dir}/locales"), |_| false);
-    assert!(!locales.is_empty(), "no locales found under {dir}/locales");
-    let browser = std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32");
-    let mut out = String::with_capacity(1 << 20);
-    out.push_str("pub static LOCALES: &[(&str, &[(&str, &str)])] = &[\n");
-    for (locale, keys) in &locales {
-        if browser && locale != FALLBACK {
-            continue;
-        }
-        out.push_str(&format!("    ({locale:?}, &[\n"));
-        for (key, value) in keys {
-            out.push_str(&format!("        ({key:?}, {value:?}),\n"));
-        }
-        out.push_str("    ]),\n");
-    }
-    out.push_str("];\n");
-    let out_dir = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
-    std::fs::write(std::path::Path::new(&out_dir).join("locale_table.rs"), out)
-        .expect("write the locale table");
 }
