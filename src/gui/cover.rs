@@ -117,7 +117,7 @@ impl Slot {
         let mut canvas = crate::tui::canvas::Canvas::new(size);
         if !canvas.is_empty() && !shown.is_empty() {
             self.pane.draw(&mut canvas, art);
-            frame.render_widget(ratatui::widgets::Paragraph::new(canvas.into_lines()), shown);
+            frame.render_widget(&canvas, shown);
         }
     }
 }

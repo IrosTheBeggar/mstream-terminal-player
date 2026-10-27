@@ -1401,23 +1401,42 @@ impl Screen for Page {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) -> bool {
+        let mut came = false;
         // A native dialog's answer, from its thread (the sheet's choosers).
         while let Ok(pick) = self.picks.1.try_recv() {
             self.picked(pick);
+            came = true;
         }
         loop {
             match self.events.try_recv() {
-                Ok(event) => self.apply(event),
-                Err(TryRecvError::Empty) => return,
+                Ok(event) => {
+                    self.apply(event);
+                    came = true;
+                }
+                Err(TryRecvError::Empty) => return came,
                 Err(TryRecvError::Disconnected) => {
                     if !self.released {
                         self.worker_gone();
+                        came = true;
                     }
-                    return;
+                    return came;
                 }
             }
         }
+    }
+
+    /// The worker takes no queued ops — it reports as it goes — so a pump
+    /// is a read of its reports: the hosts that only pump (a page left
+    /// behind, the quit's wait for its ports) still hear it.
+    fn pump(&mut self) {
+        self.absorb();
+    }
+
+    /// A write reports its progress as it goes; a board merely plugged in
+    /// keeps no pace.
+    fn awaiting(&self) -> bool {
+        self.writing()
     }
 
     /// A passing note goes once its time is up.

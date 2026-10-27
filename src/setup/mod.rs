@@ -11,9 +11,10 @@
 //! brighten under the pointer, and a FIXED palette (see [`theme`]) so the
 //! screens look the same in every terminal that can carry it.
 //! Mouse-first — every control is clickable — and every action has
-//! a key. All decisions live in [`Wizard`]; the loop below only draws,
-//! reads input, and runs one queued server call per pass (queued so the
-//! "working…" frame is on screen while the call blocks).
+//! a key. All decisions live in [`Wizard`]; the loop below only folds in
+//! the worker's answers, draws, hands the worker one queued server call
+//! per pass (after the draw, so the "working…" frame is on screen while
+//! the call runs), and reads input.
 
 #[cfg(feature = "window")]
 pub(crate) mod face;
@@ -45,12 +46,26 @@ use rust_i18n::t;
 use crate::kit::{
     self, GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme,
 };
+use crate::kit::pace::{Expecting, REDRAW_ANYWAY};
 use crate::kit::theme::th;
 
-/// How long to wait for input before redrawing anyway.
+/// How long to wait for input before the next pass anyway: the resolution
+/// of the progress poll's clock, the held arrow's and the tooltip's.
 const POLL: Duration = Duration::from_millis(100);
 /// How often the Done screen re-asks for scan progress.
 const PROGRESS_EVERY: Duration = Duration::from_millis(1500);
+/// How often it re-asks once the server has said [`IDLE_REPORTS`] times in
+/// a row that everything is idle (performance audit #116). Every status
+/// answer makes the server work out enrichment coverage the wizard throws
+/// away, and its memo of that lasts fifteen seconds: a poll every second
+/// and a half kept a full recompute going every fifteen for as long as the
+/// wizard stayed open. At four memos' length a scan the server starts on
+/// its own still shows within the minute.
+const PROGRESS_IDLE_EVERY: Duration = Duration::from_secs(60);
+/// Idle reports in a row before the poll backs off: enrichment can be
+/// queued a beat after the file scan drains, so one idle between them is
+/// not the end of the story.
+const IDLE_REPORTS: u8 = 2;
 /// The one vpath name a single folder gets without being asked.
 const SINGLE_NAME: &str = "media";
 /// The widest the content column grows, in cells.
@@ -187,14 +202,25 @@ impl PartialEq for PathDraft {
 impl Eq for PathDraft {}
 
 impl PathDraft {
-    /// The entries that match the current partial segment, in order.
-    pub fn suggestions(&self) -> Vec<String> {
+    /// The entries that match the current partial segment, in order —
+    /// borrowed, never copied: a listing can run to thousands of folders,
+    /// and the modal shows six. Cloning them all was a string allocation
+    /// per folder on every frame and every cursor key (performance audit
+    /// #115); only an accepted one is copied now.
+    pub fn suggestions(&self) -> impl Iterator<Item = &str> {
         let (_, partial) = split_input(self.text.value());
-        self.entries
-            .iter()
-            .filter(|e| starts_with_fold(e, &partial))
-            .cloned()
-            .collect()
+        self.entries.iter().map(String::as_str).filter(move |e| starts_with_fold(e, &partial))
+    }
+
+    /// How many entries match: the list's length, for the cursor keys, the
+    /// scrollbar and the modal's height.
+    pub fn suggestion_count(&self) -> usize {
+        self.suggestions().count()
+    }
+
+    /// Suggestion `i`, when there is one.
+    pub fn suggestion(&self, i: usize) -> Option<&str> {
+        self.suggestions().nth(i)
     }
 }
 
@@ -353,8 +379,8 @@ fn server_port(server: &str) -> Option<u16> {
     }
 }
 
-/// A server call queued from input handling and run right after the next
-/// draw, so its "working…" note is actually visible while it blocks.
+/// A server call queued from input handling and handed to the worker right
+/// after the next draw, so its "working…" note is on screen while it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Op {
     Ping,
@@ -606,6 +632,10 @@ pub(crate) struct Wizard {
     in_flight: bool,
     pending_complete: Option<String>,
     last_poll: Instant,
+    /// Scan reports in a row that said everything is idle; from
+    /// [`IDLE_REPORTS`] on the poll backs off, until a commit gives the
+    /// server something new to scan.
+    idle_polls: u8,
 
     /// The folders table's first visible row (wheel-scrollable).
     tscroll: usize,
@@ -617,6 +647,19 @@ pub(crate) struct Wizard {
     /// Whether the hand was the pointer's shape last asked for: a shape
     /// is asked for only when it changes.
     hand: bool,
+    /// Two clocks behind the brisk wait (`kit::pace`): the single-flight op
+    /// the worker is running, and the validations that go out beside it.
+    flight: Expecting,
+    checks: Expecting,
+    /// Whether anything happened since the last frame — input, an answer, a
+    /// held arrow's step — and when it was drawn. Nothing on the wizard's
+    /// screens moves on its own but a ripening tooltip, so with `gate` on a
+    /// pass with nothing new skips the draw (performance audit #102). Only
+    /// the terminal's loop sets `gate`: a window draws every frame it is
+    /// asked for.
+    dirty: bool,
+    drawn: Instant,
+    gate: bool,
 }
 
 impl Wizard {
@@ -654,10 +697,16 @@ impl Wizard {
             in_flight: false,
             pending_complete: None,
             last_poll: Instant::now(),
+            idle_polls: 0,
             tscroll: 0,
             sel_anchor: None,
             ui: Surface::new(),
             hand: false,
+            flight: Expecting::default(),
+            checks: Expecting::default(),
+            dirty: true,
+            drawn: Instant::now(),
+            gate: false,
         }
     }
 
@@ -999,8 +1048,8 @@ impl Wizard {
     /// a first completion turns "Mus" into a real /home/... path.
     fn accept_suggestion(&mut self, i: usize) {
         if let Modal::PathEntry(draft) = &mut self.modal {
-            let picked = match draft.suggestions().get(i) {
-                Some(entry) => entry.clone(),
+            let picked = match draft.suggestion(i) {
+                Some(entry) => entry.to_string(),
                 None => return,
             };
             let base = if draft.listed_path.is_empty() {
@@ -1048,6 +1097,20 @@ impl Wizard {
     // freeze the UI. The first cut ran ops synchronously between draws and a
     // boot-busy server blocked the loop for eight seconds; the buffered
     // keystrokes then replayed into the wrong screens.
+
+    /// Whether the scan progress is due to be asked again: past the first
+    /// screen (folders commit on its Continue), never on the standalone QR
+    /// page, never on top of a call — every [`PROGRESS_EVERY`] while the
+    /// server has news, every [`PROGRESS_IDLE_EVERY`] once it has said
+    /// twice that it has none.
+    fn poll_due(&self) -> bool {
+        let every = if self.idle_polls >= IDLE_REPORTS { PROGRESS_IDLE_EVERY } else { PROGRESS_EVERY };
+        self.screen != Screen::Folders
+            && !self.standalone
+            && self.queued.is_none()
+            && !self.in_flight
+            && self.last_poll.elapsed() >= every
+    }
 
     /// Hand the queued op to the worker. Ops are single-flight: while one is
     /// in flight the UI shows its busy note and further queues are ignored
@@ -1227,6 +1290,8 @@ impl Wizard {
                 }
             }
             Done::FoldersCommitted { committed, error } => {
+                // New folders are new files to scan: the poll is brisk again.
+                self.idle_polls = 0;
                 for i in committed {
                     if let Some(folder) = self.folders.get_mut(i) {
                         folder.committed = true;
@@ -1256,6 +1321,9 @@ impl Wizard {
             }
             Done::AdminCreated(Err(e)) => self.fail(&t!("note.create_login_failed"), e),
             Done::ExtrasCommitted { applied, error } => {
+                // An extra switched on (discovery, say) queues passes of its
+                // own: the poll is brisk again.
+                self.idle_polls = 0;
                 for (i, on) in applied {
                     self.extras_done[i] = Some(on);
                 }
@@ -1309,6 +1377,14 @@ impl Wizard {
             }
             Done::Progress(rows) => {
                 self.last_poll = Instant::now();
+                match &rows {
+                    Ok(ProgressReport::Idle) => self.idle_polls = self.idle_polls.saturating_add(1),
+                    Ok(ProgressReport::Files(rows)) if rows.is_empty() => {
+                        self.idle_polls = self.idle_polls.saturating_add(1);
+                    }
+                    Ok(_) => self.idle_polls = 0,
+                    Err(_) => {}
+                }
                 match rows {
                     Ok(ProgressReport::Idle) => {
                         self.scan = Some(ScanWidget {
@@ -1614,14 +1690,14 @@ pub(crate) fn starts_with_fold(name: &str, prefix: &str) -> bool {
 }
 
 /// The longest common prefix of the suggestions, case-insensitively, in the
-/// first entry's own casing.
-pub(crate) fn common_prefix(items: &[String]) -> String {
-    let Some(first) = items.first() else { return String::new() };
+/// first entry's own casing. Borrowed names or owned ones alike.
+pub(crate) fn common_prefix<S: AsRef<str>>(items: &[S]) -> String {
+    let Some(first) = items.first().map(AsRef::as_ref) else { return String::new() };
     let mut len = first.chars().count();
     for item in &items[1..] {
         let matched = first
             .chars()
-            .zip(item.chars())
+            .zip(item.as_ref().chars())
             .take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
             .count();
         len = len.min(matched);
@@ -1859,6 +1935,8 @@ fn run_tui(mut wizard: Wizard) -> i32 {
     // wizard's surface's to swallow ([`input`]); the window never sets it.
     wizard.ui.set_echo_dialect(crate::kit::apple_dialect());
     let outcome = event_loop(&mut terminal, &mut wizard, mouse_on, &to_worker, &from_worker);
+    // Still on the alternate screen, where kitty keeps the pictures.
+    crate::tui::graphics::release_all();
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
@@ -1889,6 +1967,7 @@ fn event_loop(
     to_worker: &Sender<(Arc<Client>, Job)>,
     from_worker: &Receiver<Done>,
 ) -> std::io::Result<Outcome> {
+    wizard.gate = true;
     loop {
         let wait = frame(
             terminal,
@@ -1900,6 +1979,7 @@ fn event_loop(
         if wait.is_zero() || !event::poll(wait)? {
             continue;
         }
+        wizard.dirty = true;
         // Drain everything queued before the next draw: mouse capture arms
         // any-motion tracking, so a sweep of the pointer is one event per
         // cell crossed — pointer updates are cheap, but each must not cost
@@ -1933,9 +2013,9 @@ pub(crate) fn frame<B>(
 where
     B: ratatui::backend::Backend<Error = std::io::Error>,
 {
-    terminal.draw(|frame| render(frame, wizard))?;
-
-    // Fold in whatever the worker finished, then hand it the next op.
+    // Fold in whatever the worker finished before the frame is drawn:
+    // folded in after, an answer missed the frame it could have been on and
+    // waited out a whole poll for the next (performance audit #82).
     loop {
         match from_worker.try_recv() {
             Ok(done) => wizard.apply(done),
@@ -1943,11 +2023,27 @@ where
             Err(TryRecvError::Disconnected) => {
                 wizard.note =
                     Some((t!("note.worker_gone").to_string(), true));
+                wizard.dirty = true;
                 break;
             }
         }
+        wizard.dirty = true;
+    }
+    wizard.flight.track(wizard.in_flight);
+
+    if !wizard.gate || wizard.dirty || wizard.ui.stale() || wizard.drawn.elapsed() >= REDRAW_ANYWAY {
+        terminal.draw(|frame| render(frame, wizard))?;
+        crate::tui::graphics::release_dropped();
+        wizard.drawn = Instant::now();
+        wizard.dirty = false;
+    }
+
+    // Then hand it the next op.
+    if !wizard.pending_validate.is_empty() {
+        wizard.checks.arm();
     }
     wizard.dispatch_queued(to_worker);
+    wizard.flight.track(wizard.in_flight);
 
     // The hand cursor follows whether the pointer is over anything
     // clickable in the frame just drawn.
@@ -1960,6 +2056,7 @@ where
     // A held scrollbar arrow keeps stepping until the button lifts.
     if let Some(act) = wizard.ui.hold_action() {
         wizard.act(act);
+        wizard.dirty = true;
     }
 
     // Tooltip dwell. Tips can't leak through modals — render drops
@@ -1967,15 +2064,12 @@ where
     // belongs to the layer on top.
     wizard.ui.dwell_tick();
 
-    // The scan's progress is due: the poll is queued, and the frame that
+    // The scan's progress is due (backing off once the scan reports Idle,
+    // performance audit #116): the poll is queued, and the frame that
     // sends it is wanted now, not after a wait for input.
-    if wizard.screen != Screen::Folders
-        && !wizard.standalone
-        && wizard.queued.is_none()
-        && !wizard.in_flight
-        && wizard.last_poll.elapsed() >= PROGRESS_EVERY
-    {
+    if wizard.poll_due() {
         wizard.queued = Some(Op::PollProgress);
+        wizard.dirty = true;
         return Ok(Duration::ZERO);
     }
 
@@ -1987,7 +2081,12 @@ where
     if wizard.graphics.is_hosted() && wizard.ui.overlays_moved() {
         return Ok(Duration::ZERO);
     }
-    Ok(POLL)
+    // Brisk only where a pass that finds nothing skips its draw (the
+    // terminal): the window draws every pass, as the GUI's does.
+    if !wizard.gate {
+        return Ok(POLL);
+    }
+    Ok(wizard.checks.wait(wizard.flight.wait(POLL)))
 }
 
 /// The loop's input half, for one event: a key, a press, the pointer's
@@ -2098,7 +2197,7 @@ fn press(wizard: &mut Wizard, at: Position) -> Option<Outcome> {
 /// that gains nothing, start cycling.
 fn complete_path(wizard: &mut Wizard) {
     let Modal::PathEntry(draft) = &mut wizard.modal else { return };
-    let suggestions = draft.suggestions();
+    let suggestions: Vec<&str> = draft.suggestions().collect();
     if let Some(i) = draft.sel {
         wizard.accept_suggestion(i);
     } else if suggestions.len() == 1 {
@@ -2135,13 +2234,13 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
                     }
                 }
                 KeyCode::Down => {
-                    let n = draft.suggestions().len();
+                    let n = draft.suggestion_count();
                     if n > 0 {
                         draft.sel = Some(draft.sel.map_or(0, |i| (i + 1) % n));
                     }
                 }
                 KeyCode::Up | KeyCode::BackTab => {
-                    let n = draft.suggestions().len();
+                    let n = draft.suggestion_count();
                     if n > 0 {
                         draft.sel = Some(draft.sel.map_or(n - 1, |i| (i + n - 1) % n));
                     }
@@ -2351,6 +2450,13 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
 pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
+    render_page(frame, wizard);
+    // The overlays drew after the pictures: a kitty picture's pixels,
+    // riding its first cell, may not have survived the frame.
+    crate::tui::graphics::verify_sent(frame.buffer_mut());
+}
+
+fn render_page(frame: &mut Frame, wizard: &mut Wizard) {
     wizard.ui.begin_frame();
     let area = frame.area();
     // The fixed scheme paints its own ground — but only when the terminal
@@ -2509,12 +2615,34 @@ pub(crate) fn render(frame: &mut Frame, wizard: &mut Wizard) {
     // and a window that hears it stands down any picture placed beneath:
     // the directory browser's top border crosses the folders wordmark's
     // band at the window's grid, and any modal does in a short window.
-    match wizard.modal.clone() {
+    // The folder browser and the path modal each hold a server listing —
+    // thousands of names at a music root — so they are drawn from where
+    // they live, not from a copy made every frame (performance audit #110).
+    match &mut wizard.modal {
         Modal::None => {}
         Modal::SkipWarning => draw_skip_warning(frame, wizard, area),
-        Modal::Browser(browse) => draw_browser(frame, wizard, area, &browse),
-        Modal::PathEntry(draft) => draw_path_entry(frame, wizard, area, &draft),
-        Modal::Language(sel) => draw_language(frame, wizard, area, sel),
+        Modal::Browser(_) => {
+            // Lent to its draw, which never touches the modal, and put back.
+            let modal = std::mem::replace(&mut wizard.modal, Modal::None);
+            if let Modal::Browser(browse) = &modal {
+                draw_browser(frame, wizard, area, browse);
+            }
+            wizard.modal = modal;
+        }
+        Modal::PathEntry(draft) => {
+            // The draft stays in place — its draw keeps the list's scroll
+            // there — and lends the frame only its listing.
+            let entries = std::mem::take(&mut draft.entries);
+            let lent = PathDraft { entries, ..draft.clone() };
+            draw_path_entry(frame, wizard, area, &lent);
+            if let Modal::PathEntry(draft) = &mut wizard.modal {
+                draft.entries = lent.entries;
+            }
+        }
+        Modal::Language(sel) => {
+            let sel = *sel;
+            draw_language(frame, wizard, area, sel);
+        }
     }
 
     // The tooltip draws last — over everything, once the dwell matures.
@@ -3485,8 +3613,8 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
 }
 
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
-    let suggestions = draft.suggestions();
-    let shown = suggestions.len().min(6) as u16;
+    let count = draft.suggestion_count();
+    let shown = count.min(6) as u16;
     // Anchored as if always full: the title and input hold one spot and
     // the suggestion list grows DOWNWARD beneath them.
     let inner =
@@ -3513,15 +3641,15 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     );
     let sel_moved = draft.sel != draft.sel_anchor;
     let reveal = if sel_moved { draft.sel } else { None };
-    let (first, visible) = kit::table_view(suggestions.len(), reveal, draft.scroll, 6);
+    let (first, visible) = kit::table_view(count, reveal, draft.scroll, 6);
     if let Modal::PathEntry(d) = &mut wizard.modal {
         d.scroll = first;
         d.sel_anchor = d.sel;
     }
-    let overflow = suggestions.len() > visible;
+    let overflow = count > visible;
     let row_width = if overflow { inner.width.saturating_sub(1) } else { inner.width };
-    for (row, i) in (first..first + visible).enumerate() {
-        let entry = &suggestions[i];
+    for (row, entry) in draft.suggestions().skip(first).take(visible).enumerate() {
+        let i = first + row;
         let selected = draft.sel == Some(i);
         let rect =
             Rect { x: inner.x, y: inner.y + 4 + row as u16, width: row_width, height: 1 };
@@ -3549,7 +3677,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         frame,
         &mut wizard.ui,
         bar,
-        suggestions.len(),
+        count,
         visible,
         first,
         Act::PathScroll(-1),
@@ -3666,6 +3794,54 @@ pub(crate) mod tests {
         assert!(LOGO[2].contains(r"_ \\___ \|"), "m's trailing and S's leading backslash are ADJACENT");
         assert!(LOGO[3].contains(r"| |_| | |  __/"));
         assert!(LOGO[4].contains(r"\__|_|  \___|"));
+    }
+
+    /// Two idle reports in a row and the scan poll backs off from a second
+    /// and a half to a minute; news of a scan, or a commit that gives the
+    /// server one, brings it back (performance audit #116).
+    #[test]
+    fn the_scan_poll_backs_off_once_the_server_is_idle_and_a_commit_rearms_it() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.screen = Screen::Extras;
+        let due_after = |w: &mut Wizard, ago: Duration| {
+            w.last_poll = Instant::now() - ago;
+            w.poll_due()
+        };
+        let brisk = PROGRESS_EVERY + Duration::from_millis(10);
+        let idle = || Done::Progress(Ok(ProgressReport::Idle));
+        assert!(due_after(&mut wizard, brisk), "a scan may be starting: every second and a half");
+
+        wizard.apply(idle());
+        assert!(due_after(&mut wizard, brisk), "one idle between the files and the passes is not the end");
+        wizard.apply(Done::Progress(Ok(ProgressReport::Files(Vec::new()))));
+        assert!(!due_after(&mut wizard, brisk), "idle twice in a row: backed off");
+        assert!(due_after(&mut wizard, PROGRESS_IDLE_EVERY), "but not stopped");
+
+        wizard.apply(Done::Progress(Ok(ProgressReport::Enrichment {
+            pass: "waveform".into(),
+            attempted: 1,
+            total: None,
+            more: false,
+        })));
+        assert!(due_after(&mut wizard, brisk), "news of a pass: brisk again");
+
+        wizard.apply(idle());
+        wizard.apply(idle());
+        assert!(!due_after(&mut wizard, brisk));
+        wizard.apply(Done::Progress(Err(crate::api::ApiError::Config("net".into()))));
+        assert!(!due_after(&mut wizard, brisk), "a hiccup is no news either way");
+        wizard.apply(Done::FoldersCommitted { committed: Vec::new(), error: None });
+        assert!(due_after(&mut wizard, brisk), "new folders: brisk again");
+
+        wizard.apply(idle());
+        wizard.apply(idle());
+        wizard.apply(Done::ExtrasCommitted { applied: Vec::new(), error: None });
+        assert!(due_after(&mut wizard, brisk), "an extra switched on queues passes: brisk again");
+
+        wizard.screen = Screen::Folders;
+        assert!(!due_after(&mut wizard, PROGRESS_IDLE_EVERY), "never on the folders screen");
     }
 
     #[test]
@@ -4593,13 +4769,30 @@ pub(crate) mod tests {
         assert_eq!(split_input("C:\\Us"), ("C:\\".to_string(), "Us".to_string()));
     }
 
+    /// The list is read where it lies (performance audit #115): its length
+    /// and the rows a frame shows come borrowed, whatever the listing's
+    /// size, and only an accepted suggestion is copied.
+    #[test]
+    fn suggestions_are_counted_and_windowed_where_they_lie() {
+        let entries: Vec<String> = (0..5000).map(|i| format!("Artist {i:04}")).collect();
+        let mut draft = PathDraft { text: "/srv/music/".into(), entries, ..PathDraft::default() };
+        assert_eq!(draft.suggestion_count(), 5000, "an empty partial matches every folder");
+        assert_eq!(draft.suggestions().skip(4998).take(6).collect::<Vec<_>>(), vec!["Artist 4998", "Artist 4999"]);
+        draft.text = "/srv/music/artist 12".into();
+        assert_eq!(draft.suggestion_count(), 100);
+        assert_eq!(draft.suggestion(0), Some("Artist 1200"));
+        assert_eq!(draft.suggestion(99), Some("Artist 1299"));
+        assert_eq!(draft.suggestion(100), None);
+    }
+
     #[test]
     fn suggestions_filter_case_insensitively_and_share_a_prefix() {
         assert!(starts_with_fold("Music", "mus"));
         assert!(!starts_with_fold("Music", "musik"));
         let items = vec!["Music".to_string(), "Musicals".to_string(), "music-old".to_string()];
         assert_eq!(common_prefix(&items), "Music");
-        assert_eq!(common_prefix(&[]), "");
+        assert_eq!(common_prefix(&["Music", "musicals"]), "Music", "borrowed names alike");
+        assert_eq!(common_prefix::<&str>(&[]), "");
     }
 
     #[test]
@@ -4774,7 +4967,7 @@ pub(crate) mod tests {
         wizard.refresh_completion();
         assert!(wizard.queued.is_none(), "no listing for an empty input");
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
-        assert!(draft.entries.is_empty() && draft.suggestions().is_empty());
+        assert!(draft.entries.is_empty() && draft.suggestion_count() == 0);
     }
 
     #[test]
@@ -5036,6 +5229,38 @@ pub(crate) mod tests {
         wizard.confirm = "hunter2".into();
         wizard.act(Act::CreateAdmin);
         assert!(matches!(wizard.queued, Some(Op::CreateAdmin)));
+    }
+
+
+    #[test]
+    fn the_path_modal_is_drawn_from_its_own_draft_and_keeps_its_listing() {
+        // The draft lends the frame its listing instead of being copied
+        // with it every frame (performance audit #110): the listing is back
+        // after a draw, and the scroll the draw keeps lands in the draft.
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        let entries: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        wizard.modal = Modal::PathEntry(PathDraft {
+            text: "/srv/".into(),
+            listed_for: "/srv/".to_string(),
+            listed_path: "/srv".to_string(),
+            entries: entries.clone(),
+            sel: Some(11),
+            ..PathDraft::default()
+        });
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|frame| render(frame, &mut wizard)).unwrap();
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!("the path modal") };
+        assert_eq!(draft.entries, entries, "the listing is back after the frame");
+        assert_eq!(draft.sel_anchor, Some(11), "the draw kept its anchor");
+        assert!((6..=11).contains(&draft.scroll), "scrolled to the cursor: {}", draft.scroll);
+        // The browser is lent and put back whole.
+        let browse = Browse { path: "/srv".into(), dirs: entries, sel: 3 };
+        wizard.modal = Modal::Browser(browse.clone());
+        terminal.draw(|frame| render(frame, &mut wizard)).unwrap();
+        assert_eq!(wizard.modal, Modal::Browser(browse));
     }
 
     /// The folders table under the path modal: a press where its bar
@@ -5387,9 +5612,17 @@ pub(crate) mod tests {
         wizard.last_poll = overdue();
         assert_eq!(frame_once(&mut wizard, &wires, &mut asked), Duration::ZERO);
         assert_eq!(wizard.queued, Some(Op::PollProgress));
+        // In flight, no second ask goes. The window (no gate: it draws
+        // every pass) waits its poll; the terminal, whose idle passes skip
+        // their draw, waits briskly for the answer (`kit::pace`).
         assert_eq!(frame_once(&mut wizard, &wires, &mut asked), POLL, "in flight: no second ask");
+        wizard.gate = true;
+        assert!(frame_once(&mut wizard, &wires, &mut asked) <= crate::kit::pace::BRISK, "the terminal: brisk");
+        wizard.gate = false;
+        assert_eq!(wizard.queued, None, "still no second ask");
         let (_, job) = wires.jobs.try_recv().expect("the frame after sent it");
         assert!(matches!(job, Job::Plain(Op::PollProgress)));
+        assert!(wires.jobs.try_recv().is_err(), "and only the one");
 
         let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
         wizard.standalone = true;

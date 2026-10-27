@@ -2262,6 +2262,8 @@ mod tests {
 
     #[test]
     fn a_paused_view_whose_lines_all_fit_says_following_on_the_same_frame() {
+        // The word looked for is English: no other test's locale between.
+        let _en = english();
         let mut log = LogUi::new(None).utc();
         log.model.take(infos(1, 3));
         log.wheel(true);

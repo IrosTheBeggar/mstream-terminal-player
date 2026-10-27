@@ -10,7 +10,8 @@
 //! shares (the header, the note and tips lines on the bottom edge) and
 //! the gate sentences for the errors B4 warns a terminal client will hit.
 //! Rooms keep their own state, worker and drawing; the loop only asks a
-//! room to pump its worker, tick its timers, draw, and answer input.
+//! room to fold in and pump its worker, tick its timers, draw, and answer
+//! input.
 
 mod backups;
 mod torrents;
@@ -22,7 +23,7 @@ pub(crate) mod stats;
 pub(crate) mod tz;
 mod users;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Subcommand};
 use ratatui::Frame;
@@ -38,12 +39,14 @@ use ratatui::widgets::{Block, Paragraph};
 use rust_i18n::t;
 
 use crate::api::{ApiError, Client};
+use crate::kit::pace::{Expecting, REDRAW_ANYWAY};
 use crate::kit::theme::th;
 use crate::kit::{
     GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme, width,
 };
 
-/// How long to wait for input before redrawing anyway.
+/// How long to wait for input before the next pass anyway: the resolution
+/// of the rooms' timers, the held arrow's and the tooltip's.
 const POLL: Duration = Duration::from_millis(100);
 
 #[derive(Args)]
@@ -221,7 +224,8 @@ pub(crate) enum Claim {
 
 /// What the terminal session asks of a room. A room keeps its own worker
 /// channels, state and drawing; the loop calls these in a fixed order —
-/// tick, draw, pump, then input — so a busy note queued by a key is on
+/// absorb, tick, draw, pump, then input — so a worker's answer is on
+/// screen the frame it is folded in, and a busy note queued by a key is on
 /// screen the frame before its call blocks the worker.
 pub(crate) trait Screen {
     type Act: Clone;
@@ -230,17 +234,28 @@ pub(crate) trait Screen {
     /// drags, hold-repeat and tooltip dwell through it.
     fn ui(&mut self) -> &mut Surface<Self::Act>;
 
-    /// Fold in whatever the worker finished, then hand it the next queued
-    /// op. Called once per frame, right after the draw.
+    /// Fold in whatever the worker finished, and say whether anything came
+    /// — a frame to draw. Called once per frame, right before the draw:
+    /// folded in after it, an answer missed the frame it could have been on
+    /// and waited out a whole poll for the next (performance audit #82).
+    fn absorb(&mut self) -> bool;
+
+    /// Hand the worker the next queued op. Called once per frame, right
+    /// after the draw.
     fn pump(&mut self);
+
+    /// Whether a call is out with the worker: the loop waits briskly for
+    /// its answer while one is (`kit::pace`).
+    fn awaiting(&self) -> bool;
 
     /// Once per loop turn, before the draw: a room's own timers (a poll
     /// cadence, say). Nothing by default.
     fn tick(&mut self) {}
 
-    /// Asked right after the pump: a screen whose job is done (the sign-in
-    /// page, once the server answered) ends the loop from here — the rooms
-    /// only ever end on a key or a click, and never override it.
+    /// Asked right after the answers are folded in: a screen whose job is
+    /// done (the sign-in page, once the server answered) ends the loop
+    /// from here — the rooms only ever end on a key or a click, and never
+    /// override it.
     fn finished(&self) -> Option<Outcome> {
         None
     }
@@ -333,13 +348,27 @@ fn event_loop<S: Screen>(
     mouse_on: bool,
 ) -> std::io::Result<Outcome> {
     let mut hand = false;
+    let mut expecting = Expecting::default();
+    // Whether anything happened since the last frame — input, an answer, a
+    // held arrow's step — and when it was drawn. Nothing in a room moves on
+    // its own but the caret, a ripening tooltip and the ages (minutes), so
+    // a pass with nothing new skips the draw (performance audit #102).
+    let mut dirty = true;
+    let mut drawn = Instant::now();
     loop {
-        screen.tick();
-        terminal.draw(|frame| screen.render(frame))?;
-        screen.pump();
+        dirty |= screen.absorb();
         if let Some(outcome) = screen.finished() {
             return Ok(outcome);
         }
+        expecting.track(screen.awaiting());
+        screen.tick();
+        if dirty || screen.ui().stale() || drawn.elapsed() >= REDRAW_ANYWAY {
+            terminal.draw(|frame| screen.render(frame))?;
+            drawn = Instant::now();
+            dirty = false;
+        }
+        screen.pump();
+        expecting.track(screen.awaiting());
 
         let over = screen.ui().hovering_clickable();
         if over != hand {
@@ -349,12 +378,14 @@ fn event_loop<S: Screen>(
         let held = screen.ui().hold_action();
         if let Some(act) = held {
             screen.act(act);
+            dirty = true;
         }
         screen.ui().dwell_tick();
 
-        if !event::poll(POLL)? {
+        if !event::poll(expecting.wait(POLL))? {
             continue;
         }
+        dirty = true;
         // Drain everything queued before the next draw: a sweep of the
         // pointer is one event per cell crossed.
         let mut inputs = vec![event::read()?];
@@ -493,9 +524,11 @@ pub(crate) trait HostedRoom {
     /// on stepping, and a thumb go on following, with no release to come.
     fn leave(&mut self);
 
-    /// The host's frame is on screen: fold in what the worker finished and
-    /// hand it the next op, run the room's timers, step a held scrollbar
-    /// arrow, age the tooltip dwell. Pump comes before tick so that an op
+    /// The host's frame is on screen: fold in what the worker finished
+    /// ([`Screen::absorb`]; a host that hosts a room draws every frame, so
+    /// the answer is on the next) and hand it the next op, run the room's
+    /// timers, step a held scrollbar arrow, age the tooltip dwell. Pump
+    /// comes before tick so that an op
     /// a tick queues is drawn (its busy line) the frame before it is
     /// pumped, which is the hub's own tick, draw, pump order seen from
     /// after the host's draw. Returns whether the pointer rests on
@@ -552,6 +585,7 @@ impl<S: Screen + 'static> HostedRoom for S {
     }
 
     fn after_frame(&mut self) -> bool {
+        <S as Screen>::absorb(self);
         <S as Screen>::pump(self);
         <S as Screen>::tick(self);
         let held = self.ui().hold_action();
@@ -915,6 +949,98 @@ pub(crate) fn join_home(home: &str, path: &str) -> String {
     }
 }
 
+/// A server for the workers' tests that answers in waves: each request is
+/// held until the rest of its wave has arrived (or two seconds pass), so
+/// reads sent together are answered together, and reads sent one at a
+/// time show up as a crowd of one — and a slow test.
+#[cfg(test)]
+pub(crate) mod waves {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Seen {
+        arrived: usize,
+        in_flight: usize,
+        peak: usize,
+        paths: Vec<String>,
+    }
+
+    pub(crate) struct Server {
+        pub url: String,
+        seen: Arc<(Mutex<Seen>, Condvar)>,
+    }
+
+    impl Server {
+        /// The most requests the server held at once.
+        pub(crate) fn peak(&self) -> usize {
+            self.seen.0.lock().unwrap().peak
+        }
+
+        /// Every path asked for (with its query), in arrival order.
+        pub(crate) fn paths(&self) -> Vec<String> {
+            self.seen.0.lock().unwrap().paths.clone()
+        }
+    }
+
+    /// Serve `answer(path)` — a status and a JSON body — to requests that
+    /// arrive in waves of the given sizes.
+    pub(crate) fn serve(
+        sizes: &[usize],
+        answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    ) -> Server {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new((Mutex::new(Seen::default()), Condvar::new()));
+        // Where each wave ends, counted in requests.
+        let ends: Vec<usize> = sizes.iter().scan(0, |n, s| { *n += s; Some(*n) }).collect();
+        let answer = Arc::new(answer);
+        let shared = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (seen, ends, answer) = (shared.clone(), ends.clone(), answer.clone());
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 2048];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let path = String::from_utf8_lossy(&head).split_whitespace().nth(1).unwrap_or("").to_string();
+                    let (lock, cvar) = &*seen;
+                    {
+                        let mut s = lock.lock().unwrap();
+                        s.arrived += 1;
+                        s.in_flight += 1;
+                        s.peak = s.peak.max(s.in_flight);
+                        s.paths.push(path.clone());
+                        cvar.notify_all();
+                        let end = ends.iter().copied().find(|e| *e >= s.arrived).unwrap_or(0);
+                        let deadline = Instant::now() + Duration::from_secs(2);
+                        while s.arrived < end && Instant::now() < deadline {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            s = cvar.wait_timeout(s, left).unwrap().0;
+                        }
+                        s.in_flight -= 1;
+                    }
+                    let (status, body) = answer(&path);
+                    let reply = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+            }
+        });
+        Server { url, seen }
+    }
+}
+
 /// What the room lanes' tests share: the areas the GUI player's Admin tab
 /// hands a room, and a frame drawn around one so a test can see whether
 /// anything landed outside it.
@@ -1019,8 +1145,17 @@ mod tests {
             &mut self.ui
         }
 
+        fn absorb(&mut self) -> bool {
+            self.log.push("absorb");
+            false
+        }
+
         fn pump(&mut self) {
             self.log.push("pump");
+        }
+
+        fn awaiting(&self) -> bool {
+            false
         }
 
         fn tick(&mut self) {
@@ -1261,11 +1396,11 @@ mod tests {
     }
 
     #[test]
-    fn after_frame_pumps_then_ticks_and_reports_the_hand() {
+    fn after_frame_absorbs_pumps_then_ticks_and_reports_the_hand() {
         let mut probe = drawn();
         probe.ui.pointer = Some(Position { x: 2, y: 0 });
         assert!(probe.after_frame(), "over a click rect the hand shows");
-        assert_eq!(probe.log, vec!["pump", "tick"]);
+        assert_eq!(probe.log, vec!["absorb", "pump", "tick"]);
         probe.ui.dwell_backdate(crate::kit::TIP_DELAY);
         assert!(probe.ui.ripe_tooltip().is_some(), "the dwell was aged");
 
@@ -1306,7 +1441,13 @@ mod tests {
             fn ui(&mut self) -> &mut Surface<u16> {
                 &mut self.ui
             }
+            fn absorb(&mut self) -> bool {
+                false
+            }
             fn pump(&mut self) {}
+            fn awaiting(&self) -> bool {
+                false
+            }
             fn render(&mut self, _frame: &mut Frame) {}
             fn key(&mut self, _key: KeyEvent) -> Option<Outcome> {
                 None

@@ -885,17 +885,17 @@ impl App {
     }
 
     /// A strip album's cover from a connected server, through the parent's
-    /// federation art proxy (the queue panel's way for a peer's row): `None`
-    /// when the album names no art, the cache already holds or awaits it,
-    /// or the server cannot be reached.
-    pub(crate) fn taste_peer_album_art(&mut self, album: &TastePeerAlbum) -> Option<Effect> {
-        let file = album.art.as_deref()?;
+    /// federation art proxy (the queue panel's way for a peer's row):
+    /// nothing when the album names no art, the cache already holds or
+    /// awaits it, or the server cannot be reached.
+    pub(crate) fn taste_peer_album_art(&mut self, album: &TastePeerAlbum) -> Vec<Effect> {
+        let Some(file) = album.art.as_deref() else { return Vec::new() };
         if self.art.contains_key(file) {
-            return None;
+            return Vec::new();
         }
         let origin = Origin { server: self.origin().server, peer: Some(album.peer) };
-        let reach = self.reach(&origin).ok()?;
-        self.fetch_art_from(file, Some(reach))
+        let Ok(reach) = self.reach(&origin) else { return Vec::new() };
+        self.claim_art(file, Some(reach))
     }
 
     /// An album's songs, landed: played (the queue replaced, the first

@@ -1245,9 +1245,9 @@ fn draw_strip(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, fill: Str
         let effect = match *tile {
             Tile::Library(i) => {
                 let file = gui.app.taste.library.data.as_ref().and_then(|l| l.albums.get(i)).and_then(|a| a.album_art_file.clone());
-                file.filter(|f| !f.is_empty()).and_then(|f| gui.app.fetch_art_file(&f))
+                file.filter(|f| !f.is_empty()).map(|f| gui.app.claim_art(&f, None)).unwrap_or_default()
             }
-            Tile::Peer(i) => peers.get(i).and_then(|album| gui.app.taste_peer_album_art(album)),
+            Tile::Peer(i) => peers.get(i).map(|album| gui.app.taste_peer_album_art(album)).unwrap_or_default(),
         };
         fetches.extend(effect);
     }
@@ -4902,7 +4902,7 @@ mod tests {
             gui.pending
                 .iter()
                 .filter_map(|e| match e {
-                    Effect::Api(ApiCmd::AlbumArt { file, reach }) => Some((file.clone(), reach.as_ref().and_then(|r| r.peer))),
+                    Effect::Api(ApiCmd::AlbumArt { file, reach, .. }) => Some((file.clone(), reach.as_ref().and_then(|r| r.peer))),
                     _ => None,
                 })
                 .collect()
@@ -4938,7 +4938,7 @@ mod tests {
             })
             .expect("a reach");
         assert_eq!(
-            reach.client().unwrap().art_url("pc.jpg").unwrap(),
+            reach.client().unwrap().art_url("pc.jpg", true).unwrap(),
             "http://host:3000/api/v1/federation/peers/7/art/pc.jpg?compress=l",
             "the peer's 256 px rendition, as the webapp's album cards ask"
         );
@@ -4948,15 +4948,15 @@ mod tests {
         // The proxy fails (the peer dropped: 502): the slot is given back,
         // but the next frames do not ask again — the GUI draws ten times a
         // second, and every visible tile used to re-ask on each one.
-        gui.app.apply_event(Event::AlbumArt { file: "pc.jpg".into(), art: None, settled: false });
+        gui.app.apply_event(Event::AlbumArt { file: "pc.jpg".into(), art: None, settled: false, small: true });
         for _ in 0..3 {
             gui.pending.clear();
             draw(&mut gui);
             assert!(claims(&gui).is_empty(), "a failed cover waits out its pause");
         }
-        // Once the pause has passed, one more ask, through the same proxy.
-        let backdated = crate::clock::Instant::now().checked_sub(crate::tui::app::ART_RETRY).expect("a clock that far back");
-        gui.app.art_retry.insert("pc.jpg".into(), backdated);
+        // Once its rung has passed, one more ask, through the same proxy.
+        gui.app.art_retry.get_mut("pc.jpg").expect("the failure is on the ladder").failed_at =
+            crate::clock::Instant::now() - std::time::Duration::from_secs(5);
         gui.pending.clear();
         draw(&mut gui);
         assert_eq!(claims(&gui), vec![("pc.jpg".to_string(), Some(7))]);
@@ -5000,13 +5000,13 @@ mod tests {
             .pending
             .iter()
             .find_map(|e| match e {
-                Effect::Api(ApiCmd::AlbumArt { file, reach: Some(reach) }) if file == "pc.jpg" => Some(reach.clone()),
+                Effect::Api(ApiCmd::AlbumArt { file, reach: Some(reach), .. }) if file == "pc.jpg" => Some(reach.clone()),
                 _ => None,
             })
             .expect("the strip claims the peer's cover");
         assert_eq!((reach.base.as_str(), reach.peer), ("http://127.0.0.1:5000", None), "from the peer's own tunnel");
         assert_eq!(
-            reach.client().unwrap().art_url("pc.jpg").unwrap(),
+            reach.client().unwrap().art_url("pc.jpg", true).unwrap(),
             "http://127.0.0.1:5000/album-art/pc.jpg?compress=l&__lt=lt",
             "the peer's own 256 px rendition, the bridge's token after it"
         );
@@ -5036,7 +5036,7 @@ mod tests {
             .pending
             .iter()
             .filter_map(|e| match e {
-                Effect::Api(ApiCmd::AlbumArt { file, reach }) => Some((file.clone(), reach.as_ref().and_then(|r| r.peer))),
+                Effect::Api(ApiCmd::AlbumArt { file, reach, .. }) => Some((file.clone(), reach.as_ref().and_then(|r| r.peer))),
                 _ => None,
             })
             .collect();

@@ -1766,17 +1766,17 @@ impl App {
     }
 
     /// The open flow's cover, asked of its own server through the parent's
-    /// art proxy (the strip's way) — `None` when it names none, the cache
+    /// art proxy (the strip's way) — nothing when it names none, the cache
     /// holds or awaits it, or the server cannot be reached.
-    pub(crate) fn keep_cover(&mut self) -> Option<Effect> {
-        let flow = self.taste.keep.flow.as_ref()?;
-        let file = flow.subject.art.clone()?;
+    pub(crate) fn keep_cover(&mut self) -> Vec<Effect> {
+        let Some(flow) = self.taste.keep.flow.as_ref() else { return Vec::new() };
+        let Some(file) = flow.subject.art.clone() else { return Vec::new() };
         if self.art.contains_key(&file) {
-            return None;
+            return Vec::new();
         }
         let origin = Origin { server: self.origin().server, peer: Some(flow.subject.peer) };
-        let reach = self.reach(&origin).ok()?;
-        self.fetch_art_from(&file, Some(reach))
+        let Ok(reach) = self.reach(&origin) else { return Vec::new() };
+        self.claim_art(&file, Some(reach))
     }
 
     /// The Keep modal closed (Esc, "Esc close", Close): the copy keeps

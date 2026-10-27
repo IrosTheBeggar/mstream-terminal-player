@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "324d622013dde045cd3f9da40e52fc222625242e"
+  },
+  "path_in_vcs": "crates/stream-download"
+}
