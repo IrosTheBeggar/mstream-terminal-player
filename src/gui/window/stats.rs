@@ -41,17 +41,26 @@ pub(crate) struct Counted<B> {
     timed: bool,
     /// The last flush's time; zero when not timing.
     flushed: Duration,
+    /// A flush came since [`Counted::take_drew`] last asked: the face drew
+    /// (every ratatui draw ends in one), though perhaps no cell changed.
+    drew: bool,
 }
 
 impl<B> Counted<B> {
     pub(super) fn new(inner: B, timed: bool) -> Self {
-        Self { inner, cells: 0, timed, flushed: Duration::ZERO }
+        Self { inner, cells: 0, timed, flushed: Duration::ZERO, drew: false }
     }
 
     /// The cells drawn since the last call, and the last flush's time
     /// (zero when not timing).
     pub(super) fn take_cells(&mut self) -> (u64, Duration) {
         (std::mem::take(&mut self.cells), self.flushed)
+    }
+
+    /// Whether the face drew since the last call: a pass with nothing new
+    /// skips its draw (`gui::Ctx::gate`).
+    pub(super) fn take_drew(&mut self) -> bool {
+        std::mem::take(&mut self.drew)
     }
 }
 
@@ -116,6 +125,7 @@ impl<B: Backend> Backend for Counted<B> {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
+        self.drew = true;
         if !self.timed {
             return self.inner.flush();
         }
@@ -145,6 +155,8 @@ pub(super) struct Stats {
     visible_pending: bool,
     frames: u64,
     unchanged: u64,
+    /// Frames whose face skipped the draw: nothing new, nothing owed.
+    skipped: u64,
     cells: u64,
     flush_ms: Vec<f64>,
     /// Flushes of frames that changed something: the ones that encode and
@@ -178,6 +190,7 @@ impl Stats {
             visible_pending: false,
             frames: 0,
             unchanged: 0,
+            skipped: 0,
             cells: 0,
             flush_ms: Vec::new(),
             present_flush_ms: Vec::new(),
@@ -211,6 +224,12 @@ impl Stats {
             Some(at) => self.first_visible = Some(at),
             None => self.visible_pending = true,
         }
+    }
+
+    /// A frame whose face skipped its draw; it counts among the unchanged
+    /// too ([`Stats::frame`] is told of it as well).
+    pub(super) fn skipped(&mut self) {
+        self.skipped += 1;
     }
 
     /// One frame: the cells it drew, whether its flush made a present that
@@ -272,6 +291,7 @@ impl Stats {
                 .collect::<Vec<_>>(),
             "frames": self.frames,
             "frames_unchanged": self.unchanged,
+            "frames_skipped": self.skipped,
             "frames_per_s": self.frames as f64 / wall.as_secs_f64().max(f64::EPSILON),
             "cells_drawn": self.cells,
             "frame_ms": spread(&self.frame_ms),

@@ -4137,3 +4137,16 @@ Smokes after the merge (debug builds, the e2e fake, volume 0, scratch config):
   boards. With `absorb` taken out of `after_frame`, the library never shows.
 - The window and its wizard page connect, switch rooms, add folders and quit cleanly under
   `MSTREAM_WINDOW_SCRIPT`.
+
+**The window skips idle draws too (follow-up, 2026-10-26).** The merge left the window drawing
+every pass at a poll's pace (main's behaviour). The GUI's face is now gated like the terminal.
+The window tells it through `Host::must_draw` when its surface needs a frame though the player
+holds nothing new: before the window is first shown, after a clear (a resize, the window
+shown), for an owed present (back from minimised or occluded), and for a cover the worker
+resampled since. A skipped pass leaves the picture board's covers as they were
+(`Board::end_frame`). The setup wizard's window page still draws every pass.
+- A scripted 17 s window run (idle stretches, two room switches, a resize, a minimise) took
+  0.77 s CPU against 1.19 s. 337 of its 356 passes skipped the draw. The dumps after every step
+  matched the ungated build's.
+- On the Albums wall of a real mStream (the demo music), all six cover pictures stayed on
+  screen through 6 s of skipped passes and came back after a minimise. Checked by screenshot.
