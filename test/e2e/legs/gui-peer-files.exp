@@ -1,0 +1,162 @@
+#!/usr/bin/expect -f
+# Keep a copy while browsing a connected server: the Files room's folder
+# copies (the keep-a-copy spec §4.5, §6.5–§6.7; docs/ux-contracts/
+# discovery-page.md, clauses 150–172). The fake own server is paired with a
+# fake connected server, Stage Peer B (test/e2e/fake_mstream.py,
+# FAKE_ROLE=peer and FAKE_PEER_URL), whose reads cross the own server's
+# browse proxy; run.sh seeds the HOME with the peer as the last server and
+# its place, peerlib/Boukmanflow, so the GUI opens on it, its Files room
+# listing Borrowed Tapes, Harbour Lights and Second Shift. At 100 × 30 with
+# the queue panel folded (Tab), the gate asked of the own server through its
+# probe ping, the header line wears its key word after the crumb
+# (@@PF:word@@: "◂ Files ▸ peerlib/Boukmanflow · read-only   c keep a copy"
+# and "3 items" at the right — no "playlists and ratings" clause). `c` with
+# the cursor stowed keeps the open folder: folder focus on As on Stage Peer
+# B, its count from one recursive listing (@@PF:mirror@@, "[ Add folder · 9
+# songs ]"), and Enter starts it with no landing on the wire; the window
+# follows the copy (@@PF:mirror-live@@) and Esc leaves it running, its state
+# in the word's place (@@PF:mirror-room@@). ↓ holds Borrowed Tapes' row (the
+# word goes, @@PF:held@@) and `c` keeps it; ↓ chooses Into a folder…
+# (@@PF:into@@, `d change` under it) and `d` opens the chooser on its default
+# (@@PF:chooser@@): the folder's own name, not on the own server yet, over
+# `copies`' three folders. The field is emptied and "From Sam/Borrowed
+# Tapes" typed; the list follows 300 ms after the typing stops, From Sam
+# being the nearest folder that exists (@@PF:typed@@). Esc keeps the choice
+# (@@PF:into-place@@) and Enter starts it with that landing. ↓ holds Harbour
+# Lights, `c`, ↓ ↓ chooses By your layout — its tags read once, ≤ 100 songs
+# (@@PF:tags@@) — and Enter starts it with the tags landing. `C` opens the
+# Copies list here, outside Discover (@@PF:copies@@: three folder copies);
+# Esc, and the room's poll walks them to done — the open folder's "✓ kept"
+# and its rows' ✓ (@@PF:kept@@). q quits. check_peer.py replays the stream
+# at each mark (the README's first law); run.sh asks the fakes what was
+# sent: three folder starts — no landing, {vpath, path}, {tags: true} — to
+# the fake's throwaway `copies` library, one recursive listing per window,
+# one tag batch, and nothing the proxy refused. Gates on first-paint single
+# words only (the renderer skips a blank's cell between plain words); each
+# gate's braces span lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "Harbour" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-PEER-FOLDER" 2 }
+}
+# The probe ping, the gate's two reads and the page's lookup land.
+drain 2
+# The queue panel folds: the room takes its 80 cells.
+send "\t"
+drain 2
+puts "@@PF:word@@"
+send "c"
+expect {
+    "Add folder" {}
+    eof { puts "DIED-ON-C"; exit 7 }
+    timeout { fail "NO-FOLDER-WINDOW" 3 }
+}
+# The recursive listing counts the songs.
+drain 2
+puts "@@PF:mirror@@"
+send "\r"
+expect {
+    -re "(Waiting|Copying)" {}
+    eof { puts "DIED-ON-MIRROR"; exit 8 }
+    timeout { fail "NO-MIRROR-COPY" 4 }
+}
+drain 1
+puts "@@PF:mirror-live@@"
+send "\x1b"
+drain 2
+puts "@@PF:mirror-room@@"
+send "\x1b\[B"
+drain 1
+puts "@@PF:held@@"
+send "c"
+expect {
+    "Add folder" {}
+    eof { puts "DIED-ON-ROW"; exit 9 }
+    timeout { fail "NO-ROW-WINDOW" 5 }
+}
+drain 2
+send "\x1b\[B"
+drain 1
+puts "@@PF:into@@"
+send "d"
+expect {
+    "isn't" {}
+    eof { puts "DIED-ON-D"; exit 10 }
+    timeout { fail "NO-CHOOSER" 11 }
+}
+drain 1
+puts "@@PF:chooser@@"
+# The field holds the folder's name; fourteen Backspaces empty it.
+send "\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f"
+drain 1
+send "From Sam/Borrowed Tapes"
+# The list is asked 300 ms after the last key.
+drain 2
+puts "@@PF:typed@@"
+send "\x1b"
+drain 1
+puts "@@PF:into-place@@"
+send "\r"
+expect {
+    -re "(Waiting|Copying)" {}
+    eof { puts "DIED-ON-INTO"; exit 12 }
+    timeout { fail "NO-INTO-COPY" 13 }
+}
+drain 1
+send "\x1b"
+drain 1
+send "\x1b\[B"
+drain 1
+send "c"
+expect {
+    "Add folder" {}
+    eof { puts "DIED-ON-ROW2"; exit 14 }
+    timeout { fail "NO-ROW2-WINDOW" 15 }
+}
+drain 2
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+# The first By your layout reads the folder's tags.
+drain 2
+puts "@@PF:tags@@"
+send "\r"
+expect {
+    -re "(Waiting|Copying)" {}
+    eof { puts "DIED-ON-TAGS"; exit 16 }
+    timeout { fail "NO-TAGS-COPY" 17 }
+}
+drain 1
+send "\x1b"
+drain 1
+send "C"
+expect {
+    "TITLE" {}
+    eof { puts "DIED-ON-COPIES"; exit 18 }
+    timeout { fail "NO-COPIES" 19 }
+}
+drain 1
+puts "@@PF:copies@@"
+send "\x1b"
+# The fake keeps a copy queued for a second and running for six; the
+# room's poll sees the last one end.
+drain 12
+puts "@@PF:kept@@"
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 20 }
+}
+catch wait result
+exit [lindex $result 3]
