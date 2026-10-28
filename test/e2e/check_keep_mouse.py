@@ -92,7 +92,9 @@ lines, win = at("row")
 need("row", len(lines) > 17 and "Ember" in lines[17] and "[⋯]" not in lines[17] and "[▸]" not in lines[17], "the room's row lit under the pointer")
 _, win = at("artist")
 need("artist", "(•) Every album by Attic Band" in win and "( ) Album" in win, "Every album by chosen")
-need("artist", "one folder per album" in win and "[ Add every album ]" in win, "its place and its primary")
+# Every album by counts the artist's own albums on the connected server
+# (the fake's Attic credits Lanterns to Attic Band; gap 26).
+need("artist", "one folder per album" in win and "[ Add 1 album ]" in win, "its place and its primary")
 _, win = at("album")
 need("album", "(•) Album" in win and "[ Add album ]" in win, "Album chosen again")
 lines, _ = at("picker")

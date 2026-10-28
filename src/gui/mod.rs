@@ -28,6 +28,7 @@ mod device;
 mod discover;
 mod dj;
 mod keep;
+mod keep_doors;
 mod library;
 mod log_file;
 mod mini;
@@ -323,6 +324,10 @@ pub(crate) enum Act {
     /// The Discover room's own pointer ways: its tabs, rows and their
     /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
     Disc(discover::DiscAct),
+    /// A connected server's header line's key word, "c keep a copy", or
+    /// the page's copy state standing in its place: `c` with the cursor
+    /// stowed (keep-a-copy spec §4.1).
+    KeepWord,
     /// A modal's whole-screen backdrop: swallow the click.
     Guard,
 }
@@ -605,6 +610,9 @@ pub(crate) struct Gui {
     mini_cover: Option<cover::Slot>,
     /// The Discover room: its cursor, wheel, hanging lists and seeds modal.
     discover: discover::DiscoverUi,
+    /// Keep a copy's ways in from the browse rooms: what their marks last
+    /// asked.
+    doors: keep_doors::DoorsUi,
     /// The queue's highlighted row last drawn, so a new one is revealed.
     last_qsel: Option<usize>,
     /// The last frame left paced work unfinished (covers still waiting to
@@ -679,6 +687,7 @@ impl Gui {
             card: None,
             mini_cover: None,
             discover: discover::DiscoverUi::new(),
+            doors: keep_doors::DoorsUi::default(),
             last_qsel: None,
             hot: false,
             prefs_unsaved: None,
@@ -1239,6 +1248,9 @@ impl Gui {
                     self.pend(effects);
                 }
             }
+            // The header word, or the state in its place (keep-a-copy spec
+            // §4.1.1): the page's window.
+            Act::KeepWord => keep_doors::open_page(self),
             // The servers acts were consumed by servers::act above.
             _ => {}
         }
@@ -1590,19 +1602,22 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
     gui.stats.drawn = false; // and the Stats screen's says it drew
-    // A Discover modal makes the screen beneath inert (the kit's Modal): the
-    // tabs, the nav, the room and the bar draw without the pointer, so
-    // nothing of them lights or ripens a tooltip under it; the modals get it
-    // back as they draw.
+    // A Discover modal — or Keep a copy and the Copies list, over any room
+    // (keep-a-copy spec §12.3) — makes the screen beneath inert (the kit's
+    // Modal): the tabs, the nav, the room and the bar draw without the
+    // pointer, so nothing of them lights or ripens a tooltip under it; the
+    // modals get it back as they draw.
     let pointer = gui.ui.pointer;
-    let inert = gui.screen == Screen::Library && gui.active == DISCOVER_NAV && discover::modal_open(gui);
+    let inert = gui.screen == Screen::Library
+        && ((gui.active == DISCOVER_NAV && discover::modal_open(gui)) || keep_doors::window_open(gui));
     if inert {
         gui.ui.pointer = None;
     }
-    // The Discover room's copies: the poll's beat from what shows, and the
-    // copies that ended since, worded on the status line (discovery-page
-    // clauses 112, 118).
+    // The copies: the poll's beat from what shows, and the copies that ended
+    // since, worded on the status line (discovery-page clauses 112, 118) —
+    // the beat from whichever room shows them.
     keep::frame_tick(gui);
+    keep_doors::watch(gui);
     // Where the Admin screen's room and log stood is this frame's to say:
     // a frame drawn as the mini player leaves no target behind.
     gui.admin.room_at = Rect::default();
@@ -1735,6 +1750,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(torrent::tips(gui))
     } else if sonic::modal_open(gui) {
         std::borrow::Cow::from(sonic::tips(gui))
+    } else if keep_doors::window_open(gui) && gui.screen == Screen::Library {
+        std::borrow::Cow::from(keep_doors::tips(gui))
     } else if discover::modal_open(gui) && gui.screen == Screen::Library {
         std::borrow::Cow::from(discover::tips(gui))
     } else if playlists::modal_open(gui) {
@@ -1764,7 +1781,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     } else if gui.in_settings_room(SettingsRoom::Torrent) {
         std::borrow::Cow::from(torrent::tips(gui))
     } else {
-        match gui.active {
+        let room = match gui.active {
             SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
             FILES_NAV if gui.app.filtering => t!("gui.tips.filter"),
             // Stowed, the line says how to pick the cursor up and names
@@ -1793,7 +1810,10 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
                 std::borrow::Cow::from(playlists::tips(gui))
             }
             _ => t!("gui.tips.base"),
-        }
+        };
+        // Where `c` keeps the held row or card, the line names it
+        // (keep-a-copy spec §6.9) — asked only while the line shows.
+        if gui.footer() { std::borrow::Cow::from(keep_doors::room_tips(gui, &room)) } else { room }
     };
     // The footer of keys only when asked for: this surface is the
     // pointer's, and the classic TUI is the keyboard's room. The MP3
@@ -1836,6 +1856,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
     discover::draw_modals(frame, gui, area);
+    // Keep a copy and the Copies list, over whichever room asked for them.
+    keep_doors::draw_window(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
@@ -2010,7 +2032,20 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 /// row is the TUI's Enter aimed by the mouse; the hovered track row
 /// reveals a [+] that queues just that one.
 fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    let list = Rect {
+        x: content.x,
+        y: content.y + 3,
+        width: content.width.saturating_sub(2),
+        height: content.height.saturating_sub(3),
+    };
+    // The rows on screen, and their marks asked before the bar draws: the
+    // open folder's own copy state stands on it (keep-a-copy spec §5.0).
+    let window = (gui.app.connected && !gui.app.files.loading && !gui.app.files.entries.is_empty()).then(|| {
+        let selected = gui.app.files.state.selected();
+        gui.files_view.window(gui.app.files.entries.len(), selected, list.height as usize)
+    });
     if gui.app.connected {
+        files_marks(gui, window.unwrap_or_default());
         draw_files_bar(frame, gui, content);
     } else {
         put(frame, content.x, content.y, &t!("gui.nav.files"), dim());
@@ -2025,20 +2060,12 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         return;
     }
 
-    let entries = &gui.app.files.entries;
-    if entries.is_empty() {
+    let Some((first, visible)) = window else {
         put(frame, content.x, content.y + 3, &t!("gui.files.empty"), dim());
         return;
-    }
-
-    let list = Rect {
-        x: content.x,
-        y: content.y + 3,
-        width: content.width - 2,
-        height: content.height - 3,
     };
+    let entries = &gui.app.files.entries;
     let selected = gui.app.files.state.selected();
-    let (first, visible) = gui.files_view.window(entries.len(), selected, list.height as usize);
     // Lit only while the keyboard holds it (the kit's list-cursor law).
     let shown = gui.files_view.shown(selected);
 
@@ -2046,11 +2073,15 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let rows: Vec<(usize, &Entry)> =
         entries.iter().enumerate().skip(first).take(visible).collect();
     let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.as_str());
-    draw_pane_rows(
+    // A connected server's folder rows wear their folder copies, its file
+    // rows their songs' (keep-a-copy spec §5.4; the user's 2026-10-27 call).
+    let marks = keep_doors::row_marks(&gui.app, &rows, true);
+    draw_marked_rows(
         frame,
         &mut gui.ui,
         playing,
         &rows,
+        &marks,
         list,
         shown,
         List::Files,
@@ -2067,6 +2098,28 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         Act::ScrollBy(List::Files, 1),
         |first| Act::ScrollTo(List::Files, first),
     );
+}
+
+/// The Files room's marks on a connected server, asked of the App's holder
+/// (keep-a-copy spec §5.0): the open folder's own copy first — below a
+/// library's top — then the folder and file rows on screen.
+fn files_marks(gui: &mut Gui, (first, visible): (usize, usize)) {
+    if gui.app.session.peer.is_none() {
+        return;
+    }
+    let path = gui.app.path.clone();
+    let near = keep_doors::near(first, visible, gui.app.files.entries.len());
+    let rows_sig = keep_doors::sig(|h| {
+        use std::hash::Hash;
+        path.hash(h);
+        let rows: Vec<(usize, &Entry)> = gui.app.files.entries.iter().enumerate().skip(near.start).take(near.len()).collect();
+        keep_doors::hash_rows(&rows, h);
+    });
+    let page = crate::tui::app::keep::MarksPage::Files(path.clone());
+    keep_doors::ask(gui, page, keep_doors::Own::Folder(path), rows_sig, |app| {
+        let rows: Vec<(usize, &Entry)> = app.files.entries.iter().enumerate().skip(near.start).take(near.len()).collect();
+        keep_doors::list_rows(&rows, true)
+    });
 }
 
 /// The honest count for a browse bar's first line: the room's own plain
@@ -2205,6 +2258,11 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
 fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let y = content.y;
     let count = bar_count(gui, t!("gui.files.items", count = gui.app.files.counts().1).to_string());
+    if gui.app.session.peer.is_some() {
+        draw_peer_crumb(frame, gui, content, &count);
+        draw_bar_controls(frame, gui, content, content.y + 1);
+        return;
+    }
     let count_x = content.right().saturating_sub(count.chars().count() as u16);
     put(frame, count_x, y, &count, dim());
 
@@ -2213,18 +2271,53 @@ fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if !gui.app.path.is_empty() {
         x += draw_bar_back(frame, gui, x, y);
     }
-    let mut crumb = if gui.app.path.is_empty() {
+    let crumb = if gui.app.path.is_empty() {
         t!("gui.nav.files").to_string()
     } else {
         format!("{} {} {}", t!("gui.nav.files"), forward_glyph, gui.app.path)
     };
-    // A peer is read-only, and the crumb says so (contract clause 26).
-    if gui.app.session.peer.is_some() {
-        crumb = format!("{crumb} · {}", t!("gui.srv.read_only"));
-    }
     put(frame, x, y, &clip_lead(&crumb, count_x.saturating_sub(x + 2) as usize), dim());
 
     draw_bar_controls(frame, gui, content, content.y + 1);
+}
+
+/// A connected server's crumb line (contract clause 26: a peer is read-only,
+/// and the crumb says so; keep-a-copy spec §4.5, §4.11): back ◂,
+/// "Files ▸ {path} · read-only", the key word or the open folder's copy
+/// state 3 cells after, the count at the right — giving way as §4.1.4 says,
+/// " · read-only" first and the path by whole leading segments, so the
+/// folder you are in is always on screen.
+fn draw_peer_crumb(frame: &mut Frame, gui: &mut Gui, content: Rect, count: &str) {
+    let y = content.y;
+    let cells = |text: &str| crate::kit::width(text) as u16;
+    let path = gui.app.path.clone();
+    let files = t!("gui.nav.files").to_string();
+    let prefix = format!("{files} {} ", forward_glyph());
+    let tail = format!(" · {}", t!("gui.srv.read_only"));
+    let back = !path.is_empty();
+    let spot = keep_doors::page_spot(gui);
+    let head = keep_doors::Head::crumb(content.width, &prefix, &path, &files, &tail, count, spot.cells);
+    let plan = keep_doors::fit(&head);
+    let mut x = content.x;
+    if back {
+        x += draw_bar_back(frame, gui, x, y);
+        if !plan.short {
+            put(frame, x, y, &prefix, dim());
+            x += cells(&prefix);
+        }
+    }
+    put(frame, x, y, &plan.subject, dim());
+    x += cells(&plan.subject);
+    if plan.tail {
+        put(frame, x, y, &tail, dim());
+        x += cells(&tail);
+    }
+    if plan.count {
+        put(frame, content.right().saturating_sub(cells(count)), y, count, dim());
+    }
+    if let Some(shown) = spot.shown.filter(|_| plan.spot) {
+        keep_doors::draw_spot(frame, gui, x + keep_doors::SPOT_GAP, y, &shown);
+    }
 }
 
 /// The shared list renderer for the App's browse panes: kit table rows —
@@ -2248,6 +2341,24 @@ fn draw_pane_rows(
     pane: List,
     // An armed pick consumes the next activation outright (clause 10) —
     // the hover verbs must not offer to queue what a click would capture.
+    queue_plus: bool,
+) {
+    draw_marked_rows(frame, ui, playing, rows, &[], list, selected, pane, queue_plus);
+}
+
+/// [`draw_pane_rows`] with each drawn row's copy mark (`marks`, by the
+/// row's place in `rows`; keep-a-copy spec §5.3–§5.4): a song's or a
+/// folder's, one glyph in the row's lead — the playing `▸` wins the cell.
+#[allow(clippy::too_many_arguments)]
+fn draw_marked_rows(
+    frame: &mut Frame,
+    ui: &mut Surface<Act>,
+    playing: Option<&str>,
+    rows: &[(usize, &Entry)],
+    marks: &[Option<crate::api::types::JobMark>],
+    list: Rect,
+    selected: Option<usize>,
+    pane: List,
     queue_plus: bool,
 ) {
     let tab = pane.tab().unwrap_or(Tab::Files);
@@ -2277,6 +2388,8 @@ fn draw_pane_rows(
                 if marker {
                     let mark = forward_glyph();
                     put(frame, list.x, y, mark, if is_sel { sel().add_modifier(Modifier::BOLD) } else { Style::default().fg(th().ok).add_modifier(Modifier::BOLD) });
+                } else if let Some(mark) = marks.get(row).copied().flatten() {
+                    keep_doors::draw_lead_mark(frame, ui, list.x, y, mark, is_sel);
                 }
                 // A right click opens the row's sheet (track-actions
                 // contract, entry point 1).
@@ -2327,6 +2440,9 @@ fn draw_pane_rows(
                 };
                 let shown = bar::clip(main, name_width.saturating_sub(suffix.chars().count()));
                 put(frame, list.x + 2, y, &shown, style);
+                if let (Entry::Dir { .. }, Some(mark)) = (other, marks.get(row).copied().flatten()) {
+                    keep_doors::draw_lead_mark(frame, ui, list.x, y, mark, is_sel);
+                }
                 if !suffix.is_empty() {
                     let sstyle = if is_sel { sel() } else { dim() };
                     put(frame, list.x + 2 + shown.chars().count() as u16, y, suffix, sstyle);
@@ -2454,12 +2570,26 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let sel_pos = selected.and_then(|sel| visible_rows.iter().position(|(i, _)| *i == sel));
     let (first, visible) = gui.search_view.window(visible_rows.len(), sel_pos, list.height as usize);
     let shown = gui.search_view.shown(selected);
+    // A connected server's song hits wear their songs' copies (the user's
+    // 2026-10-27 call): asked for the hits on screen, by the query they
+    // answer — never while it is being typed.
+    let total = visible_rows.len();
+    let indices: Vec<usize> = visible_rows[first..first + visible].iter().map(|(i, _)| *i).collect();
+    if gui.app.session.peer.is_some() && !gui.app.editing_query {
+        // The block of hits that holds those on screen.
+        let near: Vec<usize> = visible_rows[keep_doors::near(first, visible, total)].iter().map(|(i, _)| *i).collect();
+        search_marks(gui, &near);
+    }
+    let entries = &gui.app.search.entries;
+    let rows: Vec<(usize, &Entry)> = indices.iter().filter_map(|&i| entries.get(i).map(|e| (i, e))).collect();
+    let marks = keep_doors::row_marks(&gui.app, &rows, false);
     let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.as_str());
-    draw_pane_rows(
+    draw_marked_rows(
         frame,
         &mut gui.ui,
         playing,
-        &visible_rows[first..first + visible],
+        &rows,
+        &marks,
         list,
         shown,
         List::Search,
@@ -2469,13 +2599,30 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         frame,
         &mut gui.ui,
         Rect { x: content.right() - 1, y: list.y, width: 1, height: list.height },
-        visible_rows.len(),
+        total,
         visible,
         first,
         Act::ScrollBy(List::Search, -1),
         Act::ScrollBy(List::Search, 1),
         |first| Act::ScrollTo(List::Search, first),
     );
+}
+
+/// Search's marks on a connected server, asked of the App's holder (the
+/// user's 2026-10-27 call): the song hits on screen or near — the pane's
+/// rows at `indices` — by the query on the card.
+fn search_marks(gui: &mut Gui, indices: &[usize]) {
+    fn rows_of<'a>(app: &'a App, indices: &[usize]) -> Vec<(usize, &'a Entry)> {
+        indices.iter().filter_map(|&i| app.search.entries.get(i).map(|e| (i, e))).collect()
+    }
+    let query = gui.app.query.clone();
+    let rows_sig = keep_doors::sig(|h| {
+        use std::hash::Hash;
+        query.hash(h);
+        keep_doors::hash_rows(&rows_of(&gui.app, indices), h);
+    });
+    let page = crate::tui::app::keep::MarksPage::Search(query);
+    keep_doors::ask(gui, page, keep_doors::Own::None, rows_sig, |app| keep_doors::list_rows(&rows_of(app, indices), false));
 }
 
 fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
@@ -2638,6 +2785,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if let Some(quit) = torrent::handle_key(gui, key) {
         return quit;
     }
+    // Keep a copy and the Copies list own the keyboard while up, over
+    // whichever room asked for them (keep-a-copy spec §12.3).
+    if let Some(quit) = keep_doors::window_key(gui, key) {
+        return quit;
+    }
     // The Now Playing screen has no rooms and no queue panel: the TUI's
     // view has its own queue tab, and the screen's keys are the view's.
     if gui.screen == Screen::NowPlaying {
@@ -2777,6 +2929,12 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             _ => {}
         }
         return false;
+    }
+    // Keep a copy's `c` in the browse rooms — the held row or card, else
+    // the page's own subject (keep-a-copy spec §4.9) — and `C`, the Copies
+    // list (the user's 2026-10-27 decision).
+    if let Some(quit) = keep_doors::room_key(gui, key) {
+        return quit;
     }
     match key.code {
         KeyCode::Char('q') => return true,
@@ -3401,7 +3559,7 @@ fn moving(gui: &mut Gui) -> bool {
         || gui.ui.stale()
         || stats::stale(gui)
         || matches!(gui.screen, Screen::Admin | Screen::Device)
-        || (gui.screen == Screen::Library && gui.active == DISCOVER_NAV)
+        || (gui.screen == Screen::Library && (gui.active == DISCOVER_NAV || keep_doors::window_open(gui)))
 }
 
 impl Gui {
@@ -3649,6 +3807,12 @@ impl Gui {
             if !self.modal_open() {
                 admin::wheel(self, at, delta);
             }
+            return;
+        }
+        // Keep a copy and the Copies list scroll their own under the wheel,
+        // over whichever room.
+        if self.screen == Screen::Library && keep_doors::window_open(self) {
+            keep_doors::wheel(self, delta);
             return;
         }
         // The Discover room's modal and lists scroll their own rows under
@@ -4229,7 +4393,7 @@ mod tests {
         }
         handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let results = SearchResults {
-            artists: vec![SearchGroup { name: "Moon Parade".into(), album_art_file: None }],
+            artists: vec![SearchGroup { name: "Moon Parade".into(), album_art_file: None, ..Default::default() }],
             albums: Vec::new(),
             title: vec![SearchTrack {
                 name: "Moonstruck".into(),
@@ -6035,6 +6199,7 @@ mod dump_tests {
                 artist: Some(format!("Artist {i:02}")),
                 year: Some(1959 + i as i32 * 5),
                 album_art_file: Some(format!("aa{i:02}.jpeg")),
+                ..Default::default()
             })
             .collect();
         let effects = gui.app.apply_event(Event::Library {
@@ -6078,6 +6243,9 @@ mod dump_tests {
             node: LibraryNode::Album {
                 name: "Discovery".into(),
                 artist: Some("Artist 02".into()),
+                album_artist: crate::api::types::AlbumCredit::Unknown,
+                year: Some(1969),
+                compilation: false,
             },
             dest: Tab::Library,
             data: LibraryData::Tracks(

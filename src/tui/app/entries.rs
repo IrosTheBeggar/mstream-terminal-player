@@ -109,9 +109,27 @@ impl App {
                 label: group.name.clone(),
                 node: LibraryNode::Artist(group.name.clone()),
             })),
-            SearchClass::Albums => entries.extend(hits.albums.iter().map(|group| Entry::Node {
-                label: group.name.clone(),
-                node: LibraryNode::Album { name: group.name.clone(), artist: None },
+            // An album hit carries the albums listing's credit and year
+            // (mStream since 2026-10-24): its tracks are asked by them, and
+            // its songs' Keep a copy reads the credit (keep-a-copy spec
+            // §4.1.3, step 1).
+            SearchClass::Albums => entries.extend(hits.albums.iter().map(|group| {
+                let album_artist = match &group.album_artist {
+                    None => crate::api::types::AlbumCredit::Unknown,
+                    Some(None) => crate::api::types::AlbumCredit::Disagree(Vec::new()),
+                    Some(Some(credit)) => crate::api::types::AlbumCredit::Known(credit.clone()),
+                };
+                let compilation = crate::api::types::various_artists(album_artist.known());
+                Entry::Node {
+                    label: group.name.clone(),
+                    node: LibraryNode::Album {
+                        name: group.name.clone(),
+                        artist: None,
+                        album_artist,
+                        year: group.year.filter(|y| *y > 0),
+                        compilation,
+                    },
+                }
             })),
             SearchClass::Titles => entries.extend(track_rows(&hits.title)),
             SearchClass::Files => entries.extend(track_rows(&hits.files)),
@@ -129,10 +147,8 @@ pub(super) fn entries_from_library(data: LibraryData) -> Vec<Entry> {
         })),
         LibraryData::Albums(albums) => entries.extend(albums.into_iter().map(|album| {
             let label = album_label(&album);
-            let node = LibraryNode::Album {
-                name: album.name.unwrap_or_default(),
-                artist: album.artist,
-            };
+            // The singles bucket opens by its artist alone, its name empty.
+            let node = LibraryNode::album_of(&album).unwrap_or_else(|| LibraryNode::album("", album.artist.clone()));
             Entry::Node { label, node }
         })),
         LibraryData::Genres(list) => {

@@ -127,7 +127,18 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     Recent's hundred, a genre's tracks, an album's tracks.
 16. **A peer session browses all three** through its parent (the
     allowlist); the header crumb wears the multi-server contract's
-    `· read-only`.
+    `· read-only` — the word alone since 2026-10-27 (no "— playlists and
+    ratings stay on your own server"). A connected server's header lines
+    keep 2 cells free before their right-aligned count or pager and give
+    way in order while they do not fit: " · read-only" first, then the
+    count, then the way back to its glyph `◂`, then the subject to a
+    12-cell floor (a title from its tail, a path by whole leading
+    segments), so the Artists, Genres and Recent headings never run under
+    the queue panel and the folder you are in stays on screen. The album
+    page, an artist's wall and a Files folder below the library's top also
+    carry Keep a copy's key word or its copy state there; the album page
+    names its credit, "{album} — {credit}" (docs/ux-contracts/
+    discovery-page.md, clauses 153–156).
 
 ### The play lists (2026-09-23)
 
@@ -314,6 +325,17 @@ behind is dropped.
   nothing shared. Discover hides for a peer as the play lists do (clause
   23's reason: a guest has no history there), and is the thirteenth room —
   last in `NAV`, no digit, `G`.
+- **2026-10-27 — "read-only" alone, and its give-way** (clause 16; the
+  user's rule that every word on screen names a choice, a place, a state
+  or an action): `gui.srv.read_only` drops "— playlists and ratings stay
+  on your own server" in every locale (the header label and the missing
+  Playlists room already say whose server it is), and a connected
+  server's header lines give way in the discovery-page contract's order
+  (clause 155) instead of clipping the crumb from its lead: the Artists,
+  Genres and Recent headings ran under the queue panel at 47 cells, and
+  the Files crumb lost the folder you are in. The album page's header
+  names its credit beside the album on every server (the user's
+  2026-10-27 call; discovery-page clause 156).
 - **2026-10-28 — The genre source** (clauses 25–29; mStream #716,
   mstream_music #211). The switch is right-aligned on the controls line
   (the user's call), where a track list's verbs go — a list of genres

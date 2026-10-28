@@ -13,10 +13,12 @@ use rust_i18n::t;
 use crate::api::types::GenreSource;
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, STRIP_MIN_ROWS, dim, letter_index, letter_strip, scroll_list};
+use crate::tui::app::keep::MarksPage;
 use crate::tui::app::{Action, App, Entry, Tab};
 use crate::tui::worker::LibraryNode;
 
 use super::albums::{self, WallState};
+use super::keep_doors;
 use super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RECENT_NAV, accent, bright_bold, put};
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -152,11 +154,11 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     draw_list(frame, gui, content);
 }
 
-/// The room's header: the room's name at a root; the way back and the
-/// genre's name inside one. Returns where the count may start.
-fn draw_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
+/// The room's header and its count: the room's name at a root; the way
+/// back and the genre's name inside one.
+fn draw_heading(frame: &mut Frame, gui: &mut Gui, content: Rect, count: &str) {
     let node = gui.app.library_stack.here().clone();
-    match node {
+    let count_x = match node {
         LibraryNode::Genre(genre, _) => {
             let (back_glyph, forward) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
             let back_label = format!("{back_glyph} {}", t!("gui.nav.genres"));
@@ -172,16 +174,57 @@ fn draw_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
             x + shown.chars().count() as u16 + 2
         }
         _ => {
-            let mut heading = super::NAV[gui.active].label().to_string();
             // A peer is read-only, and the crumb says so (multi-server
-            // clause 26, library-rooms clause 16) — as the Files bar does.
-            if gui.app.session.peer.is_some() {
-                heading = format!("{heading} · {}", t!("gui.srv.read_only"));
+            // clause 26, library-rooms clause 16) — as the Files bar does;
+            // the words give way first, then the count, so the line never
+            // runs under the queue panel (keep-a-copy spec §4.1.4).
+            let heading = super::NAV[gui.active].label().to_string();
+            let tail = format!(" · {}", t!("gui.srv.read_only"));
+            let cells = |text: &str| crate::kit::width(text) as u16;
+            let head = keep_doors::Head {
+                width: content.width,
+                lead: (0, 0),
+                subject: keep_doors::Subject::Title(&heading),
+                credit: None,
+                tail: if gui.app.session.peer.is_some() { cells(&tail) } else { 0 },
+                count: cells(count),
+                inline: false,
+                pager: 0,
+                spot: 0,
+            };
+            let plan = keep_doors::fit(&head);
+            let shown = if plan.tail { format!("{}{tail}", plan.subject) } else { plan.subject };
+            put(frame, content.x, content.y, &shown, Style::default().add_modifier(Modifier::BOLD));
+            if !plan.count {
+                return;
             }
-            put(frame, content.x, content.y, &heading, Style::default().add_modifier(Modifier::BOLD));
-            content.x + crate::kit::width(&heading) as u16 + 2
+            content.x + cells(&shown) + 2
         }
+    };
+    let x = content.right().saturating_sub(crate::kit::width(count) as u16).max(count_x);
+    put(frame, x, content.y, count, dim());
+}
+
+/// A track list's marks on a connected server — Recent's, a genre's —
+/// asked of the App's holder for the songs on screen (the user's
+/// 2026-10-27 call on song marks beyond the album page).
+fn list_marks(gui: &mut Gui, (skip, first, visible): (usize, usize, usize)) {
+    if gui.app.session.peer.is_none() {
+        return;
     }
+    let node = gui.app.library_stack.here().clone();
+    // The block of drawn rows that holds those on screen (`skip` the
+    // hidden `..`).
+    let near = keep_doors::near(first, visible, gui.app.library.entries.len().saturating_sub(skip));
+    let rows_sig = keep_doors::sig(|h| {
+        keep_doors::hash_node(&node, h);
+        let rows: Vec<(usize, &Entry)> = gui.app.library.entries.iter().enumerate().skip(skip + near.start).take(near.len()).collect();
+        keep_doors::hash_rows(&rows, h);
+    });
+    keep_doors::ask(gui, MarksPage::Library(node), keep_doors::Own::None, rows_sig, |app| {
+        let rows: Vec<(usize, &Entry)> = app.library.entries.iter().enumerate().skip(skip + near.start).take(near.len()).collect();
+        keep_doors::list_rows(&rows, false)
+    });
 }
 
 /// The Genres list's Tags · Generated · Both (clauses 25–29), right-aligned
@@ -227,10 +270,8 @@ fn source_label(source: GenreSource) -> std::borrow::Cow<'static, str> {
 }
 
 fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    let count_x = draw_heading(frame, gui, content);
     let count = super::bar_count(gui, t!("gui.files.items", count = gui.app.library.counts().1).to_string());
-    let x = content.right().saturating_sub(count.chars().count() as u16).max(count_x);
-    put(frame, x, content.y, &count, dim());
+    draw_heading(frame, gui, content, &count);
     super::draw_bar_controls(frame, gui, content, content.y + 1);
     // The Genres switch at the controls line's right (clause 27).
     draw_genre_switch(frame, gui, content, content.y + 1);
@@ -267,19 +308,25 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let selected = gui.app.library.state.selected();
     // Off the drawn rows when it rests on the hidden `..`.
     let sel_pos = selected.and_then(|s| s.checked_sub(skip)).filter(|&pos| pos < rows.len());
-    let (first, visible) = gui.library.view.window(rows.len(), sel_pos, list.height as usize);
+    let len = rows.len();
+    let (first, visible) = gui.library.view.window(len, sel_pos, list.height as usize);
     // Lit only while the keyboard holds it (the kit's list-cursor law).
     let lit = gui.library.view.shown(selected);
+    // A connected server's songs here — Recent's, a genre's — wear their
+    // copies (the user's 2026-10-27 call).
+    list_marks(gui, (skip, first, visible));
 
-    let len = rows.len();
+    let (_, rows) = rows_of(&gui.app, root);
     let shown: Vec<(usize, &Entry)> =
         rows.iter().enumerate().skip(first).take(visible).map(|(pos, entry)| (skip + pos, entry)).collect();
     let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.as_str());
-    super::draw_pane_rows(
+    let marks = keep_doors::row_marks(&gui.app, &shown, false);
+    super::draw_marked_rows(
         frame,
         &mut gui.ui,
         playing,
         &shown,
+        &marks,
         list,
         lit,
         List::Library,
@@ -447,6 +494,7 @@ mod tests {
             artist: Some(artist.into()),
             year,
             album_art_file: None,
+            ..Default::default()
         }
     }
 
@@ -764,14 +812,17 @@ mod tests {
         assert_eq!(hit_text(&gui, &rows, "◂ Artists"), Some(Act::LibBack));
         assert_eq!(hit_text(&gui, &rows, "Dummy"), Some(Act::AlbCell(0)));
         gui.act(Act::AlbCell(0));
-        assert!(asked(&gui, &LibraryNode::Album { name: "Dummy".into(), artist: Some("Portishead".into()) }));
+        assert!(asked(&gui, &LibraryNode::Album { name: "Dummy".into(), artist: Some("Portishead".into()), album_artist: crate::api::types::AlbumCredit::Unknown, year: Some(1994), compilation: false }));
         land(
             &mut gui,
-            LibraryNode::Album { name: "Dummy".into(), artist: Some("Portishead".into()) },
+            LibraryNode::Album { name: "Dummy".into(), artist: Some("Portishead".into()), album_artist: crate::api::types::AlbumCredit::Unknown, year: Some(1994), compilation: false },
             LibraryData::Tracks(vec![track("p/mysterons.mp3", 306.0)]),
         );
         let all = draw(&mut gui).join("\n");
-        assert!(all.contains("◂ Portishead") && all.contains("Dummy — Portishead"), "Back is the artist: {all}");
+        // The way back names the artist, so the album's own credit beside
+        // its name would say it twice (keep-a-copy, the user's 2026-10-27
+        // call): it stands only once the way back shrinks to its glyph.
+        assert!(all.contains("◂ Portishead  Dummy") && !all.contains("Dummy — Portishead"), "Back is the artist: {all}");
         assert!(all.contains("mysterons.mp3"));
         // Back to the wall, then to the artists — the wall stands on its state.
         key(&mut gui, KeyCode::Esc);
@@ -788,7 +839,7 @@ mod tests {
         gui.pending.clear();
         gui.act(Act::AlbCell(0));
         assert!(
-            asked(&gui, &LibraryNode::Album { name: String::new(), artist: Some("Portishead".into()) }),
+            asked(&gui, &LibraryNode::album("", Some("Portishead".into()))),
             "the bucket asks with no album name: {:?} / here {:?}",
             gui.pending,
             gui.app.library_stack.here()

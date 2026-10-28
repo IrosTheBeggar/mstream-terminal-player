@@ -2109,6 +2109,15 @@ pub struct App {
     /// The GUI's Discover room: its own row model (docs/ux-contracts/
     /// discovery-page.md), apart from the TUI's Discover tab above.
     pub taste: taste::TasteState,
+    /// Keep a copy's state for the user's own server in front — its gate,
+    /// its jobs, the marks, the open window (discovery-page clauses
+    /// 100–149; the keep-a-copy-from-browsing spec §3.2) — kept across
+    /// moves onto that server's connected servers.
+    pub keep: keep::KeepState,
+    /// The other own servers' states, parked, and what Keep a copy keeps
+    /// beside them: each own server's flags, the connected servers each
+    /// lists, the album page's credit ask.
+    pub(crate) keep_shelf: keep::KeepShelf,
     /// Tracks played recently, newest first. Feeds both the sonic anchor and
     /// the artist cooldown, so the session anchors on where it has been
     /// rather than only on the song currently sounding.
@@ -2371,6 +2380,8 @@ impl App {
             sonic_stack: Drill::new(SonicNode::Root),
             capture: None,
             taste: taste::TasteState::default(),
+            keep: keep::KeepState::default(),
+            keep_shelf: keep::KeepShelf::default(),
             sonic_playlist_name: None,
             playlist_save_files: None,
             autodj_recent: Vec::new(),
@@ -5677,7 +5688,6 @@ impl App {
 
     /// The session generation (see the field): what a library or search ask
     /// is stamped with, and what its reply must carry to be taken.
-    #[cfg(test)]
     pub(crate) fn session_gen(&self) -> u64 {
         self.session_gen
     }
@@ -6135,11 +6145,16 @@ impl App {
                 // A connect is when owed plays can go out again
                 // (play-reporting contract, clause 8).
                 let connected = matches!(event, Event::Connected { .. });
-                let effects = self.consume_session(event);
+                let mut effects = self.consume_session(event);
                 if connected {
                     self.stats.retry_at = None;
                     self.stats.flush_wanted = true;
                     self.taste_reconnected();
+                    // Keep a copy: an own server's flags kept, the gate asked
+                    // of the own server — here, or through a connected one's
+                    // parent (keep-a-copy spec §3.2) — once the waits a
+                    // reconnect lets go are gone.
+                    effects.extend(self.keep_connected());
                 }
                 effects
             }
@@ -6207,9 +6222,15 @@ impl App {
                     }
                     _ => {}
                 }
+                // An album page's credit, where its opener did not know it
+                // (keep-a-copy spec §4.1.3).
+                let credit = match (&node, dest, &data) {
+                    (LibraryNode::Album { .. }, Tab::Library, LibraryData::Tracks(tracks)) => self.album_credit_landed(&node, tracks),
+                    _ => Vec::new(),
+                };
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;
-                Vec::new()
+                credit
             }
             // The full-screen panel's own answer, told apart from the
             // browser tab's by the destination it carried out with it.
@@ -6307,9 +6328,15 @@ impl App {
             | Event::JobsCleared { .. }
             | Event::PluginLinks { .. }
             | Event::KeepFacts { .. }
+            | Event::KeepFolderTags { .. }
             | Event::DestinationRead { .. }
             | Event::DestinationSaved { .. }
             | Event::DestinationFolders { .. }) => self.consume_keep(event),
+            // An own server's flags, while one of its connected servers is
+            // browsed (keep-a-copy spec §3.2).
+            Event::OwnPing { server, ping } => self.keep_own_pinged(server, ping),
+            // The album page's credit, step 3 (keep-a-copy spec §4.1.3).
+            Event::AlbumCredit { seq, generation, rows } => self.album_credit_answered(seq, generation, rows),
             Event::AlbumArt { file, art, settled, small } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just
@@ -6396,8 +6423,14 @@ impl App {
             Event::Rated { filepath, rating, seq, error } => self.consume_rated(filepath, rating, seq, error),
             Event::AddedToPlaylist { playlist, error } => self.consume_added_to_playlist(playlist, error),
             Event::TrackInfo { filepath, track } => {
+                // An untagged song's Keep a copy window learns its tags too
+                // (keep-a-copy spec §6.3).
+                let keep = match track.as_deref() {
+                    Some(block) if block.filepath == filepath => self.keep_track_info_landed(block),
+                    _ => Vec::new(),
+                };
                 self.consume_track_info(filepath, track.map(|t| *t));
-                Vec::new()
+                keep
             }
             Event::PlaylistNames { names } => {
                 self.playlist_names = names.map_or(PlaylistNames::Failed, PlaylistNames::Listed);
@@ -6456,10 +6489,15 @@ impl App {
                 Vec::new()
             }
             Event::FederationPeers { parent, peers } => match peers {
-                Some(peers) => vec![Effect::SavePeers {
-                    parent,
-                    listed: peers.into_iter().map(|p| (p.id, p.name)).collect(),
-                }],
+                Some(peers) => {
+                    // Keep a copy's ways in stand only for a connected
+                    // server its parent still lists (keep-a-copy spec §3.1).
+                    self.keep_peers_listed(&parent, peers.iter().map(|p| p.id).collect());
+                    vec![Effect::SavePeers {
+                        parent,
+                        listed: peers.into_iter().map(|p| (p.id, p.name)).collect(),
+                    }]
+                }
                 None => Vec::new(),
             },
             Event::Error(e) => {

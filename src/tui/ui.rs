@@ -5669,8 +5669,8 @@ mod tests {
             query: "moon".into(),
             results: Box::new(SearchResults {
                 artists: vec![
-                    SearchGroup { name: "Moon Hooch".into(), album_art_file: None },
-                    SearchGroup { name: "Moondog".into(), album_art_file: None },
+                    SearchGroup { name: "Moon Hooch".into(), album_art_file: None, ..Default::default() },
+                    SearchGroup { name: "Moondog".into(), album_art_file: None, ..Default::default() },
                 ],
                 albums: vec![],
                 title: vec![hit("Moonlight")],

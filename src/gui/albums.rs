@@ -12,14 +12,18 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
+use std::hash::Hash;
+
 use crate::kit::{ListView, STRIP_BUCKETS, dim, scroll_list};
 use crate::kit::theme::{legacy_conhost, th};
+use crate::tui::app::keep::MarksPage;
 use crate::tui::app::{Action, App};
-use crate::api::types::Album;
+use crate::api::types::{Album, JobMark, name_key};
 use crate::tui::worker::LibraryNode;
 
 use super::cover::{Pace, Slot};
-use super::{Act, Gui, List, accent, bright_bold, put, sel};
+use super::keep_doors::{self, Head, Own, SPOT_GAP};
+use super::{Act, Gui, List, accent, bright_bold, keep, put, sel};
 
 /// The cover's cells: 12x6 is square at the common 10x20 font.
 const COVER_W: u16 = 12;
@@ -218,9 +222,31 @@ fn albums_of(app: &App, root: bool) -> Option<&Vec<Album>> {
 /// view. Anything else shows the wall.
 fn drilled_album(gui: &Gui) -> Option<(String, Option<String>)> {
     match gui.app.library_stack.here() {
-        LibraryNode::Album { name, artist } => Some((name.clone(), artist.clone())),
+        LibraryNode::Album { name, artist, .. } => Some((name.clone(), artist.clone())),
         _ => None,
     }
+}
+
+/// A wall is on screen: the Albums room's own, or an artist's in the
+/// Library rooms — not a drilled album's tracks.
+pub(super) fn wall_up(gui: &Gui) -> bool {
+    match gui.active {
+        super::ALBUMS_NAV => drilled_album(gui).is_none(),
+        active => {
+            super::library::root_of(active).is_some() && matches!(gui.app.library_stack.here(), LibraryNode::Artist(_))
+        }
+    }
+}
+
+/// The card the keyboard's hand holds on the wall on screen — what `c`
+/// keeps there (keep-a-copy spec §4.9).
+pub(super) fn held_card(gui: &mut Gui) -> Option<Album> {
+    if !wall_up(gui) || !wall_ref(gui).held {
+        return None;
+    }
+    let at = wall_ref(gui).page * shape(gui).capacity() + wall_ref(gui).cursor;
+    let index = visible_albums(gui)?.get(at)?;
+    wall_albums(gui)?.get(index).cloned()
 }
 
 fn page_count(albums: usize, capacity: usize) -> usize {
@@ -291,10 +317,9 @@ fn open_album(gui: &mut Gui, index_on_page: usize) {
         w.tracks.held = w.held;
         w.tracks.reveal = w.held;
     }
-    let node = LibraryNode::Album {
-        name: album.name.clone().unwrap_or_default(),
-        artist: album.artist.clone(),
-    };
+    // The card's credit, year and flag ride along (keep-a-copy spec
+    // §4.1.3): the same node the pane's own row names.
+    let node = LibraryNode::album_of(&album).unwrap_or_else(|| LibraryNode::album("", album.artist.clone()));
     // The App's door drills through the pane's own row when the pane lists
     // this album, so Back restores the wall's list from the trail without
     // asking again (library-rooms contract, clause 6).
@@ -437,46 +462,96 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 }
 
-/// The wall's heading: the room's name on the Albums wall; on an artist's
-/// wall the way back to the artists, then the artist (library-rooms
-/// contract, clause 7). Returns where the count may start.
-fn draw_wall_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
+/// The wall's heading: the room's name on the Albums wall, its `count` two
+/// cells after; on an artist's wall the way back to the artists, then the
+/// artist and its count (library-rooms contract, clause 7) — and, on a
+/// connected server, the key word or the artist's copy state 3 cells after
+/// them (keep-a-copy spec §4.3, §5.1), the line giving way before `pager`
+/// cells at its right as §4.1.4 says.
+fn draw_wall_heading(frame: &mut Frame, gui: &mut Gui, content: Rect, count: Option<&str>, pager: u16) {
     let artist = match gui.app.library_stack.here() {
         LibraryNode::Artist(artist) if !on_root_wall(gui) => Some(artist.clone()),
         _ => None,
     };
+    let bold = Style::default().add_modifier(Modifier::BOLD);
     let Some(artist) = artist else {
         let heading = t!("gui.nav.albums").to_string();
-        put(frame, content.x, content.y, &heading, Style::default().add_modifier(Modifier::BOLD));
-        return content.x + heading.chars().count() as u16 + 2;
+        put(frame, content.x, content.y, &heading, bold);
+        if let Some(count) = count {
+            put(frame, content.x + crate::kit::width(&heading) as u16 + 2, content.y, count, dim());
+        }
+        return;
     };
+    let cells = |text: &str| crate::kit::width(text) as u16;
     let (back_glyph, forward) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
-    let back_label = format!("{back_glyph} {}", t!("gui.nav.artists"));
-    let back = Rect { x: content.x, y: content.y, width: back_label.chars().count() as u16, height: 1 };
+    let back_full = format!("{back_glyph} {}", t!("gui.nav.artists"));
+    let way = format!("{forward} ");
+    let spot = keep_doors::page_spot(gui);
+    let head = Head::artist_wall(content.width, &back_full, &way, &artist, count, pager, spot.cells);
+    let plan = keep_doors::fit(&head);
+    // The way back shrinks to its glyph, "▸" going with "Artists" (§4.1.4).
+    let back_label = if plan.short { back_glyph.to_string() } else { back_full };
+    let back = Rect { x: content.x, y: content.y, width: cells(&back_label), height: 1 };
     let hover = gui.ui.hovers(back);
     put(frame, content.x, content.y, &back_label, if hover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::LibBack);
-    let title = format!("{forward} {artist}");
-    let x = back.right() + 1;
-    let shown = super::bar::clip(&title, content.width.saturating_sub(back.width + 18) as usize);
-    put(frame, x, content.y, &shown, Style::default().add_modifier(Modifier::BOLD));
-    x + shown.chars().count() as u16 + 2
+    if !plan.short {
+        put(frame, back.right() + 1, content.y, &way, bold);
+    }
+    let mut x = content.x + if plan.short { head.lead.1 } else { head.lead.0 };
+    put(frame, x, content.y, &plan.subject, bold);
+    x += cells(&plan.subject);
+    if let Some(count) = count.filter(|_| plan.count) {
+        put(frame, x + 2, content.y, count, dim());
+        x += 2 + cells(count);
+    }
+    if let Some(shown) = spot.shown.filter(|_| plan.spot) {
+        keep_doors::draw_spot(frame, gui, x + SPOT_GAP, content.y, &shown);
+    }
+}
+
+/// The wall's marks, asked of the App's holder on a connected server
+/// (keep-a-copy spec §5.0): on an artist's wall the artist's own copy first
+/// — its header's state — then the page's cards, `visible` by their place
+/// in the wall's list.
+fn wall_marks(gui: &mut Gui, visible: &[usize]) {
+    if gui.app.session.peer.is_none() {
+        return;
+    }
+    let root = on_root_wall(gui);
+    let node = if root { LibraryNode::Albums } else { gui.app.library_stack.here().clone() };
+    let own = if root { Own::None } else { Own::ArtistWall };
+    let rows_sig = keep_doors::sig(|h| {
+        keep_doors::hash_node(&node, h);
+        let albums = albums_of(&gui.app, root);
+        for album in visible.iter().filter_map(|&at| albums.and_then(|a| a.get(at))) {
+            (&album.name, &album.album_artist, album.year).hash(h);
+        }
+    });
+    keep_doors::ask(gui, MarksPage::Library(node), own, rows_sig, |app| {
+        let albums = albums_of(app, root);
+        visible.iter().filter_map(|&at| albums.and_then(|a| a.get(at))).map(|album| keep_doors::Row::Card(Box::new(album.clone()))).collect()
+    });
 }
 
 pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    let count_x = draw_wall_heading(frame, gui, content);
-
     let Some(total) = visible_albums(gui).map(WallView::len) else {
+        wall_marks(gui, &[]);
+        draw_wall_heading(frame, gui, content, None, 0);
         put(frame, content.x, content.y + 3, &t!("gui.alb.loading"), accent());
         return;
     };
     let all = wall_albums(gui).map_or(0, Vec::len);
     super::draw_bar_controls(frame, gui, content, content.y + 1);
     if all == 0 {
+        wall_marks(gui, &[]);
+        draw_wall_heading(frame, gui, content, None, 0);
         put(frame, content.x, content.y + 3, &t!("gui.alb.empty"), dim());
         return;
     }
     if total == 0 {
+        wall_marks(gui, &[]);
+        draw_wall_heading(frame, gui, content, None, 0);
         // The filter matched nothing; the way back is one key (clause 30).
         put(frame, content.x, content.y + 3, &t!("gui.files.empty"), dim());
         put(
@@ -513,13 +588,14 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         (view.page(start, shown), view.strip)
     };
 
-    put(
-        frame,
-        count_x,
-        content.y,
-        &super::bar_count(gui, t!("gui.alb.count", count = all).to_string()),
-        dim(),
-    );
+    // The page's cards' marks, asked before the heading draws: an artist's
+    // own copy state rides it (keep-a-copy spec §5.0).
+    wall_marks(gui, &visible);
+    let label = format!("{}/{}", page + 1, pages);
+    let count = super::bar_count(gui, t!("gui.alb.count", count = all).to_string());
+    // The pager's cells, from its ◂ to the content's edge.
+    let pager = crate::kit::width(&label) as u16 + 5;
+    draw_wall_heading(frame, gui, content, Some(&count), pager);
 
     // The strip (library-rooms contract, clause 10): the root wall is
     // alphabetical; an artist's albums are in the server's order.
@@ -532,7 +608,6 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // The pager: two arrows around "page/pages", each end dim when there
     // is nothing further that way.
     let (back_glyph, fwd_glyph) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
-    let label = format!("{}/{}", page + 1, pages);
     let fwd_x = content.right().saturating_sub(2);
     let label_x = fwd_x.saturating_sub(label.chars().count() as u16 + 1);
     let back_x = label_x.saturating_sub(2);
@@ -598,6 +673,15 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     gui.albums.slots.truncate(capacity.max(widest.capacity()));
     // A cover per cell whichever wall is up: the slots are the room's, keyed
     // by what they last drew.
+
+    // The cards' copies, in their year lines (keep-a-copy spec §5.2): a
+    // connected server's only.
+    let marks: Vec<Option<JobMark>> = match (gui.app.session.peer.is_some(), wall_albums(gui)) {
+        (true, Some(albums)) => {
+            visible.iter().filter_map(|&at| albums.get(at)).map(|album| gui.app.keep_card_mark(album)).collect()
+        }
+        _ => Vec::new(),
+    };
 
     // Split borrows: the page's rows are READ from the App while each
     // slot's caches are written — disjoint fields of the one Gui. This is
@@ -667,7 +751,13 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 (None, Some(artist)) => artist.to_string(),
                 (None, None) => String::new(),
             };
-            if !below.is_empty() {
+            // A copy's state takes the year line in its token, Discover's
+            // tile words — the selection's colours under the hand; with
+            // none the year returns.
+            if let Some(mark) = marks.get(i).copied().flatten() {
+                let style = if selected { sel() } else { keep::mark_style(mark) };
+                put(frame, cell.x, name_y + 1, &super::bar::clip(&keep::mark_word(mark), COVER_W as usize), style);
+            } else if !below.is_empty() {
                 let bstyle = if selected { sel() } else { dim() };
                 put(
                     frame,
@@ -687,49 +777,101 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 }
 
+/// The album page's marks, asked of the App's holder on a connected server
+/// (keep-a-copy spec §5.0): the album's own copy first — its header's
+/// state, once its credit is known — then the songs on screen, by the
+/// block that holds them.
+fn tracks_marks(gui: &mut Gui, (first, visible): (usize, usize)) {
+    if gui.app.session.peer.is_none() {
+        return;
+    }
+    let node = gui.app.library_stack.here().clone();
+    let near = keep_doors::near(first, visible, gui.app.library.entries.len());
+    let rows_sig = keep_doors::sig(|h| {
+        keep_doors::hash_node(&node, h);
+        let rows: Vec<(usize, &crate::tui::app::Entry)> =
+            gui.app.library.entries.iter().enumerate().skip(near.start).take(near.len()).collect();
+        keep_doors::hash_rows(&rows, h);
+    });
+    keep_doors::ask(gui, MarksPage::Library(node), Own::AlbumPage, rows_sig, |app| {
+        let rows: Vec<(usize, &crate::tui::app::Entry)> = app.library.entries.iter().enumerate().skip(near.start).take(near.len()).collect();
+        keep_doors::list_rows(&rows, false)
+    });
+}
+
 pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, artist: Option<&str>) {
+    let len = gui.app.library.entries.len();
+    let list = Rect {
+        x: content.x,
+        y: content.y + 3,
+        width: content.width.saturating_sub(2),
+        height: content.height.saturating_sub(3),
+    };
+    // The rows on screen, and their marks asked before the header draws:
+    // the album's own copy state stands on it (keep-a-copy spec §5.0).
+    let window = (len > 1).then(|| {
+        let selected = gui.app.library.state.selected();
+        wall(gui).tracks.window(len, selected, list.height as usize)
+    });
+    tracks_marks(gui, window.unwrap_or_default());
+
     // The way back leads the header — named for where it goes: the artist
     // when the album was reached through one (library-rooms contract,
-    // clause 9), the wall otherwise — then the album's own name.
+    // clause 9), the wall otherwise — then the album's own name, its
+    // credit beside it, the count at the right; on a connected server the
+    // key word or the album's copy state 3 cells after the name (keep-a-
+    // copy spec §4.2, §5.1), the line giving way as §4.1.4 says.
+    let cells = |text: &str| crate::kit::width(text) as u16;
     let back_glyph = super::back_glyph();
     let back_name = match gui.app.library_stack.parent() {
         Some(LibraryNode::Artist(artist)) => artist.clone(),
         _ => t!("gui.nav.albums").to_string(),
     };
-    let back_label = format!("{back_glyph} {back_name}");
-    let back = Rect {
-        x: content.x,
-        y: content.y,
-        width: back_label.chars().count() as u16,
-        height: 1,
+    let back_full = format!("{back_glyph} {back_name}");
+    let title = if name.is_empty() { t!("gui.lib.singles").to_string() } else { name.to_string() };
+    // The album's credit (the user's 2026-10-27 call): its own, or the
+    // artists its rows credit where they disagree — never one song's
+    // artist, nothing while it is asked; else the artist its opener named.
+    let credit = if gui.app.album_credit_resolving() {
+        None
+    } else {
+        gui.app.album_credit_words().or_else(|| artist.map(str::to_string))
     };
+    let count =
+        super::bar_count(gui, t!("gui.files.items", count = gui.app.library.counts().1).to_string());
+    let spot = keep_doors::page_spot(gui);
+    let head = Head::album_page(content.width, &back_full, &title, credit.as_deref(), &count, spot.cells);
+    // The way back already names the credit (an artist's wall opened the
+    // album): the artist is said once.
+    let named = match (gui.app.library_stack.parent(), credit.as_deref()) {
+        (Some(LibraryNode::Artist(artist)), Some(credit)) => name_key(Some(artist)) == name_key(Some(credit)),
+        _ => false,
+    };
+    let plan = keep_doors::fit_album(&head, named);
+    let back_label = if plan.short { back_glyph.to_string() } else { back_full };
+    let back = Rect { x: content.x, y: content.y, width: cells(&back_label), height: 1 };
     let hover = gui.ui.hovers(back);
     put(frame, content.x, content.y, &back_label, if hover { bright_bold() } else { dim() });
     // Back itself, not the Parent row's activation: the row is not there
     // while the tracks are still being asked for.
     gui.ui.click(back, Act::LibBack);
-
-    let title_x = back.right() + 2;
-    let name = if name.is_empty() { t!("gui.lib.singles").to_string() } else { name.to_string() };
-    let title = match artist {
-        Some(artist) => format!("{name} — {artist}"),
-        None => name,
-    };
-    let count =
-        super::bar_count(gui, t!("gui.files.items", count = gui.app.library.counts().1).to_string());
-    let count_x = content.right().saturating_sub(count.chars().count() as u16);
-    put(frame, count_x, content.y, &count, dim());
-    put(
-        frame,
-        title_x,
-        content.y,
-        &super::bar::clip(&title, count_x.saturating_sub(title_x + 2) as usize),
-        Style::default().add_modifier(Modifier::BOLD),
-    );
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut x = content.x + if plan.short { head.lead.1 } else { head.lead.0 };
+    put(frame, x, content.y, &plan.subject, bold);
+    x += cells(&plan.subject);
+    if let Some(credit) = &plan.credit {
+        put(frame, x, content.y, credit, bold);
+        x += cells(credit);
+    }
+    if plan.count {
+        put(frame, content.right().saturating_sub(cells(&count)), content.y, &count, dim());
+    }
+    if let Some(shown) = spot.shown.filter(|_| plan.spot) {
+        keep_doors::draw_spot(frame, gui, x + SPOT_GAP, content.y, &shown);
+    }
     super::draw_bar_controls(frame, gui, content, content.y + 1);
 
-    let len = gui.app.library.entries.len();
-    if len <= 1 {
+    let Some((first, visible)) = window else {
         // The wait while the tracks are asked for; after a failed or empty
         // answer, the empty words — "listing…" forever said nothing true.
         if gui.app.library.loading {
@@ -738,16 +880,9 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
             put(frame, content.x, content.y + 3, &t!("gui.lib.empty"), dim());
         }
         return;
-    }
-
-    let list = Rect {
-        x: content.x,
-        y: content.y + 3,
-        width: content.width - 2,
-        height: content.height - 3,
     };
+
     let selected = gui.app.library.state.selected();
-    let (first, visible) = wall(gui).tracks.window(len, selected, list.height as usize);
     // Lit only while the keyboard holds it (the kit's list-cursor law).
     let shown = wall_ref(gui).tracks.shown(selected);
     let entries = &gui.app.library.entries;
@@ -756,11 +891,14 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
         entries.iter().enumerate().skip(first).take(visible).collect();
     let len = entries.len();
     let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.as_str());
-    super::draw_pane_rows(
+    // The songs' copies in their lead (keep-a-copy spec §5.3).
+    let marks = keep_doors::row_marks(&gui.app, &rows, false);
+    super::draw_marked_rows(
         frame,
         &mut gui.ui,
         playing,
         &rows,
+        &marks,
         list,
         shown,
         List::AlbumTracks,
@@ -799,6 +937,7 @@ mod tests {
             artist: Some(artist.to_string()),
             year: Some(year),
             album_art_file: art.map(str::to_string),
+            ..Default::default()
         }
     }
 
@@ -1198,7 +1337,13 @@ mod tests {
         // clause 6).
         let effects = gui.app.apply_event(Event::Library {
             generation: gui.app.session_gen(),
-            node: LibraryNode::Album { name: "Album 11".into(), artist: Some("Artist 11".into()) },
+            node: LibraryNode::Album {
+                name: "Album 11".into(),
+                artist: Some("Artist 11".into()),
+                album_artist: crate::api::types::AlbumCredit::Unknown,
+                year: Some(2011),
+                compilation: false,
+            },
             dest: Tab::Library,
             data: LibraryData::Tracks(vec![crate::api::types::Track {
                 filepath: "music/a.mp3".into(),

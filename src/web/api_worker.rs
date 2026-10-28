@@ -235,45 +235,46 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
 
         // The room's plug-ins (discovery-page clauses 100–149): the native
         // worker's shapers, against the page's own server — the session.
-        ApiCmd::KeepGate { generation } => {
+        ApiCmd::KeepGate { generation, .. } => {
             with_session(session, async |s| worker::keep_gate(&s.client, generation).await).await
         }
-        ApiCmd::JobsLookup { seq, generation, recs } => {
+        ApiCmd::JobsLookup { seq, generation, recs, .. } => {
             with_session(session, async |s| worker::jobs_lookup(&s.client, seq, generation, &recs).await).await
         }
-        ApiCmd::Jobs { seq, generation } => {
+        ApiCmd::Jobs { seq, generation, .. } => {
             with_session(session, async |s| worker::jobs(&s.client, seq, generation).await).await
         }
-        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination } => {
+        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination, landing, .. } => {
             with_session(session, async |s| {
                 let ask = worker::JobStartAsk {
                     plugin: &plugin,
                     rec: &rec,
                     scope,
                     destination: destination.as_ref().map(Option::as_ref),
+                    landing: landing.as_ref(),
                 };
                 worker::job_start(&s.client, ticket, generation, ask).await
             })
             .await
         }
-        ApiCmd::DestinationRead { seq, generation } => {
+        ApiCmd::DestinationRead { seq, generation, .. } => {
             with_session(session, async |s| worker::destination_read(&s.client, seq, generation).await).await
         }
-        ApiCmd::DestinationSave { seq, generation, destination } => {
+        ApiCmd::DestinationSave { seq, generation, destination, .. } => {
             with_session(session, async |s| worker::destination_save(&s.client, seq, generation, destination.as_ref()).await)
                 .await
         }
-        ApiCmd::DestinationFolders { seq, generation, path } => {
+        ApiCmd::DestinationFolders { seq, generation, path, .. } => {
             with_session(session, async |s| worker::destination_folders(&s.client, seq, generation, path.clone()).await)
                 .await
         }
-        ApiCmd::JobCancel { generation, id } => {
+        ApiCmd::JobCancel { generation, id, .. } => {
             with_session(session, async |s| worker::job_cancel(&s.client, generation, id).await).await
         }
-        ApiCmd::JobsClear { generation } => {
+        ApiCmd::JobsClear { generation, .. } => {
             with_session(session, async |s| worker::jobs_clear(&s.client, generation).await).await
         }
-        ApiCmd::PluginLinks { seq, generation, plugin, rec } => {
+        ApiCmd::PluginLinks { seq, generation, plugin, rec, .. } => {
             with_session(session, async |s| worker::plugin_links(&s.client, seq, generation, &plugin, &rec).await)
                 .await
         }
@@ -286,6 +287,18 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             })
             .await
         }
+        // One client here too: a connected server's folder is not read from
+        // the browser build — "By your layout" draws its slots.
+        ApiCmd::KeepFolderTags { seq, generation, .. } => Some(Event::KeepFolderTags { seq, generation, tracks: None }),
+        // The album page's credit is the browsed server's own read: the session.
+        ApiCmd::AlbumCredit { seq, generation, artist } => {
+            with_session(session, async |s| {
+                Ok(Event::AlbumCredit { seq, generation, rows: s.client.artist_album_rows_async(&artist).await.ok() })
+            })
+            .await
+        }
+        // Another server than the session's is not asked from here.
+        ApiCmd::OwnPing { server, .. } => Some(Event::OwnPing { server, ping: None }),
 
         ApiCmd::Discover { node, seed, dest } => {
             with_session(session, async |s| {

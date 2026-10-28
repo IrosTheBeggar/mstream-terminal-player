@@ -65,6 +65,11 @@ pub(crate) struct Sheet {
     /// and file, not its place: a peers answer landing while the sheet is
     /// open never retargets them ([`sheet_target`]).
     pub keep: Option<KeepPin>,
+    /// Any other connected server's song — a browse row on its session, a
+    /// queue item, the playing card — whose own server's gate offered Keep a
+    /// copy when the sheet opened (keep-a-copy spec §4.7): the row stands for
+    /// as long as the sheet does, and the badge row stays blank.
+    pub item: Option<KeepTarget>,
     /// Open elsewhere's list hangs from its row (clause 140).
     pub links: bool,
 }
@@ -118,9 +123,15 @@ fn actions_for(app: &App, sheet: &Sheet, own: bool) -> Vec<SheetAction> {
     }
     // A new peers answer that left the sheet's row out takes both away —
     // what they would send is gone — except a links list already asked,
-    // which hangs on from its row for the row it was asked for.
+    // which hangs on from its row for the row it was asked for. Any other
+    // connected server's song keeps the row it opened with (keep-a-copy
+    // spec §4.7).
     let target = sheet_target(app, sheet);
-    if target.is_some_and(|target| !app.keep_choices(target).is_empty()) {
+    let keep = match sheet.keep {
+        Some(_) => target.as_ref().is_some_and(|target| !app.keep_choices(target.clone()).is_empty()),
+        None => sheet.item.is_some(),
+    };
+    if keep {
         rows.push(SheetAction::KeepCopy);
     }
     rows.push(SheetAction::Info);
@@ -140,6 +151,15 @@ fn sheet_target(app: &App, sheet: &Sheet) -> Option<KeepTarget> {
     app.keep_find(sheet.keep.as_ref()?)
 }
 
+/// What the sheet's Keep a copy… opens on: the Discover row's pin where it
+/// still stands, else the connected server's song it opened for.
+fn keep_target(app: &App, sheet: &Sheet) -> Option<KeepTarget> {
+    match sheet.keep {
+        Some(_) => sheet_target(app, sheet),
+        None => sheet.item.clone(),
+    }
+}
+
 pub(crate) fn modal_open(gui: &Gui) -> bool {
     gui.actions.sheet.is_some()
 }
@@ -147,13 +167,24 @@ pub(crate) fn modal_open(gui: &Gui) -> bool {
 // ── Opening ─────────────────────────────────────────────────────────────────
 
 /// The sheet for one track (clause 1): the row's own block now, the full
-/// one asked of its server (clause 8).
-pub(crate) fn open_for(gui: &mut Gui, origin: Origin, track: Track, queue_row: Option<usize>) {
+/// one asked of its server (clause 8). `from` is the pane the row is drawn
+/// in — `None` for a queue item and the playing card.
+pub(crate) fn open_for(gui: &mut Gui, origin: Origin, track: Track, queue_row: Option<usize>, from: Option<Tab>) {
     let effects = gui.app.fetch_track_info(&origin, &track.filepath);
     gui.pend(effects);
     gui.actions.picker = None;
     gui.actions.info = false;
-    gui.actions.sheet = Some(Sheet { origin, track, queue_row, row: 0, keep: None, links: false });
+    // A connected server's song offers Keep a copy… while its own server's
+    // gate is open and that server still lists it (keep-a-copy spec §4.7,
+    // W2 and W8–W11) — decided now, for as long as the sheet stands; on
+    // every screen that opens it (Q9: the playing card's too), the Library
+    // screen brought back for the window when it is chosen. A queue item of
+    // another own server's connected server, its gate never asked: asked
+    // now, for the next time (W10).
+    let asked = gui.app.keep_ask_owner(&origin);
+    gui.pend(asked);
+    let item = gui.app.keep_track(&origin, &track, from).filter(|target| !gui.app.keep_choices(target.clone()).is_empty());
+    gui.actions.sheet = Some(Sheet { origin, track, queue_row, row: 0, keep: None, item, links: false });
 }
 
 /// A browse row's `[⋯]`, `m` or right click: the pane's track at `index`.
@@ -163,13 +194,13 @@ fn open_from_pane(gui: &mut Gui, tab: Tab, index: usize) {
         _ => return,
     };
     let origin = gui.app.origin();
-    open_for(gui, origin, track, None);
+    open_for(gui, origin, track, None, Some(tab));
 }
 
 fn open_from_queue(gui: &mut Gui, index: usize) {
     let Some(item) = gui.app.queue.items.get(index) else { return };
     let (origin, track) = (item.origin.clone(), item.track.clone());
-    open_for(gui, origin, track, Some(index));
+    open_for(gui, origin, track, Some(index), None);
 }
 
 /// The bar's card: the playing track, with its queue row when it is one.
@@ -179,7 +210,7 @@ fn open_for_playing(gui: &mut Gui) {
     let origin = current
         .and_then(|i| gui.app.queue.items.get(i).map(|q| q.origin.clone()))
         .unwrap_or_else(|| gui.app.origin());
-    open_for(gui, origin, now, current);
+    open_for(gui, origin, now, current, None);
 }
 
 /// `m`: the queue's highlighted row while the panel has the keys, else the
@@ -654,9 +685,17 @@ fn run(gui: &mut Gui, action: SheetAction) {
         SheetAction::Info => gui.actions.info = true,
         // The sheet gives way to the Keep a copy modal (clause 102).
         SheetAction::KeepCopy => {
-            if let Some(target) = sheet_target(&gui.app, &sheet) {
+            if let Some(target) = keep_target(&gui.app, &sheet) {
                 close(gui);
-                super::keep::open(gui, target);
+                // The window stands over the Library's rooms: the playing
+                // card's sheet on another screen brings that screen back
+                // first (Q9).
+                if gui.screen != super::Screen::Library {
+                    gui.act(Act::Screen(super::Screen::Library));
+                }
+                if gui.screen == super::Screen::Library {
+                    super::keep::open(gui, target);
+                }
             }
         }
         // Open elsewhere's list hangs from its row, asked now (clause 140).
@@ -883,6 +922,10 @@ pub(crate) fn queue_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             gui.forward(Action::JumpToPlaying);
         }
         KeyCode::Char('m') => return Some(gui.act(Act::MoreKey)),
+        // Not bound on the held queue row: `C`, one Shift away, clears the
+        // queue without asking — a queue item's Keep a copy is its sheet's
+        // row (keep-a-copy spec §4.8). Nor the room's `c` beneath.
+        KeyCode::Char('c') => {}
         KeyCode::Esc => {
             gui.queue_view.stow();
             gui.app.focus = Focus::Browser;
@@ -928,12 +971,22 @@ pub(crate) fn tips(gui: &Gui) -> Option<String> {
             } else {
                 t!("gui.tips.discover_sheet_keep")
             }
+        } else if gui.actions.sheet.as_ref().is_some_and(|s| s.item.is_some()) {
+            // Any other connected server's song with its Keep row (keep-a-
+            // copy spec §4.7): no rating keys, `c` named.
+            t!("gui.tips.discover_sheet_keep")
+        } else if gui.actions.sheet.as_ref().is_some_and(|s| s.origin.peer.is_some()) {
+            // A connected server's song without it: no rating keys either —
+            // they rate nothing there.
+            t!("gui.tips.discover_sheet")
         } else {
             t!("gui.tips.sheet")
         };
         return Some(tip.to_string());
     }
-    if gui.queue_open && gui.app.focus == Focus::Queue {
+    // Keep a copy (or a chooser of its) opened from a queue item's sheet
+    // holds every key: its tips, never the queue's.
+    if gui.queue_open && gui.app.focus == Focus::Queue && !super::keep_doors::window_open(gui) {
         // Stowed, how to pick the cursor up and what works without a row.
         let tip = if gui.queue_view.held { t!("gui.tips.queue") } else { t!("gui.tips.queue_stowed") };
         return Some(tip.to_string());

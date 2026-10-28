@@ -179,6 +179,32 @@ closer than three cells. No tooltip (self-evident). Like a text button
 it hides rather than going grey. First consumer: Keep a copy's window
 (discovery-page clauses 105–110).
 
+**On a room's header line** (since 2026-10-27; first consumer: Keep a
+copy's "c keep a copy" on a connected server's album page, artist's wall
+and Files folder, discovery-page clauses 153–155) a key word stands 3
+cells after the line's left run — the way back, the title, the count or
+the crumb — and the right-aligned count or pager keeps its place. It adds
+no cells to the room: no reserved space before it shows, nothing shifts
+when it does. Its click is the key with the room's cursor stowed, so it
+is drawn only while the cursor is stowed (a held row's key is the row's,
+named by the tips line instead), while the room has the keys (not the
+queue panel, not a filter taking text) and never under a modal or a
+dropdown — and the line is planned with its cells whenever the page has
+it this visit, so hiding it blanks those cells and moves nothing else.
+Once drawn it stays for the visit, whatever its right does meanwhile: a
+press then says why it no longer works. **Its state form**: where the
+thing the key acts on has a state of its own (a copy waiting, running,
+kept, failed), the state's words in their token stand in the key word's
+cells instead, a button while the key's right holds (hover BRIGHT +
+BOLD, its click the key's) and plain text once it is gone. **Its
+give-way**, while the line would leave fewer than 2 cells before the
+right-aligned part, each step only as far as needed: a trailing
+qualifier (" · read-only"), the count, the way back to its glyph (`◂`,
+still Back), the subject to a 12-cell floor (a title from its tail with
+`…`, a path by whole leading segments; a credit beside a title first,
+and a credit that goes whole gives back what gave way for it), and last
+the key word or its state — the key still works.
+
 ### Tabs
 One row, under the screen's state line (or first, on a page with none): the ACTIVE tab is a 1-row filled
 slab (bg LightBlue, fg Black BOLD, one cell of padding each side) — the
