@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::api::types::{
     Album, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
-    DiscoveryPluginsResponse, Genre, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, Ping, PluginJobList,
+    DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, Ping, PluginJobList,
     PluginLink, PlaylistSummary, SearchResults, SimilarArtist, TasteRequest, TasteResponse, Track,
 };
 use crate::api::{ApiError, Client, PluginFailure};
@@ -590,8 +590,13 @@ pub enum LibraryNode {
     Artist(String),
     Albums,
     Album { name: String, artist: Option<String> },
-    Genres,
-    Genre(String),
+    /// The Genres list of one kind (mStream #716) — part of the view's
+    /// identity, so a list asked for before the switch moved is dropped
+    /// when it lands.
+    Genres(GenreSource),
+    /// A genre's songs, asked for with its list's kind
+    /// ([`GenreList::songs_source`]).
+    Genre(String, GenreSource),
     Recent,
     /// The play lists (library-rooms contract, clauses 21–24): the user's
     /// last hundred plays newest first, and the hundred played most.
@@ -608,7 +613,7 @@ pub enum LibraryNode {
 pub enum LibraryData {
     Artists(Vec<String>),
     Albums(Vec<Album>),
-    Genres(Vec<Genre>),
+    Genres(GenreList),
     Playlists(Vec<PlaylistSummary>),
     Tracks(Vec<Track>),
 }
@@ -2262,9 +2267,9 @@ pub(crate) async fn load_library(
         LibraryNode::Album { name, artist } => {
             LibraryData::Tracks(client.album_songs_async(name, artist.as_deref()).await?)
         }
-        LibraryNode::Genres => LibraryData::Genres(client.genres_async().await?),
-        LibraryNode::Genre(genre) => {
-            LibraryData::Tracks(client.genre_songs_async(genre).await?)
+        LibraryNode::Genres(source) => LibraryData::Genres(load_genres(client, *source).await?),
+        LibraryNode::Genre(genre, source) => {
+            LibraryData::Tracks(client.genre_songs_async(genre, *source).await?)
         }
         LibraryNode::Recent => {
             LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
@@ -2278,6 +2283,23 @@ pub(crate) async fn load_library(
             LibraryData::Tracks(client.playlist_load_async(name).await?)
         }
     })
+}
+
+/// A Genres list of `source`'s kind — or of the other kind, asked for at
+/// once, when the server says this one has none and the other has some: an
+/// untagged library still lists its generated genres, and one the model
+/// never ran on its tags. A server that predates the filter answered every
+/// genre whatever was asked, and the list says so.
+async fn load_genres(client: &Client, source: GenreSource) -> Result<GenreList, ApiError> {
+    let answer = client.genre_list_async(source).await?;
+    let Some(sources) = answer.sources else {
+        return Ok(GenreList { genres: answer.genres, sources: None, shown: GenreSource::Both });
+    };
+    if let Some(other) = sources.fallback(source) {
+        let answer = client.genre_list_async(other).await?;
+        return Ok(GenreList { genres: answer.genres, sources: answer.sources.or(Some(sources)), shown: other });
+    }
+    Ok(GenreList { genres: answer.genres, sources: Some(sources), shown: source })
 }
 
 // ── Auto DJ ─────────────────────────────────────────────────────────────────

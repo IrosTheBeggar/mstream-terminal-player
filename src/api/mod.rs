@@ -1337,19 +1337,38 @@ impl Client {
         wait(self.genres_async())
     }
 
-    /// Tracks in a genre.
+    /// One kind of genre (mStream #716's `source`), with the `sources` count
+    /// that says whether there is a choice to offer. A POST where `genres`
+    /// GETs: a peer's proxy forwards the body but no query string, and the
+    /// filter has to reach the peer. A server that predates the filter
+    /// ignores the field and answers every genre, without `sources`.
+    pub async fn genre_list_async(&self, source: GenreSource) -> Result<GenresResponse, ApiError> {
+        let body = match source.api_value() {
+            Some(source) => serde_json::json!({ "source": source }),
+            None => serde_json::json!({}),
+        };
+        self.post("api/v1/db/genres", body).await
+    }
+
+    /// Tracks in a genre — those linked to it from `source` alone, or every
+    /// one for [`GenreSource::Both`].
     ///
     /// Deliberately the flat song list rather than albums-in-a-genre: the
     /// `/api/v1/db/genre/albums` route lives in mStream's velvet-stubs module
     /// and is only mounted when the server runs `ui: velvet`, so a general
     /// client cannot depend on it. Same story for the decade endpoints.
-    pub async fn genre_songs_async(&self, genre: &str) -> Result<Vec<Track>, ApiError> {
-        self.post("api/v1/db/genre-songs", serde_json::json!({ "genre": genre })).await
+    pub async fn genre_songs_async(&self, genre: &str, source: GenreSource) -> Result<Vec<Track>, ApiError> {
+        // The field only when it narrows: Both asks exactly as before.
+        let mut body = serde_json::json!({ "genre": genre });
+        if let Some(source) = source.api_value() {
+            body["source"] = source.into();
+        }
+        self.post("api/v1/db/genre-songs", body).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn genre_songs(&self, genre: &str) -> Result<Vec<Track>, ApiError> {
-        wait(self.genre_songs_async(genre))
+    pub fn genre_songs(&self, genre: &str, source: GenreSource) -> Result<Vec<Track>, ApiError> {
+        wait(self.genre_songs_async(genre, source))
     }
 
     pub async fn recently_added_async(&self, limit: u32) -> Result<Vec<Track>, ApiError> {

@@ -1494,6 +1494,10 @@ gui:
     empty: "Ancora niente qui"
     singles: "Singoli"
     jump_tip: "Vai a %{letter}"
+    genre_tags: "Tag"
+    genre_generated: "Generati"
+    genre_both: "Entrambi"
+    genre_source_tip: "Origine dei generi"
   act:
     play_now: "Riproduci ora"
     add_next: "Aggiungi dopo"

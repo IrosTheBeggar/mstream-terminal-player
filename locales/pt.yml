@@ -1494,6 +1494,10 @@ gui:
     empty: "Nada aqui ainda"
     singles: "Singles"
     jump_tip: "Ir para %{letter}"
+    genre_tags: "Tags"
+    genre_generated: "Gerados"
+    genre_both: "Ambos"
+    genre_source_tip: "Origem dos gêneros"
   act:
     play_now: "Reproduzir agora"
     add_next: "Adicionar a seguir"

@@ -1494,6 +1494,10 @@ gui:
     empty: "Noch nichts hier"
     singles: "Singles"
     jump_tip: "Zu %{letter} springen"
+    genre_tags: "Tags"
+    genre_generated: "Generiert"
+    genre_both: "Beide"
+    genre_source_tip: "Genre-Quelle"
   act:
     play_now: "Jetzt abspielen"
     add_next: "Als Nächstes"

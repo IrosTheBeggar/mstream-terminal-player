@@ -1494,6 +1494,10 @@ gui:
     empty: "Jeszcze nic tu nie ma"
     singles: "Single"
     jump_tip: "Skocz do %{letter}"
+    genre_tags: "Tagi"
+    genre_generated: "Wygenerowane"
+    genre_both: "Oba"
+    genre_source_tip: "Źródło gatunków"
   act:
     play_now: "Odtwórz teraz"
     add_next: "Dodaj jako następny"

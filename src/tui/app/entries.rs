@@ -15,7 +15,9 @@ pub(super) fn library_root_entries(peer: bool) -> Vec<Entry> {
     [
         ("Artists", LibraryNode::Artists),
         ("Albums", LibraryNode::Albums),
-        ("Genres", LibraryNode::Genres),
+        // Every genre, tagged or generated: the switch between the two is
+        // the GUI's, and this menu lists what it always did.
+        ("Genres", LibraryNode::Genres(GenreSource::Both)),
         ("Recently Added", LibraryNode::Recent),
         // Last because the four above are ways the tags cut the library and
         // this is the one you cut yourself — not because it matters least.
@@ -133,10 +135,14 @@ pub(super) fn entries_from_library(data: LibraryData) -> Vec<Entry> {
             };
             Entry::Node { label, node }
         })),
-        LibraryData::Genres(genres) => entries.extend(genres.into_iter().map(|genre| {
-            let label = genre_label(&genre);
-            Entry::Node { label, node: LibraryNode::Genre(genre.name) }
-        })),
+        LibraryData::Genres(list) => {
+            // A genre's songs are asked for with its list's kind.
+            let source = list.songs_source();
+            entries.extend(list.genres.into_iter().map(|genre| {
+                let label = genre_label(&genre);
+                Entry::Node { label, node: LibraryNode::Genre(genre.name, source) }
+            }))
+        }
         // A row that opens into its tracks — the same shape an artist or a
         // genre is, which is the whole reason playlists moved in here.
         LibraryData::Playlists(playlists) => {

@@ -2,7 +2,7 @@
 //! of app.rs. `use super::*;` keeps them exactly the tests they were.
 
 use super::*;
-use crate::api::types::{DirEntry, FileEntry, FileMetadata, SearchResults, TrackMetadata};
+use crate::api::types::{DirEntry, FileEntry, FileMetadata, GenreList, GenreSources, SearchResults, TrackMetadata};
 
 fn track(path: &str) -> Track {
     Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
@@ -3860,24 +3860,29 @@ fn genres_show_track_counts_and_lead_to_songs() {
     let mut app = connected_app();
     app.tab = Tab::Library;
     app.library_stack.restart();
-    app.library_stack.enter(LibraryNode::Genres);
+    app.library_stack.enter(LibraryNode::Genres(GenreSource::Both));
+    // A server that predates the source filter: no `sources`, so every
+    // genre's songs are asked for whole.
     app.apply_event(Event::Library {
         generation: app.session_gen(),
         dest: Tab::Library,
-        node: LibraryNode::Genres,
-        data: LibraryData::Genres(vec![
-            Genre { name: "Ambient".into(), track_count: Some(2) },
-            Genre { name: "Electronic".into(), track_count: None },
-        ]),
+        node: LibraryNode::Genres(GenreSource::Both),
+        data: LibraryData::Genres(GenreList {
+            genres: vec![
+                Genre { name: "Ambient".into(), track_count: Some(2) },
+                Genre { name: "Electronic".into(), track_count: None },
+            ],
+            ..GenreList::default()
+        }),
     });
 
     assert_eq!(
         app.library.entries[1],
-        Entry::Node { label: "Ambient (2)".into(), node: LibraryNode::Genre("Ambient".into()) }
+        Entry::Node { label: "Ambient (2)".into(), node: LibraryNode::Genre("Ambient".into(), GenreSource::Both) }
     );
     assert_eq!(
         app.library.entries[2],
-        Entry::Node { label: "Electronic".into(), node: LibraryNode::Genre("Electronic".into()) }
+        Entry::Node { label: "Electronic".into(), node: LibraryNode::Genre("Electronic".into(), GenreSource::Both) }
     );
 
     let effects = app.handle_action(Action::Activate);
@@ -3885,10 +3890,67 @@ fn genres_show_track_counts_and_lead_to_songs() {
         effects,
         vec![Effect::Api(ApiCmd::Library {
             generation: app.session_gen(),
-            node: LibraryNode::Genre("Ambient".into()),
+            node: LibraryNode::Genre("Ambient".into(), GenreSource::Both),
             dest: Tab::Library,
         })]
     );
+}
+
+#[test]
+fn a_genre_list_of_one_kind_asks_its_songs_with_that_kind_and_switches_in_place() {
+    let mut app = connected_app();
+    app.tab = Tab::Library;
+    let generation = app.session_gen();
+    let asks = |effects: &[Effect], node: LibraryNode| {
+        effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: n, .. }) if *n == node))
+    };
+    let both = GenreSources { tag: 2, model: 5 };
+    let list = |shown| {
+        LibraryData::Genres(GenreList {
+            genres: vec![Genre { name: "Dub".into(), track_count: Some(3) }],
+            sources: Some(both),
+            shown,
+        })
+    };
+    let effects = app.open_library_node(LibraryNode::Genres(GenreSource::Model), true);
+    assert!(asks(&effects, LibraryNode::Genres(GenreSource::Model)));
+    app.apply_event(Event::Library {
+        node: LibraryNode::Genres(GenreSource::Model),
+        dest: Tab::Library,
+        data: list(GenreSource::Model),
+        generation,
+    });
+    assert_eq!(
+        app.library.entries[1],
+        Entry::Node { label: "Dub (3)".into(), node: LibraryNode::Genre("Dub".into(), GenreSource::Model) },
+        "a generated genre's songs are its generated songs"
+    );
+
+    // The switch swaps the list in place: the same depth, asked afresh.
+    let depth_before = app.library_stack.parent().cloned();
+    let effects = app.switch_genre_source(GenreSource::Tag);
+    assert!(asks(&effects, LibraryNode::Genres(GenreSource::Tag)));
+    assert_eq!(app.library_stack.here(), &LibraryNode::Genres(GenreSource::Tag));
+    assert_eq!(app.library_stack.parent().cloned(), depth_before, "no new level");
+    // The other kind's reply, landing late, is not this view's.
+    app.apply_event(Event::Library {
+        node: LibraryNode::Genres(GenreSource::Model),
+        dest: Tab::Library,
+        data: list(GenreSource::Model),
+        generation,
+    });
+    assert!(app.library.entries.is_empty(), "the stale kind is dropped");
+    app.apply_event(Event::Library {
+        node: LibraryNode::Genres(GenreSource::Tag),
+        dest: Tab::Library,
+        data: list(GenreSource::Tag),
+        generation,
+    });
+    assert!(matches!(&app.library.entries[1], Entry::Node { node: LibraryNode::Genre(_, GenreSource::Tag), .. }));
+
+    // Anywhere else, the switch does nothing.
+    let _ = app.open_library_node(LibraryNode::Recent, true);
+    assert!(app.switch_genre_source(GenreSource::Both).is_empty());
 }
 
 #[test]
@@ -4759,21 +4821,32 @@ fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
     assert!(app.library.trail.is_empty() && !app.library.loading);
     assert_eq!(app.library.entries.iter().map(Entry::label).collect::<Vec<_>>(), ["..", "Air", "Bonobo"]);
 
-    let effects = app.open_library_node(LibraryNode::Genres, true);
-    assert!(asks(&effects, LibraryNode::Genres));
+    let effects = app.open_library_node(LibraryNode::Genres(GenreSource::Tag), true);
+    assert!(asks(&effects, LibraryNode::Genres(GenreSource::Tag)));
     app.apply_event(Event::Library {
-        node: LibraryNode::Genres,
+        node: LibraryNode::Genres(GenreSource::Tag),
         dest: Tab::Library,
-        data: LibraryData::Genres(vec![Genre { name: "Dub".into(), track_count: Some(3) }]),
+        data: LibraryData::Genres(GenreList {
+            genres: vec![Genre { name: "Dub".into(), track_count: Some(3) }],
+            ..GenreList::default()
+        }),
         generation,
     });
-    assert!(app.open_library_node(LibraryNode::Genres, true).is_empty());
+    assert!(app.open_library_node(LibraryNode::Genres(GenreSource::Tag), true).is_empty());
+    // The copy is of the kind it was asked for; another kind asks.
+    assert!(asks(
+        &app.open_library_node(LibraryNode::Genres(GenreSource::Model), true),
+        LibraryNode::Genres(GenreSource::Model)
+    ));
     assert!(asks(&app.open_library_node(LibraryNode::Recent, true), LibraryNode::Recent), "recent means now");
 
     // Forgotten on request (the GUI's second choice of the room), and with
     // the server.
-    app.forget_root_list(&LibraryNode::Genres);
-    assert!(asks(&app.open_library_node(LibraryNode::Genres, true), LibraryNode::Genres));
+    app.forget_root_list(&LibraryNode::Genres(GenreSource::Tag));
+    assert!(asks(
+        &app.open_library_node(LibraryNode::Genres(GenreSource::Tag), true),
+        LibraryNode::Genres(GenreSource::Tag)
+    ));
     app.shed_server_state();
     assert!(app.artists.is_none() && app.genre_list.is_none());
     assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
@@ -4790,7 +4863,7 @@ fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
     };
     app.apply_event(connected(Some("alice")));
     app.artists = Some(vec!["Air".into()]);
-    app.genre_list = Some(Vec::new());
+    app.genre_list = Some((GenreSource::Tag, GenreList::default()));
     app.apply_event(connected(Some("alice")));
     app.apply_event(connected(None));
     assert!(app.artists.is_some() && app.genre_list.is_some(), "the same account keeps its lists");

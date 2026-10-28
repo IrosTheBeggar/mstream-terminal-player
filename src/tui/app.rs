@@ -15,7 +15,7 @@ use std::sync::Arc;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::api::types::{Album, DirListing, Genre, Track};
+use crate::api::types::{Album, DirListing, Genre, GenreSource, Track};
 use crate::api::urls;
 use crate::dj;
 use crate::player::PlayerStatus;
@@ -2005,7 +2005,10 @@ pub struct App {
     /// (library-rooms contract, entry point 1; performance audit #99).
     /// Cleared with the session.
     pub artists: Option<Vec<String>>,
-    pub genre_list: Option<Vec<crate::api::types::Genre>>,
+    /// The Genres list with the kind it was asked for: a return seats it
+    /// only while the kind still matches, and the GUI's switch reads what
+    /// the server said it has from it.
+    pub genre_list: Option<(crate::api::types::GenreSource, crate::api::types::GenreList)>,
     /// The full block the sheet or Song info asked for last (track-actions
     /// contract, clause 8), by the track's path.
     pub track_info: Option<Track>,
@@ -5721,7 +5724,11 @@ impl App {
     fn root_list(&self, node: &LibraryNode) -> Option<LibraryData> {
         match node {
             LibraryNode::Artists => self.artists.clone().map(LibraryData::Artists),
-            LibraryNode::Genres => self.genre_list.clone().map(LibraryData::Genres),
+            LibraryNode::Genres(asked) => self
+                .genre_list
+                .as_ref()
+                .filter(|(kept, _)| kept == asked)
+                .map(|(_, list)| LibraryData::Genres(list.clone())),
             _ => None,
         }
     }
@@ -5731,9 +5738,22 @@ impl App {
     pub(crate) fn forget_root_list(&mut self, node: &LibraryNode) {
         match node {
             LibraryNode::Artists => self.artists = None,
-            LibraryNode::Genres => self.genre_list = None,
+            LibraryNode::Genres(_) => self.genre_list = None,
             _ => {}
         }
+    }
+
+    /// The Genres list asked for another kind — the GUI's Tags · Generated
+    /// · Both switch. The list is swapped in place, not entered: Back from
+    /// it climbs where it did before. Nothing unless the list is up.
+    pub(crate) fn switch_genre_source(&mut self, source: crate::api::types::GenreSource) -> Vec<Effect> {
+        if !matches!(self.library_stack.here(), LibraryNode::Genres(_)) {
+            return Vec::new();
+        }
+        let node = LibraryNode::Genres(source);
+        self.library_stack.replace(node.clone());
+        self.library.set(Vec::new());
+        vec![self.ask_library(node, Tab::Library)]
     }
 
     /// Whether the Library pane's drill stands on the Albums wall, or on an
@@ -6182,8 +6202,8 @@ impl App {
                     (LibraryNode::Artists, Tab::Library, LibraryData::Artists(names)) => {
                         self.artists = Some(names.clone());
                     }
-                    (LibraryNode::Genres, Tab::Library, LibraryData::Genres(genres)) => {
-                        self.genre_list = Some(genres.clone());
+                    (LibraryNode::Genres(asked), Tab::Library, LibraryData::Genres(list)) => {
+                        self.genre_list = Some((*asked, list.clone()));
                     }
                     _ => {}
                 }

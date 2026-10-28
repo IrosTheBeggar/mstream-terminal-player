@@ -1494,6 +1494,10 @@ gui:
     empty: "まだ何もありません"
     singles: "シングル"
     jump_tip: "%{letter} へ移動"
+    genre_tags: "タグ"
+    genre_generated: "自動生成"
+    genre_both: "両方"
+    genre_source_tip: "ジャンルの取得元"
   act:
     play_now: "今すぐ再生"
     add_next: "次に追加"

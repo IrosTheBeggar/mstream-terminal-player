@@ -202,6 +202,8 @@ pub(crate) enum Act {
     /// the way back — the rows are [`Act::PaneRow`]s.
     LibJump(usize),
     LibBack,
+    /// The Genres list's Tags · Generated · Both (clauses 25–29).
+    GenreSource(crate::api::types::GenreSource),
     /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
     /// radios, chips, the keyword field, the genre and server pickers —
     /// starting with its one primary: Start through the toggle (the
@@ -757,6 +759,7 @@ impl Gui {
         config.gui.key_hints = self.config.gui.key_hints;
         config.gui.discover_tab = self.config.gui.discover_tab.clone();
         config.gui.discover_window = self.config.gui.discover_window;
+        config.gui.genre_source = self.config.gui.genre_source.clone();
         match config::save(&config) {
             Ok(()) => self.config = config,
             Err(e) => {

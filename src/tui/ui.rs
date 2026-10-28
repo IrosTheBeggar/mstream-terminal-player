@@ -1102,8 +1102,8 @@ pub(crate) fn browser_title(app: &App) -> String {
             LibraryNode::Artist(artist) => format!(" Artist: {artist} "),
             LibraryNode::Albums => " Albums ".to_string(),
             LibraryNode::Album { name, .. } => format!(" Album: {name} "),
-            LibraryNode::Genres => " Genres ".to_string(),
-            LibraryNode::Genre(genre) => format!(" Genre: {genre} "),
+            LibraryNode::Genres(_) => " Genres ".to_string(),
+            LibraryNode::Genre(genre, _) => format!(" Genre: {genre} "),
             LibraryNode::Recent => " Recently Added ".to_string(),
             LibraryNode::RecentlyPlayed => " Recently Played ".to_string(),
             LibraryNode::MostPlayed => " Most Played ".to_string(),
@@ -4531,11 +4531,11 @@ mod tests {
 
         app.library_stack.restart();
 
-        app.library_stack.enter(LibraryNode::Genre("Ambient".into()));
+        app.library_stack.enter(LibraryNode::Genre("Ambient".into(), crate::api::types::GenreSource::Both));
         app.apply_event(crate::tui::worker::Event::Library {
             generation: app.session_gen(),
             dest: Tab::Library,
-            node: LibraryNode::Genre("Ambient".into()),
+            node: LibraryNode::Genre("Ambient".into(), crate::api::types::GenreSource::Both),
             data: LibraryData::Tracks(vec![Track {
                 filepath: "lib/a.mp3".into(),
                 metadata: TrackMetadata {

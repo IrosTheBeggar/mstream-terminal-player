@@ -530,6 +530,11 @@ pub struct GuiPrefs {
     /// number not among the four, asks the default 30.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discover_window: Option<u32>,
+    /// The Genres room's kind — `tag`, `model` or `both` (mStream #716's
+    /// `source`; library-rooms contract, clause 26). Unset, or a word this
+    /// build does not know, reads as tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre_source: Option<String>,
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -1721,6 +1726,26 @@ mod tests {
         assert!(text.contains("[gui]") && text.contains("discover_window = 0"), "{text}");
         let loaded = load().unwrap();
         assert_eq!((loaded.gui.discover_window, loaded.gui.discover_tab.as_deref()), (Some(0), Some("library")));
+    }
+
+    #[test]
+    fn the_genres_rooms_kind_round_trips_and_an_unknown_word_reads_as_tags() {
+        use crate::api::types::GenreSource;
+        let scratch = Scratch::new("genre-source");
+        save(&Config::default()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("genre_source"), "no kind chosen, nothing written: {text}");
+
+        let mut config = Config::default();
+        config.gui.genre_source = Some(GenreSource::Model.as_str().into());
+        save(&config).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("[gui]") && text.contains("genre_source = \"model\""), "{text}");
+        let loaded = load().unwrap();
+        assert_eq!(GenreSource::from_name(loaded.gui.genre_source.as_deref()), GenreSource::Model);
+        assert_eq!(GenreSource::from_name(Some("both")), GenreSource::Both);
+        assert_eq!(GenreSource::from_name(Some("moods")), GenreSource::Tag, "a word this build does not know");
+        assert_eq!(GenreSource::from_name(None), GenreSource::Tag);
     }
 
     #[test]
