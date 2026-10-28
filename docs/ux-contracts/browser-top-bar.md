@@ -154,3 +154,8 @@ drawing, the keys, and the three verbs composed from public App pieces
   German, Spanish, French, Italian, Polish, Russian, Japanese and
   Portuguese hint lines ran to 127 cells and clipped at the window's
   edge; every line fits in 99 cells now.
+- **2026-10-28 — A room's own control at line two's right**
+  (docs/ux-contracts/library-rooms.md, clauses 25–29): the Genres list's
+  `Tags · Generated · Both` sits where a track list's verbs go. A list of
+  genres has no verbs, so the two never share the line; the filter still
+  leads, and an open filter's field takes the whole line.

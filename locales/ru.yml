@@ -1494,6 +1494,10 @@ gui:
     empty: "Здесь пока ничего нет"
     singles: "Синглы"
     jump_tip: "Перейти к %{letter}"
+    genre_tags: "Теги"
+    genre_generated: "Сгенерированные"
+    genre_both: "Оба"
+    genre_source_tip: "Источник жанров"
   act:
     play_now: "Воспроизвести сейчас"
     add_next: "Добавить следующим"

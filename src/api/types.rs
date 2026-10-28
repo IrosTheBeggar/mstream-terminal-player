@@ -547,6 +547,104 @@ pub struct Genre {
 #[serde(default)]
 pub struct GenresResponse {
     pub genres: Vec<Genre>,
+    /// How many genres each source has (mStream #716) — absent from a
+    /// server that predates the `source` filter.
+    pub sources: Option<GenreSources>,
+}
+
+/// Which genres a Genres list asks for (mStream #716): the ones the files'
+/// own tags name, the ones the discovery model predicted, or both together
+/// — no filter, which is also all a server that predates it ever answers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GenreSource {
+    #[default]
+    Tag,
+    Model,
+    Both,
+}
+
+impl GenreSource {
+    pub const ALL: [GenreSource; 3] = [GenreSource::Tag, GenreSource::Model, GenreSource::Both];
+
+    /// The `source` a request carries; `None` asks for every genre.
+    pub fn api_value(self) -> Option<&'static str> {
+        match self {
+            GenreSource::Tag => Some("tag"),
+            GenreSource::Model => Some("model"),
+            GenreSource::Both => None,
+        }
+    }
+
+    /// The word `[gui] genre_source` keeps.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GenreSource::Tag => "tag",
+            GenreSource::Model => "model",
+            GenreSource::Both => "both",
+        }
+    }
+
+    /// A kept word read back: unset, or a word this build does not know,
+    /// is tags.
+    pub fn from_name(name: Option<&str>) -> GenreSource {
+        match name {
+            Some("model") => GenreSource::Model,
+            Some("both") => GenreSource::Both,
+            _ => GenreSource::Tag,
+        }
+    }
+}
+
+/// `sources` on `/db/genres`: how many genres each source has here,
+/// whatever was asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct GenreSources {
+    pub tag: u32,
+    pub model: u32,
+}
+
+impl GenreSources {
+    /// A choice is worth offering only when both kinds exist.
+    pub fn offers_choice(&self) -> bool {
+        self.tag > 0 && self.model > 0
+    }
+
+    /// The other kind, when the asked one has no genres here and the other
+    /// has some — an untagged library, or one the model never ran on.
+    /// Both never falls back: it already holds everything there is.
+    pub fn fallback(&self, asked: GenreSource) -> Option<GenreSource> {
+        match asked {
+            GenreSource::Tag if self.tag == 0 && self.model > 0 => Some(GenreSource::Model),
+            GenreSource::Model if self.model == 0 && self.tag > 0 => Some(GenreSource::Tag),
+            _ => None,
+        }
+    }
+}
+
+/// A Genres list as it came back: the genres, what the server said it has
+/// (`None` from one that predates the filter), and the kind the list holds
+/// — the one asked for, or the other when that one had none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GenreList {
+    pub genres: Vec<Genre>,
+    pub sources: Option<GenreSources>,
+    pub shown: GenreSource,
+}
+
+impl GenreList {
+    /// Whether the list offers the Tags · Generated · Both switch.
+    pub fn offers_choice(&self) -> bool {
+        self.sources.is_some_and(|s| s.offers_choice())
+    }
+
+    /// What a genre's songs are asked for with: the list's own kind, so a
+    /// genre opened from the generated list never brings in songs that
+    /// carry it only in their tags — or every song, from a server that
+    /// predates the filter.
+    pub fn songs_source(&self) -> GenreSource {
+        if self.sources.is_some() { self.shown } else { GenreSource::Both }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

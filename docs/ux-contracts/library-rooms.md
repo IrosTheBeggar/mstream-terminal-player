@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Design of record** | `mstream_music` @ `a27da385` (2026-09-21) — `lib/singletons/api.dart` (`getArtists`, `getArtistAlbums`, `getRecentlyAdded`: how each answer becomes rows, which lists are pushed *alphabetical*, the `SINGLES` bucket), `lib/singletons/browser_list.dart` (the list stack and its alphabetical cache), `lib/screens/browser.dart` (a list that is all albums becomes the grid; the strip's gutter; the row builders), `lib/widgets/letter_strip.dart` (the `#` + A–Z index, `showsFor` and its threshold, `scrubbableCount`, snapping to the nearest present letter), `lib/widgets/album_grid.dart` (cards, columns by width), `lib/objects/display_item.dart` (`getText`: the title, else the file name; `getSubText`: the artist). **Genres**: the mobile app does not browse them (its genres call feeds Auto DJ only), so the record for that room is the webapp — mStream @ `ccf78c82`, `webapp/alpha/m.js` (`renderGenre` "name (count)", `getAllGenres`, `getGenreSongsList`, `getRecentlyAdded` with its 100). **Last played · Most played** (2026-09-23): the webapp again — `webapp/index.html` (the side-nav entries "Recently Played" / "Most Played", `local-only`), `webapp/alpha/m.js` (`getRecentlyPlayed` / `getMostPlayed`: a "Get last [100] songs" box, then the rows as files — the title, else the file name, the artist under it — through the same `createMusicFileHtml` as Recently Added). The mobile app has neither list. |
-| **Server API** | `GET/POST /api/v1/db/artists` → `{artists: [name…]}`, the server's order (A–Z, case-insensitive) · `POST /api/v1/db/artists-albums {artist}` → `{albums: [{name, artist, year, album_art_file}]}` in the server's order — every album the artist is on, compilations and features included (V17), plus one **name-less bucket** for the artist's loose tracks · `GET/POST /api/v1/db/genres` → `{genres: [{name, track_count}]}` · `POST /api/v1/db/genre-songs {genre, limit?, offset?}` → tracks (everything when unpaged) · `POST /api/v1/db/recent/added {limit}` (required) → tracks newest first (`created_at DESC`), each carrying `created-at` · `POST /api/v1/db/album-songs {album, artist}` — `album: null` is the singles bucket (the webapp sends `album: null, artist: null`). All take `ignoreVPaths`; all answer through a federated peer's parent (the webapp's `peerReq` variants). **The play lists** (2026-09-23): `POST /api/v1/db/stats/recently-played {limit}` (required; `ignoreVPaths` optional) → tracks by `last_played DESC` · `POST /api/v1/db/stats/most-played {limit}` → tracks by `play_count DESC` where `play_count > 0`; both read the signed-in user's own `user_metadata`, render like every listing, and answer `[]` for a caller with no user (a federation key, a guest). A play is what the server has counted — the webapp's play sessions (`/api/v1/stats/plays`, 6.27) or the legacy 30-second scrobble; this player reports neither yet. |
+| **Server API** | `GET/POST /api/v1/db/artists` → `{artists: [name…]}`, the server's order (A–Z, case-insensitive) · `POST /api/v1/db/artists-albums {artist}` → `{albums: [{name, artist, year, album_art_file}]}` in the server's order — every album the artist is on, compilations and features included (V17), plus one **name-less bucket** for the artist's loose tracks · `GET/POST /api/v1/db/genres` → `{genres: [{name, track_count}]}` — since mStream #716 (2026-10-28) `{source?}` in (`tag` · `model`, absent for both) and `sources: {tag, model}` out, the genre count of each kind · `POST /api/v1/db/genre-songs {genre, source?, limit?, offset?}` → tracks (everything when unpaged; `source` keeps the songs linked from that kind) · `POST /api/v1/db/recent/added {limit}` (required) → tracks newest first (`created_at DESC`), each carrying `created-at` · `POST /api/v1/db/album-songs {album, artist}` — `album: null` is the singles bucket (the webapp sends `album: null, artist: null`). All take `ignoreVPaths`; all answer through a federated peer's parent (the webapp's `peerReq` variants). **The play lists** (2026-09-23): `POST /api/v1/db/stats/recently-played {limit}` (required; `ignoreVPaths` optional) → tracks by `last_played DESC` · `POST /api/v1/db/stats/most-played {limit}` → tracks by `play_count DESC` where `play_count > 0`; both read the signed-in user's own `user_metadata`, render like every listing, and answer `[]` for a caller with no user (a federation key, a guest). A play is what the server has counted — the webapp's play sessions (`/api/v1/stats/plays`, 6.27) or the legacy 30-second scrobble; this player reports neither yet. |
 | **Already in this repo** | `LibraryNode::{Artists, Artist, Genres, Genre, Recent}` and `load_library` (`src/tui/worker.rs`, `RECENT_LIMIT = 100`); `entries_from_library` (`src/tui/app/entries.rs`: an artist row is its name, an album row `album_label` "Artist — Name (year)", a genre row `genre_label` "Name (count)", a track row `display_name`); the Library pane (`App.library`) with its `Drill` stack and the pane's **trail** — Back restores the parent listing and its cursor from the trail without asking again; `open_library_node`; the TUI's Library tab, which walks all five nodes today; the GUI's album wall (`src/gui/albums.rs`: cells, pages, per-slot covers, the drilled album's track list through `draw_pane_rows`) with `App.albums` as its cache; the browse top bar (docs/ux-contracts/browser-top-bar.md); the GUI nav rows Artists · Genres · Recent, placeholders that say the browse slice is coming. |
 | **Target surface** | the GUI player — three left-nav rooms (digits 3, 4, 5) over the shared App's Library pane; the artist's albums as the wall; the TUI changes nothing. **2026-09-23**: Last played and Most played as two more rows of the LIBRARY group over the same pane — no digit (the digits end at 9), the pointer's rooms; the TUI's Library root menu gains the two nodes |
 | **Status** | contract extracted 2026-09-21 and **implemented the same day** in the GUI (`src/gui/library.rs`, the wall generalized in `src/gui/albums.rs`, the kit's `letter_strip`); **checked on the rig the same day** (`smoke/gui/scenario_library.py`: the artists list, Boukmanflow's wall with its Singles card, an album with the artist as Back, Esc up twice, chillhop's five tracks under the verbs, Recent's hundred). **2026-09-23**: Last played and Most played added (clauses 21–24), Recent's grammar over the same pane; the rig run opens both |
@@ -148,6 +148,33 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     docs/ux-contracts/play-reporting.md), so what is played here counts
     here too.
 
+### The genre source (2026-10-28)
+
+25. **Two kinds of genre** (mStream #716): a song is linked to a genre by
+    its own tags, or by the discovery model's prediction. The server says
+    how many genres of each kind it has (`sources`), and the Genres list
+    shows one kind at a time, or both together.
+26. **The kind is remembered** in `[gui] genre_source` — tags until one is
+    chosen — and the room opens on it. A kind with no genres on this server
+    gives way to the other (an untagged library lists its generated
+    genres); a server that predates the filter lists every genre, as
+    before.
+27. **The switch**: `Tags · Generated · Both` sits at the controls line's
+    right, where a list of tracks wears its verbs — a list of genres has
+    none — and the filter leads the line as in every room. The kind on
+    screen is in the ok colour, the others dim, each a click (a pointer
+    control, as the strip is). Choosing asks
+    for the list again in place — no new level, so Back climbs where it did
+    — and keeps the choice; the kind already up asks nothing. Drawn only
+    while the server has both kinds, never over a genre's songs, and not
+    while the filter's field holds the line.
+28. **A genre's songs follow its list**: opened from the generated list, a
+    genre lists the songs the model linked to it — never one that carries
+    it only in its tags — and the other way round; from Both, or from a
+    server without the filter, every song.
+29. **The TUI keeps every genre**: its Library menu lists both kinds
+    together, as it always did, and has no switch.
+
 ## Wording
 
 | String | Key |
@@ -159,6 +186,8 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 | Nothing here yet | `gui.lib.empty` — the record's `browserEmptyList` |
 | Singles | `gui.lib.singles` — the record's literal `SINGLES`, in a word |
 | Jump to %{letter} (the strip's tip) | `gui.lib.jump_tip` |
+| Tags · Generated · Both | `gui.lib.genre_tags` · `gui.lib.genre_generated` · `gui.lib.genre_both` — the phone's `genreSourceTags` · `genreSourceGenerated` · `genreSourceBoth`, the same words in every locale |
+| Genre source (the switch's tip) | `gui.lib.genre_source_tip` — the phone's `genreSourceLabel` |
 
 ## Out of scope here
 
@@ -184,6 +213,7 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 | `getSubText` (the artist under a title) | The track row's `display_name` already reads "Artist - Title"; no second line |
 | The singles bucket | `album_songs` grows an `Option<&str>` album so a name-less album asks with an empty `album` (`""` — the server reads it as the webapp's `null`) |
 | Loading / empty | `busy.listing` / `gui.lib.empty` |
+| The phone's Tags · Generated · Both `SegmentedButton` before search (mstream_music #211) | Three toggle words right-aligned on the controls line where a track list's verbs go, the Search room's chip grammar (the lit one in the ok colour); the filter keeps the line's lead. `LibraryNode::Genres(GenreSource)` and `Genre(name, GenreSource)` carry the kind, so a list of the other kind landing late is dropped by the drill's stale-reply rule; `App.genre_list` keeps the kind it was asked with beside the list, and `load_genres` makes the fall back to the other kind one round trip more |
 
 ### What the tests pin
 
@@ -197,7 +227,12 @@ the strip appears at 25 rows and not at 24, dims absent letters, jumps
 the list, snaps from a dim letter, follows the filter, and is absent on
 Recent; the bar's verbs are absent on artists and genres and present on
 tracks. The play lists ask with the limit, draw track rows with the verbs
-and no strip, and hide for a peer.
+and no strip, and hide for a peer. The genre source: the switch sits at the
+controls line's right with the filter leading it, and lights the kind on
+screen; a choice asks again in place, is remembered, rides into a genre's
+songs, and comes back with the room; one kind, a server without the filter,
+a genre's songs and an open filter draw no switch; a reply of the kind left
+behind is dropped.
 
 ## Deviations log
 
@@ -279,3 +314,9 @@ and no strip, and hide for a peer.
   nothing shared. Discover hides for a peer as the play lists do (clause
   23's reason: a guest has no history there), and is the thirteenth room —
   last in `NAV`, no digit, `G`.
+- **2026-10-28 — The genre source** (clauses 25–29; mStream #716,
+  mstream_music #211). The switch is right-aligned on the controls line
+  (the user's call), where a track list's verbs go — a list of genres
+  never has any — and the filter keeps the line's lead, as in every room.
+  The list is asked for with `POST /db/genres` and the kind in the body,
+  where it was a GET: a peer's proxy forwards a body but no query string.

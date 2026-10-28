@@ -10,7 +10,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
-use crate::kit::theme::legacy_conhost;
+use crate::api::types::GenreSource;
+use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, STRIP_MIN_ROWS, dim, letter_index, letter_strip, scroll_list};
 use crate::tui::app::{Action, App, Entry, Tab};
 use crate::tui::worker::LibraryNode;
@@ -39,7 +40,8 @@ impl LibraryUi {
 pub(crate) fn root_of(active: usize) -> Option<LibraryNode> {
     match active {
         ARTISTS_NAV => Some(LibraryNode::Artists),
-        GENRES_NAV => Some(LibraryNode::Genres),
+        // The kind is the remembered one, which [`open`] puts in.
+        GENRES_NAV => Some(LibraryNode::Genres(GenreSource::default())),
         RECENT_NAV => Some(LibraryNode::Recent),
         LAST_PLAYED_NAV => Some(LibraryNode::RecentlyPlayed),
         MOST_PLAYED_NAV => Some(LibraryNode::MostPlayed),
@@ -59,8 +61,27 @@ pub(crate) fn open(gui: &mut Gui, root: LibraryNode) {
     // Fresh, and with the cursor stowed (the kit's list-cursor law).
     gui.library.view.stow();
     gui.library.wall = WallState::default();
+    // The Genres room opens on the kind it was left on (clause 26).
+    let root = match root {
+        LibraryNode::Genres(_) => LibraryNode::Genres(remembered_source(gui)),
+        other => other,
+    };
     let effects = gui.app.open_library_node(root, true);
     gui.pend(effects);
+}
+
+/// The kind `[gui] genre_source` keeps — tags when it keeps none.
+fn remembered_source(gui: &Gui) -> GenreSource {
+    GenreSource::from_name(gui.config.gui.genre_source.as_deref())
+}
+
+/// The kind the Genres switch lights, when the switch is offered: the
+/// list's own — the other one, when the asked kind had none — or, while a
+/// list of another kind is on its way, the kind asked for (clause 27).
+fn switch_on(gui: &Gui) -> Option<GenreSource> {
+    let LibraryNode::Genres(asked) = *gui.app.library_stack.here() else { return None };
+    let (kept, list) = gui.app.genre_list.as_ref()?;
+    list.offers_choice().then_some(if *kept == asked { list.shown } else { asked })
 }
 
 /// Whether the drill stands on a wall or inside an album — the views the
@@ -73,7 +94,7 @@ fn wall_view(gui: &Gui) -> bool {
 fn at_root(gui: &Gui) -> bool {
     matches!(
         gui.app.library_stack.here(),
-        LibraryNode::Artists | LibraryNode::Genres | LibraryNode::Recent | LibraryNode::RecentlyPlayed | LibraryNode::MostPlayed
+        LibraryNode::Artists | LibraryNode::Genres(_) | LibraryNode::Recent | LibraryNode::RecentlyPlayed | LibraryNode::MostPlayed
     )
 }
 
@@ -106,7 +127,7 @@ pub(super) fn keep_off_parent(gui: &mut Gui) {
 /// is newest first and a track list is an album's or a genre's order
 /// (clauses 10 and 12).
 fn alphabetical(gui: &Gui) -> bool {
-    matches!(gui.app.library_stack.here(), LibraryNode::Artists | LibraryNode::Genres)
+    matches!(gui.app.library_stack.here(), LibraryNode::Artists | LibraryNode::Genres(_))
 }
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
@@ -136,7 +157,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 fn draw_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
     let node = gui.app.library_stack.here().clone();
     match node {
-        LibraryNode::Genre(genre) => {
+        LibraryNode::Genre(genre, _) => {
             let (back_glyph, forward) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
             let back_label = format!("{back_glyph} {}", t!("gui.nav.genres"));
             let back =
@@ -163,12 +184,56 @@ fn draw_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
     }
 }
 
+/// The Genres list's Tags · Generated · Both (clauses 25–29), right-aligned
+/// on the controls line where a list of tracks wears its verbs — a list of
+/// genres has none: the kind on screen in the ok colour, the others dim,
+/// each a click. Only while the server has both kinds, and not while the
+/// filter's field holds the line (the bar contract, clause 20).
+fn draw_genre_switch(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
+    let Some(on) = switch_on(gui).filter(|_| !gui.app.filtering) else { return };
+    let sep = " · ";
+    let sep_width = crate::kit::width(sep) as u16;
+    let labels = GenreSource::ALL.map(source_label);
+    let width = labels.iter().map(|label| crate::kit::width(label) as u16).sum::<u16>()
+        + sep_width * (labels.len() as u16 - 1);
+    // The verbs' right edge: a cell in from the count's.
+    let mut x = content.right().saturating_sub(width + 1);
+    for (i, (source, label)) in GenreSource::ALL.into_iter().zip(&labels).enumerate() {
+        if i > 0 {
+            put(frame, x, y, sep, dim());
+            x += sep_width;
+        }
+        let rect = Rect { x, y, width: crate::kit::width(label) as u16, height: 1 };
+        let style = if gui.ui.hovers(rect) {
+            bright_bold()
+        } else if source == on {
+            Style::default().fg(th().ok).add_modifier(Modifier::BOLD)
+        } else {
+            dim()
+        };
+        put(frame, x, y, label, style);
+        gui.ui.click(rect, Act::GenreSource(source));
+        gui.ui.tip(rect, t!("gui.lib.genre_source_tip").to_string());
+        x += rect.width;
+    }
+}
+
+fn source_label(source: GenreSource) -> std::borrow::Cow<'static, str> {
+    match source {
+        GenreSource::Tag => t!("gui.lib.genre_tags"),
+        GenreSource::Model => t!("gui.lib.genre_generated"),
+        GenreSource::Both => t!("gui.lib.genre_both"),
+    }
+}
+
 fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let count_x = draw_heading(frame, gui, content);
     let count = super::bar_count(gui, t!("gui.files.items", count = gui.app.library.counts().1).to_string());
     let x = content.right().saturating_sub(count.chars().count() as u16).max(count_x);
     put(frame, x, content.y, &count, dim());
     super::draw_bar_controls(frame, gui, content, content.y + 1);
+    // The Genres switch at the controls line's right (clause 27).
+    draw_genre_switch(frame, gui, content, content.y + 1);
 
     if gui.app.library.loading {
         put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
@@ -259,9 +324,29 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             // The parent comes back with its cursor (clause 6): in view.
             gui.library.view.reveal = true;
         }
+        Act::GenreSource(source) => switch_source(gui, *source),
         _ => return false,
     }
     true
+}
+
+/// A kind chosen on the Genres switch (clause 27): kept in `[gui]
+/// genre_source`, and the list asked again in place — the kind already on
+/// screen asks nothing.
+fn switch_source(gui: &mut Gui, source: GenreSource) {
+    if gui.config.gui.genre_source.as_deref() != Some(source.as_str()) {
+        gui.config.gui.genre_source = Some(source.as_str().to_string());
+        gui.save_now();
+    }
+    if switch_on(gui).is_none_or(|on| on == source) {
+        return;
+    }
+    gui.library.view.scroll = 0;
+    gui.library.view.reveal = false;
+    gui.library.view.stow();
+    gui.app.tab = Tab::Library;
+    let effects = gui.app.switch_genre_source(source);
+    gui.pend(effects);
 }
 
 /// The rooms' keys: the wall's and the drilled album's are the Albums
@@ -336,7 +421,7 @@ mod tests {
     use ratatui::layout::Position;
 
     use super::super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RECENT_NAV, RowVerb, render};
-    use crate::api::types::{Album, Genre, Track};
+    use crate::api::types::{Album, Genre, GenreList, GenreSource, GenreSources, Track};
     use crate::config::Config;
     use crate::tui::app::{App, Effect, Tab};
     use crate::tui::worker::{ApiCmd, Event, LibraryData, LibraryNode};
@@ -424,7 +509,7 @@ mod tests {
         gui.act(Act::PaneRow(List::Library, 1, RowVerb::Open));
         assert!(asked(&gui, &LibraryNode::Artist("Bassnectar".into())));
         gui.act(Act::Nav(GENRES_NAV));
-        assert!(asked(&gui, &LibraryNode::Genres));
+        assert!(asked(&gui, &LibraryNode::Genres(GenreSource::Tag)), "tags, with no kind remembered");
         gui.act(Act::Nav(RECENT_NAV));
         assert!(asked(&gui, &LibraryNode::Recent), "Recent asks on every visit");
         gui.pending.clear();
@@ -446,19 +531,23 @@ mod tests {
         gui.pending.clear();
         land(
             &mut gui,
-            LibraryNode::Genres,
-            LibraryData::Genres(vec![
-                Genre { name: "Ambient".into(), track_count: Some(4) },
-                Genre { name: "Techno".into(), track_count: Some(9) },
-            ]),
+            LibraryNode::Genres(GenreSource::Tag),
+            LibraryData::Genres(GenreList {
+                genres: vec![
+                    Genre { name: "Ambient".into(), track_count: Some(4) },
+                    Genre { name: "Techno".into(), track_count: Some(9) },
+                ],
+                ..GenreList::default()
+            }),
         );
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("Ambient (4)") && all.contains("Techno (9)"), "{all}");
         assert_eq!(hit_text(&gui, &rows, "Techno"), Some(Act::PaneRow(List::Library, 2, RowVerb::Open)));
         gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));
-        assert!(asked(&gui, &LibraryNode::Genre("Techno".into())), "a genre opens into its tracks");
-        land(&mut gui, LibraryNode::Genre("Techno".into()), LibraryData::Tracks(vec![track("t/a.mp3", 61.0), track("t/b.mp3", 125.0)]));
+        let techno = LibraryNode::Genre("Techno".into(), GenreSource::Both);
+        assert!(asked(&gui, &techno), "a genre opens into its tracks — all of them, from a server without the filter");
+        land(&mut gui, techno, LibraryData::Tracks(vec![track("t/a.mp3", 61.0), track("t/b.mp3", 125.0)]));
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("◂ Genres") && all.contains("▸ Techno"), "{all}");
@@ -466,9 +555,124 @@ mod tests {
         assert!(all.contains("▸ play"), "tracks carry the bar's verbs: {all}");
         assert_eq!(hit_text(&gui, &rows, "◂ Genres"), Some(Act::LibBack));
         key(&mut gui, KeyCode::Char('h'));
-        assert!(matches!(gui.app.library_stack.here(), LibraryNode::Genres), "Back climbs to the genres");
+        assert!(matches!(gui.app.library_stack.here(), LibraryNode::Genres(_)), "Back climbs to the genres");
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("Ambient (4)"), "the parent comes back from the trail: {all}");
+    }
+
+    /// The cell `needle` starts at on `row`.
+    fn col(row: &str, needle: &str) -> usize {
+        row.char_indices().position(|(i, _)| row[i..].starts_with(needle)).unwrap_or_else(|| panic!("{needle}: {row}"))
+    }
+
+    /// A Genres list of `shown`'s kind, from a server with both kinds.
+    fn genre_list(shown: GenreSource, names: &[(&str, u32)]) -> LibraryData {
+        LibraryData::Genres(GenreList {
+            genres: names.iter().map(|(name, n)| Genre { name: (*name).into(), track_count: Some(*n) }).collect(),
+            sources: Some(GenreSources { tag: 2, model: 3 }),
+            shown,
+        })
+    }
+
+    fn genres_gui() -> Gui {
+        let mut gui = session_gui();
+        gui.act(Act::Nav(GENRES_NAV));
+        assert!(asked(&gui, &LibraryNode::Genres(GenreSource::Tag)));
+        gui.pending.clear();
+        land(&mut gui, LibraryNode::Genres(GenreSource::Tag), genre_list(GenreSource::Tag, &[("ambient", 4), ("techno", 9)]));
+        gui
+    }
+
+    #[test]
+    fn the_genre_switch_sits_right_on_the_controls_line_and_the_filter_leads_it() {
+        let mut gui = genres_gui();
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        let y = rows.iter().position(|r| r.contains("Tags · Generated · Both")).unwrap_or_else(|| panic!("{all}"));
+        let (heading, line) = (&rows[y - 1], &rows[y]);
+        assert_eq!(col(line, "/ filter"), col(heading, "Genres"), "the filter leads the line, under the heading: {all}");
+        assert_eq!(
+            col(line, "Both") + "Both".len() + 1,
+            col(heading, "items") + "items".len(),
+            "the switch ends where the bar's verbs do, a cell in from the count: {all}"
+        );
+        assert_eq!(hit_text(&gui, &rows, "Generated"), Some(Act::GenreSource(GenreSource::Model)));
+        assert_eq!(hit_text(&gui, &rows, "/ filter"), Some(Act::BarFilter), "the filter still opens");
+        assert_eq!(super::switch_on(&gui), Some(GenreSource::Tag), "the kind on screen is lit");
+
+        // The filter's field takes the whole line while it is open.
+        gui.act(Act::BarFilter);
+        let all = draw(&mut gui).join("\n");
+        assert!(!all.contains("Generated"), "{all}");
+    }
+
+    #[test]
+    fn a_kind_chosen_relists_in_place_is_remembered_and_rides_into_a_genres_songs() {
+        let mut gui = genres_gui();
+        gui.act(Act::GenreSource(GenreSource::Model));
+        assert!(asked(&gui, &LibraryNode::Genres(GenreSource::Model)), "the list is asked again");
+        assert_eq!(gui.app.library_stack.here(), &LibraryNode::Genres(GenreSource::Model), "in place");
+        assert_eq!(gui.config.gui.genre_source.as_deref(), Some("model"), "remembered");
+        assert_eq!(super::switch_on(&gui), Some(GenreSource::Model), "lit while the list is out");
+        gui.pending.clear();
+        land(&mut gui, LibraryNode::Genres(GenreSource::Model), genre_list(GenreSource::Model, &[("Synthwave", 2)]));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("Synthwave (2)") && !all.contains("techno"), "{all}");
+
+        // A generated genre's songs are its generated songs; Back keeps the kind.
+        gui.act(Act::PaneRow(List::Library, 1, RowVerb::Open));
+        let synthwave = LibraryNode::Genre("Synthwave".into(), GenreSource::Model);
+        assert!(asked(&gui, &synthwave));
+        land(&mut gui, synthwave, LibraryData::Tracks(vec![track("s/a.mp3", 90.0)]));
+        let all = draw(&mut gui).join("\n");
+        assert!(!all.contains("Generated"), "no switch over a genre's songs: {all}");
+        key(&mut gui, KeyCode::Char('h'));
+        assert_eq!(gui.app.library_stack.here(), &LibraryNode::Genres(GenreSource::Model));
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("Synthwave (2)") && all.contains("Tags · Generated · Both"), "{all}");
+
+        // The kind already on screen asks nothing; the room comes back on
+        // the remembered kind, from the session's copy.
+        gui.pending.clear();
+        gui.act(Act::GenreSource(GenreSource::Model));
+        assert!(gui.pending.is_empty(), "{:?}", gui.pending);
+        gui.act(Act::Nav(super::super::RECENT_NAV));
+        gui.pending.clear();
+        gui.act(Act::Nav(GENRES_NAV));
+        assert_eq!(gui.app.library_stack.here(), &LibraryNode::Genres(GenreSource::Model));
+        assert!(!asked(&gui, &LibraryNode::Genres(GenreSource::Model)), "seated from the session's copy");
+    }
+
+    #[test]
+    fn one_kind_or_a_server_without_the_filter_draws_no_switch() {
+        // Only generated genres here: the tags asked for came back as the
+        // generated list, and there is nothing to choose between.
+        let mut gui = session_gui();
+        gui.act(Act::Nav(GENRES_NAV));
+        let only_model = GenreList {
+            genres: vec![Genre { name: "Dub".into(), track_count: Some(3) }],
+            sources: Some(GenreSources { tag: 0, model: 1 }),
+            shown: GenreSource::Model,
+        };
+        land(&mut gui, LibraryNode::Genres(GenreSource::Tag), LibraryData::Genres(only_model));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("Dub (3)") && !all.contains("Generated"), "{all}");
+        let y = rows.iter().position(|r| r.contains("/ filter")).unwrap_or_else(|| panic!("{all}"));
+        assert_eq!(col(&rows[y], "/ filter"), col(&rows[y - 1], "Genres"), "the filter leads: {all}");
+        gui.act(Act::PaneRow(List::Library, 1, RowVerb::Open));
+        assert!(asked(&gui, &LibraryNode::Genre("Dub".into(), GenreSource::Model)), "the songs follow the list's kind");
+
+        // A server that predates the filter: every genre, every song.
+        let mut gui = session_gui();
+        gui.act(Act::Nav(GENRES_NAV));
+        let old = GenreList { genres: vec![Genre { name: "Dub".into(), track_count: Some(3) }], sources: None, shown: GenreSource::Both };
+        land(&mut gui, LibraryNode::Genres(GenreSource::Tag), LibraryData::Genres(old));
+        let all = draw(&mut gui).join("\n");
+        assert!(!all.contains("Generated"), "{all}");
+        gui.act(Act::PaneRow(List::Library, 1, RowVerb::Open));
+        assert!(asked(&gui, &LibraryNode::Genre("Dub".into(), GenreSource::Both)));
     }
 
     #[test]
@@ -621,9 +825,10 @@ mod tests {
         key(&mut gui, KeyCode::Esc);
         gui.act(Act::Nav(GENRES_NAV));
         gui.pending.clear();
-        land(&mut gui, LibraryNode::Genres, LibraryData::Genres(vec![Genre { name: "Ambient".into(), track_count: Some(1) }]));
+        let one = GenreList { genres: vec![Genre { name: "Ambient".into(), track_count: Some(1) }], ..GenreList::default() };
+        land(&mut gui, LibraryNode::Genres(GenreSource::Tag), LibraryData::Genres(one));
         gui.act(Act::PaneRow(List::Library, 1, RowVerb::Open));
-        land(&mut gui, LibraryNode::Genre("Ambient".into()), LibraryData::Tracks(vec![track("t/a.mp3", 61.0)]));
+        land(&mut gui, LibraryNode::Genre("Ambient".into(), GenreSource::Both), LibraryData::Tracks(vec![track("t/a.mp3", 61.0)]));
         let rows = draw(&mut gui);
         assert_eq!(hit_text(&gui, &rows, ".."), Some(Act::PaneRow(List::Library, 0, RowVerb::Open)));
         assert_eq!(hit_text(&gui, &rows, "a.mp3"), Some(Act::PaneRow(List::Library, 1, RowVerb::Open)));

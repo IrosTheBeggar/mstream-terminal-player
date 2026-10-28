@@ -1494,6 +1494,10 @@ gui:
     empty: "这里还没有内容"
     singles: "单曲"
     jump_tip: "跳到 %{letter}"
+    genre_tags: "标签"
+    genre_generated: "自动生成"
+    genre_both: "全部"
+    genre_source_tip: "流派来源"
   act:
     play_now: "立即播放"
     add_next: "添加为下一首"

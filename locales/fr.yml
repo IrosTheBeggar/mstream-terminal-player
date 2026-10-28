@@ -1494,6 +1494,10 @@ gui:
     empty: "Rien ici pour l'instant"
     singles: "Singles"
     jump_tip: "Aller à %{letter}"
+    genre_tags: "Tags"
+    genre_generated: "Générés"
+    genre_both: "Les deux"
+    genre_source_tip: "Origine des genres"
   act:
     play_now: "Lire maintenant"
     add_next: "Ajouter à la suite"

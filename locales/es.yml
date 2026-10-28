@@ -1494,6 +1494,10 @@ gui:
     empty: "Aún no hay nada aquí"
     singles: "Sencillos"
     jump_tip: "Ir a %{letter}"
+    genre_tags: "Etiquetas"
+    genre_generated: "Generados"
+    genre_both: "Ambos"
+    genre_source_tip: "Origen de los géneros"
   act:
     play_now: "Reproducir ahora"
     add_next: "Añadir a continuación"
