@@ -308,7 +308,7 @@ pub(crate) enum Act {
     // ── Add from YouTube (see gui::ytdl) ────────────────────────────────
     /// The room's controls, its list's, its sheets' and its windows'.
     Yt(ytdl::YtAct),
-    /// A connected server's header line's key word, "c keep a copy", or
+    /// A connected server's header line's word, "keep a copy", or
     /// the page's copy state standing in its place: `c` with the cursor
     /// stowed (keep-a-copy spec §4.1).
     KeepWord,

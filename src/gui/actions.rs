@@ -530,6 +530,8 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             (false, true, _) => bright_bold(),
             (false, false, SheetAction::Remove) => Style::default().fg(th().danger),
             (false, false, _) if open_list => accent().add_modifier(Modifier::BOLD),
+            // Keep a copy stands out in the accent, its key unnamed.
+            (false, false, SheetAction::KeepCopy) => accent(),
             (false, false, _) => Style::default(),
         };
         let label = action.label();
@@ -538,12 +540,6 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // label (clause 140).
         if open_list {
             discover.links.anchor = Some((inner, y, inner.x + 1 + crate::kit::width(&label) as u16));
-        }
-        // Keep a copy's key, DIM after its label: `c` works from anywhere
-        // in the sheet.
-        if *action == SheetAction::KeepCopy {
-            let kx = inner.x + 1 + crate::kit::width(&label) as u16 + 2;
-            put(frame, kx, y, "c", if is_sel { sel() } else { dim() });
         }
         ui.click(rect, Act::SheetVerb(*action));
     }

@@ -8,7 +8,7 @@ Each leg writes a mark into the stream after each step has been drained
 marks are cut out and the stream is replayed at each (ratatui's diff
 renderer emits only changed cells, so stream-grep lies about anything that
 repaints in place). The frames are the spec's, cell for cell where it
-draws them: the header line's key word and its state in the same cells,
+draws them: the header line's word and its state in the same cells,
 the album page's credit, the window's folder, song, album and artist
 focus, the Into a folder chooser, the queue item's sheet row, the copy
 states on the header, the rows, the cards and the Copies list.
@@ -124,8 +124,8 @@ def rows_of(text):
 if leg == "files":
     # §4.5 / M4: the word 3 cells after the crumb, "read-only" alone, the
     # count right-aligned; no "playlists and ratings" anywhere.
-    need("word", header("word") == " ▸ Files       │ ◂ Files ▸ peerlib/Boukmanflow · read-only   c keep a copy                3 items",
-         "the Files crumb's key word")
+    need("word", header("word") == " ▸ Files       │ ◂ Files ▸ peerlib/Boukmanflow · read-only   keep a copy                  3 items",
+         "the Files crumb's word")
     need("word", all(frame("word")[y][17:19] == "  " for y in (6, 7, 8)), "folder rows unmarked")
     need("word", not any("playlists and ratings" in l for l in frame("word")), "the cut clause drawn")
     # M5: the open folder, As on Stage Peer B, counted by one recursive listing.
@@ -143,7 +143,7 @@ if leg == "files":
 │                                                 [ Add folder · 9 songs ] │
 ╰─╯
 """), "folder focus on the open folder (M5)")
-    need("mirror", "c keep a copy" not in header("mirror"), "the word drawn under the window")
+    need("mirror", "keep a copy" not in header("mirror"), "the word drawn under the window")
     live = window(frame("mirror-live"), "Keep a copy")
     need("mirror-live", any(l.startswith(" Copying") or l.startswith(" Waiting") for l in live), "the window follows the copy")
     need("mirror-live", " Into copies › Boukmanflow" in live, "its landing: the folder's own path (mirror)")
@@ -230,8 +230,8 @@ if leg == "files":
 else:
     # M1 with the credit (the user's 2026-10-27 call): "{album} — {credit}",
     # the word 3 cells after it, the count right-aligned.
-    need("word", header("word") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   c keep a copy                   3 items",
-         "the album page's credit and its key word")
+    need("word", header("word") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   keep a copy                     3 items",
+         "the album page's credit and its word")
     need("word", [l[17:].rstrip() for l in frame("word")[5:9]] == [
         "  ..", "  Boukmanflow - Rooftop Cypher                                           0:12",
         "  Boukmanflow - Late Train Verse                                         0:08",
@@ -257,20 +257,20 @@ else:
     same("song", window(frame("song"), "Keep a copy"), song, "the song window from a held row (§6.3)")
     # §4.1.4 at 47 cells: the count gives way, the way back shrinks to its
     # glyph; the title, the credit and the word stay.
-    need("narrow", frame("narrow")[2].startswith("   Files       │ ◂  Borrowed Tapes — Boukmanflow   c keep a copy  │ QUEUE"),
+    need("narrow", frame("narrow")[2].startswith("   Files       │ ◂  Borrowed Tapes — Boukmanflow   keep a copy    │ QUEUE"),
          "the 47-cell header line's give-way")
     need("queue-c", window(frame("queue-c"), "Keep a copy") == [], "`c` on the held queue row opened something")
     # §4.8: the queue item's sheet, Keep a copy… in Add to playlist's slot,
     # the badge row blank.
     sheet = frame("sheet")
     verbs = [l[17:].strip(" │") for l in sheet[8:22]]
-    verbs = [v for v in verbs if v in ("Play now", "Add next", "Add to end of queue", "Keep a copy…  c", "Song Info", "Remove from queue")]
-    need("sheet", verbs == ["Play now", "Add next", "Add to end of queue", "Keep a copy…  c", "Song Info", "Remove from queue"],
+    verbs = [v for v in verbs if v in ("Play now", "Add next", "Add to end of queue", "Keep a copy…", "Song Info", "Remove from queue")]
+    need("sheet", verbs == ["Play now", "Add next", "Add to end of queue", "Keep a copy…", "Song Info", "Remove from queue"],
          "the queue sheet's rows")
     need("sheet", not any("from Stage Peer B" in l for l in sheet[8:22]), "a badge on the queue sheet")
     need("sheet", "keep a copy" not in sheet[2], "the header word drawn under the sheet")
     same("queue-song", window(frame("queue-song"), "Keep a copy"), song, "the queue item's song window (§4.8, W10)")
-    need("folded", header("folded") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   c keep a copy                   3 items",
+    need("folded", header("folded") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   keep a copy                     3 items",
          "the word back once the row is stowed")
     # M2 / §6.2: album focus opened by the word.
     same("album", window(frame("album"), "Keep a copy"), rows_of("""
@@ -307,8 +307,8 @@ else:
     need("state", any(l.startswith(" c choose again") and l.endswith("[ Play your copy ]") for l in outcome), "its action row")
     # M3: the artist's wall, the word after the count; the kept card's year
     # line wears the tile word (§5.2).
-    need("wall", header("wall") == "   Files       │ ◂ Artists ▸ Boukmanflow  4 albums   c keep a copy                       ◂ 1/1 ▸",
-         "the artist's wall's key word (M3)")
+    need("wall", header("wall") == "   Files       │ ◂ Artists ▸ Boukmanflow  4 albums   keep a copy                         ◂ 1/1 ▸",
+         "the artist's wall's word (M3)")
     cards = frame("wall")[11][17:]
     years = frame("wall")[12][17:]
     at = cards.find("Borrowed Ta…")
