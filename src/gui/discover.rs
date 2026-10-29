@@ -2139,7 +2139,7 @@ fn tile_verb_words(gui: &Gui, verb: TileVerb, album: usize) -> (String, Option<&
     match verb {
         TileVerb::Play => (t!("gui.discover.tile_play").to_string(), None),
         TileVerb::Queue => (t!("gui.discover.tile_queue").to_string(), Some("a")),
-        TileVerb::Keep => (super::keep::ell(&t!("gui.act.keep_copy")), Some("c")),
+        TileVerb::Keep => (super::keep::ell(&t!("gui.act.keep_copy")), None),
         TileVerb::OpenOn(_) => {
             let server = gui.app.taste.peer_albums().get(album).map(|a| a.server.clone()).unwrap_or_default();
             (t!("gui.discover.tile_open_on", server = server).to_string(), None)
@@ -2194,6 +2194,8 @@ fn draw_tile_list(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let style = match (on, hover) {
             (true, _) => sel().add_modifier(Modifier::BOLD),
             (false, true) => bright_bold(),
+            // Keep a copy stands out in the accent, its key unnamed.
+            (false, false) if *verb == TileVerb::Keep => accent(),
             (false, false) => Style::default(),
         };
         let label = super::bar::clip(&label, usize::from(inner.width.saturating_sub(2))).into_owned();

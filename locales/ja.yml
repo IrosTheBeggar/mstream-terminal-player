@@ -1791,6 +1791,7 @@ gui:
       key_cancel: "x コピーを中止"
       key_cancel_other: "x そのコピーを中止"
       key_keep: "c コピーを保存"
+      keep_word: "コピーを保存"
       esc_close: "Esc 閉じる"
       esc_close_going: "Esc 閉じる · コピーは続きます"
       tip_play: "コピーを再生"

@@ -106,14 +106,14 @@ room against the taste route, is described in run.sh):
   federation-browse.js — the exact allowlist screened, 403 off it, the
   method and the JSON body passed through). `seed_peer_home` writes a HOME
   whose player opens on the peer at `peerlib/Boukmanflow`. The Files leg
-  (`gui-peer-files`) keeps the open folder by the header's key word (As on
+  (`gui-peer-files`) keeps the open folder by the header's word (As on
   Stage Peer B: no landing on the wire), a held folder row Into a folder…
   through the chooser (the field emptied, "From Sam/Borrowed Tapes"
   typed, Esc keeping it: `landing: {vpath, path}`), another By your layout
   (`{tags: true}`, its tags read once), opens Copies outside Discover and
   waits for "✓ kept" on the header and the rows. The album leg
   (`gui-peer-album`) reads the album page's credit and its word, keeps a
-  held row, the queue item through its sheet's "Keep a copy…  c" (`c` on
+  held row, the queue item through its sheet's "Keep a copy…" (`c` on
   the held queue row does nothing), the album by its word (`scope: album`
   with the page's credit), clicks the "✓ kept" state for its outcome, and
   opens the artist's focus on his wall. `check_peer.py` replays each

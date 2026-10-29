@@ -1791,6 +1791,7 @@ gui:
       key_cancel: "x 取消复制"
       key_cancel_other: "x 取消那项复制"
       key_keep: "c 保留副本"
+      keep_word: "保留副本"
       esc_close: "Esc 关闭"
       esc_close_going: "Esc 关闭 · 复制会继续"
       tip_play: "播放你的副本"

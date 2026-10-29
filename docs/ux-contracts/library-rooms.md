@@ -136,7 +136,7 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     segments), so the Artists, Genres and Recent headings never run under
     the queue panel and the folder you are in stays on screen. The album
     page, an artist's wall and a Files folder below the library's top also
-    carry Keep a copy's key word or its copy state there; the album page
+    carry Keep a copy's word or its copy state there; the album page
     names its credit, "{album} — {credit}" (docs/ux-contracts/
     discovery-page.md, clauses 153–156).
 

@@ -1791,6 +1791,7 @@ gui:
       key_cancel: "x cancelar la copia"
       key_cancel_other: "x cancelar esa copia"
       key_keep: "c guardar una copia"
+      keep_word: "guardar una copia"
       esc_close: "Esc cerrar"
       esc_close_going: "Esc cerrar · la copia sigue"
       tip_play: "reproducir tu copia"

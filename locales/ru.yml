@@ -1791,6 +1791,7 @@ gui:
       key_cancel: "x отменить копию"
       key_cancel_other: "x отменить ту копию"
       key_keep: "c сохранить копию"
+      keep_word: "сохранить копию"
       esc_close: "Esc закрыть"
       esc_close_going: "Esc закрыть · копия продолжится"
       tip_play: "слушать вашу копию"

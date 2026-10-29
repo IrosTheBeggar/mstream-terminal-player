@@ -1791,6 +1791,7 @@ gui:
       key_cancel: "x anuluj kopię"
       key_cancel_other: "x anuluj tamtą kopię"
       key_keep: "c zachowaj kopię"
+      keep_word: "zachowaj kopię"
       esc_close: "Esc zamknij"
       esc_close_going: "Esc zamknij · kopia trwa dalej"
       tip_play: "odtwórz swoją kopię"

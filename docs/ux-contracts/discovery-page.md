@@ -797,7 +797,8 @@ three other Boukmanflow albums, the destination `copies` with
      Context list): an ACCENT `frame_at`, `Clear` beneath,
      overlay-registered, no title, no `[X]`, 24 cells wide, kept inside
      the room — with **Play album** (Enter or a click on the tile does the
-     same), **Queue album  a**, **Keep a copy…  c** (album focus) and
+     same), **Queue album  a**, **Keep a copy…** (album focus; in the
+     ACCENT, naming no key) and
      **Open on {server}** (the album as that server holds it: the session
      moves to that connected server — its saved entry, Settings › Servers'
      own switch — the Albums room opens, and the album opens there once
@@ -2078,14 +2079,15 @@ screen names a choice, a place, a state or an action needed right there**
 
 **Ways in**
 
-153. **The header key word** "c keep a copy" (`gui.discover.keep.key_keep`)
+153. **The header word** "keep a copy" (`gui.discover.keep.keep_word`)
      stands on the header line of a connected server's page about one
      thing — an **album page**, an **artist's wall**, a **Files folder
      below the library's top** — 3 cells after the line's left run (the
      album's name and credit, the wall's count, the crumb), the count or
-     the pager where it was. DIM, BRIGHT BOLD under the pointer, no
+     the pager where it was. In the ACCENT, its key unnamed (the user's
+     2026-10-28 call), BRIGHT BOLD under the pointer, no
      tooltip; a click is `c` with the cursor stowed. **Drawn only where
-     `c` stowed opens the page's window** (rule: a key word only where
+     `c` stowed opens the page's window** (rule: a key's word only where
      its key works): the gate open for the scope; the subject known —
      an album page's credit known and agreeing, not the Singles page; a
      wall whose listing names credits, theirs ≥ 1, not Various Artists;
@@ -2154,8 +2156,8 @@ screen names a choice, a place, a state or an action needed right there**
 158. **`C` opens the Copies list in every browse room** while your own
      server's gate is open (the user's 2026-10-27 call), on a connected
      server too; its poll runs at the quick beat while it is shown.
-159. **The track sheet's row** "Keep a copy…  c" (`gui.act.keep_copy`,
-     the DIM `c` two cells after, in Add to playlist's slot) stands on
+159. **The track sheet's row** "Keep a copy…" (`gui.act.keep_copy`,
+     in the ACCENT and naming no key, in Add to playlist's slot) stands on
      the sheet of every connected server's song — a browse row of a
      connected server, a queue row in any session, the bar's playing card
      (the user kept it there, on every screen that opens its sheet —
@@ -2448,7 +2450,8 @@ confirm).
 
 | String | Key |
 |---|---|
-| c keep a copy (the header's key word and the rooms' tips segment; each locale its own segment of `gui.tips.discover_sheet_keep`) | `gui.discover.keep.key_keep` |
+| c keep a copy (the rooms' tips segment; each locale its own segment of `gui.tips.discover_sheet_keep`) | `gui.discover.keep.key_keep` |
+| keep a copy (the header's word: the tips segment without its key) | `gui.discover.keep.keep_word` |
 | As on %{server} · Into a folder… · By your layout (folder focus's landings) | `gui.discover.keep.land_mirror` · `land_folder` · `land_tags` |
 | Add folder ("Add folder · 3 songs" composed in code with `songs_*`) | `gui.discover.keep.add_folder` |
 | %{count} song(s) · limit %{cap} (the cap's GOLD line; its "! " is code, the numbers grouped) | `gui.discover.keep.folder_cap_*` |
@@ -2457,7 +2460,7 @@ confirm).
 | folder (a folder copy's kind in the Copies list) | `gui.discover.copies.kind_folder` |
 | type a folder · ↑ ↓ rows · Esc close · ↑ ↓ folders · Enter open · Esc close (the chooser's field and list tips; its libraries row is `discover_dest_library`) | `gui.tips.keep_into_field` · `keep_into_list` |
 | read-only (reworded: each locale its words before " — "; "playlists and ratings stay on your own server" is drawn nowhere) | `gui.srv.read_only` |
-| Keep a copy…  c · from %{server} · Singles · the window's, the marks', the picker's and the notes' words (reused, unchanged) | `gui.act.keep_copy` · `from_server` · `gui.lib.singles` · `gui.discover.keep.*` · `mark.*` · `dest.*` · `note.*` |
+| Keep a copy… · from %{server} · Singles · the window's, the marks', the picker's and the notes' words (reused, unchanged) | `gui.act.keep_copy` · `from_server` · `gui.lib.singles` · `gui.discover.keep.*` · `mark.*` · `dest.*` · `note.*` |
 
 Data is never translated: titles, artists, album and server names.
 
@@ -3166,7 +3169,7 @@ folder (no `landing` sent), a held row Into a folder… through the chooser
 By your layout (`{tags: true}`, one tag batch of ≤ 100 songs), Copies
 outside Discover, "✓ kept" on the header and the rows; the album page's
 credit and word, a held row's song window, the 47-cell give-way, `c`
-inert on the held queue row and its sheet's "Keep a copy…  c" opening the
+inert on the held queue row and its sheet's "Keep a copy…" opening the
 window on the item's server, the album copy with the page's credit, its
 "copying…" and "✓ kept", the state's click opening its outcome, the
 artist's wall's word and its card's "✓ kept", artist focus ticked and
@@ -4385,3 +4388,14 @@ name one of Attic Band's and its primary counts them ("[ Add 1 album ]").
     Enter, the busy note naming the server only where the header does
     not, the Off window and the queue's tips (the window's own while it
     is up).
+- **2026-10-28 — The keep word without its key, in the accent** (the
+  user: "remove the 'c' label from all instances of the 'keep a copy'
+  button and make the text a different color so it stands out"). The
+  header's word reads "keep a copy" (`gui.discover.keep.keep_word`: each
+  locale's tips segment without its key) in the ACCENT, BRIGHT BOLD under
+  the pointer (clause 153); the track sheet's row and the tile's list
+  row read "Keep a copy…" in the ACCENT with no key after them (clauses
+  103, 159). `c` keeps everywhere it did, and the tips lines still name
+  it (clauses 119, 160). The word is 2 cells narrower, so the give-way
+  keeps more: at 80 cells a Files folder's " · read-only" now stands
+  beside a held row's blanked word.

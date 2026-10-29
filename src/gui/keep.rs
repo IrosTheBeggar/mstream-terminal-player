@@ -6167,9 +6167,9 @@ pub(crate) mod tests {
         assert_eq!(rows[8].chars().nth(17), Some('╭'), "{all}");
         assert_eq!(rows[21].chars().nth(17), Some('╰'), "{all}");
         let labels: Vec<String> = (14..20).map(|y| rows[y].chars().skip(19).take(30).collect::<String>().trim_end().to_string()).collect();
-        assert_eq!(labels, ["Play now", "Add next", "Add to end of queue", "Keep a copy…  c", "Song Info", "Open elsewhere…"]);
-        let c = Position { x: 33, y: 17 };
-        assert_eq!((buffer[(c.x, c.y)].symbol(), fg(&buffer, c)), ("c", th().dim), "the key DIM after the label");
+        assert_eq!(labels, ["Play now", "Add next", "Add to end of queue", "Keep a copy…", "Song Info", "Open elsewhere…"]);
+        assert_eq!(fg(&buffer, Position { x: 19, y: 17 }), th().accent, "the label in the accent");
+        assert_eq!(buffer[(33, 17)].symbol(), " ", "no key after the label");
         let badge = rows[12].chars().skip(19).collect::<String>();
         assert!(badge.starts_with("from Stage Peer B   • online"), "{badge}");
         assert_eq!(fg(&buffer, Position { x: 39, y: 12 }), th().ok, "the dot OK");
@@ -6204,7 +6204,7 @@ pub(crate) mod tests {
         // row under it, 24 wide, ACCENT, no title, no [X].
         assert_eq!(rows[13].chars().skip(16).take(24).collect::<String>(), "╭──────────────────────╮");
         let shown: Vec<String> = (14..17).map(|y| rows[y].chars().skip(16).take(24).collect()).collect();
-        assert_eq!(shown, ["│ Play album           │", "│ Queue album  a       │", "│ Keep a copy…  c      │"]);
+        assert_eq!(shown, ["│ Play album           │", "│ Queue album  a       │", "│ Keep a copy…         │"]);
         assert_eq!(rows[17].chars().skip(16).take(24).collect::<String>(), "╰──────────────────────╯", "no Open on: the server is not saved");
         assert_eq!(fg(&buffer, Position { x: 16, y: 13 }), th().accent);
         assert_eq!(fg(&buffer, Position { x: 31, y: 15 }), th().dim, "Queue album's key DIM");
@@ -11455,7 +11455,7 @@ pub(crate) mod tests {
             "╰──────────────────────────────╯   │",
         ].map(str::to_string), "{}", shown.join("\n"));
         let labels: Vec<String> = shown[6..12].iter().map(|r| r.chars().take(30).collect::<String>().trim_end().to_string()).collect();
-        assert_eq!(labels, ["│ Play now", "│ Add next", "│ Add to end of queue", "│ Keep a copy…  c", "│ Song Info", "│ Open elsewhere…"]);
+        assert_eq!(labels, ["│ Play now", "│ Add next", "│ Add to end of queue", "│ Keep a copy…", "│ Song Info", "│ Open elsewhere…"]);
         assert!(!rows.join("\n").contains("https") && !rows.join("\n").contains("Odd"));
         assert_eq!(fg(&buffer, Position { x: 49, y: 10 }), th().dim, "CANONICAL DIM");
         let slab: Vec<_> = (47..80).map(|x| bg(&buffer, Position { x, y: 11 })).collect();
@@ -11513,7 +11513,7 @@ pub(crate) mod tests {
         let shown = sheet_rows(&lines(&buffer));
         assert_eq!(shown[8..13], [
             "│ Add to end of queue         ╭──────────────────────────────╮   │",
-            "│ Keep a copy…  c             │ couldn't get links:          │   │",
+            "│ Keep a copy…                │ couldn't get links:          │   │",
             "│ Song Info                   │ the links plug-in timed out  │   │",
             "│ Open elsewhere…             │   Try again                  │   │",
             "│                             ╰──────────────────────────────╯   │",
@@ -11731,7 +11731,7 @@ pub(crate) mod tests {
         ]));
         assert_eq!(gui.app.taste.peer_row(0, 2).and_then(|(_, l)| l.title.as_deref()), Some("Fresh Song"));
         let all = draw(&mut gui, 100, 30).join("\n");
-        assert!(all.contains("from Stage Peer B") && all.contains("Keep a copy…  c") && all.contains("Open elsewhere…"), "{all}");
+        assert!(all.contains("from Stage Peer B") && all.contains("Keep a copy…") && all.contains("Open elsewhere…"), "{all}");
         // Open elsewhere asks for the sheet's song.
         gui.pending.clear();
         gui.act(Act::SheetVerb(super::super::actions::SheetAction::OpenElsewhere));

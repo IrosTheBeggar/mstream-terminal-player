@@ -6,7 +6,7 @@
 # panel folded (Tab), `2` opens the Albums wall, ↓ picks the cursor up on
 # Borrowed Tapes and Enter opens its page; Esc stows the hand the wall
 # handed down, and the header line names the album and its credit — the
-# card's, the user's 2026-10-27 call — then the key word (@@PA:word@@). ↓ ↓
+# card's, the user's 2026-10-27 call — then the word (@@PA:word@@). ↓ ↓
 # holds Late Train Verse (the word goes, @@PA:held@@); `a` queues it (it
 # tries to play, and the fake streams nothing: the queue keeps it) and `c`
 # keeps the held row: the song window, its choices appended as the facts
@@ -14,7 +14,7 @@
 # the header line giving way in its 47 cells with the word kept
 # (@@PA:narrow@@). A click on the queue's row and ↓ hold it: `c` there does
 # nothing (C beside it clears the queue, @@PA:queue-c@@); `m` opens its
-# sheet, "Keep a copy…  c" in Add to playlist's slot (@@PA:sheet@@), and
+# sheet, "Keep a copy…" in Add to playlist's slot (@@PA:sheet@@), and
 # `c` the song window on the track's own server (@@PA:queue-song@@) —
 # Enter starts the song copy. Esc, Tab folds the panel (@@PA:folded@@), `c`
 # keeps the album: album focus, Album chosen, Every album by its credit, the

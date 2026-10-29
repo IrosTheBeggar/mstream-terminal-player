@@ -3,7 +3,7 @@
 //! the shell's hosting of the Keep a copy window, the Copies list and the
 //! picker over every room — drawn, keyed, the room inert beneath, the poll
 //! watched from wherever they stand; the rooms' one `c` (§4.9) and `C`; the
-//! header line's key word "c keep a copy" and the copy state in its place,
+//! header line's word "keep a copy" in the accent and the copy state in its place,
 //! with the line's give-way (§4.1.4); the rows', cards' and folder rows'
 //! marks, asked of the App's per-page holder (§5.0); the tips line's keep
 //! segment. The window's insides are `keep`'s; every fact is the App's
@@ -19,12 +19,12 @@ use rust_i18n::t;
 
 use crate::api::types::{Album, JobMark, Track};
 use crate::kit::theme::legacy_conhost;
-use crate::kit::{dim, width};
+use crate::kit::width;
 use crate::tui::app::keep::{KeepTarget, KeepWatch, MarkAsk, MarksPage};
 use crate::tui::app::{App, Entry};
 use crate::tui::worker::LibraryNode;
 
-use super::{Act, DISCOVER_NAV, FILES_NAV, Gui, SEARCH_NAV, Screen, albums, bright_bold, keep, put};
+use super::{Act, DISCOVER_NAV, FILES_NAV, Gui, SEARCH_NAV, Screen, accent, albums, bright_bold, keep, put};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -302,7 +302,7 @@ fn held_keeps(gui: &mut Gui) -> bool {
 
 // ── The header word and the state in its place (spec §4.1, §5.1) ───────────
 
-/// What stands 3 cells after a header line's left run: the key word, or the
+/// What stands 3 cells after a header line's left run: the word, or the
 /// page's copy state in the tile words — a button (`live`) while the gate
 /// lets its press open the window, plain text once it does not.
 #[derive(Debug, Clone, PartialEq)]
@@ -347,16 +347,16 @@ pub(super) fn page_spot(gui: &mut Gui) -> PageSpot {
     let live = opens || (latched(gui) && page_target(gui).is_some());
     let (spot, word) = match gui.app.keep_page_state().filter(|mark| *mark != JobMark::Cancelled) {
         Some(mark) => (Some(Spot { text: keep::mark_word(mark), style: keep::mark_style(mark), live }), false),
-        None if live => (Some(Spot { text: t!("gui.discover.keep.key_keep").to_string(), style: dim(), live: true }), true),
+        None if live => (Some(Spot { text: t!("gui.discover.keep.keep_word").to_string(), style: accent(), live: true }), true),
         None => (None, false),
     };
     let hidden = gui.modal_open() || gui.servers.drop_open || (word && (held(gui).is_some() || keys_elsewhere(gui)));
     PageSpot { cells: spot_cells(spot.as_ref()), shown: spot.filter(|_| !hidden) }
 }
 
-/// The spot at (x, y): DIM (or its token), BRIGHT BOLD under the pointer
-/// while live; its cells a click that is `c` with the cursor stowed. No
-/// tooltip: a key word says itself.
+/// The spot at (x, y): the word in the ACCENT (a state in its token),
+/// BRIGHT BOLD under the pointer while live; its cells a click that is `c`
+/// with the cursor stowed. No tooltip: the word says itself.
 pub(super) fn draw_spot(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, spot: &Spot) {
     let rect = Rect { x, y, width: width(&spot.text) as u16, height: 1 };
     let hover = spot.live && gui.ui.hovers(rect);
@@ -1153,25 +1153,27 @@ mod tests {
         // word 3 cells after, the count right-aligned to x 96.
         assert_eq!(cells(&shown, 2, 17, 8), "◂ Albums");
         assert_eq!(cells(&shown, 2, 27, 28), "Borrowed Tapes — Boukmanflow");
-        assert_eq!(cells(&shown, 2, 55, 16), "   c keep a copy");
+        assert_eq!(cells(&shown, 2, 55, 14), "   keep a copy");
         assert_eq!(cells(&shown, 2, 90, 7), "3 items");
         assert!(cells(&shown, 2, 71, 19).trim().is_empty(), "{}", shown[2]);
-        // A click on its cells is `c` with the cursor stowed; DIM at rest.
+        // A click on its cells is `c` with the cursor stowed; the ACCENT at
+        // rest.
         let buf = buffer(&mut gui, 100, 30);
-        assert_eq!(buf[(58, 2)].fg, crate::kit::theme::th().dim);
+        assert_eq!(buf[(58, 2)].fg, crate::kit::theme::th().accent);
         assert_eq!(gui.ui.hit(Position { x: 58, y: 2 }), Some(Act::KeepWord));
-        assert_eq!(gui.ui.hit(Position { x: 70, y: 2 }), Some(Act::KeepWord));
+        assert_eq!(gui.ui.hit(Position { x: 68, y: 2 }), Some(Act::KeepWord));
+        assert_eq!(gui.ui.hit(Position { x: 69, y: 2 }), None);
         gui.act(Act::KeepWord);
         assert_eq!(focus(&gui), Some(KeepFocus::Album));
         assert_eq!(gui.app.keep_view().unwrap().choice, KeepChoice::Album);
         // The window over the room hides the word (rule 9), the name stays.
         let shown = draw(&mut gui);
-        assert!(shown[2].contains("Borrowed Tapes") && !shown[2].contains("c keep a copy"), "{}", shown[2]);
+        assert!(shown[2].contains("Borrowed Tapes") && !shown[2].contains("keep a copy"), "{}", shown[2]);
         assert!(shown.iter().any(|r| r.contains("╭─ Keep a copy ")), "the window, at the shell's level:\n{}", shown.join("\n"));
         // Its keys are the window's: Esc closes it, the word returns.
         key(&mut gui, KeyCode::Esc);
         assert!(gui.app.keep.flow.is_none());
-        assert!(draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(draw(&mut gui)[2].contains("keep a copy"));
     }
 
     #[test]
@@ -1184,7 +1186,7 @@ mod tests {
         assert!(gui.app.album_credit_resolving(), "step 3 asked of the peer");
         let shown = draw(&mut gui);
         assert_eq!(cells(&shown, 2, 17, 25), "◂ Albums  Borrowed Tapes ");
-        assert!(!shown[2].contains('—') && !shown[2].contains("c keep a copy"), "{}", shown[2]);
+        assert!(!shown[2].contains('—') && !shown[2].contains("keep a copy"), "{}", shown[2]);
         // An opener that named an artist (one track's): nothing either while
         // the album's own credit is asked.
         let mut gui = peer_gui();
@@ -1199,24 +1201,24 @@ mod tests {
         album_page(&mut gui, split, tapes(None));
         let shown = draw(&mut gui);
         assert!(shown[2].contains("Split Series — ALM, Boukmanflow"), "{}", shown[2]);
-        assert!(!shown[2].contains("c keep a copy"));
+        assert!(!shown[2].contains("keep a copy"));
         key(&mut gui, KeyCode::Char('c'));
         assert!(gui.app.keep.flow.is_none(), "`c` stowed is inert there");
         // The songs' own credit agrees (step 2): known at once — the word.
         let mut gui = peer_gui();
         album_page(&mut gui, tapes_node(AlbumCredit::Unknown), tapes(Some("Boukmanflow")));
         let shown = draw(&mut gui);
-        assert!(shown[2].contains("Borrowed Tapes — Boukmanflow   c keep a copy"), "{}", shown[2]);
+        assert!(shown[2].contains("Borrowed Tapes — Boukmanflow   keep a copy"), "{}", shown[2]);
         // The singles bucket: no word.
         let mut gui = peer_gui();
         album_page(&mut gui, LibraryNode::album("", None), tapes(Some("Boukmanflow")));
         let shown = draw(&mut gui);
-        assert!(shown[2].contains("Singles") && !shown[2].contains("c keep a copy"), "{}", shown[2]);
+        assert!(shown[2].contains("Singles") && !shown[2].contains("keep a copy"), "{}", shown[2]);
         // The user's own server: its credit, never a word.
         let mut gui = own_gui();
         album_page(&mut gui, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tapes(Some("Boukmanflow")));
         let shown = draw(&mut gui);
-        assert!(shown[2].contains("Borrowed Tapes — Boukmanflow") && !shown[2].contains("c keep a copy"), "{}", shown[2]);
+        assert!(shown[2].contains("Borrowed Tapes — Boukmanflow") && !shown[2].contains("keep a copy"), "{}", shown[2]);
     }
 
     #[test]
@@ -1224,32 +1226,32 @@ mod tests {
         let _guard = english();
         let mut gui = peer_gui();
         album_page(&mut gui, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tapes(Some("Boukmanflow")));
-        assert!(draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(draw(&mut gui)[2].contains("keep a copy"));
         // The cursor up on the `..` row: the word stays.
         gui.app.library.state.select(Some(0));
         gui.albums.wall.tracks.held = true;
-        assert!(draw(&mut gui)[2].contains("c keep a copy"), "`..` held is stowed for `c`");
+        assert!(draw(&mut gui)[2].contains("keep a copy"), "`..` held is stowed for `c`");
         key(&mut gui, KeyCode::Down);
         assert_eq!(gui.app.library.state.selected(), Some(1));
-        assert!(!draw(&mut gui)[2].contains("c keep a copy"), "a song held: `c` keeps it, so no word");
+        assert!(!draw(&mut gui)[2].contains("keep a copy"), "a song held: `c` keeps it, so no word");
         // `c` on the held song: its song window.
         key(&mut gui, KeyCode::Char('c'));
         assert_eq!(focus(&gui), Some(KeepFocus::Song));
         assert_eq!(gui.app.keep_view().unwrap().subject.title.as_deref(), Some("Rooftop Cypher"));
         key(&mut gui, KeyCode::Esc);
         key(&mut gui, KeyCode::Esc);
-        assert!(draw(&mut gui)[2].contains("c keep a copy"), "stowed again");
+        assert!(draw(&mut gui)[2].contains("keep a copy"), "stowed again");
         // The track sheet over the page: no word.
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Char('m'));
         assert!(gui.actions.sheet.is_some());
-        assert!(!draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(!draw(&mut gui)[2].contains("keep a copy"));
         // The server dropdown over it: no word either.
         key(&mut gui, KeyCode::Esc);
         gui.act(Act::SrvMenu);
         assert!(gui.servers.drop_open);
-        assert!(!draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(!draw(&mut gui)[2].contains("keep a copy"));
     }
 
     #[test]
@@ -1261,7 +1263,7 @@ mod tests {
         // M3: "◂ Artists ▸ Boukmanflow  4 albums" x 17–49, the word x 53–65,
         // the pager x 89–95.
         assert_eq!(cells(&shown, 2, 17, 33), "◂ Artists ▸ Boukmanflow  4 albums");
-        assert_eq!(cells(&shown, 2, 50, 16), "   c keep a copy");
+        assert_eq!(cells(&shown, 2, 50, 14), "   keep a copy");
         assert_eq!(cells(&shown, 2, 89, 7), "◂ 1/1 ▸");
         assert_eq!(gui.ui.hit(Position { x: 53, y: 2 }), Some(Act::KeepWord));
         // Stowed `c`: artist focus.
@@ -1271,7 +1273,7 @@ mod tests {
         // A held card: `c` keeps that album, the word gone.
         key(&mut gui, KeyCode::Down);
         let shown = draw(&mut gui);
-        assert!(!shown[2].contains("c keep a copy"), "{}", shown[2]);
+        assert!(!shown[2].contains("keep a copy"), "{}", shown[2]);
         key(&mut gui, KeyCode::Char('c'));
         let view = gui.app.keep_view().expect("album focus");
         assert_eq!((view.subject.focus, view.subject.album.as_deref()), (KeepFocus::Album, Some("Borrowed Tapes")));
@@ -1284,7 +1286,7 @@ mod tests {
             let mut gui = peer_gui();
             artist_wall(&mut gui, artist, wall);
             let shown = draw(&mut gui);
-            assert!(shown[2].contains(artist) && !shown[2].contains("c keep a copy"), "{artist}: {}", shown[2]);
+            assert!(shown[2].contains(artist) && !shown[2].contains("keep a copy"), "{artist}: {}", shown[2]);
             key(&mut gui, KeyCode::Char('c'));
             assert!(gui.app.keep.flow.is_none(), "{artist}: `c` inert");
         }
@@ -1292,7 +1294,7 @@ mod tests {
         let mut gui = peer_gui();
         let old: Vec<Album> = vec![serde_json::from_value(json!({ "name": "Borrowed Tapes", "year": 2019 })).unwrap()];
         artist_wall(&mut gui, "Boukmanflow", old);
-        assert!(!draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(!draw(&mut gui)[2].contains("keep a copy"));
     }
 
     #[test]
@@ -1304,13 +1306,13 @@ mod tests {
         // M4: "◂ Files ▸ peerlib/Boukmanflow · read-only" x 17–57, the word
         // x 61–73, the count right; the clause about playlists is gone.
         assert_eq!(cells(&shown, 2, 17, 41), "◂ Files ▸ peerlib/Boukmanflow · read-only");
-        assert_eq!(cells(&shown, 2, 58, 16), "   c keep a copy");
+        assert_eq!(cells(&shown, 2, 58, 14), "   keep a copy");
         assert_eq!(cells(&shown, 2, 90, 7), "3 items");
         assert!(!shown.join("\n").contains("playlists and ratings"));
         // Stowed, or on `..`: the open folder.
         gui.app.files.state.select(Some(0));
         gui.files_view.held = true;
-        assert!(draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(draw(&mut gui)[2].contains("keep a copy"));
         key(&mut gui, KeyCode::Char('c'));
         let view = gui.app.keep_view().expect("folder focus");
         assert_eq!((view.subject.focus, view.subject.folder.as_ref().map(|f| f.path.as_str())), (KeepFocus::Folder, Some("peerlib/Boukmanflow")));
@@ -1319,7 +1321,7 @@ mod tests {
         // A held folder row: that folder, the word gone.
         key(&mut gui, KeyCode::Down);
         assert_eq!(gui.app.files.state.selected(), Some(1));
-        assert!(!draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(!draw(&mut gui)[2].contains("keep a copy"));
         key(&mut gui, KeyCode::Char('c'));
         let view = gui.app.keep_view().expect("folder focus");
         assert_eq!(view.subject.folder.as_ref().map(|f| f.name.as_str()), Some("Borrowed Tapes"));
@@ -1328,7 +1330,7 @@ mod tests {
         let mut gui = peer_gui();
         files_at(&mut gui, "peerlib", vec![dir("peerlib/Boukmanflow"), dir("peerlib/Color Out")]);
         let shown = draw(&mut gui);
-        assert!(shown[2].contains("◂ Files ▸ peerlib · read-only") && !shown[2].contains("c keep a copy"), "{}", shown[2]);
+        assert!(shown[2].contains("◂ Files ▸ peerlib · read-only") && !shown[2].contains("keep a copy"), "{}", shown[2]);
         key(&mut gui, KeyCode::Char('c'));
         assert!(gui.app.keep.flow.is_none());
         key(&mut gui, KeyCode::Down);
@@ -1339,7 +1341,7 @@ mod tests {
         let mut gui = peer_gui();
         files_at(&mut gui, "", vec![dir("peerlib"), dir("other")]);
         let shown = draw(&mut gui);
-        assert!(shown[2].contains("Files · read-only") && !shown[2].contains("c keep a copy"), "{}", shown[2]);
+        assert!(shown[2].contains("Files · read-only") && !shown[2].contains("keep a copy"), "{}", shown[2]);
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Char('c'));
         assert!(gui.app.keep.flow.is_none(), "a library row at `/`: inert");
@@ -1410,7 +1412,7 @@ mod tests {
             gui.queue_open = queue;
             let buf = buffer(gui, 100, 30);
             let mut must: Vec<String> = whole.iter().map(|w| w.to_string()).collect();
-            must.push("c keep a copy".into());
+            must.push("keep a copy".into());
             out.push((what.to_string(), text_of(&buf, 2), rows(&buf)[2].clone(), must));
         };
         let mut gui = peer_gui();
@@ -1461,7 +1463,7 @@ mod tests {
     #[test]
     fn the_header_line_stands_as_planned_while_its_word_hides() {
         let _guard = english();
-        let blank = |line: &str| line.replace("c keep a copy", &" ".repeat(13));
+        let blank = |line: &str| line.replace("keep a copy", &" ".repeat(11));
         for queue in [true, false] {
             // The album page: a row held, the track sheet, the server
             // dropdown — the word goes, nothing else moves (spec §3.2).
@@ -1469,7 +1471,7 @@ mod tests {
             gui.queue_open = queue;
             album_page(&mut gui, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tapes(Some("Boukmanflow")));
             let stowed = room_line(&mut gui);
-            assert!(stowed.contains("c keep a copy"), "{stowed}");
+            assert!(stowed.contains("keep a copy"), "{stowed}");
             key(&mut gui, KeyCode::Down);
             key(&mut gui, KeyCode::Down);
             assert_eq!(room_line(&mut gui), blank(&stowed), "a row held, queue {queue}");
@@ -1490,8 +1492,9 @@ mod tests {
             let stowed = room_line(&mut gui);
             key(&mut gui, KeyCode::Down);
             assert_eq!(room_line(&mut gui), blank(&stowed), "a card held, queue {queue}");
-            // Files one folder deeper: a file row held keeps " · read-only"
-            // given way (the spec's fragment), and the window over it too.
+            // Files one folder deeper: a file row held keeps the plan —
+            // " · read-only" no more back than it stood (the spec's
+            // fragment) — and the window over it too.
             let mut gui = peer_gui();
             gui.queue_open = queue;
             files_at(&mut gui, "peerlib/Boukmanflow/Borrowed Tapes", vec![Entry::Parent, file_row(&tapes(None)[0]), file_row(&tapes(None)[1])]);
@@ -1499,18 +1502,19 @@ mod tests {
             key(&mut gui, KeyCode::Down);
             key(&mut gui, KeyCode::Down);
             assert_eq!(room_line(&mut gui), blank(&stowed), "a file row held, queue {queue}");
-            assert!(!room_line(&mut gui).contains("read-only"));
+            assert_eq!(room_line(&mut gui).contains("read-only"), stowed.contains("read-only"), "queue {queue}");
             key(&mut gui, KeyCode::Char('c'));
             assert!(gui.app.keep.flow.is_some());
             assert_eq!(room_line(&mut gui), blank(&stowed), "the window over it");
         }
-        // The spec's 80-cell fragment, exactly.
+        // The 80-cell line, a row held: the word's cells blank, " · read-only"
+        // whole before them.
         let mut gui = peer_gui();
         files_at(&mut gui, "peerlib/Boukmanflow/Borrowed Tapes", vec![Entry::Parent, file_row(&tapes(None)[0]), file_row(&tapes(None)[1]), file_row(&tapes(None)[2])]);
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Down);
         let shown = draw(&mut gui);
-        assert_eq!(cells(&shown, 2, 17, 80), "◂ Files ▸ peerlib/Boukmanflow/Borrowed Tapes                             3 items");
+        assert_eq!(cells(&shown, 2, 17, 80), "◂ Files ▸ peerlib/Boukmanflow/Borrowed Tapes · read-only                 3 items");
     }
 
     #[test]
@@ -1520,21 +1524,21 @@ mod tests {
         gui.queue_open = true;
         album_page(&mut gui, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tapes(Some("Boukmanflow")));
         let stowed = room_line(&mut gui);
-        let word = stowed.find("c keep a copy").expect("the word");
+        let word = stowed.find("keep a copy").expect("the word");
         // The queue panel holds the keys: `c` is the queue's (inert), so no
         // word — its cells kept.
         gui.app.queue.push(Queued { origin: Origin { server: HOST.into(), peer: Some(B) }, dj: None, track: tapes(Some("Boukmanflow"))[0].clone() });
         gui.app.focus = Focus::Queue;
         let line = room_line(&mut gui);
-        assert_eq!(line, stowed.replace("c keep a copy", &" ".repeat(13)));
+        assert_eq!(line, stowed.replace("keep a copy", &" ".repeat(11)));
         key(&mut gui, KeyCode::Char('c'));
         assert!(gui.app.keep.flow.is_none());
         // The keys back in the room: the word in the same cells.
         gui.app.focus = Focus::Browser;
-        assert_eq!(room_line(&mut gui).find("c keep a copy"), Some(word));
+        assert_eq!(room_line(&mut gui).find("keep a copy"), Some(word));
         // The filter taking text: `c` is a letter of it — no word.
         gui.app.filtering = true;
-        assert!(!room_line(&mut gui).contains("c keep a copy"));
+        assert!(!room_line(&mut gui).contains("keep a copy"));
     }
 
     #[test]
@@ -1542,13 +1546,13 @@ mod tests {
         let _guard = english();
         let mut gui = peer_gui();
         bouk_folder(&mut gui);
-        assert!(draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(draw(&mut gui)[2].contains("keep a copy"));
         // The gate closes mid-visit (Save in Where copies land, a re-ask
         // after a refusal): the word stays, live, until the next visit.
         gui.app.keep.gate.view.as_mut().unwrap().destination = None;
         assert!(!gui.app.keep_gate());
         let shown = draw(&mut gui);
-        assert!(shown[2].contains("c keep a copy"), "{}", shown[2]);
+        assert!(shown[2].contains("keep a copy"), "{}", shown[2]);
         assert_eq!(gui.ui.hit(Position { x: 62, y: 2 }), Some(Act::KeepWord));
         gui.act(Act::KeepWord);
         let view = gui.app.keep_view().expect("its window");
@@ -1558,12 +1562,12 @@ mod tests {
         key(&mut gui, KeyCode::Esc);
         // Another page is another visit: no word there, `c` inert.
         files_at(&mut gui, "peerlib/Color Out", vec![Entry::Parent, dir("peerlib/Color Out/Peer Sessions")]);
-        assert!(!draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(!draw(&mut gui)[2].contains("keep a copy"));
         key(&mut gui, KeyCode::Char('c'));
         assert!(gui.app.keep.flow.is_none());
         // And back on the first: a new visit, the gate's word now.
         bouk_folder(&mut gui);
-        assert!(!draw(&mut gui)[2].contains("c keep a copy"));
+        assert!(!draw(&mut gui)[2].contains("keep a copy"));
     }
 
     #[test]
@@ -1574,7 +1578,7 @@ mod tests {
         for code in LOCALES {
             let t = |key: &str| super::t!(key, locale = code).to_string();
             let album = |head: &Head, named: bool| super::fit_album(head, named);
-            let spot = super::cells(&t("gui.discover.keep.key_keep"));
+            let spot = super::cells(&t("gui.discover.keep.keep_word"));
             let albums = format!("◂ {}", t("gui.nav.albums"));
             let artists = format!("◂ {}", t("gui.nav.artists"));
             let items = super::t!("gui.files.items", locale = code, count = 3).to_string();
@@ -1621,20 +1625,20 @@ mod tests {
         crate::kit::theme::pin_modern_terminal();
         let t = |key: &str| super::t!(key, locale = "de").to_string();
         let back = format!("◂ {}", t("gui.nav.albums"));
-        let word = t("gui.discover.keep.key_keep");
+        let word = t("gui.discover.keep.keep_word");
         let items = super::t!("gui.files.items", locale = "de", count = 3).to_string();
         let head = Head::album_page(47, &back, "Borrowed Tapes", Some("Boukmanflow"), &items, super::cells(&word));
         let plan = super::fit(&head);
         assert_eq!((plan.short, plan.count, plan.credit.as_deref(), plan.spot), (false, false, None, true));
-        assert_eq!(format!("{back}  {}   {word}", plan.subject), "◂ Alben  Borrowed Tapes   c Kopie behalten");
+        assert_eq!(format!("{back}  {}   {word}", plan.subject), "◂ Alben  Borrowed Tapes   Kopie behalten");
         // English keeps its credit at 47, the way back shrunk (step 3
         // comes before the subject clips).
-        let head = Head::album_page(47, "◂ Albums", "Borrowed Tapes", Some("Boukmanflow"), "3 items", 13);
+        let head = Head::album_page(47, "◂ Albums", "Borrowed Tapes", Some("Boukmanflow"), "3 items", 11);
         let plan = super::fit(&head);
         assert_eq!((plan.short, plan.credit.as_deref()), (true, Some(" — Boukmanflow")));
         // A compilation from the wall: " — Various Artists" goes, "◂ Albums"
         // and the name stand (46 cells).
-        let head = Head::album_page(47, "◂ Albums", "Night Market Sampler", Some("Various Artists"), "3 items", 13);
+        let head = Head::album_page(47, "◂ Albums", "Night Market Sampler", Some("Various Artists"), "3 items", 11);
         let plan = super::fit(&head);
         assert_eq!((plan.short, plan.credit, plan.subject.as_str()), (false, None, "Night Market Sampler"));
     }
@@ -1785,7 +1789,7 @@ mod tests {
         album_page(&mut gui, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tapes(Some("Boukmanflow")));
         gui.act(Act::More(Tab::Library, 2));
         let shown = draw(&mut gui);
-        let y = shown.iter().position(|r| r.contains("Keep a copy…  c")).expect("the row");
+        let y = shown.iter().position(|r| r.contains("Keep a copy…")).expect("the row");
         assert!(!shown.join("\n").contains("from Stage Peer B"), "the badge row stays blank");
         assert!(y > 0);
         // `c` from anywhere in the sheet: the song window, the sheet gone.
@@ -1803,7 +1807,7 @@ mod tests {
         mine.filepath = "music/host.mp3".into();
         gui.app.queue.push(Queued { origin: own.clone(), dj: None, track: mine.clone() });
         gui.act(Act::QueueMore(0));
-        assert!(draw(&mut gui).iter().any(|r| r.contains("Keep a copy…  c")), "a connected server's queue item");
+        assert!(draw(&mut gui).iter().any(|r| r.contains("Keep a copy…")), "a connected server's queue item");
         gui.act(Act::SheetVerb(super::super::actions::SheetAction::KeepCopy));
         let view = gui.app.keep_view().expect("its window on its own server");
         assert_eq!((view.subject.peer, view.subject.title.as_deref()), (B, Some("Rooftop Cypher")));
@@ -1816,7 +1820,7 @@ mod tests {
         gui.app.now_playing = Some(tapes(Some("Boukmanflow"))[0].clone());
         gui.app.queue.current = Some(0);
         gui.act(Act::NowMore);
-        assert!(draw(&mut gui).iter().any(|r| r.contains("Keep a copy…  c")), "the playing card");
+        assert!(draw(&mut gui).iter().any(|r| r.contains("Keep a copy…")), "the playing card");
         key(&mut gui, KeyCode::Esc);
         // The gate closed: no row.
         gui.app.keep.gate.plugins.as_mut().unwrap().jobs.allowed = false;
@@ -1837,7 +1841,7 @@ mod tests {
         gui.act(Act::Screen(super::super::Screen::Admin));
         gui.act(Act::NowMore);
         assert!(gui.actions.sheet.as_ref().is_some_and(|s| s.item.is_some()), "the row stands off the Library screen");
-        assert!(draw(&mut gui).iter().any(|r| r.contains("Keep a copy…  c")));
+        assert!(draw(&mut gui).iter().any(|r| r.contains("Keep a copy…")));
         // `c`: the Library screen back, the song window over it.
         key(&mut gui, KeyCode::Char('c'));
         assert_eq!(gui.screen, super::super::Screen::Library);
@@ -1919,7 +1923,7 @@ mod tests {
         let mut gui = peer_gui();
         album_page(&mut gui, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tapes(Some("Boukmanflow")));
         let shown = draw(&mut gui);
-        assert_eq!(cells(&shown, 2, 17, 80), "< Albums  Borrowed Tapes - Boukmanflow   c keep a copy                   3 items");
+        assert_eq!(cells(&shown, 2, 17, 80), "< Albums  Borrowed Tapes - Boukmanflow   keep a copy                     3 items");
         let tracks = tapes(Some("Boukmanflow"));
         let account = json!({ "scope": "album", "stopped": null, "songs": { "total": 3,
             "copied": [{ "from": tracks[0].filepath, "filepath": "copies/a.mp3" }, { "from": tracks[1].filepath, "filepath": "copies/b.mp3" }],
@@ -1933,7 +1937,7 @@ mod tests {
         let mut gui = peer_gui();
         artist_wall(&mut gui, "Boukmanflow", bouk_wall());
         let shown = draw(&mut gui);
-        assert!(cells(&shown, 2, 17, 80).starts_with("< Artists > Boukmanflow  4 albums   c keep a copy"), "{}", shown[2]);
+        assert!(cells(&shown, 2, 17, 80).starts_with("< Artists > Boukmanflow  4 albums   keep a copy"), "{}", shown[2]);
         let kept = job(53, "album:boukmanflow|borrowed tapes", Some("album"), "done", B,
             json!({ "scope": "album", "counts": { "total": 3, "copied": 3, "skipped": 0, "failed": 0 }, "stopped": null }));
         land_lookups(&mut gui, &[kept]);
@@ -1945,7 +1949,7 @@ mod tests {
         let mut gui = peer_gui();
         bouk_folder(&mut gui);
         let shown = draw(&mut gui);
-        assert_eq!(cells(&shown, 2, 17, 57), "< Files > peerlib/Boukmanflow · read-only   c keep a copy");
+        assert_eq!(cells(&shown, 2, 17, 55), "< Files > peerlib/Boukmanflow · read-only   keep a copy");
         land_lookups(&mut gui, &[job(55, "folder:peerlib/boukmanflow/borrowed tapes", Some("folder"), "running", B, Value::Null)]);
         let shown = draw(&mut gui);
         let row = shown.iter().position(|r| r.contains("Borrowed Tapes")).unwrap();
@@ -1954,7 +1958,7 @@ mod tests {
         gui.queue_open = true;
         files_at(&mut gui, "peerlib/Boukmanflow/Borrowed Tapes", vec![Entry::Parent, file_row(&tapes(None)[0])]);
         let shown = draw(&mut gui);
-        assert_eq!(cells(&shown, 2, 17, 47).trim_end(), "< »/Boukmanflow/Borrowed Tapes   c keep a copy");
+        assert_eq!(cells(&shown, 2, 17, 47).trim_end(), "< »/Boukmanflow/Borrowed Tapes   keep a copy");
     }
 
     // ── Marks (spec §5; the user's 2026-10-27 call) ─────────────────────
@@ -2046,7 +2050,7 @@ mod tests {
         let theirs = job(52, "album:boukmanflow|borrowed tapes", Some("album"), "running", C, Value::Null);
         land_lookups(&mut gui, &[theirs]);
         let shown = draw(&mut gui);
-        assert!(shown[2].contains("c keep a copy"), "the word as it is: {}", shown[2]);
+        assert!(shown[2].contains("keep a copy"), "the word as it is: {}", shown[2]);
     }
 
     #[test]
@@ -2205,21 +2209,24 @@ mod tests {
     // ── Words in every locale (spec §9, §10) ────────────────────────────
 
     #[test]
-    fn the_header_key_word_is_each_locales_own_tips_segment_and_fits_its_spot() {
+    fn the_header_word_is_each_locales_tips_segment_without_its_key_and_fits_its_spot() {
         // Each locale's words asked for by name: the process's locale is
         // left alone.
         for code in LOCALES {
             let t = |key: &str| super::t!(key, locale = code).to_string();
             let word = t("gui.discover.keep.key_keep");
-            assert_ne!(word, "gui.discover.keep.key_keep", "{code}: the key word is missing");
+            assert_ne!(word, "gui.discover.keep.key_keep", "{code}: the tips segment is missing");
             // Its key never translates, and its words are the segment the
             // locale's keep tips already say.
             assert!(word.starts_with("c "), "{code}: {word}");
             for line in ["gui.tips.discover_sheet_keep", "gui.tips.discover_tile_list_keep"] {
                 assert!(t(line).contains(&format!(" · {word} · ")), "{code}: {word} is no segment of {}", t(line));
             }
-            // §10: the widest is Spanish's and Portuguese's, 19 cells.
-            assert!(super::cells(&word) <= 19, "{code}: {word} is {} cells", super::cells(&word));
+            // The header's word is the segment's words, its key unnamed.
+            let header = t("gui.discover.keep.keep_word");
+            assert_eq!(Some(header.as_str()), word.strip_prefix("c "), "{code}: the header word");
+            // §10: the widest is Spanish's and Portuguese's, 17 cells.
+            assert!(super::cells(&header) <= 17, "{code}: {header} is {} cells", super::cells(&header));
             // "read-only" alone: the locale's words before the cut clause.
             let read_only = t("gui.srv.read_only");
             assert!(!read_only.contains('—') && !read_only.contains(" · "), "{code}: {read_only}");

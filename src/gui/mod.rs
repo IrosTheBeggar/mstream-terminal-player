@@ -324,7 +324,7 @@ pub(crate) enum Act {
     /// The Discover room's own pointer ways: its tabs, rows and their
     /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
     Disc(discover::DiscAct),
-    /// A connected server's header line's key word, "c keep a copy", or
+    /// A connected server's header line's word, "keep a copy", or
     /// the page's copy state standing in its place: `c` with the cursor
     /// stowed (keep-a-copy spec §4.1).
     KeepWord,
