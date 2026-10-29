@@ -35,6 +35,19 @@ fn int_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     })
 }
 
+/// An album's credit as a listing names it (mStream's album-API series,
+/// `/db/albums`, `/db/artists-albums`, a search's album hit): the key
+/// there with a name is the credit; there and null (or blank) is the
+/// listing's word that the album's rows credit different artists —
+/// `Some(None)`; absent, a server from before the credit said nothing —
+/// `None` (the field's default).
+fn listed_credit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Ok(Some(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s),
+        _ => None,
+    }))
+}
+
 /// The ping's `transcode` field is the server's defaults object when
 /// transcoding is on offer and the literal `false` when it is not — which
 /// is every fresh install for the ten-odd seconds its ffmpeg bootstrap
@@ -397,6 +410,13 @@ pub struct TrackMetadata {
     #[serde(rename = "artist-display")]
     pub artist_display: Option<String>,
     pub album: Option<String>,
+    /// The album's own credit (mStream since 2026-10-23): its ALBUMARTIST
+    /// consensus, else its primary artist — "Various Artists" on every song
+    /// of a compilation, where `artist` is each song's own. What keeps an
+    /// album whole from any of its songs (the album page's credit, step 2).
+    /// An older server sends none.
+    #[serde(rename = "album-artist", skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
     pub track: Option<u32>,
     pub disk: Option<u32>,
     pub year: Option<i32>,
@@ -521,13 +541,64 @@ pub fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
+/// One item of the walls' listings (`/db/albums`, `/db/artists-albums`):
+/// the legacy trio, and since mStream's album-API series the credit facts
+/// and the aggregates — group facts over every row the card stands for.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Album {
+    /// `None` is an artist's singles bucket: songs outside any album.
     pub name: Option<String>,
     pub artist: Option<String>,
     pub year: Option<i32>,
     pub album_art_file: Option<String>,
+    /// The card's credit ([`listed_credit`]): `None` a server from before
+    /// the credit, `Some(None)` its rows disagree, else the credit.
+    #[serde(deserialize_with = "listed_credit")]
+    pub album_artist: Option<Option<String>>,
+    /// Every row's main credits, in the server's order.
+    #[serde(deserialize_with = "null_default")]
+    pub artists: Vec<String>,
+    /// Any of its rows is flagged a compilation.
+    #[serde(deserialize_with = "int_bool")]
+    pub compilation: bool,
+    pub year_min: Option<i32>,
+    pub year_max: Option<i32>,
+    pub track_count: Option<f64>,
+}
+
+impl Album {
+    /// The card's credit as the album page's resolver takes it from its
+    /// opener (keep-a-copy spec §4.1.3, step 1): the singles bucket and a
+    /// listing that names none are unknown; a null credit disagrees, with
+    /// the listing's artists to name instead.
+    pub fn credit(&self) -> AlbumCredit {
+        if self.name.as_deref().is_none_or(|n| n.trim().is_empty()) {
+            return AlbumCredit::Unknown;
+        }
+        match &self.album_artist {
+            None => AlbumCredit::Unknown,
+            Some(None) => AlbumCredit::Disagree(self.artists.clone()),
+            Some(Some(credit)) => AlbumCredit::Known(credit.clone()),
+        }
+    }
+
+    /// The same item as the Keep a copy facts read an artist's albums
+    /// ([`ArtistAlbumRow`]) — an artist's wall's own listing, reused so the
+    /// window asks the peer nothing it already answered.
+    pub fn as_row(&self) -> ArtistAlbumRow {
+        ArtistAlbumRow {
+            name: self.name.clone(),
+            album_artist: self.album_artist.clone().flatten(),
+            credit_listed: self.album_artist.is_some(),
+            artists: self.artists.clone(),
+            compilation: self.compilation,
+            track_count: self.track_count,
+            year: self.year,
+            year_min: self.year_min,
+            year_max: self.year_max,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -555,7 +626,7 @@ pub struct GenresResponse {
 /// Which genres a Genres list asks for (mStream #716): the ones the files'
 /// own tags name, the ones the discovery model predicted, or both together
 /// — no filter, which is also all a server that predates it ever answers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum GenreSource {
     #[default]
     Tag,
@@ -1158,6 +1229,13 @@ impl SearchResults {
 pub struct SearchGroup {
     pub name: String,
     pub album_art_file: Option<String>,
+    /// An album hit's credit, as the albums listing credits the same card
+    /// (mStream since 2026-10-24, [`listed_credit`]); an artist hit, and an
+    /// older server, name none.
+    #[serde(deserialize_with = "listed_credit")]
+    pub album_artist: Option<Option<String>>,
+    /// An album hit's year.
+    pub year: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

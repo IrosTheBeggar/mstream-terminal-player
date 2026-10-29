@@ -22,6 +22,15 @@
 //! its place (clauses 142–148; the phone's destination sheet and the
 //! webapp's editor in the terminal's grammar): the account's destination,
 //! edited and saved on the server.
+//!
+//! Entered while a connected server is browsed (the keep-a-copy spec §6),
+//! the same window takes an album page or card (album focus on its own
+//! credit), a song from any row, a queue item or the playing card, an
+//! artist's wall (artist focus: the box its only stop, then "Leaves out …")
+//! and a Files folder (folder focus: three landings as its choices, a place
+//! line each, the cap line past the plug-in's limit). Under Into a folder…
+//! `d change` opens the **Into a folder** chooser, a mode of the picker: a
+//! library, a folder in it, nothing saved.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
@@ -33,15 +42,15 @@ use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::types::{
     CollectionDestination, CollectionDestinationView, DEFAULT_LAYOUT, JobAction, JobMark, JobOutcome, JobScope, Landing,
-    LayoutProblem, MAX_RESOLVED_LEN, MAX_TEMPLATE_LEN, ManyCounts, PEER_LAYOUT, PluginJob, PluginLink, Run, SERVER_FOLDER,
-    SERVERFOLDER_LAYOUT, SongTag, StopReason, base_folders, braced_folder, fold_base, layout_lead, sanitize_segment,
-    start_layout_at, validate_layout, validate_resolved_path,
+    LayoutProblem, LeftOut, MAX_RESOLVED_LEN, MAX_TEMPLATE_LEN, ManyCounts, PEER_LAYOUT, PluginJob, PluginLink, Run,
+    SERVER_FOLDER, SERVERFOLDER_LAYOUT, SongTag, StopReason, base_folders, braced_folder, fold_base, layout_lead,
+    sanitize_segment, start_layout_at, validate_layout, validate_resolved_path,
 };
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, dim, scroll_list, width};
 use crate::tui::app::keep::{
-    ChoiceSize, CopyRow, CopyTitle, Fact, Folders, KeepChoice, KeepNote, KeepPhase, KeepStage, KeepVerb, KeepView,
-    LinksStatus, OffWhy,
+    ChoiceSize, CopyRow, CopyTitle, Fact, FolderCap, FolderLanding, Folders, IntoPlace, KeepChoice, KeepFocus, KeepNote,
+    KeepPhase, KeepStage, KeepVerb, KeepView, LinksStatus, OffWhy,
 };
 use crate::tui::app::MessageKind;
 
@@ -140,6 +149,9 @@ fn open_window(frame: &mut Frame, gui: &mut Gui, area: Rect, rect: Rect, band: O
         crate::kit::blank(frame, band);
     }
     let inner = modal_box(frame, rect);
+    // A wide nav label straddling its left edge would hide its border (the
+    // queue panel open: the window centres over the frame).
+    clear_spill(frame, own);
     gui.ui.click(own, Act::Guard);
     (inner, own)
 }
@@ -165,6 +177,9 @@ pub(crate) struct KeepUi {
     drawn: Option<(KeepView, Shown, Vec<KeyWord>)>,
     /// "Where copies land" while it is open over the window (clause 142).
     pub dest: Option<DestUi>,
+    /// "Into a folder"'s chooser while it is open over a folder's window
+    /// (keep-a-copy spec §6.6).
+    pub into: Option<IntoUi>,
 }
 
 impl KeepUi {
@@ -191,6 +206,8 @@ pub(crate) enum KeepAct {
     Key(KeyWord),
     /// The picker's controls (clauses 142–144).
     Dest(DestAct),
+    /// The Into a folder chooser's controls (keep-a-copy spec §6.6).
+    Into(IntoAct),
 }
 
 /// A key word (the window's other controls, §4.8): a DIM text button whose
@@ -511,16 +528,44 @@ fn many_runs(n: &ManyCounts, base: Style) -> Vec<(String, Style)> {
     runs
 }
 
-/// A choice's name, as its radio says it.
+/// A choice's name, as its radio says it — "Into a folder…" with the
+/// legacy console's three dots.
 fn choice_name(choice: KeepChoice, view: &KeepView) -> String {
-    match choice {
+    let name = match choice {
         KeepChoice::Song => t!("gui.discover.keep.song").to_string(),
         KeepChoice::Album => t!("gui.discover.keep.album").to_string(),
         KeepChoice::Artist => {
             let artist = view.subject.track_artist.clone().unwrap_or_default();
             t!("gui.discover.keep.artist", artist = artist).to_string()
         }
+        KeepChoice::Folder(FolderLanding::Mirror) => t!("gui.discover.keep.land_mirror", server = view.subject.server).to_string(),
+        KeepChoice::Folder(FolderLanding::Into) => t!("gui.discover.keep.land_folder").to_string(),
+        KeepChoice::Folder(FolderLanding::Tags) => t!("gui.discover.keep.land_tags").to_string(),
+    };
+    ell(&name)
+}
+
+/// "Leaves out …" (spec §6.4): the albums an artist copy will not take, in
+/// the listing's order, then the singles bucket by the wall's own word —
+/// one DIM row at col 1, clipped with the mark past its cells, the whole
+/// line then its tooltip.
+fn left_out_low(left: &LeftOut, room: usize) -> Low {
+    let mut names = left.albums.clone();
+    if left.singles {
+        names.push(t!("gui.lib.singles").to_string());
     }
+    let words = t!("gui.discover.keep.leaves_out", albums = names.join(" · ")).to_string();
+    let shown = super::bar::clip(&words, room).into_owned();
+    let tip = (shown != words).then_some(words);
+    Low::Text { runs: vec![(shown, dim())], cont: false, tip }
+}
+
+/// The cap line's words (spec §6.5.5): "1,240 songs · limit 1,000", the
+/// numbers grouped — the "! " is the caller's.
+fn cap_words(cap: FolderCap) -> String {
+    let key = format!("gui.discover.keep.folder_cap_{}", super::discover::plural_form(cap.count as u64));
+    let count = crate::admin::fmt_count(cap.count as u64);
+    t!(key.as_str(), count = count, cap = crate::admin::fmt_count(cap.cap)).to_string()
 }
 
 /// The primary's words while choosing (§4.8) — the size lives here: Add
@@ -554,6 +599,22 @@ fn add_words(verb: KeepVerb, view: &KeepView) -> String {
         // no count to say.
         KeepVerb::Missing(0) => t!("gui.discover.keep.add_missing").to_string(),
         KeepVerb::Missing(n) => count("gui.discover.keep.add_albums", n as u64),
+        // "Add folder · 3 songs", the count dropped past the cells as an
+        // album's is (keep-a-copy spec §6.5.1).
+        KeepVerb::Folder => {
+            let add = t!("gui.discover.keep.add_folder").to_string();
+            let songs = view.choices.iter().find_map(|(c, size)| match (c, size) {
+                (KeepChoice::Folder(_), ChoiceSize::Folder { songs: Fact::Known(n) }) => Some(*n),
+                _ => None,
+            });
+            match songs {
+                Some(n) => {
+                    let whole = format!("{add} · {}", count("gui.discover.keep.songs", n as u64));
+                    if width(&whole) + 4 <= PRIMARY_MAX { whole } else { add }
+                }
+                None => add,
+            }
+        }
     }
 }
 
@@ -710,8 +771,10 @@ enum Low {
     Choice(KeepChoice),
     /// "Only the N albums you don't have" under Every album by: ticked or
     /// not, its count — 0 for none to say ("Only the albums you don't
-    /// have").
-    Missing { on: bool, count: usize },
+    /// have"). `alone`: an artist's window, where the box is the only stop
+    /// (spec §6.4) — its glyph at col 1, its label at col 5, count-less:
+    /// the primary carries the count.
+    Missing { on: bool, count: usize, alone: bool },
     /// A row of the place (§4.4): its lead DIM and its crumbs, at col 3
     /// where it continues a first; `change` stands `d change` at its end;
     /// `tip` the whole path where a row clips it.
@@ -890,29 +953,42 @@ fn action(low: &mut Vec<Low>, keys: Vec<KeyWord>, primary: Primary, room: usize)
 }
 
 /// A choosing state's rows (§5.1–5.2): the radios and the box where the
-/// subject offers two choices or more, then — after a blank — the place
-/// with `d change`, its slot note and `aside` (a refusal, a moved place,
-/// another server's copy); the key words and the primary. Starting draws
-/// the same, its primary off and its controls inert ([`draw_low`]).
+/// subject offers two choices or more — an artist's window its box alone
+/// (keep-a-copy spec §6.4), a folder's its three landings (§6.5) — and
+/// "Leaves out …" under them while Every album by is the choice; then,
+/// after a blank, the place with `d change` (none under As on {server}),
+/// its slot note and `aside` (a refusal, a moved place, another server's
+/// copy); the key words and the primary. Starting draws the same, its
+/// primary off and its controls inert ([`draw_low`]).
 fn choosing(low: &mut Vec<Low>, view: &KeepView, room: usize, fit: Fit, aside: Vec<Low>, keys: Vec<KeyWord>, primary: Primary) {
     let radios = view.choices.len() >= 2;
+    let mut stops = radios;
     if radios {
         for (choice, _) in &view.choices {
             low.push(Low::Choice(*choice));
             if *choice == KeepChoice::Artist
                 && let Some((on, count)) = view.missing
             {
-                low.push(Low::Missing { on, count });
+                low.push(Low::Missing { on, count, alone: false });
             }
         }
+    } else if view.subject.focus == KeepFocus::Artist
+        && let Some((on, count)) = view.missing
+    {
+        low.push(Low::Missing { on, count, alone: true });
+        stops = true;
+    }
+    if let Some(left) = &view.left_out {
+        low.push(left_out_low(left, room));
+        stops = true;
     }
     let mut body = Vec::new();
     if let Some(landing) = &view.landing {
-        body.extend(place_lows(&t!("gui.discover.keep.goes_to"), landing, None, true, room, fit.place));
+        body.extend(place_lows(&t!("gui.discover.keep.goes_to"), landing, None, view.changes(), room, fit.place));
         note_lows(&mut body, landing, room, fit.note);
     }
     body.extend(aside);
-    if radios && !body.is_empty() {
+    if stops && !body.is_empty() {
         low.push(Low::Blank(Gap::B2));
     }
     low.extend(body);
@@ -1205,6 +1281,16 @@ fn lower(view: &KeepView, shown: Shown, room: usize, fit: Fit) -> Vec<Low> {
     let mut low = vec![Low::Blank(Gap::B1)];
     let server = view.subject.server.clone();
     match &view.stage {
+        // A folder past the plug-in's cap, before any start (spec §6.5.5):
+        // no landings, no place — one GOLD line and Close.
+        KeepStage::Choose { .. } | KeepStage::Refused { .. } if view.cap.is_some() => {
+            if let Some(cap) = view.cap {
+                let gold = Style::default().fg(th().gold);
+                lines(&mut low, &format!("! {}", cap_words(cap)), gold, room, CONT_X, &[], fit.lines);
+            }
+            low.push(Low::Blank(Gap::B3));
+            action(&mut low, Vec::new(), Primary::close(), room);
+        }
         KeepStage::Choose { verb, other } => {
             let (aside, keys, primary) = match (verb, other) {
                 // Another server's live copy covers the choice: whose, and
@@ -1387,6 +1473,15 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Rect) {
         draw_dest(frame, gui, area);
         return;
     }
+    // The Into a folder chooser, while its folder's window chooses (spec
+    // §6.6): in Keep a copy's place, as the picker is.
+    if gui.discover.keep.into.is_some() && !gui.app.keep_view().is_some_and(|view| into_stands(&view)) {
+        gui.discover.keep.into = None;
+    }
+    if gui.discover.keep.into.is_some() {
+        draw_into(frame, gui, area);
+        return;
+    }
     // Retry's outcome holds only while its start is out.
     if !gui.app.keep_view().is_some_and(|view| matches!(view.stage, KeepStage::Starting)) {
         gui.discover.keep.frozen = None;
@@ -1472,11 +1567,18 @@ fn draw_head(frame: &mut Frame, gui: &mut Gui, view: &KeepView, inner: Rect, own
     };
     put(frame, x, inner.y, &super::bar::clip(&title, room), Style::default().add_modifier(Modifier::BOLD));
     let from = t!("gui.act.from_server", server = s.server).to_string();
-    let parts: Vec<String> = if s.album_focus() {
-        let year = s.year.filter(|y| *y > 0).map(|y| y.to_string());
-        [s.album_credit().map(str::to_string), year, Some(from)].into_iter().flatten().collect()
-    } else {
-        [s.track_artist.clone(), s.album.clone(), Some(from)].into_iter().flatten().filter(|p| !p.trim().is_empty()).collect()
+    let parts: Vec<String> = match s.focus {
+        // An artist's and a folder's window: the server alone — the title
+        // names the artist or the folder, the place line its path (spec
+        // §6.4, §6.5).
+        KeepFocus::Artist | KeepFocus::Folder => vec![from],
+        KeepFocus::Album => {
+            let year = s.year.filter(|y| *y > 0).map(|y| y.to_string());
+            [s.album_credit().map(str::to_string), year, Some(from)].into_iter().flatten().collect()
+        }
+        KeepFocus::Song => {
+            [s.track_artist.clone(), s.album.clone(), Some(from)].into_iter().flatten().filter(|p| !p.trim().is_empty()).collect()
+        }
     };
     put(frame, x, inner.y + 1, &super::bar::clip(&parts.join(" · "), room), dim());
 }
@@ -1538,17 +1640,20 @@ fn draw_low(frame: &mut Frame, gui: &mut Gui, view: &KeepView, inner: Rect, y: u
                 gui.ui.click(row, Act::Disc(DiscAct::Keep(KeepAct::Pick(*choice))));
             }
         }
-        Low::Missing { on, count } => {
+        Low::Missing { on, count, alone } => {
             // The choice's fourth stop: ticked ACCENT, its label BOLD — its
             // count where one is known: a copy of it that still wants the
-            // user keeps it with none missing by name, and says none.
+            // user keeps it with none missing by name, and says none. An
+            // artist's window's only stop stands at the text's column,
+            // count-less (spec §6.4).
             let (check_on, check_off) = super::check_glyphs();
-            let words = match count {
-                0 => t!("gui.discover.keep.only_missing").to_string(),
-                n => plural("gui.discover.keep.only_missing", *n as u64),
+            let words = match (alone, count) {
+                (true, _) | (false, 0) => t!("gui.discover.keep.only_missing").to_string(),
+                (false, n) => plural("gui.discover.keep.only_missing", *n as u64),
             };
-            let words = super::bar::clip(&words, usize::from(room - BOX_LABEL_X)).into_owned();
-            let at = Rect { x: x + LABEL_X, y, width: BOX_LABEL_X - LABEL_X + width(&words) as u16, height: 1 };
+            let (glyph_x, label_x) = if *alone { (0, LABEL_X) } else { (LABEL_X, BOX_LABEL_X) };
+            let words = super::bar::clip(&words, usize::from(room - label_x)).into_owned();
+            let at = Rect { x: x + glyph_x, y, width: label_x - glyph_x + width(&words) as u16, height: 1 };
             let hover = !starting && gui.ui.hovers(at);
             put(frame, at.x, y, if *on { check_on } else { check_off }, if *on { accent() } else { dim() });
             let style = match (hover, *on) {
@@ -1556,7 +1661,7 @@ fn draw_low(frame: &mut Frame, gui: &mut Gui, view: &KeepView, inner: Rect, y: u
                 (false, true) => bold,
                 (false, false) => Style::default(),
             };
-            put(frame, x + BOX_LABEL_X, y, &words, style);
+            put(frame, x + label_x, y, &words, style);
             if !starting {
                 gui.ui.click(at, Act::Disc(DiscAct::Keep(KeepAct::Missing)));
             }
@@ -1659,8 +1764,21 @@ fn draw_bar(frame: &mut Frame, x: u16, y: u16, progress: Option<f64>) {
 pub(crate) fn open(gui: &mut Gui, target: crate::tui::app::keep::KeepTarget) {
     let effects = gui.app.keep_open(target);
     gui.pend(effects);
+    opened(gui);
+}
+
+/// Open Keep a copy on a page whose word stood this visit, its gate closed
+/// since (keep-a-copy spec §3.2): its one plain line and Close.
+pub(crate) fn open_off(gui: &mut Gui, target: crate::tui::app::keep::KeepTarget) {
+    gui.app.keep_open_off(target);
+    opened(gui);
+}
+
+/// A window just opened: none of the last one's own state stands.
+fn opened(gui: &mut Gui) {
     gui.discover.keep.frozen = None;
     gui.discover.keep.dest = None;
+    gui.discover.keep.into = None;
     gui.discover.keep.last_own = None;
     gui.discover.keep.drawn = None;
 }
@@ -1672,12 +1790,13 @@ pub(crate) fn close(gui: &mut Gui) {
         && let KeepStage::Job { job, .. } = &view.stage
         && job.live()
     {
-        let note = busy_note(job, note_room(gui));
+        let note = busy_note(job, note_room(gui), gui.app.origin().peer);
         set_note(gui, note);
     }
     gui.app.keep_close();
     gui.discover.keep.frozen = None;
     gui.discover.keep.dest = None;
+    gui.discover.keep.into = None;
     gui.discover.keep.last_own = None;
     gui.discover.keep.drawn = None;
 }
@@ -1688,6 +1807,7 @@ pub(crate) fn act(gui: &mut Gui, act: KeepAct) {
     match act {
         KeepAct::Close => close(gui),
         KeepAct::Dest(act) => dest_act(gui, act),
+        KeepAct::Into(act) => into_act(gui, act),
         KeepAct::Pick(choice) => gui.app.keep_pick(choice),
         KeepAct::Missing => {
             let on = view.missing.is_some_and(|(on, _)| on);
@@ -1700,6 +1820,14 @@ pub(crate) fn act(gui: &mut Gui, act: KeepAct) {
                 return;
             }
             match word {
+                // Under Into a folder… its own chooser (spec §6.6); else
+                // Where copies land.
+                KeyWord::Change
+                    if view.choice == KeepChoice::Folder(FolderLanding::Into)
+                        && matches!(view.stage, KeepStage::Choose { .. } | KeepStage::Refused { .. }) =>
+                {
+                    open_into(gui, &view)
+                }
                 KeyWord::Change => open_dest(gui),
                 KeyWord::Queue => {
                     if let KeepStage::Job { job, .. } = &view.stage {
@@ -1787,18 +1915,32 @@ fn walk(gui: &mut Gui, view: &KeepView, delta: i64) {
     }
 }
 
-/// The window's keys (§6.2): ↑ ↓ move the choice, Enter presses the
-/// primary, `d` `x` `a` `c` only where their words are drawn, Esc closes —
-/// the copy keeps running. Everything else — Space, Tab, ← →, other
-/// letters, `C` — does nothing.
+/// Whether ↑ ↓ have stops to walk while choosing: two choices or more (a
+/// folder's three landings among them), or an artist's window's box —
+/// never past a folder's cap (spec §6.5.5).
+fn walks(view: &KeepView) -> bool {
+    let stops = view.choices.len() >= 2 || (view.subject.focus == KeepFocus::Artist && view.missing.is_some());
+    stops && view.cap.is_none() && matches!(view.stage, KeepStage::Choose { .. } | KeepStage::Refused { .. })
+}
+
+/// The window's keys (§6.2): ↑ ↓ move the choice — an artist's window's
+/// tick the box and untick it (spec §6.4) — Enter presses the primary, `d`
+/// `x` `a` `c` only where their words are drawn, Esc closes — the copy
+/// keeps running. Everything else — Space, Tab, ← →, other letters, `C` —
+/// does nothing.
 pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) {
-    // Where copies land, while it is open over the window, has every key.
+    // Where copies land, or the Into a folder chooser, while it is open
+    // over the window, has every key.
+    if gui.discover.keep.into.is_some() {
+        into_key(gui, key);
+        return;
+    }
     if gui.discover.keep.dest.is_some() {
         dest_key(gui, key);
         return;
     }
     let Some((view, shown)) = shown_of(gui) else { return };
-    let choosing = matches!(view.stage, KeepStage::Choose { .. } | KeepStage::Refused { .. }) && view.choices.len() >= 2;
+    let choosing = walks(&view);
     match key.code {
         KeyCode::Esc => close(gui),
         KeyCode::Down if choosing => walk(gui, &view, 1),
@@ -1831,6 +1973,9 @@ fn fit_tips(line: String, drops: &[String]) -> String {
 /// The tips line while the window is up (§6.4, clause 119): the keys that
 /// work in its state, and nothing else.
 pub(crate) fn tips(gui: &Gui) -> String {
+    if let Some(ui) = &gui.discover.keep.into {
+        return into_tips(ui);
+    }
     if let Some(ui) = &gui.discover.keep.dest {
         return dest_tips(gui, ui);
     }
@@ -1838,6 +1983,10 @@ pub(crate) fn tips(gui: &Gui) -> String {
     let d = t!("gui.tips.discover_keep_d").to_string();
     let one = view.choices.len() < 2;
     match &view.stage {
+        // Past a folder's cap: Close alone (spec §6.9).
+        KeepStage::Choose { .. } | KeepStage::Refused { .. } if view.cap.is_some() => {
+            t!("gui.tips.discover_keep_yours").to_string()
+        }
         KeepStage::Choose { other: Some(other), .. } => {
             let mut line = t!("gui.tips.discover_keep_other").to_string();
             if other.cancelling {
@@ -1848,9 +1997,16 @@ pub(crate) fn tips(gui: &Gui) -> String {
             }
             fit_tips(line, &[d])
         }
+        // ↑ ↓ wherever they walk (an artist's box too); "d where files
+        // land" gone under As on {server}, where `d` changes nothing (spec
+        // §6.9).
         KeepStage::Choose { .. } | KeepStage::Refused { .. } => {
-            let key = if one { "gui.tips.discover_keep_one" } else { "gui.tips.discover_keep_choose" };
-            fit_tips(t!(key).to_string(), &[d])
+            let key = if walks(&view) { "gui.tips.discover_keep_choose" } else { "gui.tips.discover_keep_one" };
+            let mut line = t!(key).to_string();
+            if !view.changes() {
+                line = line.replace(&format!(" · {d}"), "");
+            }
+            fit_tips(line, &[d])
         }
         KeepStage::Starting => t!("gui.tips.discover_keep_close").to_string(),
         KeepStage::Off(_) => t!("gui.tips.discover_keep_yours").to_string(),
@@ -2835,8 +2991,13 @@ pub(crate) fn dest_act(gui: &mut Gui, act: DestAct) {
     dest_ask(gui);
 }
 
-/// The wheel over the picker: its folder list, a row a notch.
+/// The wheel over the picker: its folder list, a row a notch — or the Into
+/// a folder chooser's.
 pub(crate) fn dest_wheel(gui: &mut Gui, delta: i32) {
+    if let Some(ui) = gui.discover.keep.into.as_mut() {
+        ui.view.step(delta);
+        return;
+    }
     if let Some(list) = gui.discover.keep.dest.as_mut().and_then(|ui| ui.list.as_mut()) {
         list.view.step(delta);
     }
@@ -2891,7 +3052,13 @@ fn dest_key(gui: &mut Gui, key: KeyEvent) {
             }
         }
         (Some(DestStop::Folders), KeyCode::Enter | KeyCode::Char(' ')) if held.is_some() => {
-            dest_act(gui, DestAct::Folder(held.unwrap_or(0)))
+            dest_act(gui, DestAct::Folder(held.unwrap_or(0)));
+            // Gone in (or up) with the keyboard: the new listing's first
+            // row held, so Enter goes on.
+            if let Some(list) = gui.discover.keep.dest.as_mut().and_then(|ui| ui.list.as_mut()).filter(|list| list.braced.is_none() && list.held.is_none()) {
+                list.held = Some(0);
+                list.view.pick_up();
+            }
         }
         (Some(DestStop::Folders), KeyCode::Enter | KeyCode::Char(' ')) => dest_act(gui, DestAct::Folders),
         (hand, KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab) => {
@@ -3107,45 +3274,9 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 }
             }
             DestRow::Library => {
-                // The hand on the row shows on the chosen name, ACCENT BOLD
-                // — no label to take it.
                 let hand = ui.hand == Some(DestStop::Library);
                 let chips = ui.chips(&dview);
-                // Every library in the server's order, the chosen one marked
-                // — from the chosen one behind `…` where they would not all
-                // fit (the mark steps to the one before), the last that has
-                // room for a dot, a space and a cell of its name clipped at
-                // the right, the rest reached by ← → alone (gui/dj.rs's
-                // rule: never over the border).
-                let cells = |name: &str| 4 + width(name) as u16;
-                let total: u16 = chips.iter().map(|name| cells(name) + 3).sum::<u16>().saturating_sub(3);
-                let at = chips.iter().position(|name| *name == ui.vpath).unwrap_or(0);
-                let (first, mut x) = if usize::from(total) <= wide || at == 0 {
-                    (0, text_x)
-                } else {
-                    put(frame, text_x, y, clip_mark(), dim());
-                    gui.ui.click(Rect { x: text_x, y, width: 1, height: 1 }, dest(DestAct::Step(-1)));
-                    (at, text_x + 2)
-                };
-                for (n, name) in chips.iter().enumerate().skip(first) {
-                    if x + 5 > end {
-                        break;
-                    }
-                    let on = n == at;
-                    let w = cells(name).min(end - x);
-                    let cell = Rect { x, y, width: w, height: 1 };
-                    let hover = gui.ui.hovers(cell);
-                    put(frame, x, y, if on { dot_on } else { dot_off }, if on { Style::default().fg(th().ok) } else { dim() });
-                    let style = match (hover, on) {
-                        (_, true) if hand => accent().add_modifier(Modifier::BOLD),
-                        (true, _) => bright_bold(),
-                        (false, true) => bold,
-                        (false, false) => Style::default(),
-                    };
-                    put(frame, x + 4, y, &super::bar::clip(name, usize::from(w.saturating_sub(4))), style);
-                    gui.ui.click(cell, dest(DestAct::Library(n)));
-                    x += w + 3;
-                }
+                draw_libraries(frame, gui, (text_x, end, y), &chips, &ui.vpath, hand, &|n| dest(DestAct::Library(n)), dest(DestAct::Step(-1)));
             }
             DestRow::Radio(radio) => {
                 let on = chosen == Some(*radio);
@@ -3326,6 +3457,591 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 }
 
+/// The libraries' row (clause 143; keep-a-copy spec §6.6): every library in
+/// the server's order, the chosen one's dot OK and its name BOLD — ACCENT
+/// BOLD with the keyboard's hand on the row, no label to take it — from the
+/// chosen one behind `…` where they would not all fit (the mark steps to
+/// the one before, `back`), the last that has room for a dot, a space and a
+/// cell of its name clipped at the right, the rest reached by ← → alone
+/// (gui/dj.rs's rule: never over the border). A name clicked is `pick`'s.
+#[allow(clippy::too_many_arguments)]
+fn draw_libraries(
+    frame: &mut Frame,
+    gui: &mut Gui,
+    (text_x, end, y): (u16, u16, u16),
+    chips: &[String],
+    chosen: &str,
+    hand: bool,
+    pick: &dyn Fn(usize) -> Act,
+    back: Act,
+) {
+    let wide = usize::from(end.saturating_sub(text_x));
+    let (dot_on, dot_off) = if legacy_conhost() { ("(*)", "( )") } else { ("(•)", "( )") };
+    let cells = |name: &str| 4 + width(name) as u16;
+    let total: u16 = chips.iter().map(|name| cells(name) + 3).sum::<u16>().saturating_sub(3);
+    let at = chips.iter().position(|name| name == chosen).unwrap_or(0);
+    let (first, mut x) = if usize::from(total) <= wide || at == 0 {
+        (0, text_x)
+    } else {
+        put(frame, text_x, y, clip_mark(), dim());
+        gui.ui.click(Rect { x: text_x, y, width: 1, height: 1 }, back);
+        (at, text_x + 2)
+    };
+    for (n, name) in chips.iter().enumerate().skip(first) {
+        if x + 5 > end {
+            break;
+        }
+        let on = n == at;
+        let w = cells(name).min(end - x);
+        let cell = Rect { x, y, width: w, height: 1 };
+        let hover = gui.ui.hovers(cell);
+        put(frame, x, y, if on { dot_on } else { dot_off }, if on { Style::default().fg(th().ok) } else { dim() });
+        let style = match (hover, on) {
+            (_, true) if hand => accent().add_modifier(Modifier::BOLD),
+            (true, _) => bright_bold(),
+            (false, true) => Style::default().add_modifier(Modifier::BOLD),
+            (false, false) => Style::default(),
+        };
+        put(frame, x + 4, y, &super::bar::clip(name, usize::from(w.saturating_sub(4))), style);
+        gui.ui.click(cell, pick(n));
+        x += w + 3;
+    }
+}
+
+// ── Into a folder (keep-a-copy spec §6.6) ──────────────────────────────────
+
+/// The list waits this long after the last keystroke before it asks your
+/// server for a folder's folders (spec §6.6).
+const INTO_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Where the chooser's keyboard is: the libraries' row (with a choice of
+/// them), the field, or the list — a row of it held, or none yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntoHand {
+    Library,
+    Field,
+    List,
+}
+
+/// What the chooser's pointer and keys do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntoAct {
+    /// Esc, "Esc close", Enter in the field: back to Keep a copy, Into a
+    /// folder… chosen at the chooser's last valid place.
+    Close,
+    /// ← → on the libraries' row: the library before, the one after.
+    Step(i8),
+    /// A library clicked, by its place in the row.
+    Library(usize),
+    /// The field clicked: the keyboard goes there.
+    Field,
+    /// A row of the list, by its place: up to the parent, or into a folder.
+    Row(usize),
+    /// The list's scrollbar.
+    Scroll(i32),
+    Jump(usize),
+}
+
+/// The Into a folder chooser (spec §6.6): a mode of Where copies land — its
+/// geometry, frame, libraries' row, field and folder list — with no Save,
+/// no layout: where one folder copy lands, for this copy only. The library
+/// chosen, the field (the path inside it, `/` between folders), the
+/// keyboard's hand, the list's held row and viewport, a listed folder
+/// pressed whose name has a brace, when the field was last typed in, and
+/// the last place the field held that the copy can take — what closing
+/// hands the window ([`crate::tui::app::App::keep_set_into`]). Nothing is
+/// saved.
+#[derive(Clone)]
+pub(crate) struct IntoUi {
+    vpath: String,
+    text: Input,
+    hand: IntoHand,
+    held: Option<usize>,
+    view: ListView,
+    braced: Option<String>,
+    typed: Option<crate::clock::Instant>,
+    last: IntoPlace,
+}
+
+impl IntoUi {
+    /// Opened on the window's place: its library, its folder in the field,
+    /// the hand on the field.
+    fn of(place: &IntoPlace) -> IntoUi {
+        let at = place.path.chars().count();
+        IntoUi {
+            vpath: place.vpath.clone(),
+            text: Input::new(place.path.clone()).with_cursor(at),
+            hand: IntoHand::Field,
+            held: None,
+            view: ListView::default(),
+            braced: None,
+            typed: None,
+            last: place.clone(),
+        }
+    }
+
+    /// The field's folders, as the server reads a landing's path
+    /// (destination.js `normalizeBase`): split at either slash, trimmed,
+    /// the empty ones gone — a slash at either end silently.
+    fn folders(&self) -> Vec<String> {
+        base_folders(self.text.value())
+    }
+
+    /// The place the field names, where the copy can take it.
+    fn place(&self) -> Option<IntoPlace> {
+        let folders = self.folders();
+        matches!(into_check(&folders), IntoCheck::Ok).then(|| IntoPlace { vpath: self.vpath.clone(), path: folders.join("/") })
+    }
+
+    /// The place changed (a key, a row, a library): the list starts over —
+    /// nothing held, at its top, no brace said — and a place the copy can
+    /// take is the one closing keeps.
+    fn moved(&mut self) {
+        self.held = None;
+        self.view = ListView::default();
+        self.braced = None;
+        if let Some(place) = self.place() {
+            self.last = place;
+        }
+    }
+}
+
+/// Whether the field's path is one the copy can take (spec §6.6): the
+/// library's top (empty), or a path the server would place — the picker's
+/// own words for `..`, `~` / `$HOME`, a drive letter, a control character;
+/// too long its own row; a folder with a brace in its name (a layout would
+/// read it as a variable).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IntoCheck {
+    Ok,
+    TooLong,
+    Words(String),
+}
+
+fn into_check(folders: &[String]) -> IntoCheck {
+    let path = folders.join("/");
+    if path.is_empty() {
+        return IntoCheck::Ok;
+    }
+    match validate_resolved_path(&path) {
+        Err(LayoutProblem::PathTooLong) => IntoCheck::TooLong,
+        Err(problem) => IntoCheck::Words(problem_words(&problem)),
+        Ok(()) => match braced_folder(&path) {
+            Some(folder) => IntoCheck::Words(t!("gui.discover.keep.into_braces", folder = folder).to_string()),
+            None => IntoCheck::Ok,
+        },
+    }
+}
+
+/// The chooser worked out from the App's listings: the field's check, the
+/// folder the list lists — the field's where your server has it, else its
+/// nearest parent that is there, walked from the library's top through the
+/// listings asked so far — the field's first folder not there yet, once a
+/// listing says so; the list's rows (Up below the library's top, then that
+/// folder's folders) and its one note; the libraries.
+struct IntoShown {
+    check: IntoCheck,
+    dir: Vec<String>,
+    missing: Option<String>,
+    tree: Vec<TreeRow>,
+    list_note: Option<(String, bool)>,
+    chips: Vec<String>,
+}
+
+fn into_shown(app: &crate::tui::app::App, ui: &IntoUi) -> IntoShown {
+    let folders = ui.folders();
+    let mut dir: Vec<String> = Vec::new();
+    let mut missing = None;
+    for folder in &folders {
+        match app.keep_dest_folders(&folder_path(&ui.vpath, &dir)) {
+            Some(Folders::Listed(names)) if names.contains(folder) => dir.push(folder.clone()),
+            Some(Folders::Listed(_)) => {
+                missing = Some(folder.clone());
+                break;
+            }
+            _ => break,
+        }
+    }
+    let listing = app.keep_dest_folders(&folder_path(&ui.vpath, &dir));
+    let mut tree = Vec::new();
+    if !dir.is_empty() {
+        tree.push(TreeRow::Up);
+    }
+    if let Some(Folders::Listed(names)) = listing {
+        tree.extend(names.iter().cloned().map(TreeRow::Folder));
+    }
+    let list_note = match listing {
+        None | Some(Folders::Asking) => Some((t!("gui.discover.dest.looking_up").to_string(), false)),
+        Some(Folders::Failed(failure)) => Some((t!("gui.discover.dest.list_failed", words = failure_words(failure)).to_string(), true)),
+        Some(Folders::Listed(names)) => names.is_empty().then(|| (t!("gui.discover.dest.no_folders").to_string(), false)),
+    };
+    let mut chips: Vec<String> = app.keep_dest_view().map(|view| view.libraries.iter().map(|l| l.vpath.clone()).collect()).unwrap_or_default();
+    if !chips.contains(&ui.vpath) {
+        chips.push(ui.vpath.clone());
+    }
+    IntoShown { check: into_check(&folders), dir, missing, tree, list_note, chips }
+}
+
+/// The note under the preview, and whether it is GOLD: the field's
+/// problem in the picker's words; a listed folder pressed whose name has
+/// a brace; else the field's first folder not there yet (the first file
+/// creates it). None where the folder is there, or not known yet — and a
+/// path too long says so in the preview's own row.
+fn into_note(ui: &IntoUi, shown: &IntoShown) -> Option<(String, bool)> {
+    match &shown.check {
+        IntoCheck::TooLong => None,
+        IntoCheck::Words(words) => Some((words.clone(), true)),
+        IntoCheck::Ok => match (&ui.braced, &shown.missing) {
+            (Some(folder), _) => Some((t!("gui.discover.keep.into_braces", folder = folder).to_string(), true)),
+            (None, Some(folder)) => Some((t!("gui.discover.dest.will_create", folder = folder).to_string(), false)),
+            (None, None) => None,
+        },
+    }
+}
+
+/// One row of the chooser under its top border, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntoRow {
+    Preview,
+    Note,
+    Blank,
+    Library,
+    Field,
+    /// The list's rows by their place in its window, and its one note.
+    Listed(usize),
+    ListNote,
+}
+
+/// The chooser's rows (spec §6.6): the preview and its note, a blank, the
+/// libraries and a blank where there is a choice of them, the field, the
+/// list — three rows at most — or its note, a blank.
+fn into_rows(shown: &IntoShown, note: bool) -> Vec<IntoRow> {
+    let mut rows = vec![IntoRow::Preview];
+    if note {
+        rows.push(IntoRow::Note);
+    }
+    rows.push(IntoRow::Blank);
+    if shown.chips.len() > 1 {
+        rows.extend([IntoRow::Library, IntoRow::Blank]);
+    }
+    rows.push(IntoRow::Field);
+    rows.extend((0..shown.tree.len().min(DEST_LIST)).map(IntoRow::Listed));
+    if shown.list_note.is_some() {
+        rows.push(IntoRow::ListNote);
+    }
+    rows.push(IntoRow::Blank);
+    rows
+}
+
+/// Whether a window's chooser may stand: a folder's, choosing, under no cap.
+fn into_stands(view: &KeepView) -> bool {
+    view.subject.focus == KeepFocus::Folder
+        && view.cap.is_none()
+        && matches!(view.stage, KeepStage::Choose { .. } | KeepStage::Refused { .. })
+}
+
+/// `d change` under Into a folder…: the chooser, on the window's place.
+fn open_into(gui: &mut Gui, view: &KeepView) {
+    let Some(place) = view.into.clone() else { return };
+    gui.discover.keep.into = Some(IntoUi::of(&place));
+}
+
+/// Back to Keep a copy (Esc, "Esc close", Enter in the field): the dot on
+/// Into a folder…, its place the chooser's last valid one; the listings go.
+fn close_into(gui: &mut Gui) {
+    let Some(ui) = gui.discover.keep.into.take() else { return };
+    gui.app.keep_pick(KeepChoice::Folder(FolderLanding::Into));
+    gui.app.keep_set_into(&ui.last.vpath, &ui.last.path);
+    gui.app.keep_dest_forget();
+}
+
+/// Ask the listed folder's folders of your server, once — the field's own
+/// place 300 ms after typing stops, a library or a row at once; until then
+/// the frames keep coming, so the wait ends on time.
+fn into_ask(gui: &mut Gui) {
+    let Some(ui) = gui.discover.keep.into.as_ref() else { return };
+    let shown = into_shown(&gui.app, ui);
+    let path = folder_path(&ui.vpath, &shown.dir);
+    if gui.app.keep_dest_folders(&path).is_some() {
+        return;
+    }
+    if ui.typed.is_some_and(|at| at.elapsed() < INTO_WAIT) {
+        gui.hot = true;
+        return;
+    }
+    let effects = gui.app.keep_dest_list(&path);
+    gui.pend(effects);
+}
+
+/// The chooser's acts (spec §6.6).
+fn into_act(gui: &mut Gui, act: IntoAct) {
+    if act == IntoAct::Close {
+        close_into(gui);
+        return;
+    }
+    let Some(ui) = gui.discover.keep.into.as_ref() else { return };
+    let shown = into_shown(&gui.app, ui);
+    let Some(ui) = gui.discover.keep.into.as_mut() else { return };
+    match act {
+        IntoAct::Close => {}
+        // Another library: the field keeps its text, the list relists.
+        IntoAct::Step(delta) => {
+            if shown.chips.len() > 1 {
+                let at = shown.chips.iter().position(|name| *name == ui.vpath).unwrap_or(0);
+                let next = (at as i64 + i64::from(delta)).rem_euclid(shown.chips.len() as i64) as usize;
+                ui.vpath = shown.chips[next].clone();
+                ui.typed = None;
+                ui.moved();
+            }
+            ui.hand = IntoHand::Library;
+        }
+        IntoAct::Library(at) => {
+            if let Some(name) = shown.chips.get(at).filter(|name| **name != ui.vpath) {
+                ui.vpath = name.clone();
+                ui.typed = None;
+                ui.moved();
+            }
+            ui.hand = IntoHand::Library;
+        }
+        IntoAct::Field => ui.hand = IntoHand::Field,
+        // A row: Up goes up, a folder goes in — the field becomes its path,
+        // the hand stays in the list. A folder whose name has a brace does
+        // nothing but say so.
+        IntoAct::Row(at) => {
+            let mut dir = shown.dir.clone();
+            match shown.tree.get(at) {
+                Some(TreeRow::Up) => {
+                    dir.pop();
+                }
+                Some(TreeRow::Folder(name)) => {
+                    let folder = sanitize_segment(Some(name));
+                    if braced_folder(&folder).is_some() {
+                        ui.braced = Some(folder);
+                        ui.hand = IntoHand::List;
+                        return;
+                    }
+                    dir.push(folder);
+                }
+                None => return,
+            }
+            let path = dir.join("/");
+            let end = path.chars().count();
+            ui.text = Input::new(path).with_cursor(end);
+            ui.typed = None;
+            ui.hand = IntoHand::List;
+            ui.moved();
+        }
+        IntoAct::Scroll(delta) => ui.view.step(delta),
+        IntoAct::Jump(first) => ui.view.scroll = first,
+    }
+}
+
+/// The chooser's keys (spec §6.6): ↑ ↓ (and Tab / Shift-Tab) walk the
+/// libraries' row, the field and the list's rows; ← → on the libraries'
+/// row step the library; in the field every printable key edits and Enter
+/// closes; Enter on a held row goes in, or up; Esc closes.
+fn into_key(gui: &mut Gui, key: KeyEvent) {
+    let Some(ui) = gui.discover.keep.into.as_ref() else { return };
+    let shown = into_shown(&gui.app, ui);
+    let rows = shown.tree.len();
+    let libraries = shown.chips.len() > 1;
+    let back = key.code == KeyCode::BackTab || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
+    let Some(ui) = gui.discover.keep.into.as_mut() else { return };
+    match (ui.hand, key.code) {
+        (_, KeyCode::Esc) | (IntoHand::Field, KeyCode::Enter) => close_into(gui),
+        (IntoHand::List, KeyCode::Enter) => {
+            if let Some(at) = ui.held {
+                into_act(gui, IntoAct::Row(at));
+                // Gone in (or up) with the keyboard: it holds the new
+                // listing's first row, so Enter goes on — a click leaves
+                // nothing lit.
+                if let Some(ui) = gui.discover.keep.into.as_mut().filter(|ui| ui.braced.is_none() && ui.held.is_none()) {
+                    ui.held = Some(0);
+                    ui.view.pick_up();
+                }
+            }
+        }
+        (IntoHand::Library, KeyCode::Left) => into_act(gui, IntoAct::Step(-1)),
+        (IntoHand::Library, KeyCode::Right) => into_act(gui, IntoAct::Step(1)),
+        (hand, KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab) => {
+            let down = key.code == KeyCode::Down || (key.code == KeyCode::Tab && !back);
+            match (hand, down) {
+                (IntoHand::Library, true) => ui.hand = IntoHand::Field,
+                (IntoHand::Field, true) if rows > 0 => {
+                    ui.hand = IntoHand::List;
+                    ui.held = Some(0);
+                    ui.view.pick_up();
+                }
+                (IntoHand::Field, false) if libraries => ui.hand = IntoHand::Library,
+                (IntoHand::List, true) if rows > 0 => {
+                    ui.held = Some(ui.held.map_or(0, |at| (at + 1).min(rows - 1)));
+                    ui.view.pick_up();
+                }
+                (IntoHand::List, false) => match ui.held {
+                    Some(at) if at > 0 => {
+                        ui.held = Some(at - 1);
+                        ui.view.pick_up();
+                    }
+                    _ => {
+                        ui.hand = IntoHand::Field;
+                        ui.held = None;
+                    }
+                },
+                _ => {}
+            }
+        }
+        (IntoHand::Field, _) => {
+            let edited = ui.text.handle_event(&TermEvent::Key(key)).is_some_and(|change| change.value);
+            if edited {
+                ui.typed = Some(crate::clock::Instant::now());
+                ui.moved();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The tips line while the chooser is up (spec §6.9), by the hand.
+fn into_tips(ui: &IntoUi) -> String {
+    match ui.hand {
+        IntoHand::Library => t!("gui.tips.discover_dest_library"),
+        IntoHand::Field => t!("gui.tips.keep_into_field"),
+        IntoHand::List => t!("gui.tips.keep_into_list"),
+    }
+    .to_string()
+}
+
+/// The chooser, drawn (and registered) over everything in Keep a copy's
+/// place, as Where copies land is — its geometry, frame and controls
+/// (spec §6.6): 80 wide, centred over the frame, anchored as if 22 rows;
+/// "Into a folder" on the top border, "Esc close" on the bottom. The room
+/// beneath is inert.
+fn draw_into(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    into_ask(gui);
+    let Some(ui) = gui.discover.keep.into.clone() else { return };
+    let shown = into_shown(&gui.app, &ui);
+    let note = into_note(&ui, &shown);
+    let rows = into_rows(&shown, note.is_some());
+    let listed = rows.iter().filter(|r| matches!(r, IntoRow::Listed(_))).count();
+    let held = ui.held.filter(|_| ui.hand == IntoHand::List);
+    let (first, visible) = gui.discover.keep.into.as_mut().map(|ui| ui.view.window(shown.tree.len(), held, listed)).unwrap_or((0, 0));
+    gui.ui.clear_registries();
+    gui.ui.click(area, Act::Guard);
+    let h = rows.len() as u16 + 2;
+    let rect = crate::kit::modal_rect(area, DEST_W, h, DEST_ANCHOR.max(h));
+    gui.ui.overlay(rect);
+    gui.ui.modal_over();
+    let inner = modal_box(frame, rect);
+    clear_spill(frame, rect);
+    gui.ui.click(rect, Act::Guard);
+    let into = |act: IntoAct| Act::Disc(DiscAct::Keep(KeepAct::Into(act)));
+    draw_borders(frame, gui, rect, &t!("gui.discover.keep.into_title"), &t!("gui.discover.keep.esc_close"), into(IntoAct::Close));
+    let text_x = rect.x + DEST_TEXT;
+    let tree_x = rect.x + DEST_TREE;
+    let end = rect.x + DEST_LAST + 1;
+    let wide = usize::from(end.saturating_sub(text_x));
+    let tree_room = usize::from(end.saturating_sub(tree_x));
+    let gold = Style::default().fg(th().gold);
+    let tip_clipped = |gui: &mut Gui, x: u16, y: u16, room: usize, words: &str| {
+        if width(words) > room {
+            gui.ui.tip(Rect { x, y, width: room as u16, height: 1 }, words.to_string());
+        }
+    };
+    for (i, row) in rows.iter().enumerate() {
+        let y = inner.y + i as u16;
+        match row {
+            IntoRow::Blank => {}
+            IntoRow::Preview => {
+                // A path past the server's 500: its GOLD words in the row's
+                // place.
+                if shown.check == IntoCheck::TooLong {
+                    let words = t!("gui.discover.dest.too_long", max = MAX_RESOLVED_LEN).to_string();
+                    put(frame, text_x, y, &super::bar::clip(&words, wide), gold);
+                    tip_clipped(gui, text_x, y, wide, &words);
+                    continue;
+                }
+                // Keep a copy's words, DIM; then the library BOLD and the
+                // field's folders, clipped from the left — or the kit's DIM
+                // `—` while the copy could not take the field's path.
+                let lead = format!("{} ", t!("gui.discover.keep.goes_to"));
+                put(frame, text_x, y, &super::bar::clip(&lead, wide), dim());
+                let x = text_x + (width(&lead) as u16).min(wide as u16);
+                let room = wide.saturating_sub(width(&lead));
+                if shown.check != IntoCheck::Ok {
+                    put(frame, x, y, &super::bar::clip(super::discover::dash(), room), dim());
+                    continue;
+                }
+                let folders = ui.folders().into_iter().map(|folder| vec![(folder, Run::Text)]).collect();
+                let landing = Landing { library: ui.vpath.clone(), folders, ..Landing::default() };
+                let mut runs: Vec<(String, Style)> = Vec::new();
+                for (i, crumb) in landing_crumbs(&landing).into_iter().enumerate() {
+                    if i > 0 {
+                        runs.push((crumb_sep().to_string(), dim()));
+                    }
+                    runs.extend(crumb);
+                }
+                if put_tail(frame, x, y, &runs, room) {
+                    gui.ui.tip(Rect { x: text_x, y, width: wide as u16, height: 1 }, whole_path(&landing, None));
+                }
+            }
+            IntoRow::Note => {
+                let Some((words, is_gold)) = &note else { continue };
+                put(frame, text_x, y, &super::bar::clip(words, wide), if *is_gold { gold } else { dim() });
+                tip_clipped(gui, text_x, y, wide, words);
+            }
+            IntoRow::Library => {
+                let hand = ui.hand == IntoHand::Library;
+                draw_libraries(frame, gui, (text_x, end, y), &shown.chips, &ui.vpath, hand, &|n| into(IntoAct::Library(n)), into(IntoAct::Step(-1)));
+            }
+            IntoRow::Field => {
+                let w = wide as u16;
+                let cell = Rect { x: text_x, y, width: w, height: 1 };
+                if ui.hand == IntoHand::Field {
+                    super::text_field(frame, &mut gui.ui, text_x, y, ui.text.value(), ui.text.cursor(), w, Style::default());
+                } else {
+                    put(frame, text_x, y, &super::clip_lead(ui.text.value(), wide), Style::default());
+                }
+                gui.ui.click(cell, into(IntoAct::Field));
+            }
+            IntoRow::Listed(n) => {
+                let at = first + n;
+                let Some(tree_row) = shown.tree.get(at) else { continue };
+                let words = match tree_row {
+                    TreeRow::Up => {
+                        let parent = shown.dir.iter().rev().nth(1).map_or(ui.vpath.as_str(), String::as_str);
+                        t!("gui.discover.dest.up", name = parent).to_string()
+                    }
+                    TreeRow::Folder(name) => name.clone(),
+                };
+                let slab = Rect { x: tree_x - 1, y, width: end - (tree_x - 1), height: 1 };
+                let lit = held == Some(at);
+                if lit {
+                    frame.buffer_mut().set_style(slab, sel());
+                }
+                let style = match (lit, gui.ui.hovers(slab)) {
+                    (true, _) => sel(),
+                    (false, true) => Style::default().fg(th().bright),
+                    (false, false) => dim(),
+                };
+                put(frame, tree_x, y, &super::bar::clip(&words, tree_room), style);
+                gui.ui.click(slab, into(IntoAct::Row(at)));
+                if *n == 0 && shown.tree.len() > visible {
+                    let bar = Rect { x: end, y, width: 1, height: visible as u16 };
+                    scroll_list(frame, &mut gui.ui, bar, shown.tree.len(), visible, first, into(IntoAct::Scroll(-1)), into(IntoAct::Scroll(1)), move |n| {
+                        Act::Disc(DiscAct::Keep(KeepAct::Into(IntoAct::Jump(n))))
+                    });
+                }
+            }
+            IntoRow::ListNote => {
+                let Some((words, is_gold)) = &shown.list_note else { continue };
+                let words = ell(words);
+                put(frame, tree_x, y, &super::bar::clip(&words, tree_room), if *is_gold { gold } else { dim() });
+                tip_clipped(gui, tree_x, y, tree_room, &words);
+            }
+        }
+    }
+}
+
 // ── The Copies modal (clause 117) ───────────────────────────────────────────
 
 /// The list's width — Keep a copy's, the two opening in the same place
@@ -3371,7 +4087,7 @@ enum CopiesBody {
 
 /// The list's body, and the failure of a refresh that kept its rows.
 fn copies_body(app: &crate::tui::app::App) -> (CopiesBody, Option<crate::api::PluginFailure>) {
-    let book = &app.taste.keep.book;
+    let book = &app.keep.book;
     let rows = app.copies_rows();
     if !rows.is_empty() {
         return (CopiesBody::Rows(rows), book.failed.clone());
@@ -3383,9 +4099,11 @@ fn copies_body(app: &crate::tui::app::App) -> (CopiesBody, Option<crate::api::Pl
     }
 }
 
-/// The verbs line's indicator, or `C`: the Copies modal, its first ask now.
+/// The verbs line's indicator, or `C`: the Copies modal, its first ask now
+/// — in any room while the own server's gate is open (the keep-a-copy
+/// spec's Q1), whichever of its servers is browsed.
 pub(crate) fn open_copies(gui: &mut Gui) {
-    if !gui.app.keep_gate() {
+    if !gui.app.keep_copies_ready() {
         return;
     }
     let effects = gui.app.copies_open();
@@ -3433,7 +4151,7 @@ fn state_cell(row: &CopyRow) -> StateCell {
 /// by {artist}".
 fn copy_title(row: &CopyRow) -> String {
     match &row.title {
-        CopyTitle::Song(s) | CopyTitle::Album(s) => s.clone(),
+        CopyTitle::Song(s) | CopyTitle::Album(s) | CopyTitle::Folder(s) => s.clone(),
         CopyTitle::Artist { artist, .. } => t!("gui.discover.copies.every_album", artist = artist).to_string(),
     }
 }
@@ -3444,6 +4162,7 @@ fn copy_kind(row: &CopyRow) -> Option<String> {
     match &row.title {
         CopyTitle::Song(_) => Some(t!("gui.discover.copies.kind_song").to_string()),
         CopyTitle::Album(_) => Some(t!("gui.discover.copies.kind_album").to_string()),
+        CopyTitle::Folder(_) => Some(t!("gui.discover.copies.kind_folder").to_string()),
         CopyTitle::Artist { missing_only: true, .. } => Some(t!("gui.discover.copies.kind_missing").to_string()),
         CopyTitle::Artist { missing_only: false, .. } => None,
     }
@@ -3576,8 +4295,7 @@ pub(crate) fn draw_copies(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Re
     };
     let fits = usize::from(avail / 2).max(1);
     let list_h: u16 = match &body {
-        CopiesBody::Asking | CopiesBody::LoadFailed(_) => 1,
-        CopiesBody::Empty => 2,
+        CopiesBody::Asking | CopiesBody::LoadFailed(_) | CopiesBody::Empty => 1,
         CopiesBody::Rows(_) => 2 * n.min(fits) as u16,
     };
     let h = 2 + COPIES_HEAD + list_h + 2;
@@ -3608,9 +4326,10 @@ pub(crate) fn draw_copies(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Re
             let words = t!("gui.discover.copies.load_failed", words = failure_words(failure)).to_string();
             put(frame, tx, top, &super::bar::clip(&words, room), Style::default().fg(th().gold));
         }
+        // The state alone: what `c` keeps is the rooms' to say (the user's
+        // rule; it keeps more than songs and albums now).
         CopiesBody::Empty => {
             put(frame, tx, top, &super::bar::clip(&t!("gui.discover.copies.empty"), room), Style::default());
-            put(frame, tx, top + 1, &super::bar::clip(&t!("gui.discover.copies.empty_sub"), room), dim());
         }
         CopiesBody::Rows(rows) => {
             clearable = rows.iter().any(|r| r.job.state.finished());
@@ -3858,7 +4577,7 @@ pub(crate) fn copies_key(gui: &mut Gui, key: KeyEvent) {
         KeyCode::Enter => match row.and_then(|r| r.action.map(|a| (r.job.id, a))) {
             Some((_, JobAction::Cancel)) => {}
             Some((id, _)) => copies_act(gui, &DiscAct::CopiesAct(id)),
-            None if gui.app.taste.keep.book.failed.is_some() => copies_act(gui, &DiscAct::CopiesTryAgain),
+            None if gui.app.keep.book.failed.is_some() => copies_act(gui, &DiscAct::CopiesTryAgain),
             None => {}
         },
         KeyCode::Char('x') => {
@@ -3948,14 +4667,14 @@ enum LinkLine {
 /// The https links of the list's answer, CANONICAL first (clause 140) —
 /// nothing else reaches the opener.
 fn web_links(app: &crate::tui::app::App) -> Vec<PluginLink> {
-    let Some(LinksStatus::Ready(links)) = app.taste.keep.links.as_ref().map(|l| &l.status) else { return Vec::new() };
+    let Some(LinksStatus::Ready(links)) = app.keep.links.as_ref().map(|l| &l.status) else { return Vec::new() };
     let web: Vec<&PluginLink> = links.iter().filter(|l| l.is_web() && !l.label.trim().is_empty()).collect();
     web.iter().filter(|l| l.canonical()).chain(web.iter().filter(|l| !l.canonical())).map(|l| (*l).clone()).collect()
 }
 
 /// The list's lines for its state, wrapped to `room` cells.
 fn link_lines(app: &crate::tui::app::App, room: usize) -> Vec<LinkLine> {
-    let Some(state) = app.taste.keep.links.as_ref() else { return Vec::new() };
+    let Some(state) = app.keep.links.as_ref() else { return Vec::new() };
     match &state.status {
         LinksStatus::Asking => vec![LinkLine::Words(ell(&t!("gui.discover.asking")), accent())],
         LinksStatus::Failed(failure) => {
@@ -4010,7 +4729,7 @@ const LINKS_INNER: u16 = 30;
 pub(crate) fn draw_links(frame: &mut Frame, gui: &mut Gui) {
     gui.discover.links.at = None;
     let Some((sheet, row_y, label_end)) = gui.discover.links.anchor else { return };
-    if gui.app.taste.keep.links.is_none() {
+    if gui.app.keep.links.is_none() {
         return;
     }
     let right = sheet.right().saturating_sub(3);
@@ -4229,7 +4948,8 @@ pub(crate) fn fit_note(head: &str, wide: Option<&str>, room: usize) -> String {
     }
 }
 
-/// What a job names: the song, the album, or the artist.
+/// What a job names: the song, the album, the artist — or the folder, by
+/// its name (its recommendation's title).
 fn job_title(job: &PluginJob) -> String {
     let text = |k: &str| job.rec_text(k).unwrap_or_default();
     match job.scope() {
@@ -4247,11 +4967,14 @@ fn refused_note(failure: &crate::api::PluginFailure, room: usize) -> (String, Me
     (fit_note(&words, None, room), MessageKind::Error)
 }
 
-/// "copying Borrowed Tapes…" — a copy still moving.
-fn busy_note(job: &PluginJob, room: usize) -> (String, MessageKind) {
+/// "copying Borrowed Tapes…" — a copy still moving; where the note has the
+/// room, "… from Stage Peer B…" — unless that is the server browsed, which
+/// the header names already (`here`, the session's connected server).
+fn busy_note(job: &PluginJob, room: usize, here: Option<i64>) -> (String, MessageKind) {
     let title = job_title(job);
     let head = ell(&t!("gui.discover.note.copying", title = title));
-    let wide = job.peer_name().map(|server| ell(&t!("gui.discover.note.copying_from", title = title, server = server)));
+    let named = here.is_some() && job.peer_id() == here;
+    let wide = job.peer_name().filter(|_| !named).map(|server| ell(&t!("gui.discover.note.copying_from", title = title, server = server)));
     (fit_note(&head, wide.as_deref(), room), MessageKind::Busy)
 }
 
@@ -4260,7 +4983,15 @@ pub(crate) fn news_note(job: &PluginJob, room: usize) -> Option<(String, Message
     let title = job_title(job);
     let server = job.peer_name().unwrap_or_default();
     let tail = |head: String| format!("{head} · {title}");
+    let folder = job.scope() == Some(JobScope::Folder);
     let (head, wide, kind) = match job.outcome() {
+        // A folder's copy says its folder (keep-a-copy spec §6.7): "copied
+        // Borrowed Tapes", never an album's words — with a gap, its songs
+        // that didn't copy.
+        JobOutcome::CopiedMany(n) if folder => match gap_words(&n) {
+            Some(gap) => (gap.clone(), Some(format!("{title} · {gap}")), MessageKind::Error),
+            None => (t!("gui.discover.note.copied", title = title).to_string(), None, MessageKind::Success),
+        },
         JobOutcome::Copied { vpath, filepath } => {
             let library = vpath.or_else(|| filepath.split('/').next().map(str::to_string)).filter(|l| !l.is_empty());
             let head = t!("gui.discover.note.copied", title = title).to_string();
@@ -4337,12 +5068,15 @@ pub(crate) fn frame_tick(gui: &mut Gui) {
     let room = gui.screen == super::Screen::Library && gui.active == super::DISCOVER_NAV;
     // The quick beat only while a job's own surface shows it: the Copies
     // modal, or a Keep a copy modal whose own copy moves — one still
-    // choosing over another copy keeps the room's (clause 112).
+    // choosing over another copy keeps the room's (clause 112) — in any
+    // room they stand over (the keep-a-copy spec's Q1: Copies everywhere).
+    // A connected server's page that shows marks raises Away to Room as it
+    // draws, after this.
     let modal = gui.discover.copies.is_some() || gui.app.keep_flow_live();
     let watch = match (room, modal) {
-        (true, true) => KeepWatch::Modal,
+        (_, true) => KeepWatch::Modal,
         (true, false) => KeepWatch::Room,
-        (false, _) => KeepWatch::Away,
+        (false, false) => KeepWatch::Away,
     };
     gui.app.keep_watch(watch);
     // Where copies land's save that answered since (clause 144) — before
@@ -4356,7 +5090,7 @@ pub(crate) fn frame_tick(gui: &mut Gui) {
     // have said so is gone.
     for landed in gui.app.keep_take_landed() {
         let note = match landed {
-            Ok(job) if job.live() => Some(busy_note(&job, room)),
+            Ok(job) if job.live() => Some(busy_note(&job, room, gui.app.origin().peer)),
             Ok(job) => news_note(&job, room),
             Err(failure) => Some(refused_note(&failure, room)),
         };
@@ -4368,7 +5102,7 @@ pub(crate) fn frame_tick(gui: &mut Gui) {
     if news.is_empty() {
         return;
     }
-    let followed = gui.app.taste.keep.flow.as_ref().and_then(|f| match f.phase {
+    let followed = gui.app.keep.flow.as_ref().and_then(|f| match f.phase {
         KeepPhase::Following(id) => Some(id),
         _ => None,
     });
@@ -4615,7 +5349,7 @@ pub(crate) mod tests {
             .pending
             .iter()
             .filter_map(|e| match e {
-                Effect::Api(ApiCmd::JobsLookup { seq, generation, recs }) => Some((*seq, *generation, recs.clone())),
+                Effect::Api(ApiCmd::JobsLookup { seq, generation, recs, .. }) => Some((*seq, *generation, recs.clone())),
                 _ => None,
             })
             .collect();
@@ -4646,7 +5380,7 @@ pub(crate) mod tests {
             .pending
             .iter()
             .filter_map(|e| match e {
-                Effect::Api(ApiCmd::Jobs { seq, generation }) => Some((*seq, *generation)),
+                Effect::Api(ApiCmd::Jobs { seq, generation, .. }) => Some((*seq, *generation)),
                 _ => None,
             })
             .collect();
@@ -4707,11 +5441,13 @@ pub(crate) mod tests {
             artist: Some("Boukmanflow".into()),
             year: Some(2019),
             genre: None,
+            ..Default::default()
         };
         let facts = crate::tui::worker::KeepFacts {
             album_songs: songs.map(|n| (1..=n).map(song).collect()),
             peer_albums: Some(rows(remote, "Boukmanflow")),
             local_albums: Some(rows(local, "Boukmanflow")),
+            ..Default::default()
         };
         apply(gui, Event::KeepFacts { seq, generation, facts: Box::new(facts) });
     }
@@ -5356,19 +6092,19 @@ pub(crate) mod tests {
         let rows = draw(&mut gui, 100, 30);
         // Nothing held, nothing under the pointer: `c` passes.
         key(&mut gui, KeyCode::Char('c'));
-        assert!(gui.app.taste.keep.flow.is_none());
+        assert!(gui.app.keep.flow.is_none());
         // The hovered row.
         gui.ui.pointer = Some(at(&rows, "Corner Store Loop"));
         draw(&mut gui, 100, 30);
         key(&mut gui, KeyCode::Char('c'));
-        let flow = gui.app.taste.keep.flow.as_ref().expect("Keep a copy on the hovered row");
+        let flow = gui.app.keep.flow.as_ref().expect("Keep a copy on the hovered row");
         assert_eq!(flow.subject.title.as_deref(), Some("Corner Store Loop"));
         key(&mut gui, KeyCode::Esc);
         // The hovered tile: album focus.
         gui.ui.pointer = Some(Position { x: 20, y: 8 });
         draw(&mut gui, 100, 30);
         key(&mut gui, KeyCode::Char('c'));
-        let flow = gui.app.taste.keep.flow.as_ref().expect("Keep a copy on the hovered tile");
+        let flow = gui.app.keep.flow.as_ref().expect("Keep a copy on the hovered tile");
         assert!(flow.subject.album_focus() && flow.subject.album.as_deref() == Some("Borrowed Tapes"));
         key(&mut gui, KeyCode::Esc);
         // The held row wins over the pointer.
@@ -5376,7 +6112,7 @@ pub(crate) mod tests {
             key(&mut gui, KeyCode::Down);
         }
         key(&mut gui, KeyCode::Char('c'));
-        assert_eq!(gui.app.taste.keep.flow.as_ref().and_then(|f| f.subject.title.as_deref()), Some("Late Train Verse"));
+        assert_eq!(gui.app.keep.flow.as_ref().and_then(|f| f.subject.title.as_deref()), Some("Late Train Verse"));
         key(&mut gui, KeyCode::Esc);
         // The lit tile: `c` in album focus, `m` its list.
         gui.ui.pointer = None;
@@ -5388,7 +6124,7 @@ pub(crate) mod tests {
             "← → albums · Enter play the album · + a queue · c keep a copy · m more · ↓ songs · Esc done"
         );
         key(&mut gui, KeyCode::Char('c'));
-        assert!(gui.app.taste.keep.flow.as_ref().is_some_and(|f| f.subject.album_focus()));
+        assert!(gui.app.keep.flow.as_ref().is_some_and(|f| f.subject.album_focus()));
     }
 
     #[test]
@@ -5402,7 +6138,7 @@ pub(crate) mod tests {
         gui.ui.pointer = Some(at(&rows, "Corner Store Loop"));
         draw(&mut gui, 100, 30);
         key(&mut gui, KeyCode::Char('c'));
-        assert!(gui.app.taste.keep.flow.is_none(), "c does nothing");
+        assert!(gui.app.keep.flow.is_none(), "c does nothing");
         key(&mut gui, KeyCode::Char('C'));
         assert!(gui.discover.copies.is_none(), "C does nothing");
         gui.act(Act::Disc(DiscAct::More(3)));
@@ -5431,9 +6167,9 @@ pub(crate) mod tests {
         assert_eq!(rows[8].chars().nth(17), Some('╭'), "{all}");
         assert_eq!(rows[21].chars().nth(17), Some('╰'), "{all}");
         let labels: Vec<String> = (14..20).map(|y| rows[y].chars().skip(19).take(30).collect::<String>().trim_end().to_string()).collect();
-        assert_eq!(labels, ["Play now", "Add next", "Add to end of queue", "Keep a copy…  c", "Song Info", "Open elsewhere…"]);
-        let c = Position { x: 33, y: 17 };
-        assert_eq!((buffer[(c.x, c.y)].symbol(), fg(&buffer, c)), ("c", th().dim), "the key DIM after the label");
+        assert_eq!(labels, ["Play now", "Add next", "Add to end of queue", "Keep a copy…", "Song Info", "Open elsewhere…"]);
+        assert_eq!(fg(&buffer, Position { x: 19, y: 17 }), th().accent, "the label in the accent");
+        assert_eq!(buffer[(33, 17)].symbol(), " ", "no key after the label");
         let badge = rows[12].chars().skip(19).collect::<String>();
         assert!(badge.starts_with("from Stage Peer B   • online"), "{badge}");
         assert_eq!(fg(&buffer, Position { x: 39, y: 12 }), th().ok, "the dot OK");
@@ -5447,11 +6183,11 @@ pub(crate) mod tests {
         let buffer = super::tests::buffer(&mut gui, 100, 30);
         assert_eq!(fg(&buffer, Position { x: 19, y: 19 }), th().accent);
         key(&mut gui, KeyCode::Esc);
-        assert!(gui.actions.sheet.as_ref().is_some_and(|s| !s.links) && gui.app.taste.keep.links.is_none());
+        assert!(gui.actions.sheet.as_ref().is_some_and(|s| !s.links) && gui.app.keep.links.is_none());
         // `c` from anywhere in the sheet: the sheet gives way to the modal.
         key(&mut gui, KeyCode::Char('c'));
         assert!(gui.actions.sheet.is_none());
-        assert_eq!(gui.app.taste.keep.flow.as_ref().and_then(|f| f.subject.title.as_deref()), Some("Late Train Verse"));
+        assert_eq!(gui.app.keep.flow.as_ref().and_then(|f| f.subject.title.as_deref()), Some("Late Train Verse"));
     }
 
     #[test]
@@ -5468,7 +6204,7 @@ pub(crate) mod tests {
         // row under it, 24 wide, ACCENT, no title, no [X].
         assert_eq!(rows[13].chars().skip(16).take(24).collect::<String>(), "╭──────────────────────╮");
         let shown: Vec<String> = (14..17).map(|y| rows[y].chars().skip(16).take(24).collect()).collect();
-        assert_eq!(shown, ["│ Play album           │", "│ Queue album  a       │", "│ Keep a copy…  c      │"]);
+        assert_eq!(shown, ["│ Play album           │", "│ Queue album  a       │", "│ Keep a copy…         │"]);
         assert_eq!(rows[17].chars().skip(16).take(24).collect::<String>(), "╰──────────────────────╯", "no Open on: the server is not saved");
         assert_eq!(fg(&buffer, Position { x: 16, y: 13 }), th().accent);
         assert_eq!(fg(&buffer, Position { x: 31, y: 15 }), th().dim, "Queue album's key DIM");
@@ -5480,7 +6216,7 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Enter);
         assert!(gui.discover.tile_list.is_none());
-        assert!(gui.app.taste.keep.flow.as_ref().is_some_and(|f| f.subject.album_focus()), "Keep a copy in album focus");
+        assert!(gui.app.keep.flow.as_ref().is_some_and(|f| f.subject.album_focus()), "Keep a copy in album focus");
         key(&mut gui, KeyCode::Esc);
         // `a` queues from inside it.
         gui.act(Act::Disc(DiscAct::TileList(0)));
@@ -5509,10 +6245,10 @@ pub(crate) mod tests {
         gui.act(Act::Disc(DiscAct::TileVerb(super::super::discover::TileVerb::OpenOn(1))));
         assert_eq!(gui.app.session.peer, Some((HOST.to_string(), B)), "the session moved to Stage Peer B");
         assert_eq!(gui.active, super::super::ALBUMS_NAV, "the Albums room");
-        assert_eq!(
-            gui.discover.open_on,
-            Some(crate::tui::worker::LibraryNode::Album { name: "Borrowed Tapes".into(), artist: None }),
-            "the album waits for that server's answer"
+        assert!(
+            matches!(&gui.discover.open_on, Some(crate::tui::worker::LibraryNode::Album { name, artist: None, .. }) if name == "Borrowed Tapes"),
+            "the album waits for that server's answer: {:?}",
+            gui.discover.open_on
         );
     }
 
@@ -5550,7 +6286,9 @@ pub(crate) mod tests {
         let mut gui = canvas_gui(&[]);
         draw(&mut gui, 100, 30);
         super::open(&mut gui, LATE);
-        // The sizes still asked: no box, the primary without its count.
+        // The sizes still asked: no box, the primary without its count —
+        // and no Every album by until the artist's albums there answer with
+        // one of theirs (the user's 2026-10-27 decision: choices append).
         let rows = draw(&mut gui, 100, 30);
         assert_eq!(
             modal_rows(&rows),
@@ -5562,7 +6300,6 @@ pub(crate) mod tests {
                 │                                                                          │
                 │ (•) This song                                                            │
                 │ ( ) Album                                                                │
-                │ ( ) Every album by Boukmanflow                                           │
                 │                                                                          │
                 │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
                 │                                                                          │
@@ -5749,7 +6486,7 @@ pub(crate) mod tests {
         assert_eq!(hit_at(&gui, 87, 18), keep_act(super::KeepAct::Close));
         // Esc closes; the start still lands.
         key(&mut gui, KeyCode::Esc);
-        assert!(gui.app.taste.keep.flow.is_none());
+        assert!(gui.app.keep.flow.is_none());
     }
 
     #[test]
@@ -6319,7 +7056,7 @@ pub(crate) mod tests {
         let queued: Vec<&str> = gui.app.queue.items.iter().map(|q| q.filepath.as_str()).collect();
         assert_eq!(queued, ["copies/Boukmanflow/Borrowed Tapes/01.mp3", "copies/Boukmanflow/Borrowed Tapes/02.mp3", "copies/Boukmanflow/Borrowed Tapes/03.mp3"]);
         assert_eq!(gui.app.queue.current, Some(0));
-        assert!(gui.app.taste.keep.flow.is_none());
+        assert!(gui.app.keep.flow.is_none());
         // Left out as already yours: the songs are yours; no In row — the
         // walk names the album, not its folder; Close.
         let mut gui = keep_in("E17b");
@@ -6405,7 +7142,6 @@ pub(crate) mod tests {
                 │                                                                          │
                 │ ( ) This song                                                            │
                 │ (•) Album                                                                │
-                │ ( ) Every album by Peer Kim                                              │
                 │                                                                          │
                 │ Files go to copies › From friends › ‹artist›                    d change │
                 │ ‹artist› comes from each song's own tags, so these songs can land in     │
@@ -6656,7 +7392,7 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Up);
         key(&mut gui, KeyCode::Up);
         key(&mut gui, KeyCode::Enter);
-        assert!(gui.app.taste.keep.flow.is_none());
+        assert!(gui.app.keep.flow.is_none());
         let rows = draw(&mut gui, 100, 30);
         assert!(room(&rows, 12).starts_with("Boukmanflow"), "{}", rows[12]);
     }
@@ -6952,7 +7688,7 @@ pub(crate) mod tests {
         }
         assert!(gui.discover.keep.dest.is_none() && gui.pending.iter().all(|e| !matches!(e, Effect::Api(ApiCmd::JobCancel { .. }))));
         key(&mut gui, KeyCode::Enter);
-        assert!(gui.app.taste.keep.flow.is_none());
+        assert!(gui.app.keep.flow.is_none());
         // A 403 at start is a right lost, never a refusal with Add still
         // offered: its words name uploading (R3), or the right to start
         // copies is gone (R4); a gate asked again that no longer lists the
@@ -6987,7 +7723,7 @@ pub(crate) mod tests {
         gui.pending.clear();
         key(&mut gui, KeyCode::Char('c'));
         key(&mut gui, KeyCode::Enter);
-        assert!(gui.app.taste.keep.flow.is_none() && starts(&gui).is_empty());
+        assert!(gui.app.keep.flow.is_none() && starts(&gui).is_empty());
     }
 
     #[test]
@@ -7226,7 +7962,7 @@ pub(crate) mod tests {
             for code in [KeyCode::Char(' '), KeyCode::Tab, KeyCode::Left, KeyCode::Right, KeyCode::Char('C')] {
                 key(&mut gui, code);
             }
-            assert!(gui.app.taste.keep.flow.is_some(), "{id}: still open");
+            assert!(gui.app.keep.flow.is_some(), "{id}: still open");
             assert_eq!(window_of(&mut gui), before, "{id}");
             let acted = gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::JobCancel { .. } | ApiCmd::JobStart { .. } | ApiCmd::DestinationSave { .. })));
             assert!(!acted && gui.discover.keep.dest.is_none() && gui.discover.copies.is_none(), "{id}: {:?}", gui.pending);
@@ -7242,7 +7978,7 @@ pub(crate) mod tests {
         let mut gui = keep_in("E1");
         key(&mut gui, KeyCode::Char('a'));
         assert_eq!(gui.app.queue.items.last().map(|q| q.filepath.as_str()), Some("copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3"));
-        assert!(gui.app.taste.keep.flow.is_none(), "queued, closed");
+        assert!(gui.app.keep.flow.is_none(), "queued, closed");
     }
 
     #[test]
@@ -7283,7 +8019,7 @@ pub(crate) mod tests {
         let mut gui = keep_in("E7");
         gui.pending.clear();
         key(&mut gui, KeyCode::Enter);
-        assert!(gui.app.taste.keep.flow.is_none() && starts(&gui).is_empty());
+        assert!(gui.app.keep.flow.is_none() && starts(&gui).is_empty());
     }
 
     #[test]
@@ -7314,11 +8050,11 @@ pub(crate) mod tests {
         assert_eq!(queued, ["copies/Boukmanflow/Borrowed Tapes/01.mp3", "copies/Boukmanflow/Borrowed Tapes/02.mp3", "music/Boukmanflow/Borrowed Tapes/03.mp3"]);
         assert_eq!(gui.app.queue.current, Some(0));
         assert!(gui.app.queue.items.iter().all(|q| q.origin.peer.is_none()), "the user's own library");
-        assert!(gui.app.taste.keep.flow.is_none());
+        assert!(gui.app.keep.flow.is_none());
         // Every album by is no one queue: Close.
         let mut gui = keep_in("E4");
         key(&mut gui, KeyCode::Enter);
-        assert!(gui.app.queue.items.is_empty() && gui.app.taste.keep.flow.is_none());
+        assert!(gui.app.queue.items.is_empty() && gui.app.keep.flow.is_none());
     }
 
     #[test]
@@ -7359,7 +8095,7 @@ pub(crate) mod tests {
                 gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
             }
             gui.app.art.insert("bt.jpg".into(), Some(art.clone()));
-            if let Some(flow) = gui.app.taste.keep.flow.as_mut() {
+            if let Some(flow) = gui.app.keep.flow.as_mut() {
                 flow.subject.art = Some("bt.jpg".into());
             }
             gui
@@ -7558,7 +8294,7 @@ pub(crate) mod tests {
                 _ => None,
             });
             key(&mut gui, KeyCode::Esc);
-            assert!(gui.app.taste.keep.flow.is_none(), "Esc closes while it is out");
+            assert!(gui.app.keep.flow.is_none(), "Esc closes while it is out");
             draw(&mut gui, 100, 30);
             assert!(gui.app.message.is_none(), "nothing yet: {:?}", gui.app.message);
             let generation = gui.app.session_gen();
@@ -7598,7 +8334,7 @@ pub(crate) mod tests {
         gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
         gui.app.art.insert("bt.jpg".into(), Some(art));
         let long = "The Extremely Long Album Title Of The Night Sessions And The Morning After";
-        if let Some(flow) = gui.app.taste.keep.flow.as_mut() {
+        if let Some(flow) = gui.app.keep.flow.as_mut() {
             flow.subject.art = Some("bt.jpg".into());
             flow.subject.album = Some(long.into());
         }
@@ -7766,6 +8502,7 @@ pub(crate) mod tests {
                 artist: Some(artist.to_string()),
                 year: Some(2019),
                 genre: None,
+                ..Default::default()
             })
             .collect();
         let facts = crate::tui::worker::KeepFacts { album_songs: Some(songs), ..Default::default() };
@@ -7881,7 +8618,7 @@ pub(crate) mod tests {
     /// again) with `view`.
     fn land_read(gui: &mut Gui, view: Value) {
         let ask = gui.pending.iter().rev().find_map(|e| match e {
-            Effect::Api(ApiCmd::DestinationRead { seq, generation }) => Some((*seq, *generation)),
+            Effect::Api(ApiCmd::DestinationRead { seq, generation, .. }) => Some((*seq, *generation)),
             _ => None,
         });
         let Some((seq, generation)) = ask else { panic!("no read in {:?}", gui.pending) };
@@ -7896,7 +8633,7 @@ pub(crate) mod tests {
     fn land_folders_with(gui: &mut Gui, more: Option<usize>) {
         loop {
             let ask = gui.pending.iter().find_map(|e| match e {
-                Effect::Api(ApiCmd::DestinationFolders { seq, generation, path }) => Some((*seq, *generation, path.clone())),
+                Effect::Api(ApiCmd::DestinationFolders { seq, generation, path, .. }) => Some((*seq, *generation, path.clone())),
                 _ => None,
             });
             let Some((seq, generation, path)) = ask else { return };
@@ -8048,13 +8785,13 @@ pub(crate) mod tests {
         assert!(gui.discover.keep.dest.is_none());
         assert!(rows.iter().any(|r| r.contains("Keep a copy")), "{}", rows.join("\n"));
         key(&mut gui, KeyCode::Esc);
-        assert!(gui.app.taste.keep.flow.is_none(), "Esc closes it");
+        assert!(gui.app.keep.flow.is_none(), "Esc closes it");
     }
 
     /// Answer one folder listing the picker asked, of `path`, with `names`.
     fn land_listing(gui: &mut Gui, path: &str, names: &[&str]) {
         let ask = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::DestinationFolders { seq, generation, path: asked }) if asked == path => Some((*seq, *generation)),
+            Effect::Api(ApiCmd::DestinationFolders { seq, generation, path: asked, .. }) if asked == path => Some((*seq, *generation)),
             _ => None,
         });
         let Some((seq, generation)) = ask else { panic!("no listing of {path} in {:?}", gui.pending) };
@@ -8523,10 +9260,14 @@ pub(crate) mod tests {
             rows.join("\n")
         );
         assert!(ui(&gui).custom);
+        // Gone in with Enter: the new listing's first row held, its slab
+        // lit, so Enter goes on from where the keyboard is.
+        assert_eq!(ui(&gui).list.as_ref().and_then(|list| list.held), Some(0));
+        assert_eq!(bg(&buffer, at(&rows, "Up to copies")), th().accent);
         assert_eq!(fg(&buffer, Position { x: 14, y: at_row(&rows, "Up to copies") - 1 }), th().dim, "the head DIM");
-        // ↓ ↓ ↓ Enter goes into Stage Peer B: nothing in it, Up to its
+        // ↓ ↓ Enter goes into Stage Peer B: nothing in it, Up to its
         // parent; the layout starts there.
-        for _ in 0..3 {
+        for _ in 0..2 {
             key(&mut gui, KeyCode::Down);
         }
         key(&mut gui, KeyCode::Enter);
@@ -8602,7 +9343,7 @@ pub(crate) mod tests {
         };
         let failed = |gui: &mut Gui, status: u16, words: &str| {
             let ask = gui.pending.iter().find_map(|e| match e {
-                Effect::Api(ApiCmd::DestinationFolders { seq, generation, path }) => Some((*seq, *generation, path.clone())),
+                Effect::Api(ApiCmd::DestinationFolders { seq, generation, path, .. }) => Some((*seq, *generation, path.clone())),
                 _ => None,
             });
             let (seq, generation, path) = ask.expect("a listing asked");
@@ -8633,7 +9374,7 @@ pub(crate) mod tests {
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Folders);
         let ask = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::DestinationFolders { seq, generation, path }) => Some((*seq, *generation, path.clone())),
+            Effect::Api(ApiCmd::DestinationFolders { seq, generation, path, .. }) => Some((*seq, *generation, path.clone())),
             _ => None,
         });
         let (seq, generation, path) = ask.expect("the root asked");
@@ -8671,7 +9412,7 @@ pub(crate) mod tests {
         let mut gui = dest_gui("");
         dest_act(&mut gui, super::DestAct::Folders);
         let ask = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::DestinationFolders { seq, generation, path }) => Some((*seq, *generation, path.clone())),
+            Effect::Api(ApiCmd::DestinationFolders { seq, generation, path, .. }) => Some((*seq, *generation, path.clone())),
             _ => None,
         });
         let (seq, generation, path) = ask.expect("the root asked");
@@ -10226,7 +10967,7 @@ pub(crate) mod tests {
             .pending
             .iter()
             .filter_map(|e| match e {
-                Effect::Api(ApiCmd::Jobs { seq, generation }) => Some((*seq, *generation)),
+                Effect::Api(ApiCmd::Jobs { seq, generation, .. }) => Some((*seq, *generation)),
                 _ => None,
             })
             .collect();
@@ -10437,7 +11178,7 @@ pub(crate) mod tests {
         };
         // Loading: the first ask out, ACCENT.
         let mut gui = canvas_gui(&[]);
-        gui.app.taste.keep.book = Default::default();
+        gui.app.keep.book = Default::default();
         gui.act(Act::Disc(DiscAct::Copies));
         assert_eq!(copies_on(&mut gui), modal(&[
             "│ asking your server for copies…                                           │", blank, blank,
@@ -10457,8 +11198,7 @@ pub(crate) mod tests {
         // Empty: nothing to clear, so no Clear finished.
         land_jobs(&mut gui, &[]);
         assert_eq!(copies_on(&mut gui), modal(&[
-            "│ Nothing copying.                                                         │",
-            "│ Start one with c on a connected server's song or album.                  │", blank, blank,
+            "│ Nothing copying.                                                         │", blank, blank,
         ]));
         // Running, then no estimate yet: the bar all DIM, no %.
         let late = rec_on(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes");
@@ -10715,7 +11455,7 @@ pub(crate) mod tests {
             "╰──────────────────────────────╯   │",
         ].map(str::to_string), "{}", shown.join("\n"));
         let labels: Vec<String> = shown[6..12].iter().map(|r| r.chars().take(30).collect::<String>().trim_end().to_string()).collect();
-        assert_eq!(labels, ["│ Play now", "│ Add next", "│ Add to end of queue", "│ Keep a copy…  c", "│ Song Info", "│ Open elsewhere…"]);
+        assert_eq!(labels, ["│ Play now", "│ Add next", "│ Add to end of queue", "│ Keep a copy…", "│ Song Info", "│ Open elsewhere…"]);
         assert!(!rows.join("\n").contains("https") && !rows.join("\n").contains("Odd"));
         assert_eq!(fg(&buffer, Position { x: 49, y: 10 }), th().dim, "CANONICAL DIM");
         let slab: Vec<_> = (47..80).map(|x| bg(&buffer, Position { x, y: 11 })).collect();
@@ -10773,7 +11513,7 @@ pub(crate) mod tests {
         let shown = sheet_rows(&lines(&buffer));
         assert_eq!(shown[8..13], [
             "│ Add to end of queue         ╭──────────────────────────────╮   │",
-            "│ Keep a copy…  c             │ couldn't get links:          │   │",
+            "│ Keep a copy…                │ couldn't get links:          │   │",
             "│ Song Info                   │ the links plug-in timed out  │   │",
             "│ Open elsewhere…             │   Try again                  │   │",
             "│                             ╰──────────────────────────────╯   │",
@@ -10814,7 +11554,7 @@ pub(crate) mod tests {
             assert!(crate::kit::width(&t("gui.discover.copies.col_from")) <= 12, "{code}");
             assert!(crate::kit::width(&t("gui.discover.copies.col_state")) <= 20);
             // The modal's lines: the table's 72 cells.
-            for key in ["gui.discover.copies.asking", "gui.discover.copies.empty", "gui.discover.copies.empty_sub"] {
+            for key in ["gui.discover.copies.asking", "gui.discover.copies.empty"] {
                 assert!(crate::kit::width(&t(key)) <= 72, "{code}: {key}: {}", t(key));
             }
             let no_answer = t("gui.discover.keep.no_answer");
@@ -10991,7 +11731,7 @@ pub(crate) mod tests {
         ]));
         assert_eq!(gui.app.taste.peer_row(0, 2).and_then(|(_, l)| l.title.as_deref()), Some("Fresh Song"));
         let all = draw(&mut gui, 100, 30).join("\n");
-        assert!(all.contains("from Stage Peer B") && all.contains("Keep a copy…  c") && all.contains("Open elsewhere…"), "{all}");
+        assert!(all.contains("from Stage Peer B") && all.contains("Keep a copy…") && all.contains("Open elsewhere…"), "{all}");
         // Open elsewhere asks for the sheet's song.
         gui.pending.clear();
         gui.act(Act::SheetVerb(super::super::actions::SheetAction::OpenElsewhere));
@@ -10999,7 +11739,7 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Esc);
         // Keep a copy opens on it, its row sent unchanged.
         key(&mut gui, KeyCode::Char('c'));
-        let flow = gui.app.taste.keep.flow.as_ref().expect("Keep a copy");
+        let flow = gui.app.keep.flow.as_ref().expect("Keep a copy");
         assert_eq!(flow.subject.title.as_deref(), Some("Late Train Verse"));
         assert_eq!(flow.subject.rec, fed(B, "Late Train Verse", "Boukmanflow", "Borrowed Tapes", 0.99, Some(9.0)));
         key(&mut gui, KeyCode::Esc);
@@ -11036,7 +11776,7 @@ pub(crate) mod tests {
         assert!(all.contains("from Stage Peer B"), "the badge names the sheet's server: {all}");
         assert_eq!(super::super::actions::tips(&gui).as_deref(), Some("↑ ↓ rows · Enter choose · Esc close"));
         key(&mut gui, KeyCode::Char('c'));
-        assert!(gui.app.taste.keep.flow.is_none(), "c starts nothing");
+        assert!(gui.app.keep.flow.is_none(), "c starts nothing");
         assert!(gui.actions.sheet.is_some());
     }
 
@@ -11066,7 +11806,7 @@ pub(crate) mod tests {
         assert_eq!(queued.as_deref(), Some("Borrowed Tapes"), "{:?}", gui.pending);
         gui.act(Act::Disc(DiscAct::TileList(1)));
         key(&mut gui, KeyCode::Char('c'));
-        let flow = gui.app.taste.keep.flow.as_ref().expect("Keep a copy");
+        let flow = gui.app.keep.flow.as_ref().expect("Keep a copy");
         assert!(flow.subject.album_focus() && flow.subject.album.as_deref() == Some("Borrowed Tapes"));
         key(&mut gui, KeyCode::Esc);
         // A newer answer without it: the list folds, nothing acts.
@@ -11076,7 +11816,7 @@ pub(crate) mod tests {
         land_again(&mut gui, peers_with(&[("Fresh Song", "Color Out", "New Light", 1.0)]));
         gui.pending.clear();
         key(&mut gui, KeyCode::Char('c'));
-        assert!(gui.discover.tile_list.is_none() && gui.app.taste.keep.flow.is_none());
+        assert!(gui.discover.tile_list.is_none() && gui.app.keep.flow.is_none());
         // Opened anew, the second tile's list is that tile's: Stage Peer
         // C's Borrowed Tapes.
         gui.act(Act::Disc(DiscAct::TileList(1)));
@@ -11085,33 +11825,32 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_folder_copy_is_no_discover_copy_anywhere() {
+    fn a_folder_copy_is_listed_by_its_folder_and_never_marks_a_discover_row() {
         let _en = english();
-        let rec = rec_on(B, "Northern Signal", "Color Out", "Peer Sessions");
+        // A folder copy (a connected server's Files, the keep-a-copy spec
+        // §6.7, gap 16): the Copies list names it by its folder, kind
+        // "folder", and offers what its outcome allows; it never marks a
+        // Discover row — its key is its folder's, never a song's.
+        let rec = json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" },
+            "filepath": "peerlib/Color Out/Peer Sessions", "title": "Peer Sessions" });
         let folder = |state: &str, extra: Value| job(50, &rec, Some("folder"), state, extra);
-        // Failed (the webapp's peer browser's): not listed, no indicator,
-        // no inert Retry.
-        let mut gui = copies_gui(&[folder("failed", json!({ "error": "Stage Peer B is unreachable" }))]);
-        let all = draw(&mut gui, 100, 30).join("\n");
-        assert!(all.contains("Nothing copying."), "{all}");
-        assert!(gui.app.copies_rows().is_empty() && gui.app.keep_indicator().is_none());
-        assert!(super::copies_tips(&gui).contains("Esc close") && !super::copies_tips(&gui).contains("retry"));
-        // Live, then finished: no poll kept going for it, no note.
-        key(&mut gui, KeyCode::Esc);
+        let gui = copies_gui(&[folder("failed", json!({ "error": "Stage Peer B is unreachable" }))]);
+        let rows = gui.app.copies_rows();
+        assert_eq!(rows.iter().map(|r| r.title.clone()).collect::<Vec<_>>(), vec![super::CopyTitle::Folder("Peer Sessions".into())]);
+        assert_eq!(rows[0].action, Some(crate::api::types::JobAction::Retry));
+        assert!(gui.app.keep_indicator().is_some_and(|i| i.failed));
+        assert_eq!(super::copy_kind(&rows[0]).as_deref(), Some("folder"));
+        // Live: the poll keeps going for it while the list shows it.
         let mut gui = canvas_gui(&[]);
         gui.act(Act::Disc(DiscAct::Copies));
         land_jobs(&mut gui, &[folder("running", json!({}))]);
-        assert!(gui.app.keep_indicator().is_none());
-        key(&mut gui, KeyCode::Esc);
+        assert!(gui.app.keep_indicator().is_some_and(|i| i.live));
+        assert!((0..2).all(|row| gui.app.keep_row_mark(0, row).is_none()), "no Discover row wears it");
         draw(&mut gui, 100, 30);
         gui.pending.clear();
         let later = crate::clock::Instant::now() + std::time::Duration::from_secs(30);
         let effects = gui.app.keep_tick(later);
-        assert!(effects.is_empty(), "nothing Discover's is live: {effects:?}");
-        gui.act(Act::Disc(DiscAct::Copies));
-        land_jobs(&mut gui, &[folder("done", json!({ "result": { "scope": "folder" } }))]);
-        draw(&mut gui, 100, 30);
-        assert!(gui.app.message.is_none(), "{:?}", gui.app.message);
+        assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Jobs { .. }))), "its poll: {effects:?}");
     }
 
     #[test]
@@ -11120,23 +11859,23 @@ pub(crate) mod tests {
         let _en = english();
         let mut gui = canvas_gui(&canvas_jobs());
         draw(&mut gui, 100, 30);
-        assert_eq!(gui.app.taste.keep.watch, KeepWatch::Room);
+        assert_eq!(gui.app.keep.watch, KeepWatch::Room);
         // Keep a copy on Northern Signal, whose copies are done: the live
         // copies of others keep the room's beat.
         super::open(&mut gui, KeepTarget::Row { group: 0, row: 1 });
-        assert_eq!(gui.app.taste.keep.flow.as_ref().and_then(|f| f.subject.title.as_deref()), Some("Northern Signal"));
+        assert_eq!(gui.app.keep.flow.as_ref().and_then(|f| f.subject.title.as_deref()), Some("Northern Signal"));
         draw(&mut gui, 100, 30);
-        assert_eq!(gui.app.taste.keep.watch, KeepWatch::Room);
+        assert_eq!(gui.app.keep.watch, KeepWatch::Room);
         key(&mut gui, KeyCode::Esc);
         // On Late Train Verse, whose album is copying: the quick beat.
         super::open(&mut gui, LATE);
         draw(&mut gui, 100, 30);
-        assert_eq!(gui.app.taste.keep.watch, KeepWatch::Modal);
+        assert_eq!(gui.app.keep.watch, KeepWatch::Modal);
         key(&mut gui, KeyCode::Esc);
         // The Copies modal: the quick beat.
         gui.act(Act::Disc(DiscAct::Copies));
         draw(&mut gui, 100, 30);
-        assert_eq!(gui.app.taste.keep.watch, KeepWatch::Modal);
+        assert_eq!(gui.app.keep.watch, KeepWatch::Modal);
     }
 
     #[test]
@@ -11158,5 +11897,1476 @@ pub(crate) mod tests {
         let all = rows.join("\n");
         assert!(all.contains("! stopped") && all.contains("the copy stopped before it finished") && all.contains("Retry"), "{all}");
         assert!(!all.contains("in your collection"), "{all}");
+    }
+
+    // ── The window entered while browsing a connected server (the
+    // design-term-fed spec §6, §8, §11; the user's 2026-10-27 decisions) ──
+
+    use crate::api::types::{ArtistAlbumRow, JobLanding, Ping};
+    use crate::tui::app::keep::{FolderCap, FolderLanding, IntoPlace, KeepChoice, KeepPhase, KeepStage, KeepVerb};
+    use crate::tui::app::MessageKind;
+    use crate::tui::app::{KnownServer, Origin, Session};
+    use crate::tui::worker::{KeepFacts, KeepSong};
+
+    /// Stage Peer B, as its own server reaches it.
+    fn peer_b() -> Origin {
+        Origin { server: HOST.into(), peer: Some(B) }
+    }
+
+    /// Where copies land on the user's own server (spec §2): the saved
+    /// library `copies`, `music` beside it, the layout Artist / Album.
+    fn two_libraries() -> Value {
+        json!({
+            "destination": { "vpath": "copies", "base": "", "layout": "{{ALBUMARTIST}}/{{ALBUM}}", "source": "default" },
+            "libraries": [{ "vpath": "copies" }, { "vpath": "music" }], "defaultLayout": "{{ALBUMARTIST}}/{{ALBUM}}",
+            "variables": ["ARTIST", "ALBUM", "ALBUMARTIST", "YEAR", "GENRE", "PEER", "SERVERFOLDER"]
+        })
+    }
+
+    /// The copy plug-in's listing with the folder cap (`jobs.maxFolderSongs`).
+    fn capped(cap: Option<u64>) -> Value {
+        let mut listed = listing(true);
+        if let Some(cap) = cap {
+            listed["jobs"]["maxFolderSongs"] = json!(cap);
+        }
+        listed
+    }
+
+    /// Answer the gate's asks out — the own server's — and the list's ask
+    /// behind them.
+    fn land_gate(gui: &mut Gui, listed: &Value, view: &Value) {
+        let asks: Vec<u64> = gui
+            .pending
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::KeepGate { generation, .. }) => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        gui.pending.retain(|e| !matches!(e, Effect::Api(ApiCmd::KeepGate { .. })));
+        for generation in asks {
+            apply(
+                gui,
+                Event::KeepGate {
+                    generation,
+                    plugins: Ok(Box::new(serde_json::from_value(listed.clone()).unwrap())),
+                    destination: Some(Ok(Box::new(serde_json::from_value(view.clone()).unwrap()))),
+                },
+            );
+        }
+        land_jobs(gui, &[]);
+    }
+
+    /// Stage Peer B browsed through the user's own server, whose gate is
+    /// open (`listed`, `view`): the own server's way in, then the move.
+    fn peer_gui_on(listed: Value, view: Value) -> Gui {
+        let mut gui = plugin_gui();
+        let saved = |id: String, name: &str, peer: Option<(String, i64)>| KnownServer {
+            id,
+            name: name.into(),
+            token: if peer.is_none() { Some("tok".into()) } else { None },
+            username: None,
+            self_signed: false,
+            peer,
+            pairing: None,
+            dj: Default::default(),
+        };
+        let peer_id = crate::config::peer_identity(HOST, B);
+        gui.app.servers = vec![saved(HOST.into(), HOST, None), saved(peer_id.clone(), "Stage Peer B", Some((HOST.into(), B)))];
+        let asked = gui.app.keep_connected();
+        gui.pend(asked);
+        land_gate(&mut gui, &listed, &view);
+        let session = Session { server: HOST.into(), server_id: peer_id, token: Some("tok".into()), peer: Some((HOST.into(), B)), ..Default::default() };
+        let moved = gui.app.adopt_server(session, None);
+        gui.pend(moved);
+        let ping = Ping { vpaths: vec!["peerlib".into()], ..Ping::default() };
+        apply(&mut gui, Event::Connected { server: HOST.into(), id: HOST.into(), username: None, token: None, ping: Box::new(ping) });
+        land_gate(&mut gui, &listed, &view);
+        gui.pending.clear();
+        assert!(gui.app.keep_gate() && gui.app.session.peer.is_some(), "Stage Peer B, its own server's gate open");
+        gui
+    }
+
+    fn peer_gui() -> Gui {
+        peer_gui_on(capped(Some(1000)), two_libraries())
+    }
+
+    /// The window alone, hosted as the shell hosts it in any room: a frame
+    /// of `width` × `height` with the window over the room's place.
+    fn window_buffer(gui: &mut Gui, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                gui.ui.begin_frame();
+                super::frame_tick(gui);
+                let area = frame.area();
+                let room = super::super::content_rect(area.width, area.height, gui.queue_open, gui.footer());
+                super::draw(frame, gui, area, room);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn window(gui: &mut Gui) -> Vec<String> {
+        modal_rows(&lines(&window_buffer(gui, 100, 30)))
+    }
+
+    /// The chooser's rows, 80 wide, from its top border to its bottom.
+    fn chooser_rows(rows: &[String]) -> Vec<String> {
+        let title: String = rust_i18n::t!("gui.discover.keep.into_title")
+            .chars()
+            .flat_map(|c| if crate::kit::width(&c.to_string()) == 2 { vec![c, ' '] } else { vec![c] })
+            .collect();
+        let top = rows.iter().position(|r| r.contains(&format!("─ {title} ─")) || r.contains(&format!("- {title} -"))).expect("the chooser");
+        let x = rows[top].chars().position(|c| c == '╭' || c == '+').expect("its corner");
+        let bottom = (top + 1..rows.len()).find(|&y| matches!(rows[y].chars().nth(x), Some('╰' | '+'))).expect("its bottom");
+        rows[top..=bottom].iter().map(|r| r.chars().skip(x).take(80).collect()).collect()
+    }
+
+    fn chooser(gui: &mut Gui) -> Vec<String> {
+        chooser_rows(&lines(&window_buffer(gui, 100, 30)))
+    }
+
+    /// The window's keys, as the shell hands them over while it is up.
+    fn press_key(gui: &mut Gui, code: KeyCode) {
+        super::handle_key(gui, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn type_in(gui: &mut Gui, text: &str) {
+        for c in text.chars() {
+            press_key(gui, KeyCode::Char(c));
+        }
+    }
+
+    /// Answer the window's facts ask out with `facts`.
+    fn land_browse_facts(gui: &mut Gui, facts: KeepFacts) {
+        let ask = gui.pending.iter().rev().find_map(|e| match e {
+            Effect::Api(ApiCmd::KeepFacts { seq, generation, .. }) => Some((*seq, *generation)),
+            _ => None,
+        });
+        let Some((seq, generation)) = ask else { panic!("no facts ask in {:?}", gui.pending) };
+        gui.pending.retain(|e| !matches!(e, Effect::Api(ApiCmd::KeepFacts { .. })));
+        apply(gui, Event::KeepFacts { seq, generation, facts: Box::new(facts) });
+    }
+
+    fn rows_of(rows: Vec<Value>) -> Vec<ArtistAlbumRow> {
+        rows.into_iter().map(|row| serde_json::from_value(row).unwrap()).collect()
+    }
+
+    /// Stage Peer B's albums by Boukmanflow (spec §2): Borrowed Tapes,
+    /// Harbour Lights and Second Shift his; Night Market Sampler a
+    /// compilation he is on; `more` named after them — and the wall's
+    /// name-less bucket where `singles`.
+    fn bouk_albums(more: &[&str], singles: bool) -> Vec<ArtistAlbumRow> {
+        let mut rows = vec![
+            json!({ "name": "Borrowed Tapes", "album_artist": "Boukmanflow", "artists": ["Boukmanflow"], "year": 2019 }),
+            json!({ "name": "Harbour Lights", "album_artist": "Boukmanflow", "artists": ["Boukmanflow"], "year": 2021 }),
+            json!({ "name": "Second Shift", "album_artist": "Boukmanflow", "artists": ["Boukmanflow"], "year": 2023 }),
+            json!({ "name": "Night Market Sampler", "album_artist": "Various Artists", "artists": ["Color Out", "Boukmanflow", "ALM"], "compilation": true, "year": 2024 }),
+        ];
+        rows.extend(more.iter().map(|name| json!({ "name": name, "album_artist": "Various Artists", "artists": ["Boukmanflow", "ALM"], "compilation": true })));
+        if singles {
+            rows.push(json!({ "name": null, "album_artist": "Boukmanflow", "artists": ["Boukmanflow"] }));
+        }
+        rows_of(rows)
+    }
+
+    /// The user's library's albums by Boukmanflow, by name.
+    fn yours(names: &[&str]) -> Vec<ArtistAlbumRow> {
+        rows_of(names.iter().map(|name| json!({ "name": name, "album_artist": "Boukmanflow", "artists": ["Boukmanflow"] })).collect())
+    }
+
+    /// Borrowed Tapes' three songs on Stage Peer B, as their tags read.
+    fn tapes_songs() -> Vec<KeepSong> {
+        ["01 - Rooftop Cypher.mp3", "02 - Late Train Verse.mp3", "03 - Corner Store Loop.mp3"]
+            .iter()
+            .map(|file| KeepSong {
+                filepath: format!("peerlib/Boukmanflow/Borrowed Tapes/{file}"),
+                artist: Some("Boukmanflow".into()),
+                year: Some(2019),
+                genre: None,
+                album: Some("Borrowed Tapes".into()),
+                album_artist: Some("Boukmanflow".into()),
+            })
+            .collect()
+    }
+
+    /// The sample's facts for Boukmanflow (spec §2): his albums there, your
+    /// library's Harbour Lights — so Borrowed Tapes and Second Shift are
+    /// missing — and Borrowed Tapes' songs.
+    fn bouk_facts() -> KeepFacts {
+        KeepFacts { album_songs: Some(tapes_songs()), peer_albums: Some(bouk_albums(&[], false)), local_albums: Some(yours(&["Harbour Lights"])), folder_files: None }
+    }
+
+    fn tapes_album(compilation: bool) -> KeepTarget {
+        if compilation {
+            return KeepTarget::Album { origin: peer_b(), name: "Night Market Sampler".into(), album_artist: "Various Artists".into(), year: Some(2024), compilation: true, art: None };
+        }
+        KeepTarget::Album { origin: peer_b(), name: "Borrowed Tapes".into(), album_artist: "Boukmanflow".into(), year: Some(2019), compilation: false, art: None }
+    }
+
+    fn late_track(tagged: bool) -> Track {
+        let metadata = if tagged {
+            TrackMetadata {
+                title: Some("Late Train Verse".into()),
+                artist: Some("Boukmanflow".into()),
+                album: Some("Borrowed Tapes".into()),
+                year: Some(2019),
+                duration: Some(8.0),
+                ..Default::default()
+            }
+        } else {
+            TrackMetadata::default()
+        };
+        Track { filepath: "peerlib/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3".into(), metadata }
+    }
+
+    /// Borrowed Tapes' three songs as the recursive listing names them —
+    /// or `n` songs spread over folders of a folder.
+    fn folder_files(folder: &str, n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("{folder}/{:02}/{i:04}.mp3", i % 56)).collect()
+    }
+
+    fn tapes_files() -> Vec<String> {
+        ["01 - Rooftop Cypher.mp3", "02 - Late Train Verse.mp3", "03 - Corner Store Loop.mp3"]
+            .iter()
+            .map(|file| format!("peerlib/Boukmanflow/Borrowed Tapes/{file}"))
+            .collect()
+    }
+
+    fn bouk_files() -> Vec<String> {
+        ["Borrowed Tapes", "Harbour Lights", "Second Shift"]
+            .iter()
+            .flat_map(|album| (1..=3).map(move |i| format!("peerlib/Boukmanflow/{album}/{i:02}.mp3")))
+            .collect()
+    }
+
+    /// A folder's window on Stage Peer B, its listing landed (`files`; none:
+    /// still out).
+    fn folder_window(gui: &mut Gui, path: &str, files: Option<Vec<String>>) {
+        let target = gui.app.keep_folder(path).expect("a folder below a library's top");
+        super::open(gui, target);
+        if let Some(files) = files {
+            land_browse_facts(gui, KeepFacts { folder_files: Some(files), ..KeepFacts::default() });
+        }
+    }
+
+    /// By your layout's tags read (spec §6.5.3): the read the window sends
+    /// once that landing is chosen, answered with each song's album and
+    /// credit — the album its folder's second name.
+    fn land_folder_tags(gui: &mut Gui) {
+        let effects = gui.app.keep_tick(crate::clock::Instant::now());
+        let Some((seq, generation, filepaths)) = effects.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::KeepFolderTags { seq, generation, filepaths, .. }) => Some((*seq, *generation, filepaths.clone())),
+            _ => None,
+        }) else {
+            panic!("no tags read in {effects:?}")
+        };
+        let tracks = filepaths
+            .iter()
+            .map(|f| {
+                let album = f.split('/').nth(2).unwrap_or_default().to_string();
+                let metadata = TrackMetadata { artist: Some("Boukmanflow".into()), album: Some(album), album_artist: Some("Boukmanflow".into()), year: Some(2019), ..Default::default() };
+                Track { filepath: f.clone(), metadata }
+            })
+            .collect();
+        apply(gui, Event::KeepFolderTags { seq, generation, tracks: Some(tracks) });
+    }
+
+    /// Land a listing of your server's folders.
+    fn land_folders_of(gui: &mut Gui, path: &str, names: &[&str]) {
+        let ask = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::DestinationFolders { seq, generation, path: asked, .. }) if asked == path => Some((*seq, *generation)),
+            _ => None,
+        });
+        let Some((seq, generation)) = ask else { panic!("no listing of {path} in {:?}", gui.pending) };
+        gui.pending.retain(|e| !matches!(e, Effect::Api(ApiCmd::DestinationFolders { seq: s, .. }) if *s == seq));
+        let names = names.iter().map(|n| n.to_string()).collect();
+        apply(gui, Event::DestinationFolders { seq, generation, path: path.to_string(), answer: Ok(names) });
+    }
+
+    /// The window in one of the boards' browse states (RecStates), by its id.
+    fn browse_in(id: &str) -> Gui {
+        let mut gui = peer_gui();
+        match id {
+            "album" | "album-every" => {
+                super::open(&mut gui, tapes_album(false));
+                land_browse_facts(&mut gui, bouk_facts());
+                if id == "album-every" {
+                    super::act(&mut gui, super::KeepAct::Pick(KeepChoice::Artist));
+                }
+            }
+            "compilation" => {
+                super::open(&mut gui, tapes_album(true));
+                land_browse_facts(&mut gui, KeepFacts { album_songs: Some(tapes_songs()), ..KeepFacts::default() });
+            }
+            "offline" => {
+                super::open(&mut gui, tapes_album(false));
+                land_browse_facts(&mut gui, KeepFacts::default());
+            }
+            "song" => {
+                let target = KeepTarget::Track { origin: peer_b(), track: Box::new(late_track(true)), album_artist: crate::api::types::AlbumCredit::Known("Boukmanflow".into()) };
+                super::open(&mut gui, target);
+                land_browse_facts(&mut gui, bouk_facts());
+            }
+            "untagged" => {
+                let target = gui.app.keep_track(&peer_b(), &late_track(false), None).expect("a connected server's song");
+                super::open(&mut gui, target);
+            }
+            "artist" | "artist-off" | "artist-singles" | "artist-none" | "artist-one" | "artist-long" => {
+                super::open(&mut gui, KeepTarget::Artist { origin: peer_b(), name: "Boukmanflow".into() });
+                let (more, singles, have): (&[&str], bool, &[&str]) = match id {
+                    "artist-singles" => (&[], true, &["Harbour Lights"]),
+                    "artist-none" => (&[], false, &["Borrowed Tapes", "Harbour Lights", "Second Shift"]),
+                    "artist-one" => (&[], false, &["Harbour Lights", "Second Shift"]),
+                    "artist-long" => (&["Split Series", "Free Instrumentals Vol. 9", "Night Owl Radio Archive"], false, &["Harbour Lights"]),
+                    _ => (&[], false, &["Harbour Lights"]),
+                };
+                land_browse_facts(&mut gui, KeepFacts { peer_albums: Some(bouk_albums(more, singles)), local_albums: Some(yours(have)), ..KeepFacts::default() });
+                if id == "artist-off" {
+                    press_key(&mut gui, KeyCode::Up);
+                }
+            }
+            "folder-mirror" | "folder-into" | "folder-tags" => {
+                folder_window(&mut gui, "peerlib/Boukmanflow/Borrowed Tapes", Some(tapes_files()));
+                match id {
+                    "folder-into" => press_key(&mut gui, KeyCode::Down),
+                    "folder-tags" => {
+                        press_key(&mut gui, KeyCode::Down);
+                        press_key(&mut gui, KeyCode::Down);
+                        land_folder_tags(&mut gui);
+                    }
+                    _ => {}
+                }
+            }
+            "folder-lead" => {
+                let mut view = two_libraries();
+                view["destination"]["layout"] = json!("from-peers/{{ALBUMARTIST}}/{{ALBUM}}");
+                view["destination"]["source"] = json!("user");
+                gui = peer_gui_on(capped(Some(1000)), view);
+                folder_window(&mut gui, "peerlib/Boukmanflow/Borrowed Tapes", Some(tapes_files()));
+            }
+            "folder-bouk" | "folder-bouk-tags" => {
+                folder_window(&mut gui, "peerlib/Boukmanflow", Some(bouk_files()));
+                if id == "folder-bouk-tags" {
+                    press_key(&mut gui, KeyCode::Down);
+                    press_key(&mut gui, KeyCode::Down);
+                    land_folder_tags(&mut gui);
+                }
+            }
+            "folder-counting" => folder_window(&mut gui, "peerlib/Night Owl Radio Archive", None),
+            "folder-cap" => folder_window(&mut gui, "peerlib/Night Owl Radio Archive", Some(folder_files("peerlib/Night Owl Radio Archive", 1240))),
+            id if id.starts_with("into") => return into_in(id),
+            other => panic!("no state {other}"),
+        }
+        gui
+    }
+
+    /// Your server's folders (spec §2): `copies` holds Boukmanflow, Color
+    /// Out and From Sam (none in it).
+    fn land_copies_top(gui: &mut Gui) {
+        window_buffer(gui, 100, 30);
+        land_folders_of(gui, "/copies", &["Boukmanflow", "Color Out", "From Sam"]);
+    }
+
+    /// The Into a folder chooser in one of the boards' states, by its id:
+    /// opened with `d` on Borrowed Tapes' window, Into a folder… chosen.
+    fn into_in(id: &str) -> Gui {
+        let mut gui = if id == "into-one" {
+            let mut view = two_libraries();
+            view["libraries"] = json!([{ "vpath": "copies" }]);
+            peer_gui_on(capped(Some(1000)), view)
+        } else {
+            peer_gui()
+        };
+        folder_window(&mut gui, "peerlib/Boukmanflow/Borrowed Tapes", Some(tapes_files()));
+        press_key(&mut gui, KeyCode::Down);
+        press_key(&mut gui, KeyCode::Char('d'));
+        assert!(gui.discover.keep.into.is_some(), "d opens the chooser");
+        if id == "into-looking" {
+            return gui;
+        }
+        land_copies_top(&mut gui);
+        // From Sam: the hand down to its row, Enter — its folders asked.
+        let from_sam = |gui: &mut Gui| {
+            for _ in 0..3 {
+                press_key(gui, KeyCode::Down);
+            }
+            press_key(gui, KeyCode::Enter);
+            window_buffer(gui, 100, 30);
+        };
+        match id {
+            "into-default" | "into-one" => {}
+            "into-from-sam" | "into-typed" | "into-long" => {
+                from_sam(&mut gui);
+                land_folders_of(&mut gui, "/copies/From Sam", &[]);
+                if id != "into-from-sam" {
+                    press_key(&mut gui, KeyCode::Up);
+                    let more = if id == "into-long" { 34 } else { 1 };
+                    for _ in 0..more {
+                        type_in(&mut gui, "/Borrowed Tapes");
+                    }
+                }
+            }
+            "into-failed" => {
+                from_sam(&mut gui);
+                let ask = gui.pending.iter().find_map(|e| match e {
+                    Effect::Api(ApiCmd::DestinationFolders { seq, generation, path, .. }) if path == "/copies/From Sam" => Some((*seq, *generation)),
+                    _ => None,
+                });
+                let (seq, generation) = ask.expect("From Sam's listing");
+                let failure = crate::api::PluginFailure::Refused { status: 500, words: "EACCES: permission denied, scandir '/srv/copies/From Sam'".into() };
+                apply(&mut gui, Event::DestinationFolders { seq, generation, path: "/copies/From Sam".into(), answer: Err(failure) });
+                press_key(&mut gui, KeyCode::Up);
+            }
+            "into-music" => {
+                press_key(&mut gui, KeyCode::Up);
+                press_key(&mut gui, KeyCode::Right);
+                window_buffer(&mut gui, 100, 30);
+                land_folders_of(&mut gui, "/music", &["ALM", "Boukmanflow", "Color Out", "Night Owl Radio"]);
+                press_key(&mut gui, KeyCode::Down);
+            }
+            "into-dots" => {
+                press_key(&mut gui, KeyCode::Home);
+                type_in(&mut gui, "../");
+            }
+            "into-brace" => {
+                for _ in 0.."Borrowed Tapes".len() {
+                    press_key(&mut gui, KeyCode::Backspace);
+                }
+                type_in(&mut gui, "Tapes {2019}");
+            }
+            "into-held" => {
+                press_key(&mut gui, KeyCode::Down);
+                press_key(&mut gui, KeyCode::Down);
+            }
+            other => panic!("no state {other}"),
+        }
+        gui
+    }
+
+    const INTO_STATES: &[&str] = &[
+        "into-default", "into-from-sam", "into-typed", "into-one", "into-music", "into-dots", "into-brace", "into-long", "into-looking",
+        "into-failed", "into-held",
+    ];
+
+    const BROWSE_STATES: &[&str] = &[
+        "album", "album-every", "compilation", "offline", "song", "untagged", "artist", "artist-off", "artist-singles", "artist-none",
+        "artist-one", "artist-long", "folder-mirror", "folder-into", "folder-tags", "folder-lead", "folder-bouk", "folder-bouk-tags",
+        "folder-counting", "folder-cap",
+    ];
+
+    /// `cargo test dump_browse_states -- --ignored --nocapture`: the
+    /// browse states at 100 × 30, then the legacy console's.
+    #[test]
+    #[ignore]
+    fn dump_browse_states() {
+        let locale = std::env::var("KEEP_DUMP_LOCALE").unwrap_or_else(|_| "en".to_string());
+        let _locale = crate::setup::tests::in_locale(&locale);
+        for &id in BROWSE_STATES {
+            let mut gui = browse_in(id);
+            let rows = window(&mut gui);
+            println!("── {id} · {} rows · tips: {}", rows.len(), super::tips(&gui));
+            println!("{}", rows.join("\n"));
+        }
+        for &id in INTO_STATES {
+            let mut gui = into_in(id);
+            let all = lines(&window_buffer(&mut gui, 100, 30));
+            let rows = chooser_rows(&all);
+            let top = all.iter().position(|r| r.contains(&rows[0])).unwrap_or(0);
+            println!("── {id} · {} rows · rows {top}–{} · tips: {}", rows.len(), top + rows.len() - 1, super::tips(&gui));
+            println!("{}", rows.join("\n"));
+        }
+        let _legacy = crate::kit::theme::legacy_glyphs_here();
+        for id in ["folder-into", "artist"] {
+            let mut gui = browse_in(id);
+            println!("── {id} · legacy console");
+            println!("{}", window(&mut gui).join("\n"));
+        }
+        let mut gui = into_in("into-default");
+        println!("── into-default · legacy console");
+        println!("{}", chooser(&mut gui).join("\n"));
+    }
+
+    /// The JobStart effects out: what each sends — its recommendation,
+    /// scope, landing and the place shown.
+    type Sent = (Value, crate::api::types::JobScope, Option<JobLanding>, Option<Option<crate::api::types::CollectionDestination>>);
+
+    fn sent(gui: &Gui) -> Vec<Sent> {
+        gui.pending
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::JobStart { rec, scope, landing, destination, .. }) => {
+                    Some(((**rec).clone(), *scope, landing.clone(), destination.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_album_from_a_connected_servers_page_opens_on_its_credit_with_every_album_by() {
+        let _en = english();
+        // Opened from the album page's word (or a card): its credit, its
+        // year, the server — Album and Every album by at open (spec §6.2:
+        // the album is his, so he has one at least), the primary uncounted
+        // and no box until the facts answer.
+        let mut gui = peer_gui();
+        super::open(&mut gui, tapes_album(false));
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ Boukmanflow · 2019 · from Stage Peer B                                   │
+            │                                                                          │
+            │ (•) Album                                                                │
+            │ ( ) Every album by Boukmanflow                                           │
+            │                                                                          │
+            │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+            │                                                                          │
+            │                                                            [ Add album ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        land_browse_facts(&mut gui, bouk_facts());
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ Boukmanflow · 2019 · from Stage Peer B                                   │
+            │                                                                          │
+            │ (•) Album                                                                │
+            │ ( ) Every album by Boukmanflow                                           │
+            │     [✓] Only the 2 albums you don't have                                 │
+            │                                                                          │
+            │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+            │                                                                          │
+            │                                                  [ Add album · 3 songs ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        // Every album by chosen: "Leaves out …" at col 1 under the box, DIM;
+        // its primary counts the missing of his albums (theirs).
+        press_key(&mut gui, KeyCode::Down);
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(modal_rows(&rows), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ Boukmanflow · 2019 · from Stage Peer B                                   │
+            │                                                                          │
+            │ ( ) Album                                                                │
+            │ (•) Every album by Boukmanflow                                           │
+            │     [✓] Only the 2 albums you don't have                                 │
+            │ Leaves out Night Market Sampler                                          │
+            │                                                                          │
+            │ Files go to copies › Boukmanflow › one folder per album         d change │
+            │                                                                          │
+            │                                                         [ Add 2 albums ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        let left = at(&rows, "Leaves out");
+        assert_eq!((left.x, fg(&buffer, left)), (at(&rows, "( ) Album").x, th().dim));
+        // ↑ back on Album: the line goes with Every album by.
+        press_key(&mut gui, KeyCode::Up);
+        press_key(&mut gui, KeyCode::Up);
+        assert!(!window(&mut gui).iter().any(|r| r.contains("Leaves out")));
+        // Enter sends the album with its credit (spec §6.2).
+        press_key(&mut gui, KeyCode::Enter);
+        let starts = sent(&gui);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].0, json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" },
+            "album": "Borrowed Tapes", "albumArtist": "Boukmanflow", "artist": "Boukmanflow", "year": 2019 }));
+        assert_eq!((starts[0].1, starts[0].2.clone()), (crate::api::types::JobScope::Album, None), "no landing off a folder");
+        // A compilation: Album alone, never Every album by (8 rows).
+        let mut gui = browse_in("compilation");
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Night Market Sampler                                                     │
+            │ Various Artists · 2024 · from Stage Peer B                               │
+            │                                                                          │
+            │ Files go to copies › Various Artists › Night Market Sampler     d change │
+            │                                                                          │
+            │                                                  [ Add album · 3 songs ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        assert_eq!(super::tips(&gui), "Enter starts · d where files land · Esc close");
+        // The server away (RecStates PEER OFFLINE): nothing it must answer
+        // did — no box, no count; a start is still taken.
+        let mut gui = browse_in("offline");
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ Boukmanflow · 2019 · from Stage Peer B                                   │
+            │                                                                          │
+            │ (•) Album                                                                │
+            │ ( ) Every album by Boukmanflow                                           │
+            │                                                                          │
+            │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+            │                                                                          │
+            │                                                            [ Add album ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        press_key(&mut gui, KeyCode::Enter);
+        assert_eq!(sent(&gui).len(), 1);
+    }
+
+    #[test]
+    fn a_connected_servers_songs_window_appends_its_choices_and_the_dot_stays() {
+        let _en = english();
+        // A song row on its album page (the page's credit known): This song
+        // and Album at once; Every album by joins with his albums there.
+        let mut gui = peer_gui();
+        let target = KeepTarget::Track { origin: peer_b(), track: Box::new(late_track(true)), album_artist: crate::api::types::AlbumCredit::Known("Boukmanflow".into()) };
+        super::open(&mut gui, target);
+        let shown = window(&mut gui);
+        assert!(shown[4].starts_with("│ (•) This song") && shown[5].starts_with("│ ( ) Album") && !shown[6].contains("Every album by"), "{}", shown.join("\n"));
+        land_browse_facts(&mut gui, bouk_facts());
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Late Train Verse                                                         │
+            │ Boukmanflow · Borrowed Tapes · from Stage Peer B                         │
+            │                                                                          │
+            │ (•) This song                                                            │
+            │ ( ) Album                                                                │
+            │ ( ) Every album by Boukmanflow                                           │
+            │     [✓] Only the 2 albums you don't have                                 │
+            │                                                                          │
+            │ Files go to copies › Boukmanflow › Borrowed Tapes               d change │
+            │                                                                          │
+            │                                                             [ Add song ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        // Every album by chosen: 14 rows with its left-out line.
+        press_key(&mut gui, KeyCode::Down);
+        press_key(&mut gui, KeyCode::Down);
+        let shown = window(&mut gui);
+        assert_eq!(shown.len(), 14);
+        assert_eq!(shown[8], "│ Leaves out Night Market Sampler                                          │");
+        // An untagged Files song: its file's name, the server alone, This
+        // song alone — no radios, no Folder.
+        let mut gui = browse_in("untagged");
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ 02 - Late Train Verse.mp3                                                │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ Files go to copies                                              d change │
+            │                                                                          │
+            │                                                             [ Add song ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        assert!(gui.app.keep_view().is_some_and(|v| !v.choices.iter().any(|(c, _)| matches!(c, KeepChoice::Folder(_)))));
+    }
+
+    #[test]
+    fn an_artists_window_is_its_box_alone_and_says_what_it_leaves_out() {
+        let _en = english();
+        // Only the albums you don't have, ticked: the box the window's only
+        // stop, count-less — the primary counts (spec §6.4).
+        let mut gui = browse_in("artist");
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(modal_rows(&rows), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Boukmanflow                                                              │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ [✓] Only the albums you don't have                                       │
+            │ Leaves out Night Market Sampler                                          │
+            │                                                                          │
+            │ Files go to copies › Boukmanflow › one folder per album         d change │
+            │                                                                          │
+            │                                                         [ Add 2 albums ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        // Its glyph at inner cols 1–3 ACCENT, its label at col 5 BOLD; the
+        // head the artist BOLD, the server alone DIM; the line DIM.
+        let glyph = at(&rows, "[✓]");
+        let label = at(&rows, "Only the albums");
+        let left = at(&rows, "Leaves out");
+        assert_eq!((label.x - glyph.x, left.x, fg(&buffer, glyph)), (4, glyph.x, th().accent));
+        assert!(bold(&buffer, label) && bold(&buffer, at(&rows, "Boukmanflow ")));
+        assert_eq!((fg(&buffer, left), fg(&buffer, at(&rows, "from Stage Peer B"))), (th().dim, th().dim));
+        assert_eq!(super::tips(&gui), "↑ ↓ choose · Enter starts · d where files land · Esc close");
+        // ↑ unticks — the primary counts theirs — and stays clamped; ↓ ticks.
+        press_key(&mut gui, KeyCode::Up);
+        let shown = window(&mut gui);
+        assert_eq!((shown[4].as_str(), shown[9].as_str()), (
+            "│ [ ] Only the albums you don't have                                       │",
+            "│                                                         [ Add 3 albums ] │",
+        ));
+        press_key(&mut gui, KeyCode::Up);
+        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((false, 2))));
+        press_key(&mut gui, KeyCode::Down);
+        press_key(&mut gui, KeyCode::Down);
+        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((true, 2))));
+        // A click on the box or its label toggles it.
+        let rows = lines(&window_buffer(&mut gui, 100, 30));
+        let label = at(&rows, "Only the albums");
+        assert_eq!(hit_at(&gui, label.x + 3, label.y), keep_act(super::KeepAct::Missing));
+        assert_eq!(hit_at(&gui, label.x - 4, label.y), keep_act(super::KeepAct::Missing));
+        super::act(&mut gui, super::KeepAct::Missing);
+        assert!(gui.app.keep_view().is_some_and(|v| v.missing == Some((false, 2))));
+        // Enter sends the artist: every album of his, or the missing ones.
+        press_key(&mut gui, KeyCode::Enter);
+        let starts = sent(&gui);
+        assert_eq!(starts[0].0, json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" }, "artist": "Boukmanflow" }));
+        assert_eq!(starts[0].1, crate::api::types::JobScope::Artist);
+        let mut gui = browse_in("artist");
+        press_key(&mut gui, KeyCode::Enter);
+        assert_eq!(sent(&gui)[0].1, crate::api::types::JobScope::ArtistMissing);
+        // The wall's name-less bucket ends the line in the wall's own word.
+        let mut gui = browse_in("artist-singles");
+        assert_eq!(window(&mut gui)[5], "│ Leaves out Night Market Sampler · Singles                                │");
+        // Nothing missing by name: no box, the line first (10 rows), and
+        // ↑ ↓ walk nothing.
+        let mut gui = browse_in("artist-none");
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Boukmanflow                                                              │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ Leaves out Night Market Sampler                                          │
+            │                                                                          │
+            │ Files go to copies › Boukmanflow › one folder per album         d change │
+            │                                                                          │
+            │                                                         [ Add 3 albums ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        assert_eq!(super::tips(&gui), "Enter starts · d where files land · Esc close");
+        // One album missing: the place names it.
+        let mut gui = browse_in("artist-one");
+        let shown = window(&mut gui);
+        assert!(shown[7].starts_with("│ Files go to copies › Boukmanflow › Borrowed Tapes") && shown[9].contains("[ Add 1 album ]"), "{}", shown.join("\n"));
+        // Past 72 cells the line clips with the mark; the whole line is its
+        // tooltip.
+        let mut gui = browse_in("artist-long");
+        let rows = lines(&window_buffer(&mut gui, 100, 30));
+        assert_eq!(modal_rows(&rows)[5], "│ Leaves out Night Market Sampler · Split Series · Free Instrumentals Vol… │");
+        let line = at(&rows, "Leaves out");
+        let whole = "Leaves out Night Market Sampler · Split Series · Free Instrumentals Vol. 9 · Night Owl Radio Archive";
+        assert!(gui.ui.tips.iter().any(|(r, t)| r.y == line.y && r.x == line.x && t == whole), "{:?}", gui.ui.tips);
+        // Nothing left out: no line at all.
+        let mut gui = peer_gui();
+        super::open(&mut gui, KeepTarget::Artist { origin: peer_b(), name: "Boukmanflow".into() });
+        let his = rows_of(vec![json!({ "name": "Borrowed Tapes", "album_artist": "Boukmanflow", "artists": ["Boukmanflow"] })]);
+        land_browse_facts(&mut gui, KeepFacts { peer_albums: Some(his), local_albums: Some(yours(&["Second Shift"])), ..KeepFacts::default() });
+        assert!(!window(&mut gui).iter().any(|r| r.contains("Leaves out")));
+    }
+
+    #[test]
+    fn a_folders_window_offers_three_landings_each_with_its_place() {
+        let _en = english();
+        // As on Stage Peer B, preselected: the folder's path inside its
+        // library, no `d change` (spec §6.5.1).
+        let mut gui = browse_in("folder-mirror");
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(modal_rows(&rows), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ (•) As on Stage Peer B                                                   │
+            │ ( ) Into a folder…                                                       │
+            │ ( ) By your layout                                                       │
+            │                                                                          │
+            │ Files go to copies › Boukmanflow › Borrowed Tapes                        │
+            │                                                                          │
+            │                                                 [ Add folder · 3 songs ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        assert!(bold(&buffer, at(&rows, "As on Stage Peer B")));
+        assert_eq!(super::tips(&gui), "↑ ↓ choose · Enter starts · Esc close", "no d where it changes nothing");
+        // `d` there does nothing.
+        press_key(&mut gui, KeyCode::Char('d'));
+        assert!(gui.discover.keep.into.is_none() && gui.discover.keep.dest.is_none());
+        // ↑ is clamped; a click picks.
+        press_key(&mut gui, KeyCode::Up);
+        assert_eq!(gui.app.keep_view().map(|v| v.choice), Some(KeepChoice::Folder(FolderLanding::Mirror)));
+        let tags = at(&rows, "By your layout");
+        assert_eq!(hit_at(&gui, tags.x + 2, tags.y), keep_act(super::KeepAct::Pick(KeepChoice::Folder(FolderLanding::Tags))));
+        // Into a folder…: a new folder named as the pressed one in the saved
+        // library; `d change` opens its chooser.
+        let mut gui = browse_in("folder-into");
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ ( ) As on Stage Peer B                                                   │
+            │ (•) Into a folder…                                                       │
+            │ ( ) By your layout                                                       │
+            │                                                                          │
+            │ Files go to copies › Borrowed Tapes                             d change │
+            │                                                                          │
+            │                                                 [ Add folder · 3 songs ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        assert_eq!(super::tips(&gui), "↑ ↓ choose · Enter starts · d where files land · Esc close");
+        press_key(&mut gui, KeyCode::Char('d'));
+        assert!(gui.discover.keep.into.is_some() && gui.discover.keep.dest.is_none(), "the chooser, never Where copies land");
+        // By your layout: the account's layout by the folder rule — its
+        // songs' agreeing album and credit; `d change` opens Where copies
+        // land, its preview by the same rule.
+        let mut gui = browse_in("folder-tags");
+        assert_eq!(window(&mut gui)[8], "│ Files go to copies › Boukmanflow › Borrowed Tapes               d change │");
+        press_key(&mut gui, KeyCode::Char('d'));
+        assert!(gui.discover.keep.dest.is_some() && gui.discover.keep.into.is_none());
+        let picker = picker_rows(&lines(&window_buffer(&mut gui, 100, 30)));
+        assert!(picker[1].contains("Files go to copies › Boukmanflow › Borrowed Tapes"), "{}", picker.join("\n"));
+        // ↓ is clamped at By your layout.
+        press_key(&mut gui, KeyCode::Esc);
+        press_key(&mut gui, KeyCode::Down);
+        assert_eq!(gui.app.keep_view().map(|v| v.choice), Some(KeepChoice::Folder(FolderLanding::Tags)));
+        // Three albums by the layout: the album folder is one per album.
+        let mut gui = browse_in("folder-bouk-tags");
+        assert_eq!(window(&mut gui)[8], "│ Files go to copies › Boukmanflow › one folder per album         d change │");
+        // The mirror keeps the layout's leading folders (spec §6.5.2).
+        let mut gui = browse_in("folder-lead");
+        assert_eq!(window(&mut gui)[8], "│ Files go to copies › from-peers › Boukmanflow › Borrowed Tapes           │");
+        // The open folder of nine songs: the primary counts them all.
+        let mut gui = browse_in("folder-bouk");
+        let shown = window(&mut gui);
+        assert_eq!((shown[1].as_str(), shown[8].as_str(), shown[10].as_str()), (
+            "│ Boukmanflow                                                              │",
+            "│ Files go to copies › Boukmanflow                                         │",
+            "│                                                 [ Add folder · 9 songs ] │",
+        ));
+        // At the 100 × 24 floor it stands on rows 3–14, nothing given way
+        // (M6); its chooser on rows 1–12.
+        let rows = lines(&window_buffer(&mut gui, 100, 24));
+        assert_eq!((at(&rows, "╭─ Keep a copy").y, at(&rows, "Esc close ─╯").y, modal_rows(&rows).len()), (3, 14, 12));
+        let mut gui = into_in("into-default");
+        let rows = lines(&window_buffer(&mut gui, 100, 24));
+        assert_eq!((at(&rows, "╭─ Into a folder").y, chooser_rows(&rows).len()), (1, 12));
+        // Counting: the landings and the place stand, the primary uncounted
+        // — and it starts at once.
+        let mut gui = browse_in("folder-counting");
+        let shown = window(&mut gui);
+        assert_eq!((shown.len(), shown[10].as_str()), (12, "│                                                           [ Add folder ] │"));
+        press_key(&mut gui, KeyCode::Enter);
+        assert_eq!(sent(&gui).len(), 1, "Add never waits on the count");
+    }
+
+    #[test]
+    fn past_the_cap_and_before_any_start_the_folders_window_is_one_gold_line_and_close() {
+        let _en = english();
+        let mut gui = browse_in("folder-cap");
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(modal_rows(&rows), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Night Owl Radio Archive                                                  │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ ! 1,240 songs · limit 1,000                                              │
+            │                                                                          │
+            │                                                                [ Close ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        let line = at(&rows, "! 1,240");
+        assert_eq!((fg(&buffer, line), bold(&buffer, line)), (th().gold, false));
+        assert_eq!(super::tips(&gui), "Enter close · Esc close");
+        // ↑ ↓ and `d` do nothing; Enter closes, nothing sent.
+        press_key(&mut gui, KeyCode::Down);
+        press_key(&mut gui, KeyCode::Char('d'));
+        assert_eq!(gui.app.keep_view().map(|v| v.choice), Some(KeepChoice::Folder(FolderLanding::Mirror)));
+        assert!(gui.discover.keep.into.is_none() && gui.discover.keep.dest.is_none());
+        press_key(&mut gui, KeyCode::Enter);
+        assert!(gui.app.keep.flow.is_none() && sent(&gui).is_empty());
+        // A server that names no cap: no cap state — its refusal says it.
+        let mut gui = peer_gui_on(capped(None), two_libraries());
+        folder_window(&mut gui, "peerlib/Night Owl Radio Archive", Some(folder_files("peerlib/Night Owl Radio Archive", 1240)));
+        assert!(window(&mut gui).iter().any(|r| r.contains("[ Add folder · 1240 songs ]")), "{}", window(&mut gui).join("\n"));
+        // The cap is a state before a start only: a copy followed past it
+        // reads as its job.
+        let mut gui = browse_in("folder-cap");
+        let rec = gui.app.keep_view().unwrap().subject.rec;
+        let running = job(97, &rec, Some("folder"), "running", json!({ "progress": 0.1 }));
+        if let Some(flow) = gui.app.keep.flow.as_mut() {
+            flow.phase = KeepPhase::Following(97);
+        }
+        poll(&mut gui, &[running]);
+        let shown = window(&mut gui);
+        assert!(!shown.iter().any(|r| r.contains("limit")) && shown.iter().any(|r| r.contains("Copying")), "{}", shown.join("\n"));
+    }
+
+    #[test]
+    fn a_folder_start_sends_its_landing_as_the_route_takes_it() {
+        let _en = english();
+        let mut gui = browse_in("folder-mirror");
+        let rec = json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" }, "filepath": "peerlib/Boukmanflow/Borrowed Tapes", "title": "Borrowed Tapes" });
+        // As on the server: no landing on the wire.
+        press_key(&mut gui, KeyCode::Enter);
+        let starts = sent(&gui);
+        assert_eq!((starts[0].0.clone(), starts[0].1, starts[0].2.clone()), (rec.clone(), crate::api::types::JobScope::Folder, Some(JobLanding::Mirror)));
+        assert_eq!(starts[0].2.as_ref().and_then(JobLanding::wire), None);
+        assert_eq!(starts[0].3.clone().flatten().map(|d| d.vpath), Some("copies".into()), "the place shown");
+        // Into a folder…: its library and path.
+        let mut gui = browse_in("folder-into");
+        press_key(&mut gui, KeyCode::Enter);
+        let landing = sent(&gui)[0].2.clone();
+        assert_eq!(landing, Some(JobLanding::Into { vpath: Some("copies".into()), path: "Borrowed Tapes".into() }));
+        assert_eq!(landing.as_ref().and_then(JobLanding::wire), Some(json!({ "vpath": "copies", "path": "Borrowed Tapes" })));
+        // By your layout: the tags.
+        let mut gui = browse_in("folder-tags");
+        press_key(&mut gui, KeyCode::Enter);
+        let landing = sent(&gui)[0].2.clone();
+        assert_eq!(landing.as_ref().and_then(JobLanding::wire), Some(json!({ "tags": true })));
+    }
+
+    #[test]
+    fn the_into_a_folder_chooser_is_the_pickers_mode_and_esc_keeps_its_choice() {
+        let _en = english();
+        // Default: the pressed folder's name in the saved library, not there
+        // yet; the list your server's top; the hand in the field (12 rows,
+        // rows 4–15 at 30 rows).
+        let mut gui = into_in("into-default");
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(chooser_rows(&rows), board("
+            ╭─ Into a folder ──────────────────────────────────────────────────────────────╮
+            │ Files go to copies › Borrowed Tapes                                          │
+            │ “Borrowed Tapes” isn't there yet · the first file creates it                 │
+            │                                                                              │
+            │ (•) copies   ( ) music                                                       │
+            │                                                                              │
+            │ Borrowed Tapes▏                                                              │
+            │   Boukmanflow                                                                │
+            │   Color Out                                                                  │
+            │   From Sam                                                                   │
+            │                                                                              │
+            ╰────────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        assert_eq!(at(&rows, "╭─ Into a folder").y, 4);
+        assert_eq!(at(&rows, "╭─ Into a folder").x, 10);
+        let preview = at(&rows, "copies › Borrowed");
+        assert!(bold(&buffer, preview) && fg(&buffer, at(&rows, "Files go to")) == th().dim);
+        assert_eq!(fg(&buffer, at(&rows, "“Borrowed Tapes” isn't")), th().dim);
+        assert_eq!(fg(&buffer, at(&rows, "Boukmanflow")), th().dim);
+        assert!(!rows.iter().any(|r| r.contains("Save") || r.contains("Use the library default") || r.contains("Custom")));
+        assert_eq!(super::tips(&gui), "type a folder · ↑ ↓ rows · Esc close");
+        // ↓ into the list, ↓ ↓ to From Sam, Enter: in — the field its path,
+        // the hand still in the list, nothing held; it is there: no note.
+        for _ in 0..3 {
+            press_key(&mut gui, KeyCode::Down);
+        }
+        assert_eq!(super::tips(&gui), "↑ ↓ folders · Enter open · Esc close");
+        press_key(&mut gui, KeyCode::Enter);
+        window_buffer(&mut gui, 100, 30);
+        land_folders_of(&mut gui, "/copies/From Sam", &[]);
+        assert_eq!(chooser(&mut gui), board("
+            ╭─ Into a folder ──────────────────────────────────────────────────────────────╮
+            │ Files go to copies › From Sam                                                │
+            │                                                                              │
+            │ (•) copies   ( ) music                                                       │
+            │                                                                              │
+            │ From Sam                                                                     │
+            │   Up to copies                                                               │
+            │   No folders in here                                                         │
+            │                                                                              │
+            ╰────────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        // A new folder typed inside it: the list stays on From Sam, the
+        // nearest folder that is there — nothing asked while it is.
+        press_key(&mut gui, KeyCode::Up);
+        gui.pending.clear();
+        type_in(&mut gui, "/Borrowed Tapes");
+        assert_eq!(chooser(&mut gui), board("
+            ╭─ Into a folder ──────────────────────────────────────────────────────────────╮
+            │ Files go to copies › From Sam › Borrowed Tapes                               │
+            │ “Borrowed Tapes” isn't there yet · the first file creates it                 │
+            │                                                                              │
+            │ (•) copies   ( ) music                                                       │
+            │                                                                              │
+            │ From Sam/Borrowed Tapes▏                                                     │
+            │   Up to copies                                                               │
+            │   No folders in here                                                         │
+            │                                                                              │
+            ╰────────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        assert!(!gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::DestinationFolders { .. }))), "{:?}", gui.pending);
+        // Esc: back to Keep a copy, Into a folder… chosen, its place the
+        // chooser's — nothing saved (no save asked, the account's place as
+        // it was).
+        press_key(&mut gui, KeyCode::Esc);
+        assert!(gui.discover.keep.into.is_none());
+        let view = gui.app.keep_view().unwrap();
+        assert_eq!((view.choice, view.into.clone()), (KeepChoice::Folder(FolderLanding::Into), Some(IntoPlace { vpath: "copies".into(), path: "From Sam/Borrowed Tapes".into() })));
+        assert_eq!(window(&mut gui)[8], "│ Files go to copies › From Sam › Borrowed Tapes                  d change │");
+        assert!(!gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::DestinationSave { .. }))));
+        assert_eq!(gui.app.keep_destination().map(|d| d.vpath.as_str()), Some("copies"));
+        // Enter starts it there.
+        press_key(&mut gui, KeyCode::Enter);
+        assert_eq!(sent(&gui)[0].2, Some(JobLanding::Into { vpath: Some("copies".into()), path: "From Sam/Borrowed Tapes".into() }));
+        // Reopened, the chooser starts on that place; Up goes up.
+        let mut gui = into_in("into-from-sam");
+        press_key(&mut gui, KeyCode::Down);
+        press_key(&mut gui, KeyCode::Enter);
+        let shown = chooser(&mut gui);
+        assert_eq!(shown[1], "│ Files go to copies                                                           │", "Up to copies: its top");
+        // The pointer: a library, the field, a row, "Esc close".
+        let mut gui = into_in("into-default");
+        let rows = lines(&window_buffer(&mut gui, 100, 30));
+        let into = |act: super::IntoAct| keep_act(super::KeepAct::Into(act));
+        let music = at(&rows, "music");
+        assert_eq!(hit_at(&gui, music.x, music.y), into(super::IntoAct::Library(1)));
+        let field = at(&rows, "Borrowed Tapes▏");
+        assert_eq!(hit_at(&gui, field.x + 20, field.y), into(super::IntoAct::Field));
+        let color = at(&rows, "Color Out");
+        assert_eq!(hit_at(&gui, color.x + 30, color.y), into(super::IntoAct::Row(1)));
+        let esc = at(&rows, "Esc close");
+        assert_eq!(hit_at(&gui, esc.x, esc.y), into(super::IntoAct::Close));
+        super::act(&mut gui, super::KeepAct::Into(super::IntoAct::Row(1)));
+        assert_eq!(gui.discover.keep.into.as_ref().map(|ui| ui.text.value().to_string()).as_deref(), Some("Color Out"));
+        super::act(&mut gui, super::KeepAct::Into(super::IntoAct::Close));
+        assert_eq!(gui.app.keep_view().and_then(|v| v.into).map(|p| p.path).as_deref(), Some("Color Out"));
+    }
+
+    #[test]
+    fn the_choosers_libraries_list_and_held_row_walk_with_the_keys() {
+        let _en = english();
+        // ↑ from the field: the libraries' row; → music — the field keeps its
+        // text, the list relists, and scrolls past three rows.
+        let mut gui = into_in("into-music");
+        assert_eq!(chooser(&mut gui), board("
+            ╭─ Into a folder ──────────────────────────────────────────────────────────────╮
+            │ Files go to music › Borrowed Tapes                                           │
+            │ “Borrowed Tapes” isn't there yet · the first file creates it                 │
+            │                                                                              │
+            │ ( ) copies   (•) music                                                       │
+            │                                                                              │
+            │ Borrowed Tapes▏                                                              │
+            │   ALM                                                                       ▲│
+            │   Boukmanflow                                                               █│
+            │   Color Out                                                                 ▼│
+            │                                                                              │
+            ╰────────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        press_key(&mut gui, KeyCode::Up);
+        assert_eq!(super::tips(&gui), "← → library · ↑ ↓ rows · Esc close");
+        press_key(&mut gui, KeyCode::Left);
+        assert_eq!(chooser(&mut gui)[1], "│ Files go to copies › Borrowed Tapes                                          │");
+        // A held row: the selection's slab, the field without its caret; ↑
+        // from the first row back to the field (Shift-Tab and Tab too).
+        let mut gui = into_in("into-held");
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(chooser_rows(&rows)[6], "│ Borrowed Tapes                                                               │");
+        let color = at(&rows, "Color Out");
+        assert_eq!((bg(&buffer, color), bg(&buffer, Position { x: color.x - 1, y: color.y }), bg(&buffer, Position { x: 87, y: color.y })), (th().accent, th().accent, th().accent));
+        press_key(&mut gui, KeyCode::Up);
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(super::tips(&gui), "type a folder · ↑ ↓ rows · Esc close");
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(super::tips(&gui), "↑ ↓ folders · Enter open · Esc close");
+        // Enter in the field closes, as Esc does.
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        press_key(&mut gui, KeyCode::Enter);
+        assert!(gui.discover.keep.into.is_none() && gui.app.keep.flow.is_some());
+        // One writable library: no libraries' row and no blank under it.
+        let mut gui = into_in("into-one");
+        let shown = chooser(&mut gui);
+        assert_eq!(shown.len(), 10);
+        assert_eq!(shown[4], "│ Borrowed Tapes▏                                                              │");
+        press_key(&mut gui, KeyCode::Up);
+        assert_eq!(super::tips(&gui), "type a folder · ↑ ↓ rows · Esc close", "no row to go up to");
+        // While its listing is out: "Looking up…", and no note yet.
+        let mut gui = into_in("into-looking");
+        let shown = chooser(&mut gui);
+        assert_eq!((shown.len(), shown[6].as_str()), (9, "│   Looking up…                                                                │"));
+        // A listing that failed: its words in GOLD under Up, clipped, whole
+        // in the tooltip.
+        let mut gui = into_in("into-failed");
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(chooser_rows(&rows)[7], "│   Couldn't list this folder: EACCES: permission denied, scandir '/srv/copie… │");
+        let note = at(&rows, "Couldn't list");
+        assert_eq!(fg(&buffer, note), th().gold);
+        assert!(gui.ui.tips.iter().any(|(r, t)| r.y == note.y && t.ends_with("'/srv/copies/From Sam'")));
+    }
+
+    #[test]
+    fn enter_on_a_choosers_row_goes_in_and_holds_the_new_listings_first_row() {
+        let _en = english();
+        // From Sam, gone into with Enter: its first row ("Up to copies")
+        // held and lit — the keyboard is somewhere it can see.
+        let mut gui = into_in("into-from-sam");
+        assert_eq!(gui.discover.keep.into.as_ref().and_then(|ui| ui.held), Some(0));
+        let buffer = window_buffer(&mut gui, 100, 30);
+        assert_eq!(bg(&buffer, at(&lines(&buffer), "Up to copies")), th().accent);
+        // Enter again goes up — the library's top, its first folder held.
+        press_key(&mut gui, KeyCode::Enter);
+        assert_eq!(chooser(&mut gui)[1], "│ Files go to copies                                                           │");
+        assert_eq!(gui.discover.keep.into.as_ref().and_then(|ui| ui.held), Some(0));
+        // A click goes in and lights nothing: the pointer holds no row.
+        super::into_act(&mut gui, super::IntoAct::Row(0));
+        assert_eq!(gui.discover.keep.into.as_ref().and_then(|ui| ui.held), None);
+    }
+
+    #[test]
+    fn the_chooser_says_what_the_copy_cannot_take_in_the_pickers_words() {
+        let _en = english();
+        let mut gui = into_in("into-dots");
+        press_key(&mut gui, KeyCode::End);
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        assert_eq!(chooser_rows(&rows)[1..3], [
+            "│ Files go to —                                                                │",
+            "│ A path can't contain .. folders.                                             │",
+        ]);
+        assert_eq!(fg(&buffer, at(&rows, "A path can't")), th().gold);
+        // Esc keeps the last place it could take: "..Borrowed Tapes", a key
+        // before the slash.
+        press_key(&mut gui, KeyCode::Esc);
+        assert_eq!(gui.app.keep_view().and_then(|v| v.into).map(|p| p.path).as_deref(), Some("..Borrowed Tapes"));
+        // A brace: its own words (the picker's speak of a layout).
+        let mut gui = into_in("into-brace");
+        assert_eq!(chooser(&mut gui)[1..3], [
+            "│ Files go to —                                                                │",
+            "│ “Tapes {2019}” has a brace                                                   │",
+        ]);
+        // Each refusal by the picker's own words, a slash at either end
+        // silently.
+        for (typed, words) in [
+            ("~/Tapes", "A path can't contain ~ or $HOME."),
+            ("$HOME/Tapes", "A path can't contain ~ or $HOME."),
+            ("C:/Tapes", "A path can't use a drive letter like C:."),
+            ("Ta\u{7}pes", "A path can't contain tabs or other control characters."),
+            ("/Tapes/", ""),
+        ] {
+            let mut gui = into_in("into-default");
+            for _ in 0.."Borrowed Tapes".len() {
+                press_key(&mut gui, KeyCode::Backspace);
+            }
+            type_in(&mut gui, typed);
+            let shown = chooser(&mut gui);
+            if words.is_empty() {
+                assert_eq!(shown[1], "│ Files go to copies › Tapes                                                   │", "{typed}");
+            } else {
+                assert_eq!(shown[2], format!("│ {words:<77}│"), "{typed}");
+            }
+        }
+        // Too long for the server: its words in the preview's own row.
+        let mut gui = into_in("into-long");
+        let buffer = window_buffer(&mut gui, 100, 30);
+        let rows = lines(&buffer);
+        let shown = chooser_rows(&rows);
+        assert_eq!(shown[1], "│ Too long for the server · over 500 characters                                │");
+        assert_eq!(shown[2], format!("│{}│", " ".repeat(78)), "no note row under it");
+        assert_eq!(fg(&buffer, at(&rows, "Too long")), th().gold);
+        // A listed folder whose name has a brace: pressed, nothing but the
+        // words.
+        let mut gui = into_in("into-looking");
+        window_buffer(&mut gui, 100, 30);
+        land_folders_of(&mut gui, "/copies", &["{2019} Tapes", "Color Out"]);
+        press_key(&mut gui, KeyCode::Down);
+        press_key(&mut gui, KeyCode::Enter);
+        let shown = chooser(&mut gui);
+        assert_eq!(shown[2], "│ “{2019} Tapes” has a brace                                                   │");
+        assert_eq!(gui.discover.keep.into.as_ref().map(|ui| ui.text.value().to_string()).as_deref(), Some("Borrowed Tapes"));
+    }
+
+    #[test]
+    fn the_chooser_asks_a_folder_once_and_only_after_typing_stops() {
+        let _en = english();
+        // The library's top asked at once on open; one ask out at a time.
+        let mut gui = into_in("into-looking");
+        window_buffer(&mut gui, 100, 30);
+        let asked = |gui: &Gui| -> Vec<String> {
+            gui.pending
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Api(ApiCmd::DestinationFolders { path, .. }) => Some(path.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(asked(&gui), ["/copies"]);
+        land_folders_of(&mut gui, "/copies", &["Boukmanflow", "Color Out", "From Sam"]);
+        // Typing a folder that is there: its folders are asked only once the
+        // field has been still for 300 ms — the frames keep coming until.
+        for _ in 0.."Borrowed Tapes".len() {
+            press_key(&mut gui, KeyCode::Backspace);
+        }
+        type_in(&mut gui, "From Sam");
+        gui.pending.clear();
+        window_buffer(&mut gui, 100, 30);
+        assert!(asked(&gui).is_empty() && gui.hot, "{:?}", gui.pending);
+        if let Some(ui) = gui.discover.keep.into.as_mut() {
+            ui.typed = crate::clock::Instant::now().checked_sub(std::time::Duration::from_millis(301));
+        }
+        window_buffer(&mut gui, 100, 30);
+        assert_eq!(asked(&gui), ["/copies/From Sam"]);
+        // A folder not there: nothing to ask, its nearest parent's listing
+        // shown.
+        land_folders_of(&mut gui, "/copies/From Sam", &[]);
+        gui.pending.clear();
+        type_in(&mut gui, "/New");
+        if let Some(ui) = gui.discover.keep.into.as_mut() {
+            ui.typed = None;
+        }
+        window_buffer(&mut gui, 100, 30);
+        assert!(asked(&gui).is_empty());
+        // Every ask is of the user's own server, whichever server is browsed.
+        let mut gui = into_in("into-looking");
+        window_buffer(&mut gui, 100, 30);
+        let reach = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::DestinationFolders { reach, .. }) => Some(reach.as_ref().map(|r| (r.base.clone(), r.peer))),
+            _ => None,
+        });
+        assert_eq!(reach, Some(Some((HOST.to_string(), None))), "its own server's reach, never the connected server's");
+    }
+
+    #[test]
+    fn a_folder_copys_life_reads_its_own_landing_its_folder_and_its_songs() {
+        let _en = english();
+        let rec = json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" }, "filepath": "peerlib/Boukmanflow/Borrowed Tapes", "title": "Borrowed Tapes" });
+        let params = json!({ "scope": "folder", "landing": { "vpath": "copies", "path": "Borrowed Tapes" }, "destination": destination()["destination"] });
+        let folder_job = |state: &str, extra: Value| {
+            let mut more = json!({ "params": params.clone() });
+            for (k, v) in extra.as_object().unwrap() {
+                more[k] = v.clone();
+            }
+            job(96, &rec, Some("folder"), state, more)
+        };
+        let songs = |copied: u64, owned: u64, failed: u64, stopped: Option<&str>| {
+            let from = |i: u64| format!("peerlib/Boukmanflow/Borrowed Tapes/{i:02}.mp3");
+            let copied_songs: Vec<Value> = (1..=copied).map(|i| json!({ "from": from(i), "vpath": "copies", "filepath": format!("copies/Borrowed Tapes/{i:02}.mp3") })).collect();
+            let owned_songs: Vec<Value> = (copied + 1..=copied + owned).map(|i| json!({ "from": from(i), "why": "owned", "at": format!("music/Boukmanflow/Borrowed Tapes/{i:02}.mp3") })).collect();
+            json!({ "result": { "scope": "folder", "folder": { "path": "peerlib/Boukmanflow/Borrowed Tapes", "name": "Borrowed Tapes", "landed": "copies/Borrowed Tapes" },
+                "songs": { "total": 3, "copied": copied_songs, "skipped": owned_songs, "failed": [] },
+                "counts": { "total": 3, "copied": copied, "skipped": owned, "failed": failed }, "stopped": stopped } })
+        };
+        // Copying, into a folder: "Into" its own landing, the server's step.
+        let mut gui = browse_in("folder-into");
+        start(&mut gui, Ok(folder_job("running", json!({ "progress": 0.33, "statusText": "1 of 3 songs · 4.1 MB" }))));
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ Copying · 1 of 3 songs · 4.1 MB                                          │
+            │ ▰▰▰▱▱▱▱▱▱▱ 33%                                                           │
+            │                                                                          │
+            │ Into copies › Borrowed Tapes                                             │
+            │                                                                          │
+            │ x cancel copy                                                  [ Close ] │
+            ╰─────────────────────────────────────── Esc close · the copy keeps going ─╯
+        "));
+        // Its notes: "copying Borrowed Tapes…" while it moves.
+        let (note, _) = super::busy_note(&folder_job("running", json!({})), 99, None);
+        assert_eq!(note, "copying Borrowed Tapes from Stage Peer B…");
+        // Stage Peer B browsed: the header names it — the folder alone.
+        let (note, _) = super::busy_note(&folder_job("running", json!({})), 99, Some(B));
+        assert_eq!(note, "copying Borrowed Tapes…");
+        // Kept: In the folder its result names, `c choose again` and Play
+        // your copy.
+        poll(&mut gui, &[folder_job("done", songs(2, 1, 0, None))]);
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ ✓ In your collection                                                     │
+            │ 2 copied · 1 already yours                                               │
+            │                                                                          │
+            │ In copies › Borrowed Tapes                                               │
+            │                                                                          │
+            │ c choose again                                        [ Play your copy ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        assert_eq!(super::news_note(&folder_job("done", songs(2, 1, 0, None)), 99).map(|(n, _)| n).as_deref(), Some("copied Borrowed Tapes"));
+        // `c choose again`: back to the landings, the dot where it stood.
+        press_key(&mut gui, KeyCode::Char('c'));
+        assert!(gui.app.keep_view().is_some_and(|v| v.choice == KeepChoice::Folder(FolderLanding::Into) && matches!(v.stage, KeepStage::Choose { .. })));
+        // A gap: its songs that didn't copy, Retry — at its own landing.
+        let mut gui = browse_in("folder-into");
+        start(&mut gui, Ok(folder_job("done", songs(2, 0, 1, None))));
+        let shown = window(&mut gui);
+        assert_eq!((shown[4].as_str(), shown[5].as_str(), shown[9].as_str()), (
+            "│ ! 1 song didn't copy                                                     │",
+            "│ 2 copied                                                                 │",
+            "│ c choose again                                                 [ Retry ] │",
+        ));
+        let (note, kind) = super::news_note(&folder_job("done", songs(2, 0, 1, None)), 99).unwrap();
+        assert_eq!((note.as_str(), kind), ("Borrowed Tapes · 1 song didn't copy", MessageKind::Error));
+        assert_eq!(super::news_note(&folder_job("done", songs(2, 0, 1, None)), 20).map(|(n, _)| n).as_deref(), Some("1 song didn't copy"));
+        gui.pending.clear();
+        press_key(&mut gui, KeyCode::Enter);
+        let starts = sent(&gui);
+        assert_eq!((starts[0].1, starts[0].2.clone()), (crate::api::types::JobScope::Folder, Some(JobLanding::Into { vpath: Some("copies".into()), path: "Borrowed Tapes".into() })));
+        // Refused: no Retry, no choose again.
+        let mut gui = browse_in("folder-into");
+        start(&mut gui, Ok(folder_job("done", songs(0, 0, 0, Some("refused")))));
+        assert_eq!(window(&mut gui), board("
+            ╭─ Keep a copy ────────────────────────────────────────────────────────────╮
+            │ Borrowed Tapes                                                           │
+            │ from Stage Peer B                                                        │
+            │                                                                          │
+            │ ! Stage Peer B does not allow copies with your server's key              │
+            │ Nothing was copied · playing it still works                              │
+            │ Only Stage Peer B's admin can change this.                               │
+            │                                                                          │
+            │                                                                [ Close ] │
+            ╰────────────────────────────────────────────────────────────── Esc close ─╯
+        "));
+        // Cancelled: Add again brings the landings back, the dot on its
+        // own landing, its Into place restored.
+        let mut gui = browse_in("folder-mirror");
+        start(&mut gui, Ok(folder_job("cancelled", songs(1, 0, 0, None))));
+        assert!(window(&mut gui)[9].ends_with("[ Add again ] │"));
+        press_key(&mut gui, KeyCode::Enter);
+        let view = gui.app.keep_view().unwrap();
+        assert_eq!((view.choice, view.into.map(|p| p.path)), (KeepChoice::Folder(FolderLanding::Into), Some("Borrowed Tapes".into())));
+        // The Copies list: its folder's name, kind "folder", its counts.
+        let mut gui = copies_gui(&[folder_job("done", songs(3, 0, 0, None))]);
+        let rows = copies_rows_on(&draw(&mut gui, 100, 30));
+        assert!(rows.iter().any(|r| r.starts_with("│ Borrowed Tapes                   Stage Peer B  ✓ in your collection")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.starts_with("│   folder · 3 copied")), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn the_legacy_console_draws_the_browse_windows_and_the_chooser_in_its_own_glyphs() {
+        let _en = english();
+        let _legacy = crate::kit::theme::legacy_glyphs_here();
+        let mut gui = browse_in("folder-into");
+        assert_eq!(window(&mut gui), board("
+            +- Keep a copy ------------------------------------------------------------+
+            | Borrowed Tapes                                                           |
+            | from Stage Peer B                                                        |
+            |                                                                          |
+            | ( ) As on Stage Peer B                                                   |
+            | (*) Into a folder...                                                     |
+            | ( ) By your layout                                                       |
+            |                                                                          |
+            | Files go to copies > Borrowed Tapes                             d change |
+            |                                                                          |
+            |                                                 [ Add folder · 3 songs ] |
+            +-------------------------------------------------------------- Esc close -+
+        "));
+        let mut gui = browse_in("artist");
+        assert_eq!(window(&mut gui), board("
+            +- Keep a copy ------------------------------------------------------------+
+            | Boukmanflow                                                              |
+            | from Stage Peer B                                                        |
+            |                                                                          |
+            | [x] Only the albums you don't have                                       |
+            | Leaves out Night Market Sampler                                          |
+            |                                                                          |
+            | Files go to copies > Boukmanflow > one folder per album         d change |
+            |                                                                          |
+            |                                                         [ Add 2 albums ] |
+            +-------------------------------------------------------------- Esc close -+
+        "));
+        let mut gui = browse_in("folder-cap");
+        assert_eq!(window(&mut gui)[4], "| ! 1,240 songs · limit 1,000                                              |");
+        let mut gui = into_in("into-music");
+        let shown = chooser(&mut gui);
+        assert_eq!((shown[0].as_str(), shown[1].as_str(), shown[4].as_str()), (
+            "+- Into a folder --------------------------------------------------------------+",
+            "| Files go to music > Borrowed Tapes                                           |",
+            "| ( ) copies   (*) music                                                       |",
+        ));
+        assert!(shown[11].ends_with("- Esc close -+"));
+    }
+
+    #[test]
+    fn the_new_window_strings_fit_their_cells_in_every_locale() {
+        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+            let _locale = crate::setup::tests::in_locale(code);
+            let w = crate::kit::width;
+            // The folder primary with a two-digit count fits its 34 cells,
+            // or drops its count as an album's does; "Add folder" alone
+            // always fits.
+            let mut gui = peer_gui();
+            folder_window(&mut gui, "peerlib/Boukmanflow", Some(folder_files("peerlib/Boukmanflow", 99)));
+            let view = gui.app.keep_view().unwrap();
+            let primary = format!("[ {} ]", super::add_words(KeepVerb::Folder, &view));
+            assert!(w(&primary) <= super::PRIMARY_MAX, "{code}: {primary}");
+            assert!(w(&rust_i18n::t!("gui.discover.keep.add_folder")) + 4 <= super::PRIMARY_MAX, "{code}");
+            if code == "de" {
+                assert_eq!(primary, "[ Ordner hinzufügen · 99 Songs ]");
+            }
+            // The landings, the cap line, the chooser's words: the window's
+            // 72 text cells, the chooser's 76.
+            for words in [
+                super::choice_name(KeepChoice::Folder(FolderLanding::Mirror), &view),
+                super::choice_name(KeepChoice::Folder(FolderLanding::Into), &view),
+                super::choice_name(KeepChoice::Folder(FolderLanding::Tags), &view),
+                format!("! {}", super::cap_words(FolderCap { count: 99_999, cap: 10_000 })),
+                rust_i18n::t!("gui.discover.keep.leaves_out", albums = "Night Market Sampler · Singles").to_string(),
+            ] {
+                assert!(w(&words) <= 68, "{code}: {words}");
+            }
+            assert!(w(&rust_i18n::t!("gui.discover.keep.into_braces", folder = "Tapes {2019}")) <= 76, "{code}");
+            // The title on the top border, with its frame's cells.
+            assert!(w(&rust_i18n::t!("gui.discover.keep.into_title")) + 6 <= 80, "{code}");
+            // Every tips line the window and the chooser compose: 99 cells.
+            let mirror = rust_i18n::t!("gui.tips.discover_keep_choose").replace(&format!(" · {}", rust_i18n::t!("gui.tips.discover_keep_d")), "");
+            for line in [
+                mirror,
+                rust_i18n::t!("gui.tips.keep_into_field").to_string(),
+                rust_i18n::t!("gui.tips.keep_into_list").to_string(),
+                rust_i18n::t!("gui.tips.discover_dest_library").to_string(),
+            ] {
+                assert!(w(&line) <= 99, "{code}: {line}");
+            }
+            // The mirror's tips drop exactly "d where files land".
+            assert!(!super::tips(&gui).contains(&*rust_i18n::t!("gui.tips.discover_keep_d")), "{code}: {}", super::tips(&gui));
+        }
+    }
+
+    #[test]
+    fn the_new_window_words_are_each_locales_own_and_reuse_its_picker_words() {
+        // Read with the locale named, never switched process-wide.
+        let new = [
+            "gui.discover.keep.land_mirror",
+            "gui.discover.keep.land_folder",
+            "gui.discover.keep.land_tags",
+            "gui.discover.keep.add_folder",
+            "gui.discover.keep.key_keep",
+            "gui.discover.keep.folder_cap_one",
+            "gui.discover.keep.folder_cap_other",
+            "gui.discover.keep.leaves_out",
+            "gui.discover.keep.into_title",
+            "gui.discover.keep.into_braces",
+            "gui.discover.copies.kind_folder",
+            "gui.tips.keep_into_field",
+            "gui.tips.keep_into_list",
+            "gui.srv.read_only",
+        ];
+        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+            let t = |key: &str| rust_i18n::t!(key, locale = code).to_string();
+            // Every new word is there and translated — Polish's "folder" is
+            // the one that reads as the English.
+            for key in new {
+                assert_ne!(t(key), key, "{code}: {key} is missing");
+                let english = rust_i18n::t!(key, locale = "en").to_string();
+                assert!(code == "en" || t(key) != english || (code, key) == ("pl", "gui.discover.copies.kind_folder"), "{code}: {key} reads as the English");
+            }
+            // The chooser's name is its landing's without the ellipsis that
+            // says `d` opens it, as "Keep a copy…" opens "Keep a copy".
+            assert_eq!(t("gui.discover.keep.land_folder"), format!("{}…", t("gui.discover.keep.into_title")), "{code}");
+            assert_eq!(t("gui.act.keep_copy"), format!("{}…", t("gui.discover.keep.title")), "{code}");
+            // The chooser's tips are the picker's words: the field's after
+            // the thing it types, the list's but its Esc, which closes the
+            // chooser — both ending on the window's own Esc.
+            let segments = |key: &str| t(key).split(" · ").map(str::to_string).collect::<Vec<_>>();
+            let field = segments("gui.tips.keep_into_field");
+            assert_eq!(field[1..], segments("gui.tips.discover_dest_custom")[1..], "{code}: {field:?}");
+            let list = segments("gui.tips.keep_into_list");
+            assert_eq!(list[..2], segments("gui.tips.discover_dest_list")[..2], "{code}: {list:?}");
+            for tips in [&field, &list] {
+                assert_eq!(tips.last(), Some(&t("gui.tips.discover_keep_esc")), "{code}: {tips:?}");
+            }
+            // The cap line counts its songs in the window's own words, in
+            // every plural form, then names the limit.
+            for form in ["one", "few", "many", "other"] {
+                let key = format!("gui.discover.keep.songs_{form}");
+                let songs = rust_i18n::t!(key.as_str(), locale = code, count = "1,240").to_string();
+                let key = format!("gui.discover.keep.folder_cap_{form}");
+                let line = rust_i18n::t!(key.as_str(), locale = code, count = "1,240", cap = "1,000").to_string();
+                assert!(line.starts_with(&format!("{songs} · ")) && line.ends_with("1,000"), "{code}: {line}");
+            }
+        }
     }
 }

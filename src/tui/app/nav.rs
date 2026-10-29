@@ -32,6 +32,12 @@ impl<N: PartialEq + Clone> Drill<N> {
         self.stack.last().unwrap_or(&self.root)
     }
 
+    /// The view on screen, to learn what it shows — an album page's credit
+    /// once its resolver answers — `None` before the tab was ever opened.
+    pub fn here_mut(&mut self) -> Option<&mut N> {
+        self.stack.last_mut()
+    }
+
     /// Whether the tab has never been visited — the caller plants the root
     /// (and its entries) on the first look.
     pub fn unopened(&self) -> bool {

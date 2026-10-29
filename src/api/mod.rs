@@ -1163,10 +1163,12 @@ impl Client {
     }
 
     /// `POST /api/v1/discovery/plugins/{plugin}/jobs {recommendation,
-    /// scope?, destination?}` — start a job on `recommendation`, sent
-    /// exactly as given (a taste row as it arrived, clause 103). A song job
-    /// sends no scope (the server's default). `destination` is the place
-    /// the client showed (clause 145): `None` sends none (no check),
+    /// scope?, landing?, destination?}` — start a job on `recommendation`,
+    /// sent exactly as given (a taste row as it arrived, clause 103). A song
+    /// job sends no scope (the server's default). `landing` is a folder
+    /// copy's ([`JobLanding::wire`]: none for the mirror, and none for any
+    /// other scope — the route refuses one there). `destination` is the
+    /// place the client showed (clause 145): `None` sends none (no check),
     /// `Some(None)` null — it showed nowhere; a server from before the key
     /// is asked again without it. `202` and `200` (a live job already
     /// covers it) both answer [`JobStartAnswer::Started`]; the server's 409
@@ -1178,11 +1180,17 @@ impl Client {
         recommendation: &serde_json::Value,
         scope: Option<JobScope>,
         destination: Option<Option<&CollectionDestination>>,
+        landing: Option<&JobLanding>,
     ) -> Result<JobStartAnswer, ApiError> {
         self.own_server()?;
         let mut body = serde_json::json!({ "recommendation": recommendation });
         if let Some(scope) = scope.filter(|s| *s != JobScope::Song) {
             body["scope"] = serde_json::Value::String(scope.as_str().to_string());
+        }
+        if scope == Some(JobScope::Folder)
+            && let Some(landing) = landing.and_then(JobLanding::wire)
+        {
+            body["landing"] = landing;
         }
         if let Some(shown) = destination {
             body["destination"] = shown.map(CollectionDestination::shown).unwrap_or(serde_json::Value::Null);
@@ -1278,6 +1286,39 @@ impl Client {
         let rows: ArtistAlbumRows =
             self.post("api/v1/db/artists-albums", serde_json::json!({ "artist": artist })).await?;
         Ok(rows.albums)
+    }
+
+    /// `POST /api/v1/file-explorer/recursive {directory}` — every file
+    /// under a folder the server plays, as library paths (on the federation
+    /// allowlist): what a folder copy of it takes, before the copy's own
+    /// rules ([`crate::api::types::plan_folder`]). Asked of whichever
+    /// server this client is aimed at — a connected server's through its
+    /// reach.
+    pub async fn file_explorer_recursive_async(&self, directory: &str) -> Result<Vec<String>, ApiError> {
+        let listed: Vec<serde_json::Value> =
+            self.post("api/v1/file-explorer/recursive", serde_json::json!({ "directory": directory })).await?;
+        Ok(listed.into_iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+    }
+
+    /// `POST /api/v1/db/metadata/batch [filepath…]` — each file's tags (on
+    /// the federation allowlist), in the order asked: a path the server has
+    /// no row for comes back with none. What "By your layout" files a
+    /// folder's songs by (keep-a-copy spec §6.5.3).
+    pub async fn metadata_batch_async(&self, filepaths: &[String]) -> Result<Vec<Track>, ApiError> {
+        let answer: std::collections::HashMap<String, serde_json::Value> =
+            self.post("api/v1/db/metadata/batch", serde_json::json!(filepaths)).await?;
+        Ok(filepaths
+            .iter()
+            .map(|path| {
+                let metadata = answer
+                    .get(path)
+                    .and_then(|entry| entry.get("metadata"))
+                    .filter(|m| m.is_object())
+                    .and_then(|m| serde_json::from_value(m.clone()).ok())
+                    .unwrap_or_default();
+                Track { filepath: path.clone(), metadata }
+            })
+            .collect())
     }
 
     /// `POST /api/v1/db/album-songs` with every selector it takes: the
@@ -3449,25 +3490,25 @@ pub(crate) mod tests {
             JobStartAnswer::Started(started) => started,
             other => panic!("{other:?}"),
         };
-        let first = started(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Song), None)));
+        let first = started(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Song), None, None)));
         assert!(first.created && first.job.id == 7);
         let (line, body) = seen_json(&seen);
         assert!(line.starts_with("POST /api/v1/discovery/plugins/federation-copy/jobs "), "{line}");
         assert_eq!(body, serde_json::json!({ "recommendation": row }), "the row exactly as it came, no scope for a song");
-        let again = started(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::ArtistMissing), None)));
+        let again = started(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::ArtistMissing), None, None)));
         assert!(!again.created, "a live job already covers it");
         assert_eq!(seen_json(&seen).1["scope"], "artist-missing");
         let words = |r: Result<JobStartAnswer, ApiError>| PluginFailure::of(&r.unwrap_err());
-        assert_eq!(words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None))), PluginFailure::Refused { status: 403, words: "Uploading Disabled".into() });
+        assert_eq!(words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None, None))), PluginFailure::Refused { status: 403, words: "Uploading Disabled".into() });
         // Another account's live copy is a 409 of its own words, never a changed destination.
         assert_eq!(
-            words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None))).words(),
+            words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None, None))).words(),
             "someone else on this server is already getting this — try again in a moment"
         );
-        assert!(matches!(words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None))), PluginFailure::Refused { status: 429, .. }));
+        assert!(matches!(words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None, None))), PluginFailure::Refused { status: 429, .. }));
         // A 404's words are kept on the plug-in routes (never the path).
         assert_eq!(
-            words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None))),
+            words(wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, None, None))),
             PluginFailure::Refused { status: 404, words: "Unknown plug-in: federation-copy".into() }
         );
         // A server that is not there: "your server didn't answer".
@@ -3504,7 +3545,7 @@ pub(crate) mod tests {
             layout: "{{ARTIST}}/{{ALBUM}}".into(),
             source: Some("user".into()),
         };
-        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)))).unwrap() {
+        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)), None)).unwrap() {
             JobStartAnswer::Started(started) => {
                 assert_eq!(started.job.params.destination, Some(Some(CollectionDestination { source: Some("user".into()), ..shown.clone() })), "pinned");
             }
@@ -3515,18 +3556,18 @@ pub(crate) mod tests {
         assert_eq!(body["scope"], "album");
         let now: CollectionDestination = serde_json::from_value(music).unwrap();
         assert_eq!(
-            wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)))).unwrap(),
+            wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)), None)).unwrap(),
             JobStartAnswer::DestinationChanged(Some(Some(now))),
             "nothing started: where files land now"
         );
         seen_json(&seen);
         assert_eq!(
-            wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(None))).unwrap(),
+            wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(None), None)).unwrap(),
             JobStartAnswer::DestinationChanged(Some(None)),
             "an explicit null: nowhere"
         );
         assert_eq!(seen_json(&seen).1["destination"], serde_json::Value::Null, "it showed nowhere");
-        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)))) {
+        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)), None)) {
             Err(ApiError::Server { status: 409, message }) => assert!(message.starts_with("someone else"), "{message}"),
             other => panic!("another account's copy keeps its words: {other:?}"),
         }
@@ -3534,7 +3575,7 @@ pub(crate) mod tests {
         // never nowhere: what is drawn stays until the view is read again.
         for _ in 0..2 {
             assert_eq!(
-                wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)))).unwrap(),
+                wait(client.plugin_job_start_async(COPY_PLUGIN, &row, None, Some(Some(&shown)), None)).unwrap(),
                 JobStartAnswer::DestinationChanged(None)
             );
         }
@@ -3554,7 +3595,7 @@ pub(crate) mod tests {
         ]);
         let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
         let shown = CollectionDestination { vpath: "copies".into(), layout: "{{ALBUMARTIST}}/{{ALBUM}}".into(), ..CollectionDestination::default() };
-        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)))).unwrap() {
+        match wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)), None)).unwrap() {
             JobStartAnswer::Started(started) => assert_eq!(started.job.params.destination, None, "it reads as from before the pin"),
             other => panic!("{other:?}"),
         }
@@ -3563,9 +3604,65 @@ pub(crate) mod tests {
         assert_eq!(again, serde_json::json!({ "recommendation": row, "scope": "album" }), "then without it, nothing else changed");
         // Any other 400 keeps its words, asked once.
         assert_eq!(
-            PluginFailure::of(&wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)))).unwrap_err()),
+            PluginFailure::of(&wait(client.plugin_job_start_async(COPY_PLUGIN, &row, Some(JobScope::Album), Some(Some(&shown)), None)).unwrap_err()),
             PluginFailure::Refused { status: 400, words: "\"scope\" must be one of [album, artist]".into() }
         );
+    }
+
+    #[test]
+    fn a_folder_copy_sends_its_landing_and_a_connected_server_lists_its_folder_and_tags() {
+        let folder = serde_json::json!({ "source": "federation", "peer": { "id": 1, "name": "Stage Peer B" },
+            "filepath": "peerlib/Boukmanflow/Borrowed Tapes", "title": "Borrowed Tapes" });
+        let job = serde_json::json!({ "id": 3, "plugin": "federation-copy", "state": "queued",
+            "params": { "scope": "folder", "landing": { "vpath": null, "path": "From Sam" } } });
+        let accepted = || json_reply("202 Accepted", serde_json::json!({ "created": true, "job": job }));
+        let (port, seen) = canned_server_bodies(vec![
+            accepted(),
+            accepted(),
+            accepted(),
+            accepted(),
+            accepted(),
+            json_reply("200 OK", serde_json::json!(["peerlib/Boukmanflow/Borrowed Tapes/01 - Rooftop Cypher.mp3", 7, "peerlib/Boukmanflow/Borrowed Tapes/CD 2/x.mp3"])),
+            json_reply("200 OK", serde_json::json!({
+                "peerlib/a.mp3": { "filepath": "peerlib/a.mp3", "metadata": { "artist": "Boukmanflow", "album": "Borrowed Tapes", "album-artist": "Boukmanflow" } },
+                "peerlib/b.mp3": { "filepath": "peerlib/b.mp3", "metadata": null }
+            })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let shown = CollectionDestination { vpath: "copies".into(), layout: "{{ALBUMARTIST}}/{{ALBUM}}".into(), ..CollectionDestination::default() };
+        let start = |landing: &JobLanding, scope: JobScope| {
+            let answer = wait(client.plugin_job_start_async(COPY_PLUGIN, &folder, Some(scope), Some(Some(&shown)), Some(landing))).unwrap();
+            assert!(matches!(answer, JobStartAnswer::Started(_)));
+            seen_json(&seen).1
+        };
+        // As on the server: no landing at all.
+        let mirror = start(&JobLanding::Mirror, JobScope::Folder);
+        assert_eq!((mirror["scope"].as_str(), mirror.get("landing")), (Some("folder"), None));
+        assert_eq!(mirror["recommendation"], folder, "the folder's recommendation as given");
+        // Into a folder: the library and the folder; no library named, the path alone.
+        let into = start(&JobLanding::Into { vpath: Some("copies".into()), path: "From Sam".into() }, JobScope::Folder);
+        assert_eq!(into["landing"], serde_json::json!({ "vpath": "copies", "path": "From Sam" }));
+        let root = start(&JobLanding::Into { vpath: None, path: String::new() }, JobScope::Folder);
+        assert_eq!(root["landing"], serde_json::json!({ "path": "" }), "the destination's library, its top");
+        // By your layout.
+        assert_eq!(start(&JobLanding::Tags, JobScope::Folder)["landing"], serde_json::json!({ "tags": true }));
+        // Another scope never carries one: the route refuses it there.
+        assert!(start(&JobLanding::Tags, JobScope::Album).get("landing").is_none());
+        // The folder's files, as the server names them; and their tags, in the order asked.
+        let listed = wait(client.file_explorer_recursive_async("peerlib/Boukmanflow/Borrowed Tapes")).unwrap();
+        assert_eq!(listed, ["peerlib/Boukmanflow/Borrowed Tapes/01 - Rooftop Cypher.mp3", "peerlib/Boukmanflow/Borrowed Tapes/CD 2/x.mp3"]);
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/file-explorer/recursive "), "{line}");
+        assert_eq!(body, serde_json::json!({ "directory": "peerlib/Boukmanflow/Borrowed Tapes" }));
+        let paths = vec!["peerlib/b.mp3".to_string(), "peerlib/a.mp3".to_string(), "peerlib/c.mp3".to_string()];
+        let tagged = wait(client.metadata_batch_async(&paths)).unwrap();
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/db/metadata/batch "), "{line}");
+        assert_eq!(body, serde_json::json!(paths));
+        assert_eq!(tagged.iter().map(|t| t.filepath.as_str()).collect::<Vec<_>>(), ["peerlib/b.mp3", "peerlib/a.mp3", "peerlib/c.mp3"]);
+        assert_eq!(tagged[1].metadata.album_artist.as_deref(), Some("Boukmanflow"), "the album's own credit");
+        assert_eq!(tagged[0].metadata, TrackMetadata::default(), "no row there: no tags");
+        assert_eq!(tagged[2].metadata, TrackMetadata::default(), "not answered: no tags");
     }
 
     #[test]
@@ -3605,7 +3702,7 @@ pub(crate) mod tests {
         // Never a connected server's.
         let peer = Client::new("http://127.0.0.1:9").unwrap().with_peer(Some(3));
         assert!(matches!(wait(peer.collection_destination_save_async(None)), Err(ApiError::Config(_))));
-        assert!(matches!(wait(peer.plugin_job_start_async(COPY_PLUGIN, &serde_json::json!({}), None, None)), Err(ApiError::Config(_))));
+        assert!(matches!(wait(peer.plugin_job_start_async(COPY_PLUGIN, &serde_json::json!({}), None, None, None)), Err(ApiError::Config(_))));
     }
 
     #[test]

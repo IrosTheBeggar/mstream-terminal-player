@@ -383,6 +383,9 @@ impl App {
         // The Discover room's answer, pins and prefs were the old server's
         // (discovery-page clause 31).
         self.reset_taste();
+        // Keep a copy's window and page marks were too; its state follows
+        // the session's own server (keep-a-copy spec §3.2).
+        self.keep_session_moved();
     }
 
     pub(super) fn handle_connect_action(&mut self, action: Action) -> Vec<Effect> {

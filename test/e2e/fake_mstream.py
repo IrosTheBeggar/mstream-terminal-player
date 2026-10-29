@@ -65,7 +65,40 @@ server, and no audio files:
     answered (`job_answers`), the lookups' sizes (`lookup_sizes`), the
     cancels, clears and resolves, the destination's reads
     (`destination_gets`), saves (`destination_puts`) and listings
-    (`folder_lists`).
+    (`folder_lists`). The Discover room's connected server (id 7, "Attic")
+    answers its artist's albums through the browse proxy — Lanterns,
+    credited to Attic Band — and the user's own library holds Lanterns by
+    name, so Keep a copy's Every album by counts one of theirs with
+    nothing missing to tick.
+  - FAKE_ROLE=peer: this process is a CONNECTED server, "Stage Peer B" —
+    the keep-a-copy spec's §2 sample library, one library `peerlib`
+    (Boukmanflow's three albums, the Various Artists compilation, Peer
+    Sessions, Split Series whose credits disagree, Night Owl Radio
+    Archive's 1,240 untagged songs in 56 folders). It answers the
+    federation allowlist's reads as mStream words them: the layered GET
+    /api/ (a peer answers no ping through the proxy), the file explorer
+    and its recursive listing, the albums and an artist's albums (the
+    credit facts: album_artist — null where the rows disagree — artists,
+    compilation, the year aggregates), album-songs (album_artist and year
+    narrowing), the artists, genres, genre-songs, search (album hits with
+    the listing's credit), recent/added, metadata and metadata/batch, and
+    /album-art/. /_state lists every read (`asked`) and keeps the
+    recursive listings' and the tag batches' bodies.
+  - FAKE_PEER_URL=http://…  (with FAKE_PLUGINS): the user's OWN server
+    paired with that connected server, as id 2 "Stage Peer B": the ping
+    adds `federationBrowse`, GET /api/v1/federation/peers lists it, and
+    ALL /api/v1/federation/peers/2/api/<path> is mStream's browse proxy
+    (federation-browse.js): the route screened against the exact
+    allowlist (403 "Route not available over federation" off it), then
+    the method, the JSON body and the peer's answer passed through;
+    …/peers/2/art/<file> its art proxy. The user's library holds Harbour
+    Lights by name (the artist's albums, asked of the own server); the
+    `copies` library holds Boukmanflow, Color Out and From Sam (the Into a
+    folder chooser's list); the listing names `jobs.maxFolderSongs` 1,000.
+    Folder jobs key on the peer and the path (jobKey), keep their
+    `landing` in `params`, and end with the folder they landed in.
+    /_state adds the proxied routes (`proxied`) and the refused
+    (`proxy_refused`).
 
 Usage: fake_mstream.py PORT
 """
@@ -76,6 +109,9 @@ import socketserver
 import struct
 import time
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -91,6 +127,10 @@ PLUGINS = TASTE and os.environ.get("FAKE_PLUGINS", "") not in ("", "0")
 # A server from before the start's destination (mStream before 2026-10-21):
 # its jobs route's strict body refuses the key, and no job is pinned.
 NO_PIN = PLUGINS and os.environ.get("FAKE_NO_PIN", "") not in ("", "0")
+# This process is a connected server (the keep-a-copy spec's Stage Peer B).
+PEER_ROLE = os.environ.get("FAKE_ROLE", "") == "peer"
+# The own server's connected server, reached through its browse proxy.
+PEER_URL = os.environ.get("FAKE_PEER_URL", "").rstrip("/") if PLUGINS else ""
 
 # The room's answer, as the server words it (plan §3.1). The sources it was
 # not asked for come back null, as the real route's do.
@@ -164,9 +204,11 @@ calls = {"n": 0, "s": 0}
 state = {"directories": {}, "users": [], "taste_asks": 0, "taste_body": None, "prefs_calls": 0, "art_gets": 0,
          "peer_asks": 0, "peer_art_gets": 0, "peer_art_paths": [],
          "jobs": [], "job_starts": [], "job_answers": [], "lookup_sizes": [], "cancels": 0, "clears": 0, "resolves": 0,
-         "saved_destination": None, "destination_gets": 0, "destination_puts": [], "folder_lists": []}
+         "saved_destination": None, "destination_gets": 0, "destination_puts": [], "folder_lists": [],
+         "proxied": [], "proxy_refused": [], "asked": [], "recursive_bodies": [], "batch_bodies": []}
 
-# The plug-in listing, the destination and the links (FAKE_PLUGINS).
+# The plug-in listing, the destination and the links (FAKE_PLUGINS). A
+# folder copy past `maxFolderSongs` is refused before it starts.
 PLUGIN_LISTING = {
     "plugins": [
         {"name": "links", "title": "Open elsewhere", "capabilities": ["links"], "scope": "server",
@@ -174,7 +216,7 @@ PLUGIN_LISTING = {
         {"name": "federation-copy", "title": "Add to your collection", "capabilities": ["acquire"], "scope": "server",
          "scopes": ["song", "album", "artist", "artist-missing", "folder"], "settings": [], "enabled": True, "available": True},
     ],
-    "jobs": {"allowed": True},
+    "jobs": {"allowed": True, "maxFolderSongs": 1000},
 }
 # The libraries this account may upload to, in the server's order: the
 # first is the default.
@@ -183,8 +225,167 @@ DEFAULT_LAYOUT = "{{ALBUMARTIST}}/{{ALBUM}}"
 # The variables a layout may name, as mStream lists them since 2026-10-22:
 # SERVERFOLDER (the song's folders on the connected server) last.
 LAYOUT_VARS = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER", "SERVERFOLDER"]
-# The picker's folders, by the path the file explorer is asked.
+# The picker's folders, by the path the file explorer is asked. Paired with
+# a connected server, the spec's §2 sample instead: the Into a folder
+# chooser lists `copies`' three folders, From Sam with none inside.
 FOLDERS = {"/copies": ["from-peers"], "/copies/from-peers": ["2025 archive", "Stage Peer B", "Stage Peer C"]}
+if PEER_URL:
+    FOLDERS = {"/copies": ["Boukmanflow", "Color Out", "From Sam"], "/copies/Boukmanflow": ["Harbour Lights"],
+               "/copies/Color Out": [], "/copies/From Sam": []}
+
+# The user's own library, by artist, as /db/artists-albums words it: what
+# "Only the albums you don't have" is reckoned against. Attic's Lanterns
+# for the Discover room's legs; Harbour Lights for Stage Peer B's.
+OWN_ALBUMS = {
+    "attic band": [{"name": "Lanterns", "year": None, "album_art_file": None, "album_artist": "Attic Band",
+                    "artists": ["Attic Band"], "compilation": False, "year_min": None, "year_max": None,
+                    "track_count": 1, "duration": 199}],
+    "boukmanflow": [{"name": "Harbour Lights", "year": 2021, "album_art_file": None, "album_artist": "Boukmanflow",
+                     "artists": ["Boukmanflow"], "compilation": False, "year_min": 2021, "year_max": 2021,
+                     "track_count": 3, "duration": 31}],
+}
+# Attic (the Discover room's connected server, id 7), as its browse proxy
+# answers an artist's albums: the one album its row names, credited.
+ATTIC_ALBUMS = {"attic band": OWN_ALBUMS["attic band"]}
+
+# ── Stage Peer B (FAKE_ROLE=peer): the spec's §2 sample library ──────────────
+PEER_ID = 2
+PEER_NAME = "Stage Peer B"
+PEER_LIB = "peerlib"
+# The federation allowlist's exact reads (mStream api/federation-auth.js):
+# the browse proxy forwards only these.
+FED_ALLOWED = {
+    "GET /api", "GET /api/", "GET /api/v1/db/status", "POST /api/v1/db/metadata", "POST /api/v1/db/metadata/batch",
+    "GET /api/v1/db/artists", "POST /api/v1/db/artists", "POST /api/v1/db/artists-albums", "GET /api/v1/db/albums",
+    "POST /api/v1/db/albums", "GET /api/v1/db/genres", "POST /api/v1/db/genres", "POST /api/v1/db/genre-songs",
+    "POST /api/v1/db/album-songs", "POST /api/v1/db/recent/added", "POST /api/v1/db/search",
+    "POST /api/v1/db/random-songs", "POST /api/v1/discovery/local/embeddings", "POST /api/v1/file-explorer",
+    "POST /api/v1/file-explorer/recursive", "POST /api/v1/file-explorer/m3u", "GET /api/v1/federation/health",
+    "POST /api/v1/federation/discovery/similar", "POST /api/v1/federation/guest",
+}
+
+
+def _psong(path, title, artist, album, credit, year, track, seconds, genre="Hip-Hop"):
+    return {"filepath": PEER_LIB + "/" + path, "metadata": {
+        "title": title, "artist": artist, "album": album, "album-artist": credit, "year": year, "track": track,
+        "duration": seconds, "genres": [genre], "format": "mp3", "bitrate": 320000, "sample-rate": 44100,
+        "album-art": None}}
+
+
+PEER_SONGS = [
+    _psong("Boukmanflow/Borrowed Tapes/01 - Rooftop Cypher.mp3", "Rooftop Cypher", "Boukmanflow", "Borrowed Tapes", "Boukmanflow", 2019, 1, 12),
+    _psong("Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3", "Late Train Verse", "Boukmanflow", "Borrowed Tapes", "Boukmanflow", 2019, 2, 8),
+    _psong("Boukmanflow/Borrowed Tapes/03 - Corner Store Loop.mp3", "Corner Store Loop", "Boukmanflow", "Borrowed Tapes", "Boukmanflow", 2019, 3, 9),
+    _psong("Boukmanflow/Harbour Lights/01 - Harbour Lights.mp3", "Harbour Lights", "Boukmanflow", "Harbour Lights", "Boukmanflow", 2021, 1, 11),
+    _psong("Boukmanflow/Harbour Lights/02 - Tide Tables.mp3", "Tide Tables", "Boukmanflow", "Harbour Lights", "Boukmanflow", 2021, 2, 10),
+    _psong("Boukmanflow/Harbour Lights/03 - Night Ferry.mp3", "Night Ferry", "Boukmanflow", "Harbour Lights", "Boukmanflow", 2021, 3, 10),
+    _psong("Boukmanflow/Second Shift/01 - Clock In.mp3", "Clock In", "Boukmanflow", "Second Shift", "Boukmanflow", 2023, 1, 9),
+    _psong("Boukmanflow/Second Shift/02 - Overtime.mp3", "Overtime", "Boukmanflow", "Second Shift", "Boukmanflow", 2023, 2, 12),
+    _psong("Boukmanflow/Second Shift/03 - Clock Out.mp3", "Clock Out", "Boukmanflow", "Second Shift", "Boukmanflow", 2023, 3, 8),
+    _psong("Various Artists/Night Market Sampler/01 - Lantern Street.mp3", "Lantern Street", "Color Out", "Night Market Sampler", "Various Artists", 2024, 1, 12, "Electronic"),
+    _psong("Various Artists/Night Market Sampler/02 - Night Market Cypher.mp3", "Night Market Cypher", "Boukmanflow", "Night Market Sampler", "Various Artists", 2024, 2, 8),
+    _psong("Various Artists/Night Market Sampler/03 - Paper Lanterns.mp3", "Paper Lanterns", "ALM", "Night Market Sampler", "Various Artists", 2024, 3, 9, "Electronic"),
+    _psong("Color Out/Peer Sessions/01 - Open Line.mp3", "Open Line", "Color Out", "Peer Sessions", "Color Out", 2026, 1, 10, "Electronic"),
+    _psong("Color Out/Peer Sessions/02 - Echo Room.mp3", "Echo Room", "Color Out", "Peer Sessions", "Color Out", 2026, 2, 11, "Electronic"),
+    _psong("ALM/Split Series/01 - Split One.mp3", "Split One", "ALM", "Split Series", "ALM", 2022, 1, 10, "Electronic"),
+    _psong("ALM/Split Series/02 - Split Two.mp3", "Split Two", "Color Out", "Split Series", "Color Out", 2022, 2, 10, "Electronic"),
+]
+# The compilation's songs are flagged so; the albums group them by name.
+for _s in PEER_SONGS:
+    _s["compilation"] = _s["metadata"]["album-artist"] == "Various Artists"
+# Untagged files the database never read: Night Owl Radio's two shows, and
+# the archive's 1,240 songs in 56 folders (past the folder cap).
+PEER_UNTAGGED = ["Night Owl Radio/Episode 1.mp3", "Night Owl Radio/Episode 2.mp3"] + [
+    "Night Owl Radio Archive/Show %03d/Hour %02d.mp3" % (show, hour)
+    for show in range(1, 57) for hour in range(1, (23 if show <= 8 else 22) + 1)]
+PEER_FILES = [s["filepath"] for s in PEER_SONGS] + [PEER_LIB + "/" + p for p in PEER_UNTAGGED]
+PEER_BY_PATH = {s["filepath"]: s for s in PEER_SONGS}
+
+
+def _name_key(s):
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+
+def _peer_path(p):
+    """A path as the peer's library holds it: no leading or trailing slash."""
+    return "/".join(seg for seg in str(p or "").replace("\\", "/").split("/") if seg and seg != ".")
+
+
+def _peer_albums():
+    """The albums listing's items (db.js albumItems), by name: a group's
+    credit is its rows' album-artist when they agree, null when not."""
+    groups = {}
+    for s in PEER_SONGS:
+        groups.setdefault(s["metadata"]["album"], []).append(s)
+    out = []
+    for name in sorted(groups, key=str.lower):
+        rows = groups[name]
+        credits = {r["metadata"]["album-artist"] for r in rows}
+        years = [r["metadata"]["year"] for r in rows]
+        artists = []
+        for r in rows:
+            if r["metadata"]["artist"] not in artists:
+                artists.append(r["metadata"]["artist"])
+        out.append({"name": name, "year": max(years), "album_art_file": None,
+                    "album_artist": credits.pop() if len(credits) == 1 else None, "artists": artists,
+                    "compilation": any(r["compilation"] for r in rows), "year_min": min(years), "year_max": max(years),
+                    "track_count": len(rows), "duration": sum(r["metadata"]["duration"] for r in rows)})
+    return out
+
+
+def _peer_artist_albums(artist):
+    """An artist's albums (db.js /db/artists-albums): every album the artist
+    is on, credited or performing, newest first, ties by name."""
+    key = _name_key(artist)
+    names = {s["metadata"]["album"] for s in PEER_SONGS
+             if key in (_name_key(s["metadata"]["artist"]), _name_key(s["metadata"]["album-artist"]))}
+    albums = [a for a in _peer_albums() if a["name"] in names]
+    return sorted(albums, key=lambda a: (-(a["year"] or 0), a["name"].lower()))
+
+
+def _peer_listing(directory, pull):
+    """The file explorer (file-explorer.js): the library at the top, else the
+    folder's folders and files, each file's tags when asked (null for a file
+    the database never read)."""
+    path = _peer_path(directory)
+    if path in ("", "~"):
+        if directory == "~":
+            path = PEER_LIB
+        else:
+            return {"path": "/", "directories": [{"name": PEER_LIB}], "files": []}
+    prefix = path + "/"
+    dirs, files = [], []
+    for fp in PEER_FILES:
+        if not fp.startswith(prefix):
+            continue
+        rest = fp[len(prefix):].split("/")
+        if len(rest) > 1:
+            if rest[0] not in dirs:
+                dirs.append(rest[0])
+        else:
+            entry = {"type": "mp3", "name": rest[0]}
+            if pull:
+                song = PEER_BY_PATH.get(fp)
+                entry["metadata"] = {"filepath": fp, "metadata": song["metadata"] if song else None}
+            files.append(entry)
+    if not dirs and not files and path != PEER_LIB:
+        return None
+    return {"path": "/" + path + "/", "directories": [{"name": d} for d in sorted(dirs, key=str.lower)],
+            "files": sorted(files, key=lambda f: f["name"].lower())}
+
+
+def _peer_search(text):
+    """db.js /db/search: artists, albums (the listing's credit and year),
+    titles and files."""
+    q = _name_key(text)
+    hit = lambda s: q and q in _name_key(s)
+    artists = sorted({s["metadata"]["artist"] for s in PEER_SONGS if hit(s["metadata"]["artist"])}, key=str.lower)
+    albums = [{"name": a["name"], "album_art_file": None, "album_artist": a["album_artist"], "year": a["year"],
+               "filepath": False} for a in _peer_albums() if hit(a["name"])]
+    titles = [{"name": "%s - %s" % (s["metadata"]["artist"], s["metadata"]["title"]), "filepath": s["filepath"],
+               "album_art_file": None, "metadata": s["metadata"]} for s in PEER_SONGS if hit(s["metadata"]["title"])]
+    return {"artists": [{"name": a, "album_art_file": None, "filepath": False} for a in artists], "albums": albums,
+            "title": titles, "files": [], "lyrics": []}
 
 
 def _base(base):
@@ -268,7 +469,31 @@ def _keys(rec):
     if rec.get("artist"):
         keys["artist"] = "artist:" + low("artist")
         keys["artist-missing"] = "artist-missing:" + low("artist")
+    # A folder job keys on the peer AND the path, case kept (jobKey): any
+    # recommendation with both has a folder key, a song's included.
+    peer = (rec.get("peer") or {}).get("id")
+    if rec.get("filepath") and peer is not None:
+        keys["folder"] = "folder:%s|%s" % (peer, _peer_path(rec.get("filepath")))
     return keys
+
+
+def _landed(rec, landing, destination):
+    """Where a folder copy lands (federation-copy.js landingFor), as its
+    result names it: the folder's own path under the library and the
+    layout's leading folders (mirror), the place picked (`{vpath, path}`),
+    or nowhere one folder names (tags)."""
+    destination = destination or _effective()
+    if isinstance(landing, dict) and landing.get("tags"):
+        return None
+    if isinstance(landing, dict) and "path" in landing:
+        return "/".join(p for p in [landing.get("vpath") or destination["vpath"], _peer_path(landing["path"])] if p)
+    lead = []
+    for seg in _base(destination.get("layout")).split("/"):
+        if "{{" in seg:
+            break
+        lead.append(seg)
+    inside = _peer_path(rec.get("filepath")).split("/")[1:]
+    return "/".join(p for p in [destination["vpath"], _base(destination.get("base"))] + lead + inside if p)
 
 
 # A copy's life on the wall clock: waiting for a free slot this long, then
@@ -289,7 +514,9 @@ def _walk_jobs():
         if job["state"] == "running" and age >= JOB_QUEUED_S + JOB_RUNNING_S:
             scope = (job.get("params") or {}).get("scope")
             rec = job["recommendation"]
-            if scope:
+            if scope and PEER_URL and (rec.get("peer") or {}).get("id") == PEER_ID:
+                result = _peer_result(scope, rec, job.get("params") or {})
+            elif scope:
                 result = {"scope": scope, "counts": {"total": 2, "copied": 2, "skipped": 0, "failed": 0},
                           "songs": {"total": 2, "copied": [{}, {}], "skipped": [], "failed": []}, "stopped": None,
                           "peer": rec.get("peer")}
@@ -297,6 +524,31 @@ def _walk_jobs():
                 result = {"copied": {"vpath": "copies", "filepath": "copies/%s/%s/%s.mp3" % (
                     rec.get("artist"), rec.get("album"), rec.get("title")), "title": rec.get("title")}}
             job.update(state="done", progress=1, statusText=None, result=result)
+
+def _peer_result(scope, rec, params):
+    """A many-song copy of Stage Peer B's, ended as federation-copy words
+    it: its songs by the file each came from — the last one already yours
+    (the spec's "2 copied · 1 already yours"), the rest copied — and, for a
+    folder, the folder it landed in (`landed`, none for a tags landing)."""
+    if scope == "folder":
+        top = _peer_path(rec.get("filepath")) + "/"
+        songs = [s for s in PEER_SONGS if s["filepath"].startswith(top)]
+    else:
+        songs = [s for s in PEER_SONGS if _name_key(s["metadata"]["album"]) == _name_key(rec.get("album"))]
+    def landed_file(s):
+        m = s["metadata"]
+        return "copies/%s/%s/%s" % (m["album-artist"], m["album"], s["filepath"].rsplit("/", 1)[-1])
+    copied = [{"from": s["filepath"], "filepath": landed_file(s), "title": s["metadata"]["title"]} for s in songs[:-1]]
+    skipped = [{"from": s["filepath"], "why": "owned", "at": landed_file(s)} for s in songs[-1:]]
+    result = {"scope": scope, "counts": {"total": len(songs), "copied": len(copied), "skipped": len(skipped), "failed": 0},
+              "songs": {"total": len(songs), "copied": copied, "skipped": skipped, "failed": []}, "stopped": None,
+              "peer": rec.get("peer")}
+    if scope == "folder":
+        result["folder"] = {"path": _peer_path(rec.get("filepath")), "name": rec.get("title"),
+                            "landed": _landed(rec, params.get("landing"), params.get("destination"))}
+        result["layout"] = (params.get("destination") or _effective()).get("layout")
+    return result
+
 
 def _public(job):
     """A job as the server words it: without the fake's own clock."""
@@ -362,7 +614,132 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _png(self, data):
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _peer(self, method, body):
+        """Stage Peer B's reads, as mStream answers them (FAKE_ROLE=peer)."""
+        path = urllib.parse.unquote(self.path.split("?")[0])
+        if path == "/_state":
+            return self._json(state)
+        state["asked"].append(method + " " + path)
+        body = body if body is not None else {}
+        if path == "/api/v1/ping":
+            return self._json({"vpaths": [PEER_LIB], "noFileModify": True, "noUpload": True})
+        if path in ("/api", "/api/"):
+            # The layered payload a guest reads — no ping crosses the proxy.
+            return self._json({"server": "6.30.0", "features": {"discovery": False},
+                               "user": {"vpaths": [PEER_LIB], "noFileModify": True, "noUpload": True}})
+        if path.startswith("/album-art/"):
+            return self._png(PEER_COVER)
+        if path == "/api/v1/db/status":
+            return self._json({"totalFileCount": len(PEER_SONGS), "locked": False})
+        if path == "/api/v1/file-explorer":
+            listing = _peer_listing(str(body.get("directory", "")), bool(body.get("pullMetadata")))
+            if listing is None:
+                return self._status(404, {"error": "Directory not found"})
+            return self._json(listing)
+        if path == "/api/v1/file-explorer/recursive":
+            state["recursive_bodies"].append(body)
+            top = _peer_path(body.get("directory")) + "/"
+            return self._json([fp for fp in PEER_FILES if fp.startswith(top)])
+        if path == "/api/v1/db/albums":
+            return self._json({"albums": _peer_albums()})
+        if path == "/api/v1/db/artists-albums":
+            return self._json({"albums": _peer_artist_albums(body.get("artist"))})
+        if path == "/api/v1/db/album-songs":
+            def wanted(s):
+                m = s["metadata"]
+                if _name_key(m["album"]) != _name_key(body.get("album")):
+                    return False
+                if body.get("album_artist") and _name_key(m["album-artist"]) != _name_key(body["album_artist"]):
+                    return False
+                if body.get("artist") and _name_key(body["artist"]) not in (_name_key(m["artist"]), _name_key(m["album-artist"])):
+                    return False
+                return not body.get("year") or m["year"] == body["year"]
+            return self._json([s for s in PEER_SONGS if wanted(s)])
+        if path == "/api/v1/db/artists":
+            return self._json({"artists": sorted({s["metadata"]["artist"] for s in PEER_SONGS}, key=str.lower)})
+        if path == "/api/v1/db/genres":
+            genres = {}
+            for s in PEER_SONGS:
+                for g in s["metadata"]["genres"]:
+                    genres[g] = genres.get(g, 0) + 1
+            return self._json({"genres": [{"name": g, "track_count": n} for g, n in sorted(genres.items())]})
+        if path == "/api/v1/db/genre-songs":
+            return self._json([s for s in PEER_SONGS if body.get("genre") in s["metadata"]["genres"]])
+        if path == "/api/v1/db/search":
+            return self._json(_peer_search(body.get("search")))
+        if path == "/api/v1/db/recent/added":
+            return self._json(list(reversed(PEER_SONGS))[: int(body.get("limit") or 100)])
+        if path == "/api/v1/db/metadata":
+            song = PEER_BY_PATH.get(_peer_path(body.get("filepath")))
+            return self._json({"filepath": body.get("filepath"), "metadata": song["metadata"] if song else None})
+        if path == "/api/v1/db/metadata/batch":
+            state["batch_bodies"].append(body)
+            paths = body if isinstance(body, list) else []
+            return self._json({fp: {"filepath": fp, "metadata": PEER_BY_PATH[fp]["metadata"] if fp in PEER_BY_PATH else None}
+                               for fp in paths})
+        return self._status(404, {"error": "Not Found"})
+
+    def _proxy(self, method, body):
+        """mStream's browse proxy (federation-browse.js) in front of Stage
+        Peer B: an API read screened against the exact allowlist before it
+        is dialled — 403 off it — its JSON body re-serialized, the peer's
+        status and body passed back; art as /album-art/, `compress` the one
+        query kept."""
+        raw, _, query = self.path.partition("?")
+        rest = raw[len("/api/v1/federation/peers/%d/" % PEER_ID):]
+        if rest.startswith("art/"):
+            remote = "/album-art/" + rest[len("art/"):]
+            kept = [kv for kv in query.split("&") if kv.split("=")[0] == "compress"]
+            remote_query = "?" + "&".join(kept) if kept else ""
+        elif rest.startswith("api/"):
+            remote = "/" + rest[len("api/"):]
+            remote_query = ""
+            screened = method + " " + urllib.parse.unquote(remote)
+            if screened not in FED_ALLOWED:
+                state["proxy_refused"].append(screened)
+                return self._status(403, {"error": "Route not available over federation"})
+        else:
+            return self._status(404, {"error": "Not Found"})
+        state["proxied"].append(method + " " + urllib.parse.unquote(remote))
+        data = json.dumps(body if body is not None else {}).encode() if method != "GET" else None
+        request = urllib.request.Request(PEER_URL + remote + remote_query, data=data, method=method,
+                                         headers={"Content-Type": "application/json"} if data else {})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as answer:
+                status, kind, payload = answer.status, answer.headers.get("Content-Type"), answer.read()
+        except urllib.error.HTTPError as e:
+            status, kind, payload = e.code, e.headers.get("Content-Type"), e.read()
+        except Exception:
+            return self._status(502, {"error": "Peer unreachable"})
+        self.send_response(status)
+        self.send_header("Content-Type", kind or "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _attic(self, body):
+        """The Discover room's connected server (id 7, Attic) through the
+        browse proxy: its artist's albums answered, every other read the
+        empty answer it always was."""
+        if self.path == "/api/v1/federation/peers/7/api/api/v1/db/artists-albums":
+            return self._json({"albums": ATTIC_ALBUMS.get(_name_key((body or {}).get("artist")), [])})
+        return self._json({})
+
     def do_GET(self):
+        if PEER_ROLE:
+            return self._peer("GET", None)
+        if PEER_URL and self.path.startswith("/api/v1/federation/peers/%d/" % PEER_ID):
+            return self._proxy("GET", None)
+        if PEER_URL and self.path == "/api/v1/federation/peers":
+            return self._json({"peers": [{"id": PEER_ID, "name": PEER_NAME, "lastSeen": None, "lastStatus": None,
+                                          "useDiscovery": False, "endpointId": None, "direct": None}]})
         if self._walled():
             return self._deny()
         if self.path == "/api/v1/scan/progress":
@@ -385,6 +762,8 @@ class Handler(BaseHTTPRequestHandler):
                 ping.update({"discovery": True, "discoveryTaste": 1, "federationDiscovery": True})
             if PLUGINS:
                 ping["discoveryPlugins"] = True
+            if PEER_URL:
+                ping["federationBrowse"] = True
             return self._json(ping)
         if PLUGINS and self.path == "/api/v1/discovery/plugins":
             return self._json(PLUGIN_LISTING)
@@ -435,6 +814,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._body()
+        if PEER_ROLE:
+            return self._peer("POST", body)
+        if PEER_URL and self.path.startswith("/api/v1/federation/peers/%d/" % PEER_ID):
+            return self._proxy("POST", body)
+        if PLUGINS and self.path.startswith("/api/v1/federation/peers/7/api/"):
+            return self._attic(body)
+        if PLUGINS and self.path == "/api/v1/db/artists-albums":
+            return self._json({"albums": OWN_ALBUMS.get(_name_key(body.get("artist")), [])})
         if self.path == "/api/v1/auth/login":
             if AUTH and body.get("username") not in state["users"]:
                 return self._deny()
@@ -467,9 +854,13 @@ class Handler(BaseHTTPRequestHandler):
             live = [j for j in state["jobs"] if j["key"] == key and j["state"] in ("queued", "running")]
             # The destination the client showed, when it showed one: no
             # longer the one in force is a 409 and nothing starts — unless
-            # a live job already covers this recommendation.
+            # a live job already covers this recommendation, or the copy
+            # lands in a place picked for it (`{vpath, path}`), which no
+            # saved destination decides.
             effective = _effective()
-            if not NO_PIN and "destination" in body and not _same(body["destination"], effective) and not live:
+            landing = body.get("landing")
+            picked = isinstance(landing, dict) and "path" in landing
+            if not NO_PIN and "destination" in body and not _same(body["destination"], effective) and not live and not picked:
                 state["job_answers"].append("destination_changed")
                 return self._status(409, {"error": "destination_changed", "destination": effective,
                                           "message": "your collection destination has changed — check where this will land and ask again"})
@@ -480,6 +871,8 @@ class Handler(BaseHTTPRequestHandler):
             params = {} if NO_PIN else {"destination": effective}
             if scope:
                 params["scope"] = scope
+            if scope == "folder" and landing is not None:
+                params["landing"] = landing
             job = {"id": len(state["jobs"]) + 1, "plugin": "federation-copy", "key": key, "recommendation": rec,
                    "params": params or None, "state": "queued", "progress": None,
                    "statusText": None, "result": None, "error": None, "attempts": 0, "cancelRequested": False,

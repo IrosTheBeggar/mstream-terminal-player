@@ -97,6 +97,22 @@ pub struct DiscoveryPluginsResponse {
 pub struct PluginJobsGate {
     #[serde(deserialize_with = "null_default")]
     pub allowed: bool,
+    /// The most songs one folder copy may take (the admin's
+    /// `discoveryJobs.maxFolderSongs`): a whole number from a number or a
+    /// numeric string, cut to its whole part; `None` — no cap known, an
+    /// older server — for anything else (the webapp's `maxFolderSongs`).
+    #[serde(rename = "maxFolderSongs", deserialize_with = "song_cap")]
+    pub max_folder_songs: Option<u64>,
+}
+
+/// [`PluginJobsGate::max_folder_songs`]: at least one song, or none.
+fn song_cap<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let n = match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    Ok(n.filter(|n| n.is_finite() && *n >= 1.0).map(|n| n.trunc() as u64))
 }
 
 /// One listed plug-in. The user listing holds only enabled, available
@@ -159,8 +175,8 @@ impl DiscoveryPluginsResponse {
 // ── Jobs ────────────────────────────────────────────────────────────────────
 
 /// What a job acts on (the server's `JOB_SCOPES`). Discover offers the
-/// first four; a folder job is never started from here and never marks a
-/// row (clause 104).
+/// first four; a folder copy is a connected server's Files' alone
+/// (keep-a-copy spec §6.5) and never marks a song's row (clause 104).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum JobScope {
     #[default]
@@ -199,7 +215,8 @@ impl JobScope {
         matches!(self, JobScope::Album | JobScope::Artist | JobScope::ArtistMissing)
     }
 
-    /// The scopes Discover offers and marks (never Folder).
+    /// The scopes Discover offers and a song's or an album's row holds
+    /// (never Folder).
     pub fn discover(self) -> bool {
         self != JobScope::Folder
     }
@@ -255,6 +272,70 @@ pub struct JobParams {
     /// a file; else the place, whatever the account has saved since.
     #[serde(deserialize_with = "pinned")]
     pub destination: Option<Option<CollectionDestination>>,
+    /// A folder copy's own landing, as it was started ([`JobLanding`]): a
+    /// job with none — every other scope, a folder kept as it is on the
+    /// connected server — reads [`JobLanding::Mirror`].
+    #[serde(deserialize_with = "landing_of")]
+    pub landing: JobLanding,
+}
+
+/// [`JobParams::landing`], read as the webapp's `landingMode` reads it.
+fn landing_of<'de, D: Deserializer<'de>>(d: D) -> Result<JobLanding, D::Error> {
+    Ok(JobLanding::of(&serde_json::Value::deserialize(d)?))
+}
+
+/// Where a folder copy lands (the jobs route's `landing`; destination.js
+/// `validateLanding`, federation-copy.js `landingFor`): as the folder is on
+/// the connected server — sent as no landing at all — into a library and
+/// a folder the user chose, or song by song by the account's layout, like
+/// any other copy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum JobLanding {
+    /// "As on {server}": the destination's library, its base folder, the
+    /// layout's leading folders, then the folder's path inside the
+    /// connected server's library.
+    #[default]
+    Mirror,
+    /// "Into a folder…": the pressed folder's own files straight into
+    /// `path` (`""` the library's top) of `vpath` (`None`: the
+    /// destination's library), its subfolders beneath.
+    Into { vpath: Option<String>, path: String },
+    /// "By your layout": `{ tags: true }`.
+    Tags,
+}
+
+impl JobLanding {
+    /// A landing as the wire carries it (the webapp's `landingMode`): `tags`
+    /// true is the layout; a `path` (any string) or a library is a folder;
+    /// anything else — none, an empty object — is the mirror.
+    pub fn of(value: &serde_json::Value) -> JobLanding {
+        if value.get("tags").and_then(serde_json::Value::as_bool) == Some(true) {
+            return JobLanding::Tags;
+        }
+        let vpath = text(value, "vpath");
+        match value.get("path").and_then(serde_json::Value::as_str) {
+            Some(path) => JobLanding::Into { vpath, path: path.to_string() },
+            None if vpath.is_some() => JobLanding::Into { vpath, path: String::new() },
+            None => JobLanding::Mirror,
+        }
+    }
+
+    /// The landing a start sends (the webapp's `folderLanding`): none for
+    /// the mirror; `{ vpath, path }` — a library only when one is named, as
+    /// the route takes none empty — or `{ tags: true }`.
+    pub fn wire(&self) -> Option<serde_json::Value> {
+        match self {
+            JobLanding::Mirror => None,
+            JobLanding::Into { vpath, path } => {
+                let mut body = serde_json::json!({ "path": path });
+                if let Some(vpath) = vpath.as_deref().filter(|v| !v.trim().is_empty()) {
+                    body["vpath"] = serde_json::Value::String(vpath.to_string());
+                }
+                Some(body)
+            }
+            JobLanding::Tags => Some(serde_json::json!({ "tags": true })),
+        }
+    }
 }
 
 /// A pinned destination: `null` is nowhere, an object the place — and a
@@ -724,6 +805,18 @@ pub struct JobPeer {
     pub name: Option<String>,
 }
 
+/// A folder copy's own account of its folder (`result.folder`): its path
+/// on the connected server, its name, and where its files went — the
+/// library and folder (`landed`, "copies/Borrowed Tapes"); `None` for one
+/// filed by the layout, whose songs each went their own way.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct FolderResult {
+    pub path: Option<String>,
+    pub name: Option<String>,
+    pub landed: Option<String>,
+}
+
 /// A copy plug-in job's `result`, read one field at a time
 /// ([`CopyResult::from_value`]): the song shapes (`copied`, or `skipped`
 /// with `existing` / `filepath`) and the many-song shapes (`songs`,
@@ -745,6 +838,10 @@ pub struct CopyResult {
     pub peer: Option<JobPeer>,
     pub destination: Option<CollectionDestination>,
     pub truncated: bool,
+    /// A folder copy's folder ([`FolderResult`]).
+    pub folder: Option<FolderResult>,
+    /// A folder copy's landing as it ran: `mirror` · `folder` · `tags`.
+    pub layout: Option<String>,
 }
 
 impl CopyResult {
@@ -770,6 +867,8 @@ impl CopyResult {
             peer: field(value, "peer"),
             destination: field(value, "destination"),
             truncated: value.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            folder: field(value, "folder"),
+            layout: text(value, "layout"),
         }
     }
 
@@ -854,6 +953,18 @@ impl CopyResult {
             Some(KeptSong { from: text(entry, "from"), filepath: text(entry, "at")?, title: None, artist: None, album: None })
         });
         copied.chain(owned).collect()
+    }
+
+    /// Where a folder copy put its files, as its result says
+    /// (`folder.landed`, "copies/Borrowed Tapes"): the library and the
+    /// folder its own files went into; `None` for one filed by the layout
+    /// (each song went its own way: [`CopyResult::landed`] then), or a
+    /// result that names none.
+    pub fn folder_landed(&self) -> Option<Landed> {
+        let landed = self.folder.as_ref()?.landed.as_deref()?;
+        let mut crumbs = landed.split(['/', '\\']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        let vpath = crumbs.next()?;
+        Some(Landed { vpath: Some(vpath), dirs: crumbs.collect(), file: None })
     }
 }
 
@@ -1024,8 +1135,8 @@ pub struct JobLookup {
 impl JobLookup {
     /// The keys a later job is matched to this row by: the song's, then
     /// the album's, the artist's and the only-missing one — never the
-    /// folder's (a row's folder key is its own file's, and Discover offers
-    /// no folder copy, clause 104).
+    /// folder's (a song's folder key is its own file's; a folder's row is
+    /// matched by [`JobLookup::folder_key`] alone).
     pub fn row_keys(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut add = |k: &str| {
@@ -1045,6 +1156,14 @@ impl JobLookup {
             }
         }
         out
+    }
+
+    /// A folder's own key (a folder recommendation's: the connected server
+    /// and the folder's path) — the one key a folder row is matched by: a
+    /// folder kept as an album or an artist says so on its card, never on
+    /// its row (keep-a-copy spec §5.4).
+    pub fn folder_key(&self) -> Option<String> {
+        self.keys.get("folder").and_then(serde_json::Value::as_str).filter(|k| !k.is_empty()).map(str::to_string)
     }
 }
 
@@ -1240,6 +1359,17 @@ impl SongTag {
             SERVER_FOLDER => Some(SongTag::ServerFolder),
             _ => None,
         }
+    }
+
+    /// The slot `name` stands as for these tags: its own — and
+    /// `{{ALBUMARTIST}}` with no credit of its own renders as `{{ARTIST}}`
+    /// does (the engine's own fallback), its slot too: a folder copy whose
+    /// songs agree on no credit (keep-a-copy spec §6.5.3).
+    fn slot_in(name: &str, tags: &LayoutTags) -> Option<SongTag> {
+        let own = SongTag::of(name).or_else(|| {
+            (name == "ALBUMARTIST" && tags.album_artist.as_deref().is_none_or(|a| a.is_empty())).then_some(SongTag::Artist)
+        });
+        own.filter(|slot| tags.slots.contains(slot))
     }
 
     /// Its name in plain words — what the tests' `Landing::crumbs` writes
@@ -1633,7 +1763,7 @@ pub fn layout_folders(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> b
     for piece in pieces(layout) {
         match piece {
             Piece::Var { name, raw } if !known(&name) => push(&mut folders, raw, Run::Unknown),
-            Piece::Var { name, .. } => match SongTag::of(&name).filter(|slot| tags.slots.contains(slot)) {
+            Piece::Var { name, .. } => match SongTag::slot_in(&name, tags) {
                 Some(slot) => push(&mut folders, &format!("‹{}›", slot.name()), Run::Slot(slot)),
                 None => words(&mut folders, &tag_value(&name, tags)),
             },
@@ -1663,7 +1793,7 @@ fn missing_vars(layout: &str, tags: &LayoutTags, known: &dyn Fn(&str) -> bool) -
     for piece in pieces(layout) {
         if let Piece::Var { name, .. } = piece
             && known(&name)
-            && !SongTag::of(&name).is_some_and(|slot| tags.slots.contains(&slot))
+            && SongTag::slot_in(&name, tags).is_none()
             && tag_value(&name, tags).is_empty()
             && !out.contains(&name)
         {
@@ -1820,19 +1950,60 @@ pub(crate) struct PluginLinksResult {
 /// whether it is a compilation (the [`super::Album`] the rooms read keeps
 /// none of these).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(from = "ArtistAlbumWire")]
 pub struct ArtistAlbumRow {
+    /// `None` (or blank): the artist's singles bucket, no album.
     pub name: Option<String>,
+    /// The album's credit; `None` where its rows disagree — or the listing
+    /// names none ([`ArtistAlbumRow::credit_listed`] tells the two apart).
     pub album_artist: Option<String>,
-    #[serde(deserialize_with = "null_default")]
+    /// The listing names `album_artist` at all, null or not: a server from
+    /// before the credit says nothing either way (the album page's credit,
+    /// step 3).
+    pub credit_listed: bool,
     pub artists: Vec<String>,
-    #[serde(deserialize_with = "int_bool")]
     pub compilation: bool,
     pub track_count: Option<f64>,
-    /// The album's year, and the earliest of its songs' (the V71
-    /// aggregate) — where a lone missing album lands names it.
+    /// The album's year, and the earliest and latest of its songs' (the
+    /// V71 aggregates) — where a lone missing album lands names it, and
+    /// what a page's year is matched within.
     pub year: Option<i32>,
     pub year_min: Option<i32>,
+    pub year_max: Option<i32>,
+}
+
+/// [`ArtistAlbumRow`] as the wire carries it: the credit kept apart from
+/// its absence.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct ArtistAlbumWire {
+    name: Option<String>,
+    #[serde(deserialize_with = "super::listed_credit")]
+    album_artist: Option<Option<String>>,
+    #[serde(deserialize_with = "null_default")]
+    artists: Vec<String>,
+    #[serde(deserialize_with = "int_bool")]
+    compilation: bool,
+    track_count: Option<f64>,
+    year: Option<i32>,
+    year_min: Option<i32>,
+    year_max: Option<i32>,
+}
+
+impl From<ArtistAlbumWire> for ArtistAlbumRow {
+    fn from(wire: ArtistAlbumWire) -> ArtistAlbumRow {
+        ArtistAlbumRow {
+            name: wire.name,
+            credit_listed: wire.album_artist.is_some(),
+            album_artist: wire.album_artist.flatten(),
+            artists: wire.artists,
+            compilation: wire.compilation,
+            track_count: wire.track_count,
+            year: wire.year,
+            year_min: wire.year_min,
+            year_max: wire.year_max,
+        }
+    }
 }
 
 impl ArtistAlbumRow {
@@ -1983,6 +2154,332 @@ pub fn job_for_album(job: &PluginJob, album: Option<&str>) -> Option<PluginJob> 
         return Some(view(None, None, Some(extra)));
     }
     None
+}
+
+// ── An album's credit (keep-a-copy spec §4.1.3) ────────────────────────────
+
+/// The credit an album page names and an album copy is keyed on — the
+/// album's, never one track's artist (rule 1): not known (yet), known, or
+/// its rows crediting different artists — then the names they credit, for
+/// the page to name in its place (the user's 2026-10-27 decision).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum AlbumCredit {
+    #[default]
+    Unknown,
+    Known(String),
+    Disagree(Vec<String>),
+}
+
+impl AlbumCredit {
+    /// The credit, when known.
+    pub fn known(&self) -> Option<&str> {
+        match self {
+            AlbumCredit::Known(credit) => Some(credit.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The words an album page draws for it: the credit, or the artists its
+    /// rows credit, joined ", "; nothing while it is not known.
+    pub fn words(&self) -> Option<String> {
+        match self {
+            AlbumCredit::Known(credit) => Some(credit.clone()),
+            AlbumCredit::Disagree(names) if !names.is_empty() => Some(names.join(", ")),
+            _ => None,
+        }
+    }
+}
+
+/// "Various Artists" by its name key: never an artist copy's (rule 8), and
+/// always a compilation's credit.
+pub fn various_artists(name: Option<&str>) -> bool {
+    name_key(name) == "various artists"
+}
+
+/// The album page's credit, step 2 (the phone's `fromSongs`): the songs'
+/// own `album-artist`, in their order — all named and the same by name key
+/// is that credit, spelled as the first song spells it; two that differ
+/// disagree (each credit named once, first spelling); one that names none
+/// (an older server) says nothing — `None`, step 3 decides. No songs say
+/// nothing either.
+pub fn credit_of_songs<'a>(credits: impl IntoIterator<Item = Option<&'a str>>) -> Option<AlbumCredit> {
+    let mut names: Vec<&str> = Vec::new();
+    let mut lacking = false;
+    let mut any = false;
+    for credit in credits {
+        any = true;
+        match credit.map(str::trim).filter(|c| !c.is_empty()) {
+            None => lacking = true,
+            Some(credit) => {
+                if !names.iter().any(|n| name_key(Some(n)) == name_key(Some(credit))) {
+                    names.push(credit);
+                }
+            }
+        }
+    }
+    match names.as_slice() {
+        [] => None,
+        [_, _, ..] => Some(AlbumCredit::Disagree(names.iter().map(|n| n.to_string()).collect())),
+        [one] if any && !lacking => Some(AlbumCredit::Known(one.to_string())),
+        [_] => None,
+    }
+}
+
+/// The album page's credit, step 3 (the phone's `fromArtistAlbums`): the
+/// connected server's albums by the first song's artist, matched to the
+/// page's album by name key and — where the page has a year — one whose
+/// years hold it (its `year_min`..`year_max`, else its `year`; one that
+/// names no year holds any). Exactly one match gives its credit — none
+/// named, the listing's word that they disagree, its artists named; a
+/// listing from before the credit says nothing — and whether it is a
+/// compilation; none, several: unknown.
+pub fn credit_of_rows(rows: &[ArtistAlbumRow], album: &str, year: Option<i32>) -> (AlbumCredit, bool) {
+    let want = name_key(Some(album));
+    let holds = |row: &ArtistAlbumRow, year: i32| match (row.year_min.filter(|y| *y > 0), row.year_max.filter(|y| *y > 0)) {
+        (Some(lo), Some(hi)) => (lo..=hi).contains(&year),
+        _ => row.year.filter(|y| *y > 0).is_none_or(|y| y == year),
+    };
+    let matches: Vec<&ArtistAlbumRow> = rows
+        .iter()
+        .filter(|row| !want.is_empty() && name_key(row.name.as_deref()) == want)
+        .filter(|row| year.filter(|y| *y > 0).is_none_or(|y| holds(row, y)))
+        .collect();
+    match matches.as_slice() {
+        [one] if !one.credit_listed => (AlbumCredit::Unknown, false),
+        [one] => match one.album_artist.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(credit) => (AlbumCredit::Known(credit.to_string()), one.compilation),
+            None => (AlbumCredit::Disagree(one.artists.clone()), one.compilation),
+        },
+        _ => (AlbumCredit::Unknown, false),
+    }
+}
+
+// ── What an artist copy takes ───────────────────────────────────────────────
+
+/// Which of a connected server's albums an artist copy takes (federation-
+/// copy's `planArtistAlbums`, the webapp's mirror of it): the artist's own
+/// — the album's credit is the artist, or a credit names them on an album
+/// that is no compilation — in the listing's order; the named ones they
+/// only appear on are left out; the singles bucket (an item with no name)
+/// is no album, and stays out too.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ArtistPlan<'a> {
+    pub theirs: Vec<&'a ArtistAlbumRow>,
+    pub appearances: Vec<&'a ArtistAlbumRow>,
+    pub singles: bool,
+}
+
+pub fn plan_artist_albums<'a>(rows: &'a [ArtistAlbumRow], artist: &str) -> ArtistPlan<'a> {
+    let who = name_key(Some(artist));
+    let mut plan = ArtistPlan::default();
+    for row in rows {
+        if row.name.as_deref().is_none_or(|n| n.trim().is_empty()) {
+            plan.singles = true;
+            continue;
+        }
+        let credited = row.artists.iter().any(|n| name_key(Some(n)) == who);
+        if name_key(row.album_artist.as_deref()) == who || (credited && !row.compilation) {
+            plan.theirs.push(row);
+        } else {
+            plan.appearances.push(row);
+        }
+    }
+    plan
+}
+
+/// What an artist copy will not take, as the window's "Leaves out …" line
+/// names it (keep-a-copy spec §6.4): the named albums the artist only
+/// appears on, in the listing's order, then the listing's singles bucket
+/// — whose word ("Singles") is the room's own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeftOut {
+    pub albums: Vec<String>,
+    pub singles: bool,
+}
+
+impl LeftOut {
+    /// What [`plan_artist_albums`] leaves out of `rows`, `None` when it
+    /// leaves nothing out.
+    pub fn of(rows: &[ArtistAlbumRow], artist: &str) -> Option<LeftOut> {
+        let plan = plan_artist_albums(rows, artist);
+        let albums: Vec<String> = plan.appearances.iter().filter_map(|row| row.name.clone()).collect();
+        (!albums.is_empty() || plan.singles).then_some(LeftOut { albums, singles: plan.singles })
+    }
+}
+
+// ── A folder from a connected server ───────────────────────────────────────
+
+/// A path as the copy reads a connected server's (recommendation.js
+/// `normalizePeerPath`): either separator, names trimmed, the empty ones and
+/// `.` gone, `/` between.
+pub fn normalize_peer_path(path: &str) -> String {
+    path.split(['/', '\\']).map(str::trim).filter(|s| !s.is_empty() && *s != ".").collect::<Vec<_>>().join("/")
+}
+
+/// A folder's path inside its library on the connected server, as a
+/// mirrored folder lands (federation-copy `insidePeerLibrary`): the
+/// library's own name — the first — dropped, each folder made safe, the
+/// empty ones gone.
+pub fn inside_peer_library(folder: &str) -> String {
+    let path = normalize_peer_path(folder);
+    let rest: Vec<&str> = path.split('/').skip(1).collect();
+    sanitize_folders(Some(&rest.join("/")))
+}
+
+/// The scanner's folders no library holds (mStream's scan-ignore.js
+/// `IGNORED_DIR_NAMES`), lower case.
+const IGNORED_DIR_NAMES: [&str; 10] = [
+    "$recycle.bin",
+    "#recycle",
+    "@recycle",
+    "@recently-snapshot",
+    "#snapshot",
+    ".git",
+    "lost+found",
+    ".stfolder",
+    ".stversions",
+    "system volume information",
+];
+
+/// One leading dot hides a name; `..Trilogy` is a name (scan-ignore.js
+/// `isDotEntry`).
+fn dot_entry(name: &str) -> bool {
+    name.starts_with('.') && !name.starts_with("..")
+}
+
+/// A path the scanner never walks (scan-ignore.js `isIgnoredRelPath`, its
+/// defaults): through an ignored or a hidden folder, or to a hidden file.
+pub fn ignored_rel_path(rel: &str) -> bool {
+    let segs: Vec<&str> = rel.split('/').collect();
+    segs.iter().enumerate().any(|(i, seg)| {
+        !seg.is_empty()
+            && if i + 1 == segs.len() {
+                dot_entry(seg)
+            } else {
+                IGNORED_DIR_NAMES.contains(&seg.to_lowercase().as_str()) || dot_entry(seg)
+            }
+    })
+}
+
+/// Why a folder copy leaves a listed file out (federation-copy
+/// `planFolder`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderSkip {
+    /// Not under the folder, or a path that climbs.
+    Outside,
+    /// The scanner's own rules: a recycle bin, a dot entry.
+    Ignored,
+}
+
+/// One song a folder copy takes: its path on the connected server, and the
+/// folder it sits in under the pressed one, each folder made safe.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderSong {
+    pub filepath: String,
+    pub rel_dir: String,
+}
+
+/// What a folder copy takes (federation-copy `planFolder`): every file the
+/// connected server's recursive listing names under the folder, once, in
+/// path order (numbers as numbers, case aside), and what it leaves out with
+/// why. The listing names only the audio that server plays; this server's
+/// own list of what it plays is not read here (the server's word decides
+/// at the copy).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderPlan {
+    pub songs: Vec<FolderSong>,
+    pub skipped: Vec<(String, FolderSkip)>,
+}
+
+pub fn plan_folder(listing: &[String], folder: &str) -> FolderPlan {
+    let dir = normalize_peer_path(folder);
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let mut plan = FolderPlan::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for raw in listing {
+        let path = normalize_peer_path(raw);
+        if path.is_empty() || !seen.insert(path.clone()) {
+            continue;
+        }
+        let Some(rel) = (if prefix.is_empty() { Some(path.as_str()) } else { path.strip_prefix(&prefix) }) else {
+            plan.skipped.push((raw.clone(), FolderSkip::Outside));
+            continue;
+        };
+        let segs: Vec<&str> = rel.split('/').collect();
+        if segs.contains(&"..") {
+            plan.skipped.push((raw.clone(), FolderSkip::Outside));
+            continue;
+        }
+        if ignored_rel_path(rel) {
+            plan.skipped.push((raw.clone(), FolderSkip::Ignored));
+            continue;
+        }
+        let rel_dir = segs[..segs.len() - 1]
+            .iter()
+            .map(|s| sanitize_segment(Some(s)))
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("/");
+        plan.songs.push(FolderSong { filepath: path, rel_dir });
+    }
+    plan.songs.sort_by(|a, b| natural_order(&a.filepath, &b.filepath));
+    plan
+}
+
+/// `localeCompare` with `numeric: true, sensitivity: 'base'` as a path
+/// list needs it: runs of digits by their number, the rest case aside.
+pub fn natural_order(a: &str, b: &str) -> std::cmp::Ordering {
+    fn runs(s: &str) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        for c in s.chars() {
+            let digit = c.is_ascii_digit();
+            match out.last_mut() {
+                Some((d, run)) if *d == digit => run.push(c),
+                _ => out.push((digit, c.to_string())),
+            }
+        }
+        out
+    }
+    let (x, y) = (runs(a), runs(b));
+    for (p, q) in x.iter().zip(&y) {
+        let order = match (p, q) {
+            ((true, m), (true, n)) => {
+                let (m, n) = (m.trim_start_matches('0'), n.trim_start_matches('0'));
+                m.len().cmp(&n.len()).then_with(|| m.cmp(n))
+            }
+            ((_, m), (_, n)) => m.to_lowercase().cmp(&n.to_lowercase()),
+        };
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+    }
+    x.len().cmp(&y.len()).then_with(|| a.cmp(b))
+}
+
+/// Where a folder copy lands as it is on the connected server
+/// (federation-copy `landingFor`'s mirror, the user's 2026-10-23 call):
+/// the destination's library, its base folder, the layout's leading folders
+/// that name no variable, then the folder's path inside the connected
+/// server's library — never through the rest of the layout.
+pub fn mirror_landing(place: &CollectionDestination, folder: &str) -> Landing {
+    let layout = if place.layout.trim().is_empty() { DEFAULT_LAYOUT } else { place.layout.as_str() };
+    let inside = inside_peer_library(folder);
+    let folders = base_folders(&place.base)
+        .into_iter()
+        .chain(layout_lead(layout).0)
+        .chain(inside.split('/').filter(|s| !s.is_empty()).map(str::to_string))
+        .map(|name| vec![(name, Run::Text)])
+        .collect();
+    Landing { library: place.vpath.clone(), folders, per_album: false, one_song: false, missing: Vec::new() }
+}
+
+/// Where a folder copy lands into a folder the user chose
+/// (`landingFor`'s folder): the chosen library — the destination's where
+/// none is named — and the folder, as the copy reads the path.
+pub fn into_landing(place: &CollectionDestination, vpath: Option<&str>, path: &str) -> Landing {
+    let library = vpath.filter(|v| !v.trim().is_empty()).unwrap_or(&place.vpath).to_string();
+    let folders = normalize_peer_path(path).split('/').filter(|s| !s.is_empty()).map(|s| vec![(s.to_string(), Run::Text)]).collect();
+    Landing { library, folders, per_album: false, one_song: false, missing: Vec::new() }
 }
 
 #[cfg(test)]
@@ -2735,5 +3232,343 @@ mod tests {
         assert!(!JobScope::Folder.discover() && JobScope::Song.discover());
         assert!(JobState::Queued.live() && JobState::Running.live() && !JobState::Done.live());
         assert!(JobState::Cancelled.finished() && !JobState::Unknown.finished());
+    }
+
+    // ── Keep a copy while browsing a connected server (the
+    // design-term-fed spec §12.1) ─────────────────────────────────────────
+
+    #[test]
+    fn a_listings_album_keeps_its_credit_apart_from_its_absence() {
+        let albums: Vec<crate::api::types::Album> = serde_json::from_value(serde_json::json!([
+            { "name": "Borrowed Tapes", "year": 2019, "album_art_file": "bt.jpg", "album_artist": "Boukmanflow", "artists": ["Boukmanflow"],
+              "compilation": 0, "year_min": 2018, "year_max": 2019, "track_count": 3, "duration": 29 },
+            { "name": "Split Series", "year": 2022, "album_artist": null, "artists": ["ALM", "Boukmanflow"], "compilation": false },
+            { "name": "Night Market Sampler", "year": 2024, "album_artist": "Various Artists", "artists": ["Color Out"], "compilation": 1 },
+            { "name": "Old Server", "year": 2001, "artist": "Someone" },
+            { "name": null, "album_artist": "Boukmanflow" },
+            { "name": "Blank", "album_artist": "  " }
+        ]))
+        .unwrap();
+        let tapes = &albums[0];
+        assert_eq!((tapes.album_artist.clone(), tapes.year_min, tapes.year_max, tapes.track_count, tapes.compilation), (Some(Some("Boukmanflow".into())), Some(2018), Some(2019), Some(3.0), false));
+        assert_eq!(tapes.credit(), AlbumCredit::Known("Boukmanflow".into()));
+        // Null: its rows disagree — the listing's artists to name instead.
+        assert_eq!(albums[1].album_artist, Some(None));
+        assert_eq!(albums[1].credit(), AlbumCredit::Disagree(vec!["ALM".into(), "Boukmanflow".into()]));
+        assert!(albums[2].compilation, "a SQLite flag");
+        // Absent: a server from before the credit says nothing.
+        assert_eq!((albums[3].album_artist.clone(), albums[3].credit()), (None, AlbumCredit::Unknown));
+        // The singles bucket is no album; a blank credit is the listing's null.
+        assert_eq!(albums[4].credit(), AlbumCredit::Unknown);
+        assert_eq!(albums[5].album_artist, Some(None));
+        // As the Keep facts read an artist's albums: the same facts, the credit's presence kept.
+        let row = tapes.as_row();
+        assert_eq!((row.name.as_deref(), row.album_artist.as_deref(), row.credit_listed, row.year_max), (Some("Borrowed Tapes"), Some("Boukmanflow"), true, Some(2019)));
+        assert!(!albums[3].as_row().credit_listed);
+        // The album page's node from a card: every fact the listing gave.
+        use crate::tui::worker::LibraryNode;
+        assert_eq!(
+            LibraryNode::album_of(tapes),
+            Some(LibraryNode::Album { name: "Borrowed Tapes".into(), artist: None, album_artist: AlbumCredit::Known("Boukmanflow".into()), year: Some(2019), compilation: false })
+        );
+        assert!(matches!(LibraryNode::album_of(&albums[2]), Some(LibraryNode::Album { compilation: true, .. })));
+        assert_eq!(LibraryNode::album_of(&albums[4]), None, "the singles bucket opens by its artist");
+        // A song's own album credit, and a search's album hit's.
+        let track: crate::api::types::Track = serde_json::from_value(serde_json::json!({
+            "filepath": "peerlib/a.mp3", "metadata": { "artist": "Color Out", "album-artist": "Various Artists" } }))
+        .unwrap();
+        assert_eq!(track.metadata.album_artist.as_deref(), Some("Various Artists"));
+        let none = serde_json::to_value(crate::api::types::TrackMetadata::default()).unwrap();
+        assert!(none.get("album-artist").is_none(), "a queue saved without one stays as it was");
+        let hits: crate::api::types::SearchResults = serde_json::from_value(serde_json::json!({
+            "albums": [{ "name": "Borrowed Tapes", "album_artist": "Boukmanflow", "year": 2019 }, { "name": "Split Series", "album_artist": null }],
+            "artists": [{ "name": "Boukmanflow" }] }))
+        .unwrap();
+        assert_eq!((hits.albums[0].album_artist.clone(), hits.albums[0].year), (Some(Some("Boukmanflow".into())), Some(2019)));
+        assert_eq!((hits.albums[1].album_artist.clone(), hits.artists[0].album_artist.clone()), (Some(None), None));
+    }
+
+    #[test]
+    fn the_folder_cap_is_a_whole_number_from_the_listing_and_none_without_one() {
+        // The webapp's `maxFolderSongs` cases.
+        let cap = |jobs: serde_json::Value| -> Option<u64> {
+            serde_json::from_value::<DiscoveryPluginsResponse>(serde_json::json!({ "plugins": [], "jobs": jobs })).unwrap().jobs.max_folder_songs
+        };
+        assert_eq!(
+            [cap(serde_json::json!({ "allowed": true, "maxFolderSongs": 1000 })), cap(serde_json::json!({ "allowed": true, "maxFolderSongs": "250" })), cap(serde_json::json!({ "allowed": true, "maxFolderSongs": 12.7 }))],
+            [Some(1000), Some(250), Some(12)]
+        );
+        for jobs in [serde_json::json!({ "allowed": true }), serde_json::json!({ "maxFolderSongs": 0 }), serde_json::json!({ "maxFolderSongs": -5 }),
+            serde_json::json!({ "maxFolderSongs": "lots" }), serde_json::json!({ "maxFolderSongs": null }), serde_json::Value::Null] {
+            assert_eq!(cap(jobs.clone()), None, "{jobs}");
+        }
+        assert!(serde_json::from_value::<DiscoveryPluginsResponse>(serde_json::json!({ "jobs": { "allowed": true, "maxFolderSongs": 9 } })).unwrap().jobs.allowed);
+    }
+
+    #[test]
+    fn a_folder_jobs_landing_reads_as_the_webapp_reads_it_and_goes_out_as_the_route_takes_it() {
+        // The webapp's `landingMode` cases.
+        let modes: Vec<JobLanding> = [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({ "tags": true }),
+            serde_json::json!({ "tags": false }),
+            serde_json::json!({ "path": "" }),
+            serde_json::json!({ "vpath": "music" }),
+            serde_json::json!({ "vpath": null, "path": "x" }),
+        ]
+        .iter()
+        .map(JobLanding::of)
+        .collect();
+        assert_eq!(
+            modes,
+            vec![
+                JobLanding::Mirror,
+                JobLanding::Mirror,
+                JobLanding::Tags,
+                JobLanding::Mirror,
+                JobLanding::Into { vpath: None, path: String::new() },
+                JobLanding::Into { vpath: Some("music".into()), path: String::new() },
+                JobLanding::Into { vpath: None, path: "x".into() },
+            ]
+        );
+        // The webapp's `folderLanding`: none for the mirror, a library only when named.
+        assert_eq!(JobLanding::Mirror.wire(), None);
+        assert_eq!(JobLanding::Tags.wire(), Some(serde_json::json!({ "tags": true })));
+        assert_eq!(JobLanding::Into { vpath: Some("copies".into()), path: "From Sam".into() }.wire(), Some(serde_json::json!({ "vpath": "copies", "path": "From Sam" })));
+        assert_eq!(JobLanding::Into { vpath: Some(" ".into()), path: String::new() }.wire(), Some(serde_json::json!({ "path": "" })));
+        for landing in [JobLanding::Mirror, JobLanding::Tags, JobLanding::Into { vpath: Some("copies".into()), path: "x".into() }] {
+            assert_eq!(JobLanding::of(&landing.wire().unwrap_or(serde_json::Value::Null)), landing, "round trip");
+        }
+        // A job's params carry it; every other job reads the mirror.
+        let folder = job(serde_json::json!({ "params": { "scope": "folder", "landing": { "vpath": null, "path": "From Sam" } } }));
+        assert_eq!((folder.scope(), folder.params.landing.clone()), (Some(JobScope::Folder), JobLanding::Into { vpath: None, path: "From Sam".into() }));
+        assert_eq!(job(serde_json::json!({ "params": { "scope": "album" } })).params.landing, JobLanding::Mirror);
+        // Its result names the folder and where its files went.
+        let done = job(serde_json::json!({ "state": "done", "params": { "scope": "folder" }, "result": {
+            "scope": "folder", "folder": { "path": "peerlib/Boukmanflow/Borrowed Tapes", "name": "Borrowed Tapes", "landed": "copies/Borrowed Tapes" },
+            "layout": "folder", "songs": { "total": 3, "copied": [{ "from": "a", "filepath": "copies/Borrowed Tapes/CD1/a.mp3" }], "skipped": [], "failed": [] }, "stopped": null } }));
+        let result = done.copy_result();
+        assert_eq!((result.layout.as_deref(), result.folder.as_ref().and_then(|f| f.name.as_deref())), (Some("folder"), Some("Borrowed Tapes")));
+        assert_eq!(result.folder_landed(), Some(Landed { vpath: Some("copies".into()), dirs: vec!["Borrowed Tapes".into()], file: None }), "its own word, not its files' deepest folder");
+        let tags = job(serde_json::json!({ "state": "done", "result": { "folder": { "name": "x", "landed": null } } }));
+        assert_eq!(tags.copy_result().folder_landed(), None, "by the layout: each song went its own way");
+        // A folder's lookup keeps its folder key apart from a row's.
+        let found: JobLookup = serde_json::from_value(serde_json::json!({ "key": "text:1", "keys": { "song": "text:1", "folder": "folder:91ac" }, "jobs": [] })).unwrap();
+        assert_eq!((found.folder_key().as_deref(), found.row_keys()), (Some("folder:91ac"), vec!["text:1".to_string()]));
+        assert_eq!(JobLookup::default().folder_key(), None);
+    }
+
+    #[test]
+    fn an_artists_album_rows_keep_the_credits_presence_and_its_years() {
+        let rows: ArtistAlbumRows = serde_json::from_value(serde_json::json!({ "albums": [
+            { "name": "Borrowed Tapes", "album_artist": "Boukmanflow", "year": 2019, "year_min": 2018, "year_max": 2020 },
+            { "name": "Split Series", "album_artist": null },
+            { "name": "Old" }
+        ] }))
+        .unwrap();
+        let listed: Vec<(bool, Option<&str>, Option<i32>)> = rows.albums.iter().map(|r| (r.credit_listed, r.album_artist.as_deref(), r.year_max)).collect();
+        assert_eq!(listed, vec![(true, Some("Boukmanflow"), Some(2020)), (true, None, None), (false, None, None)]);
+    }
+
+    #[test]
+    fn an_album_pages_credit_is_found_from_its_songs_then_from_its_artists_albums() {
+        // Step 2 (the phone's `fromSongs`): all named and the same → known,
+        // spelled as the first song spells it; two differ → disagree; one
+        // that names none → step 3.
+        assert_eq!(credit_of_songs([Some("Boukmanflow"), Some(" boukmanflow")]), Some(AlbumCredit::Known("Boukmanflow".into())));
+        assert_eq!(credit_of_songs([Some("ALM"), Some("Boukmanflow"), Some("alm")]), Some(AlbumCredit::Disagree(vec!["ALM".into(), "Boukmanflow".into()])));
+        assert_eq!(credit_of_songs([Some("ALM"), None, Some("Boukmanflow")]), Some(AlbumCredit::Disagree(vec!["ALM".into(), "Boukmanflow".into()])), "two that differ disagree whatever else");
+        assert_eq!(credit_of_songs([Some("Boukmanflow"), None]), None);
+        assert_eq!(credit_of_songs([Some("Boukmanflow"), Some("  ")]), None, "a blank is none");
+        assert_eq!(credit_of_songs(std::iter::empty::<Option<&str>>()), None);
+        // Step 3 (the phone's `fromArtistAlbums`): one album of the page's
+        // name — and year, within its years — gives its credit.
+        let row = |name: &str, credit: Option<&str>, year: Option<i32>, range: Option<(i32, i32)>| ArtistAlbumRow {
+            name: Some(name.into()),
+            album_artist: credit.map(str::to_string),
+            credit_listed: true,
+            artists: vec!["ALM".into(), "Boukmanflow".into()],
+            year,
+            year_min: range.map(|r| r.0),
+            year_max: range.map(|r| r.1),
+            ..ArtistAlbumRow::default()
+        };
+        let rows = vec![
+            row("Borrowed Tapes", Some("Boukmanflow"), Some(2019), None),
+            row("Harbour Lights", Some("Boukmanflow"), Some(2021), Some((2020, 2022))),
+            row("Split Series", None, Some(2022), None),
+            row("Twice", Some("A"), Some(2001), None),
+            row("twice", Some("B"), Some(2005), None),
+        ];
+        assert_eq!(credit_of_rows(&rows, "borrowed  TAPES", None), (AlbumCredit::Known("Boukmanflow".into()), false));
+        assert_eq!(credit_of_rows(&rows, "Harbour Lights", Some(2020)).0, AlbumCredit::Known("Boukmanflow".into()), "within its years");
+        assert_eq!(credit_of_rows(&rows, "Harbour Lights", Some(2021)).0, AlbumCredit::Known("Boukmanflow".into()), "inside them");
+        assert_eq!(credit_of_rows(&rows, "Harbour Lights", Some(2022)).0, AlbumCredit::Known("Boukmanflow".into()), "their top");
+        assert_eq!(credit_of_rows(&rows, "Harbour Lights", Some(2023)).0, AlbumCredit::Unknown, "past them");
+        assert_eq!(credit_of_rows(&rows, "Harbour Lights", Some(2019)).0, AlbumCredit::Unknown, "outside them");
+        assert_eq!(credit_of_rows(&rows, "Split Series", Some(2022)).0, AlbumCredit::Disagree(vec!["ALM".into(), "Boukmanflow".into()]));
+        assert_eq!(credit_of_rows(&rows, "Twice", None).0, AlbumCredit::Unknown, "several");
+        assert_eq!(credit_of_rows(&rows, "Twice", Some(2005)).0, AlbumCredit::Known("B".into()), "the year tells them apart");
+        assert_eq!(credit_of_rows(&rows, "Nowhere", None).0, AlbumCredit::Unknown);
+        let older = ArtistAlbumRow { credit_listed: false, ..row("Borrowed Tapes", None, None, None) };
+        assert_eq!(credit_of_rows(&[older], "Borrowed Tapes", None).0, AlbumCredit::Unknown, "a server from before the credit says nothing");
+        let comp = ArtistAlbumRow { compilation: true, ..row("Night Market Sampler", Some("Various Artists"), None, None) };
+        assert_eq!(credit_of_rows(&[comp], "Night Market Sampler", None), (AlbumCredit::Known("Various Artists".into()), true));
+        // How a page draws it (the user's 2026-10-27 decision).
+        assert_eq!(AlbumCredit::Known("Boukmanflow".into()).words().as_deref(), Some("Boukmanflow"));
+        assert_eq!(AlbumCredit::Disagree(vec!["ALM".into(), "Boukmanflow".into()]).words().as_deref(), Some("ALM, Boukmanflow"));
+        assert_eq!((AlbumCredit::Disagree(Vec::new()).words(), AlbumCredit::Unknown.words()), (None, None));
+        assert!(various_artists(Some(" various  ARTISTS")) && !various_artists(Some("Boukmanflow")) && !various_artists(None));
+    }
+
+    /// The webapp test's artist listing (planArtistAlbums' own): three of
+    /// his, a collaboration credited to him outside a compilation, a
+    /// compilation he is on, an album his credit only reaches through a
+    /// track, blank and nameless items.
+    fn boukmanflow_listing() -> Vec<ArtistAlbumRow> {
+        let row = |name: Option<&str>, credit: Option<&str>, artists: &[&str], compilation: bool| ArtistAlbumRow {
+            name: name.map(str::to_string),
+            album_artist: credit.map(str::to_string),
+            credit_listed: true,
+            artists: artists.iter().map(|a| a.to_string()).collect(),
+            compilation,
+            ..ArtistAlbumRow::default()
+        };
+        vec![
+            row(Some("Second Shift"), Some("Boukmanflow"), &["Boukmanflow"], false),
+            row(Some("Harbour Lights"), Some("boukmanflow "), &["Boukmanflow"], false),
+            row(Some("Borrowed Tapes"), Some("Boukmanflow"), &["Boukmanflow"], false),
+            row(Some("Split Series"), None, &["ALM", "Boukmanflow"], false),
+            row(Some("Night Market Sampler"), Some("Various Artists"), &["Color Out", "Boukmanflow", "ALM"], true),
+            row(Some("Guest Spots"), Some("Color Out"), &["Color Out"], false),
+            row(Some("  "), Some("Boukmanflow"), &[], false),
+            row(None, Some("Boukmanflow"), &["Boukmanflow"], false),
+        ]
+    }
+
+    #[test]
+    fn an_artist_copy_takes_what_the_copy_takes_and_the_left_out_line_names_the_rest() {
+        let listing = boukmanflow_listing();
+        let names = |rows: &[&ArtistAlbumRow]| rows.iter().map(|r| r.name.clone().unwrap_or_default()).collect::<Vec<_>>();
+        // federation-copy planArtistAlbums, album for album.
+        let plan = plan_artist_albums(&listing, " BOUKMANFLOW ");
+        assert_eq!(names(&plan.theirs), ["Second Shift", "Harbour Lights", "Borrowed Tapes", "Split Series"]);
+        assert_eq!(names(&plan.appearances), ["Night Market Sampler", "Guest Spots"]);
+        assert!(plan.singles, "a blank name and none are the singles bucket");
+        assert_eq!(missing_albums("Boukmanflow", &listing, &[]).len(), plan.theirs.len(), "only-missing's theirs is the plan's");
+        let color = plan_artist_albums(&listing, "Color Out");
+        assert_eq!(names(&color.theirs), ["Guest Spots"], "a compilation credit is no album of theirs");
+        assert!(plan_artist_albums(&listing, "Lantern Choir").theirs.is_empty());
+        assert!(!plan_artist_albums(&[], "x").singles);
+        // The left-out line: the named ones they only appear on, in order, then the bucket.
+        assert_eq!(LeftOut::of(&listing, "Boukmanflow"), Some(LeftOut { albums: vec!["Night Market Sampler".into(), "Guest Spots".into()], singles: true }));
+        assert_eq!(LeftOut::of(&listing[..4], "Boukmanflow"), None, "every album theirs, no singles");
+        assert_eq!(LeftOut::of(&[listing[0].clone(), listing[7].clone()], "Boukmanflow"), Some(LeftOut { albums: Vec::new(), singles: true }), "singles alone still stay out");
+        assert_eq!(LeftOut::of(&listing, "Lantern Choir").map(|l| l.albums.len()), Some(6), "nothing theirs: everything named left out");
+    }
+
+    const TAPES: [&str; 3] = ["01 - Rooftop Cypher.mp3", "02 - Late Train Verse.mp3", "03 - Corner Store Loop.mp3"];
+
+    /// The webapp test's peer folder: Boukmanflow's three albums.
+    fn boukmanflow_files() -> Vec<String> {
+        let mut out: Vec<String> = TAPES.iter().map(|f| format!("music/Boukmanflow/Borrowed Tapes/{f}")).collect();
+        out.extend(["01 - Tide.mp3", "02 - Pier.mp3", "03 - Lamps.mp3"].iter().map(|f| format!("music/Boukmanflow/Harbour Lights/{f}")));
+        out.extend(["01 - Clock In.mp3", "02 - Break.mp3", "03 - Clock Out.mp3"].iter().map(|f| format!("music/Boukmanflow/Second Shift/{f}")));
+        out
+    }
+
+    #[test]
+    fn a_folder_copy_takes_what_federation_copy_plans() {
+        // The webapp test's listing: nested, outside, climbing, the
+        // scanner's ignored folders, dot entries, names that only start with
+        // dots, duplicates, either separator.
+        let mut listing: Vec<String> = boukmanflow_files().into_iter().rev().collect();
+        listing.extend(
+            [
+                "music/Boukmanflow/Borrowed Tapes/CD 10/01 - x.mp3",
+                "music/Boukmanflow/Borrowed Tapes/CD 2/01 - x.mp3",
+                "/music/Boukmanflow/Borrowed Tapes/01 - Rooftop Cypher.mp3",
+                "music\\Boukmanflow\\Borrowed Tapes\\04 - Back.flac",
+                "music/Other/x.mp3",
+                "music/Boukmanflow/Borrowed Tapes/../../Other/y.mp3",
+                "music/Boukmanflow/Borrowed Tapesque/z.mp3",
+                "music/Boukmanflow/Borrowed Tapes/.hidden/a.mp3",
+                "music/Boukmanflow/Borrowed Tapes/.cover.mp3",
+                "music/Boukmanflow/Borrowed Tapes/...Trilogy/a.mp3",
+                "music/Boukmanflow/Borrowed Tapes/LOUD.MP3",
+                "music/Boukmanflow/Borrowed Tapes/AC:DC?/x.mp3",
+                "music/Boukmanflow/Borrowed Tapes/ . /./y.mp3",
+                "",
+            ]
+            .map(str::to_string),
+        );
+        listing.extend(IGNORED_DIR_NAMES.iter().map(|d| format!("music/Boukmanflow/Borrowed Tapes/{}/a.mp3", d.to_uppercase())));
+        let plan = plan_folder(&listing, "music/Boukmanflow/Borrowed Tapes");
+        let top: Vec<&str> = plan.songs.iter().filter(|s| s.rel_dir.is_empty()).map(|s| s.filepath.rsplit('/').next().unwrap()).collect();
+        assert_eq!(top, [TAPES[0], TAPES[1], TAPES[2], "04 - Back.flac", "LOUD.MP3", "y.mp3"], "path order; a '.' is no folder");
+        let discs: Vec<&str> = plan.songs.iter().filter(|s| s.rel_dir.starts_with("CD")).map(|s| s.rel_dir.as_str()).collect();
+        assert_eq!(discs, ["CD 2", "CD 10"], "numbers as numbers");
+        assert!(plan.songs.iter().any(|s| s.rel_dir == "AC-DC-"), "a peer's folder name made safe");
+        assert!(plan.songs.iter().any(|s| s.filepath.ends_with("/...Trilogy/a.mp3") && s.rel_dir == "Trilogy"), "a name that starts with dots is a name");
+        assert_eq!(plan.songs.iter().filter(|s| s.filepath.ends_with("01 - Rooftop Cypher.mp3") && s.rel_dir.is_empty()).count(), 1, "one entry per path");
+        let why = |w: FolderSkip| plan.skipped.iter().filter(|(_, x)| *x == w).count();
+        assert_eq!((why(FolderSkip::Outside), why(FolderSkip::Ignored)), (9, IGNORED_DIR_NAMES.len() + 2));
+        let wider = plan_folder(&listing, "music/Boukmanflow");
+        let outside: Vec<&str> = wider.skipped.iter().filter(|(_, w)| *w == FolderSkip::Outside).map(|(f, _)| f.as_str()).collect();
+        assert_eq!(outside, ["music/Other/x.mp3", "music/Boukmanflow/Borrowed Tapes/../../Other/y.mp3"]);
+        // Either spelling of the folder, the library's top, everything.
+        for folder in ["/music/Boukmanflow/Borrowed Tapes/", "music\\Boukmanflow\\Borrowed Tapes"] {
+            assert_eq!(plan_folder(&listing, folder), plan, "{folder}");
+        }
+        assert_eq!(plan_folder(&boukmanflow_files(), "music/Boukmanflow").songs.len(), 9);
+        assert_eq!(plan_folder(&boukmanflow_files(), "").songs.len(), 9);
+        assert_eq!(plan_folder(&[], "music/x"), FolderPlan::default());
+    }
+
+    #[test]
+    fn a_folder_lands_as_landing_for_puts_it() {
+        let place = |base: &str, layout: &str| CollectionDestination { vpath: "copies".into(), base: base.into(), layout: layout.into(), source: None };
+        let crumbs = |landing: Landing| landing.crumbs();
+        let folder = "music/Boukmanflow/Borrowed Tapes";
+        // As on the server: the library, the folder's path inside the peer's
+        // library — never through the layout.
+        assert_eq!(crumbs(mirror_landing(&place("", "{{ALBUMARTIST}}/{{ALBUM}}"), folder)), ["copies", "Boukmanflow", "Borrowed Tapes"]);
+        assert_eq!(crumbs(mirror_landing(&place("", "{{GENRE}}/{{ARTIST}} - {{YEAR}}"), folder)), ["copies", "Boukmanflow", "Borrowed Tapes"], "no slot, no layout folder");
+        // Under the base folder and the layout's leading folders (the user's 2026-10-23 call).
+        assert_eq!(crumbs(mirror_landing(&place("", "From friends/{{ALBUMARTIST}}/{{ALBUM}}"), folder)), ["copies", "From friends", "Boukmanflow", "Borrowed Tapes"]);
+        assert_eq!(
+            crumbs(mirror_landing(&place(" Mirror / ", " a / b \\{{ALBUM}}/x"), folder)),
+            ["copies", "Mirror", "a", "b", "Boukmanflow", "Borrowed Tapes"]
+        );
+        assert_eq!(crumbs(mirror_landing(&place("", "Only/literal"), folder)), ["copies", "Only", "literal", "Boukmanflow", "Borrowed Tapes"]);
+        // The library's top: what the base and the lead give.
+        assert_eq!(crumbs(mirror_landing(&place("", "From friends/{{ALBUMARTIST}}/{{ALBUM}}"), "/music/")), ["copies", "From friends"]);
+        assert_eq!(crumbs(mirror_landing(&place("", "{{ALBUMARTIST}}/{{ALBUM}}"), "music")), ["copies"]);
+        // A peer's names made safe as the copy writes them.
+        assert_eq!(crumbs(mirror_landing(&place("", ""), "music/AC:DC?/Back*In|Black")), ["copies", "AC-DC-", "Back-In-Black"]);
+        assert_eq!(inside_peer_library(" . /music/A"), "A");
+        // Into a folder: the library and folder chosen, neither base nor lead.
+        let lead = place("Mirror", "From friends/{{ALBUMARTIST}}/{{ALBUM}}");
+        assert_eq!(crumbs(into_landing(&lead, Some("copies"), "From Sam")), ["copies", "From Sam"]);
+        assert_eq!(crumbs(into_landing(&lead, None, " Inbox \\ From Sam ")), ["copies", "Inbox", "From Sam"], "no library chosen: the destination's");
+        assert_eq!(crumbs(into_landing(&lead, Some("music"), "")), ["music"], "the library's top");
+        assert_eq!(crumbs(into_landing(&lead, Some(""), "a/./b")), ["copies", "a", "b"]);
+    }
+
+    #[test]
+    fn an_albumartist_with_no_credit_of_its_own_renders_as_artist_does_its_slot_too() {
+        // A folder by the layout whose songs agree on no credit (keep-a-copy
+        // spec §6.5.3): {{ALBUMARTIST}} as {{ARTIST}} — a slot where ARTIST is.
+        let tags = LayoutTags { artist: None, album: Some("Borrowed Tapes".into()), slots: vec![SongTag::Artist], ..LayoutTags::default() };
+        let place = CollectionDestination { vpath: "copies".into(), layout: "{{ALBUMARTIST}}/{{ALBUM}}".into(), ..CollectionDestination::default() };
+        let landing = place.landing(&tags, false);
+        assert_eq!((landing.crumbs(), landing.slots(), landing.missing.clone()), (vec!["copies".to_string(), "‹artist›".into(), "Borrowed Tapes".into()], vec![SongTag::Artist], Vec::<String>::new()));
+        // A credit of its own: that, whatever ARTIST is.
+        let credited = LayoutTags { album_artist: Some("Various Artists".into()), ..tags.clone() };
+        assert_eq!(place.landing(&credited, false).crumbs(), ["copies", "Various Artists", "Borrowed Tapes"]);
+        // ARTIST no slot: the artist's value, as before.
+        let named = LayoutTags { artist: Some("Boukmanflow".into()), slots: Vec::new(), ..tags };
+        assert_eq!(place.landing(&named, false).crumbs(), ["copies", "Boukmanflow", "Borrowed Tapes"]);
     }
 }
