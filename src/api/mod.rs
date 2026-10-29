@@ -974,24 +974,37 @@ impl Client {
         wait(self.file_explorer_async(directory))
     }
 
-    pub async fn artists_async(&self) -> Result<Vec<String>, ApiError> {
-        let r: ArtistsResponse = self.get("api/v1/db/artists").await?;
+    /// Every artist, or — under a mood filter (mStream #1092) — those most
+    /// of whose songs match it. The filter rides in a POST body, as the
+    /// genre kind does: a peer's proxy forwards a body, not a query string.
+    pub async fn artists_async(&self, moods: MoodFilter) -> Result<Vec<String>, ApiError> {
+        let r: ArtistsResponse = if moods.is_empty() {
+            self.get("api/v1/db/artists").await?
+        } else {
+            self.post("api/v1/db/artists", serde_json::json!({ "moods": moods })).await?
+        };
         Ok(r.artists)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn artists(&self) -> Result<Vec<String>, ApiError> {
-        wait(self.artists_async())
+        wait(self.artists_async(MoodFilter::NONE))
     }
 
-    pub async fn albums_async(&self) -> Result<Vec<Album>, ApiError> {
-        let r: AlbumsResponse = self.get("api/v1/db/albums").await?;
+    /// Every album, or those most of whose songs match `moods` — as
+    /// [`Self::artists_async`].
+    pub async fn albums_async(&self, moods: MoodFilter) -> Result<Vec<Album>, ApiError> {
+        let r: AlbumsResponse = if moods.is_empty() {
+            self.get("api/v1/db/albums").await?
+        } else {
+            self.post("api/v1/db/albums", serde_json::json!({ "moods": moods })).await?
+        };
         Ok(r.albums)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn albums(&self) -> Result<Vec<Album>, ApiError> {
-        wait(self.albums_async())
+        wait(self.albums_async(MoodFilter::NONE))
     }
 
     pub async fn artist_albums_async(&self, artist: &str) -> Result<Vec<Album>, ApiError> {
@@ -3428,6 +3441,32 @@ pub(crate) mod tests {
         let (head, body) = seen.recv_timeout(Duration::from_secs(5)).expect("a request");
         let line = head.lines().next().unwrap_or_default().to_string();
         (line, if body.is_empty() { serde_json::Value::Null } else { serde_json::from_str(&body).expect("a JSON body") })
+    }
+
+    #[test]
+    fn a_mood_filter_rides_in_a_post_body_and_no_filter_keeps_the_plain_get() {
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", serde_json::json!({ "albums": [{ "name": "Stim Pack" }], "moods": {} })),
+            json_reply("200 OK", serde_json::json!({ "artists": ["ALM"], "moods": { "energy": "relaxed" } })),
+            json_reply("200 OK", serde_json::json!({ "albums": [], "moods": { "tags": ["party"] } })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let albums = wait(client.albums_async(MoodFilter::NONE)).unwrap();
+        assert_eq!(albums.len(), 1);
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("GET /api/v1/db/albums "), "{line}");
+        assert_eq!(body, serde_json::Value::Null, "no filter, no body");
+
+        let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        assert_eq!(wait(client.artists_async(relaxed)).unwrap(), vec!["ALM".to_string()]);
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/db/artists "), "{line}");
+        assert_eq!(body, serde_json::json!({ "moods": { "energy": "relaxed" } }));
+
+        assert!(wait(client.albums_async(MoodFilter::NONE.toggle_tag("party"))).unwrap().is_empty());
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/db/albums "), "{line}");
+        assert_eq!(body, serde_json::json!({ "moods": { "tags": ["party"] } }));
     }
 
     #[test]

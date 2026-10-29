@@ -249,8 +249,17 @@ fn visible_albums(gui: &mut Gui) -> Option<&WallView> {
 /// inputs, so key handling agrees with the pointer about where cells are.
 fn shape(gui: &Gui) -> GridShape {
     // The same rect the frame drew the grid in — a row lower under a pick's
-    // banner — else a click opened the album a page's worth away.
-    GridShape::for_content(gui.room_rect())
+    // banner, rows lower under the open mood panel — else a click opened
+    // the album a page's worth away.
+    GridShape::for_content(below_panel(gui, gui.room_rect()))
+}
+
+/// The wall's rect below the mood Filters' panel: the strip and the grid
+/// stand as many rows lower as the open panel takes (library-rooms clause
+/// 32) — on the root wall only; an artist's wall has no Filters.
+fn below_panel(gui: &Gui, content: Rect) -> Rect {
+    let panel = if on_root_wall(gui) { super::moods::panel_height(gui, content.width) } else { 0 };
+    Rect { y: content.y + panel, height: content.height.saturating_sub(panel), ..content }
 }
 
 fn turn_page(gui: &mut Gui, delta: i32) {
@@ -472,13 +481,19 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     };
     let all = wall_albums(gui).map_or(0, Vec::len);
     super::draw_bar_controls(frame, gui, content, content.y + 1);
+    // The mood Filters at the controls line's right and their panel under
+    // it (library-rooms clauses 30–32): what follows stands below it.
+    if on_root_wall(gui) {
+        super::moods::draw_for_list(frame, gui, content);
+    }
+    let body = below_panel(gui, content);
     if all == 0 {
-        put(frame, content.x, content.y + 3, &t!("gui.alb.empty"), dim());
+        put(frame, content.x, body.y + 3, &t!("gui.alb.empty"), dim());
         return;
     }
     if total == 0 {
         // The filter matched nothing; the way back is one key (clause 30).
-        put(frame, content.x, content.y + 3, &t!("gui.files.empty"), dim());
+        put(frame, content.x, body.y + 3, &t!("gui.files.empty"), dim());
         put(
             frame,
             content.right().saturating_sub(
@@ -491,7 +506,7 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         return;
     }
 
-    let shape = GridShape::for_content(content);
+    let shape = GridShape::for_content(body);
     let capacity = shape.capacity();
     let pages = page_count(total, capacity);
     {
@@ -525,7 +540,7 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // alphabetical; an artist's albums are in the server's order.
     if on_root_wall(gui) && total >= crate::kit::STRIP_MIN_ROWS {
         let (present, first_of) = strip;
-        let strip = Rect { x: content.x, y: content.y + 2, width: content.width, height: 1 };
+        let strip = Rect { x: content.x, y: body.y + 2, width: content.width, height: 1 };
         crate::kit::letter_strip(frame, &mut gui.ui, strip, &present, move |bucket| Act::AlbJump(first_of[bucket]));
     }
 
@@ -822,7 +837,7 @@ mod tests {
             .collect();
         let effects = gui.app.apply_event(Event::Library {
             generation: gui.app.session_gen(),
-            node: LibraryNode::Albums,
+            node: LibraryNode::Albums(crate::api::types::MoodFilter::NONE),
             dest: Tab::Library,
             data: LibraryData::Albums(albums),
         });
@@ -1072,7 +1087,7 @@ mod tests {
         let zebras = (0..30).map(|i| album(&format!("Zebra {i:02}"), "Herd", 2000, None)).collect();
         let effects = gui.app.apply_event(Event::Library {
             generation: gui.app.session_gen(),
-            node: LibraryNode::Albums,
+            node: LibraryNode::Albums(crate::api::types::MoodFilter::NONE),
             dest: Tab::Library,
             data: LibraryData::Albums(zebras),
         });
@@ -1163,7 +1178,7 @@ mod tests {
         gui.pend(effects);
         gui.pending.clear();
         gui.act(Act::Nav(super::super::ALBUMS_NAV));
-        assert!(matches!(gui.app.library_node(), LibraryNode::Albums), "the drill is the wall's again");
+        assert!(matches!(gui.app.library_node(), LibraryNode::Albums(_)), "the drill is the wall's again");
         assert_eq!(gui.app.library.entries.len(), 6, "seated from the cache: the parent and five albums");
         assert!(
             !gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { .. }))),
@@ -1220,7 +1235,7 @@ mod tests {
         assert!(
             !gui.pending
                 .iter()
-                .any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: LibraryNode::Albums, .. }))),
+                .any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: LibraryNode::Albums(_), .. }))),
             "the wall's list is back from the trail, not re-asked: {:?}",
             gui.pending
         );
@@ -1303,7 +1318,7 @@ mod tests {
         assert!(
             gui.pending
                 .iter()
-                .any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: LibraryNode::Albums, .. }))),
+                .any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: LibraryNode::Albums(_), .. }))),
             "the first visit asks for the list"
         );
         let all = draw(&mut gui).join("\n");
@@ -1315,6 +1330,69 @@ mod tests {
         gui.act(Act::Nav(super::super::ALBUMS_NAV));
         assert!(gui.pending.is_empty(), "a return finds the wall standing");
         assert_eq!(gui.app.tab, Tab::Library, "but the tab still points at the pane");
+    }
+
+    // ── The mood Filters (library-rooms contract, clauses 30–32) ─────────
+
+    #[test]
+    fn the_walls_filters_open_a_panel_over_the_grid_and_a_choice_relists_in_place() {
+        use crate::api::types::{MoodFilter, MoodScale};
+        use super::super::moods::{MoodAct, is_open};
+        let mut gui = wall_gui(3);
+        let all = draw(&mut gui).join("\n");
+        assert!(!all.contains("filters"), "no scores to filter by, no Filters: {all}");
+
+        gui.app.capabilities.mood_filters = true;
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        let first = rows.iter().position(|r| r.contains("Album 00")).unwrap_or_else(|| panic!("{all}"));
+        let line = rows.iter().position(|r| r.contains("/ filter")).unwrap_or_else(|| panic!("{all}"));
+        assert!(rows[line].contains("filters ▾"), "at the controls line's right: {all}");
+        assert!(!is_open(&gui), "hidden by default");
+
+        gui.act(Act::Mood(MoodAct::Toggle));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(rows[line].contains("filters ▴"), "{all}");
+        assert!(rows[line + 1].contains("Happy · Neutral · Sad"), "the panel under the line: {all}");
+        let moved = rows.iter().position(|r| r.contains("Album 00")).unwrap_or_else(|| panic!("{all}"));
+        assert!(moved > first, "the grid stands below the panel: {all}");
+        // The keys' grid is the drawn one: Enter on the first cell opens Album 00.
+        assert_eq!(super::shape(&gui).cell(0).y, moved as u16 - COVER_H, "{all}");
+
+        let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        gui.act(Act::Mood(MoodAct::Pick(MoodScale::Energy, "relaxed")));
+        assert!(
+            gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { node, .. }) if *node == LibraryNode::Albums(relaxed))),
+            "asked again under the filter: {:?}",
+            gui.pending
+        );
+        assert_eq!(gui.app.library_node(), &LibraryNode::Albums(relaxed), "in place");
+        assert!(is_open(&gui), "the panel stays open while the list comes");
+
+        // The unfiltered list landing late fills nothing; the filtered one does.
+        for (moods, names) in [(MoodFilter::NONE, ["Album 00", "Album 02"]), (relaxed, ["Album 01", "Album 01"])] {
+            let effects = gui.app.apply_event(Event::Library {
+                generation: gui.app.session_gen(),
+                node: LibraryNode::Albums(moods),
+                dest: Tab::Library,
+                data: LibraryData::Albums(names.iter().map(|n| album(n, "Artist", 2001, None)).collect()),
+            });
+            gui.pend(effects);
+        }
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("Album 01") && !all.contains("Album 02"), "{all}");
+        assert_eq!(gui.app.albums_moods, relaxed);
+        assert!(all.contains("filters ● ▴"), "the dot says the wall is filtered: {all}");
+
+        // Away and back: the panel closed, the wall seated from the copy
+        // asked under the same filter — no request.
+        gui.act(Act::Nav(super::super::FILES_NAV));
+        gui.pending.clear();
+        gui.act(Act::Nav(super::super::ALBUMS_NAV));
+        assert!(!gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { .. }))), "{:?}", gui.pending);
+        assert!(!is_open(&gui), "hidden again on the next visit");
+        assert!(draw(&mut gui).join("\n").contains("filters ● ▾"));
     }
 }
 

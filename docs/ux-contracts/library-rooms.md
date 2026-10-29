@@ -175,6 +175,38 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 29. **The TUI keeps every genre**: its Library menu lists both kinds
     together, as it always did, and has no switch.
 
+### The mood filters (2026-10-29)
+
+30. **Filters by mood** (mStream #1092): a server with mood scores — the
+    ping's `moodFilters` — filters the Albums wall and the Artists list by
+    mood: Happy · Neutral · Sad, Relaxed · Neutral · Aggressive,
+    Instrumental · Vocals, and any of Acoustic, Party, Danceable. An album
+    or artist stays when most of its songs match. A server without scores,
+    an older one, and a peer's session offer none. The filter rides in the
+    list's POST body (`moods`), which a peer's proxy forwards.
+31. **The control**: `filters ▾` at the controls line's right — where a
+    list of tracks wears its verbs, and these lists have none — not while
+    the filter's field holds the line: the word in the row's weight, a dot
+    in the ok colour while the room's filter is set (a closed panel still
+    says the list is filtered), the chevron DIM, `▴` while the panel is
+    open. Each room keeps its own filter while the app runs: the Artists
+    room opens under it, and the wall's copy serves only the filter it was
+    asked under — a return under another asks again. The session keeps
+    only the whole Artists list; a filtered one always asks.
+32. **The panel**: hidden by default, and on every visit; the control opens
+    it under the controls line, and the strip and the list stand that many
+    rows lower. Its choices are words — each scale's values `·` apart, then
+    the tags, groups three cells apart and wrapped whole to the width — the
+    chosen ones in the ok colour and BOLD, the others DIM, each a click (a
+    pointer control, as the genre switch is, clause 27). A value picks it,
+    and again lets it go; a tag toggles; `clear` — the accent's text
+    button, at the last row's right while anything is set — lets every
+    group go. A choice asks for the list again in place — no new level, so
+    Back climbs where it did — the wall from its first page, the list from
+    its top; a list asked before the choice is dropped when it lands.
+33. **The TUI keeps every album and artist**: its Library menu lists them
+    unfiltered, as it always did, and has no Filters.
+
 ## Wording
 
 | String | Key |
@@ -188,6 +220,9 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 | Jump to %{letter} (the strip's tip) | `gui.lib.jump_tip` |
 | Tags · Generated · Both | `gui.lib.genre_tags` · `gui.lib.genre_generated` · `gui.lib.genre_both` — the phone's `genreSourceTags` · `genreSourceGenerated` · `genreSourceBoth`, the same words in every locale |
 | Genre source (the switch's tip) | `gui.lib.genre_source_tip` — the phone's `genreSourceLabel` |
+| filters (the control) · Filter by mood (its tip) | `gui.moods.filters` · `gui.moods.tip` — the phone's `moodFilters`, lower-case where the locale writes its text buttons so |
+| Happy · Neutral · Sad · Relaxed · Aggressive · Instrumental · Vocals · Acoustic · Party · Danceable | `gui.moods.happy` … `gui.moods.danceable` — the phone's `moodHappy` … `moodDanceable` |
+| clear | `gui.moods.clear` — a text button, lower-case as "more options" is |
 
 ## Out of scope here
 

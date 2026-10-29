@@ -73,6 +73,7 @@ fn connected_app() -> App {
         discovery_taste: 0,
         discovery_plugins: false,
         uploads: true,
+        mood_filters: false,
     };
     // What a real ping does on the way in: the Auto-DJ rows depend on it.
     app.dj_panel.rebuild(&app.dj, None, false);
@@ -3628,7 +3629,7 @@ fn a_pane_knows_when_its_contents_are_still_on_the_wire() {
 
     app.apply_event(Event::Library {
         generation: app.session_gen(),
-        node: LibraryNode::Artists,
+        node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE),
         dest: Tab::Library,
         data: LibraryData::Artists(Vec::new()),
     });
@@ -3751,12 +3752,12 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     let effects = app.handle_action(Action::Activate);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Library { generation: app.session_gen(), node: LibraryNode::Artists, dest: Tab::Library })]
+        vec![Effect::Api(ApiCmd::Library { generation: app.session_gen(), node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE), dest: Tab::Library })]
     );
     app.apply_event(Event::Library {
         generation: app.session_gen(),
         dest: Tab::Library,
-        node: LibraryNode::Artists,
+        node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE),
         data: LibraryData::Artists(vec!["Signal Chain".into(), "Terminal Test".into()]),
     });
     assert_eq!(app.library.entries.len(), 3); // ".." + two artists
@@ -3820,14 +3821,14 @@ fn back_walks_the_library_stack_to_the_menu() {
     app.apply_event(Event::Library {
         generation: app.session_gen(),
         dest: Tab::Library,
-        node: LibraryNode::Artists,
+        node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE),
         data: LibraryData::Artists(vec!["Solo".into()]),
     });
     app.handle_action(Action::Activate); // → Artist("Solo")
 
     let effects = app.handle_action(Action::Back);
     assert!(effects.is_empty(), "the artist list came back off the trail");
-    assert_eq!(app.library_node(), &LibraryNode::Artists);
+    assert_eq!(app.library_node(), &LibraryNode::Artists(crate::api::types::MoodFilter::NONE));
 
     let effects = app.handle_action(Action::Back);
     assert!(effects.is_empty(), "returning to the static menu needs no request");
@@ -3848,7 +3849,7 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
     app.apply_event(Event::Library {
         generation: app.session_gen(),
         dest: Tab::Library,
-        node: LibraryNode::Artists,
+        node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE),
         data: LibraryData::Artists(vec!["Ghost".into()]),
     });
     assert_eq!(app.library_node(), &LibraryNode::Root);
@@ -3959,11 +3960,11 @@ fn albums_without_an_artist_still_resolve() {
     // has to be enough to fetch tracks.
     let mut app = connected_app();
     app.library_stack.restart();
-    app.library_stack.enter(LibraryNode::Albums);
+    app.library_stack.enter(LibraryNode::Albums(crate::api::types::MoodFilter::NONE));
     app.apply_event(Event::Library {
         generation: app.session_gen(),
         dest: Tab::Library,
-        node: LibraryNode::Albums,
+        node: LibraryNode::Albums(crate::api::types::MoodFilter::NONE),
         data: LibraryData::Albums(vec![Album {
             name: Some("Phase Three".into()),
             artist: None,
@@ -4787,7 +4788,7 @@ fn a_playlist_change_reasks_an_open_playlists_view() {
     );
     assert!(app.message.is_none(), "the new row is the confirmation, not a toast");
 
-    app.open_library_node(LibraryNode::Albums, true);
+    app.open_library_node(LibraryNode::Albums(crate::api::types::MoodFilter::NONE), true);
     let effects = app.apply_event(Event::PlaylistDeleted);
     assert!(effects.is_empty(), "no refresh for a view not on screen: {effects:?}");
 }
@@ -4802,11 +4803,11 @@ fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
         effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: n, .. }) if *n == node))
     };
     let mut app = connected_app();
-    let effects = app.open_library_node(LibraryNode::Artists, true);
-    assert!(asks(&effects, LibraryNode::Artists), "the first opening asks");
+    let effects = app.open_library_node(LibraryNode::Artists(crate::api::types::MoodFilter::NONE), true);
+    assert!(asks(&effects, LibraryNode::Artists(crate::api::types::MoodFilter::NONE)), "the first opening asks");
     let generation = app.session_gen();
     app.apply_event(Event::Library {
-        node: LibraryNode::Artists,
+        node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE),
         dest: Tab::Library,
         data: LibraryData::Artists(vec!["Air".into(), "Bonobo".into()]),
         generation,
@@ -4815,9 +4816,9 @@ fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
     app.handle_action(Action::Activate); // down into Bonobo
     assert!(matches!(app.library_stack.here(), LibraryNode::Artist(_)));
 
-    let effects = app.open_library_node(LibraryNode::Artists, true);
+    let effects = app.open_library_node(LibraryNode::Artists(crate::api::types::MoodFilter::NONE), true);
     assert!(effects.is_empty(), "a return asks nothing: {effects:?}");
-    assert!(matches!(app.library_stack.here(), LibraryNode::Artists), "at the root again");
+    assert!(matches!(app.library_stack.here(), LibraryNode::Artists(_)), "at the root again");
     assert!(app.library.trail.is_empty() && !app.library.loading);
     assert_eq!(app.library.entries.iter().map(Entry::label).collect::<Vec<_>>(), ["..", "Air", "Bonobo"]);
 
@@ -4849,7 +4850,7 @@ fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
     ));
     app.shed_server_state();
     assert!(app.artists.is_none() && app.genre_list.is_none());
-    assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
+    assert!(asks(&app.open_library_node(LibraryNode::Artists(crate::api::types::MoodFilter::NONE), true), LibraryNode::Artists(crate::api::types::MoodFilter::NONE)));
 
     // And with the account (the review's note): a reconnect as the same
     // user, or one that names none, keeps them; another user on the same
@@ -4869,7 +4870,7 @@ fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
     assert!(app.artists.is_some() && app.genre_list.is_some(), "the same account keeps its lists");
     app.apply_event(connected(Some("bob")));
     assert!(app.artists.is_none() && app.genre_list.is_none(), "another account's are not its own");
-    assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
+    assert!(asks(&app.open_library_node(LibraryNode::Artists(crate::api::types::MoodFilter::NONE), true), LibraryNode::Artists(crate::api::types::MoodFilter::NONE)));
 }
 
 #[test]
@@ -5844,7 +5845,7 @@ fn the_cooldown_list_does_not_repeat_an_artist() {
 #[test]
 fn selection_stays_in_bounds() {
     let mut pane = Pane::default();
-    pane.set(vec![Entry::Parent, Entry::Node { label: "x".into(), node: LibraryNode::Artists }]);
+    pane.set(vec![Entry::Parent, Entry::Node { label: "x".into(), node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE) }]);
     pane.move_by(-5);
     assert_eq!(pane.state.selected(), Some(0));
     pane.move_by(50);
@@ -5860,7 +5861,7 @@ fn selection_stays_in_bounds() {
 fn the_counts_leave_out_the_way_out_whether_or_not_there_is_one() {
     // Asked every frame, so answered from the length: `..` leads a listing
     // or is absent (performance audit #109).
-    let node = |label: &str| Entry::Node { label: label.into(), node: LibraryNode::Artists };
+    let node = |label: &str| Entry::Node { label: label.into(), node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE) };
     let mut pane = Pane::default();
     pane.set(vec![Entry::Parent, node("Alpha"), node("Beta"), node("Gamma")]);
     assert_eq!(pane.counts(), (3, 3));
@@ -5882,7 +5883,7 @@ fn the_counts_leave_out_the_way_out_whether_or_not_there_is_one() {
 #[test]
 #[should_panic(expected = "below the first row")]
 fn a_way_out_below_the_first_row_is_caught_where_the_list_lands() {
-    let node = |label: &str| Entry::Node { label: label.into(), node: LibraryNode::Artists };
+    let node = |label: &str| Entry::Node { label: label.into(), node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE) };
     Pane::default().set(vec![node("Alpha"), Entry::Parent]);
 }
 
@@ -7570,18 +7571,18 @@ fn a_reply_from_the_server_the_session_left_fills_nothing() {
     app.shed_server_state();
     assert_ne!(app.session_gen(), old, "a switch moves the generation on");
     // The new server's own walk wants the same node.
-    app.library_stack.enter(LibraryNode::Artists);
+    app.library_stack.enter(LibraryNode::Artists(crate::api::types::MoodFilter::NONE));
     app.apply_event(Event::Library {
         generation: old,
         dest: Tab::Library,
-        node: LibraryNode::Artists,
+        node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE),
         data: LibraryData::Artists(vec!["Old Server's Band".into()]),
     });
     assert!(app.library.entries.is_empty(), "the old server's answer is dropped: {:?}", labels(&app));
     app.apply_event(Event::Library {
         generation: app.session_gen(),
         dest: Tab::Library,
-        node: LibraryNode::Artists,
+        node: LibraryNode::Artists(crate::api::types::MoodFilter::NONE),
         data: LibraryData::Artists(vec!["Signal Chain".into()]),
     });
     assert_eq!(labels(&app), vec!["..", "Signal Chain"], "the new server's answer lands");

@@ -1098,9 +1098,9 @@ pub(crate) fn browser_title(app: &App) -> String {
         }
         Tab::Library => match app.library_node() {
             LibraryNode::Root => " Library ".to_string(),
-            LibraryNode::Artists => " Artists ".to_string(),
+            LibraryNode::Artists(_) => " Artists ".to_string(),
             LibraryNode::Artist(artist) => format!(" Artist: {artist} "),
-            LibraryNode::Albums => " Albums ".to_string(),
+            LibraryNode::Albums(_) => " Albums ".to_string(),
             LibraryNode::Album { name, .. } => format!(" Album: {name} "),
             LibraryNode::Genres(_) => " Genres ".to_string(),
             LibraryNode::Genre(genre, _) => format!(" Genre: {genre} "),
@@ -3214,6 +3214,7 @@ mod tests {
             discovery_taste: 0,
             discovery_plugins: false,
             uploads: false,
+            mood_filters: false,
         };
         // What a real ping does on the way in: the Auto-DJ rows depend on it.
         app.dj_panel.rebuild(&app.dj, None, false);

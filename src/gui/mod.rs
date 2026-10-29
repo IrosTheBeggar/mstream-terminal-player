@@ -30,6 +30,7 @@ mod dj;
 mod keep;
 mod library;
 mod log_file;
+mod moods;
 mod mini;
 mod now;
 mod opener;
@@ -204,6 +205,9 @@ pub(crate) enum Act {
     LibBack,
     /// The Genres list's Tags · Generated · Both (clauses 25–29).
     GenreSource(crate::api::types::GenreSource),
+    /// The mood Filters (library-rooms clauses 30–33, discovery-page
+    /// clause 33): the word that opens the panel, and its choices.
+    Mood(moods::MoodAct),
     /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
     /// radios, chips, the keyword field, the genre and server pickers —
     /// starting with its one primary: Start through the toggle (the
@@ -605,6 +609,8 @@ pub(crate) struct Gui {
     mini_cover: Option<cover::Slot>,
     /// The Discover room: its cursor, wheel, hanging lists and seeds modal.
     discover: discover::DiscoverUi,
+    /// The mood Filters of Albums and Artists, and whose panel is open.
+    moods: moods::MoodRooms,
     /// The queue's highlighted row last drawn, so a new one is revealed.
     last_qsel: Option<usize>,
     /// The last frame left paced work unfinished (covers still waiting to
@@ -679,6 +685,7 @@ impl Gui {
             card: None,
             mini_cover: None,
             discover: discover::DiscoverUi::new(),
+            moods: moods::MoodRooms::default(),
             last_qsel: None,
             hot: false,
             prefs_unsaved: None,
@@ -883,6 +890,9 @@ impl Gui {
         if library::act(self, &act) {
             return false;
         }
+        if moods::act(self, &act) {
+            return false;
+        }
         if sonic::act(self, &act) {
             return false;
         }
@@ -1002,6 +1012,9 @@ impl Gui {
                     self.albums.wall.stow();
                 }
                 self.active = i;
+                // The mood Filters' panel is hidden on every visit
+                // (library-rooms clause 32).
+                self.moods.open = None;
                 // The keys are the room's now: the App's focus comes back
                 // to the browser (the queue panel's cursor stows), and the
                 // Files room seats its own pane — the other rooms seat
@@ -1052,10 +1065,11 @@ impl Gui {
                 // on its track list). The tab must point at Library either
                 // way, so Activate on a track row lands on the right pane.
                 if i == ALBUMS_NAV && self.app.connected {
-                    if self.app.albums.is_none() {
-                        let effects = self
-                            .app
-                            .open_library_node(crate::tui::worker::LibraryNode::Albums, true);
+                    // The cache serves only the filter it was asked under
+                    // (library-rooms clause 31).
+                    if self.app.albums.is_none() || self.app.albums_moods != self.moods.albums {
+                        let node = crate::tui::worker::LibraryNode::Albums(self.moods.albums);
+                        let effects = self.app.open_library_node(node, true);
                         self.pend(effects);
                     } else if !self.app.on_albums_drill() {
                         // The shared pane holds another room's list: the wall
@@ -3566,7 +3580,8 @@ impl Gui {
             library::open(self, root);
         } else if self.active == ALBUMS_NAV {
             self.albums.wall = albums::WallState::default();
-            let effects = self.app.open_library_node(crate::tui::worker::LibraryNode::Albums, true);
+            let node = crate::tui::worker::LibraryNode::Albums(self.moods.albums);
+            let effects = self.app.open_library_node(node, true);
             self.pend(effects);
             // The Discover room's "Open on {server}": the album, once that
             // server's session answers (discovery-page clause 103).
@@ -6039,7 +6054,7 @@ mod dump_tests {
             .collect();
         let effects = gui.app.apply_event(Event::Library {
             generation: gui.app.session_gen(),
-            node: LibraryNode::Albums,
+            node: LibraryNode::Albums(crate::api::types::MoodFilter::NONE),
             dest: Tab::Library,
             data: LibraryData::Albums(albums),
         });

@@ -13,8 +13,10 @@ use super::*;
 /// (contract clause 26), so that row is left off for one.
 pub(super) fn library_root_entries(peer: bool) -> Vec<Entry> {
     [
-        ("Artists", LibraryNode::Artists),
-        ("Albums", LibraryNode::Albums),
+        // Unfiltered: the mood Filters are the GUI's (library-rooms
+        // contract, clause 30), and this menu lists what it always did.
+        ("Artists", LibraryNode::Artists(MoodFilter::NONE)),
+        ("Albums", LibraryNode::Albums(MoodFilter::NONE)),
         // Every genre, tagged or generated: the switch between the two is
         // the GUI's, and this menu lists what it always did.
         ("Genres", LibraryNode::Genres(GenreSource::Both)),
