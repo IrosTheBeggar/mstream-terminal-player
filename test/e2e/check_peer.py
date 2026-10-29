@@ -295,7 +295,12 @@ else:
          "rows marked by a live album copy")
     need("album-kept", header("album-kept") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   ✓ kept                          3 items",
          "the album's ✓ kept in the word's cells")
-    need("album-kept", all(frame("album-kept")[y][17:19] == "✓ " for y in (6, 7, 8)), "the kept album's rows' ✓")
+    # The queued Late Train Verse may still be playing (Linux keeps the
+    # fake's empty stream at 0:00; macOS gives it up): the playing glyph
+    # takes its lead cell over the ✓.
+    kept = frame("album-kept")
+    late = "▸ " if "Late Train Verse" in kept[26] else "✓ "
+    need("album-kept", [kept[y][17:19] for y in (6, 7, 8)] == ["✓ ", late, "✓ "], "the kept album's rows' ✓")
     outcome = window(frame("state"), "Keep a copy")
     need("state", " ✓ In your collection" in outcome and " 2 copied · 1 already yours" in outcome, "the state's click: its outcome")
     need("state", " In copies › Boukmanflow › Borrowed Tapes" in outcome, "where it landed")
