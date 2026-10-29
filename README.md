@@ -649,8 +649,9 @@ quarter, half-year and year, the older months and years, all time — and `p` or
 the period drops the list; `o` cycles the origin (all, this server, peers) while peer plays
 exist. Everything loads on entry and on a change, and a change keeps the page as it stands
 until the new numbers land; there is no poll. Times are in the machine's zone, read the way
-`date` reads it (`TZ`, else `/etc/localtime`), and the server is asked for its periods and
-buckets in that zone; a machine without a zone file gets UTC, and the Recent tab says so.
+`date` reads it (`TZ`, else `/etc/localtime`; on Windows, the zone Windows is set to), and the
+server is asked for its periods and buckets in that zone; a machine with no zone at all gets
+UTC, and the Recent tab says so.
 A server older than 6.27 has no Stats API, and the page says that instead. The player
 reports its own plays (see Play reporting below), and the log names them *this player*;
 a total under a minute reads in seconds.
