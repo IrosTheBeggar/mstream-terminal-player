@@ -583,6 +583,17 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    /// LOCALE_LOCK held and English set, for every test here. The room reads
+    /// its words through `t!`, and the locale is the whole process's:
+    /// gui::keep's and gui::discover's every-locale tests, which run beside
+    /// these, would otherwise have it drawn in German or Japanese.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        crate::kit::theme::pin_modern_terminal();
+        guard
+    }
+
     /// A connected Gui on the Playlists section with `names` standing —
     /// arrived at the way a user arrives: the nav click asks, the list is
     /// the server's reply.
@@ -620,6 +631,7 @@ mod tests {
 
     #[test]
     fn the_list_leads_with_the_new_card_and_names_the_playlists() {
+        let _en = english();
         let mut gui = pl_gui(&["Morning", "Road Trip", "Rainy Days"]);
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("+ New playlist"), "the create action leads:\n{text}");
@@ -635,6 +647,7 @@ mod tests {
 
     #[test]
     fn the_dialog_creates_and_respects_the_no_ops() {
+        let _en = english();
         let mut gui = pl_gui(&["Morning"]);
         key(&mut gui, KeyCode::Char('n'));
         assert!(gui.playlists.dialog.is_some(), "n opens the name dialog");
@@ -663,6 +676,7 @@ mod tests {
 
     #[test]
     fn rename_prefills_and_the_unchanged_name_is_a_no_op() {
+        let _en = english();
         let mut gui = pl_gui(&["Morning"]);
         key(&mut gui, KeyCode::Down); // the cursor up, on Morning
         key(&mut gui, KeyCode::Char('e'));
@@ -688,6 +702,7 @@ mod tests {
 
     #[test]
     fn the_delete_gate_asks_and_x_answers() {
+        let _en = english();
         // The pane arrives with its cursor on the first playlist, unlit —
         // x wants it up (the kit's list-cursor law), and ↓ lights it there.
         let mut gui = pl_gui(&["Morning", "Road Trip"]);
@@ -721,6 +736,7 @@ mod tests {
 
     #[test]
     fn activation_drills_and_the_tracks_draw_the_shared_way() {
+        let _en = english();
         let mut gui = pl_gui(&["Morning"]);
         // Enter wants the cursor up (the kit's list-cursor law): ↓ picks it
         // up on the first playlist, and the drill keeps the hand on the
@@ -762,6 +778,7 @@ mod tests {
 
     #[test]
     fn the_bar_reaches_both_playlist_levels() {
+        let _en = english();
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = pl_gui(&["Morning", "Road Trip", "Rainy Days"]);
         gui.queue_open = false;
@@ -807,6 +824,7 @@ mod tests {
 
     #[test]
     fn the_wheel_scrolls_whichever_level_is_up() {
+        let _en = english();
         let names: Vec<String> = (0..30).map(|i| format!("List {i:02}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut gui = pl_gui(&refs);
@@ -819,6 +837,7 @@ mod tests {
 
     #[test]
     fn a_name_typed_into_the_dialog_never_reaches_the_queue_panel() {
+        let _en = english();
         // With the panel holding the keys, the dialog's letters went to the
         // queue first: a `C` in a playlist's name cleared it.
         let mut gui = pl_gui(&["Morning"]);

@@ -426,6 +426,17 @@ mod tests {
     use crate::tui::app::{App, Effect, Tab};
     use crate::tui::worker::{ApiCmd, Event, LibraryData, LibraryNode};
 
+    /// LOCALE_LOCK held and English set, for every test here. The rooms read
+    /// their words through `t!`, and the locale is the whole process's:
+    /// gui::keep's and gui::discover's every-locale tests, which run beside
+    /// these, would otherwise have them drawn in German or Japanese.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        crate::kit::theme::pin_modern_terminal();
+        guard
+    }
+
     fn session_gui() -> Gui {
         let mut gui = Gui::new(Config::default(), false, App::new(Some("http://host:3000".into()), None, None));
         gui.app.connected = true;
@@ -494,6 +505,7 @@ mod tests {
 
     #[test]
     fn each_room_opens_its_root_fresh_with_the_pane_and_no_play_verbs() {
+        let _en = english();
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
@@ -526,6 +538,7 @@ mod tests {
 
     #[test]
     fn genres_show_their_counts_and_open_into_tracks_with_the_verbs() {
+        let _en = english();
         let mut gui = session_gui();
         gui.act(Act::Nav(GENRES_NAV));
         gui.pending.clear();
@@ -585,6 +598,7 @@ mod tests {
 
     #[test]
     fn the_genre_switch_sits_right_on_the_controls_line_and_the_filter_leads_it() {
+        let _en = english();
         let mut gui = genres_gui();
         let rows = draw(&mut gui);
         let all = rows.join("\n");
@@ -608,6 +622,7 @@ mod tests {
 
     #[test]
     fn a_kind_chosen_relists_in_place_is_remembered_and_rides_into_a_genres_songs() {
+        let _en = english();
         let mut gui = genres_gui();
         gui.act(Act::GenreSource(GenreSource::Model));
         assert!(asked(&gui, &LibraryNode::Genres(GenreSource::Model)), "the list is asked again");
@@ -646,6 +661,7 @@ mod tests {
 
     #[test]
     fn one_kind_or_a_server_without_the_filter_draws_no_switch() {
+        let _en = english();
         // Only generated genres here: the tags asked for came back as the
         // generated list, and there is nothing to choose between.
         let mut gui = session_gui();
@@ -677,6 +693,7 @@ mod tests {
 
     #[test]
     fn the_footer_names_the_keys_of_the_view_that_is_up() {
+        let _en = english();
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         // The footer is a setting on this surface, off by default.
         gui.config.gui.key_hints = true;
@@ -696,6 +713,7 @@ mod tests {
 
     #[test]
     fn recent_asks_the_limit_lists_the_tracks_and_wears_no_strip() {
+        let _en = english();
         let mut gui = session_gui();
         gui.act(Act::Nav(RECENT_NAV));
         assert!(asked(&gui, &LibraryNode::Recent));
@@ -711,6 +729,7 @@ mod tests {
 
     #[test]
     fn the_play_lists_ask_the_limit_list_tracks_like_recent_and_hide_for_a_peer() {
+        let _en = english();
         let mut gui = session_gui();
         gui.act(Act::Nav(LAST_PLAYED_NAV));
         assert!(asked(&gui, &LibraryNode::RecentlyPlayed), "asks on every visit");
@@ -741,6 +760,7 @@ mod tests {
 
     #[test]
     fn an_artist_opens_a_wall_of_its_albums_and_a_card_opens_its_tracks() {
+        let _en = english();
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         let rows = draw(&mut gui);
         assert_eq!(hit_text(&gui, &rows, "Portishead"), Some(Act::PaneRow(List::Library, 2, RowVerb::Open)));
@@ -797,6 +817,7 @@ mod tests {
 
     #[test]
     fn the_rows_past_a_hidden_way_out_keep_their_pane_indices() {
+        let _en = english();
         // A root's `..` is sliced off the front rather than filtered out of
         // a copy (performance audit #109): every drawn row still answers
         // with its own pane index, filtered or not.
@@ -841,6 +862,7 @@ mod tests {
     #[test]
     #[ignore = "a measurement, not a check; run --release with --nocapture"]
     fn render_twenty_thousand_artists_and_time_it() {
+        let _en = english();
         let names: Vec<String> =
             (0..20_000).map(|i| format!("{}rtist {i:05}", (b'A' + (i % 26) as u8) as char)).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -860,6 +882,7 @@ mod tests {
 
     #[test]
     fn the_strip_shows_at_25_rows_dims_absent_letters_jumps_and_follows_the_filter() {
+        let _en = english();
         // Twenty-four names: no strip. A twenty-fifth: the strip.
         let letters: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
         let names: Vec<String> = (0..24).map(|i| format!("{}rtist {i:02}", letters[i])).collect();
