@@ -5610,40 +5610,39 @@ mod tests {
     fn the_rest_tips_with_save_fit_the_footer_in_every_locale() {
         // The footer has 99 cells at the 100-column floor; the save words
         // ride after either rest tip (clause 64).
-        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
-            let _guard = locale(code);
-            for strip in [false, true] {
-                // Where the tab has no album no strip stands, and the rest tip
-                // is the plain one.
-                let mut gui = if strip {
-                    strip_gui()
-                } else {
-                    let mut gui = session_gui();
-                    key(&mut gui, KeyCode::Char('G'));
-                    let mut answer = main_answer();
-                    answer.library.as_mut().unwrap().albums.clear();
-                    land(&mut gui, TastePart::Main, answer);
-                    gui
-                };
-                draw_sized(&mut gui, 100, if strip { 30 } else { 24 });
-                let tips = super::tips(&gui);
-                let rest = if strip { rust_i18n::t!("gui.tips.discover_strip") } else { rust_i18n::t!("gui.tips.discover") };
-                assert!(tips.starts_with(&*rest), "{code} ({strip}): {tips}");
-                assert!(tips.ends_with(&*rust_i18n::t!("gui.tips.discover_save")), "{code}: {tips}");
-                assert!(crate::kit::width(&tips) <= 99, "{code} ({strip}): {} cells: {tips}", crate::kit::width(&tips));
-            }
-            // The fallback card's tip names `s` too: its Library tab saves.
-            let mut gui = session_gui();
-            key(&mut gui, KeyCode::Char('G'));
-            land_main(&mut gui, fallback_answer());
-            draw_sized(&mut gui, 100, 24);
+        let codes = ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"];
+        let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+        for strip in [false, true] {
+            // Where the tab has no album no strip stands, and the rest tip
+            // is the plain one.
+            let mut gui = if strip {
+                strip_gui()
+            } else {
+                let mut gui = session_gui();
+                key(&mut gui, KeyCode::Char('G'));
+                let mut answer = main_answer();
+                answer.library.as_mut().unwrap().albums.clear();
+                land(&mut gui, TastePart::Main, answer);
+                gui
+            };
+            draw_sized(&mut gui, 100, if strip { 30 } else { 24 });
             let tips = super::tips(&gui);
-            let want = format!("{} · {}", rust_i18n::t!("gui.tips.discover_fallback"), rust_i18n::t!("gui.tips.discover_save"));
-            assert_eq!(tips, want, "{code}: the fallback tip");
-            assert!(crate::kit::width(&tips) <= 99, "{code} (fallback): {} cells: {tips}", crate::kit::width(&tips));
-            key(&mut gui, KeyCode::Char('s'));
-            assert_eq!(gui.app.sonic_playlist_name.as_deref(), Some(""), "{code}: and `s` saves there");
+            let rest = if strip { rust_i18n::t!("gui.tips.discover_strip") } else { rust_i18n::t!("gui.tips.discover") };
+            assert!(tips.starts_with(&*rest), "{code} ({strip}): {tips}");
+            assert!(tips.ends_with(&*rust_i18n::t!("gui.tips.discover_save")), "{code}: {tips}");
+            assert!(crate::kit::width(&tips) <= 99, "{code} ({strip}): {} cells: {tips}", crate::kit::width(&tips));
         }
+        // The fallback card's tip names `s` too: its Library tab saves.
+        let mut gui = session_gui();
+        key(&mut gui, KeyCode::Char('G'));
+        land_main(&mut gui, fallback_answer());
+        draw_sized(&mut gui, 100, 24);
+        let tips = super::tips(&gui);
+        let want = format!("{} · {}", rust_i18n::t!("gui.tips.discover_fallback"), rust_i18n::t!("gui.tips.discover_save"));
+        assert_eq!(tips, want, "{code}: the fallback tip");
+        assert!(crate::kit::width(&tips) <= 99, "{code} (fallback): {} cells: {tips}", crate::kit::width(&tips));
+        key(&mut gui, KeyCode::Char('s'));
+        assert_eq!(gui.app.sonic_playlist_name.as_deref(), Some(""), "{code}: and `s` saves there");
     }
 
     #[test]
@@ -5815,22 +5814,6 @@ mod tests {
         assert_eq!(servers, vec![Line::Peer { group: 0, row: 0 }, Line::Peer { group: 0, row: 1 }], "no unreachable, no mismatched");
     }
 
-    /// The tests that read another language's words: the lock, then
-    /// `code`, and English again when the guard drops.
-    struct Locale(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-
-    impl Drop for Locale {
-        fn drop(&mut self) {
-            rust_i18n::set_locale("en");
-        }
-    }
-
-    fn locale(code: &str) -> Locale {
-        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        rust_i18n::set_locale(code);
-        Locale(guard)
-    }
-
     /// The cell a glyph stands in, by the buffer (a wide glyph's second
     /// cell joins a row's string as nothing, so a string index lies).
     fn cell_of(buffer: &ratatui::buffer::Buffer, symbol: &str) -> Position {
@@ -5847,7 +5830,7 @@ mod tests {
 
     #[test]
     fn the_headings_stand_over_their_columns_in_french() {
-        let _fr = locale("fr");
+        let Some(_) = crate::setup::tests::in_own_process(&["fr"]) else { return };
         let mut gui = answered_gui();
         let rows = draw(&mut gui);
         let header = &rows[15];
@@ -5864,7 +5847,7 @@ mod tests {
 
     #[test]
     fn the_columns_are_laid_out_in_cells_in_japanese() {
-        let _ja = locale("ja");
+        let Some(_) = crate::setup::tests::in_own_process(&["ja"]) else { return };
         let mut gui = answered_gui();
         let buffer = draw_buffer(&mut gui);
         // The header row: 曲 (two cells), then アーティスト — six glyphs, twelve
@@ -5878,7 +5861,7 @@ mod tests {
 
     #[test]
     fn the_cards_buttons_are_laid_out_in_cells_in_japanese() {
-        let _ja = locale("ja");
+        let Some(_) = crate::setup::tests::in_own_process(&["ja"]) else { return };
         let mut gui = session_gui();
         key(&mut gui, KeyCode::Char('G'));
         land(&mut gui, TastePart::Main, fallback_answer());
