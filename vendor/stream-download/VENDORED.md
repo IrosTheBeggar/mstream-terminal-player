@@ -26,7 +26,10 @@ seconds after a seek:
 - a seek made while the last one still sat unread in the one-slot seek queue was dropped. The
   download can reach a seek's position by itself before it reads the seek (a probe's seek to
   0 while the prefetch lands), so the reader's next seek parked it until the download
-  happened by (a seek into a file's last stretch waited out a stalled first request).
+  happened by (a seek into a file's last stretch waited out a stalled first request);
+- a read that found too few bytes named the position it would wait for only after looking, so
+  when the rest landed in between, the download found no position named and woke nobody: the
+  reader slept through its own bytes until the download ended.
 
 Neither 0.24.3, 0.24.4 nor upstream main (checked 2026-09-28) changes those files.
 
@@ -37,9 +40,13 @@ Every change is marked in the source with a comment beginning `mstream-player pa
 - `src/source/handle.rs`: `SourceHandle::want`, which a read about to wait calls with the
   position where its bytes run out. It is a `tokio::sync::watch`, so a want can be replaced by
   a newer one but never dropped. `request_seek` sends on a `watch` too, in place of the
-  one-slot `mpsc`: the latest seek replaces one the download has not looked at yet.
-- `src/source/mod.rs`: the download takes the latest seek from its `watch`; it wakes on a want
-  and asks for the gap at that position; it
+  one-slot `mpsc`: the latest seek replaces one the download has not looked at yet. A wait
+  (`wait_until_reached`) checks the downloaded runs for its position itself, under the lock
+  the download's wake takes, and the wake names the position it is for, so a late one wakes
+  no later wait.
+- `src/source/mod.rs`: the download takes the latest seek from its `watch`; a prefetch a seek
+  ends early wakes a reader parked in what it wrote; it wakes on a want and asks for the gap
+  at that position; it
   records where the reader last sought; a seek's gap that holds the seek position comes first;
   a reader parked on `requested_position` is woken once the run of written bytes reaches it,
   whatever path wrote them (the prefetch included); a refill goes forward from the reader's

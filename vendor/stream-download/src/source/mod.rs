@@ -269,6 +269,9 @@ where
                 debug!("seeking during prefetch, ending prefetch early");
                 self.downloaded
                     .add(self.prefetch_start_position..current_stream_position);
+                // mstream-player patch: a reader parked in what the prefetch wrote is woken, as
+                // wherever else a run is recorded.
+                self.notify_if_reached(current_stream_position);
                 self.prefetch_complete = true;
             }
             if let Some(content_length) = self.content_length {
@@ -408,7 +411,7 @@ where
         if run_start <= requested && requested <= end {
             debug!("notifying position reached");
             self.requested_position.clear();
-            self.position_reached.notify_position_reached();
+            self.position_reached.notify_position_reached(requested);
         }
     }
 
