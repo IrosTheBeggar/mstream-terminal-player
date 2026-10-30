@@ -3463,11 +3463,12 @@ mod tests {
         listener.join().expect("the thread ended on its own terms");
     }
 
-    /// A player that only counts: ticks, pauses, and whether it calls
-    /// itself settled.
+    /// A player that only counts: ticks (and when each came), pauses, and
+    /// whether it calls itself settled.
     #[derive(Clone, Default)]
     struct Counter {
         ticks: Arc<std::sync::atomic::AtomicUsize>,
+        ticked_at: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
         pauses: Arc<std::sync::atomic::AtomicUsize>,
         settled: Arc<std::sync::atomic::AtomicBool>,
     }
@@ -3496,6 +3497,7 @@ mod tests {
         }
         fn tick(&self) {
             self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.ticked_at.lock().unwrap().push(std::time::Instant::now());
         }
         fn settled(&self) -> bool {
             self.settled.load(std::sync::atomic::Ordering::SeqCst)
@@ -3511,9 +3513,15 @@ mod tests {
         let theirs = player.clone();
         let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
 
-        // Moving: the brisk tick, ~8 a second.
+        // Moving: the brisk tick, ~8 a second. A loaded machine starts and
+        // wakes the thread late, so the count in 1.3s drifts (5 on a macOS
+        // runner and on a busy Windows box, against ~10), but late only ever
+        // lengthens a gap: the shortest says which wait the loop is on, and
+        // the settled one is a second at the least.
         std::thread::sleep(Duration::from_millis(1300));
         let moving = player.ticks.swap(0, Ordering::SeqCst);
+        let ticked_at = std::mem::take(&mut *player.ticked_at.lock().unwrap());
+        let closest = ticked_at.windows(2).map(|pair| pair[1] - pair[0]).min();
         // Settled (paused, stopped): the device watch's pace — the wait in
         // flight when it settled still ends on the brisk clock.
         player.settled.store(true, Ordering::SeqCst);
@@ -3521,7 +3529,8 @@ mod tests {
         player.ticks.store(0, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(2300));
         let settled = player.ticks.swap(0, Ordering::SeqCst);
-        assert!(moving >= 6, "a moving player ticks briskly: {moving} in 1.3s");
+        let brisk = closest.is_some_and(|gap| gap < Duration::from_millis(500));
+        assert!(brisk, "a moving player ticks briskly: {moving} in 1.3s, at closest {closest:?} apart");
         assert!((1..=3).contains(&settled), "a settled player ticks once a second: {settled} in 2.3s");
 
         // A command does not wait out the lazy tick: it lands, and its

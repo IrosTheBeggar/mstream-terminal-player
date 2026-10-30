@@ -13,7 +13,7 @@ use futures_util::{Future, Stream, StreamExt, TryStream};
 use handle::{
     DownloadStatus, Downloaded, NotifyRead, PositionReached, RequestedPosition, SourceHandle,
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::task::yield_now;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -120,8 +120,10 @@ pub(crate) struct Source<S: SourceStream, W: StorageWriter> {
     position_reached: PositionReached,
     notify_read: NotifyRead,
     content_length: Option<u64>,
-    seek_tx: mpsc::Sender<u64>,
-    seek_rx: mpsc::Receiver<u64>,
+    // mstream-player patch: where the reader seeks (`SourceHandle::request_seek`): the latest
+    // seek, not a queue of them.
+    seek_tx: watch::Sender<u64>,
+    seek_rx: watch::Receiver<u64>,
     // mstream-player patch: where a waiting read's bytes run out (`SourceHandle::want`): the
     // latest such place, not a queue of them.
     want_tx: watch::Sender<u64>,
@@ -151,11 +153,9 @@ where
         settings: Settings<S>,
         cancellation_token: CancellationToken,
     ) -> Self {
-        // buffer size of 1 is fine here because we wait for the position to update after we send
-        // each request
-        let (seek_tx, seek_rx) = mpsc::channel(1);
-        // mstream-player patch: the initial 0 counts as seen, so nothing is wanted until a read
-        // says so.
+        // mstream-player patch: the initial 0s count as seen, so nothing is sought until the
+        // reader seeks, and nothing is wanted until a read says so.
+        let (seek_tx, seek_rx) = watch::channel(0);
         let (want_tx, want_rx) = watch::channel(0);
         Self {
             writer,
@@ -215,9 +215,12 @@ where
             // chunk. Forcing the client to abort and retry may help in these cases.
             let next_chunk = timeout(self.retry_timeout, stream.next());
             tokio::select! {
-                position = self.seek_rx.recv() => {
+                changed = self.seek_rx.changed() => {
                     // seek_tx can't be dropped here since we keep a reference in this struct
-                    self.handle_seek(stream, position.expect("seek_tx dropped")).await?;
+                    changed.expect("seek_tx dropped");
+                    // The latest seek: one made since the last look replaced any before it.
+                    let position = *self.seek_rx.borrow_and_update();
+                    self.handle_seek(stream, position).await?;
                 },
                 changed = self.want_rx.changed() => {
                     // want_tx can't be dropped here either, for the same reason
@@ -266,6 +269,9 @@ where
                 debug!("seeking during prefetch, ending prefetch early");
                 self.downloaded
                     .add(self.prefetch_start_position..current_stream_position);
+                // mstream-player patch: a reader parked in what the prefetch wrote is woken, as
+                // wherever else a run is recorded.
+                self.notify_if_reached(current_stream_position);
                 self.prefetch_complete = true;
             }
             if let Some(content_length) = self.content_length {
@@ -405,7 +411,7 @@ where
         if run_start <= requested && requested <= end {
             debug!("notifying position reached");
             self.requested_position.clear();
-            self.position_reached.notify_position_reached();
+            self.position_reached.notify_position_reached(requested);
         }
     }
 
