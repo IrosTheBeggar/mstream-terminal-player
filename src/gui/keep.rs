@@ -5096,7 +5096,8 @@ pub(crate) mod tests {
     #[ignore]
     fn dump_keep_states() {
         let locale = std::env::var("KEEP_DUMP_LOCALE").unwrap_or_else(|_| "en".to_string());
-        let _locale = crate::setup::tests::in_locale(&locale);
+        rust_i18n::set_locale(&locale);
+        crate::kit::theme::pin_modern_terminal();
         let height = std::env::var("KEEP_DUMP_ROWS").ok().and_then(|h| h.parse().ok()).unwrap_or(30);
         let hints = std::env::var("KEEP_DUMP_HINTS").is_ok_and(|h| h == "1");
         let show = |id: &str, gui: &mut Gui, hints: bool| {
@@ -6506,7 +6507,8 @@ pub(crate) mod tests {
 
     #[test]
     fn an_album_spread_over_the_servers_folders_draws_a_slot_with_its_own_note() {
-        let _en = english();
+        // English, but for a turn in Polish: a process of its own.
+        let Some(_) = crate::setup::tests::in_own_process(&["en"]) else { return };
         // Mixtape Vol 1 on Stage Peer B sits in each artist's own folder.
         let keep = |layout: &str, songs: Option<&[(&str, &str)]>| {
             let (mut gui, _) = mixtape_gui();
@@ -7520,28 +7522,26 @@ pub(crate) mod tests {
         // Their sentences have no blank to break at: the note's first row
         // carries on after the slot, by cells, and the whole note stands
         // on its two rows — or, cut, is their tooltip.
-        for code in ["ja", "zh"] {
-            let _locale = crate::setup::tests::in_locale(code);
-            let mut gui = keep_on(place_view("", "{{GENRE}}/{{ALBUMARTIST}}/{{ALBUM}}"));
-            choose(&mut gui, Some("album"));
-            let view = gui.app.keep_view().expect("the window");
-            let note = super::slot_note(view.landing.as_ref().expect("a place")).expect("a slot's note");
-            let low = super::lower(&view, super::Shown::default(), 72, super::Fit::default());
-            let rows: Vec<(String, Option<String>)> = low
-                .iter()
-                .filter_map(|line| match line {
-                    super::Low::Text { runs, tip, .. } => Some((runs.iter().map(|(t, _)| t.as_str()).collect(), tip.clone())),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(rows.len(), 2, "{code}: {rows:?}");
-            let slot = format!("‹{}›", rust_i18n::t!("gui.discover.dest.slot_genre"));
-            assert!(crate::kit::width(&rows[0].0) > crate::kit::width(&slot) + 2, "{code}: the first row filled: {rows:?}");
-            assert!(rows.iter().all(|(row, _)| crate::kit::width(row) <= 72), "{code}: {rows:?}");
-            match &rows[0].1 {
-                None => assert_eq!(format!("{}{}", rows[0].0, rows[1].0).replace(' ', ""), note.replace(' ', ""), "{code}"),
-                Some(tip) => assert!(tip == &note && rows[1].0.ends_with('…'), "{code}: {rows:?}"),
-            }
+        let Some(code) = crate::setup::tests::in_own_process(&["ja", "zh"]) else { return };
+        let mut gui = keep_on(place_view("", "{{GENRE}}/{{ALBUMARTIST}}/{{ALBUM}}"));
+        choose(&mut gui, Some("album"));
+        let view = gui.app.keep_view().expect("the window");
+        let note = super::slot_note(view.landing.as_ref().expect("a place")).expect("a slot's note");
+        let low = super::lower(&view, super::Shown::default(), 72, super::Fit::default());
+        let rows: Vec<(String, Option<String>)> = low
+            .iter()
+            .filter_map(|line| match line {
+                super::Low::Text { runs, tip, .. } => Some((runs.iter().map(|(t, _)| t.as_str()).collect(), tip.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 2, "{code}: {rows:?}");
+        let slot = format!("‹{}›", rust_i18n::t!("gui.discover.dest.slot_genre"));
+        assert!(crate::kit::width(&rows[0].0) > crate::kit::width(&slot) + 2, "{code}: the first row filled: {rows:?}");
+        assert!(rows.iter().all(|(row, _)| crate::kit::width(row) <= 72), "{code}: {rows:?}");
+        match &rows[0].1 {
+            None => assert_eq!(format!("{}{}", rows[0].0, rows[1].0).replace(' ', ""), note.replace(' ', ""), "{code}"),
+            Some(tip) => assert!(tip == &note && rows[1].0.ends_with('…'), "{code}: {rows:?}"),
         }
     }
 
@@ -9235,29 +9235,19 @@ pub(crate) mod tests {
 
     #[test]
     fn a_wide_glyph_left_of_the_picker_never_hides_its_left_border() {
-        let _en = english();
-        struct English;
-        impl Drop for English {
-            fn drop(&mut self) {
-                rust_i18n::set_locale("en");
-            }
-        }
-        let _back = English;
         // The room's nav beside the picker in a wide locale: a CJK glyph
         // across cols 9–10 would hide the border at col 10 (a terminal
         // never draws the cell a wide glyph spans) — col 9 is a blank there.
-        for code in ["ja", "zh"] {
-            rust_i18n::set_locale(code);
-            let mut gui = dest_gui("");
-            dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
-            let buffer = super::tests::buffer(&mut gui, 100, 30);
-            let all = lines(&buffer).join("\n");
-            let top = (0..30).find(|&y| buffer[(10, y)].symbol() == "╭").unwrap_or_else(|| panic!("{code}: the picker\n{all}"));
-            let bottom = (top..30).find(|&y| buffer[(10, y)].symbol() == "╰").unwrap_or_else(|| panic!("{code}: its bottom\n{all}"));
-            for y in top..=bottom {
-                assert!(crate::kit::width(buffer[(9, y)].symbol()) <= 1, "{code}: row {y} spills onto the border\n{all}");
-                assert!(matches!(buffer[(10, y)].symbol(), "╭" | "│" | "╰"), "{code}: row {y}\n{all}");
-            }
+        let Some(code) = crate::setup::tests::in_own_process(&["ja", "zh"]) else { return };
+        let mut gui = dest_gui("");
+        dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
+        let buffer = super::tests::buffer(&mut gui, 100, 30);
+        let all = lines(&buffer).join("\n");
+        let top = (0..30).find(|&y| buffer[(10, y)].symbol() == "╭").unwrap_or_else(|| panic!("{code}: the picker\n{all}"));
+        let bottom = (top..30).find(|&y| buffer[(10, y)].symbol() == "╰").unwrap_or_else(|| panic!("{code}: its bottom\n{all}"));
+        for y in top..=bottom {
+            assert!(crate::kit::width(buffer[(9, y)].symbol()) <= 1, "{code}: row {y} spills onto the border\n{all}");
+            assert!(matches!(buffer[(10, y)].symbol(), "╭" | "│" | "╰"), "{code}: row {y}\n{all}");
         }
     }
 
@@ -9286,48 +9276,39 @@ pub(crate) mod tests {
 
     #[test]
     fn the_variables_row_draws_every_one_inside_the_border_in_every_locale() {
-        let _en = english();
-        struct English;
-        impl Drop for English {
-            fn drop(&mut self) {
-                rust_i18n::set_locale("en");
-            }
-        }
-        let _back = English;
+        let codes = ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"];
+        let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
         let six = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER"];
         let seven = ["ARTIST", "ALBUM", "YEAR", "GENRE", "ALBUMARTIST", "PEER", "SERVERFOLDER"];
         // The six, and the seven of a server that lists SERVERFOLDER (65
         // cells): under Custom's field from col 5, never one lost.
         for (view, names) in [(dest_view("", "user"), &six[..]), (dest_view_folders("", "user"), &seven[..])] {
-            for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
-                rust_i18n::set_locale(code);
-                let mut gui = dest_gui_on(view.clone());
-                dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
-                let buffer = super::tests::buffer(&mut gui, 100, 30);
-                // The picker's content cells, cols 11–87 (its border at 10 and 89).
-                let row = |y: u16| (11..88).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>();
-                let y = (0..30).find(|&y| row(y).contains("ARTIST · ALBUM")).unwrap_or_else(|| panic!("{code}: no variables row"));
-                let cells = row(y);
-                for (i, name) in names.iter().enumerate() {
-                    let token = if *name == "ALBUM" { "ALBUM ·" } else { name };
-                    let byte = cells.find(token).unwrap_or_else(|| panic!("{code}: {name} missing from {cells:?}"));
-                    let at = cells[..byte].chars().count() as u16 + 11;
-                    assert_eq!(dest_hit(&gui, Position { x: at, y }), Some(super::DestAct::Var(i)), "{code}: {name} at {at}");
-                    assert!(at + name.len() as u16 - 1 <= 87, "{code}: {name} past the last cell");
-                }
-                assert!(!cells.trim_end().ends_with('·'), "{code}: no stray separator: {cells:?}");
-                assert!(cells.starts_with("     ARTIST · "), "{code}: under the field: {cells:?}");
-                // Every radio's words whole at col 5 and nothing after them:
-                // no layout beside a preset (a wide locale's cells hold a
-                // blank after each CJK glyph in the buffer: compared without).
-                for (_, key, _) in super::presets(&serde_json::from_value(view.clone()).unwrap(), "copies") {
-                    let words = rust_i18n::t!(key).to_string();
-                    let packed = words.replace(' ', "");
-                    let y = (0..30).find(|&y| row(y).replace(' ', "").contains(&packed)).unwrap_or_else(|| panic!("{code}: {words} missing"));
-                    let shown = row(y);
-                    assert!(shown.starts_with(" ( ) "), "{code}: {shown:?}");
-                    assert!(shown.trim_end().replace(' ', "").ends_with(&packed) && !shown.contains("{{"), "{code}: {shown:?}");
-                }
+            let mut gui = dest_gui_on(view.clone());
+            dest_act(&mut gui, super::DestAct::Pick(super::Radio::Custom));
+            let buffer = super::tests::buffer(&mut gui, 100, 30);
+            // The picker's content cells, cols 11–87 (its border at 10 and 89).
+            let row = |y: u16| (11..88).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>();
+            let y = (0..30).find(|&y| row(y).contains("ARTIST · ALBUM")).unwrap_or_else(|| panic!("{code}: no variables row"));
+            let cells = row(y);
+            for (i, name) in names.iter().enumerate() {
+                let token = if *name == "ALBUM" { "ALBUM ·" } else { name };
+                let byte = cells.find(token).unwrap_or_else(|| panic!("{code}: {name} missing from {cells:?}"));
+                let at = cells[..byte].chars().count() as u16 + 11;
+                assert_eq!(dest_hit(&gui, Position { x: at, y }), Some(super::DestAct::Var(i)), "{code}: {name} at {at}");
+                assert!(at + name.len() as u16 - 1 <= 87, "{code}: {name} past the last cell");
+            }
+            assert!(!cells.trim_end().ends_with('·'), "{code}: no stray separator: {cells:?}");
+            assert!(cells.starts_with("     ARTIST · "), "{code}: under the field: {cells:?}");
+            // Every radio's words whole at col 5 and nothing after them:
+            // no layout beside a preset (a wide locale's cells hold a
+            // blank after each CJK glyph in the buffer: compared without).
+            for (_, key, _) in super::presets(&serde_json::from_value(view.clone()).unwrap(), "copies") {
+                let words = rust_i18n::t!(key).to_string();
+                let packed = words.replace(' ', "");
+                let y = (0..30).find(|&y| row(y).replace(' ', "").contains(&packed)).unwrap_or_else(|| panic!("{code}: {words} missing"));
+                let shown = row(y);
+                assert!(shown.starts_with(" ( ) "), "{code}: {shown:?}");
+                assert!(shown.trim_end().replace(' ', "").ends_with(&packed) && !shown.contains("{{"), "{code}: {shown:?}");
             }
         }
     }
