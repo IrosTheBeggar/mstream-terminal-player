@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::api::types::{
     Album, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
-    DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, Ping, PluginJobList,
+    DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, MoodFilter, Ping, PluginJobList,
     PluginLink, PlaylistSummary, SearchResults, SimilarArtist, TasteRequest, TasteResponse, Track,
 };
 use crate::api::{ApiError, Client, PluginFailure};
@@ -586,9 +586,14 @@ impl KeepSong {
 pub enum LibraryNode {
     /// The mode menu — static, needs no request.
     Root,
-    Artists,
+    /// Every artist, or those a mood filter keeps (mStream #1092) — the
+    /// filter is part of the view's identity, as the genre kind is, so a
+    /// list asked for before the filter moved is dropped when it lands.
+    /// [`MoodFilter::NONE`] everywhere but the GUI's Filters.
+    Artists(MoodFilter),
     Artist(String),
-    Albums,
+    /// Every album, or those a mood filter keeps — as [`Self::Artists`].
+    Albums(MoodFilter),
     Album { name: String, artist: Option<String> },
     /// The Genres list of one kind (mStream #716) — part of the view's
     /// identity, so a list asked for before the switch moved is dropped
@@ -2259,11 +2264,11 @@ pub(crate) async fn load_library(
     Ok(match node {
         // The mode menu is static; the UI fills it in without asking.
         LibraryNode::Root => LibraryData::Artists(Vec::new()),
-        LibraryNode::Artists => LibraryData::Artists(client.artists_async().await?),
+        LibraryNode::Artists(moods) => LibraryData::Artists(client.artists_async(*moods).await?),
         LibraryNode::Artist(artist) => {
             LibraryData::Albums(client.artist_albums_async(artist).await?)
         }
-        LibraryNode::Albums => LibraryData::Albums(client.albums_async().await?),
+        LibraryNode::Albums(moods) => LibraryData::Albums(client.albums_async(*moods).await?),
         LibraryNode::Album { name, artist } => {
             LibraryData::Tracks(client.album_songs_async(name, artist.as_deref()).await?)
         }

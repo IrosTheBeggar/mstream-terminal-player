@@ -436,7 +436,7 @@ fn strip_fill(app: &App, tab: TasteTab) -> Option<StripFill> {
 /// frame laid out — empty where no strip of albums stands (clause 49).
 fn strip_tiles(gui: &Gui) -> Vec<Tile> {
     match strip_fill(&gui.app, gui.app.taste.tab) {
-        Some(StripFill::Tiles(tiles)) if layout(gui.discover.content, gui.app.taste.no_history, true).strip_y.is_some() => {
+        Some(StripFill::Tiles(tiles)) if layout(laid(gui, gui.discover.content), gui.app.taste.no_history, true).strip_y.is_some() => {
             tiles
         }
         _ => Vec::new(),
@@ -657,6 +657,15 @@ fn blanks(height: u16) -> (u16, u16) {
     (u16::from(height >= 17), u16::from(height >= 18))
 }
 
+/// The rect the room's rows are laid out in: the content, as many rows
+/// lower as the open mood panel takes (clause 33). The header keeps the top
+/// row and the panel the rows under it, so the layout's own header row
+/// falls on the panel's last — and a closed panel moves nothing.
+fn laid(gui: &Gui, content: Rect) -> Rect {
+    let panel = super::moods::panel_height(gui, content.width);
+    Rect { y: content.y + panel, height: content.height.saturating_sub(panel), ..content }
+}
+
 /// `strip`: the tab has a strip to draw. It stands where the table keeps
 /// [`STRIP_TABLE_MIN`] rows under it — a content area of 16 rows with no
 /// card (clause 49) — and gives way to the card, which comes first.
@@ -778,8 +787,11 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     gui.discover.hovered = None;
     gui.discover.tile_rects.clear();
     let fill = strip_fill(&gui.app, gui.app.taste.tab);
-    let lay = layout(content, gui.app.taste.no_history, fill.is_some());
-    draw_header(frame, gui, content, lay.header_y);
+    let lay = layout(laid(gui, content), gui.app.taste.no_history, fill.is_some());
+    // The header keeps the room's top row, the open mood panel the rows
+    // under it (clause 33); the rest stands below.
+    draw_header(frame, gui, content, content.y);
+    super::moods::draw_panel(frame, gui, content, content.y + 1);
     if let Some((rect, compact)) = lay.card {
         draw_card(frame, gui, rect, compact);
     }
@@ -889,6 +901,9 @@ struct HeadStep {
     long: bool,
     mark: bool,
     name: bool,
+    /// "options" drawn at all — and the mood Filters with their word.
+    more: bool,
+    filters_word: bool,
 }
 
 /// The header's steps, in the drop order (clause 17): the refresh's words
@@ -896,14 +911,23 @@ struct HeadStep {
 /// stand), then "more options" shortens to "options", then a widened
 /// window's mark gives way to the window the answer came from, then the
 /// room's name — the nav row already names the room — so the controls
-/// stand whole at the queue's 47 cells in every locale.
-fn head_steps(glyph: bool) -> Vec<HeadStep> {
-    let mut steps = vec![HeadStep { words: true, long: true, mark: true, name: true }];
+/// stand whole at the queue's 47 cells in every locale. With the mood
+/// Filters in the header (clause 33) the legacy console, whose refresh
+/// keeps its words, can still be short: "options" gives way (its modal is
+/// `e`), then Filters keep only their glyphs.
+fn head_steps(glyph: bool, filters: bool) -> Vec<HeadStep> {
+    let whole = HeadStep { words: true, long: true, mark: true, name: true, more: true, filters_word: true };
+    let mut steps = vec![whole];
     if glyph {
-        steps.push(HeadStep { words: false, long: true, mark: true, name: true });
+        steps.push(HeadStep { words: false, ..whole });
     }
     for (mark, name) in [(true, true), (false, true), (false, false)] {
-        steps.push(HeadStep { words: !glyph, long: false, mark, name });
+        steps.push(HeadStep { words: !glyph, long: false, mark, name, ..whole });
+    }
+    if filters {
+        let last = steps[steps.len() - 1];
+        steps.push(HeadStep { more: false, ..last });
+        steps.push(HeadStep { more: false, filters_word: false, ..last });
     }
     steps
 }
@@ -936,6 +960,11 @@ struct HeadWords {
     more: (String, String),
     /// "new seeds" and "asking…".
     refresh: (String, String),
+    /// The mood Filters control's widths (clause 33), whole — its word, the
+    /// dot while the room's filter is set, the chevron — and its glyphs
+    /// alone, where the server takes the filter; none elsewhere, and the
+    /// header is as it was.
+    filters: Option<(u16, u16)>,
 }
 
 impl HeadWords {
@@ -954,6 +983,13 @@ impl HeadWords {
             widest: WINDOWS.iter().map(|w| width(&window_label_in(*w, locale))).max().unwrap_or(0) as u16,
             more: (t!("gui.discover.more_options", locale = locale).to_string(), t!("gui.discover.options_short", locale = locale).to_string()),
             refresh: (t!("gui.discover.new_seeds", locale = locale).to_string(), t!("gui.discover.asking", locale = locale).to_string()),
+            filters: app.capabilities.taste_moods().then(|| {
+                let set = !app.taste.moods.is_empty();
+                (
+                    super::moods::toggle_width_of(&t!("gui.moods.filters", locale = locale), set, true),
+                    super::moods::toggle_width_of("", set, false),
+                )
+            }),
         }
     }
 }
@@ -964,6 +1000,8 @@ impl HeadWords {
 struct HeadPlan {
     step: HeadStep,
     window: (u16, u16),
+    /// The mood Filters control, between the window and "more options".
+    filters: Option<(u16, u16)>,
     more: (u16, u16),
     refresh: (u16, u16),
 }
@@ -985,19 +1023,30 @@ fn head_plan(words: &HeadWords, content: Rect, glyph: Option<&str>) -> HeadPlan 
         (width(value) as u16).max(words.widest) + 2
     };
     let more_w = |long: bool| width(if long { &words.more.0 } else { &words.more.1 }) as u16;
+    // The mood Filters (clause 33): whole, or their glyphs alone at the
+    // last step.
+    let filters_w = |s: &HeadStep| words.filters.map(|(whole, glyphs)| if s.filters_word { whole } else { glyphs });
     let need = |s: &HeadStep| {
         let name = if s.name { width(&words.name) as u16 + HEAD_GAP } else { 0 };
-        name + window_w(s.mark) + HEAD_GAP + more_w(s.long) + HEAD_GAP + refresh_w(s.words)
+        let filters = filters_w(s).map_or(0, |w| w + HEAD_GAP);
+        let more = if s.more { more_w(s.long) + HEAD_GAP } else { 0 };
+        name + window_w(s.mark) + HEAD_GAP + filters + more + refresh_w(s.words)
     };
-    let steps = head_steps(glyph.is_some());
+    let steps = head_steps(glyph.is_some(), words.filters.is_some());
     let step = steps.iter().copied().find(|s| need(s) <= content.width).unwrap_or(steps[steps.len() - 1]);
     let slot_w = refresh_w(step.words);
     let slot_x = content.right().saturating_sub(slot_w);
-    let more_w = more_w(step.long);
-    let more_x = slot_x.saturating_sub(HEAD_GAP + more_w);
+    // "options" given way: no width, at the refresh's slot.
+    let (more_x, more_w) = if step.more {
+        let w = more_w(step.long);
+        (slot_x.saturating_sub(HEAD_GAP + w), w)
+    } else {
+        (slot_x, 0)
+    };
+    let filters = filters_w(&step).map(|w| (more_x.saturating_sub(HEAD_GAP + w), w));
     let window_w = window_w(step.mark);
-    let window_x = more_x.saturating_sub(HEAD_GAP + window_w).max(content.x);
-    HeadPlan { step, window: (window_x, window_w), more: (more_x, more_w), refresh: (slot_x, slot_w) }
+    let window_x = filters.map_or(more_x, |(x, _)| x).saturating_sub(HEAD_GAP + window_w).max(content.x);
+    HeadPlan { step, window: (window_x, window_w), filters, more: (more_x, more_w), refresh: (slot_x, slot_w) }
 }
 
 /// The header (clauses 11, 15, 17, 91): the room's name BOLD, then, at the
@@ -1037,10 +1086,17 @@ fn draw_header(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     gui.ui.tip_keyed(rect, tip);
     gui.discover.window_at = rect;
 
+    // The mood Filters (clause 33): their panel opens under the header.
+    if let Some((x, _)) = plan.filters {
+        super::moods::draw_toggle(frame, gui, x, y, step.filters_word);
+    }
+
     let (more_x, more_w) = plan.more;
-    let more = if step.long { &words.more.0 } else { &words.more.1 };
-    super::text_button(frame, gui, more_x, y, more, false, Act::Disc(DiscAct::Seeds));
-    gui.ui.tip_keyed(Rect { x: more_x, y, width: more_w, height: 1 }, t!("gui.discover.seeds_tip").to_string());
+    if step.more {
+        let more = if step.long { &words.more.0 } else { &words.more.1 };
+        super::text_button(frame, gui, more_x, y, more, false, Act::Disc(DiscAct::Seeds));
+        gui.ui.tip_keyed(Rect { x: more_x, y, width: more_w, height: 1 }, t!("gui.discover.seeds_tip").to_string());
+    }
 
     // An ask out (either half, or a 403's probe): the refresh says so —
     // the state line's word before the line left (2026-10-16, clause 32).
@@ -5969,5 +6025,107 @@ mod tests {
         assert!(tips.contains("P play now") && tips.contains("m actions"), "a connected server's row has the sheet: {tips}");
         key(&mut gui, KeyCode::Char('w'));
         assert_eq!(super::tips(&gui), "↑ ↓ rows · Enter pick · Esc close");
+    }
+
+    // ── The mood Filters (clause 33) ──────────────────────────────────────
+
+    /// The room answered by a server whose taste route takes `moods`.
+    fn moody_gui() -> Gui {
+        let mut gui = answered_gui();
+        gui.app.capabilities.discovery_taste = 2;
+        gui.app.capabilities.mood_filters = true;
+        gui
+    }
+
+    #[test]
+    fn the_filters_stand_whole_in_the_header_in_every_locale_at_the_queues_47_cells() {
+        use crate::api::types::{MoodFilter, MoodScale};
+        let mut gui = moody_gui();
+        // The widest the control gets: the dot of a filter set.
+        gui.app.taste.moods = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        gui.queue_open = true;
+        draw(&mut gui);
+        let content = gui.discover.content;
+        assert_eq!(content.width, 47);
+        for legacy in [false, true] {
+            let _tier = legacy.then(crate::kit::theme::legacy_glyphs_here);
+            let glyph = super::refresh_glyph();
+            for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+                let words = super::HeadWords::of(&gui.app, code);
+                let plan = super::head_plan(&words, content, glyph);
+                let what = format!("{code}/legacy {legacy}: {plan:?}");
+                let (wx, ww) = plan.window;
+                let (fx, fw) = plan.filters.unwrap_or_else(|| panic!("no Filters: {what}"));
+                let (mx, mw) = plan.more;
+                let (rx, rw) = plan.refresh;
+                assert!(wx >= content.x, "{what}");
+                // "options" given way stands nowhere: Filters run to the refresh.
+                let middle = if plan.step.more { fx + fw + 2 <= mx && mx + mw + 2 <= rx } else { fx + fw + 2 <= rx };
+                assert!(wx + ww + 2 <= fx && middle && rx + rw <= content.right(), "{what}");
+                // Only the legacy console, whose refresh keeps its words,
+                // ever lets "options" go or Filters' word.
+                assert!(legacy || (plan.step.more && plan.step.filters_word), "{what}");
+            }
+        }
+        // A generation-1 route: no Filters, and the header as it was.
+        gui.app.capabilities.discovery_taste = 1;
+        let words = super::HeadWords::of(&gui.app, "en");
+        assert!(super::head_plan(&words, content, super::refresh_glyph()).filters.is_none());
+    }
+
+    #[test]
+    fn the_filters_open_a_panel_under_the_header_and_a_choice_asks_both_halves_again() {
+        use crate::api::types::{MoodFilter, MoodScale};
+        use super::super::moods::{MoodAct, is_open};
+        let _en = english();
+        let mut gui = moody_gui();
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(rows[2].contains("filters ▾"), "in the header: {all}");
+        assert_eq!(gui.ui.hit(at(&rows, "filters")), Some(Act::Mood(MoodAct::Toggle)));
+        let tabs_closed = rows.iter().position(|r| r.contains("based on")).unwrap_or_else(|| panic!("{all}"));
+
+        gui.act(Act::Mood(MoodAct::Toggle));
+        assert!(is_open(&gui));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(rows[3].contains("Happy · Neutral · Sad"), "the panel under the header: {all}");
+        let tabs_open = rows.iter().position(|r| r.contains("based on")).unwrap_or_else(|| panic!("{all}"));
+        assert!(tabs_open > tabs_closed, "the room stands below the panel: {all}");
+
+        gui.pending.clear();
+        gui.act(Act::Mood(MoodAct::Pick(MoodScale::Energy, "relaxed")));
+        let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        assert_eq!(gui.app.taste.moods, relaxed);
+        let body = main_body(&gui);
+        assert_eq!(body.moods, Some(relaxed));
+        assert_eq!(serde_json::to_value(&body).unwrap()["moods"], serde_json::json!({ "energy": "relaxed" }));
+        land(&mut gui, TastePart::Main, main_answer());
+        let peers = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::Taste { part: TastePart::Peers, body, .. }) => Some(body.moods),
+            _ => None,
+        });
+        assert_eq!(peers, Some(Some(relaxed)), "the connected servers are asked under it too");
+
+        // Another room and back: hidden again, the filter kept.
+        gui.act(Act::Nav(super::super::ALBUMS_NAV));
+        gui.act(Act::Nav(DISCOVER_NAV));
+        assert!(!is_open(&gui));
+        assert_eq!(gui.app.taste.moods, relaxed);
+    }
+
+    #[test]
+    fn a_generation_one_route_gets_no_filters_and_no_moods_key() {
+        use crate::api::types::{MoodFilter, MoodScale};
+        let _en = english();
+        let mut gui = answered_gui();
+        // Scores, but a taste body that would 400 on the key.
+        gui.app.capabilities.mood_filters = true;
+        gui.app.taste.moods = MoodFilter::NONE.press(MoodScale::Valence, "happy");
+        let all = draw(&mut gui).join("\n");
+        assert!(!all.contains("filters"), "{all}");
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Char('G'));
+        assert_eq!(main_body(&gui).moods, None);
     }
 }

@@ -316,6 +316,21 @@ answer and the visit (the session generation, clause 31).
     skeleton rows) — and no sentence: the refresh is the only "asking…". A
     re-ask leaves the rows standing until the new ones land; only the
     refresh says it is asking.
+33. **The mood filter** (2026-10-29, mStream #1092): where the server's
+    taste route takes it — the ping's `discoveryTaste` 2 and `moodFilters`
+    — the header carries `filters ▾` between the window and "more options"
+    (library-rooms clauses 31–32 for its look and its panel), and the panel
+    opens under the header, the room standing that many rows lower. The
+    room's filter rides in both asks as `moods`, only while set: the
+    library's songs match it and an album card needs most of its album to,
+    the server seeds from the history songs that match when there are any,
+    and a connected server that cannot filter has its rows dropped by the
+    server. A choice asks again, the visit kept (clause 3); the filter is
+    kept while the app runs, as the window is. A generation-1 route gets no
+    Filters and no key — its body would refuse it. At the queue's 47 cells
+    the header's steps make the room (clause 17); on the legacy console,
+    whose refresh keeps its words, "options" gives way next (its modal
+    stays `e`), then Filters keep only their glyphs.
 
 ### Tabs
 

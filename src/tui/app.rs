@@ -15,7 +15,7 @@ use std::sync::Arc;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::api::types::{Album, DirListing, Genre, GenreSource, Track};
+use crate::api::types::{Album, DirListing, Genre, GenreSource, MoodFilter, Track};
 use crate::api::urls;
 use crate::dj;
 use crate::player::PlayerStatus;
@@ -1988,6 +1988,9 @@ pub struct App {
     /// away. Same bargain as `search_hits`. Cleared with the session — the
     /// list belongs to one server.
     pub albums: Option<Vec<crate::api::types::Album>>,
+    /// The mood filter `albums` was asked under (the GUI's Filters): a
+    /// return to the wall seats the cache only while it still matches.
+    pub albums_moods: MoodFilter,
     /// The drilled artist's albums, kept whole for the GUI's artist wall the
     /// way `albums` is kept for the root wall (library-rooms contract,
     /// clause 7): the pane holds them as text rows, the wall wants the
@@ -2327,6 +2330,7 @@ impl App {
             library: Pane::default(),
             library_stack: Drill::new(LibraryNode::Root),
             albums: None,
+            albums_moods: MoodFilter::NONE,
             artist_albums: None,
             albums_rev: 0,
             artists: None,
@@ -5720,10 +5724,13 @@ impl App {
     }
 
     /// The session's copy of a room's root list, when it has one — Artists
-    /// and Genres; Recent and the play lists mean now and always ask.
+    /// and Genres; Recent and the play lists mean now and always ask. Only
+    /// the whole Artists list is kept: a mood-filtered one always asks.
     fn root_list(&self, node: &LibraryNode) -> Option<LibraryData> {
         match node {
-            LibraryNode::Artists => self.artists.clone().map(LibraryData::Artists),
+            LibraryNode::Artists(moods) if moods.is_empty() => {
+                self.artists.clone().map(LibraryData::Artists)
+            }
             LibraryNode::Genres(asked) => self
                 .genre_list
                 .as_ref()
@@ -5737,10 +5744,24 @@ impl App {
     /// GUI's click on the room already up — the way to see a rescan.
     pub(crate) fn forget_root_list(&mut self, node: &LibraryNode) {
         match node {
-            LibraryNode::Artists => self.artists = None,
+            LibraryNode::Artists(_) => self.artists = None,
             LibraryNode::Genres(_) => self.genre_list = None,
             _ => {}
         }
+    }
+
+    /// The Albums or Artists list asked for again under another mood
+    /// filter — the GUI's Filters. Swapped in place, as the genre kind is:
+    /// Back climbs where it did before. Nothing unless that list is up.
+    pub(crate) fn switch_moods(&mut self, moods: MoodFilter) -> Vec<Effect> {
+        let node = match self.library_stack.here() {
+            LibraryNode::Albums(now) if *now != moods => LibraryNode::Albums(moods),
+            LibraryNode::Artists(now) if *now != moods => LibraryNode::Artists(moods),
+            _ => return Vec::new(),
+        };
+        self.library_stack.replace(node.clone());
+        self.library.set(Vec::new());
+        vec![self.ask_library(node, Tab::Library)]
     }
 
     /// The Genres list asked for another kind — the GUI's Tags · Generated
@@ -5759,9 +5780,9 @@ impl App {
     /// Whether the Library pane's drill stands on the Albums wall, or on an
     /// album opened from it.
     pub(crate) fn on_albums_drill(&self) -> bool {
-        matches!(self.library_stack.here(), LibraryNode::Albums)
+        matches!(self.library_stack.here(), LibraryNode::Albums(_))
             || (matches!(self.library_stack.here(), LibraryNode::Album { .. })
-                && matches!(self.library_stack.parent(), Some(LibraryNode::Albums)))
+                && matches!(self.library_stack.parent(), Some(LibraryNode::Albums(_))))
     }
 
     /// The Albums wall seated over its own drill from the cached list, no
@@ -5772,7 +5793,7 @@ impl App {
         self.tab = Tab::Library;
         self.library_stack = Drill::new(LibraryNode::Root);
         self.library.trail.clear();
-        self.library_stack.enter(LibraryNode::Albums);
+        self.library_stack.enter(LibraryNode::Albums(self.albums_moods));
         self.library.set(entries::entries_from_library(LibraryData::Albums(albums)));
     }
 
@@ -6185,10 +6206,11 @@ impl App {
                     return Vec::new();
                 }
                 // The grid's copy, kept whole — see the field's note.
-                if let (LibraryNode::Albums, Tab::Library, LibraryData::Albums(albums)) =
+                if let (LibraryNode::Albums(moods), Tab::Library, LibraryData::Albums(albums)) =
                     (&node, dest, &data)
                 {
                     self.albums = Some(albums.clone());
+                    self.albums_moods = *moods;
                     self.albums_rev = self.albums_rev.wrapping_add(1);
                 }
                 if let (LibraryNode::Artist(artist), Tab::Library, LibraryData::Albums(albums)) =
@@ -6199,7 +6221,9 @@ impl App {
                 }
                 // The Artists and Genres rooms' copies — see the fields.
                 match (&node, dest, &data) {
-                    (LibraryNode::Artists, Tab::Library, LibraryData::Artists(names)) => {
+                    (LibraryNode::Artists(moods), Tab::Library, LibraryData::Artists(names))
+                        if moods.is_empty() =>
+                    {
                         self.artists = Some(names.clone());
                     }
                     (LibraryNode::Genres(asked), Tab::Library, LibraryData::Genres(list)) => {

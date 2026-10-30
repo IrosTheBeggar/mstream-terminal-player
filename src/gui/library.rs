@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
-use crate::api::types::GenreSource;
+use crate::api::types::{GenreSource, MoodFilter};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, STRIP_MIN_ROWS, dim, letter_index, letter_strip, scroll_list};
 use crate::tui::app::{Action, App, Entry, Tab};
@@ -39,8 +39,9 @@ impl LibraryUi {
 /// The root node a nav row opens, when the row is one of ours.
 pub(crate) fn root_of(active: usize) -> Option<LibraryNode> {
     match active {
-        ARTISTS_NAV => Some(LibraryNode::Artists),
-        // The kind is the remembered one, which [`open`] puts in.
+        // The room's mood filter, and the Genres room's kind, are put in by
+        // [`open`].
+        ARTISTS_NAV => Some(LibraryNode::Artists(MoodFilter::NONE)),
         GENRES_NAV => Some(LibraryNode::Genres(GenreSource::default())),
         RECENT_NAV => Some(LibraryNode::Recent),
         LAST_PLAYED_NAV => Some(LibraryNode::RecentlyPlayed),
@@ -61,9 +62,11 @@ pub(crate) fn open(gui: &mut Gui, root: LibraryNode) {
     // Fresh, and with the cursor stowed (the kit's list-cursor law).
     gui.library.view.stow();
     gui.library.wall = WallState::default();
-    // The Genres room opens on the kind it was left on (clause 26).
+    // The Genres room opens on the kind it was left on (clause 26), the
+    // Artists room under its mood filter (clause 31).
     let root = match root {
         LibraryNode::Genres(_) => LibraryNode::Genres(remembered_source(gui)),
+        LibraryNode::Artists(_) => LibraryNode::Artists(gui.moods.artists),
         other => other,
     };
     let effects = gui.app.open_library_node(root, true);
@@ -94,7 +97,7 @@ fn wall_view(gui: &Gui) -> bool {
 fn at_root(gui: &Gui) -> bool {
     matches!(
         gui.app.library_stack.here(),
-        LibraryNode::Artists | LibraryNode::Genres(_) | LibraryNode::Recent | LibraryNode::RecentlyPlayed | LibraryNode::MostPlayed
+        LibraryNode::Artists(_) | LibraryNode::Genres(_) | LibraryNode::Recent | LibraryNode::RecentlyPlayed | LibraryNode::MostPlayed
     )
 }
 
@@ -127,7 +130,7 @@ pub(super) fn keep_off_parent(gui: &mut Gui) {
 /// is newest first and a track list is an album's or a genre's order
 /// (clauses 10 and 12).
 fn alphabetical(gui: &Gui) -> bool {
-    matches!(gui.app.library_stack.here(), LibraryNode::Artists | LibraryNode::Genres(_))
+    matches!(gui.app.library_stack.here(), LibraryNode::Artists(_) | LibraryNode::Genres(_))
 }
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
@@ -232,11 +235,16 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let x = content.right().saturating_sub(count.chars().count() as u16).max(count_x);
     put(frame, x, content.y, &count, dim());
     super::draw_bar_controls(frame, gui, content, content.y + 1);
-    // The Genres switch at the controls line's right (clause 27).
+    // The Genres switch at the controls line's right (clause 27); the
+    // Artists list's mood Filters there instead, and their panel under it
+    // (clauses 30–32): what follows stands below the panel.
     draw_genre_switch(frame, gui, content, content.y + 1);
+    super::moods::draw_for_list(frame, gui, content);
+    let panel = super::moods::panel_height(gui, content.width);
+    let body = Rect { y: content.y + panel, height: content.height.saturating_sub(panel), ..content };
 
     if gui.app.library.loading {
-        put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
+        put(frame, content.x, body.y + 3, &t!("busy.listing"), accent());
         return;
     }
     let root = at_root(gui);
@@ -246,7 +254,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         // An empty answer, or a filter that matched nothing (the bar
         // contract's rule: the way back is one key).
         let words = if gui.app.library.filter.is_empty() { t!("gui.lib.empty") } else { t!("gui.files.empty") };
-        put(frame, content.x, content.y + 3, &words, dim());
+        put(frame, content.x, body.y + 3, &words, dim());
         return;
     }
 
@@ -254,15 +262,15 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if alpha && rows.len() >= STRIP_MIN_ROWS {
         // The narrowed list's letters (clause 11), by drawn position.
         let (present, first_of) = letter_index(rows.iter().map(Entry::label));
-        let strip = Rect { x: content.x, y: content.y + 2, width: content.width, height: 1 };
+        let strip = Rect { x: content.x, y: body.y + 2, width: content.width, height: 1 };
         letter_strip(frame, &mut gui.ui, strip, &present, move |bucket| Act::LibJump(first_of[bucket]));
     }
 
     let list = Rect {
         x: content.x,
-        y: content.y + 3,
+        y: body.y + 3,
         width: content.width - 2,
-        height: content.height.saturating_sub(3),
+        height: body.height.saturating_sub(3),
     };
     let selected = gui.app.library.state.selected();
     // Off the drawn rows when it rests on the hidden `..`.
@@ -421,7 +429,7 @@ mod tests {
     use ratatui::layout::Position;
 
     use super::super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RECENT_NAV, RowVerb, render};
-    use crate::api::types::{Album, Genre, GenreList, GenreSource, GenreSources, Track};
+    use crate::api::types::{Album, Genre, GenreList, GenreSource, GenreSources, MoodFilter, MoodScale, Track};
     use crate::config::Config;
     use crate::tui::app::{App, Effect, Tab};
     use crate::tui::worker::{ApiCmd, Event, LibraryData, LibraryNode};
@@ -486,9 +494,9 @@ mod tests {
     fn artists_gui(names: &[&str]) -> Gui {
         let mut gui = session_gui();
         gui.act(Act::Nav(ARTISTS_NAV));
-        assert!(asked(&gui, &LibraryNode::Artists), "the row asks for the list");
+        assert!(asked(&gui, &LibraryNode::Artists(crate::api::types::MoodFilter::NONE)), "the row asks for the list");
         gui.pending.clear();
-        land(&mut gui, LibraryNode::Artists, LibraryData::Artists(names.iter().map(|n| n.to_string()).collect()));
+        land(&mut gui, LibraryNode::Artists(crate::api::types::MoodFilter::NONE), LibraryData::Artists(names.iter().map(|n| n.to_string()).collect()));
         gui
     }
 
@@ -514,14 +522,14 @@ mod tests {
         assert!(asked(&gui, &LibraryNode::Recent), "Recent asks on every visit");
         gui.pending.clear();
         gui.act(Act::Nav(ARTISTS_NAV));
-        assert!(matches!(gui.app.library_stack.here(), LibraryNode::Artists), "a room restarts at its root");
-        assert!(!asked(&gui, &LibraryNode::Artists), "seated from the session's copy");
+        assert!(matches!(gui.app.library_stack.here(), LibraryNode::Artists(_)), "a room restarts at its root");
+        assert!(!asked(&gui, &LibraryNode::Artists(crate::api::types::MoodFilter::NONE)), "seated from the session's copy");
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("Bassnectar") && all.contains("Portishead") && all.contains("2 items"), "{all}");
         // The room chosen again while it is up asks afresh: the way to see
         // a rescan.
         gui.act(Act::Nav(ARTISTS_NAV));
-        assert!(asked(&gui, &LibraryNode::Artists), "a second choice reloads");
+        assert!(asked(&gui, &LibraryNode::Artists(crate::api::types::MoodFilter::NONE)), "a second choice reloads");
     }
 
     #[test]
@@ -779,7 +787,7 @@ mod tests {
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("Third"), "the wall again: {all}");
         key(&mut gui, KeyCode::Esc);
-        assert!(matches!(gui.app.library_stack.here(), LibraryNode::Artists));
+        assert!(matches!(gui.app.library_stack.here(), LibraryNode::Artists(_)));
         // Opening the bucket asks for the artist's name-less album.
         gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));
         assert!(asked(&gui, &LibraryNode::Artist("Portishead".into())), "the artist opens again: {:?}", gui.pending);
@@ -901,5 +909,92 @@ mod tests {
         assert!(all3.contains("10 of 25"), "{all3}");
         assert!(!rows.iter().any(|r| r.contains("# A B C")), "ten rows: the strip stands down\n{all3}");
         let _ = all;
+    }
+
+    // ── The mood Filters (clauses 30–32) ─────────────────────────────────
+
+    #[test]
+    fn the_artists_filters_sit_right_on_the_controls_line_and_their_panel_pushes_the_list_down() {
+        use super::super::moods::{MoodAct, is_open};
+        let mut gui = artists_gui(&["ALM", "Boukmanflow", "Color Out"]);
+        let all = draw(&mut gui).join("\n");
+        assert!(!all.contains("filters"), "no scores to filter by, no Filters: {all}");
+
+        gui.app.capabilities.mood_filters = true;
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        let y = rows.iter().position(|r| r.contains("filters ▾")).unwrap_or_else(|| panic!("{all}"));
+        let (heading, line) = (&rows[y - 1], &rows[y]);
+        assert_eq!(col(line, "/ filter"), col(heading, "Artists"), "the filter leads the line: {all}");
+        assert_eq!(
+            col(line, "filters ▾") + "filters ▾".chars().count() + 1,
+            col(heading, "items") + "items".len(),
+            "the control ends where the bar's verbs do, a cell in from the count: {all}"
+        );
+        let alm = rows.iter().position(|r| r.contains("ALM")).unwrap();
+        assert_eq!(hit_text(&gui, &rows, "filters"), Some(Act::Mood(MoodAct::Toggle)));
+
+        gui.act(Act::Mood(MoodAct::Toggle));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(rows[y + 1].contains("Happy · Neutral · Sad"), "the panel under the line: {all}");
+        assert!(all.contains("Acoustic · Party · Danceable") && !all.contains("clear"), "{all}");
+        assert!(rows.iter().position(|r| r.contains("ALM")).unwrap() > alm, "the list below the panel: {all}");
+        assert_eq!(
+            hit_text(&gui, &rows, "Relaxed"),
+            Some(Act::Mood(MoodAct::Pick(MoodScale::Energy, "relaxed")))
+        );
+
+        // The filter's field takes the whole line; the panel stays.
+        gui.act(Act::BarFilter);
+        let all = draw(&mut gui).join("\n");
+        assert!(!all.contains("filters ▴") && all.contains("Happy · Neutral · Sad"), "{all}");
+        key(&mut gui, KeyCode::Esc);
+
+        // Another room, and back: hidden again.
+        gui.act(Act::Nav(RECENT_NAV));
+        gui.act(Act::Nav(ARTISTS_NAV));
+        assert!(!is_open(&gui));
+    }
+
+    #[test]
+    fn a_mood_chosen_relists_the_artists_in_place_and_a_filtered_list_always_asks() {
+        use super::super::moods::{MoodAct, is_open};
+        let mut gui = artists_gui(&["ALM", "Boukmanflow", "Color Out"]);
+        gui.app.capabilities.mood_filters = true;
+        gui.act(Act::Mood(MoodAct::Toggle));
+        gui.pending.clear();
+
+        let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        gui.act(Act::Mood(MoodAct::Pick(MoodScale::Energy, "relaxed")));
+        assert!(asked(&gui, &LibraryNode::Artists(relaxed)), "asked again under the filter");
+        assert_eq!(gui.app.library_stack.here(), &LibraryNode::Artists(relaxed), "in place");
+        assert!(is_open(&gui));
+        // The whole list landing late fills nothing.
+        land(&mut gui, LibraryNode::Artists(MoodFilter::NONE), LibraryData::Artists(vec!["Old".into()]));
+        assert!(!draw(&mut gui).join("\n").contains("Old"));
+        land(&mut gui, LibraryNode::Artists(relaxed), LibraryData::Artists(vec!["ALM".into()]));
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("ALM") && !all.contains("Boukmanflow"), "{all}");
+        assert!(all.contains("filters ● ▴") && all.contains("clear"), "{all}");
+        assert_eq!(gui.app.artists.as_ref().map(Vec::len), Some(3), "the session keeps the whole list only");
+
+        // Back in the room: the filtered list is asked for again.
+        gui.act(Act::Nav(RECENT_NAV));
+        gui.pending.clear();
+        gui.act(Act::Nav(ARTISTS_NAV));
+        assert!(asked(&gui, &LibraryNode::Artists(relaxed)));
+        land(&mut gui, LibraryNode::Artists(relaxed), LibraryData::Artists(vec!["ALM".into()]));
+
+        // Clear lets every group go, and the whole list comes back.
+        gui.act(Act::Mood(MoodAct::Toggle));
+        gui.pending.clear();
+        gui.act(Act::Mood(MoodAct::Clear));
+        assert!(asked(&gui, &LibraryNode::Artists(MoodFilter::NONE)));
+        assert!(gui.moods.artists.is_empty());
+        // A choice that changes nothing asks nothing.
+        gui.pending.clear();
+        gui.act(Act::Mood(MoodAct::Clear));
+        assert!(gui.pending.is_empty(), "{:?}", gui.pending);
     }
 }
