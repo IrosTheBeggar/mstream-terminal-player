@@ -22,7 +22,11 @@ seconds after a seek:
   dead track);
 - a read that ran off the end of an island never asked for what came next;
 - a chunk landing above a reader that had sought back into a gap woke it onto bytes never
-  written.
+  written;
+- a seek made while the last one still sat unread in the one-slot seek queue was dropped. The
+  download can reach a seek's position by itself before it reads the seek (a probe's seek to
+  0 while the prefetch lands), so the reader's next seek parked it until the download
+  happened by (a seek into a file's last stretch waited out a stalled first request).
 
 Neither 0.24.3, 0.24.4 nor upstream main (checked 2026-09-28) changes those files.
 
@@ -32,8 +36,10 @@ Every change is marked in the source with a comment beginning `mstream-player pa
 
 - `src/source/handle.rs`: `SourceHandle::want`, which a read about to wait calls with the
   position where its bytes run out. It is a `tokio::sync::watch`, so a want can be replaced by
-  a newer one but never dropped.
-- `src/source/mod.rs`: the download wakes on a want and asks for the gap at that position; it
+  a newer one but never dropped. `request_seek` sends on a `watch` too, in place of the
+  one-slot `mpsc`: the latest seek replaces one the download has not looked at yet.
+- `src/source/mod.rs`: the download takes the latest seek from its `watch`; it wakes on a want
+  and asks for the gap at that position; it
   records where the reader last sought; a seek's gap that holds the seek position comes first;
   a reader parked on `requested_position` is woken once the run of written bytes reaches it,
   whatever path wrote them (the prefetch included); a refill goes forward from the reader's

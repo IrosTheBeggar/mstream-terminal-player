@@ -7,9 +7,8 @@ use std::time::Instant;
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use rangemap::RangeSet;
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Notify, mpsc, watch};
-use tracing::{debug, error};
+use tokio::sync::{Notify, watch};
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SourceHandle {
@@ -18,7 +17,8 @@ pub(crate) struct SourceHandle {
     pub(super) requested_position: RequestedPosition,
     pub(super) position_reached: PositionReached,
     pub(super) content_length: Option<u64>,
-    pub(super) seek_tx: mpsc::Sender<u64>,
+    // mstream-player patch: see `request_seek`.
+    pub(super) seek_tx: watch::Sender<u64>,
     // mstream-player patch: see `want`.
     pub(super) want_tx: watch::Sender<u64>,
     pub(super) notify_read: NotifyRead,
@@ -80,15 +80,15 @@ impl SourceHandle {
         self.requested_position.set(position);
     }
 
+    // mstream-player patch: only the latest seek counts, as with `want`. A seek waits for its
+    // position, but the download can reach that position by itself before it looks at the
+    // seek (a probe's seek to 0 while the prefetch lands), and the reader, woken, seeks on. On
+    // the one-slot queue the stale seek still held the slot and the new one was dropped
+    // ("Sent multiple seek requests without waiting"), so the reader parked until the
+    // download happened by: a seek into the file's last stretch waited out the whole first
+    // request.
     fn request_seek(&self, position: u64) {
-        self.seek_tx
-            .try_send(position)
-            .inspect_err(|e| {
-                if let TrySendError::Full(_) = e {
-                    error!("Sent multiple seek requests without waiting");
-                }
-            })
-            .ok();
+        self.seek_tx.send_replace(position);
     }
 }
 
