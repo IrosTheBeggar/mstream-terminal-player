@@ -35,12 +35,6 @@ const SEEK_STEP: f64 = 5.0;
 /// The shifted seek keys. Five seconds is the wrong unit for a long mix or a
 /// set recording, where the interesting distance is minutes.
 const SEEK_STEP_FAR: f64 = 60.0;
-/// How long a just-issued seek outvotes the position status reports when
-/// the next seek computes its base. Covers the round trip through the
-/// worker and a status poll or two; short enough that a target the engine
-/// lawfully landed short of (its end-of-track runway clamp) stops steering
-/// follow-up presses once it has gone stale.
-const SEEK_CHAIN: std::time::Duration = std::time::Duration::from_millis(2500);
 const VOLUME_STEP: f32 = 0.05;
 /// Rows a page key moves. Ctrl+u/d move half of this, as they do in vim.
 const PAGE_STEP: isize = 10;
@@ -2170,15 +2164,18 @@ pub struct App {
     /// that doesn't. A late success for an undone path is dropped by the
     /// listing handler's own path guard.
     browse_undo: Option<(String, bool)>,
-    /// Where the last seek was told to land, so the next press builds on it.
-    /// Status refreshes a few times a second, and seek keys compute their
-    /// target from the last position heard — so a quick `}}}` all read the
-    /// same stale base and moved one minute, not three. Cleared when a
-    /// status shows the seek arrived (or the source changed under it), and
-    /// trusted only briefly: the engine may lawfully land a forward seek
-    /// short of the ask (its end-of-track runway clamp), and an expired
-    /// goal must not keep outvoting reality.
-    seek_goal: Option<(f64, crate::clock::Instant)>,
+    /// Where the last seek was told to land, so the next press builds on it,
+    /// and whether the audio thread has said it is done with that seek. The
+    /// position heard is stale while a seek is in flight: status refreshes a
+    /// few times a second, so a quick `}}}` all read the same base and moved
+    /// one minute, not three, and a seek waiting on the network holds the
+    /// audio thread, statuses and all, for as long as its bytes take —
+    /// seconds, for a FLAC with no seek table on a slow link. So the goal
+    /// stands until the thread names it done ([`Event::Seeked`]) and the
+    /// status after that says where playback landed, which may lawfully be
+    /// short of the ask (the engine's end-of-track runway clamp). A source
+    /// change under it drops it too.
+    seek_goal: Option<(f64, bool)>,
     pub volume: f32,
     /// Seconds of blend between tracks, from `crossfade_seconds` in
     /// config.toml; 0 is off. Also adjustable in the Auto-DJ panel (C4).
@@ -3257,12 +3254,15 @@ impl App {
         self.pointer = Some(at);
     }
 
-    /// A click on the progress bar, in seconds from the start.
+    /// A click on the progress bar, in seconds from the start. A seek key
+    /// pressed while it is in flight builds on where the click aimed.
     pub fn seek_to(&mut self, position: f64) -> Vec<Effect> {
         if self.status.is_idle() || !position.is_finite() {
             return Vec::new();
         }
-        vec![Effect::Audio(AudioCmd::Seek(position.max(0.0)))]
+        let target = position.max(0.0);
+        self.seek_goal = Some((target, false));
+        vec![Effect::Audio(AudioCmd::Seek(target))]
     }
 
     fn move_selection(&mut self, delta: isize) -> Vec<Effect> {
@@ -5923,8 +5923,11 @@ impl App {
 
     fn skip_previous(&mut self) -> Vec<Effect> {
         // Restart the track if we're more than a few seconds in, like every
-        // other player.
-        if self.status.position > 3.0 {
+        // other player — counted from where a seek in flight is taking
+        // playback, so a second press during a slow restart goes back a
+        // track instead of restarting again.
+        if self.aimed_position() > 3.0 {
+            self.seek_goal = Some((0.0, false));
             return vec![Effect::Audio(AudioCmd::Seek(0.0))];
         }
         match self.queue.prev_index() {
@@ -5938,21 +5941,24 @@ impl App {
             return Vec::new();
         }
         // Build on the seek still in flight, not the position it is about
-        // to replace: status refreshes a few times a second, so a quick
-        // `}}}` all read the same stale base and landed as one press.
-        let base = match self.seek_goal {
-            Some((goal, at)) if at.elapsed() < SEEK_CHAIN => goal,
-            _ => self.status.position,
-        };
-        let mut target = (base + delta).max(0.0);
+        // to replace, for as long as it is in flight: a 2.5 s window used to
+        // run out under seeks still waiting on the network, and the next
+        // press jumped from wherever the first of them had landed.
+        let mut target = (self.aimed_position() + delta).max(0.0);
         // The bar's end is as far as chaining may bank; where exactly a
         // near-end landing stops is the engine's call (its transition
         // runway clamp), not something to duplicate here.
         if self.status.duration > 0.0 {
             target = target.min(self.status.duration);
         }
-        self.seek_goal = Some((target, crate::clock::Instant::now()));
+        self.seek_goal = Some((target, false));
         vec![Effect::Audio(AudioCmd::Seek(target))]
+    }
+
+    /// Where playback is headed: the seek still in flight, else the last
+    /// position heard.
+    fn aimed_position(&self) -> f64 {
+        self.seek_goal.map_or(self.status.position, |(goal, _)| goal)
     }
 
     fn change_volume(&mut self, delta: f32) -> Vec<Effect> {
@@ -6001,11 +6007,14 @@ impl App {
                     self.failures = 0;
                     self.retries = 0;
                 }
-                // A seek goal has served once status catches up to it — or
-                // once the source changes under it, where the old track's
-                // target would steer presses on the new one.
-                if let Some((goal, _)) = self.seek_goal {
-                    if status.source != self.status.source || status.position >= goal - 1.0 {
+                // A seek goal has served once the audio thread is done with
+                // it and this status, the first after, says where playback
+                // landed — or once the source changes under it, where the old
+                // track's target would steer presses on the new one. How near
+                // a status stands to the goal says nothing: one from before a
+                // backward seek is past its goal already.
+                if let Some((_, landed)) = self.seek_goal {
+                    if landed || status.source != self.status.source {
                         self.seek_goal = None;
                     }
                 }
@@ -6087,6 +6096,17 @@ impl App {
                         self.skip(false)
                     }
                 }
+            }
+            Event::Seeked { target } => {
+                // Only the newest goal's own seek serves it. An older one
+                // the thread was still busy with lands first, and the newer
+                // seek is yet to come.
+                if let Some((goal, landed)) = &mut self.seek_goal {
+                    if *goal == target {
+                        *landed = true;
+                    }
+                }
+                Vec::new()
             }
             Event::AudioFailed(e) => {
                 self.audio_available = false;
