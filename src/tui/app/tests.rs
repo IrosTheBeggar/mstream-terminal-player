@@ -717,6 +717,20 @@ fn previous_restarts_the_track_when_past_the_grace_window() {
 }
 
 #[test]
+fn previous_counts_from_a_restart_still_in_flight() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    app.play_index(1);
+    app.status.position = 120.0;
+    assert_eq!(app.handle_action(Action::PrevTrack), vec![Effect::Audio(AudioCmd::Seek(0.0))]);
+    // The restart waits on the network, so the status still says two
+    // minutes in when the second press comes. It goes back a track, as it
+    // would once the restart had landed, instead of restarting again.
+    app.handle_action(Action::PrevTrack);
+    assert_eq!(app.queue.current, Some(0));
+}
+
+#[test]
 fn removing_the_playing_track_stops_playback() {
     let mut app = connected_app();
     app.replace_queue(vec![track("a"), track("b"), track("c")]);
@@ -1213,18 +1227,110 @@ fn fast_seek_presses_build_on_each_other_not_the_stale_status() {
         app.handle_action(Action::SeekForwardFar),
         vec![Effect::Audio(AudioCmd::Seek(300.0))]
     );
-    // A status that catches up to the goal hands the base back to
-    // reality — the next press moves from where playback actually is.
+    // Once the audio thread is done with that seek, the status after it
+    // hands the base back to reality — here a landing the engine's
+    // end-of-track runway clamp stopped short of the ask — and the next
+    // press moves from where playback actually is.
+    app.apply_event(Event::Seeked { target: 300.0 });
     app.apply_event(Event::Status(PlayerStatus {
         source: "http://host/a.mp3".into(),
-        position: 299.0,
+        position: 296.0,
         duration: 300.0,
         playing: true,
         ..Default::default()
     }));
     assert_eq!(
         app.handle_action(Action::SeekBackward),
-        vec![Effect::Audio(AudioCmd::Seek(294.0))]
+        vec![Effect::Audio(AudioCmd::Seek(291.0))]
+    );
+}
+
+/// What the audio thread says about one FLAC, at `position` seconds.
+fn flac_at(position: f64) -> Event {
+    Event::Status(PlayerStatus {
+        source: "http://host/a.flac".into(),
+        position,
+        duration: 240.0,
+        playing: true,
+        ..Default::default()
+    })
+}
+
+#[test]
+fn a_press_builds_on_a_seek_still_in_flight_however_long_it_takes() {
+    let mut app = connected_app();
+    app.status.source = "http://host/a.flac".into();
+    app.status.position = 2.0;
+    app.status.duration = 240.0;
+    // `}}}` over a slow link (the PR #64 smoke, 2026-10-30): a FLAC with no
+    // seek table bisects over the network, two seconds a seek, so the
+    // audio thread runs the first alone and boils the other two down to
+    // the last behind it.
+    for _ in 0..3 {
+        app.handle_action(Action::SeekForwardFar);
+    }
+    // The first lands, says so, and its status comes; the newest is still
+    // out. The next press builds on it, not on where the first landed: once
+    // a 2.5 s window ran out, this one went to 2 s.
+    app.apply_event(Event::Seeked { target: 62.0 });
+    app.apply_event(flac_at(62.0));
+    assert_eq!(
+        app.handle_action(Action::SeekBackwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(122.0))]
+    );
+    // The seek that was in flight lands. It is not this goal's, so the goal
+    // stands through its status.
+    app.apply_event(Event::Seeked { target: 182.0 });
+    app.apply_event(flac_at(182.0));
+    assert_eq!(
+        app.handle_action(Action::SeekBackward),
+        vec![Effect::Audio(AudioCmd::Seek(117.0))]
+    );
+}
+
+#[test]
+fn quick_backward_presses_outlive_the_statuses_from_before_them() {
+    let mut app = connected_app();
+    app.status.source = "http://host/a.flac".into();
+    app.status.position = 182.0;
+    app.status.duration = 240.0;
+    // A status sent before the seek reached the audio thread stands past a
+    // backward goal already, and the old check took that for the seek
+    // having landed: the next press moved from 182 s again, and two
+    // presses went back one minute.
+    assert_eq!(
+        app.handle_action(Action::SeekBackwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(122.0))]
+    );
+    app.apply_event(flac_at(182.3));
+    assert_eq!(
+        app.handle_action(Action::SeekBackwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(62.0))]
+    );
+    app.apply_event(flac_at(182.6));
+    assert_eq!(
+        app.handle_action(Action::SeekBackwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(2.0))]
+    );
+}
+
+#[test]
+fn a_seek_key_builds_on_a_click_or_a_restart_still_in_flight() {
+    let mut app = connected_app();
+    app.status.source = "http://host/a.mp3".into();
+    app.status.position = 10.0;
+    app.status.duration = 300.0;
+    assert_eq!(app.seek_to(150.0), vec![Effect::Audio(AudioCmd::Seek(150.0))]);
+    // Before the click lands, the status still says 10 s.
+    assert_eq!(
+        app.handle_action(Action::SeekForward),
+        vec![Effect::Audio(AudioCmd::Seek(155.0))]
+    );
+    // A restart is a seek too.
+    assert_eq!(app.handle_action(Action::PrevTrack), vec![Effect::Audio(AudioCmd::Seek(0.0))]);
+    assert_eq!(
+        app.handle_action(Action::SeekForward),
+        vec![Effect::Audio(AudioCmd::Seek(5.0))]
     );
 }
 
