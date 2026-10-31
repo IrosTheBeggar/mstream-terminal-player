@@ -95,7 +95,33 @@ room against the taste route, is described in run.sh):
   ripens no tooltip of the room's; its row under the window lights
   nothing. `check_keep_mouse.py` replays the stream at the leg's
   `@@KM:…@@` marks; `/_state` says each click acted once (one start, one
-  cancel, no save).
+  cancel, no save). Every album by stands in the tile's window from its
+  open (an album's window, the keep-a-copy spec §6.2); the fake answers
+  Attic's albums through the browse proxy (the user's library holds
+  Lanterns, so nothing is missing to tick), so its primary counts
+  theirs: "[ Add 1 album ]".
+- **P** — Keep a copy while browsing a connected server, on two fakes:
+  Stage Peer B (`FAKE_ROLE=peer`, the keep-a-copy spec's sample library)
+  behind the own server's browse proxy (`FAKE_PEER_URL`: mStream's
+  federation-browse.js — the exact allowlist screened, 403 off it, the
+  method and the JSON body passed through). `seed_peer_home` writes a HOME
+  whose player opens on the peer at `peerlib/Boukmanflow`. The Files leg
+  (`gui-peer-files`) keeps the open folder by the header's word (As on
+  Stage Peer B: no landing on the wire), a held folder row Into a folder…
+  through the chooser (the field emptied, "From Sam/Borrowed Tapes"
+  typed, Esc keeping it: `landing: {vpath, path}`), another By your layout
+  (`{tags: true}`, its tags read once), opens Copies outside Discover and
+  waits for "✓ kept" on the header and the rows. The album leg
+  (`gui-peer-album`) reads the album page's credit and its word, keeps a
+  held row, the queue item through its sheet's "Keep a copy…" (`c` on
+  the held queue row does nothing), the album by its word (`scope: album`
+  with the page's credit), clicks the "✓ kept" state for its outcome, and
+  opens the artist's focus on his wall. `check_peer.py` replays each
+  stream at its `@@PF:…@@` / `@@PA:…@@` marks against the spec's frames;
+  with `E2E_CAPTURES=DIR` it keeps every mark's decoded frame there.
+  `/_state` of both fakes says what was started (each copy into the fake's
+  `copies` library), what the proxy refused (nothing), the recursive
+  listings (one a window) and the tag batch (one, ≤ 100 songs).
 
 ## The three harness laws (learned the hard way)
 
@@ -104,7 +130,10 @@ room against the taste route, is described in run.sh):
    percentage or a rewritten word never appears as a contiguous token.
    `replay.py` is the oracle: it renders a captured stream (or any
    prefix of one) to a final frame; `check_scan.py` slices a stream
-   through time this way. Gate expect on FIRST-paint single words only.
+   through time this way. Gate expect on FIRST-paint single words only:
+   even a first paint skips the blank cell between two plain words with
+   a cursor move (`Second` ESC`[9;27H` `Shift`), so "Second Shift" never
+   matches.
 2. **Drain, don't sleep.** A pty whose output buffer fills freezes the
    TUI mid-run; every wait in a leg is an `expect -timeout N timeout {}`
    drain that keeps reading.

@@ -2,7 +2,9 @@
 //! of app.rs. `use super::*;` keeps them exactly the tests they were.
 
 use super::*;
-use crate::api::types::{DirEntry, FileEntry, FileMetadata, GenreList, GenreSources, SearchResults, TrackMetadata};
+use crate::api::types::{
+    AlbumCredit, DirEntry, FileEntry, FileMetadata, GenreList, GenreSources, SearchResults, TrackMetadata,
+};
 
 fn track(path: &str) -> Track {
     Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
@@ -1350,7 +1352,7 @@ fn every_class_a_search_matched_is_reachable() {
         generation: app.session_gen(),
         query: "moon".into(),
         results: Box::new(SearchResults {
-            artists: vec![SearchGroup { name: "Moon Hooch".into(), album_art_file: None }],
+            artists: vec![SearchGroup { name: "Moon Hooch".into(), album_art_file: None, ..Default::default() }],
             albums: vec![],
             title: vec![hit("lib/a.mp3")],
             files: vec![hit("lib/a.mp3"), hit("lib/b.mp3")],
@@ -3886,6 +3888,7 @@ fn drilling_from_artists_to_an_album_of_tracks() {
             artist: Some("Signal Chain".into()),
             year: Some(2025),
             album_art_file: None,
+            ..Default::default()
         }]),
     });
 
@@ -3898,6 +3901,9 @@ fn drilling_from_artists_to_an_album_of_tracks() {
             node: LibraryNode::Album {
                 name: "Second Album".into(),
                 artist: Some("Signal Chain".into()),
+                album_artist: AlbumCredit::Unknown,
+                year: Some(2025),
+                compilation: false,
             },
             dest: Tab::Library,
         })]
@@ -3908,6 +3914,9 @@ fn drilling_from_artists_to_an_album_of_tracks() {
         node: LibraryNode::Album {
             name: "Second Album".into(),
             artist: Some("Signal Chain".into()),
+            album_artist: AlbumCredit::Unknown,
+            year: Some(2025),
+            compilation: false,
         },
         data: LibraryData::Tracks(vec![track("testlib/a.mp3"), track("testlib/b.mp3")]),
     });
@@ -4075,6 +4084,7 @@ fn albums_without_an_artist_still_resolve() {
             artist: None,
             year: Some(2026),
             album_art_file: None,
+            ..Default::default()
         }]),
     });
 
@@ -4082,7 +4092,7 @@ fn albums_without_an_artist_still_resolve() {
         app.library.entries[1],
         Entry::Node {
             label: "Phase Three (2026)".into(),
-            node: LibraryNode::Album { name: "Phase Three".into(), artist: None },
+            node: LibraryNode::Album { name: "Phase Three".into(), artist: None, album_artist: AlbumCredit::Unknown, year: Some(2026), compilation: false },
         }
     );
 }
@@ -5404,6 +5414,7 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
             artists: vec![crate::api::types::SearchGroup {
                 name: "Moon Hooch".into(),
                 album_art_file: None,
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -8405,7 +8416,7 @@ fn a_taste_answer_lands_its_parts_and_every_visit_asks_again() {
     assert_eq!(t.shown_window(), Some(30));
     // By name alone: the credit is an album artist, `album-songs`' `artist` a
     // track-artist filter.
-    assert_eq!(app.taste_album_node(0), Some(LibraryNode::Album { name: "Album".into(), artist: None }));
+    assert_eq!(app.taste_album_node(0), Some(LibraryNode::album("Album", None)));
 
     // Clause 3: no answer is reused — a visit right after one asks again,
     // and the old rows stand until the new land (clause 32).
@@ -9294,6 +9305,7 @@ mod keep {
                 artist: Some("Boukmanflow".into()),
                 year: Some(2019),
                 genre: None,
+                ..Default::default()
             })
             .collect()
     }
@@ -9464,10 +9476,9 @@ mod keep {
         let (app, _) = ready_room();
         assert!(app.keep_gate() && app.keep_listed() && app.links_gate());
         let late = row_at(&app, "Late Train Verse");
-        assert_eq!(
-            app.keep_choices(KeepTarget::Row { group: late.0, row: late.1 }),
-            vec![KeepChoice::Song, KeepChoice::Album, KeepChoice::Artist]
-        );
+        // At open; Every album by joins once the artist's albums there
+        // answer (the user's 2026-10-27 decision).
+        assert_eq!(app.keep_choices(KeepTarget::Row { group: late.0, row: late.1 }), vec![KeepChoice::Song, KeepChoice::Album]);
         // Each missing half hides every entry point — never grey.
         let (refused, _) = keep_room(listing(false), Some("copies"));
         assert!(!refused.keep_gate() && !refused.keep_listed());
@@ -9491,7 +9502,7 @@ mod keep {
         let opened = failed.taste_open();
         let generation = failed.session_gen();
         failed.apply_event(Event::KeepGate { generation, plugins: Err(PluginFailure::Unreachable("down".into())), destination: None });
-        assert!(!failed.keep_gate() && failed.taste.keep.gate.failed.is_some());
+        assert!(!failed.keep_gate() && failed.keep.gate.failed.is_some());
         drop(opened);
         assert_eq!(gate_asks(&failed.taste_open()), 1);
         // A gate reply from the server the session left fills nothing.
@@ -9499,7 +9510,7 @@ mod keep {
         moved.taste_open();
         let stale = moved.session_gen() + 1;
         moved.apply_event(Event::KeepGate { generation: stale, plugins: Ok(Box::new(listing(true))), destination: Some(Ok(Box::new(destination(Some("copies"))))) });
-        assert!(moved.taste.keep.gate.plugins.is_none());
+        assert!(moved.keep.gate.plugins.is_none());
     }
 
     #[test]
@@ -9616,7 +9627,7 @@ mod keep {
             })
             .expect("the sizes are asked");
         assert_eq!(reach.and_then(|r| r.peer), Some(B));
-        assert_eq!(ask, KeepFactsAsk { album: Some("Borrowed Tapes".into()), artist: Some("Boukmanflow".into()), album_artist: None, year: Some(2019) });
+        assert_eq!(ask, KeepFactsAsk { album: Some("Borrowed Tapes".into()), artist: Some("Boukmanflow".into()), album_artist: None, year: Some(2019), ..Default::default() });
         assert!(lookups(&opened).is_empty(), "its row was looked up already");
         let view = app.keep_view().unwrap();
         assert_eq!((view.choice, view.scope), (KeepChoice::Song, JobScope::Song));
@@ -9729,7 +9740,7 @@ mod keep {
         // It ends: the primary is back.
         let mut done = theirs;
         done.state = crate::api::types::JobState::Done;
-        app.taste.keep.watch = KeepWatch::Modal;
+        app.keep.watch = KeepWatch::Modal;
         let polled = app.tick_at(crate::clock::Instant::now() + std::time::Duration::from_secs(2));
         let seq = job_asks(&polled)[0];
         app.apply_event(Event::Jobs { seq, generation, answer: Ok(Box::new(PluginJobList { jobs: vec![done], runner: None })) });
@@ -9765,7 +9776,7 @@ mod keep {
         // Seen live, its end is news as any copy's.
         let mut done = queued;
         done.state = crate::api::types::JobState::Done;
-        app.taste.keep.watch = KeepWatch::Room;
+        app.keep.watch = KeepWatch::Room;
         let polled = app.tick_at(crate::clock::Instant::now() + std::time::Duration::from_secs(5));
         app.apply_event(Event::Jobs { seq: job_asks(&polled)[0], generation, answer: Ok(Box::new(PluginJobList { jobs: vec![done], runner: None })) });
         assert_eq!(app.keep_take_news().iter().map(|j| j.id).collect::<Vec<_>>(), [42]);
@@ -9819,7 +9830,7 @@ mod keep {
         let kept = copy_job(50, "text:late train verse", None, "done", B, serde_json::json!({ "copied": { "vpath": "copies", "filepath": "copies/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3", "title": "Late Train Verse", "artist": "Boukmanflow", "album": "Borrowed Tapes" } }));
         answer_lookup(&mut app, &effects, &[kept]);
         open_late(&mut app);
-        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(50));
+        assert_eq!(app.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(50));
         let view = app.keep_view().unwrap();
         let KeepStage::Job { outcome, action, .. } = view.stage else { panic!("{:?}", view.stage) };
         assert!(outcome.kept());
@@ -9874,7 +9885,7 @@ mod keep {
         // library for the album.
         let index = app.taste.peer_albums().iter().position(|a| a.album == "Borrowed Tapes" && a.peer == B).unwrap();
         app.keep_open(KeepTarget::Tile(index));
-        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Covered(70));
+        assert_eq!(app.keep.flow.as_ref().unwrap().phase, KeepPhase::Covered(70));
         let view = app.keep_view().unwrap();
         assert_eq!(view.borrowed, Some(JobScope::ArtistMissing));
         let KeepStage::Job { job, outcome, action } = view.stage else { panic!("{:?}", view.stage) };
@@ -9900,7 +9911,7 @@ mod keep {
         // Play your copy plays the user's own file.
         app.keep_close();
         open_late(&mut app);
-        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Covered(70));
+        assert_eq!(app.keep.flow.as_ref().unwrap().phase, KeepPhase::Covered(70));
         let KeepStage::Job { outcome, action, .. } = app.keep_view().unwrap().stage else { panic!("not the copy") };
         assert_eq!((outcome, action), (JobOutcome::Copied { filepath: landed.into(), vpath: Some("copies".into()) }, Some(JobAction::Play)));
         app.keep_again();
@@ -9921,7 +9932,7 @@ mod keep {
         let own = copy_job(71, "album:boukmanflow|borrowed tapes", Some("album"), "queued", B, serde_json::Value::Null);
         let generation = app.session_gen();
         app.apply_event(Event::Jobs { seq: job_asks(&effects)[0], generation, answer: Ok(Box::new(PluginJobList { jobs: vec![own], runner: None })) });
-        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(71));
+        assert_eq!(app.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(71));
         assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Job { outcome: JobOutcome::Queued, .. }));
     }
 
@@ -9997,7 +10008,7 @@ mod keep {
             open_late(&mut app);
             assert!(!app.keep_view().unwrap().choose_again());
             app.keep_choose_again();
-            assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(job.id));
+            assert_eq!(app.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(job.id));
         }
         // A compilation's tile offers one choice: nothing to choose again.
         let (mut app, effects) = ready_room();
@@ -10109,6 +10120,7 @@ mod keep {
             album_songs: Some(tapes_songs()),
             peer_albums: Some(vec![crate::api::types::ArtistAlbumRow { year_min: Some(2017), ..row("Borrowed Tapes", Some("Boukmanflow")) }]),
             local_albums: Some(vec![row("One", None), row("Two", None), row("Three", None)]),
+            ..Default::default()
         };
         let generation = app.session_gen();
         app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(facts) });
@@ -10137,7 +10149,7 @@ mod keep {
         answer_lookup(&mut app, &effects, &[]);
         let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
         let seq = opened.iter().find_map(|e| match e { Effect::Api(ApiCmd::KeepFacts { seq, .. }) => Some(*seq), _ => None }).unwrap();
-        let facts = KeepFacts { album_songs: Some(tapes_songs()), peer_albums: Some(vec![row("Borrowed Tapes", Some("Boukmanflow"))]), local_albums: Some(vec![row("borrowed  TAPES", None)]) };
+        let facts = KeepFacts { album_songs: Some(tapes_songs()), peer_albums: Some(vec![row("Borrowed Tapes", Some("Boukmanflow"))]), local_albums: Some(vec![row("borrowed  TAPES", None)]), ..Default::default() };
         let generation = app.session_gen();
         app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(facts.clone()) });
         assert_eq!(app.keep_view().unwrap().missing, None);
@@ -10215,7 +10227,7 @@ mod keep {
         assert!(app.keep_take_news().is_empty(), "only a job seen live and now finished is news");
         // A cancel: out once; a 409 is the server's word it had already finished.
         let live = copy_job(71, "album:boukmanflow|borrowed tapes", Some("album"), "running", B, serde_json::Value::Null);
-        app.taste.keep.book.jobs.insert(71, live);
+        app.keep.book.jobs.insert(71, live);
         let cancel = app.keep_cancel_job(71);
         assert!(matches!(cancel.as_slice(), [Effect::Api(ApiCmd::JobCancel { id: 71, .. })]), "{cancel:?}");
         assert!(app.keep_cancel_job(71).is_empty(), "one cancel at a time");
@@ -10225,7 +10237,7 @@ mod keep {
         assert_eq!(job_asks(&landed).len(), 1, "the list is asked again for the outcome");
         // A cancel that took: the job as it now stands.
         let mut stopping = copy_job(72, "text:corner store loop", None, "running", B, serde_json::Value::Null);
-        app.taste.keep.book.jobs.insert(72, stopping.clone());
+        app.keep.book.jobs.insert(72, stopping.clone());
         app.keep_cancel_job(72);
         stopping.cancel_requested = true;
         app.apply_event(Event::JobCancelled { generation, id: 72, answer: Ok(CancelAnswer::Cancelled(Box::new(JobCancelled { job: Some(stopping), outcome: Some("requested".into()) }))) });
@@ -10267,7 +10279,7 @@ mod keep {
         assert!(app.copies_open().is_empty(), "one ask at a time");
         let generation = app.session_gen();
         app.apply_event(Event::Jobs { seq: job_asks(&opened)[0], generation, answer: Err(PluginFailure::Unreachable("down".into())) });
-        assert!(app.taste.keep.book.failed.is_some() && app.copies_rows().len() == 6, "a failed refresh keeps the rows");
+        assert!(app.keep.book.failed.is_some() && app.copies_rows().len() == 6, "a failed refresh keeps the rows");
         // Clear finished: what went leaves, the list and the rows are asked again.
         let clear = app.copies_clear();
         assert!(matches!(clear.as_slice(), [Effect::Api(ApiCmd::JobsClear { .. })]));
@@ -10300,7 +10312,7 @@ mod keep {
         // A peer that is no longer paired: the room is asked again instead.
         let mut unpaired = copy_job(14, "text:late train verse", None, "failed", B, serde_json::Value::Null);
         unpaired.error = Some("this server is no longer paired with that peer".into());
-        app.taste.keep.book.jobs.insert(14, unpaired);
+        app.keep.book.jobs.insert(14, unpaired);
         let effects = app.copies_act(14);
         assert!(starts(&effects).is_empty());
         assert_eq!(taste_ask(&effects, TastePart::Main).0 > 0, true, "{effects:?}");
@@ -10320,13 +10332,13 @@ mod keep {
             .expect("asked on open");
         assert_eq!(plugin, "links");
         assert_eq!(rec, app.taste.peer_row(late.0, late.1).unwrap().1.raw);
-        assert_eq!(app.taste.keep.links.as_ref().unwrap().status, LinksStatus::Asking);
+        assert_eq!(app.keep.links.as_ref().unwrap().status, LinksStatus::Asking);
         let link = PluginLink { id: "deezer".into(), label: "Deezer".into(), url: "https://www.deezer.com/search/x".into(), kind: "search".into() };
         let generation = app.session_gen();
         app.apply_event(Event::PluginLinks { seq, generation, answer: Ok(vec![link.clone()]) });
-        assert_eq!(app.taste.keep.links.as_ref().unwrap().status, LinksStatus::Ready(vec![link]));
+        assert_eq!(app.keep.links.as_ref().unwrap().status, LinksStatus::Ready(vec![link]));
         app.links_close();
-        assert!(app.taste.keep.links.is_none());
+        assert!(app.keep.links.is_none());
         // Without a links plug-in: nothing asked.
         let (mut bare, _) = keep_room(
             serde_json::from_value(serde_json::json!({ "plugins": [{ "name": "federation-copy", "capabilities": ["acquire"], "scopes": ["song"] }], "jobs": { "allowed": true } })).unwrap(),
@@ -10428,7 +10440,7 @@ mod keep {
         let view = app.keep_view().unwrap();
         assert!(matches!(view.stage, KeepStage::Refused { failure: PluginFailure::DestinationChanged(_), verb: Some(KeepVerb::Song) }));
         assert_eq!(view.landing.map(|l| l.crumbs()), Some(vec!["music".into(), "Boukmanflow".into(), "2019 - Borrowed Tapes".into()]));
-        assert!(app.taste.keep.book.jobs.is_empty(), "no job");
+        assert!(app.keep.book.jobs.is_empty(), "no job");
         // Add again sends the place now drawn.
         let effects = app.keep_start();
         assert_eq!(start_places(&effects), vec![Some(Some(music))]);
@@ -10690,6 +10702,7 @@ mod keep {
             artist: Some(artist.into()),
             year: Some(2019),
             genre: None,
+            ..Default::default()
         };
         let open_mixtape = |jobs: &[PluginJob]| {
             let (mut app, effects) = ready_room();
@@ -10786,7 +10799,7 @@ mod keep {
         let saved = place("copies", "from-peers", "{{ALBUMARTIST}}/{{ALBUM}}", "user");
         let (effects, sent) = app.keep_dest_save(Some(saved.clone()));
         let (seq, generation) = match effects.as_slice() {
-            [Effect::Api(ApiCmd::DestinationSave { seq, generation, destination })] => {
+            [Effect::Api(ApiCmd::DestinationSave { seq, generation, destination, .. })] => {
                 assert_eq!(destination.as_ref(), Some(&saved));
                 (*seq, *generation)
             }
@@ -10875,20 +10888,33 @@ mod keep {
     }
 
     #[test]
-    fn a_server_switch_drops_the_plugins_state_with_the_answer() {
+    fn a_server_switch_closes_the_window_and_keeps_each_own_servers_state() {
         let (mut app, effects) = ready_room();
         answer_lookup(&mut app, &effects, &[copy_job(7, "text:late train verse", None, "running", B, serde_json::Value::Null)]);
-        open_late(&mut app);
+        let late = open_late(&mut app);
+        assert!(app.keep_row_mark(late.0, late.1).is_some());
+        // The room's answer goes: its rows' marks with it; the gate stands.
         app.reset_taste();
-        assert!(app.taste.keep.gate.plugins.is_none() && app.taste.keep.flow.is_none());
+        assert!(app.keep_row_mark(late.0, late.1).is_none());
+        assert!(app.keep_gate());
+        // A switch to another own server: the window closes, the state parks,
+        // and that server's — a fresh one — is in front.
+        app.session = Session { server: "http://other:3000".into(), ..Default::default() };
+        app.shed_server_state();
+        assert!(app.keep.gate.plugins.is_none() && app.keep.flow.is_none());
         assert!(!app.keep_gate());
+        // Back: its gate, its jobs, as it left them.
+        app.session = Session { server: "http://host:3000".into(), token: Some("tok".into()), ..Default::default() };
+        app.shed_server_state();
+        assert!(app.keep_gate() && app.keep.flow.is_none());
+        assert!(app.keep.book.jobs.contains_key(&7) || app.copies_rows().is_empty());
         // An error clears every wait: no start stays "starting…".
         let (mut app, effects) = ready_room();
         answer_lookup(&mut app, &effects, &[]);
         open_late(&mut app);
         app.keep_start();
         app.apply_event(Event::Error("could not reach server".into()));
-        assert_eq!(app.taste.keep.flow.as_ref().unwrap().phase, KeepPhase::Choose);
+        assert_eq!(app.keep.flow.as_ref().unwrap().phase, KeepPhase::Choose);
         // A 401 clears no wait: a gate ask out when the session went bad
         // would hold every later visit's back, so a reconnect lets it go.
         let mut app = plugin_app();
@@ -10898,5 +10924,1007 @@ mod keep {
         app.connected = true;
         app.taste_reconnected();
         assert_eq!(gate_asks(&app.taste_open()), 1);
+    }
+
+    // ── Keep a copy while browsing a connected server (the design-term-fed
+    // spec §12.2; the user's 2026-10-27 decisions) ──────────────────────────
+
+    use crate::api::types::{AlbumCredit, ArtistAlbumRow, JobLanding, Ping};
+    use crate::tui::app::keep::{FolderCap, FolderLanding, IntoPlace, KeepFocus, MarkAsk, MarksPage};
+
+    const HOST: &str = "http://host:3000";
+
+    fn peer_b() -> String {
+        crate::config::peer_identity(HOST, B)
+    }
+
+    fn book() -> Vec<KnownServer> {
+        let server = |id: String, name: &str, peer: Option<(String, i64)>| KnownServer {
+            id,
+            name: name.into(),
+            token: if peer.is_none() { Some("tok".into()) } else { None },
+            username: None,
+            self_signed: false,
+            peer,
+            pairing: None,
+            dj: Default::default(),
+        };
+        vec![server(HOST.into(), HOST, None), server(peer_b(), "Stage Peer B", Some((HOST.into(), B)))]
+    }
+
+    /// A listing with the folder cap.
+    fn capped(cap: u64) -> DiscoveryPluginsResponse {
+        let mut listed = listing(true);
+        listed.jobs.max_folder_songs = Some(cap);
+        listed
+    }
+
+    /// The user's own server, its ping's flags kept on the way in, the
+    /// gate answered; Stage Peer B in the book.
+    fn own_app() -> App {
+        let mut app = plugin_app();
+        app.servers = book();
+        let asked = app.keep_connected();
+        assert_eq!(gate_asks(&asked), 1, "a session's way in asks the gate: {asked:?}");
+        let generation = app.session_gen();
+        let landed = app.apply_event(Event::KeepGate { generation, plugins: Ok(Box::new(capped(1000))), destination: Some(Ok(Box::new(destination(Some("copies"))))) });
+        // The list asked once for the indicator: nothing yet.
+        for seq in job_asks(&landed) {
+            app.apply_event(Event::Jobs { seq, generation, answer: Ok(Box::new(PluginJobList::default())) });
+        }
+        assert!(app.keep_gate());
+        app
+    }
+
+    /// A move onto Stage Peer B: the switch, then the peer's `Connected`
+    /// (the worker answers with the parent's identity) — its effects.
+    fn onto_peer(app: &mut App) -> Vec<Effect> {
+        app.adopt_server(Session { server: HOST.into(), server_id: peer_b(), token: Some("tok".into()), peer: Some((HOST.into(), B)), ..Default::default() }, None);
+        let ping = Ping { vpaths: vec!["peerlib".into()], ..Ping::default() };
+        app.apply_event(Event::Connected { server: HOST.into(), id: HOST.into(), username: None, token: None, ping: Box::new(ping) })
+    }
+
+    fn reach_of(effects: &[Effect]) -> Vec<Option<(String, Option<i64>)>> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(
+                    ApiCmd::KeepGate { reach, .. }
+                    | ApiCmd::JobsLookup { reach, .. }
+                    | ApiCmd::Jobs { reach, .. }
+                    | ApiCmd::JobStart { reach, .. }
+                    | ApiCmd::DestinationRead { reach, .. },
+                ) => Some(reach.as_ref().map(|r| (r.base.clone(), r.peer))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn on_a_connected_server_the_gate_is_its_own_servers_asked_through_its_reach() {
+        let mut app = own_app();
+        let generation = app.session_gen();
+        let moved = onto_peer(&mut app);
+        assert_ne!(app.session_gen(), generation, "the session moved on");
+        // Kept across the move onto its connected server (gap 12): its gate
+        // stands; the peer's own flags are pinned off, its parent's read.
+        assert!(app.keep_gate() && app.keep_listed());
+        assert!(!app.capabilities.discovery_plugins && app.keep_caps().discovery_plugins && app.keep_caps().uploads);
+        // Asked again on the move, of the own server, through its reach.
+        assert_eq!(gate_asks(&moved), 1);
+        assert_eq!(reach_of(&moved), vec![Some((HOST.to_string(), None))]);
+        // The gate's answer to the ask from before the move lands in the
+        // same state, by its generation.
+        assert_ne!(generation, app.session_gen());
+        app.apply_event(Event::KeepGate { generation, plugins: Ok(Box::new(capped(7))), destination: Some(Ok(Box::new(destination(Some("copies"))))) });
+        assert_eq!(app.keep.gate.plugins.as_ref().and_then(|p| p.jobs.max_folder_songs), Some(7));
+        // Copies in every room on it (the user's 2026-10-27 decision): its
+        // ask, through the own server's reach.
+        assert!(app.keep_copies_ready());
+        let asked = app.copies_open();
+        assert_eq!(reach_of(&asked), vec![Some((HOST.to_string(), None))]);
+        // A parked own server's state takes its own answers: a list asked
+        // there, the session gone to another own server meanwhile.
+        let seq = job_asks(&app.copies_try_again()).first().copied().unwrap_or_else(|| job_asks(&asked)[0]);
+        let asked_at = app.keep.epoch;
+        app.adopt_server(Session { server: "http://other:3000".into(), server_id: "http://other:3000".into(), ..Default::default() }, None);
+        app.apply_event(Event::Connected { server: "http://other:3000".into(), id: "http://other:3000".into(), username: None, token: None, ping: Box::new(Ping::default()) });
+        let job = copy_job(77, "text:late train verse", None, "running", B, serde_json::Value::Null);
+        app.apply_event(Event::Jobs { seq, generation: asked_at, answer: Ok(Box::new(PluginJobList { jobs: vec![job], runner: None })) });
+        assert!(app.copies_rows().is_empty(), "never the state in front");
+        onto_peer(&mut app);
+        assert_eq!(app.copies_rows().len(), 1, "its own state took it");
+        // A move straight onto a peer whose parent was never pinged: one probe
+        // ping first, then the gate.
+        let mut cold = plugin_app();
+        cold.servers = book();
+        let moved = onto_peer(&mut cold);
+        assert_eq!(gate_asks(&moved), 0);
+        let Some(Effect::Api(ApiCmd::OwnPing { server, reach })) = moved.iter().find(|e| matches!(e, Effect::Api(ApiCmd::OwnPing { .. }))) else {
+            panic!("a probe ping: {moved:?}")
+        };
+        assert_eq!((server.as_str(), reach.base.as_str(), reach.peer), (HOST, HOST, None));
+        assert!(onto_peer(&mut cold).iter().filter(|e| matches!(e, Effect::Api(ApiCmd::OwnPing { .. }))).count() <= 1);
+        let ping = Ping { discovery_plugins: true, no_upload: Some(false), ..Ping::default() };
+        let pinged = cold.apply_event(Event::OwnPing { server: HOST.into(), ping: Some(Box::new(ping)) });
+        assert_eq!(gate_asks(&pinged), 1, "its flags say plug-ins: the gate");
+        assert_eq!(reach_of(&pinged), vec![Some((HOST.to_string(), None))]);
+        // An own server that says no plug-ins: nothing asked, nothing shown.
+        let mut off = plugin_app();
+        off.servers = book();
+        onto_peer(&mut off);
+        let pinged = off.apply_event(Event::OwnPing { server: HOST.into(), ping: Some(Box::new(Ping::default())) });
+        assert!(gate_asks(&pinged) == 0 && !off.keep_gate());
+    }
+
+    #[test]
+    fn each_own_server_keeps_its_state_and_a_queue_items_window_brings_its_own_forward() {
+        let mut app = own_app();
+        let epoch = app.keep.epoch;
+        onto_peer(&mut app);
+        assert!(app.keep_gate() && app.keep.epoch != epoch, "one state for the server and its connected servers, its asks stamped anew");
+        // Another own server: its own state in front, the first parked.
+        app.servers.push(KnownServer { id: "http://other:3000".into(), name: "Other".into(), token: Some("o".into()), username: None, self_signed: false, peer: None, pairing: None, dj: Default::default() });
+        app.adopt_server(Session { server: "http://other:3000".into(), server_id: "http://other:3000".into(), token: Some("o".into()), ..Default::default() }, None);
+        app.apply_event(Event::Connected { server: "http://other:3000".into(), id: "http://other:3000".into(), username: None, token: None, ping: Box::new(Ping::default()) });
+        assert!(!app.keep_gate() && app.keep.owner == "http://other:3000");
+        // A queue item of Stage Peer B: judged by its own server's parked
+        // gate, its window brings that state forward, closing puts it back.
+        let late = Track {
+            filepath: "peerlib/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3".into(),
+            metadata: TrackMetadata { title: Some("Late Train Verse".into()), artist: Some("Boukmanflow".into()), album: Some("Borrowed Tapes".into()), ..Default::default() },
+        };
+        let target = app.keep_track(&Origin { server: HOST.into(), peer: Some(B) }, &late, None).expect("a connected server's song");
+        assert_eq!(app.keep_choices(target.clone()), vec![KeepChoice::Song]);
+        let opened = app.keep_open(target);
+        assert!(app.keep.flow.is_some() && crate::config::same_server(&app.keep.owner, HOST));
+        assert!(reach_of(&opened).iter().all(|r| r.as_ref().map(|(b, p)| (b.as_str(), *p)) == Some((HOST, None))), "its own server's: {opened:?}");
+        app.tick_at(crate::clock::Instant::now());
+        assert!(crate::config::same_server(&app.keep.owner, HOST), "the window holds it in front");
+        app.keep_close();
+        assert_eq!(app.keep.owner, "http://other:3000", "the session's own again");
+        // A peer its parent no longer lists: no way in.
+        app.keep_peers_listed(HOST, vec![9]);
+        let gone = app.keep_track(&Origin { server: HOST.into(), peer: Some(B) }, &late, None).unwrap();
+        assert!(app.keep_choices(gone).is_empty());
+    }
+
+    /// Stage Peer B browsed, its own server's gate open.
+    fn peer_app() -> App {
+        let mut app = own_app();
+        onto_peer(&mut app);
+        app
+    }
+
+    fn peer_track(file: &str, title: &str, artist: &str, album: &str, credit: Option<&str>) -> Track {
+        Track {
+            filepath: format!("peerlib/{file}"),
+            metadata: TrackMetadata {
+                title: Some(title.into()),
+                artist: Some(artist.into()),
+                album: Some(album.into()),
+                album_artist: credit.map(str::to_string),
+                year: Some(2019),
+                duration: Some(8.0),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Open an album page on the peer and land its songs.
+    fn album_page(app: &mut App, node: LibraryNode, tracks: Vec<Track>) -> Vec<Effect> {
+        app.open_library_node(node.clone(), true);
+        let generation = app.session_gen();
+        app.apply_event(Event::Library { generation, dest: Tab::Library, node, data: LibraryData::Tracks(tracks) })
+    }
+
+    fn tapes_node(credit: AlbumCredit) -> LibraryNode {
+        LibraryNode::Album { name: "Borrowed Tapes".into(), artist: None, album_artist: credit, year: Some(2019), compilation: false }
+    }
+
+    #[test]
+    fn a_connected_servers_things_are_targets_with_their_own_recommendations() {
+        let mut app = peer_app();
+        let origin = Origin { server: HOST.into(), peer: Some(B) };
+        let late = peer_track("Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3", "Late Train Verse", "Boukmanflow", "Borrowed Tapes", Some("Boukmanflow"));
+        // A song off any page: no credit of the page's — never its own album-artist.
+        let song = app.keep_track(&origin, &late, None).unwrap();
+        assert_eq!(song.focus(), KeepFocus::Song);
+        assert!(matches!(&song, KeepTarget::Track { album_artist: AlbumCredit::Unknown, .. }));
+        // On its album page with a known credit: the page's credit rides along.
+        album_page(&mut app, tapes_node(AlbumCredit::Known("Boukmanflow".into())), vec![late.clone()]);
+        let on_page = app.keep_track(&origin, &late, Some(Tab::Library)).unwrap();
+        assert!(matches!(&on_page, KeepTarget::Track { album_artist: AlbumCredit::Known(c), .. } if c == "Boukmanflow"));
+        assert_eq!(app.keep_choices(on_page.clone()), vec![KeepChoice::Song, KeepChoice::Album], "Album at once with the page's credit");
+        assert_eq!(app.keep_choices(song), vec![KeepChoice::Song], "Album waits for its credit");
+        // Its recommendation (spec §5.0): source, server, the song's fields.
+        app.keep_open(on_page);
+        let rec = app.keep_view().unwrap().subject.rec;
+        assert_eq!(rec, serde_json::json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" },
+            "filepath": "peerlib/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3", "title": "Late Train Verse", "artist": "Boukmanflow",
+            "album": "Borrowed Tapes", "albumArtist": "Boukmanflow", "year": 2019, "duration": 8.0 }));
+        app.keep_close();
+        // The album page itself: album focus, its credit; the artist's too unless a compilation.
+        let page = app.keep_album_page().expect("the page's credit is known");
+        assert_eq!(page.focus(), KeepFocus::Album);
+        let rec = |app: &mut App, target: KeepTarget| {
+            app.keep_open(target);
+            let rec = app.keep_view().expect("its window").subject.rec;
+            app.keep_close();
+            rec
+        };
+        assert_eq!(rec(&mut app, page), serde_json::json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" },
+            "album": "Borrowed Tapes", "albumArtist": "Boukmanflow", "artist": "Boukmanflow", "year": 2019 }));
+        // A wall's card: a known credit, never the singles bucket or a null.
+        let card = |name: Option<&str>, credit: serde_json::Value, compilation: bool| -> crate::api::types::Album {
+            serde_json::from_value(serde_json::json!({ "name": name, "year": 2024, "album_artist": credit, "compilation": compilation })).unwrap()
+        };
+        let sampler = app.keep_album_card(&card(Some("Night Market Sampler"), serde_json::json!("Various Artists"), false)).unwrap();
+        assert_eq!(rec(&mut app, sampler.clone())["artist"], serde_json::Value::Null, "a compilation's credit is no one's own");
+        assert_eq!(app.keep_choices(sampler), vec![KeepChoice::Album]);
+        assert!(app.keep_album_card(&card(Some("Split Series"), serde_json::Value::Null, false)).is_none(), "credits disagree");
+        assert!(app.keep_album_card(&card(None, serde_json::json!("Boukmanflow"), false)).is_none(), "the singles bucket");
+        // A folder below a library's top; the top and `/` are none.
+        let folder = app.keep_folder("/peerlib/Boukmanflow/").unwrap();
+        assert_eq!(folder, KeepTarget::Folder { origin: origin.clone(), path: "peerlib/Boukmanflow".into(), name: "Boukmanflow".into() });
+        assert!(app.keep_folder("peerlib").is_none() && app.keep_folder("").is_none());
+        assert_eq!(rec(&mut app, folder.clone()), serde_json::json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" }, "filepath": "peerlib/Boukmanflow", "title": "Boukmanflow" }));
+        assert_eq!(app.keep_choices(folder), [FolderLanding::Mirror, FolderLanding::Into, FolderLanding::Tags].map(KeepChoice::Folder).to_vec());
+        // A pin is the target itself.
+        let pinned = app.keep_pin(app.keep_album_page().unwrap()).unwrap();
+        assert_eq!(pinned.server(), "Stage Peer B");
+        assert_eq!(app.keep_find(&pinned), app.keep_album_page());
+        // On the user's own server, none of them.
+        let own = own_app();
+        assert!(own.keep_folder("music/Boukmanflow").is_none() && own.keep_album_page().is_none());
+        assert!(own.keep_track(&own.origin(), &late, None).is_none());
+    }
+
+    #[test]
+    fn an_album_pages_credit_is_found_once_and_stored_on_its_node() {
+        let mut app = peer_app();
+        // Step 2: the songs' own album-artist agree — at once, nothing asked.
+        let a = peer_track("Boukmanflow/Borrowed Tapes/01.mp3", "Rooftop Cypher", "Boukmanflow", "Borrowed Tapes", Some("Boukmanflow"));
+        let b = peer_track("Boukmanflow/Borrowed Tapes/02.mp3", "Late Train Verse", "Boukmanflow", "Borrowed Tapes", Some("boukmanflow"));
+        let asked = album_page(&mut app, tapes_node(AlbumCredit::Unknown), vec![a.clone(), b.clone()]);
+        assert!(!asked.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AlbumCredit { .. }))));
+        assert!(matches!(app.library_stack.here(), LibraryNode::Album { album_artist: AlbumCredit::Known(c), .. } if c == "Boukmanflow"));
+        assert_eq!(app.album_credit_words().as_deref(), Some("Boukmanflow"), "the page names it beside the album");
+        assert!(app.keep_album_page().is_some(), "and its way in stands");
+        // They disagree: never a way in; the page names both.
+        let split = peer_track("ALM/Split Series/01.mp3", "One", "ALM", "Split Series", Some("ALM"));
+        let other = peer_track("Boukmanflow/Split Series/02.mp3", "Two", "Boukmanflow", "Split Series", Some("Boukmanflow"));
+        let node = LibraryNode::Album { name: "Split Series".into(), artist: None, album_artist: AlbumCredit::Unknown, year: None, compilation: false };
+        album_page(&mut app, node, vec![split, other]);
+        assert_eq!(app.album_credit_words().as_deref(), Some("ALM, Boukmanflow"));
+        assert!(app.keep_album_page().is_none());
+        // The opener's word stands: a card's null is the listing's artists.
+        let opened = LibraryNode::Album { name: "Split Series".into(), artist: None, album_artist: AlbumCredit::Disagree(vec!["ALM".into(), "Boukmanflow".into()]), year: Some(2022), compilation: false };
+        let asked = album_page(&mut app, opened, vec![]);
+        assert!(asked.is_empty() && app.album_credit_words().as_deref() == Some("ALM, Boukmanflow"));
+        // Step 3: an older server's songs name none — its artist's albums, once.
+        let old = |title: &str| peer_track(&format!("Boukmanflow/Second Shift/{title}.mp3"), title, "Boukmanflow", "Second Shift", None);
+        let node = LibraryNode::Album { name: "Second Shift".into(), artist: None, album_artist: AlbumCredit::Unknown, year: Some(2023), compilation: false };
+        let asked = album_page(&mut app, node.clone(), vec![old("Clock In"), old("Break")]);
+        let Some(Effect::Api(ApiCmd::AlbumCredit { seq, generation, artist })) = asked.first() else { panic!("{asked:?}") };
+        assert_eq!(artist, "Boukmanflow");
+        assert!(app.album_credit_resolving() && app.album_credit_words().is_none(), "nothing drawn while it resolves");
+        let rows = vec![ArtistAlbumRow { name: Some("Second Shift".into()), album_artist: Some("Boukmanflow".into()), credit_listed: true, year: Some(2023), ..Default::default() }];
+        app.apply_event(Event::AlbumCredit { seq: *seq, generation: *generation, rows: Some(rows) });
+        assert!(!app.album_credit_resolving());
+        assert_eq!(app.album_credit_words().as_deref(), Some("Boukmanflow"));
+        // No answer in 8 s: unknown, for this visit.
+        let later = LibraryNode::Album { name: "Second Shift".into(), artist: None, album_artist: AlbumCredit::Unknown, year: Some(2024), compilation: false };
+        let asked = album_page(&mut app, later, vec![old("Clock In")]);
+        assert!(matches!(asked.first(), Some(Effect::Api(ApiCmd::AlbumCredit { .. }))));
+        app.tick_at(crate::clock::Instant::now() + std::time::Duration::from_secs(9));
+        assert!(!app.album_credit_resolving() && app.album_credit_words().is_none());
+        // The user's own server: its songs' word only, nothing asked.
+        let mut own = own_app();
+        let asked = album_page(&mut own, LibraryNode::album("Second Shift", None), vec![old("Clock In")]);
+        assert!(asked.is_empty());
+    }
+
+    #[test]
+    fn a_folders_window_offers_its_three_landings_their_places_and_the_cap() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let folder = app.keep_folder("peerlib/Boukmanflow").unwrap();
+        let opened = app.keep_open(folder);
+        // The facts: the folder's recursive listing, of the peer, once.
+        let (seq, reach, ask) = opened
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::KeepFacts { seq, reach, ask, .. }) => Some((*seq, reach.clone(), (**ask).clone())),
+                _ => None,
+            })
+            .expect("the facts");
+        assert_eq!((ask.folder.as_deref(), reach.and_then(|r| r.peer)), (Some("peerlib/Boukmanflow"), Some(B)));
+        let view = app.keep_view().unwrap();
+        assert_eq!((view.subject.focus, view.choice), (KeepFocus::Folder, KeepChoice::Folder(FolderLanding::Mirror)));
+        assert!(!view.changes(), "no `d change` under As on {{server}}");
+        assert_eq!(view.into, Some(IntoPlace { vpath: "copies".into(), path: "Boukmanflow".into() }), "the saved library, the pressed folder's name");
+        assert!(matches!(view.stage, KeepStage::Choose { verb: Some(KeepVerb::Folder), .. }), "Add never waits on the count: {:?}", view.stage);
+        // Listed: nine songs, every landing alike.
+        let files: Vec<String> = ["Borrowed Tapes/01.mp3", "Borrowed Tapes/02.mp3", "Borrowed Tapes/03.mp3", "Harbour Lights/01.mp3", "Harbour Lights/02.mp3", "Harbour Lights/03.mp3", "Second Shift/01.mp3", "Second Shift/02.mp3", "Second Shift/03.mp3", "../x.mp3"]
+            .iter()
+            .map(|f| format!("peerlib/Boukmanflow/{f}"))
+            .collect();
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { folder_files: Some(files), ..KeepFacts::default() }) });
+        let view = app.keep_view().unwrap();
+        assert!(view.choices.iter().all(|(_, size)| *size == ChoiceSize::Folder { songs: Fact::Known(9) }));
+        // As on the server: the folder's path inside its library.
+        assert_eq!(view.landing.as_ref().map(|l| l.crumbs()), Some(vec!["copies".to_string(), "Boukmanflow".into()]));
+        // A place line per landing: the window draws the chosen one's.
+        let place = view.destination.clone().expect("a place");
+        let places: Vec<Vec<String>> = [JobLanding::Mirror, view.into.clone().unwrap().landing()].iter().map(|l| view.folder_landing_at(&place, l).crumbs()).collect();
+        assert_eq!(places, vec![vec!["copies".to_string(), "Boukmanflow".into()], vec!["copies".to_string(), "Boukmanflow".into()]], "Into starts named as the pressed folder");
+        // Into a folder…: the chooser's place, d change.
+        app.keep_pick(KeepChoice::Folder(FolderLanding::Into));
+        app.keep_set_into("copies", "From Sam");
+        let view = app.keep_view().unwrap();
+        assert!(view.changes());
+        assert_eq!(view.landing.as_ref().map(|l| l.crumbs()), Some(vec!["copies".to_string(), "From Sam".into()]));
+        // By your layout: its tags read once at most 100 songs, on the
+        // landing's first choosing; until they answer, slots, one folder per album.
+        app.keep_pick(KeepChoice::Folder(FolderLanding::Tags));
+        let view = app.keep_view().unwrap();
+        let landing = view.landing.clone().unwrap();
+        assert_eq!((landing.crumbs(), landing.per_album), (vec!["copies".to_string(), "‹artist›".into()], true));
+        let tags = app.tick_at(crate::clock::Instant::now());
+        let Some(Effect::Api(ApiCmd::KeepFolderTags { seq: tags_seq, reach, filepaths, .. })) = tags.iter().find(|e| matches!(e, Effect::Api(ApiCmd::KeepFolderTags { .. }))) else {
+            panic!("the tags read: {tags:?}")
+        };
+        assert_eq!((filepaths.len(), reach.as_ref().and_then(|r| r.peer)), (9, Some(B)));
+        assert!(!app.tick_at(crate::clock::Instant::now()).iter().any(|e| matches!(e, Effect::Api(ApiCmd::KeepFolderTags { .. }))), "once");
+        let tagged: Vec<Track> = filepaths
+            .iter()
+            .map(|f| {
+                let album = f.split('/').nth(2).unwrap().to_string();
+                Track { filepath: f.clone(), metadata: TrackMetadata { artist: Some("Boukmanflow".into()), album: Some(album), album_artist: Some("Boukmanflow".into()), year: Some(2019), ..Default::default() } }
+            })
+            .collect();
+        app.apply_event(Event::KeepFolderTags { seq: *tags_seq, generation, tracks: Some(tagged) });
+        let landing = app.keep_view().unwrap().landing.unwrap();
+        assert_eq!((landing.crumbs(), landing.per_album), (vec!["copies".to_string(), "Boukmanflow".into()], true), "three albums: one folder per album");
+        // The start bodies: each landing as the route takes it.
+        let start = |app: &mut App, landing: FolderLanding| {
+            app.keep_pick(KeepChoice::Folder(landing));
+            let effects = app.keep_start();
+            let sent = effects.iter().find_map(|e| match e {
+                Effect::Api(ApiCmd::JobStart { rec, scope, landing, destination, .. }) => Some(((**rec).clone(), *scope, landing.clone(), destination.clone())),
+                _ => None,
+            });
+            if let Some(flow) = app.keep.flow.as_mut() {
+                flow.phase = KeepPhase::Choose;
+            }
+            sent.expect("a start")
+        };
+        let (rec, scope, landing, shown) = start(&mut app, FolderLanding::Mirror);
+        assert_eq!((rec["filepath"].as_str(), scope, landing), (Some("peerlib/Boukmanflow"), JobScope::Folder, Some(JobLanding::Mirror)));
+        assert_eq!(shown.flatten().map(|d| d.vpath), Some("copies".into()), "the place shown");
+        assert_eq!(start(&mut app, FolderLanding::Into).2, Some(JobLanding::Into { vpath: Some("copies".into()), path: "From Sam".into() }));
+        assert_eq!(start(&mut app, FolderLanding::Tags).2, Some(JobLanding::Tags));
+        // Past the plug-in's cap, before any start: no landings, no place, Close.
+        app.keep_close();
+        let generation = app.session_gen();
+        app.apply_event(Event::KeepGate { generation, plugins: Ok(Box::new(capped(5))), destination: Some(Ok(Box::new(destination(Some("copies"))))) });
+        let opened = app.keep_open(app.keep_folder("peerlib/Boukmanflow").unwrap());
+        let seq = opened.iter().find_map(|e| match e { Effect::Api(ApiCmd::KeepFacts { seq, .. }) => Some(*seq), _ => None }).unwrap();
+        let nine = (1..=9).map(|i| format!("peerlib/Boukmanflow/{i}.mp3")).collect();
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { folder_files: Some(nine), ..KeepFacts::default() }) });
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.cap, Some(FolderCap { count: 9, cap: 5 }));
+        assert!(view.landing.is_none() && matches!(view.stage, KeepStage::Choose { verb: None, .. }));
+        assert!(app.keep_start().is_empty(), "nothing to add");
+    }
+
+    #[test]
+    fn a_folder_copys_life_reads_its_own_landing() {
+        let mut app = peer_app();
+        let folder = app.keep_folder("peerlib/Boukmanflow/Borrowed Tapes").unwrap();
+        let opened = app.keep_open(folder);
+        let (seq, recs) = lookups(&opened).pop().expect("its own lookup");
+        assert_eq!(recs[0]["filepath"], "peerlib/Boukmanflow/Borrowed Tapes");
+        // Its folder copy, live, into a folder: followed, Into its own landing.
+        let params = serde_json::json!({ "scope": "folder", "landing": { "vpath": "copies", "path": "From Sam" },
+            "destination": { "vpath": "copies", "base": "", "layout": "{{ALBUMARTIST}}/{{ALBUM}}" } });
+        let mut live = copy_job(90, "folder:tapes", Some("folder"), "running", B, serde_json::Value::Null);
+        live.params = serde_json::from_value(params).unwrap();
+        live.recommendation = recs[0].clone();
+        let found = JobLookup {
+            key: Some("text:x".into()),
+            keys: [("song".to_string(), serde_json::json!("text:x")), ("folder".to_string(), serde_json::json!("folder:tapes"))].into_iter().collect(),
+            jobs: vec![live.clone(), copy_job(91, "text:x", None, "done", B, serde_json::json!({ "copied": { "filepath": "copies/x.mp3" } }))],
+        };
+        let generation = app.session_gen();
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(vec![found]) });
+        let view = app.keep_view().unwrap();
+        assert_eq!(app.keep.flow.as_ref().unwrap().phase, KeepPhase::Following(90), "its folder copy, never a song's");
+        assert_eq!(view.landing.map(|l| l.crumbs()), Some(vec!["copies".to_string(), "From Sam".into()]), "Into its own landing");
+        // Kept: In the folder its result names, Play your copy; the Copies
+        // list names it by its folder, and Retry or Add again reuse its landing.
+        let result = serde_json::json!({ "scope": "folder", "folder": { "path": "peerlib/Boukmanflow/Borrowed Tapes", "name": "Borrowed Tapes", "landed": "copies/From Sam" },
+            "layout": "folder", "songs": { "total": 2, "copied": [{ "from": "peerlib/Boukmanflow/Borrowed Tapes/02.mp3", "filepath": "copies/From Sam/02.mp3" }, { "from": "peerlib/Boukmanflow/Borrowed Tapes/01.mp3", "filepath": "copies/From Sam/01.mp3" }], "skipped": [], "failed": [] }, "stopped": null });
+        let mut kept = PluginJob { state: crate::api::types::JobState::Done, result: Some(result), progress: None, status_text: None, ..live.clone() };
+        kept.updated_at = Some(2);
+        let asked = app.copies_open();
+        app.apply_event(Event::Jobs { seq: job_asks(&asked)[0], generation, answer: Ok(Box::new(PluginJobList { jobs: vec![kept.clone()], runner: None })) });
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.landing.map(|l| l.crumbs()), Some(vec!["copies".to_string(), "From Sam".into()]));
+        let KeepStage::Job { action, .. } = view.stage else { panic!() };
+        assert_eq!(action, Some(crate::api::types::JobAction::Play));
+        assert_eq!(app.copies_rows()[0].title, CopyTitle::Folder("Borrowed Tapes".into()));
+        app.keep_again();
+        let queued: Vec<&str> = app.queue.items.iter().map(|q| q.track.filepath.as_str()).collect();
+        assert_eq!(queued, ["copies/From Sam/01.mp3", "copies/From Sam/02.mp3"], "path order, from the user's own server");
+        assert!(app.queue.items.iter().all(|q| q.origin == Origin { server: HOST.into(), peer: None }));
+        let mut failed = PluginJob { state: crate::api::types::JobState::Failed, result: None, error: Some("gone".into()), ..kept.clone() };
+        failed.updated_at = Some(3);
+        let asked = app.copies_try_again();
+        app.apply_event(Event::Jobs { seq: job_asks(&asked)[0], generation, answer: Ok(Box::new(PluginJobList { jobs: vec![failed.clone()], runner: None })) });
+        let effects = app.copies_act(90);
+        let sent = effects.iter().find_map(|e| match e { Effect::Api(ApiCmd::JobStart { landing, scope, .. }) => Some((landing.clone(), *scope)), _ => None });
+        assert_eq!(sent, Some((Some(JobLanding::Into { vpath: Some("copies".into()), path: "From Sam".into() }), JobScope::Folder)));
+        // Cancelled: Add again brings the landings back, the dot on its own.
+        let cancelled = PluginJob { state: crate::api::types::JobState::Cancelled, error: None, updated_at: Some(4), ..failed };
+        let asked = app.copies_try_again();
+        app.apply_event(Event::Jobs { seq: job_asks(&asked)[0], generation, answer: Ok(Box::new(PluginJobList { jobs: vec![cancelled], runner: None })) });
+        if let Some(flow) = app.keep.flow.as_mut() {
+            flow.choice = KeepChoice::Folder(FolderLanding::Mirror);
+            flow.into = IntoPlace::default();
+        }
+        app.keep_again();
+        let view = app.keep_view().unwrap();
+        assert_eq!((view.choice, view.into), (KeepChoice::Folder(FolderLanding::Into), Some(IntoPlace { vpath: "copies".into(), path: "From Sam".into() })));
+    }
+
+    #[test]
+    fn an_artists_window_is_the_box_alone_counted_by_theirs_and_names_what_it_leaves_out() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        app.open_library_node(LibraryNode::Artist("Boukmanflow".into()), true);
+        let wall: Vec<crate::api::types::Album> = serde_json::from_value(serde_json::json!([
+            { "name": "Borrowed Tapes", "year": 2019, "album_artist": "Boukmanflow", "artists": ["Boukmanflow"] },
+            { "name": "Harbour Lights", "year": 2021, "album_artist": "Boukmanflow", "artists": ["Boukmanflow"] },
+            { "name": "Second Shift", "year": 2023, "album_artist": "Boukmanflow", "artists": ["Boukmanflow"] },
+            { "name": "Night Market Sampler", "year": 2024, "album_artist": "Various Artists", "artists": ["Color Out", "Boukmanflow", "ALM"], "compilation": true },
+            { "name": null, "album_artist": "Boukmanflow", "artists": ["Boukmanflow"] }
+        ]))
+        .unwrap();
+        app.apply_event(Event::Library { generation, dest: Tab::Library, node: LibraryNode::Artist("Boukmanflow".into()), data: LibraryData::Albums(wall) });
+        let target = app.keep_artist_wall().expect("theirs ≥ 1");
+        assert_eq!(app.keep_choices(target.clone()), vec![KeepChoice::Artist]);
+        let opened = app.keep_open(target);
+        let (seq, ask) = opened.iter().find_map(|e| match e { Effect::Api(ApiCmd::KeepFacts { seq, ask, .. }) => Some((*seq, (**ask).clone())), _ => None }).unwrap();
+        assert!(ask.listed, "the wall's own listing: not asked again");
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.choices, vec![(KeepChoice::Artist, ChoiceSize::Artist { albums: Fact::Known(3), have: Fact::Asking })], "theirs, never the wall's five");
+        assert_eq!(view.left_out, Some(crate::api::types::LeftOut { albums: vec!["Night Market Sampler".into()], singles: true }));
+        // Your library holds one of the three: the box, ticked, two missing.
+        let local = vec![ArtistAlbumRow { name: Some("Harbour Lights".into()), credit_listed: true, ..Default::default() }];
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { local_albums: Some(local), ..KeepFacts::default() }) });
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.missing, Some((true, 2)));
+        assert!(matches!(view.stage, KeepStage::Choose { verb: Some(KeepVerb::Missing(2)), .. }), "{:?}", view.stage);
+        app.keep_set_missing(false);
+        assert!(matches!(app.keep_view().unwrap().stage, KeepStage::Choose { verb: Some(KeepVerb::Artist), .. }));
+        let sent = starts(&app.keep_start());
+        assert_eq!((sent[0].1.clone(), sent[0].2), (serde_json::json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" }, "artist": "Boukmanflow" }), JobScope::Artist));
+        // Various Artists, and an artist with nothing of theirs: no way in.
+        app.keep_close();
+        for (artist, wall) in [("Various Artists", serde_json::json!([{ "name": "Night Market Sampler", "album_artist": "Various Artists", "artists": ["Various Artists"] }])),
+            ("Lantern Choir", serde_json::json!([{ "name": "Night Market Sampler", "album_artist": "Various Artists", "artists": ["Lantern Choir"], "compilation": true }]))] {
+            app.open_library_node(LibraryNode::Artist(artist.into()), true);
+            let albums = serde_json::from_value(wall).unwrap();
+            app.apply_event(Event::Library { generation, dest: Tab::Library, node: LibraryNode::Artist(artist.into()), data: LibraryData::Albums(albums) });
+            assert!(app.keep_artist_wall().is_none(), "{artist}");
+        }
+    }
+
+    #[test]
+    fn a_connected_servers_page_asks_its_rows_marks_in_batches_and_keeps_them() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let tracks: Vec<Track> = (0..150)
+            .map(|i| peer_track(&format!("Boukmanflow/Borrowed Tapes/{i:03}.mp3"), &format!("Song {i}"), "Boukmanflow", "Borrowed Tapes", Some("Boukmanflow")))
+            .collect();
+        album_page(&mut app, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tracks.clone());
+        let page = MarksPage::Library(app.library_stack.here().clone());
+        let mut asks = vec![MarkAsk::AlbumPage];
+        asks.extend(tracks.iter().map(MarkAsk::Song));
+        // One lookup of at most 100: the page's own ask first, then its rows.
+        let first = app.keep_marks_ask(&page, &asks);
+        let (seq, recs) = lookups(&first).pop().expect("a lookup");
+        assert_eq!(recs.len(), 100);
+        assert_eq!(recs[0], serde_json::json!({ "source": "federation", "peer": { "id": B, "name": "Stage Peer B" }, "album": "Borrowed Tapes", "albumArtist": "Boukmanflow", "artist": "Boukmanflow", "year": 2019 }));
+        assert_eq!(reach_of(&first), vec![Some((HOST.to_string(), None))], "the own server's lookup");
+        assert!(app.keep_marks_ask(&page, &asks).is_empty(), "one out at a time");
+        // The album copying (this server's), a song copied from elsewhere.
+        let album = copy_job(60, "album:boukmanflow|borrowed tapes", Some("album"), "running", B, serde_json::Value::Null);
+        let song = copy_job(61, "text:song 1", None, "done", C, serde_json::json!({ "copied": { "filepath": "copies/x.mp3" } }));
+        let results: Vec<JobLookup> = recs.iter().map(|rec| lookup_of(rec, &[album.clone(), song.clone()])).collect();
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(results) });
+        assert_eq!(app.keep_page_state(), Some(JobMark::Copying), "the header's state");
+        assert_eq!(app.keep_song_mark(&tracks[1]), Some(JobMark::Kept), "a song copy is the recording, from any server");
+        assert_eq!(app.keep_song_mark(&tracks[2]), None, "nothing while the album copy is live");
+        // The rest, in the next lookup; then nothing more is asked.
+        let second = app.keep_marks_ask(&page, &asks);
+        let (seq2, recs2) = lookups(&second).pop().expect("the rest");
+        assert_eq!(recs2.len(), 51);
+        app.apply_event(Event::JobsLookup { seq: seq2, generation, answer: Err(PluginFailure::Unreachable("down".into())) });
+        assert_eq!(app.keep_song_mark(&tracks[120]), None, "a failed lookup draws nothing");
+        assert!(app.keep_marks_ask(&page, &asks).is_empty(), "asked once; a failed one is not asked again");
+        // The album copy ends: the rows that held it are asked again — only them.
+        let mut done = album.clone();
+        done.state = crate::api::types::JobState::Done;
+        done.result = Some(serde_json::json!({ "scope": "album", "stopped": null, "songs": { "total": 2,
+            "copied": [{ "from": tracks[2].filepath, "filepath": "copies/a.mp3" }], "skipped": [{ "from": tracks[3].filepath, "why": "owned", "at": "music/b.mp3" }],
+            "failed": [{ "from": tracks[4].filepath, "error": "gone" }] } }));
+        app.keep_watch(KeepWatch::Room);
+        let polled = app.tick_at(crate::clock::Instant::now() + std::time::Duration::from_secs(5));
+        let jobs_seq = job_asks(&polled).first().copied().unwrap_or_else(|| job_asks(&app.copies_try_again())[0]);
+        app.apply_event(Event::Jobs { seq: jobs_seq, generation, answer: Ok(Box::new(PluginJobList { jobs: vec![done], runner: None })) });
+        assert_eq!(
+            [2, 3, 4, 5].map(|i| app.keep_song_mark(&tracks[i])),
+            [Some(JobMark::Kept), Some(JobMark::Yours), Some(JobMark::Failed), None],
+            "ended, read through each song"
+        );
+        let again = app.keep_marks_ask(&page, &asks);
+        assert_eq!(lookups(&again).pop().map(|(_, recs)| recs.len()), Some(100), "the rows that held it, at most 100 again");
+        // Another server's album copy never marks this server's page.
+        let (seq, recs) = lookups(&again).pop().unwrap();
+        let other = copy_job(70, "album:boukmanflow|borrowed tapes", Some("album"), "done", C, serde_json::json!({ "scope": "album", "counts": { "total": 1, "copied": 1, "skipped": 0, "failed": 0 } }));
+        let mut theirs = peer_app();
+        album_page(&mut theirs, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tracks.clone());
+        let theirs_seq = lookups(&theirs.keep_marks_ask(&page, &asks[..1])).pop().unwrap().0;
+        theirs.apply_event(Event::JobsLookup { seq: theirs_seq, generation: theirs.session_gen(), answer: Ok(vec![lookup_of(&recs[0], std::slice::from_ref(&other))]) });
+        assert_eq!(theirs.keep_page_state(), None);
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(recs.iter().map(|rec| lookup_of(rec, std::slice::from_ref(&song))).collect()) });
+        // The gate closed keeps the marks: only the flag counts (gap 28).
+        app.keep.gate.plugins.as_mut().unwrap().jobs.allowed = false;
+        assert!(!app.keep_gate());
+        assert_eq!(app.keep_song_mark(&tracks[1]), Some(JobMark::Kept));
+        // Another page: a fresh holder.
+        let recent = app.keep_marks_ask(&MarksPage::Library(LibraryNode::Recent), &[MarkAsk::Song(&tracks[0])]);
+        assert_eq!(lookups(&recent).pop().map(|(_, recs)| recs.len()), Some(1));
+        assert_eq!(app.keep_song_mark(&tracks[1]), None, "its marks went with the page");
+    }
+
+    #[test]
+    fn a_walls_cards_wear_their_albums_copies_and_searchs_song_hits_their_own() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let card = |name: &str, credit: serde_json::Value| -> crate::api::types::Album {
+            serde_json::from_value(serde_json::json!({ "name": name, "year": 2019, "album_artist": credit })).unwrap()
+        };
+        let cards = [card("Borrowed Tapes", serde_json::json!("Boukmanflow")), card("Harbour Lights", serde_json::json!("Boukmanflow")), card("Split Series", serde_json::Value::Null)];
+        let page = MarksPage::Library(LibraryNode::Albums);
+        let asks: Vec<MarkAsk> = cards.iter().map(MarkAsk::Card).collect();
+        let asked = app.keep_marks_ask(&page, &asks);
+        let (seq, recs) = lookups(&asked).pop().unwrap();
+        assert_eq!(recs.len(), 2, "a card whose credits disagree asks nothing");
+        // Borrowed Tapes: an every-album copy that ended, as its walk saw the
+        // album; Harbour Lights: a song copy of it and an artist copy still
+        // running — neither marks a card.
+        let walk = serde_json::json!({ "scope": "artist", "albums": [{ "name": "Borrowed Tapes", "songs": { "total": 1, "copied": [{ "from": "x" }], "skipped": [], "failed": [] } }],
+            "skippedAlbums": [], "songs": { "total": 1, "copied": [{ "from": "x" }], "skipped": [], "failed": [] }, "stopped": null });
+        let walked = copy_job(95, "artist:boukmanflow", Some("artist"), "done", B, walk);
+        let running = copy_job(96, "artist:boukmanflow", Some("artist"), "running", B, serde_json::Value::Null);
+        let song = copy_job(97, "text:", None, "done", B, serde_json::json!({ "copied": { "filepath": "copies/x.mp3" } }));
+        let found = vec![lookup_of(&recs[0], &[walked]), lookup_of(&recs[1], &[running, song])];
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(found) });
+        assert_eq!(cards.iter().map(|c| app.keep_card_mark(c)).collect::<Vec<_>>(), [Some(JobMark::Kept), None, None]);
+        // Search's song hits: the rows on screen, their own copies.
+        let hit = peer_track("Boukmanflow/Borrowed Tapes/02.mp3", "Late Train Verse", "Boukmanflow", "Borrowed Tapes", Some("Boukmanflow"));
+        let search = MarksPage::Search("late".into());
+        let asked = app.keep_marks_ask(&search, &[MarkAsk::Song(&hit)]);
+        let (seq, recs) = lookups(&asked).pop().unwrap();
+        // Off its album page, a song row's mark is keyed by its own
+        // album-artist — a compilation's songs wear its album copy's marks.
+        assert_eq!(recs[0]["albumArtist"], "Boukmanflow");
+        let mine = copy_job(98, "text:late train verse", None, "queued", B, serde_json::Value::Null);
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(vec![lookup_of(&recs[0], &[mine])]) });
+        assert_eq!(app.keep_song_mark(&hit), Some(JobMark::Waiting));
+        assert!(app.keep_marks_ask(&search, &[MarkAsk::Song(&hit)]).is_empty(), "kept for the page");
+    }
+
+    #[test]
+    fn an_untagged_files_song_learns_its_tags_and_its_choices_append() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let origin = Origin { server: HOST.into(), peer: Some(B) };
+        let bare = Track { filepath: "peerlib/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3".into(), metadata: TrackMetadata::default() };
+        let opened = app.keep_open(app.keep_track(&origin, &bare, None).unwrap());
+        // Until its tags answer: the file's name, This song alone.
+        let view = app.keep_view().unwrap();
+        assert_eq!((view.subject.title.as_deref(), view.choices.len()), (Some("02 - Late Train Verse.mp3"), 1));
+        assert_eq!(view.subject.rec["title"], "02 - Late Train Verse.mp3");
+        assert!(opened.iter().any(|e| matches!(e, Effect::Api(ApiCmd::TrackInfo { filepath, .. }) if filepath == &bare.filepath)), "its tags asked: {opened:?}");
+        // They land: title, byline, recommendation; the facts asked again.
+        let tagged = peer_track("Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3", "Late Train Verse", "Boukmanflow", "Borrowed Tapes", Some("Boukmanflow"));
+        let again = app.apply_event(Event::TrackInfo { filepath: bare.filepath.clone(), track: Some(Box::new(tagged)) });
+        let view = app.keep_view().unwrap();
+        assert_eq!((view.subject.title.as_deref(), view.subject.track_artist.as_deref(), view.subject.album.as_deref()), (Some("Late Train Verse"), Some("Boukmanflow"), Some("Borrowed Tapes")));
+        assert_eq!((view.subject.rec["title"].as_str(), view.subject.rec["artist"].as_str()), (Some("Late Train Verse"), Some("Boukmanflow")));
+        let seq = again.iter().find_map(|e| match e { Effect::Api(ApiCmd::KeepFacts { seq, .. }) => Some(*seq), _ => None }).expect("the facts again");
+        // Its album's songs agree on their credit, its artist has albums of
+        // theirs there: Album and Every album by join, the dot stays.
+        let songs = vec![KeepSong { filepath: "peerlib/x.mp3".into(), album_artist: Some("Boukmanflow".into()), ..KeepSong::default() }];
+        let rows = vec![ArtistAlbumRow { name: Some("Borrowed Tapes".into()), album_artist: Some("Boukmanflow".into()), credit_listed: true, ..Default::default() }];
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { album_songs: Some(songs), peer_albums: Some(rows), ..KeepFacts::default() }) });
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.choices.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![KeepChoice::Song, KeepChoice::Album, KeepChoice::Artist]);
+        assert_eq!(view.choice, KeepChoice::Song);
+        app.keep_pick(KeepChoice::Album);
+        let sent = starts(&app.keep_start());
+        assert_eq!((sent[0].1["albumArtist"].as_str(), sent[0].2), (Some("Boukmanflow"), JobScope::Album), "the found credit keys the album copy");
+        // A connected server's queue item while the user's own server is
+        // browsed: its own server's state, the session's reach.
+        let mut own = own_app();
+        let target = own.keep_track(&origin, &bare, None).unwrap();
+        assert_eq!(own.keep_choices(target.clone()), vec![KeepChoice::Song]);
+        let opened = own.keep_open(target);
+        assert!(reach_of(&opened).iter().all(Option::is_none), "the session is that server: {opened:?}");
+    }
+
+    #[test]
+    fn a_folder_row_wears_its_folder_copies_alone() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let page = MarksPage::Files("peerlib/Boukmanflow".into());
+        let asks = [MarkAsk::Folder("peerlib/Boukmanflow"), MarkAsk::Folder("peerlib/Boukmanflow/Borrowed Tapes"), MarkAsk::Folder("peerlib")];
+        let asked = app.keep_marks_ask(&page, &asks);
+        let (seq, recs) = lookups(&asked).pop().unwrap();
+        assert_eq!(recs.len(), 2, "a library's top is no folder copy");
+        let folder = copy_job(80, "folder:tapes", Some("folder"), "running", B, serde_json::Value::Null);
+        let album = copy_job(81, "album:tapes", Some("album"), "done", B, serde_json::json!({ "scope": "album", "counts": { "total": 1, "copied": 1, "skipped": 0, "failed": 0 } }));
+        let found = |folder_key: &str, jobs: Vec<PluginJob>| JobLookup {
+            key: Some("text:t".into()),
+            keys: [("song".to_string(), serde_json::json!("text:t")), ("album".to_string(), serde_json::json!("album:tapes")), ("folder".to_string(), serde_json::json!(folder_key))].into_iter().collect(),
+            jobs,
+        };
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(vec![found("folder:bouk", vec![album.clone()]), found("folder:tapes", vec![folder, album])]) });
+        assert_eq!(app.keep_folder_mark("peerlib/Boukmanflow/Borrowed Tapes"), Some(JobMark::Copying));
+        assert_eq!(app.keep_folder_mark("peerlib/Boukmanflow"), None, "a folder kept as an album says so on its card, never on its row");
+        assert_eq!(app.keep_page_state(), None);
+        // The ping says no plug-ins: no lookups, no marks.
+        let mut off = peer_app();
+        off.apply_event(Event::OwnPing { server: HOST.into(), ping: Some(Box::new(Ping::default())) });
+        assert!(off.keep_marks_ask(&page, &asks).is_empty());
+    }
+
+    /// The facts a window's open (or a re-ask) sent: its seq and its ask.
+    fn facts_ask(effects: &[Effect]) -> (u64, KeepFactsAsk) {
+        effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::KeepFacts { seq, ask, .. }) => Some((*seq, (**ask).clone())),
+                _ => None,
+            })
+            .expect("the facts asked")
+    }
+
+    #[test]
+    fn a_songs_album_is_found_whole_never_by_its_artists_share() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let origin = Origin { server: HOST.into(), peer: Some(B) };
+        // Split Series, its page saying its credits disagree: its song never
+        // offers Album, whatever the window finds (rule 1).
+        let one = peer_track("ALM/Split Series/01.mp3", "One", "ALM", "Split Series", Some("ALM"));
+        let two = peer_track("Boukmanflow/Split Series/02.mp3", "Two", "Boukmanflow", "Split Series", Some("Boukmanflow"));
+        let split = LibraryNode::Album { name: "Split Series".into(), artist: None, album_artist: AlbumCredit::Disagree(vec!["ALM".into(), "Boukmanflow".into()]), year: Some(2022), compilation: false };
+        album_page(&mut app, split, vec![one.clone(), two.clone()]);
+        let target = app.keep_track(&origin, &two, Some(Tab::Library)).unwrap();
+        assert!(matches!(&target, KeepTarget::Track { album_artist: AlbumCredit::Disagree(_), .. }));
+        assert_eq!(app.keep_choices(target.clone()), vec![KeepChoice::Song]);
+        let opened = app.keep_open(target);
+        let (seq, ask) = facts_ask(&opened);
+        assert!(!ask.whole);
+        // His share agrees on him, and he has albums of his own: Every album
+        // by joins, Album never.
+        let share = KeepSong { filepath: two.filepath.clone(), album_artist: Some("Boukmanflow".into()), ..KeepSong::default() };
+        let rows = vec![ArtistAlbumRow { name: Some("Borrowed Tapes".into()), album_artist: Some("Boukmanflow".into()), credit_listed: true, ..Default::default() }];
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { album_songs: Some(vec![share.clone()]), peer_albums: Some(rows), ..KeepFacts::default() }) });
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.choices.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![KeepChoice::Song, KeepChoice::Artist]);
+        assert_eq!(view.subject.album_artist, None);
+        app.keep_close();
+        // The same song off its page (Recent): its album's songs by name and
+        // year alone — both artists' — so they disagree: no Album.
+        app.open_library_node(LibraryNode::Recent, true);
+        app.apply_event(Event::Library { generation, dest: Tab::Library, node: LibraryNode::Recent, data: LibraryData::Tracks(vec![two.clone()]) });
+        let target = app.keep_track(&origin, &two, Some(Tab::Library)).unwrap();
+        assert!(matches!(&target, KeepTarget::Track { album_artist: AlbumCredit::Unknown, .. }));
+        let opened = app.keep_open(target);
+        let (seq, ask) = facts_ask(&opened);
+        assert_eq!((ask.whole, ask.album_artist.as_deref(), ask.album.as_deref()), (true, None, Some("Split Series")));
+        let whole = vec![KeepSong { filepath: one.filepath.clone(), album_artist: Some("ALM".into()), ..KeepSong::default() }, share];
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { album_songs: Some(whole), ..KeepFacts::default() }) });
+        assert_eq!(app.keep_view().unwrap().choices.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![KeepChoice::Song]);
+        app.keep_close();
+        // A compilation's song off its page: the whole album agrees on
+        // Various Artists — Album counts its three songs, what its copy (by
+        // that credit) takes.
+        let cypher = peer_track("Various Artists/Night Market Sampler/02.mp3", "Night Market Cypher", "Boukmanflow", "Night Market Sampler", Some("Various Artists"));
+        let opened = app.keep_open(app.keep_track(&origin, &cypher, None).unwrap());
+        let (seq, ask) = facts_ask(&opened);
+        assert!(ask.whole && ask.artist.as_deref() == Some("Boukmanflow"), "its artist's albums still asked: {ask:?}");
+        let sampler: Vec<KeepSong> = ["Lantern Street", "Night Market Cypher", "Paper Lanterns"]
+            .iter()
+            .map(|t| KeepSong { filepath: format!("peerlib/Various Artists/Night Market Sampler/{t}.mp3"), album_artist: Some("Various Artists".into()), ..KeepSong::default() })
+            .collect();
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { album_songs: Some(sampler), ..KeepFacts::default() }) });
+        let view = app.keep_view().unwrap();
+        assert!(view.choices.contains(&(KeepChoice::Album, ChoiceSize::Album { songs: Fact::Known(3) })), "{:?}", view.choices);
+        app.keep_pick(KeepChoice::Album);
+        let sent = starts(&app.keep_start());
+        assert_eq!((sent[0].1["albumArtist"].as_str(), sent[0].2), (Some("Various Artists"), JobScope::Album));
+        app.keep_close();
+        // An older server's songs name no credit: step 3 finds it among the
+        // artist's albums, and the album's songs are asked again by it —
+        // Album counts what its copy takes, waiting meanwhile.
+        let clock = peer_track("Boukmanflow/Second Shift/01.mp3", "Clock In", "Boukmanflow", "Second Shift", None);
+        let opened = app.keep_open(app.keep_track(&origin, &clock, None).unwrap());
+        let (seq, _) = facts_ask(&opened);
+        let bare = |n: usize| (0..n).map(|i| KeepSong { filepath: format!("peerlib/x/{i}.mp3"), ..KeepSong::default() }).collect::<Vec<_>>();
+        let rows = vec![ArtistAlbumRow { name: Some("Second Shift".into()), album_artist: Some("Boukmanflow".into()), credit_listed: true, year: Some(2019), ..Default::default() }];
+        let again = app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { album_songs: Some(bare(5)), peer_albums: Some(rows), ..KeepFacts::default() }) });
+        let (songs_seq, ask) = facts_ask(&again);
+        assert_eq!((ask.album.as_deref(), ask.album_artist.as_deref(), ask.artist.as_deref(), ask.whole), (Some("Second Shift"), Some("Boukmanflow"), None, false));
+        assert!(app.keep_view().unwrap().choices.contains(&(KeepChoice::Album, ChoiceSize::Album { songs: Fact::Asking })));
+        app.apply_event(Event::KeepFacts { seq: songs_seq, generation, facts: Box::new(KeepFacts { album_songs: Some(bare(3)), ..KeepFacts::default() }) });
+        assert!(app.keep_view().unwrap().choices.contains(&(KeepChoice::Album, ChoiceSize::Album { songs: Fact::Known(3) })));
+    }
+
+    #[test]
+    fn a_pages_credit_goes_to_its_own_songs_never_to_another_album_of_its_name() {
+        let mut app = peer_app();
+        let origin = Origin { server: HOST.into(), peer: Some(B) };
+        let mine = peer_track("Boukmanflow/Greatest Hits/01.mp3", "Hit One", "Boukmanflow", "Greatest Hits", Some("Boukmanflow"));
+        let theirs = peer_track("ALM/Greatest Hits/01.mp3", "Other Hit", "ALM", "Greatest Hits", Some("ALM"));
+        let node = LibraryNode::Album { name: "Greatest Hits".into(), artist: None, album_artist: AlbumCredit::Known("Boukmanflow".into()), year: Some(2019), compilation: false };
+        album_page(&mut app, node.clone(), vec![mine.clone()]);
+        // The page's own song, drawn there: its credit, Album at once.
+        let on_page = app.keep_track(&origin, &mine, Some(Tab::Library)).unwrap();
+        assert!(matches!(&on_page, KeepTarget::Track { album_artist: AlbumCredit::Known(c), .. } if c == "Boukmanflow"));
+        // ALM's album of the same name — from Search, the queue, the playing
+        // card, Files, even the Library pane: never Boukmanflow's credit.
+        for from in [None, Some(Tab::Search), Some(Tab::Files), Some(Tab::Library)] {
+            let target = app.keep_track(&origin, &theirs, from).unwrap();
+            assert!(matches!(&target, KeepTarget::Track { album_artist: AlbumCredit::Unknown, .. }), "{from:?}");
+            assert_eq!(app.keep_choices(target), vec![KeepChoice::Song], "{from:?}");
+        }
+        // The page's own song as a queue item: the queue is no page.
+        assert!(matches!(app.keep_track(&origin, &mine, None), Some(KeepTarget::Track { album_artist: AlbumCredit::Unknown, .. })));
+        // Their marks' recs on the page: each by its own credit.
+        let page = MarksPage::Library(node);
+        let (_, recs) = lookups(&app.keep_marks_ask(&page, &[MarkAsk::Song(&theirs), MarkAsk::Song(&mine)])).pop().unwrap();
+        assert_eq!((recs[0]["albumArtist"].as_str(), recs[1]["albumArtist"].as_str()), (Some("ALM"), Some("Boukmanflow")));
+        // Search's drilled album lends its credit to its own rows, in Search.
+        let alms = LibraryNode::Album { name: "Greatest Hits".into(), artist: None, album_artist: AlbumCredit::Known("ALM".into()), year: Some(2019), compilation: false };
+        app.search_stack.enter(SearchNode::Library(alms));
+        app.search.set(vec![Entry::Track { label: "Other Hit".into(), track: Box::new(theirs.clone()) }]);
+        assert!(matches!(app.keep_track(&origin, &theirs, Some(Tab::Search)), Some(KeepTarget::Track { album_artist: AlbumCredit::Known(c), .. }) if c == "ALM"));
+        assert!(matches!(app.keep_track(&origin, &mine, Some(Tab::Search)), Some(KeepTarget::Track { album_artist: AlbumCredit::Unknown, .. })));
+    }
+
+    #[test]
+    fn an_album_pages_rows_wait_for_its_credit_and_ask_with_it_its_own_ask_first() {
+        let mut app = peer_app();
+        let old = |title: &str| peer_track(&format!("Boukmanflow/Second Shift/{title}.mp3"), title, "Boukmanflow & ALM", "Second Shift", None);
+        let node = LibraryNode::Album { name: "Second Shift".into(), artist: None, album_artist: AlbumCredit::Unknown, year: Some(2023), compilation: false };
+        let tracks = vec![old("Clock In"), old("Break")];
+        let asked = album_page(&mut app, node.clone(), tracks.clone());
+        let Some(Effect::Api(ApiCmd::AlbumCredit { seq, generation, .. })) = asked.first() else { panic!("{asked:?}") };
+        let (seq, generation) = (*seq, *generation);
+        let asks: Vec<MarkAsk> = std::iter::once(MarkAsk::AlbumPage).chain(tracks.iter().map(MarkAsk::Song)).collect();
+        assert!(app.keep_marks_ask(&MarksPage::Library(node), &asks).is_empty(), "nothing while its credit is asked");
+        let rows = vec![ArtistAlbumRow { name: Some("Second Shift".into()), album_artist: Some("Boukmanflow".into()), credit_listed: true, year: Some(2023), ..Default::default() }];
+        app.apply_event(Event::AlbumCredit { seq, generation, rows: Some(rows) });
+        let page = MarksPage::Library(app.library_stack.here().clone());
+        let (_, recs) = lookups(&app.keep_marks_ask(&page, &asks)).pop().expect("the page's lookup");
+        assert_eq!(recs.len(), 3);
+        assert!(recs[0]["album"] == "Second Shift" && recs[0].get("title").is_none(), "the page's own ask first: {recs:?}");
+        assert!(recs[1..].iter().all(|rec| rec["albumArtist"] == "Boukmanflow"), "its rows carry its credit: {recs:?}");
+    }
+
+    #[test]
+    fn a_step_3_answer_for_a_page_left_behind_writes_nothing_on_the_page_now_open() {
+        let mut app = peer_app();
+        let old = peer_track("Boukmanflow/Second Shift/01.mp3", "Clock In", "Boukmanflow", "Second Shift", None);
+        let first = LibraryNode::Album { name: "Second Shift".into(), artist: None, album_artist: AlbumCredit::Unknown, year: Some(2023), compilation: false };
+        let asked = album_page(&mut app, first, vec![old]);
+        let Some(Effect::Api(ApiCmd::AlbumCredit { seq, generation, .. })) = asked.first() else { panic!("{asked:?}") };
+        let (seq, generation) = (*seq, *generation);
+        // Another album opened meanwhile, its credit known.
+        album_page(&mut app, tapes_node(AlbumCredit::Known("Boukmanflow".into())), vec![]);
+        let rows = vec![ArtistAlbumRow { name: Some("Second Shift".into()), album_artist: Some("ALM".into()), credit_listed: true, year: Some(2023), ..Default::default() }];
+        app.apply_event(Event::AlbumCredit { seq, generation, rows: Some(rows) });
+        assert_eq!(app.library_stack.here(), &tapes_node(AlbumCredit::Known("Boukmanflow".into())));
+        assert_eq!(app.album_credit_words().as_deref(), Some("Boukmanflow"));
+    }
+
+    #[test]
+    fn a_lookup_an_error_dropped_is_asked_again_and_its_late_answer_fills_nothing() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let tracks: Vec<Track> = (0..3).map(|i| peer_track(&format!("Boukmanflow/Borrowed Tapes/{i}.mp3"), &format!("Song {i}"), "Boukmanflow", "Borrowed Tapes", Some("Boukmanflow"))).collect();
+        album_page(&mut app, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tracks.clone());
+        let page = MarksPage::Library(app.library_stack.here().clone());
+        let asks: Vec<MarkAsk> = std::iter::once(MarkAsk::AlbumPage).chain(tracks.iter().map(MarkAsk::Song)).collect();
+        let (seq, recs) = lookups(&app.keep_marks_ask(&page, &asks)).pop().unwrap();
+        // Any request failing (a cover, say) clears every wait: the page's
+        // rows are asked again, first, on the next frame.
+        app.apply_event(Event::Error("cover gone".into()));
+        let (again, recs_again) = lookups(&app.keep_marks_ask(&page, &asks)).pop().expect("asked again");
+        assert_eq!(recs_again, recs);
+        let kept = copy_job(62, "text:song 1", None, "done", B, serde_json::json!({ "copied": { "filepath": "copies/x.mp3" } }));
+        let answer = |recs: &[serde_json::Value]| Ok(recs.iter().map(|rec| lookup_of(rec, std::slice::from_ref(&kept))).collect());
+        app.apply_event(Event::JobsLookup { seq, generation, answer: answer(&recs) });
+        assert_eq!(app.keep_song_mark(&tracks[1]), None, "the dropped lookup's late answer fills nothing");
+        app.apply_event(Event::JobsLookup { seq: again, generation, answer: answer(&recs_again) });
+        assert_eq!(app.keep_song_mark(&tracks[1]), Some(JobMark::Kept));
+    }
+
+    #[test]
+    fn a_pages_marks_are_worked_out_as_their_jobs_change_never_as_they_are_read() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let tracks: Vec<Track> = (0..30).map(|i| peer_track(&format!("Boukmanflow/Borrowed Tapes/{i:02}.mp3"), &format!("Song {i}"), "Boukmanflow", "Borrowed Tapes", Some("Boukmanflow"))).collect();
+        album_page(&mut app, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tracks.clone());
+        let page = MarksPage::Library(app.library_stack.here().clone());
+        let asks: Vec<MarkAsk> = std::iter::once(MarkAsk::AlbumPage).chain(tracks.iter().map(MarkAsk::Song)).collect();
+        let (seq, recs) = lookups(&app.keep_marks_ask(&page, &asks)).pop().unwrap();
+        // A done every-album copy that walked 40 albums of 12 songs.
+        let songs = |album: usize| serde_json::json!({ "total": 12, "skipped": [], "failed": [],
+            "copied": (0..12).map(|i| serde_json::json!({ "from": format!("peerlib/Boukmanflow/A{album}/{i}.mp3"), "filepath": "copies/x.mp3" })).collect::<Vec<_>>() });
+        let albums: Vec<serde_json::Value> = (0..40).map(|a| serde_json::json!({ "name": if a == 0 { "Borrowed Tapes".to_string() } else { format!("A{a}") }, "songs": songs(a) })).collect();
+        let walk = serde_json::json!({ "scope": "artist", "albums": albums, "skippedAlbums": [], "songs": songs(0), "stopped": null });
+        let done = copy_job(63, "artist:boukmanflow", Some("artist"), "done", B, walk);
+        app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(recs.iter().map(|rec| lookup_of(rec, std::slice::from_ref(&done))).collect()) });
+        let worked = app.keep_marks_worked();
+        assert_eq!(worked, recs.len(), "once each, as they landed");
+        for _ in 0..50 {
+            for track in &tracks {
+                app.keep_song_mark(track);
+            }
+            app.keep_page_state();
+        }
+        assert_eq!(app.keep_marks_worked(), worked, "reading them works out nothing");
+        assert!(app.keep_marks_ask(&page, &asks).is_empty());
+        assert_eq!(app.keep_marks_worked(), worked, "nor does a frame with nothing new");
+        // A job that changes: the rows that hold its key, those alone.
+        let song = copy_job(64, "text:song 1", None, "queued", B, serde_json::Value::Null);
+        let asked = app.copies_open();
+        app.apply_event(Event::Jobs { seq: job_asks(&asked)[0], generation, answer: Ok(Box::new(PluginJobList { jobs: vec![song], runner: None })) });
+        assert_eq!(app.keep_marks_worked(), worked + 1);
+        assert_eq!(app.keep_song_mark(&tracks[1]), Some(JobMark::Waiting));
+    }
+
+    #[test]
+    fn scrolling_a_long_list_asks_its_marks_a_block_at_a_time() {
+        use crate::tui::app::keep::{LOOKUP_BATCH, marks_block};
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let walk = |app: &mut App, page: &MarksPage, own: Option<MarkAsk<'_>>, tracks: &[Track], firsts: Vec<usize>| -> usize {
+            let mut sent = 0;
+            for first in firsts {
+                let block = marks_block(first, 30, tracks.len());
+                let asks: Vec<MarkAsk> = own.into_iter().chain(tracks[block].iter().map(MarkAsk::Song)).collect();
+                for (seq, recs) in lookups(&app.keep_marks_ask(page, &asks)) {
+                    assert!(recs.len() <= LOOKUP_BATCH);
+                    sent += 1;
+                    app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(recs.iter().map(|rec| lookup_of(rec, &[])).collect()) });
+                }
+            }
+            sent
+        };
+        let recent: Vec<Track> = (0..2000).map(|i| peer_track(&format!("Boukmanflow/Recent/{i:04}.mp3"), &format!("Song {i}"), "Boukmanflow", "Borrowed Tapes", None)).collect();
+        // A row at a time, each lookup answered at once (a LAN server).
+        let page = MarksPage::Library(LibraryNode::Recent);
+        assert!(walk(&mut app, &page, None, &recent, (0..1970).collect()) <= 21);
+        // The wheel's steps of 3, on a genre's page.
+        let page = MarksPage::Library(LibraryNode::Genre("Hip-Hop".into(), GenreSource::Tag));
+        assert!(walk(&mut app, &page, None, &recent, (0..1970).step_by(3).collect()) <= 21);
+        // Files, a folder of 1,000, its own ask first.
+        let files: Vec<Track> = recent[..1000].to_vec();
+        let page = MarksPage::Files("peerlib/Boukmanflow/Recent".into());
+        assert!(walk(&mut app, &page, Some(MarkAsk::Folder("peerlib/Boukmanflow/Recent")), &files, (0..970).collect()) <= 11);
+        // The blocks: whole ones holding what is on screen, never past the end.
+        assert_eq!(marks_block(0, 30, 2000), 0..99);
+        assert_eq!(marks_block(80, 30, 2000), 0..198);
+        assert_eq!(marks_block(1990, 30, 2000), 1980..2000);
+        assert_eq!(marks_block(0, 0, 2000), 0..0);
+    }
+
+    #[test]
+    fn a_copy_that_ends_asks_again_only_the_rows_the_page_lists_again() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        let tracks: Vec<Track> = (0..300).map(|i| peer_track(&format!("Boukmanflow/Recent/{i:03}.mp3"), &format!("Song {i}"), "Boukmanflow", "Borrowed Tapes", None)).collect();
+        let page = MarksPage::Library(LibraryNode::Recent);
+        let asks: Vec<MarkAsk> = tracks.iter().map(MarkAsk::Song).collect();
+        // Every row listed and answered, each holding an artist copy still
+        // running.
+        let running = copy_job(66, "artist:boukmanflow", Some("artist"), "running", B, serde_json::Value::Null);
+        loop {
+            let asked = lookups(&app.keep_marks_ask(&page, &asks));
+            let Some((seq, recs)) = asked.into_iter().next() else { break };
+            app.apply_event(Event::JobsLookup { seq, generation, answer: Ok(recs.iter().map(|rec| lookup_of(rec, std::slice::from_ref(&running))).collect()) });
+        }
+        // It ends (the poll): every row that held it goes stale, none asked.
+        let stirred = app.keep_marks_stirred();
+        app.keep_watch(KeepWatch::Room);
+        let polled = app.tick_at(crate::clock::Instant::now() + std::time::Duration::from_secs(5));
+        let mut done = running.clone();
+        done.state = crate::api::types::JobState::Done;
+        app.apply_event(Event::Jobs { seq: job_asks(&polled)[0], generation, answer: Ok(Box::new(PluginJobList { jobs: vec![done], runner: None })) });
+        assert!(app.keep_marks_stirred() > stirred);
+        // The page lists the block on screen: those rows alone are asked.
+        let shown: Vec<MarkAsk> = tracks[..99].iter().map(MarkAsk::Song).collect();
+        let again = lookups(&app.keep_marks_ask(&page, &shown));
+        assert_eq!(again.iter().map(|(_, recs)| recs.len()).collect::<Vec<_>>(), vec![99]);
+    }
+
+    #[test]
+    fn a_folder_of_exactly_the_cap_is_no_cap() {
+        let mut app = peer_app();
+        let generation = app.session_gen();
+        app.apply_event(Event::KeepGate { generation, plugins: Ok(Box::new(capped(9))), destination: Some(Ok(Box::new(destination(Some("copies"))))) });
+        let opened = app.keep_open(app.keep_folder("peerlib/Boukmanflow").unwrap());
+        let (seq, _) = facts_ask(&opened);
+        let nine = (1..=9).map(|i| format!("peerlib/Boukmanflow/{i}.mp3")).collect();
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { folder_files: Some(nine), ..KeepFacts::default() }) });
+        let view = app.keep_view().unwrap();
+        assert_eq!(view.cap, None, "exceeds, not reaches (spec §6.5.5)");
+        assert!(matches!(view.stage, KeepStage::Choose { verb: Some(KeepVerb::Folder), .. }));
+    }
+
+    #[test]
+    fn the_discover_rooms_windows_never_say_what_an_artist_copy_leaves_out() {
+        let (mut app, _) = ready_room();
+        let generation = app.session_gen();
+        let late = row_at(&app, "Late Train Verse");
+        let opened = app.keep_open(KeepTarget::Row { group: late.0, row: late.1 });
+        let (seq, _) = facts_ask(&opened);
+        let rows = vec![
+            ArtistAlbumRow { name: Some("Borrowed Tapes".into()), album_artist: Some("Boukmanflow".into()), credit_listed: true, ..Default::default() },
+            ArtistAlbumRow { name: Some("Night Market Sampler".into()), album_artist: Some("Various Artists".into()), artists: vec!["Boukmanflow".into()], credit_listed: true, compilation: true, ..Default::default() },
+        ];
+        app.apply_event(Event::KeepFacts { seq, generation, facts: Box::new(KeepFacts { peer_albums: Some(rows), ..KeepFacts::default() }) });
+        app.keep_pick(KeepChoice::Artist);
+        let view = app.keep_view().unwrap();
+        assert_eq!((view.choice, view.left_out), (KeepChoice::Artist, None), "spec §6: the Discover room's windows as built");
+    }
+
+    #[test]
+    fn a_queue_items_own_server_is_asked_when_its_sheet_opens_and_its_row_stands_next_time() {
+        // The session on another own server, never on the item's.
+        let mut app = connected_app();
+        app.session.server = "http://other:3000".into();
+        app.session.server_id = "http://other:3000".into();
+        app.capabilities.discovery_plugins = true;
+        app.servers = book();
+        app.servers.push(KnownServer { id: "http://other:3000".into(), name: "Other".into(), token: Some("o".into()), username: None, self_signed: false, peer: None, pairing: None, dj: Default::default() });
+        app.keep_sync();
+        let origin = Origin { server: HOST.into(), peer: Some(B) };
+        let late = peer_track("Boukmanflow/Borrowed Tapes/02.mp3", "Late Train Verse", "Boukmanflow", "Borrowed Tapes", None);
+        assert!(app.keep_choices(app.keep_track(&origin, &late, None).unwrap()).is_empty(), "nothing known of its server");
+        // Its sheet opens: its own server's flags (a probe ping), then its gate.
+        let pinged = app.keep_ask_owner(&origin);
+        let Some(Effect::Api(ApiCmd::OwnPing { server, .. })) = pinged.first() else { panic!("{pinged:?}") };
+        assert_eq!(server, HOST);
+        assert!(app.keep_ask_owner(&origin).is_empty(), "one ask at a time");
+        let ping = Ping { discovery_plugins: true, no_upload: Some(false), ..Ping::default() };
+        let asked = app.apply_event(Event::OwnPing { server: HOST.into(), ping: Some(Box::new(ping)) });
+        let Some(Effect::Api(ApiCmd::KeepGate { generation, reach })) = asked.iter().find(|e| matches!(e, Effect::Api(ApiCmd::KeepGate { .. }))) else { panic!("{asked:?}") };
+        assert_eq!(reach.as_ref().map(|r| (r.base.as_str(), r.peer)), Some((HOST, None)));
+        assert_eq!(app.keep.owner, "http://other:3000", "the session's own state in front");
+        app.apply_event(Event::KeepGate { generation: *generation, plugins: Ok(Box::new(capped(1000))), destination: Some(Ok(Box::new(destination(Some("copies"))))) });
+        // The next time its sheet opens: its row.
+        assert_eq!(app.keep_choices(app.keep_track(&origin, &late, None).unwrap()), vec![KeepChoice::Song]);
+        assert!(app.keep_ask_owner(&origin).is_empty(), "asked once");
     }
 }
