@@ -2715,7 +2715,7 @@ mod tests {
     /// locale (the room reads its labels through `t!`), held for the test.
     #[test]
     fn every_tab_label_draws_whole_in_japanese() {
-        let _ja = crate::setup::tests::in_locale("ja");
+        let Some(_) = crate::setup::tests::in_own_process(&["ja"]) else { return };
         let mut p = ready();
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| render(frame, &mut p)).unwrap();

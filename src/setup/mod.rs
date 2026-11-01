@@ -3982,20 +3982,22 @@ pub(crate) mod tests {
         assert_eq!(folders[0].name, "media");
     }
 
-    /// Serialises the one test that flips the process-global locale
-    /// against the tests that assert English strings — today's config
-    /// env-race lesson, applied before it flakes. Not re-entrant: a test
-    /// takes it once (through one `english()` / `in_locale` guard), and
-    /// before `config::testing::Scratch`, never after, or the two locks
-    /// can deadlock against the tests that take them in that order.
+    /// Serialises the tests that assert English strings against a switch
+    /// of the process-global locale. Nothing in the parallel run switches
+    /// it now — a test in another language runs in a process of its own
+    /// ([`in_own_process`]) — so this is the backstop for one that sets the
+    /// locale by hand. Not re-entrant: a test takes it once (through one
+    /// `english()` / `in_locale` guard), and before
+    /// `config::testing::Scratch`, never after, or the two locks can deadlock
+    /// against the tests that take them in that order.
     pub(crate) static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// LOCALE_LOCK held with the process-wide locale switched to another
-    /// language, for a test that draws a whole room in it (the rooms read
-    /// their labels through `t!` with no locale passed). Dropping it puts
-    /// English back before the lock is let go, a failed assertion's unwind
-    /// included, so the language never leaks into the next test to take
-    /// the lock; the rooms' `english()` guards set English anyway.
+    /// LOCALE_LOCK held with the process-wide locale set to `code` (the
+    /// rooms read their labels through `t!` with no locale passed): English
+    /// in the parallel run, any language in a process of its own. Dropping
+    /// it puts English back before the lock is let go, a failed assertion's
+    /// unwind included, so the language never leaks into the next test to
+    /// take the lock; the rooms' `english()` guards set English anyway.
     pub(crate) struct LocaleGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -4007,10 +4009,49 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn in_locale(code: &str) -> LocaleGuard {
+        assert!(
+            code == "en" || std::env::var_os(OWN_LOCALE).is_some(),
+            "{code} in the parallel run would draw every test beside this one in it: use in_own_process",
+        );
         let lock = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale(code);
         crate::kit::theme::pin_modern_terminal();
         LocaleGuard { _lock: lock }
+    }
+
+    /// Names the language of a process [`in_own_process`] started.
+    const OWN_LOCALE: &str = "MSTREAM_TEST_LOCALE";
+
+    /// For a test in another language, or one that switches language: the
+    /// locale is the whole process's, so switched under the parallel run
+    /// it would draw every test running beside this one in that language.
+    /// In the normal run this runs the calling test again once per code,
+    /// each in a process of its own — this test binary, that test alone,
+    /// the code in the environment — checks each passed, and answers None:
+    /// the caller returns. In one of those processes it sets that process's
+    /// code, pins the modern glyphs as [`in_locale`] does, and answers it;
+    /// alone there, the test may switch again.
+    pub(crate) fn in_own_process(codes: &[&'static str]) -> Option<&'static str> {
+        if let Ok(named) = std::env::var(OWN_LOCALE) {
+            let code = codes.iter().copied().find(|code| *code == named);
+            let code = code.unwrap_or_else(|| panic!("{named} is none of {codes:?}"));
+            rust_i18n::set_locale(code);
+            crate::kit::theme::pin_modern_terminal();
+            return Some(code);
+        }
+        // libtest runs each test on a thread named after it, in full.
+        let test = std::thread::current().name().filter(|name| *name != "main").expect("a test's thread").to_string();
+        let exe = std::env::current_exe().expect("the test binary");
+        for code in codes {
+            let out = std::process::Command::new(&exe)
+                .args(["--exact", &test, "--include-ignored"])
+                .env(OWN_LOCALE, code)
+                .output()
+                .expect("the test binary runs again");
+            let (said, err) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && said.contains("1 passed"), "{test} in {code}:\n{said}{err}");
+        }
+        None
     }
 
     #[test]
@@ -4586,7 +4627,8 @@ pub(crate) mod tests {
 
     #[test]
     fn the_language_selector_lists_switches_and_confesses() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // It switches the language, so in a process of its own.
+        let Some(_) = in_own_process(&["en"]) else { return };
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
