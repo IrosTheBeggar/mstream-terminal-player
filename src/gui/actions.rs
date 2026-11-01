@@ -14,6 +14,7 @@ use tui_input::backend::crossterm::EventHandler;
 use crate::api::types::{Track, TrackMetadata};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{Surface, dim, modal_close, modal_frame_on, table_view};
+use crate::tui::app::keep::{KeepPin, KeepTarget};
 use crate::tui::app::{Action, App, Entry, Focus, Origin, PlaylistNames, Tab};
 
 use super::cover::{Pace, Slot};
@@ -58,6 +59,14 @@ pub(crate) struct Sheet {
     /// The queue row the sheet was opened from, which gains Remove.
     pub queue_row: Option<usize>,
     pub row: usize,
+    /// A Discover room's connected-server row the sheet was opened from:
+    /// it gains Keep a copy… and Open elsewhere…, and its badge row names
+    /// the server (discovery-page clause 102). Pinned to the row's server
+    /// and file, not its place: a peers answer landing while the sheet is
+    /// open never retargets them ([`sheet_target`]).
+    pub keep: Option<KeepPin>,
+    /// Open elsewhere's list hangs from its row (clause 140).
+    pub links: bool,
 }
 
 /// The add-to-playlist picker: its cursor, and the name being typed for a
@@ -75,34 +84,60 @@ pub(crate) enum SheetAction {
     AddNext,
     AddEnd,
     AddPlaylist,
+    /// A connected server's song in the Discover room: Keep a copy (the
+    /// slot Add to playlist holds on your own songs) and Open elsewhere
+    /// (the last row: it leaves the app) — discovery-page clause 102.
+    KeepCopy,
     Info,
+    OpenElsewhere,
     Remove,
 }
 
 impl SheetAction {
     fn label(self) -> String {
         match self {
-            SheetAction::PlayNow => t!("gui.act.play_now"),
-            SheetAction::AddNext => t!("gui.act.add_next"),
-            SheetAction::AddEnd => t!("gui.act.add_end"),
-            SheetAction::AddPlaylist => t!("gui.act.add_playlist"),
-            SheetAction::Info => t!("gui.act.info"),
-            SheetAction::Remove => t!("gui.act.remove"),
+            SheetAction::PlayNow => t!("gui.act.play_now").to_string(),
+            SheetAction::AddNext => t!("gui.act.add_next").to_string(),
+            SheetAction::AddEnd => t!("gui.act.add_end").to_string(),
+            SheetAction::AddPlaylist => t!("gui.act.add_playlist").to_string(),
+            SheetAction::KeepCopy => super::keep::ell(&t!("gui.act.keep_copy")),
+            SheetAction::Info => t!("gui.act.info").to_string(),
+            SheetAction::OpenElsewhere => super::keep::ell(&t!("gui.act.open_elsewhere")),
+            SheetAction::Remove => t!("gui.act.remove").to_string(),
         }
-        .to_string()
     }
 }
 
-fn actions_for(sheet: &Sheet, own: bool) -> Vec<SheetAction> {
+/// The sheet's rows (clause 4), and a Discover room connected-server
+/// row's two (discovery-page clause 102) — each only while its gate holds,
+/// hidden, never grey.
+fn actions_for(app: &App, sheet: &Sheet, own: bool) -> Vec<SheetAction> {
     let mut rows = vec![SheetAction::PlayNow, SheetAction::AddNext, SheetAction::AddEnd];
     if own {
         rows.push(SheetAction::AddPlaylist);
     }
+    // A new peers answer that left the sheet's row out takes both away —
+    // what they would send is gone — except a links list already asked,
+    // which hangs on from its row for the row it was asked for.
+    let target = sheet_target(app, sheet);
+    if target.is_some_and(|target| !app.keep_choices(target).is_empty()) {
+        rows.push(SheetAction::KeepCopy);
+    }
     rows.push(SheetAction::Info);
+    if (target.is_some() || (sheet.links && sheet.keep.is_some())) && app.links_gate() {
+        rows.push(SheetAction::OpenElsewhere);
+    }
     if sheet.queue_row.is_some() {
         rows.push(SheetAction::Remove);
     }
     rows
+}
+
+/// Where the sheet's pinned connected-server row stands in the answer on
+/// screen now, `None` once a new answer left it out (or for any other
+/// sheet).
+fn sheet_target(app: &App, sheet: &Sheet) -> Option<KeepTarget> {
+    app.keep_find(sheet.keep.as_ref()?)
 }
 
 pub(crate) fn modal_open(gui: &Gui) -> bool {
@@ -118,7 +153,7 @@ pub(crate) fn open_for(gui: &mut Gui, origin: Origin, track: Track, queue_row: O
     gui.pend(effects);
     gui.actions.picker = None;
     gui.actions.info = false;
-    gui.actions.sheet = Some(Sheet { origin, track, queue_row, row: 0 });
+    gui.actions.sheet = Some(Sheet { origin, track, queue_row, row: 0, keep: None, links: false });
 }
 
 /// A browse row's `[⋯]`, `m` or right click: the pane's track at `index`.
@@ -291,6 +326,15 @@ fn info_rows(track: &Track) -> Vec<(String, String)> {
 
 /// The sheet, then whichever of the picker or Song info stands over it.
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    // The sheet's cover goes on record while the sheet stands, so the
+    // cache keeps it (performance audit #91); a comparison per frame, and
+    // a name only when the sheet opens, changes track or closes.
+    let cover = gui.actions.sheet.as_ref().and_then(|sheet| current_track(&gui.app, sheet).metadata.album_art.as_deref());
+    if !gui.app.sheet_on_view_is(cover) {
+        let cover = cover.map(str::to_string);
+        gui.app.set_sheet_on_view(cover);
+    }
+    gui.discover.links.anchor = None;
     if gui.actions.sheet.is_none() {
         return;
     }
@@ -299,6 +343,10 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         draw_picker(frame, gui, area);
     } else if gui.actions.info {
         draw_info(frame, gui, area);
+    } else if gui.actions.sheet.as_ref().is_some_and(|s| s.links) {
+        // Open elsewhere's list hangs from its row (discovery-page clause
+        // 140), over the sheet.
+        super::keep::draw_links(frame, gui);
     }
 }
 
@@ -319,12 +367,12 @@ fn guard_frame(ui: &mut crate::kit::Surface<Act>, inner: Rect) {
 fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // Drawn from the sheet in place: the track and its decoded cover are
     // read each frame, not copied.
-    let Gui { app, actions, ui, hot, .. } = &mut *gui;
+    let Gui { app, actions, ui, hot, discover, .. } = &mut *gui;
     let Some(sheet) = actions.sheet.as_ref() else { return };
     ui.click(area, Act::SheetClose);
     let track = current_track(app, sheet);
     let own = app.track_is_own(&sheet.origin);
-    let rows = actions_for(sheet, own);
+    let rows = actions_for(app, sheet, own);
     let art = track.metadata.album_art.as_deref().and_then(|file| app.art.get(file)).and_then(|a| a.as_ref());
     let width: u16 = 66.min(area.width.saturating_sub(2)).max(44);
     let height = (3 + 1 + 1 + rows.len() + 1) as u16 + 2;
@@ -417,13 +465,31 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if track.metadata.has_lyrics && own {
         badge(frame, t!("gui.act.lyrics").to_string());
     }
+    // A Discover room connected-server song names its server, as the
+    // webapp's window does: "from Stage Peer B   • online" — the dot OK,
+    // the words DIM; no stars, a rating is your own server's (clause 102).
+    if let Some(server) = sheet.keep.as_ref().map(|pin| pin.server().to_string()) {
+        let from = t!("gui.act.from_server", server = server).to_string();
+        let from_w = crate::kit::width(&from) as u16;
+        if bx + from_w < inner.right() {
+            put(frame, bx, by, &from, dim());
+            bx += from_w + 3;
+            if bx + 2 + crate::kit::width(&t!("gui.act.online")) as u16 <= inner.right() {
+                put(frame, bx, by, super::bullet_glyph(), Style::default().fg(th().ok));
+                put(frame, bx + 2, by, &t!("gui.act.online"), dim());
+            }
+        }
+    }
 
     // The actions (clause 4), one row each; a click acts, as the record's
     // rows do.
     for (i, action) in rows.iter().enumerate() {
         let y = inner.y + 5 + i as u16;
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
-        let is_sel = sheet.row == i;
+        // Open elsewhere's label wears the accent while its list hangs
+        // from it, the list holding the keyboard's slab (clause 140).
+        let open_list = *action == SheetAction::OpenElsewhere && sheet.links;
+        let is_sel = sheet.row == i && !open_list;
         let hover = ui.hovers(rect);
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
@@ -432,9 +498,22 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             (true, _, _) => sel().add_modifier(Modifier::BOLD),
             (false, true, _) => bright_bold(),
             (false, false, SheetAction::Remove) => Style::default().fg(th().danger),
+            (false, false, _) if open_list => accent().add_modifier(Modifier::BOLD),
             (false, false, _) => Style::default(),
         };
-        put(frame, inner.x + 1, y, &action.label(), style);
+        let label = action.label();
+        put(frame, inner.x + 1, y, &label, style);
+        // Where Open elsewhere's list hangs from: this row, beside its
+        // label (clause 140).
+        if open_list {
+            discover.links.anchor = Some((inner, y, inner.x + 1 + crate::kit::width(&label) as u16));
+        }
+        // Keep a copy's key, DIM after its label: `c` works from anywhere
+        // in the sheet.
+        if *action == SheetAction::KeepCopy {
+            let kx = inner.x + 1 + crate::kit::width(&label) as u16 + 2;
+            put(frame, kx, y, "c", if is_sel { sel() } else { dim() });
+        }
         ui.click(rect, Act::SheetVerb(*action));
     }
 }
@@ -540,6 +619,9 @@ fn draw_info(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 // ── Acting ──────────────────────────────────────────────────────────────────
 
 fn close(gui: &mut Gui) {
+    if gui.actions.sheet.as_ref().is_some_and(|s| s.links) {
+        gui.app.links_close();
+    }
     gui.actions.sheet = None;
     gui.actions.picker = None;
     gui.actions.info = false;
@@ -570,6 +652,26 @@ fn run(gui: &mut Gui, action: SheetAction) {
             gui.actions.picker = Some(Picker::default());
         }
         SheetAction::Info => gui.actions.info = true,
+        // The sheet gives way to the Keep a copy modal (clause 102).
+        SheetAction::KeepCopy => {
+            if let Some(target) = sheet_target(&gui.app, &sheet) {
+                close(gui);
+                super::keep::open(gui, target);
+            }
+        }
+        // Open elsewhere's list hangs from its row, asked now (clause 140).
+        SheetAction::OpenElsewhere => {
+            if let Some(target) = sheet_target(&gui.app, &sheet) {
+                let effects = gui.app.links_open(target);
+                gui.pend(effects);
+                // Opened by the pointer: nothing held (the keys hold the
+                // first link, `handle_key`).
+                gui.discover.links.reset();
+                if let Some(sheet) = gui.actions.sheet.as_mut() {
+                    sheet.links = true;
+                }
+            }
+        }
         SheetAction::Remove => {
             if let Some(index) = sheet.queue_row {
                 let effects = gui.app.remove_queue_row(index);
@@ -701,12 +803,34 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         }
         return Some(false);
     }
+    let own = gui.actions.sheet.as_ref()?.origin.peer.is_none();
+    let actions = actions_for(&gui.app, gui.actions.sheet.as_ref()?, own);
     let sheet = gui.actions.sheet.as_mut()?;
-    let own = sheet.origin.peer.is_none();
-    let actions = actions_for(sheet, own);
     let rating = gui.app.rating_known(&sheet.track.filepath).unwrap_or(sheet.track.metadata.rating).unwrap_or(0).min(10);
+    let on_links_row = actions.get(sheet.row.min(actions.len() - 1)) == Some(&SheetAction::OpenElsewhere);
     match key.code {
+        // Open elsewhere's list goes first: Esc or ← folds it, the sheet
+        // stays; ↑ ↓ walk its links and Enter opens the held one (clause
+        // 140).
+        KeyCode::Esc | KeyCode::Left if sheet.links => {
+            sheet.links = false;
+            gui.app.links_close();
+        }
+        KeyCode::Up if sheet.links => super::keep::links_walk(gui, -1),
+        KeyCode::Down if sheet.links => super::keep::links_walk(gui, 1),
+        KeyCode::Enter if sheet.links => super::keep::links_enter(gui),
+        // Enter or → on Open elsewhere… opens its list, the first link
+        // held.
+        KeyCode::Enter | KeyCode::Right if on_links_row => {
+            let quit = gui.act(Act::SheetVerb(SheetAction::OpenElsewhere));
+            gui.discover.links.held = Some(0);
+            return Some(quit);
+        }
         KeyCode::Esc => close(gui),
+        // Keep a copy from anywhere in the sheet (clause 102).
+        KeyCode::Char('c') if actions.contains(&SheetAction::KeepCopy) => {
+            return Some(gui.act(Act::SheetVerb(SheetAction::KeepCopy)));
+        }
         KeyCode::Up => sheet.row = sheet.row.saturating_sub(1),
         KeyCode::Down => sheet.row = (sheet.row + 1).min(actions.len().saturating_sub(1)),
         KeyCode::Enter => {
@@ -731,8 +855,13 @@ pub(crate) fn queue_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         return None;
     }
     // A dialog taking text owns the keyboard outright: a playlist's name
-    // must not clear the queue because it held a `C`.
-    if super::playlists::modal_open(gui) || super::sonic::modal_open(gui) {
+    // must not clear the queue because it held a `C`. So does a Discover
+    // room's list or modal — its ↑ ↓ and Esc are its own (discovery-page
+    // clauses 103, 106).
+    if super::playlists::modal_open(gui)
+        || super::sonic::modal_open(gui)
+        || (gui.screen == super::Screen::Library && gui.active == super::DISCOVER_NAV && super::discover::modal_open(gui))
+    {
         return None;
     }
     // The kit's list-cursor law: a walking key picks the cursor up on the
@@ -781,12 +910,24 @@ fn walk_queue(gui: &mut Gui, action: Action) {
 /// The footer for the sheet's layers and the focused queue.
 pub(crate) fn tips(gui: &Gui) -> Option<String> {
     if gui.actions.sheet.is_some() {
+        let keep = gui.actions.sheet.as_ref().filter(|s| s.keep.is_some());
         let tip = if gui.actions.info {
             t!("gui.tips.info")
         } else if gui.actions.picker.as_ref().is_some_and(|p| p.naming.is_some()) {
             t!("gui.tips.pl_dialog")
         } else if gui.actions.picker.is_some() {
             t!("gui.tips.picker")
+        } else if gui.actions.sheet.as_ref().is_some_and(|s| s.links) {
+            // Open elsewhere's list (clause 140).
+            return Some(super::keep::links_tips(gui));
+        } else if let Some(sheet) = keep {
+            // A connected server's song: no rating keys; `c` while Keep a
+            // copy stands (clause 119).
+            if sheet_target(&gui.app, sheet).is_none_or(|target| gui.app.keep_choices(target).is_empty()) {
+                t!("gui.tips.discover_sheet")
+            } else {
+                t!("gui.tips.discover_sheet_keep")
+            }
         } else {
             t!("gui.tips.sheet")
         };
@@ -816,6 +957,15 @@ mod tests {
     use crate::tui::worker::{ApiCmd, Event};
 
     const HOST: &str = "http://host:3000";
+
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
 
     fn session_gui() -> Gui {
         let mut gui = Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None));
@@ -890,6 +1040,7 @@ mod tests {
 
     #[test]
     fn the_sheets_cover_is_pixels_while_the_sheet_is_the_top_layer() {
+        let _en = english();
         use ratatui_image::picker::ProtocolType;
         // The wall's and the queue's rule for the sheet's one cover: real
         // pixels where the terminal draws them, the mosaic only while
@@ -928,6 +1079,24 @@ mod tests {
         assert!(placeholders(&buffer), "the pixels return once nothing stands over the sheet");
     }
 
+    #[test]
+    fn the_sheets_cover_is_on_record_while_the_sheet_stands() {
+        // The review of performance audit #91: the cache keeps what is on
+        // screen, and the sheet's cover is on screen.
+        let mut gui = files_gui();
+        if let Some(Entry::Track { track, .. }) = gui.app.files.entries.get_mut(0) {
+            track.metadata.album_art = Some("aa.jpeg".into());
+        }
+        draw(&mut gui);
+        assert!(gui.app.sheet_on_view_is(None));
+        gui.act(Act::More(Tab::Files, 0));
+        draw(&mut gui);
+        assert!(gui.app.sheet_on_view_is(Some("aa.jpeg")));
+        gui.act(Act::SheetClose);
+        draw(&mut gui);
+        assert!(gui.app.sheet_on_view_is(None), "closed, it lets go");
+    }
+
     /// `cargo test dump_actions -- --ignored --nocapture` to eyeball the
     /// sheet, the picker, Song info and the queue's hover verbs.
     #[test]
@@ -954,6 +1123,7 @@ mod tests {
 
     #[test]
     fn the_more_verb_on_a_row_opens_the_sheet_for_that_track() {
+        let _en = english();
         let mut gui = files_gui();
         let rows = draw(&mut gui);
         // The second row: the pane's cursor rests on the first, and a
@@ -978,6 +1148,7 @@ mod tests {
 
     #[test]
     fn the_sheets_verbs_are_the_apps_and_close_it() {
+        let _en = english();
         let mut gui = files_gui();
         gui.act(Act::More(Tab::Files, 1));
         gui.act(Act::SheetVerb(SheetAction::AddEnd));
@@ -1003,6 +1174,7 @@ mod tests {
 
     #[test]
     fn a_peers_track_has_neither_stars_nor_a_playlist_row() {
+        let _en = english();
         let mut gui = session_gui();
         let mut item = queued("q/a.flac", "Peer song");
         item.origin.peer = Some(3);
@@ -1035,6 +1207,7 @@ mod tests {
 
     #[test]
     fn the_picker_lists_the_playlists_and_new_adds_through_a_name() {
+        let _en = english();
         let mut gui = files_gui();
         gui.act(Act::More(Tab::Files, 0));
         gui.pending.clear();
@@ -1063,6 +1236,7 @@ mod tests {
 
     #[test]
     fn the_name_box_has_a_create_button_beside_the_field() {
+        let _en = english();
         // The review's finding: Enter was the only way to add through a
         // new name — no clickable Create for the pointer.
         let mut gui = files_gui();
@@ -1082,6 +1256,7 @@ mod tests {
 
     #[test]
     fn song_info_lists_only_the_facts_present() {
+        let _en = english();
         let mut gui = files_gui();
         gui.act(Act::More(Tab::Files, 0));
         gui.act(Act::SheetVerb(SheetAction::Info));
@@ -1098,6 +1273,7 @@ mod tests {
 
     #[test]
     fn the_queue_rows_offer_the_sheet_the_grip_and_clear_and_the_keys_shape_it() {
+        let _en = english();
         let mut gui = session_gui();
         gui.app.queue.items = vec![queued("q/a.flac", "First"), queued("q/b.flac", "Second"), queued("q/c.flac", "Third")];
         let rows = draw(&mut gui);

@@ -1,0 +1,162 @@
+#!/usr/bin/expect -f
+# The GUI player's Where copies land against the fake server's destination
+# (test/e2e/fake_mstream.py, FAKE_TASTE=1 FAKE_PLUGINS=1; docs/ux-contracts/
+# discovery-page.md, clauses 105 and 142–148). Before the room opens, a
+# place saved with a base folder — older data, as the terminal kept it
+# before 2026-10-23 — is seeded behind the client (POST /_move_destination:
+# copies, base "From friends", layout {{ALBUMARTIST}}/{{ALBUM}}). At
+# 100 × 30 with the queue panel folded, `G` opens the room, → its Connected
+# servers tab, ↓ lights the strip's "Lanterns" from Attic and `c` opens
+# Keep a copy in album focus: "Files go to copies › From friends › Attic
+# Band › Lanterns", "d change" at its end. `d` opens Where copies land on that
+# place — its title on the top border, its first row the same "Files go
+# to …" — folded into Custom as "From friends/{{ALBUMARTIST}}/{{ALBUM}}"
+# (the hand on the libraries: the fake offers copies and music); Enter
+# there saves nothing — nothing is dirty until edited (run.sh counts one
+# PUT).
+# ↓ walks the radios — Artist / Album, Server / Artist / Album, Same
+# folders as the server (the fake lists SERVERFOLDER), Custom — to "Start
+# from an existing folder…", Enter opens the list on the library root (the
+# parent of the folder the layout starts in; the fake lists copies'
+# from-peers, and "From friends" is not there: the list says, by its
+# name, the first file creates it), ↓ holds from-peers and Enter starts
+# the layout there:
+# Custom reads from-peers/{{ALBUMARTIST}}/{{ALBUM}} and the list goes
+# inside it. Esc closes the list, ↓ ↓ ↓ ↓ walks the field, the variables
+# and Use the library default to Save and Enter saves — the layout with no
+# base folder: Keep a copy's place line reads "Files go to copies ›
+# from-peers › Attic Band › Lanterns", the dot where it was. Then the
+# destination moves behind the client's back (POST /_move_destination, as
+# another tab saving the library default) and Enter alone presses Add
+# album, the one primary — the fake answers 409 destination_changed and
+# starts nothing: the place line redraws from the answer and one GOLD line
+# says so. Esc, q. run.sh replays the stream for the states that repaint
+# in place (check_dest.py) and asks the fake what was sent. Gates on
+# first-paint words only; each gate's braces span lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+# Older data: a place saved with a base folder, before the room reads it.
+exec curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "{\"destination\": {\"vpath\": \"copies\", \"base\": \"From friends\", \"layout\": \"{{ALBUMARTIST}}/{{ALBUM}}\"}}" "$::env(FAKE_URL)/_move_destination"
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "Discover" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-DISCOVER-ROW" 2 }
+}
+drain 1
+# The queue panel folds: the room takes its 80 cells.
+send "\t"
+drain 1
+send "G"
+expect {
+    "based on songs you finished" {}
+    eof { puts "DIED-ON-ANSWER"; exit 8 }
+    timeout { fail "NO-ANSWER" 4 }
+}
+drain 1
+send "\x1b\[C"
+expect {
+    "Lanterns" {}
+    eof { puts "DIED-ON-SERVERS"; exit 9 }
+    timeout { fail "NO-PEER-ALBUM" 5 }
+}
+# The gate's two reads and the rows' lookup land.
+drain 2
+send "\x1b\[B"
+drain 1
+send "c"
+expect {
+    "Add album" {}
+    eof { puts "DIED-ON-C"; exit 12 }
+    timeout { fail "NO-KEEP-MODAL" 13 }
+}
+# Its own read of the destination lands.
+drain 1
+send "d"
+expect {
+    "Where copies land" {}
+    eof { puts "DIED-ON-D"; exit 14 }
+    timeout { fail "NO-PICKER" 15 }
+}
+drain 1
+# Enter on the libraries saves only while Save is on: nothing is dirty as
+# it opened (the fold is no edit) — run.sh counts the PUTs.
+send "\r"
+drain 1
+# ↓ past the four radios to "Start from an existing folder…".
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+# Enter opens the list; the library's folders, asked of the fake, land —
+# the note under them ("“From friends” isn't there yet · …") is painted in
+# one run (the row "from-peers" shares a cell with "Looking up…", which the
+# diff renderer leaves in place).
+send "\r"
+expect {
+    "there yet" {}
+    eof { puts "DIED-ON-LIST"; exit 21 }
+    timeout { fail "NO-FOLDER-LIST" 22 }
+}
+drain 1
+send "\x1b\[B"
+drain 1
+# Enter starts the layout in from-peers and lists inside it.
+send "\r"
+drain 1
+send "\x1b"
+drain 1
+# ↓ the field, the variables, Use the library default, Save.
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+# What the picker painted so far goes: its list and its field carry
+# "from-peers" too, so the gate after Save reads only what came after.
+expect -re ".*"
+send "\r"
+# Keep a copy back on the saved place: its place line's folder, painted in
+# one run over the picker's row.
+expect {
+    "from-peers" {}
+    eof { puts "DIED-ON-SAVE"; exit 16 }
+    timeout { fail "NO-SAVED" 17 }
+}
+drain 1
+# Another tab puts the library default back: the place shown is stale.
+exec curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "{\"destination\": null}" "$::env(FAKE_URL)/_move_destination"
+# Enter presses the one primary wherever the dot is: no walk to it.
+send "\r"
+expect {
+    "Where files land changed" {}
+    eof { puts "DIED-ON-START"; exit 18 }
+    timeout { fail "NO-MOVED-LINE" 19 }
+}
+drain 1
+send "\x1b"
+drain 1
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 20 }
+}
+catch wait result
+exit [lindex $result 3]

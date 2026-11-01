@@ -15,6 +15,18 @@ cd "$(dirname "$0")/../.."
 E2E=test/e2e
 BIN="${BIN:-target/debug/mstream-player}"
 
+# README law 3, checked before anything runs: a braced pattern list is a
+# list only as `expect`'s sole argument with a newline after the brace.
+# On one line, or after -timeout/-i, it is ONE glob that never matches —
+# the gate waits out its timeout and cannot fail. Nineteen did, for 390 s
+# a run (performance audit #129). Comments are skipped; -brace is fine.
+one_line='^[^#]*(^|[^[:alnum:]_])expect[[:space:]]+\{[[:space:]]*[^[:space:]]'
+after_flag='^[^#]*(^|[^[:alnum:]_])expect([[:space:]]+-(timeout|i)[[:space:]]+[^[:space:]]+)+[[:space:]]+\{'
+if grep -nE -e "$one_line" -e "$after_flag" "$E2E"/legs/*.exp; then
+  echo "FAIL a braced expect above is one glob, not a pattern list: put \`expect {\` alone on its line (README law 3)"
+  exit 1
+fi
+
 command -v expect >/dev/null || { echo "SKIP: expect(1) not installed"; exit 0; }
 command -v python3 >/dev/null || { echo "SKIP: python3 not installed"; exit 0; }
 
@@ -29,14 +41,21 @@ FAILS=0
 
 port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
 
+# Prints the port once the fake answers, or fails: callers run it in
+# $(...), where an exit would only end the subshell, so each checks the
+# status. Every probe is bounded — macOS drops a SYN to a port that is
+# bound but not listening yet instead of refusing it, and an unbounded
+# curl then hangs ~8 s a try, forty of them minutes (performance audit
+# #131, which also took the ~35 s bind-to-listen stall out of the fake).
 start_fake() { # $1 = name
   local p; p="$(port)"
   python3 "$E2E/fake_mstream.py" "$p" >/dev/null 2>&1 & echo $! > "$WORK/fake.pid"
   for _ in $(seq 1 40); do
-    curl -s -o /dev/null "http://127.0.0.1:$p/api/v1/ping" && break
+    curl -s --connect-timeout 1 -m 2 -o /dev/null "http://127.0.0.1:$p/api/v1/ping" && { echo "$p"; return 0; }
     sleep 0.25
   done
-  echo "$p"
+  echo "FAIL fake $1 never answered on :$p" >&2
+  return 1
 }
 
 stop_fake() { kill "$(cat "$WORK/fake.pid" 2>/dev/null)" 2>/dev/null; sleep 0.2; }
@@ -58,7 +77,7 @@ assert() { # $1 label, $2 python expr over WORK/PORT env
 }
 
 # ── Scenario A: the full English walk, then the QR pages on its session ──
-PORT="$(start_fake A)"
+PORT="$(start_fake A)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 mkdir -p "$WORK/music"
 leg drive-en drive-en.exp "$WORK/h1" "$WORK/drive-en.out" env WIZMUSIC="$WORK/music"
@@ -80,13 +99,13 @@ leg qr-buttons qr-buttons.exp "$WORK/h1" "$WORK/qr-buttons.out" env MSTREAM_NO_G
 stop_fake
 
 # ── Scenario B: the same walk auf Deutsch ────────────────────────────────
-PORT="$(start_fake B)"
+PORT="$(start_fake B)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg drive-de drive-de.exp "$WORK/h2" "$WORK/drive-de.out" env WIZMUSIC="$WORK/music"
 stop_fake
 
 # ── Scenario C: quit before the login, reopen, finish (seeding) ─────────
-PORT="$(start_fake C)"
+PORT="$(start_fake C)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg reopen-phase1 reopen.exp "$WORK/h3" "$WORK/reopen1.out" env WIZMUSIC="$WORK/music"
 mkdir -p "$WORK/music2"
@@ -100,7 +119,7 @@ assert s['users'], 'no user after reopen'
 stop_fake
 
 # ── Scenario D: public mode still shows the code ─────────────────────────
-PORT="$(start_fake D)"
+PORT="$(start_fake D)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg skip-public skip.exp "$WORK/h4" "$WORK/skip.out" env WIZMUSIC="$WORK/music"
 assert "public-mode Done renders the half-block code" "
@@ -114,7 +133,7 @@ assert out.count('█')>10, 'no code on the public-mode Done page'
 stop_fake
 
 # ── Scenario E: click-to-rename on a fresh row ───────────────────────────
-PORT="$(start_fake E)"
+PORT="$(start_fake E)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg rename rename.exp "$WORK/h5" "$WORK/rename.out" env WIZMUSIC="$WORK/music"
 assert "the mouse rename landed" "
@@ -128,7 +147,7 @@ assert 'mediax' in out, 'renamed row not found'
 stop_fake
 
 # ── Scenario F: the scan widget's whole choreography ─────────────────────
-PORT="$(start_fake F)"
+PORT="$(start_fake F)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg scan scan.exp "$WORK/h6" "$WORK/scan.out"
 if python3 "$E2E/check_scan.py" "$WORK/scan.out" "$E2E/replay.py"; then
@@ -142,7 +161,7 @@ stop_fake
 # A fake with the auth wall up and one account: the tokenless pre-flight
 # ping is a 401, the sign-in page comes first, the room after; the second
 # run on the same HOME rides the kept session straight into the room.
-PORT="$(FAKE_AUTH=1 start_fake G)"
+PORT="$(FAKE_AUTH=1 start_fake G)" || exit 1
 curl -s -o /dev/null -X PUT -H 'Content-Type: application/json'   -d '{"username":"alice","password":"hunter2","admin":true}'   "http://127.0.0.1:$PORT/api/v1/admin/users"
 ARGS=(admin --server "http://127.0.0.1:$PORT")
 leg admin-signin admin-signin.exp "$WORK/h7" "$WORK/admin-signin.out"
@@ -166,6 +185,197 @@ leg gui-now gui-now.exp "$WORK/h8" "$WORK/gui-now.out"
 # The Admin tab on the same seat: M opens it on its no-session sentence,
 # Esc in the hallway comes back to the Library, q quits.
 leg gui-admin gui-admin.exp "$WORK/h10" "$WORK/gui-admin.out"
+# The Discover room's gate on the same seat: with no server the row is
+# absent, G opens nothing and the Library keeps the keys.
+leg gui-discover gui-discover.exp "$WORK/h11" "$WORK/gui-discover.out"
+
+# ── Scenario T: the GUI's Discover room against the fake's taste route ───
+# The gate open (the ping advertises discoveryTaste): the nav grows its
+# row, G opens the room on the answer's header and rows, and Now Playing's
+# per-song tab reads Similar (docs/ux-contracts/discovery-page.md). The
+# fake counts the asks: the room must have asked the route itself — and
+# its peers half, whose Connected servers tile fetches its cover from the
+# peer through the federation art proxy by the row's `albumArt`.
+PORT="$(FAKE_TASTE=1 start_fake T)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-room gui-discover-room.exp "$WORK/h12" "$WORK/gui-discover-room.out"
+assert "the room asked the taste route" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['taste_asks'] >= 1, s
+"
+assert "the asks were stateless: the window, no prefs, no remember/filter" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+b=s['taste_body'] or {}
+assert s['prefs_calls'] == 0, s
+assert b.get('window') == 30, b
+assert not any(k in b for k in ('remember','filter','staleDays')), b
+"
+assert "the strip fetched its album's cover" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['art_gets'] >= 1, s
+"
+assert "the peers half was asked and its tile fetched the peer's cover through the art proxy" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['peer_asks'] >= 1, s
+assert s['peer_art_gets'] == 1, s  # claimed once
+assert all(p.split('?')[0] == '/api/v1/federation/peers/7/art/attic-lanterns.png' for p in s['peer_art_paths']), s
+"
+assert "the peer's cover was asked as its compressed rendition (compress=l)" "
+import json,urllib.request,urllib.parse
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['peer_art_paths'], s
+assert all(urllib.parse.parse_qs(urllib.parse.urlsplit(p).query).get('compress') == ['l'] for p in s['peer_art_paths']), s
+"
+stop_fake
+
+# ── Scenario K: Keep a copy, end to end, against the fake's plug-ins ─────
+# The five-part gate open (the ping's `discoveryPlugins` and `noUpload:
+# false`, `federation-copy` listed with jobs allowed, a throwaway `copies`
+# destination): `c` on the Connected servers tab's lit tile opens Keep a
+# copy, Enter alone presses its one primary, Add album, and starts the copy
+# with the row unchanged, the tile and the verbs line say so while the
+# room's poll walks it to done, `C` lists it in the Copies modal
+# (docs/ux-contracts/discovery-page.md, clauses 100-141).
+# check_keep.py replays the stream frame by frame for those states.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake K)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-keep gui-discover-keep.exp "$WORK/h13" "$WORK/gui-discover-keep.out"
+if python3 "$E2E/check_keep.py" "$WORK/gui-discover-keep.out" "$E2E/replay.py" 30 100; then
+  echo "PASS keep a copy: modal, live marks, kept, Copies"
+else
+  echo "FAIL keep a copy: modal, live marks, kept, Copies"; FAILS=$((FAILS+1))
+fi
+assert "the album copy sent the row unchanged, scope album, to the user's own server" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert len(s['job_starts']) == 1, s['job_starts']
+start = s['job_starts'][0]
+assert start['scope'] == 'album', start
+assert start['destination'] == {'vpath': 'copies', 'base': '', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'}, start  # the place "Files go to" drew
+assert start['recommendation'] == {'artist': 'Attic Band', 'title': 'Ember', 'album': 'Lanterns', 'duration': 199,
+    'similarity': 0.81, 'filepath': 'Music/ember.mp3', 'albumArt': 'attic-lanterns.png',
+    'peer': {'id': 7, 'name': 'Attic'}, 'source': 'federation'}, start
+assert [j['state'] for j in s['jobs']] == ['done'], s['jobs']
+"
+assert "the rows were looked up in chunks of at most 100, again once the copy ended" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert len(s['lookup_sizes']) >= 2 and all(0 < n <= 100 for n in s['lookup_sizes']), s['lookup_sizes']
+assert s['cancels'] == 0 and s['clears'] == 0, s
+"
+stop_fake
+
+# ── Scenario K2: Keep a copy against a server from before the pin ────────
+# The same leg against FAKE_NO_PIN=1: mStream before 2026-10-21, whose jobs
+# route's strict body refuses `destination` (Joi's 400). The start is asked
+# once more without the key and runs unpinned, as such a server runs every
+# copy (discovery-page clause 145) — the same states, the same Copies.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 FAKE_NO_PIN=1 start_fake K2)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-keep-no-pin gui-discover-keep.exp "$WORK/h16" "$WORK/gui-discover-keep-no-pin.out"
+if python3 "$E2E/check_keep.py" "$WORK/gui-discover-keep-no-pin.out" "$E2E/replay.py" 30 100; then
+  echo "PASS keep a copy on a server from before the pin"
+else
+  echo "FAIL keep a copy on a server from before the pin"; FAILS=$((FAILS+1))
+fi
+assert "the start was asked again without the destination, and ran" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert [('destination' in b) for b in s['job_starts']] == [True, False], s['job_starts']
+assert s['job_answers'] == [400, 202], s['job_answers']
+assert s['job_starts'][1]['scope'] == 'album' and s['job_starts'][1]['recommendation'] == s['job_starts'][0]['recommendation'], s['job_starts']
+assert [j['state'] for j in s['jobs']] == ['done'], s['jobs']
+"
+stop_fake
+
+# ── Scenario W: Where copies land, the start's pinned destination ────────
+# The same gate as K, on a place seeded with a base folder (older data: the
+# leg's /_move_destination before the room opens). `c` on the lit tile
+# opens Keep a copy on it; `d` opens Where copies land folded into Custom
+# ("From friends/{{ALBUMARTIST}}/{{ALBUM}}", nothing dirty: Enter on the
+# libraries saves nothing) — trimmed since 2026-10-24: the title on its
+# border, "Files go to …" its first row, no header, labels, templates or
+# help — "Start from an existing folder…" lists the library's own folders
+# (the file explorer; the seeded folder is not among them: the first file
+# creates it), a folder picked there starts Custom's layout and Save keeps
+# it (PUT, the layout with base '' — the one PUT); Keep a copy's place line
+# reads the new place. The destination then moves
+# behind the client's back (the fake's /_move_destination, as another tab
+# would), and Enter presses Add album — which sends the place Keep a copy
+# showed — answered 409 destination_changed: nothing starts, the place line
+# redraws from the answer (docs/ux-contracts/discovery-page.md, clauses
+# 105, 142-148).
+# check_dest.py replays the stream frame by frame for those states.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake W)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-dest gui-discover-dest.exp "$WORK/h15" "$WORK/gui-discover-dest.out" env FAKE_URL="http://127.0.0.1:$PORT"
+if python3 "$E2E/check_dest.py" "$WORK/gui-discover-dest.out" "$E2E/replay.py" 30 100; then
+  echo "PASS where copies land: the seeded place, the picker folded, the list, a folder picked, saved, moved"
+else
+  echo "FAIL where copies land: the seeded place, the picker folded, the list, a folder picked, saved, moved"; FAILS=$((FAILS+1))
+fi
+assert "the picker saved the layout started in the picked folder with no base folder, once; the start showed it; the moved destination started nothing" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['destination_puts'] == [{'destination': {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}}], s['destination_puts']  # one PUT: the fold on open was no edit (Enter on the libraries sent nothing), the seeded base folder went into the layout, never sent as a base
+assert s['folder_lists'][-2:] == ['/copies', '/copies/from-peers'] and s['folder_lists'].count('/copies') == 1, s['folder_lists']  # after the Files pane's own: the root on opening the list, the picked folder, each once
+assert s['destination_gets'] == 3, s['destination_gets']  # the gate, the open, the 409's read again — never one a frame
+assert len(s['job_starts']) == 1, s['job_starts']
+assert s['job_starts'][0]['destination'] == {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}, s['job_starts'][0]
+assert s['job_answers'] == ['destination_changed'] and s['jobs'] == [], (s['job_answers'], s['jobs'])
+"
+stop_fake
+
+# ── Scenario M: Apple Terminal's mouse dialect, the release echo ─────────
+# The GUI spawned with TERM_PROGRAM=Apple_Terminal and every click sent as
+# that terminal sends one: the press an instant pair, the physical release
+# the same pair again (docs/ui-kit.md, behavioral rules). A connected
+# server's tile's `[⋯]` opens its list and the echo, landing on the list's
+# catcher, leaves it open; a row's `[⋯]` opens the track-actions sheet and
+# the echo, landing outside it, leaves it open and presses nothing — the
+# queue empty, nothing playing (docs/ux-contracts/discovery-page.md,
+# clauses 48, 102 and 103). check_echo.py replays the stream between the
+# leg's marks.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake M)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-echo gui-discover-echo.exp "$WORK/h14" "$WORK/gui-discover-echo.out"
+if python3 "$E2E/check_echo.py" "$WORK/gui-discover-echo.out" "$E2E/replay.py" 30 100; then
+  echo "PASS the release echo: the tile's list and the sheet stay, nothing pressed"
+else
+  echo "FAIL the release echo: the tile's list and the sheet stay, nothing pressed"; FAILS=$((FAILS+1))
+fi
+stop_fake
+
+# ── Scenario KM: Keep a copy by the pointer, in Apple Terminal's dialect ──
+# The same dialect as M: the tile's list opens Keep a copy, and every
+# control the window draws is clicked, each press pair followed by its
+# echo — the choices, `d change`, the primary, "x cancel copy", Add again,
+# "Esc close" — while the room beneath stays inert: no tooltip of its
+# ripens over the band or the footer, its row under the window lights
+# nothing (docs/ui-kit.md, Modal; docs/ux-contracts/discovery-page.md,
+# clauses 106–110). check_keep_mouse.py replays the stream at the leg's
+# marks; the fake says each click acted once.
+PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake KM)"
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+leg gui-discover-keep-mouse gui-discover-keep-mouse.exp "$WORK/h17" "$WORK/gui-discover-keep-mouse.out"
+if python3 "$E2E/check_keep_mouse.py" "$WORK/gui-discover-keep-mouse.out" "$E2E/replay.py" 30 100; then
+  echo "PASS keep a copy by the pointer: every click once, its echo nothing, the room inert"
+else
+  echo "FAIL keep a copy by the pointer: every click once, its echo nothing, the room inert"; FAILS=$((FAILS+1))
+fi
+assert "the pointer's clicks sent one start, one cancel and no save" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert len(s['job_starts']) == 1 and s['job_starts'][0]['scope'] == 'album', s['job_starts']
+assert s['cancels'] == 1, s['cancels']
+assert s.get('destination_puts', []) == [], s.get('destination_puts')
+assert [j['state'] for j in s['jobs']] == ['cancelled'], s['jobs']
+"
+stop_fake
 
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
 # No fake mStream at all: the page talks to a board, and the board is the

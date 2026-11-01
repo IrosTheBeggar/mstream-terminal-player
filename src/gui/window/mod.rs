@@ -251,6 +251,7 @@ pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
         quit_flushed: false,
         min_surface: PhysicalSize::new(1, 1),
         shown: false,
+        cleared: false,
         opened_at: None,
         stats,
         instance,
@@ -476,6 +477,10 @@ struct App {
     /// the GPU's setup is never seen; elsewhere it is visible from its
     /// creation, as winit makes it, and this is true from `open`.
     shown: bool,
+    /// The backend was cleared (a resize, the window shown) since the face
+    /// last drew: the next frame must draw though the player has nothing
+    /// new, or the surface stays as the clear left it.
+    cleared: bool,
     /// When the window was made: the deadline a hidden one is shown by
     /// counts from here.
     opened_at: Option<Instant>,
@@ -729,12 +734,18 @@ impl Gpu {
 struct WindowHost<'a> {
     window: &'a Window,
     hand: &'a mut bool,
+    /// This frame must draw whatever the player holds (`redraw_inner`).
+    must_draw: bool,
 }
 
 impl Host for WindowHost<'_> {
     fn pointer(&mut self, hand: bool) {
         *self.hand = hand;
         self.window.set_cursor(if hand { CursorIcon::Pointer } else { CursorIcon::Default });
+    }
+
+    fn must_draw(&self) -> bool {
+        self.must_draw
     }
 }
 
@@ -1056,6 +1067,7 @@ impl App {
     fn repaint_all(&mut self) {
         if let Some(terminal) = self.terminal.as_mut() {
             let _ = terminal.clear();
+            self.cleared = true;
         }
         self.ask_redraw();
     }
@@ -1102,15 +1114,30 @@ impl App {
         if self.frames == 0 {
             self.lap.mark(&mut self.stats, "to_first_frame");
         }
-        self.board.begin_frame();
         // An owed present this frame's flush makes is a present though no
         // cell changed: the stats lever counts it as one.
         let owed = terminal.backend().owes_present();
-        let framed =
-            self.face.frame(terminal, &mut WindowHost { window, hand: &mut self.hand });
+        // A face whose pass finds nothing new skips its draw (gui::Ctx's
+        // gate). What the surface needs regardless, it is told: drawn
+        // until the window is first shown, after a clear, for a present
+        // owed, for a cover the worker resampled since.
+        let must_draw = !self.shown || self.cleared || owed || self.board.has_news();
+        self.board.begin_frame();
+        let _ = terminal.backend_mut().take_drew();
+        let framed = self
+            .face
+            .frame(terminal, &mut WindowHost { window, hand: &mut self.hand, must_draw });
+        let drew = terminal.backend_mut().take_drew();
+        self.board.end_frame(drew);
+        if drew {
+            self.cleared = false;
+        }
         let (cells, flush) = terminal.backend_mut().take_cells();
         let repaid = owed && !terminal.backend().owes_present();
         if let (Some(stats), Some(started)) = (self.stats.as_mut(), started) {
+            if !drew {
+                stats.skipped();
+            }
             stats.frame(cells, repaid, flush, started.elapsed());
         }
         match framed {
@@ -1499,6 +1526,7 @@ impl App {
             (side(size.width, self.min_surface.width), side(size.height, self.min_surface.height));
         terminal.backend_mut().resize(width, height);
         let _ = terminal.clear();
+        self.cleared = true;
         let Ok(grid) = terminal.backend_mut().size() else { return };
         self.feed(event_loop, TermEvent::Resize(grid.width, grid.height));
     }
@@ -2119,12 +2147,13 @@ fn hack() -> Result<Font<'static>, String> {
 }
 
 /// What the GUI draws that Hack has no glyph for, CJK aside: the rating
-/// stars and the checkbox tick. A terminal borrows these from its own font
-/// fallback without being asked; the window has to be handed a face that
-/// has them, or they draw as boxes. The census test below keeps the list
-/// complete as the GUI grows new glyphs, and checks that [`SYMBOLS`] has
-/// every one of them.
-const BEYOND_HACK: &str = "★☆✓";
+/// stars, the checkbox tick, and the MP3 Player tab's ✗ (a verdict's mark:
+/// other firmware, a failed write). A terminal borrows these from its own
+/// font fallback without being asked; the window has to be handed a face
+/// that has them, or they draw as boxes. The census test below keeps the
+/// list complete as the GUI grows new glyphs, and checks that [`SYMBOLS`]
+/// has every one of them.
+const BEYOND_HACK: &str = "★☆✓✗";
 
 /// The window's own symbol face (assets/fonts/, made by
 /// scripts/symbol-font.py on Hack's metrics, under the OFL): every glyph of
@@ -2590,14 +2619,16 @@ mod tests {
     /// than the wide CJK the borrowed CJK face is for, must be in
     /// [`BEYOND_HACK`], or the window would draw it as a box where a
     /// terminal would not. The census reads what the GUI can draw from
-    /// its sources — the string and char literals of the GUI and the kit,
-    /// with whole-line comments dropped — and from every locale's strings.
+    /// its sources — the string and char literals of the GUI, the kit and
+    /// the device page the GUI hosts, with whole-line comments dropped — and
+    /// from every locale's strings.
     #[test]
     fn every_glyph_hack_lacks_has_a_fallback() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let literal = regex::Regex::new(r#""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)'"#).unwrap();
         let mut drawn = String::new();
-        let mut dirs = vec![root.join("src/gui"), root.join("src/kit")];
+        // The device page draws inside the GUI too, as its MP3 Player tab.
+        let mut dirs = vec![root.join("src/gui"), root.join("src/kit"), root.join("src/device")];
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).unwrap().map(Result::unwrap) {
                 let path = entry.path();

@@ -15,6 +15,9 @@ mod input;
 /// level type and switches are shared, because the Settings tab that
 /// drives them is drawing code the browser build keeps.
 mod logging;
+/// Tests over Cargo.toml and Cargo.lock: dependency and profile choices.
+#[cfg(test)]
+mod manifest;
 mod player;
 mod tui;
 
@@ -74,6 +77,15 @@ mod device;
 /// drawing code and the worker message types compile unchanged there.
 #[cfg(target_arch = "wasm32")]
 mod web;
+/// The browser shell's timing rules and its canvas colours (src/web/pace.rs,
+/// src/web/colours.rs), which are pure: compiled here too so their tests
+/// run where `cargo test` does.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "web/pace.rs"]
+mod web_pace;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "web/colours.rs"]
+mod web_colours;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod discovery;
@@ -577,6 +589,9 @@ fn main() {
     if let Some(path) = logging::init(run) {
         eprintln!("logging to {}", path.display());
     }
+
+    // The TLS provider, before anything can dial (see runtime.rs).
+    runtime::install_tls_provider();
 
     // Streaming scratch space (PLAN A1): each playing track spools to a temp
     // file. Decide where those belong before anything can open a stream, and

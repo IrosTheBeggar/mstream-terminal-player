@@ -155,13 +155,10 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.queue_view.scroll = first;
 
     // The covers these rows still owe the cache, claimed through the App's
-    // own fetch — hashmap lookups after the first frame.
-    let mut fetches = Vec::new();
-    for index in first..first + visible {
-        if let Some(effect) = gui.app.fetch_queue_art(index) {
-            fetches.push(effect);
-        }
-    }
+    // own fetch in one batch — hashmap lookups after the first frame. The
+    // rows go on record with it: what the panel shows is what the cache
+    // must not evict (performance audit #91).
+    let fetches = gui.app.claim_queue_art(first..first + visible);
     gui.pend(fetches);
 
 
@@ -425,7 +422,7 @@ mod tests {
         gui.pending
             .iter()
             .filter_map(|e| match e {
-                Effect::Api(ApiCmd::AlbumArt { file, reach }) => {
+                Effect::Api(ApiCmd::AlbumArt { file, reach, .. }) => {
                     Some((file.clone(), reach.as_ref().map(|r| r.base.clone())))
                 }
                 _ => None,
@@ -508,7 +505,7 @@ mod tests {
             "the other server's row asks its own server: {asks:?}"
         );
         let reach = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::AlbumArt { file, reach }) if file == "bb.jpeg" => reach.clone(),
+            Effect::Api(ApiCmd::AlbumArt { file, reach, .. }) if file == "bb.jpeg" => reach.clone(),
             _ => None,
         });
         assert_eq!(reach.unwrap().token.as_deref(), Some("tok"), "with its token");
@@ -526,6 +523,10 @@ mod tests {
         draw(&mut gui);
         assert!(art_asks(&gui).is_empty(), "nothing to ask while the tunnel is closed");
         assert!(!gui.app.art.contains_key("cc.jpeg"), "and no placeholder stands in the way");
+        assert!(
+            super::super::next_wait(&gui) > std::time::Duration::ZERO,
+            "a refused claim sends nothing: the loop waits, it does not spin"
+        );
 
         gui.app.tunnels.insert(
             id,
@@ -729,6 +730,55 @@ mod tests {
         }
         assert_eq!(gui.queue.encodes(), 10, "every cover encoded once on its way through");
         assert!(gui.queue.slots.len() <= 5 + super::SLACK, "{} slots", gui.queue.slots.len());
+    }
+
+    #[test]
+    fn the_playing_rows_original_leaves_its_cover_in_the_panel_as_drawn() {
+        // The panel shows the server's small copies; the track that starts
+        // asks for its cover's original (performance audit #92). Landing
+        // under a new id, it was a new slot for the row: a re-encode, a
+        // new kitty image on every track change, and the old one held
+        // until the pool's slack ran out (the integration check).
+        use crate::tui::worker::Event;
+        use ratatui_image::picker::ProtocolType;
+        let mut gui = gui_with(vec![
+            queued("a.mp3", "First", None, Some("aa.jpeg"), 200.0, HOME),
+            queued("b.mp3", "Second", None, Some("bb.jpeg"), 200.0, HOME),
+        ]);
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        let cover = |side: u32, rgb: [u8; 3]| {
+            let png = image::RgbImage::from_pixel(side, side, image::Rgb(rgb));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            crate::tui::art::decode(&bytes.into_inner()).unwrap()
+        };
+        draw(&mut gui);
+        assert_eq!(art_asks(&gui).len(), 2, "the panel claims both, small");
+        for (file, rgb) in [("aa.jpeg", [200, 40, 40]), ("bb.jpeg", [40, 40, 200])] {
+            let art = Some(cover(256, rgb));
+            gui.app.apply_event(Event::AlbumArt { file: file.into(), art, settled: true, small: true });
+        }
+        settle(&mut gui);
+        assert_eq!(gui.queue.encodes(), 2);
+
+        // The card shows the small copy meanwhile, as the row does.
+        let asked = gui.app.play_index(1);
+        let original = Effect::Api(ApiCmd::AlbumArt { file: "bb.jpeg".into(), reach: None, small: false });
+        assert!(asked.contains(&original), "{asked:?}");
+        let buffer = settle(&mut gui);
+        assert_eq!(lines(&buffer).concat().matches("a=T").count(), 1, "the card's picture");
+
+        let full = cover(640, [40, 40, 200]);
+        let bytes = full.source().to_vec();
+        let art = Some(full);
+        gui.app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art, settled: true, small: false });
+        let buffer = settle(&mut gui);
+        assert_eq!(gui.queue.encodes(), 2, "the row's picture is the one it drew");
+        assert_eq!(gui.queue.slots.len(), 2, "in the slot it drew it in");
+        let sent = lines(&buffer).concat();
+        assert!(!sent.contains("_G"), "nothing goes to the terminal again, the card's picture included");
+        let held = gui.app.art["bb.jpeg"].as_ref().unwrap();
+        assert_eq!(held.source(), &bytes[..], "while the big box has the original's bytes");
     }
 
     #[test]

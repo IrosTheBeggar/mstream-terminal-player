@@ -24,13 +24,14 @@ drain 1
 send "\r"
 expect {
     "/admin" {}
+    eof { puts "DIED-BEFORE-ADMIN-NOTE"; exit 6 }
     timeout { puts "NO-ADMIN-NOTE"; exec kill -9 [exp_pid]; expect eof; exit 3 }
 }
 drain 1
 send "\x1b"
 expect {
     eof {}
-    timeout { exec kill -9 [exp_pid]; expect eof; exit 4 }
+    timeout { puts "NO-EXIT"; exec kill -9 [exp_pid]; expect eof; exit 4 }
 }
 catch wait result
 exit [lindex $result 3]

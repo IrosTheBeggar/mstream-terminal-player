@@ -518,6 +518,23 @@ pub struct GuiPrefs {
     /// ` — key` tail on a tooltip. Off by default — this surface is the
     /// pointer's, and the classic TUI is the keyboard's room.
     pub key_hints: bool,
+    /// The Discover room's tab in front — `library` or `servers`
+    /// (discovery-page contract, clause 40). The tab's old name `peers`
+    /// reads as `servers`; `network`, or a word this build does not know,
+    /// reads as no memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discover_tab: Option<String>,
+    /// The Discover room's window, in days — 7, 30, 90 or 0 for all time
+    /// (clause 15). The server keeps nothing between calls (the contract's
+    /// 2026-10-14 log), so the choice is remembered here; unset, or a
+    /// number not among the four, asks the default 30.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discover_window: Option<u32>,
+    /// The Genres room's kind — `tag`, `model` or `both` (mStream #716's
+    /// `source`; library-rooms contract, clause 26). Unset, or a word this
+    /// build does not know, reads as tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre_source: Option<String>,
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -889,7 +906,11 @@ pub fn config_dir() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(dir));
     }
 
-    let base = if cfg!(windows) {
+    // A test that saves outside a `testing::Scratch` must never reach the real
+    // folder: one that did reset the player settings of whoever ran the suite.
+    let base = if cfg!(test) {
+        Some(std::env::temp_dir().join(format!("mstream-player-tests-{}", std::process::id())))
+    } else if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
@@ -940,6 +961,39 @@ pub fn save_queue_file(body: &str) -> Result<(), String> {
     write_atomic(&queue_path()?, body, false)
 }
 
+/// The saved queue's file as the drive has it — its size and when it was
+/// last replaced — so the saver can tell the rows it wrote are still the
+/// rows there without reading them back (performance audit #106). `None`
+/// for no file, or a platform that keeps no times.
+pub fn queue_file_mark() -> Option<(u64, std::time::SystemTime)> {
+    let meta = fs::metadata(queue_path().ok()?).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// Where the saved queue stands between writes of its rows — the playing
+/// row and the seconds into it, naming the rows it belongs to — so the
+/// ten-second checkpoint rewrites a few dozen bytes rather than every row
+/// (performance audit #106). Read only against `queue.json`.
+pub fn queue_place_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("queue-place.json"))
+}
+
+pub fn load_queue_place_file() -> Result<Option<String>, String> {
+    let path = queue_place_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+/// Without the flush `queue.json` gets: this file is rewritten every ten
+/// seconds of playback, and one a power loss emptied is simply not taken —
+/// the rows file's own place stands in, and the rows are never at risk.
+pub fn save_queue_place_file(body: &str) -> Result<(), String> {
+    write_atomic_as(&queue_place_path()?, body, false, false)
+}
+
 /// `stats.json` — the play reporter's outbox and its checkpointed session
 /// (play-reporting contract, clause 9), beside the queue's file and as
 /// disposable: a corrupt file is ignored, never repaired.
@@ -972,12 +1026,15 @@ pub fn delete_stats_file() -> Result<(), String> {
 /// Drop the saved queue: a cleared queue must not come back on the next
 /// launch, and neither may one the setting was turned off for.
 pub fn delete_queue_file() -> Result<(), String> {
-    let path = queue_path()?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+    // The place first: without its rows it is never read anyway.
+    for path in [queue_place_path()?, queue_path()?] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("could not remove {}: {e}", path.display())),
+        }
     }
+    Ok(())
 }
 
 pub fn spool_dir() -> Option<PathBuf> {
@@ -1058,6 +1115,13 @@ fn expand_home_from(path: PathBuf, home: Option<PathBuf>) -> PathBuf {
 /// A rename is atomic on both platforms, so a crash mid-write leaves the old
 /// contents rather than a truncated file.
 fn write_atomic(path: &Path, contents: &str, owner_only: bool) -> Result<(), String> {
+    write_atomic_as(path, contents, owner_only, true)
+}
+
+/// [`write_atomic`], with the flush to the drive a choice: `durable: false`
+/// keeps the rename's atomicity against a crash and skips the flush —
+/// for a file whose loss costs nothing (see the queue's place).
+fn write_atomic_as(path: &Path, contents: &str, owner_only: bool, durable: bool) -> Result<(), String> {
     use std::io::Write;
 
     let dir = path
@@ -1074,7 +1138,7 @@ fn write_atomic(path: &Path, contents: &str, owner_only: bool) -> Result<(), Str
         // leave the new name pointing at a file whose bytes never landed —
         // an empty config where the crash-safety was supposed to leave the
         // old one.
-        file.sync_all()
+        if durable { file.sync_all() } else { Ok(()) }
     };
     write(&temp).map_err(|e| format!("could not write {}: {e}", temp.display()))?;
     if owner_only {
@@ -1631,6 +1695,64 @@ mod tests {
     }
 
     #[test]
+    fn the_discover_rooms_tab_round_trips_and_stays_out_of_the_file_when_unset() {
+        let scratch = Scratch::new("discover-tab");
+        save(&Config::default()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("discover_tab"), "no tab chosen, nothing written: {text}");
+
+        let mut config = Config::default();
+        config.gui.discover_tab = Some("peers".into());
+        save(&config).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("[gui]") && text.contains("discover_tab = \"peers\""), "{text}");
+        assert_eq!(load().unwrap().gui.discover_tab.as_deref(), Some("peers"));
+
+        // Beside a key a newer player wrote into the same section.
+        fs::write(scratch.dir.join(CONFIG_FILE), "[gui]\ndiscover_tab = \"network\"\nzoom = 2\n").unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded.gui.discover_tab.as_deref(), Some("network"));
+        assert_eq!(loaded.gui.extra.get("zoom").and_then(toml::Value::as_integer), Some(2));
+    }
+
+    #[test]
+    fn the_discover_rooms_window_round_trips_beside_the_tab() {
+        let scratch = Scratch::new("discover-window");
+        save(&Config::default()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("discover_window"), "no window chosen, nothing written: {text}");
+
+        let mut config = Config::default();
+        config.gui.discover_tab = Some("library".into());
+        config.gui.discover_window = Some(0);
+        save(&config).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("[gui]") && text.contains("discover_window = 0"), "{text}");
+        let loaded = load().unwrap();
+        assert_eq!((loaded.gui.discover_window, loaded.gui.discover_tab.as_deref()), (Some(0), Some("library")));
+    }
+
+    #[test]
+    fn the_genres_rooms_kind_round_trips_and_an_unknown_word_reads_as_tags() {
+        use crate::api::types::GenreSource;
+        let scratch = Scratch::new("genre-source");
+        save(&Config::default()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("genre_source"), "no kind chosen, nothing written: {text}");
+
+        let mut config = Config::default();
+        config.gui.genre_source = Some(GenreSource::Model.as_str().into());
+        save(&config).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("[gui]") && text.contains("genre_source = \"model\""), "{text}");
+        let loaded = load().unwrap();
+        assert_eq!(GenreSource::from_name(loaded.gui.genre_source.as_deref()), GenreSource::Model);
+        assert_eq!(GenreSource::from_name(Some("both")), GenreSource::Both);
+        assert_eq!(GenreSource::from_name(Some("moods")), GenreSource::Tag, "a word this build does not know");
+        assert_eq!(GenreSource::from_name(None), GenreSource::Tag);
+    }
+
+    #[test]
     fn the_visualizers_choices_round_trip_and_an_untouched_window_writes_nothing() {
         let scratch = Scratch::new("visualizer");
         save(&Config::default()).unwrap();
@@ -2003,6 +2125,16 @@ mod tests {
         let from_env = spool_dir();
         unsafe { std::env::remove_var("MSTREAM_PLAYER_CACHE_DIR") };
         assert_eq!(from_env, Some(scratch.dir.join("from-env").join("spool")));
+    }
+
+    #[test]
+    fn a_test_outside_a_scratch_never_reaches_the_real_folder() {
+        let _scratch = Scratch::new("no-real-folder");
+        // SAFETY: the Scratch guard's lock serialises env manipulation.
+        unsafe { std::env::remove_var("MSTREAM_PLAYER_CONFIG_DIR") };
+        let dir = config_dir().expect("a test build always has one");
+        let this_run = format!("mstream-player-tests-{}", std::process::id());
+        assert!(dir.starts_with(std::env::temp_dir().join(this_run)), "{}", dir.display());
     }
 
     #[test]

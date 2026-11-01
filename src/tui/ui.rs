@@ -245,6 +245,7 @@ const CURSOR: &str = "> ";
 /// glyph sets — braille turns in ten, ASCII in four — so the modulo has to
 /// ask the set rather than a constant.
 fn spinner_frame(app: &App) -> &'static str {
+    app.spinner_shown.set(true);
     let frames = glyphs().spinner;
     frames[app.spinner % frames.len()]
 }
@@ -312,6 +313,9 @@ fn connect_message(app: &App, area: Rect) -> Vec<Line<'static>> {
     let style = match message.kind {
         MessageKind::Error => Style::new().fg(Color::Red),
         MessageKind::Info => Style::new().fg(dim()),
+        MessageKind::Busy => Style::new().fg(accent()),
+        MessageKind::Success => Style::new().fg(Color::Green),
+        MessageKind::Plain => Style::new(),
     };
     wrap(&message.text, MESSAGE_WIDTH.min(area.width as usize))
         .into_iter()
@@ -550,7 +554,15 @@ pub(crate) fn regions(area: Rect) -> Regions {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    render_screen(frame, app);
+    // The overlays drew after the cover: a kitty picture's pixels, riding
+    // its first cell, may not have survived the frame.
+    crate::tui::graphics::verify_sent(frame.buffer_mut());
+}
+
+fn render_screen(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.spinner_shown.set(false);
 
     if !app.connected {
         render_connect(frame, area, app);
@@ -1086,13 +1098,14 @@ pub(crate) fn browser_title(app: &App) -> String {
         }
         Tab::Library => match app.library_node() {
             LibraryNode::Root => " Library ".to_string(),
-            LibraryNode::Artists => " Artists ".to_string(),
+            LibraryNode::Artists(_) => " Artists ".to_string(),
             LibraryNode::Artist(artist) => format!(" Artist: {artist} "),
-            LibraryNode::Albums => " Albums ".to_string(),
+            LibraryNode::Albums(_) => " Albums ".to_string(),
             LibraryNode::Album { name, .. } => format!(" Album: {name} "),
-            LibraryNode::Genres => " Genres ".to_string(),
-            LibraryNode::Genre(genre) => format!(" Genre: {genre} "),
-            LibraryNode::Recent => " Recently Added ".to_string(),
+            LibraryNode::Genres(_) => " Genres ".to_string(),
+            LibraryNode::Genre(genre, _) => format!(" Genre: {genre} "),
+            LibraryNode::Recent(_) => " Recently Added ".to_string(),
+            LibraryNode::Rated(_) => " Rated ".to_string(),
             LibraryNode::RecentlyPlayed => " Recently Played ".to_string(),
             LibraryNode::MostPlayed => " Most Played ".to_string(),
             LibraryNode::Playlists => " Playlists ".to_string(),
@@ -1624,7 +1637,7 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
             .and_then(|file| app.art.get(file))
             .and_then(|art| art.as_ref());
         app.viz.draw(&mut canvas, &app.heard, sounding, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), picture);
+        frame.render_widget(&canvas, picture);
     }
 }
 
@@ -1764,7 +1777,7 @@ fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App, mosaic: bool
     let mut canvas = crate::tui::canvas::Canvas::new(area);
     if !canvas.is_empty() {
         app.cover_pane.draw(&mut canvas, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), area);
+        frame.render_widget(&canvas, area);
     }
     Some(area)
 }
@@ -2373,6 +2386,9 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
                 match m.kind {
                     MessageKind::Error => Style::new().fg(Color::Red),
                     MessageKind::Info => Style::new().fg(dim()),
+                    MessageKind::Busy => Style::new().fg(accent()),
+                    MessageKind::Success => Style::new().fg(Color::Green),
+                    MessageKind::Plain => Style::new(),
                 },
             ),
             None => Span::styled(
@@ -3163,6 +3179,15 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     /// Render one frame and flatten the buffer to text for assertions.
     fn draw(app: &mut App) -> String {
         draw_sized(app, 90, 26)
@@ -3196,6 +3221,10 @@ mod tests {
             federation_browse: false,
             federation_direct: false,
             stats: true,
+            discovery_taste: 0,
+            discovery_plugins: false,
+            uploads: false,
+            mood_filters: false,
         };
         // What a real ping does on the way in: the Auto-DJ rows depend on it.
         app.dj_panel.rebuild(&app.dj, None, false);
@@ -4329,7 +4358,7 @@ mod tests {
         // reaches it.
         let wide = draw_sized(&mut app, 110, 16);
         assert!(
-            wide.contains("[1:Queue]  2:Lyrics   3:Discover   4:Auto-DJ   5:Visualizer "),
+            wide.contains("[1:Queue]  2:Lyrics   3:Similar   4:Auto-DJ   5:Visualizer "),
             "{wide}"
         );
 
@@ -4338,7 +4367,7 @@ mod tests {
         // survives the squeeze — it is the way out of wherever you are.
         let narrow = draw_sized(&mut app, 64, 16);
         assert!(narrow.contains("‹ 1:Queue ›"), "{narrow}");
-        assert!(!narrow.contains("Discover"), "{narrow}");
+        assert!(!narrow.contains("Similar"), "{narrow}");
     }
 
     #[test]
@@ -4513,11 +4542,11 @@ mod tests {
 
         app.library_stack.restart();
 
-        app.library_stack.enter(LibraryNode::Genre("Ambient".into()));
+        app.library_stack.enter(LibraryNode::Genre("Ambient".into(), crate::api::types::GenreSource::Both));
         app.apply_event(crate::tui::worker::Event::Library {
             generation: app.session_gen(),
             dest: Tab::Library,
-            node: LibraryNode::Genre("Ambient".into()),
+            node: LibraryNode::Genre("Ambient".into(), crate::api::types::GenreSource::Both),
             data: LibraryData::Tracks(vec![Track {
                 filepath: "lib/a.mp3".into(),
                 metadata: TrackMetadata {
@@ -4784,6 +4813,7 @@ mod tests {
 
     #[test]
     fn the_genre_chooser_marks_what_is_selected() {
+        let _en = english();
         let mut app = connected_app();
         app.dj.genres = vec!["Techno".into()];
         on_the_dj_tab(&mut app);
@@ -5596,6 +5626,21 @@ mod tests {
         app.spinner += 1;
         let second = draw(&mut app);
         assert_ne!(first, second, "advancing the tick changes the frame");
+    }
+
+    /// The loop skips unchanged frames, and a turn of the spinner is news
+    /// only to a frame that drew one (performance audit #102).
+    #[test]
+    fn the_frame_says_whether_it_drew_the_spinner() {
+        let mut app = connected_app();
+        draw(&mut app);
+        assert!(!app.spinner_shown.get(), "nothing loading, nothing turning");
+        on_the_playlists_node(&mut app);
+        draw(&mut app);
+        assert!(app.spinner_shown.get(), "a pane loading shows it");
+        app.apply_event(Event::Error("server said no".into()));
+        draw(&mut app);
+        assert!(!app.spinner_shown.get(), "the answer took it away again");
     }
 
     #[test]

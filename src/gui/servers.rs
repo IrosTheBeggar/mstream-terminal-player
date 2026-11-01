@@ -236,6 +236,13 @@ impl ServersUi {
         self.form.is_some() || self.confirm.is_some() || self.qr.is_some()
     }
 
+    /// Whether a thread of this layer's is out — a form's submit, a version
+    /// probe — so the loop waits briskly for its answer (`kit::pace`).
+    pub(crate) fn busy(&self) -> bool {
+        self.form.as_ref().is_some_and(|form| form.submitting)
+            || self.versions.values().any(|probe| matches!(probe, Probe::Pending))
+    }
+
     fn version_label(&self, key: &str) -> String {
         match self.versions.get(key) {
             Some(Probe::Pending) => "…".to_string(),
@@ -412,6 +419,7 @@ pub(crate) fn update_config(gui: &mut Gui, mutate: impl FnOnce(&mut Config)) -> 
     if !gui.config_ok {
         return false;
     }
+    gui.flush_prefs();
     let mut config = match config::load() {
         Ok(config) => config,
         Err(e) => {
@@ -599,6 +607,7 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
 
     // The outgoing session's place is worth keeping before it is replaced.
     if gui.app.connected {
+        gui.flush_prefs();
         crate::tui::remember(&gui.app);
         if let Ok(fresh) = config::load() {
             gui.config = fresh;
@@ -887,13 +896,16 @@ pub(crate) fn submit_form(gui: &mut Gui) {
 
 // ── Background replies ──────────────────────────────────────────────────────
 
-/// Drain what the threads sent since the last pass.
-pub(crate) fn poll(gui: &mut Gui) {
+/// Drain what the threads sent since the last pass; true when anything
+/// came — a frame to draw.
+pub(crate) fn poll(gui: &mut Gui) -> bool {
+    let mut folded = false;
     loop {
         let reply = match gui.servers.rx.try_recv() {
             Ok(reply) => reply,
-            Err(_) => return,
+            Err(_) => return folded,
         };
+        folded = true;
         match reply {
             Reply::Version { key, version } => {
                 let state = version.map_or(Probe::Unreachable, Probe::Version);
@@ -2374,6 +2386,15 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     fn entry(url: &str, username: Option<&str>) -> ServerEntry {
         ServerEntry {
             url: url.to_string(),
@@ -2410,6 +2431,7 @@ mod tests {
 
     #[test]
     fn the_header_grows_a_dropdown_once_a_second_server_is_saved() {
+        let _en = english();
         // The chevron obeys the same glyph gate as everything else, so the
         // assertion reads it from the same switch.
         let chevron = if legacy_conhost() { " v" } else { " ▾" };
@@ -2484,6 +2506,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_server_keeps_the_picker_says_so_and_leaves_the_transport_live() {
+        let _en = english();
         use crate::api::types::Track;
         use crate::tui::app::{KnownServer, Origin, Queued};
         use crate::tui::worker::AudioCmd;
@@ -2629,6 +2652,7 @@ mod tests {
 
     #[test]
     fn the_add_flow_starts_at_the_chooser() {
+        let _en = english();
         let mut gui = two_server_gui();
         open_add(&mut gui);
         assert_eq!(gui.servers.form.as_ref().unwrap().stage, FormStage::Choosing);
@@ -2849,6 +2873,7 @@ mod tests {
 
     #[test]
     fn the_form_validates_before_any_network() {
+        let _en = english();
         let mut gui = two_server_gui();
         open_add(&mut gui);
         gui.act(Act::FormMethod(0));
@@ -2869,6 +2894,7 @@ mod tests {
 
     #[test]
     fn public_mode_stands_the_credential_fields_down() {
+        let _en = english();
         let mut gui = two_server_gui();
         open_add(&mut gui);
         gui.act(Act::FormMethod(0));
@@ -2971,6 +2997,7 @@ mod tests {
 
     #[test]
     fn the_room_and_the_dropdown_scroll_to_the_cursor_and_under_the_wheel() {
+        let _en = english();
         // The review's finding: past about twelve entries the cursor walked
         // onto rows that were never drawn and the add row was gone. Peers
         // are added automatically, so the count is reachable.
@@ -3014,6 +3041,7 @@ mod tests {
 
     #[test]
     fn the_room_lists_servers_with_their_marks_and_removes_with_secrets() {
+        let _en = english();
         let scratch = Scratch::new("gui-room");
         let _ = &scratch;
         let mut config = Config::default();
@@ -3061,6 +3089,7 @@ mod tests {
 
     #[test]
     fn the_bundled_server_cannot_be_removed_and_keeps_its_address() {
+        let _en = english();
         use super::super::SETTINGS_NAV;
         use ratatui::crossterm::event::{KeyCode, KeyEvent};
         // Contract clauses 52 and 53: no Remove verb, the note instead of a
@@ -3105,6 +3134,7 @@ mod tests {
 
     #[test]
     fn federated_peers_list_under_their_parent_and_switch_through_it() {
+        let _en = english();
         use super::super::SETTINGS_NAV;
         use ratatui::crossterm::event::{KeyCode, KeyEvent};
         // Contract clauses 12, 24, 25 and 27.
@@ -3266,6 +3296,7 @@ mod tests {
 
     #[test]
     fn the_settings_row_opens_the_room_and_esc_walks_back() {
+        let _en = english();
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = two_server_gui();
         gui.active = super::super::SETTINGS_NAV;

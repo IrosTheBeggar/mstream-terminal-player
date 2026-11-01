@@ -4,8 +4,8 @@
     python3 scripts/symbol-font.py
 
 The GUI draws a few glyphs that Hack, the window's face, does not have (the
-census test in src/gui/window/mod.rs keeps the list: the rating stars and the
-checkbox tick). A terminal borrows them from its own font fallback; the window
+census test in src/gui/window/mod.rs keeps the list: the rating stars, the
+checkbox tick and the MP3 Player tab's ballot cross). A terminal borrows them from its own font fallback; the window
 used to borrow them from whatever the system had (Menlo, DejaVu, Segoe UI
 Symbol), so they looked different on every OS and were boxes where none was
 found. This face draws them itself, on Hack's metrics (2048 units to the em,

@@ -25,9 +25,12 @@ mod actions;
 mod admin;
 mod cover;
 mod device;
+mod discover;
 mod dj;
+mod keep;
 mod library;
 mod log_file;
+mod moods;
 mod mini;
 mod now;
 mod opener;
@@ -46,7 +49,7 @@ mod vizwin;
 pub(crate) mod window;
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{
@@ -56,7 +59,6 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::Paragraph;
 use rust_i18n::t;
 
 use crate::config::{self, Config};
@@ -64,6 +66,7 @@ use crate::kit::{
     GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display_composing, scroll_list,
     set_pointer_shape,
 };
+use crate::kit::pace::{Expecting, REDRAW_ANYWAY};
 use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
     Action, App, Effect, Entry, MessageKind, SEARCH_CLASSES, SearchClass, SearchNode, Tab,
@@ -200,6 +203,12 @@ pub(crate) enum Act {
     /// the way back — the rows are [`Act::PaneRow`]s.
     LibJump(usize),
     LibBack,
+    /// The Genres list's Tags · Generated · Both (clauses 25–29).
+    GenreSource(crate::api::types::GenreSource),
+    /// The mood Filters (library-rooms clauses 30–36, discovery-page
+    /// clause 33): the opener and the strip's words, the modal's stops and
+    /// its `[ Done ]`, the strip's `[X]`.
+    Mood(moods::MoodAct),
     /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
     /// radios, chips, the keyword field, the genre and server pickers —
     /// starting with its one primary: Start through the toggle (the
@@ -315,6 +324,10 @@ pub(crate) enum Act {
     TorChooseHandOff,
     TorChooseAsk,
     TorChooseClose,
+    // ── Discover (see gui::discover) ────────────────────────────────────
+    /// The Discover room's own pointer ways: its tabs, rows and their
+    /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
+    Disc(discover::DiscAct),
     /// A modal's whole-screen backdrop: swallow the click.
     Guard,
 }
@@ -334,6 +347,8 @@ pub(crate) enum List {
     Sonic,
     DjRoom,
     DjGenres,
+    /// The Discover room's table: its rows live on the App (`App.taste`).
+    Discover,
 }
 
 impl List {
@@ -344,7 +359,7 @@ impl List {
             List::Files => Some(Tab::Files),
             List::Search => Some(Tab::Search),
             List::Library | List::AlbumTracks | List::Playlists | List::PlaylistTracks => Some(Tab::Library),
-            List::Queue | List::Sonic | List::DjRoom | List::DjGenres => None,
+            List::Queue | List::Sonic | List::DjRoom | List::DjGenres | List::Discover => None,
         }
     }
 }
@@ -413,9 +428,15 @@ enum NavId {
     /// are the pointer's.
     LastPlayed,
     MostPlayed,
+    /// The history-seeded Discover room (discovery-page contract, clause
+    /// 2): drawn third in TOOLS, late in the array — no digit, `G`.
+    Discover,
+    /// The songs you rated (library-rooms contract, clause 37): drawn in
+    /// the LIBRARY group after Recent, last in the array — no digit.
+    Rated,
 }
 
-const NAV: [NavId; 12] = [
+const NAV: [NavId; 14] = [
     NavId::Files,
     NavId::Albums,
     NavId::Artists,
@@ -428,6 +449,8 @@ const NAV: [NavId; 12] = [
     NavId::Dj,
     NavId::LastPlayed,
     NavId::MostPlayed,
+    NavId::Discover,
+    NavId::Rated,
 ];
 
 impl NavId {
@@ -445,6 +468,8 @@ impl NavId {
             NavId::Dj => t!("gui.nav.dj").to_string(),
             NavId::LastPlayed => t!("gui.nav.last_played").to_string(),
             NavId::MostPlayed => t!("gui.nav.most_played").to_string(),
+            NavId::Discover => t!("gui.nav.discover").to_string(),
+            NavId::Rated => t!("gui.nav.rated").to_string(),
         }
     }
 }
@@ -461,6 +486,8 @@ const SONIC_NAV: usize = 8;
 const DJ_NAV: usize = 9;
 const LAST_PLAYED_NAV: usize = 10;
 const MOST_PLAYED_NAV: usize = 11;
+const DISCOVER_NAV: usize = 12;
+const RATED_NAV: usize = 13;
 
 /// A class's slot in [`SEARCH_CLASSES`] — the chip order.
 fn class_idx(class: SearchClass) -> usize {
@@ -583,13 +610,31 @@ pub(crate) struct Gui {
     library: library::LibraryUi,
     /// Track actions: the sheet, its picker and info, a grip drag.
     actions: actions::ActionsUi,
+    /// The bar card's cover and the mini player's, a slot each — see
+    /// [`draw_card_cover`].
+    card: Option<cover::Slot>,
+    mini_cover: Option<cover::Slot>,
+    /// The Discover room: its cursor, wheel, hanging lists and seeds modal.
+    discover: discover::DiscoverUi,
+    /// The mood Filters' choices, a room each, and the open modal's draft.
+    moods: moods::MoodRooms,
     /// The queue's highlighted row last drawn, so a new one is revealed.
     last_qsel: Option<usize>,
     /// The last frame left paced work unfinished (covers still waiting to
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
     hot: bool,
+    /// When a setting last changed, while the change is not yet on disk:
+    /// the file is written once the changes rest (see [`PREFS_REST`]).
+    prefs_unsaved: Option<Instant>,
 }
+
+/// How long settings rest before they are written: a held ← on the blend
+/// or an Auto DJ bar steps at the key repeat, each step used to be a load,
+/// a serialize and a full flush of the drive, and now the file is written
+/// once, after (performance audit #86). Short, so a crash or a closed
+/// window costs a third of a second of choices at most.
+const PREFS_REST: Duration = Duration::from_millis(300);
 
 impl Gui {
     fn new(config: Config, config_ok: bool, mut app: App) -> Self {
@@ -601,6 +646,13 @@ impl Gui {
         app.connect_screen = false;
         let mut ui = Surface::new();
         ui.key_hints = config.gui.key_hints;
+        // The Discover room's memories of its own (discovery-page clauses
+        // 15 and 40): the window and the tab in front, seeded before the
+        // first frame.
+        if let Some(tab) = config.gui.discover_tab.as_deref().and_then(crate::tui::app::TasteTab::parse) {
+            app.taste.tab = tab;
+        }
+        app.taste.window = config.gui.discover_window.and_then(crate::tui::app::taste::taste_window);
         Gui {
             app,
             pending: Vec::new(),
@@ -637,8 +689,13 @@ impl Gui {
             dj: dj::DjUi::new(),
             library: library::LibraryUi::new(),
             actions: actions::ActionsUi::new(),
+            card: None,
+            mini_cover: None,
+            discover: discover::DiscoverUi::new(),
+            moods: moods::MoodRooms::default(),
             last_qsel: None,
             hot: false,
+            prefs_unsaved: None,
         }
     }
 
@@ -649,6 +706,9 @@ impl Gui {
         // `handle_action` (idempotent for effects that already had it).
         self.app.note_pending(&effects);
         self.pending.extend(effects);
+        // Every App call's batch comes through here: a mood ask the App
+        // just put back takes the room's choice back with it.
+        moods::follow_ask(self);
     }
 
     fn forward(&mut self, action: Action) {
@@ -673,15 +733,22 @@ impl Gui {
         }
     }
 
-    /// Forward an Activate that may answer an armed sonic pick — and when
-    /// it does, follow the answer home to the room that asked (clause 12;
-    /// the record re-pushes its screen the same way).
+    /// Forward an Activate that may answer an armed pick — and when it
+    /// does, follow the answer home to the room that asked (sonic-path
+    /// clause 12; discovery-page clause 14, the same grammar; the record
+    /// re-pushes its screen the same way).
     fn forward_capturing(&mut self, action: Action) {
-        let was_armed = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
+        let armed = self.app.capture;
         self.forward(action);
-        if was_armed && self.app.capture.is_none() {
-            self.active = SONIC_NAV;
-            self.app.tab = Tab::SonicPath;
+        if self.app.capture.is_none() {
+            match armed {
+                Some(crate::tui::app::Capture::Sonic(_)) => {
+                    self.active = SONIC_NAV;
+                    self.app.tab = Tab::SonicPath;
+                }
+                Some(crate::tui::app::Capture::TasteSeed) => discover::returned(self),
+                _ => {}
+            }
         }
     }
 
@@ -691,7 +758,10 @@ impl Gui {
     /// Loads fresh before writing: other flows save behind this copy's back
     /// (a connect's SaveSession touches the server list, the servers room
     /// edits it), and writing the boot-time copy wholesale would undo them.
+    /// What it writes of the player's comes from the App as it stands, so a
+    /// change still waiting to be written (see [`Gui::save_soon`]) goes too.
     fn save_now(&mut self) {
+        self.prefs_unsaved = None;
         if !self.config_ok {
             return;
         }
@@ -704,11 +774,39 @@ impl Gui {
         };
         config.player.adopt(self.app.prefs());
         config.gui.key_hints = self.config.gui.key_hints;
+        config.gui.discover_tab = self.config.gui.discover_tab.clone();
+        config.gui.discover_window = self.config.gui.discover_window;
+        config.gui.genre_source = self.config.gui.genre_source.clone();
         match config::save(&config) {
             Ok(()) => self.config = config,
             Err(e) => {
                 self.note = Some((t!("note.settings_save_failed", err = e).to_string(), true));
             }
+        }
+    }
+
+    /// A player setting changed: written once the changes rest
+    /// ([`PREFS_REST`]), so a held key's every step is not a write of its
+    /// own. Only the player's settings wait — they live in the App, which
+    /// no reload of the config replaces; the GUI's own section is written
+    /// at once ([`Gui::set_key_hints`]).
+    fn save_soon(&mut self) {
+        self.prefs_unsaved = Some(Instant::now());
+    }
+
+    /// Once a pass: the settings written once they have rested.
+    fn save_rested(&mut self) {
+        if self.prefs_unsaved.is_some_and(|since| since.elapsed() >= PREFS_REST) {
+            self.save_now();
+        }
+    }
+
+    /// Before the config is read back from disk (a reload, another flow's
+    /// load-and-save): settings still waiting are written first, so the
+    /// file the reload reads is the file the screen shows.
+    fn flush_prefs(&mut self) {
+        if self.prefs_unsaved.is_some() {
+            self.save_now();
         }
     }
 
@@ -720,7 +818,7 @@ impl Gui {
         self.app.crossfade = snapped.clamp(0.0, 30.0);
         let set = AudioCmd::SetCrossfade(self.app.crossfade);
         self.pend(vec![Effect::Audio(set)]);
-        self.save_now();
+        self.save_soon();
     }
 
     fn adjust_row(&mut self, row: usize, delta: i32) {
@@ -738,23 +836,23 @@ impl Gui {
                 self.app.gapless = !self.app.gapless;
                 let cmd = AudioCmd::SetGapless(self.app.gapless);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_BLEND_SKIPS => {
                 self.app.blend_skips = !self.app.blend_skips;
                 let cmd = AudioCmd::SetBlendSkips(self.app.blend_skips);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_PAUSE_FADE => {
                 self.app.pause_fade = !self.app.pause_fade;
                 let cmd = AudioCmd::SetPauseFade(self.app.pause_fade);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_RESUME => {
                 self.app.resume_queue = !self.app.resume_queue;
-                self.save_now();
+                self.save_soon();
             }
             ROW_HINTS => self.set_key_hints(!self.config.gui.key_hints),
             _ => {}
@@ -802,7 +900,13 @@ impl Gui {
         if library::act(self, &act) {
             return false;
         }
+        if moods::act(self, &act) {
+            return false;
+        }
         if sonic::act(self, &act) {
+            return false;
+        }
+        if discover::act(self, &act) {
             return false;
         }
         if playlists::act(self, &act) {
@@ -819,6 +923,7 @@ impl Gui {
                 // The banner's [X] is Esc: a sonic pick let go goes home to
                 // the room that asked (sonic-path contract, clause 12).
                 let sonic = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
+                let taste = self.app.capture == Some(crate::tui::app::Capture::TasteSeed);
                 self.forward(Action::Cancel);
                 if sonic {
                     // Home to the Library leaves the MP3 Player tab too, and
@@ -827,6 +932,11 @@ impl Gui {
                     self.screen = Screen::Library;
                     self.active = SONIC_NAV;
                     self.app.tab = Tab::SonicPath;
+                }
+                // The Discover room's pick goes home the same way
+                // (discovery-page clause 14).
+                if taste {
+                    discover::returned(self);
                 }
             }
             Act::Screen(screen) => {
@@ -866,6 +976,12 @@ impl Gui {
             }
             Act::VizWindow => vizwin::toggle(self),
             Act::Nav(i) => {
+                // The room already up, chosen again: the Library rooms ask
+                // the server afresh (below).
+                let again = i == self.active && self.screen == Screen::Library;
+                // The room the row was asked from: the Discover room asks
+                // again when its own row (or `G`) is pressed while it is up.
+                let was = (self.screen == Screen::Library).then_some(self.active);
                 // A nav row is the Library's: it brings that screen back.
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
@@ -877,10 +993,19 @@ impl Gui {
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
                     return false;
                 }
-                // A peer has no playlists to offer (contract clause 26), and
-                // no play counts of its guest's either (library-rooms clause
-                // 23): the rows are not drawn, and their digits are as dead.
-                if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV) && self.app.session.peer.is_some() {
+                // The Discover room rides its own gate, and hides for a peer
+                // as the play lists do: a guest has no history there
+                // (discovery-page clause 1). `G` is as dead as the row.
+                if i == DISCOVER_NAV && !discover::gate(&self.app) {
+                    return false;
+                }
+                // A peer has no playlists to offer (contract clause 26), no
+                // play counts of its guest's either (library-rooms clause
+                // 23), and no ratings (clause 37): the rows are not drawn,
+                // and their digits are as dead.
+                if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV | RATED_NAV)
+                    && self.app.session.peer.is_some()
+                {
                     return false;
                 }
                 // A filter describes the list it was typed against —
@@ -900,6 +1025,9 @@ impl Gui {
                     self.albums.wall.stow();
                 }
                 self.active = i;
+                // The mood Filters' modal goes with any move to a room, its
+                // draft unapplied (library-rooms clause 32).
+                self.moods.draft = None;
                 // The keys are the room's now: the App's focus comes back
                 // to the browser (the queue panel's cursor stows), and the
                 // Files room seats its own pane — the other rooms seat
@@ -910,6 +1038,12 @@ impl Gui {
                 if i == FILES_NAV {
                     self.app.tab = Tab::Files;
                 }
+                // Leaving the Discover room lets its hanging lists and its
+                // modals go: they would hold the keys of a room off screen.
+                // A copy keeps running on the server.
+                if i != DISCOVER_NAV {
+                    discover::close_all(self);
+                }
                 // Leaving for a section stows every servers surface; the
                 // room is a Settings sub-view, not a place to come back to.
                 self.servers.drop_open = false;
@@ -917,10 +1051,17 @@ impl Gui {
                 // The shell's own note was about the room being left.
                 self.note = None;
                 // The Library rooms open their root list fresh on every
-                // visit (library-rooms contract, entry point 1).
+                // visit (library-rooms contract, entry point 1) — Artists
+                // and Genres from the session's copy once they have one, a
+                // whole list's round trip saved per return (performance
+                // audit #99). Choosing the room already up asks again: the
+                // lists change only with a rescan, and that is how to see it.
                 if let Some(root) = library::root_of(i)
                     && self.app.connected
                 {
+                    if again {
+                        self.app.forget_root_list(&root);
+                    }
                     library::open(self, root);
                 }
                 if i != SETTINGS_NAV {
@@ -937,10 +1078,12 @@ impl Gui {
                 // on its track list). The tab must point at Library either
                 // way, so Activate on a track row lands on the right pane.
                 if i == ALBUMS_NAV && self.app.connected {
-                    if self.app.albums.is_none() {
-                        let effects = self
-                            .app
-                            .open_library_node(crate::tui::worker::LibraryNode::Albums, true);
+                    // The cache serves only the filter it was asked under
+                    // (library-rooms clause 31).
+                    let asked = moods::asked(self, ALBUMS_NAV);
+                    if self.app.albums.is_none() || self.app.albums_moods != asked {
+                        let node = crate::tui::worker::LibraryNode::Albums(asked);
+                        let effects = self.app.open_library_node(node, true);
                         self.pend(effects);
                     } else if !self.app.on_albums_drill() {
                         // The shared pane holds another room's list: the wall
@@ -972,6 +1115,19 @@ impl Gui {
                         self.forward(Action::Cancel);
                     }
                     self.app.tab = Tab::SonicPath;
+                }
+                // The Discover room: every visit asks; a fresh one lets the
+                // last visit's pins and drops go, while the row or `G` with
+                // the room up asks again keeping them (discovery-page clause
+                // 3). Re-entering disarms its pick left standing, as the
+                // sonic room's (clause 14) — a way back from the pick, not a
+                // new visit.
+                if i == DISCOVER_NAV {
+                    let picking = self.app.capture == Some(crate::tui::app::Capture::TasteSeed);
+                    if picking {
+                        self.forward(Action::Cancel);
+                    }
+                    discover::enter(self, was == Some(DISCOVER_NAV) || picking);
                 }
                 // Playlists: a fresh visit fetches the list; a return finds
                 // it (or a drilled playlist) standing — the albums pattern.
@@ -1154,13 +1310,23 @@ impl Gui {
         }
     }
 
-    /// The note to show: the shell's own first, else the App's words.
-    fn note_words(&self) -> Option<(String, bool)> {
-        self.note.clone().or_else(|| {
-            self.app
-                .message
-                .as_ref()
-                .map(|m| (m.text.clone(), matches!(m.kind, MessageKind::Error)))
+    /// The note to show and its colour: the shell's own first (DIM, or
+    /// Yellow for an error), else the App's words in their kind's — busy
+    /// LightBlue and a landing Green among them (the kit's Status line;
+    /// discovery-page clause 118).
+    fn note_words(&self) -> Option<(String, Style)> {
+        if let Some((text, is_err)) = self.note.clone() {
+            return Some((text, if is_err { Style::default().fg(th().gold) } else { dim() }));
+        }
+        self.app.message.as_ref().map(|m| {
+            let style = match m.kind {
+                MessageKind::Error => Style::default().fg(th().gold),
+                MessageKind::Info => dim(),
+                MessageKind::Busy => accent(),
+                MessageKind::Success => Style::default().fg(th().ok),
+                MessageKind::Plain => Style::default(),
+            };
+            (m.text.clone(), style)
         })
     }
 
@@ -1375,9 +1541,11 @@ fn angle_glyphs() -> (&'static str, &'static str) {
 }
 
 /// A 1-row text button: dim at rest, bright under the pointer; the
-/// accent when it is the row's one way forward. Returns its width.
+/// accent when it is the row's one way forward. Returns its width in
+/// CELLS (ui-kit: widths are cells, not characters): a CJK label is two a
+/// character, and a char count would put the next button on top of it.
 fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
-    let rect = Rect { x, y, width: label.chars().count() as u16, height: 1 };
+    let rect = Rect { x, y, width: crate::kit::width(label) as u16, height: 1 };
     let hover = gui.ui.hovers(rect);
     let style = match (hover, lead) {
         (true, _) => bright_bold(),
@@ -1440,8 +1608,30 @@ fn clip_lead(text: &str, max: usize) -> String {
 
 /// One frame. Public to the crate so render tests can drive it.
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
+    draw_frame(frame, gui);
+    // The overlays drew after the covers: a kitty picture's pixels, riding
+    // its first cell, may not have survived the frame.
+    crate::tui::graphics::verify_sent(frame.buffer_mut());
+}
+
+fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
+    gui.stats.drawn = false; // and the Stats screen's says it drew
+    // A Discover modal makes the screen beneath inert (the kit's Modal): the
+    // tabs, the nav, the room and the bar draw without the pointer, so
+    // nothing of them lights or ripens a tooltip under it; the modals get it
+    // back as they draw.
+    let pointer = gui.ui.pointer;
+    let inert = gui.screen == Screen::Library
+        && ((gui.active == DISCOVER_NAV && discover::modal_open(gui)) || moods::is_open(gui));
+    if inert {
+        gui.ui.pointer = None;
+    }
+    // The Discover room's copies: the poll's beat from what shows, and the
+    // copies that ended since, worded on the status line (discovery-page
+    // clauses 112, 118).
+    keep::frame_tick(gui);
     // Where the Admin screen's room and log stood is this frame's to say:
     // a frame drawn as the mini player leaves no target behind.
     gui.admin.room_at = Rect::default();
@@ -1489,14 +1679,18 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             match NAV[gui.active] {
                 NavId::Files => draw_files(frame, gui, content),
                 NavId::Albums => albums::draw(frame, gui, content),
-                NavId::Artists | NavId::Genres | NavId::Recent | NavId::LastPlayed | NavId::MostPlayed => {
-                    library::draw(frame, gui, content)
-                }
+                NavId::Artists
+                | NavId::Genres
+                | NavId::Recent
+                | NavId::Rated
+                | NavId::LastPlayed
+                | NavId::MostPlayed => library::draw(frame, gui, content),
                 NavId::Search => draw_search(frame, gui, content),
                 NavId::Settings => draw_settings(frame, gui, content),
                 NavId::Sonic => sonic::draw(frame, gui, content),
                 NavId::Playlists => playlists::draw(frame, gui, content),
                 NavId::Dj => dj::draw_room(frame, gui, content),
+                NavId::Discover => discover::draw(frame, gui, content),
             }
         }
         Screen::NowPlaying => {
@@ -1551,10 +1745,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // words); the keyboard tips, when shown, take the very last row. The
     // Now Playing screen has no bar and draws its note on its own row.
     if matches!(gui.screen, Screen::Library | Screen::Admin)
-        && let Some((text, is_err)) = gui.note_words()
+        && let Some((text, style)) = gui.note_words()
     {
         let note = bar::note_rect(area, gui.footer());
-        let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, note.x, note.y, &bar::clip(&text, note.width as usize), style);
     }
     // On the MP3 Player tab the page's hint outranks the queue's and an
@@ -1574,10 +1767,16 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(torrent::tips(gui))
     } else if sonic::modal_open(gui) {
         std::borrow::Cow::from(sonic::tips(gui))
+    } else if moods::is_open(gui) {
+        std::borrow::Cow::from(moods::tips())
+    } else if discover::modal_open(gui) && gui.screen == Screen::Library {
+        std::borrow::Cow::from(discover::tips(gui))
     } else if playlists::modal_open(gui) {
         std::borrow::Cow::from(playlists::tips(gui))
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
+    } else if gui.app.capture == Some(crate::tui::app::Capture::TasteSeed) {
+        t!("gui.tips.discover_pick")
     } else if gui.screen == Screen::NowPlaying {
         t!("gui.tips.now")
     } else if gui.screen == Screen::Stats {
@@ -1606,8 +1805,12 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             // only what works without a row (the kit's list-cursor law).
             FILES_NAV if gui.files_view.held => t!("gui.tips.files"),
             FILES_NAV => t!("gui.tips.files_stowed"),
-            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV if gui.app.connected => {
-                library::tips(gui)
+            // A room that offers the mood Filters names `o` where the line
+            // has the cells (library-rooms clause 31).
+            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | RATED_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV
+                if gui.app.connected =>
+            {
+                moods::tips_tail(gui, library::tips(gui), usize::from(area.width.saturating_sub(1)))
             }
             ALBUMS_NAV if gui.app.connected => {
                 if matches!(
@@ -1616,13 +1819,14 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
                 ) {
                     albums::tracks_tips(gui)
                 } else {
-                    t!("gui.tips.albums")
+                    moods::tips_tail(gui, t!("gui.tips.albums"), usize::from(area.width.saturating_sub(1)))
                 }
             }
             SEARCH_NAV if gui.app.editing_query => t!("gui.tips.search_edit"),
             SEARCH_NAV if gui.search_view.held => t!("gui.tips.search"),
             SEARCH_NAV => t!("gui.tips.search_stowed"),
             SONIC_NAV => std::borrow::Cow::from(sonic::tips(gui)),
+            DISCOVER_NAV if gui.app.connected => std::borrow::Cow::from(discover::tips(gui)),
             PLAYLISTS_NAV if gui.app.connected => {
                 std::borrow::Cow::from(playlists::tips(gui))
             }
@@ -1638,11 +1842,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
 
     // The bar, under the Library and the Admin tab: the Now Playing view
     // carries its own scrubber and transport, and the Stats page takes the
-    // whole height. While the pairing QR is up, the card cover stands
-    // down: the graphics encode cache holds ONE image, and two per frame
-    // thrash it.
+    // whole height.
     if matches!(gui.screen, Screen::Library | Screen::Admin) {
-        let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
+        let has_art = playing_cover_ready(&gui.app);
         let now = gui.bar_now();
         let view = BarView {
             now: now.as_ref(),
@@ -1661,13 +1863,18 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             // The mosaic where an overlay stood last frame — the rule every
             // other cover follows, since a picture's cells are skipped.
             let mosaic = gui.ui.covered_last_frame(cover);
-            draw_card_cover(frame, cover, &mut gui.app, mosaic);
+            draw_card_cover(frame, cover, &gui.app, &mut gui.card, mosaic);
         }
     }
 
     // Overlays draw (and register) last, so their rects win the pointer.
+    if inert {
+        gui.ui.pointer = pointer;
+    }
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
+    discover::draw_modals(frame, gui, area);
+    moods::draw_modal(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
@@ -1683,6 +1890,14 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
 
 }
 
+/// Whether the pointer rests on something a click would press — where the
+/// OSC 22 hand shows: a modal's guard over the screen beneath is no
+/// control, so only the modal's own controls take the hand (the kit's
+/// Modal).
+fn over_control(gui: &Gui) -> bool {
+    gui.ui.pointer.is_some_and(|at| !matches!(gui.ui.hit(at), None | Some(Act::Guard)))
+}
+
 /// Whether the playing track's cover is decoded and waiting in the cache.
 fn playing_cover_ready(app: &App) -> bool {
     app.now_playing
@@ -1696,10 +1911,21 @@ fn playing_cover_ready(app: &App) -> bool {
 /// terminal can (kitty · sixel · iTerm2), the ▀-mosaic everywhere else —
 /// the same two paths the TUI's facts column walks. The kit's rule holds:
 /// pixels are for album art only, never chrome.
-fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
-    // Field by field, the way the TUI spells it: the art cache's borrow
-    // must be visibly disjoint from the graphics and cover-pane fields
-    // taken mutably below.
+///
+/// Through a slot of its own — the bar's, or the mini player's — not
+/// `app.graphics`, which the Now Playing cover draws through at its own
+/// size: sharing its one encoded picture, every switch between the two
+/// screens decoded and encoded the cover again (60-180 ms on sixel, a
+/// megabyte or two re-sent on kitty) for a picture drawn a moment ago
+/// (performance audit #97). Forked on first draw, which is after the
+/// probe: a fork taken with the Gui would be of the disabled answer.
+fn draw_card_cover(
+    frame: &mut Frame,
+    rect: Rect,
+    app: &App,
+    slot: &mut Option<cover::Slot>,
+    mosaic: bool,
+) {
     let cover = app
         .now_playing
         .as_ref()
@@ -1709,13 +1935,12 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
     let Some(cover) = cover else {
         return;
     };
-    if !mosaic && app.graphics.draw(frame, rect, cover) {
-        return;
-    }
-    let mut canvas = crate::tui::canvas::Canvas::new(rect);
-    if !canvas.is_empty() {
-        app.cover_pane.draw(&mut canvas, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), rect);
+    let slot = slot.get_or_insert_with(|| cover::Slot::new(app.graphics.fork()));
+    if mosaic {
+        slot.draw_mosaic(frame, rect, cover);
+    } else {
+        // One cover: a frame's whole budget, never starved.
+        slot.draw_paced(frame, rect, cover, &cover::Pace::frame());
     }
 }
 
@@ -1732,6 +1957,7 @@ fn capture_banner(gui: &Gui) -> Option<String> {
         Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::End)) => {
             t!("gui.sonic.pick_banner_end").to_string()
         }
+        Some(crate::tui::app::Capture::TasteSeed) => discover::banner(gui)?,
         _ => dj::banner(gui)?,
     };
     if gui.config.gui.key_hints && gui.screen != Screen::Device {
@@ -1753,34 +1979,50 @@ fn draw_capture_banner(frame: &mut Frame, gui: &mut Gui, at: Rect, text: &str) {
 }
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    // Files and Search at the top; the LIBRARY group's seven rooms; then
-    // the tools, the record's desktop-rail group: Auto DJ, then the
-    // capability-gated sonic room. Fourteen rows, so the column fits the
-    // 24-row minimum with the footer on and Settings on the last row.
-    put(frame, 1, 5, &t!("gui.nav.library"), dim());
-    put(frame, 1, 14, &t!("gui.nav.tools"), dim());
+    // Files and Search at the top; the LIBRARY group's eight rooms; then
+    // the tools, the record's desktop-rail group: Auto DJ, the
+    // capability-gated sonic room, the Discover room. Sixteen rows, to
+    // Discover's 17 (library-rooms clause 37). The 24-row minimum with the
+    // footer on puts Settings on that same row: there, and only there, the
+    // LIBRARY heading through Discover rise one row into the blank under
+    // Search, so Settings keeps the last row alone (discovery-page clause
+    // 2).
     let forward = forward_glyph();
     // The Settings row sits on the content's last row, above the bar.
     let set_y = content_rect(area.width, area.height, gui.queue_open, gui.footer()).bottom() - 1;
+    let lift = u16::from(set_y <= 17);
+    put(frame, 1, 5 - lift, &t!("gui.nav.library"), dim());
+    put(frame, 1, 14 - lift, &t!("gui.nav.tools"), dim());
     for (i, id) in NAV.iter().enumerate() {
         // The sonic room rides the ping's flag: absent is absent — no
         // placeholder row, and digit 9 goes dead with it (contract §1).
         if i == SONIC_NAV && !gui.app.capabilities.discovery_path {
             continue;
         }
-        // A peer has no playlists, and no play counts for its guest
-        // (library-rooms clause 23): neither row is drawn.
-        if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV) && gui.app.session.peer.is_some() {
+        // The Discover room likewise, and not for a peer's guest, who has
+        // no history there (discovery-page clause 1).
+        if i == DISCOVER_NAV && !discover::gate(&gui.app) {
+            continue;
+        }
+        // A peer has no playlists, no play counts for its guest
+        // (library-rooms clause 23) and no ratings (clause 37): none of
+        // those rows is drawn.
+        if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV | RATED_NAV)
+            && gui.app.session.peer.is_some()
+        {
             continue;
         }
         let y = match i {
             FILES_NAV => 2,
             SEARCH_NAV => 3,
-            1..=5 => 5 + i as u16,
-            LAST_PLAYED_NAV => 11,
-            MOST_PLAYED_NAV => 12,
-            DJ_NAV => 15,
-            SONIC_NAV => 16,
+            ALBUMS_NAV..=RECENT_NAV => 5 + i as u16 - lift,
+            RATED_NAV => 10 - lift,
+            PLAYLISTS_NAV => 11 - lift,
+            LAST_PLAYED_NAV => 12 - lift,
+            MOST_PLAYED_NAV => 13 - lift,
+            DJ_NAV => 15 - lift,
+            SONIC_NAV => 16 - lift,
+            DISCOVER_NAV => 17 - lift,
             _ => set_y,
         };
         let label = id.label();
@@ -1885,6 +2127,14 @@ fn bar_count(gui: &Gui, plain: String) -> String {
     } else {
         plain
     }
+}
+
+/// Where a right-hand item of a browse bar's line one starts: ending one
+/// cell in from the content's last — x62 at the queue's 47 cells, x95 at 80
+/// (browser-top-bar clause 1) — measured in cells, so a CJK count does not
+/// run a cell long.
+fn right_at(content: Rect, text: &str) -> u16 {
+    content.right().saturating_sub(1 + crate::kit::width(text) as u16)
 }
 
 /// The bar's back ◂ at (x, y). Returns how far the crumb moves over.
@@ -2009,8 +2259,8 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
 /// path, the honest count — line 2 the shared controls.
 fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let y = content.y;
-    let count = bar_count(gui, t!("gui.files.items", count = gui.app.files.counts().1).to_string());
-    let count_x = content.right().saturating_sub(count.chars().count() as u16);
+    let count = bar_count(gui, discover::plural("gui.files.items", gui.app.files.counts().1 as u64));
+    let count_x = right_at(content, &count);
     put(frame, count_x, y, &count, dim());
 
     let forward_glyph = forward_glyph();
@@ -2443,6 +2693,13 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if let Some(quit) = torrent::handle_key(gui, key) {
         return quit;
     }
+    // The mood Filters' modal owns the keyboard ahead of every room: the
+    // room beneath is inert (library-rooms clause 32).
+    if gui.screen == Screen::Library
+        && let Some(quit) = moods::handle_key(gui, key)
+    {
+        return quit;
+    }
     // The Now Playing screen has no rooms and no queue panel: the TUI's
     // view has its own queue tab, and the screen's keys are the view's.
     if gui.screen == Screen::NowPlaying {
@@ -2520,6 +2777,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             KeyCode::Char('p') => return gui.act(Act::BarPlay),
             KeyCode::Char('A') => return gui.act(Act::BarQueueAll),
             KeyCode::Char('S') => return gui.act(Act::BarShuffle),
+            // The mood Filters' modal, where the room offers it (library-
+            // rooms clause 31): no browse room binds `o`.
+            KeyCode::Char('o') if moods::offered_here(gui) => {
+                return gui.act(Act::Mood(moods::MoodAct::Open { key: true }));
+            }
             KeyCode::Esc if !gui.app.pane().filter.is_empty() => {
                 return gui.act(Act::BarClear);
             }
@@ -2538,6 +2800,13 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         gui.app.tab = Tab::SonicPath;
         return false;
     }
+    // The Discover room's pick likewise goes home (discovery-page clause
+    // 14).
+    if key.code == KeyCode::Esc && gui.app.capture == Some(crate::tui::app::Capture::TasteSeed) {
+        gui.forward(Action::Cancel);
+        discover::returned(gui);
+        return false;
+    }
     if gui.active == ALBUMS_NAV
         && gui.app.connected
         && let Some(quit) = albums::handle_key(gui, key)
@@ -2548,6 +2817,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         return quit;
     }
     if let Some(quit) = sonic::handle_key(gui, key) {
+        return quit;
+    }
+    if let Some(quit) = discover::handle_key(gui, key) {
         return quit;
     }
     if let Some(quit) = playlists::handle_key(gui, key) {
@@ -2585,14 +2857,18 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         // The Admin screen (admin-screen contract, entry 2).
         KeyCode::Char('M') => return gui.act(Act::Screen(Screen::Admin)),
         // The MP3 Player screen (mp3-player-screen contract, entry 2): `K`,
-        // whose lowercase is no key of the GUI's. Opening the tab resets a
-        // plugged-in Core2, so Shift or Caps Lock on a key that is one (the
-        // browse bar's `f`, when the tab's key was `F`) must never open it.
+        // whose lowercase is no key of the GUI's — and the page's `d`, `s`,
+        // `a`, `c`, `w` and `r` are lowercase — so Shift or Caps Lock on a
+        // key that is one (the browse bar's `f`, when the tab's key was
+        // `F`) never opens it.
         KeyCode::Char('K') => return gui.act(Act::Screen(Screen::Device)),
         // The visualizer's window (visualizer-window contract, entry 2).
         KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The tenth room has no digit; `D` is the capital beside `A`'s toggle.
         KeyCode::Char('D') => return gui.act(Act::Nav(DJ_NAV)),
+        // Nor the Discover room: `G` opens it, and asks again while it is
+        // up (discovery-page clause 3); dead while the row is absent.
+        KeyCode::Char('G') => return gui.act(Act::Nav(DISCOVER_NAV)),
         // `/` is the search key everywhere, the TUI's own habit: land on
         // Search with the query box open.
         KeyCode::Char('/') => {
@@ -2721,21 +2997,57 @@ struct Ctx {
     channels: Channels,
     saver: tui::QueueSaver,
     hand: bool,
+    /// Two clocks behind the brisk wait (`kit::pace`): the workers'
+    /// requests the App sends, and the side threads' calls — a sign-in, a
+    /// torrent check, the Stats page's load — which say themselves when
+    /// they are out.
+    asked: Expecting,
+    side: Expecting,
+    /// Whether anything happened since the last frame that it does not
+    /// show yet — input, an answer, a timer of the App's — and when it was
+    /// drawn. With `gate` on, a pass with nothing new skips its draw
+    /// (performance audit #102): a paused GUI redrew the same frame ten
+    /// times a second, thirty with the visualizer window open, each a full
+    /// render and a diff of every cell. Both loops set `gate`, the
+    /// terminal's and the window's; what a window's surface needs drawn
+    /// though the player is unchanged (cleared, or owed a present) its host
+    /// says ([`Host::must_draw`]).
+    dirty: bool,
+    drawn: Instant,
+    gate: bool,
 }
 
 impl Ctx {
     /// Made where the loop begins, so the saver's first signature is the
     /// App as the loop finds it.
     fn new(app: &App, channels: Channels) -> Self {
-        Ctx { channels, saver: tui::QueueSaver::new(app), hand: false }
+        Ctx {
+            channels,
+            saver: tui::QueueSaver::new(app),
+            hand: false,
+            asked: Expecting::default(),
+            side: Expecting::default(),
+            dirty: true,
+            drawn: Instant::now(),
+            gate: false,
+        }
     }
 }
 
-/// Whatever shows the GUI, for the one thing the loop asks of it beyond
-/// drawing: the pointer's shape over something clickable. The terminal
-/// writes the OSC 22 shape; a native window sets its own cursor.
+/// Whatever shows the GUI, for what the loop asks of it beyond drawing:
+/// the pointer's shape over something clickable (the terminal writes the
+/// OSC 22 shape; a native window sets its own cursor), and whether this
+/// pass must draw though nothing in the player changed.
 pub(crate) trait Host {
     fn pointer(&mut self, hand: bool);
+
+    /// The host needs this pass drawn whatever the player holds: a
+    /// window's surface just cleared (a resize, the window shown), a
+    /// present it owes, a cover decoded since. A terminal's screen keeps
+    /// what was written to it, so it never does.
+    fn must_draw(&self) -> bool {
+        false
+    }
 }
 
 /// The terminal as a [`Host`]: the shape escape goes out only while the
@@ -2765,9 +3077,10 @@ fn saves_config(pending: &[Effect]) -> bool {
     })
 }
 
-/// The loop's frame half: effects out, workers' answers in, one frame
-/// drawn, the per-frame pumps run — and the wait until the next frame is
-/// wanted, which the caller sleeps on while it listens for input.
+/// The loop's frame half: workers' answers in, effects out, one frame
+/// drawn (unless nothing moved), the per-frame pumps run — and the wait
+/// until the next frame is wanted, which the caller sleeps on while it
+/// listens for input.
 fn frame<B>(
     terminal: &mut ratatui::Terminal<B>,
     gui: &mut Gui,
@@ -2777,29 +3090,10 @@ fn frame<B>(
 where
     B: ratatui::backend::Backend<Error = std::io::Error>,
 {
-    // A SaveSession about to be dispatched writes the config behind
-    // this copy's back — a Quick Connect add mints a whole new entry
-    // there. Reload after, so the dropdown and the room list it.
-    let saving = saves_config(&gui.pending);
-    let ch = &ctx.channels;
-    tui::dispatch(&gui.app, &mut gui.pending, &ch.audio_tx, &ch.api_tx, &ch.event_tx);
-    ctx.saver.tick(&gui.app);
-    let ticked = gui.app.tick();
-    gui.pend(ticked);
-    if saving && let Ok(fresh) = config::load() {
-        gui.config = fresh;
-        refresh_book(gui);
-    }
-    terminal.draw(|frame| render(frame, gui))?;
-    // A modal, dropdown or tooltip opened, closed or moved: the covers drew
-    // this frame by last frame's footprints, so one under a modal that just
-    // opened is still a picture over it (and one a modal just left is still
-    // text). The next frame, which draws them by these, comes at the hot
-    // pace rather than a poll later — one 10 ms frame, not 100.
-    if gui.ui.overlays_moved() {
-        gui.hot = true;
-    }
-
+    // Whatever the workers sent is folded in before anything is drawn —
+    // the TUI's order. Drawn first, an answer that landed during the wait
+    // missed this frame and sat out a whole second poll for the next, and
+    // so did the requests it led to (performance audit #82).
     while let Ok(ev) = ctx.channels.event_rx.try_recv() {
         // The servers layer looks first: session answers that would
         // land on the TUI's connect screen open the GUI's form instead.
@@ -2811,7 +3105,12 @@ where
         let sonic_random = matches!(ev, Event::SonicRandom { .. });
         let connected = matches!(ev, Event::Connected { .. });
         let was_results = gui.app.sonic.view == crate::tui::app::SonicView::Results;
+        // A status that says what the last one said changes nothing on
+        // screen: paused or stopped, the audio thread repeats itself every
+        // tick.
+        let repeat = matches!(&ev, Event::Status(status) if *status == gui.app.status);
         let effects = gui.app.apply_event(ev);
+        ctx.dirty |= !repeat || !effects.is_empty();
         gui.pend(effects);
         if sonic_random {
             sonic::random_landed(gui, was_results);
@@ -2824,24 +3123,70 @@ where
             admin::reopen(gui);
         }
     }
-    servers::poll(gui);
-    torrent::poll(gui);
+    ctx.dirty |= servers::poll(gui);
+    ctx.dirty |= torrent::poll(gui);
+    ctx.dirty |= stats::absorb(gui);
     // The control face's requests — the server-audio remote driving
-    // this player — answered here, on the thread that owns the App.
+    // this player — answered here, on the thread that owns the App. They
+    // say nothing of what they changed, so a pass with a face up draws.
     if let Some((_, rx)) = &ctx.channels.control {
         control::pump(gui, rx);
+        ctx.dirty = true;
+    }
+
+    // A SaveSession about to be dispatched writes the config behind
+    // this copy's back — a Quick Connect add mints a whole new entry
+    // there. Reload after, so the dropdown and the room list it.
+    let saving = saves_config(&gui.pending);
+    if gui.pending.iter().any(tui::awaits_answer) {
+        ctx.asked.arm();
+    }
+    let ch = &ctx.channels;
+    tui::dispatch(&gui.app, &mut gui.pending, &ch.audio_tx, &ch.api_tx, &ch.event_tx);
+    ctx.saver.tick(&gui.app);
+    let ticked = gui.app.tick();
+    ctx.dirty |= !ticked.is_empty();
+    gui.pend(ticked);
+    if saving {
+        gui.flush_prefs();
+    }
+    if saving && let Ok(fresh) = config::load() {
+        gui.config = fresh;
+        refresh_book(gui);
+        ctx.dirty = true;
+    }
+    if !ctx.gate || ctx.dirty || host.must_draw() || moving(gui) || ctx.drawn.elapsed() >= REDRAW_ANYWAY {
+        terminal.draw(|frame| render(frame, gui))?;
+        // The kitty pictures this frame stopped drawing — a queue row's
+        // slot let go, a wall slot past the page — leave the terminal's
+        // store now that the frame covering their cells is out.
+        crate::tui::graphics::release_dropped();
+        ctx.drawn = Instant::now();
+        ctx.dirty = false;
+        // A modal, dropdown or tooltip opened, closed or moved: the covers
+        // drew this frame by last frame's footprints, so one under a modal
+        // that just opened is still a picture over it (and one a modal just
+        // left is still text). The next frame, which draws them by these,
+        // comes at the hot pace rather than a poll later — one 10 ms frame,
+        // not 100.
+        if gui.ui.overlays_moved() {
+            gui.hot = true;
+        }
     }
 
     // The Stats screen's page pumps its worker and its controls here too,
     // and the Admin screen its room and its log.
-    let stats_over = stats::frame(gui);
+    let page = stats::frame(gui);
+    ctx.dirty |= page.stepped;
     let admin_over = admin::frame(gui);
     // The MP3 Player screen's page: its worker's reports, its port watch,
     // and whether it has ended (mp3-player-screen contract, clause 6).
     let device_over = device::frame(gui);
     // The visualizer window's host: the child's exit, the next texture.
-    vizwin::tick(gui);
-    let over = gui.ui.hovering_clickable() || stats_over || admin_over || device_over;
+    ctx.dirty |= vizwin::tick(gui);
+    // Settings changed a moment ago, now resting: written.
+    gui.save_rested();
+    let over = over_control(gui) || page.over || admin_over || device_over;
     if over != ctx.hand {
         ctx.hand = over;
         host.pointer(ctx.hand);
@@ -2852,23 +3197,20 @@ where
     admin::let_go_unseen(gui);
     if let Some(act) = gui.ui.hold_action() {
         gui.act(act);
+        ctx.dirty = true;
     }
     gui.ui.dwell_tick();
 
-    // While covers are still upgrading to pixels, the next frame is
-    // wanted promptly — idling out the full poll would stretch a page
-    // turn's ~50 ms of encode work across a second of ticks. A blinking
-    // caret wants its next frame ON the flip, not a poll tick after it.
-    let wait = if gui.hot {
-        HOT
-    } else if gui.app.drawing_audio() || vizwin::is_open(gui) {
-        // The visualizer tab, moving: the TUI's thirty frames a second —
-        // and the visualizer window's feed, at the same pace.
-        Duration::from_millis(33)
-    } else {
-        gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
-    };
-    Ok(wait)
+    let wait = next_wait(gui);
+    ctx.side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
+    // Brisk only where a pass that finds nothing skips its draw
+    // (`Ctx::gate`): a loop that draws every pass, waking every few
+    // milliseconds for an answer, redrew the whole player a hundred times a
+    // second, a second at a time, where a poll's pace drew ten.
+    if !ctx.gate {
+        return Ok(wait);
+    }
+    Ok(ctx.side.wait(ctx.asked.wait(wait)))
 }
 
 /// The loop's input half, for one event. A quit flushes the queue saver
@@ -2885,6 +3227,16 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
         }
         TermEvent::Mouse(mouse) => {
             let at = Position { x: mouse.column, y: mouse.row };
+            // Apple Terminal's release echo — the second click pair its
+            // physical release sends after every click — is dropped whole,
+            // its press and its release, before anything below reads it:
+            // the Stats, Admin and MP3 Player pages, a grip, the surface.
+            // A click that opened a sheet or a list stops there, wherever
+            // the echo lands (the kit's `EchoFilter`; off in every other
+            // terminal and in the window).
+            if gui.ui.swallow_echo(mouse.kind, at) {
+                return Flow::Continue;
+            }
             // The App keeps the pointer too: the Now Playing band
             // lights under it, the TUI's way.
             gui.app.note_pointer(at);
@@ -3030,13 +3382,14 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             }
         }
         // A resized window changes the cell-to-pixel mapping the
-        // cover encodes against — the card's, every album slot's
-        // and every queue row's alike.
+        // cover encodes against — the card's, every album slot's, every
+        // queue row's and the Discover strip's alike.
         TermEvent::Resize(..) => {
             gui.app.graphics.refresh();
             gui.albums.on_resize();
             gui.queue.on_resize();
             gui.actions.on_resize();
+            gui.discover.on_resize();
         }
         _ => {}
     }
@@ -3052,11 +3405,14 @@ fn event_loop(
     ctx: &mut Ctx,
     host: &mut TermHost,
 ) -> std::io::Result<()> {
+    // A terminal pass with nothing new skips its draw (`Ctx::gate`).
+    ctx.gate = true;
     loop {
         let wait = frame(terminal, gui, ctx, host)?;
         if !event::poll(wait)? {
             continue;
         }
+        ctx.dirty = true;
         let mut inputs = vec![event::read()?];
         while event::poll(Duration::ZERO)? {
             inputs.push(event::read()?);
@@ -3067,6 +3423,52 @@ fn event_loop(
             }
         }
     }
+}
+
+/// How long the pass waits for input before the next one.
+fn next_wait(gui: &Gui) -> Duration {
+    // Effects this pass made after its dispatch go out at the top of the
+    // next: the covers the wall's page and the queue panel's rows claimed
+    // as the frame drew, a held control's step. They waited out the whole
+    // wait for it, so a page turn's cover asks left up to a poll after its
+    // frame (performance audit #82 follow-up). A cover is claimed once and
+    // a refused claim sends nothing, so the pass after finds nothing
+    // pending and waits as it would have.
+    if !gui.pending.is_empty() {
+        return Duration::ZERO;
+    }
+    // While covers are still upgrading to pixels, the next frame is
+    // wanted promptly — idling out the full poll would stretch a page
+    // turn's ~50 ms of encode work across a second of ticks. A blinking
+    // caret wants its next frame ON the flip, not a poll tick after it.
+    if gui.hot {
+        HOT
+    } else if gui.app.drawing_audio() || vizwin::wants_frames(gui) {
+        // The visualizer tab, moving: the TUI's thirty frames a second —
+        // and the visualizer window's feed, at the same pace, while it
+        // has anything to say (silence, once settled, is said once).
+        Duration::from_millis(33)
+    } else {
+        gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
+    }
+}
+
+/// Whether the screen moves on its own, with nothing happening: covers
+/// still upgrading to pixels, the visualizer tab settling, a caret due to
+/// blink, a tooltip ripening, the frame after an overlay came or went.
+/// Every pass draws while it does, as every pass did before frames could
+/// be skipped.
+///
+/// The Admin and MP3 Player screens and the Discover room do per-frame
+/// work inside their render (the server log's tail, the port watch, the
+/// copies' poll beat), so while one is up every pass draws, as before.
+fn moving(gui: &mut Gui) -> bool {
+    gui.hot
+        || gui.app.drawing_audio()
+        || gui.ui.stale()
+        || stats::stale(gui)
+        || matches!(gui.screen, Screen::Admin | Screen::Device)
+        || (gui.screen == Screen::Library && gui.active == DISCOVER_NAV)
 }
 
 impl Gui {
@@ -3090,6 +3492,7 @@ impl Gui {
             List::Sonic => &mut self.sonic.results,
             List::DjRoom => &mut self.dj.body,
             List::DjGenres => &mut self.dj.genres,
+            List::Discover => &mut self.discover.view,
         }
     }
 
@@ -3121,6 +3524,7 @@ impl Gui {
             List::Sonic => &self.sonic.results,
             List::DjRoom => &self.dj.body,
             List::DjGenres => &self.dj.genres,
+            List::Discover => &self.discover.view,
         }
     }
 
@@ -3175,7 +3579,7 @@ impl Gui {
             ALBUMS_NAV => {
                 matches!(self.app.library_node(), LibraryNode::Album { .. }).then_some(List::AlbumTracks)
             }
-            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV => {
+            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | RATED_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV => {
                 match self.app.library_node() {
                     LibraryNode::Album { .. } => Some(List::AlbumTracks),
                     LibraryNode::Artist(_) => None,
@@ -3212,18 +3616,37 @@ impl Gui {
         if self.screen != Screen::Library || !self.app.connected {
             return;
         }
+        // The mood Filters' draft was the old session's room's.
+        self.moods.draft = None;
         if self.app.session.peer.is_some()
-            && matches!(self.active, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV)
+            && matches!(self.active, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV | RATED_NAV)
         {
             self.act(Act::Nav(FILES_NAV));
+            return;
+        }
+        // The Discover room asks the new server — or yields to Files when
+        // the row went with the ping or the session is a peer's
+        // (discovery-page clause 1).
+        if self.active == DISCOVER_NAV {
+            discover::reopen(self);
             return;
         }
         if let Some(root) = library::root_of(self.active) {
             library::open(self, root);
         } else if self.active == ALBUMS_NAV {
             self.albums.wall = albums::WallState::default();
-            let effects = self.app.open_library_node(crate::tui::worker::LibraryNode::Albums, true);
+            let node = crate::tui::worker::LibraryNode::Albums(moods::asked(self, ALBUMS_NAV));
+            let effects = self.app.open_library_node(node, true);
             self.pend(effects);
+            // The Discover room's "Open on {server}": the album, once that
+            // server's session answers (discovery-page clause 103).
+            if let Some(node) = self.discover.open_on.take().filter(|_| self.app.session.peer.is_some()) {
+                self.albums.wall.held = false;
+                self.albums.wall.tracks.scroll = 0;
+                self.albums.wall.tracks.stow();
+                let effects = self.app.open_library_node(node, false);
+                self.pend(effects);
+            }
         } else if self.active == PLAYLISTS_NAV {
             let effects = self.app.open_library_node(crate::tui::worker::LibraryNode::Playlists, true);
             self.pend(effects);
@@ -3251,6 +3674,8 @@ impl Gui {
         actions::modal_open(self)
             || dj::modal_open(self)
             || sonic::modal_open(self)
+            || discover::modal_open(self)
+            || moods::is_open(self)
             || playlists::modal_open(self)
             || self.servers.modal_open()
             || self.torrent.modal_open()
@@ -3267,7 +3692,15 @@ impl Gui {
         self.screen == Screen::Library
             && matches!(
                 self.active,
-                FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV
+                FILES_NAV
+                    | ALBUMS_NAV
+                    | ARTISTS_NAV
+                    | GENRES_NAV
+                    | RECENT_NAV
+                    | RATED_NAV
+                    | PLAYLISTS_NAV
+                    | LAST_PLAYED_NAV
+                    | MOST_PLAYED_NAV
             )
     }
 
@@ -3284,12 +3717,23 @@ impl Gui {
             servers::wheel_dropdown(self, delta);
             return;
         }
+        // Open elsewhere's list over the track-actions sheet scrolls its
+        // own links under the pointer (discovery-page clause 140).
+        if self.actions.sheet.as_ref().is_some_and(|s| s.links) && keep::links_wheel(self, delta) {
+            return;
+        }
         // The Admin screen's log scrolls under the wheel; a wheel over the
         // hosted room reached the room through `admin::pointer`.
         if self.screen == Screen::Admin {
             if !self.modal_open() {
                 admin::wheel(self, at, delta);
             }
+            return;
+        }
+        // The Discover room's modal and lists scroll their own rows under
+        // the wheel (discovery-page clause 58).
+        if self.screen == Screen::Library && self.active == DISCOVER_NAV && discover::modal_open(self) {
+            discover::wheel(self, delta);
             return;
         }
         // A modal owns the pointer whole; the Now Playing screen scrolls
@@ -3332,9 +3776,13 @@ impl Gui {
             NavId::Dj => {
                 dj::wheel(self, delta);
             }
-            NavId::Artists | NavId::Genres | NavId::Recent | NavId::LastPlayed | NavId::MostPlayed => {
-                library::wheel(self, delta)
-            }
+            NavId::Artists
+            | NavId::Genres
+            | NavId::Recent
+            | NavId::Rated
+            | NavId::LastPlayed
+            | NavId::MostPlayed => library::wheel(self, delta),
+            NavId::Discover => discover::wheel(self, delta),
         }
     }
 }
@@ -3393,6 +3841,9 @@ pub fn run(
         return window::run(Box::new(GuiFace::new(gui, channels)), instance.take());
     }
     let (mut gui, channels) = start(server, token, torrent, bundled, control);
+    // The terminal's mouse dialect: Apple Terminal's release echo is the
+    // surface's to swallow. The window above never sets it.
+    gui.ui.set_echo_dialect(crate::kit::apple_dialect());
 
     let _title = crate::tui::WindowTitle::claim("mStream Player");
     // The OSC 11 ground lease runs before ratatui takes the terminal — the
@@ -3417,6 +3868,8 @@ pub fn run(
     let mut ctx = Ctx::new(&gui.app, channels);
     let outcome = event_loop(&mut terminal, &mut gui, &mut ctx, &mut TermHost { mouse_on });
 
+    // Still on the alternate screen, where kitty keeps the pictures.
+    crate::tui::graphics::release_all();
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
@@ -3479,8 +3932,9 @@ fn start(
 /// The player's teardown that owes nothing to a terminal, after whatever
 /// showed it has let go.
 fn finish(gui: &mut Gui, ctx: &Ctx) {
-    // A Core2 the MP3 Player tab holds in its bootloader is let go before
-    // the exit can end its worker (mp3-player-screen contract, clause 11).
+    // The MP3 Player tab's worker lets every port go — a board being read
+    // is restarted — before the exit can end it (mp3-player-screen
+    // contract, clause 11).
     device::quit(gui);
     // The visualizer window, if one is open, closes with the player.
     vizwin::close(gui);
@@ -3508,7 +3962,10 @@ impl GuiFace {
     /// it either way, and its clocks start only the event loop's few
     /// milliseconds sooner.
     fn new(gui: Gui, channels: Channels) -> Self {
-        let ctx = Ctx::new(&gui.app, channels);
+        let mut ctx = Ctx::new(&gui.app, channels);
+        // A window pass with nothing new skips its draw too; the window
+        // says when its surface needs one anyway (`Host::must_draw`).
+        ctx.gate = true;
         GuiFace { gui, ctx }
     }
 }
@@ -3527,7 +3984,9 @@ impl window::face::Face for GuiFace {
         frame(terminal, &mut self.gui, &mut self.ctx, host)
     }
 
+    /// Any input is news for the next pass, as in the terminal's loop.
     fn input(&mut self, event: TermEvent) -> Flow {
+        self.ctx.dirty = true;
         input(&mut self.gui, &mut self.ctx, event)
     }
 
@@ -3610,6 +4069,42 @@ mod tests {
         let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
         gui.demo = Some(demo_now());
         gui
+    }
+
+    /// A held key's steps are written once they rest, not once a step; a
+    /// reload, another flow's write, and Start/Stop write what is waiting
+    /// first (performance audit #86).
+    #[test]
+    fn settings_are_written_once_they_rest_and_before_anything_rereads_them() {
+        let scratch = crate::config::testing::Scratch::new("gui-prefs-rest");
+        let mut gui = Gui::new(Config::default(), true, App::new(None, None, None));
+        config::save(&gui.config).unwrap();
+        let file = scratch.dir.join("config.toml");
+        let on_disk = || config::load().unwrap().player.crossfade_seconds;
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        for _ in 0..5 {
+            gui.adjust_blend(1);
+        }
+        assert_eq!(gui.app.crossfade, 5.0, "each step lands at once");
+        gui.save_rested();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "still moving: nothing written");
+        gui.prefs_unsaved = gui.prefs_unsaved.map(|since| since - PREFS_REST);
+        gui.save_rested();
+        assert_eq!(on_disk(), 5.0, "rested: written, once");
+        assert!(gui.prefs_unsaved.is_none());
+
+        // Another flow's load-and-save writes the waiting change first.
+        gui.adjust_blend(1);
+        servers::update_config(&mut gui, |_| {});
+        assert_eq!(on_disk(), 6.0);
+        assert_eq!(gui.config.player.crossfade_seconds, 6.0, "the GUI's copy is the file's");
+
+        // The GUI's own section is written at once.
+        gui.set_key_hints(false);
+        assert!(!config::load().unwrap().gui.key_hints);
+        assert!(gui.prefs_unsaved.is_none());
+        let _ = &scratch;
     }
 
     fn track(filepath: &str, title: &str, duration: f64) -> Track {
@@ -3753,7 +4248,39 @@ mod tests {
     }
 
     #[test]
+    fn the_mood_modal_has_its_own_tips_line_and_a_room_that_offers_it_names_o() {
+        let _en = crate::setup::tests::in_locale("en");
+        use crate::api::types::MoodFilter;
+        use crate::tui::worker::{LibraryData, LibraryNode};
+        let mut gui = test_gui();
+        gui.app.connected = true;
+        gui.set_key_hints(true);
+        gui.act(Act::Nav(ARTISTS_NAV));
+        let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
+            node: LibraryNode::Artists(MoodFilter::NONE),
+            dest: Tab::Library,
+            data: LibraryData::Artists(vec!["ALM".into()]),
+        });
+        gui.pend(effects);
+        let rows = draw(&mut gui);
+        let tail = format!("· {}", t!("gui.tips.mood_key"));
+        assert!(!rows[29].contains(&tail), "no scores, no `o`: {:?}", rows[29]);
+        gui.app.capabilities.mood_filters = true;
+        let rows = draw(&mut gui);
+        assert!(rows[29].trim_end().ends_with(&tail), "the resting line names `o`: {:?}", rows[29]);
+        // While the filter's field takes the letters, `o` is one of them.
+        gui.act(Act::BarFilter);
+        assert!(!draw(&mut gui)[29].contains(&tail));
+        gui.forward(Action::Cancel);
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let rows = draw(&mut gui);
+        assert_eq!(rows[29].trim(), t!("gui.tips.moods"), "the modal's own line while it is up");
+    }
+
+    #[test]
     fn keyboard_hints_are_off_by_default_and_the_settings_row_brings_them_back() {
+        let _en = crate::setup::tests::in_locale("en");
         // This surface is the pointer's: no footer of keys and no key on a
         // tooltip until asked; the classic TUI is the keyboard's room.
         let mut gui = browsing_gui();
@@ -3780,6 +4307,7 @@ mod tests {
 
     #[test]
     fn the_queue_panel_shows_the_real_queue_headed_by_its_count() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.act(Act::PaneRow(List::Files, 2, RowVerb::Queue));
         gui.act(Act::PaneRow(List::Files, 3, RowVerb::Queue));
@@ -3836,6 +4364,7 @@ mod tests {
 
     #[test]
     fn search_flows_through_the_shared_app() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = searched_gui();
         assert_eq!(gui.app.query, "moon", "typed characters reached the App's box");
         assert!(
@@ -3868,6 +4397,7 @@ mod tests {
 
     #[test]
     fn the_focused_field_draws_a_caret_that_blinks_on_the_kits_clock() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = test_gui();
         gui.app.connected = true;
         // A fresh visit to Search opens the query box; a key touches the
@@ -4093,6 +4623,71 @@ mod tests {
         let mut ctx = quiet_ctx(gui);
         let mut terminal = Terminal::new(IoTest(TestBackend::new(w, h))).unwrap();
         frame(&mut terminal, gui, &mut ctx, &mut NoHost).unwrap()
+    }
+
+    /// A request out keeps a gated loop brisk for its answer (performance
+    /// audit #86), since a pass that finds nothing skips its draw. A loop
+    /// without the gate draws every pass, so it waits as it would have:
+    /// brisk, a smoke counted 289 window frames in 12 s against 121, with
+    /// the same 5 frames changing anything (before the window was gated).
+    #[test]
+    fn only_a_loop_that_skips_idle_draws_waits_briskly_for_an_answer() {
+        for gate in [false, true] {
+            let mut gui = test_gui();
+            let mut ctx = quiet_ctx(&gui);
+            ctx.gate = gate;
+            let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+            frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+            gui.pend(vec![Effect::Api(worker::ApiCmd::Browse("lib".into()))]);
+            let wait = frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+            if gate {
+                assert!(wait <= crate::kit::pace::BRISK, "the terminal: brisk, not {wait:?}");
+            } else {
+                assert_eq!(wait, next_wait(&gui), "the window: its own wait");
+                assert!(wait > crate::kit::pace::BRISK, "and not a brisk one: {wait:?}");
+            }
+        }
+    }
+
+    /// A gated pass with nothing new skips its draw unless its host says
+    /// the surface needs one (a window cleared or owed a present, a cover
+    /// decoded): then it draws, though nothing in the player changed.
+    #[test]
+    fn a_gated_pass_draws_when_its_host_must_have_a_frame() {
+        struct MustHost;
+        impl Host for MustHost {
+            fn pointer(&mut self, _hand: bool) {}
+            fn must_draw(&self) -> bool {
+                true
+            }
+        }
+        let mut gui = test_gui();
+        let mut ctx = quiet_ctx(&gui);
+        ctx.gate = true;
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        let first = ctx.drawn;
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        assert_eq!(ctx.drawn, first, "nothing new: the pass skipped its draw");
+        frame(&mut terminal, &mut gui, &mut ctx, &mut MustHost).unwrap();
+        assert!(ctx.drawn > first, "the host needed a frame: drawn");
+    }
+
+    /// The window's face gates its passes as the terminal's loop does, and
+    /// any input it is handed is news for the next one.
+    #[cfg(feature = "window")]
+    #[test]
+    fn the_window_face_is_gated_and_an_input_is_news() {
+        use crate::gui::window::face::Face;
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (audio_tx, _) = std::sync::mpsc::channel();
+        let (api_tx, _) = std::sync::mpsc::channel();
+        let mut face =
+            GuiFace::new(test_gui(), Channels { event_rx, audio_tx, api_tx, event_tx, control: None });
+        assert!(face.ctx.gate);
+        face.ctx.dirty = false;
+        face.input(TermEvent::Resize(100, 30));
+        assert!(face.ctx.dirty);
     }
 
     /// The GUI as the window's face answers the host's reads from the Gui
@@ -4349,6 +4944,7 @@ mod tests {
 
     #[test]
     fn the_top_bar_has_a_visualizer_item_that_opens_the_window() {
+        let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         // The visualizer-window contract, entries 1–2: the item after the
         // tabs opens the window (a flag under test), lit while it is open,
@@ -4374,6 +4970,7 @@ mod tests {
 
     #[test]
     fn the_top_bar_items_stand_on_their_labels_cells_in_every_script() {
+        let _en = crate::setup::tests::in_locale("en");
         // A rect is the label's cells: Japanese and Chinese draw two a
         // character, and rects counted in characters left the Admin tab's
         // right half under the Visualizer item.
@@ -4481,6 +5078,7 @@ mod tests {
 
     #[test]
     fn the_stats_tab_hosts_the_stats_page_under_the_top_bar() {
+        let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         // The stats-screen contract: the page whole under the bar, the
         // page's keys, Esc and T the way back, q the player's quit.
@@ -4532,7 +5130,54 @@ mod tests {
     }
 
     #[test]
+    fn a_stats_page_under_the_mini_player_is_not_on_screen() {
+        // The mini player stands in for every screen and draws no page: a
+        // page chosen under it has no frame to be out of date, so its
+        // surface's clocks do not redraw the mini player every pass
+        // (performance audit #102 follow-up), and the pointer below the
+        // bar is the mini player's transport, not the undrawn page's.
+        use crate::admin::Screen as _;
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        gui.act(Act::Screen(Screen::Stats));
+        assert!(gui.stats.page.is_some());
+        let mut small = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(gui.stats.page.as_mut().unwrap().ui().stale(), "never drawn: its own surface says so");
+        assert!(!moving(&mut gui), "but it is not on screen");
+        let click = event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!stats::pointer(&mut gui, click), "the mini player's to take");
+
+        // Full size: the page draws, and its clocks and pointer are the
+        // frame's again.
+        draw(&mut gui);
+        assert!(!moving(&mut gui), "drawn, and nothing on a clock");
+        gui.stats.page.as_mut().unwrap().ui().overlay(Rect::new(2, 2, 10, 4));
+        assert!(moving(&mut gui), "an overlay came: the page owes a frame");
+        assert!(stats::pointer(&mut gui, click), "the page's");
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(!moving(&mut gui), "not under the mini player");
+
+        // An arrow held on the page when the window drops to the mini
+        // player: the button's release still ends it, though the page is
+        // not drawn to take the event.
+        draw(&mut gui);
+        gui.stats.page.as_mut().unwrap().ui().hold_arrow();
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        let lift = event::MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), ..click };
+        assert!(!stats::pointer(&mut gui, lift), "still the mini player's event");
+        assert!(!gui.stats.page.as_mut().unwrap().ui().holding(), "and the hold is over");
+    }
+
+    #[test]
     fn the_server_dropdown_takes_its_clicks_over_the_stats_page() {
+        let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
         // Stats-screen clause 5: the header's server menu owns the pointer
         // while it is open, over the page too — the page used to take the
@@ -4591,6 +5236,7 @@ mod tests {
 
     #[test]
     fn the_top_bar_has_the_library_and_stats_tabs_and_0_opens_now_playing() {
+        let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = browsing_gui();
         let rows = draw(&mut gui);
@@ -4751,6 +5397,7 @@ mod tests {
 
     #[test]
     fn no_server_is_said_in_words_not_a_blank_screen() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = test_gui();
         gui.demo = None;
         let all = draw(&mut gui).join("\n");
@@ -4902,6 +5549,7 @@ mod tests {
 
     #[test]
     fn a_small_window_is_the_mini_player_instead_of_breaking() {
+        let _en = crate::setup::tests::in_locale("en");
         // The mini-player contract: below the screens' size, the cover, the
         // transport in the bar's own frames, and a line asking for room.
         let mut gui = test_gui();
@@ -4973,10 +5621,49 @@ mod tests {
         let first = mini::plan(&gui, area).mini.lines.remove(0).2;
         assert!(!all.contains(&first), "and the line is gone:\n{all}");
     }
+
+    #[test]
+    fn the_card_now_playing_and_the_mini_player_keep_a_cover_each() {
+        // One encoded picture shared by the card and Now Playing meant every
+        // switch between the two screens decoded and encoded the cover
+        // again (performance audit #97); the mini player made three.
+        use ratatui_image::picker::ProtocolType;
+        let mut gui = test_gui();
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        let mut playing = track("music/a.mp3", "Night Drive", 252.0);
+        playing.metadata.album_art = Some("aa.jpeg".into());
+        gui.app.now_playing = Some(playing);
+        // Larger than the thumbnail, so Now Playing's box decodes the source.
+        let cover = image::RgbImage::from_fn(400, 400, |x, y| image::Rgb([x as u8, y as u8, 90]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        cover.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        gui.app.art.insert("aa.jpeg".into(), Some(crate::tui::art::decode(&bytes.into_inner()).unwrap()));
+
+        let mut full = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut small = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        for _ in 0..3 {
+            full.draw(|frame| render(frame, &mut gui)).unwrap();
+            gui.act(Act::Screen(Screen::NowPlaying));
+            full.draw(|frame| render(frame, &mut gui)).unwrap();
+            gui.act(Act::Screen(Screen::Library));
+            small.draw(|frame| render(frame, &mut gui)).unwrap();
+        }
+        let encodes = |slot: &Option<cover::Slot>| slot.as_ref().map(cover::Slot::encodes);
+        assert_eq!(gui.app.graphics.encodes(), 1, "Now Playing's cover, once");
+        assert_eq!(encodes(&gui.card), Some(1), "the card's, once");
+        assert_eq!(encodes(&gui.mini_cover), Some(1), "the mini player's, once");
+        let placed = |terminal: &Terminal<TestBackend>| {
+            let cells = &terminal.backend().buffer().content;
+            cells.iter().any(|cell| cell.symbol().contains('\u{10EEEE}'))
+        };
+        assert!(placed(&full) && placed(&small), "and each drew as pixels");
+    }
+
     // ── The browser bar ─────────────────────────────────────────────────
 
     #[test]
     fn the_bar_gates_its_verbs_on_playable_rows() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.queue_open = false;
         let text = draw(&mut gui).join("\n");
@@ -5007,6 +5694,7 @@ mod tests {
 
     #[test]
     fn the_filter_narrows_live_and_enter_keeps_it() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.queue_open = false;
         handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
@@ -5063,6 +5751,7 @@ mod tests {
 
     #[test]
     fn the_bar_back_walks_up_and_the_crumb_leads() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.queue_open = false;
         gui.app.path = "music".into();
@@ -5139,6 +5828,7 @@ mod tests {
 
     #[test]
     fn the_sonic_room_rides_the_pings_flag() {
+        let _en = crate::setup::tests::in_locale("en");
         // Without the capability the row is absent and its digit is dead —
         // and the rooms that don't come and go keep their digits.
         let mut gui = test_gui();
@@ -5157,6 +5847,7 @@ mod tests {
 
     #[test]
     fn the_setup_cards_offer_the_ways_in_and_build_waits_for_both() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         // At full width (queue folded) the methods sit inline on the card.
         gui.queue_open = false;
@@ -5186,6 +5877,7 @@ mod tests {
 
     #[test]
     fn the_results_wear_seed_tags_meters_and_the_verbs() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         gui.app.sonic.start = Some(track("lib/a.mp3", "A", 200.0));
         gui.app.sonic.end = Some(track("lib/b.mp3", "B", 210.0));
@@ -5208,6 +5900,7 @@ mod tests {
 
     #[test]
     fn the_failure_states_name_themselves_and_retry_where_it_helps() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         gui.app.sonic.start = Some(track("lib/a.mp3", "A", 200.0));
         gui.app.sonic.end = Some(track("lib/b.mp3", "B", 210.0));
@@ -5236,6 +5929,7 @@ mod tests {
 
     #[test]
     fn an_armed_pick_banners_the_browse_and_stows_the_queue_add() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.app.capabilities.discovery_path = true;
         gui.app.capture = Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start));
@@ -5326,6 +6020,7 @@ mod tests {
 
     #[test]
     fn the_menu_opens_from_a_chip_and_the_keyboard_walks_it() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         gui.act(Act::SonMenu(crate::tui::app::SonicSide::End));
         let text = draw(&mut gui).join("\n");
@@ -5407,6 +6102,7 @@ mod tests {
 
     #[test]
     fn the_save_prompt_rides_the_apps_line() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         gui.app.sonic.start = Some(track("lib/a.mp3", "Departure", 200.0));
         gui.app.sonic.end = Some(track("lib/b.mp3", "Arrival", 210.0));
@@ -5477,7 +6173,7 @@ mod dump_tests {
             .collect();
         let effects = gui.app.apply_event(Event::Library {
             generation: gui.app.session_gen(),
-            node: LibraryNode::Albums,
+            node: LibraryNode::Albums(crate::api::types::MoodFilter::NONE),
             dest: Tab::Library,
             data: LibraryData::Albums(albums),
         });

@@ -127,7 +127,10 @@ at once. A lane picks from ONE server: the DJ's.
 14. **A batch ahead**: a fetch lands as the next rows in the server's order
     (best tier first); the play-now flag belongs to the first row and only
     when the queue was empty. Overlapping fetches are dropped; every
-    trigger re-fires once the in-flight one lands.
+    trigger re-fires once the in-flight one lands. A pick already in the
+    queue is not queued again — nor one a restore let go of (multi-server
+    clause 40: the queue comes back with the DJ's last 100 played rows,
+    and remembers the paths of the rest).
 15. Every DJ pick joins the **rolling sonic history** — kept even while
     sonic mode is off, so switching it on mid-session already has the
     session's recent sound to anchor on.
@@ -715,3 +718,22 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   through the locale table (the TUI boots no language and stays English).
   The Auto-DJ tab's keyword row names the key the keymap binds to
   remove-from-queue instead of an unbound `x`.
+- **2026-09-28 — Played picks are let go at a restore** (clause 14;
+  multi-server clause 40; performance audit #106). The record never
+  trims: a lean-back DJ queue grew ~15 rows an hour, and a resumed queue
+  brought every one back at each launch, with every per-row cost the
+  player pays growing alike. A restore with the DJ armed now keeps the
+  last 100 played DJ rows (straight play only — a shuffled or wrapping
+  queue still has them to come) and remembers the rest by path, 500 at
+  most, so they are still not picked again. Nothing is trimmed while the
+  app runs: the rows the queue panel is scrolled to, dragged or opened on
+  never move under it.
+- **2026-10-05 — TOOLS holds three rooms** (entry point 2; the
+  translation table's "Auto DJ, then Sonic path"): the Discover room joins
+  the group under Sonic path (docs/ux-contracts/discovery-page.md, clause
+  2), and the group moves up a row to fit it — the TOOLS label on row 13,
+  **Auto DJ on 14**, Sonic path 15, Discover 16, Settings still on the
+  content's last row. The row keeps its `•` while armed and its `D`.
+  Entry point 4 is unchanged: "Start a sonic session" belongs to the
+  record's per-song Discover screen, and the GUI's Discover room is the
+  history-seeded page, which does not carry it.
