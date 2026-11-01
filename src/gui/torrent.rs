@@ -2331,8 +2331,8 @@ mod tests {
         // folder could move between this write and arrive()'s own look (our
         // file taken for a stranger's: a chooser), or the file could land
         // in another test's scratch and vanish with it (nothing read, no
-        // room) — and with no scratch live it landed in the developer's
-        // REAL config. Holding a scratch pins the folder for the whole test,
+        // room) — and with no scratch live it stayed behind in the test run's
+        // own folder. Holding a scratch pins the folder for the whole test,
         // and its drop cleans up.
         let scratch = crate::config::testing::Scratch::new("torrent-bounce");
         let dir = handoff_dir();

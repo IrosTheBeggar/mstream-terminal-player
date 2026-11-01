@@ -5501,6 +5501,8 @@ pub(crate) mod tests {
     #[test]
     fn open_on_moves_to_the_saved_connected_server_and_opens_the_album_there() {
         let _en = english();
+        // Moving to another server saves the settings.
+        let _config = crate::config::testing::Scratch::new("keep-open-on");
         let mut gui = canvas_gui(&canvas_jobs());
         gui.config.servers = vec![
             crate::config::ServerEntry { url: HOST.into(), ..Default::default() },
