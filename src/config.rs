@@ -906,7 +906,11 @@ pub fn config_dir() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(dir));
     }
 
-    let base = if cfg!(windows) {
+    // A test that saves outside a `testing::Scratch` must never reach the real
+    // folder: one that did reset the player settings of whoever ran the suite.
+    let base = if cfg!(test) {
+        Some(std::env::temp_dir().join(format!("mstream-player-tests-{}", std::process::id())))
+    } else if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
@@ -2121,6 +2125,16 @@ mod tests {
         let from_env = spool_dir();
         unsafe { std::env::remove_var("MSTREAM_PLAYER_CACHE_DIR") };
         assert_eq!(from_env, Some(scratch.dir.join("from-env").join("spool")));
+    }
+
+    #[test]
+    fn a_test_outside_a_scratch_never_reaches_the_real_folder() {
+        let _scratch = Scratch::new("no-real-folder");
+        // SAFETY: the Scratch guard's lock serialises env manipulation.
+        unsafe { std::env::remove_var("MSTREAM_PLAYER_CONFIG_DIR") };
+        let dir = config_dir().expect("a test build always has one");
+        let this_run = format!("mstream-player-tests-{}", std::process::id());
+        assert!(dir.starts_with(std::env::temp_dir().join(this_run)), "{}", dir.display());
     }
 
     #[test]
