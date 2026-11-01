@@ -3697,23 +3697,21 @@ mod tests {
         listener.join().expect("the thread ended on its own terms");
     }
 
-    /// A player whose opens take 400 ms and can be given up, and which
-    /// writes down what happened to them, in order.
-    #[derive(Clone, Default)]
-    struct SlowOpens {
-        log: Arc<std::sync::Mutex<Vec<String>>>,
+    /// A player whose opens each wait for the test's word, unless they are
+    /// given up first, and which tells the test everything it does as it
+    /// does it, an open's start included.
+    struct HeldOpens {
+        did: mpsc::Sender<String>,
+        go: mpsc::Receiver<()>,
     }
 
-    impl SlowOpens {
+    impl HeldOpens {
         fn note(&self, line: String) {
-            self.log.lock().unwrap().push(line);
-        }
-        fn lines(&self) -> Vec<String> {
-            self.log.lock().unwrap().clone()
+            let _ = self.did.send(line);
         }
     }
 
-    impl crate::player::PlayerCtl for SlowOpens {
+    impl crate::player::PlayerCtl for HeldOpens {
         fn play(&self, source: &str, _hint: Option<f64>) -> Result<(), String> {
             self.play_unless(source, None, &mut || false)
         }
@@ -3723,13 +3721,19 @@ mod tests {
             _hint: Option<f64>,
             superseded: &mut dyn FnMut() -> bool,
         ) -> Result<(), String> {
-            let began = std::time::Instant::now();
-            while began.elapsed() < Duration::from_millis(400) {
+            self.note(format!("opening {source}"));
+            loop {
                 if superseded() {
                     self.note(format!("gave up {source}"));
                     return Ok(());
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                match self.go.recv_timeout(Duration::from_millis(5)) {
+                    Ok(()) => break,
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Err("the test went away".to_string());
+                    }
+                }
             }
             self.note(format!("playing {source}"));
             Ok(())
@@ -3758,50 +3762,104 @@ mod tests {
         fn tick(&self) {}
     }
 
-    /// Run `script` against a SlowOpens player: each step is sent after the
-    /// given pause, then the thread is given time and shut down. Returns
-    /// what the player saw — less the stop the thread always makes on its
-    /// way out — and every event the thread sent.
-    fn against_slow_opens(script: Vec<(u64, AudioCmd)>) -> (Vec<String>, Vec<Event>) {
-        let player = SlowOpens::default();
-        let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
-        let theirs = player.clone();
-        let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
-        for (after_ms, cmd) in script {
-            std::thread::sleep(Duration::from_millis(after_ms));
-            cmd_tx.send(cmd).unwrap();
+    /// The audio thread around a [`HeldOpens`] player, which a test walks
+    /// through a step at a time. No step runs on the clock: each waits to
+    /// hear the last one land, so a machine too loaded to keep time can only
+    /// make the walk slower.
+    struct AudioThread {
+        cmds: mpsc::Sender<AudioCmd>,
+        did: mpsc::Receiver<String>,
+        go: mpsc::Sender<()>,
+        events: mpsc::Receiver<Event>,
+        listener: thread::JoinHandle<()>,
+    }
+
+    impl AudioThread {
+        /// `queued` is waiting when the thread starts: its first batch.
+        fn start(queued: Vec<AudioCmd>) -> Self {
+            let (cmds, cmd_rx) = mpsc::channel();
+            let (event_tx, events) = mpsc::channel();
+            let (did_tx, did) = mpsc::channel();
+            let (go, go_rx) = mpsc::channel();
+            for cmd in queued {
+                cmds.send(cmd).unwrap();
+            }
+            let player = HeldOpens { did: did_tx, go: go_rx };
+            let listener = thread::spawn(move || listen_guarded(&player, &cmd_rx, &event_tx));
+            Self { cmds, did, go, events, listener }
         }
-        std::thread::sleep(Duration::from_millis(700));
-        cmd_tx.send(AudioCmd::Shutdown).unwrap();
-        listener.join().expect("the thread ended on its own terms");
-        let mut lines = player.lines();
-        assert_eq!(lines.pop().as_deref(), Some("stop"), "the thread stops the player on its way out");
-        (lines, event_rx.try_iter().collect())
+
+        fn send(&self, cmd: AudioCmd) {
+            self.cmds.send(cmd).unwrap();
+        }
+
+        /// The player's next moves are these, in this order. Only a thread
+        /// that has gone wrong waits the time out.
+        fn player_did(&self, moves: &[&str]) {
+            for step in moves {
+                let next = self.did.recv_timeout(Duration::from_secs(60));
+                assert_eq!(next.as_deref(), Ok(*step));
+            }
+        }
+
+        /// Let the open in flight finish.
+        fn go(&self) {
+            self.go.send(()).unwrap();
+        }
+
+        /// Shut the thread down and hand back every event it sent, once the
+        /// player has done nothing more than the stop the thread always
+        /// makes on its way out.
+        fn finish(self) -> Vec<Event> {
+            self.cmds.send(AudioCmd::Shutdown).unwrap();
+            self.listener.join().expect("the thread ended on its own terms");
+            let rest: Vec<String> = self.did.try_iter().collect();
+            assert_eq!(rest, vec!["stop"], "the thread stops the player on its way out");
+            self.events.try_iter().collect()
+        }
     }
 
     #[test]
     fn a_newer_play_or_a_stop_gives_up_the_open_in_flight() {
-        // The second pick arrives 100 ms into the first one's open: the
-        // first is given up, not played for a moment and then replaced.
-        let (lines, events) = against_slow_opens(vec![(0, play("a")), (100, play("b"))]);
-        assert_eq!(lines, vec!["gave up a", "playing b"]);
+        // The second pick arrives during the first one's open: the first is
+        // given up, not played for a moment and then replaced.
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(play("b"));
+        audio.player_did(&["gave up a", "opening b"]);
+        audio.go();
+        audio.player_did(&["playing b"]);
+        let events = audio.finish();
         // Nothing failed: a play overtaken is not a play that went wrong.
         assert!(!events.iter().any(|e| matches!(e, Event::PlaybackFailed { .. })));
 
         // A stop the same way: the open is dropped and the stop lands now.
-        let (lines, _) = against_slow_opens(vec![(0, play("a")), (100, AudioCmd::Stop)]);
-        assert_eq!(lines, vec!["gave up a", "stop"]);
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(AudioCmd::Stop);
+        audio.player_did(&["gave up a", "stop"]);
+        audio.finish();
 
         // What came with the play and was aimed at it goes with it: the
         // seek behind a (a resume spot) dies; the pause behind b stands.
-        let (lines, _) = against_slow_opens(vec![
-            (0, play("a")),
-            (0, AudioCmd::Seek(30.0)),
-            (100, play("b")),
-            (0, AudioCmd::Pause),
-        ]);
-        assert_eq!(lines, vec!["gave up a", "playing b", "pause"]);
+        let audio = AudioThread::start(vec![play("a"), AudioCmd::Seek(30.0)]);
+        audio.player_did(&["opening a"]);
+        audio.send(play("b"));
+        audio.send(AudioCmd::Pause);
+        audio.player_did(&["gave up a", "opening b"]);
+        audio.go();
+        audio.player_did(&["playing b", "pause"]);
+        audio.finish();
+
+        // A seek that arrives during the open dies with it just the same.
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(AudioCmd::Seek(30.0));
+        audio.send(play("b"));
+        audio.player_did(&["gave up a", "opening b"]);
+        audio.go();
+        audio.player_did(&["playing b"]);
+        audio.finish();
     }
 
     #[test]
@@ -3810,12 +3868,13 @@ mod tests {
         // is opening is about that track, so it applies once it plays —
         // the order the engine answers a Play's trailing Seek in. (The
         // pair is one batch by then, and collapse puts the seek last.)
-        let (lines, _) = against_slow_opens(vec![
-            (0, play("a")),
-            (100, AudioCmd::Seek(12.0)),
-            (0, AudioCmd::Pause),
-        ]);
-        assert_eq!(lines, vec!["playing a", "pause", "seek 12"]);
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(AudioCmd::Seek(12.0));
+        audio.send(AudioCmd::Pause);
+        audio.go();
+        audio.player_did(&["playing a", "pause", "seek 12"]);
+        audio.finish();
     }
 
     #[test]
