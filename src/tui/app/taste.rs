@@ -243,6 +243,9 @@ pub struct TasteState {
     pub tab: TasteTab,
     /// The window asked for (clause 15); `None` asks the default, 30 days.
     pub window: Option<u32>,
+    /// The room's mood filter (clause 33): sent on both halves where the
+    /// server takes it, kept, like the window, while the app runs.
+    pub moods: crate::api::types::MoodFilter,
     /// The songs picked to start from, for this visit (clause 14).
     pub pins: Vec<TastePin>,
     /// Seed hashes dropped in this visit (clause 13): sent as `exclude` on
@@ -445,8 +448,8 @@ impl TasteState {
     }
 
     fn reset(&mut self) {
-        let (tab, window) = (self.tab, self.window);
-        *self = TasteState { tab, window, ..TasteState::default() };
+        let (tab, window, moods) = (self.tab, self.window, self.moods);
+        *self = TasteState { tab, window, moods, ..TasteState::default() };
     }
 
     /// A fresh visit (clause 3): the pins, the drops and the passed-over
@@ -540,6 +543,12 @@ impl App {
             new_artists_only: Some(false),
             ignore_v_paths: Vec::new(),
             limit,
+            // Both halves, where the server's taste route takes the key: the
+            // connected servers filter too, and their rows that cannot are
+            // dropped by the server (clause 33).
+            // Its wire form: a level picked with no mood asks nothing.
+            moods: (self.capabilities.taste_moods() && !self.taste.moods.is_empty())
+                .then_some(self.taste.moods.wire()),
         };
         match part {
             TastePart::Main => {

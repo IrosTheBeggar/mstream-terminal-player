@@ -359,7 +359,10 @@ standard — ratatui cells cannot carry them.
 description fg DarkGray indented 4 cells. The card hovers like every
 clickable (border → Cyan); the LightBlue border marks the KEYBOARD
 cursor only — ↑/↓ pick it up, click toggles without selecting, Space
-and Enter toggle under the cursor. No tri-state.
+and Enter toggle under the cursor. No tri-state. **In a modal's grid**
+(the mood filter modal's tags, library-rooms clause 32) a checkbox has no
+card: `[ ]` DIM and its label TEXT, ticked `[✓]` OK with its label OK
+BOLD, a stop of the grid's keys (Modal).
 
 ### Radio group
 One card per group, DarkGray UPPERCASE group label, one row per option:
@@ -392,7 +395,17 @@ fit the row starts at the chosen one behind `…` (that cell a click that
 steps back), and only a choice with room for its dot, a space and a
 cell of its name is drawn — the last clipped at the last cell, the rest
 ← →'s alone, never over the border (the Auto DJ room's `draw_choice`
-rule).
+rule). (Logged exceptions in the mood filter modal, library-rooms
+clause 32 and its 2026-10-31 log: its **mood scales** are radio rows that
+may stand with **none chosen** — pressing the chosen value lets it go —
+and wear `(•)` OK with the label OK BOLD, green meaning "a mood is on";
+its **level and Sort** stand side by side with the Radio group's ACCENT
+`(•)` and a TEXT BOLD label, not the side-by-side OK, so green never
+marks them. A **resting radio** — the Sort's Match while no mood is set —
+is DIM, glyph and label, with no click, no hover, no hand stop and no
+tooltip, the minimal-text waiver of the disabled control's tip; the
+group's other radio shows pressed, and the resting one wakes, still
+chosen if it was, when what it ranks by exists.)
 
 ### List cursor
 **Selection is the KEYBOARD cursor, nothing more** — in every list of
@@ -617,6 +630,18 @@ keyboard's place — a checkbox under the last radio its fourth stop
 off while its press is out; every other control is a key word (Key
 word); Space does nothing. On the legacy console both frames are
 `+ - |`, a border's title and way out on it.
+**The mood filter modal** (library-rooms clause 32, discovery-page clause
+33) carries its title on its top border with **no** way out on its bottom
+border and no `[X]`: `[ Done ]` is the way out, and Esc, Enter and its own
+key `o` apply as Done — the draft law of discovery-page clause 13, so
+closing never loses a choice. Its **keyboard stops stand on a grid**: ↑ ↓
+keep the column (clamped to a row's last stop), ← → walk the row, Tab and
+Shift-Tab walk the reading order and wrap. Opened by a click it **stows
+the hand**: the first walking key, or Space, only shows it, and a click on
+a stop presses it and stows the hand there (the list-cursor law); opened
+by its key, the hand is up. The foot's text button `clear` (DIM) wears
+ACCENT BOLD under the hand, as a radio's label does, and `[ Done ]` the
+slab; where the hand and the pointer meet, the hand wins.
 **A list in a modal** (the Discover room's Copies, discovery-page clause
 117): the kit table under the title — its DIM header and rule never
 scroll — items of one or two rows (the held one's slab across all of
@@ -706,13 +731,15 @@ mark kept) where it would not; at the 100-column floor a local server's
 label stands whole in every locale. While the MP3 Player tab's page
 writes, the strip is inert: no tab lights or answers a click. The
 Library is the nav column and its rooms — Files and Search at the top, the
-LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
-Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok
-colour while the DJ is armed, the capability-gated Sonic path, and
-Discover on row 16, gated by the server's `discoveryTaste` —
+LIBRARY group (Albums, Artists, Genres, Recent, Rated, Playlists, Last
+played, Most played), then a TOOLS group (Auto DJ, whose row wears a `•`
+in the ok colour while the DJ is armed, the capability-gated Sonic path,
+and Discover on row 17, gated by the server's `discoveryTaste` —
 docs/ux-contracts/discovery-page.md), Settings on the column's last row;
-fifteen rows, the 24-row minimum's worth with the footer on, Discover and
-Settings never on one row. Now Playing is the TUI's full-screen view,
+sixteen rows since 2026-10-31 (Rated, library-rooms clause 37) — at the
+24-row minimum with the footer on, the LIBRARY heading through Discover
+rise one row into the blank under Search, so Discover and Settings are
+never on one row. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);

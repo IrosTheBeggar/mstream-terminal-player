@@ -14,6 +14,9 @@ use serde::Serialize;
 // their own (discovery-page clauses 100–149).
 mod plugins;
 pub use plugins::*;
+// The mood filters on Albums, Artists and Discover (mStream #1092).
+mod moods;
+pub use moods::*;
 
 /// Accept an explicit JSON `null` where the server documents a nullable object,
 /// yielding `T::default()` instead of failing the whole response.
@@ -129,6 +132,12 @@ pub struct Ping {
     /// row has actions (`GET /api/v1/discovery/plugins` lists them).
     #[serde(rename = "discoveryPlugins", deserialize_with = "null_default")]
     pub discovery_plugins: bool,
+    /// The server has mood scores to filter by (mStream #1092): Albums and
+    /// Artists take a `moods` filter, and the Discover page too from
+    /// `discoveryTaste` 2. It follows the scores, not the build — off on a
+    /// server whose scan has not scored a song yet, and on an older one.
+    #[serde(rename = "moodFilters", deserialize_with = "null_default")]
+    pub mood_filters: bool,
 }
 
 /// `GET /api/` — the layered payload (mStream #932): server-wide `features`
@@ -167,6 +176,9 @@ pub struct LayeredFeatures {
     pub discovery_taste: u32,
     #[serde(rename = "discoveryPlugins", deserialize_with = "null_default")]
     pub discovery_plugins: bool,
+    /// As [`Ping::mood_filters`].
+    #[serde(rename = "moodFilters", deserialize_with = "null_default")]
+    pub mood_filters: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -203,6 +215,7 @@ impl From<LayeredInfo> for Ping {
             stats: info.features.stats,
             discovery_taste: info.features.discovery_taste,
             discovery_plugins: info.features.discovery_plugins,
+            mood_filters: info.features.mood_filters,
         }
     }
 }
@@ -305,6 +318,9 @@ pub struct Capabilities {
     /// a ping says otherwise, like every flag here, and off in a peer
     /// session.
     pub uploads: bool,
+    /// Mood scores to filter by (the ping's `moodFilters`): the Albums and
+    /// Artists rooms offer Filters (library-rooms contract, clause 30).
+    pub mood_filters: bool,
 }
 
 impl Capabilities {
@@ -313,6 +329,13 @@ impl Capabilities {
     /// own rule, not the server's, so it is not read here.
     pub fn taste(&self) -> bool {
         self.discovery && self.discovery_taste >= 1
+    }
+
+    /// The Discover room's Filters (discovery-page clause 33): the room,
+    /// scores to filter by, and a taste route of generation 2 — the first
+    /// whose body takes `moods` (an older one answers a 400 to the key).
+    pub fn taste_moods(&self) -> bool {
+        self.taste() && self.discovery_taste >= 2 && self.mood_filters
     }
 }
 
@@ -329,6 +352,7 @@ impl From<&Ping> for Capabilities {
             discovery_taste: ping.discovery_taste,
             discovery_plugins: ping.discovery_plugins,
             uploads: ping.no_upload == Some(false),
+            mood_filters: ping.mood_filters,
         }
     }
 }
@@ -1394,6 +1418,10 @@ pub struct TasteRequest {
     /// Caps the server applies to this call; `None` takes its defaults.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<TasteLimit>,
+    /// The room's mood filter (clause 33), only to a server whose taste
+    /// route takes it ([`Capabilities::taste_moods`]) and only when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moods: Option<MoodFilter>,
 }
 
 /// The `limit` of a taste ask (plan §3.1): only what the room sets is sent.
@@ -2293,6 +2321,7 @@ mod tests {
                 discovery_taste: 0,
                 discovery_plugins: false,
                 uploads: false,
+                mood_filters: false,
             }
         );
         assert_eq!(caps.enabled_names(), vec!["similarity", "sonic journey"]);
@@ -2437,6 +2466,43 @@ mod tests {
             Some("new.jpg")
         );
         assert_eq!(row(serde_json::json!({ "album_art_file": "../x.jpg" })).album_art, None);
+    }
+
+    #[test]
+    fn the_mood_flag_comes_from_either_payload_and_discover_wants_generation_two() {
+        let ping: Ping = serde_json::from_value(serde_json::json!({
+            "discovery": true, "discoveryTaste": 2, "moodFilters": true
+        }))
+        .unwrap();
+        let caps = Capabilities::from(&ping);
+        assert!(caps.mood_filters && caps.taste_moods());
+        // Scores, but a generation-1 taste route: Albums and Artists filter,
+        // Discover does not (its body would refuse the key).
+        let ping: Ping = serde_json::from_value(serde_json::json!({
+            "discovery": true, "discoveryTaste": 1, "moodFilters": true
+        }))
+        .unwrap();
+        let caps = Capabilities::from(&ping);
+        assert!(caps.mood_filters && !caps.taste_moods());
+        // An older server says nothing — and a null is nothing too.
+        let ping: Ping = serde_json::from_value(serde_json::json!({ "discovery": true, "moodFilters": null })).unwrap();
+        assert!(!Capabilities::from(&ping).mood_filters);
+        // The layered payload carries it under `features`.
+        let info: LayeredInfo = serde_json::from_value(serde_json::json!({
+            "features": { "discovery": true, "discoveryTaste": 2, "moodFilters": true }, "user": {}
+        }))
+        .unwrap();
+        assert!(Capabilities::from(&Ping::from(info)).taste_moods());
+        // The taste body names the filter only when one is set.
+        let body = TasteRequest { moods: Some(MoodFilter::NONE.press(MoodScale::Voice, "vocals")), ..TasteRequest::default() };
+        assert_eq!(serde_json::to_value(&body).unwrap(), serde_json::json!({ "moods": { "voice": "vocals" } }));
+        // The level's bar rides inside `moods` (mStream #1099).
+        let loose = MoodFilter::NONE.press(MoodScale::Voice, "vocals").with_level(MoodLevel::Loose);
+        let body = TasteRequest { moods: Some(loose), ..TasteRequest::default() };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({ "moods": { "voice": "vocals", "threshold": 0.3 } })
+        );
     }
 
     #[test]

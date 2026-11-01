@@ -3984,7 +3984,10 @@ pub(crate) mod tests {
 
     /// Serialises the one test that flips the process-global locale
     /// against the tests that assert English strings — today's config
-    /// env-race lesson, applied before it flakes.
+    /// env-race lesson, applied before it flakes. Not re-entrant: a test
+    /// takes it once (through one `english()` / `in_locale` guard), and
+    /// before `config::testing::Scratch`, never after, or the two locks
+    /// can deadlock against the tests that take them in that order.
     pub(crate) static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// LOCALE_LOCK held with the process-wide locale switched to another

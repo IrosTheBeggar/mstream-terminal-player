@@ -1098,13 +1098,14 @@ pub(crate) fn browser_title(app: &App) -> String {
         }
         Tab::Library => match app.library_node() {
             LibraryNode::Root => " Library ".to_string(),
-            LibraryNode::Artists => " Artists ".to_string(),
+            LibraryNode::Artists(_) => " Artists ".to_string(),
             LibraryNode::Artist(artist) => format!(" Artist: {artist} "),
-            LibraryNode::Albums => " Albums ".to_string(),
+            LibraryNode::Albums(_) => " Albums ".to_string(),
             LibraryNode::Album { name, .. } => format!(" Album: {name} "),
             LibraryNode::Genres(_) => " Genres ".to_string(),
             LibraryNode::Genre(genre, _) => format!(" Genre: {genre} "),
-            LibraryNode::Recent => " Recently Added ".to_string(),
+            LibraryNode::Recent(_) => " Recently Added ".to_string(),
+            LibraryNode::Rated(_) => " Rated ".to_string(),
             LibraryNode::RecentlyPlayed => " Recently Played ".to_string(),
             LibraryNode::MostPlayed => " Most Played ".to_string(),
             LibraryNode::Playlists => " Playlists ".to_string(),
@@ -3178,6 +3179,15 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     /// Render one frame and flatten the buffer to text for assertions.
     fn draw(app: &mut App) -> String {
         draw_sized(app, 90, 26)
@@ -3214,6 +3224,7 @@ mod tests {
             discovery_taste: 0,
             discovery_plugins: false,
             uploads: false,
+            mood_filters: false,
         };
         // What a real ping does on the way in: the Auto-DJ rows depend on it.
         app.dj_panel.rebuild(&app.dj, None, false);
@@ -4802,6 +4813,7 @@ mod tests {
 
     #[test]
     fn the_genre_chooser_marks_what_is_selected() {
+        let _en = english();
         let mut app = connected_app();
         app.dj.genres = vec!["Techno".into()];
         on_the_dj_tab(&mut app);

@@ -958,6 +958,15 @@ mod tests {
 
     const HOST: &str = "http://host:3000";
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     fn session_gui() -> Gui {
         let mut gui = Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None));
         gui.app.connected = true;
@@ -1031,6 +1040,7 @@ mod tests {
 
     #[test]
     fn the_sheets_cover_is_pixels_while_the_sheet_is_the_top_layer() {
+        let _en = english();
         use ratatui_image::picker::ProtocolType;
         // The wall's and the queue's rule for the sheet's one cover: real
         // pixels where the terminal draws them, the mosaic only while
@@ -1113,6 +1123,7 @@ mod tests {
 
     #[test]
     fn the_more_verb_on_a_row_opens_the_sheet_for_that_track() {
+        let _en = english();
         let mut gui = files_gui();
         let rows = draw(&mut gui);
         // The second row: the pane's cursor rests on the first, and a
@@ -1137,6 +1148,7 @@ mod tests {
 
     #[test]
     fn the_sheets_verbs_are_the_apps_and_close_it() {
+        let _en = english();
         let mut gui = files_gui();
         gui.act(Act::More(Tab::Files, 1));
         gui.act(Act::SheetVerb(SheetAction::AddEnd));
@@ -1162,6 +1174,7 @@ mod tests {
 
     #[test]
     fn a_peers_track_has_neither_stars_nor_a_playlist_row() {
+        let _en = english();
         let mut gui = session_gui();
         let mut item = queued("q/a.flac", "Peer song");
         item.origin.peer = Some(3);
@@ -1194,6 +1207,7 @@ mod tests {
 
     #[test]
     fn the_picker_lists_the_playlists_and_new_adds_through_a_name() {
+        let _en = english();
         let mut gui = files_gui();
         gui.act(Act::More(Tab::Files, 0));
         gui.pending.clear();
@@ -1222,6 +1236,7 @@ mod tests {
 
     #[test]
     fn the_name_box_has_a_create_button_beside_the_field() {
+        let _en = english();
         // The review's finding: Enter was the only way to add through a
         // new name — no clickable Create for the pointer.
         let mut gui = files_gui();
@@ -1241,6 +1256,7 @@ mod tests {
 
     #[test]
     fn song_info_lists_only_the_facts_present() {
+        let _en = english();
         let mut gui = files_gui();
         gui.act(Act::More(Tab::Files, 0));
         gui.act(Act::SheetVerb(SheetAction::Info));
@@ -1257,6 +1273,7 @@ mod tests {
 
     #[test]
     fn the_queue_rows_offer_the_sheet_the_grip_and_clear_and_the_keys_shape_it() {
+        let _en = english();
         let mut gui = session_gui();
         gui.app.queue.items = vec![queued("q/a.flac", "First"), queued("q/b.flac", "Second"), queued("q/c.flac", "Third")];
         let rows = draw(&mut gui);

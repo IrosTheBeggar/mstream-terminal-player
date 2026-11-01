@@ -1994,6 +1994,15 @@ mod tests {
 
     const MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Vela+-+Cassini+(2020)";
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     /// A minimal single-file torrent, bencoded by hand.
     fn torrent(name: &str) -> Vec<u8> {
         let mut bytes = b"d8:announce18:http://t.example/4:infod6:lengthi1234e4:name".to_vec();
@@ -2057,6 +2066,7 @@ mod tests {
 
     #[test]
     fn the_settings_doorway_opens_the_room_and_esc_walks_back() {
+        let _en = english();
         let mut gui = gui();
         gui.active = super::super::SETTINGS_NAV;
         let text = draw(&mut gui).join("\n");
@@ -2082,6 +2092,7 @@ mod tests {
 
     #[test]
     fn the_form_stays_hidden_until_a_source_is_real() {
+        let _en = english();
         let mut gui = ready_gui(&["music"]);
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("Transmission · ready"), "the gate's standing:\n{text}");
@@ -2123,6 +2134,7 @@ mod tests {
 
     #[test]
     fn a_loaded_file_names_itself_and_takes_the_magnets_place() {
+        let _en = english();
         let mut gui = ready_gui(&["music"]);
         gui.torrent.magnet = Input::new("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into());
         set_file(&mut gui, LoadedFile { name: "vela.torrent".into(), bytes: torrent("Vela - Cassini (2020)") });
@@ -2160,6 +2172,7 @@ mod tests {
 
     #[test]
     fn submit_reads_the_form_and_refuses_in_words() {
+        let _en = english();
         let mut gui = ready_gui(&[]);
         gui.torrent.magnet = Input::new(MAGNET.into());
         assert_eq!(plan_submit(&gui).unwrap_err(), "Pick a library");
@@ -2205,6 +2218,7 @@ mod tests {
 
     #[test]
     fn the_seed_check_outcomes_are_worded_and_the_partial_match_asks() {
+        let _en = english();
         let mut gui = ready_gui(&["music"]);
         let file = LoadedFile { name: "vela.torrent".into(), bytes: torrent("Vela - Cassini (2020)") };
         set_file(&mut gui, file.clone());
@@ -2258,6 +2272,7 @@ mod tests {
 
     #[test]
     fn the_arrival_chooser_asks_and_the_dont_ask_box_persists() {
+        let _en = english();
         let mut gui = gui();
         arrive(&mut gui, MAGNET);
         assert!(matches!(gui.torrent.chooser, Some(Chooser { incoming: Incoming::Magnet(_), .. })));
@@ -2286,6 +2301,7 @@ mod tests {
 
     #[test]
     fn a_torrent_arriving_with_ask_off_goes_straight_to_the_room() {
+        let _en = english();
         let dir = scratch("arrive");
         let path = dir.join("vela.torrent");
         std::fs::write(&path, torrent("Vela - Cassini (2020)")).unwrap();
@@ -2309,6 +2325,7 @@ mod tests {
 
     #[test]
     fn a_bounced_hand_off_is_named_not_looped() {
+        let _en = english();
         // handoff_dir() follows MSTREAM_PLAYER_CONFIG_DIR, which the config
         // tests repoint process-wide under their scratch lock. Unheld, the
         // folder could move between this write and arrive()'s own look (our
@@ -2335,6 +2352,7 @@ mod tests {
 
     #[test]
     fn the_picker_lists_folders_and_torrents_and_completes() {
+        let _en = english();
         let dir = scratch("picker");
         std::fs::create_dir_all(dir.join("Albums")).unwrap();
         std::fs::write(dir.join("vela.torrent"), b"x").unwrap();
@@ -2368,6 +2386,7 @@ mod tests {
 
     #[test]
     fn the_native_dialog_falls_back_to_the_typed_picker_and_t_is_its_own_road() {
+        let _en = english();
         use crate::setup::picker::Pick;
         let mut gui = ready_gui(&["music"]);
         // No dialog could open: the room says so and the typed picker

@@ -32,20 +32,34 @@ when they would do something*.
 1. **Line one is the room's own header, unchanged**: back (`◂`,
    clickable) when there is somewhere to go — above the root it
    disappears, not dims — the crumb or title, leading-clipped so the leaf
-   survives, and the count at the right edge.
+   survives, and the count at the right edge. Where a room offers the mood
+   filters, line one also carries its `mood` opener at a fixed column
+   (library-rooms clause 31) that the count never moves. Every right-hand
+   item of line one ends one cell in from the content's last — x62 at the
+   queue's 47 cells, x95 at 80 — measured in cells, not chars, so a CJK
+   count does not run a cell long *(2026-10-31: the lists' counts ended at
+   x63)*.
 2. **Line two carries the controls.** The **filter** affordance leads it
    on the left — always there; finding a folder or an album by name is as
    real as finding a track. The verbs sit right: **Play, Queue all and
    Shuffle appear only while the list holds playable rows** (the record's
    rule: lists of containers — the albums wall, the playlists — keep a
    clean line, and there is never a play button with nothing to play).
-3. The count reads `n items` (the wall keeps its `n albums`); under an
-   active filter it reads **`n of m`** — the narrowed view never
-   impersonates the whole.
+3. The count reads `n items` (the wall keeps its `n albums`), in the
+   locale's plural form — `1 item`, `1 album`, and ru's and pl's few and
+   many; under an active filter it reads **`n of m`** — the narrowed view
+   never impersonates the whole. Under a mood filter the count is the
+   filtered list's own total: `n of m` belongs to the text filter alone.
+   The count is never dropped for another control.
 4. On the **albums wall** the filter narrows the grid itself: pages,
    cells, the keyboard cursor and the cover prefetch all follow the
    narrowed view, and a click on a filtered cell opens the album it
    shows, never what lived at that index unfiltered.
+5. **The row under the controls is shared** (2026-10-31): the letter
+   strip's row (r4) takes the mood strip first where a mood filter
+   stands (library-rooms clause 35), the letter strip under it, and the
+   list or the grid one row lower — only when both stand; with one of
+   them, nothing below moves.
 
 ### The verbs
 
@@ -96,7 +110,7 @@ English reference:
 | play · queue all · shuffle · filter | the record's Play / Add all / Shuffle / "Search this list" tooltips, worn as kit text buttons |
 | queued %{count} | browserSongsAdded, house-shortened |
 | %{shown} of %{total} | this surface (the record filters silently) |
-| %{count} items | already shipped (gui.files.items) |
+| %{count} items | `gui.files.items_*`, a plural family (`_one` `_few` `_many` `_other`; the one-form `gui.files.items` retired 2026-10-31) — the wall's `gui.alb.count_*` likewise |
 
 ## Out of scope here
 
@@ -159,3 +173,10 @@ drawing, the keys, and the three verbs composed from public App pieces
   `Tags · Generated · Both` sits where a track list's verbs go. A list of
   genres has no verbs, so the two never share the line; the filter still
   leads, and an open filter's field takes the whole line.
+- **2026-10-31 — The mood opener on line one, the count's edge and its
+  plurals** (docs/ux-contracts/library-rooms.md, clauses 31, 35 and 38).
+  The mood filters' `mood` opener stands on line one at a fixed column,
+  and the strip naming a standing filter shares the letter strip's row
+  (clause 5). The lists' counts moved from x63 to x62, a cell in from the
+  content's last like the pager and the verbs, measured in cells; the
+  counts read their plural forms, where `1 albums` and `1 items` stood.
