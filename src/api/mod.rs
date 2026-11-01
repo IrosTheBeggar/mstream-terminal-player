@@ -977,7 +977,9 @@ impl Client {
     /// Every artist, or — under a mood filter (mStream #1092) — those most
     /// of whose songs match it. The filter rides in a POST body, as the
     /// genre kind does: a peer's proxy forwards a body, not a query string.
+    /// Its [`MoodFilter::wire`] form: a level with no mood keeps the GET.
     pub async fn artists_async(&self, moods: MoodFilter) -> Result<Vec<String>, ApiError> {
+        let moods = moods.wire();
         let r: ArtistsResponse = if moods.is_empty() {
             self.get("api/v1/db/artists").await?
         } else {
@@ -994,6 +996,7 @@ impl Client {
     /// Every album, or those most of whose songs match `moods` — as
     /// [`Self::artists_async`].
     pub async fn albums_async(&self, moods: MoodFilter) -> Result<Vec<Album>, ApiError> {
+        let moods = moods.wire();
         let r: AlbumsResponse = if moods.is_empty() {
             self.get("api/v1/db/albums").await?
         } else {
@@ -1384,13 +1387,40 @@ impl Client {
         wait(self.genre_songs_async(genre, source))
     }
 
-    pub async fn recently_added_async(&self, limit: u32) -> Result<Vec<Track>, ApiError> {
-        self.post("api/v1/db/recent/added", serde_json::json!({ "limit": limit })).await
+    /// The newest `limit` songs, or — under a mood filter (mStream #1095)
+    /// — the newest `limit` that match it, each with its `moodMatch`. The
+    /// filter beside the limit, and only when it filters: the route's
+    /// schema takes the key from a server with scores alone, which is what
+    /// the ping's `moodFilters` says.
+    pub async fn recently_added_async(
+        &self,
+        limit: u32,
+        moods: MoodFilter,
+    ) -> Result<Vec<MoodSong>, ApiError> {
+        let mut body = serde_json::json!({ "limit": limit });
+        if !moods.is_empty() {
+            body["moods"] = serde_json::json!(moods.wire());
+        }
+        self.post("api/v1/db/recent/added", body).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn recently_added(&self, limit: u32) -> Result<Vec<Track>, ApiError> {
-        wait(self.recently_added_async(limit))
+        let songs = wait(self.recently_added_async(limit, MoodFilter::NONE))?;
+        Ok(songs.into_iter().map(|song| song.track).collect())
+    }
+
+    /// The songs the user rated, highest first — or those of them that
+    /// match a mood filter, each with its `moodMatch`, in the same order. A
+    /// plain GET unfiltered; filtered, the filter in a POST body, as the
+    /// phone asks. A bare array either way.
+    pub async fn rated_async(&self, moods: MoodFilter) -> Result<Vec<MoodSong>, ApiError> {
+        let moods = moods.wire();
+        if moods.is_empty() {
+            self.get("api/v1/db/rated").await
+        } else {
+            self.post("api/v1/db/rated", serde_json::json!({ "moods": moods })).await
+        }
     }
 
     /// The signed-in user's play history, newest first — mStream's
@@ -3449,6 +3479,7 @@ pub(crate) mod tests {
             json_reply("200 OK", serde_json::json!({ "albums": [{ "name": "Stim Pack" }], "moods": {} })),
             json_reply("200 OK", serde_json::json!({ "artists": ["ALM"], "moods": { "energy": "relaxed" } })),
             json_reply("200 OK", serde_json::json!({ "albums": [], "moods": { "tags": ["party"] } })),
+            json_reply("200 OK", serde_json::json!({ "artists": ["ALM", "Boukmanflow"] })),
         ]);
         let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
         let albums = wait(client.albums_async(MoodFilter::NONE)).unwrap();
@@ -3467,6 +3498,87 @@ pub(crate) mod tests {
         let (line, body) = seen_json(&seen);
         assert!(line.starts_with("POST /api/v1/db/albums "), "{line}");
         assert_eq!(body, serde_json::json!({ "moods": { "tags": ["party"] } }));
+
+        // A level with no mood filters nothing: the plain GET.
+        let lone = MoodFilter::NONE.with_level(MoodLevel::Strict);
+        assert_eq!(wait(client.artists_async(lone)).unwrap().len(), 2);
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("GET /api/v1/db/artists "), "{line}");
+        assert_eq!(body, serde_json::Value::Null, "a lone level, no body");
+    }
+
+    #[test]
+    fn rated_is_a_plain_get_unfiltered_and_a_post_with_moods_filtered() {
+        let song = |path: &str, at: Option<f64>| {
+            let mut row = serde_json::json!({ "filepath": path, "metadata": { "title": path, "rating": 10 } });
+            if let Some(at) = at {
+                row["moodMatch"] = at.into();
+            }
+            row
+        };
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", serde_json::json!([song("a.mp3", None), song("b.mp3", None)])),
+            json_reply("200 OK", serde_json::json!([song("b.mp3", Some(0.555))])),
+            json_reply("200 OK", serde_json::json!([song("b.mp3", Some(0.51))])),
+            json_reply("200 OK", serde_json::json!([song("a.mp3", None)])),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let all = wait(client.rated_async(MoodFilter::NONE)).unwrap();
+        assert_eq!(all.iter().map(|s| s.track.filepath.as_str()).collect::<Vec<_>>(), vec!["a.mp3", "b.mp3"]);
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("GET /api/v1/db/rated "), "{line}");
+        assert_eq!(body, serde_json::Value::Null, "no filter, no body");
+
+        let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        let songs = wait(client.rated_async(relaxed)).unwrap();
+        assert_eq!(songs[0].mood_match, Some(0.555));
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/db/rated "), "{line}");
+        assert_eq!(body, serde_json::json!({ "moods": { "energy": "relaxed" } }));
+
+        wait(client.rated_async(relaxed.with_level(MoodLevel::Strict))).unwrap();
+        let (_, body) = seen_json(&seen);
+        assert_eq!(body, serde_json::json!({ "moods": { "energy": "relaxed", "threshold": 0.7 } }), "inside moods");
+
+        wait(client.rated_async(MoodFilter::NONE.with_level(MoodLevel::Loose))).unwrap();
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("GET /api/v1/db/rated "), "a lone level keeps the GET: {line}");
+        assert_eq!(body, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn recent_sends_moods_beside_its_limit_with_the_threshold_inside() {
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", serde_json::json!([{ "filepath": "new.mp3", "metadata": { "title": "New" } }])),
+            json_reply(
+                "200 OK",
+                serde_json::json!([
+                    { "filepath": "host.mp3", "metadata": {}, "moodMatch": 0.865 },
+                    { "filepath": "civil.mp3", "metadata": {}, "moodMatch": null },
+                ]),
+            ),
+            json_reply("200 OK", serde_json::json!([])),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let songs = wait(client.recently_added_async(100, MoodFilter::NONE)).unwrap();
+        assert_eq!((songs[0].track.filepath.as_str(), songs[0].mood_match), ("new.mp3", None));
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/db/recent/added "), "{line}");
+        assert_eq!(body, serde_json::json!({ "limit": 100 }));
+
+        let loose = MoodFilter::NONE.press(MoodScale::Voice, "instrumental").with_level(MoodLevel::Loose);
+        let songs = wait(client.recently_added_async(100, loose)).unwrap();
+        assert_eq!(songs.iter().map(|s| s.mood_match).collect::<Vec<_>>(), vec![Some(0.865), None]);
+        let (_, body) = seen_json(&seen);
+        assert_eq!(
+            body,
+            serde_json::json!({ "limit": 100, "moods": { "voice": "instrumental", "threshold": 0.3 } })
+        );
+
+        // A lone level: the limit alone.
+        wait(client.recently_added_async(100, MoodFilter::NONE.with_level(MoodLevel::Strict))).unwrap();
+        let (_, body) = seen_json(&seen);
+        assert_eq!(body, serde_json::json!({ "limit": 100 }));
     }
 
     #[test]

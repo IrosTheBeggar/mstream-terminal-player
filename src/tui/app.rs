@@ -547,6 +547,30 @@ impl Pane {
         }
     }
 
+    /// Re-order the track rows by `key`, a stable sort below a leading
+    /// `..`, in the rows shown and in those a filter is hiding alike — so
+    /// clearing the filter, or widening it, finds the same order. True when
+    /// a row moved; the cursor then rests on the first row again.
+    pub(crate) fn order_tracks_by<K: Ord>(&mut self, key: impl Fn(&Track) -> K) -> bool {
+        let keyed = |entry: &Entry| match entry {
+            Entry::Track { track, .. } => Some(key(track)),
+            _ => None,
+        };
+        let mut moved = false;
+        for list in std::iter::once(&mut self.entries).chain(self.unfiltered.iter_mut()) {
+            let lead = usize::from(matches!(list.first(), Some(Entry::Parent)));
+            let rows = &mut list[lead..];
+            if !rows.is_sorted_by_key(keyed) {
+                rows.sort_by_key(keyed);
+                moved = true;
+            }
+        }
+        if moved {
+            self.rest_cursor();
+        }
+        moved
+    }
+
     /// Visit every track row this pane holds — the shown ones and the ones
     /// a filter is hiding — so a patch reaches them all.
     pub(crate) fn for_each_track_mut(&mut self, mut f: impl FnMut(&mut Track)) {
@@ -1991,6 +2015,28 @@ pub struct App {
     /// The mood filter `albums` was asked under (the GUI's Filters): a
     /// return to the wall seats the cache only while it still matches.
     pub albums_moods: MoodFilter,
+    /// The order a filtered Recent or Rated list stands in: by match (the
+    /// surest first) or its own. The GUI's Sort sets it; the TUI never does.
+    pub(crate) songs_by_match: bool,
+    /// The song list in the Library pane, by filepath: each song's place in
+    /// the server's order and its place by match ([`match_order`]) — what
+    /// [`Self::sort_songs`] orders by, by key rather than from the order on
+    /// screen, so either way and back is exact. Only a filtered answer has
+    /// matches; any other list leaves this `None`. Cleared with the
+    /// session, as `albums` is.
+    ///
+    /// [`match_order`]: crate::api::types::match_order
+    pub(crate) song_ranks: Option<HashMap<String, (u32, u32)>>,
+    /// A mood re-ask still out ([`Self::switch_moods`]): the node the rows
+    /// on screen were answered under, and the node asked for. Cleared by
+    /// the answer that lands and by a fresh room; consumed by an error, or
+    /// by a drill from the rows still standing, which put the node back
+    /// ([`Self::put_back_moods`]) — so Done with the same choice asks again,
+    /// and Back finds those rows under their own filter.
+    mood_undo: Option<(LibraryNode, LibraryNode)>,
+    /// A mood re-ask was put back: the GUI's room takes back the choice the
+    /// rows carry. The GUI takes it; the TUI never asks one.
+    pub(crate) moods_put_back: bool,
     /// The drilled artist's albums, kept whole for the GUI's artist wall the
     /// way `albums` is kept for the root wall (library-rooms contract,
     /// clause 7): the pane holds them as text rows, the wall wants the
@@ -2331,6 +2377,10 @@ impl App {
             library_stack: Drill::new(LibraryNode::Root),
             albums: None,
             albums_moods: MoodFilter::NONE,
+            songs_by_match: false,
+            song_ranks: None,
+            mood_undo: None,
+            moods_put_back: false,
             artist_albums: None,
             albums_rev: 0,
             artists: None,
@@ -3378,6 +3428,9 @@ impl App {
                 vec![self.ask_library(node, Tab::Search)]
             }
             Entry::Node { node, label } => {
+                // Out of rows a mood re-ask left standing: Back comes back
+                // to them under their own filter.
+                self.put_back_moods();
                 self.push_trail();
                 self.library_stack.enter(node.clone());
                 self.library.set(Vec::new());
@@ -5703,14 +5756,20 @@ impl App {
             // A fresh root has no way back: a trail left by an earlier walk
             // would be an orphan under it.
             self.library.trail.clear();
-        } else if let Some(row) =
-            self.library.entries.iter().position(|e| matches!(e, Entry::Node { node: n, .. } if *n == node))
-        {
-            // The pane lists the node: drill through its own row, so the
-            // trail keeps the listing and Back restores it without asking
-            // again (library-rooms contract, clause 6).
-            self.library.state.select(Some(row));
-            self.push_trail();
+            self.mood_undo = None;
+        } else {
+            // A drill from the rows a mood re-ask left standing: their
+            // filter, not the one asked, is what Back comes back to.
+            self.put_back_moods();
+            if let Some(row) =
+                self.library.entries.iter().position(|e| matches!(e, Entry::Node { node: n, .. } if *n == node))
+            {
+                // The pane lists the node: drill through its own row, so the
+                // trail keeps the listing and Back restores it without asking
+                // again (library-rooms contract, clause 6).
+                self.library.state.select(Some(row));
+                self.push_trail();
+            }
         }
         self.library_stack.enter(node.clone());
         // A root list the session holds is seated from it: a fresh drill,
@@ -5750,18 +5809,70 @@ impl App {
         }
     }
 
-    /// The Albums or Artists list asked for again under another mood
-    /// filter — the GUI's Filters. Swapped in place, as the genre kind is:
-    /// Back climbs where it did before. Nothing unless that list is up.
+    /// The Albums, Artists, Recent or Rated list asked for again under
+    /// another mood filter — the GUI's Filters, in its wire form. Swapped
+    /// in place, as the genre kind is: Back climbs where it did before. The
+    /// rows on screen stand until the answer lands, and one asked under the
+    /// old filter is dropped then (the view's identity moved); an ask that
+    /// fails puts the old node back (`mood_undo`). Nothing unless that list
+    /// is up, or when the filter is the one it has.
     pub(crate) fn switch_moods(&mut self, moods: MoodFilter) -> Vec<Effect> {
-        let node = match self.library_stack.here() {
+        let here = self.library_stack.here().clone();
+        let node = match &here {
             LibraryNode::Albums(now) if *now != moods => LibraryNode::Albums(moods),
             LibraryNode::Artists(now) if *now != moods => LibraryNode::Artists(moods),
+            LibraryNode::Recent(now) if *now != moods => LibraryNode::Recent(moods),
+            LibraryNode::Rated(now) if *now != moods => LibraryNode::Rated(moods),
             _ => return Vec::new(),
         };
+        // The node the rows were answered under: an earlier ask still out
+        // keeps its own.
+        let answered = match self.mood_undo.take() {
+            Some((answered, asked)) if asked == here => answered,
+            _ => here,
+        };
+        self.mood_undo = Some((answered, node.clone()));
         self.library_stack.replace(node.clone());
-        self.library.set(Vec::new());
         vec![self.ask_library(node, Tab::Library)]
+    }
+
+    /// Whether a mood re-ask is still out (`mood_undo`).
+    pub(crate) fn mood_ask_out(&self) -> bool {
+        self.mood_undo.is_some()
+    }
+
+    /// A mood re-ask that will not land put back: the node the rows on
+    /// screen were answered under returns, and the GUI's room follows
+    /// (`moods_put_back`). Nothing unless that ask's node is still up.
+    fn put_back_moods(&mut self) {
+        if let Some((answered, asked)) = self.mood_undo.take()
+            && *self.library_stack.here() == asked
+        {
+            self.library_stack.replace(answered);
+            self.moods_put_back = true;
+        }
+    }
+
+    /// A filtered Recent or Rated list put in its Sort's order, in hand —
+    /// by match, the surest first and the unscored last, or back to the
+    /// server's own; no request. `by_match` stays the order the next
+    /// filtered answer lands in. True when a row moved; nothing moves
+    /// unless such a list, with its matches, is in the pane.
+    pub(crate) fn sort_songs(&mut self, by_match: bool) -> bool {
+        self.songs_by_match = by_match;
+        self.reorder_songs()
+    }
+
+    fn reorder_songs(&mut self) -> bool {
+        if !matches!(self.library_stack.here(), LibraryNode::Recent(_) | LibraryNode::Rated(_)) {
+            return false;
+        }
+        let Some(ranks) = self.song_ranks.as_ref() else { return false };
+        let by_match = self.songs_by_match;
+        self.library.order_tracks_by(|track| {
+            let (own, matched) = ranks.get(&track.filepath).copied().unwrap_or((u32::MAX, u32::MAX));
+            if by_match { matched } else { own }
+        })
     }
 
     /// The Genres list asked for another kind — the GUI's Tags · Generated
@@ -5793,6 +5904,7 @@ impl App {
         self.tab = Tab::Library;
         self.library_stack = Drill::new(LibraryNode::Root);
         self.library.trail.clear();
+        self.mood_undo = None;
         self.library_stack.enter(LibraryNode::Albums(self.albums_moods));
         self.library.set(entries::entries_from_library(LibraryData::Albums(albums)));
     }
@@ -6205,6 +6317,9 @@ impl App {
                 if !fresh {
                     return Vec::new();
                 }
+                if dest == Tab::Library {
+                    self.mood_undo = None;
+                }
                 // The grid's copy, kept whole — see the field's note.
                 if let (LibraryNode::Albums(moods), Tab::Library, LibraryData::Albums(albums)) =
                     (&node, dest, &data)
@@ -6231,7 +6346,32 @@ impl App {
                     }
                     _ => {}
                 }
+                // A filtered song list's places and matches, before the rows
+                // take its songs — see the field. Any other list has none.
+                if dest == Tab::Library {
+                    self.song_ranks = match &data {
+                        LibraryData::Songs(songs) => {
+                            let matches: Vec<Option<f64>> = songs.iter().map(|s| s.mood_match).collect();
+                            let by_match = crate::api::types::match_order(&matches);
+                            let mut ranks: HashMap<String, (u32, u32)> = songs
+                                .iter()
+                                .enumerate()
+                                .map(|(own, song)| (song.track.filepath.clone(), (own as u32, own as u32)))
+                                .collect();
+                            for (place, own) in by_match.into_iter().enumerate() {
+                                if let Some(rank) = ranks.get_mut(&songs[own].track.filepath) {
+                                    rank.1 = place as u32;
+                                }
+                            }
+                            Some(ranks)
+                        }
+                        _ => None,
+                    };
+                }
                 self.pane_for_mut(dest).set(entries_from_library(data));
+                if dest == Tab::Library && self.songs_by_match {
+                    self.reorder_songs();
+                }
                 self.message = None;
                 Vec::new()
             }
@@ -6507,6 +6647,10 @@ impl App {
                         self.files.state.select(Some(step.chosen));
                     }
                 }
+                // A mood re-ask this error answers will never land: the
+                // node goes back to the rows' own filter, so the strip names
+                // what they carry and Done asks again.
+                self.put_back_moods();
                 self.error(e);
                 Vec::new()
             }

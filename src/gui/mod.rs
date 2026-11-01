@@ -205,8 +205,9 @@ pub(crate) enum Act {
     LibBack,
     /// The Genres list's Tags · Generated · Both (clauses 25–29).
     GenreSource(crate::api::types::GenreSource),
-    /// The mood Filters (library-rooms clauses 30–33, discovery-page
-    /// clause 33): the word that opens the panel, and its choices.
+    /// The mood Filters (library-rooms clauses 30–36, discovery-page
+    /// clause 33): the opener and the strip's words, the modal's stops and
+    /// its `[ Done ]`, the strip's `[X]`.
     Mood(moods::MoodAct),
     /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
     /// radios, chips, the keyword field, the genre and server pickers —
@@ -428,11 +429,14 @@ enum NavId {
     LastPlayed,
     MostPlayed,
     /// The history-seeded Discover room (discovery-page contract, clause
-    /// 2): drawn third in TOOLS, last in the array — no digit, `G`.
+    /// 2): drawn third in TOOLS, late in the array — no digit, `G`.
     Discover,
+    /// The songs you rated (library-rooms contract, clause 37): drawn in
+    /// the LIBRARY group after Recent, last in the array — no digit.
+    Rated,
 }
 
-const NAV: [NavId; 13] = [
+const NAV: [NavId; 14] = [
     NavId::Files,
     NavId::Albums,
     NavId::Artists,
@@ -446,6 +450,7 @@ const NAV: [NavId; 13] = [
     NavId::LastPlayed,
     NavId::MostPlayed,
     NavId::Discover,
+    NavId::Rated,
 ];
 
 impl NavId {
@@ -464,6 +469,7 @@ impl NavId {
             NavId::LastPlayed => t!("gui.nav.last_played").to_string(),
             NavId::MostPlayed => t!("gui.nav.most_played").to_string(),
             NavId::Discover => t!("gui.nav.discover").to_string(),
+            NavId::Rated => t!("gui.nav.rated").to_string(),
         }
     }
 }
@@ -481,6 +487,7 @@ const DJ_NAV: usize = 9;
 const LAST_PLAYED_NAV: usize = 10;
 const MOST_PLAYED_NAV: usize = 11;
 const DISCOVER_NAV: usize = 12;
+const RATED_NAV: usize = 13;
 
 /// A class's slot in [`SEARCH_CLASSES`] — the chip order.
 fn class_idx(class: SearchClass) -> usize {
@@ -609,7 +616,7 @@ pub(crate) struct Gui {
     mini_cover: Option<cover::Slot>,
     /// The Discover room: its cursor, wheel, hanging lists and seeds modal.
     discover: discover::DiscoverUi,
-    /// The mood Filters of Albums and Artists, and whose panel is open.
+    /// The mood Filters' choices, a room each, and the open modal's draft.
     moods: moods::MoodRooms,
     /// The queue's highlighted row last drawn, so a new one is revealed.
     last_qsel: Option<usize>,
@@ -699,6 +706,9 @@ impl Gui {
         // `handle_action` (idempotent for effects that already had it).
         self.app.note_pending(&effects);
         self.pending.extend(effects);
+        // Every App call's batch comes through here: a mood ask the App
+        // just put back takes the room's choice back with it.
+        moods::follow_ask(self);
     }
 
     fn forward(&mut self, action: Action) {
@@ -989,10 +999,13 @@ impl Gui {
                 if i == DISCOVER_NAV && !discover::gate(&self.app) {
                     return false;
                 }
-                // A peer has no playlists to offer (contract clause 26), and
-                // no play counts of its guest's either (library-rooms clause
-                // 23): the rows are not drawn, and their digits are as dead.
-                if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV) && self.app.session.peer.is_some() {
+                // A peer has no playlists to offer (contract clause 26), no
+                // play counts of its guest's either (library-rooms clause
+                // 23), and no ratings (clause 37): the rows are not drawn,
+                // and their digits are as dead.
+                if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV | RATED_NAV)
+                    && self.app.session.peer.is_some()
+                {
                     return false;
                 }
                 // A filter describes the list it was typed against —
@@ -1012,9 +1025,9 @@ impl Gui {
                     self.albums.wall.stow();
                 }
                 self.active = i;
-                // The mood Filters' panel is hidden on every visit
-                // (library-rooms clause 32).
-                self.moods.open = None;
+                // The mood Filters' modal goes with any move to a room, its
+                // draft unapplied (library-rooms clause 32).
+                self.moods.draft = None;
                 // The keys are the room's now: the App's focus comes back
                 // to the browser (the queue panel's cursor stows), and the
                 // Files room seats its own pane — the other rooms seat
@@ -1067,8 +1080,9 @@ impl Gui {
                 if i == ALBUMS_NAV && self.app.connected {
                     // The cache serves only the filter it was asked under
                     // (library-rooms clause 31).
-                    if self.app.albums.is_none() || self.app.albums_moods != self.moods.albums {
-                        let node = crate::tui::worker::LibraryNode::Albums(self.moods.albums);
+                    let asked = moods::asked(self, ALBUMS_NAV);
+                    if self.app.albums.is_none() || self.app.albums_moods != asked {
+                        let node = crate::tui::worker::LibraryNode::Albums(asked);
                         let effects = self.app.open_library_node(node, true);
                         self.pend(effects);
                     } else if !self.app.on_albums_drill() {
@@ -1609,7 +1623,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // nothing of them lights or ripens a tooltip under it; the modals get it
     // back as they draw.
     let pointer = gui.ui.pointer;
-    let inert = gui.screen == Screen::Library && gui.active == DISCOVER_NAV && discover::modal_open(gui);
+    let inert = gui.screen == Screen::Library
+        && ((gui.active == DISCOVER_NAV && discover::modal_open(gui)) || moods::is_open(gui));
     if inert {
         gui.ui.pointer = None;
     }
@@ -1664,9 +1679,12 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
             match NAV[gui.active] {
                 NavId::Files => draw_files(frame, gui, content),
                 NavId::Albums => albums::draw(frame, gui, content),
-                NavId::Artists | NavId::Genres | NavId::Recent | NavId::LastPlayed | NavId::MostPlayed => {
-                    library::draw(frame, gui, content)
-                }
+                NavId::Artists
+                | NavId::Genres
+                | NavId::Recent
+                | NavId::Rated
+                | NavId::LastPlayed
+                | NavId::MostPlayed => library::draw(frame, gui, content),
                 NavId::Search => draw_search(frame, gui, content),
                 NavId::Settings => draw_settings(frame, gui, content),
                 NavId::Sonic => sonic::draw(frame, gui, content),
@@ -1749,6 +1767,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(torrent::tips(gui))
     } else if sonic::modal_open(gui) {
         std::borrow::Cow::from(sonic::tips(gui))
+    } else if moods::is_open(gui) {
+        std::borrow::Cow::from(moods::tips())
     } else if discover::modal_open(gui) && gui.screen == Screen::Library {
         std::borrow::Cow::from(discover::tips(gui))
     } else if playlists::modal_open(gui) {
@@ -1785,8 +1805,12 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
             // only what works without a row (the kit's list-cursor law).
             FILES_NAV if gui.files_view.held => t!("gui.tips.files"),
             FILES_NAV => t!("gui.tips.files_stowed"),
-            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV if gui.app.connected => {
-                library::tips(gui)
+            // A room that offers the mood Filters names `o` where the line
+            // has the cells (library-rooms clause 31).
+            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | RATED_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV
+                if gui.app.connected =>
+            {
+                moods::tips_tail(gui, library::tips(gui), usize::from(area.width.saturating_sub(1)))
             }
             ALBUMS_NAV if gui.app.connected => {
                 if matches!(
@@ -1795,7 +1819,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
                 ) {
                     albums::tracks_tips(gui)
                 } else {
-                    t!("gui.tips.albums")
+                    moods::tips_tail(gui, t!("gui.tips.albums"), usize::from(area.width.saturating_sub(1)))
                 }
             }
             SEARCH_NAV if gui.app.editing_query => t!("gui.tips.search_edit"),
@@ -1850,6 +1874,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
     discover::draw_modals(frame, gui, area);
+    moods::draw_modal(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
@@ -1954,17 +1979,20 @@ fn draw_capture_banner(frame: &mut Frame, gui: &mut Gui, at: Rect, text: &str) {
 }
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    // Files and Search at the top; the LIBRARY group's seven rooms; then
+    // Files and Search at the top; the LIBRARY group's eight rooms; then
     // the tools, the record's desktop-rail group: Auto DJ, the
-    // capability-gated sonic room, the Discover room. Fifteen rows — the
-    // TOOLS group took the old gap at 13 — so the column fits the 24-row
-    // minimum with the footer on and Settings alone on the last row
-    // (discovery-page clause 2).
-    put(frame, 1, 5, &t!("gui.nav.library"), dim());
-    put(frame, 1, 13, &t!("gui.nav.tools"), dim());
+    // capability-gated sonic room, the Discover room. Sixteen rows, to
+    // Discover's 17 (library-rooms clause 37). The 24-row minimum with the
+    // footer on puts Settings on that same row: there, and only there, the
+    // LIBRARY heading through Discover rise one row into the blank under
+    // Search, so Settings keeps the last row alone (discovery-page clause
+    // 2).
     let forward = forward_glyph();
     // The Settings row sits on the content's last row, above the bar.
     let set_y = content_rect(area.width, area.height, gui.queue_open, gui.footer()).bottom() - 1;
+    let lift = u16::from(set_y <= 17);
+    put(frame, 1, 5 - lift, &t!("gui.nav.library"), dim());
+    put(frame, 1, 14 - lift, &t!("gui.nav.tools"), dim());
     for (i, id) in NAV.iter().enumerate() {
         // The sonic room rides the ping's flag: absent is absent — no
         // placeholder row, and digit 9 goes dead with it (contract §1).
@@ -1976,20 +2004,25 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         if i == DISCOVER_NAV && !discover::gate(&gui.app) {
             continue;
         }
-        // A peer has no playlists, and no play counts for its guest
-        // (library-rooms clause 23): neither row is drawn.
-        if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV) && gui.app.session.peer.is_some() {
+        // A peer has no playlists, no play counts for its guest
+        // (library-rooms clause 23) and no ratings (clause 37): none of
+        // those rows is drawn.
+        if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV | RATED_NAV)
+            && gui.app.session.peer.is_some()
+        {
             continue;
         }
         let y = match i {
             FILES_NAV => 2,
             SEARCH_NAV => 3,
-            1..=5 => 5 + i as u16,
-            LAST_PLAYED_NAV => 11,
-            MOST_PLAYED_NAV => 12,
-            DJ_NAV => 14,
-            SONIC_NAV => 15,
-            DISCOVER_NAV => 16,
+            ALBUMS_NAV..=RECENT_NAV => 5 + i as u16 - lift,
+            RATED_NAV => 10 - lift,
+            PLAYLISTS_NAV => 11 - lift,
+            LAST_PLAYED_NAV => 12 - lift,
+            MOST_PLAYED_NAV => 13 - lift,
+            DJ_NAV => 15 - lift,
+            SONIC_NAV => 16 - lift,
+            DISCOVER_NAV => 17 - lift,
             _ => set_y,
         };
         let label = id.label();
@@ -2094,6 +2127,14 @@ fn bar_count(gui: &Gui, plain: String) -> String {
     } else {
         plain
     }
+}
+
+/// Where a right-hand item of a browse bar's line one starts: ending one
+/// cell in from the content's last — x62 at the queue's 47 cells, x95 at 80
+/// (browser-top-bar clause 1) — measured in cells, so a CJK count does not
+/// run a cell long.
+fn right_at(content: Rect, text: &str) -> u16 {
+    content.right().saturating_sub(1 + crate::kit::width(text) as u16)
 }
 
 /// The bar's back ◂ at (x, y). Returns how far the crumb moves over.
@@ -2218,8 +2259,8 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
 /// path, the honest count — line 2 the shared controls.
 fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let y = content.y;
-    let count = bar_count(gui, t!("gui.files.items", count = gui.app.files.counts().1).to_string());
-    let count_x = content.right().saturating_sub(count.chars().count() as u16);
+    let count = bar_count(gui, discover::plural("gui.files.items", gui.app.files.counts().1 as u64));
+    let count_x = right_at(content, &count);
     put(frame, count_x, y, &count, dim());
 
     let forward_glyph = forward_glyph();
@@ -2652,6 +2693,13 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if let Some(quit) = torrent::handle_key(gui, key) {
         return quit;
     }
+    // The mood Filters' modal owns the keyboard ahead of every room: the
+    // room beneath is inert (library-rooms clause 32).
+    if gui.screen == Screen::Library
+        && let Some(quit) = moods::handle_key(gui, key)
+    {
+        return quit;
+    }
     // The Now Playing screen has no rooms and no queue panel: the TUI's
     // view has its own queue tab, and the screen's keys are the view's.
     if gui.screen == Screen::NowPlaying {
@@ -2729,6 +2777,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             KeyCode::Char('p') => return gui.act(Act::BarPlay),
             KeyCode::Char('A') => return gui.act(Act::BarQueueAll),
             KeyCode::Char('S') => return gui.act(Act::BarShuffle),
+            // The mood Filters' modal, where the room offers it (library-
+            // rooms clause 31): no browse room binds `o`.
+            KeyCode::Char('o') if moods::offered_here(gui) => {
+                return gui.act(Act::Mood(moods::MoodAct::Open { key: true }));
+            }
             KeyCode::Esc if !gui.app.pane().filter.is_empty() => {
                 return gui.act(Act::BarClear);
             }
@@ -3526,7 +3579,7 @@ impl Gui {
             ALBUMS_NAV => {
                 matches!(self.app.library_node(), LibraryNode::Album { .. }).then_some(List::AlbumTracks)
             }
-            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV => {
+            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | RATED_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV => {
                 match self.app.library_node() {
                     LibraryNode::Album { .. } => Some(List::AlbumTracks),
                     LibraryNode::Artist(_) => None,
@@ -3563,8 +3616,10 @@ impl Gui {
         if self.screen != Screen::Library || !self.app.connected {
             return;
         }
+        // The mood Filters' draft was the old session's room's.
+        self.moods.draft = None;
         if self.app.session.peer.is_some()
-            && matches!(self.active, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV)
+            && matches!(self.active, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV | RATED_NAV)
         {
             self.act(Act::Nav(FILES_NAV));
             return;
@@ -3580,7 +3635,7 @@ impl Gui {
             library::open(self, root);
         } else if self.active == ALBUMS_NAV {
             self.albums.wall = albums::WallState::default();
-            let node = crate::tui::worker::LibraryNode::Albums(self.moods.albums);
+            let node = crate::tui::worker::LibraryNode::Albums(moods::asked(self, ALBUMS_NAV));
             let effects = self.app.open_library_node(node, true);
             self.pend(effects);
             // The Discover room's "Open on {server}": the album, once that
@@ -3620,6 +3675,7 @@ impl Gui {
             || dj::modal_open(self)
             || sonic::modal_open(self)
             || discover::modal_open(self)
+            || moods::is_open(self)
             || playlists::modal_open(self)
             || self.servers.modal_open()
             || self.torrent.modal_open()
@@ -3636,7 +3692,15 @@ impl Gui {
         self.screen == Screen::Library
             && matches!(
                 self.active,
-                FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV
+                FILES_NAV
+                    | ALBUMS_NAV
+                    | ARTISTS_NAV
+                    | GENRES_NAV
+                    | RECENT_NAV
+                    | RATED_NAV
+                    | PLAYLISTS_NAV
+                    | LAST_PLAYED_NAV
+                    | MOST_PLAYED_NAV
             )
     }
 
@@ -3712,9 +3776,12 @@ impl Gui {
             NavId::Dj => {
                 dj::wheel(self, delta);
             }
-            NavId::Artists | NavId::Genres | NavId::Recent | NavId::LastPlayed | NavId::MostPlayed => {
-                library::wheel(self, delta)
-            }
+            NavId::Artists
+            | NavId::Genres
+            | NavId::Recent
+            | NavId::Rated
+            | NavId::LastPlayed
+            | NavId::MostPlayed => library::wheel(self, delta),
             NavId::Discover => discover::wheel(self, delta),
         }
     }
@@ -4181,7 +4248,39 @@ mod tests {
     }
 
     #[test]
+    fn the_mood_modal_has_its_own_tips_line_and_a_room_that_offers_it_names_o() {
+        let _en = crate::setup::tests::in_locale("en");
+        use crate::api::types::MoodFilter;
+        use crate::tui::worker::{LibraryData, LibraryNode};
+        let mut gui = test_gui();
+        gui.app.connected = true;
+        gui.set_key_hints(true);
+        gui.act(Act::Nav(ARTISTS_NAV));
+        let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
+            node: LibraryNode::Artists(MoodFilter::NONE),
+            dest: Tab::Library,
+            data: LibraryData::Artists(vec!["ALM".into()]),
+        });
+        gui.pend(effects);
+        let rows = draw(&mut gui);
+        let tail = format!("· {}", t!("gui.tips.mood_key"));
+        assert!(!rows[29].contains(&tail), "no scores, no `o`: {:?}", rows[29]);
+        gui.app.capabilities.mood_filters = true;
+        let rows = draw(&mut gui);
+        assert!(rows[29].trim_end().ends_with(&tail), "the resting line names `o`: {:?}", rows[29]);
+        // While the filter's field takes the letters, `o` is one of them.
+        gui.act(Act::BarFilter);
+        assert!(!draw(&mut gui)[29].contains(&tail));
+        gui.forward(Action::Cancel);
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let rows = draw(&mut gui);
+        assert_eq!(rows[29].trim(), t!("gui.tips.moods"), "the modal's own line while it is up");
+    }
+
+    #[test]
     fn keyboard_hints_are_off_by_default_and_the_settings_row_brings_them_back() {
+        let _en = crate::setup::tests::in_locale("en");
         // This surface is the pointer's: no footer of keys and no key on a
         // tooltip until asked; the classic TUI is the keyboard's room.
         let mut gui = browsing_gui();
@@ -4208,6 +4307,7 @@ mod tests {
 
     #[test]
     fn the_queue_panel_shows_the_real_queue_headed_by_its_count() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.act(Act::PaneRow(List::Files, 2, RowVerb::Queue));
         gui.act(Act::PaneRow(List::Files, 3, RowVerb::Queue));
@@ -4264,6 +4364,7 @@ mod tests {
 
     #[test]
     fn search_flows_through_the_shared_app() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = searched_gui();
         assert_eq!(gui.app.query, "moon", "typed characters reached the App's box");
         assert!(
@@ -4296,6 +4397,7 @@ mod tests {
 
     #[test]
     fn the_focused_field_draws_a_caret_that_blinks_on_the_kits_clock() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = test_gui();
         gui.app.connected = true;
         // A fresh visit to Search opens the query box; a key touches the
@@ -4842,6 +4944,7 @@ mod tests {
 
     #[test]
     fn the_top_bar_has_a_visualizer_item_that_opens_the_window() {
+        let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         // The visualizer-window contract, entries 1–2: the item after the
         // tabs opens the window (a flag under test), lit while it is open,
@@ -4867,6 +4970,7 @@ mod tests {
 
     #[test]
     fn the_top_bar_items_stand_on_their_labels_cells_in_every_script() {
+        let _en = crate::setup::tests::in_locale("en");
         // A rect is the label's cells: Japanese and Chinese draw two a
         // character, and rects counted in characters left the Admin tab's
         // right half under the Visualizer item.
@@ -4974,6 +5078,7 @@ mod tests {
 
     #[test]
     fn the_stats_tab_hosts_the_stats_page_under_the_top_bar() {
+        let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         // The stats-screen contract: the page whole under the bar, the
         // page's keys, Esc and T the way back, q the player's quit.
@@ -5072,6 +5177,7 @@ mod tests {
 
     #[test]
     fn the_server_dropdown_takes_its_clicks_over_the_stats_page() {
+        let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
         // Stats-screen clause 5: the header's server menu owns the pointer
         // while it is open, over the page too — the page used to take the
@@ -5130,6 +5236,7 @@ mod tests {
 
     #[test]
     fn the_top_bar_has_the_library_and_stats_tabs_and_0_opens_now_playing() {
+        let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = browsing_gui();
         let rows = draw(&mut gui);
@@ -5290,6 +5397,7 @@ mod tests {
 
     #[test]
     fn no_server_is_said_in_words_not_a_blank_screen() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = test_gui();
         gui.demo = None;
         let all = draw(&mut gui).join("\n");
@@ -5441,6 +5549,7 @@ mod tests {
 
     #[test]
     fn a_small_window_is_the_mini_player_instead_of_breaking() {
+        let _en = crate::setup::tests::in_locale("en");
         // The mini-player contract: below the screens' size, the cover, the
         // transport in the bar's own frames, and a line asking for room.
         let mut gui = test_gui();
@@ -5554,6 +5663,7 @@ mod tests {
 
     #[test]
     fn the_bar_gates_its_verbs_on_playable_rows() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.queue_open = false;
         let text = draw(&mut gui).join("\n");
@@ -5584,6 +5694,7 @@ mod tests {
 
     #[test]
     fn the_filter_narrows_live_and_enter_keeps_it() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.queue_open = false;
         handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
@@ -5640,6 +5751,7 @@ mod tests {
 
     #[test]
     fn the_bar_back_walks_up_and_the_crumb_leads() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.queue_open = false;
         gui.app.path = "music".into();
@@ -5716,6 +5828,7 @@ mod tests {
 
     #[test]
     fn the_sonic_room_rides_the_pings_flag() {
+        let _en = crate::setup::tests::in_locale("en");
         // Without the capability the row is absent and its digit is dead —
         // and the rooms that don't come and go keep their digits.
         let mut gui = test_gui();
@@ -5734,6 +5847,7 @@ mod tests {
 
     #[test]
     fn the_setup_cards_offer_the_ways_in_and_build_waits_for_both() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         // At full width (queue folded) the methods sit inline on the card.
         gui.queue_open = false;
@@ -5763,6 +5877,7 @@ mod tests {
 
     #[test]
     fn the_results_wear_seed_tags_meters_and_the_verbs() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         gui.app.sonic.start = Some(track("lib/a.mp3", "A", 200.0));
         gui.app.sonic.end = Some(track("lib/b.mp3", "B", 210.0));
@@ -5785,6 +5900,7 @@ mod tests {
 
     #[test]
     fn the_failure_states_name_themselves_and_retry_where_it_helps() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         gui.app.sonic.start = Some(track("lib/a.mp3", "A", 200.0));
         gui.app.sonic.end = Some(track("lib/b.mp3", "B", 210.0));
@@ -5813,6 +5929,7 @@ mod tests {
 
     #[test]
     fn an_armed_pick_banners_the_browse_and_stows_the_queue_add() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = browsing_gui();
         gui.app.capabilities.discovery_path = true;
         gui.app.capture = Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start));
@@ -5903,6 +6020,7 @@ mod tests {
 
     #[test]
     fn the_menu_opens_from_a_chip_and_the_keyboard_walks_it() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         gui.act(Act::SonMenu(crate::tui::app::SonicSide::End));
         let text = draw(&mut gui).join("\n");
@@ -5984,6 +6102,7 @@ mod tests {
 
     #[test]
     fn the_save_prompt_rides_the_apps_line() {
+        let _en = crate::setup::tests::in_locale("en");
         let mut gui = sonic_gui();
         gui.app.sonic.start = Some(track("lib/a.mp3", "Departure", 200.0));
         gui.app.sonic.end = Some(track("lib/b.mp3", "Arrival", 210.0));

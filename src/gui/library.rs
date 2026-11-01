@@ -1,8 +1,8 @@
-//! The Library rooms — Artists, Genres, Recent (docs/ux-contracts/
+//! The Library rooms — Artists, Genres, Recent, Rated (docs/ux-contracts/
 //! library-rooms.md): the shared App's Library pane under the browse top
 //! bar, with the letter strip on the alphabetical lists, an artist opening
 //! as a wall of its albums (the Albums room's wall, generalized), and a
-//! genre or Recent listing tracks the drilled album's way.
+//! genre, Recent or Rated listing tracks the drilled album's way.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -17,7 +17,10 @@ use crate::tui::app::{Action, App, Entry, Tab};
 use crate::tui::worker::LibraryNode;
 
 use super::albums::{self, WallState};
-use super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RECENT_NAV, accent, bright_bold, put};
+use super::{
+    ARTISTS_NAV, Act, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RATED_NAV, RECENT_NAV, accent,
+    bright_bold, moods, put,
+};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -39,11 +42,12 @@ impl LibraryUi {
 /// The root node a nav row opens, when the row is one of ours.
 pub(crate) fn root_of(active: usize) -> Option<LibraryNode> {
     match active {
-        // The room's mood filter, and the Genres room's kind, are put in by
-        // [`open`].
+        // The rooms' mood filters, and the Genres room's kind, are put in
+        // by [`open`].
         ARTISTS_NAV => Some(LibraryNode::Artists(MoodFilter::NONE)),
         GENRES_NAV => Some(LibraryNode::Genres(GenreSource::default())),
-        RECENT_NAV => Some(LibraryNode::Recent),
+        RECENT_NAV => Some(LibraryNode::Recent(MoodFilter::NONE)),
+        RATED_NAV => Some(LibraryNode::Rated(MoodFilter::NONE)),
         LAST_PLAYED_NAV => Some(LibraryNode::RecentlyPlayed),
         MOST_PLAYED_NAV => Some(LibraryNode::MostPlayed),
         _ => None,
@@ -63,10 +67,19 @@ pub(crate) fn open(gui: &mut Gui, root: LibraryNode) {
     gui.library.view.stow();
     gui.library.wall = WallState::default();
     // The Genres room opens on the kind it was left on (clause 26), the
-    // Artists room under its mood filter (clause 31).
+    // Artists, Recent and Rated rooms under their mood filters where the
+    // server offers them (clause 30) — and a song list in its Sort's order.
     let root = match root {
         LibraryNode::Genres(_) => LibraryNode::Genres(remembered_source(gui)),
-        LibraryNode::Artists(_) => LibraryNode::Artists(gui.moods.artists),
+        LibraryNode::Artists(_) => LibraryNode::Artists(moods::asked(gui, ARTISTS_NAV)),
+        LibraryNode::Recent(_) => {
+            gui.app.songs_by_match = moods::by_match(gui, RECENT_NAV);
+            LibraryNode::Recent(moods::asked(gui, RECENT_NAV))
+        }
+        LibraryNode::Rated(_) => {
+            gui.app.songs_by_match = moods::by_match(gui, RATED_NAV);
+            LibraryNode::Rated(moods::asked(gui, RATED_NAV))
+        }
         other => other,
     };
     let effects = gui.app.open_library_node(root, true);
@@ -97,7 +110,12 @@ fn wall_view(gui: &Gui) -> bool {
 fn at_root(gui: &Gui) -> bool {
     matches!(
         gui.app.library_stack.here(),
-        LibraryNode::Artists(_) | LibraryNode::Genres(_) | LibraryNode::Recent | LibraryNode::RecentlyPlayed | LibraryNode::MostPlayed
+        LibraryNode::Artists(_)
+            | LibraryNode::Genres(_)
+            | LibraryNode::Recent(_)
+            | LibraryNode::Rated(_)
+            | LibraryNode::RecentlyPlayed
+            | LibraryNode::MostPlayed
     )
 }
 
@@ -231,35 +249,53 @@ fn source_label(source: GenreSource) -> std::borrow::Cow<'static, str> {
 
 fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let count_x = draw_heading(frame, gui, content);
-    let count = super::bar_count(gui, t!("gui.files.items", count = gui.app.library.counts().1).to_string());
-    let x = content.right().saturating_sub(count.chars().count() as u16).max(count_x);
-    put(frame, x, content.y, &count, dim());
-    super::draw_bar_controls(frame, gui, content, content.y + 1);
-    // The Genres switch at the controls line's right (clause 27); the
-    // Artists list's mood Filters there instead, and their panel under it
-    // (clauses 30–32): what follows stands below the panel.
-    draw_genre_switch(frame, gui, content, content.y + 1);
-    super::moods::draw_for_list(frame, gui, content);
-    let panel = super::moods::panel_height(gui, content.width);
-    let body = Rect { y: content.y + panel, height: content.height.saturating_sub(panel), ..content };
-
-    if gui.app.library.loading {
-        put(frame, content.x, body.y + 3, &t!("busy.listing"), accent());
-        return;
+    let count = super::bar_count(gui, super::discover::plural("gui.files.items", gui.app.library.counts().1 as u64));
+    put(frame, super::right_at(content, &count).max(count_x), content.y, &count, dim());
+    // The mood opener two cells after the room's name, a fixed column the
+    // count never moves (clause 31), wherever the room offers the filters —
+    // whatever the controls line holds.
+    if moods::offered_here(gui) {
+        let name = crate::kit::width(&super::NAV[gui.active].label()) as u16;
+        let w = crate::kit::width(&moods::opener_word(&rust_i18n::locale())) as u16;
+        moods::draw_opener(frame, gui, moods::opener_x(content, moods::OpenerAt::AfterName(name), w), content.y);
     }
+    super::draw_bar_controls(frame, gui, content, content.y + 1);
+    // The Genres switch at the controls line's right (clause 27).
+    draw_genre_switch(frame, gui, content, content.y + 1);
+    // The mood strip on the row under the controls (clause 35), before any
+    // wait or empty wording: the way back is always on screen.
+    let mooded = moods::strip_stands(gui);
+    moods::draw_strip(frame, gui, content, content.y + 2);
+
     let root = at_root(gui);
     let alpha = alphabetical(gui);
     let (skip, rows) = rows_of(&gui.app, root);
     if rows.is_empty() {
-        // An empty answer, or a filter that matched nothing (the bar
-        // contract's rule: the way back is one key).
-        let words = if gui.app.library.filter.is_empty() { t!("gui.lib.empty") } else { t!("gui.files.empty") };
-        put(frame, content.x, body.y + 3, &words, dim());
+        // The wait, while there are no rows to stand in for the answer — a
+        // mood's re-ask leaves its list's on screen until it lands (clause
+        // 34), the album's way.
+        if gui.app.library.loading {
+            put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
+            return;
+        }
+        // An empty answer, or a filter that matched nothing — the text
+        // filter or a mood's (the bar contract's rule: the way back is one
+        // key; clause 38).
+        let words = if gui.app.library.filter.is_empty() && !mooded {
+            t!("gui.lib.empty")
+        } else {
+            t!("gui.files.empty")
+        };
+        put(frame, content.x, content.y + 3, &words, dim());
         return;
     }
 
-    // The strip on an alphabetical list of 25 or more (clauses 10–12).
-    if alpha && rows.len() >= STRIP_MIN_ROWS {
+    // The strip on an alphabetical list of 25 or more (clauses 10–12) —
+    // under the mood strip where that stands, the list a row lower.
+    let lettered = alpha && rows.len() >= STRIP_MIN_ROWS;
+    let shift = u16::from(mooded && lettered);
+    let body = Rect { y: content.y + shift, height: content.height.saturating_sub(shift), ..content };
+    if lettered {
         // The narrowed list's letters (clause 11), by drawn position.
         let (present, first_of) = letter_index(rows.iter().map(Entry::label));
         let strip = Rect { x: content.x, y: body.y + 2, width: content.width, height: 1 };
@@ -428,11 +464,25 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Position;
 
-    use super::super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RECENT_NAV, RowVerb, render};
-    use crate::api::types::{Album, Genre, GenreList, GenreSource, GenreSources, MoodFilter, MoodScale, Track};
+    use super::super::{
+        ARTISTS_NAV, Act, FILES_NAV, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RATED_NAV, RECENT_NAV,
+        RowVerb, render,
+    };
+    use crate::api::types::{
+        Album, Genre, GenreList, GenreSource, GenreSources, MoodFilter, MoodLevel, MoodScale, MoodSong, MoodSort, Track,
+    };
     use crate::config::Config;
     use crate::tui::app::{App, Effect, Tab};
     use crate::tui::worker::{ApiCmd, Event, LibraryData, LibraryNode};
+
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
 
     fn session_gui() -> Gui {
         let mut gui = Gui::new(Config::default(), false, App::new(Some("http://host:3000".into()), None, None));
@@ -502,6 +552,7 @@ mod tests {
 
     #[test]
     fn each_room_opens_its_root_fresh_with_the_pane_and_no_play_verbs() {
+        let _en = english();
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
@@ -519,7 +570,7 @@ mod tests {
         gui.act(Act::Nav(GENRES_NAV));
         assert!(asked(&gui, &LibraryNode::Genres(GenreSource::Tag)), "tags, with no kind remembered");
         gui.act(Act::Nav(RECENT_NAV));
-        assert!(asked(&gui, &LibraryNode::Recent), "Recent asks on every visit");
+        assert!(asked(&gui, &LibraryNode::Recent(MoodFilter::NONE)), "Recent asks on every visit");
         gui.pending.clear();
         gui.act(Act::Nav(ARTISTS_NAV));
         assert!(matches!(gui.app.library_stack.here(), LibraryNode::Artists(_)), "a room restarts at its root");
@@ -534,6 +585,7 @@ mod tests {
 
     #[test]
     fn genres_show_their_counts_and_open_into_tracks_with_the_verbs() {
+        let _en = english();
         let mut gui = session_gui();
         gui.act(Act::Nav(GENRES_NAV));
         gui.pending.clear();
@@ -593,6 +645,7 @@ mod tests {
 
     #[test]
     fn the_genre_switch_sits_right_on_the_controls_line_and_the_filter_leads_it() {
+        let _en = english();
         let mut gui = genres_gui();
         let rows = draw(&mut gui);
         let all = rows.join("\n");
@@ -600,9 +653,9 @@ mod tests {
         let (heading, line) = (&rows[y - 1], &rows[y]);
         assert_eq!(col(line, "/ filter"), col(heading, "Genres"), "the filter leads the line, under the heading: {all}");
         assert_eq!(
-            col(line, "Both") + "Both".len() + 1,
+            col(line, "Both") + "Both".len(),
             col(heading, "items") + "items".len(),
-            "the switch ends where the bar's verbs do, a cell in from the count: {all}"
+            "the switch ends where the bar's verbs and the count do, a cell in from the content's last: {all}"
         );
         assert_eq!(hit_text(&gui, &rows, "Generated"), Some(Act::GenreSource(GenreSource::Model)));
         assert_eq!(hit_text(&gui, &rows, "/ filter"), Some(Act::BarFilter), "the filter still opens");
@@ -616,6 +669,7 @@ mod tests {
 
     #[test]
     fn a_kind_chosen_relists_in_place_is_remembered_and_rides_into_a_genres_songs() {
+        let _en = english();
         let mut gui = genres_gui();
         gui.act(Act::GenreSource(GenreSource::Model));
         assert!(asked(&gui, &LibraryNode::Genres(GenreSource::Model)), "the list is asked again");
@@ -654,6 +708,7 @@ mod tests {
 
     #[test]
     fn one_kind_or_a_server_without_the_filter_draws_no_switch() {
+        let _en = english();
         // Only generated genres here: the tags asked for came back as the
         // generated list, and there is nothing to choose between.
         let mut gui = session_gui();
@@ -685,6 +740,7 @@ mod tests {
 
     #[test]
     fn the_footer_names_the_keys_of_the_view_that_is_up() {
+        let _en = english();
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         // The footer is a setting on this surface, off by default.
         gui.config.gui.key_hints = true;
@@ -704,12 +760,13 @@ mod tests {
 
     #[test]
     fn recent_asks_the_limit_lists_the_tracks_and_wears_no_strip() {
+        let _en = english();
         let mut gui = session_gui();
         gui.act(Act::Nav(RECENT_NAV));
-        assert!(asked(&gui, &LibraryNode::Recent));
+        assert!(asked(&gui, &LibraryNode::Recent(MoodFilter::NONE)));
         gui.pending.clear();
         let tracks: Vec<Track> = (0..30).map(|i| track(&format!("r/{}{i:02}.mp3", (b'A' + (i % 26) as u8) as char), 100.0)).collect();
-        land(&mut gui, LibraryNode::Recent, LibraryData::Tracks(tracks));
+        land(&mut gui, LibraryNode::Recent(MoodFilter::NONE), LibraryData::Tracks(tracks));
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("30 items") && all.contains("▸ play"), "{all}");
@@ -719,6 +776,7 @@ mod tests {
 
     #[test]
     fn the_play_lists_ask_the_limit_list_tracks_like_recent_and_hide_for_a_peer() {
+        let _en = english();
         let mut gui = session_gui();
         gui.act(Act::Nav(LAST_PLAYED_NAV));
         assert!(asked(&gui, &LibraryNode::RecentlyPlayed), "asks on every visit");
@@ -747,8 +805,149 @@ mod tests {
         assert_eq!(gui.active, ARTISTS_NAV, "a hidden room's row goes nowhere");
     }
 
+    // ── Rated (clause 37) ─────────────────────────────────────────────────
+
+    #[test]
+    fn rated_sits_after_recent_and_lists_the_rated_songs() {
+        let _en = english();
+        let mut gui = session_gui();
+        let rows = draw_sized(&mut gui, 100, 30);
+        let nav = |y: usize| rows[y].chars().take(15).collect::<String>();
+        assert!(nav(9).contains("Recent") && nav(10).contains("Rated"), "{}", rows.join("\n"));
+        assert!(nav(11).contains("Playlists"), "{}", rows.join("\n"));
+        assert_eq!(hit_text(&gui, &rows, "Rated"), Some(Act::Nav(RATED_NAV)));
+
+        gui.act(Act::Nav(RATED_NAV));
+        assert!(asked(&gui, &LibraryNode::Rated(MoodFilter::NONE)), "no scores: the whole list");
+        gui.pending.clear();
+        let tracks: Vec<Track> = (0..3).map(|i| track(&format!("r/{i}.mp3"), 100.0)).collect();
+        land(&mut gui, LibraryNode::Rated(MoodFilter::NONE), LibraryData::Tracks(tracks));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("▸ Rated") && all.contains("3 items") && all.contains("▸ play"), "{all}");
+        assert!(!rows.iter().any(|r| r.contains("# A B C")), "highest first is not an alphabet: {all}");
+        assert_eq!(hit_text(&gui, &rows, "0.mp3"), Some(Act::PaneRow(List::Library, 1, RowVerb::Open)));
+
+        // Ratings change: every visit asks.
+        gui.act(Act::Nav(RECENT_NAV));
+        gui.pending.clear();
+        gui.act(Act::Nav(RATED_NAV));
+        assert!(asked(&gui, &LibraryNode::Rated(MoodFilter::NONE)), "asks again");
+    }
+
+    #[test]
+    fn rated_hides_for_a_peer_and_its_row_goes_nowhere() {
+        let _en = english();
+        let mut gui = session_gui();
+        gui.act(Act::Nav(RATED_NAV));
+        assert_eq!(gui.active, RATED_NAV);
+        // A peer's session: db/rated is off the federation allowlist.
+        gui.app.session.peer = Some(("http://host:3000".into(), 3));
+        gui.reopen_room();
+        assert_eq!(gui.active, FILES_NAV, "the room yields to Files");
+        let column: Vec<String> = draw(&mut gui).iter().map(|r| r.chars().take(15).collect()).collect();
+        let column = column.join("\n");
+        assert!(!column.contains("Rated") && column.contains("Recent"), "{column}");
+        gui.pending.clear();
+        gui.act(Act::Nav(RATED_NAV));
+        assert_eq!(gui.active, FILES_NAV, "a hidden room's row goes nowhere");
+        assert!(gui.pending.is_empty(), "and asks nothing: {:?}", gui.pending);
+    }
+
+    #[test]
+    fn recent_and_rated_ask_under_their_filter_only_where_offered() {
+        let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        let strict = relaxed.with_level(MoodLevel::Strict);
+        let mut gui = session_gui();
+        gui.moods.recent.filter = relaxed;
+        gui.moods.recent.sort = MoodSort::Match;
+        gui.moods.rated.filter = strict;
+
+        // No scores to filter by: the whole lists, the choices kept.
+        gui.act(Act::Nav(RECENT_NAV));
+        assert!(asked(&gui, &LibraryNode::Recent(MoodFilter::NONE)));
+        assert!(!gui.app.songs_by_match, "an unfiltered list has nothing to rank by");
+        gui.act(Act::Nav(RATED_NAV));
+        assert!(asked(&gui, &LibraryNode::Rated(MoodFilter::NONE)));
+        assert_eq!((gui.moods.recent.filter, gui.moods.rated.filter), (relaxed, strict));
+
+        // The ping says `moodFilters`: each under its own, in its order.
+        gui.app.capabilities.mood_filters = true;
+        gui.pending.clear();
+        gui.act(Act::Nav(RECENT_NAV));
+        assert!(asked(&gui, &LibraryNode::Recent(relaxed)));
+        assert!(gui.app.songs_by_match, "Recent lands best first");
+        gui.act(Act::Nav(RATED_NAV));
+        assert!(asked(&gui, &LibraryNode::Rated(strict)), "the level rides with the mood");
+        assert!(!gui.app.songs_by_match, "Rated keeps its own order");
+
+        // A peer's session, flag or not: never the stored filter.
+        gui.app.session.peer = Some(("http://host:3000".into(), 3));
+        gui.pending.clear();
+        gui.act(Act::Nav(RECENT_NAV));
+        assert!(asked(&gui, &LibraryNode::Recent(MoodFilter::NONE)), "{:?}", gui.pending);
+        assert!(!gui.app.songs_by_match);
+        assert_eq!(gui.moods.recent.filter, relaxed, "kept for the user's own server");
+    }
+
+    #[test]
+    fn a_choice_asks_once_where_the_wire_moved_reorders_in_hand_or_does_nothing() {
+        use super::super::moods::{Applied, RoomMoods, apply};
+        let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        let lists = |gui: &Gui| gui.pending.iter().filter(|e| matches!(e, Effect::Api(ApiCmd::Library { .. }))).count();
+        let order = |gui: &Gui| -> Vec<String> {
+            gui.app.library.entries.iter().skip(1).map(|e| e.label().trim_end_matches(".mp3").to_string()).collect()
+        };
+        let mut gui = session_gui();
+        gui.app.capabilities.mood_filters = true;
+        gui.act(Act::Nav(RATED_NAV));
+        let tracks: Vec<Track> =
+            ["Swing", "Host", "Civil Attack"].iter().map(|t| track(&format!("demo/{t}.mp3"), 1.0)).collect();
+        land(&mut gui, LibraryNode::Rated(MoodFilter::NONE), LibraryData::Tracks(tracks.clone()));
+        gui.pending.clear();
+
+        // A mood under Match: one ask, the rows standing until it lands in
+        // the Sort's order.
+        assert_eq!(apply(&mut gui, RATED_NAV, RoomMoods { filter: relaxed, sort: MoodSort::Match }), Applied::Asked);
+        assert_eq!(lists(&gui), 1);
+        assert!(asked(&gui, &LibraryNode::Rated(relaxed)));
+        assert_eq!(order(&gui), ["Swing", "Host", "Civil Attack"], "the old rows stand");
+        let matches = [Some(0.555), Some(0.865), Some(0.524)];
+        let songs: Vec<MoodSong> =
+            tracks.iter().zip(matches).map(|(track, mood_match)| MoodSong { track: track.clone(), mood_match }).collect();
+        land(&mut gui, LibraryNode::Rated(relaxed), LibraryData::Songs(songs));
+        assert_eq!(order(&gui), ["Host", "Swing", "Civil Attack"], "best first");
+
+        // The Sort alone: in hand, from the top, no request.
+        gui.pending.clear();
+        gui.library.view.scroll = 2;
+        assert_eq!(apply(&mut gui, RATED_NAV, RoomMoods { filter: relaxed, sort: MoodSort::Own }), Applied::Reordered);
+        assert!(gui.pending.is_empty(), "{:?}", gui.pending);
+        assert_eq!(order(&gui), ["Swing", "Host", "Civil Attack"]);
+        assert_eq!((gui.library.view.scroll, gui.library.view.held), (0, false));
+        // The same choice again: nothing.
+        assert_eq!(apply(&mut gui, RATED_NAV, RoomMoods { filter: relaxed, sort: MoodSort::Own }), Applied::Nothing);
+        assert!(gui.pending.is_empty());
+
+        // Every mood let go: one ask for the whole list. Then a level with
+        // no mood, or Match with nothing to rank by: nothing on screen,
+        // nothing asked — but kept for the first mood.
+        assert_eq!(apply(&mut gui, RATED_NAV, RoomMoods { filter: MoodFilter::NONE, sort: MoodSort::Own }), Applied::Asked);
+        assert!(asked(&gui, &LibraryNode::Rated(MoodFilter::NONE)));
+        gui.pending.clear();
+        let lone = MoodFilter::NONE.with_level(MoodLevel::Strict);
+        assert_eq!(apply(&mut gui, RATED_NAV, RoomMoods { filter: lone, sort: MoodSort::Match }), Applied::Nothing);
+        assert!(gui.pending.is_empty(), "{:?}", gui.pending);
+        assert_eq!(gui.app.library_node(), &LibraryNode::Rated(MoodFilter::NONE));
+        let strict = relaxed.with_level(MoodLevel::Strict);
+        assert_eq!(apply(&mut gui, RATED_NAV, RoomMoods { filter: strict, sort: MoodSort::Match }), Applied::Asked);
+        assert!(asked(&gui, &LibraryNode::Rated(strict)), "the level rides with the first mood");
+        assert!(gui.app.songs_by_match);
+    }
+
     #[test]
     fn an_artist_opens_a_wall_of_its_albums_and_a_card_opens_its_tracks() {
+        let _en = english();
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         let rows = draw(&mut gui);
         assert_eq!(hit_text(&gui, &rows, "Portishead"), Some(Act::PaneRow(List::Library, 2, RowVerb::Open)));
@@ -805,6 +1004,7 @@ mod tests {
 
     #[test]
     fn the_rows_past_a_hidden_way_out_keep_their_pane_indices() {
+        let _en = english();
         // A root's `..` is sliced off the front rather than filtered out of
         // a copy (performance audit #109): every drawn row still answers
         // with its own pane index, filtered or not.
@@ -840,7 +1040,7 @@ mod tests {
         let rows = draw(&mut gui);
         assert_eq!(hit_text(&gui, &rows, ".."), Some(Act::PaneRow(List::Library, 0, RowVerb::Open)));
         assert_eq!(hit_text(&gui, &rows, "a.mp3"), Some(Act::PaneRow(List::Library, 1, RowVerb::Open)));
-        assert!(rows.join("\n").contains("1 items") || rows.join("\n").contains("1 item"), "{}", rows.join("\n"));
+        assert!(rows.join("\n").contains("1 item ") && !rows.join("\n").contains("1 items"), "{}", rows.join("\n"));
     }
 
     /// Not a check, a measurement (performance audit #109): a frame of the
@@ -868,6 +1068,7 @@ mod tests {
 
     #[test]
     fn the_strip_shows_at_25_rows_dims_absent_letters_jumps_and_follows_the_filter() {
+        let _en = english();
         // Twenty-four names: no strip. A twenty-fifth: the strip.
         let letters: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
         let names: Vec<String> = (0..24).map(|i| format!("{}rtist {i:02}", letters[i])).collect();
@@ -911,90 +1112,384 @@ mod tests {
         let _ = all;
     }
 
-    // ── The mood Filters (clauses 30–32) ─────────────────────────────────
+    // ── The mood Filters (clauses 30–36) ─────────────────────────────────
 
-    #[test]
-    fn the_artists_filters_sit_right_on_the_controls_line_and_their_panel_pushes_the_list_down() {
-        use super::super::moods::{MoodAct, is_open};
-        let mut gui = artists_gui(&["ALM", "Boukmanflow", "Color Out"]);
-        let all = draw(&mut gui).join("\n");
-        assert!(!all.contains("filters"), "no scores to filter by, no Filters: {all}");
+    use super::super::moods::{MoodAct, MoodStop, is_open};
 
+    /// A song with its artist and title, as the boards' rows read.
+    fn song(artist: &str, title: &str, seconds: f64) -> Track {
+        let mut track = track(&format!("demo/{title}.mp3"), seconds);
+        track.metadata.artist = Some(artist.into());
+        track.metadata.title = Some(title.into());
+        track
+    }
+
+    /// The room at nav row `nav` with the queue open — the boards' 47
+    /// cells — on a server with scores to filter by, its list landed.
+    fn mood_room(nav: usize, data: LibraryData) -> Gui {
+        let mut gui = session_gui();
+        gui.queue_open = true;
         gui.app.capabilities.mood_filters = true;
-        let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        let y = rows.iter().position(|r| r.contains("filters ▾")).unwrap_or_else(|| panic!("{all}"));
-        let (heading, line) = (&rows[y - 1], &rows[y]);
-        assert_eq!(col(line, "/ filter"), col(heading, "Artists"), "the filter leads the line: {all}");
-        assert_eq!(
-            col(line, "filters ▾") + "filters ▾".chars().count() + 1,
-            col(heading, "items") + "items".len(),
-            "the control ends where the bar's verbs do, a cell in from the count: {all}"
-        );
-        let alm = rows.iter().position(|r| r.contains("ALM")).unwrap();
-        assert_eq!(hit_text(&gui, &rows, "filters"), Some(Act::Mood(MoodAct::Toggle)));
+        gui.act(Act::Nav(nav));
+        let node = gui.app.library_stack.here().clone();
+        gui.pending.clear();
+        land(&mut gui, node, data);
+        gui
+    }
 
-        gui.act(Act::Mood(MoodAct::Toggle));
-        let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        assert!(rows[y + 1].contains("Happy · Neutral · Sad"), "the panel under the line: {all}");
-        assert!(all.contains("Acoustic · Party · Danceable") && !all.contains("clear"), "{all}");
-        assert!(rows.iter().position(|r| r.contains("ALM")).unwrap() > alm, "the list below the panel: {all}");
-        assert_eq!(
-            hit_text(&gui, &rows, "Relaxed"),
-            Some(Act::Mood(MoodAct::Pick(MoodScale::Energy, "relaxed")))
-        );
+    fn board(gui: &mut Gui) -> Vec<String> {
+        draw_sized(gui, 100, 30)
+    }
 
-        // The filter's field takes the whole line; the panel stays.
-        gui.act(Act::BarFilter);
-        let all = draw(&mut gui).join("\n");
-        assert!(!all.contains("filters ▴") && all.contains("Happy · Neutral · Sad"), "{all}");
-        key(&mut gui, KeyCode::Esc);
+    fn draw_buffer(gui: &mut Gui) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, gui)).unwrap();
+        terminal.backend().buffer().clone()
+    }
 
-        // Another room, and back: hidden again.
-        gui.act(Act::Nav(RECENT_NAV));
-        gui.act(Act::Nav(ARTISTS_NAV));
-        assert!(!is_open(&gui));
+    fn x_of(row: &str, needle: &str) -> u16 {
+        let at = row.find(needle).unwrap_or_else(|| panic!("{needle:?} not in {row:?}"));
+        crate::kit::width(&row[..at]) as u16
+    }
+
+    fn lists(gui: &Gui) -> usize {
+        gui.pending.iter().filter(|e| matches!(e, Effect::Api(ApiCmd::Library { .. }))).count()
+    }
+
+    fn order(gui: &Gui) -> Vec<String> {
+        gui.app.library.entries.iter().skip(1).map(|e| e.label().to_string()).collect()
+    }
+
+    fn rated_songs() -> Vec<Track> {
+        vec![song("ALM", "Swing", 205.0), song("Color Out", "Host", 178.0), song("ALM", "Civil Attack", 271.0)]
     }
 
     #[test]
-    fn a_mood_chosen_relists_the_artists_in_place_and_a_filtered_list_always_asks() {
-        use super::super::moods::{MoodAct, is_open};
-        let mut gui = artists_gui(&["ALM", "Boukmanflow", "Color Out"]);
-        gui.app.capabilities.mood_filters = true;
-        gui.act(Act::Mood(MoodAct::Toggle));
-        gui.pending.clear();
+    fn the_artists_opener_stands_two_cells_after_the_name_and_the_count_ends_at_x62() {
+        let _en = english();
+        let mut gui = mood_room(ARTISTS_NAV, LibraryData::Artists(vec!["ALM".into(), "Color Out".into()]));
+        let rows = board(&mut gui);
+        let line = &rows[2];
+        assert_eq!((x_of(line, "Artists"), x_of(line, "mood")), (17, 26), "{line}");
+        assert_eq!(x_of(line, "2 items") + 7, 63, "the count ends at x62: {line}");
+        assert_eq!(gui.ui.hit(Position::new(26, 2)), Some(Act::Mood(MoodAct::Open { key: false })));
+        // The filter's field takes line two; the opener stays on line one.
+        gui.act(Act::BarFilter);
+        let rows = board(&mut gui);
+        assert_eq!(x_of(&rows[2], "mood"), 26);
+        // While the field takes the letters, `o` is one of them.
+        key(&mut gui, KeyCode::Char('o'));
+        assert!(!is_open(&gui) && gui.app.library.filter == "o", "{:?}", gui.app.library.filter);
+        key(&mut gui, KeyCode::Esc);
+        // Recent and Rated: two after their names, x25 and x24; Genres and a
+        // peer's lists have none, and every list's count ends at x62.
+        for (nav, x) in [(RECENT_NAV, 25), (RATED_NAV, 24)] {
+            let mut gui = mood_room(nav, LibraryData::Tracks(rated_songs()));
+            let rows = board(&mut gui);
+            assert_eq!(x_of(&rows[2], "mood"), x, "{}", rows[2]);
+            assert_eq!(x_of(&rows[2], "3 items") + 7, 63, "{}", rows[2]);
+        }
+        let mut gui = mood_room(GENRES_NAV, genre_list(GenreSource::Tag, &[("Techno", 2)]));
+        let rows = board(&mut gui);
+        assert!(!rows[2].contains("mood"), "{}", rows[2]);
+        assert_eq!(x_of(&rows[2], "1 item") + 6, 63, "one item reads its own form: {}", rows[2]);
+    }
 
+    #[test]
+    fn recent_opens_the_eleven_row_modal_with_newest_pressed_and_match_resting() {
+        let _en = english();
+        let mut gui = mood_room(RECENT_NAV, LibraryData::Tracks(rated_songs()));
+        board(&mut gui);
+        key(&mut gui, KeyCode::Char('o'));
+        let rows = board(&mut gui);
+        let all = rows.join("\n");
+        // r9–r19: the SORT row under the level.
+        assert_eq!((x_of(&rows[9], "╭─ Filters"), x_of(&rows[19], "╰")), (17, 17), "{all}");
+        assert_eq!(
+            (x_of(&rows[16], "SORT"), x_of(&rows[16], "(•) Newest"), x_of(&rows[16], "( ) Match")),
+            (19, 45, 67),
+            "{all}"
+        );
+        assert!(!all.contains("clear"), "{all}");
+        // Match rests: DIM, and its cells take no click.
+        let buffer = draw_buffer(&mut gui);
+        assert_eq!(buffer[(71, 16)].fg, crate::kit::theme::th().dim);
+        assert_eq!(gui.ui.hit(Position::new(72, 16)), Some(Act::Guard));
+        assert_eq!(gui.ui.hit(Position::new(50, 16)), Some(Act::Mood(MoodAct::Press(MoodStop::Sort(MoodSort::Own)))));
+        // A mood wakes it, and `clear` comes.
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Pick(MoodScale::Energy, "relaxed"))));
+        let rows = board(&mut gui);
+        assert!(rows[11].contains("(•) Relaxed") && rows[18].contains("clear"), "{}", rows.join("\n"));
+        assert_eq!(gui.ui.hit(Position::new(72, 16)), Some(Act::Mood(MoodAct::Press(MoodStop::Sort(MoodSort::Match)))));
+    }
+
+    #[test]
+    fn rated_under_match_lands_best_first_and_a_sort_alone_reorders_without_asking() {
+        let _en = english();
+        let mut gui = mood_room(RATED_NAV, LibraryData::Tracks(rated_songs()));
+        board(&mut gui);
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Pick(MoodScale::Energy, "relaxed"))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Sort(MoodSort::Match))));
+        let rows = board(&mut gui);
+        assert!(rows[16].contains("( ) Rating") && rows[16].contains("(•) Match"), "{}", rows.join("\n"));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Done)));
         let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
-        gui.act(Act::Mood(MoodAct::Pick(MoodScale::Energy, "relaxed")));
-        assert!(asked(&gui, &LibraryNode::Artists(relaxed)), "asked again under the filter");
-        assert_eq!(gui.app.library_stack.here(), &LibraryNode::Artists(relaxed), "in place");
+        assert_eq!(lists(&gui), 1);
+        assert!(asked(&gui, &LibraryNode::Rated(relaxed)));
+        let songs: Vec<MoodSong> = rated_songs()
+            .into_iter()
+            .zip([Some(0.555), Some(0.865), Some(0.524)])
+            .map(|(track, mood_match)| MoodSong { track, mood_match })
+            .collect();
+        land(&mut gui, LibraryNode::Rated(relaxed), LibraryData::Songs(songs));
+        assert_eq!(order(&gui), ["Color Out - Host", "ALM - Swing", "ALM - Civil Attack"]);
+        let rows = board(&mut gui);
+        let all = rows.join("\n");
+        assert_eq!(x_of(&rows[4], "Relaxed [X]"), 17, "{all}");
+        assert!(rows[5].contains("Color Out - Host"), "the rows from r5: {all}");
+        // The Sort alone: re-ordered in hand, nothing asked.
+        gui.pending.clear();
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Sort(MoodSort::Own))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Done)));
+        assert_eq!(lists(&gui), 0, "{:?}", gui.pending);
+        assert_eq!(order(&gui), ["ALM - Swing", "Color Out - Host", "ALM - Civil Attack"]);
+    }
+
+    #[test]
+    fn a_mood_ask_leaves_the_rows_on_screen_and_a_failed_one_puts_the_choice_back() {
+        let _en = english();
+        let mut gui = mood_room(RATED_NAV, LibraryData::Tracks(rated_songs()));
+        board(&mut gui);
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Pick(MoodScale::Energy, "relaxed"))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Level(MoodLevel::Strict))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Sort(MoodSort::Match))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Done)));
+        let strict = MoodFilter::NONE.press(MoodScale::Energy, "relaxed").with_level(MoodLevel::Strict);
+        assert!(asked(&gui, &LibraryNode::Rated(strict)) && gui.app.library.loading);
+        // While it is out the strip names it and the rows stand, drawn: the
+        // verbs on line two act on the rows on screen.
+        let rows = board(&mut gui);
+        let all = rows.join("\n");
+        assert_eq!(x_of(&rows[4], "Relaxed · Strict [X]"), 17, "{all}");
+        assert!(rows[5].contains("ALM - Swing") && !all.contains(&*rust_i18n::t!("busy.listing")), "{all}");
+        assert!(rows[3].contains("play"), "{all}");
+        // The ask fails (a server before #1099 refuses the threshold): the
+        // list and the choice go back to what the rows carry, and the strip
+        // with them.
+        let effects = gui.app.apply_event(Event::Error("\"threshold\" is not allowed".into()));
+        gui.pend(effects);
+        assert_eq!(gui.app.library_stack.here(), &LibraryNode::Rated(MoodFilter::NONE));
+        assert_eq!((gui.moods.rated.filter, gui.moods.rated.sort), (MoodFilter::NONE, MoodSort::Own));
+        assert!(!gui.app.songs_by_match);
+        let rows = board(&mut gui);
+        assert!(!rows[4].contains("[X]") && rows[5].contains("ALM - Swing"), "{}", rows.join("\n"));
+        // Done with the same choice asks again, and its answer keeps it.
+        gui.pending.clear();
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Pick(MoodScale::Energy, "relaxed"))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Level(MoodLevel::Strict))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Done)));
+        assert_eq!(lists(&gui), 1);
+        assert!(asked(&gui, &LibraryNode::Rated(strict)));
+        let songs = rated_songs().into_iter().map(|track| MoodSong { track, mood_match: Some(0.8) }).collect();
+        land(&mut gui, LibraryNode::Rated(strict), LibraryData::Songs(songs));
+        assert_eq!(gui.moods.rated.filter, strict);
+        assert!(board(&mut gui)[4].contains("Relaxed · Strict [X]"));
+    }
+
+    #[test]
+    fn a_drill_from_the_rows_a_mood_ask_left_standing_comes_back_to_them_under_their_filter() {
+        let _en = english();
+        let mut gui = mood_room(ARTISTS_NAV, LibraryData::Artists(vec!["ALM".into(), "Color Out".into()]));
+        let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        let set = super::super::moods::RoomMoods { filter: relaxed, sort: MoodSort::Own };
+        let _ = super::super::moods::apply(&mut gui, ARTISTS_NAV, set);
+        let rows = board(&mut gui);
+        assert!(rows[4].contains("Relaxed [X]"), "{}", rows.join("\n"));
+        assert_eq!(hit_text(&gui, &rows, "Color Out"), Some(Act::PaneRow(List::Library, 2, RowVerb::Open)));
+        gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));
+        assert!(asked(&gui, &LibraryNode::Artist("Color Out".into())));
+        assert_eq!(gui.app.library_stack.parent(), Some(&LibraryNode::Artists(MoodFilter::NONE)));
+        assert!(gui.moods.artists.filter.is_empty(), "the choice the rows carry");
+        // The filtered answer, late, is dropped; Back finds the whole list.
+        land(&mut gui, LibraryNode::Artists(relaxed), LibraryData::Artists(vec!["ALM".into()]));
+        let host = vec![album(Some("Host"), "Color Out", None)];
+        land(&mut gui, LibraryNode::Artist("Color Out".into()), LibraryData::Albums(host));
+        gui.act(Act::LibBack);
+        let rows = board(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("ALM") && all.contains("Color Out") && all.contains("2 items"), "{all}");
+        assert!(!rows[4].contains("[X]"), "{all}");
+    }
+
+    #[test]
+    fn hover_brightens_a_label_and_keeps_its_glyphs_colour() {
+        let mut gui = mood_room(RATED_NAV, LibraryData::Tracks(rated_songs()));
+        board(&mut gui);
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Pick(MoodScale::Energy, "relaxed"))));
+        // The pointer on Relaxed (r11): the word BRIGHT, the glyph still OK.
+        gui.ui.pointer = Some(Position::new(25, 11));
+        let buffer = draw_buffer(&mut gui);
+        let th = crate::kit::theme::th();
+        assert_eq!(buffer[(20, 11)].fg, th.ok, "the glyph keeps its state");
+        assert_eq!(buffer[(23, 11)].fg, th.bright, "the word lights");
+        // Under the hand the word is ACCENT, and the hand wins over the pointer.
+        if let Some(draft) = gui.moods.draft.as_mut() {
+            draft.shown = true;
+        }
+        let buffer = draw_buffer(&mut gui);
+        assert_eq!((buffer[(20, 11)].fg, buffer[(23, 11)].fg), (th.ok, th.accent));
+    }
+
+    #[test]
+    fn a_click_presses_and_stows_the_hand_and_the_first_arrow_only_shows_it() {
+        let mut gui = mood_room(RECENT_NAV, LibraryData::Tracks(rated_songs()));
+        board(&mut gui);
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        let tag = MoodStop::Tag("party");
+        gui.act(Act::Mood(MoodAct::Press(tag)));
+        let draft = gui.moods.draft.unwrap();
+        assert_eq!((draft.hand, draft.shown, draft.moods.filter.has_tag("party")), (tag, false, true));
+        // The first arrow shows the hand where the click left it; the next
+        // walks.
+        key(&mut gui, KeyCode::Right);
+        let draft = gui.moods.draft.unwrap();
+        assert_eq!((draft.hand, draft.shown), (tag, true));
+        key(&mut gui, KeyCode::Right);
+        assert_eq!(gui.moods.draft.unwrap().hand, MoodStop::Tag("danceable"));
+        // Space presses the held stop; a stowed hand is only shown by it.
+        key(&mut gui, KeyCode::Char(' '));
+        assert!(gui.moods.draft.unwrap().moods.filter.has_tag("danceable"));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Level(MoodLevel::Strict))));
+        key(&mut gui, KeyCode::Char(' '));
+        let draft = gui.moods.draft.unwrap();
+        assert_eq!((draft.shown, draft.moods.filter.level()), (true, MoodLevel::Strict));
+        // Enter is Done from anywhere.
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        assert!(!is_open(&gui));
+        let wire = MoodFilter::NONE.toggle_tag("party").toggle_tag("danceable").with_level(MoodLevel::Strict);
+        assert!(asked(&gui, &LibraryNode::Recent(wire)), "{:?}", gui.pending);
+    }
+
+    #[test]
+    fn clear_lets_the_moods_go_puts_the_level_on_standard_keeps_the_sort_and_moves_the_hand_to_done() {
+        let _en = english();
+        let mut gui = mood_room(RATED_NAV, LibraryData::Tracks(rated_songs()));
+        let set = MoodFilter::NONE.press(MoodScale::Energy, "relaxed").with_level(MoodLevel::Loose);
+        let _ = super::super::moods::apply(&mut gui, RATED_NAV, super::super::moods::RoomMoods { filter: set, sort: MoodSort::Match });
+        let songs = rated_songs().into_iter().map(|track| MoodSong { track, mood_match: Some(0.5) }).collect();
+        land(&mut gui, LibraryNode::Rated(set), LibraryData::Songs(songs));
+        let rows = board(&mut gui);
+        assert_eq!(x_of(&rows[4], "Relaxed · Loose [X]"), 17, "{}", rows.join("\n"));
+        key(&mut gui, KeyCode::Char('o'));
+        // Shift-Tab from the first stop wraps to Done, then ← is clear.
+        key(&mut gui, KeyCode::BackTab);
+        assert_eq!(gui.moods.draft.unwrap().hand, MoodStop::Done);
+        key(&mut gui, KeyCode::Left);
+        assert_eq!(gui.moods.draft.unwrap().hand, MoodStop::Clear);
+        let rows = board(&mut gui);
+        assert!(rows[18].contains("clear   [ Done ]"), "{}", rows.join("\n"));
+        // Enter on a shown clear presses it: the modal stays, the hand on Done.
+        key(&mut gui, KeyCode::Enter);
+        let draft = gui.moods.draft.unwrap();
         assert!(is_open(&gui));
-        // The whole list landing late fills nothing.
-        land(&mut gui, LibraryNode::Artists(MoodFilter::NONE), LibraryData::Artists(vec!["Old".into()]));
-        assert!(!draw(&mut gui).join("\n").contains("Old"));
-        land(&mut gui, LibraryNode::Artists(relaxed), LibraryData::Artists(vec!["ALM".into()]));
-        let all = draw(&mut gui).join("\n");
-        assert!(all.contains("ALM") && !all.contains("Boukmanflow"), "{all}");
-        assert!(all.contains("filters ● ▴") && all.contains("clear"), "{all}");
-        assert_eq!(gui.app.artists.as_ref().map(Vec::len), Some(3), "the session keeps the whole list only");
+        assert_eq!((draft.moods.filter, draft.moods.sort, draft.hand), (MoodFilter::NONE, MoodSort::Match, MoodStop::Done));
+        let rows = board(&mut gui);
+        assert!(!rows[18].contains("clear") && rows[16].contains("(•) Rating"), "{}", rows.join("\n"));
+        // Done: the whole list asked, the Sort kept for the next mood.
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Enter);
+        assert!(asked(&gui, &LibraryNode::Rated(MoodFilter::NONE)));
+        assert_eq!(gui.moods.rated.sort, MoodSort::Match);
+        assert!(!board(&mut gui)[4].contains("[X]"));
+    }
 
-        // Back in the room: the filtered list is asked for again.
-        gui.act(Act::Nav(RECENT_NAV));
-        gui.pending.clear();
-        gui.act(Act::Nav(ARTISTS_NAV));
-        assert!(asked(&gui, &LibraryNode::Artists(relaxed)));
-        land(&mut gui, LibraryNode::Artists(relaxed), LibraryData::Artists(vec!["ALM".into()]));
+    #[test]
+    fn a_peer_or_a_server_without_scores_gets_no_opener_no_strip_and_no_key() {
+        let mut gui = mood_room(ARTISTS_NAV, LibraryData::Artists(vec!["ALM".into()]));
+        gui.moods.artists.filter = MoodFilter::NONE.press(MoodScale::Valence, "happy");
+        gui.app.capabilities.mood_filters = false;
+        let rows = board(&mut gui);
+        assert!(!rows[2].contains("mood") && !rows[4].contains("[X]"), "{}", rows.join("\n"));
+        key(&mut gui, KeyCode::Char('o'));
+        assert!(!is_open(&gui));
+        assert_eq!(gui.moods.artists.filter.value_of(MoodScale::Valence), Some("happy"), "the choice kept");
+    }
 
-        // Clear lets every group go, and the whole list comes back.
-        gui.act(Act::Mood(MoodAct::Toggle));
-        gui.pending.clear();
-        gui.act(Act::Mood(MoodAct::Clear));
-        assert!(asked(&gui, &LibraryNode::Artists(MoodFilter::NONE)));
-        assert!(gui.moods.artists.is_empty());
-        // A choice that changes nothing asks nothing.
-        gui.pending.clear();
-        gui.act(Act::Mood(MoodAct::Clear));
-        assert!(gui.pending.is_empty(), "{:?}", gui.pending);
+    /// Every scale and every tag set, and a level: the longest strip.
+    fn everything() -> MoodFilter {
+        MoodFilter::NONE
+            .press(MoodScale::Valence, "happy")
+            .press(MoodScale::Energy, "aggressive")
+            .press(MoodScale::Voice, "instrumental")
+            .toggle_tag("acoustic")
+            .toggle_tag("party")
+            .toggle_tag("danceable")
+            .with_level(MoodLevel::Loose)
+    }
+
+    #[test]
+    fn at_80_cells_the_opener_stays_after_the_name_and_the_line_ends_at_x95() {
+        let _en = english();
+        // The queue folded: the room's 80 cells, x17–x96.
+        let mut gui = mood_room(ARTISTS_NAV, LibraryData::Artists(vec!["ALM".into(), "Color Out".into()]));
+        gui.queue_open = false;
+        let rows = board(&mut gui);
+        assert_eq!((x_of(&rows[2], "Artists"), x_of(&rows[2], "mood")), (17, 26), "{}", rows[2]);
+        assert_eq!(x_of(&rows[2], "2 items") + 7, 96, "the count ends at x95: {}", rows[2]);
+
+        let mut gui = mood_room(RATED_NAV, LibraryData::Tracks(rated_songs()));
+        gui.queue_open = false;
+        let set = super::super::moods::RoomMoods { filter: everything(), sort: MoodSort::Own };
+        let _ = super::super::moods::apply(&mut gui, RATED_NAV, set);
+        let songs = rated_songs().into_iter().map(|track| MoodSong { track, mood_match: Some(0.5) }).collect();
+        land(&mut gui, LibraryNode::Rated(everything()), LibraryData::Songs(songs));
+        let rows = board(&mut gui);
+        let all = rows.join("\n");
+        assert_eq!(x_of(&rows[2], "mood"), 24, "{all}");
+        assert_eq!(x_of(&rows[2], "3 items") + 7, 96, "{all}");
+        // The verbs end where the count does; the strip by x95, [X] kept.
+        assert!(rows[3].trim_end().ends_with("shuffle") && rows[3].trim_end().chars().count() == 96, "{all}");
+        assert_eq!(x_of(&rows[4], "Happy · Aggressive"), 17, "{all}");
+        assert!(x_of(&rows[4], "[X]") + 2 <= 95, "{all}");
+
+        // The eleven-row modal centred in the room, x24–x89, r9–r19, the
+        // room's x17–x96 blank beside it on its rows.
+        key(&mut gui, KeyCode::Char('o'));
+        let rows = board(&mut gui);
+        let all = rows.join("\n");
+        assert_eq!((x_of(&rows[9], "╭─ Filters"), x_of(&rows[9], "╮")), (24, 89), "{all}");
+        assert_eq!((x_of(&rows[19], "╰"), x_of(&rows[19], "╯")), (24, 89), "{all}");
+        for (r, row) in rows.iter().enumerate().take(20).skip(9) {
+            let beside = |from: usize, to: usize| row.chars().skip(from).take(to - from).collect::<String>();
+            assert!(beside(17, 24).trim().is_empty() && beside(90, 97).trim().is_empty(), "r{r}: {all}");
+        }
+        assert_eq!(x_of(&rows[16], "SORT"), 26, "{all}");
+    }
+
+    #[test]
+    fn at_the_24_row_floor_the_modal_sits_clear_of_the_bar_and_the_nav_keeps_rated() {
+        let _en = english();
+        // 100×24 with key hints on: the content's last row is r17.
+        let mut gui = mood_room(RECENT_NAV, LibraryData::Tracks(rated_songs()));
+        gui.set_key_hints(true);
+        key(&mut gui, KeyCode::Char('o'));
+        let rows = draw_sized(&mut gui, 100, 24);
+        let all = rows.join("\n");
+        assert_eq!((x_of(&rows[6], "╭─ Filters"), x_of(&rows[16], "╰")), (17, 17), "r6–r16: {all}");
+        assert!(!rows[17].contains('╰') && !rows[5].contains('╭'), "{all}");
+        let bar = super::super::bar::top(ratatui::layout::Rect::new(0, 0, 100, 24), true);
+        assert!(16 < bar, "the bar from r{bar}: {all}");
+        // The modal's own tips line while it is up.
+        assert_eq!(rows[23].trim(), rust_i18n::t!("gui.tips.moods"), "{all}");
+        // The nav risen a row into the blank under Search: Rated at r9,
+        // Settings alone on r17.
+        assert_eq!(x_of(&rows[9], "Rated"), 3, "{all}");
+        assert_eq!(x_of(&rows[17], "Settings"), 3, "{all}");
     }
 }

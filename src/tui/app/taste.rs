@@ -546,8 +546,9 @@ impl App {
             // Both halves, where the server's taste route takes the key: the
             // connected servers filter too, and their rows that cannot are
             // dropped by the server (clause 33).
+            // Its wire form: a level picked with no mood asks nothing.
             moods: (self.capabilities.taste_moods() && !self.taste.moods.is_empty())
-                .then_some(self.taste.moods),
+                .then_some(self.taste.moods.wire()),
         };
         match part {
             TastePart::Main => {

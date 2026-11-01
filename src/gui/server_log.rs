@@ -2216,6 +2216,7 @@ mod tests {
 
     #[test]
     fn the_header_follows_in_the_ok_colour_or_pauses_dim() {
+        let _en = english();
         let mut log = LogUi::new(None).utc();
         log.model.take(infos(1, 20));
         let mut ui = Surface::new();
@@ -2430,6 +2431,7 @@ mod tests {
 
     #[test]
     fn the_bars_endcaps_step_a_line_and_repeat_while_held() {
+        let _en = english();
         let mut log = LogUi::new(None).utc();
         log.model.take(infos(1, 60));
         let mut ui = Surface::new();
@@ -2533,6 +2535,7 @@ mod tests {
 
     #[test]
     fn capacity_zero_waiting_empty_and_failures_are_one_sentence() {
+        let _en = english();
         let mut ui = Surface::new();
         let area = Rect::new(0, 0, 80, 5);
         let sentence = |log: &mut LogUi, ui: &mut Surface<LogAct>| {
@@ -2570,6 +2573,7 @@ mod tests {
 
     #[test]
     fn a_gate_stops_the_poll_and_says_the_hubs_sentence() {
+        let _en = english();
         for (e, gated) in [
             (ApiError::Unauthorized, true),
             (ApiError::Forbidden("admin only".into()), true),

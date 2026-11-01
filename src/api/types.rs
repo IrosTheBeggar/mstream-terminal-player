@@ -2496,6 +2496,13 @@ mod tests {
         // The taste body names the filter only when one is set.
         let body = TasteRequest { moods: Some(MoodFilter::NONE.press(MoodScale::Voice, "vocals")), ..TasteRequest::default() };
         assert_eq!(serde_json::to_value(&body).unwrap(), serde_json::json!({ "moods": { "voice": "vocals" } }));
+        // The level's bar rides inside `moods` (mStream #1099).
+        let loose = MoodFilter::NONE.press(MoodScale::Voice, "vocals").with_level(MoodLevel::Loose);
+        let body = TasteRequest { moods: Some(loose), ..TasteRequest::default() };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({ "moods": { "voice": "vocals", "threshold": 0.3 } })
+        );
     }
 
     #[test]

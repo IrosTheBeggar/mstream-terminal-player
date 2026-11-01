@@ -4,6 +4,15 @@
 use super::*;
 use crate::api::types::{DirEntry, FileEntry, FileMetadata, GenreList, GenreSources, SearchResults, TrackMetadata};
 
+/// English words under assertion: the locale lock, and English pinned —
+/// the locale is process-wide, and the tests that switch it hold the
+/// lock while they draw in another language.
+fn english() -> std::sync::MutexGuard<'static, ()> {
+    let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    rust_i18n::set_locale("en");
+    guard
+}
+
 fn track(path: &str) -> Track {
     Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
 }
@@ -2467,6 +2476,7 @@ fn a_held_row_keeps_its_restored_spot_for_when_the_tunnel_comes_up() {
 
 #[test]
 fn a_refused_tunnel_skips_the_held_row_with_a_word_and_an_unanswered_one_keeps_waiting() {
+    let _en = english();
     let mut app = connected_app();
     app.servers.push(faraway());
     app.queue.push(at(FARAWAY, "music/far.mp3"));
@@ -3741,6 +3751,13 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
         })
         .collect();
     assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added", "Playlists", "Recently Played", "Most Played"]);
+    // Recent unfiltered, and no Rated row: the mood filters and that room
+    // are the GUI's (library-rooms clauses 30 and 33).
+    assert!(app.library.entries.iter().any(|e| matches!(
+        e,
+        Entry::Node { node: LibraryNode::Recent(moods), .. } if *moods == crate::api::types::MoodFilter::NONE
+    )));
+    assert!(!app.library.entries.iter().any(|e| matches!(e, Entry::Node { node: LibraryNode::Rated(_), .. })));
 }
 
 #[test]
@@ -3950,7 +3967,7 @@ fn a_genre_list_of_one_kind_asks_its_songs_with_that_kind_and_switches_in_place(
     assert!(matches!(&app.library.entries[1], Entry::Node { node: LibraryNode::Genre(_, GenreSource::Tag), .. }));
 
     // Anywhere else, the switch does nothing.
-    let _ = app.open_library_node(LibraryNode::Recent, true);
+    let _ = app.open_library_node(LibraryNode::Recent(crate::api::types::MoodFilter::NONE), true);
     assert!(app.switch_genre_source(GenreSource::Both).is_empty());
 }
 
@@ -3986,15 +4003,192 @@ fn albums_without_an_artist_still_resolve() {
 fn recently_added_lists_tracks_directly() {
     let mut app = connected_app();
     app.library_stack.restart();
-    app.library_stack.enter(LibraryNode::Recent);
+    app.library_stack.enter(LibraryNode::Recent(crate::api::types::MoodFilter::NONE));
     app.apply_event(Event::Library {
         generation: app.session_gen(),
         dest: Tab::Library,
-        node: LibraryNode::Recent,
+        node: LibraryNode::Recent(crate::api::types::MoodFilter::NONE),
         data: LibraryData::Tracks(vec![track("testlib/new.mp3")]),
     });
     assert_eq!(app.library.entries.len(), 2); // ".." + the track
     assert!(matches!(app.library.entries[1], Entry::Track { .. }));
+}
+
+/// A filtered song list's answer: each song with its match.
+fn mood_songs(rows: &[(&str, Option<f64>)]) -> Vec<crate::api::types::MoodSong> {
+    rows.iter().map(|(path, at)| crate::api::types::MoodSong { track: track(path), mood_match: *at }).collect()
+}
+
+/// Swing, Host and Civil Attack, in the server's order, as the demo
+/// library's relaxed songs score them.
+fn demo_songs() -> Vec<crate::api::types::MoodSong> {
+    mood_songs(&[
+        ("demo/Swing.mp3", Some(0.555)),
+        ("demo/Host.mp3", Some(0.865)),
+        ("demo/Civil Attack.mp3", Some(0.524)),
+    ])
+}
+
+/// The pane's track rows by file name, in their order on screen.
+fn song_rows(pane: &Pane) -> Vec<String> {
+    pane.entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Track { track, .. } => Some(track.file_name().trim_end_matches(".mp3").to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_filtered_song_list_lands_in_its_own_order_and_sort_songs_reorders_it_in_hand() {
+    let relaxed = crate::api::types::MoodFilter::NONE.press(crate::api::types::MoodScale::Energy, "relaxed");
+    for node in [LibraryNode::Recent(relaxed), LibraryNode::Rated(relaxed)] {
+        let mut app = connected_app();
+        app.library_stack.restart();
+        app.library_stack.enter(node.clone());
+        let effects = app.apply_event(Event::Library {
+            generation: app.session_gen(),
+            dest: Tab::Library,
+            node: node.clone(),
+            data: LibraryData::Songs(demo_songs()),
+        });
+        assert!(effects.is_empty());
+        assert_eq!(song_rows(&app.library), ["Swing", "Host", "Civil Attack"], "{node:?}: the server's order");
+        assert!(matches!(app.library.entries[0], Entry::Parent), "the way out leads, as in every listing");
+
+        // In hand: no request either way, and back exactly.
+        assert!(app.sort_songs(true));
+        assert_eq!(song_rows(&app.library), ["Host", "Swing", "Civil Attack"], "{node:?}: best first");
+        assert_eq!(app.library.state.selected(), Some(1), "the cursor rests on the first song");
+        assert!(!app.sort_songs(true), "already in that order");
+        assert!(app.sort_songs(false));
+        assert_eq!(song_rows(&app.library), ["Swing", "Host", "Civil Attack"], "{node:?}: its own again");
+
+        // A text filter standing: the shown rows and the hidden ones alike.
+        app.library.apply_filter("s".into());
+        assert_eq!(song_rows(&app.library), ["Swing", "Host"]);
+        assert!(app.sort_songs(true));
+        assert_eq!(song_rows(&app.library), ["Host", "Swing"], "the shown rows");
+        app.library.apply_filter("st".into());
+        assert_eq!(song_rows(&app.library), ["Host"], "narrowing keeps the order");
+        app.library.clear_filter();
+        assert_eq!(song_rows(&app.library), ["Host", "Swing", "Civil Attack"], "and the hidden ones");
+    }
+
+    // Nothing to rank where the list has no matches: an unfiltered Recent.
+    let mut app = connected_app();
+    let recent = LibraryNode::Recent(crate::api::types::MoodFilter::NONE);
+    app.library_stack.restart();
+    app.library_stack.enter(recent.clone());
+    app.apply_event(Event::Library {
+        generation: app.session_gen(),
+        dest: Tab::Library,
+        node: recent,
+        data: LibraryData::Tracks(vec![track("demo/b.mp3"), track("demo/a.mp3")]),
+    });
+    assert!(!app.sort_songs(true));
+    assert_eq!(song_rows(&app.library), ["b", "a"]);
+}
+
+#[test]
+fn a_songs_answer_under_match_lands_best_first() {
+    let relaxed = crate::api::types::MoodFilter::NONE.press(crate::api::types::MoodScale::Energy, "relaxed");
+    let mut app = connected_app();
+    app.songs_by_match = true;
+    let rated = LibraryNode::Rated(relaxed);
+    app.library_stack.restart();
+    app.library_stack.enter(rated.clone());
+    let mut songs = demo_songs();
+    songs.push(crate::api::types::MoodSong { track: track("demo/Unscored.mp3"), mood_match: None });
+    songs.insert(0, crate::api::types::MoodSong { track: track("demo/Also Unscored.mp3"), mood_match: None });
+    let generation = app.session_gen();
+    app.apply_event(Event::Library { generation, dest: Tab::Library, node: rated, data: LibraryData::Songs(songs) });
+    assert_eq!(
+        song_rows(&app.library),
+        ["Host", "Swing", "Civil Attack", "Also Unscored", "Unscored"],
+        "the surest first, the unscored last in the server's order"
+    );
+    assert_eq!(app.library.state.selected(), Some(1));
+    assert!(app.sort_songs(false));
+    assert_eq!(song_rows(&app.library), ["Also Unscored", "Swing", "Host", "Civil Attack", "Unscored"]);
+}
+
+#[test]
+fn switch_moods_keeps_the_rows_and_drops_the_old_filters_answer() {
+    use crate::api::types::{MoodFilter, MoodScale};
+    let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+    let lists: [fn(MoodFilter) -> LibraryNode; 2] = [LibraryNode::Recent, LibraryNode::Rated];
+    for list in lists {
+        let mut app = connected_app();
+        let _ = app.open_library_node(list(MoodFilter::NONE), true);
+        let generation = app.session_gen();
+        let land = |app: &mut App, moods: MoodFilter, data: LibraryData| {
+            app.apply_event(Event::Library { generation, dest: Tab::Library, node: list(moods), data })
+        };
+        land(&mut app, MoodFilter::NONE, LibraryData::Tracks(vec![track("demo/a.mp3"), track("demo/b.mp3")]));
+        assert_eq!(song_rows(&app.library), ["a", "b"]);
+
+        let effects = app.switch_moods(relaxed);
+        assert_eq!(effects, vec![Effect::Api(ApiCmd::Library { generation, node: list(relaxed), dest: Tab::Library })]);
+        assert_eq!(app.library_node(), &list(relaxed), "swapped in place");
+        assert_eq!(song_rows(&app.library), ["a", "b"], "the rows stand until the answer lands");
+        assert!(app.switch_moods(relaxed).is_empty(), "the same filter asks nothing");
+
+        // The old filter's answer, late: dropped. The new one fills.
+        land(&mut app, MoodFilter::NONE, LibraryData::Tracks(vec![track("demo/old.mp3")]));
+        assert_eq!(song_rows(&app.library), ["a", "b"]);
+        land(&mut app, relaxed, LibraryData::Songs(mood_songs(&[("demo/Host.mp3", Some(0.865))])));
+        assert_eq!(song_rows(&app.library), ["Host"]);
+    }
+}
+
+#[test]
+fn a_failed_mood_ask_puts_the_list_back_and_the_same_filter_asks_again() {
+    use crate::api::types::{MoodFilter, MoodScale};
+    let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+    let mut app = connected_app();
+    let _ = app.open_library_node(LibraryNode::Rated(MoodFilter::NONE), true);
+    let generation = app.session_gen();
+    let land = |app: &mut App, moods: MoodFilter, data: LibraryData| {
+        app.apply_event(Event::Library { generation, dest: Tab::Library, node: LibraryNode::Rated(moods), data })
+    };
+    land(&mut app, MoodFilter::NONE, LibraryData::Tracks(vec![track("demo/a.mp3")]));
+    assert_eq!(app.switch_moods(relaxed).len(), 1);
+    assert!(app.mood_ask_out());
+    // A server that refuses it: the node goes back to the rows' own filter.
+    app.apply_event(Event::Error("\"threshold\" is not allowed".into()));
+    assert_eq!(app.library_node(), &LibraryNode::Rated(MoodFilter::NONE));
+    assert!(app.moods_put_back && !app.mood_ask_out());
+    assert_eq!(song_rows(&app.library), ["a"]);
+    assert_eq!(app.switch_moods(relaxed).len(), 1, "the same filter asks again");
+    // An answer that lands stands: a later error puts nothing back.
+    app.moods_put_back = false;
+    land(&mut app, relaxed, LibraryData::Songs(mood_songs(&[("demo/Host.mp3", Some(0.865))])));
+    assert!(!app.mood_ask_out());
+    app.apply_event(Event::Error("art fetch failed".into()));
+    assert_eq!(app.library_node(), &LibraryNode::Rated(relaxed));
+    assert!(!app.moods_put_back);
+}
+
+#[test]
+fn a_lone_level_never_reaches_the_taste_body() {
+    use crate::api::types::{MoodFilter, MoodLevel, MoodScale};
+    let mut app = taste_app();
+    app.capabilities.discovery_taste = 2;
+    app.capabilities.mood_filters = true;
+    app.taste.moods = MoodFilter::NONE.with_level(MoodLevel::Loose);
+    let effects = app.taste_ask();
+    assert_eq!(taste_ask(&effects, TastePart::Main).2.moods, None, "a level alone filters nothing");
+
+    let vocals = MoodFilter::NONE.press(MoodScale::Voice, "vocals").with_level(MoodLevel::Loose);
+    app.taste.moods = vocals;
+    let effects = app.taste_ask();
+    let (_, _, body) = taste_ask(&effects, TastePart::Main);
+    assert_eq!(
+        serde_json::to_value(&body).unwrap()["moods"],
+        serde_json::json!({ "voice": "vocals", "threshold": 0.3 })
+    );
 }
 
 #[test]
@@ -4430,6 +4624,7 @@ fn a_playlist_file_is_not_offered_as_a_track() {
 
 #[test]
 fn a_track_that_will_not_play_is_skipped_rather_than_stopping_everything() {
+    let _en = english();
     // The queue used to stop dead on the first unplayable file: the
     // message appeared and nothing moved. One bad file should cost one
     // track, not the session.
@@ -4474,6 +4669,7 @@ fn a_failure_from_a_track_already_left_is_not_pinned_on_this_one() {
 
 #[test]
 fn a_queue_where_nothing_plays_gives_up_instead_of_looping() {
+    let _en = english();
     // With repeat on, skipping past every broken track would go round
     // forever, hammering the server and never making a sound.
     let mut app = connected_app();
@@ -4490,6 +4686,7 @@ fn a_queue_where_nothing_plays_gives_up_instead_of_looping() {
 
 #[test]
 fn running_out_of_queue_ends_the_run_of_failures() {
+    let _en = english();
     // Repeat off: the walk dies at the queue's end, not at the give-up
     // threshold. The count used to survive that ending one short of the
     // limit, and the first hiccup after the network came back was
@@ -4518,6 +4715,7 @@ fn running_out_of_queue_ends_the_run_of_failures() {
 
 #[test]
 fn a_failure_that_reads_as_the_networks_probes_the_server_first() {
+    let _en = english();
     // Contract clause 37: a transient failure asks the row's server
     // whether it answers; one that does means the row's own open failed —
     // retried a bounded number of times, then skipped.
@@ -4839,7 +5037,8 @@ fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
         &app.open_library_node(LibraryNode::Genres(GenreSource::Model), true),
         LibraryNode::Genres(GenreSource::Model)
     ));
-    assert!(asks(&app.open_library_node(LibraryNode::Recent, true), LibraryNode::Recent), "recent means now");
+    let recent = LibraryNode::Recent(crate::api::types::MoodFilter::NONE);
+    assert!(asks(&app.open_library_node(recent.clone(), true), recent), "recent means now");
 
     // Forgotten on request (the GUI's second choice of the room), and with
     // the server.
@@ -6666,6 +6865,7 @@ fn the_old_mode_arms_on_the_remembered_server_at_start() {
 
 #[test]
 fn the_toggle_arms_here_switches_off_here_and_moves_elsewhere() {
+    let _en = english();
     let mut app = connected_app();
     app.replace_queue(vec![track("a"), track("b")]);
 
@@ -6788,6 +6988,7 @@ fn a_reply_from_another_lane_is_dropped_and_so_is_one_after_off() {
 
 #[test]
 fn a_degrade_is_said_once_per_lane_and_an_auth_failure_too() {
+    let _en = english();
     let mut app = connected_app();
     app.replace_queue(vec![track("a")]);
     app.handle_action(Action::ToggleAutoDj);
@@ -6867,6 +7068,7 @@ fn switching_on_with_an_empty_queue_asks_and_the_opener_seeds_the_session() {
 
 #[test]
 fn the_openers_failure_leaves_the_dj_off_in_the_records_words() {
+    let _en = english();
     let mut app = connected_app();
     app.dj.empty_queue = dj::EmptyQueueStart::Random;
     let effects = app.handle_action(Action::ToggleAutoDj);
@@ -6885,6 +7087,7 @@ fn the_openers_failure_leaves_the_dj_off_in_the_records_words() {
 
 #[test]
 fn the_chooser_remembers_when_asked_and_esc_leaves_the_dj_off() {
+    let _en = english();
     let mut app = connected_app();
     app.handle_action(Action::ToggleAutoDj);
     app.handle_action(Action::Cancel);
@@ -6994,6 +7197,7 @@ fn rated(path: &str, rating: Option<u32>) -> Track {
 
 #[test]
 fn a_rating_patches_every_copy_at_once_and_a_refusal_reverts_it() {
+    let _en = english();
     let mut app = connected_app();
     let t = rated("lib/a.mp3", Some(4));
     app.push_queue(t.clone());
@@ -7035,6 +7239,7 @@ fn a_peers_track_takes_no_rating_and_no_playlist() {
 
 #[test]
 fn adding_to_a_playlist_asks_the_tracks_server_and_says_so() {
+    let _en = english();
     let mut app = connected_app();
     let origin = app.origin();
     let effects = app.add_to_playlist(&origin, "lib/a.mp3", " Mix ");
@@ -7153,6 +7358,7 @@ fn g_and_shift_g_jump_to_the_ends_of_the_dj_tab() {
 
 #[test]
 fn the_sources_chooser_keeps_one_library_on() {
+    let _en = english();
     let mut app = connected_app();
     app.servers.push(KnownServer {
         id: HOST.into(),
@@ -7384,6 +7590,7 @@ fn the_outbox_and_a_checkpointed_session_survive_a_restart() {
 
 #[test]
 fn a_long_run_of_unreachable_rows_walks_without_recursing() {
+    let _en = english();
     // Hundreds of restored rows from a server that is gone used to re-enter
     // `play_index` once per row and overflow the stack (the review's 450
     // rows on a Windows main thread). A thread with a small stack proves

@@ -2386,6 +2386,15 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     fn entry(url: &str, username: Option<&str>) -> ServerEntry {
         ServerEntry {
             url: url.to_string(),
@@ -2422,6 +2431,7 @@ mod tests {
 
     #[test]
     fn the_header_grows_a_dropdown_once_a_second_server_is_saved() {
+        let _en = english();
         // The chevron obeys the same glyph gate as everything else, so the
         // assertion reads it from the same switch.
         let chevron = if legacy_conhost() { " v" } else { " ▾" };
@@ -2496,6 +2506,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_server_keeps_the_picker_says_so_and_leaves_the_transport_live() {
+        let _en = english();
         use crate::api::types::Track;
         use crate::tui::app::{KnownServer, Origin, Queued};
         use crate::tui::worker::AudioCmd;
@@ -2641,6 +2652,7 @@ mod tests {
 
     #[test]
     fn the_add_flow_starts_at_the_chooser() {
+        let _en = english();
         let mut gui = two_server_gui();
         open_add(&mut gui);
         assert_eq!(gui.servers.form.as_ref().unwrap().stage, FormStage::Choosing);
@@ -2861,6 +2873,7 @@ mod tests {
 
     #[test]
     fn the_form_validates_before_any_network() {
+        let _en = english();
         let mut gui = two_server_gui();
         open_add(&mut gui);
         gui.act(Act::FormMethod(0));
@@ -2881,6 +2894,7 @@ mod tests {
 
     #[test]
     fn public_mode_stands_the_credential_fields_down() {
+        let _en = english();
         let mut gui = two_server_gui();
         open_add(&mut gui);
         gui.act(Act::FormMethod(0));
@@ -2983,6 +2997,7 @@ mod tests {
 
     #[test]
     fn the_room_and_the_dropdown_scroll_to_the_cursor_and_under_the_wheel() {
+        let _en = english();
         // The review's finding: past about twelve entries the cursor walked
         // onto rows that were never drawn and the add row was gone. Peers
         // are added automatically, so the count is reachable.
@@ -3026,6 +3041,7 @@ mod tests {
 
     #[test]
     fn the_room_lists_servers_with_their_marks_and_removes_with_secrets() {
+        let _en = english();
         let scratch = Scratch::new("gui-room");
         let _ = &scratch;
         let mut config = Config::default();
@@ -3073,6 +3089,7 @@ mod tests {
 
     #[test]
     fn the_bundled_server_cannot_be_removed_and_keeps_its_address() {
+        let _en = english();
         use super::super::SETTINGS_NAV;
         use ratatui::crossterm::event::{KeyCode, KeyEvent};
         // Contract clauses 52 and 53: no Remove verb, the note instead of a
@@ -3117,6 +3134,7 @@ mod tests {
 
     #[test]
     fn federated_peers_list_under_their_parent_and_switch_through_it() {
+        let _en = english();
         use super::super::SETTINGS_NAV;
         use ratatui::crossterm::event::{KeyCode, KeyEvent};
         // Contract clauses 12, 24, 25 and 27.
@@ -3278,6 +3296,7 @@ mod tests {
 
     #[test]
     fn the_settings_row_opens_the_room_and_esc_walks_back() {
+        let _en = english();
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = two_server_gui();
         gui.active = super::super::SETTINGS_NAV;

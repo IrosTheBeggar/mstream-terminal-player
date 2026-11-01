@@ -94,15 +94,9 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let count = super::bar_count(
         gui,
-        t!("gui.files.items", count = gui.app.library.counts().1).to_string(),
+        super::discover::plural("gui.files.items", gui.app.library.counts().1 as u64),
     );
-    put(
-        frame,
-        content.right().saturating_sub(count.chars().count() as u16),
-        content.y,
-        &count,
-        dim(),
-    );
+    put(frame, super::right_at(content, &count), content.y, &count, dim());
     super::draw_bar_controls(frame, gui, content, content.y + 1);
 
     let card_w = content.width.min(60);
@@ -231,9 +225,9 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
     );
     let count = super::bar_count(
         gui,
-        t!("gui.files.items", count = gui.app.library.counts().1).to_string(),
+        super::discover::plural("gui.files.items", gui.app.library.counts().1 as u64),
     );
-    let count_x = content.right().saturating_sub(count.chars().count() as u16);
+    let count_x = super::right_at(content, &count);
     put(frame, count_x, content.y, &count, dim());
     let mut x = content.x;
     x += super::draw_bar_back(frame, gui, x, content.y);
@@ -618,8 +612,19 @@ mod tests {
         super::super::handle_key(gui, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// a locale loop elsewhere (discover.rs's) holds the lock while it draws
+    /// in another language, and a test reading English beside it unlocked
+    /// read German.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     #[test]
     fn the_list_leads_with_the_new_card_and_names_the_playlists() {
+        let _en = english();
         let mut gui = pl_gui(&["Morning", "Road Trip", "Rainy Days"]);
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("+ New playlist"), "the create action leads:\n{text}");
@@ -635,6 +640,7 @@ mod tests {
 
     #[test]
     fn the_dialog_creates_and_respects_the_no_ops() {
+        let _en = english();
         let mut gui = pl_gui(&["Morning"]);
         key(&mut gui, KeyCode::Char('n'));
         assert!(gui.playlists.dialog.is_some(), "n opens the name dialog");
@@ -690,6 +696,7 @@ mod tests {
     fn the_delete_gate_asks_and_x_answers() {
         // The pane arrives with its cursor on the first playlist, unlit —
         // x wants it up (the kit's list-cursor law), and ↓ lights it there.
+        let _en = english();
         let mut gui = pl_gui(&["Morning", "Road Trip"]);
         key(&mut gui, KeyCode::Char('x'));
         assert!(gui.playlists.confirm.is_none(), "x on a stowed cursor asks nothing");
@@ -721,6 +728,7 @@ mod tests {
 
     #[test]
     fn activation_drills_and_the_tracks_draw_the_shared_way() {
+        let _en = english();
         let mut gui = pl_gui(&["Morning"]);
         // Enter wants the cursor up (the kit's list-cursor law): ↓ picks it
         // up on the first playlist, and the drill keeps the hand on the
@@ -763,6 +771,7 @@ mod tests {
     #[test]
     fn the_bar_reaches_both_playlist_levels() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let _en = english();
         let mut gui = pl_gui(&["Morning", "Road Trip", "Rainy Days"]);
         gui.queue_open = false;
         let text = draw(&mut gui).join("\n");

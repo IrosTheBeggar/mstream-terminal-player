@@ -247,19 +247,30 @@ fn visible_albums(gui: &mut Gui) -> Option<&WallView> {
 
 /// The grid geometry the last frame drew with — recomputed from the same
 /// inputs, so key handling agrees with the pointer about where cells are.
-fn shape(gui: &Gui) -> GridShape {
+fn shape(gui: &mut Gui) -> GridShape {
     // The same rect the frame drew the grid in — a row lower under a pick's
-    // banner, rows lower under the open mood panel — else a click opened
+    // banner, and a row lower again under both strips — else a click opened
     // the album a page's worth away.
-    GridShape::for_content(below_panel(gui, gui.room_rect()))
+    let both = both_strips(gui);
+    GridShape::for_content(below_strips(gui.room_rect(), both))
 }
 
-/// The wall's rect below the mood Filters' panel: the strip and the grid
-/// stand as many rows lower as the open panel takes (library-rooms clause
-/// 32) — on the root wall only; an artist's wall has no Filters.
-fn below_panel(gui: &Gui, content: Rect) -> Rect {
-    let panel = if on_root_wall(gui) { super::moods::panel_height(gui, content.width) } else { 0 };
-    Rect { y: content.y + panel, height: content.height.saturating_sub(panel), ..content }
+/// Whether the root wall wears both strips: the mood strip on the row
+/// under the controls and the letter strip — alphabetical, 25 albums or
+/// more — under it (library-rooms clause 35). An artist's wall has no
+/// Filters.
+fn both_strips(gui: &mut Gui) -> bool {
+    on_root_wall(gui)
+        && super::moods::strip_stands(gui)
+        && visible_albums(gui).is_some_and(|view| view.len() >= crate::kit::STRIP_MIN_ROWS)
+}
+
+/// The wall's rect: the letter strip and the grid a row lower while `both`
+/// strips stand; otherwise the mood strip takes the letter strip's free
+/// row, and nothing moves.
+fn below_strips(content: Rect, both: bool) -> Rect {
+    let shift = u16::from(both);
+    Rect { y: content.y + shift, height: content.height.saturating_sub(shift), ..content }
 }
 
 fn turn_page(gui: &mut Gui, delta: i32) {
@@ -457,7 +468,7 @@ fn draw_wall_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
     let Some(artist) = artist else {
         let heading = t!("gui.nav.albums").to_string();
         put(frame, content.x, content.y, &heading, Style::default().add_modifier(Modifier::BOLD));
-        return content.x + heading.chars().count() as u16 + 2;
+        return content.x + crate::kit::width(&heading) as u16 + 2;
     };
     let (back_glyph, forward) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
     let back_label = format!("{back_glyph} {}", t!("gui.nav.artists"));
@@ -481,30 +492,12 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     };
     let all = wall_albums(gui).map_or(0, Vec::len);
     super::draw_bar_controls(frame, gui, content, content.y + 1);
-    // The mood Filters at the controls line's right and their panel under
-    // it (library-rooms clauses 30–32): what follows stands below it.
-    if on_root_wall(gui) {
-        super::moods::draw_for_list(frame, gui, content);
-    }
-    let body = below_panel(gui, content);
-    if all == 0 {
-        put(frame, content.x, body.y + 3, &t!("gui.alb.empty"), dim());
-        return;
-    }
-    if total == 0 {
-        // The filter matched nothing; the way back is one key (clause 30).
-        put(frame, content.x, body.y + 3, &t!("gui.files.empty"), dim());
-        put(
-            frame,
-            content.right().saturating_sub(
-                super::bar_count(gui, String::new()).chars().count() as u16,
-            ),
-            content.y,
-            &super::bar_count(gui, String::new()),
-            dim(),
-        );
-        return;
-    }
+    // The mood strip on the row under the controls, the letter strip's
+    // (library-rooms clause 35): where both stand the letter strip and the
+    // grid stand a row lower.
+    let mooded = super::moods::strip_stands(gui);
+    super::moods::draw_strip(frame, gui, content, content.y + 2);
+    let body = below_strips(content, on_root_wall(gui) && mooded && total >= crate::kit::STRIP_MIN_ROWS);
 
     let shape = GridShape::for_content(body);
     let capacity = shape.capacity();
@@ -514,6 +507,44 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         w.page = w.page.min(pages - 1);
     }
     let page = wall_ref(gui).page;
+    // The pager's place: two arrows around "page/pages" at the line's
+    // right, drawn once there are albums to page through.
+    let label = format!("{}/{}", page + 1, pages);
+    let fwd_x = content.right().saturating_sub(2);
+    let label_x = fwd_x.saturating_sub(crate::kit::width(&label) as u16 + 1);
+    let back_x = label_x.saturating_sub(2);
+    let paged = all > 0 && total > 0;
+    // The opener at its fixed column, left of the pager (clause 31) — drawn
+    // before any empty wording, so the way back is always on screen.
+    let opener = super::moods::offered_here(gui).then(|| {
+        let w = crate::kit::width(&super::moods::opener_word(&rust_i18n::locale())) as u16;
+        let at = super::moods::OpenerAt::BeforePager(if paged { back_x } else { u16::MAX });
+        super::moods::opener_x(content, at, w)
+    });
+    // The count after the name, whatever the wall holds — the honest count
+    // is never dropped (browser-top-bar clause 3): under a mood filter the
+    // filtered wall's own, `n of m` under the text filter alone — ending two
+    // cells before the opener, its words clipped where a wide pager pulls
+    // the opener onto them.
+    let count = super::bar_count(gui, super::discover::plural("gui.alb.count", all as u64));
+    let cells = opener.map_or(usize::MAX, |x| super::moods::count_cells(count_x, x));
+    put(frame, count_x, content.y, &super::bar::clip(&count, cells), dim());
+    if let Some(x) = opener {
+        super::moods::draw_opener(frame, gui, x, content.y);
+    }
+    if all == 0 {
+        // Nothing under a mood filter is the filter's doing, not an empty
+        // library (clause 38).
+        let words = if mooded { t!("gui.files.empty") } else { t!("gui.alb.empty") };
+        put(frame, content.x, body.y + 3, &words, dim());
+        return;
+    }
+    if total == 0 {
+        // The filter matched nothing; the way back is one key (clause 30).
+        put(frame, content.x, body.y + 3, &t!("gui.files.empty"), dim());
+        return;
+    }
+
     let start = page * capacity;
     let shown = total.saturating_sub(start).min(capacity);
     {
@@ -528,14 +559,6 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         (view.page(start, shown), view.strip)
     };
 
-    put(
-        frame,
-        count_x,
-        content.y,
-        &super::bar_count(gui, t!("gui.alb.count", count = all).to_string()),
-        dim(),
-    );
-
     // The strip (library-rooms contract, clause 10): the root wall is
     // alphabetical; an artist's albums are in the server's order.
     if on_root_wall(gui) && total >= crate::kit::STRIP_MIN_ROWS {
@@ -544,13 +567,8 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         crate::kit::letter_strip(frame, &mut gui.ui, strip, &present, move |bucket| Act::AlbJump(first_of[bucket]));
     }
 
-    // The pager: two arrows around "page/pages", each end dim when there
-    // is nothing further that way.
+    // The pager: each end dim when there is nothing further that way.
     let (back_glyph, fwd_glyph) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
-    let label = format!("{}/{}", page + 1, pages);
-    let fwd_x = content.right().saturating_sub(2);
-    let label_x = fwd_x.saturating_sub(label.chars().count() as u16 + 1);
-    let back_x = label_x.saturating_sub(2);
     for (x, glyph, delta, live) in [
         (back_x, back_glyph, -1i32, page > 0),
         (fwd_x, fwd_glyph, 1, page + 1 < pages),
@@ -731,8 +749,8 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
         None => name,
     };
     let count =
-        super::bar_count(gui, t!("gui.files.items", count = gui.app.library.counts().1).to_string());
-    let count_x = content.right().saturating_sub(count.chars().count() as u16);
+        super::bar_count(gui, super::discover::plural("gui.files.items", gui.app.library.counts().1 as u64));
+    let count_x = super::right_at(content, &count);
     put(frame, count_x, content.y, &count, dim());
     put(
         frame,
@@ -807,6 +825,15 @@ mod tests {
     use crate::tui::worker::{ApiCmd, Event, LibraryData};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
 
     fn album(name: &str, artist: &str, year: i32, art: Option<&str>) -> Album {
         Album {
@@ -991,6 +1018,7 @@ mod tests {
 
     #[test]
     fn the_bar_filters_the_wall_and_gates_its_verbs() {
+        let _en = english();
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = wall_gui(25);
         let text = draw(&mut gui).join("\n");
@@ -1026,6 +1054,7 @@ mod tests {
 
     #[test]
     fn a_standing_filter_is_matched_once_not_every_frame() {
+        let _en = english();
         // Performance audit #103: the view stands between frames and keys,
         // and a new needle is what rebuilds it.
         let mut gui = wall_gui(25);
@@ -1112,12 +1141,13 @@ mod tests {
 
     #[test]
     fn the_wall_pages_with_arrows_and_clamps_at_the_ends() {
+        let _en = english();
         let mut gui = wall_gui(25);
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("Album 00"), "page one leads with the first album");
         assert!(all.contains("2000 · Arti"), "the year and artist ride under the name");
         assert!(all.contains("1/3"), "25 albums at 10 a page is three pages");
-        assert!(all.contains(&t!("gui.alb.count", count = 25).to_string()));
+        assert!(all.contains(&super::super::discover::plural("gui.alb.count", 25)));
 
         turn_page(&mut gui, 1);
         let all = draw(&mut gui).join("\n");
@@ -1174,7 +1204,7 @@ mod tests {
         // The wall drew the cached albums over whatever list the shared pane
         // held from another room: its verbs, count and Back ran on that.
         let mut gui = wall_gui(5);
-        let effects = gui.app.open_library_node(LibraryNode::Recent, true);
+        let effects = gui.app.open_library_node(LibraryNode::Recent(crate::api::types::MoodFilter::NONE), true);
         gui.pend(effects);
         gui.pending.clear();
         gui.act(Act::Nav(super::super::ALBUMS_NAV));
@@ -1312,6 +1342,7 @@ mod tests {
 
     #[test]
     fn the_nav_fetches_the_wall_once_and_reuses_it_after() {
+        let _en = english();
         let mut gui = wall_gui(3);
         gui.app.albums = None;
         gui.act(Act::Nav(super::super::ALBUMS_NAV));
@@ -1332,67 +1363,317 @@ mod tests {
         assert_eq!(gui.app.tab, Tab::Library, "but the tab still points at the pane");
     }
 
-    // ── The mood Filters (library-rooms contract, clauses 30–32) ─────────
+    // ── The mood Filters (library-rooms contract, clauses 30–36) ─────────
+
+    use crate::api::types::{MoodFilter, MoodLevel, MoodScale};
+    use super::super::moods::{MoodAct, MoodStop, is_open};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Position;
+
+    /// The wall with the queue open — the content's 47 cells, x17–x63, the
+    /// boards' — on a server with scores to filter by.
+    fn mood_wall(n: usize) -> Gui {
+        let mut gui = wall_gui(n);
+        gui.queue_open = true;
+        gui.app.capabilities.mood_filters = true;
+        gui
+    }
+
+    fn press(gui: &mut Gui, code: KeyCode) -> bool {
+        super::super::handle_key(gui, KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// The row's cells `from..to`, one char a cell (the rows tested are
+    /// narrow glyphs).
+    fn cells(row: &str, from: usize, to: usize) -> String {
+        row.chars().skip(from).take(to - from).collect()
+    }
+
+    /// The x a needle starts at on a drawn row, in cells.
+    fn x_of(row: &str, needle: &str) -> u16 {
+        let at = row.find(needle).unwrap_or_else(|| panic!("{needle:?} not in {row:?}"));
+        crate::kit::width(&row[..at]) as u16
+    }
+
+    fn library_asks(gui: &Gui) -> Vec<LibraryNode> {
+        gui.pending
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(ApiCmd::Library { node, .. }) => Some(node.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn land_albums(gui: &mut Gui, moods: MoodFilter, names: &[&str]) {
+        let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
+            node: LibraryNode::Albums(moods),
+            dest: Tab::Library,
+            data: LibraryData::Albums(names.iter().map(|n| album(n, "Artist", 2001, None)).collect()),
+        });
+        gui.pend(effects);
+    }
 
     #[test]
-    fn the_walls_filters_open_a_panel_over_the_grid_and_a_choice_relists_in_place() {
-        use crate::api::types::{MoodFilter, MoodScale};
-        use super::super::moods::{MoodAct, is_open};
-        let mut gui = wall_gui(3);
+    fn the_walls_opener_ends_at_x51_and_o_opens_the_modal_with_the_hand_on_happy() {
+        let _en = english();
+        let mut gui = wall_gui(2);
+        gui.queue_open = true;
         let all = draw(&mut gui).join("\n");
-        assert!(!all.contains("filters"), "no scores to filter by, no Filters: {all}");
+        assert!(!all.contains("mood"), "no scores to filter by, no opener: {all}");
+        assert!(!press(&mut gui, KeyCode::Char('o')) && !is_open(&gui), "and `o` is dead");
 
         gui.app.capabilities.mood_filters = true;
         let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        let first = rows.iter().position(|r| r.contains("Album 00")).unwrap_or_else(|| panic!("{all}"));
-        let line = rows.iter().position(|r| r.contains("/ filter")).unwrap_or_else(|| panic!("{all}"));
-        assert!(rows[line].contains("filters ▾"), "at the controls line's right: {all}");
-        assert!(!is_open(&gui), "hidden by default");
+        // Line one: the name, the count after it, the opener at its fixed
+        // column, the pager at the right — every item a cell in from x63.
+        let line = &rows[2];
+        assert_eq!((x_of(line, "Albums"), x_of(line, "2 albums"), x_of(line, "mood")), (17, 25, 48), "{line}");
+        assert_eq!(x_of(line, "◂ 1/1 ▸"), 56, "{line}");
+        assert_eq!(gui.ui.hit(Position::new(48, 2)), Some(Act::Mood(MoodAct::Open { key: false })));
+        assert_eq!(gui.ui.hit(Position::new(51, 2)), Some(Act::Mood(MoodAct::Open { key: false })));
 
-        gui.act(Act::Mood(MoodAct::Toggle));
+        assert!(!press(&mut gui, KeyCode::Char('o')));
+        assert!(is_open(&gui));
+        let draft = gui.moods.draft.unwrap();
+        assert_eq!((draft.hand, draft.shown), (MoodStop::Pick(MoodScale::Valence, "happy"), true));
         let rows = draw(&mut gui);
         let all = rows.join("\n");
-        assert!(rows[line].contains("filters ▴"), "{all}");
-        assert!(rows[line + 1].contains("Happy · Neutral · Sad"), "the panel under the line: {all}");
-        let moved = rows.iter().position(|r| r.contains("Album 00")).unwrap_or_else(|| panic!("{all}"));
-        assert!(moved > first, "the grid stands below the panel: {all}");
-        // The keys' grid is the drawn one: Enter on the first cell opens Album 00.
-        assert_eq!(super::shape(&gui).cell(0).y, moved as u16 - COVER_H, "{all}");
+        // The box at x17–x82, r10–r19, the title on its top border.
+        assert!(rows[10][..].contains("╭─ Filters ─"), "{all}");
+        assert_eq!(x_of(&rows[10], "╭"), 17);
+        assert_eq!(x_of(&rows[10], "╮"), 82);
+        assert_eq!(x_of(&rows[19], "╰"), 17);
+        let at = |r: usize, needle: &str| x_of(&rows[r], needle);
+        assert_eq!((at(11, "( ) Happy"), at(11, "( ) Neutral"), at(11, "( ) Sad")), (19, 45, 67), "{all}");
+        assert_eq!((at(12, "( ) Relaxed"), at(12, "( ) Aggressive")), (19, 67), "{all}");
+        assert_eq!((at(13, "( ) Instrumental"), at(13, "( ) Vocals")), (19, 45), "{all}");
+        assert_eq!((at(14, "[ ] Acoustic"), at(14, "[ ] Party"), at(14, "[ ] Danceable")), (19, 45, 67), "{all}");
+        assert!(cells(&rows[15], 18, 82).trim().is_empty(), "{all}");
+        assert_eq!((at(16, "( ) Strict"), at(16, "(•) Standard"), at(16, "( ) Loose")), (19, 45, 67), "{all}");
+        assert!(cells(&rows[17], 18, 82).trim().is_empty(), "{all}");
+        assert_eq!(at(18, "[ Done ]"), 73, "{all}");
+        assert!(!all.contains("clear") && !all.contains("SORT"), "nothing to clear, no Sort on the wall: {all}");
+        assert_eq!(gui.ui.hit(Position::new(20, 11)), Some(Act::Mood(MoodAct::Press(MoodStop::Pick(MoodScale::Valence, "happy")))));
+        assert_eq!(gui.ui.hit(Position::new(75, 18)), Some(Act::Mood(MoodAct::Press(MoodStop::Done))));
+        // `o` again closes it, as Done: nothing changed, nothing asked.
+        gui.pending.clear();
+        press(&mut gui, KeyCode::Char('o'));
+        assert!(!is_open(&gui) && library_asks(&gui).is_empty(), "{:?}", gui.pending);
+    }
+
+    #[test]
+    fn done_asks_once_under_the_draft_and_the_strip_takes_the_free_row() {
+        let _en = english();
+        let mut gui = mood_wall(3);
+        draw(&mut gui);
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        assert!(!gui.moods.draft.unwrap().shown, "a click opens with the hand stowed");
+        gui.pending.clear();
+        for stop in [
+            MoodStop::Pick(MoodScale::Energy, "relaxed"),
+            MoodStop::Pick(MoodScale::Voice, "instrumental"),
+            MoodStop::Level(MoodLevel::Strict),
+        ] {
+            gui.act(Act::Mood(MoodAct::Press(stop)));
+        }
+        assert!(library_asks(&gui).is_empty(), "nothing asked while the modal is up");
+        assert!(gui.moods.albums.filter.is_empty(), "the room's choice waits for Done");
+        let rows = draw(&mut gui);
+        assert!(cells(&rows[4], 17, 64).trim().is_empty(), "no strip while the draft is open: {}", rows.join("\n"));
+        assert!(rows[18].contains("clear   [ Done ]"), "{}", rows.join("\n"));
+
+        press(&mut gui, KeyCode::Enter);
+        assert!(!is_open(&gui));
+        let wire = MoodFilter::NONE
+            .press(MoodScale::Energy, "relaxed")
+            .press(MoodScale::Voice, "instrumental")
+            .with_level(MoodLevel::Strict);
+        assert_eq!(library_asks(&gui), vec![LibraryNode::Albums(wire)], "one ask");
+        assert_eq!(
+            serde_json::to_value(wire).unwrap(),
+            serde_json::json!({ "energy": "relaxed", "voice": "instrumental", "threshold": 0.7 })
+        );
+        // The old wall stands until the answer lands; one asked under the old
+        // filter is dropped.
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("Album 02"), "{all}");
+        land_albums(&mut gui, MoodFilter::NONE, &["Old 1", "Old 2"]);
+        land_albums(&mut gui, wire, &["Stim Pack"]);
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("Stim Pack") && !all.contains("Old 1") && !all.contains("Album 02"), "{all}");
+        // The strip in the free row under the controls; the grid unmoved.
+        assert_eq!(x_of(&rows[4], "Relaxed · Instrumental · Strict [X]"), 17, "{all}");
+        assert_eq!(x_of(&rows[11], "Stim Pack"), 17, "the names stand on r11, the grid from r5: {all}");
+        assert_eq!(gui.ui.hit(Position::new(30, 4)), Some(Act::Mood(MoodAct::Open { key: false })));
+        assert_eq!(gui.ui.hit(Position::new(50, 4)), Some(Act::Mood(MoodAct::Drop)));
+        // The same choice again asks nothing.
+        gui.pending.clear();
+        press(&mut gui, KeyCode::Char('o'));
+        press(&mut gui, KeyCode::Esc);
+        assert!(library_asks(&gui).is_empty(), "{:?}", gui.pending);
+    }
+
+    #[test]
+    fn the_strips_x_lets_everything_go_and_asks_once_the_sort_kept() {
+        let _en = english();
+        let mut gui = mood_wall(3);
+        let party = MoodFilter::NONE.toggle_tag("party").with_level(MoodLevel::Loose);
+        let set = super::super::moods::RoomMoods { filter: party, sort: crate::api::types::MoodSort::Match };
+        let _ = super::super::moods::apply(&mut gui, super::super::ALBUMS_NAV, set);
+        land_albums(&mut gui, party, &["Party Album"]);
+        let rows = draw(&mut gui);
+        assert_eq!(x_of(&rows[4], "Party · Loose [X]"), 17, "{}", rows.join("\n"));
+        gui.pending.clear();
+        gui.act(Act::Mood(MoodAct::Drop));
+        assert_eq!(library_asks(&gui), vec![LibraryNode::Albums(MoodFilter::NONE)]);
+        assert_eq!(gui.moods.albums.filter, MoodFilter::NONE, "the level back to Standard");
+        assert_eq!(gui.moods.albums.sort, crate::api::types::MoodSort::Match, "the Sort kept");
+        let rows = draw(&mut gui);
+        assert!(!rows[4].contains("[X]"), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn the_room_is_inert_under_the_modal() {
+        let mut gui = mood_wall(3);
+        gui.demo = Some(super::super::demo_now());
+        draw(&mut gui);
+        press(&mut gui, KeyCode::Char('o'));
+        draw(&mut gui);
+        let before = (gui.queue_open, gui.active, gui.demo_paused);
+        for code in [KeyCode::Char(' '), KeyCode::Char('1'), KeyCode::Char('G'), KeyCode::Char('f'), KeyCode::Char('e')] {
+            assert!(!press(&mut gui, code), "{code:?}");
+        }
+        // Tab walks the stops, it does not fold the queue; q types nothing
+        // and quits nothing.
+        press(&mut gui, KeyCode::Tab);
+        assert!(!press(&mut gui, KeyCode::Char('q')));
+        assert_eq!((gui.queue_open, gui.active, gui.demo_paused), before);
+        assert!(is_open(&gui) && !gui.app.filtering);
+        // The wall beneath and the nav take no click; the wheel turns nothing.
+        draw(&mut gui);
+        assert_eq!(gui.ui.hit(Position::new(20, 6)), Some(Act::Guard), "the wall");
+        assert_eq!(gui.ui.hit(Position::new(5, 2)), Some(Act::Guard), "the nav");
+        assert_eq!(gui.ui.hit(Position::new(90, 12)), Some(Act::Guard), "the queue");
+        let page = gui.albums.wall.page;
+        gui.wheel(Position::new(30, 6), 1);
+        assert_eq!(gui.albums.wall.page, page);
+        // Ctrl-C still quits.
+        assert!(super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn a_level_with_no_mood_asks_nothing_and_rides_with_the_first_mood() {
+        let _en = english();
+        let mut gui = mood_wall(3);
+        draw(&mut gui);
+        gui.pending.clear();
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Level(MoodLevel::Loose))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Done)));
+        assert!(library_asks(&gui).is_empty(), "a lone level filters nothing: {:?}", gui.pending);
+        assert_eq!(gui.moods.albums.filter.level(), MoodLevel::Loose, "but it is kept");
+        let rows = draw(&mut gui);
+        assert!(!rows[4].contains("Loose"), "and the strip waits for a mood: {}", rows.join("\n"));
+        // The modal opens on it; the first mood carries it.
+        gui.act(Act::Mood(MoodAct::Open { key: false }));
+        let rows = draw(&mut gui);
+        assert!(rows[16].contains("(•) Loose") && rows[18].contains("clear"), "{}", rows.join("\n"));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Tag("party"))));
+        gui.act(Act::Mood(MoodAct::Press(MoodStop::Done)));
+        let wire = MoodFilter::NONE.toggle_tag("party").with_level(MoodLevel::Loose);
+        assert_eq!(library_asks(&gui), vec![LibraryNode::Albums(wire)]);
+        assert_eq!(serde_json::to_value(wire).unwrap(), serde_json::json!({ "tags": ["party"], "threshold": 0.3 }));
+    }
+
+    #[test]
+    fn a_filtered_alphabetical_wall_puts_the_letter_strip_under_the_mood_strip() {
+        let _en = english();
+        let mut gui = mood_wall(30);
+        let rows = draw(&mut gui);
+        assert_eq!(x_of(&rows[4], "#ABC"), 17, "the letter strip on r4: {}", rows.join("\n"));
+        assert_eq!(super::shape(&mut gui).cell(0).y, 5);
 
         let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
-        gui.act(Act::Mood(MoodAct::Pick(MoodScale::Energy, "relaxed")));
-        assert!(
-            gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { node, .. }) if *node == LibraryNode::Albums(relaxed))),
-            "asked again under the filter: {:?}",
-            gui.pending
-        );
-        assert_eq!(gui.app.library_node(), &LibraryNode::Albums(relaxed), "in place");
-        assert!(is_open(&gui), "the panel stays open while the list comes");
+        let next = super::super::moods::RoomMoods { filter: relaxed, ..Default::default() };
+        let _ = super::super::moods::apply(&mut gui, super::super::ALBUMS_NAV, next);
+        let names: Vec<String> = (0..30).map(|i| format!("Album {i:02}")).collect();
+        land_albums(&mut gui, relaxed, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert_eq!(x_of(&rows[4], "Relaxed [X]"), 17, "the mood strip first: {all}");
+        assert_eq!(x_of(&rows[5], "#ABC"), 17, "the letter strip a row lower: {all}");
+        assert_eq!(x_of(&rows[12], "Album 00"), 17, "the grid a row lower: {all}");
+        // The keys' grid is the drawn one.
+        assert_eq!(super::shape(&mut gui).cell(0).y, 6);
+    }
 
-        // The unfiltered list landing late fills nothing; the filtered one does.
-        for (moods, names) in [(MoodFilter::NONE, ["Album 00", "Album 02"]), (relaxed, ["Album 01", "Album 01"])] {
-            let effects = gui.app.apply_event(Event::Library {
-                generation: gui.app.session_gen(),
-                node: LibraryNode::Albums(moods),
-                dest: Tab::Library,
-                data: LibraryData::Albums(names.iter().map(|n| album(n, "Artist", 2001, None)).collect()),
-            });
-            gui.pend(effects);
-        }
-        let all = draw(&mut gui).join("\n");
-        assert!(all.contains("Album 01") && !all.contains("Album 02"), "{all}");
-        assert_eq!(gui.app.albums_moods, relaxed);
-        assert!(all.contains("filters ● ▴"), "the dot says the wall is filtered: {all}");
-
-        // Away and back: the panel closed, the wall seated from the copy
-        // asked under the same filter — no request.
+    #[test]
+    fn an_empty_answer_under_a_mood_reads_nothing_here_and_keeps_the_opener_and_strip() {
+        let _en = english();
+        let mut gui = mood_wall(3);
+        let sad = MoodFilter::NONE.press(MoodScale::Valence, "sad");
+        gui.moods.albums.filter = sad;
         gui.act(Act::Nav(super::super::FILES_NAV));
-        gui.pending.clear();
         gui.act(Act::Nav(super::super::ALBUMS_NAV));
-        assert!(!gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { .. }))), "{:?}", gui.pending);
-        assert!(!is_open(&gui), "hidden again on the next visit");
-        assert!(draw(&mut gui).join("\n").contains("filters ● ▾"));
+        assert!(library_asks(&gui).contains(&LibraryNode::Albums(sad)), "{:?}", gui.pending);
+        land_albums(&mut gui, sad, &[]);
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains(&t!("gui.files.empty").to_string()), "{all}");
+        assert!(!all.contains(&t!("gui.alb.empty").to_string()), "not an empty library: {all}");
+        assert_eq!(x_of(&rows[2], "mood"), 48, "{all}");
+        assert!(rows[2].contains("0 albums"), "the count stands: {all}");
+        assert_eq!(x_of(&rows[4], "Sad [X]"), 17, "{all}");
+    }
+
+    #[test]
+    fn at_80_cells_the_opener_ends_at_x84_the_line_at_x95_and_the_modal_is_banded() {
+        let _en = english();
+        // The queue folded: the room's 80 cells, x17–x96.
+        let mut gui = wall_gui(1);
+        gui.app.capabilities.mood_filters = true;
+        let rows = draw(&mut gui);
+        let line = &rows[2];
+        // One album reads its own form; the opener ends 13 in, the pager
+        // a cell in from the content's last.
+        assert_eq!((x_of(line, "1 album "), x_of(line, "mood")), (25, 81), "{line}");
+        assert_eq!(x_of(line, "◂ 1/1 ▸") + 7, 96, "the pager ends at x95: {line}");
+
+        // Everything set: the strip ends by x95, its [X] standing.
+        let all = MoodFilter::NONE
+            .press(MoodScale::Valence, "happy")
+            .press(MoodScale::Energy, "aggressive")
+            .press(MoodScale::Voice, "instrumental")
+            .toggle_tag("acoustic")
+            .toggle_tag("party")
+            .toggle_tag("danceable")
+            .with_level(MoodLevel::Strict);
+        let next = super::super::moods::RoomMoods { filter: all, ..Default::default() };
+        let _ = super::super::moods::apply(&mut gui, super::super::ALBUMS_NAV, next);
+        land_albums(&mut gui, all, &["Everything"]);
+        let rows = draw(&mut gui);
+        let all_rows = rows.join("\n");
+        assert_eq!(x_of(&rows[4], "Happy · Aggressive"), 17, "{all_rows}");
+        assert!(x_of(&rows[4], "[X]") + 2 <= 95, "{all_rows}");
+        assert_eq!(x_of(&rows[2], "mood"), 81, "the opener never moves: {all_rows}");
+
+        // The modal: centred in the room at x24–x89, r10–r19, and the room's
+        // cells x17–x96 on its rows blank beside it; the rows above and
+        // below stay the room's.
+        press(&mut gui, KeyCode::Char('o'));
+        let rows = draw(&mut gui);
+        let all_rows = rows.join("\n");
+        assert_eq!((x_of(&rows[10], "╭─ Filters"), x_of(&rows[10], "╮")), (24, 89), "{all_rows}");
+        assert_eq!((x_of(&rows[19], "╰"), x_of(&rows[19], "╯")), (24, 89), "{all_rows}");
+        for (r, row) in rows.iter().enumerate().take(20).skip(10) {
+            assert!(cells(row, 17, 24).trim().is_empty() && cells(row, 90, 97).trim().is_empty(), "r{r}: {all_rows}");
+        }
+        assert_eq!(x_of(&rows[4], "Happy · Aggressive"), 17, "the strip stands over the band: {all_rows}");
+        assert_eq!(gui.ui.hit(Position::new(20, 12)), Some(Act::Guard), "the band is inert");
+        assert_eq!(x_of(&rows[11], "(•) Happy"), 26, "the draft opens on the choice: {all_rows}");
     }
 }
 

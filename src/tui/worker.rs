@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::api::types::{
     Album, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
-    DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, MoodFilter, Ping, PluginJobList,
+    DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, MoodFilter, MoodSong, Ping, PluginJobList,
     PluginLink, PlaylistSummary, SearchResults, SimilarArtist, TasteRequest, TasteResponse, Track,
 };
 use crate::api::{ApiError, Client, PluginFailure};
@@ -602,7 +602,14 @@ pub enum LibraryNode {
     /// A genre's songs, asked for with its list's kind
     /// ([`GenreList::songs_source`]).
     Genre(String, GenreSource),
-    Recent,
+    /// The newest songs, or the newest a mood filter keeps (mStream #1095)
+    /// — as [`Self::Artists`], the filter part of the view's identity.
+    /// [`MoodFilter::NONE`] everywhere but the GUI's Filters.
+    Recent(MoodFilter),
+    /// The songs the user rated, highest first, or those a mood filter
+    /// keeps — as [`Self::Recent`]. The GUI's room alone: the TUI's menu
+    /// has no row for it, and a peer's session no such list.
+    Rated(MoodFilter),
     /// The play lists (library-rooms contract, clauses 21–24): the user's
     /// last hundred plays newest first, and the hundred played most.
     RecentlyPlayed,
@@ -621,6 +628,9 @@ pub enum LibraryData {
     Genres(GenreList),
     Playlists(Vec<PlaylistSummary>),
     Tracks(Vec<Track>),
+    /// A song list asked under a mood filter: each song with its match, in
+    /// the list's own order.
+    Songs(Vec<MoodSong>),
 }
 
 /// How Auto-DJ chooses what comes next.
@@ -2276,9 +2286,8 @@ pub(crate) async fn load_library(
         LibraryNode::Genre(genre, source) => {
             LibraryData::Tracks(client.genre_songs_async(genre, *source).await?)
         }
-        LibraryNode::Recent => {
-            LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
-        }
+        LibraryNode::Recent(moods) => songs(*moods, client.recently_added_async(RECENT_LIMIT, *moods).await?),
+        LibraryNode::Rated(moods) => songs(*moods, client.rated_async(*moods).await?),
         LibraryNode::RecentlyPlayed => {
             LibraryData::Tracks(client.recently_played_async(RECENT_LIMIT).await?)
         }
@@ -2288,6 +2297,16 @@ pub(crate) async fn load_library(
             LibraryData::Tracks(client.playlist_load_async(name).await?)
         }
     })
+}
+
+/// A song list's answer: the tracks alone where nothing filtered — every
+/// list's shape — and each song with its match where `moods` did.
+fn songs(moods: MoodFilter, songs: Vec<MoodSong>) -> LibraryData {
+    if moods.is_empty() {
+        LibraryData::Tracks(songs.into_iter().map(|song| song.track).collect())
+    } else {
+        LibraryData::Songs(songs)
+    }
 }
 
 /// A Genres list of `source`'s kind — or of the other kind, asked for at
