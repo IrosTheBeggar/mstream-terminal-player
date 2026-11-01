@@ -1,6 +1,6 @@
 [package]
 name = "mstream-player"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Terminal player and headless server-audio engine for mStream"
@@ -356,10 +356,16 @@ rfd = { version = "0.15", default-features = false }
 # probe too, so the crate is not optional, and the desktop flavour's calls
 # are gated on its feature where they are made. windows-sys is bindings
 # alone, so the terminal binary links nothing it does not call.
+#
+# Win32_System_Time is the machine's time zone, both flavours
+# (src/admin/tz.rs): GetDynamicTimeZoneInformation names the zone Windows is
+# set to, and GetTimeZoneInformationForYear, over the years its
+# EffectiveYears lists, gives that zone's rule for each of them.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Time",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

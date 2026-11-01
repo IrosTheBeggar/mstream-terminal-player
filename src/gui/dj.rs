@@ -1736,6 +1736,15 @@ mod tests {
     const HOST: &str = "http://host:3000";
     const ATTIC: &str = "http://attic:3000";
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     /// A connected session with a server to arm the DJ for.
     fn session_gui() -> Gui {
         let mut gui = Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None));
@@ -1810,6 +1819,7 @@ mod tests {
 
     #[test]
     fn the_toggle_on_an_empty_queue_draws_the_chooser_and_a_click_answers_it() {
+        let _en = english();
         let mut gui = session_gui();
         gui.act(Act::AutoDj);
         assert!(gui.app.dj_chooser.is_some(), "the opening question");
@@ -1837,6 +1847,7 @@ mod tests {
 
     #[test]
     fn the_keyboard_belongs_to_a_field_in_the_top_layer_only() {
+        let _en = english();
         // The search box has it while it takes text...
         let mut gui = session_gui();
         gui.act(Act::Nav(super::super::SEARCH_NAV));
@@ -1856,6 +1867,7 @@ mod tests {
 
     #[test]
     fn the_empty_genre_filter_has_the_keyboard_behind_its_placeholder() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
@@ -1902,6 +1914,7 @@ mod tests {
 
     #[test]
     fn the_empty_queue_offers_the_openers_only_while_the_dj_is_armed() {
+        let _en = english();
         let mut gui = session_gui();
         let all = draw(&mut gui).join("\n");
         assert!(!all.contains("Pick a random song"), "off: just the label");
@@ -1918,6 +1931,7 @@ mod tests {
 
     #[test]
     fn dj_picked_rows_wear_the_badge_and_the_road_wears_its_banner() {
+        let _en = english();
         let mut gui = session_gui();
         gui.app.queue.items = vec![
             queued("mine.mp3", None),
@@ -1939,14 +1953,15 @@ mod tests {
 
     #[test]
     fn the_nav_row_opens_the_room_and_esc_only_stows_the_cursor() {
+        let _en = english();
         let mut gui = session_gui();
         let rows = draw(&mut gui);
-        // The TOOLS group under the play lists (row 13 since the Discover
-        // room joined it): Auto DJ, then the sonic room's slot.
-        assert!(rows[13].contains("TOOLS"), "the group:\n{}", rows[13]);
+        // The TOOLS group under the play lists (row 14 since the Rated
+        // room joined LIBRARY): Auto DJ, then the sonic room's slot.
+        assert!(rows[14].contains("TOOLS"), "the group:\n{}", rows[14]);
         assert_eq!(hit_text(&gui, &rows, "Auto DJ"), Some(Act::Nav(DJ_NAV)));
         let nav = |r: &String| r.chars().take(15).collect::<String>();
-        assert!(!nav(&rows[14]).contains('•'), "off: the row wears no state dot:\n{}", rows[14]);
+        assert!(!nav(&rows[15]).contains('•'), "off: the row wears no state dot:\n{}", rows[15]);
         assert!(!rows.iter().any(|r| r.contains("LISTEN")), "Settings has no doorway any more");
         gui.act(Act::Nav(DJ_NAV));
         assert_eq!(gui.active, DJ_NAV);
@@ -1967,6 +1982,7 @@ mod tests {
 
     #[test]
     fn d_opens_the_room_from_anywhere_and_the_nav_row_wears_the_armed_dot() {
+        let _en = english();
         let mut gui = session_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.act(Act::Screen(Screen::NowPlaying));
@@ -1978,17 +1994,18 @@ mod tests {
         assert!(gui.app.dj_armed());
         gui.act(Act::Nav(FILES_NAV));
         let rows = draw(&mut gui);
-        assert!(rows[14].contains("Auto DJ •"), "the dot while armed:\n{}", rows[14]);
+        assert!(rows[15].contains("Auto DJ •"), "the dot while armed:\n{}", rows[15]);
         assert_eq!(hit_text(&gui, &rows, "Auto DJ •"), Some(Act::Nav(DJ_NAV)), "one click target with its dot");
         gui.act(Act::Nav(DJ_NAV));
         gui.act(Act::DjStartStop);
         let rows = draw(&mut gui);
         let nav = |r: &String| r.chars().take(15).collect::<String>();
-        assert!(!nav(&rows[14]).contains('•'), "off again, no dot:\n{}", rows[14]);
+        assert!(!nav(&rows[15]).contains('•'), "off again, no dot:\n{}", rows[15]);
     }
 
     #[test]
     fn the_button_starts_and_stops_through_the_shared_toggle() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
@@ -2012,6 +2029,7 @@ mod tests {
 
     #[test]
     fn switches_bars_and_radios_edit_the_running_settings() {
+        let _en = english();
         let mut gui = room_gui();
         let rows = draw_tall(&mut gui);
         // The strictness bar: a click on a cell sets, ←→ step by .05.
@@ -2075,6 +2093,7 @@ mod tests {
 
     #[test]
     fn the_rows_line_up_at_the_value_column_and_the_help_line_explains_the_row_in_hand() {
+        let _en = english();
         let mut gui = room_gui();
         let rows = draw_tall(&mut gui);
         let cells = |r: &String| r.chars().collect::<Vec<char>>();
@@ -2117,6 +2136,7 @@ mod tests {
 
     #[test]
     fn keywords_are_added_by_typing_and_removed_by_their_chip() {
+        let _en = english();
         let mut gui = room_gui();
         gui.act(Act::DjStep(DjRow::Keywords, 1));
         assert!(gui.app.dj.keyword_filter);
@@ -2137,6 +2157,7 @@ mod tests {
 
     #[test]
     fn genres_are_picked_in_the_modal_and_written_to_the_dj_servers_entry() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
@@ -2172,6 +2193,7 @@ mod tests {
 
     #[test]
     fn the_genre_switch_and_the_mode_are_two_controls() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         let rows = draw_tall(&mut gui);
@@ -2219,6 +2241,7 @@ mod tests {
 
     #[test]
     fn the_server_picker_moves_the_dj_and_reselecting_is_a_no_op() {
+        let _en = english();
         let mut gui = room_gui();
         gui.config.servers.push(config::ServerEntry { url: HOST.into(), ..Default::default() });
         gui.config.servers.push(config::ServerEntry { url: ATTIC.into(), ..Default::default() });
@@ -2245,6 +2268,7 @@ mod tests {
 
     #[test]
     fn a_server_known_to_predate_the_filters_hides_them_and_says_why() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
@@ -2279,6 +2303,7 @@ mod tests {
 
     #[test]
     fn preview_asks_three_picks_without_queueing() {
+        let _en = english();
         let mut gui = room_gui();
         gui.pending.clear();
         gui.act(Act::DjPreview);

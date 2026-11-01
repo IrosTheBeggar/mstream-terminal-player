@@ -25,9 +25,11 @@ cannot play, and a later Explore room draws them.
 
 ## Entry points
 
-1. **The nav row `Discover`** — the TOOLS group's third room, row **16**
-   under Sonic path (TOOLS label 13, Auto DJ 14, Sonic path 15, Discover
-   16; Settings stays on the content's last row — clause 2). No digit —
+1. **The nav row `Discover`** — the TOOLS group's third room, row **17**
+   under Sonic path (TOOLS label 14, Auto DJ 15, Sonic path 16, Discover
+   17 since 2026-10-31, the Rated row above them; at 100×24 with the key
+   hints on the block rises a row and Discover stands on **16**; Settings
+   stays on the content's last row — clause 2). No digit —
    the digits end at 9 (library-rooms entry point 1) and never renumber
    (the sonic-path log, 2026-08-31) — so **`G`** from the Library
    screen. Drawn only while the ping carries the gate and the session is
@@ -112,13 +114,15 @@ answer and the visit (the session generation, clause 31).
    the room is up (a peer session, a ping without the flag), the room
    yields to Files, as a peer's hidden rooms do. With no session up the
    room shows the offline text every browse room shows.
-2. **Its place.** `NavId::Discover` is the **last** of `NAV` (index 12):
-   rooms past the digits are the pointer's. The TOOLS group reads TOOLS
-   (row 13) · Auto DJ (14) · Sonic path (15) · **Discover (16)**, and
-   Settings stays on the content's last row — 17 at 100×24 with the key
-   hints on, 18 with them off — so at the 24-row floor Discover and
-   Settings never share a row (the canvas's row 17 would). With Sonic path
-   absent its row stays empty; rows never close up.
+2. **Its place.** `NavId::Discover` is index 12 of `NAV` — the last
+   until Rated took index 13 (2026-10-31, library-rooms clause 37): rooms
+   past the digits are the pointer's. The TOOLS group reads TOOLS (row
+   14) · Auto DJ (15) · Sonic path (16) · **Discover (17)**, and Settings
+   stays on the content's last row — 17 at 100×24 with the key hints on,
+   18 with them off. At that floor alone the LIBRARY heading through
+   Discover rise one row into the blank under Search (Discover 16), so
+   Discover and Settings never share a row. With Sonic path absent its row
+   stays empty; rows never close up.
 3. **`G` opens it** wherever the Library screen takes keys; the hosted
    screens' key tables (Now Playing, Stats, Admin) are not touched — this
    is a room, not a screen (plan §4.3). `G` does nothing while the row is
@@ -178,7 +182,9 @@ answer and the visit (the session generation, clause 31).
     visit's drop list, sent as `exclude` on every ask of the visit (this
     call only on the server — never stored); a dropped one checked again
     ("use again") leaves it. A modal closed with nothing changed asks
-    nothing. A fresh visit starts with no drops.
+    nothing. A fresh visit starts with no drops. The mood modal (clause
+    33) keeps the same law: its changes apply when it closes, then one
+    ask.
 14. **Pins are explicit** — the room never pins on its own. The modal
     offers **Pin the playing song** (only while the playing track is the
     session server's own, not a peer's, not already a seed, and fewer than
@@ -216,7 +222,9 @@ answer and the visit (the session generation, clause 31).
     the room's name (BOLD) — and nothing else: the tagline is the tabs
     row's (clause 11) — right-aligned
     in this order, two cells apart: the **window dropdown** `Last 30 days
-    ▾` (clause 15, `w`); **more options**, a DIM text button that opens the
+    ▾` (clause 15, `w`); where clause 33's gate holds, **mood**, a DIM text
+    button that opens the mood modal (`o`, no tooltip, nothing but its
+    word); **more options**, a DIM text button that opens the
     seeds modal (clause 13, `e`); and **↻ new seeds**, the accent's text
     button — the header's one primary — that asks again plainly, the
     visit's window, pins and drops kept (clause 3, `G`). The `↻` is gated
@@ -244,7 +252,12 @@ answer and the visit (the session generation, clause 31).
     47 in German, Spanish, French, Japanese, Portuguese and Russian). The
     three controls never leave the row and never move for anything but
     the width (and a widened answer's wider value): they stay reachable
-    at 47 cells in every locale, on both glyph tiers.
+    at 47 cells in every locale, on both glyph tiers. With `mood` in the
+    row (clause 33) the order is the same, plus one last step for the
+    legacy console alone: "options" gives way — its modal stays `e` — and
+    the refresh's slot stays the content's last three cells wherever its
+    glyph stands alone. In English at 47 cells the row reads `Discover
+    Last 30 days ▾  mood  options  ↻`, `↻` at x61.
 
 ### Nothing finished yet
 
@@ -316,6 +329,28 @@ answer and the visit (the session generation, clause 31).
     skeleton rows) — and no sentence: the refresh is the only "asking…". A
     re-ask leaves the rows standing until the new ones land; only the
     refresh says it is asking.
+33. **The mood filter** (2026-10-29, mStream #1092; the overlay
+    2026-10-31, #1099): where the server's taste route takes it — the
+    ping's `discoveryTaste` 2 and `moodFilters`, on the user's own server
+    — the header's `mood` (clause 17) and `o` open library-rooms clause
+    32's modal, without its SORT row (the room has no Sort): ten rows, the
+    scales, the tags and the level. On close — Done, Enter, Esc or `o` —
+    it asks a new batch where the choice changed, the visit kept (clause
+    3), both halves carrying `moods` with the level inside as `threshold`
+    (Strict 0.7, Loose 0.3, Standard none, and only beside a mood or tag:
+    `{valence: happy, tags: [party], threshold: 0.3}`); a lone level, or
+    the same choice again, asks nothing. The library's songs match it and
+    an album card needs most of its album to; the server seeds from the
+    history songs that match when there are any, and a connected server
+    that cannot filter has its rows dropped by the server. The choice is
+    kept while the app runs, as the window is. While a mood stands, the
+    strip (library-rooms clause 35) names it on the blank under the
+    header, its `[X]` letting it go with one ask; at the 16-row floor,
+    which has no blank there, the room stands one row lower while a mood
+    is set (at 17 rows and up nothing moves). The room's other modals —
+    the seeds, the window's list, a tile's list, Keep a copy, Copies — keep
+    `o` dead while they are up. A generation-1 route gets no opener and
+    no key — its body would refuse it.
 
 ### Tabs
 
@@ -2041,6 +2076,7 @@ modals carry theirs (clause 126: numbers live only there).
 | String | Key |
 |---|---|
 | Discover (the nav row and the room's heading) | `gui.nav.discover` — at most 12 cells in every locale |
+| mood (the header's opener) · the mood modal's words · o mood (the tips' tail, key hints on, where the line fits) | `gui.moods.*` — library-rooms Wording · `gui.tips.mood_key` |
 | base tips: … · D Auto DJ · **G discover** · T stats · … | `gui.tips.base` (amended) |
 | ↓ pick a row · ← → tabs · w window · e more options · G new seeds (2026-10-16; German, Spanish, French, Japanese and Russian name `e` by the short "options" to fit the 99-cell footer with the save words) | `gui.tips.discover` |
 | ↓ pick an album · ← → tabs · w window · e more options · G new seeds (at rest where the album strip stands) | `gui.tips.discover_strip` |
@@ -2198,7 +2234,7 @@ Data is never translated: titles, artists, album and server names.
 
 | Record (plan · canvas) | Here |
 |---|---|
-| A TOOLS room "under Sonic path" (§2.9; canvas row 17) | `NavId::Discover` last in `NAV`; `draw_nav` gates it like the sonic row and hides it for a peer like the play lists; rows TOOLS 13 · Auto DJ 14 · Sonic 15 · Discover 16 · Settings on the content's last row; `G` in the Library screen's global table, recorded in `gui.tips.base`; `render`'s match over `NAV` and `Gui::wheel` get their arms |
+| A TOOLS room "under Sonic path" (§2.9; canvas row 17) | `NavId::Discover` last in `NAV`; `draw_nav` gates it like the sonic row and hides it for a peer like the play lists; rows TOOLS 14 · Auto DJ 15 · Sonic 16 · Discover 17 · Settings on the content's last row (since 2026-10-31, the Rated row above them; 13 · 14 · 15 · 16 before, and the block a row higher at the 24-row floor with the footer on); `G` in the Library screen's global table, recorded in `gui.tips.base`; `render`'s match over `NAV` and `Gui::wheel` get their arms |
 | The room's own rows | **Its own row model** (`App.taste`), the sonic room's precedent: `List::Discover` maps to no pane (`List::tab()` → `None`), and the verbs call App methods that build the queue rows themselves — play from here, play now, add next, add to the end, play / queue / shuffle all — stamping `self.origin()` on Library rows and the peer origin on Connected servers rows (`TasteState::peer_lines`, the rows that play now). The TUI's `Tab::Discover` pane is never written |
 | A federation row | Flat (`artist`, `title`, `album`, `year`, `duration`, `filepath` = the **peer's** path, `peer: {id, name}`), not the `{filepath, metadata}` envelope: the App builds the queue row's `Track` metadata from those fields, which is also the play report's snapshot |
 | Two calls (§3.1) | `ApiCmd::Taste { seq, generation, half, body }` → `Event::Taste { seq, generation, half, answer }` — one command, a half on it (the D7 habit: a destination on the command, not a second command); arms in `worker::answer`, `web/api_worker.rs` and `App::apply_event` (the prefs command and the "another pick" `random-songs` command left on 2026-10-14) |
@@ -2288,8 +2324,9 @@ locales and e2e leg come with the drawing.
 Render tests at TestBackend 100×30 and 100×24, footer on and off,
 injecting `Event::Taste`: the row's gate (absent without either flag,
 absent in a peer session, gone with a ping that drops it, the room
-yielding to Files); TOOLS at 13, Auto DJ 14, Sonic 15, Discover 16, and
-Discover and Settings never on one row; `G` opens it; the tabs row's
+yielding to Files); TOOLS at 14, Auto DJ 15, Sonic 16, Discover 17 (16
+under the floor's lift, 2026-10-31), and Discover and Settings never on
+one row; `G` opens it; the tabs row's
 tagline per `seedSource` and the widened fact; **no count, no meter, no
 percentage and no "never played" on the page** — the answered tabs, the
 queue-open view, the first ask's skeletons, the fallback card, scan
@@ -2813,6 +2850,19 @@ variable at its cell, "Start from an existing folder…", a folder's row,
 (`every_control_the_trim_kept_…`); the radios' names alone in all ten
 locales; the legacy frame `+- Where copies land -…+` / `+…- Esc close -+`.
 `KeepView::file_name` and `safe_file_name` went with the file crumb.
+**The mood filter (2026-10-31)**, tests in `src/gui/discover.rs`: the
+header keeps `mood` between the window and "options" in every locale at
+47 and 80 cells on both glyph tiers — only the legacy console ever lets
+"options" go, the refresh's slot the last three cells — and in English
+at 47 reads `Discover` x17, `mood` x46, `options` x52, `↻` x61; `o`
+opens the ten-row modal (r10–r19, no SORT) with the hand on Happy, and
+Esc asks one batch with `{valence, tags, threshold}` in both halves, the
+visit kept; the strip takes r3, and at the 100×24 floor with hints on the
+room stands a row lower; a generation-1 route has no opener and `o` is
+dead; the tips end `· o mood` at rest and read the modal's own line while
+it is up; the nav row sits at 17 under Sonic (16 with Settings at 17 at
+the floor). The browse rooms' counts read their plural forms (ru 2, 5,
+21; pl 1, 2, 5; ja one form).
 **The e2e**: Scenario W's `check_dest.py` gates the picker on its border
 title, its "Esc close" border, its first row "Files go to copies › From
 friends › Attic Band › Lanterns", the libraries with no label, the list's
@@ -3919,3 +3969,16 @@ counts, and K, K2, W and KM's semantics, are unchanged.
   it still counts only under Every album by and only while offered. ↓
   onto Every album by therefore lands on the box (only the missing
   albums); ↑ from there unticks it for every album by the artist.
+- **2026-10-31 — The mood filter as an overlay** (clause 33; library-rooms
+  clauses 30–38 and their log). The inline panel under the header — which
+  stood the whole room lower and left four song rows at 47 cells — gives
+  way to the kit modal the library rooms share, without its SORT row; the
+  header's `filters ▾` becomes the plain word `mood` (`o`, no tooltip),
+  laid out by `head_plan`, and #62's legacy step "Filters keep only their
+  glyphs" goes with the glyphs. The choice is a draft applied on close
+  with one ask, as the seeds modal's (clause 13), and carries the level
+  as `threshold` inside `moods`. The strip takes the blank under the
+  header; only at the 16-row floor, with no blank there, does the room
+  stand a row lower while a mood is set. The Rated row above the TOOLS
+  group moves Discover to row 17 (16 at the floor, under the lift that
+  keeps Settings alone on its row; clause 2).

@@ -436,7 +436,7 @@ fn strip_fill(app: &App, tab: TasteTab) -> Option<StripFill> {
 /// frame laid out — empty where no strip of albums stands (clause 49).
 fn strip_tiles(gui: &Gui) -> Vec<Tile> {
     match strip_fill(&gui.app, gui.app.taste.tab) {
-        Some(StripFill::Tiles(tiles)) if layout(gui.discover.content, gui.app.taste.no_history, true).strip_y.is_some() => {
+        Some(StripFill::Tiles(tiles)) if layout(laid(gui, gui.discover.content), gui.app.taste.no_history, true).strip_y.is_some() => {
             tiles
         }
         _ => Vec::new(),
@@ -521,10 +521,15 @@ fn saveable(app: &App, tab: TasteTab) -> bool {
 /// The plural form a count takes in the running locale — the DJ room's
 /// `songs_words` rule, for the two languages here with more than one plural.
 /// The room shows no counts; the seeds modal's ages and the Keep a copy
-/// modal's sizes and counts are its families (clause 126).
+/// modal's sizes and counts are its families (clause 126), and so are the
+/// browse rooms' counts (library-rooms clause 38).
 pub(crate) fn plural_form(count: u64) -> &'static str {
-    let locale = rust_i18n::locale();
-    let lang: &str = &locale;
+    plural_form_in(count, &rust_i18n::locale())
+}
+
+/// [`plural_form`] in `lang` — passed, never switched, so a test can lay a
+/// count out in every language while others read English.
+pub(crate) fn plural_form_in(count: u64, lang: &str) -> &'static str {
     let few_many = |n: u64| (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100));
     match &lang[..lang.len().min(2)] {
         "pl" if count == 1 => "one",
@@ -542,8 +547,13 @@ pub(crate) fn plural_form(count: u64) -> &'static str {
 /// A `_*` family's words for `count` (the contract's Wording: `%{count}` is
 /// the family's placeholder).
 pub(crate) fn plural(stem: &str, count: u64) -> String {
-    let key = format!("{stem}_{}", plural_form(count));
-    t!(key.as_str(), count = count).to_string()
+    plural_in(stem, count, &rust_i18n::locale())
+}
+
+/// [`plural`] in `locale`, passed as [`plural_form_in`]'s is.
+pub(crate) fn plural_in(stem: &str, count: u64, locale: &str) -> String {
+    let key = format!("{stem}_{}", plural_form_in(count, locale));
+    t!(key.as_str(), count = count, locale = locale).to_string()
 }
 
 /// A relative age on the local clock (the seeds modal's last play, clause
@@ -655,6 +665,15 @@ pub(crate) struct Layout {
 /// By the height alone, never the tab: switching tabs moves nothing.
 fn blanks(height: u16) -> (u16, u16) {
     (u16::from(height >= 17), u16::from(height >= 18))
+}
+
+/// The rect the room's rows are laid out in (clause 33): the content —
+/// the mood strip takes the blank under the header — or, at the floor,
+/// where there is no such blank, the content a row lower while the strip
+/// stands. At 17 rows and up nothing moves.
+fn laid(gui: &Gui, content: Rect) -> Rect {
+    let shift = u16::from(blanks(content.height).0 == 0 && super::moods::strip_stands(gui));
+    Rect { y: content.y + shift, height: content.height.saturating_sub(shift), ..content }
 }
 
 /// `strip`: the tab has a strip to draw. It stands where the table keeps
@@ -778,8 +797,11 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     gui.discover.hovered = None;
     gui.discover.tile_rects.clear();
     let fill = strip_fill(&gui.app, gui.app.taste.tab);
-    let lay = layout(content, gui.app.taste.no_history, fill.is_some());
-    draw_header(frame, gui, content, lay.header_y);
+    let lay = layout(laid(gui, content), gui.app.taste.no_history, fill.is_some());
+    // The header keeps the room's top row, the mood strip the row under it
+    // (clause 33); the rest stands below.
+    draw_header(frame, gui, content, content.y);
+    super::moods::draw_strip(frame, gui, content, content.y + 1);
     if let Some((rect, compact)) = lay.card {
         draw_card(frame, gui, rect, compact);
     }
@@ -889,6 +911,8 @@ struct HeadStep {
     long: bool,
     mark: bool,
     name: bool,
+    /// "options" drawn at all.
+    more: bool,
 }
 
 /// The header's steps, in the drop order (clause 17): the refresh's words
@@ -896,14 +920,22 @@ struct HeadStep {
 /// stand), then "more options" shortens to "options", then a widened
 /// window's mark gives way to the window the answer came from, then the
 /// room's name — the nav row already names the room — so the controls
-/// stand whole at the queue's 47 cells in every locale.
-fn head_steps(glyph: bool) -> Vec<HeadStep> {
-    let mut steps = vec![HeadStep { words: true, long: true, mark: true, name: true }];
+/// stand whole at the queue's 47 cells in every locale. With the mood
+/// opener in the header (clause 33) the legacy console, whose refresh keeps
+/// its words, can still be short: last, "options" gives way (its modal is
+/// `e`).
+fn head_steps(glyph: bool, filters: bool) -> Vec<HeadStep> {
+    let whole = HeadStep { words: true, long: true, mark: true, name: true, more: true };
+    let mut steps = vec![whole];
     if glyph {
-        steps.push(HeadStep { words: false, long: true, mark: true, name: true });
+        steps.push(HeadStep { words: false, ..whole });
     }
     for (mark, name) in [(true, true), (false, true), (false, false)] {
-        steps.push(HeadStep { words: !glyph, long: false, mark, name });
+        steps.push(HeadStep { words: !glyph, long: false, mark, name, ..whole });
+    }
+    if filters && !glyph {
+        let last = steps[steps.len() - 1];
+        steps.push(HeadStep { more: false, ..last });
     }
     steps
 }
@@ -936,6 +968,9 @@ struct HeadWords {
     more: (String, String),
     /// "new seeds" and "asking…".
     refresh: (String, String),
+    /// The mood opener's cells (clause 33), where the room offers the
+    /// filters; none elsewhere, and the header is as it was.
+    filters: Option<u16>,
 }
 
 impl HeadWords {
@@ -954,6 +989,8 @@ impl HeadWords {
             widest: WINDOWS.iter().map(|w| width(&window_label_in(*w, locale))).max().unwrap_or(0) as u16,
             more: (t!("gui.discover.more_options", locale = locale).to_string(), t!("gui.discover.options_short", locale = locale).to_string()),
             refresh: (t!("gui.discover.new_seeds", locale = locale).to_string(), t!("gui.discover.asking", locale = locale).to_string()),
+            filters: (app.capabilities.taste_moods() && app.session.peer.is_none())
+                .then(|| width(&super::moods::opener_word(locale)) as u16),
         }
     }
 }
@@ -964,6 +1001,8 @@ impl HeadWords {
 struct HeadPlan {
     step: HeadStep,
     window: (u16, u16),
+    /// The mood opener, between the window and "more options".
+    filters: Option<(u16, u16)>,
     more: (u16, u16),
     refresh: (u16, u16),
 }
@@ -987,17 +1026,25 @@ fn head_plan(words: &HeadWords, content: Rect, glyph: Option<&str>) -> HeadPlan 
     let more_w = |long: bool| width(if long { &words.more.0 } else { &words.more.1 }) as u16;
     let need = |s: &HeadStep| {
         let name = if s.name { width(&words.name) as u16 + HEAD_GAP } else { 0 };
-        name + window_w(s.mark) + HEAD_GAP + more_w(s.long) + HEAD_GAP + refresh_w(s.words)
+        let filters = words.filters.map_or(0, |w| w + HEAD_GAP);
+        let more = if s.more { more_w(s.long) + HEAD_GAP } else { 0 };
+        name + window_w(s.mark) + HEAD_GAP + filters + more + refresh_w(s.words)
     };
-    let steps = head_steps(glyph.is_some());
+    let steps = head_steps(glyph.is_some(), words.filters.is_some());
     let step = steps.iter().copied().find(|s| need(s) <= content.width).unwrap_or(steps[steps.len() - 1]);
     let slot_w = refresh_w(step.words);
     let slot_x = content.right().saturating_sub(slot_w);
-    let more_w = more_w(step.long);
-    let more_x = slot_x.saturating_sub(HEAD_GAP + more_w);
+    // "options" given way: no width, at the refresh's slot.
+    let (more_x, more_w) = if step.more {
+        let w = more_w(step.long);
+        (slot_x.saturating_sub(HEAD_GAP + w), w)
+    } else {
+        (slot_x, 0)
+    };
+    let filters = words.filters.map(|w| (more_x.saturating_sub(HEAD_GAP + w), w));
     let window_w = window_w(step.mark);
-    let window_x = more_x.saturating_sub(HEAD_GAP + window_w).max(content.x);
-    HeadPlan { step, window: (window_x, window_w), more: (more_x, more_w), refresh: (slot_x, slot_w) }
+    let window_x = filters.map_or(more_x, |(x, _)| x).saturating_sub(HEAD_GAP + window_w).max(content.x);
+    HeadPlan { step, window: (window_x, window_w), filters, more: (more_x, more_w), refresh: (slot_x, slot_w) }
 }
 
 /// The header (clauses 11, 15, 17, 91): the room's name BOLD, then, at the
@@ -1037,10 +1084,17 @@ fn draw_header(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     gui.ui.tip_keyed(rect, tip);
     gui.discover.window_at = rect;
 
+    // The mood opener (clause 33): its modal opens over the room.
+    if let Some((x, _)) = plan.filters {
+        super::moods::draw_opener(frame, gui, x, y);
+    }
+
     let (more_x, more_w) = plan.more;
-    let more = if step.long { &words.more.0 } else { &words.more.1 };
-    super::text_button(frame, gui, more_x, y, more, false, Act::Disc(DiscAct::Seeds));
-    gui.ui.tip_keyed(Rect { x: more_x, y, width: more_w, height: 1 }, t!("gui.discover.seeds_tip").to_string());
+    if step.more {
+        let more = if step.long { &words.more.0 } else { &words.more.1 };
+        super::text_button(frame, gui, more_x, y, more, false, Act::Disc(DiscAct::Seeds));
+        gui.ui.tip_keyed(Rect { x: more_x, y, width: more_w, height: 1 }, t!("gui.discover.seeds_tip").to_string());
+    }
 
     // An ask out (either half, or a 403's probe): the refresh says so —
     // the state line's word before the line left (2026-10-16, clause 32).
@@ -3024,6 +3078,10 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             }
         }
         KeyCode::Char('e') => return Some(gui.act(Act::Disc(DiscAct::Seeds))),
+        // The mood Filters' modal, where the room offers it (clause 33).
+        KeyCode::Char('o') if super::moods::offered_here(gui) => {
+            return Some(gui.act(Act::Mood(super::moods::MoodAct::Open { key: true })));
+        }
         // Another pick, only while the card stands (clause 21); otherwise
         // `r` stays the transport's repeat.
         KeyCode::Char('r') if gui.app.taste.no_history => return Some(gui.act(Act::Disc(DiscAct::Another))),
@@ -3170,6 +3228,14 @@ pub(crate) fn tips(gui: &Gui) -> String {
     if gui.discover.menu.is_some() {
         return t!("gui.tips.discover_menu").to_string();
     }
+    // The room's own lines end naming the mood Filters' `o` where the room
+    // offers them and the line has the cells (clause 33).
+    super::moods::tips_tail(gui, std::borrow::Cow::Owned(room_tips(gui)), TIPS_MAX).into_owned()
+}
+
+/// The tips line of the room itself, no modal up: the strip's, a held
+/// row's, or at rest.
+fn room_tips(gui: &Gui) -> String {
     // The strip's tiles (clause 47): ← → walk them here, and switch tabs
     // everywhere else — the tips say which.
     if gui.discover.strip.on {
@@ -3548,21 +3614,31 @@ mod tests {
     // ── The row ─────────────────────────────────────────────────────────
 
     #[test]
-    fn the_row_sits_at_16_under_sonic_and_never_meets_settings() {
+    fn the_row_sits_at_17_under_sonic_and_never_meets_settings() {
         let _en = english();
+        // Sixteen rows to Discover's 17 since Rated joined LIBRARY. At 24
+        // rows with the footer on, Settings takes 17 itself: the LIBRARY
+        // heading through Discover rise one row into the blank under Search
+        // there, and only there (library-rooms clause 37).
         for (height, footer, settings) in [(30u16, false, 24u16), (30, true, 23), (24, false, 18), (24, true, 17)] {
             let mut gui = session_gui();
             gui.config.gui.key_hints = footer;
             gui.ui.key_hints = footer;
             let rows = draw_sized(&mut gui, 100, height);
             let nav = |y: u16| rows[y as usize].chars().take(15).collect::<String>();
-            assert!(nav(13).contains("TOOLS"), "{height}/{footer}: TOOLS at 13:\n{}", rows.join("\n"));
-            assert!(nav(14).contains("Auto DJ"), "{height}/{footer}: Auto DJ at 14");
-            assert!(nav(15).contains("Sonic path"), "{height}/{footer}: Sonic at 15");
-            assert!(nav(16).contains("Discover"), "{height}/{footer}: Discover at 16");
-            assert!(nav(settings).contains("Settings"), "{height}/{footer}: Settings at {settings}:\n{}", rows.join("\n"));
+            let lift = u16::from(settings == 17);
+            let all = rows.join("\n");
+            assert!(nav(3).contains("Search"), "{height}/{footer}: Search stays at 3:\n{all}");
+            assert!(nav(5 - lift).contains("LIBRARY"), "{height}/{footer}: LIBRARY at {}:\n{all}", 5 - lift);
+            assert!(nav(10 - lift).contains("Rated"), "{height}/{footer}: Rated at {}:\n{all}", 10 - lift);
+            assert!(nav(14 - lift).contains("TOOLS"), "{height}/{footer}: TOOLS at {}:\n{all}", 14 - lift);
+            assert!(nav(15 - lift).contains("Auto DJ"), "{height}/{footer}: Auto DJ at {}", 15 - lift);
+            assert!(nav(16 - lift).contains("Sonic path"), "{height}/{footer}: Sonic at {}", 16 - lift);
+            let discover = 17 - lift;
+            assert!(nav(discover).contains("Discover"), "{height}/{footer}: Discover at {discover}:\n{all}");
+            assert!(nav(settings).contains("Settings"), "{height}/{footer}: Settings at {settings}:\n{all}");
             assert!(
-                !nav(settings).contains("Discover") && !nav(16).contains("Settings"),
+                !nav(settings).contains("Discover") && !nav(discover).contains("Settings"),
                 "{height}/{footer}: Discover and Settings never share a row"
             );
             let pos = at(&rows, "Discover");
@@ -5751,6 +5827,29 @@ mod tests {
     }
 
     #[test]
+    fn the_browse_counts_read_their_plural_forms() {
+        use super::{plural, plural_in};
+        {
+            let _en = english();
+            assert_eq!((plural("gui.alb.count", 1), plural("gui.alb.count", 2)), ("1 album".into(), "2 albums".into()));
+            assert_eq!((plural("gui.files.items", 1), plural("gui.files.items", 0)), ("1 item".into(), "0 items".into()));
+        }
+        let cases: [(&str, &[(u64, &str, &str)]); 3] = [
+            ("ru", &[(2, "2 альбома", "2 элемента"), (5, "5 альбомов", "5 элементов"), (21, "21 альбом", "21 элемент")]),
+            ("pl", &[(1, "1 album", "1 pozycja"), (2, "2 albumy", "2 pozycje"), (5, "5 albumów", "5 pozycji")]),
+            ("ja", &[(1, "1 枚のアルバム", "1 件"), (2, "2 枚のアルバム", "2 件"), (21, "21 枚のアルバム", "21 件")]),
+        ];
+        // Passed, not switched: the process stays in English for the tests
+        // that read it with no lock.
+        for (code, counts) in cases {
+            for &(n, albums, items) in counts {
+                let read = (plural_in("gui.alb.count", n, code), plural_in("gui.files.items", n, code));
+                assert_eq!((read.0.as_str(), read.1.as_str()), (albums, items), "{code} {n}");
+            }
+        }
+    }
+
+    #[test]
     fn the_layout_keeps_a_table_row_at_the_floor() {
         // 100×24 with the footer on: 16 content rows, no blank under the
         // header or the tabs; 17 with it off, the header's blank back; both
@@ -5952,5 +6051,199 @@ mod tests {
         assert!(tips.contains("P play now") && tips.contains("m actions"), "a connected server's row has the sheet: {tips}");
         key(&mut gui, KeyCode::Char('w'));
         assert_eq!(super::tips(&gui), "↑ ↓ rows · Enter pick · Esc close");
+    }
+
+    // ── The mood Filters (clause 33) ──────────────────────────────────────
+
+    use super::super::moods::{MoodAct, MoodStop, is_open};
+    use crate::kit::width;
+    use rust_i18n::t;
+
+    /// The room answered by a server whose taste route takes `moods`.
+    fn moody_gui() -> Gui {
+        let mut gui = answered_gui();
+        gui.app.capabilities.discovery_taste = 2;
+        gui.app.capabilities.mood_filters = true;
+        gui
+    }
+
+    /// The x a needle starts at on a drawn row, in cells.
+    fn x_of(row: &str, needle: &str) -> u16 {
+        let i = row.find(needle).unwrap_or_else(|| panic!("{needle:?} not in {row:?}"));
+        width(&row[..i]) as u16
+    }
+
+    #[test]
+    fn the_mood_opener_stands_in_the_header_in_every_locale_at_the_queues_47_cells() {
+        use crate::api::types::{MoodFilter, MoodScale};
+        let mut gui = moody_gui();
+        gui.app.taste.moods = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        gui.queue_open = true;
+        draw(&mut gui);
+        let narrow = gui.discover.content;
+        assert_eq!(narrow.width, 47);
+        // The queue folded: the room's 80 cells.
+        let wide = super::super::content_rect(100, 30, false, false);
+        assert_eq!(wide.width, 80);
+        for (legacy, content) in [false, true].into_iter().flat_map(|l| [(l, narrow), (l, wide)]) {
+            let _tier = legacy.then(crate::kit::theme::legacy_glyphs_here);
+            let glyph = super::refresh_glyph();
+            for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+                let words = super::HeadWords::of(&gui.app, code);
+                let plan = super::head_plan(&words, content, glyph);
+                let what = format!("{code}/legacy {legacy} at {}: {plan:?}", content.width);
+                let (wx, ww) = plan.window;
+                let (fx, fw) = plan.filters.unwrap_or_else(|| panic!("no opener: {what}"));
+                let (mx, mw) = plan.more;
+                let (rx, rw) = plan.refresh;
+                assert!(wx >= content.x, "{what}");
+                // "options" given way stands nowhere: the opener runs to the
+                // refresh.
+                let middle = if plan.step.more { fx + fw + 2 <= mx && mx + mw + 2 <= rx } else { fx + fw + 2 <= rx };
+                assert!(wx + ww + 2 <= fx && middle && rx + rw <= content.right(), "{what}");
+                // Only the legacy console, whose refresh keeps its words,
+                // ever lets "options" go; the refresh's slot is the content's
+                // last three cells wherever its glyph stands alone.
+                assert!(legacy || plan.step.more, "{what}");
+                if glyph.is_some() && !plan.step.words {
+                    assert_eq!((rx, rw), (content.right() - 3, 3), "{what}");
+                }
+                // At 80 cells the room's name and "options" stand whole.
+                if content == wide {
+                    assert!(plan.step.more && plan.step.name, "{what}");
+                }
+            }
+        }
+        // A generation-1 route: no opener, and the header as it was.
+        gui.app.capabilities.discovery_taste = 1;
+        let words = super::HeadWords::of(&gui.app, "en");
+        assert!(super::head_plan(&words, narrow, super::refresh_glyph()).filters.is_none());
+    }
+
+    #[test]
+    fn the_english_header_at_47_keeps_its_name_and_the_refresh_at_x61() {
+        let _en = english();
+        let mut gui = moody_gui();
+        gui.queue_open = true;
+        let rows = draw(&mut gui);
+        let line = &rows[2];
+        assert_eq!(x_of(line, "Discover"), 17, "{line}");
+        assert_eq!((x_of(line, "mood"), x_of(line, "options"), x_of(line, "↻")), (46, 52, 61), "{line}");
+        assert_eq!(gui.ui.hit(Position { x: 49, y: 2 }), Some(Act::Mood(MoodAct::Open { key: false })));
+    }
+
+    #[test]
+    fn o_opens_the_ten_row_modal_and_done_asks_one_batch_with_the_threshold_inside() {
+        use crate::api::types::{MoodFilter, MoodLevel, MoodScale};
+        let _en = english();
+        let mut gui = moody_gui();
+        gui.queue_open = true;
+        let window = gui.app.taste.shown_window();
+        draw(&mut gui);
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Char('o'));
+        assert!(is_open(&gui));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        // r10–r19, no SORT row: the room has no Sort.
+        assert_eq!((x_of(&rows[10], "╭─ Filters"), x_of(&rows[19], "╰")), (17, 17), "{all}");
+        assert!(rows[16].contains("( ) Strict") && !all.contains("SORT"), "{all}");
+        // The hand is up on Happy: Space picks it; → → ↓ … the tags.
+        assert_eq!(gui.moods.draft.unwrap().hand, MoodStop::Pick(MoodScale::Valence, "happy"));
+        key(&mut gui, KeyCode::Char(' '));
+        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Right, KeyCode::Char(' ')] {
+            key(&mut gui, code);
+        }
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Char(' ')] {
+            key(&mut gui, code);
+        }
+        let draft = gui.moods.draft.unwrap();
+        let wire = MoodFilter::NONE.press(MoodScale::Valence, "happy").toggle_tag("party").with_level(MoodLevel::Loose);
+        assert_eq!(draft.moods.filter, wire, "{draft:?}");
+        let rows = draw(&mut gui);
+        assert!(rows[11].contains("(•) Happy") && rows[14].contains("[✓] Party"), "{}", rows.join("\n"));
+        assert!(rows[16].contains("(•) Loose") && rows[18].contains("clear   [ Done ]"), "{}", rows.join("\n"));
+        assert!(gui.pending.iter().all(|e| !matches!(e, Effect::Api(ApiCmd::Taste { .. }))), "nothing asked while up");
+
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Esc);
+        assert!(!is_open(&gui));
+        assert_eq!(gui.app.taste.moods, wire);
+        let body = main_body(&gui);
+        assert_eq!(
+            serde_json::to_value(&body).unwrap()["moods"],
+            serde_json::json!({ "valence": "happy", "tags": ["party"], "threshold": 0.3 })
+        );
+        land(&mut gui, TastePart::Main, main_answer());
+        let peers = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::Taste { part: TastePart::Peers, body, .. }) => Some(body.moods),
+            _ => None,
+        });
+        assert_eq!(peers, Some(Some(wire)), "the connected servers are asked under it too");
+        assert_eq!(gui.app.taste.shown_window(), window, "the visit kept");
+
+        // Another room and back: closed, the choice kept.
+        key(&mut gui, KeyCode::Char('o'));
+        gui.act(Act::Nav(super::super::ALBUMS_NAV));
+        gui.act(Act::Nav(DISCOVER_NAV));
+        assert!(!is_open(&gui));
+        assert_eq!(gui.app.taste.moods, wire);
+    }
+
+    #[test]
+    fn the_strip_takes_the_blank_under_the_header_and_at_the_floor_the_room_stands_a_row_lower() {
+        use crate::api::types::{MoodFilter, MoodScale};
+        let _en = english();
+        let mut gui = moody_gui();
+        gui.queue_open = true;
+        let tabs = |rows: &[String]| {
+            rows.iter().position(|r| r.contains("Connected servers")).unwrap_or_else(|| panic!("{}", rows.join("\n")))
+        };
+        let before = tabs(&draw(&mut gui));
+        gui.app.taste.moods = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        let rows = draw(&mut gui);
+        assert_eq!(x_of(&rows[3], "Relaxed [X]"), 17, "{}", rows.join("\n"));
+        assert_eq!(tabs(&rows), before, "at 17 rows and up nothing moves");
+        assert_eq!(gui.ui.hit(Position { x: 26, y: 3 }), Some(Act::Mood(MoodAct::Drop)));
+
+        // The floor: 100×24 with key hints on, no blank under the header.
+        gui.set_key_hints(true);
+        gui.app.taste.moods = MoodFilter::NONE;
+        let floor = tabs(&draw_sized(&mut gui, 100, 24));
+        assert_eq!(floor, 3);
+        gui.app.taste.moods = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+        let rows = draw_sized(&mut gui, 100, 24);
+        assert_eq!(x_of(&rows[3], "Relaxed [X]"), 17, "{}", rows.join("\n"));
+        assert_eq!(tabs(&rows), floor + 1, "the room a row lower: {}", rows.join("\n"));
+    }
+
+    #[test]
+    fn a_generation_one_route_gets_no_opener_and_no_moods_key() {
+        use crate::api::types::{MoodFilter, MoodScale};
+        let _en = english();
+        let mut gui = answered_gui();
+        // Scores, but a taste body that would 400 on the key.
+        gui.app.capabilities.mood_filters = true;
+        gui.app.taste.moods = MoodFilter::NONE.press(MoodScale::Valence, "happy");
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(!rows[2].contains("mood") && !rows[3].contains("[X]"), "{all}");
+        key(&mut gui, KeyCode::Char('o'));
+        assert!(!is_open(&gui), "`o` is dead");
+        gui.pending.clear();
+        key(&mut gui, KeyCode::Char('G'));
+        assert_eq!(main_body(&gui).moods, None);
+    }
+
+    #[test]
+    fn the_tips_name_o_where_it_works_and_the_modals_own_line_while_up() {
+        let _en = english();
+        let mut gui = moody_gui();
+        gui.set_key_hints(true);
+        let rows = draw(&mut gui);
+        assert!(rows[29].trim_end().ends_with("· o mood"), "{:?}", rows[29]);
+        key(&mut gui, KeyCode::Char('o'));
+        let rows = draw(&mut gui);
+        assert_eq!(rows[29].trim(), t!("gui.tips.moods"));
     }
 }

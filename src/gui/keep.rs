@@ -1333,7 +1333,7 @@ fn acting_keys(gui: &Gui, view: &KeepView, shown: Shown) -> Vec<KeyWord> {
 /// The legacy console's frame: `+ - |` (clause 124); elsewhere the kit's
 /// rounded one. Clear beneath, the ground repainted, the footprint the
 /// caller registered.
-fn modal_box(frame: &mut Frame, rect: Rect) -> Rect {
+pub(crate) fn modal_box(frame: &mut Frame, rect: Rect) -> Rect {
     if !legacy_conhost() {
         return crate::kit::frame_at(frame, rect, th().accent);
     }
@@ -1417,11 +1417,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Rect) {
 /// a text button doing what Esc does (`close`), its tail ("· the copy
 /// keeps going") plain. Keep a copy's, and Where copies land's.
 fn draw_borders(frame: &mut Frame, gui: &mut Gui, rect: Rect, title: &str, footer: &str, close: Act) {
-    // TEXT, never the border's ACCENT carried over: the window's own text
-    // colour — the scheme's where it paints the ground, else the terminal's.
-    let owned = th().ground.is_some() && crate::kit::theme::ground_owned();
-    let text = if owned { th().text } else { ratatui::style::Color::Reset };
-    put(frame, rect.x + 2, rect.y, &format!(" {title} "), Style::default().fg(text).add_modifier(Modifier::BOLD));
+    border_title(frame, rect, title);
     let bottom = rect.bottom().saturating_sub(1);
     let end = rect.right().saturating_sub(3);
     let start = end.saturating_sub(width(footer) as u16);
@@ -1433,6 +1429,17 @@ fn draw_borders(frame: &mut Frame, gui: &mut Gui, rect: Rect, title: &str, foote
         put(frame, start, bottom, &button, bright_bold());
     }
     gui.ui.click(at, close);
+}
+
+/// The title on a window's top border, ` {title} ` from two cells in —
+/// after the corner and one `─` — TEXT BOLD: Keep a copy's, Where copies
+/// land's and the mood Filters' (library-rooms clause 32).
+pub(crate) fn border_title(frame: &mut Frame, rect: Rect, title: &str) {
+    // TEXT, never the border's ACCENT carried over: the window's own text
+    // colour — the scheme's where it paints the ground, else the terminal's.
+    let owned = th().ground.is_some() && crate::kit::theme::ground_owned();
+    let text = if owned { th().text } else { ratatui::style::Color::Reset };
+    put(frame, rect.x + 2, rect.y, &format!(" {title} "), Style::default().fg(text).add_modifier(Modifier::BOLD));
 }
 
 /// The head (§4.2): the item's title TEXT BOLD, the byline DIM — and the

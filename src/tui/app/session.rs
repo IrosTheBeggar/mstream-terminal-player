@@ -378,6 +378,8 @@ impl App {
         self.albums_rev = self.albums_rev.wrapping_add(1);
         self.artists = None;
         self.genre_list = None;
+        self.song_ranks = None;
+        self.mood_undo = None;
         self.library.set(Vec::new());
         self.library_stack = super::nav::Drill::new(crate::tui::worker::LibraryNode::Root);
         // The Discover room's answer, pins and prefs were the old server's
