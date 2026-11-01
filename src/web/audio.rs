@@ -145,6 +145,10 @@ impl WebAudioPlayer {
                         el.set_current_time(to.max(0.0));
                     }
                 }
+                // The element's current time reads the new one at once, so
+                // the seek is done as soon as it is asked; the status below
+                // says where it stands.
+                self.async_events.borrow_mut().push_back(Event::Seeked { target: to });
             }
             AudioCmd::SetVolume(v) => {
                 if let Some(el) = &self.element {

@@ -2732,21 +2732,26 @@ mod tests {
     #[test]
     fn an_open_nobody_wants_any_more_is_given_up_at_once() {
         // The same stall the deadline exists for, but a newer command
-        // arrives 200 ms in: the wait ends then, not at START_TIMEOUT
-        // (audit #79) — and without anyone calling it a failure.
+        // arrives 200 ms into the wait: the wait ends then, not at
+        // START_TIMEOUT (audit #79) — and without anyone calling it a
+        // failure.
         let entry = QueueEntry { path: stalled_url(), duration_hint: None };
-        let started = Instant::now();
+        // The 200 ms run from the first ask: a loaded machine can take that
+        // long to spawn the open's thread and ask at all, and a yes at the
+        // first ask proves nothing about asking while it waited.
+        let mut first_ask = None;
         let mut asked = 0;
         let mut said_yes = None;
         let outcome = open_entry_unless(&entry, &mut || {
             asked += 1;
-            let yes = started.elapsed() > Duration::from_millis(200);
+            let since = *first_ask.get_or_insert_with(Instant::now);
+            let yes = since.elapsed() > Duration::from_millis(200);
             if yes && said_yes.is_none() {
                 said_yes = Some(Instant::now());
             }
             yes
         });
-        let waited = started.elapsed();
+        let waited = first_ask.expect("asked at all").elapsed();
         assert!(matches!(outcome, Err(OpenError::Superseded(Some(_)))), "given up, not failed");
         assert!(waited < START_TIMEOUT / 2, "took {waited:?}");
         // At once is from the yes, however far apart a loaded machine's
@@ -2763,25 +2768,31 @@ mod tests {
         assert!(started.elapsed() >= START_TIMEOUT, "the full deadline, not less");
     }
 
-    /// A WAV that answers after `delay`, sends enough at once for an open
-    /// to finish, then trickles the rest for longer than any test runs —
-    /// and reports when the client hangs up.
-    fn trickling_wav_server(delay: Duration) -> (String, mpsc::Receiver<Instant>) {
+    /// A WAV that answers a request once the test sends a go (one for each
+    /// request), sends enough at once for an open to finish, then trickles
+    /// the rest for longer than any test runs — and reports when the client
+    /// hangs up.
+    fn trickling_wav_server() -> (String, mpsc::Sender<()>, mpsc::Receiver<Instant>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (hung_up, hang_ups) = mpsc::channel();
+        let (go, goes) = mpsc::channel::<()>();
+        let goes = Arc::new(std::sync::Mutex::new(goes));
         // Twenty seconds of WAV: eighteen seconds of trickle, well past
         // the end of any test.
         let body = Arc::new(wav_bytes(20));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let (body, hung_up) = (body.clone(), hung_up.clone());
+                let (body, hung_up, goes) = (body.clone(), hung_up.clone(), goes.clone());
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     let mut request = [0u8; 2048];
                     let _ = stream.read(&mut request);
-                    std::thread::sleep(delay);
+                    // Held for its go, or gone with the test.
+                    if goes.lock().unwrap().recv().is_err() {
+                        return;
+                    }
                     let head = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\n\
                          Content-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2799,7 +2810,7 @@ mod tests {
                 });
             }
         });
-        (format!("http://{addr}/trickling.wav"), hang_ups)
+        (format!("http://{addr}/trickling.wav"), go, hang_ups)
     }
 
     #[test]
@@ -2810,15 +2821,19 @@ mod tests {
         // whole unwanted track beside the wanted one until something next
         // pruned the list (review of audit #79). Given up, the answer drops
         // on the open's own thread the moment it arrives.
-        let (url, hang_ups) = trickling_wav_server(Duration::from_millis(100));
+        let (url, go, hang_ups) = trickling_wav_server();
         let entry = QueueEntry { path: url, duration_hint: None };
 
         // Waited for, the same open succeeds: a real track, not a failure
         // whose connection would close on its own. Dropped here, which is
         // the hang-up the server reports first.
+        go.send(()).unwrap();
         assert!(open_entry_bounded(&entry).is_ok(), "the track opens");
         hang_ups.recv_timeout(Duration::from_secs(3)).expect("a dropped track hangs up");
 
+        // The server holds this one's answer until after the give-up: its
+        // request is out when it is given up, however late a loaded
+        // machine's first ask comes (a 100 ms answer once beat it).
         let asked = Instant::now();
         let outcome =
             open_entry_unless(&entry, &mut || asked.elapsed() > Duration::from_millis(20));
@@ -2826,6 +2841,7 @@ mod tests {
             panic!("given up while its request was out");
         };
         let thread = opener.give_up();
+        go.send(()).unwrap();
         let until = Instant::now() + Duration::from_secs(5);
         while !thread.is_finished() {
             assert!(Instant::now() < until, "the open never finished");

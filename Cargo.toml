@@ -592,8 +592,10 @@ winit = { path = "vendor/winit" }
 # response shorter than the prefetch never woke the reader waiting on it (a
 # 1 s nudge back stalled 14 s at 8 Mbit/s), the loader refilled the file's
 # lowest gap instead of the one ahead of the reader, a seek past an island
-# asked for an inverted range, and a read off an island's end could lose its
-# ask. Every change is marked "mstream-player patch"; VENDORED.md lists them,
-# and the range tests in src/engine/http.rs say whether an upstream release
-# has made the copy unnecessary.
+# asked for an inverted range, a read off an island's end could lose its
+# ask, a seek made before the last one was read could be dropped, and a
+# reader could sleep through bytes that landed as it went to wait. Every
+# change is marked "mstream-player patch"; VENDORED.md lists them, and the
+# range tests in src/engine/http.rs say whether an upstream release has made
+# the copy unnecessary.
 stream-download = { path = "vendor/stream-download" }

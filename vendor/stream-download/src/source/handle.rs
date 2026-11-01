@@ -7,9 +7,8 @@ use std::time::Instant;
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use rangemap::RangeSet;
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Notify, mpsc, watch};
-use tracing::{debug, error};
+use tokio::sync::{Notify, watch};
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SourceHandle {
@@ -18,7 +17,8 @@ pub(crate) struct SourceHandle {
     pub(super) requested_position: RequestedPosition,
     pub(super) position_reached: PositionReached,
     pub(super) content_length: Option<u64>,
-    pub(super) seek_tx: mpsc::Sender<u64>,
+    // mstream-player patch: see `request_seek`.
+    pub(super) seek_tx: watch::Sender<u64>,
     // mstream-player patch: see `want`.
     pub(super) want_tx: watch::Sender<u64>,
     pub(super) notify_read: NotifyRead,
@@ -36,7 +36,7 @@ impl SourceHandle {
             "waiting for requested position"
         );
         self.notify_read.notify_waiting();
-        self.position_reached.wait_for_position_reached();
+        self.wait_until_reached(requested_position);
     }
 
     pub(crate) fn seek(&self, seek_position: u64) {
@@ -46,7 +46,20 @@ impl SourceHandle {
             requested_position = seek_position,
             "waiting for requested position"
         );
-        self.position_reached.wait_for_position_reached();
+        self.wait_until_reached(seek_position);
+    }
+
+    // mstream-player patch: the wait looks at the downloaded runs itself, as well as for the
+    // download's word. A read finds too few bytes downloaded and only then names the position
+    // it will wait for; a download writing the rest in between found no position named and
+    // told nobody, and the reader slept through its own bytes until the download ended or
+    // came by again (a seek into a file's last stretch waited out the stalled back-fill of
+    // everything below it). The download's word now names the position it is for, so one
+    // that lands after its reader has moved on wakes no later wait.
+    fn wait_until_reached(&self, position: u64) {
+        let downloaded = &self.downloaded;
+        self.position_reached
+            .wait_for_position_reached(position, || downloaded.reaches(position));
     }
 
     // mstream-player patch: tells the download that a read is about to wait at `position`,
@@ -80,15 +93,15 @@ impl SourceHandle {
         self.requested_position.set(position);
     }
 
+    // mstream-player patch: only the latest seek counts, as with `want`. A seek waits for its
+    // position, but the download can reach that position by itself before it looks at the
+    // seek (a probe's seek to 0 while the prefetch lands), and the reader, woken, seeks on. On
+    // the one-slot queue the stale seek still held the slot and the new one was dropped
+    // ("Sent multiple seek requests without waiting"), so the reader parked until the
+    // download happened by: a seek into the file's last stretch waited out the whole first
+    // request.
     fn request_seek(&self, position: u64) {
-        self.seek_tx
-            .try_send(position)
-            .inspect_err(|e| {
-                if let TrySendError::Full(_) = e {
-                    error!("Sent multiple seek requests without waiting");
-                }
-            })
-            .ok();
+        self.seek_tx.send_replace(position);
     }
 }
 
@@ -120,7 +133,9 @@ impl RequestedPosition {
 
 #[derive(Default, Debug)]
 struct Waiter {
-    position_reached: bool,
+    // mstream-player patch: the position the download last said was reached, in place of a
+    // bare flag (`SourceHandle::wait_until_reached`).
+    position_reached: Option<u64>,
     stream_done: bool,
 }
 
@@ -132,9 +147,9 @@ struct Waiter {
 pub(super) struct PositionReached(Arc<(AssertUnwindSafe<Mutex<Waiter>>, Condvar)>);
 
 impl PositionReached {
-    pub(super) fn notify_position_reached(&self) {
+    pub(super) fn notify_position_reached(&self, position: u64) {
         let (mutex, cvar) = self.0.as_ref();
-        mutex.lock().position_reached = true;
+        mutex.lock().position_reached = Some(position);
         cvar.notify_all();
     }
 
@@ -144,7 +159,10 @@ impl PositionReached {
         cvar.notify_all();
     }
 
-    fn wait_for_position_reached(&self) {
+    // mstream-player patch: see `SourceHandle::wait_until_reached`. `reached` is checked under
+    // the lock, before the first sleep and after every wake, and a write's word takes the same
+    // lock, so a word can't slip in between the check and the sleep.
+    fn wait_for_position_reached(&self, position: u64, reached: impl Fn() -> bool) {
         let (mutex, cvar) = self.0.as_ref();
         let mut waiter = mutex.lock();
         if waiter.stream_done {
@@ -154,14 +172,14 @@ impl PositionReached {
         let wait_start = Instant::now();
 
         cvar.wait_while(&mut waiter, |waiter| {
-            !waiter.stream_done && !waiter.position_reached
+            !waiter.stream_done && waiter.position_reached != Some(position) && !reached()
         });
         debug!(
             elapsed = format!("{:?}", wait_start.elapsed()),
             "position reached"
         );
         if !waiter.stream_done {
-            waiter.position_reached = false;
+            waiter.position_reached = None;
         }
     }
 }
@@ -179,6 +197,13 @@ impl Downloaded {
 
     pub(super) fn get(&self, position: u64) -> Option<Range<u64>> {
         self.0.read().get(&position).cloned()
+    }
+
+    // mstream-player patch: whether a run of downloaded bytes holds `position`, its end
+    // included, which is what `Source::notify_if_reached` wakes a reader for.
+    pub(super) fn reaches(&self, position: u64) -> bool {
+        let runs = self.0.read();
+        runs.contains(&position) || position.checked_sub(1).is_some_and(|last| runs.contains(&last))
     }
 
     pub(super) fn next_gap(&self, range: Range<u64>) -> Option<Range<u64>> {

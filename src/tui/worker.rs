@@ -634,6 +634,13 @@ pub enum Event {
     /// moves its cursor without starting anything — the audio has already
     /// moved.
     HandedOver { from: String, to: String },
+    /// The engine is done with a seek — landed, clamped short of the end,
+    /// or refused — named by the target it was asked for; the status after
+    /// it says where playback stands. A seek holds this thread for as long
+    /// as its bytes take to arrive, seconds on a slow link, and the name is
+    /// what lets the UI tell its newest seek from an older one the thread
+    /// was still busy with.
+    Seeked { target: f64 },
     /// The audio device could not be opened; playback is unavailable.
     AudioFailed(String),
     /// News about the output device itself: playback moved to a new
@@ -1043,6 +1050,10 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
                 AudioCmd::Play { url, .. } => Some(url.clone()),
                 _ => None,
             };
+            let seeking = match &cmd {
+                AudioCmd::Seek(target) => Some(*target),
+                _ => None,
+            };
             // Asked while a Play's open waits: take in whatever has arrived
             // since, and say whether a newer Play or a Stop is among it.
             // One is, and the open is given up — it used to run to its end
@@ -1064,6 +1075,11 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
                     None => Event::Error(err),
                 };
                 let _ = events.send(event);
+            }
+            // Refused or not, the thread is done with the seek, and the
+            // status this batch ends on reports where it left playback.
+            if let Some(target) = seeking {
+                let _ = events.send(Event::Seeked { target });
             }
             // Overtaken: what is left of this batch was aimed at a track
             // the newcomers have already moved past, so it goes in ahead
@@ -3463,11 +3479,12 @@ mod tests {
         listener.join().expect("the thread ended on its own terms");
     }
 
-    /// A player that only counts: ticks, pauses, and whether it calls
-    /// itself settled.
+    /// A player that only counts: ticks (and when each came), pauses, and
+    /// whether it calls itself settled.
     #[derive(Clone, Default)]
     struct Counter {
         ticks: Arc<std::sync::atomic::AtomicUsize>,
+        ticked_at: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
         pauses: Arc<std::sync::atomic::AtomicUsize>,
         settled: Arc<std::sync::atomic::AtomicBool>,
     }
@@ -3496,6 +3513,7 @@ mod tests {
         }
         fn tick(&self) {
             self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.ticked_at.lock().unwrap().push(std::time::Instant::now());
         }
         fn settled(&self) -> bool {
             self.settled.load(std::sync::atomic::Ordering::SeqCst)
@@ -3511,9 +3529,15 @@ mod tests {
         let theirs = player.clone();
         let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
 
-        // Moving: the brisk tick, ~8 a second.
+        // Moving: the brisk tick, ~8 a second. A loaded machine starts and
+        // wakes the thread late, so the count in 1.3s drifts (5 on a macOS
+        // runner and on a busy Windows box, against ~10), but late only ever
+        // lengthens a gap: the shortest says which wait the loop is on, and
+        // the settled one is a second at the least.
         std::thread::sleep(Duration::from_millis(1300));
         let moving = player.ticks.swap(0, Ordering::SeqCst);
+        let ticked_at = std::mem::take(&mut *player.ticked_at.lock().unwrap());
+        let closest = ticked_at.windows(2).map(|pair| pair[1] - pair[0]).min();
         // Settled (paused, stopped): the device watch's pace — the wait in
         // flight when it settled still ends on the brisk clock.
         player.settled.store(true, Ordering::SeqCst);
@@ -3521,7 +3545,8 @@ mod tests {
         player.ticks.store(0, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(2300));
         let settled = player.ticks.swap(0, Ordering::SeqCst);
-        assert!(moving >= 6, "a moving player ticks briskly: {moving} in 1.3s");
+        let brisk = closest.is_some_and(|gap| gap < Duration::from_millis(500));
+        assert!(brisk, "a moving player ticks briskly: {moving} in 1.3s, at closest {closest:?} apart");
         assert!((1..=3).contains(&settled), "a settled player ticks once a second: {settled} in 2.3s");
 
         // A command does not wait out the lazy tick: it lands, and its
@@ -3538,6 +3563,111 @@ mod tests {
         assert_eq!(status, crate::player::PlayerStatus::default());
         assert_eq!(player.pauses.load(Ordering::SeqCst), 1, "the pause was applied");
         assert!(sent.elapsed() < Duration::from_millis(300), "took {:?}", sent.elapsed());
+
+        cmd_tx.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    /// A player whose seeks each wait for the test's word, the way one over
+    /// a slow link waits for its bytes, and which refuses a seek past
+    /// 1000 s. Its status stands where the last seek put it.
+    #[derive(Clone)]
+    struct HeldSeeks {
+        at: Arc<std::sync::Mutex<f64>>,
+        begun: Arc<std::sync::Mutex<mpsc::Sender<f64>>>,
+        go: Arc<std::sync::Mutex<mpsc::Receiver<()>>>,
+    }
+
+    impl crate::player::PlayerCtl for HeldSeeks {
+        fn play(&self, _source: &str, _hint: Option<f64>) -> Result<(), String> {
+            Ok(())
+        }
+        fn pause(&self) {}
+        fn resume(&self) {}
+        fn stop(&self) {}
+        fn seek(&self, position: f64) -> Result<(), String> {
+            let _ = self.begun.lock().unwrap().send(position);
+            self.go.lock().unwrap().recv().map_err(|_| "the test went away".to_string())?;
+            if position > 1000.0 {
+                return Err("past the end".to_string());
+            }
+            *self.at.lock().unwrap() = position;
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus {
+                source: "http://x/a.flac".into(),
+                playing: true,
+                position: *self.at.lock().unwrap(),
+                duration: 240.0,
+                ..Default::default()
+            }
+        }
+        fn tick(&self) {}
+        fn settled(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn each_seek_the_thread_runs_is_named_before_the_status_that_says_where_it_landed() {
+        let (begun_tx, begun) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel();
+        let player = HeldSeeks {
+            at: Arc::new(std::sync::Mutex::new(2.0)),
+            begun: Arc::new(std::sync::Mutex::new(begun_tx)),
+            go: Arc::new(std::sync::Mutex::new(go_rx)),
+        };
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let theirs = player.clone();
+        let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
+        let wait = Duration::from_secs(5);
+        // The errors said before the next seek's name, the name, and where
+        // the first status after it stands. Idle ticks' statuses in between
+        // say nothing new.
+        let answer = || {
+            let mut errors = Vec::new();
+            let target = loop {
+                match event_rx.recv_timeout(wait).expect("the thread answers the seek") {
+                    Event::Seeked { target } => break target,
+                    Event::Error(e) => errors.push(e),
+                    _ => {}
+                }
+            };
+            let landed = loop {
+                if let Event::Status(status) = event_rx.recv_timeout(wait).expect("its status") {
+                    break status.position;
+                }
+            };
+            (errors, target, landed)
+        };
+
+        cmd_tx.send(AudioCmd::Seek(62.0)).unwrap();
+        assert_eq!(begun.recv_timeout(wait), Ok(62.0));
+        // Two more presses arrive while it waits on its bytes.
+        cmd_tx.send(AudioCmd::Seek(122.0)).unwrap();
+        cmd_tx.send(AudioCmd::Seek(182.0)).unwrap();
+        go.send(()).unwrap();
+        assert_eq!(answer(), (vec![], 62.0, 62.0), "the first seek's name, then where it landed");
+        // The two that queued are boiled down to the last, and that is the
+        // seek the thread names next: one the UI's newest goal can know.
+        assert_eq!(begun.recv_timeout(wait), Ok(182.0));
+        go.send(()).unwrap();
+        assert_eq!(answer(), (vec![], 182.0, 182.0));
+        // A refused seek is named too, after its error: the thread is done
+        // with it either way, and the status says playback stayed put.
+        cmd_tx.send(AudioCmd::Seek(5000.0)).unwrap();
+        assert_eq!(begun.recv_timeout(wait), Ok(5000.0));
+        go.send(()).unwrap();
+        assert_eq!(answer(), (vec!["past the end".to_string()], 5000.0, 182.0));
 
         cmd_tx.send(AudioCmd::Shutdown).unwrap();
         listener.join().expect("the thread ended on its own terms");
