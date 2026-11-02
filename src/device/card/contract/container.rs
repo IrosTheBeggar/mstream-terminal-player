@@ -1,6 +1,6 @@
-//! The container (docs/METADATA.md 2.4): the one frame of MSMF, MPTG, MSPD
-//! and MPDJ — a 40-byte common header, the type's own header, a directory
-//! of 32-byte entries, then the sections, each 8-byte aligned.
+//! The container (docs/METADATA.md 2.4): the one frame of MSMF, MPTG, MSPD,
+//! MPDJ and MPWF — a 40-byte common header, the type's own header, a
+//! directory of 32-byte entries, then the sections, each 8-byte aligned.
 //!
 //! [`Container::open`] runs 2.4.3's checks of the frame and the directory,
 //! in the player's order (`lib/core/CardContainer.cpp`), so the first one a
@@ -25,6 +25,7 @@ pub(crate) const MSMF: u32 = fourcc(b"MSMF");
 pub(crate) const MPTG: u32 = fourcc(b"MPTG");
 pub(crate) const MSPD: u32 = fourcc(b"MSPD");
 pub(crate) const MPDJ: u32 = fourcc(b"MPDJ");
+pub(crate) const MPWF: u32 = fourcc(b"MPWF");
 pub(crate) const MPTH: u32 = fourcc(b"MPTH");
 pub(crate) const STRS: u32 = fourcc(b"STRS");
 
@@ -108,7 +109,18 @@ impl<'a> Container<'a> {
     /// requires. Sums and products are taken in 64 bits, so no crafted u32
     /// field wraps past a check.
     pub(crate) fn open(bytes: &'a [u8], spec: &FormatSpec) -> Result<Container<'a>, Why> {
-        let size = bytes.len() as u64;
+        Container::open_head(bytes, bytes.len() as u64, spec)
+    }
+
+    /// [`open`](Self::open) of a file of `size` bytes from its first ones: the
+    /// same checks, none of which reads a section, so what it opens is for the
+    /// format's check of its header and holds no section's bytes. A directory
+    /// that runs past them reads [`Why::Short`].
+    pub(crate) fn open_head(
+        bytes: &'a [u8],
+        size: u64,
+        spec: &FormatSpec,
+    ) -> Result<Container<'a>, Why> {
         let Some(header) = Header::parse(bytes) else { return Err(Why::Short) };
         if header.magic != spec.magic {
             return Err(Why::Magic);
@@ -128,6 +140,9 @@ impl<'a> Container<'a> {
         }
         if header.file_bytes as u64 != size {
             return Err(Why::FileBytes);
+        }
+        if dir_end > bytes.len() as u64 {
+            return Err(Why::Short);
         }
         let dir_end = dir_end as usize;
         // The header's CRC, over the header and the directory with its own
@@ -257,7 +272,7 @@ pub(crate) fn unknown_major(head: &[u8]) -> bool {
     let major = u16_at(head, 4);
     match u32_at(head, 0) {
         MPDJ => major != 1 && major != 2,
-        MSMF | MPTG | MSPD => major != 1,
+        MSMF | MPTG | MSPD | MPWF => major != 1,
         _ => false,
     }
 }
@@ -295,8 +310,8 @@ pub(crate) fn write(
     header_bytes: u32,
     sections: &[SectionOut],
 ) -> Result<Vec<u8>, WriteError> {
-    // The longest header any format has is MPDJ's 104 bytes, padded to a
-    // 512-byte slot: past a few KB it is a caller's bug.
+    // The longest header any format has is MPDJ's 104 bytes padded to a
+    // 512-byte slot (MPWF's is 224): past a few KB it is a caller's bug.
     let short = (header_bytes as usize) < COMMON_HEADER as usize + type_header.len();
     if short || header_bytes % 8 != 0 || header_bytes > 4096 {
         return Err(WriteError("the header's length"));

@@ -26,12 +26,13 @@
 //! After a 304, the ledger itself is the wanted card ([`wanted_of_ledger`]).
 //!
 //! **The fit** ([`fit`]): what the run adds — each file rounded up to the
-//! volume's cluster, its directory entries, the next tags file and Auto DJ
-//! index beside the ones there, a thumbnail a new album, the stage file in
-//! flight, the player's room for its library and its play log — against
-//! the free space and what the run takes off, less a margin of 1% of the
-//! card (at least 256 MB); and the 20,000-track cap, past which the player
-//! shows no library at all.
+//! volume's cluster, its directory entries, the next tags file and Auto DJ and
+//! waveform indexes beside the ones there, a thumbnail a new album, the stage
+//! file in flight, the player's room for its library and its play log —
+//! against the free space and what the run takes off, less a margin of 1% of
+//! the card (at least 256 MB); and the 20,000-track cap, past which the player
+//! shows no library at all. A run that adds no file needs nothing but a
+//! waveform index the card lacks.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -615,6 +616,10 @@ pub(crate) fn needing_metadata(
 /// docs/METADATA.md's sizes).
 const TAGS_PER_TRACK: u64 = 345;
 const MPDJ_PER_TRACK: u64 = 530;
+/// A waveform index's bytes a track, and its own beside them: exactly its slot
+/// and its header (WAVEFORM-INDEX.md 10).
+const WAVES_PER_TRACK: u64 = 256;
+const WAVES_FIXED: u64 = 256;
 /// The player's own room on the card: its library a track, a megabyte, and
 /// its play log's cap (2.20.2).
 const PLAYER_PER_TRACK: u64 = 330;
@@ -648,14 +653,32 @@ impl Fit {
     }
 }
 
+/// What a run's waveform index asks of a card's room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WaveFit {
+    /// The card's player doesn't read one: nothing.
+    Off,
+    /// The next file, beside the one there, when the run adds any other.
+    Beside,
+    /// The card lacks one: the file comes even with nothing else to do.
+    Missing,
+}
+
 /// See the module's note. A run that fetches nothing needs nothing new: its
-/// commit takes the place of the last one.
-pub(crate) fn fit(space: &Space, fp: &Footprint, auto_dj: bool) -> Fit {
+/// commit takes the place of the last one. Unless the card lacks a waveform
+/// index: that run's commit is the file's own, and it needs the file and the
+/// next tags file beside the last. No margin for those: they take a few
+/// megabytes of a card that adds no music, and a nearly full card gets its
+/// shapes too.
+pub(crate) fn fit(space: &Space, fp: &Footprint, auto_dj: bool, waves: WaveFit) -> Fit {
     let cluster = (space.cluster as u64).max(512);
     let up = |b: u64| b.div_ceil(cluster) * cluster;
     let room = space.free + fp.freed.iter().map(|&b| up(b)).sum::<u64>();
     if fp.writes.is_empty() {
-        return Fit { needed: 0, room, tracks: fp.records };
+        let tracks = fp.records as u64;
+        let (tags, file) = (TAGS_PER_TRACK * tracks, WAVES_FIXED + WAVES_PER_TRACK * tracks);
+        let needed = if waves == WaveFit::Missing { up(tags) + up(file) } else { 0 };
+        return Fit { needed, room, tracks: fp.records };
     }
     let music: u64 = fp.writes.iter().map(|(_, size)| up(*size)).sum();
     // Directory entries: each new name in its folder, every folder's growth
@@ -672,6 +695,9 @@ pub(crate) fn fit(space: &Space, fp: &Footprint, auto_dj: bool) -> Fit {
     if auto_dj {
         mstream += MPDJ_PER_TRACK * tracks;
     }
+    if waves != WaveFit::Off {
+        mstream += WAVES_FIXED + WAVES_PER_TRACK * tracks;
+    }
     let albums: BTreeSet<&str> = fp.writes.iter().map(|(p, _)| split_last(p).0).collect();
     mstream += albums.len() as u64 * cluster;
     mstream += fp.writes.iter().map(|(_, size)| up(*size)).max().unwrap_or(0);
@@ -682,10 +708,11 @@ pub(crate) fn fit(space: &Space, fp: &Footprint, auto_dj: bool) -> Fit {
 }
 
 /// What a track takes of a card beside its bytes: the next tags file's
-/// record and Auto DJ row beside the ones there, the player's room for it,
-/// and its name's directory entries (about a long name's). A multi-card
-/// set's split and its offers (B7) count a card's load by it.
-const TRACK_EXTRA: u64 = 2 * TAGS_PER_TRACK + 2 * MPDJ_PER_TRACK + PLAYER_PER_TRACK + 96;
+/// record, Auto DJ row and waveform slot beside the ones there, the player's
+/// room for it, and its name's directory entries (about a long name's). A
+/// multi-card set's split and its offers (B7) count a card's load by it.
+const TRACK_EXTRA: u64 =
+    2 * TAGS_PER_TRACK + 2 * MPDJ_PER_TRACK + 2 * WAVES_PER_TRACK + PLAYER_PER_TRACK + 96;
 
 /// A track of `size` bytes on a card of `cluster`-byte clusters, its
 /// overheads with it.
@@ -1001,33 +1028,66 @@ mod tests {
             records_before: 0,
             records: 2,
         };
-        let f = fit(&space, &fp, true);
+        let f = fit(&space, &fp, true, WaveFit::Beside);
         let c = 32 * 1024u64;
         let music = 30_015_488 + c;
         // The growth of `/music` (A), A (B) and A/B (the two files), a
         // cluster each, and a cluster of each new folder's own.
         let dirs = 3 * c + 2 * c;
-        // The next tags file and index, a thumbnail, the stage file.
-        let mstream = 2 * 345 + 2 * 530 + c + 30_015_488;
+        // The next tags file and indexes, a thumbnail, the stage file.
+        let mstream = 2 * 345 + 2 * 530 + (256 + 2 * 256) + c + 30_015_488;
         let player = 2 * 330 + (1 << 20) + 1_048_480;
         let margin = (64u64 << 30) / 100;
         assert_eq!(f.needed, music + dirs + mstream + player + margin);
         assert_eq!(f.room, (10 << 30) + c);
         assert!(f.fits() && !f.over_cap());
+        // A card that lacks the file counts the same; a player that doesn't
+        // read one, none.
+        assert_eq!(fit(&space, &fp, true, WaveFit::Missing).needed, f.needed);
+        assert_eq!(fit(&space, &fp, true, WaveFit::Off).needed, f.needed - (256 + 2 * 256));
 
         // A full card: short by the difference.
         let tight = Space { free: f.needed - c - 10, ..space };
-        let f2 = fit(&tight, &fp, true);
+        let f2 = fit(&tight, &fp, true, WaveFit::Beside);
         assert!(!f2.fits());
         assert_eq!(f2.short(), 10);
         // A run that fetches nothing always fits; the cap counts tracks.
         fp.writes.clear();
-        assert!(fit(&tight, &fp, true).fits());
+        assert!(fit(&tight, &fp, true, WaveFit::Beside).fits());
         fp.records = TRACK_CAP + 1;
-        assert!(fit(&space, &fp, false).over_cap());
+        assert!(fit(&space, &fp, false, WaveFit::Off).over_cap());
         // A small card's margin is 256 MB.
         let small = Space { size: 2 << 30, free: 2 << 30, cluster: 0, clusters: 0 };
         let one = Footprint { writes: vec![("x.mp3".into(), 1)], records: 1, ..Footprint::default() };
-        assert!(fit(&small, &one, false).needed > 256 << 20);
+        assert!(fit(&small, &one, false, WaveFit::Off).needed > 256 << 20);
+    }
+
+    #[test]
+    fn a_run_that_adds_only_a_waveform_index_needs_its_file_and_no_margin() {
+        let space = Space { size: 64 << 30, free: 100 << 20, cluster: 32 * 1024, clusters: 0 };
+        let fp = Footprint { records: 19_388, records_before: 19_388, ..Footprint::default() };
+        let c = 32 * 1024u64;
+        let f = fit(&space, &fp, true, WaveFit::Missing);
+        // The file, 256 + 256 × tracks, and the next tags file beside the last,
+        // each to its cluster.
+        assert_eq!(f.needed, 4_980_736 + 6_717_440);
+        assert_eq!(f.needed % c, 0);
+        assert!(f.fits(), "well under the 640 MB margin a run of music keeps");
+        assert_eq!(f.tracks, 19_388);
+        // The rest of the card is what it's short of, nothing more.
+        let full = Space { free: f.needed - 10, ..space };
+        assert_eq!(fit(&full, &fp, true, WaveFit::Missing).short(), 10);
+        // A card that has one, or whose player reads none, needs nothing.
+        assert_eq!(fit(&full, &fp, true, WaveFit::Beside).needed, 0);
+        assert_eq!(fit(&full, &fp, true, WaveFit::Off).needed, 0);
+    }
+
+    #[test]
+    fn a_track_costs_its_bytes_and_its_share_of_every_index() {
+        // Its record, Auto DJ row and slot, beside the ones there; the player's
+        // room; its name's entries.
+        let extra = 2 * 345 + 2 * 530 + 2 * 256 + 330 + 96;
+        assert_eq!(track_cost(1, 32 * 1024), 32 * 1024 + extra);
+        assert_eq!(track_cost(0, 0), extra);
     }
 }

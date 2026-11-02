@@ -8,9 +8,12 @@ use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 
 use super::*;
+use crate::device::card::contract::mppl::{KIND_PLAY, Slot as Play};
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::history::tests::MemStore;
-use crate::device::card::sync::tests::{Fake, SERIAL, Scratch, card, no_peers, server, with_hidden};
+use crate::device::card::sync::tests::{
+    Fake, SERIAL, Scratch, card, no_peers, server, sync_now, with_hidden, with_waves,
+};
 use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
 
 /// The volumes of the test: host folders, each a FAT card at a serial.
@@ -359,6 +362,216 @@ fn a_sync_runs_on_the_worker_its_progress_told_and_done_is_the_card_again() {
     assert_eq!((seen.server.as_str(), seen.synced), ("Home", 1_791_900_000));
 }
 
+/// Clause 51a: a card in step with its server and no waveform file has a sync
+/// to offer, which tells its phase and its count, and is in step after it.
+#[test]
+fn a_card_in_step_that_lacks_its_waveforms_is_offered_a_sync_and_its_phase_is_told() {
+    let scratch = Scratch::new("worker-waves");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let off = sync::Ask { no_waves: true, ..sync::Ask::default() };
+    let synced = sync_now(&sim, &base, &off, &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    drop(sim);
+    with_waves(&fake);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    let plan = planned(rig.card(&key)).unwrap();
+    assert_eq!((plan.new, plan.removals.len(), plan.plays), (0, 0, 0), "{plan:?}");
+    assert!(plan.waves_missing && plan.unchanged, "{plan:?}");
+
+    let mut runs: Vec<Run> = Vec::new();
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let t0 = Instant::now();
+    loop {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the sync ended: {:#?}", rig.fold.cards);
+        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) {
+            if let Event::Progress { run, .. } = &event {
+                runs.push(run.clone());
+            }
+            rig.fold.apply(event);
+        }
+        let card = rig.card(&key);
+        if card.run.is_none() && matches!(card.ended, Some(Ended::Done { .. })) {
+            break;
+        }
+    }
+    let mut phases: Vec<Phase> = runs.iter().map(|r| r.phase).collect();
+    phases.dedup();
+    assert!(phases.ends_with(&[Phase::Index, Phase::Waves, Phase::Verifying]), "{phases:?}");
+    let first = runs.iter().find(|r| r.phase == Phase::Waves).unwrap();
+    assert_eq!(first.waves, (0, 5), "its phase told at once, with what it asks");
+    let last = runs.last().unwrap();
+    assert_eq!((last.phase, last.waves), (Phase::Verifying, (5, 5)));
+
+    // The next look: in step.
+    let wanted = key.clone();
+    rig.until("the look after", |f| {
+        let in_step = |p: &Planned| !p.waves_missing && p.unchanged;
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(in_step))
+    });
+}
+
+/// The waveforms' counts are told as a download's bytes are, every so often,
+/// and the phase's first and what comes after it at once.
+#[test]
+fn the_waveforms_counts_are_told_every_so_often_and_their_phase_at_once() {
+    let scratch = Scratch::new("worker-waves-told");
+    let (me, _inbox) = channel();
+    let (out, events) = channel();
+    let (volumes, home) = (Arc::new(Shelf::default()), Arc::new(Here::default()));
+    let mut worker = Worker::new(Setup { volumes, home, every: EVERY }, me, out);
+    let found = volume_at(&scratch.0, Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let mut view = CardView::new(found);
+    view.run = Some(Run { phase: Phase::Index, ..Run::default() });
+    worker.slots.push(Slot {
+        view,
+        look_again: false,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    });
+    for done in 0..=1000 {
+        worker.progress(&key, RunEvent::Waves { done, of: 1000 });
+    }
+    let progress = |e: Event| match e {
+        Event::Progress { run, .. } => Some(run),
+        _ => None,
+    };
+    let told: Vec<Run> = events.try_iter().filter_map(progress).collect();
+    assert_eq!((told[0].phase, told[0].waves), (Phase::Waves, (0, 1000)));
+    assert!(told.len() < 1001, "{} of 1,001 told", told.len());
+    worker.progress(&key, RunEvent::Committed { generation: 2, last: true });
+    let told: Vec<Run> = events.try_iter().filter_map(progress).collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!((told[0].phase, told[0].waves), (Phase::Verifying, (1000, 1000)));
+}
+
+/// A run with nothing to copy has no bytes for a bar: its waveforms are what
+/// it counts, and it never says 100 ahead of them. One that copied keeps the
+/// bar of its bytes.
+#[test]
+fn a_run_with_nothing_to_copy_counts_its_waveforms_and_says_100_only_after_them() {
+    let scratch = Scratch::new("worker-percent");
+    let mut view = CardView::new(volume_at(&scratch.0, Fs::Fat32, SERIAL));
+    let mut percent = |run: Run| {
+        view.run = Some(run);
+        view.percent()
+    };
+    let nothing = |phase: Phase, waves: (usize, usize)| Run { phase, waves, ..Run::default() };
+    assert_eq!(percent(nothing(Phase::Listing, (0, 0))), Some(0));
+    assert_eq!(percent(nothing(Phase::Planning, (0, 0))), Some(0));
+    assert_eq!(percent(nothing(Phase::Index, (0, 0))), Some(0));
+    assert_eq!(percent(nothing(Phase::Waves, (0, 400))), Some(0));
+    assert_eq!(percent(nothing(Phase::Waves, (100, 400))), Some(25));
+    assert_eq!(percent(nothing(Phase::Waves, (400, 400))), Some(100));
+    assert_eq!(percent(nothing(Phase::Verifying, (400, 400))), Some(100));
+    assert_eq!(percent(nothing(Phase::Waiting, (0, 0))), None);
+    // Its bytes' bar, whatever the waveforms have reached.
+    let copied = |waves: (usize, usize)| Run {
+        phase: Phase::Waves,
+        files: 2,
+        bytes: 400,
+        done_bytes: 300,
+        waves,
+        ..Run::default()
+    };
+    assert_eq!(percent(copied((1, 400))), Some(75));
+    // Files of no known size, copied: nothing to go back on.
+    let no_size = Run { phase: Phase::Waves, files: 2, waves: (1, 400), ..Run::default() };
+    assert_eq!(percent(no_size), Some(100));
+    assert_eq!(Run::default().waves_percent(), 0, "none asked");
+    assert!(Phase::Index < Phase::Waves && Phase::Waves < Phase::Verifying, "the run's order");
+}
+
+/// A sync that makes no commit, with plays to send and nothing else, still comes
+/// to its last look, and says 100 there: the 0 of its index steps doesn't stay
+/// on the tabs till it is done.
+#[test]
+fn a_sync_of_plays_alone_makes_no_commit_and_says_100_at_its_last_look() {
+    let scratch = Scratch::new("worker-plays-alone");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    with_waves(&fake);
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let seen = volume::inspect(&sim).unwrap();
+    let root = seen.root.as_ref().expect("a root");
+    let generation = root.manifest.header.generation;
+    let tags = root.tags.as_ref().expect("its tags file");
+    let record = tags.records.iter().find(|e| e.path.ends_with("01.mp3")).expect("a track");
+    let play = Play {
+        kind: KIND_PLAY,
+        outcome: 1,
+        source: 2,
+        seq: 1,
+        epoch: 0x1122_3344_5566_7788,
+        device_id: [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01],
+        started_at: 1_791_950_000_000,
+        boot_seq: 1,
+        uptime_ms: 1000,
+        played_ms: 181_000,
+        path_hash: record.hash,
+        size: record.rec.size,
+        fat_time: record.rec.fat_time,
+        ..Play::default()
+    };
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play.encode()).unwrap();
+    drop(sim);
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    let plan = planned(rig.card(&key)).unwrap();
+    assert_eq!((plan.new, plan.removals.len(), plan.plays), (0, 0, 1), "{plan:?}");
+    assert!(!plan.waves_missing, "{plan:?}");
+
+    let mut runs: Vec<Run> = Vec::new();
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let t0 = Instant::now();
+    loop {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the sync ended: {:#?}", rig.fold.cards);
+        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) {
+            if let Event::Progress { run, .. } = &event {
+                runs.push(run.clone());
+            }
+            rig.fold.apply(event);
+        }
+        let card = rig.card(&key);
+        if card.run.is_none() && matches!(card.ended, Some(Ended::Done { .. })) {
+            break;
+        }
+    }
+    let mut phases: Vec<Phase> = runs.iter().map(|r| r.phase).collect();
+    phases.dedup();
+    assert!(phases.ends_with(&[Phase::Index, Phase::Verifying]), "{phases:?}");
+    let mut view = rig.card(&key).clone();
+    let mut percent = |run: &Run| {
+        view.run = Some(run.clone());
+        view.percent()
+    };
+    let index = runs.iter().find(|r| r.phase == Phase::Index).unwrap();
+    assert_eq!(percent(index), Some(0));
+    assert_eq!(percent(runs.last().unwrap()), Some(100));
+    assert_eq!(fake.lock().unwrap().plays.len(), 1, "the play went");
+    let seen = volume::inspect(&FatSim::new(&scratch.0.join("card"), SERIAL)).unwrap();
+    assert_eq!(seen.root.unwrap().manifest.header.generation, generation, "no commit for it");
+}
+
 #[test]
 fn a_stop_before_anything_is_written_leaves_the_card_as_it_was() {
     let scratch = Scratch::new("worker-stop");
@@ -621,6 +834,78 @@ fn eject_asks_the_os_and_a_card_taken_out_takes_its_tab_with_it() {
     let wanted = key.clone();
     rig.until("gone", |f| !f.cards.iter().any(|c| c.key == wanted));
     assert!(rig.fold.notes.iter().any(|n| matches!(n, Note::Out { card, .. } if card == "Car")));
+}
+
+/// A worker with a sync of a card under way at this phase, its place held by
+/// hand: the worker, the shelf, the card's key and its run's stop.
+fn running_at(scratch: &Scratch, phase: Phase) -> (Worker, Arc<Shelf>, String, Arc<AtomicBool>) {
+    let _sim = card(scratch);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Arc::new(Shelf::default());
+    shelf.put(found.clone(), SERIAL);
+    let (me, _inbox) = channel();
+    let (out, _events) = channel();
+    let setup = Setup { volumes: shelf.clone(), home: Arc::new(Here::default()), every: EVERY };
+    let mut worker = Worker::new(setup, me, out);
+    let mut view = CardView::new(found);
+    view.run = Some(Run { phase, ..Run::default() });
+    worker.slots.push(Slot {
+        view,
+        look_again: false,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    worker.running = Some(Running { key: key.clone(), stop: stop.clone() });
+    (worker, shelf, key, stop)
+}
+
+/// A run's next write may be half an hour off while it asks for its waveforms,
+/// with the other cards' syncs waiting behind it: a card taken out stops the
+/// asking. While it copies, the copy's next write finds the gap by itself.
+#[test]
+fn a_card_taken_out_while_it_asks_for_its_waveforms_stops_asking() {
+    for (phase, stops) in [(Phase::Waves, true), (Phase::Copying, false)] {
+        let scratch = Scratch::new("worker-out-waves");
+        let (mut worker, shelf, key, stop) = running_at(&scratch, phase);
+        shelf.take(&key);
+        worker.watch();
+        assert!(worker.slots[0].view.out, "kept, marked out");
+        assert_eq!(stop.load(Ordering::SeqCst), stops, "{phase:?}");
+    }
+}
+
+/// So does one taken out before it asks, in the minutes of the Auto DJ index's
+/// step, or with its last file skipped, which leaves its phase Copying: the
+/// first ask finds the card marked out. Back in its reader by then, the run
+/// goes on, and a pull that killed its hold on the card is its own to find.
+#[test]
+fn a_card_taken_out_ahead_of_its_first_ask_stops_asking_at_it() {
+    for phase in [Phase::Index, Phase::Copying] {
+        let scratch = Scratch::new("worker-out-first");
+        let (mut worker, shelf, key, stop) = running_at(&scratch, phase);
+        shelf.take(&key);
+        worker.watch();
+        assert!(worker.slots[0].view.out, "kept, marked out");
+        assert!(!stop.load(Ordering::SeqCst), "nothing to stop yet: {phase:?}");
+        worker.progress(&key, RunEvent::Waves { done: 0, of: 5 });
+        assert!(stop.load(Ordering::SeqCst), "{phase:?}");
+    }
+
+    let scratch = Scratch::new("worker-out-back");
+    let (mut worker, shelf, key, stop) = running_at(&scratch, Phase::Index);
+    let found = worker.slots[0].view.found.clone();
+    shelf.take(&key);
+    worker.watch();
+    shelf.put(found, SERIAL);
+    worker.watch();
+    assert!(!worker.slots[0].view.out);
+    worker.progress(&key, RunEvent::Waves { done: 0, of: 5 });
+    assert!(!stop.load(Ordering::SeqCst));
 }
 
 #[test]

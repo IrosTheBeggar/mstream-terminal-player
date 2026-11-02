@@ -14,7 +14,7 @@ use crate::device::card::span::{self, Decision, Key, Offer, Set};
 /// Artist folders under Rock, each with albums of so many tracks.
 type Shelf = [(&'static str, &'static [usize])];
 
-/// 47 tracks of about 12 KB of load each: three cards of [`ROOM`].
+/// 47 tracks of about 13 KB of load each: three cards of [`ROOM`].
 const SHELF: &Shelf = &[
     ("Artist A", &[4, 4]),
     ("Artist B", &[5]),
@@ -26,8 +26,8 @@ const SHELF: &Shelf = &[
 ];
 
 /// A card's usable room; the second card's is bigger.
-const ROOM: u64 = 300_000;
-const ROOM_TWO: u64 = 450_000;
+const ROOM: u64 = 312_000;
+const ROOM_TWO: u64 = 468_000;
 
 /// A track: an MP3 of `frames` silence-shaped frames, its id in its first
 /// frame's body so no two are alike.
@@ -538,7 +538,7 @@ fn a_card_added_after_a_full_one_takes_its_last_artists_once_it_joins() {
 /// the same sync is asked about as ever.
 #[test]
 fn a_set_made_of_a_card_holding_more_lets_the_rest_go_and_asks_only_of_what_isnt_the_sets() {
-    const SMALL: u64 = 150_000;
+    const SMALL: u64 = 174_000;
     let shelf: &Shelf = &[("Artist A", &[20]), ("Artist B", &[20, 20])];
     let mut w = World::new("gate", shelf, 2);
     let one = w.card("one", 0x1111_0001);
@@ -690,7 +690,7 @@ fn an_album_the_server_moves_across_an_edge_leaves_its_old_card_only_after_the_a
 /// which has taken B: the set of the two, and card 1 before the sync that
 /// lets B go.
 fn two_of_sixty(name: &str, removal: Removal) -> (World, FatSim, FatSim) {
-    const SMALL: u64 = 150_000;
+    const SMALL: u64 = 174_000;
     let shelf: &Shelf = &[("Artist A", &[20]), ("Artist B", &[20, 20])];
     let mut w = World::new(name, shelf, 2);
     let one = w.card("one", 0x1111_0001);

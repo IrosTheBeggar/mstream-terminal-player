@@ -1,16 +1,16 @@
 //! `manifest.bin` (MSMF): the commit point (docs/METADATA.md 2.5).
 //!
 //! A small file that names the companion files of the card's current state
-//! — exactly one tags file, then at most one Auto DJ index — each by its
-//! generation, length and header CRC. Writing it, through `manifest.tmp`, is
-//! the moment a run's work becomes visible. Its header describes server 0,
-//! the root's own server; `SRVS` lists the others (2.5.5), and `ACKS` the
-//! plays of the device's log the software has (2.5.6). [`elect`] is which
-//! of `manifest.bin` and `manifest.tmp` counts (2.5.4); the same rule picks
-//! between `pending.bin` and `pending.tmp`.
+//! — exactly one tags file, then at most one Auto DJ index, then at most one
+//! waveform index — each by its generation, length and header CRC. Writing
+//! it, through `manifest.tmp`, is the moment a run's work becomes visible.
+//! Its header describes server 0, the root's own server; `SRVS` lists the
+//! others (2.5.5), and `ACKS` the plays of the device's log the software has
+//! (2.5.6). [`elect`] is which of `manifest.bin` and `manifest.tmp` counts
+//! (2.5.4); the same rule picks between `pending.bin` and `pending.tmp`.
 
 use super::container::{self, Container, FileMeta, FormatSpec, Header, SectionOut, SectionSpec};
-use super::container::{MPDJ, MPTG, MSMF, REQUIRED, STRS, StrCursor, Strs};
+use super::container::{MPDJ, MPTG, MPWF, MSMF, REQUIRED, STRS, StrCursor, Strs};
 use super::order::{compare_names, valid_rel_path};
 use super::prim::{bytes16_at, fourcc, u32_at, u64_at};
 use super::server::{SRVS_STRIDE, Server, Servers, PEER, srvs_breaks};
@@ -114,31 +114,33 @@ impl Ack {
 /// A companion the root names (2.5.3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Comp {
-    /// `MPTG` or `MPDJ`.
+    /// `MPTG`, `MPDJ` or `MPWF`.
     pub(crate) kind: u32,
     /// The companion's own header generation: older than the root's when a
     /// file is named again.
     pub(crate) generation: u32,
     pub(crate) file_bytes: u32,
     pub(crate) header_crc: u32,
-    /// MPDJ: the selection signature; zeros for MPTG.
+    /// MPDJ: the selection signature; zeros for MPTG and MPWF. An MPWF row's
+    /// is kept as read: one that isn't zeros matches no file.
     pub(crate) key: [u8; 16],
 }
 
 impl Comp {
     /// Its file name inside `/.mstream`: `tags-0000002a.bin`,
-    /// `autodj-00000029.bin`.
+    /// `autodj-00000029.bin`, `waves-0000002a.bin`.
     pub(crate) fn name(&self) -> String {
         companion_name(self.kind, self.generation)
     }
 
     /// The entry naming a companion file, from its bytes: its generation,
     /// length and header CRC, and an MPDJ's selection signature (its header
-    /// bytes 64-79). None when the bytes aren't an MPTG or an MPDJ frame.
+    /// bytes 64-79). None when the bytes aren't an MPTG, an MPDJ or an MPWF
+    /// frame.
     pub(crate) fn of(file: &[u8]) -> Option<Comp> {
         let h = Header::parse(file)?;
         let key = match h.magic {
-            MPTG => [0; 16],
+            MPTG | MPWF => [0; 16],
             MPDJ if file.len() >= 80 => bytes16_at(file, 64),
             _ => return None,
         };
@@ -147,11 +149,12 @@ impl Comp {
     }
 }
 
-/// `tags-<gen>.bin` or `autodj-<gen>.bin`, the generation as 8 lowercase
-/// hex digits (2.2).
+/// `tags-<gen>.bin`, `autodj-<gen>.bin` or `waves-<gen>.bin`, the generation
+/// as 8 lowercase hex digits (2.2).
 pub(crate) fn companion_name(kind: u32, generation: u32) -> String {
     match kind {
         MPDJ => format!("autodj-{generation:08x}.bin"),
+        MPWF => format!("waves-{generation:08x}.bin"),
         _ => format!("tags-{generation:08x}.bin"),
     }
 }
@@ -174,6 +177,9 @@ pub(crate) struct Manifest {
     /// The commit's tags file, and its Auto DJ index when it has one.
     pub(crate) tags: Comp,
     pub(crate) autodj: Option<Comp>,
+    /// Its waveform index, when COMP has a good MPWF row: a bad one costs
+    /// only itself, and the root stays valid (WAVEFORM-INDEX.md 7.2).
+    pub(crate) waves: Option<Comp>,
     /// The vpath layout's library roots, relative to `/music`, in byte
     /// order (2.8.6); empty: one root, `/music`.
     pub(crate) roots: Vec<String>,
@@ -229,7 +235,7 @@ impl Manifest {
             producer: self.producer.clone(),
             server_revision: self.server_revision.clone(),
             base_generation: self.base_generation,
-            comps: std::iter::once(self.tags.clone()).chain(self.autodj.clone()).collect(),
+            comps: std::iter::once(&self.tags).chain(&self.autodj).chain(&self.waves).cloned().collect(),
             roots: self.roots.clone(),
             servers: self.servers.iter().map(|s| Server { flags: s.flags & PEER, ..*s }).collect(),
             acks: self.acks.clone(),
@@ -239,7 +245,8 @@ impl Manifest {
     /// Reads a root, in the player's order of checks: the frame (2.4.3);
     /// STRS's first byte and the header's two strings; each COMP entry
     /// (exactly one MPTG, then at most one MPDJ, each named for its
-    /// generation; another kind is ignored where it stands); each LIBR root
+    /// generation; a bad MPWF row costs only itself, its name still a string
+    /// of the root; another kind is ignored where it stands); each LIBR root
     /// (a relative path of names, the roots strictly increasing); then the
     /// sections' CRCs. With [`Uses::ALL`] SRVS too: rows of at least 40
     /// bytes, and its CRC. An entry that breaks a writer rule is not damage
@@ -269,6 +276,7 @@ impl Manifest {
         let server_revision = String::from_utf8_lossy(ss.ordered(revision_at)?).into_owned();
 
         let (mut tags, mut autodj): (Option<Comp>, Option<Comp>) = (None, None);
+        let (mut waves, mut waves_rows): (Option<Comp>, u32) = (None, 0);
         for i in 0..comp.count {
             let e = c.row(&comp, i, COMP_STRIDE as usize);
             let entry = Comp {
@@ -291,6 +299,12 @@ impl Manifest {
                         return Err(Why::Comp);
                     }
                     autodj = Some(entry);
+                }
+                // A bad row costs only itself (WAVEFORM-INDEX.md 7.2): of two
+                // rows, neither counts. Readers don't check its place.
+                MPWF => {
+                    waves_rows += 1;
+                    waves = (waves_rows == 1 && name == entry.name().as_bytes()).then_some(entry);
                 }
                 // Another kind: ignored (2.4.5), its name read in its place.
                 _ => {}
@@ -340,6 +354,7 @@ impl Manifest {
             base_generation,
             tags,
             autodj,
+            waves,
             roots,
             servers,
             acks,
@@ -382,7 +397,8 @@ pub(crate) struct ManifestIn {
     pub(crate) producer: String,
     pub(crate) server_revision: String,
     pub(crate) base_generation: u32,
-    /// The tags file, then the Auto DJ index when there is one.
+    /// The tags file, then the Auto DJ index when there is one, then the
+    /// waveform index when there is one.
     pub(crate) comps: Vec<Comp>,
     /// The vpath layout's roots, in any order: the writer sorts them.
     pub(crate) roots: Vec<String>,
@@ -400,19 +416,20 @@ pub(crate) struct ManifestIn {
 /// given; STRS (the producer, the revision, the companions' names, the
 /// roots); SRVS when other servers are; ACKS, after it, when plays are
 /// acknowledged, by device id then epoch. Refused: COMP that isn't one MPTG
-/// then at most one MPDJ; a root that isn't a relative path of names, or
-/// twice; an SRVS entry that breaks a writer rule of 2.5.5; a header or SRVS
-/// flag bit v1 doesn't define (2.4.5); a device and epoch acknowledged
-/// twice. That SRVS lists exactly the servers the tags file's rows name is
-/// the caller's to keep ([`servers_match_rows`]).
+/// then at most one MPDJ then at most one MPWF; a root that isn't a relative
+/// path of names, or twice; an SRVS entry that breaks a writer rule of 2.5.5;
+/// a header or SRVS flag bit v1 doesn't define (2.4.5); a device and epoch
+/// acknowledged twice. That SRVS lists exactly the servers the tags file's
+/// rows name is the caller's to keep ([`servers_match_rows`]).
 pub(crate) fn write(m: &ManifestIn) -> Result<Vec<u8>, WriteError> {
     let comps_ok = match m.comps.as_slice() {
         [t] => t.kind == MPTG,
-        [t, d] => t.kind == MPTG && d.kind == MPDJ,
+        [t, x] => t.kind == MPTG && (x.kind == MPDJ || x.kind == MPWF),
+        [t, d, w] => t.kind == MPTG && d.kind == MPDJ && w.kind == MPWF,
         _ => false,
     };
     if !comps_ok {
-        return Err(WriteError("COMP: one MPTG, then at most one MPDJ"));
+        return Err(WriteError("COMP: one MPTG, then at most one MPDJ, then at most one MPWF"));
     }
     let mut roots: Vec<&str> = m.roots.iter().map(String::as_str).collect();
     if roots.iter().any(|r| !valid_rel_path(r.as_bytes())) {
@@ -508,8 +525,9 @@ pub(crate) fn servers_match_rows(servers: usize, rows: impl IntoIterator<Item = 
 /// A companion a root names is valid only when it validates (the caller
 /// read it) and its header agrees with the entry: its magic, generation,
 /// length and header CRC; a tags file of source 2 or 3; an Auto DJ index
-/// whose selection signature is the entry's key (2.5.3). One that fails is
-/// absent; the root stays valid.
+/// whose selection signature is the entry's key; a waveform index whose
+/// entry's key is zeros (2.5.3). One that fails is absent; the root stays
+/// valid.
 pub(crate) fn companion_matches(
     entry: &Comp,
     companion: &Header,
@@ -526,6 +544,7 @@ pub(crate) fn companion_matches(
     match entry.kind {
         MPTG => mptg_source == 2 || mptg_source == 3,
         MPDJ => mpdj_sig == Some(&entry.key),
+        MPWF => entry.key == [0; 16],
         _ => false,
     }
 }

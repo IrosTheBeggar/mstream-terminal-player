@@ -9,8 +9,9 @@
 //! an empty value (`read.mpdj=`) says none, and the `contract` line is what
 //! makes a file a `device.txt` at all. `history` (the play log's majors)
 //! comes with the firmware that keeps the log (2.20); none writes it yet.
+//! `read.mpwf` comes with the firmware that opens the waveform index (2.21).
 
-use super::mpdj;
+use super::{mpdj, mpwf};
 
 /// The formats whose majors `read.*` lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +19,7 @@ pub(crate) enum Format {
     Msmf,
     Mptg,
     Mpdj,
+    Mpwf,
     Mpth,
 }
 
@@ -32,6 +34,7 @@ pub(crate) struct DeviceTxt {
     pub(crate) read_msmf: u32,
     pub(crate) read_mptg: u32,
     pub(crate) read_mpdj: u32,
+    pub(crate) read_mpwf: u32,
     pub(crate) read_mpth: u32,
     /// What it decodes, and the extensions its walk lists as audio (any
     /// case): comma-separated.
@@ -50,9 +53,9 @@ const VALUE_MAX: usize = 1024;
 
 impl DeviceTxt {
     /// A card with no device.txt (a new card, or firmware before this
-    /// design): every format's major 1 except MPDJ, which is none; mp3 and
-    /// flac; 48 kHz; two channels; no play log. Firmware 0.7.0 plays Opus
-    /// but can't say so; the software MAY ask the listener rather than
+    /// design): every format's major 1 except MPDJ and MPWF, which are none;
+    /// mp3 and flac; 48 kHz; two channels; no play log. Firmware 0.7.0 plays
+    /// Opus but can't say so; the software MAY ask the listener rather than
     /// convert.
     pub(crate) fn defaults() -> DeviceTxt {
         DeviceTxt {
@@ -62,6 +65,7 @@ impl DeviceTxt {
             read_msmf: 1,
             read_mptg: 1,
             read_mpdj: 0,
+            read_mpwf: 0,
             read_mpth: 1,
             codecs: "mp3,flac".into(),
             extensions: "mp3,flac".into(),
@@ -91,6 +95,7 @@ impl DeviceTxt {
                 b"read.msmf" => out.read_msmf = majors(value),
                 b"read.mptg" => out.read_mptg = majors(value),
                 b"read.mpdj" => out.read_mpdj = majors(value),
+                b"read.mpwf" => out.read_mpwf = majors(value),
                 b"read.mpth" => out.read_mpth = majors(value),
                 b"codecs" => out.codecs = text_value(value),
                 b"extensions" => out.extensions = text_value(value),
@@ -113,6 +118,7 @@ impl DeviceTxt {
             Format::Msmf => self.read_msmf,
             Format::Mptg => self.read_mptg,
             Format::Mpdj => self.read_mpdj,
+            Format::Mpwf => self.read_mpwf,
             Format::Mpth => self.read_mpth,
         };
         (1..=32).contains(&major) && mask >> (major - 1) & 1 != 0
@@ -128,6 +134,13 @@ impl DeviceTxt {
     /// firmware 0.8.0-0.10.0 lists 1 without reading it.
     pub(crate) fn writes_mpdj(&self) -> bool {
         mpdj::writes_v2(self.read_mpdj)
+    }
+
+    /// The software writes MPWF v1 only when `read.mpwf` lists 1, and no MPWF
+    /// otherwise (WAVEFORM-INDEX.md 7.4): firmware before it writes no such
+    /// key, and ignores the file, which would only cost the card space.
+    pub(crate) fn writes_mpwf(&self) -> bool {
+        mpwf::writes_v1(self.read_mpwf)
     }
 
     /// `name` is one of `codecs`, ignoring ASCII case.
@@ -151,13 +164,14 @@ impl DeviceTxt {
             false => String::new(),
         };
         format!(
-            "contract={}\nfirmware={}\nread.msmf={}\nread.mptg={}\nread.mpdj={}\nread.mpth={}\ncodecs={}\n\
-             extensions={}\nmax_rate={}\nmax_channels={}\n{}",
+            "contract={}\nfirmware={}\nread.msmf={}\nread.mptg={}\nread.mpdj={}\nread.mpwf={}\nread.mpth={}\n\
+             codecs={}\nextensions={}\nmax_rate={}\nmax_channels={}\n{}",
             self.contract,
             self.firmware,
             list(self.read_msmf),
             list(self.read_mptg),
             list(self.read_mpdj),
+            list(self.read_mpwf),
             list(self.read_mpth),
             self.codecs,
             self.extensions,

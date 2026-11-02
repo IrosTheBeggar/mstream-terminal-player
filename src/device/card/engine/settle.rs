@@ -53,10 +53,10 @@ pub(super) fn ms(name: &str) -> String {
     format!("/.mstream/{name}")
 }
 
-/// A companion's name, generation and all (2.4.3's COMP names): `tags-` or
-/// `autodj-`, 8 lowercase hex digits, `.bin`. Its generation.
+/// A companion's name, generation and all (2.4.3's COMP names): `tags-`,
+/// `autodj-` or `waves-`, 8 lowercase hex digits, `.bin`. Its generation.
 pub(super) fn companion_generation(name: &str) -> Option<u32> {
-    let rest = name.strip_prefix("tags-").or_else(|| name.strip_prefix("autodj-"))?;
+    let rest = ["tags-", "autodj-", "waves-"].iter().find_map(|stem| name.strip_prefix(stem))?;
     let hex = rest.strip_suffix(".bin")?;
     let lower = hex.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
     (hex.len() == 8 && lower).then(|| u32::from_str_radix(hex, 16).ok()).flatten()
@@ -83,7 +83,17 @@ pub(super) fn newer(card: &dyn CardFs) -> io::Result<Vec<String>> {
     let files: Vec<Item> = entries(card, "/.mstream")?.into_iter().filter(|i| !i.dir).collect();
     for item in &files {
         let lower = item.name.to_ascii_lowercase();
-        if volume::contract_named(&lower) && unknown_major(&card.read_at(&ms(&item.name), 0, 6)?) {
+        if !volume::contract_named(&lower) {
+            continue;
+        }
+        // A waveform index the card can't read is the settling's to say, which
+        // tells a bad sector from a pulled card (`Reads::head`): an error here
+        // would read as the card gone.
+        let head = card.read_at(&ms(&item.name), 0, 6);
+        if head.is_err() && lower.starts_with("waves-") {
+            continue;
+        }
+        if unknown_major(&head?) {
             out.push(item.name.clone());
         }
     }
@@ -107,9 +117,11 @@ pub(super) fn newer(card: &dyn CardFs) -> io::Result<Vec<String>> {
 }
 
 /// `/.player/device.txt`, or its no-file values (2.15). The software reads
-/// it and nothing else there (2.11).
-pub(super) fn device_txt(card: &dyn CardFs) -> DeviceTxt {
-    DeviceTxt::read(card.read("/.player/device.txt", 64 * 1024).ok().flatten().as_deref())
+/// it and nothing else there (2.11). A read that fails is neither: it would
+/// read as a player that lists no format, and the run's commit would drop the
+/// indexes that player reads.
+pub(super) fn device_txt(card: &dyn CardFs) -> io::Result<DeviceTxt> {
+    Ok(DeviceTxt::read(card.read("/.player/device.txt", 64 * 1024)?.as_deref()))
 }
 
 /// The card's reads for the settling: a failure kept for after the
@@ -123,6 +135,20 @@ impl Reads<'_> {
     fn read(&self, name: &str) -> Option<Vec<u8>> {
         match self.card.read(&ms(name), MAX_FILE) {
             Ok(bytes) => bytes,
+            Err(e) => {
+                self.error.borrow_mut().get_or_insert(e);
+                None
+            }
+        }
+    }
+
+    /// A waveform index's first bytes. A read that fails says nothing of the
+    /// file (WAVEFORM-INDEX.md 8.3), so it is kept like any other's: taken as
+    /// absent, a file that may be whole would leave the run's next root, and
+    /// the next clean-up would delete it (12).
+    fn head(&self, name: &str) -> Option<volume::Head> {
+        match volume::head_of(self.card, &ms(name)) {
+            Ok(head) => head,
             Err(e) => {
                 self.error.borrow_mut().get_or_insert(e);
                 None
@@ -161,7 +187,7 @@ pub(super) fn settle(card: &dyn CardWrite, bound: &mut Bound, answers: &Answers)
 
     // Step 1: the root. One commit seen twice is touched by no one until a
     // disk check has run; a manifest.tmp that won is renamed into place.
-    let mut root = volume::settle_root(&|name| reads.read(name));
+    let mut root = volume::settle_root(&|name| reads.read(name), &|name| reads.head(name));
     reads.done(bound)?;
     if let Some(r) = root.as_mut() {
         if r.twice {
@@ -238,7 +264,8 @@ pub(super) fn settle(card: &dyn CardWrite, bound: &mut Bound, answers: &Answers)
     let manifest = root.as_ref().map(|r| &r.manifest);
     let tags_name = manifest.map(|m| m.tags.name());
     let autodj_name = manifest.and_then(|m| m.autodj.as_ref()).map(|c| c.name());
-    let named: HashSet<String> = tags_name.into_iter().chain(autodj_name).collect();
+    let waves_name = manifest.and_then(|m| m.waves.as_ref()).map(|c| c.name());
+    let named: HashSet<String> = tags_name.into_iter().chain(autodj_name).chain(waves_name).collect();
     // Listed again: steps 1 and 2 may have renamed a .tmp into place.
     let top = entries(card, "/.mstream").map_err(|e| bound.failed(e))?;
     clean(card, bound, &top, &named, &resume_parts(resume.value.as_ref()))?;

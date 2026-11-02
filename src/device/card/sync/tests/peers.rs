@@ -462,6 +462,36 @@ fn a_peers_files_go_on_the_card_beside_the_servers_and_every_byte_is_counted() {
     assert_eq!(printed["peers"][0]["reach"], "direct");
 }
 
+/// A peer's files have no waveform row in v1: no route answers for them and
+/// nothing asks it, which its day's budget would count. The server's own files
+/// beside them have theirs, and a peer's file that is one of them, the same
+/// recording, has its bars too (WAVEFORM-INDEX.md 7.3 asks only that the writer
+/// has them).
+#[test]
+fn a_peers_files_have_no_waveform_row_and_nothing_asks_it() {
+    let rows_with = |tracks: Vec<Track>| {
+        let scratch = Scratch::new("peer-waves");
+        let sim = card(&scratch);
+        let (base, fake, peer, dial) = world(true, false, tracks);
+        with_waves(&fake);
+        let clock = Arc::new(AtomicU64::new(NOW));
+        let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+        let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs());
+        let outcome = ran(&synced);
+        assert_eq!((outcome.verified.clone(), outcome.records), (Ok(()), 6), "{:?}", synced.notes);
+        assert!(!asked_of(&peer).iter().any(|a| a.contains("waveform")), "{:?}", asked_of(&peer));
+        let asked = fake.lock().unwrap().waved.clone();
+        assert!(asked.len() == 4 && asked.iter().all(|p| p.starts_with("Rock/")), "{asked:?}");
+        let seen = look(&sim);
+        let waves = seen.root.as_ref().unwrap().manifest.waves.clone().expect("the server's rows' file");
+        let bytes = std::fs::read(scratch.0.join("card/.mstream").join(waves.name())).unwrap();
+        crate::device::card::contract::mpwf::Table::open(&bytes).unwrap().rows
+    };
+    let its_own = vec![peer_track(ONE, 1, corpus("cbr.mp3")), peer_track(TWO, 2, corpus("latin1.mp3"))];
+    assert_eq!(rows_with(its_own), 4, "the peer's two have none");
+    assert_eq!(rows_with(folk()), 6, "the same recordings as the server's two");
+}
+
 /// A peer's files no server serves (a Mac's AppleDouble twin beside each
 /// of its files) are left out of its listing before it is asked anything
 /// of them, its metadata included; the run counts them and names their
