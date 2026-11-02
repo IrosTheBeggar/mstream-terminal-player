@@ -6105,6 +6105,19 @@ mod tests {
             ("card, copied", c::with(c::ready("E:", now), |v| c::facts(v).copied = true), &[]),
             ("card, no device.txt", c::with(c::ready("E:", now), |v| c::facts(v).device.present = false), &[]),
             ("card, syncing", c::syncing("E:", now), &[]),
+            ("card, lacks its waveforms", c::with(c::ready("E:", now), |v| plan(v, &|p| {
+                (p.new, p.bytes, p.plays) = (0, 0, 0);
+                p.removals.clear();
+                p.waves_missing = true;
+            })), &[]),
+            ("card, all that waits", c::with(c::ready("E:", now), |v| plan(v, &|p| p.waves_missing = true)), &[]),
+            ("card, asking for waveforms", c::with(c::ready("E:", now), |v| {
+                v.run = Some(Run { phase: Phase::Waves, waves: (12_048, 19_388), ..Run::default() });
+            }), &[]),
+            ("card, syncing, its waveforms", c::with(c::syncing("E:", now), |v| {
+                let run = v.run.as_mut().expect("a run");
+                (run.phase, run.waves, run.now) = (Phase::Waves, (12_048, 19_388), None);
+            }), &[]),
             ("card, paused", c::with(c::ready("E:", now), |v| {
                 let pause = Pause::Budget { until: now + 18_720, peer: "3".into(), days: 4, mb: 1_500 };
                 v.ended = Some(Ended::Paused { pause, at: 2_945, of: 4_812, bytes: (13_000_000_000, 21_300_000_000) });

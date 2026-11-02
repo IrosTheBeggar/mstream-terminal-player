@@ -2,8 +2,8 @@
 //! part A6): the paged sync manifest with its ETag, full metadata in chunks
 //! under the server's body cap, embeddings eight paths at a time, the
 //! recursive listing a peer offers where it serves no manifest, covers in
-//! their three sizes, and backdated plays from a card's log. The files'
-//! bytes are [`fetch`]'s.
+//! their three sizes, a track's peaks, and backdated plays from a card's log.
+//! The files' bytes are [`fetch`]'s.
 //!
 //! For a federation peer (B9): the parent's peers with their iroh
 //! identities ([`TransferPeer`]), a client of the parent aimed at one of
@@ -34,7 +34,7 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::types::{DirListing, LayeredInfo, PlaysAnswer, TranscodeInfo};
+use super::types::{DirListing, LayeredInfo, PlaysAnswer, TranscodeInfo, WaveformResponse};
 use super::urls::{self, ArtSize, TransferBitrate, TransferCodec};
 use super::{ApiError, Client, refused, wait};
 
@@ -607,6 +607,29 @@ fn floats(text: &str, dim: u32) -> Option<Vec<f32>> {
     Some(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
 }
 
+/// What `GET /api/v1/db/waveform` says of a track, as a card's sync goes on
+/// from it ([`Client::waveform_peaks_async`]). The player's own call latches
+/// on a 503 for the session ([`Client::waveform_async`]), which a sync of a
+/// whole library can't live with: the route says it only on a miss in the
+/// server's memory and on its disk, so one track an ffmpeg-less server can't
+/// make would blank every other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Peaks {
+    /// Its M peak bars, 0-255 each: 800 from today's mStream, and any M of at
+    /// least 1 reads (the firmware repo's docs/WAVEFORM-INDEX.md 5).
+    Bars(Vec<u8>),
+    /// It has none to give: no access to it (403), gone or not in the database
+    /// (404), the server's failure marker (500), or an answer that isn't an
+    /// array of bytes.
+    None,
+    /// A 503: no ffmpeg to make them. The next track may be in the server's
+    /// cache all the same, so nothing latches. With a Retry-After: a server
+    /// that means to answer later.
+    NoFfmpeg(Option<Duration>),
+    /// A 429, and its Retry-After when it sent one.
+    Limited(Option<Duration>),
+}
+
 /// Who reports a card's plays: `stats/plays`'s `client` block. The server
 /// caps the name and the instance id at 64 characters, the version at 32.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1108,6 +1131,43 @@ impl Client {
 
     pub fn embeddings(&self, paths: &[String]) -> Result<Option<Embeddings>, ApiError> {
         wait(self.embeddings_async(paths))
+    }
+
+    /// A track's peaks as a card's sync asks them (`GET /api/v1/db/waveform`;
+    /// [`Peaks`] says why not [`Client::waveform_async`]). Err is what the sync
+    /// can't go on from: the sign-in refused, the server out of reach, any
+    /// other refusal. A first call for a track the server hasn't seen takes a
+    /// decode, up to 30 s behind the two it runs at once: [`Client::exchange`]'s
+    /// ceiling holds that on a slow server too.
+    pub async fn waveform_peaks_async(&self, filepath: &str) -> Result<Peaks, ApiError> {
+        const PATH: &str = "api/v1/db/waveform";
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("filepath", filepath)
+            .finish();
+        let reply = self.exchange(Method::GET, &format!("{PATH}?{query}"), None, &[]).await?;
+        let after = fetch::retry_after(&reply.headers);
+        match reply.status {
+            StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::INTERNAL_SERVER_ERROR => {
+                return Ok(Peaks::None);
+            }
+            StatusCode::SERVICE_UNAVAILABLE => return Ok(Peaks::NoFfmpeg(after)),
+            StatusCode::TOO_MANY_REQUESTS => return Ok(Peaks::Limited(after)),
+            _ => {}
+        }
+        if let Some(refusal) = refused(reply.status, &String::from_utf8_lossy(&reply.body), PATH) {
+            return Err(refusal);
+        }
+        // An array of bytes, or nothing to draw: one value out of range is no
+        // shape, and an empty array is none.
+        let answer: Result<WaveformResponse, _> = serde_json::from_slice(&reply.body);
+        Ok(match answer.map(|a| a.waveform) {
+            Ok(bars) if !bars.is_empty() => Peaks::Bars(bars),
+            _ => Peaks::None,
+        })
+    }
+
+    pub fn waveform_peaks(&self, filepath: &str) -> Result<Peaks, ApiError> {
+        wait(self.waveform_peaks_async(filepath))
     }
 
     /// Every audio file under `directory`, as `vpath/rel` paths, from
@@ -1884,6 +1944,74 @@ mod tests {
         assert_eq!(floats(&vector_b64(&[1.0, 0.0, 0.0]), 2), None);
         assert_eq!(floats("not base64!", 2), None);
         assert_eq!(floats(&vector_b64(&[0.5; 3]), 0), Some(vec![0.5; 3]), "no dim named: any whole count");
+    }
+
+    #[test]
+    fn a_tracks_peaks_read_any_length_and_no_answer_latches() {
+        let (bars, one) = (r#"{"waveform":[0,7,255]}"#, r#"{"waveform":[9]}"#);
+        let limited = reply("429 Too Many Requests", &[("Retry-After", "7")], b"{}");
+        let busy = reply("503 Service Unavailable", &[("Retry-After", "2")], b"{}");
+        let (base, seen) = canned(vec![
+            json("200 OK", bars),
+            json("200 OK", one),
+            json("503 Service Unavailable", r#"{"error":"FFmpeg not available"}"#),
+            // A 503 is one track's: the next is asked and read.
+            json("200 OK", bars),
+            busy,
+            limited,
+            json("429 Too Many Requests", "{}"),
+            json("403 Forbidden", r#"{"error":"Access Denied"}"#),
+            json("404 Not Found", r#"{"error":"File not found"}"#),
+            json("500 Internal Server Error", r#"{"error":"Waveform generation failed"}"#),
+        ]);
+        let meter = Arc::new(AtomicU64::new(0));
+        let client =
+            Client::new(&base).unwrap().with_token(Some("tok".into())).with_meter(Some(meter.clone()));
+        let path = "Rock/Artist A/01 + more.mp3";
+        assert_eq!(client.waveform_peaks(path).unwrap(), Peaks::Bars(vec![0, 7, 255]));
+        let request = recv(&seen);
+        let line = "GET /api/v1/db/waveform?filepath=Rock%2FArtist+A%2F01+%2B+more.mp3 HTTP/1.1";
+        assert!(request.starts_with(line), "the path as a query, escaped: {request}");
+        assert!(request.to_ascii_lowercase().contains("x-access-token: tok"), "{request}");
+        assert_eq!(meter.load(Ordering::Relaxed), bars.len() as u64, "counted as the transfer's calls are");
+        let peaks = |want: Peaks| assert_eq!(client.waveform_peaks("a.mp3").unwrap(), want);
+        peaks(Peaks::Bars(vec![9]));
+        peaks(Peaks::NoFfmpeg(None));
+        peaks(Peaks::Bars(vec![0, 7, 255]));
+        peaks(Peaks::NoFfmpeg(Some(Duration::from_secs(2))));
+        peaks(Peaks::Limited(Some(Duration::from_secs(7))));
+        peaks(Peaks::Limited(None));
+        peaks(Peaks::None);
+        peaks(Peaks::None);
+        peaks(Peaks::None);
+    }
+
+    #[test]
+    fn a_tracks_peaks_are_an_array_of_bytes_or_none_and_a_refused_sign_in_is_an_error() {
+        let odd = [
+            r#"{"waveform":[]}"#,
+            r#"{"waveform":[1,256]}"#,
+            r#"{"waveform":[1,-1]}"#,
+            r#"{"waveform":[1.5]}"#,
+            r#"{"waveform":"[1,2]"}"#,
+            r#"{"waveform":null}"#,
+            r#"{"bars":[1,2]}"#,
+            "[1,2]",
+            "not json",
+        ];
+        let mut answers: Vec<Vec<u8>> = odd.iter().map(|body| json("200 OK", body)).collect();
+        answers.push(json("401 Unauthorized", r#"{"error":"Authentication Error"}"#));
+        answers.push(json("502 Bad Gateway", r#"{"error":"no upstream"}"#));
+        // No answer at all: the connection closes first.
+        answers.push(Vec::new());
+        let (base, _seen) = canned(answers);
+        let client = Client::new(&base).unwrap();
+        for body in odd {
+            assert_eq!(client.waveform_peaks("a.mp3").unwrap(), Peaks::None, "{body}");
+        }
+        assert!(matches!(client.waveform_peaks("a.mp3"), Err(ApiError::Unauthorized)));
+        assert!(matches!(client.waveform_peaks("a.mp3"), Err(ApiError::Server { status: 502, .. })));
+        assert!(matches!(client.waveform_peaks("a.mp3"), Err(ApiError::Network(_))));
     }
 
     #[test]

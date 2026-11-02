@@ -407,7 +407,7 @@ fn content_range(headers: &HeaderMap) -> Option<(Option<(u64, u64)>, Option<u64>
 
 /// Retry-After in seconds. Its other form, an HTTP date, is read as none:
 /// mStream sends seconds.
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+pub(super) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     header(headers, RETRY_AFTER)?.parse::<u64>().ok().map(Duration::from_secs)
 }
 

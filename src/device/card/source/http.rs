@@ -207,7 +207,7 @@ fn until<T>(fut: impl std::future::Future<Output = T>, stop: &AtomicBool) -> Opt
 }
 
 /// [`until`], given up once `stopped` says so (asked every 100 ms).
-fn until_with<T>(
+pub(crate) fn until_with<T>(
     fut: impl std::future::Future<Output = T>,
     stopped: &dyn Fn() -> bool,
 ) -> Option<T> {

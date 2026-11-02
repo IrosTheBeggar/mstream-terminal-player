@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::fatsim::{Cut, FatSim};
+use super::run::read_pieces;
 use super::*;
 use crate::device::card::autodj::{self, FileIn, Index, IndexIn, Model, Selection, Work};
 use crate::device::card::contract::fat::fat_wall;
@@ -27,10 +28,12 @@ use crate::device::card::contract::mptg::{
 };
 use crate::device::card::contract::msmf::{self, Comp};
 use crate::device::card::contract::mspd::{self, OP_FOLDER, OP_WRITE, Op, PlanIn};
+use crate::device::card::contract::mpwf::{self, bars_from};
 use crate::device::card::contract::prim::{fnv1a64, md5, path_hash, qfp_of};
 use crate::device::card::contract::server::{NO_INSTANCE, TalkPeer, server_url_key};
 use crate::device::card::tags::PARSER_VERSION;
 use crate::device::card::volume::{self, Inspection, Serial};
+use crate::device::card::waves::{self, Shapes};
 
 // ── The scene ───────────────────────────────────────────────────────────────
 
@@ -253,13 +256,30 @@ impl Fetcher for Canned {
 
 /// What the tests' hooks add: a thumbnail for every album without one (a
 /// flat colour of its folder's hash and its count of files), none for the
-/// album `gone` names, and an Auto DJ index of made-up vectors under a
-/// made-up model (no real embeddings: AUTODJ-INDEX.md 12.5); and a count
-/// of the plays hook's calls.
+/// album `gone` names, an Auto DJ index of made-up vectors under a made-up
+/// model (no real embeddings: AUTODJ-INDEX.md 12.5), and a waveform index of
+/// made-up peaks; and a count of the plays hook's calls.
 #[derive(Default)]
 struct Extras {
     plays: usize,
     gone: Option<&'static str>,
+    /// The recordings the waveform step asked for, in order.
+    asked: Vec<[u8; 16]>,
+    /// The fetch stops once this many are answered (a stop, a token, the
+    /// network, a time budget); None: all of them.
+    answers: Option<usize>,
+    /// Its index steps may keep the card waiting long.
+    long: bool,
+}
+
+/// A recording's made-up peaks, the server's M = 800: its hash over and over.
+fn peaks_of(hash: &[u8; 16]) -> Vec<u8> {
+    (0..800).map(|i| hash[i % 16].wrapping_add((i / 16) as u8)).collect()
+}
+
+/// The bars a file of this ledger row's recording has, wherever they came from.
+fn bars_of(ledger: &Ledger) -> [u8; mpwf::BAR_COUNT] {
+    bars_from(&peaks_of(&ledger.canonical_hash().expect("a recording")))
 }
 
 impl Hooks for Extras {
@@ -277,6 +297,10 @@ impl Hooks for Extras {
         let colour = (path_hash(album.folder) as u16) ^ album.files.len() as u16;
         let pixels = Pixels { small: vec![colour; 40 * 40], large: vec![colour; 96 * 96] };
         Cover::New { pixels, source_bytes: 1_000 }
+    }
+
+    fn long_index_steps(&self) -> bool {
+        self.long
     }
 
     fn autodj(&mut self, commit: &Commit<'_>) -> AutoDj {
@@ -305,6 +329,20 @@ impl Hooks for Extras {
             Ok(Index::Same) => AutoDj::Same,
             _ => AutoDj::None,
         }
+    }
+
+    fn waves(&mut self, commit: &Commit<'_>, events: &mut dyn FnMut(Event)) -> Waves {
+        let asks = match commit.device.writes_mpwf() {
+            true => waves::asks(commit.records, commit.old_waves, |_| true),
+            false => Vec::new(),
+        };
+        let mut fetched = Shapes::new();
+        for (k, ask) in asks.iter().take(self.answers.unwrap_or(asks.len())).enumerate() {
+            self.asked.push(ask.hash);
+            fetched.insert(ask.hash, bars_from(&peaks_of(&ask.hash)));
+            events(Event::Waves { done: k + 1, of: asks.len() });
+        }
+        Waves::from(commit.waves_index(&fetched).expect("a waveform index"))
     }
 }
 
@@ -442,12 +480,13 @@ fn plan_of<'c>(
 }
 
 /// The card as the kit reads it (the volume layer's look): its root, which
-/// must read with its tags file and Auto DJ index whole.
+/// must read with its tags file and indexes whole.
 fn look(card: &FatSim) -> Inspection {
     let seen = volume::inspect(card).expect("the card lists");
     if let Some(root) = &seen.root {
         assert!(root.tags.is_ok(), "the root's tags file: {:?}", root.tags.as_ref().err());
         assert!(root.autodj.is_none_or(|v| v.is_ok()), "the root's Auto DJ index: {:?}", root.autodj);
+        assert!(root.waves.is_none_or(|v| v.is_ok()), "the root's waveform index: {:?}", root.waves);
     }
     seen
 }
@@ -534,9 +573,9 @@ const MOVED: &str = "Lib/Alex Artist/Second Album (Deluxe)/01 - Three.flac";
 /// What changed after the first sync, on the server and on the card: each
 /// row of the plan table once.
 fn second(dir: &Path, wanted: &mut WantedCard, server: &mut Canned) {
-    // The server: Two retagged, Loose gone, Three moved to another album,
-    // a new album.
-    let two = corpus("v23_utf16.mp3");
+    // The server: Two another recording, of another length (WAVEFORM-INDEX.md
+    // 7.3), Loose gone, Three moved to another album, a new album.
+    let two = corpus("mpeg2.mp3");
     server.add("Lib/Alex Artist/First Album/02 - Two.mp3", two.clone());
     wanted.files[1] = track("Lib/Alex Artist/First Album/02 - Two.mp3", &two, 102);
     wanted.files.retain(|f| f.ledger.server_path != "Lib/Loose.mp3");
@@ -563,13 +602,36 @@ fn second(dir: &Path, wanted: &mut WantedCard, server: &mut Canned) {
 }
 
 /// What a card holds once a run is over, its stamps and ids aside:
-/// `/music`'s files, and the root's records and folders.
+/// `/music`'s files, the root's records and folders, and its waveform index's
+/// slots (a file of one commit's is another's, but for its header).
 #[derive(Debug, PartialEq, Eq)]
 struct Finished {
     music: BTreeMap<String, (u64, u64)>,
     records: Vec<(String, u32, u64, String, u8, u16)>,
     folders: Vec<(String, u32)>,
     autodj: bool,
+    waves: Option<Vec<u8>>,
+}
+
+/// The bytes of the waveform index the root names, every slot of it good and
+/// no other waveform index on the card.
+fn waves_file(card: &FatSim) -> Option<Vec<u8>> {
+    let root = look(card).root.expect("a root");
+    let name = root.manifest.waves.as_ref().map(|c| format!("/.mstream/{}", c.name()));
+    let image = card.image();
+    let others = image.keys().filter(|p| p.starts_with("/.mstream/waves-") && Some(*p) != name.as_ref());
+    assert_eq!(others.collect::<Vec<_>>(), Vec::<&String>::new(), "a file no root names");
+    let bytes = card.read(name.as_ref()?, usize::MAX).expect("it reads").expect("the file the root names");
+    let table = mpwf::Table::open(&bytes).expect("it opens");
+    table.check().expect("every slot of it");
+    Some(bytes)
+}
+
+/// The rows of the waveform index the root names, by path hash.
+fn wave_rows(card: &FatSim) -> BTreeMap<u64, mpwf::Slot> {
+    let Some(bytes) = waves_file(card) else { return BTreeMap::new() };
+    let table = mpwf::Table::open(&bytes).expect("it opens");
+    (0..table.rows).map(|r| table.slot(r).expect("its slot")).map(|s| (s.path_hash, s)).collect()
 }
 
 fn finished(card: &FatSim) -> Finished {
@@ -602,7 +664,11 @@ fn finished(card: &FatSim) -> Finished {
         .collect();
     let flagged = tags.folders.iter().filter(|f| f.flags != 0);
     let folders = flagged.map(|f| (f.path.clone(), f.flags)).collect();
-    Finished { music, records, folders, autodj: root.autodj.is_some() }
+    let waves = waves_file(card).map(|bytes| {
+        let table = mpwf::Table::open(&bytes).expect("it opens");
+        table.wvsl().to_vec()
+    });
+    Finished { music, records, folders, autodj: root.autodj.is_some(), waves }
 }
 
 // ── The simulated card ──────────────────────────────────────────────────────
@@ -659,21 +725,24 @@ fn the_simulated_card_matches_names_and_renames_as_fat_does() {
 
 /// vectors.json's privateFiles.cleanup: step 4 over a `/.mstream` of
 /// leftovers deletes exactly the vector's files, and the private files
-/// stay. The root, where the case has one, is the fixture card's.
+/// stay. The root, where the case has one, is the fixture card's that names
+/// the vector's three companions, `manifest-waves.bin`.
 #[test]
 fn the_clean_up_deletes_what_the_vectors_say() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures/card/vectors.json");
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     let cases = v["privateFiles"]["cleanup"].as_array().unwrap();
     assert_eq!(cases.len(), 4);
-    let golden = ["manifest.bin", "tags-0000002a.bin", "autodj-00000029.bin"];
+    let golden = ["tags-0000002a.bin", "autodj-00000029.bin", "waves-0000002a.bin"];
     for (k, c) in cases.iter().enumerate() {
         let dir = Scratch::new(&format!("cleanup{k}"));
         let files = c["files"].as_object().unwrap();
         for (rel, size) in files {
             let host = dir.0.join(".mstream").join(rel);
             std::fs::create_dir_all(host.parent().unwrap()).unwrap();
-            if golden.contains(&rel.as_str()) {
+            if rel == "manifest.bin" {
+                std::fs::write(&host, fixture("card/golden/manifest-waves.bin")).unwrap();
+            } else if golden.contains(&rel.as_str()) {
                 std::fs::write(&host, fixture(&format!("card/golden/{rel}"))).unwrap();
             } else if rel == "resume.json" && c["resume"].is_string() {
                 std::fs::write(&host, c["resume"].as_str().unwrap()).unwrap();
@@ -702,9 +771,40 @@ fn the_clean_up_deletes_what_the_vectors_say() {
         assert_eq!(left, want, "case {k}: {}", c["note"]);
         let took = events.iter().any(|e| matches!(e, Event::TookOver(_)));
         assert_eq!(took, files.contains_key("run.lock"), "case {k}: a stale run.lock is taken over");
+        // The file the root names, the run's to reuse; a card's highest
+        // generation counts any companion's name.
+        let waves = session.root().map(|r| r.waves);
+        let want = files.contains_key("manifest.bin").then_some(Some(Ok(())));
+        assert_eq!(waves, want, "case {k}: the old waveform index");
+        if files.contains_key("manifest.bin") {
+            assert_eq!(session.settled.top, 43, "case {k}: the root's");
+        }
         session.close();
         assert!(card.stat("/.mstream/run.lock").unwrap().is_none(), "case {k}: the card let go");
     }
+}
+
+/// 2.5.2: no generation is used twice, whichever companion's name shows it,
+/// and a waveform index the root doesn't name goes at step 4 (2.12.1).
+#[test]
+fn a_waveform_index_counts_by_its_name() {
+    let generation = super::settle::companion_generation;
+    assert_eq!(generation("waves-0000002a.bin"), Some(42));
+    assert_eq!(generation("autodj-00000029.bin"), Some(41));
+    assert_eq!(generation("tags-ffffffff.bin"), Some(u32::MAX));
+    for name in ["waves-0000002A.bin", "waves-2a.bin", "waves-old.bin", "wave-0000002a.bin", "waves-0000002a.tmp"] {
+        assert_eq!(generation(name), None, "{name}");
+    }
+
+    let dir = Scratch::new("waves-name");
+    set_up(&dir.0);
+    put(&dir.0, "/.mstream/waves-00000063.bin", &fixture("card/golden/waves-one.bin"), LATER);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let session = open(&card, Answers::default(), 1, &mut |_| {}).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(session.settled.top, 0x63, "a name is never used again");
+    assert_eq!(session.root().map(|r| r.waves), Some(None), "the root names none");
+    session.close();
+    assert!(card.stat("/.mstream/waves-00000063.bin").unwrap().is_none(), "a companion the root doesn't name");
 }
 
 #[test]
@@ -888,10 +988,13 @@ fn every_cut_leaves_a_card_the_kit_reads_and_the_next_run_finishes() {
     sync(&card, &wanted, &mut server, 2).expect("uncut");
     let writes = card.log();
     let want = finished(&card);
+    assert!(want.waves.is_some() && writes.iter().any(|w| w.starts_with("create /.mstream/waves-")));
 
     // Each write cut in turn; each rename also between its two directory
     // writes.
     let mut disk_checks = 0;
+    let mut replaced = 0;
+    let two = recording_of(&wanted, "Lib/Alex Artist/First Album/02 - Two.mp3");
     let mut settled: BTreeSet<(String, bool)> = BTreeSet::new();
     for (n, how) in cuts_of(&writes, writes.len()) {
         let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
@@ -901,6 +1004,12 @@ fn every_cut_leaves_a_card_the_kit_reads_and_the_next_run_finishes() {
         let seen = look(&card);
         assert!(seen.root.is_some(), "{what}: a root");
         dump(&format!("cut-{n:03}-{how:?}"), &card);
+        // A checkpoint with Two replaced names the old file again, whose slot
+        // of Two is the old recording's (WAVEFORM-INDEX.md 7.3).
+        let root = seen.root.as_ref().filter(|r| !r.manifest.is_final() && r.waves == Some(Ok(())));
+        let tags = root.and_then(|r| r.tags.as_ref().ok());
+        let has = |e: &mptg::Entry| e.ledger.as_ref().and_then(Ledger::canonical_hash) == Some(two);
+        replaced += usize::from(tags.is_some_and(|t| t.records.iter().any(has)));
 
         // The next run brings it to where the uncut run did.
         let again = recover(&card, &wanted, &mut server, 3);
@@ -935,6 +1044,7 @@ fn every_cut_leaves_a_card_the_kit_reads_and_the_next_run_finishes() {
         }
     }
     assert!(disk_checks > 0, "a rename cut between its directory writes stops for a disk check");
+    assert!(replaced > 0, "a run taken up from a checkpoint with a recording replaced before it");
     for rename in ["manifest", "pending"] {
         let at = format!("rename /.mstream/{rename}.tmp -> /.mstream/{rename}.bin");
         assert!(settled.contains(&(at, true)), "a settling's own rename, cut: {settled:?}");
@@ -1866,11 +1976,790 @@ fn a_new_card_id_commits_the_same_files_and_is_a_run_of_its_own() {
     assert_eq!(ids, (done.card_id, done.card_id), "the root and its tags file carry it");
     let index = |r: &Root| r.manifest.autodj.as_ref().map(|c| c.name());
     assert!(index(&root).is_some() && index(&root) != index(&before), "an index of its own");
-    assert_eq!(finished(&card), old, "the same music, records, folders and an index");
+    assert_eq!(finished(&card), old, "the same music, records, folders and indexes");
+    // A waveform index of its own too, from the old one's slots: its bars asked
+    // for nowhere.
+    let waves = |r: &Root| r.manifest.waves.as_ref().map(|c| c.name());
+    assert!(waves(&root).is_some() && waves(&root) != waves(&before), "a waveform index of its own");
+    let file = waves_file(&card).expect("the file");
+    assert_eq!(mpwf::Table::open(&file).unwrap().header().card_id, done.card_id);
+    assert_eq!(extras.asked, Vec::<[u8; 16]>::new());
     // And a plain run after it changes nothing more.
     let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
     let again = session.run(plan, &mut server, &mut Extras::default(), &mut |_| {}).unwrap();
     assert_eq!((again.card_id, again.commit_id), (done.card_id, done.commit_id));
+}
+
+// ── The waveform index (WAVEFORM-INDEX.md 7.2, 7.3) ─────────────────────────
+
+/// The generation of the card's root.
+fn generation_of(card: &FatSim) -> u32 {
+    look(card).root.expect("a root").manifest.header.generation
+}
+
+/// What a commit writes, and `/music`: a run that makes none leaves them as
+/// they were, stamps and all. The library's loose file has an album of its
+/// own, `/music`'s, whose thumbnail every run writes again (no folder but a
+/// named one is read back as having THUMB).
+fn commit_image(card: &FatSim) -> BTreeMap<String, (u64, u32, u64)> {
+    let image = card.image().into_iter();
+    image.filter(|(p, _)| p.ends_with(".bin") || p.starts_with("/music/")).collect()
+}
+
+/// A run under these hooks and the tests' knobs, its outcome verified.
+fn synced(card: &FatSim, wanted: &WantedCard, server: &mut Canned, extras: &mut Extras) -> Vec<Event> {
+    let (ran, events) = sync_with(card, wanted, server, extras, knobs(), Answers::default(), 7);
+    let outcome = ran.unwrap_or_else(|e| panic!("the run: {e}"));
+    assert_eq!(outcome.verified, Ok(()));
+    events
+}
+
+/// The recording of a server path, as the selection has it.
+fn recording_of(wanted: &WantedCard, server_path: &str) -> [u8; 16] {
+    let file = wanted.files.iter().find(|f| f.ledger.server_path == server_path);
+    file.expect("a file of the selection").ledger.canonical_hash().expect("a recording")
+}
+
+/// Every record of the card's root has a row: its own path hash and length,
+/// and the bars of its recording.
+fn every_record_has_its_row(card: &FatSim) {
+    let rows = wave_rows(card);
+    let records = records(card);
+    assert_eq!(rows.len(), records.len());
+    for e in &records {
+        let row = rows.get(&e.hash).unwrap_or_else(|| panic!("{}: no row", e.path));
+        assert_eq!(row.length_ms, e.rec.duration_ms, "{}", e.path);
+        assert_eq!(row.bars, bars_of(e.ledger.as_ref().expect("a ledger row")), "{}", e.path);
+    }
+}
+
+#[test]
+fn a_sync_writes_its_waveform_index_with_the_final_commit_only() {
+    let dir = Scratch::new("waves-first");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    let mut extras = Extras::default();
+    let events = synced(&card, &wanted, &mut server, &mut extras);
+    assert_eq!(extras.asked.len(), 6, "each recording once");
+    let said = events.iter().filter_map(|e| match e {
+        Event::Waves { done, of } => Some((*done, *of)),
+        _ => None,
+    });
+    assert_eq!(said.collect::<Vec<_>>(), [(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)]);
+
+    // 7.2's order: under its final name after the tags file and the Auto DJ
+    // index, before the root that names it. A checkpoint wrote none.
+    let log = card.log();
+    let at = |what: &str| log.iter().position(|w| w.starts_with(what)).unwrap_or_else(|| panic!("{what}"));
+    assert_eq!(log.iter().filter(|w| w.starts_with("create /.mstream/waves-")).count(), 1);
+    let last = log.iter().rposition(|w| w.starts_with("create /.mstream/manifest.tmp")).unwrap();
+    assert!(at("create /.mstream/tags-00000004.bin") < at("create /.mstream/autodj-00000004.bin"));
+    assert!(at("create /.mstream/autodj-00000004.bin") < at("create /.mstream/waves-00000004.bin"));
+    assert!(at("sync /.mstream/waves-00000004.bin") < last);
+
+    // The root's row, after the others' in its COMP order, the file's own
+    // generation; and each record's row.
+    let root = look(&card).root.unwrap();
+    assert_eq!(root.waves, Some(Ok(())));
+    let entry = root.manifest.waves.as_ref().expect("the root's row");
+    assert_eq!((entry.generation, entry.name().as_str()), (4, "waves-00000004.bin"));
+    assert_eq!(entry.key, [0; 16]);
+    every_record_has_its_row(&card);
+
+    // A converted file takes its source's peaks, and its own length.
+    let records = records(&card);
+    let five = records.iter().find(|e| e.path == "Blake Band/Live/02 - Five.opus").expect("Five");
+    assert_eq!(five.rec.duration_ms, 5_000, "the card's Opus, not the source's 30 s");
+    assert_eq!(wave_rows(&card)[&five.hash].length_ms, 5_000);
+    assert!(extras.asked.contains(&recording_of(&wanted, "Lib/Blake Band/Live/02 - Five.flac")));
+}
+
+/// 7.3: a moved file keeps its bars under its new path hash; a new recording,
+/// and a new file, are what a run asks for. An unchanged card then makes no
+/// commit, and no asks.
+#[test]
+fn a_moved_file_keeps_its_bars_and_an_unchanged_card_makes_no_commit() {
+    let dir = Scratch::new("waves-moved");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    let before = wave_rows(&card);
+    second(&dir.0, &mut wanted, &mut server);
+    let mut extras = Extras::default();
+    synced(&card, &wanted, &mut server, &mut extras);
+    let want = [
+        recording_of(&wanted, "Lib/Alex Artist/First Album/02 - Two.mp3"),
+        recording_of(&wanted, "Lib/Casey Choir/Hymns/01 - Six.mp3"),
+    ];
+    assert_eq!(BTreeSet::from_iter(extras.asked), BTreeSet::from(want), "the rest came from the old slots");
+    every_record_has_its_row(&card);
+
+    // Three moved on the server, Four by the listener; each row's hash a new
+    // one, its CRC for its new place, its bars as they were.
+    let rows = wave_rows(&card);
+    let by_path = |rel: &str| rows.get(&path_hash(rel)).unwrap_or_else(|| panic!("{rel}: no row"));
+    for (old, new) in [
+        ("Alex Artist/Second Album/01 - Three.flac", "Alex Artist/Second Album (Deluxe)/01 - Three.flac"),
+        ("Blake Band/Live/01 - Four.opus", "Moved/01 - Four.opus"),
+    ] {
+        assert!(!rows.contains_key(&path_hash(old)), "{old}: no row at its old path");
+        assert_eq!(before[&path_hash(old)].bars, by_path(new).bars, "{new}");
+    }
+    // Two's own path, its new recording's bars.
+    let two = "Alex Artist/First Album/02 - Two.mp3";
+    assert_ne!(before[&path_hash(two)].bars, by_path(two).bars);
+    // Loose left the card, and the listener's edit of One: no row.
+    assert!(!rows.contains_key(&path_hash("Loose.mp3")));
+    assert!(!rows.contains_key(&path_hash("Alex Artist/First Album/01 - One.mp3")));
+    // The old file went at the clean-up (`wave_rows` looked).
+
+    // Nothing new on either side: no ask, no commit, the card as it was.
+    let image = card.image();
+    let generation = generation_of(&card);
+    let mut again = Extras::default();
+    let events = synced(&card, &wanted, &mut server, &mut again);
+    assert_eq!(again.asked, Vec::<[u8; 16]>::new());
+    assert!(!events.iter().any(|e| matches!(e, Event::Committed { .. })), "{events:?}");
+    assert_eq!(events.last(), Some(&Event::Unchanged), "and it says so: its last look comes next");
+    assert_eq!(card.image(), image, "not even a stamp");
+    assert_eq!(generation_of(&card), generation);
+}
+
+/// A card synced before its player read MPWF, or whose server had no answers
+/// then, and nothing else to do: that run commits, because its bytes change
+/// (12). A commit makes the device build its library again, so nothing less
+/// makes one.
+#[test]
+fn a_card_that_lacks_waves_gets_a_commit_for_them_alone() {
+    let dir = Scratch::new("waves-lacks");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    let mut none = Extras { answers: Some(0), ..Extras::default() };
+    synced(&card, &wanted, &mut server, &mut none);
+    let root = look(&card).root.unwrap();
+    assert_eq!((root.manifest.waves.clone(), root.waves), (None, None), "no row: no MPWF");
+    assert!(waves_file(&card).is_none());
+    let (generation, fetched, music) = (generation_of(&card), server.fetched.len(), finished(&card).music);
+
+    // A second run of no answers: nothing to commit.
+    let image = commit_image(&card);
+    let mut none = Extras { answers: Some(0), ..Extras::default() };
+    let events = synced(&card, &wanted, &mut server, &mut none);
+    assert!(!events.iter().any(|e| matches!(e, Event::Committed { .. })), "{events:?}");
+    assert_eq!(commit_image(&card), image);
+
+    // Now it answers: the one thing that changes is the file, and it commits.
+    let mut extras = Extras::default();
+    let events = synced(&card, &wanted, &mut server, &mut extras);
+    assert_eq!(events.iter().filter(|e| matches!(e, Event::Committed { last: true, .. })).count(), 1);
+    assert_eq!(generation_of(&card), generation + 1);
+    assert_eq!(extras.asked.len(), 6);
+    every_record_has_its_row(&card);
+    assert_eq!((server.fetched.len(), finished(&card).music), (fetched, music), "no music moved");
+
+    // And the run after that makes none.
+    let image = commit_image(&card);
+    let events = synced(&card, &wanted, &mut server, &mut Extras::default());
+    assert!(!events.iter().any(|e| matches!(e, Event::Committed { .. })), "{events:?}");
+    assert_eq!(commit_image(&card), image);
+}
+
+/// 12: a fetch that stops is never a failed transfer. What came stays, the old
+/// rows that hold stay, the next run asks for the rest; and the old file is
+/// never deleted while it names a useful row.
+#[test]
+fn a_fetch_that_stops_early_keeps_what_came_and_what_holds() {
+    let dir = Scratch::new("waves-stops");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let mut wanted = library(&mut server);
+
+    // Two answers of six.
+    let mut extras = Extras { answers: Some(2), ..Extras::default() };
+    synced(&card, &wanted, &mut server, &mut extras);
+    let rows = wave_rows(&card);
+    assert_eq!(rows.len(), 2);
+
+    // One more: a new file, the first two carried; asked only the rest.
+    let mut extras = Extras { answers: Some(1), ..Extras::default() };
+    let generation = generation_of(&card);
+    synced(&card, &wanted, &mut server, &mut extras);
+    assert_eq!(extras.asked.len(), 1);
+    let more = wave_rows(&card);
+    assert_eq!(more.len(), 3);
+    assert!(rows.iter().all(|(h, row)| more.get(h) == Some(row)));
+    assert_eq!(generation_of(&card), generation + 1);
+
+    // Nothing gained and no old row changed: the bytes are equal, the file
+    // named again, and no commit.
+    let image = commit_image(&card);
+    let mut none = Extras { answers: Some(0), ..Extras::default() };
+    let events = synced(&card, &wanted, &mut server, &mut none);
+    assert!(!events.iter().any(|e| matches!(e, Event::Committed { .. })), "{events:?}");
+    assert_eq!(commit_image(&card), image);
+
+    // Nothing gained, one old row gone (its recording replaced): a new file
+    // leaves that row out, and keeps the others.
+    let kept = records(&card).into_iter().filter(|e| more.contains_key(&e.hash));
+    let rel = kept.map(|e| e.path).find(|p| p.ends_with(".mp3")).expect("an MP3 of the three");
+    let path = format!("Lib/{rel}");
+    let bytes = corpus("mpeg2.mp3");
+    server.add(&path, bytes.clone());
+    let file = wanted.files.iter_mut().find(|f| f.ledger.server_path == path).expect("its file");
+    *file = track(&path, &bytes, 777);
+    let mut none = Extras { answers: Some(0), ..Extras::default() };
+    let generation = generation_of(&card);
+    synced(&card, &wanted, &mut server, &mut none);
+    let left = wave_rows(&card);
+    assert_eq!(left.len(), 2);
+    assert!(!left.contains_key(&path_hash(&rel)), "its old bars aren't its new recording's");
+    assert_eq!(generation_of(&card), generation + 1);
+
+    // The whole selection gone and no answer: no row left, so no MPWF, and the
+    // clean-up takes the file.
+    wanted.files.clear();
+    let answers = Answers { removals: true, mass_removals: true, ..Answers::default() };
+    let mut none = Extras { answers: Some(0), ..Extras::default() };
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut none, knobs(), answers, 8);
+    assert_eq!(ran.expect("the run").verified, Ok(()));
+    assert_eq!(look(&card).root.unwrap().manifest.waves, None);
+    assert!(waves_file(&card).is_none(), "no row, no file: there is no file of 0 rows");
+}
+
+/// 7.4: a player that doesn't read it gets none; one that stops listing it
+/// loses the file at the clean-up, whatever else the card holds.
+#[test]
+fn a_card_whose_player_doesnt_read_the_file_gets_none() {
+    let dir = Scratch::new("waves-gate");
+    let (card, wanted, mut server) = first(&dir.0);
+    assert!(waves_file(&card).is_some());
+    let text = String::from_utf8(fixture("card/golden/device.txt")).unwrap();
+    assert!(text.contains("read.mpwf=1"));
+    put(&dir.0, "/.player/device.txt", text.replace("read.mpwf=1", "read.mpwf=2").as_bytes(), LATER);
+    let generation = generation_of(&card);
+    let mut extras = Extras::default();
+    synced(&card, &wanted, &mut server, &mut extras);
+    assert_eq!(extras.asked, Vec::<[u8; 16]>::new());
+    assert_eq!(look(&card).root.unwrap().manifest.waves, None);
+    assert!(waves_file(&card).is_none());
+    assert_eq!(generation_of(&card), generation + 1, "the row's going is a commit's");
+
+    // None comes back while it says so.
+    let image = commit_image(&card);
+    synced(&card, &wanted, &mut server, &mut Extras::default());
+    assert_eq!(commit_image(&card), image);
+}
+
+/// 7.2, 7.3: a bad old file is absent, never fatal. The frame or the row: no old
+/// slot holds, and everything is asked for again. One slot: that slot alone. A
+/// major this writer doesn't know is another matter: it stops (9).
+#[test]
+fn a_bad_old_file_is_absent_and_the_run_goes_on() {
+    let base = Scratch::new("waves-bad-base");
+    let (card, wanted, mut server) = first(&base.0);
+    let want = finished(&card);
+    let name = look(&card).root.unwrap().manifest.waves.expect("the root's row").name();
+    let good = card.read(&format!("/.mstream/{name}"), usize::MAX).unwrap().expect("the file");
+    drop(card);
+    let rel = format!("/.mstream/{name}");
+    let all = wanted.files.len();
+    let flip_at = |at: usize| {
+        let mut b = good.clone();
+        b[at] ^= 1;
+        b
+    };
+    // Whatever the card holds under its name, with the frame good or not. A
+    // magic of another format is a bad file, not a newer one.
+    let cases: [(&str, Option<Vec<u8>>, usize, bool); 6] = [
+        ("a flipped header byte", Some(flip_at(44)), all, false),
+        ("another magic", Some(flip_at(0)), all, false),
+        ("cut short", Some(good[..good.len() - 100].to_vec()), all, false),
+        ("another file", Some(fixture("card/golden/waves-0000002a.bin")), all, false),
+        ("gone", None, all, false),
+        ("a damaged slot", Some(flip_at(256 + 2 * 256 + 100)), 1, true),
+    ];
+    for (what, bytes, asked, frame_good) in &cases {
+        let dir = Scratch::new("waves-bad");
+        copy_tree(&base.0, &dir.0);
+        match bytes {
+            Some(b) => put(&dir.0, &rel, b, LATER),
+            None => std::fs::remove_file(dir.0.join(rel.trim_start_matches('/'))).unwrap(),
+        }
+        let card = FatSim::new(&dir.0, SERIAL);
+        let seen = volume::inspect(&card).expect("the card lists");
+        assert_eq!(seen.root.as_ref().unwrap().waves == Some(Ok(())), *frame_good, "{what}");
+
+        let mut extras = Extras::default();
+        let (ran, _) = sync_with(&card, &wanted, &mut server, &mut extras, knobs(), Answers::default(), 7);
+        let outcome = ran.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(extras.asked.len(), *asked, "{what}");
+        assert_eq!(finished(&card), want, "{what}: the rows again, a new file, and the bad one gone");
+    }
+
+    // A checkpoint names a good old file again, and no bad one: a run parked by
+    // its source ends in one.
+    let mut more = wanted.clone();
+    let six = corpus("trck_0.mp3");
+    server.add("Lib/Casey Choir/Hymns/01 - Six.mp3", six.clone());
+    more.files.push(track("Lib/Casey Choir/Hymns/01 - Six.mp3", &six, 401));
+    server.stop_at = Some("Lib/Casey Choir/Hymns/01 - Six.mp3".into());
+    let row = look(&FatSim::new(&base.0, SERIAL)).root.unwrap().manifest.waves;
+    for (bytes, named) in [(&good, row), (&flip_at(44), None)] {
+        let dir = Scratch::new("waves-bad-parked");
+        copy_tree(&base.0, &dir.0);
+        put(&dir.0, &rel, bytes, LATER);
+        let card = FatSim::new(&dir.0, SERIAL);
+        let mut extras = Extras::default();
+        let (ran, _) = sync_with(&card, &more, &mut server, &mut extras, knobs(), Answers::default(), 7);
+        assert!(ran.expect("the run").parked.is_some());
+        assert_eq!(extras.asked, Vec::<[u8; 16]>::new(), "no index step");
+        let root = volume::inspect(&card).unwrap().root.unwrap();
+        assert!(!root.manifest.is_final());
+        assert_eq!(root.manifest.waves, named);
+    }
+    server.stop_at = None;
+
+    // A major this writer doesn't know stops it before any write.
+    let mut newer = good.clone();
+    newer[4] = 2;
+    let dir = Scratch::new("waves-bad-major");
+    copy_tree(&base.0, &dir.0);
+    put(&dir.0, &rel, &newer, LATER);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let image = card.image();
+    let ran = sync(&card, &wanted, &mut server, 7);
+    let stopped = matches!(ran, Err(Stop::Guard(Guard::Newer(ref n))) if n == std::slice::from_ref(&name));
+    assert!(stopped, "{ran:?}");
+    assert_eq!(card.image(), image);
+}
+
+/// 8.3: a read that fails says nothing of the file, and is never taken for its
+/// absence, which would ask for everything again and, with no answer, have the
+/// clean-up delete a file the device can still read (12). What the card does
+/// read of it stays of use; its frame out of reach stops the run, as any other
+/// file the root names does.
+#[test]
+fn a_read_error_of_the_old_file_costs_what_it_reaches_and_no_more() {
+    let base = Scratch::new("waves-read-base");
+    let (card, wanted, mut server) = first(&base.0);
+    let want = finished(&card);
+    let rows = wave_rows(&card);
+    let name = look(&card).root.unwrap().manifest.waves.expect("the root's row").name();
+    let rel = format!("/.mstream/{name}");
+    drop(card);
+    let in_copy = || {
+        let dir = Scratch::new("waves-read");
+        copy_tree(&base.0, &dir.0);
+        let card = FatSim::new(&dir.0, SERIAL);
+        (dir, card)
+    };
+
+    // A whole read that fails where its pieces don't: nothing lost, nothing
+    // asked, no commit.
+    let (_dir, card) = in_copy();
+    let image = commit_image(&card);
+    card.stumbles(&rel);
+    let mut extras = Extras::default();
+    let events = synced(&card, &wanted, &mut server, &mut extras);
+    card.heal();
+    assert_eq!(extras.asked, Vec::<[u8; 16]>::new());
+    assert_eq!(events.last(), Some(&Event::Unchanged), "{events:?}");
+    assert_eq!(commit_image(&card), image);
+
+    // A bad sector, of rows 1 and 2: its frame reads, those two are asked for
+    // and the rest hold.
+    let (_dir, card) = in_copy();
+    card.bad_sector(&rel, 512);
+    let seen = volume::inspect(&card).expect("the card lists");
+    assert_eq!(seen.root.as_ref().unwrap().waves, Some(Ok(())), "the file is valid");
+    let mut extras = Extras::default();
+    synced(&card, &wanted, &mut server, &mut extras);
+    card.heal();
+    assert_eq!(extras.asked.len(), 2);
+    assert_eq!(finished(&card), want, "the rows again, a new file, and the bad one gone");
+
+    // And with no answer to anything: a run with no answers isn't a card with no
+    // shapes. A new file of the rows that hold, never none.
+    let (_dir, card) = in_copy();
+    card.bad_sector(&rel, 512);
+    let mut none = Extras { answers: Some(0), ..Extras::default() };
+    synced(&card, &wanted, &mut server, &mut none);
+    card.heal();
+    let left = wave_rows(&card);
+    assert_eq!(left.len(), rows.len() - 2);
+    assert!(left.iter().all(|(h, row)| rows.get(h) == Some(row)));
+
+    // Its frame: the settling stops with nothing written, not even run.lock
+    // left. Once the card reads it again, nothing was lost.
+    let (_dir, card) = in_copy();
+    let image = card.image();
+    card.bad_sector(&rel, 0);
+    let mut extras = Extras::default();
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut extras, knobs(), Answers::default(), 7);
+    assert!(matches!(ran, Err(Stop::Card(_))), "{ran:?}");
+    card.heal();
+    assert_eq!(card.image(), image);
+    assert_eq!(extras.asked, Vec::<[u8; 16]>::new());
+    let events = synced(&card, &wanted, &mut server, &mut Extras::default());
+    assert_eq!(events.last(), Some(&Event::Unchanged), "{events:?}");
+    assert_eq!(wave_rows(&card), rows);
+
+    // Its frame out of reach only by the final commit, after a settling that
+    // read it: the run stops there too, the root as it was.
+    struct Breaks<'c>(&'c FatSim, &'c str);
+    impl Hooks for Breaks<'_> {
+        fn cover(&mut self, _album: &Album<'_>) -> Cover {
+            self.0.bad_sector(self.1, 0);
+            Cover::Keep
+        }
+    }
+    let (_dir, card) = in_copy();
+    let image = commit_image(&card);
+    let hooks = &mut Breaks(&card, &rel);
+    let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, knobs(), Answers::default(), 7);
+    assert!(matches!(ran, Err(Stop::Card(_))), "{ran:?}");
+    card.heal();
+    assert_eq!(commit_image(&card), image);
+
+    // device.txt's read failing isn't a player that stopped reading the file,
+    // whose run would drop it.
+    let (_dir, card) = in_copy();
+    let image = card.image();
+    card.bad_sector("/.player/device.txt", 0);
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut Extras::default(), knobs(), Answers::default(), 7);
+    assert!(matches!(ran, Err(Stop::Card(_))), "{ran:?}");
+    card.heal();
+    assert_eq!(card.image(), image);
+}
+
+/// A file the card can't read whole, read in pieces: all it loses is the sector
+/// it can't read, wherever that lies, and a card that turns out to be gone ends
+/// the reading.
+#[test]
+fn a_file_read_in_pieces_loses_only_the_sector_the_card_cant_read() {
+    let dir = Scratch::new("pieces");
+    let card = FatSim::new(&dir.0, SERIAL);
+    let path = "/.mstream/file.bin";
+    let len = (3 << 20) + 700;
+    let bytes: Vec<u8> = (0..len as u32).map(|i| (i ^ (i >> 8) ^ (i >> 16)) as u8).collect();
+    put(&dir.0, path, &bytes, LATER);
+    let got = read_pieces(&card, path, len, &mut || Ok(())).expect("it reads");
+    assert!(got == bytes, "all of it");
+    for at in [1024, (2 << 20) + 1000, (3 << 20) + 600] {
+        card.bad_sector(path, at as u64);
+        let mut failed = 0;
+        let count = &mut || {
+            failed += 1;
+            Ok(())
+        };
+        let got = read_pieces(&card, path, len, count).expect("it reads");
+        assert_eq!(failed, 1, "one piece, of the file's four");
+        let start = at / 512 * 512;
+        let mut want = bytes.clone();
+        want[start..(start + 512).min(len)].fill(0);
+        assert!(got == want, "the sector of byte {at}, and no other");
+    }
+    let got = read_pieces(&card, path, len, &mut || Err(Stop::Pulled));
+    assert!(matches!(got, Err(Stop::Pulled)));
+}
+
+/// A card pulled during the Auto DJ index's step, minutes long with no card
+/// access: its waveforms aren't asked for, which could take half an hour more
+/// before a write found the card gone.
+#[test]
+fn a_card_pulled_ahead_of_the_waveforms_step_isnt_asked_for_them() {
+    struct Pulls<'c> {
+        card: &'c FatSim,
+        asked: bool,
+    }
+    impl Hooks for Pulls<'_> {
+        fn autodj(&mut self, _commit: &Commit<'_>) -> AutoDj {
+            self.card.pull();
+            AutoDj::None
+        }
+        fn waves(&mut self, _commit: &Commit<'_>, _events: &mut dyn FnMut(Event)) -> Waves {
+            self.asked = true;
+            Waves::Same
+        }
+    }
+    let dir = Scratch::new("waves-pulled-first");
+    let (card, wanted, mut server) = first(&dir.0);
+    let mut hooks = Pulls { card: &card, asked: false };
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut hooks, knobs(), Answers::default(), 7);
+    assert!(matches!(ran, Err(Stop::Pulled)), "{ran:?}");
+    assert!(!hooks.asked);
+}
+
+/// A fetch of half an hour comes ahead of the final commit's first write: what a
+/// run copied is named by a checkpoint before it, so a card pulled in that wait
+/// keeps it, and the next run fetches none of it again. A run that copied
+/// nothing has nothing to name.
+#[test]
+fn a_run_names_what_it_copied_ahead_of_a_long_index_step() {
+    let rare = Knobs { checkpoint_files: 500, ..knobs() };
+    let dir = Scratch::new("waves-long");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    let mut extras = Extras { long: true, ..Extras::default() };
+    let answers = Answers::default();
+    let (ran, events) = sync_with(&card, &wanted, &mut server, &mut extras, rare.clone(), answers, 1);
+    assert_eq!(ran.expect("the run").verified, Ok(()));
+    let of_it = |e: &&Event| matches!(e, Event::Committed { .. } | Event::Waves { done: 1, .. });
+    let said: Vec<&Event> = events.iter().filter(of_it).collect();
+    let (checkpoint, ask) = (Event::Committed { generation: 2, last: false }, Event::Waves { done: 1, of: 6 });
+    assert_eq!(said, [&checkpoint, &ask, &Event::Committed { generation: 3, last: true }]);
+    every_record_has_its_row(&card);
+
+    let mut extras = Extras { long: true, ..Extras::default() };
+    let (ran, events) = sync_with(&card, &wanted, &mut server, &mut extras, rare.clone(), answers, 2);
+    assert_eq!(ran.expect("the run").verified, Ok(()));
+    assert_eq!(events.last(), Some(&Event::Unchanged), "{events:?}");
+
+    // Pulled as it asks.
+    struct Pulls<'c>(&'c FatSim);
+    impl Hooks for Pulls<'_> {
+        fn long_index_steps(&self) -> bool {
+            true
+        }
+        fn waves(&mut self, _commit: &Commit<'_>, _events: &mut dyn FnMut(Event)) -> Waves {
+            self.0.pull();
+            Waves::Same
+        }
+    }
+    let dir = Scratch::new("waves-long-pulled");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let hooks = &mut Pulls(&card);
+    let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, rare, answers, 1);
+    assert!(matches!(ran, Err(Stop::Pulled)), "{ran:?}");
+    card.replug();
+    let seen = look(&card);
+    let root = seen.root.as_ref().expect("a root");
+    assert!(!root.manifest.is_final(), "the checkpoint");
+    assert_eq!(root.tags.as_ref().unwrap().records.len(), wanted.files.len(), "every file named");
+    assert!(seen.pending.as_ref().expect("the plan").ops.is_empty(), "with none left to do");
+    let fetched = server.fetched.len();
+    let again = recover(&card, &wanted, &mut server, 3);
+    assert_eq!(again.ran.expect("the next run").verified, Ok(()));
+    assert_eq!(server.fetched.len(), fetched, "not one fetched again");
+    every_record_has_its_row(&card);
+}
+
+/// Each write of that checkpoint and what comes after it, cut: the next run
+/// finishes, as the uncut run did. The writes before it are any run's.
+#[test]
+fn every_cut_of_a_run_that_names_its_files_ahead_of_the_fetch_is_finished() {
+    let base = Scratch::new("waves-long-base");
+    let (card, mut wanted, mut server) = first(&base.0);
+    drop(card);
+    second(&base.0, &mut wanted, &mut server);
+    let rare = Knobs { checkpoint_files: 500, ..knobs() };
+    let answers = Answers::default();
+    let long = || Extras { long: true, ..Extras::default() };
+
+    let whole = Scratch::new("waves-long-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    let (ran, events) = sync_with(&card, &wanted, &mut server, &mut long(), rare.clone(), answers, 2);
+    assert_eq!(ran.expect("uncut").verified, Ok(()));
+    let checkpoints = events.iter().filter(|e| matches!(e, Event::Committed { last: false, .. }));
+    assert_eq!(checkpoints.count(), 1, "{events:?}");
+    let writes = card.log();
+    let want = finished(&card);
+    let tags = writes.iter().position(|w| w.starts_with("create /.mstream/tags-"));
+    let from = tags.expect("the checkpoint's tags file") as u64;
+
+    for (n, how) in cuts_of(&writes, writes.len()).filter(|(n, _)| *n > from) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let dir = Scratch::new("waves-long");
+        copy_tree(&base.0, &dir.0);
+        let card = FatSim::new(&dir.0, SERIAL);
+        card.cut_at(n, how);
+        let _ = sync_with(&card, &wanted, &mut server, &mut long(), rare.clone(), answers, 2);
+        card.replug();
+        assert!(look(&card).root.is_some(), "{what}: a root");
+        let outcome = recover(&card, &wanted, &mut server, 3).ran;
+        let outcome = outcome.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), want, "{what}");
+    }
+}
+
+/// A checkpoint names the old file again (7.2), its ledger already showing a
+/// recording replaced before it, while the file still holds the old bars: a run
+/// that begins from it reads the slot's length too (7.3). The rest still hold.
+#[test]
+fn a_recording_replaced_before_a_checkpoint_is_asked_for_again() {
+    let base = Scratch::new("waves-checkpoint-base");
+    let (card, mut wanted, mut server) = first(&base.0);
+    let name = look(&card).root.unwrap().manifest.waves.expect("the root's row").name();
+    let old_rows = wave_rows(&card);
+    drop(card);
+    let two = "Lib/Alex Artist/First Album/02 - Two.mp3";
+    let bytes = corpus("mpeg2.mp3");
+    server.add(two, bytes.clone());
+    wanted.files[1] = track(two, &bytes, 102);
+    let six = corpus("trck_0.mp3");
+    server.add("Lib/Casey Choir/Hymns/01 - Six.mp3", six.clone());
+    wanted.files.push(track("Lib/Casey Choir/Hymns/01 - Six.mp3", &six, 401));
+    let want = [recording_of(&wanted, two), recording_of(&wanted, "Lib/Casey Choir/Hymns/01 - Six.mp3")];
+    let every_file = Knobs { checkpoint_files: 1, ..knobs() };
+    let answers = Answers::default();
+
+    // The run uncut: where its first checkpoint's commit ends.
+    let whole = Scratch::new("waves-checkpoint-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    let hooks = &mut Extras::default();
+    let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, every_file.clone(), answers, 2);
+    assert_eq!(ran.expect("uncut").verified, Ok(()));
+    let writes = card.log();
+    let uncut = finished(&card);
+    let commit = writes.iter().position(|w| w.starts_with("rename /.mstream/manifest.tmp"));
+    let commit = commit.expect("a commit") as u64;
+
+    // Cut right after it: Two replaced, Six not yet there.
+    let dir = Scratch::new("waves-checkpoint");
+    copy_tree(&base.0, &dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    card.cut_at(commit + 2, Cut::Fail);
+    let hooks = &mut Extras::default();
+    let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, every_file, answers, 2);
+    assert!(ran.is_err(), "cut");
+    card.replug();
+
+    // The root is that checkpoint: it names the old file again, whose slot of
+    // Two is the old recording's, and its ledger already says the new one's.
+    let seen = look(&card);
+    let root = seen.root.as_ref().unwrap();
+    assert!(!root.manifest.is_final());
+    assert_eq!(root.manifest.waves.as_ref().map(Comp::name), Some(name));
+    assert_eq!(root.waves, Some(Ok(())));
+    let tags = root.tags.as_ref().unwrap();
+    let rel = "Alex Artist/First Album/02 - Two.mp3";
+    let replaced = tags.records.iter().find(|e| e.path == rel).expect("Two");
+    let hash = replaced.ledger.as_ref().and_then(Ledger::canonical_hash);
+    assert_eq!(hash, Some(want[0]), "the ledger's the new recording's");
+    let slot = &old_rows[&path_hash(rel)];
+    assert_ne!(slot.length_ms, replaced.rec.duration_ms, "the slot's length is the old one's");
+    assert_ne!(slot.bars, bars_of(replaced.ledger.as_ref().unwrap()), "and so are its bars");
+
+    // The next run asks for it, and for the new file, and for nothing else.
+    let mut extras = Extras::default();
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut extras, knobs(), Answers::default(), 3);
+    assert_eq!(ran.expect("the next run").verified, Ok(()));
+    assert_eq!(BTreeSet::from_iter(extras.asked), BTreeSet::from(want));
+    every_record_has_its_row(&card);
+    assert_eq!(finished(&card), uncut, "where the uncut run left it");
+}
+
+/// Each write of a run that does nothing but add the file, cut: the card reads
+/// as before or as that commit, and the next run finishes.
+#[test]
+fn every_cut_of_a_run_that_only_adds_waves_is_finished() {
+    let base = Scratch::new("waves-only-base");
+    set_up(&base.0);
+    let card = FatSim::new(&base.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    synced(&card, &wanted, &mut server, &mut Extras { answers: Some(0), ..Extras::default() });
+    drop(card);
+
+    let whole = Scratch::new("waves-only-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    synced(&card, &wanted, &mut server, &mut Extras::default());
+    let writes = card.log();
+    let want = finished(&card);
+    assert!(want.waves.is_some());
+    assert!(writes.iter().any(|w| w.starts_with("create /.mstream/waves-")), "{writes:?}");
+
+    let mut named = 0;
+    for (n, how) in cuts_of(&writes, writes.len()) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let dir = Scratch::new("waves-only");
+        copy_tree(&base.0, &dir.0);
+        let card = FatSim::new(&dir.0, SERIAL);
+        card.cut_at(n, how);
+        let _ = sync(&card, &wanted, &mut server, 7);
+        card.replug();
+        let seen = look(&card);
+        named += usize::from(seen.root.expect("a root").manifest.waves.is_some());
+        let again = recover(&card, &wanted, &mut server, 3);
+        let outcome = again.ran.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), want, "{what}");
+    }
+    assert!(named > 0, "the later cuts leave the commit that names it");
+}
+
+/// A hook's new file is checked before anything names it: one that doesn't read
+/// whole, or is another commit's, stops the run with the card as it was.
+#[test]
+fn a_new_waveform_index_is_checked_before_a_root_names_it() {
+    struct Hands(Vec<u8>);
+    impl Hooks for Hands {
+        fn waves(&mut self, _commit: &Commit<'_>, _events: &mut dyn FnMut(Event)) -> Waves {
+            Waves::New(self.0.clone())
+        }
+    }
+    let good = fixture("card/golden/waves-one.bin");
+    let mut damaged = good.clone();
+    damaged[256 + 100] ^= 1;
+    let short = good[..100].to_vec();
+    for (what, bytes) in [("another commit's", good), ("a damaged slot", damaged), ("short", short)] {
+        let dir = Scratch::new("waves-refused");
+        let (card, wanted, mut server) = first(&dir.0);
+        let root = look(&card).root.unwrap().manifest;
+        let hooks = &mut Hands(bytes);
+        let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, knobs(), Answers::default(), 7);
+        assert!(matches!(ran, Err(Stop::Refused(_))), "{what}: {ran:?}");
+        assert_eq!(look(&card).root.unwrap().manifest, root, "{what}");
+        assert!(wave_rows(&card).len() == 6, "{what}: the old file stays");
+    }
+}
+
+/// A run with no hook of its own, as a set-up's: no answer to anything, so the
+/// old file's rows are what it has. A copied card's new identity carries them.
+#[test]
+fn a_run_with_no_hooks_keeps_the_rows_that_hold() {
+    let dir = Scratch::new("waves-no-hooks");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    let want = wave_rows(&card);
+    let old_id = look(&card).root.unwrap().manifest.header.card_id;
+
+    // A run with nothing else to do: the file is named again.
+    let name = |card: &FatSim| look(card).root.unwrap().manifest.waves.map(|c| c.name());
+    let was = name(&card);
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut NoHooks, knobs(), Answers::default(), 7);
+    assert_eq!(ran.expect("the run").verified, Ok(()));
+    assert_eq!((name(&card), wave_rows(&card)), (was, want.clone()));
+
+    // A new identity: a new file of the same rows.
+    let answers = Answers { new_card_id: true, ..Answers::default() };
+    let (session, plan) = plan_of(&card, &wanted, &mut server, answers, knobs());
+    let done = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    assert_eq!(done.verified, Ok(()));
+    assert!(done.card_id != old_id);
+    assert_eq!(wave_rows(&card), want);
+    let file = waves_file(&card).expect("the file");
+    assert_eq!(mpwf::Table::open(&file).unwrap().header().card_id, done.card_id);
+
+    // A file that left the selection: its row goes, a new file; the others
+    // stay.
+    let gone = wanted.files.pop().expect("a file");
+    let answers = Answers { removals: true, ..Answers::default() };
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut NoHooks, knobs(), answers, 8);
+    assert_eq!(ran.expect("the run").verified, Ok(()));
+    let rows = wave_rows(&card);
+    assert_eq!(rows.len(), want.len() - 1, "{gone:?}");
+    assert!(rows.iter().all(|(h, row)| want.get(h) == Some(row)));
 }
 
 // ── Records another reader made (2.6.1) ─────────────────────────────────────

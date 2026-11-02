@@ -12,7 +12,8 @@
 //! ([`Outcome`]). The bytes come through a [`Fetcher`]; what the server's
 //! side of a sync adds — the plays of the card's log, a conversion's checks,
 //! a converted file's cover and tags put back, the thumbnails, the Auto DJ
-//! index — through [`Hooks`], each a no-op until its part fills it.
+//! and waveform indexes — through [`Hooks`], each a no-op until its part fills
+//! it (the waveform index's keeps what its old file's slots hold).
 //!
 //! **A run, step by step** (2.12.1; the transfer plan's 2.3):
 //! - [`Session::open`]: 2.4.5's check (a newer major stops it before any
@@ -25,8 +26,8 @@
 //!   table, the names, the guards ([`plan`]).
 //! - [`Session::run`]: `pending.bin`, the deletes, each file staged,
 //!   checked, renamed into `/music` and read back, checkpoints, thumbnails,
-//!   the Auto DJ index, the final commit, the collection, and a last read of
-//!   the card as the device reads it ([`run`]).
+//!   the Auto DJ and waveform indexes, the final commit, the collection, and a
+//!   last read of the card as the device reads it ([`run`]).
 //!
 //! A file whose source says a later run may take up its bytes (a peer's,
 //! under its daily quota: [`Fetcher::resumable`]) goes into a partial of
@@ -64,6 +65,7 @@ pub(crate) use self::run::CARD_WRITE;
 use self::bind::{Bound, Identity};
 use self::settle::Settled;
 use self::survey::{Music, Survey};
+use super::contract::WriteError;
 use super::contract::device_txt::DeviceTxt;
 use super::contract::mptg::{Ledger, RecordIn};
 use super::contract::mpth::Pixels;
@@ -71,6 +73,7 @@ use super::contract::msmf::Ack;
 use super::contract::server::{Server, Talk};
 use super::names::{self, Bytes};
 use super::volume::{CardFs, CardWrite, Private, Root};
+use super::waves::{self, Index, IndexIn, Old, Shapes};
 
 /// The writer and its version, as every file it writes names it (2.5.1's
 /// `producer`, run.lock's).
@@ -339,12 +342,18 @@ pub(crate) enum Event {
     Failed { server_path: String, why: String },
     /// A commit: its generation, and whether it ended the run.
     Committed { generation: u32, last: bool },
+    /// The final commit would say what the root says already, and isn't made:
+    /// the run goes on to its last look all the same.
+    Unchanged,
     /// A sync's server side read (B4's progress): its listing in hand, the
     /// plan still to make.
     Listed,
     /// A sync's plan made, its run about to start: the files it fetches and
     /// their bytes (B4's progress bar).
     Planned { files: usize, bytes: u64 },
+    /// The final commit's waveform index: the recordings the server has
+    /// answered for so far, of those asked.
+    Waves { done: usize, of: usize },
 }
 
 /// What a plan or a run reports beside its work (2.8.4, 2.10.2, U4-U5).
@@ -496,7 +505,8 @@ pub(crate) enum Cover {
     Gone,
 }
 
-/// What the final commit's Auto DJ step is given (2.13, AUTODJ-INDEX.md 7).
+/// What the final commit's index steps are given (2.13, AUTODJ-INDEX.md 7;
+/// 2.21, WAVEFORM-INDEX.md 7).
 pub(crate) struct Commit<'a> {
     pub(crate) generation: u32,
     pub(crate) card_id: u64,
@@ -507,9 +517,25 @@ pub(crate) struct Commit<'a> {
     pub(crate) device: &'a DeviceTxt,
     /// The index the current root names, when it is valid.
     pub(crate) old: Option<&'a [u8]>,
+    /// The waveform index the current root names, when it is valid and the
+    /// card's player reads one, joined through the tags ledger of the root the
+    /// run began from. Read for this step alone: a run holds none of its bytes
+    /// till then, a look or a parked run never reads them, and a file of 64 MB
+    /// costs no more than a commit's moment.
+    pub(crate) old_waves: Option<&'a Old<'a>>,
     /// Each origin's server in the records' numbering (their ledger's
     /// `server`); None for one with no record in the commit.
     pub(crate) origins: Vec<Option<u16>>,
+}
+
+impl Commit<'_> {
+    /// WAVEFORM-INDEX.md 7.3's answer for the bars a run's fetch brought, the
+    /// old file's slots that still hold beside them.
+    pub(crate) fn waves_index(&self, fetched: &Shapes) -> Result<Index, WriteError> {
+        let (generation, card_id, records) = (self.generation, self.card_id, self.records);
+        let old = self.old_waves;
+        waves::index(self.device, &IndexIn { generation, card_id, records, old, fetched })
+    }
 }
 
 /// The final commit's Auto DJ index (AUTODJ-INDEX.md 7.3).
@@ -523,8 +549,30 @@ pub(crate) enum AutoDj {
     New(Vec<u8>),
 }
 
+/// The final commit's waveform index (WAVEFORM-INDEX.md 7.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Waves {
+    /// The new root names none.
+    None,
+    /// The new root names the old file again.
+    Same,
+    /// A new file, `waves-<generation>.bin` of this commit.
+    New(Vec<u8>),
+}
+
+impl From<Index> for Waves {
+    fn from(index: Index) -> Waves {
+        match index {
+            Index::None(_) => Waves::None,
+            Index::Same => Waves::Same,
+            Index::New(file) => Waves::New(file),
+        }
+    }
+}
+
 /// What other parts add to a run, each a no-op here ([`NoHooks`]): B15's
-/// plays, B1's conversion checks, retags, covers and Auto DJ index.
+/// plays, B1's conversion checks, retags, covers and Auto DJ index. The
+/// waveform index's is as a fetch that got no answer.
 pub(crate) trait Hooks {
     /// Step 5, once the card is listed: the new plays of the card's log,
     /// mapped through the tags file of the root that counts before a
@@ -558,9 +606,23 @@ pub(crate) trait Hooks {
     fn cover(&mut self, _album: &Album<'_>) -> Cover {
         Cover::Keep
     }
+    /// The final commit's index steps may keep the card waiting long, on a
+    /// server, ahead of that commit's first write: the files a run copied are
+    /// named by a checkpoint before them.
+    fn long_index_steps(&self) -> bool {
+        false
+    }
     /// Step 11: the final commit's Auto DJ index.
     fn autodj(&mut self, _commit: &Commit<'_>) -> AutoDj {
         AutoDj::None
+    }
+    /// Step 11, after the Auto DJ index: the final commit's waveform index,
+    /// from what its fetch brought, saying as it goes ([`Event::Waves`]). A
+    /// stopped fetch is no stop: the rows are what came, and the table answers.
+    /// With no fetch at all, the old file's slots that still hold: a run with
+    /// no server to ask (a copied card's new identity) loses no shape.
+    fn waves(&mut self, commit: &Commit<'_>, _events: &mut dyn FnMut(Event)) -> Waves {
+        commit.waves_index(&Shapes::new()).map_or(Waves::Same, Waves::from)
     }
     /// The plays a commit acknowledges (2.5.6), from the root's before:
     /// each raised to the software's mark, never lowered. Only a commit the
@@ -665,9 +727,10 @@ impl<'c> Session<'c> {
             let settled = settle::settle(card, &mut bound, answers)?;
             let music = Music::list(card).map_err(|e| bound.failed(e))?;
             let survey = survey::survey(card, &music, &settled, &knobs).map_err(|e| bound.failed(e))?;
-            Ok((settled, music, survey))
+            let device = settle::device_txt(card).map_err(|e| bound.failed(e))?;
+            Ok((settled, music, survey, device))
         };
-        let (settled, music, survey) = match look() {
+        let (settled, music, survey, device) = match look() {
             Ok(looked) => {
                 if let Some(card_id) = looked.0.foreign {
                     events(Event::ForeignPlan(card_id));
@@ -683,7 +746,6 @@ impl<'c> Session<'c> {
                 return Err(stop);
             }
         };
-        let device = settle::device_txt(card);
         Ok(Session {
             card,
             bound,

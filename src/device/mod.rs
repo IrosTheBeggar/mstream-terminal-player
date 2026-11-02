@@ -392,6 +392,10 @@ pub struct CardSyncArgs {
     auto_dj: Option<bool>,
     #[arg(long, value_name = "BOOL")]
     for_someone_else: Option<bool>,
+    // false: no waveform index asked for or named, for the real-card checks. A
+    // sync has one otherwise: no setting holds this, on the card or anywhere.
+    #[arg(long, value_name = "BOOL")]
+    waves: Option<bool>,
     // The server's name on this card ("Home"); never an address.
     #[arg(long)]
     nickname: Option<String>,
@@ -530,6 +534,7 @@ impl CardSyncArgs {
                 _ => None,
             },
             stop: None,
+            no_waves: self.waves == Some(false),
         })
     }
 }
@@ -1809,6 +1814,15 @@ mod tests {
         assert!(bad.ask().unwrap_err().contains("160"), "no rate the server takes");
         let Ok(DeviceCmd::CardSync(bad)) = parse(&["card-sync", "E:", "--layout", "spiral"]) else { panic!() };
         assert!(bad.ask().is_err());
+        // The waveform index: on unless told, for the real-card checks.
+        for (flags, no_waves) in [
+            (&["card-sync", "E:"][..], false),
+            (&["card-sync", "E:", "--waves", "true"][..], false),
+            (&["card-sync", "E:", "--waves", "false"][..], true),
+        ] {
+            let Ok(DeviceCmd::CardSync(args)) = parse(flags) else { panic!("{flags:?}") };
+            assert_eq!(args.ask().expect("a sync").no_waves, no_waves, "{flags:?}");
+        }
         // A federation peer's: which peers and libraries, the run's say on an
         // older server's proxy, the day's budget.
         let peers = parse(&[

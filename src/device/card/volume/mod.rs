@@ -42,7 +42,7 @@ use super::contract::device_txt::DeviceTxt;
 use super::contract::fat::fat_from_wall;
 use super::contract::msmf::{self, Election, Manifest, Pick};
 use super::contract::mptg::{self, Tags};
-use super::contract::{MAX_FILE, Why, container, mpdj, mspd};
+use super::contract::{MAX_FILE, Why, container, mpdj, mpwf, mspd};
 use super::names::{self, Listing};
 
 /// A volume's filesystem, as the OS names it.
@@ -727,6 +727,10 @@ pub(crate) struct Root {
     pub(crate) tags: Result<Tags, Why>,
     /// Its Auto DJ index's verdict, when it names one.
     pub(crate) autodj: Option<Result<(), Why>>,
+    /// Its waveform index's verdict, when it names one: the file opens and
+    /// matches its row (WAVEFORM-INDEX.md 7.2). A slot's own CRC is no part of
+    /// it: a bad slot costs only that slot (7.3).
+    pub(crate) waves: Option<Result<(), Why>>,
 }
 
 /// A private file of 2.12.7 as its read rule settles it, read only.
@@ -781,6 +785,7 @@ pub(crate) fn inspect(card: &dyn CardFs) -> io::Result<Inspection> {
         Err(e) => return Err(e),
     };
     let read = |name: &str| card.read(&format!("/.mstream/{name}"), MAX_FILE).ok().flatten();
+    let start = |name: &str| head_of(card, &format!("/.mstream/{name}")).ok().flatten();
     let head = |name: &str| card.read_at(&format!("/.mstream/{name}"), 0, 6);
     let mut newer: Vec<String> = names
         .iter()
@@ -788,7 +793,7 @@ pub(crate) fn inspect(card: &dyn CardFs) -> io::Result<Inspection> {
         .cloned()
         .collect();
     newer.sort();
-    let root = settle_root(&read);
+    let root = settle_root(&read, &start);
     let pending = settle_pending(&read);
     if pending.as_ref().is_some_and(|p| p.stops_software()) {
         newer.push("pending.bin".into());
@@ -815,15 +820,34 @@ pub(crate) fn inspect(card: &dyn CardFs) -> io::Result<Inspection> {
 }
 
 /// The names 2.4.5's check reads: `manifest.*` and `pending.*` (`.bin`,
-/// `.tmp`), `tags-*.bin`, `autodj-*.bin`.
+/// `.tmp`), `tags-*.bin`, `autodj-*.bin`, `waves-*.bin`.
 pub(crate) fn contract_named(name: &str) -> bool {
+    let companion = ["tags-", "autodj-", "waves-"].iter().any(|stem| name.starts_with(stem));
     matches!(name, "manifest.bin" | "manifest.tmp" | "pending.bin" | "pending.tmp")
-        || (name.starts_with("tags-") || name.starts_with("autodj-")) && name.ends_with(".bin")
+        || companion && name.ends_with(".bin")
+}
+
+/// A waveform index's first bytes and its length ([`mpwf::open_head`]).
+pub(crate) type Head = (Vec<u8>, u64);
+
+/// A waveform index's [`Head`], None when it isn't there. A bad sector among the
+/// slots those bytes run into isn't the frame's: the frame is read alone then,
+/// all a valid file needs of them, as the device reads it (WAVEFORM-INDEX.md
+/// 8.3).
+pub(crate) fn head_of(card: &dyn CardFs, path: &str) -> io::Result<Option<Head>> {
+    let Some(item) = card.stat(path)?.filter(|i| !i.dir) else { return Ok(None) };
+    let head = card.read_at(path, 0, mpwf::HEAD_BYTES);
+    let head = head.or_else(|_| card.read_at(path, 0, mpwf::FIRST_SLOT as usize))?;
+    Ok(Some((head, item.size)))
 }
 
 /// 2.5.4: both roots validated, the election, then the companions the
 /// winner names, each valid only when it validates and matches its entry.
-pub(crate) fn settle_root(read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<Root> {
+/// `read` gives a file whole, `head` a waveform index's [`head_of`].
+pub(crate) fn settle_root(
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+    head: &dyn Fn(&str) -> Option<Head>,
+) -> Option<Root> {
     let valid = |name| read(name).and_then(|b| Manifest::read(&b, msmf::Uses::ALL).ok());
     let (bin, tmp) = (valid("manifest.bin"), valid("manifest.tmp"));
     let Election { pick, same_commit } = msmf::elect(
@@ -852,7 +876,16 @@ pub(crate) fn settle_root(read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<Root
         let ok = msmf::companion_matches(entry, table.header(), 0, Some(&table.sig));
         if ok { Ok(()) } else { Err(Why::Missing) }
     });
-    Some(Root { file, twice: same_commit, manifest, tags, autodj })
+    // Its frame and its row, as the device checks them: a bad slot costs only
+    // that slot (WAVEFORM-INDEX.md 7.2, 7.3), so no slot is read here, and a
+    // look at a card costs one small read of a file of any size.
+    let waves = manifest.waves.as_ref().map(|entry| {
+        let (start, size) = head(&entry.name()).ok_or(Why::Missing)?;
+        let header = mpwf::open_head(&start, size)?;
+        let ok = msmf::companion_matches(entry, &header, 0, None);
+        if ok { Ok(()) } else { Err(Why::Missing) }
+    });
+    Some(Root { file, twice: same_commit, manifest, tags, autodj, waves })
 }
 
 /// 2.12.5: `pending.bin`, or a valid `pending.tmp` that wins by 2.5.4's rule.
@@ -1113,10 +1146,10 @@ fn inspection_json(seen: &Inspection) -> Value {
             }),
             Err(why) => json!({ "name": m.tags.name(), "absent": why.name() }),
         };
-        let autodj = r.autodj.as_ref().map(|v| match v {
+        let verdict = |v: &Result<(), Why>| match v {
             Ok(()) => json!("valid"),
             Err(why) => json!({ "absent": why.name() }),
-        });
+        };
         json!({
             "file": r.file,
             "twice": r.twice,
@@ -1128,7 +1161,8 @@ fn inspection_json(seen: &Inspection) -> Value {
             "roots": m.roots,
             "servers": m.servers.len() + 1,
             "tags": tags,
-            "autodj": autodj,
+            "autodj": r.autodj.as_ref().map(verdict),
+            "waves": r.waves.as_ref().map(verdict),
         })
     });
     let private = |p: &Private| {
@@ -1156,6 +1190,7 @@ fn inspection_json(seen: &Inspection) -> Value {
             "codecs": d.codecs,
             "extensions": d.extensions,
             "mpdj": d.writes_mpdj(),
+            "mpwf": d.writes_mpwf(),
         },
         "music": {
             "present": m.present,
@@ -1404,6 +1439,71 @@ mod tests {
         // So is a missing Auto DJ index.
         card.files.remove("/.mstream/autodj-00000029.bin");
         assert_eq!(inspect(&card).unwrap().root.unwrap().autodj, Some(Err(Why::Missing)));
+    }
+
+    /// WAVEFORM-INDEX.md 7.2: the file counts as its root's row says, opened
+    /// and matching. Anything else is absent, and the root stays. A bad slot
+    /// isn't the file's: only that slot is lost (7.3).
+    #[test]
+    fn a_waveform_index_counts_when_its_root_names_it() {
+        let hardening = |name: &str| {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures/card/hardening");
+            std::fs::read(dir.join(name)).unwrap()
+        };
+        let mut card = Card::default();
+        card.golden("manifest-waves.bin", "manifest.bin");
+        card.golden("tags-0000002a.bin", "tags-0000002a.bin");
+        card.golden("autodj-00000029.bin", "autodj-00000029.bin");
+        card.golden("waves-0000002a.bin", "waves-0000002a.bin");
+        let verdict = |card: &Card| {
+            let root = inspect(card).unwrap().root.unwrap();
+            assert_eq!((root.manifest.header.generation, root.tags.is_ok(), root.autodj), (43, true, Some(Ok(()))));
+            root.waves
+        };
+        assert_eq!(verdict(&card), Some(Ok(())));
+        let seen = inspection_json(&inspect(&card).unwrap());
+        assert_eq!(seen["root"]["waves"], "valid");
+
+        // Damage to a slot: the frame is good. A tool that verifies the whole
+        // file says otherwise; a writer checks each slot it reuses.
+        let mut damaged = fixture("waves-0000002a.bin");
+        damaged[256 + 100] ^= 1;
+        card.put("/.mstream/waves-0000002a.bin", &damaged);
+        assert_eq!(verdict(&card), Some(Ok(())));
+        assert_eq!(mpwf::Table::open(&damaged).unwrap().check(), Err(Why::WvSlotCrc));
+        // The same with its CRCs made right: another headerCrc than the row's.
+        card.put("/.mstream/waves-0000002a.bin", &hardening("mpwf-uses-device-slot-crc.bin"));
+        assert_eq!(verdict(&card), Some(Err(Why::Missing)));
+
+        // A file that doesn't open, gives its reason.
+        card.put("/.mstream/waves-0000002a.bin", &hardening("mpwf-major-2.bin"));
+        assert_eq!(verdict(&card), Some(Err(Why::Major)));
+        let seen = inspect(&card).unwrap();
+        assert_eq!(seen.newer, ["waves-0000002a.bin"], "a major this software doesn't know stops the writer");
+        assert_eq!(inspection_json(&seen)["root"]["waves"]["absent"], "major");
+        card.put("/.mstream/waves-0000002a.bin", &hardening("mpwf-rows-zero.bin"));
+        assert_eq!(verdict(&card), Some(Err(Why::Enum)));
+
+        // A file that opens and isn't the one the row names.
+        card.golden("waves-one.bin", "waves-0000002a.bin");
+        assert_eq!(verdict(&card), Some(Err(Why::Missing)));
+        card.files.remove("/.mstream/waves-0000002a.bin");
+        assert_eq!(verdict(&card), Some(Err(Why::Missing)));
+
+        // A root that names none has no verdict, whatever the card holds.
+        card.golden("waves-0000002a.bin", "waves-0000002a.bin");
+        card.golden("manifest.bin", "manifest.bin");
+        let root = inspect(&card).unwrap().root.unwrap();
+        assert_eq!((root.manifest.waves, root.waves), (None, None));
+        assert!(contract_named("waves-0000002a.bin") && contract_named("waves-old.bin"));
+        assert!(!contract_named("waves-0000002a.tmp") && !contract_named("my-waves-0000002a.bin"));
+
+        // No read.mpwf, or a device.txt that lists another major: no MPWF.
+        assert!(!inspect(&card).unwrap().device.writes_mpwf());
+        card.put("/.player/device.txt", &fixture("device.txt"));
+        assert!(inspect(&card).unwrap().device.writes_mpwf());
+        card.put("/.player/device.txt", b"contract=1\nread.mpwf=2\n");
+        assert!(!inspect(&card).unwrap().device.writes_mpwf());
     }
 
     #[test]

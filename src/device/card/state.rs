@@ -13,6 +13,10 @@
 //!   once a run has settled any of the card's plays;
 //! - `set`: for a card of a multi-card set, the set's whole table and this
 //!   card's index in it ([`span`](super::span));
+//! - `wavesNone`: the generation of the root a run left when it had asked the
+//!   server for every waveform the card lacked and got none ([`State::waves_none`]);
+//! - `wavesNoFfmpeg`: the runs in a row whose asking came to no more than a
+//!   server with no ffmpeg to make them ([`State::waves_no_ffmpeg`]);
 //!
 //! and the sync's settings ([`Settings`]), written once a sync has stored
 //! them: `sources` (each server the card is filled from, by its URL's key
@@ -53,9 +57,9 @@ use crate::api::urls::{TransferBitrate, TransferCodec};
 pub(crate) const FORMAT: &str = "mstream-card-state";
 
 /// The members schema 1 reads and writes; every other member is kept.
-const KNOWN: [&str; 10] = [
+const KNOWN: [&str; 12] = [
     "format", "version", "seq", "cardId", "label", "volumeSerial", "volumeUuid", "created", "plays",
-    "set",
+    "set", "wavesNone", "wavesNoFfmpeg",
 ];
 
 /// The settings' members ([`Settings`]).
@@ -88,6 +92,17 @@ pub(crate) struct State {
     /// The file names a set this software can't read (a newer player's):
     /// kept as it is, and the card isn't synced.
     pub(crate) set_unread: bool,
+    /// The generation of the root a run left when it had asked the server for
+    /// every waveform the card lacked and got none, so that no file came of it.
+    /// A look at that root offers no sync for them: it would come back to the
+    /// same, every time (the waveform index itself keeps no "asked, none":
+    /// WAVEFORM-INDEX.md 12). Any run asks again, and any commit passes it by.
+    pub(crate) waves_none: Option<u32>,
+    /// The runs in a row that left the card no row and every recording answered,
+    /// some only with a server that had no ffmpeg to make theirs. That is no
+    /// [`State::waves_none`] of itself: a server bringing its ffmpeg up says the
+    /// same, and a look goes on offering the sync. Enough of them, and it is one.
+    pub(crate) waves_no_ffmpeg: u32,
     pub(crate) settings: Settings,
     /// Every member this software doesn't know, by name.
     pub(crate) keep: BTreeMap<String, Value>,
@@ -127,6 +142,12 @@ impl State {
             plays: object.get("plays").map_or_else(Vec::new, marks_of),
             set,
             set_unread,
+            waves_none: object.get("wavesNone").and_then(Value::as_u64).and_then(|g| u32::try_from(g).ok()),
+            waves_no_ffmpeg: object
+                .get("wavesNoFfmpeg")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0),
             settings: Settings::read(object),
             keep: keep.map(|(name, value)| (name.clone(), value.clone())).collect(),
         })
@@ -173,6 +194,12 @@ impl State {
         }
         if let Some(set) = &self.set {
             members.push(("set", set.value(set.slot_of(self.card_id).map(|i| i + 1))));
+        }
+        if let Some(generation) = self.waves_none {
+            members.push(("wavesNone", generation.into()));
+        }
+        if self.waves_no_ffmpeg > 0 {
+            members.push(("wavesNoFfmpeg", self.waves_no_ffmpeg.into()));
         }
         members.extend(self.settings.members());
         members.extend(self.keep.iter().map(|(name, value)| (name.as_str(), value.clone())));
@@ -948,6 +975,32 @@ mod tests {
             {"deviceId": "00005e005301", "epoch": 7, "seq": 1},
             {"deviceId": "00005e005301", "epoch": "0x08", "seq": -1}]}"#;
         assert_eq!(read(odd.as_bytes()).unwrap().plays, [ack(one, 7, 5)]);
+    }
+
+    #[test]
+    fn a_root_whose_server_had_no_waveforms_reads_back() {
+        let mut state = State::new(9, "Car", None, 1);
+        assert!(!String::from_utf8(state.text(1)).unwrap().contains("wavesNone"), "None: no member");
+        state.waves_none = Some(42);
+        let text = String::from_utf8(state.text(2)).unwrap();
+        assert!(text.contains("\"wavesNone\": 42"), "{text}");
+        let back = read(text.as_bytes()).unwrap();
+        assert_eq!(back.waves_none, Some(42));
+        assert!(back.keep.is_empty(), "a member it knows: {:?}", back.keep);
+        // A value that isn't a generation reads as none, and goes.
+        let odd = r#"{"format": "mstream-card-state", "version": 1, "seq": 3, "wavesNone": "42"}"#;
+        assert_eq!(read(odd.as_bytes()).unwrap().waves_none, None);
+
+        // The runs that came to no ffmpeg: none is no member, and the same.
+        assert!(!text.contains("wavesNoFfmpeg"), "0: no member");
+        state.waves_no_ffmpeg = 2;
+        let text = String::from_utf8(state.text(3)).unwrap();
+        assert!(text.contains("\"wavesNoFfmpeg\": 2"), "{text}");
+        let back = read(text.as_bytes()).unwrap();
+        assert_eq!(back.waves_no_ffmpeg, 2);
+        assert!(back.keep.is_empty(), "a member it knows: {:?}", back.keep);
+        let odd = r#"{"format": "mstream-card-state", "version": 1, "seq": 3, "wavesNoFfmpeg": "2"}"#;
+        assert_eq!(read(odd.as_bytes()).unwrap().waves_no_ffmpeg, 0);
     }
 
     #[test]

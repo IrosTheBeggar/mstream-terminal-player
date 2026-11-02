@@ -1,11 +1,12 @@
 //! The card contract: the files the transfer keeps on a Core2's SD card,
 //! byte for byte as the player reads them — the firmware repo's
-//! docs/METADATA.md part 2 (v1), and docs/AUTODJ-INDEX.md for the Auto DJ
-//! index. Pure code: every function takes bytes and gives bytes, and
-//! nothing here opens a file. The player's own implementation is its
-//! `lib/core/Card*`, and its `tools/card_fixtures.py` is a second one; the
-//! fixtures that one makes (test/fixtures/card, copied from the firmware
-//! repo) are what this third one is tested against.
+//! docs/METADATA.md part 2 (v1), docs/AUTODJ-INDEX.md for the Auto DJ index
+//! and docs/WAVEFORM-INDEX.md for the waveform index. Pure code: every
+//! function takes bytes and gives bytes, and nothing here opens a file. The
+//! player's own implementation is its `lib/core/Card*`, and its
+//! `tools/card_fixtures.py` is a second one; the fixtures that one makes
+//! (test/fixtures/card, copied from the firmware repo) are what this third
+//! one is tested against.
 //!
 //! The pieces, with the contract's sections:
 //! - [`prim`]: 2.3's conventions — CRC-32, FNV-1a 64 and the path hash,
@@ -23,9 +24,11 @@
 //!   which root counts), [`mptg`] (`tags-<gen>.bin`, the records and the
 //!   ledger), [`mspd`] (`pending.bin`, a run's plan), [`mpdj`]
 //!   (`autodj-<gen>.bin` read and checked; its builder is the Auto DJ
-//!   writer's), [`mpth`] (the album thumbnails, from pixels or an image),
-//!   [`device_txt`] (`/.player/device.txt`, what the firmware reads) and
-//!   [`mppl`] (`/.player/plays.jnl`, the device's play log, read only).
+//!   writer's), [`mpwf`] (`waves-<gen>.bin` read, checked and written; which
+//!   rows it holds is the waves writer's), [`mpth`] (the album thumbnails,
+//!   from pixels or an image), [`device_txt`] (`/.player/device.txt`, what
+//!   the firmware reads) and [`mppl`] (`/.player/plays.jnl`, the device's
+//!   play log, read only).
 //!
 //! **Absent, not an error.** A reader treats a file that fails any of
 //! 2.4.3's checks as absent: it says why with a [`Why`], the player's own
@@ -42,6 +45,7 @@ pub(crate) mod mpdj;
 pub(crate) mod mppl;
 pub(crate) mod mptg;
 pub(crate) mod mpth;
+pub(crate) mod mpwf;
 pub(crate) mod msmf;
 pub(crate) mod mspd;
 pub(crate) mod numbers;
@@ -54,14 +58,16 @@ pub(crate) mod text;
 mod tests;
 
 /// The most of one contract file a reader is handed: past it the file is
-/// treated as absent unread. The largest a writer makes is an Auto DJ index
-/// of 65,535 rows at k = 169 (about 34 MB: AUTODJ-INDEX.md 10.2); a tags
-/// file at the PSRAM ceiling's 27k tracks is about 9 MB (2.19).
+/// treated as absent unread. The largest a writer makes is a waveform index
+/// of 250,000 rows (64.00 MB: WAVEFORM-INDEX.md 10); an Auto DJ index of
+/// 65,535 rows at k = 169 is about 34 MB (AUTODJ-INDEX.md 10.2), and a tags
+/// file at the PSRAM ceiling's 27k tracks about 9 MB (2.19).
 pub(crate) const MAX_FILE: usize = 64 * 1024 * 1024;
 
-/// Why a reader treats a file as absent (2.4.3, AUTODJ-INDEX.md 8), or
-/// [`Why::Ok`]. The names are the player's (`whyName`), which the shared
-/// hardening index lists for every file it breaks.
+/// Why a reader treats a file as absent (2.4.3, AUTODJ-INDEX.md 8,
+/// WAVEFORM-INDEX.md 8), or [`Why::Ok`]. The names are the player's
+/// (`whyName`), which the shared hardening index lists for every file it
+/// breaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Why {
     Ok,
@@ -103,6 +109,9 @@ pub(crate) enum Why {
     DjSlotUnused,
     DjSlotIndex,
     DjSlotOrder,
+    WvLayout,
+    WvSlotCrc,
+    WvSlotOrder,
     PendOrder,
     PendPath,
     PendOp,
@@ -149,6 +158,9 @@ impl Why {
             Why::DjSlotUnused => "djSlotUnused",
             Why::DjSlotIndex => "djSlotIndex",
             Why::DjSlotOrder => "djSlotOrder",
+            Why::WvLayout => "wvLayout",
+            Why::WvSlotCrc => "wvSlotCrc",
+            Why::WvSlotOrder => "wvSlotOrder",
             Why::PendOrder => "pendOrder",
             Why::PendPath => "pendPath",
             Why::PendOp => "pendOp",
