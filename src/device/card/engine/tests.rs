@@ -3039,8 +3039,10 @@ fn a_score_changed_alone_makes_one_commit() {
 }
 
 /// A file moved, on the server (a rename on the card) or by the listener
-/// (kept at its new path), carries its tail, as it carries its bars; a file
-/// fetched again starts with none, and only the hook gives it one.
+/// (kept at its new path), carries its tail, as it carries its bars; so
+/// does a row's file fetched again, the scores being the server's, never the
+/// bytes'. A file new to the card starts with none, and only the hook gives
+/// it one.
 #[test]
 fn a_moved_file_keeps_its_scores() {
     let dir = Scratch::new("moods-moved");
@@ -3062,16 +3064,81 @@ fn a_moved_file_keeps_its_scores() {
         assert_eq!(after[new], before[old], "{new}");
     }
     assert_eq!(after["Casey Choir/Hymns/01 - Six.mp3"], moods::encode(row.as_ref()));
-    // Fetched again: Two (another recording), Five (the listener deleted it),
-    // One beside the listener's edit of it.
-    for rel in [
-        "Alex Artist/First Album/02 - Two.mp3",
-        "BLAKE BAND/Live/02 - Five.opus",
-        "Alex Artist/First Album/01 - One (2).mp3",
+    // Fetched again, the step bringing nothing for them: Two (another
+    // recording) in place, Five (the listener deleted it) in the folder's new
+    // case, each with its row's tail.
+    for (old, new) in [
+        ("Alex Artist/First Album/02 - Two.mp3", "Alex Artist/First Album/02 - Two.mp3"),
+        ("Blake Band/Live/02 - Five.opus", "BLAKE BAND/Live/02 - Five.opus"),
     ] {
-        assert_eq!(after[rel], NO_ROW, "{rel}");
+        assert_ne!(before[old], NO_ROW, "{old}");
+        assert_eq!(after[new], before[old], "{new}");
     }
+    // One beside the listener's edit of it, the edit theirs now: a new file.
+    assert_eq!(after["Alex Artist/First Album/01 - One (2).mp3"], NO_ROW);
     assert_eq!(tags_shape(&card), (1, 80));
+}
+
+/// A row's file fetched again keeps the row's tail under every way a run
+/// brings no scores for it (Moods::Keep: a fetch that failed, a server
+/// without them, `--moods false`, the listener's stop): replaced in place
+/// (Two, another recording), and deleted and written again under another
+/// extension (Five, its conversion gone); the record is the new bytes' all
+/// the same. An answer that names it lays its own; one that leaves it out
+/// keeps the row's.
+#[test]
+fn a_file_fetched_again_keeps_its_scores_till_an_answer_lays_others() {
+    let base = Scratch::new("moods-again-base");
+    let (card, mut wanted, mut server) = scored_card(&base.0);
+    let before = records(&card);
+    drop(card);
+    let two = "Lib/Alex Artist/First Album/02 - Two.mp3";
+    let bytes = corpus("mpeg2.mp3");
+    server.add(two, bytes.clone());
+    wanted.files[1] = track(two, &bytes, 102);
+    let five = "Lib/Blake Band/Live/02 - Five.flac";
+    wanted.files[4] = track(five, &server.files[five].clone(), 202);
+    let two_at = "Alex Artist/First Album/02 - Two.mp3";
+    let (old_five, new_five) = ("Blake Band/Live/02 - Five.opus", "Blake Band/Live/02 - Five.flac");
+    let was = |rel: &str| before.iter().find(|e| e.path == rel).expect("a record").clone();
+    let mut run = |name: &str, hooks: &mut dyn Hooks| {
+        let dir = Scratch::new(name);
+        copy_tree(&base.0, &dir.0);
+        let card = FatSim::new(&dir.0, SERIAL);
+        let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, knobs(), Answers::default(), 7);
+        let done = ran.unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((done.written, done.verified), (2, Ok(())), "{name}");
+        (dir, card)
+    };
+
+    // Moods::Keep: no hook of its own, and the tests' hooks with no fetch.
+    let keeps: [(&str, &mut dyn Hooks); 2] =
+        [("moods-again-none", &mut NoHooks), ("moods-again-keep", &mut Extras::default())];
+    for (name, hooks) in keeps {
+        let (_dir, card) = run(name, hooks);
+        let after = records(&card);
+        assert_eq!(after.len(), before.len(), "{name}");
+        assert!(!after.iter().any(|e| e.path == old_five), "{name}: the Opus gone");
+        for (old, new) in [(two_at, two_at), (old_five, new_five)] {
+            let (o, e) = (was(old), after.iter().find(|e| e.path == new).expect("written again"));
+            assert!(o.rec.has_moods(), "{name}: {old}");
+            assert_eq!(e.rec.moods, o.rec.moods, "{name}: {new} keeps its row's");
+            assert_ne!(e.rec.size, o.rec.size, "{name}: {new} read from its new bytes");
+        }
+        for e in after.iter().filter(|e| e.path != two_at && e.path != new_five) {
+            assert_eq!(e.rec, was(&e.path).rec, "{name}: {}", e.path);
+        }
+        assert_eq!(tags_shape(&card), (1, 80), "{name}");
+    }
+
+    // An answer naming Two alone: Two takes its row, Five keeps the card's.
+    let row = scores_of(&wanted, 1)[two];
+    let scores = Some(HashMap::from([(two.to_string(), row)]));
+    let (_dir, card) = run("moods-again-answer", &mut Extras { scores, ..Extras::default() });
+    let after = tails(&card);
+    assert_eq!(after[two_at], moods::encode(row.as_ref()));
+    assert_ne!(after[two_at], was(two_at).rec.moods);
+    assert_eq!(after[new_five], was(old_five).rec.moods);
 }
 
 /// A record read again from its card file (another reader's tags file:
@@ -3206,8 +3273,9 @@ fn a_rename_whose_size_moved_keeps_its_scores() {
 }
 
 /// A checkpoint carries each record's tail as the run holds it and asks for
-/// none: a cut run's root has the old scores, and none for a file it fetched
-/// again; the next run's final commit lays the new ones.
+/// none: a cut run's root has the old scores, a file it fetched again keeping
+/// its row's, and none for a file new to the card; the next run's final
+/// commit lays the new ones.
 #[test]
 fn a_checkpoint_carries_scores_and_adds_none() {
     let base = Scratch::new("moods-checkpoint-base");
@@ -3248,14 +3316,12 @@ fn a_checkpoint_carries_scores_and_adds_none() {
     assert_eq!(cut.moods_asked, 0);
     card.replug();
     assert!(!look(&card).root.expect("a root").manifest.is_final(), "the checkpoint");
-    let held = tails(&card);
     let fetched = "Alex Artist/First Album/02 - Two.mp3";
-    assert_eq!(held[fetched], NO_ROW, "fetched again: none yet");
+    let two_now = records(&card).into_iter().find(|e| e.path == fetched).expect("Two");
+    assert_eq!(two_now.rec.size as usize, bytes.len(), "fetched again by the checkpoint");
+    let held = tails(&card);
     assert!(!held.contains_key("Casey Choir/Hymns/01 - Six.mp3"));
-    assert_eq!(held.len(), old.len());
-    for (path, tail) in held.iter().filter(|(p, _)| *p != fetched) {
-        assert_eq!(Some(tail), old.get(path), "{path}: carried");
-    }
+    assert_eq!(held, old, "each carried, the file fetched again its row's");
     assert_eq!(tags_shape(&card), (1, 80));
 
     // The next run's final commit lays the new scores, once.
@@ -3355,6 +3421,57 @@ fn every_cut_of_a_run_that_only_adds_moods_is_finished() {
         assert_eq!(finished(&card), want, "{what}");
     }
     assert!(laid > 0, "the later cuts leave the commit that lays them");
+}
+
+/// Each write of a run that fetches Two again, its mood step bringing
+/// nothing (Moods::Keep), cut: the next run, under Keep too, finishes it as
+/// the uncut run did, Two with its row's tail however the cut left it (the
+/// old file still there; the new one in place under the root's old record,
+/// the cut run's half-finished work: 2.12.3; or a checkpoint's record).
+#[test]
+fn every_cut_of_a_run_that_fetches_a_file_again_keeps_its_scores() {
+    let base = Scratch::new("moods-again-cut-base");
+    let (card, mut wanted, mut server) = scored_card(&base.0);
+    let want = tails(&card);
+    drop(card);
+    let two = "Lib/Alex Artist/First Album/02 - Two.mp3";
+    let bytes = corpus("mpeg2.mp3");
+    server.add(two, bytes.clone());
+    wanted.files[1] = track(two, &bytes, 102);
+    let two_at = "Alex Artist/First Album/02 - Two.mp3";
+
+    let whole = Scratch::new("moods-again-cut-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    synced(&card, &wanted, &mut server, &mut Extras::default());
+    let writes = card.log();
+    let uncut = finished(&card);
+    assert_eq!(tails(&card), want);
+
+    // The cuts that leave Two's new bytes in place under the root's old record.
+    let mut ours = 0;
+    for (n, how) in cuts_of(&writes, writes.len()) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let dir = Scratch::new("moods-again-cut");
+        copy_tree(&base.0, &dir.0);
+        let card = FatSim::new(&dir.0, SERIAL);
+        card.cut_at(n, how);
+        let hooks = &mut Extras::default();
+        let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, knobs(), Answers::default(), 7);
+        card.replug();
+        if ran.is_err() {
+            let on = card.read(&format!("/music/{two_at}"), 1 << 20).ok().flatten();
+            let rec = records(&card).into_iter().find(|e| e.path == two_at);
+            let old = rec.is_some_and(|e| e.rec.size as usize != bytes.len());
+            ours += usize::from(on.as_deref() == Some(bytes.as_slice()) && old);
+        }
+        let again = recover_under(&card, &wanted, &mut server, 3, knobs(), Extras::default);
+        let outcome = again.ran.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), uncut, "{what}");
+        assert_eq!(tails(&card), want, "{what}");
+    }
+    assert!(ours > 0, "a cut leaves the new bytes as the cut run's work");
 }
 
 /// A tail a reader would refuse never reaches the card: the hook's answer

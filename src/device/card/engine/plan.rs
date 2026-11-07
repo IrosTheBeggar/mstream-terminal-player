@@ -98,6 +98,11 @@ pub(super) struct Write {
     /// The file it replaces in place, as listed; None: a new name, where
     /// any file at all is a collision (2.8.3, step 6), never deleted.
     pub(super) replaces: Option<Replaced>,
+    /// The row whose file it fetches again, in place or under a new name:
+    /// its record takes that row's mood tail, as a kept row keeps its own,
+    /// till an answer lays another (the player's docs/MOOD-FILTERS.md 5.2).
+    /// None: a file new to the card, or a rename (its record carried whole).
+    pub(super) row: Option<usize>,
 }
 
 /// A file a write replaces in place (2.11): a ledger file, or a cut run's
@@ -454,8 +459,8 @@ pub(super) fn plan(
     let mut keeps: Vec<Keep> = Vec::new();
     let mut deletes: Vec<Delete> = Vec::new();
     let mut seeds = Seeds::default();
-    // Files to name: (file, the row it is of) — new, written again, or
-    // replacing a row under a new extension.
+    // Files to name: (file, the row it is of, whose mood tail it takes) —
+    // new, written again, or replacing a row under a new extension.
     let mut to_name: Vec<(usize, Option<usize>)> = Vec::new();
     // Server moves of a file in its place: (row, file, its path, stamp).
     let mut moves: Vec<(usize, usize, String, u32)> = Vec::new();
@@ -486,7 +491,8 @@ pub(super) fn plan(
             Side::Changed { path } => match paired {
                 Some(f) if s.knobs.replace_edits && card_extension(&files[f]) == ext_of(path) => {
                     let replaces = item_of(path).map(|i| Replaced::of(&i, false));
-                    writes.push(Write { path: path.clone(), file: f, from: None, replaces });
+                    let row = Some(r);
+                    writes.push(Write { path: path.clone(), file: f, from: None, replaces, row });
                     seeds.kept.push((path.clone(), srv as u16, files[f].ledger.server_path.clone()));
                 }
                 // The listener's now (U5); a file of the selection still,
@@ -501,7 +507,8 @@ pub(super) fn plan(
             Side::Ours { path } => match paired {
                 Some(f) if card_extension(&files[f]) == ext_of(path) => {
                     let replaces = item_of(path).map(|i| Replaced::of(&i, true));
-                    writes.push(Write { path: path.clone(), file: f, from: None, replaces });
+                    let row = Some(r);
+                    writes.push(Write { path: path.clone(), file: f, from: None, replaces, row });
                     seeds.kept.push((path.clone(), srv as u16, files[f].ledger.server_path.clone()));
                 }
                 Some(f) => {
@@ -536,7 +543,8 @@ pub(super) fn plan(
                         if card_extension(&files[f]) == ext_of(&path) {
                             keeps.push(keep(row.ledger.clone()));
                             let replaces = Some(Replaced { size, fat_time, ours: false });
-                            writes.push(Write { path: path.clone(), file: f, from: None, replaces });
+                            let (from, row) = (None, Some(r));
+                            writes.push(Write { path: path.clone(), file: f, from, replaces, row });
                             seeds.kept.push((path, srv as u16, files[f].ledger.server_path.clone()));
                         } else {
                             deletes.push(Delete { path, size, fat_time, removal: false, ours: false });
@@ -644,20 +652,21 @@ pub(super) fn plan(
 
     // ── Names for real (pass B): around everything that stays ──
     let mut second = namer(s, &layout, &seeds)?;
-    let mut named: Vec<(usize, Option<String>)> =
-        renames.iter().map(|m| (m.1, Some(m.2.clone()))).collect();
-    named.extend(to_name.iter().filter(|t| !adopted.contains(&t.0)).map(|t| (t.0, None)));
-    let these: Vec<Wanted> = named.iter().map(|&(f, _)| wanted(files, &at, f)).collect();
+    // (file, the path it is renamed from, the row it fetches again).
+    let mut named: Vec<(usize, Option<String>, Option<usize>)> =
+        renames.iter().map(|m| (m.1, Some(m.2.clone()), None)).collect();
+    named.extend(to_name.iter().filter(|t| !adopted.contains(&t.0)).map(|t| (t.0, None, t.1)));
+    let these: Vec<Wanted> = named.iter().map(|&(f, ..)| wanted(files, &at, f)).collect();
     // A move the names refuse stays where it is, under its old row; a file
     // they refuse is reported. A cut run's target at the name a file takes
     // is its half-finished work, replaced in place (2.12.3).
     let recovering: HashMap<Vec<String>, &String> =
         recover_free.iter().map(|p| (key_path(p), p)).collect();
-    for ((f, from), placed) in named.into_iter().zip(second.place(&these)) {
+    for ((f, from, row), placed) in named.into_iter().zip(second.place(&these)) {
         if let Ok(path) = placed {
             let cut = recovering.get(&key_path(&path)).and_then(|p| item_of(p));
             let replaces = cut.map(|i| Replaced::of(&i, true));
-            writes.push(Write { path, file: f, from, replaces });
+            writes.push(Write { path, file: f, from, replaces, row });
         }
     }
     let names_report = second.report();

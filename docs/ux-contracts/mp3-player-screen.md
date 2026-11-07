@@ -1261,9 +1261,11 @@ comes from the cache, or a download, beside them.
       any it had; one the answer left out keeps its own.
     - **A fetch that fails is no failed run:** an older mStream (no
       `moodScores`), a 403 or a 404, an error: every track keeps what the
-      card had, the rest of the run commits, and the sync ends as Done
-      (clause 54). The next sync asks again, or on a card with scores the
-      next that reads whole or changes its files.
+      card had, one whose file the sync fetched again among them (the
+      scores are the server's, not the file's), the rest of the run
+      commits, and the sync ends as Done (clause 54). The next sync asks
+      again, or on a card with scores the next that reads whole or changes
+      its files.
     - **A card for someone else** asks nothing and loses the scores it had in
       the sync's commit; Converts says so (clause 44).
     - **Details' log** has one line of them, in English as the run's other

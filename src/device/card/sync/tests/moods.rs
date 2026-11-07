@@ -438,6 +438,67 @@ fn a_failed_fetch_keeps_old_scores_and_the_run_ends_well() {
     assert_eq!(tails(&sim), scored(&all));
 }
 
+/// A file fetched again over its record (another recording on the server)
+/// keeps the record's tail when no new scores come: the route failing (a
+/// 500 here) or `--moods false`, as every other track does (clause 51b). The
+/// 304 after it asks nothing of the scored card, the tail staying; the next
+/// whole read lays the server's.
+#[test]
+fn a_file_fetched_again_keeps_its_scores_when_none_come() {
+    let (_scratch, sim, base, fake, generation) = scored_card("moods-again");
+    let before = tails(&sim);
+    let size_of = |sim: &FatSim, path: &str| {
+        let seen = look(sim);
+        let records = &seen.root.as_ref().unwrap().tags.as_ref().unwrap().records;
+        let of = |e: &&Entry| e.ledger.as_ref().is_some_and(|l| l.server_path == path);
+        records.iter().find(of).expect("its record").rec.size as usize
+    };
+    let (one, two) = (corpus("mpeg2.mp3"), corpus("flac_text.flac"));
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks[0].bytes = one.clone();
+        lib.revision = "1:5:1790000000006:5".into();
+        lib.moods.insert(ONE.into(), json!(EXAMPLE));
+        lib.moods_say = Some("500 Internal Server Error");
+    }
+    let mut envs = envs();
+    let failed = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let outcome = ran(&failed);
+    let done = (outcome.verified.clone(), outcome.parked.clone(), outcome.written);
+    assert_eq!(done, (Ok(()), None, 1), "{:?}", failed.notes);
+    assert!(outcome.generation > generation, "committed");
+    assert_eq!(size_of(&sim, ONE), one.len(), "ONE read from its new bytes");
+    assert_eq!(calls_since(&fake).len(), 1);
+    assert!(note_of(&failed).is_some_and(|n| n.contains("500")), "{:?}", failed.notes);
+    assert_eq!(tails(&sim), before, "ONE's among them");
+
+    fake.lock().unwrap().moods_say = None;
+    let again = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(again.summary.as_ref().unwrap().listed, Listed::NotModified);
+    assert_eq!((calls_since(&fake), note_of(&again)), (Vec::<Vec<String>>::new(), None));
+    assert_eq!(tails(&sim), before);
+
+    // `--moods false`, which the real-card checks keep a run's other work
+    // apart with: TWO fetched again, every tail as the card had it.
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks[1].bytes = two.clone();
+        lib.revision = "1:5:1790000000007:6".into();
+    }
+    let off = sync_now(&sim, &base, &Ask { no_moods: true, ..Ask::default() }, &mut envs).0;
+    assert_eq!((ran(&off).verified.clone(), ran(&off).written), (Ok(()), 1), "{:?}", off.notes);
+    assert_eq!(size_of(&sim, TWO), two.len(), "TWO read from its new bytes");
+    assert_eq!((calls_since(&fake), note_of(&off)), (Vec::<Vec<String>>::new(), None));
+    assert_eq!(tails(&sim), before);
+
+    let filled = sync_now(&sim, &base, &whole(), &mut envs).0;
+    assert_eq!(ran(&filled).verified, Ok(()), "{:?}", filled.notes);
+    assert_eq!(calls_since(&fake), rock_call());
+    let mut want = before;
+    want.insert(ONE.into(), EXAMPLE_TAIL);
+    assert_eq!(tails(&sim), want);
+}
+
 /// A 403 (a key or a user the route refuses) or a 404 (no route) is no
 /// scores from this server: asked once, never split, the card's tails kept,
 /// no commit, and a note.

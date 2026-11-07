@@ -716,9 +716,16 @@ impl<'r, 'c> Runner<'r, 'c> {
             return self.skip(file, "the card has a file of that name".into(), events).map(Some);
         }
 
-        // 8.4: read back, and the record read from the card's bytes.
+        // 8.4: read back, and the record read from the card's bytes; a row's
+        // file fetched again keeps the row's mood tail, as read_again does:
+        // the scores are the server's, never the bytes' (a run that brings
+        // none keeps what the card had: the final commit's hook may lay new
+        // ones over it).
         let (rel, item) = self.read_back(&w.path)?;
-        let owned = self.owned_of(&rel, &item, file, origin_flags(file, verified, false))?;
+        let mut owned = self.owned_of(&rel, &item, file, origin_flags(file, verified, false))?;
+        if let Some(r) = w.row {
+            owned.rec.moods = self.s.survey.rows[r].rec.moods;
+        }
         self.take(&w.path, rel.clone(), owned);
         self.written += 1;
         events(Event::Wrote { path: rel, bytes: item.size });

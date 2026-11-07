@@ -578,8 +578,8 @@ impl From<Index> for Waves {
 /// no commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Moods {
-    /// Each record's tail as the run holds it: carried, or none for a file
-    /// the run read the first time.
+    /// Each record's tail as the run holds it: carried (a file fetched again
+    /// over its row keeps the row's), or none for a file new to the card.
     Keep,
     /// No record keeps one (a card for someone else): rows of 72 at minor 0
     /// again.
