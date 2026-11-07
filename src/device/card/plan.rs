@@ -612,9 +612,10 @@ pub(crate) fn needing_metadata(
 
 // ── The fit ─────────────────────────────────────────────────────────────────
 
-/// A tags file's bytes a track, and an Auto DJ index's (ESTIMATED, from
-/// docs/METADATA.md's sizes).
-const TAGS_PER_TRACK: u64 = 345;
+/// A tags file's bytes a track, its RECS row's mood tail among them (8: the
+/// player's docs/MOOD-FILTERS.md 5.3), and an Auto DJ index's (ESTIMATED,
+/// from docs/METADATA.md's sizes).
+const TAGS_PER_TRACK: u64 = 353;
 const MPDJ_PER_TRACK: u64 = 530;
 /// A waveform index's bytes a track, and its own beside them: exactly its slot
 /// and its header (WAVEFORM-INDEX.md 10).
@@ -1035,7 +1036,7 @@ mod tests {
         // cluster each, and a cluster of each new folder's own.
         let dirs = 3 * c + 2 * c;
         // The next tags file and indexes, a thumbnail, the stage file.
-        let mstream = 2 * 345 + 2 * 530 + (256 + 2 * 256) + c + 30_015_488;
+        let mstream = 2 * 353 + 2 * 530 + (256 + 2 * 256) + c + 30_015_488;
         let player = 2 * 330 + (1 << 20) + 1_048_480;
         let margin = (64u64 << 30) / 100;
         assert_eq!(f.needed, music + dirs + mstream + player + margin);
@@ -1070,7 +1071,7 @@ mod tests {
         let f = fit(&space, &fp, true, WaveFit::Missing);
         // The file, 256 + 256 × tracks, and the next tags file beside the last,
         // each to its cluster.
-        assert_eq!(f.needed, 4_980_736 + 6_717_440);
+        assert_eq!(f.needed, 4_980_736 + 6_848_512);
         assert_eq!(f.needed % c, 0);
         assert!(f.fits(), "well under the 640 MB margin a run of music keeps");
         assert_eq!(f.tracks, 19_388);
@@ -1086,7 +1087,7 @@ mod tests {
     fn a_track_costs_its_bytes_and_its_share_of_every_index() {
         // Its record, Auto DJ row and slot, beside the ones there; the player's
         // room; its name's entries.
-        let extra = 2 * 345 + 2 * 530 + 2 * 256 + 330 + 96;
+        let extra = 2 * 353 + 2 * 530 + 2 * 256 + 330 + 96;
         assert_eq!(track_cost(1, 32 * 1024), 32 * 1024 + extra);
         assert_eq!(track_cost(0, 0), extra);
     }

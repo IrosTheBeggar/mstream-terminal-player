@@ -396,6 +396,11 @@ pub struct CardSyncArgs {
     // sync has one otherwise: no setting holds this, on the card or anywhere.
     #[arg(long, value_name = "BOOL")]
     waves: Option<bool>,
+    // false: no mood scores asked for, each record's as the card has it, for
+    // the real-card checks. A sync asks a server that serves them otherwise:
+    // no setting holds this either.
+    #[arg(long, value_name = "BOOL")]
+    moods: Option<bool>,
     // The server's name on this card ("Home"); never an address.
     #[arg(long)]
     nickname: Option<String>,
@@ -535,6 +540,7 @@ impl CardSyncArgs {
             },
             stop: None,
             no_waves: self.waves == Some(false),
+            no_moods: self.moods == Some(false),
         })
     }
 }
@@ -1822,6 +1828,16 @@ mod tests {
         ] {
             let Ok(DeviceCmd::CardSync(args)) = parse(flags) else { panic!("{flags:?}") };
             assert_eq!(args.ask().expect("a sync").no_waves, no_waves, "{flags:?}");
+        }
+        // The mood scores: asked for unless told, the same way.
+        for (flags, no_moods) in [
+            (&["card-sync", "E:"][..], false),
+            (&["card-sync", "E:", "--moods", "true"][..], false),
+            (&["card-sync", "E:", "--moods", "false"][..], true),
+        ] {
+            let Ok(DeviceCmd::CardSync(args)) = parse(flags) else { panic!("{flags:?}") };
+            let ask = args.ask().expect("a sync");
+            assert_eq!((ask.no_moods, ask.no_waves), (no_moods, false), "{flags:?}");
         }
         // A federation peer's: which peers and libraries, the run's say on an
         // older server's proxy, the day's budget.

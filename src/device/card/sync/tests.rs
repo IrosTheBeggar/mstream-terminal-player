@@ -1,13 +1,14 @@
 //! A whole sync, end to end: a loopback mStream of made-up libraries
 //! ([`Fake`]: the paged manifest with its ETag and 304, `metadata/batch`,
-//! `/media` with Range and HEAD, `/transcode`, album art, embeddings and
-//! waveforms), a host folder as the card ([`FatSim`]), set up by B2's set-up,
-//! and the card read back by the kit's reader. The audio is the tag reader's
-//! parity corpus and made-up Ogg Opus streams; the covers are made-up pictures;
-//! the embeddings are made-up vectors (no real index: AUTODJ-INDEX.md 12.5),
-//! the peaks made-up shapes. The server's federation peers, and their own
-//! loopback servers, are [`peers`]'s; multi-card sets, several cards of one
-//! selection, [`span`]'s; the waveforms' fetch, [`waves`]'s.
+//! `/media` with Range and HEAD, `/transcode`, album art, embeddings,
+//! waveforms and mood scores), a host folder as the card ([`FatSim`]), set up
+//! by B2's set-up, and the card read back by the kit's reader. The audio is the
+//! tag reader's parity corpus and made-up Ogg Opus streams; the covers are
+//! made-up pictures; the embeddings are made-up vectors (no real index:
+//! AUTODJ-INDEX.md 12.5), the peaks made-up shapes, the mood scores made-up
+//! rows. The server's federation peers, and their own loopback servers, are
+//! [`peers`]'s; multi-card sets, several cards of one selection, [`span`]'s;
+//! the waveforms' fetch, [`waves`]'s; the mood tails, [`moods`]'s.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -21,6 +22,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::api::transfer::stub::{Asked, chunked, json as json_reply, reply, routed};
+use crate::api::transfer::{MOOD_HEADS, MoodRow};
 use crate::device::card::cards::Cards;
 use crate::device::card::contract::mptg::{BPM_ANALYSED, CONTAINER_MP3, CONTAINER_OPUS};
 use crate::device::card::contract::mpth;
@@ -142,6 +144,21 @@ pub(crate) struct Library {
     /// The asks it is answering now, and how many there were as each came.
     pub(crate) wave_flight: Arc<AtomicUsize>,
     pub(crate) wave_seen: Vec<usize>,
+    /// `/api/`'s `features.moodScores`, when it says one. The mood route
+    /// answers either way, as a server's never would, so a sync that asks it
+    /// without the flag shows.
+    pub(crate) moods_flag: Option<u32>,
+    /// What the mood route gives each path, as its JSON (a row in
+    /// [`MOOD_HEADS`] order, or null); a path with none is null, as a track
+    /// with no row is.
+    pub(crate) moods: HashMap<String, Value>,
+    /// Paths the mood route leaves out of its answer, as no mStream does.
+    pub(crate) moods_left_out: HashSet<String>,
+    /// What the mood route says in place of an answer: `403 Forbidden`,
+    /// `500 Internal Server Error`.
+    pub(crate) moods_say: Option<&'static str>,
+    /// The paths of each call of the mood route, as they came.
+    pub(crate) mood_calls: Vec<Vec<String>>,
     /// Its federation peers (B9).
     peers: Vec<peers::FedPeer>,
 }
@@ -237,6 +254,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             if let Some(proxy) = &lib.proxy_says {
                 body["features"]["federationProxy"] = proxy.clone();
             }
+            if let Some(flag) = lib.moods_flag {
+                body["features"]["moodScores"] = json!(flag);
+            }
             if lib.disk.is_some() {
                 body["user"]["admin"] = json!(true);
                 body["admin"] = json!({"platform": if cfg!(windows) { "win32" } else { "linux" }});
@@ -294,6 +314,20 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
                 .map(|p| json!({"filePath": p, "audioHash": null, "notAnalyzed": false, "embedding": vector(p)}))
                 .collect();
             let body = json!({"model": {"id": "effnet-discogs", "version": "1"}, "dim": 8, "tracks": tracks});
+            json_reply("200 OK", &body.to_string())
+        }
+        ("POST", "/api/v1/db/mood-scores") => {
+            let paths: Vec<String> =
+                serde_json::from_value(asked.json()["filepaths"].clone()).unwrap_or_default();
+            lib.mood_calls.push(paths.clone());
+            if let Some(words) = lib.moods_say {
+                return json_reply(words, r#"{"error":"a made-up refusal"}"#);
+            }
+            let given = paths.iter().filter(|p| !lib.moods_left_out.contains(*p));
+            let tracks: serde_json::Map<String, Value> =
+                given.map(|p| (p.clone(), lib.moods.get(p).cloned().unwrap_or(Value::Null))).collect();
+            let body = json!({"model": {"id": "effnet-discogs", "version": "1"}, "moodVersion": "1",
+                              "heads": MOOD_HEADS, "tracks": tracks});
             json_reply("200 OK", &body.to_string())
         }
         ("GET", "/api/v1/db/waveform") => {
@@ -415,6 +449,30 @@ pub(crate) fn with_waves(fake: &Fake) {
     for path in paths {
         let peaks = peaks_of(&path);
         lib.waves.insert(path, vec![Wave::Peaks(peaks)]);
+    }
+}
+
+/// A track's made-up mood row, from its path: in [`MOOD_HEADS`] order, each
+/// score on the server's grid of 4 places, and a NULL party for about one
+/// track in three.
+pub(crate) fn mood_row(path: &str) -> MoodRow {
+    let h = crate::device::card::contract::prim::fnv1a64(path.as_bytes());
+    let party = crate::device::card::contract::moods::PARTY;
+    std::array::from_fn(|k| {
+        let score = (h.rotate_left(8 * k as u32) % 10_001) as f64 / 10_000.0;
+        (k != party || h % 3 != 0).then_some(score)
+    })
+}
+
+/// The server says `moodScores`, and its mood route gives every track its
+/// [`mood_row`].
+pub(crate) fn with_moods(fake: &Fake) {
+    let mut lib = fake.lock().unwrap();
+    lib.moods_flag = Some(1);
+    let paths: Vec<String> = lib.tracks.iter().map(|t| t.path.clone()).collect();
+    for path in paths {
+        let row = json!(mood_row(&path));
+        lib.moods.insert(path, row);
     }
 }
 
@@ -1540,6 +1598,7 @@ fn the_hidden_commands_rate_line_says_where_the_copying_stands() {
 }
 
 mod bench;
+mod moods;
 mod peers;
 mod span;
 mod waves;

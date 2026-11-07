@@ -22,10 +22,6 @@
 //! 8 zero bytes are no server row. The tail is one-way: bits 3-7 and byte
 //! 79 never get a meaning in major 1, and a later field goes from byte 80.
 
-// The sync's overlay is `encode`'s caller, and lands after this; until then
-// it has only the tests.
-#![cfg_attr(not(test), allow(dead_code))]
-
 /// mStream's mood heads in its `MOOD_COLUMNS` order (mStream
 /// `src/db/mood-sync.js`): the slots of [`Scores`], by the indexes below.
 pub(crate) const HEADS: [&str; 8] =

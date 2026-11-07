@@ -269,7 +269,7 @@ pub(super) fn federation(peers: &[FedPeer], old: bool, asked: &Asked) -> Vec<u8>
 // ── The scene ───────────────────────────────────────────────────────────────
 
 /// 2026-10-18 13:20 UTC: the budget's clock.
-const NOW: u64 = 1_792_281_600 + 13 * 3600 + 1200;
+pub(super) const NOW: u64 = 1_792_281_600 + 13 * 3600 + 1200;
 const JITTER: u64 = 120;
 const ALBUM: &str = "Folk/Dana Duo/Album";
 const ONE: &str = "Folk/Dana Duo/Album/01.mp3";
@@ -282,12 +282,12 @@ fn peer_track(path: &str, id: i64, bytes: Vec<u8>) -> Track {
 
 /// A peer's library, Folk: an album of an MP3 and a FLAC, with mStream's
 /// art.
-fn folk() -> Vec<Track> {
+pub(super) fn folk() -> Vec<Track> {
     vec![peer_track(ONE, 1, corpus("v24_full.mp3")), peer_track(TWO, 2, corpus("flac_full.flac"))]
 }
 
 /// The direct guest path's tunnels: each peer's own loopback server.
-struct TestDial(HashMap<String, String>);
+pub(super) struct TestDial(HashMap<String, String>);
 
 impl Dial for TestDial {
     fn dial(&self, ticket: &str) -> Result<Tunnel, String> {
@@ -323,7 +323,11 @@ impl Convert for MadeUp {
 /// The parent (the fake server of two libraries, an older mStream when
 /// `old`), its peer 3 serving `tracks` under Folk, offering the direct
 /// path when `direct`; the dial to its tunnel.
-fn world(direct: bool, old: bool, tracks: Vec<Track>) -> (String, Fake, PeerFake, TestDial) {
+pub(super) fn world(
+    direct: bool,
+    old: bool,
+    tracks: Vec<Track>,
+) -> (String, Fake, PeerFake, TestDial) {
     let (base, fake) = server();
     let lib = PeerLib {
         vpaths: vec!["Folk".into()],
@@ -342,7 +346,12 @@ fn world(direct: bool, old: bool, tracks: Vec<Track>) -> (String, Fake, PeerFake
     (base, fake, peer, TestDial(HashMap::from([("mstrfedg1:3".to_string(), tunnel)])))
 }
 
-fn fed(scratch: &Scratch, clock: &Arc<AtomicU64>, dial: TestDial, ffmpeg: Ffmpeg) -> Federation {
+pub(super) fn fed(
+    scratch: &Scratch,
+    clock: &Arc<AtomicU64>,
+    dial: TestDial,
+    ffmpeg: Ffmpeg,
+) -> Federation {
     let at = clock.clone();
     Federation {
         budget: Budget::at(scratch.0.join("config")),
@@ -355,7 +364,7 @@ fn fed(scratch: &Scratch, clock: &Arc<AtomicU64>, dial: TestDial, ffmpeg: Ffmpeg
     }
 }
 
-fn sync_fed(
+pub(super) fn sync_fed(
     card: &FatSim,
     base: &str,
     ask: &Ask,
@@ -369,7 +378,7 @@ fn sync_fed(
 }
 
 /// The server's Rock, and its peer 3's every library.
-fn rock_and_folk() -> Ask {
+pub(super) fn rock_and_folk() -> Ask {
     Ask { peers: Some(vec![PeerAsk { id: 3, libraries: None }]), ..rock() }
 }
 
@@ -377,7 +386,7 @@ fn key_of(base: &str) -> PeerKey {
     PeerKey { parent_key: server_url_key(base), peer_id: 3 }
 }
 
-fn asked_of(peer: &PeerFake) -> Vec<String> {
+pub(super) fn asked_of(peer: &PeerFake) -> Vec<String> {
     peer.lock().unwrap().asked.clone()
 }
 

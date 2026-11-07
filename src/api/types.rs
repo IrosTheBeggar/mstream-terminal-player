@@ -194,7 +194,6 @@ pub struct LayeredFeatures {
     /// An older server leaves it out, and a card's sync then never asks.
     ///
     /// [`Client::mood_scores_async`]: super::Client::mood_scores_async
-    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(rename = "moodScores", deserialize_with = "soft")]
     pub mood_scores: Option<u32>,
 }
