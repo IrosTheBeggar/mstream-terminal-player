@@ -187,6 +187,16 @@ pub struct LayeredFeatures {
     /// leaves it out, as an older one does, and never says `purpose: false`.
     #[serde(rename = "federationProxy", deserialize_with = "soft")]
     pub federation_proxy: Option<FederationProxy>,
+    /// The mood scores read-out's generation: the server answers `POST
+    /// /api/v1/db/mood-scores` ([`Client::mood_scores_async`]). An integer
+    /// like `stats`, and a version fact, there whether or not any song has
+    /// scores yet (that is `moodFilters`, which a card's sync never reads).
+    /// An older server leaves it out, and a card's sync then never asks.
+    ///
+    /// [`Client::mood_scores_async`]: super::Client::mood_scores_async
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(rename = "moodScores", deserialize_with = "soft")]
+    pub mood_scores: Option<u32>,
 }
 
 /// `features.federationProxy`.
