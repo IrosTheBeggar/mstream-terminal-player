@@ -12,7 +12,7 @@
 //! readers (tools/synthtransfer.py --check).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Write as _;
+use std::io::{Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
@@ -21,7 +21,9 @@ use super::fatsim::{Cut, FatSim};
 use super::run::read_pieces;
 use super::*;
 use crate::device::card::autodj::{self, FileIn, Index, IndexIn, Model, Selection, Work};
+use crate::device::card::contract::container;
 use crate::device::card::contract::fat::fat_wall;
+use crate::device::card::contract::moods::{self, NO_ROW, Scores, Tail};
 use crate::device::card::contract::mptg::{
     self, ADOPTED, BPM_ANALYSED, CONTAINER_MP3, CONTAINER_NOT_AUDIO, CONTAINER_OPUS, FOLDER_OWNED,
     FOLDER_THUMB, Meta, Record, RecordIn, SOURCE_SOFTWARE, SOURCE_SYNC_AGENT, UNREADABLE, VERIFIED,
@@ -29,10 +31,10 @@ use crate::device::card::contract::mptg::{
 use crate::device::card::contract::msmf::{self, Comp};
 use crate::device::card::contract::mspd::{self, OP_FOLDER, OP_WRITE, Op, PlanIn};
 use crate::device::card::contract::mpwf::{self, bars_from};
-use crate::device::card::contract::prim::{fnv1a64, md5, path_hash, qfp_of};
+use crate::device::card::contract::prim::{fnv1a64, md5, path_hash, qfp_of, u32_at};
 use crate::device::card::contract::server::{NO_INSTANCE, TalkPeer, server_url_key};
 use crate::device::card::tags::PARSER_VERSION;
-use crate::device::card::volume::{self, Inspection, Serial};
+use crate::device::card::volume::{self, CardFile, Inspection, Item, LockFile, Serial};
 use crate::device::card::waves::{self, Shapes};
 
 // ── The scene ───────────────────────────────────────────────────────────────
@@ -257,8 +259,9 @@ impl Fetcher for Canned {
 /// What the tests' hooks add: a thumbnail for every album without one (a
 /// flat colour of its folder's hash and its count of files), none for the
 /// album `gone` names, an Auto DJ index of made-up vectors under a made-up
-/// model (no real embeddings: AUTODJ-INDEX.md 12.5), and a waveform index of
-/// made-up peaks; and a count of the plays hook's calls.
+/// model (no real embeddings: AUTODJ-INDEX.md 12.5), a waveform index of
+/// made-up peaks, and the mood tails of made-up scores; and a count of the
+/// plays hook's calls.
 #[derive(Default)]
 struct Extras {
     plays: usize,
@@ -270,6 +273,35 @@ struct Extras {
     answers: Option<usize>,
     /// Its index steps may keep the card waiting long.
     long: bool,
+    /// The mood scores the mood step's fetch brings, by server path (None:
+    /// the server has no row), as the sync's overlay lays them: a record
+    /// whose server path they name takes that row's tail, the rest keep
+    /// theirs. None: no fetch, every tail kept.
+    scores: Option<HashMap<String, Option<Scores>>>,
+    /// The mood step clears every tail (a card for someone else).
+    clear: bool,
+    /// How many commits asked the mood step.
+    moods_asked: usize,
+}
+
+impl Extras {
+    /// The tests' hooks, the mood step's fetch bringing [`scores_of`] the
+    /// selection.
+    fn scored(wanted: &WantedCard) -> Extras {
+        Extras { scores: Some(scores_of(wanted, 0)), ..Extras::default() }
+    }
+}
+
+/// A made-up mood row for each file of the selection, from its id and
+/// `salt`: hundredths, so the byte rule's slack is at work (0.29 and 0.58
+/// at salt 0, 0.57 at salt 1), and a NULL head for one file in three.
+fn scores_of(wanted: &WantedCard, salt: u32) -> HashMap<String, Option<Scores>> {
+    let row = |id: u32| -> Scores {
+        let score = |k: u32| ((id * 7 + k * 29 + salt * 11) % 101) as f64 / 100.0;
+        std::array::from_fn(|k| (id % 3 != 0 || k != moods::PARTY).then(|| score(k as u32)))
+    };
+    let files = wanted.files.iter();
+    files.map(|f| (f.ledger.server_path.clone(), Some(row(f.ledger.mstream_id)))).collect()
 }
 
 /// A recording's made-up peaks, the server's M = 800: its hash over and over.
@@ -344,6 +376,19 @@ impl Hooks for Extras {
         }
         Waves::from(commit.waves_index(&fetched).expect("a waveform index"))
     }
+
+    fn moods(&mut self, commit: &Commit<'_>) -> Moods {
+        self.moods_asked += 1;
+        if self.clear {
+            return Moods::Clear;
+        }
+        let Some(scores) = &self.scores else { return Moods::Keep };
+        let tail = |r: &RecordIn| {
+            let row = scores.get(&r.ledger.as_ref()?.server_path)?;
+            Some((r.path.clone(), moods::encode(row.as_ref())))
+        };
+        Moods::Overlay(commit.records.iter().filter_map(tail).collect())
+    }
 }
 
 /// The run's clock and ids, fixed: the same run makes the same bytes.
@@ -415,11 +460,23 @@ fn recover_with(
     seed: u64,
     knobs: Knobs,
 ) -> Recovered {
+    recover_under(card, wanted, server, seed, knobs, Extras::default)
+}
+
+/// [`recover_with`], each of its runs under the hooks `extras` makes.
+fn recover_under(
+    card: &FatSim,
+    wanted: &WantedCard,
+    server: &mut Canned,
+    seed: u64,
+    knobs: Knobs,
+    extras: impl Fn() -> Extras,
+) -> Recovered {
     let start = card.log().len();
     let mut answers = Answers::default();
     loop {
         let before = card.log().len() - start;
-        let (hooks, expect, knobs) = (&mut Extras::default(), Expect::default(), knobs.clone());
+        let (hooks, expect, knobs) = (&mut extras(), Expect::default(), knobs.clone());
         let opened = Session::open(card, &expect, knobs, &answers, env(seed), hooks, &mut |_| {});
         let (ran, opened) = match opened {
             Err(Stop::Guard(Guard::DiskCheck(_))) if !answers.disk_checked => {
@@ -602,12 +659,13 @@ fn second(dir: &Path, wanted: &mut WantedCard, server: &mut Canned) {
 }
 
 /// What a card holds once a run is over, its stamps and ids aside:
-/// `/music`'s files, the root's records and folders, and its waveform index's
-/// slots (a file of one commit's is another's, but for its header).
+/// `/music`'s files, the root's records (their mood tails among them) and
+/// folders, and its waveform index's slots (a file of one commit's is
+/// another's, but for its header).
 #[derive(Debug, PartialEq, Eq)]
 struct Finished {
     music: BTreeMap<String, (u64, u64)>,
-    records: Vec<(String, u32, u64, String, u8, u16)>,
+    records: Vec<(String, u32, u64, String, u8, u16, Tail)>,
     folders: Vec<(String, u32)>,
     autodj: bool,
     waves: Option<Vec<u8>>,
@@ -659,7 +717,8 @@ fn finished(card: &FatSim) -> Finished {
         .iter()
         .map(|e| {
             let l = e.ledger.clone().unwrap_or_default();
-            (e.path.clone(), e.rec.size, e.rec.qfp, l.server_path, l.origin_flags, l.server)
+            let (rec, path) = (&e.rec, e.path.clone());
+            (path, rec.size, rec.qfp, l.server_path, l.origin_flags, l.server, rec.moods)
         })
         .collect();
     let flagged = tags.folders.iter().filter(|f| f.flags != 0);
@@ -2887,6 +2946,434 @@ fn a_file_read_again_as_unreadable_keeps_no_analysed_bpm() {
         let unreadable = Record { size, fat_time, qfp, container, flags, ..Record::default() };
         assert_eq!(e.rec, unreadable, "{}", e.path);
     }
+}
+
+// ── The mood tails (MOOD-FILTERS.md 5.2, 5.3) ───────────────────────────────
+
+/// The root's records' mood tails, by path.
+fn tails(card: &FatSim) -> BTreeMap<String, Tail> {
+    records(card).into_iter().map(|e| (e.path, e.rec.moods)).collect()
+}
+
+/// The root's tags file's minor and RECS stride: (1, 80) with a mood tail,
+/// (0, 72) with none.
+fn tags_shape(card: &FatSim) -> (u16, u32) {
+    let root = look(card).root.expect("a root");
+    let name = format!("/.mstream/{}", root.manifest.tags.name());
+    let bytes = card.read(&name, usize::MAX).expect("it reads").expect("the file the root names");
+    let h = container::Header::parse(&bytes).expect("a frame");
+    let entry = |i: u32| &bytes[h.header_bytes as usize + 32 * i as usize..][..32];
+    let recs = (0..h.section_count).map(entry).find(|e| u32_at(e, 0) == mptg::RECS);
+    (h.minor, u32_at(recs.expect("RECS"), 20))
+}
+
+/// The first sync onto a set-up card, its mood step bringing [`scores_of`]
+/// the selection: every record with its row's tail, in rows of 80 at minor 1.
+fn scored_card(dir: &Path) -> (FatSim, WantedCard, Canned) {
+    set_up(dir);
+    let card = FatSim::new(dir, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    let mut extras = Extras::scored(&wanted);
+    synced(&card, &wanted, &mut server, &mut extras);
+    assert_eq!(extras.moods_asked, 1, "the final commit's, and no checkpoint's");
+    let rows = scores_of(&wanted, 0);
+    for e in records(&card) {
+        let row = &rows[&e.ledger.as_ref().expect("a ledger row").server_path];
+        assert!(e.rec.has_moods(), "{}", e.path);
+        assert_eq!(e.rec.moods, moods::encode(row.as_ref()), "{}", e.path);
+    }
+    assert_eq!(tags_shape(&card), (1, 80));
+    (card, wanted, server)
+}
+
+/// 5.2: the tails are laid over the records before the final commit is
+/// weighed, so the scores the card has already make no commit.
+#[test]
+fn equal_scores_make_no_commit() {
+    let dir = Scratch::new("moods-equal");
+    let (card, wanted, mut server) = scored_card(&dir.0);
+    let (image, generation) = (commit_image(&card), generation_of(&card));
+    let mut again = Extras::scored(&wanted);
+    let events = synced(&card, &wanted, &mut server, &mut again);
+    assert_eq!(again.moods_asked, 1);
+    assert!(!events.iter().any(|e| matches!(e, Event::Committed { .. })), "{events:?}");
+    assert_eq!(events.last(), Some(&Event::Unchanged));
+    assert_eq!((commit_image(&card), generation_of(&card)), (image, generation));
+}
+
+/// One head of one track moved on the server, and nothing else: one commit
+/// (13's score-only commit), whose one change is that record's tail.
+#[test]
+fn a_score_changed_alone_makes_one_commit() {
+    let dir = Scratch::new("moods-changed");
+    let (card, wanted, mut server) = scored_card(&dir.0);
+    let (before, generation, fetched) = (records(&card), generation_of(&card), server.fetched.len());
+    let mut changed = Extras::scored(&wanted);
+    let rows = changed.scores.as_mut().expect("rows");
+    let row = rows.get_mut("Lib/Alex Artist/First Album/02 - Two.mp3").and_then(Option::as_mut);
+    let row = row.expect("Two's row");
+    row[moods::SAD] = Some(0.99);
+    let tail = moods::encode(Some(&*row));
+    let events = synced(&card, &wanted, &mut server, &mut changed);
+    let commits: Vec<&Event> = events.iter().filter(|e| matches!(e, Event::Committed { .. })).collect();
+    assert_eq!(commits, [&Event::Committed { generation: generation + 1, last: true }]);
+    assert_eq!(server.fetched.len(), fetched, "no music moved");
+    let after = records(&card);
+    assert_eq!(after.len(), before.len());
+    for (a, b) in after.iter().zip(&before) {
+        let rec = Record { moods: b.rec.moods, ..a.rec };
+        assert_eq!((&a.path, &rec, &a.run, &a.ledger), (&b.path, &b.rec, &b.run, &b.ledger));
+        let two = a.path == "Alex Artist/First Album/02 - Two.mp3";
+        assert_eq!(a.rec.moods != b.rec.moods, two, "{}", a.path);
+        if two {
+            assert_eq!(a.rec.moods, tail);
+        }
+    }
+
+    // The run after that has nothing to do.
+    let image = commit_image(&card);
+    let events = synced(&card, &wanted, &mut server, &mut changed);
+    assert!(!events.iter().any(|e| matches!(e, Event::Committed { .. })), "{events:?}");
+    assert_eq!(commit_image(&card), image);
+}
+
+/// A file moved, on the server (a rename on the card) or by the listener
+/// (kept at its new path), carries its tail, as it carries its bars; a file
+/// fetched again starts with none, and only the hook gives it one.
+#[test]
+fn a_moved_file_keeps_its_scores() {
+    let dir = Scratch::new("moods-moved");
+    let (card, mut wanted, mut server) = scored_card(&dir.0);
+    let before = tails(&card);
+    second(&dir.0, &mut wanted, &mut server);
+    // The step brings a row for the new file alone.
+    let six = "Lib/Casey Choir/Hymns/01 - Six.mp3";
+    let row = scores_of(&wanted, 0)[six];
+    let scores = Some(HashMap::from([(six.to_string(), row)]));
+    synced(&card, &wanted, &mut server, &mut Extras { scores, ..Extras::default() });
+    let after = tails(&card);
+    assert_eq!(after.len(), 6);
+    for (old, new) in [
+        ("Alex Artist/Second Album/01 - Three.flac", "Alex Artist/Second Album (Deluxe)/01 - Three.flac"),
+        ("Blake Band/Live/01 - Four.opus", "Moved/01 - Four.opus"),
+    ] {
+        assert_ne!(before[old], NO_ROW, "{old}");
+        assert_eq!(after[new], before[old], "{new}");
+    }
+    assert_eq!(after["Casey Choir/Hymns/01 - Six.mp3"], moods::encode(row.as_ref()));
+    // Fetched again: Two (another recording), Five (the listener deleted it),
+    // One beside the listener's edit of it.
+    for rel in [
+        "Alex Artist/First Album/02 - Two.mp3",
+        "BLAKE BAND/Live/02 - Five.opus",
+        "Alex Artist/First Album/01 - One (2).mp3",
+    ] {
+        assert_eq!(after[rel], NO_ROW, "{rel}");
+    }
+    assert_eq!(tags_shape(&card), (1, 80));
+}
+
+/// A record read again from its card file (another reader's tags file:
+/// 2.6.1) is a new reading of the file, and keeps the tail it had: the
+/// scores are the server's. So does a file that reads UNREADABLE now (the
+/// player takes no scores from its record: METADATA.md 2.9).
+#[test]
+fn a_record_read_again_keeps_its_scores() {
+    let dir = Scratch::new("moods-reread");
+    let (card, wanted, mut server) = scored_card(&dir.0);
+    let before = records(&card);
+    // One MP3's bytes gone bad under the same size and stamp.
+    let bad = before.iter().find(|e| e.rec.container == CONTAINER_MP3).expect("an MP3");
+    let path = dir.0.join("music").join(&bad.path);
+    let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, vec![0u8; bad.rec.size as usize]).unwrap();
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(stamp).unwrap();
+    left_by(&dir.0, &card, SOURCE_SOFTWARE, 1, unanchored);
+    let generation = generation_of(&card);
+    let done = sync(&card, &wanted, &mut server, 2).expect("a run");
+    assert_eq!((done.written, done.generation, done.verified), (0, generation + 1, Ok(())));
+    let after = records(&card);
+    assert_eq!(after.len(), before.len());
+    for (a, b) in after.iter().zip(&before) {
+        assert_eq!((&a.path, a.rec.moods), (&b.path, b.rec.moods));
+    }
+    let read = after.iter().find(|e| e.path == bad.path).expect("the bad one");
+    assert_eq!(read.rec.flags, UNREADABLE, "{}: read again", read.path);
+    assert!(read.rec.has_moods());
+    assert_eq!(tags_shape(&card), (1, 80));
+}
+
+/// A card whose file at `at` grows by `more` the moment a rename puts it
+/// there: a size that moves between the check of a server move's file and
+/// its read back.
+struct Grows<'c> {
+    card: &'c FatSim,
+    at: &'static str,
+    more: &'static [u8],
+}
+
+impl CardFs for Grows<'_> {
+    fn list(&self, dir: &str) -> io::Result<Vec<Item>> {
+        self.card.list(dir)
+    }
+
+    fn stat(&self, path: &str) -> io::Result<Option<Item>> {
+        self.card.stat(path)
+    }
+
+    fn read(&self, path: &str, max: usize) -> io::Result<Option<Vec<u8>>> {
+        self.card.read(path, max)
+    }
+
+    fn read_at(&self, path: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.card.read_at(path, offset, len)
+    }
+}
+
+impl CardWrite for Grows<'_> {
+    fn key(&self) -> String {
+        self.card.key()
+    }
+
+    fn serial(&self) -> io::Result<Option<Serial>> {
+        self.card.serial()
+    }
+
+    fn open(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>> {
+        self.card.open(path)
+    }
+
+    fn create(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>> {
+        self.card.create(path)
+    }
+
+    fn delete(&self, path: &str) -> io::Result<()> {
+        self.card.delete(path)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.card.rename(from, to)?;
+        if to == self.at {
+            let mut file = self.card.open(to)?;
+            file.seek(io::SeekFrom::End(0))?;
+            file.write_all(self.more)?;
+            file.sync()?;
+        }
+        Ok(())
+    }
+
+    fn mkdir(&self, path: &str) -> io::Result<()> {
+        self.card.mkdir(path)
+    }
+
+    fn rmdir(&self, path: &str) -> io::Result<()> {
+        self.card.rmdir(path)
+    }
+
+    fn lock_file(&self, path: &str) -> io::Result<Box<dyn LockFile + '_>> {
+        self.card.lock_file(path)
+    }
+}
+
+/// A server move whose file's size moved by its read back: the record is
+/// read again from the file's bytes, and keeps its tail.
+#[test]
+fn a_rename_whose_size_moved_keeps_its_scores() {
+    let dir = Scratch::new("moods-rename-grew");
+    let (card, mut wanted, mut server) = scored_card(&dir.0);
+    let before = records(&card);
+    let three = before.iter().find(|e| e.path == "Alex Artist/Second Album/01 - Three.flac");
+    let three = three.expect("Three");
+    server.add(MOVED, server.files["Lib/Alex Artist/Second Album/01 - Three.flac"].clone());
+    wanted.files[2].ledger.server_path = MOVED.into();
+    let more = b"bytes another writer put there".as_slice();
+    let at = "/music/Alex Artist/Second Album (Deluxe)/01 - Three.flac";
+    let grows = Grows { card: &card, at, more };
+    let (hooks, answers) = (&mut Extras::default(), Answers::default());
+    let opened = Session::open(&grows, &Expect::default(), knobs(), &answers, env(7), hooks, &mut |_| {});
+    let mut session = opened.unwrap_or_else(|e| panic!("open: {e}"));
+    let plan = session.plan(&wanted, &answers, &mut server).unwrap_or_else(|e| panic!("plan: {e}"));
+    assert_eq!((plan.renames(), plan.fetches().0), (1, 0), "a server move, and nothing else");
+    let done = session.run(plan, &mut server, hooks, &mut |_| {}).unwrap_or_else(|e| panic!("run: {e}"));
+    assert_eq!((done.renamed, done.verified), (1, Ok(())));
+    let after = records(&card);
+    let moved = after.iter().find(|e| e.path == "Alex Artist/Second Album (Deluxe)/01 - Three.flac");
+    let moved = moved.expect("Three, moved");
+    assert_eq!(moved.rec.size, three.rec.size + more.len() as u32, "read again at its new size");
+    assert!(moved.rec.has_moods());
+    assert_eq!(moved.rec.moods, three.rec.moods);
+}
+
+/// A checkpoint carries each record's tail as the run holds it and asks for
+/// none: a cut run's root has the old scores, and none for a file it fetched
+/// again; the next run's final commit lays the new ones.
+#[test]
+fn a_checkpoint_carries_scores_and_adds_none() {
+    let base = Scratch::new("moods-checkpoint-base");
+    let (card, mut wanted, mut server) = scored_card(&base.0);
+    let old = tails(&card);
+    drop(card);
+    let two = "Lib/Alex Artist/First Album/02 - Two.mp3";
+    let bytes = corpus("mpeg2.mp3");
+    server.add(two, bytes.clone());
+    wanted.files[1] = track(two, &bytes, 102);
+    let six = corpus("trck_0.mp3");
+    server.add("Lib/Casey Choir/Hymns/01 - Six.mp3", six.clone());
+    wanted.files.push(track("Lib/Casey Choir/Hymns/01 - Six.mp3", &six, 401));
+    let every_file = Knobs { checkpoint_files: 1, ..knobs() };
+    let rows = scores_of(&wanted, 1);
+    let new = || Extras { scores: Some(rows.clone()), ..Extras::default() };
+    let answers = Answers::default();
+
+    // The run uncut: where its first checkpoint's commit ends.
+    let whole = Scratch::new("moods-checkpoint-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut new(), every_file.clone(), answers, 2);
+    assert_eq!(ran.expect("uncut").verified, Ok(()));
+    let writes = card.log();
+    let uncut = finished(&card);
+    let commit = writes.iter().position(|w| w.starts_with("rename /.mstream/manifest.tmp"));
+    let commit = commit.expect("a commit") as u64;
+
+    // Cut right after it: Two replaced, Six not yet there, no ask made.
+    let dir = Scratch::new("moods-checkpoint");
+    copy_tree(&base.0, &dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    card.cut_at(commit + 2, Cut::Fail);
+    let mut cut = new();
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut cut, every_file, answers, 2);
+    assert!(ran.is_err(), "cut");
+    assert_eq!(cut.moods_asked, 0);
+    card.replug();
+    assert!(!look(&card).root.expect("a root").manifest.is_final(), "the checkpoint");
+    let held = tails(&card);
+    let fetched = "Alex Artist/First Album/02 - Two.mp3";
+    assert_eq!(held[fetched], NO_ROW, "fetched again: none yet");
+    assert!(!held.contains_key("Casey Choir/Hymns/01 - Six.mp3"));
+    assert_eq!(held.len(), old.len());
+    for (path, tail) in held.iter().filter(|(p, _)| *p != fetched) {
+        assert_eq!(Some(tail), old.get(path), "{path}: carried");
+    }
+    assert_eq!(tags_shape(&card), (1, 80));
+
+    // The next run's final commit lays the new scores, once.
+    let mut next = new();
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut next, knobs(), answers, 3);
+    assert_eq!(ran.expect("the next run").verified, Ok(()));
+    assert_eq!(next.moods_asked, 1);
+    assert_eq!(finished(&card), uncut, "where the uncut run left it");
+    for e in records(&card) {
+        let row = &rows[&e.ledger.as_ref().expect("a ledger row").server_path];
+        assert_eq!(e.rec.moods, moods::encode(row.as_ref()), "{}", e.path);
+        assert_ne!(old.get(&e.path), Some(&e.rec.moods), "{}: the new scores", e.path);
+    }
+}
+
+/// A run with no hook of its own, as a set-up's: no fetch, so each record
+/// keeps the tail it has; and a copied card's new identity carries them.
+#[test]
+fn no_hooks_keep_the_scores() {
+    let dir = Scratch::new("moods-no-hooks");
+    let (card, wanted, mut server) = scored_card(&dir.0);
+    let (want, generation) = (tails(&card), generation_of(&card));
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut NoHooks, knobs(), Answers::default(), 7);
+    let done = ran.expect("the run");
+    assert_eq!((done.generation, done.verified), (generation + 1, Ok(())), "a commit: no Auto DJ index");
+    assert_eq!((tails(&card), tags_shape(&card)), (want.clone(), (1, 80)));
+
+    let answers = Answers { new_card_id: true, ..Answers::default() };
+    let (session, plan) = plan_of(&card, &wanted, &mut server, answers, knobs());
+    let done = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    assert_eq!(done.verified, Ok(()));
+    assert_eq!(look(&card).root.unwrap().manifest.header.card_id, done.card_id);
+    assert_eq!((tails(&card), tags_shape(&card)), (want, (1, 80)));
+}
+
+/// A card for someone else: every tail cleared in one commit, the tags file
+/// back to rows of 72 at minor 0, every other field of every record as it
+/// was; and the run after that has nothing to do.
+#[test]
+fn clear_goes_back_to_stride_72_and_minor_0() {
+    let dir = Scratch::new("moods-clear");
+    let (card, wanted, mut server) = scored_card(&dir.0);
+    let (before, generation) = (records(&card), generation_of(&card));
+    let clear = || Extras { clear: true, ..Extras::default() };
+    let events = synced(&card, &wanted, &mut server, &mut clear());
+    assert_eq!(events.iter().filter(|e| matches!(e, Event::Committed { .. })).count(), 1);
+    assert_eq!((generation_of(&card), tags_shape(&card)), (generation + 1, (0, 72)));
+    let after = records(&card);
+    assert!(after.iter().all(|e| !e.rec.has_moods()));
+    let unscored = |r: &[mptg::Entry]| -> Vec<(String, Record)> {
+        r.iter().map(|e| (e.path.clone(), Record { moods: NO_ROW, ..e.rec })).collect()
+    };
+    assert_eq!(unscored(&after), unscored(&before));
+
+    let image = commit_image(&card);
+    let events = synced(&card, &wanted, &mut server, &mut clear());
+    assert!(!events.iter().any(|e| matches!(e, Event::Committed { .. })), "{events:?}");
+    assert_eq!(commit_image(&card), image);
+}
+
+/// Each write of a run that does nothing but add the tails, cut: the card
+/// reads as before or as that commit, and the next run finishes.
+#[test]
+fn every_cut_of_a_run_that_only_adds_moods_is_finished() {
+    let base = Scratch::new("moods-only-base");
+    set_up(&base.0);
+    let card = FatSim::new(&base.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    synced(&card, &wanted, &mut server, &mut Extras::default());
+    assert_eq!(tags_shape(&card), (0, 72));
+    drop(card);
+
+    let whole = Scratch::new("moods-only-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    synced(&card, &wanted, &mut server, &mut Extras::scored(&wanted));
+    let writes = card.log();
+    let want = finished(&card);
+    assert_eq!(tags_shape(&card), (1, 80));
+    assert!(!writes.iter().any(|w| w.contains(" /music/")), "no music moved: {writes:?}");
+
+    let mut laid = 0;
+    for (n, how) in cuts_of(&writes, writes.len()) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let dir = Scratch::new("moods-only");
+        copy_tree(&base.0, &dir.0);
+        let card = FatSim::new(&dir.0, SERIAL);
+        card.cut_at(n, how);
+        let hooks = &mut Extras::scored(&wanted);
+        let _ = sync_with(&card, &wanted, &mut server, hooks, knobs(), Answers::default(), 7);
+        card.replug();
+        laid += usize::from(tags_shape(&card) == (1, 80));
+        let again = recover_under(&card, &wanted, &mut server, 3, knobs(), || Extras::scored(&wanted));
+        let outcome = again.ran.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), want, "{what}");
+    }
+    assert!(laid > 0, "the later cuts leave the commit that lays them");
+}
+
+/// A tail a reader would refuse never reaches the card: the hook's answer
+/// stops the run before the commit's first write, the card as it was.
+#[test]
+fn a_tail_a_reader_refuses_stops_the_run_with_the_card_as_it_was() {
+    struct Hands;
+    impl Hooks for Hands {
+        fn moods(&mut self, commit: &Commit<'_>) -> Moods {
+            let first = commit.records.first().expect("a record");
+            Moods::Overlay(HashMap::from([(first.path.clone(), [0xAB; 8])]))
+        }
+    }
+    let dir = Scratch::new("moods-refused");
+    let (card, wanted, mut server) = first(&dir.0);
+    let root = look(&card).root.unwrap().manifest;
+    let (ran, _) = sync_with(&card, &wanted, &mut server, &mut Hands, knobs(), Answers::default(), 7);
+    assert!(matches!(&ran, Err(Stop::Refused(why)) if why.contains("mood tail")), "{ran:?}");
+    assert_eq!(look(&card).root.unwrap().manifest, root);
 }
 
 // ── Partials a later run takes up (2.12.8) ──────────────────────────────────

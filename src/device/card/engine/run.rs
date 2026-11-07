@@ -6,8 +6,8 @@
 //! stores it, its record read from those bytes. A checkpoint every 500 files
 //! or 5 minutes commits what is done, and another comes ahead of an index step
 //! that may keep the card waiting long; at the end the thumbnails, the Auto DJ
-//! and waveform indexes and the final commit, the leftovers collected, and the
-//! card read back as the device will read it.
+//! and waveform indexes, the mood tails and the final commit, the leftovers
+//! collected, and the card read back as the device will read it.
 //!
 //! A file a later run may take up (2.12.8) is fetched into its partial in
 //! `resume/` instead — its own listed one taken up, or a new one — flushed
@@ -27,6 +27,7 @@ use std::io::{self, Seek as _, SeekFrom, Write as _};
 use std::time::Instant;
 
 use super::super::contract::container::MPTG;
+use super::super::contract::moods::NO_ROW;
 use super::super::contract::mpdj::{self, Table};
 use super::super::contract::mptg::{
     self, BPM_ANALYSED, CONTAINER_NOT_AUDIO, FOLDER_OWNED, FOLDER_THUMB, FolderIn, Ledger, Meta,
@@ -54,8 +55,8 @@ use super::resume::{Entry, same_server, take_up};
 use super::settle::{card_qfp, companion_generation, entries, ms};
 use super::survey::{Music, join, key_path};
 use super::{
-    Album, AutoDj, Commit, Cover, Event, Fetcher, Have, Hooks, Outcome, Part, Report, Session, Stop,
-    WantedFile, Waves,
+    Album, AutoDj, Commit, Cover, Event, Fetcher, Have, Hooks, Moods, Outcome, Part, Report,
+    Session, Stop, WantedFile, Waves,
 };
 
 /// A record of the next commit, by its path.
@@ -536,7 +537,10 @@ impl<'r, 'c> Runner<'r, 'c> {
 
     /// A carried record read again from its card file, mStream's analysis
     /// kept where the tags still have neither a BPM nor a key (none for a
-    /// file that reads UNREADABLE now, whose fields are all absent: 2.6.4).
+    /// file that reads UNREADABLE now, whose fields are all absent: 2.6.4),
+    /// and its mood tail kept whatever the file reads as: the scores are
+    /// the server's, never the file's (the final commit's hook may lay new
+    /// ones over it).
     fn read_again(
         &mut self,
         rel: &str,
@@ -549,6 +553,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             (rec.bpm10, rec.camelot) = (old.bpm10, old.camelot);
             rec.flags |= BPM_ANALYSED;
         }
+        rec.moods = old.moods;
         Ok((rec, run))
     }
 
@@ -1174,7 +1179,7 @@ impl<'r, 'c> Runner<'r, 'c> {
                 remap[i] = servers.len() as u16;
             }
         }
-        let records: Vec<RecordIn> = self
+        let mut records: Vec<RecordIn> = self
             .ledger
             .iter()
             .map(|(path, o)| RecordIn {
@@ -1192,6 +1197,7 @@ impl<'r, 'c> Runner<'r, 'c> {
 
         // The indexes: a checkpoint names the old ones again; the final
         // commit's are the hooks' (AUTODJ-INDEX.md 7.3, WAVEFORM-INDEX.md 7.3).
+        // So are its mood tails, where a checkpoint carries the records' own.
         let mut autodj = self.autodj.clone();
         let mut new_index: Option<Vec<u8>> = None;
         let mut waves = self.waves.clone();
@@ -1232,9 +1238,11 @@ impl<'r, 'c> Runner<'r, 'c> {
                     comp
                 }
             };
-            // The step before may have taken minutes, and this one's fetch may
-            // take half an hour with no write of its own to find the card gone.
+            // The step before may have taken minutes, and the fetches of the
+            // next two (the mood scores, then the waveforms, which may take
+            // half an hour) have no write of their own to find the card gone.
             self.s.bound.check(true)?;
+            let moods = hooks.moods(&commit);
             waves = match hooks.waves(&commit, events) {
                 Waves::None => None,
                 Waves::Same => self.waves.clone(),
@@ -1251,6 +1259,9 @@ impl<'r, 'c> Runner<'r, 'c> {
                     comp
                 }
             };
+            // The tails last, once no step reads the records: the commit is
+            // weighed with them below, so equal scores make none.
+            lay(&mut records, &moods);
         }
 
         // The root's server 0 header: the server read, or as it was; its
@@ -1293,7 +1304,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             read_rules: READ_RULES,
             generation,
             card_id: self.card_id,
-            minor: 0,
+            minor: mptg::minor_of(&records),
             producer: self.s.env.producer.clone(),
         };
         let tags = mptg::write(&meta, &records, &folders).map_err(|e| Stop::Refused(e.0.into()))?;
@@ -1582,6 +1593,21 @@ impl<'r, 'c> Runner<'r, 'c> {
 /// A file as the plan's listing had it: its size and stamp.
 fn listed(item: &Item, r: Replaced) -> bool {
     !item.dir && item.size == r.size && item.fat_time == r.fat_time
+}
+
+/// The final commit's records under the mood hook's answer: each as it
+/// is, each without a tail, or each the overlay names with its tail there.
+fn lay(records: &mut [RecordIn], moods: &Moods) {
+    for r in records {
+        r.rec.moods = match moods {
+            Moods::Keep => return,
+            Moods::Clear => NO_ROW,
+            Moods::Overlay(tails) => match tails.get(&r.path) {
+                Some(tail) => *tail,
+                None => continue,
+            },
+        };
+    }
 }
 
 /// The ops of a plan in `pending.bin`'s order (2.12.5): the deletes, then
