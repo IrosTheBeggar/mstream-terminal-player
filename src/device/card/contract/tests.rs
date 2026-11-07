@@ -3,8 +3,8 @@
 //! folder's README names the commit): every vector of 2.18, every golden
 //! written byte for byte from its description, every hardening file read as
 //! absent or present for the player's own reason, every golden truncated at
-//! every byte and every bit of it flipped, and round trips of generated
-//! libraries in any input order.
+//! every byte and every bit of it flipped, moods.json's mood tails (2.6.4),
+//! and round trips of generated libraries in any input order.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ use serde_json::Value;
 use super::container::{self, MPDJ, MPTG, MPWF, MSMF, MSPD, unknown_major};
 use super::device_txt::{DeviceTxt, Format};
 use super::fat::{fat_from_wall, fat_time, fat_valid, fat_wall, skew, time_matches};
+use super::moods::{self, Scores, Tail};
 use super::mpdj::{self, Table};
 use super::mppl;
 use super::mptg::{self, FolderIn, Ledger, Meta, Record, RecordIn, Tags};
@@ -145,8 +146,18 @@ fn ledger_of(l: &Value) -> Ledger {
     }
 }
 
+/// A server row as the fixtures give one: 8 numbers or nulls in `heads`
+/// order.
+fn scores_of(v: &Value) -> Scores {
+    let row = v.as_array().expect("a row of scores");
+    assert_eq!(row.len(), moods::HEADS.len());
+    std::array::from_fn(|i| row[i].as_f64())
+}
+
 /// A tags description (raw tag values: the writer's caller applies 2.3.6
-/// and sets TRUNCATED, as the tag reader will).
+/// and sets TRUNCATED, as the tag reader will). A record's `scores` are its
+/// server row, from which the writer's caller makes its mood tail, as the
+/// sync will; null, or none given, is no row.
 fn tags_input(d: &Value) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
     let source = num(&d["source"]) as u8;
     let meta = Meta {
@@ -186,6 +197,7 @@ fn tags_input(d: &Value) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
             pic_type: num(&pic["type"]) as u8,
             pic_mime: num(&pic["mime"]) as u8,
             pic_coding: num(&pic["coding"]) as u8,
+            moods: moods::encode(r.get("scores").filter(|s| !s.is_null()).map(scores_of).as_ref()),
         };
         let ledger = (source != mptg::SOURCE_DEVICE).then(|| ledger_of(&r["ledger"]));
         records.push(RecordIn { path: text(&r["path"]).to_owned(), rec, run, ledger });
@@ -1220,7 +1232,7 @@ fn goldens_are_written_byte_for_byte() {
         .map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(seen, goldens, "a golden with no description, or the other way");
-    assert_eq!(goldens.len(), 22);
+    assert_eq!(goldens.len(), 23);
 }
 
 /// An Auto DJ golden read and checked whole, then laid out again from its
@@ -1295,6 +1307,27 @@ fn goldens_read_back() {
     // A device's tags file: no ledger.
     let device = mptg::read(&golden("tags-device.bin"), mptg::Uses::ALL).expect("a device's records");
     assert!(device.source == mptg::SOURCE_DEVICE && !device.has_ledger && device.records.len() == 4);
+    // A file with no mood tail: minor 0, rows of 72.
+    assert_eq!((tags.header.minor, section_of(&tags_file, mptg::RECS).len()), (0, 72 * tags.records.len()));
+
+    // Mood tails (minor 1, 2.6.4): rows of 80 bytes; MOOD-FILTERS.md 5.7's
+    // worked example; a row of NULLs, analysed; none for no server row, nor
+    // for a file with no track. The device reads the same tails, and
+    // carried forward the file is itself again.
+    let moods_file = golden("tags-moods.bin");
+    let scored = mptg::read(&moods_file, mptg::Uses::ALL).expect("a minor 1 file");
+    assert_eq!(scored.header.minor, 1);
+    assert_eq!(section_of(&moods_file, mptg::RECS).len(), 80 * scored.records.len());
+    let tail = |path: &str| scored.records.iter().find(|e| e.path == path).expect("a record").rec.moods;
+    assert_eq!(spaced_of(&tail("Artist A/song.flac")), "03 3A 46 1D 31 FF 46 00");
+    assert_eq!(spaced_of(&tail("Artist A/all-null.flac")), "01 FF FF FF FF FF FF 00");
+    assert_eq!((tail("Artist A/no-row.flac"), tail("Artist B/Album/cover.jpg")), (moods::NO_ROW, moods::NO_ROW));
+    assert_eq!(scored.records.iter().filter(|e| e.rec.has_moods()).count(), 8);
+    let as_device = mptg::read(&moods_file, mptg::Uses::DEVICE).expect("the device's reading");
+    assert!(as_device.records.iter().zip(&scored.records).all(|(d, e)| d.rec == e.rec));
+    let (meta, records, folders) = scored.to_input();
+    assert_eq!((meta.minor, mptg::minor_of(&records)), (1, 1));
+    assert!(mptg::write(&meta, &records, &folders).expect("carried forward") == moods_file);
 
     // The plan, in 2.12.5's order.
     let plan = Plan::read(&golden("pending.bin")).expect("the plan");
@@ -1400,7 +1433,7 @@ fn lookup_name(l: mpwf::Lookup) -> &'static str {
 fn hardening_files_read_as_listed() {
     let index = json("hardening/index.json");
     let entries = index.as_array().expect("the index");
-    assert_eq!(entries.len(), 195);
+    assert_eq!(entries.len(), 198);
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let (mut waves_why, mut waves_lookups) = (BTreeSet::new(), 0);
     for e in entries {
@@ -1459,7 +1492,7 @@ fn hardening_files_read_as_listed() {
     }
     assert_eq!(counts.into_iter().collect::<Vec<_>>(), [
         ("MPDJ".to_owned(), 50),
-        ("MPTG".to_owned(), 52),
+        ("MPTG".to_owned(), 55),
         ("MPWF".to_owned(), 50),
         ("MSMF".to_owned(), 34),
         ("MSPD".to_owned(), 9),
@@ -1530,6 +1563,32 @@ fn hardening_files_read_as_listed() {
     let m = Manifest::read(&bytes("hardening/msmf-minor-1.bin"), msmf::Uses::ALL).expect("a newer minor");
     let carried = msmf::write(&m.to_input()).expect("carried forward");
     assert!(carried == golden("manifest-servers.bin"));
+
+    // The mood tail's files, read as the firmware reads them (FOLD, RECS and
+    // STRS alone): rows of 88 bytes give their 80-byte prefix's tails, the
+    // golden's every one; a tail a reader refuses gives none, nor does a row
+    // of 76, nor mptg-minor-1's 0xAB.
+    let tails = |file: &[u8]| -> Vec<Tail> {
+        let t = mptg::read(file, mptg::Uses::DEVICE).expect("the records");
+        t.records.iter().map(|e| e.rec.moods).collect()
+    };
+    let want = tails(&golden("tags-moods.bin"));
+    assert_eq!(want.iter().filter(|t| **t != moods::NO_ROW).count(), 8);
+    assert_eq!(tails(&bytes("hardening/mptg-moods-longer.bin")), want);
+    for file in ["mptg-tail-invalid.bin", "mptg-stride-76.bin", "mptg-minor-1.bin"] {
+        assert!(tails(&bytes(&format!("hardening/{file}"))).iter().all(|t| *t == moods::NO_ROW), "{file}");
+    }
+    // Carried forward, what a reader took is kept and what it refused goes:
+    // the golden each was made from, at its own stride.
+    for (file, golden_name) in [
+        ("mptg-moods-longer.bin", "tags-moods.bin"),
+        ("mptg-tail-invalid.bin", "tags-0000002a.bin"),
+        ("mptg-stride-76.bin", "tags-0000002a.bin"),
+    ] {
+        let t = mptg::read(&bytes(&format!("hardening/{file}")), mptg::Uses::ALL).expect("the records");
+        let (meta, records, folders) = t.to_input();
+        assert!(mptg::write(&meta, &records, &folders).expect("carried forward") == golden(golden_name), "{file}");
+    }
 }
 
 /// ORs `bits` into every row of a section, at `at` in the row.
@@ -1628,6 +1687,7 @@ fn goldens_truncated_or_flipped_are_absent() {
         "tags-device.bin",
         "tags-00000001.bin",
         "tags-00000007.bin",
+        "tags-moods.bin",
         "manifest.bin",
         "manifest-min.bin",
         "manifest-servers.bin",
@@ -1716,6 +1776,7 @@ fn mutated_files_never_panic() {
         "tags-0000002a.bin",
         "tags-00000007.bin",
         "tags-device.bin",
+        "tags-moods.bin",
         "manifest.bin",
         "manifest-servers.bin",
         "manifest-acks.bin",
@@ -2524,16 +2585,149 @@ fn the_waves_writer_at_its_edges() {
     assert_eq!(m.waves.as_ref(), Some(&waves));
 }
 
+// ── The mood tail (2.6.4; the player's MOOD-FILTERS.md 5.3) ─────────────────
+
+/// A tail as the fixtures spell one, `03 3A 46 1D 31 FF 46 00`.
+fn tail_of(v: &Value) -> Tail {
+    spaced(text(v)).try_into().expect("a tail of 8 bytes")
+}
+
+/// The player's mood word of a tail (METADATA 3.4.3, `lib/core/
+/// MoodFilter.cpp`'s wordOfTail). The device makes it, never this kit: it
+/// is here to show that the tails this kit writes and takes are those whose
+/// words the fixtures give. 0 for a tail a reader refuses; else analysed, a
+/// scale's field side << 2 | bucket (4 for NULL, its order bit ignored, and
+/// bucket 0 with no side), the voice NULL bit for a NULL instrumental, and
+/// a NULL tag 0.
+fn mood_word(t: &Tail) -> u16 {
+    if moods::read_tail(t).is_none() {
+        return 0;
+    }
+    let bucket = |v: u8| [30, 50, 70].iter().filter(|&&bar| v >= bar).count() as u16;
+    let scale = |v: u8, second: bool| match (v, bucket(v)) {
+        (moods::NULL, _) => 4,
+        (_, b) if b > 0 && second => 4 | b,
+        (_, b) => b,
+    };
+    let tag = |v: u8| if v == moods::NULL { 0 } else { bucket(v) };
+    let valence = scale(t[1], t[0] & moods::SAD_WINS != 0) << 11;
+    let energy = scale(t[2], t[0] & moods::AGGRESSIVE_WINS != 0) << 8;
+    let voice = if t[3] == moods::NULL { 1 << 14 } else { bucket(t[3]) << 6 };
+    1 << 15 | valence | energy | voice | tag(t[4]) << 4 | tag(t[5]) << 2 | tag(t[6])
+}
+
+/// Every row of moods.json: its scores make its tail, which a reader takes
+/// (none for no row), whose word is the row's.
+#[test]
+fn moods_json_rows_make_their_tails_and_words() {
+    let m = json("moods.json");
+    let heads: Vec<&str> = m["heads"].as_array().expect("heads").iter().map(text).collect();
+    assert_eq!(heads, moods::HEADS, "a row's slots");
+    let rows = m["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 40);
+    for r in rows {
+        let what = text(&r["note"]);
+        let scores = (!r["scores"].is_null()).then(|| scores_of(&r["scores"]));
+        let tail = moods::encode(scores.as_ref());
+        assert_eq!(spaced_of(&tail), text(&r["tail"]), "{what}");
+        assert_eq!(moods::read_tail(&tail), scores.map(|_| tail), "{what}: a tail this kit writes reads");
+        assert_eq!(u64::from(mood_word(&tail)), num(&r["word"]), "{what}");
+    }
+}
+
+/// Every tail of moods.json is taken or refused as listed, and a tail taken
+/// is kept as it came, an order bit beside a NULL included.
+#[test]
+fn moods_json_tails_read_as_listed() {
+    let tails = json("moods.json")["tails"].as_array().expect("tails").clone();
+    assert_eq!(tails.len(), 23);
+    for e in &tails {
+        let (t, what) = (tail_of(&e["tail"]), text(&e["note"]));
+        let read = moods::read_tail(&t);
+        assert_eq!(read.is_some(), e["valid"] == true, "{what}");
+        assert!(read.is_none_or(|r| r == t), "{what}");
+        assert_eq!(u64::from(mood_word(&t)), num(&e["word"]), "{what}");
+    }
+    assert_eq!(moods::read_tail(&[1, 0, 0, 0, 0, 0, 0]), None, "seven bytes are no tail");
+}
+
+/// moods.json's values: each score's byte by the slack floor, clamped, 255
+/// for NULL.
+#[test]
+fn moods_json_values_follow_the_value_rule() {
+    for v in json("moods.json")["values"].as_array().expect("values") {
+        assert_eq!(u64::from(moods::value(v["score"].as_f64())), num(&v["value"]), "{v}");
+    }
+    // The products a plain floor gets wrong.
+    let floor = |s: f64| (s * 100.0).floor();
+    assert_eq!([0.29, 0.57, 0.58].map(floor), [28.0, 56.0, 57.0]);
+    assert_eq!([0.29, 0.57, 0.58].map(|s| moods::value(Some(s))), [29, 57, 58]);
+}
+
+/// A tail a reader refuses costs its record the scores and nothing more:
+/// each of moods.json's tails in turn on one record of tags-moods.bin, the
+/// file resealed, reads for the software and the device alike, every record
+/// as it was but that one's tail, taken or not as listed.
+#[test]
+fn a_tail_counts_only_when_it_validates() {
+    let file = golden("tags-moods.bin");
+    let want = mptg::read(&file, mptg::Uses::ALL).expect("the golden");
+    let (off, len) = section_span(&file, mptg::RECS);
+    assert_eq!(len, 80 * want.records.len());
+    let row = want.records.iter().position(|e| e.path == "Artist A/scored.flac").expect("the record");
+    for e in json("moods.json")["tails"].as_array().expect("tails") {
+        let (t, what) = (tail_of(&e["tail"]), text(&e["note"]));
+        let mut b = file.clone();
+        b[off + 80 * row + 72..][..8].copy_from_slice(&t);
+        reseal(&mut b);
+        for uses in [mptg::Uses::ALL, mptg::Uses::DEVICE] {
+            let got = mptg::read(&b, uses).unwrap_or_else(|w| panic!("{what}: {w}"));
+            for (i, (g, w)) in got.records.iter().zip(&want.records).enumerate() {
+                let taken = if e["valid"] == true { t } else { moods::NO_ROW };
+                let moods = if i == row { taken } else { w.rec.moods };
+                assert_eq!(g.rec, Record { moods, ..w.rec }, "{what}: {}", w.path);
+                assert_eq!(g.rec.has_moods(), moods != moods::NO_ROW, "{what}");
+            }
+        }
+    }
+}
+
+/// 72 stays the smallest RECS stride a reader takes (2.4.5): rows of 72,
+/// 76, 80 and 88 all read, the tail only from rows of 80 or more, and a
+/// writer with no tail to write writes 72, as every card before minor 1.
+#[test]
+fn the_stride_constant_stays_72() {
+    assert_eq!((mptg::RECS_STRIDE, mptg::RECS_MOODS_STRIDE), (72, 80));
+    assert_eq!((moods::TAIL_AT, moods::TAIL_AT + moods::TAIL_BYTES), (72, 80));
+    let files = [
+        ("golden/tags-0000002a.bin", 72, false),
+        ("hardening/mptg-stride-76.bin", 76, false),
+        ("golden/tags-moods.bin", 80, true),
+        ("hardening/mptg-moods-longer.bin", 88, true),
+    ];
+    for (name, stride, scored) in files {
+        let b = bytes(name);
+        let t = mptg::read(&b, mptg::Uses::ALL).expect(name);
+        assert_eq!(section_of(&b, mptg::RECS).len(), stride * t.records.len(), "{name}");
+        assert_eq!(t.records.iter().any(|e| e.rec.has_moods()), scored, "{name}");
+    }
+    let meta = Meta { source: mptg::SOURCE_SOFTWARE, read_rules: 1, generation: 2, ..Meta::default() };
+    let file = mptg::write(&meta, &[RecordIn { path: "a.mp3".into(), ..RecordIn::default() }], &[]).expect("a file");
+    assert_eq!(section_of(&file, mptg::RECS).len(), 72);
+}
+
 // ── Round trips and the canonical order ─────────────────────────────────────
 
 /// A made-up library: folders from a small alphabet that holds the order's
 /// traps (`A`, `A B`, `A-`, `a`, `É`, NFC and NFD), records with tag values
-/// that need 2.3.6 (control characters, repeats, long values), ledger rows
-/// and OWNED folders.
+/// that need 2.3.6 (control characters, repeats, long values), ledger rows,
+/// OWNED folders and, in half the software's files, mood tails from server
+/// rows with NULL heads, ties and scores outside 0-1 (the minor theirs).
 fn made_up_library(rng: &mut fastrand::Rng, records: usize) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
     const NAMES: [&str; 9] = ["A", "A B", "A-", "B", "a", "\u{c9}", "Caf\u{e9}", "Cafe\u{301}", "Disc 1"];
     let source = [mptg::SOURCE_DEVICE, mptg::SOURCE_SOFTWARE, mptg::SOURCE_SYNC_AGENT][rng.usize(..3)];
-    let meta = Meta {
+    let scored = source != mptg::SOURCE_DEVICE && rng.bool();
+    let mut meta = Meta {
         source,
         parser_version: rng.u16(..),
         read_rules: 1,
@@ -2580,6 +2774,14 @@ fn made_up_library(rng: &mut fastrand::Rng, records: usize) -> (Meta, Vec<Record
             camelot: rng.u8(..),
             pic_offset: rng.u32(..),
             pic_coding: rng.u8(..),
+            moods: match scored && rng.bool() {
+                true => moods::encode(Some(&std::array::from_fn(|_| match rng.u8(..6) {
+                    0 => None,
+                    1 => Some(0.5),
+                    _ => Some(rng.f64() * 1.2 - 0.1),
+                }))),
+                false => moods::NO_ROW,
+            },
             ..Record::default()
         };
         let ledger = (source != mptg::SOURCE_DEVICE && rng.bool()).then(|| Ledger {
@@ -2599,6 +2801,7 @@ fn made_up_library(rng: &mut fastrand::Rng, records: usize) -> (Meta, Vec<Record
             FolderIn { path, flags: mptg::FOLDER_OWNED }
         })
         .collect();
+    meta.minor = mptg::minor_of(&out);
     (meta, out, folders)
 }
 
@@ -2611,6 +2814,10 @@ fn tags_round_trip_in_any_order() {
         let file = mptg::write(&meta, &records, &folders).expect("a tags file");
         let tags = mptg::read(&file, mptg::Uses::ALL).unwrap_or_else(|w| panic!("round {round}: {w}"));
         assert!(mptg::read(&file, mptg::Uses::DEVICE).is_ok());
+        // Rows of 80 bytes and minor 1 with a tail (each record's, 8 zero
+        // bytes where it has none), else 72 and minor 0.
+        let stride = if meta.minor == 1 { 80 } else { 72 };
+        assert_eq!((tags.header.minor, section_of(&file, mptg::RECS).len()), (meta.minor, stride * n));
         // Read back as written: each record by its path, its hash the path's.
         assert_eq!(tags.records.len(), records.len());
         for e in &tags.records {
@@ -2674,6 +2881,27 @@ fn tags_writer_refuses_what_its_reader_would() {
     ] {
         assert!(mptg::write(&meta, &[with(r, origin)], &[]).is_err(), "{r:?} {origin}");
     }
+    // A mood tail (2.6.4): taken in a software file of minor 1, beside a
+    // record with none; refused where a reader would refuse it, in the
+    // device's own file, and under a minor its records don't make.
+    let tail = moods::encode(Some(&[Some(0.5); 8]));
+    let scored = |path: &str, moods: Tail| RecordIn { rec: Record { moods, ..Record::default() }, ..rec(path) };
+    let minor1 = Meta { minor: 1, ..meta.clone() };
+    let file = mptg::write(&minor1, &[scored("a.mp3", tail), rec("b.mp3")], &[]).expect("a tail beside none");
+    let back = mptg::read(&file, mptg::Uses::ALL).expect("read");
+    assert_eq!(back.records.iter().map(|e| e.rec.moods).collect::<Vec<_>>(), [tail, moods::NO_ROW]);
+    for e in json("moods.json")["tails"].as_array().expect("tails") {
+        let t = tail_of(&e["tail"]);
+        if t != moods::NO_ROW {
+            let written = mptg::write(&minor1, &[scored("a.mp3", t)], &[]);
+            assert_eq!(written.is_ok(), e["valid"] == true, "{}", text(&e["note"]));
+        }
+    }
+    assert!(mptg::write(&meta, &[scored("a.mp3", tail)], &[]).is_err(), "under minor 0");
+    assert!(mptg::write(&Meta { minor: 2, ..meta.clone() }, &[scored("a.mp3", tail)], &[]).is_err());
+    assert!(mptg::write(&minor1, &[rec("a.mp3")], &[]).is_err(), "minor 1 with no tail");
+    let device1 = Meta { minor: 1, ..device.clone() };
+    assert!(mptg::write(&device1, &[scored("a.mp3", tail)], &[]).is_err(), "in the device's own file");
     let owned = |flags| FolderIn { path: "Owned".into(), flags };
     assert!(mptg::write(&meta, &[], &[owned(mptg::FOLDER_FLAGS_V1)]).is_ok());
     assert!(mptg::write(&meta, &[], &[owned(mptg::FOLDER_OWNED | 4)]).is_err());
