@@ -2361,7 +2361,7 @@ dev:
     next_asked: "asked %{when}"
     next_signin: "%{n} plays wait for %{server}: sign in to send them"
     conv_assumed: "assumed for the %{player} on %{port} (%{version}): no device.txt yet"
-    conv_gift: "for someone else: no Auto DJ index, plays not sent"
+    conv_gift: "for someone else: no Auto DJ index or mood scores, plays not sent"
     btn_sync: "Sync"
     btn_setup: "Set up"
     btn_setup_as: "Set up as card %{i}"

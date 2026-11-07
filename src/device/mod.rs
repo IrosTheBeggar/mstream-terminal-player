@@ -216,7 +216,8 @@ pub struct CardArgs {
     /// setup: write its Auto DJ index
     #[arg(long = "autodj", value_parser = ["on", "off"])]
     auto_dj: Option<String>,
-    /// setup: a card for you, or for someone else (no Auto DJ index, plays not sent)
+    /// setup: a card for you, or for someone else (no Auto DJ index or mood scores,
+    /// plays not sent)
     #[arg(long = "for", value_parser = ["me", "someone-else"])]
     for_whom: Option<String>,
     /// setup: what this computer takes from each peer a day, in MB
@@ -1774,6 +1775,15 @@ mod tests {
         assert!(flags(&["card", "E:", "setup", "--convert", "some"]).is_err());
         assert!(flags(&["card", "E:", "format"]).is_err(), "formatting is device format's (B6)");
         assert!(flags(&["card", "E:"]).is_err(), "an action, always");
+        // --for says what a card for someone else goes without, as the Card
+        // view's Converts row does (clause 51b).
+        let mut line = Line::command();
+        let card = line.find_subcommand_mut("card").expect("device card");
+        let gift = card.get_arguments().find(|a| a.get_long() == Some("for"));
+        let gift = gift.and_then(|a| a.get_help()).map(ToString::to_string);
+        let words = "setup: a card for you, or for someone else \
+                     (no Auto DJ index or mood scores, plays not sent)";
+        assert_eq!(gift.as_deref(), Some(words));
     }
 
     /// The card probe answers to its name and stays out of the help, as the

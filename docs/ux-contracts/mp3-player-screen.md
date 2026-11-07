@@ -1047,8 +1047,9 @@ comes from the cache, or a download, beside them.
       add" with a card that lacks them: clause 51a), or "nothing new on
       Home", or the server not answering, or the fit's verdict (clause 49);
     - **Converts:** the conversion rule ("only what the player can't play,
-      to Opus 192k"); a card for someone else adds "no Auto DJ index, plays
-      not sent";
+      to Opus 192k"); a card for someone else adds, dim, "for someone else:
+      no Auto DJ index or mood scores, plays not sent" (clause 51b), in two
+      lines at most in every locale;
     - **the bottom row:** `▸ Details`, then *Settings…*, *Send the plays*
       (whenever plays wait) and *Eject*, and the one primary. Short of room
       before the primary (a long locale), *Send the plays* gives way first,
@@ -1132,9 +1133,10 @@ comes from the cache, or a download, beside them.
     - **Writing:** Convert (only what it can't play, or everything), Into (a
       dropdown of codecs; MP3 above 192k dim until the server offers it),
       Removals (follow the server, or never remove: Q1), Covers, Auto DJ,
-      For (me, or someone else: no Auto DJ index, no plays sent), Player
-      (from `device.txt`, else a dropdown defaulting to the board last seen
-      or the firmware last flashed), Peer budget (the volume widget).
+      For (me, or someone else: no Auto DJ index or mood scores, no plays
+      sent), Player (from `device.txt`, else a dropdown defaulting to the
+      board last seen or the firmware last flashed), Peer budget (the volume
+      widget).
 
     A help line under the rule explains the focused row (two lines, an
     ellipsis past them). Its words keep to the two lines in every locale,
@@ -1177,9 +1179,9 @@ comes from the cache, or a download, beside them.
 51. **Sync ▸** starts a run on the transfer worker for that card. The run
     lists the source, plans, passes the gates (clause 58), sends the plays,
     deletes, fetches, renames and reads back, checkpoints, writes the
-    covers, the Auto DJ index and the waveforms (clause 51a), commits and
-    verifies (the card contract's 2.12). The Card view follows it with no
-    primary:
+    covers, the Auto DJ index, the mood scores (clause 51b) and the
+    waveforms (clause 51a), commits and verifies (the card contract's 2.12).
+    The Card view follows it with no primary:
     - Holds stays;
     - **Syncing** is a bar of the plan's bytes, with "1,204 of 4,812 · 6.1
       of 21.3 GB" and the time left once the rate is known, then dim "12.4
@@ -1233,6 +1235,57 @@ comes from the cache, or a download, beside them.
     - **The fit** counts the file (clause 49). A card with nothing else to do
       and no room for it goes without, in a line of the log: it never reads
       "doesn't fit" for its waveforms.
+51b. **Mood scores.** A player whose firmware reads them filters its Albums
+    list and its Auto DJ by mood (the firmware repo's docs/MOOD-FILTERS.md),
+    from each track's scores on the card: 8 bytes at the end of its record
+    in the tags file (MPTG minor 1, that repo's docs/METADATA.md 2.6.4),
+    which an older player skips. They have no setting and nothing on the
+    Card view of their own. Unlike the waveforms, a card for someone else
+    gets none: they come from the same models as the Auto DJ index, under
+    its licence gate.
+    - **Asking:** at the final commit, after the covers and the Auto DJ
+      index and before the waveforms, a server whose `/api/` says
+      `moodScores` is asked for the scores of each of its own tracks on the
+      card (`POST /api/v1/db/mood-scores`, 2,000 paths a call, a few hundred
+      KB each). It is quick, with no phase or count of its own. A peer's
+      tracks are never asked for: on the player they fit no mood.
+    - **When:** a sync whose list stood (a 304) asks nothing of a card that
+      has scores, so a change of scores alone comes with the next whole read
+      (7 days, or the 10th run); a card with none is asked at every sync, so
+      the first sync after an update brings them with no whole read. A run
+      that reads a peer asks as one that reads whole does. Equal scores make
+      no commit; scores that changed make one, which costs the player a new
+      list of its library at its next boot.
+    - **The answer:** a track with scores gets them; one the server has none
+      for (not analysed yet, or its mood analysis off) has none, and loses
+      any it had; one the answer left out keeps its own.
+    - **A fetch that fails is no failed run:** an older mStream (no
+      `moodScores`), a 403 or a 404, an error: every track keeps what the
+      card had, the rest of the run commits, and the sync ends as Done
+      (clause 54). The next sync asks again, or on a card with scores the
+      next that reads whole or changes its files.
+    - **A card for someone else** asks nothing and loses the scores it had in
+      the sync's commit; Converts says so (clause 44).
+    - **Details' log** has one line of them, in English as the run's other
+      notes, and `device card <drive> sync` prints it:
+      - "mood scores for 4,790 of the card's 4,812 tracks from the server":
+        what the answer had a row for, of the tracks asked for;
+      - "no mood scores: the server has none for the card's files": an
+        answer with no row, which clears the card's;
+      - "no mood scores: the card is made for someone else", at each of its
+        syncs;
+      - "no new mood scores:" and why: "the server doesn't serve them (an
+        older mStream)", "the server refused them (a 403 or a 404)", "they
+        didn't come (…)" with the error's words.
+
+      A sync that asks nothing of a card with scores whose list stood, or
+      that *Stop at the next save* ended, says nothing of them.
+    - **Nothing offers them.** A card without scores has nothing to do for
+      them: Next sync never says "mood scores to add", and nothing is kept of
+      a server with none to give, since every sync of such a card asks. The
+      player's dim "No mood data" row is the prompt: it says to sync the card
+      from mStream.
+    - **The fit** counts their 8 bytes a track in the tags file (clause 49).
 52. **Stopping and pauses.** *Stop at the next save* (`x`) finishes the
     files in flight and checkpoints; the plan stays on the card and the
     next Sync goes on from it. A pause is the run waiting by itself, with
@@ -1633,7 +1686,8 @@ the set did not draw, and `gate_fmt_unread`: 19 keys; its review adds
 which the set did not draw either (clause 5): `log_clock_range`,
 `log_clock_rtc`, `log_clock_ours`, `log_clock_silent` and
 `log_clock_failed`, 5 keys. The waveforms (clause 51a) add `next_waves` and
-`sync_waves`, 2 keys.
+`sync_waves`, 2 keys. The mood scores (clause 51b) add none and change one,
+`conv_gift`: their lines in Details' log are the run's, in English.
 Not keys: the invented names, paths, sizes and versions; the command
 line's lines (plain English, like `device list`'s); the firmware's own
 strings for its dialogs (its repo's lib/core UiStrings, ten languages).
@@ -1647,6 +1701,7 @@ and the caret.
 | `dev.card.next_new` · `next_remove` · `next_plays` | %{n} new · %{n} to remove · %{n} plays to send |
 | `dev.card.next_waves` · `sync_waves` | waveforms to add · asking %{server} for waveforms… %{i} of %{n} |
 | `dev.card.conv_needed` | only what the player can't play, to %{codec} |
+| `dev.card.conv_gift` (changed) | for someone else: no Auto DJ index or mood scores, plays not sent |
 | `dev.card.btn_sync` · `btn_setup` · `btn_eject` | Sync · Set up · Eject |
 | `dev.card.link_settings` · `link_stop` | Settings… · Stop at the next save |
 | `dev.card.board_is` | This is %{card} · synced %{when} from %{server} |
@@ -2677,3 +2732,31 @@ setting no locale, prints in English.
     (clause 56).
   - **For the native review:** `next_waves` and `sync_waves` in the nine
     translated locales, drawn from each one's `pass_waveform` word.
+- **2026-11-07 — The mood scores (clause 51b).** The firmware's mood
+  filters (its Albums and its Auto DJ, built on its branches, not yet in a
+  release) read a tail on each track's record; a sync lays it, with no
+  setting and no new row (the firmware repo's docs/MOOD-FILTERS.md 5.2, 5.3,
+  9.11). What that plan left to this screen:
+  - **Two lines it didn't name.** Its notes said only why nothing new came.
+    A sync that brought scores said nothing, so neither Details nor the
+    command line showed they had come; and an answer with no row (a server
+    with its mood analysis off, or one not yet at these files) cleared the
+    card's with no word, the player then reading "No mood data". The first
+    says the count of what came, the second that the server has none. A
+    card for someone else's line comes at every sync, as Converts says it
+    at rest.
+  - **No prompt.** A card without scores isn't offered a sync for them, as
+    one without waveforms is: every sync of it asks, so a state of "asked,
+    none" would only hold a prompt off that never comes. The player's dim
+    row says to sync.
+  - **Converts' words wrap.** The plan said they wrap in Russian; in the
+    value column's 58 cells they take two lines in eight locales, English
+    among them ("… mood scores, plays" over "not sent"), and one in Japanese
+    and Chinese. Seven wrapped already. Two lines hold them in every locale,
+    at 58 and in the console's narrower card's 50, which the page's test
+    holds.
+  - **For the native review:** `conv_gift` in the nine translated locales,
+    each with its locale's mood word from the player's own strings (its
+    `mood.no_data`, the phone app's): Stimmungswerte, puntuaciones de ánimo,
+    scores d'ambiance, punteggi d'atmosfera, ムードスコア, oceny nastroju,
+    pontuações de clima, оценки настроения, 氛围评分.

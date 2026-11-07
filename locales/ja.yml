@@ -2361,7 +2361,7 @@ dev:
     next_asked: "%{when}に問い合わせ"
     next_signin: "再生 %{n} 件が %{server} を待っています: サインインして送信"
     conv_assumed: "%{port} の %{player} (%{version}) を想定: device.txt はまだありません"
-    conv_gift: "他の人用: Auto DJ 索引なし、再生は送信しません"
+    conv_gift: "他の人用: Auto DJ 索引とムードスコアなし、再生は送信しません"
     btn_sync: "同期"
     btn_setup: "準備"
     btn_setup_as: "カード %{i} として準備"

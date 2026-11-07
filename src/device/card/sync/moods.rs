@@ -21,9 +21,17 @@
 //! heads moving between the answer's chunks, each keeps every tail as it is,
 //! with a note. Equal scores make no commit: the engine lays the tails before
 //! it weighs the commit against the root.
+//!
+//! **What Details' log says** (the MP3 Player contract's clause 51b), in
+//! English as the run's other notes: an answer's count ([`said`]), or that it
+//! had none; a card for someone else's ([`GIFT`]); why nothing new came
+//! ([`UNSERVED`], [`REFUSED`], an error's words). A run that asks nothing of a
+//! card it has nothing to say of (a 304 on a card with scores, `--moods
+//! false`, the stop) says nothing.
 
 use std::collections::{HashMap, HashSet};
 
+use crate::admin::fmt_count;
 use crate::api::Client;
 use crate::api::transfer::MoodScores;
 use crate::device::card::contract::moods::encode;
@@ -79,11 +87,13 @@ pub(super) struct Came {
 }
 
 /// The notes a step leaves: a card for someone else's, an older server's,
-/// a 403's or a 404's.
+/// a 403's or a 404's, and an answer's with no scores in it (its mood
+/// analysis off, or not yet at these files), whose nulls clear the card's.
 pub(super) const GIFT: &str = "no mood scores: the card is made for someone else";
 pub(super) const UNSERVED: &str =
     "no new mood scores: the server doesn't serve them (an older mStream)";
 pub(super) const REFUSED: &str = "no new mood scores: the server refused them (a 403 or a 404)";
+pub(super) const NONE: &str = "no mood scores: the server has none for the card's files";
 
 /// A run's step at its final commit, as `step` says: the commit's rows of
 /// its own server asked of `client`, that server's, in as many calls as the
@@ -103,7 +113,9 @@ pub(super) fn tails(client: &Client, commit: &Commit<'_>, step: Step) -> Came {
                 return keep(None);
             }
             match client.mood_scores(&paths) {
-                Ok(Some(found)) => Came { moods: overlay(commit, &found), note: None },
+                Ok(Some(found)) => {
+                    Came { moods: overlay(commit, &found), note: Some(said(&paths, &found)) }
+                }
                 Ok(None) => keep(Some(REFUSED.into())),
                 Err(e) => keep(Some(format!("no new mood scores: they didn't come ({e})"))),
             }
@@ -132,4 +144,16 @@ fn overlay(commit: &Commit<'_>, found: &MoodScores) -> Moods {
         }
     }
     Moods::Overlay(tails)
+}
+
+/// An answer's line: how many of the server paths asked for came with a row
+/// ("mood scores for 4,790 of the card's 4,812 tracks from the server"), a
+/// row of NULLs among them, or [`NONE`].
+pub(super) fn said(paths: &[String], found: &MoodScores) -> String {
+    let rows = paths.iter().filter(|p| matches!(found.tracks.get(*p), Some(Some(_)))).count();
+    if rows == 0 {
+        return NONE.into();
+    }
+    let (n, of) = (fmt_count(rows as u64), fmt_count(paths.len() as u64));
+    format!("mood scores for {n} of the card's {of} tracks from the server")
 }

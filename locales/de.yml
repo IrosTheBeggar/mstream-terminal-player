@@ -2361,7 +2361,7 @@ dev:
     next_asked: "gefragt %{when}"
     next_signin: "%{n} Wiedergaben warten auf %{server}: zum Senden anmelden"
     conv_assumed: "angenommen für den %{player} an %{port} (%{version}): noch keine device.txt"
-    conv_gift: "für jemand anderen: kein Auto-DJ-Index, Wiedergaben nicht gesendet"
+    conv_gift: "für jemand anderen: kein Auto-DJ-Index und keine Stimmungswerte, Wiedergaben nicht gesendet"
     btn_sync: "Abgleichen"
     btn_setup: "Einrichten"
     btn_setup_as: "Als Karte %{i} einrichten"

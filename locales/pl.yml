@@ -2361,7 +2361,7 @@ dev:
     next_asked: "pytano %{when}"
     next_signin: "odtworzenia czekają na %{server}: %{n} · zaloguj się, by je wysłać"
     conv_assumed: "przyjęte dla %{player} na %{port} (%{version}): jeszcze bez device.txt"
-    conv_gift: "dla kogoś innego: bez indeksu Auto DJ, odtworzenia niewysyłane"
+    conv_gift: "dla kogoś innego: bez indeksu Auto DJ i ocen nastroju, odtworzenia niewysyłane"
     btn_sync: "Synchronizuj"
     btn_setup: "Przygotuj"
     btn_setup_as: "Przygotuj jako kartę %{i}"

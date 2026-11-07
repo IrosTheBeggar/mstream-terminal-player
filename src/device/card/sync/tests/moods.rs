@@ -7,10 +7,11 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use crate::api::transfer::MoodScores;
 use crate::device::card::contract::moods::{self, NO_ROW, Tail};
 use crate::device::card::contract::prim::u32_at;
 use crate::device::card::contract::{container, mptg};
-use crate::device::card::sync::moods::{GIFT, REFUSED, Rule, Step, UNSERVED};
+use crate::device::card::sync::moods::{GIFT, NONE, REFUSED, Rule, Step, UNSERVED, said};
 use crate::device::card::sync::peers::Ffmpeg;
 
 /// Rock's tracks, as the card's records put them in order.
@@ -73,6 +74,11 @@ fn note_of(synced: &Synced) -> Option<&str> {
     note.map(String::as_str)
 }
 
+/// An answer's line, `n` of the `of` paths asked for in rows.
+fn brought(n: usize, of: usize) -> String {
+    format!("mood scores for {n} of the card's {of} tracks from the server")
+}
+
 fn committed(events: &[Event]) -> usize {
     events.iter().filter(|e| matches!(e, Event::Committed { .. })).count()
 }
@@ -97,7 +103,7 @@ fn scored_card(name: &str) -> (Scratch, FatSim, String, Fake, u32) {
     let first = sync_now(&sim, &base, &rock(), &mut envs()).0;
     let outcome = ran(&first);
     assert_eq!(outcome.verified, Ok(()), "{:?}", first.notes);
-    assert_eq!(note_of(&first), None);
+    assert_eq!(note_of(&first), Some(brought(4, 4).as_str()));
     assert_eq!(calls_since(&fake), rock_call(), "a first sync's whole read asks");
     assert_eq!(tails(&sim), scored(&ROCK));
     assert_eq!(tags_shape(&sim), (1, 80));
@@ -188,7 +194,7 @@ fn a_304_on_a_card_with_none_asks_and_commits() {
     want.insert(WAV.into(), EXAMPLE_TAIL);
     assert_eq!(tails(&sim), want, "the converted file's record has its source's");
     assert_eq!(tags_shape(&sim), (1, 80));
-    assert_eq!(note_of(&again), None);
+    assert_eq!(note_of(&again), Some(brought(4, 4).as_str()));
 }
 
 /// A card with scores, its server's files the same: a 304 asks nothing and
@@ -253,7 +259,7 @@ fn auto_dj_off_still_gets_scores() {
     assert!(look(&sim).root.as_ref().unwrap().manifest.autodj.is_none(), "no index");
     assert_eq!(calls_since(&fake), rock_call());
     assert_eq!(tails(&sim), scored(&ROCK));
-    assert_eq!(note_of(&synced), None);
+    assert_eq!(note_of(&synced), Some(brought(4, 4).as_str()));
 }
 
 /// A peer's rows aren't asked for, of the server or of the peer: they stay
@@ -272,7 +278,7 @@ fn a_peers_rows_stay_unscored() {
     let synced = peers::sync_fed(&sim, &base, &peers::rock_and_folk(), &fed, &mut envs);
     let outcome = ran(&synced);
     assert_eq!((outcome.verified.clone(), outcome.records), (Ok(()), 6), "{:?}", synced.notes);
-    assert_eq!(note_of(&synced), None);
+    assert_eq!(note_of(&synced), Some(brought(4, 4).as_str()), "the peer's two aren't counted");
     assert_eq!(calls_since(&fake), rock_call(), "the server's own four, in one call");
     let theirs = peers::asked_of(&peer);
     assert!(!theirs.iter().any(|a| a.contains("mood")), "{theirs:?}");
@@ -326,7 +332,7 @@ fn one_changed_score_commits_once() {
 /// the answer leaves out, or whose row is of the wrong length, keeps its
 /// own; a row of NULLs is a tail, analysed with nothing known. A server
 /// that turns `analyzeMoods` off, every path null, clears them all in one
-/// commit, back to rows of 72 at minor 0.
+/// commit, back to rows of 72 at minor 0, and Details' log says it had none.
 #[test]
 fn a_null_row_clears_and_a_path_left_out_keeps() {
     let (_scratch, sim, base, fake, generation) = scored_card("moods-table");
@@ -348,7 +354,8 @@ fn a_null_row_clears_and_a_path_left_out_keeps() {
     assert_eq!(tails(&sim), want);
     assert_eq!(want[TWO], before[TWO]);
     assert_eq!(want[OPUS], before[OPUS]);
-    assert_eq!((tags_shape(&sim), note_of(&synced)), ((1, 80), None));
+    assert_eq!(tags_shape(&sim), (1, 80));
+    assert_eq!(note_of(&synced), Some(brought(1, 4).as_str()), "the NULLs' row alone");
 
     {
         let mut lib = fake.lock().unwrap();
@@ -359,6 +366,33 @@ fn a_null_row_clears_and_a_path_left_out_keeps() {
     assert_eq!((ran(&off).generation, committed(&events)), (generation + 2, 1), "{events:?}");
     assert!(tails(&sim).values().all(|t| *t == NO_ROW), "{:?}", tails(&sim));
     assert_eq!(tags_shape(&sim), (0, 72));
+    assert_eq!(note_of(&off), Some(NONE));
+}
+
+/// Details' log's line of an answer (clause 51b): the rows that came, a row
+/// of NULLs among them, of the paths asked for, in the Card view's digits; a
+/// null or a path left out is no row. With no row at all, that the server
+/// has none.
+#[test]
+fn an_answers_line_counts_its_rows() {
+    let paths: Vec<String> = (0..4_812).map(|i| format!("Rock/Artist/{i}.mp3")).collect();
+    let mut found = MoodScores::default();
+    for (i, path) in paths.iter().enumerate() {
+        let row = match i % 200 {
+            0 => None,
+            1 => Some([None; 8]),
+            2 => continue,
+            _ => Some(EXAMPLE),
+        };
+        found.tracks.insert(path.clone(), row);
+    }
+    let want = "mood scores for 4,762 of the card's 4,812 tracks from the server";
+    assert_eq!(said(&paths, &found), want);
+    for row in found.tracks.values_mut() {
+        *row = None;
+    }
+    assert_eq!(said(&paths, &found), NONE, "every path null");
+    assert_eq!(said(&paths, &MoodScores::default()), NONE, "every path left out");
 }
 
 /// The mood route failing (a 500 here) costs only the new scores: the run
