@@ -50,7 +50,7 @@ Two regimes, deliberately different:
 | GROUND | the painted background (fixed tiers only) | `#12131c` | 233 | terminal's own |
 | ACCENT | actions, name chips, focus borders, selection bg | `#7aabdf` | 110 | `LightBlue` |
 | BRIGHT | hover states, the active rename chip and caret | `#8fd6e8` | 117 | `Cyan` |
-| DIM | hints, labels, idle borders, text buttons, table headers | `#69718f` | 60 | `DarkGray` |
+| DIM | hints, labels, idle borders, text buttons, table headers | `#7a82a0` | 60 | `DarkGray` |
 | GOLD | the bottom rule, warnings/errors, the warning modal | `#e5c07b` | 179 | `Yellow` |
 | OK | checked boxes, progress, success | `#98c379` | 114 | `Green` |
 | DANGER | destructive hover (the row [X]); never decoration | `#e06c75` | 167 | `Red` |
