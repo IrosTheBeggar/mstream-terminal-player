@@ -715,7 +715,7 @@ impl Slot {
                 jobs.push(job);
             }
         }
-        jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        jobs.sort_by_key(|j| std::cmp::Reverse(j.created_at));
         let retired = v
             .get("retired")
             .and_then(Value::as_array)
@@ -1107,7 +1107,7 @@ impl<T: Transport, C: Clock, S: Store> Tracker<T, C, S> {
             clock,
             store,
             generation,
-            tier: (generation >= 1).then_some(Tier::New),
+            tier: Tier::from_generation(generation),
             jobs,
             retired: slot.retired,
             dropped: BTreeSet::new(),
@@ -1258,15 +1258,18 @@ impl<T: Transport, C: Clock, S: Store> Tracker<T, C, S> {
         self.tier.unwrap_or(Tier::Older)
     }
 
+    #[cfg(test)]
     pub(crate) fn tier_known(&self) -> bool {
         self.tier.is_some()
     }
 
+    #[cfg(test)]
     pub(crate) fn generation(&self) -> u32 {
         self.generation
     }
 
     /// Every job, newest first.
+    #[cfg(test)]
     pub(crate) fn jobs(&self) -> &[Job] {
         &self.jobs
     }
@@ -1298,6 +1301,7 @@ impl<T: Transport, C: Clock, S: Store> Tracker<T, C, S> {
     }
 
     /// The row's Check again, Try again or Add again runs.
+    #[cfg(test)]
     pub(crate) fn row_busy(&self, id: &str) -> bool {
         self.busy.contains(id)
     }
@@ -1317,17 +1321,6 @@ impl<T: Transport, C: Clock, S: Store> Tracker<T, C, S> {
     /// `directory`: "Already adding to this folder".
     pub(crate) fn is_adding(&self, url: &str, directory: &str) -> bool {
         self.jobs.iter().any(|j| j.state.open() && j.url == url && bare(&j.directory) == bare(directory))
-    }
-
-    /// The jobs for a folder on screen: open ones and failures not seen
-    /// yet, in the folder or below it, not hidden.
-    pub(crate) fn jobs_under(&self, folder: &str) -> Vec<&Job> {
-        let base = slashed(folder).to_lowercase();
-        self.jobs
-            .iter()
-            .filter(|j| !j.hidden && (j.state.open() || (j.state.failure() && !j.seen)))
-            .filter(|j| slashed(&j.directory).to_lowercase().starts_with(&base))
-            .collect()
     }
 
     /// The word's counts: open jobs; failures, and songs added in the last
@@ -1388,7 +1381,7 @@ impl<T: Transport, C: Clock, S: Store> Tracker<T, C, S> {
         if full {
             rows.extend(self.added.records.iter().map(|r| row_of_record(r, &self.jobs)));
         }
-        rows.sort_by(|a, b| b.at.unwrap_or(0).cmp(&a.at.unwrap_or(0)));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.at.unwrap_or(0)));
         rows
     }
 
@@ -2499,7 +2492,7 @@ impl<T: Transport, C: Clock, S: Store> Tracker<T, C, S> {
             let extra = slot.retired.len() - RETIRED_CAP;
             slot.retired.drain(..extra);
         }
-        slot.jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        slot.jobs.sort_by_key(|j| std::cmp::Reverse(j.created_at));
         // The other's retired entries are never claimed here either.
         self.retired = slot.retired.clone();
         match self.store.save(&slot.to_json()) {
@@ -2726,7 +2719,9 @@ fn bare(path: &str) -> &str {
     path.trim_matches('/')
 }
 
-/// The folder with one slash at either end (`/` for none).
+/// The folder with one slash at either end (`/` for none): how a server
+/// spells the folder it listed.
+#[cfg(test)]
 fn slashed(path: &str) -> String {
     let b = bare(path);
     if b.is_empty() { "/".into() } else { format!("/{b}/") }
@@ -3017,7 +3012,7 @@ mod tests {
                 .filter(|r| generation == 0 || r.plugin == "ytdl")
                 .filter(|r| before.filter(|b| *b > 0).is_none_or(|b| r.id < b))
                 .collect();
-            rows.sort_by(|a, b| b.id.cmp(&a.id));
+            rows.sort_by_key(|r| std::cmp::Reverse(r.id));
             rows.truncate(limit as usize);
             Some(YtdlRecordPage {
                 count: rows.len(),
@@ -3579,7 +3574,7 @@ mod tests {
             assert_eq!(rig.job(&id).ways(Some(&["mp3", "opus"])), [Way::ChangeFormat, Way::Dismiss]);
             assert_eq!(rig.job(&id).ways(Some(&["mp3"])), [Way::Dismiss], "no other format to change to");
 
-            assert_eq!(rig.t.retry(&rig.t.jobs()[0].id.clone(), Redo { codec: Some("opus".into()), ..Redo::default() }).is_some(), true);
+            assert!(rig.t.retry(&rig.t.jobs()[0].id.clone(), Redo { codec: Some("opus".into()), ..Redo::default() }).is_some());
             assert!(rig.t.job(&id).is_none(), "the old row went");
             let next = rig.t.jobs()[0].clone();
             assert_eq!(rig.t.jobs().len(), 1);
@@ -4087,7 +4082,7 @@ mod tests {
         first.dismiss(&done);
         let open = second.start(request(OTHER, DIR, Origin::Room));
         serve_shared(&mut second, &mut fake);
-        assert_eq!(shared.ids(), [open.clone()], "the dismissed row is not written back");
+        assert_eq!(shared.ids(), std::slice::from_ref(&open), "the dismissed row is not written back");
         assert!(second.job(&done).is_none(), "and leaves the second player's list too");
         assert!(second.held().contains("id:job-1"), "its entry never claimed again there either");
         let third = Tracker::new(1, Wire::default(), Tock(T0 + 6000), shared.clone());
@@ -4229,13 +4224,13 @@ mod tests {
         let open = rig.t.start(StartRequest { mkdir: Some(inbox.into()), ..request(THIRD, inbox, Origin::Room) });
         rig.serve();
         assert_eq!(rig.t.summary().word(), Some(Word::Adding));
-        assert_eq!(rig.t.jobs_under("/Music/").len(), 1);
+        assert_eq!(rig.t.adding().len(), 1);
         rig.t.dismiss(&open);
         assert!(rig.job(&open).hidden, "an open job is hidden, not dropped");
         assert_eq!(rig.t.summary().word(), Some(Word::History));
         assert!(rig.t.is_adding(THIRD, "Music/Inbox"));
         assert!(!rig.t.is_adding(THIRD, DIR), "by link and folder");
-        assert!(rig.t.adding().is_empty() && rig.t.jobs_under("/Music/").is_empty());
+        assert!(rig.t.adding().is_empty());
     }
 
     #[test]

@@ -271,16 +271,11 @@ pub(crate) fn parse_link(text: &str) -> Link {
     }
 }
 
-/// A lookup answer for a stream (the server's isLiveEntry): live now,
-/// upcoming, or just ended and not yet processed. Only a server with the
-/// new job list sends these.
-pub(crate) fn live_meta(is_live: bool, live_status: Option<&str>) -> bool {
-    is_live || matches!(live_status, Some("is_live" | "is_upcoming" | "post_live"))
-}
-
 /// The lines under the link field, in order: a refusal (not YouTube, a
 /// playlist), "Just this video, not the playlist." and the live-stream
-/// warning — a /live/ link, or a lookup that says the video is a stream.
+/// warning — a /live/ link, or a lookup that says the video is a stream
+/// (`live_meta`: [`crate::api::ytdl::YtdlMetadata::is_stream`], which only
+/// a server with the new job list can say).
 /// A server before 6.30 doesn't refuse a stream, so there the warning is
 /// the phone's hedge. A rewritten link is just sent: no "Sent as …".
 pub(crate) fn link_notes(link: &Link, live_meta: bool, tier: Tier) -> Vec<(Tone, Label)> {
@@ -599,12 +594,16 @@ mod tests {
 
     #[test]
     fn a_lookup_reads_a_stream_as_the_server_does() {
-        assert!(live_meta(true, None));
+        // The server's isLiveEntry: live now, upcoming, or just ended and
+        // not yet processed.
+        use crate::api::ytdl::YtdlMetadata;
+        let meta = |is_live: bool, status: Option<&str>| YtdlMetadata { is_live, live_status: status.map(str::to_string), ..YtdlMetadata::default() };
+        assert!(meta(true, None).is_stream());
         for status in ["is_live", "is_upcoming", "post_live"] {
-            assert!(live_meta(false, Some(status)), "{status}");
+            assert!(meta(false, Some(status)).is_stream(), "{status}");
         }
-        assert!(!live_meta(false, Some("was_live")));
-        assert!(!live_meta(false, Some("not_live")));
-        assert!(!live_meta(false, None));
+        assert!(!meta(false, Some("was_live")).is_stream());
+        assert!(!meta(false, Some("not_live")).is_stream());
+        assert!(!meta(false, None).is_stream());
     }
 }

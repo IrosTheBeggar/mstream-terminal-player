@@ -24,7 +24,10 @@ use regex::Regex;
 use super::{JS_SPACE, Label, Tone, js_space, js_trim, squeeze};
 
 struct Regexes {
+    // The server's own clean-up, which the tests hold the guess to.
+    #[cfg(test)]
     bracket_noise: Regex,
+    #[cfg(test)]
     trailing_noise: Regex,
     artist_title: Regex,
     topic: Regex,
@@ -66,7 +69,9 @@ fn regexes() -> &'static Regexes {
         let words = r"lyrics?|audio|video|visuali[sz]er|hd|hq|4k|1080p|720p|explicit|clean|mv|m/v";
         let separators = "-–—|:,/&+·";
         Regexes {
+            #[cfg(test)]
             bracket_noise: re(format!(r"(?i)[(\[][^)\]]*{b}(?:{server_words}){b}[^)\]]*[)\]]")),
+            #[cfg(test)]
             trailing_noise: re(tail(&tail_words)),
             artist_title: re(format!(r"^({dot}{{1,80}}?){s}+([-–—:]){s}+({dot}{{1,160}})$")),
             topic: re(format!(r"(?i)-{s}*Topic$")),
@@ -89,7 +94,10 @@ fn regexes() -> &'static Regexes {
 // ── the server's title readers ──────────────────────────────────────────────
 
 /// The server's `cleanTitle`: bracketed edition noise out, then a trailing
-/// " - Official Video", blanks squeezed.
+/// " - Official Video", blanks squeezed. The guess cleans the phone's
+/// way; the tests hold it to this answer wherever the phone makes no
+/// change of its own.
+#[cfg(test)]
 pub(crate) fn clean_title(raw: &str) -> String {
     let r = regexes();
     let s = r.bracket_noise.replace_all(raw, " ");
@@ -98,6 +106,7 @@ pub(crate) fn clean_title(raw: &str) -> String {
 }
 
 /// The server's `splitArtistTitle`: "Artist - Title" → (artist, title).
+#[cfg(test)]
 pub(crate) fn split_artist_title(title: &str) -> Option<(String, String)> {
     let m = regexes().artist_title.captures(js_trim(title))?;
     Some((js_trim(&m[1]).to_string(), js_trim(&m[3]).to_string()))
@@ -817,7 +826,11 @@ mod tests {
     /// What the server's own code made of each title: cleanTitle, then
     /// splitArtistTitle of that, isTopicChannel and channelArtist of the
     /// title (the webapp's SERVER_ANSWERS, held to youtube.js there).
-    const SERVER_ANSWERS: &[(&str, &str, Option<(&str, &str)>, bool, Option<&str>)] = &[
+    /// A title, then what cleanTitle, splitArtistTitle, isTopicChannel and
+    /// channelArtist answer.
+    type ServerAnswer = (&'static str, &'static str, Option<(&'static str, &'static str)>, bool, Option<&'static str>);
+
+    const SERVER_ANSWERS: &[ServerAnswer] = &[
         ("Gorillaz - Feel Good Inc. (Official Video) [HD]", "Gorillaz - Feel Good Inc.", Some(("Gorillaz", "Feel Good Inc.")), false, Some("Gorillaz - Feel Good Inc. (Official Video) [HD]")),
         ("Sweater Weather (Official Video)", "Sweater Weather", None, false, Some("Sweater Weather (Official Video)")),
         ("Кино – Группа крови", "Кино – Группа крови", Some(("Кино", "Группа крови")), false, Some("Кино – Группа крови")),
@@ -899,7 +912,10 @@ mod tests {
     /// The webapp's differential table against the phone's own guess
     /// (`ytdlGuess`, run on the Dart VM over 3,660 answers): title, artist,
     /// tier, title out, artist out, fragments, the strip.
-    const PHONE_GUESSES: &[(Option<&str>, Option<&str>, GuessTier, &str, &str, &[&str], Option<&str>)] = &[
+    /// The lookup's title and artist, then the phone's guess of them.
+    type PhoneGuess = (Option<&'static str>, Option<&'static str>, GuessTier, &'static str, &'static str, &'static [&'static str], Option<&'static str>);
+
+    const PHONE_GUESSES: &[PhoneGuess] = &[
         (Some("Artist - Title (Official Video) [HD]"), Some("ArtistVEVO"), GuessTier::Split, "Title", "Artist", &["-", "(Official Video)", "[HD]"], Some("VEVO")),
         (Some("AC/DC - Thunderstruck (Official Video)"), Some("acdcVEVO"), GuessTier::Split, "Thunderstruck", "AC/DC", &["-", "(Official Video)"], Some("VEVO")),
         (Some("Кино - Группа крови (Official Audio)"), Some("Кино - Topic"), GuessTier::Split, "Группа крови", "Кино", &["-", "(Official Audio)"], Some("- Topic")),
@@ -944,7 +960,8 @@ mod tests {
     #[test]
     fn adversarial_titles_and_artists_read_as_the_phones_guess_reads_them() {
         let long = format!("{} - Title", "A".repeat(81));
-        let mut rows: Vec<(Option<&str>, Option<&str>, GuessTier, String, &str, &[&str], Option<&str>)> =
+        type Row<'a> = (Option<&'a str>, Option<&'a str>, GuessTier, String, &'a str, &'a [&'a str], Option<&'a str>);
+        let mut rows: Vec<Row> =
             PHONE_GUESSES.iter().map(|(t, a, tier, title, artist, f, s)| (*t, *a, *tier, title.to_string(), *artist, *f, *s)).collect();
         rows.push((Some(&long), None, GuessTier::YoutubeArtist, long.clone(), "", &[], None));
         for (title, artist, tier, out_title, out_artist, fragments, strip) in rows {

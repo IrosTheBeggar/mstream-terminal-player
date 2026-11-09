@@ -2070,7 +2070,7 @@ mod tests {
         let mut gui = gui();
         gui.active = super::super::SETTINGS_NAV;
         let text = draw(&mut gui).join("\n");
-        assert!(text.contains("TORRENTS"), "the settings grew a group:\n{text}");
+        assert!(text.contains("ADD MUSIC"), "the settings grew a group:\n{text}");
         assert!(text.contains("Add a torrent"), "got:\n{text}");
         assert!(text.contains("[✓] Ask what to do with torrents"), "ask is on by default:\n{text}");
 

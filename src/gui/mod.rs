@@ -43,6 +43,9 @@ mod stats;
 mod torrent;
 mod torrent_meta;
 mod vizwin;
+mod ytdl;
+mod ytdl_here;
+mod ytdl_where;
 // The GUI's own window: the desktop flavour's (`--features desktop`, or
 // `window` alone); the terminal releases are built without it.
 #[cfg(feature = "window")]
@@ -328,6 +331,9 @@ pub(crate) enum Act {
     /// The Discover room's own pointer ways: its tabs, rows and their
     /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
     Disc(discover::DiscAct),
+    // ── Add from YouTube (see gui::ytdl) ────────────────────────────────
+    /// The room's controls, the From YouTube list's and the format list's.
+    Yt(ytdl::YtAct),
     /// A modal's whole-screen backdrop: swallow the click.
     Guard,
 }
@@ -388,6 +394,7 @@ pub(crate) enum Screen {
 pub(crate) enum SettingsRoom {
     Servers,
     Torrent,
+    YouTube,
 }
 
 /// What a click on a pane row meant: the row itself, or one of the hover
@@ -516,12 +523,15 @@ const ROW_PAUSE_FADE: usize = 3;
 /// The queue and the place in it come back on launch (contract clause 39).
 const ROW_RESUME: usize = 4;
 const ROW_MANAGE: usize = 5;
-/// The torrents group: the Add-torrent doorway (the room, like Manage
-/// servers) and the ask-me switch for torrents arriving from outside.
+/// The ADD MUSIC group: the Add-torrent and Add-from-YouTube doorways
+/// (rooms, like Manage servers) and the ask-me switch for torrents
+/// arriving from outside. Add from YouTube shows only under its gates —
+/// hidden, never greyed ([`settings_rows`]).
 const ROW_TORRENT: usize = 6;
-const ROW_ASK: usize = 7;
-const ROW_HINTS: usize = 8;
-const SET_ROWS: usize = 9;
+const ROW_YOUTUBE: usize = 7;
+const ROW_ASK: usize = 8;
+const ROW_HINTS: usize = 9;
+const SET_ROWS: usize = 10;
 
 /// Seconds of blend as a person reads them (the TUI's own spelling).
 fn fmt_blend(seconds: f32) -> String {
@@ -604,6 +614,9 @@ pub(crate) struct Gui {
     playlists: playlists::PlaylistsUi,
     /// The Add-torrent room: its form, picker, chooser and threads.
     torrent: torrent::TorrentUi,
+    /// Add from YouTube: the server's facts, the job tracker, the room's
+    /// form and the From YouTube list.
+    ytdl: ytdl::YtUi,
     /// The Auto DJ room: its cursor, scroll, inputs and pickers.
     dj: dj::DjUi,
     /// The Library rooms: the list's scroll and the artist wall's state.
@@ -686,6 +699,7 @@ impl Gui {
             sonic: sonic::SonicUi::new(),
             playlists: playlists::PlaylistsUi::new(),
             torrent: torrent::TorrentUi::new(),
+            ytdl: ytdl::YtUi::new(),
             dj: dj::DjUi::new(),
             library: library::LibraryUi::new(),
             actions: actions::ActionsUi::new(),
@@ -827,6 +841,7 @@ impl Gui {
             // activation (Enter, click, →) opens it.
             ROW_MANAGE if delta > 0 => servers::open_room(self),
             ROW_TORRENT if delta > 0 => torrent::open_room(self),
+            ROW_YOUTUBE if delta > 0 && ytdl::available(self) => ytdl::open_room(self),
             ROW_ASK => {
                 let ask = !self.config.torrent.ask;
                 torrent::set_ask(self, ask);
@@ -913,6 +928,9 @@ impl Gui {
             return false;
         }
         if torrent::act(self, &act) {
+            return false;
+        }
+        if ytdl::act(self, &act) {
             return false;
         }
         if admin::act(self, &act) {
@@ -1624,7 +1642,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // back as they draw.
     let pointer = gui.ui.pointer;
     let inert = gui.screen == Screen::Library
-        && ((gui.active == DISCOVER_NAV && discover::modal_open(gui)) || moods::is_open(gui));
+        && ((gui.active == DISCOVER_NAV && discover::modal_open(gui)) || moods::is_open(gui) || ytdl::window_open(gui));
     if inert {
         gui.ui.pointer = None;
     }
@@ -1637,8 +1655,10 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.admin.room_at = Rect::default();
     gui.admin.log_at = None;
     // The MP3 Player screen's page likewise: the pointer reaches it only
-    // where this frame drew it.
+    // where this frame drew it. And Add from YouTube's key letters: one
+    // acts only where this frame drew its word.
     gui.device.at = None;
+    gui.ytdl.drawn.clear();
     let area = frame.area();
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
@@ -1765,6 +1785,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         t!("gui.tips.form")
     } else if gui.torrent.modal_open() {
         std::borrow::Cow::from(torrent::tips(gui))
+    } else if ytdl::modal_open(gui) {
+        std::borrow::Cow::from(ytdl::tips(gui))
     } else if sonic::modal_open(gui) {
         std::borrow::Cow::from(sonic::tips(gui))
     } else if moods::is_open(gui) {
@@ -1797,6 +1819,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         }
     } else if gui.in_settings_room(SettingsRoom::Torrent) {
         std::borrow::Cow::from(torrent::tips(gui))
+    } else if gui.in_settings_room(SettingsRoom::YouTube) {
+        std::borrow::Cow::from(ytdl::tips(gui))
     } else {
         match gui.active {
             SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
@@ -1876,6 +1900,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     discover::draw_modals(frame, gui, area);
     moods::draw_modal(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
+    ytdl::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
     dj::draw_modals(frame, gui, area);
@@ -2258,6 +2283,12 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
 /// The Files room's bar: line 1 the crumb row it always was — back ◂, the
 /// path, the honest count — line 2 the shared controls.
 fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    // Add from YouTube's door word on an own-server folder: line 1 drawn
+    // its way, the word 3 cells after the crumb (ytdl_here).
+    if ytdl_here::draw_line(frame, gui, content) {
+        draw_bar_controls(frame, gui, content, content.y + 1);
+        return;
+    }
     let y = content.y;
     let count = bar_count(gui, discover::plural("gui.files.items", gui.app.files.counts().1 as u64));
     let count_x = right_at(content, &count);
@@ -2537,20 +2568,23 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     match gui.settings_room {
         Some(SettingsRoom::Servers) => return servers::draw_room(frame, gui, content),
         Some(SettingsRoom::Torrent) => return torrent::draw_room(frame, gui, content),
+        Some(SettingsRoom::YouTube) => return ytdl::draw_room(frame, gui, content),
         None => {}
     }
     let (check_on, check_off) = check_glyphs();
-    put(frame, content.x, content.y, &t!("gui.set.playback"), dim());
-    put(frame, content.x, content.y + 7, &t!("gui.set.servers_group"), dim());
-    put(frame, content.x, content.y + 10, &t!("gui.set.torrents_group"), dim());
-    put(frame, content.x, content.y + 14, &t!("gui.set.display_group"), dim());
+    // A cursor resting on a row that went (Add from YouTube, its gate
+    // closed) moves to the row that took its line.
+    if gui.cursor == Some(ROW_YOUTUBE) && !ytdl::available(gui) {
+        gui.cursor = Some(ROW_ASK);
+    }
+    let lines = settings_lines(gui, content);
 
     // The blend row's label pads to a column in cells (a translation may be
     // wider than the English), and its - and + cells are placed off that
     // same width below, so the drawn glyphs and their hit cells agree.
     let blend_name = t!("gui.set.blend").to_string();
     let blend_w = crate::kit::width(&blend_name).max(14);
-    let rows: [(String, String); SET_ROWS] = [
+    let mut rows: [(String, String); SET_ROWS] = [
         (
             format!(
                 "{blend_name}{} -  {:>4}  +",
@@ -2596,6 +2630,10 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             t!("gui.set.tor_add_desc").to_string(),
         ),
         (
+            format!("{} {}", t!("gui.set.yt_add"), forward_glyph()),
+            t!("gui.set.yt_add_desc").to_string(),
+        ),
+        (
             format!("{} {}", if gui.config.torrent.ask { check_on } else { check_off }, t!("gui.set.tor_ask")),
             t!("gui.set.tor_ask_desc").to_string(),
         ),
@@ -2605,26 +2643,46 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         ),
     ];
 
-    for (i, (label, desc)) in rows.iter().enumerate() {
-        let y = row_y(content.y, i);
-        // A row the column has no line for (a pick's banner at the minimum
+    // While there is news, Add from YouTube's description is one word in
+    // its own token: adding, ! failed, ✓ added (TermList S1–S4).
+    let news = ytdl::settings_word(gui);
+    if let Some((word, _)) = &news {
+        rows[ROW_YOUTUBE].1 = word.clone();
+    }
+
+    for (y, line) in lines {
+        // A line the column has no room for (a pick's banner at the minimum
         // height) is not drawn, so it cannot land on the bar's seek line.
         if y >= content.bottom() {
             continue;
         }
+        let i = match line {
+            SetLine::Label(key) => {
+                put(frame, content.x, y, &t!(key), dim());
+                continue;
+            }
+            SetLine::Row(i) => i,
+        };
+        let (label, desc) = &rows[i];
         let rect = Rect { x: content.x, y, width: content.width, height: 1 };
         let selected = gui.cursor == Some(i);
         let hover = gui.ui.hovers(rect);
         if selected {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }
-        let (label_style, desc_style) = if selected {
+        let (label_style, mut desc_style) = if selected {
             (sel().add_modifier(Modifier::BOLD), sel())
         } else if hover {
             (bright_bold(), Style::default().fg(th().bright))
         } else {
             (Style::default(), dim())
         };
+        if i == ROW_YOUTUBE
+            && !selected
+            && let Some((_, style)) = &news
+        {
+            desc_style = *style;
+        }
         put(frame, content.x, y, label, label_style);
         // The description takes whatever room the row has left, clipped at
         // the cell edge — with the queue open that is not much, and the
@@ -2648,16 +2706,60 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 }
 
-/// The sheet's door on each pane's rows (track-actions contract, entry
-/// point 1): the App's pane, by tab, and the row.
-/// Where settings row `i` draws, under its section label.
-fn row_y(top: u16, i: usize) -> u16 {
-    match i {
-        i if i < ROW_MANAGE => top + 1 + i as u16,
-        ROW_MANAGE => top + 8,
-        ROW_TORRENT => top + 11,
-        ROW_HINTS => top + 15,
-        _ => top + 12,
+/// A line of the Settings column: a group's label, or a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetLine {
+    Label(&'static str),
+    Row(usize),
+}
+
+/// The Settings rows that show, in order: every row but Add from YouTube,
+/// which shows only where it can work (the phone's gates — hidden, never
+/// greyed). The rows are dynamic for that one alone.
+fn settings_rows(gui: &Gui) -> Vec<usize> {
+    (0..SET_ROWS).filter(|&row| row != ROW_YOUTUBE || ytdl::available(gui)).collect()
+}
+
+/// Where each Settings line draws: the four groups' labels with their
+/// rows, a blank between groups — the one above DISPLAY gives way when the
+/// column has fewer rows than the lines (17 with Add from YouTube: 100×24
+/// with key hints on, or a pick's banner).
+fn settings_lines(gui: &Gui, content: Rect) -> Vec<(u16, SetLine)> {
+    const GROUPS: [(&str, &[usize]); 4] = [
+        ("gui.set.playback", &[ROW_BLEND, ROW_GAPLESS, ROW_BLEND_SKIPS, ROW_PAUSE_FADE, ROW_RESUME]),
+        ("gui.set.servers_group", &[ROW_MANAGE]),
+        ("gui.set.torrents_group", &[ROW_TORRENT, ROW_YOUTUBE, ROW_ASK]),
+        ("gui.set.display_group", &[ROW_HINTS]),
+    ];
+    let rows = settings_rows(gui);
+    let tight = usize::from(content.height) < GROUPS.len() * 2 - 1 + rows.len();
+    let mut lines = Vec::new();
+    let mut y = content.y;
+    for (g, (label, members)) in GROUPS.iter().enumerate() {
+        if g > 0 && !(tight && g == GROUPS.len() - 1) {
+            y += 1;
+        }
+        lines.push((y, SetLine::Label(label)));
+        y += 1;
+        for &row in members.iter().filter(|row| rows.contains(row)) {
+            lines.push((y, SetLine::Row(row)));
+            y += 1;
+        }
+    }
+    lines
+}
+
+/// The Settings cursor one row on (`delta` > 0) or back, over the rows
+/// that show: picked up at the top (↓) or the bottom (↑), clamped at the
+/// ends, and stepping off a row that went to its neighbour.
+fn settings_step(gui: &Gui, delta: i32) -> usize {
+    let rows = settings_rows(gui);
+    let (first, last) = (rows[0], rows[rows.len() - 1]);
+    match gui.cursor {
+        None if delta > 0 => first,
+        None => last,
+        Some(c) if delta > 0 => rows.iter().copied().find(|&r| r > c).unwrap_or(last),
+        Some(c) => rows.iter().rev().copied().find(|&r| r < c).unwrap_or(first),
     }
 }
 
@@ -2691,6 +2793,12 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     // The torrent surfaces next: the arrival chooser can be up over any
     // room, and the room itself owns the keys while it is open.
     if let Some(quit) = torrent::handle_key(gui, key) {
+        return quit;
+    }
+    // Add from YouTube's: the From YouTube list and the format list over
+    // the room, then the room itself — its link field and tags take the
+    // typed keys while they hold them, and its key words the rest.
+    if let Some(quit) = ytdl::handle_key(gui, key) {
         return quit;
     }
     // The mood Filters' modal owns the keyboard ahead of every room: the
@@ -2876,12 +2984,8 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             gui.cursor = None;
             return gui.act(Act::EditQuery);
         }
-        KeyCode::Down if settings => {
-            gui.cursor = Some(gui.cursor.map_or(0, |c| (c + 1).min(SET_ROWS - 1)));
-        }
-        KeyCode::Up if settings => {
-            gui.cursor = Some(gui.cursor.map_or(SET_ROWS - 1, |c| c.saturating_sub(1)));
-        }
+        KeyCode::Down if settings => gui.cursor = Some(settings_step(gui, 1)),
+        KeyCode::Up if settings => gui.cursor = Some(settings_step(gui, -1)),
         // The Files list is the App's own pane: arrows, Enter, back and
         // queue-add forward straight to the shared state machine.
         // A walking key picks the cursor up, then walks it; the row verbs
@@ -2899,6 +3003,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Char('N') if files => gui.row_verb(List::Files, Action::AddNext),
         KeyCode::Char('P') if files => gui.row_verb(List::Files, Action::PlayNow),
         KeyCode::Esc if files => gui.files_view.stow(),
+        // Add from YouTube's door: `y`, under every word its spot shows and
+        // where the word gave way — no letter on screen (TermFiles F1).
+        KeyCode::Char('y') if files && ytdl_here::door_live(gui) => ytdl_here::open(gui),
         // Search browsing: the same pane keys as Files, plus the chip
         // cursor on ←/→ and `t` to flip the class under it.
         KeyCode::Down if search => gui.walk(List::Search, Action::Down),
@@ -2997,6 +3104,9 @@ struct Ctx {
     channels: Channels,
     saver: tui::QueueSaver,
     hand: bool,
+    /// Bracketed paste is on: while Add from YouTube's room or Files window
+    /// is up, a paste comes whole, for its link field ([`Host::paste`]).
+    paste: bool,
     /// Two clocks behind the brisk wait (`kit::pace`): the workers'
     /// requests the App sends, and the side threads' calls — a sign-in, a
     /// torrent check, the Stats page's load — which say themselves when
@@ -3025,6 +3135,7 @@ impl Ctx {
             channels,
             saver: tui::QueueSaver::new(app),
             hand: false,
+            paste: false,
             asked: Expecting::default(),
             side: Expecting::default(),
             dirty: true,
@@ -3040,6 +3151,12 @@ impl Ctx {
 /// pass must draw though nothing in the player changed.
 pub(crate) trait Host {
     fn pointer(&mut self, hand: bool);
+
+    /// A paste to arrive whole (bracketed paste) rather than typed, while
+    /// Add from YouTube wants one for its link field. A native window reads
+    /// its clipboard on the paste chord itself ([`window::face::Face::
+    /// takes_paste`]), so only the terminal does anything here.
+    fn paste(&mut self, _on: bool) {}
 
     /// The host needs this pass drawn whatever the player holds: a
     /// window's surface just cleared (a resize, the window shown), a
@@ -3059,6 +3176,23 @@ struct TermHost {
 impl Host for TermHost {
     fn pointer(&mut self, hand: bool) {
         set_pointer_shape(hand, self.mouse_on);
+    }
+
+    /// `CSI ?2004h` / `?2004l`. A terminal that ignores it still types a
+    /// paste as keys — the link field keeps the keys after a find for them
+    /// ([`ytdl::YtUi`]). Never on Windows: crossterm reads no paste there,
+    /// so a console that honoured the mode would hand the brackets over as
+    /// keys (an Esc, then `[`, `2` …).
+    fn paste(&mut self, on: bool) {
+        if cfg!(windows) {
+            return;
+        }
+        use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+        let _ = if on {
+            execute!(std::io::stdout(), EnableBracketedPaste)
+        } else {
+            execute!(std::io::stdout(), DisableBracketedPaste)
+        };
     }
 }
 
@@ -3099,6 +3233,7 @@ where
         // land on the TUI's connect screen open the GUI's form instead.
         servers::observe(gui, &ev);
         torrent::observe(gui, &ev);
+        ytdl::observe(gui, &ev);
         // A random pick that lands while results are up owes them a
         // rebuild — clause 22's promise, kept here because the App
         // consumes the pick into the setup view first.
@@ -3125,6 +3260,9 @@ where
     }
     ctx.dirty |= servers::poll(gui);
     ctx.dirty |= torrent::poll(gui);
+    // Add from YouTube's lookups and folder checks, and its job tracker's
+    // turn: answers in, polls and the POSTs that are due out, its news.
+    ctx.dirty |= ytdl::poll(gui);
     ctx.dirty |= stats::absorb(gui);
     // The control face's requests — the server-audio remote driving
     // this player — answered here, on the thread that owns the App. They
@@ -3191,6 +3329,14 @@ where
         ctx.hand = over;
         host.pointer(ctx.hand);
     }
+    // Bracketed paste follows what is up, the hand's way: on while Add
+    // from YouTube's link field wants a paste, off once it doesn't — so a
+    // room left by any road turns it off with no bookkeeping.
+    let paste = ytdl::wants_paste(gui);
+    if paste != ctx.paste {
+        ctx.paste = paste;
+        host.paste(paste);
+    }
     // A held arrow of the Admin log's bar whose log this frame left
     // undrawn lets go before it steps whatever list now stands where the
     // bar was: the pointer may rest while the keys change the screen.
@@ -3202,7 +3348,7 @@ where
     gui.ui.dwell_tick();
 
     let wait = next_wait(gui);
-    ctx.side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
+    ctx.side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui) || ytdl::busy(gui));
     // Brisk only where a pass that finds nothing skips its draw
     // (`Ctx::gate`): a loop that draws every pass, waking every few
     // milliseconds for an answer, redrew the whole player a hundred times a
@@ -3339,7 +3485,9 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                 // A right click on a row is its sheet (entry point 1) —
                 // never through a modal, which owns the pointer whole.
                 MouseEventKind::Down(MouseButton::Right) => {
-                    if !gui.modal_open()
+                    // The From YouTube list is a modal with rows of its own:
+                    // a right click on one is its list (TermList L3).
+                    if (!gui.modal_open() || ytdl::list_open(gui))
                         && let Some(act) = gui.ui.hit_context(at)
                         && gui.act(act)
                     {
@@ -3390,6 +3538,14 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             gui.queue.on_resize();
             gui.actions.on_resize();
             gui.discover.on_resize();
+        }
+        // A paste, whole: bracketed paste is on only while Add from
+        // YouTube's link field wants one (the window hands its clipboard
+        // over the same way, `Face::takes_paste`).
+        TermEvent::Paste(text) => {
+            gui.ui.dismiss_tooltip();
+            gui.ui.caret_touch();
+            ytdl::paste(gui, &text);
         }
         _ => {}
     }
@@ -3679,6 +3835,7 @@ impl Gui {
             || playlists::modal_open(self)
             || self.servers.modal_open()
             || self.torrent.modal_open()
+            || ytdl::modal_open(self)
     }
 
     /// Which App tab the active browse room's pane rides — the bar's acts
@@ -3736,6 +3893,12 @@ impl Gui {
             discover::wheel(self, delta);
             return;
         }
+        // The From YouTube list and Choose a folder scroll their own rows
+        // under the wheel.
+        if ytdl::wheels(self) {
+            ytdl::wheel(self, delta);
+            return;
+        }
         // A modal owns the pointer whole; the Now Playing screen scrolls
         // nothing yet (its queue panel is not on screen), and the hosted
         // pages' wheels reached their pages through their pointers — the
@@ -3766,13 +3929,11 @@ impl Gui {
             // Settings scrolls nothing itself; its Manage-servers room's
             // list and its Add-torrent room's file picker do. The Auto DJ
             // room's body and genre picker scroll.
-            NavId::Settings => {
-                if self.in_settings_room(SettingsRoom::Servers) {
-                    servers::wheel(self, delta)
-                } else {
-                    torrent::wheel(self, delta)
-                }
-            }
+            NavId::Settings => match self.settings_room {
+                Some(SettingsRoom::Servers) => servers::wheel(self, delta),
+                Some(SettingsRoom::Torrent) => torrent::wheel(self, delta),
+                Some(SettingsRoom::YouTube) | None => {}
+            },
             NavId::Dj => {
                 dj::wheel(self, delta);
             }
@@ -3870,6 +4031,9 @@ pub fn run(
 
     // Still on the alternate screen, where kitty keeps the pictures.
     crate::tui::graphics::release_all();
+    if ctx.paste {
+        let _ = execute!(std::io::stdout(), ratatui::crossterm::event::DisableBracketedPaste);
+    }
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
@@ -3961,11 +4125,13 @@ impl GuiFace {
     /// plays, so the saver's first signatures are the App as `start` left
     /// it either way, and its clocks start only the event loop's few
     /// milliseconds sooner.
-    fn new(gui: Gui, channels: Channels) -> Self {
+    fn new(mut gui: Gui, channels: Channels) -> Self {
         let mut ctx = Ctx::new(&gui.app, channels);
         // A window pass with nothing new skips its draw too; the window
         // says when its surface needs one anyway (`Host::must_draw`).
         ctx.gate = true;
+        // The window hands a paste over whole on every platform.
+        gui.ytdl.whole_pastes = true;
         GuiFace { gui, ctx }
     }
 }
@@ -3992,6 +4158,12 @@ impl window::face::Face for GuiFace {
 
     fn caret_at(&self) -> Option<Position> {
         self.gui.ui.caret_at()
+    }
+
+    /// Add from YouTube's room or Files window wants the clipboard whole,
+    /// caret or not.
+    fn takes_paste(&self) -> bool {
+        ytdl::wants_paste(&self.gui)
     }
 
     fn set_composition(&mut self, text: &str) {
@@ -4576,7 +4748,7 @@ mod tests {
     /// A TestBackend with the loop's error type: the frame half is generic
     /// over backends that fail as io does (the terminal's and the
     /// window's), and a TestBackend never fails at all.
-    struct IoTest(TestBackend);
+    pub(super) struct IoTest(pub(super) TestBackend);
 
     impl ratatui::backend::Backend for IoTest {
         type Error = std::io::Error;

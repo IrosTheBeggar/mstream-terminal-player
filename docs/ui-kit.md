@@ -177,7 +177,10 @@ them stands from the left, three cells apart; beside a modal primary
 they share its row, and take the row above where the two would come
 closer than three cells. No tooltip (self-evident). Like a text button
 it hides rather than going grey. First consumer: Keep a copy's window
-(discovery-page clauses 105–110).
+(discovery-page clauses 105–110). (One logged exception: Add from
+YouTube's Files door — `y` opens its window under every word its spot
+shows, with no letter on screen, the door word a door rather than a key
+word; add-from-youtube clause 30 and its 2026-11-03 log.)
 
 ### Tabs
 One row, under the screen's state line (or first, on a page with none): the ACTIVE tab is a 1-row filled
@@ -271,7 +274,11 @@ is idle until focused — a click or its own key focuses it, the border
 turns LightBlue and the caret appears — and while focused it takes every
 key: the tips line speaks for the field alone, Enter submits, Esc gives
 the keys back to the screen. Unfocused it never steals a letter, so the
-room's single-key actions keep working around it.
+room's single-key actions keep working around it. (A logged exception:
+Add from YouTube's room and Files window open with their link field
+holding the keys — a paste is the way in — and give them back once a song
+is found or on Esc; add-from-youtube clauses 10 and 31 and its 2026-11-03
+log.)
 **The caret blinks in the GUI player** (2026-09-23): the `Surface` keeps a
 blink clock — `caret_touch()` on every key and click, `caret()` answers
 the phase as a field draws (half a second on, half off, `CARET_BLINK`,
@@ -405,7 +412,10 @@ marks them. A **resting radio** — the Sort's Match while no mood is set —
 is DIM, glyph and label, with no click, no hover, no hand stop and no
 tooltip, the minimal-text waiver of the disabled control's tip; the
 group's other radio shows pressed, and the resting one wakes, still
-chosen if it was, when what it ranks by exists.)
+chosen if it was, when what it ranks by exists.) (Another: the Add from
+YouTube Files window's subfolders, `(•) Right here   ( ) Album …` —
+add-from-youtube clause 32 and its 2026-11-09 log — wear the Radio
+group's ACCENT `(•)`, a layout's dot, not the side-by-side OK.)
 
 ### List cursor
 **Selection is the KEYBOARD cursor, nothing more** — in every list of
@@ -427,9 +437,13 @@ into the bar's filter or the search box picks the cursor up too — the
 narrowing IS walking the list — so type, Enter, Enter opens the first
 match. **Esc stows it**, before Esc means anything else in the room
 (Back, handing the queue's keys back); a row click stows it; a room
-opens with it stowed. **The row verbs want the cursor up**: Enter, `a`,
-`N`, `P`, `d`, `<` `>`, `e`, `x` do nothing while it is stowed (`m` falls
-to the playing track), so no key ever acts on a row nobody can see.
+opens with it stowed. (Logged exceptions, add-from-youtube: its room
+opens with the link field holding the keys — the 2026-11-03 log — and
+Files' cursor is seated lit and held on the row an add made or the song
+Show in folder went to, clauses 34 and 42.) **The row verbs want the
+cursor up**: Enter, `a`, `N`, `P`, `d`, `<` `>`, `e`, `x` do nothing while
+it is stowed (`m` falls to the playing track), so no key ever acts on a
+row nobody can see.
 Keyboard-selected row: bg ACCENT fg ON-ACCENT; hover only brightens. The
 tips line, when it is on, names how to pick the cursor up while it is
 stowed and the row verbs only once it is up. `ListView { scroll, reveal,

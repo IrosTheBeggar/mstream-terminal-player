@@ -9,18 +9,6 @@ use super::Label;
 /// The menu's order.
 pub(crate) const FORMAT_ORDER: [&str; 6] = ["mp3", "m4a", "opus", "ogg", "flac", "wav"];
 
-/// The `true` keys of a `supportedAudioFiles` map — or the strings of a
-/// list, as an older fixture sends it — else `None` (absent or malformed).
-pub(crate) fn enabled_formats(supported: &serde_json::Value) -> Option<Vec<String>> {
-    match supported {
-        serde_json::Value::Array(list) => Some(list.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()),
-        serde_json::Value::Object(map) => {
-            Some(map.iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k.clone()).collect())
-        }
-        _ => None,
-    }
-}
-
 /// The menu: [`FORMAT_ORDER`], AAC after M4A's slot only while M4A is off,
 /// MP3 alone when nothing usable is known.
 pub(crate) fn format_options(enabled: Option<&[String]>) -> Vec<&'static str> {
@@ -131,15 +119,22 @@ mod tests {
 
     #[test]
     fn the_pings_map_gives_its_true_keys_and_a_list_its_strings() {
+        // As the ping reads `supportedAudioFiles` (crate::api::types).
+        let enabled = |supported: serde_json::Value| {
+            let ping: crate::api::types::Ping = serde_json::from_value(serde_json::json!({ "supportedAudioFiles": supported })).unwrap();
+            ping.supported_formats.map(|mut f| {
+                f.sort();
+                f
+            })
+        };
         let map = serde_json::json!({ "mp3": true, "flac": true, "wav": false, "ogg": true, "aac": true, "m4a": false, "m4b": true, "opus": true, "m3u": false });
-        let mut enabled = enabled_formats(&map).expect("a map");
-        enabled.sort();
-        assert_eq!(enabled, ["aac", "flac", "m4b", "mp3", "ogg", "opus"]);
-        assert_eq!(format_options(Some(&enabled)), ["mp3", "aac", "opus", "ogg", "flac"]);
-        assert_eq!(enabled_formats(&serde_json::json!(["mp3", 7, "flac"])), Some(list(&["mp3", "flac"])));
-        assert_eq!(enabled_formats(&serde_json::json!({ "mp3": 1 })), Some(Vec::new()), "only true counts");
+        let on = enabled(map).expect("a map");
+        assert_eq!(on, ["aac", "flac", "m4b", "mp3", "ogg", "opus"]);
+        assert_eq!(format_options(Some(&on)), ["mp3", "aac", "opus", "ogg", "flac"]);
+        assert_eq!(enabled(serde_json::json!(["mp3", 7, "flac"])), Some(list(&["flac", "mp3"])));
+        assert_eq!(enabled(serde_json::json!({ "mp3": 1 })), Some(Vec::new()), "only true counts");
         for bad in [serde_json::Value::Null, serde_json::json!("mp3"), serde_json::json!(7), serde_json::json!(true)] {
-            assert_eq!(enabled_formats(&bad), None, "{bad}");
+            assert_eq!(enabled(bad.clone()), None, "{bad}");
         }
     }
 

@@ -222,35 +222,6 @@ pub(crate) fn name_check(
     NameCheck { clash, blocks: clash && older, add_anyway: clash && !older, letters_dropped: dropped, line, name }
 }
 
-/// `file_name` cut in the middle to at most `max` characters, keeping its
-/// start, and its end with the extension and up to eight characters before
-/// it: `Gorillaz_-_Feel_Good…Video_HD.mp3`. Unchanged when it fits. Counts
-/// characters, so an emoji is never split; a cell budget is the caller's.
-pub(crate) fn middle_ellipsis(file_name: &str, max: usize) -> String {
-    let runes: Vec<char> = file_name.chars().collect();
-    if runes.len() <= max {
-        return file_name.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let keep = max - 1; // one goes to the ellipsis
-    let dot = runes.iter().rposition(|c| *c == '.');
-    // ".mp3", ".opus": a dot further back is part of the title.
-    let ext_len = match dot {
-        Some(d) if d > 0 && runes.len() - d <= 6 => runes.len() - d,
-        _ => 0,
-    };
-    let end = |n: usize| runes[runes.len() - n..].iter().collect::<String>();
-    if keep <= ext_len {
-        return format!("…{}", end(keep));
-    }
-    // The extension and up to eight characters before it, but not more
-    // than half of what fits, so a short limit still shows how it starts.
-    let tail = (ext_len + 8).min((ext_len + 2).max(keep / 2)).min(keep - 1);
-    format!("{}…{}", runes[..keep - tail].iter().collect::<String>(), end(tail))
-}
-
 // ── NFKC, the part that matters here ────────────────────────────────────────
 
 struct Tables {
@@ -476,12 +447,12 @@ fn compat(c: char) -> Option<String> {
 fn enclosed(r: u32) -> String {
     let ch = |n: u32| char::from_u32(n).expect("an ASCII letter");
     match r {
-        ..=0x2473 => (r - 0x2460 + 1).to_string(),
-        ..=0x2487 => format!("({})", r - 0x2474 + 1),
-        ..=0x249B => format!("{}.", r - 0x2488 + 1),
-        ..=0x24B5 => format!("({})", ch(0x61 + r - 0x249C)),
-        ..=0x24CF => ch(0x41 + r - 0x24B6).to_string(),
-        ..=0x24E9 => ch(0x61 + r - 0x24D0).to_string(),
+        0x2460..=0x2473 => (r - 0x2460 + 1).to_string(),
+        0x2474..=0x2487 => format!("({})", r - 0x2474 + 1),
+        0x2488..=0x249B => format!("{}.", r - 0x2488 + 1),
+        0x249C..=0x24B5 => format!("({})", ch(0x61 + r - 0x249C)),
+        0x24B6..=0x24CF => ch(0x41 + r - 0x24B6).to_string(),
+        0x24D0..=0x24E9 => ch(0x61 + r - 0x24D0).to_string(),
         _ => "0".into(),
     }
 }
@@ -766,28 +737,5 @@ mod tests {
         assert!(full.clash && full.add_anyway && !full.blocks, "6.30 refuses it after the download: Add anyway");
         assert_eq!(full.line.map(|(_, l)| l.key), Some("gui.ytdl.file.clash"));
         assert!(!name_check("One More Time", None, "opus", Some(&there), Tier::Older).clash);
-    }
-
-    #[test]
-    fn the_middle_ellipsis_keeps_the_start_the_extension_and_eight_before_it() {
-        let gorillaz = "Gorillaz_-_Feel_Good_Inc._Official_Video_HD.mp3";
-        assert_eq!(middle_ellipsis(gorillaz, 33), "Gorillaz_-_Feel_Good…Video_HD.mp3");
-        assert_eq!(middle_ellipsis(gorillaz, gorillaz.len()), gorillaz);
-        assert_eq!(middle_ellipsis(gorillaz, 100), gorillaz);
-        assert_eq!(middle_ellipsis("_.mp3", 5), "_.mp3");
-        for max in 8..gorillaz.len() {
-            let cut = middle_ellipsis(gorillaz, max);
-            assert_eq!(cut.chars().count(), max, "{max}");
-            assert!(cut.ends_with(".mp3") && cut.contains('…') && cut.starts_with('G'), "{cut}");
-        }
-        assert_eq!(middle_ellipsis(gorillaz, 15), "Gorilla…_HD.mp3");
-        assert_eq!(middle_ellipsis(gorillaz, 3), "…p3");
-        assert_eq!(middle_ellipsis(gorillaz, 1), "…");
-        assert_eq!(middle_ellipsis(gorillaz, 0), "");
-        assert_eq!(middle_ellipsis("abcdefghijklmnopqrstuvwxyz", 10), "abcde…wxyz");
-        assert_eq!(middle_ellipsis("Mr.Brightside_The_Killers_Official", 12), "Mr.Bri…icial");
-        let emoji = middle_ellipsis(&"\u{1F3B5}".repeat(12), 7);
-        assert_eq!(emoji.chars().count(), 7);
-        assert_eq!(emoji, "\u{1F3B5}\u{1F3B5}\u{1F3B5}…\u{1F3B5}\u{1F3B5}\u{1F3B5}");
     }
 }

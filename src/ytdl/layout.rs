@@ -212,11 +212,6 @@ impl Target {
         self.error.is_none()
     }
 
-    /// The folders below the library, `/` between.
-    pub(crate) fn rel_dir(&self) -> String {
-        self.segments.join("/")
-    }
-
     /// What POST /ytdl and mkdir get: `/<library>/<folders>/`, or `/<library>/`;
     /// `""` when there is nowhere to land.
     pub(crate) fn directory(&self) -> String {
@@ -350,28 +345,6 @@ pub(crate) fn folder_target(current: &str, layout: Option<&str>, tags: &SongTags
         t.segments = below.iter().cloned().chain(t.segments).collect();
     }
     t
-}
-
-/// One crumb as drawn: the library first; a folder that will be made
-/// carries "new"; the trap's folder is the warning's.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Crumb {
-    pub text: String,
-    pub is_new: bool,
-    pub trap: bool,
-}
-
-/// The crumbs of `target`, `new_segments` (indexes into its segments, the
-/// folder check's answer) marked new.
-pub(crate) fn crumb_items(target: &Target, new_segments: &[usize]) -> Vec<Crumb> {
-    let mut out = vec![Crumb { text: target.library.clone(), is_new: false, trap: false }];
-    let mut trapped = false;
-    for (i, text) in target.segments.iter().enumerate() {
-        let trap = !trapped && target.trap.as_ref().is_some_and(|t| &t.folder == text);
-        trapped |= trap;
-        out.push(Crumb { text: text.clone(), is_new: new_segments.contains(&i), trap });
-    }
-    out
 }
 
 /// The tag a trap's key word takes the room to.
@@ -755,7 +728,6 @@ mod tests {
         assert_eq!(t.crumbs(), strings(crumbs), "{t:?}");
         assert_eq!(t.library, crumbs[0]);
         assert_eq!(t.segments, strings(&crumbs[1..]));
-        assert_eq!(t.rel_dir(), crumbs[1..].join("/"));
         assert_eq!(t.directory(), directory);
         assert_eq!(t.missing, strings(missing), "{t:?}");
         assert_eq!(t.never, strings(never), "{t:?}");
@@ -862,17 +834,6 @@ mod tests {
         for f in ["", "Discovery ()", "a"] {
             assert!(!r.only_brackets.is_match(f), "{f}");
         }
-    }
-
-    #[test]
-    fn the_crumbs_mark_new_folders_and_the_trap() {
-        let t = target("Music", "", Some(LIBRARY_LAYOUT), &tags("Daft Punk", "Discovery", ""));
-        let crumb = |text: &str, is_new, trap| Crumb { text: text.into(), is_new, trap };
-        assert_eq!(
-            crumb_items(&t, &[1]),
-            [crumb("Music", false, false), crumb("Daft Punk", false, false), crumb("Discovery ()", true, true)]
-        );
-        assert_eq!(crumb_items(&target("Music", "", Some(""), &SongTags::default()), &[]), [crumb("Music", false, false)]);
     }
 
     #[test]

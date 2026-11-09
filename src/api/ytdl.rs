@@ -125,6 +125,7 @@ pub enum YtdlCallError {
 
 impl YtdlCallError {
     /// The status that came back, a 401's included.
+    #[cfg(test)]
     pub fn status(&self) -> Option<u16> {
         match self {
             YtdlCallError::Answered { status, .. } | YtdlCallError::Unreadable { status } => Some(*status),
@@ -134,6 +135,7 @@ impl YtdlCallError {
     }
 
     /// The server's own words, when it sent any.
+    #[cfg(test)]
     pub fn words(&self) -> Option<&str> {
         match self {
             YtdlCallError::Answered { words, .. } => words.as_deref(),
@@ -141,11 +143,7 @@ impl YtdlCallError {
         }
     }
 
-    /// The answer carried the server's words (the phone's `fromServer`).
-    pub fn from_server(&self) -> bool {
-        self.words().is_some()
-    }
-
+    #[cfg(test)]
     pub fn reason(&self) -> Option<&str> {
         match self {
             YtdlCallError::Answered { reason, .. } => reason.as_deref(),
@@ -153,6 +151,7 @@ impl YtdlCallError {
         }
     }
 
+    #[cfg(test)]
     pub fn file_name(&self) -> Option<&str> {
         match self {
             YtdlCallError::Answered { file_name, .. } => file_name.as_deref(),
@@ -170,11 +169,13 @@ impl YtdlCallError {
 
     /// Our bound ran out: "The server took too long" for the lookup, "not
     /// sure it started" for the add.
+    #[cfg(test)]
     pub fn timed_out(&self) -> bool {
         self.no_answer() == Some(NoAnswer::TimedOut)
     }
 
     /// See [`NoAnswer::never_connected`].
+    #[cfg(test)]
     pub fn never_connected(&self) -> bool {
         self.no_answer().is_some_and(NoAnswer::never_connected)
     }
@@ -444,6 +445,7 @@ pub struct YtdlEntry {
 }
 
 impl YtdlEntry {
+    #[cfg(test)]
     pub fn downloading(&self) -> bool {
         self.status == "downloading"
     }
@@ -600,7 +602,8 @@ pub enum YtdlTier {
 
 impl YtdlTier {
     /// The ping's generation alone: [`YtdlTier::New`] from 1. Below it the
-    /// probe decides ([`Client::ytdl_probe_tier`]).
+    /// record's first read decides — the job tracker's probe: an answer is
+    /// [`YtdlTier::Full`], Express's 404 [`YtdlTier::Older`].
     pub fn from_generation(generation: u32) -> Option<YtdlTier> {
         (generation >= 1).then_some(YtdlTier::New)
     }
@@ -895,29 +898,6 @@ impl Client {
         finish(self.ytdl_added_async(generation, before))
     }
 
-    /// The server's tier: [`YtdlTier::New`] from the ping's generation
-    /// without asking anything; below it the record's first read is the
-    /// probe (the phone's `probeTier`) — an answer is [`YtdlTier::Full`]
-    /// and the Added list's first read with it, Express's 404
-    /// [`YtdlTier::Older`]. An error leaves the tier unknown: the older
-    /// rules hold until it answers, and it is asked again.
-    pub async fn ytdl_probe_tier_async(
-        &self,
-        generation: u32,
-    ) -> Result<(YtdlTier, Option<YtdlAddedRead>), YtdlCallError> {
-        if let Some(tier) = YtdlTier::from_generation(generation) {
-            return Ok((tier, None));
-        }
-        Ok(match self.ytdl_added_async(generation, None).await? {
-            Some(read) => (YtdlTier::Full, Some(read)),
-            None => (YtdlTier::Older, None),
-        })
-    }
-
-    pub fn ytdl_probe_tier(&self, generation: u32) -> Result<(YtdlTier, Option<YtdlAddedRead>), YtdlCallError> {
-        finish(self.ytdl_probe_tier_async(generation))
-    }
-
     /// `POST /api/v1/file-explorer/mkdir {directory}`, bounded by
     /// [`MKDIR_BOUND`]: recursive, and fine when the folder is already
     /// there — which is what makes its one more try safe. Any 2xx means
@@ -1099,13 +1079,13 @@ mod tests {
         assert_eq!(api.ytdl_metadata(link).unwrap_err().words(), Some("yt-dlp is not installed"));
         let link_refused = api.ytdl_metadata(link).unwrap_err();
         assert_eq!(link_refused.status(), Some(400));
-        assert!(link_refused.from_server());
+        assert!(link_refused.words().is_some(), "the server's words (the phone's fromServer)");
         let blank = api.ytdl_metadata(link).unwrap_err();
-        assert_eq!((blank.status(), blank.from_server()), (Some(500), false), "spaces are no words");
+        assert_eq!((blank.status(), blank.words()), (Some(500), None), "spaces are no words");
         assert_eq!(api.ytdl_metadata(link).unwrap_err(), YtdlCallError::Unauthorized);
         assert_eq!(api.ytdl_metadata(link).unwrap_err(), YtdlCallError::Unreadable { status: 200 });
         let express = api.ytdl_metadata(link).unwrap_err();
-        assert!(express.no_route() && !express.from_server(), "Express's own 404: {express:?}");
+        assert!(express.no_route() && express.words().is_none(), "Express's own 404: {express:?}");
     }
 
     #[test]
@@ -1365,20 +1345,21 @@ mod tests {
 
     #[test]
     fn the_tier_comes_from_the_generation_else_the_records_answer() {
-        let (port, seen) = canned_server_bodies(vec![
+        // Below generation 1 the tracker's probe is the record's first read
+        // (the phone's `probeTier`): an answer is 6.30 on, Express's 404
+        // before it, a failure no answer at all (asked again later).
+        let (port, _seen) = canned_server_bodies(vec![
             json_reply("200 OK", json!({ "downloads": [record(5, "ytdl")] })),
             reply("404 Not Found", "text/html", b"<pre>Cannot GET /api/v1/discovery/downloads</pre>"),
             json_reply("500 Internal Server Error", json!({ "error": "Server Error" })),
         ]);
         let api = client(port);
-        assert_eq!(api.ytdl_probe_tier(1).unwrap(), (YtdlTier::New, None));
-        assert!(seen.recv_timeout(Duration::from_millis(200)).is_err(), "the generation asks nothing");
-        let (tier, added) = api.ytdl_probe_tier(0).unwrap();
-        assert_eq!(tier, YtdlTier::Full);
-        assert_eq!(added.unwrap().rows.len(), 1, "the probe is the Added list's first read");
-        assert_eq!(api.ytdl_probe_tier(0).unwrap(), (YtdlTier::Older, None));
-        assert!(api.ytdl_probe_tier(0).is_err(), "unknown: asked again later");
+        let added = api.ytdl_added(0, None).unwrap().expect("an answer");
+        assert_eq!(added.rows.len(), 1, "the probe is the Added list's first read");
+        assert_eq!(api.ytdl_added(0, None).unwrap(), None, "before 6.30");
+        assert!(api.ytdl_added(0, None).is_err(), "unknown: asked again later");
         assert_eq!(YtdlTier::from_generation(0), None);
+        assert_eq!(YtdlTier::from_generation(1), Some(YtdlTier::New));
         assert_eq!(YtdlTier::from_generation(2), Some(YtdlTier::New));
     }
 

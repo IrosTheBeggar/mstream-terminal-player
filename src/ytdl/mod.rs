@@ -19,13 +19,8 @@
 //! terminal differs on purpose the comment says so.
 //!
 //! Text never leaves here as English: a [`Label`] is a locale key under
-//! `gui.ytdl.` with its params; every key is in [`KEYS`]. The surface
-//! renders it ([`Label::text`]).
-
-// Nothing outside this module reads these rules until the room, the
-// window and the tracker do (PLAN.md, phases A3 and B); the allow goes
-// with them.
-#![allow(dead_code, unused_imports)]
+//! `gui.ytdl.` with its params; every key is in `KEYS`, the tests' list
+//! of them. The surface renders it ([`Label::text`]).
 
 mod failure;
 mod filename;
@@ -73,12 +68,6 @@ impl Label {
     /// The words in the running locale.
     pub(crate) fn text(&self) -> String {
         self.fill(&t!(self.key))
-    }
-
-    /// The words in `locale` — passed, never switched, as the fit tests
-    /// measure every language.
-    pub(crate) fn text_in(&self, locale: &str) -> String {
-        self.fill(&t!(self.key, locale = locale))
     }
 
     /// `template` with each `%{name}` this label carries filled in, in one
@@ -134,41 +123,15 @@ pub(crate) enum Surface {
     List,
 }
 
-/// What a server offers Add from YouTube, by generation (no version string
-/// is needed): the phone's two tiers and the new job list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Tier {
-    /// Before 6.30: no download record; an add whose file name is already
-    /// in the folder re-tags that file instead of adding one; no live-stream
-    /// refusal. Also the reading while the tier is not known yet (the
-    /// phone's rule).
-    Older,
-    /// 6.30 to 6.33: the record (`/discovery/downloads`) answers; a name
-    /// clash fails after the download; job entries carry no words.
-    Full,
-    /// `ytdl >= 1` on the ping (mStream #1123): ids, the 409 before
-    /// downloading, reasons and words on every failure.
-    New,
-}
-
-impl Tier {
-    /// The tier from the ping's `ytdl` generation and, without one, the
-    /// record route's probe: `Some(true)` it answered, `Some(false)` an
-    /// Express 404 with no words, `None` not asked or no answer (older
-    /// rules until it answers).
-    pub(crate) fn of(generation: u32, record_route: Option<bool>) -> Tier {
-        if generation >= 1 {
-            Tier::New
-        } else if record_route == Some(true) {
-            Tier::Full
-        } else {
-            Tier::Older
-        }
-    }
-}
+/// What a server offers Add from YouTube: the API's own reading
+/// ([`crate::api::ytdl::YtdlTier`]) — the phone's two tiers below the
+/// ping's generation 1, and the new job list from it. Older is also the
+/// reading while the tier is not known yet (the phone's rule).
+pub(crate) use crate::api::ytdl::YtdlTier as Tier;
 
 /// Every key this module can return, for the locale files and their
 /// tests: each `locales/*.yml` must carry every one.
+#[cfg(test)]
 pub(crate) const KEYS: &[&str] = &[
     "gui.ytdl.link.not_youtube",
     "gui.ytdl.link.playlist",
@@ -325,15 +288,6 @@ mod tests {
         assert_eq!(Label::new("k").fill("plain"), "plain");
         assert_eq!(l.param("text"), Some("%{text} and 50% off"));
         assert_eq!(l.param("name"), None);
-    }
-
-    #[test]
-    fn the_tier_comes_from_the_generation_then_the_record_probe() {
-        assert_eq!(Tier::of(1, None), Tier::New);
-        assert_eq!(Tier::of(2, Some(false)), Tier::New);
-        assert_eq!(Tier::of(0, Some(true)), Tier::Full);
-        assert_eq!(Tier::of(0, Some(false)), Tier::Older);
-        assert_eq!(Tier::of(0, None), Tier::Older, "not known yet reads as older");
     }
 
     #[test]

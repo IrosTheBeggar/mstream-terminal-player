@@ -229,3 +229,10 @@ validator wordings above quote the record's English.
   console gate as every other glyph; the locale strings carry words only
   (docs/ui-kit.md, Glyphs). The same for the DJ room's bullet and the
   rating's star.
+- **2026-11-09 — The TORRENTS group becomes ADD MUSIC.** Add from YouTube
+  (docs/ux-contracts/add-from-youtube.md) shares it: `Add a torrent ▸`,
+  `Add from YouTube ▸` — shown only under its own gates — and `[✓] Ask
+  what to do with torrents`. The key `gui.set.torrents_group` is kept,
+  its value new in the ten languages; the Portuguese row's description
+  reads the phone's Brazilian ("um arquivo .torrent ou um link magnet")
+  beside its new neighbour.
