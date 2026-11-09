@@ -2475,7 +2475,10 @@ album asked with its peer's reach and falling back to its matched rows.
 The locale parity test. Expect legs
 (`test/e2e/legs/gui-discover.exp`, `MSTREAM_GUI_DEMO=1`; and
 `gui-discover-room.exp` against the fake's taste route: the window
-dropdown, more options, the header's words, a row; first-paint gates, drain-not-sleep). `cargo test --features desktop`; `cargo check --target
+dropdown, more options, the header's words, a row; first-paint gates, drain-not-sleep —
+since TOOLS packs its rooms (2026-11-09) the Discover row repaints Add
+torrent's line, so the legs gate on the ping frame's "connected to" and
+run.sh replays that frame to see the row). `cargo test --features desktop`; `cargo check --target
 wasm32-unknown-unknown`.
 **Keep a copy's drawing (2026-10-20)**, render tests in `src/gui/keep.rs`
 over the canvas's sample (Stage Peer B's Borrowed Tapes and Peer

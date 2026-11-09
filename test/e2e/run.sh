@@ -199,6 +199,17 @@ leg gui-discover gui-discover.exp "$WORK/h11" "$WORK/gui-discover.out"
 PORT="$(FAKE_TASTE=1 start_fake T)"
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-room gui-discover-room.exp "$WORK/h12" "$WORK/gui-discover-room.out"
+# The row itself, replayed (law 1): the ping's frame — the one that first
+# paints "connected to" — draws Discover in the nav column, before G.
+assert "the nav grew its Discover row with the ping" "
+import subprocess
+raw=open('$WORK/gui-discover-room.out','rb').read()
+end=raw.find(b'\x1b[?2026l', raw.find(b'connected to'))
+assert end > 0, 'no ping frame'
+open('$WORK/ping.cut','wb').write(raw[:end])
+out=subprocess.run(['python3','$E2E/replay.py','$WORK/ping.cut','34','120'],capture_output=True,text=True).stdout
+assert any(line[:15].strip().endswith('Discover') for line in out.splitlines()), out
+"
 assert "the room asked the taste route" "
 import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
