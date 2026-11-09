@@ -51,6 +51,11 @@ mod gpu_pick;
 mod viz_window;
 #[cfg(not(target_arch = "wasm32"))]
 mod gui;
+/// Add from YouTube's pure rules: links, the tag guess, where a song lands,
+/// formats, file names and failures (src/ytdl/mod.rs). Native only — the GUI
+/// is its one surface.
+#[cfg(not(target_arch = "wasm32"))]
+mod ytdl;
 #[cfg(not(target_arch = "wasm32"))]
 mod instance;
 #[cfg(not(target_arch = "wasm32"))]
