@@ -3456,6 +3456,10 @@ pub(crate) mod tests {
             dj: Default::default(),
         }];
         gui.ytdl.clock = YtClock(Some(Rc::new(Cell::new(START))));
+        // The boards are drawn with whole pastes, as every platform but a
+        // Windows console delivers them: pinned here, so they read the
+        // same on Windows CI. The typed-paste path has its own test.
+        gui.ytdl.whole_pastes = true;
         observe(&mut gui, &connected(ping(generation)));
         gui.active = super::super::SETTINGS_NAV;
         gui
