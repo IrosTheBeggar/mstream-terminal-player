@@ -177,10 +177,13 @@ them stands from the left, three cells apart; beside a modal primary
 they share its row, and take the row above where the two would come
 closer than three cells. No tooltip (self-evident). Like a text button
 it hides rather than going grey. First consumer: Keep a copy's window
-(discovery-page clauses 105–110). (One logged exception: Add from
-YouTube's Files door — `y` opens its window under every word its spot
-shows, with no letter on screen, the door word a door rather than a key
-word; add-from-youtube clause 30 and its 2026-11-03 log.)
+(discovery-page clauses 105–110). (Two logged exceptions, both Add from
+YouTube's: its Files door — `y` opens its window under every word its
+spot shows, with no letter on screen, the door word a door rather than a
+key word; add-from-youtube clause 30 and its 2026-11-03 log — and its
+room's press: a nav room has no back for Esc to take, so while the press
+is out every typed key waits and Esc is the shell's, the nav's rows the
+way on; clause 20 and its 2026-11-09 log.)
 
 ### Tabs
 One row, under the screen's state line (or first, on a page with none): the ACTIVE tab is a 1-row filled
@@ -748,12 +751,16 @@ Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Rated, Playlists, Last
 played, Most played), then a TOOLS group (Auto DJ, whose row wears a `•`
 in the ok colour while the DJ is armed, the capability-gated Sonic path,
-and Discover on row 17, gated by the server's `discoveryTaste` —
-docs/ux-contracts/discovery-page.md), Settings on the column's last row;
-sixteen rows since 2026-10-31 (Rated, library-rooms clause 37) — at the
-24-row minimum with the footer on, the LIBRARY heading through Discover
-rise one row into the blank under Search, so Discover and Settings are
-never on one row. Now Playing is the TUI's full-screen view,
+Discover on row 17, gated by the server's `discoveryTaste` —
+docs/ux-contracts/discovery-page.md — then Add torrent and the gated Add
+YouTube on 18 and 19, docs/ux-contracts/add-torrent.md and
+add-from-youtube.md), Settings on the column's last row; eighteen rows
+since 2026-11-09 with every room, the TOOLS group packing the rooms it
+shows (a hidden tool leaves no blank line) — where Settings would meet
+the last of them the rooms rise only as far as they must, into
+the blank under Search, then over the TOOLS heading, then over the
+LIBRARY heading (library-rooms clause 37), so no room is ever on
+Settings' row. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);

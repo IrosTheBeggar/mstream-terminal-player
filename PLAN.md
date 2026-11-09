@@ -2360,9 +2360,30 @@ a LATER secondary screen (party view), Columns retired.
   `api::ytdl` 17, `ytdl` 88, `ytdl::jobs` 33, `gui::ytdl` 39,
   `gui::ytdl_here` 16, `gui::ytdl_where` 8 — every board frame cell for
   cell with its tokens, and every language's words in their cells and
-  drawn whole. Still to run: the pty smoke against mStream with its fake
-  yt-dlp on a new port, and against a server before #1123; the DIM
-  colour's move to `#7a82a0` is its own commit.
+  drawn whole. The pty smoke (`smoke/gui/scenario_ytdl.py`) passes
+  against mStream with #1123 and its fake yt-dlp, and against 6.32.3;
+  the DIM colour's move to `#7a82a0` is its own commit. **Both rooms move to the
+  nav, 2026-11-09** (the owner's call, the same day): Add torrent and Add
+  from YouTube leave Settings for the left nav's TOOLS group — `Add
+  torrent` and `Add YouTube` after Discover, last in `NAV` with no digit
+  and no letter, the group packing the rooms it shows (rows 18 and 19
+  with all five; no blank lines where the sonic path or Discover is
+  absent), Add YouTube under the room's gates and
+  with no state on its row — superseding the doorway above, ADD MUSIC and
+  the dynamic Settings rows: Settings is TORRENTS over the ask-me switch
+  again. Both are nav rooms in the Auto DJ room's shape (no `◂`; Esc lets
+  go of what holds the keys, then leaves nothing), an arriving torrent
+  opens its room the nav's own way, the YouTube press still holds every
+  typed key (Esc and Tab the shell's, the nav's rows the way on), and
+  where Settings would meet the last tool on short terminals the rooms
+  rise in steps — the blank under Search, the TOOLS heading, the LIBRARY
+  heading (discovery-page clause 2, library-rooms clause 37). Where no
+  verb fits the twelve cells (de es fr it pl pt ru) the rows read `+
+  Torrent` / `+ YouTube`, the add sign for "Add" — the owner's choice.
+  Tests now: `gui::ytdl` 44, `gui::ytdl_here` 17, `gui::ytdl_where` 9,
+  and the shell's give-way table at ten sizes for four sets of tools;
+  `scenario_ytdl` opens the room from its nav row, and passes on both
+  servers after the move.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

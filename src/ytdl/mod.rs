@@ -114,7 +114,7 @@ pub(crate) enum Tone {
 /// Which surface a failure is worded for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Surface {
-    /// The Settings room: inline above its primary.
+    /// The room (the nav's Add YouTube): inline above its primary.
     Room,
     /// The Files window (`[ Add here ]`): a lost library's first sentence
     /// only — the window can't pick another library.

@@ -1,4 +1,4 @@
-//! Add from YouTube in the GUI: the Settings doorway's room — a link
+//! Add from YouTube in the GUI: the nav's Add YouTube room — a link
 //! pasted in, the video looked up, its tags guessed and the folder it
 //! lands in shown, one primary that adds it to a library — and the From
 //! YouTube list the room's title-row word opens, where the adds this
@@ -64,7 +64,7 @@ use crate::ytdl::{
 };
 
 use super::keep::{self, crumb_sep, fit_note};
-use super::{Act, Gui, SettingsRoom, accent, bright_bold, put, sel, text_button};
+use super::{Act, Gui, Screen, accent, bright_bold, put, sel, text_button};
 
 /// A typed link is looked up once the typing rests this long.
 const DEBOUNCE_MS: i64 = 400;
@@ -82,8 +82,6 @@ const TITLE_W: usize = 20;
 /// Everything a click on Add from YouTube's surfaces means.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum YtAct {
-    /// The room's ◂ — back to the Settings rows (the second Esc's twin).
-    Back,
     /// The title-row word (`l`): the From YouTube list.
     List,
     /// A click on the link card: the field takes the keys.
@@ -743,8 +741,8 @@ impl YtUi {
 // ── The two forms ───────────────────────────────────────────────────────────
 
 /// Which form a reading or a key is for: the room's, or the Files
-/// window's. Never both at once — the room stands in Settings, the window
-/// over Files.
+/// window's. Never both at once — the room is a nav room of its own, the
+/// window over Files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Form {
     Room,
@@ -804,9 +802,10 @@ pub(crate) fn available(gui: &Gui) -> bool {
         && facts(gui).is_some_and(|f| f.uploads && f.transcode)
 }
 
-/// The room is what stands in Settings.
+/// The room is the Library's active one — a nav room, so the Now Playing
+/// screen over it counts as away (the Auto DJ room's rule).
 pub(super) fn in_room(gui: &Gui) -> bool {
-    gui.in_settings_room(SettingsRoom::YouTube)
+    gui.screen == Screen::Library && gui.active == super::YOUTUBE_NAV
 }
 
 /// A surface of Add from YouTube's stands beneath its windows: the room,
@@ -888,14 +887,15 @@ pub(super) fn session_client(gui: &Gui) -> Result<Client, String> {
 
 // ── Opening, and what arrives ───────────────────────────────────────────────
 
-/// Open the room from Settings: the link field holds the keys (the boards'
-/// deviation from a room that opens stowed — a paste is the way in).
+/// The nav's Add YouTube row: the room opens with the link field holding
+/// the keys (the boards' deviation from a room that opens stowed — a paste
+/// is the way in), unless its press is still out — the row is there to
+/// click again mid-press. The hub calls this from `Act::Nav`, under the
+/// gate.
 pub(crate) fn open_room(gui: &mut Gui) {
-    gui.active = super::SETTINGS_NAV;
-    gui.cursor = None;
-    gui.servers.drop_open = false;
-    gui.settings_room = Some(SettingsRoom::YouTube);
-    gui.ytdl.draft.keys = Keys::Link;
+    if gui.ytdl.draft.starting.is_none() {
+        gui.ytdl.draft.keys = Keys::Link;
+    }
     gui.ytdl.formats = None;
     ensure_jobs(gui);
     if let Some(jobs) = gui.ytdl.jobs_mut() {
@@ -1064,11 +1064,14 @@ pub(crate) fn poll(gui: &mut Gui) -> bool {
         changed = true;
     }
     // A room whose gate closed (a re-ping said uploads are off, the
-    // session moved to a peer) goes back to the Settings rows: hidden,
-    // never greyed. A connection that dropped closes nothing — the room
-    // says it can't reach the server.
+    // session moved to a peer) yields to Files as its row goes, the
+    // Discover room's way: hidden, never greyed — what hung over it let go
+    // first, as Files is a surface the sweep below keeps them on. A
+    // connection that dropped closes nothing — the room says it can't
+    // reach the server.
     if in_room(gui) && gui.app.connected && !available(gui) {
-        leave_room(gui);
+        close_overlays(gui);
+        gui.act(Act::Nav(super::FILES_NAV));
         changed = true;
     }
     ensure_jobs(gui);
@@ -1547,14 +1550,14 @@ pub(super) fn form_view(gui: &Gui, form: Form) -> RoomView {
     }
 }
 
-/// The title-row word and the Settings description's: what the jobs have
-/// to say, in its token. On the title row the room's own press, while it
-/// is out, is the primary's to say (D5: `Adding…`, one ACCENT element).
-fn news_word(gui: &Gui, history: bool) -> Option<(String, Style)> {
+/// The title-row word: what the jobs have to say, in its token. The
+/// room's own press, while it is out, is the primary's to say (D5:
+/// `Adding…`, one ACCENT element).
+fn news_word(gui: &Gui) -> Option<(String, Style)> {
     let jobs = gui.ytdl.jobs()?;
     let mut summary = jobs.summary();
     let pressed = gui.ytdl.draft.starting.as_deref().and_then(|id| jobs.job(id));
-    if history && pressed.is_some_and(|j| j.state.open() && !j.hidden) {
+    if pressed.is_some_and(|j| j.state.open() && !j.hidden) {
         summary.adding = summary.adding.saturating_sub(1);
     }
     let word = summary.word()?;
@@ -1562,15 +1565,8 @@ fn news_word(gui: &Gui, history: bool) -> Option<(String, Style)> {
         Word::Adding => (t!("gui.ytdl.word.adding").to_string(), accent()),
         Word::Failed => (format!("! {}", t!("gui.ytdl.word.failed")), Style::default().fg(th().gold)),
         Word::Added => (format!("{} {}", keep::tick(), t!("gui.ytdl.word.added")), Style::default().fg(th().ok)),
-        Word::History if history => (t!("gui.ytdl.word.history").to_string(), dim()),
-        Word::History => return None,
+        Word::History => (t!("gui.ytdl.word.history").to_string(), dim()),
     })
-}
-
-/// Settings › Add from YouTube's description while there is news: one word
-/// (TermList S2–S4); none, the description stands.
-pub(crate) fn settings_word(gui: &Gui) -> Option<(String, Style)> {
-    news_word(gui, false)
 }
 
 // ── Drawing the room ────────────────────────────────────────────────────────
@@ -1681,17 +1677,13 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let y = content.y;
     let over = list_open(gui);
 
-    // Title row: the way back, the name, and the jobs' one word.
-    let back = Rect { x, y, width: 1, height: 1 };
-    let hover = gui.ui.hovers(back);
-    put(frame, x, y, super::back_glyph(), if hover { bright_bold() } else { dim() });
-    gui.ui.click(back, yt(YtAct::Back));
-    // The press is out: ◂ is the one way left; everything else stands where
-    // it is, neither clicking nor lighting (D5).
+    // Title row: the name, and the jobs' one word — no way back, the nav
+    // column is right there. The press out, every control stands where it
+    // is, neither clicking nor lighting (D5); the nav is the way on.
     gui.ytdl.quiet = gui.ytdl.draft.starting.is_some();
     let quiet = gui.ytdl.quiet;
-    put(frame, x + 2, y, &t!("gui.ytdl.room.title"), Style::default().add_modifier(Modifier::BOLD));
-    if let Some((word, style)) = news_word(gui, true) {
+    put(frame, x, y, &t!("gui.ytdl.room.title"), Style::default().add_modifier(Modifier::BOLD));
+    if let Some((word, style)) = news_word(gui) {
         let at = Rect { x: super::right_at(content, &word), y, width: width(&word) as u16, height: 1 };
         let style = if !quiet && gui.ui.hovers(at) { bright_bold() } else { style };
         put(frame, at.x, y, &word, style);
@@ -2711,6 +2703,18 @@ fn close_list(gui: &mut Gui) {
     }
 }
 
+/// Whatever hangs over the room — the From YouTube list and Choose a
+/// folder in its place, a format list, Where new songs land — let go, as
+/// the room yields to Files: Files counts as their ground, so the frame's
+/// sweep would keep them (`discover::reopen` lets its own go the same way).
+fn close_overlays(gui: &mut Gui) {
+    if gui.ytdl.list.is_some() {
+        close_list(gui);
+    }
+    gui.ytdl.formats = None;
+    gui.ytdl.place = None;
+}
+
 fn song_at(gui: &Gui, i: usize) -> Option<AddedRow> {
     match gui.ytdl.list.as_ref()?.items.get(i)? {
         Item::Song(song) => Some(song.clone()),
@@ -2845,15 +2849,6 @@ pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
 
 // ── Acts ────────────────────────────────────────────────────────────────────
 
-fn leave_room(gui: &mut Gui) {
-    gui.settings_room = None;
-    gui.ytdl.formats = None;
-    close_list(gui);
-    if gui.ytdl.draft.keys != Keys::None {
-        gui.ytdl.draft.keys = Keys::Link;
-    }
-}
-
 /// The primary: Add to library, Add here (Add anyway, Enter again after a
 /// refusal) — the start handed to the tracker, never twice for the same
 /// link and folder.
@@ -2881,8 +2876,8 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
     // The form's own controls act on the form on screen: the room's, or
     // the Files window's over Files.
     let form = active_form(gui);
-    // Its press out, they wait for the server with it — the way back is
-    // the one left (D5, C4).
+    // Its press out, they wait for the server with it — the nav is the way
+    // on (D5, C4).
     let waiting = draft(gui, form).starting.is_some() && (form == Form::Window || in_room(gui));
     let controls = matches!(
         act,
@@ -2901,7 +2896,6 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         return true;
     }
     match act.clone() {
-        YtAct::Back => leave_room(gui),
         YtAct::List => open_list(gui),
         YtAct::Field => {
             let draft = draft_mut(gui, form);
@@ -3081,13 +3075,13 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     }
     let ctrl = key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     let now = gui.ytdl.now();
-    // The press is out: every key but Esc waits for the server (D5). The
-    // arrows are the room's throughout: the Settings rows stand hidden
-    // behind it, and a cursor walked there would have ← → and Space act on
-    // a row no one sees.
+    // The press is out: every typed key waits for the server (D5) — a link
+    // pasted as keys, where the terminal sends one so, among them: its
+    // letters and digits must never reach the shell's globals — and ↑ ↓
+    // are the room's throughout. A nav room has no way back for Esc to
+    // take: the nav's rows are the way on, and Esc and Tab the shell's.
     if gui.ytdl.draft.starting.is_some() {
         return match key.code {
-            KeyCode::Esc => Some(gui.act(yt(YtAct::Back))),
             KeyCode::Char(_) if !ctrl => Some(false),
             KeyCode::Up | KeyCode::Down => Some(false),
             _ => None,
@@ -3106,8 +3100,9 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             KeyCode::Enter => press(gui),
             _ => tag_typed(gui, Form::Room, field, key),
         },
+        // Esc has nothing left to give back: a nav room has no back, so it
+        // is the shell's (an armed pick's, else nothing).
         Keys::None => match key.code {
-            KeyCode::Esc => return Some(gui.act(yt(YtAct::Back))),
             KeyCode::Enter => {
                 if room_view(gui).primary.is_some_and(|(_, on)| on) {
                     press(gui);
@@ -3341,9 +3336,10 @@ pub(crate) fn tips(gui: &Gui) -> String {
         parts.push(t!("gui.tips.ytdl_close").to_string());
         return parts.join(" · ");
     }
-    // The press is out: Esc is the one key that does anything (D5).
+    // The press is out: none of the room's keys does anything (D5), so
+    // the line names none.
     if gui.ytdl.draft.starting.is_some() {
-        return t!("gui.tips.ytdl_esc_back").to_string();
+        return String::new();
     }
     match room_keys(gui) {
         Keys::Link => t!("gui.tips.ytdl_field").to_string(),
@@ -3371,20 +3367,16 @@ pub(crate) fn tips(gui: &Gui) -> String {
                     keys.push(words.to_string());
                 }
             }
-            let mut tail = Vec::new();
-            if room_view(gui).primary.is_some_and(|(_, on)| on) {
-                tail.push(t!("gui.tips.ytdl_enter_add").to_string());
-            }
-            tail.push(t!("gui.tips.ytdl_esc_back").to_string());
+            let enter = room_view(gui).primary.is_some_and(|(_, on)| on).then(|| t!("gui.tips.ytdl_enter_add").to_string());
             let line = |keys: &[String]| {
                 std::iter::once(t!("gui.tips.ytdl_paste").to_string())
                     .chain(keys.iter().cloned())
-                    .chain(tail.iter().cloned())
+                    .chain(enter.iter().cloned())
                     .collect::<Vec<_>>()
                     .join(" · ")
             };
             // At most the footer's 99 cells: the last key words give way,
-            // the paste, Enter and the way back stay.
+            // the paste and Enter stay.
             while !keys.is_empty() && width(&line(&keys)) > 99 {
                 keys.pop();
             }
@@ -3465,10 +3457,10 @@ pub(crate) mod tests {
         gui
     }
 
-    /// The room open on the new server (generation 1).
+    /// The room open on the new server (generation 1), by its nav row.
     pub(crate) fn room() -> Gui {
         let mut gui = seated(1);
-        open_room(&mut gui);
+        gui.act(Act::Nav(super::super::YOUTUBE_NAV));
         gui
     }
 
@@ -3743,40 +3735,46 @@ pub(crate) mod tests {
         gui.ytdl.held.as_ref().map(|h| h.wire.0.borrow().out.iter().map(|(_, c)| c.clone()).collect()).unwrap_or_default()
     }
 
-    // ── Settings ───────────────────────────────────────────────────────────
+    // ── The nav ────────────────────────────────────────────────────────────
 
-    /// T1: TORRENTS is ADD MUSIC, holding Add a torrent, Add from YouTube
-    /// and the torrent switch — 17 rows — and the doorway brightens under
-    /// the pointer.
+    /// The nav's TOOLS group ends with Add torrent and Add YouTube, after
+    /// Discover — here, with no sonic path and no Discover, packed under
+    /// Auto DJ on 16 and 17; the row brightens under the pointer and opens the
+    /// room with the link field holding the keys. Settings keeps no doorway:
+    /// TORRENTS holds the torrent switch alone.
     #[test]
-    fn settings_hold_add_from_youtube_under_add_music() {
+    fn the_nav_row_opens_the_room_and_settings_keep_no_doorway() {
         let _en = english();
         let mut gui = seated(1);
-        gui.app.crossfade = 0.0;
-        gui.app.gapless = true;
-        gui.app.blend_skips = false;
-        gui.app.pause_fade = false;
-        gui.app.resume_queue = true;
-        gui.ui.motion(Position { x: 30, y: 14 });
+        let rows = draw(&mut gui);
+        let text = rows.join("\n");
+        let nav = |rows: &[String], y: usize| rows[y].chars().take(15).collect::<String>();
+        assert_eq!((nav(&rows, 15).trim(), nav(&rows, 16).trim(), nav(&rows, 17).trim()), ("Auto DJ", "Add torrent", "Add YouTube"), "{text}");
+        assert!(!text.contains("ADD MUSIC") && !text.contains("Add from YouTube"), "no doorway in Settings:\n{text}");
+        assert!(rows[12].contains("TORRENTS") && rows[13].contains("[✓] Ask what to do with torrents"), "{text}");
+        assert!(rows[15].contains("DISPLAY") && rows[16].contains("Keyboard hints"), "{text}");
+        gui.ui.motion(Position { x: 5, y: 17 });
         let b = buffer(&mut gui, 100, 30);
-        assert_frame(&b, (17, 2), 80, boards::T1, boards::T1_RUNS);
-        assert_eq!(gui.ui.hit(Position { x: 30, y: 14 }), Some(Act::Row(super::super::ROW_YOUTUBE)));
+        assert!(b[(5, 17)].modifier.contains(Modifier::BOLD) && b[(5, 17)].fg == th().bright, "{:?}", b[(5, 17)]);
+        let row = gui.ui.hit(Position { x: 3, y: 17 }).expect("the row is a click target");
+        assert_eq!(row, Act::Nav(super::super::YOUTUBE_NAV));
 
-        // ↓ walks onto it; Enter opens the room, the field holding the keys.
-        gui.cursor = Some(super::super::ROW_TORRENT);
-        key(&mut gui, KeyCode::Down);
-        assert_eq!(gui.cursor, Some(super::super::ROW_YOUTUBE));
-        key(&mut gui, KeyCode::Enter);
-        assert!(gui.in_settings_room(SettingsRoom::YouTube));
-        assert_eq!(gui.ytdl.draft.keys, Keys::Link);
-        assert_eq!(gui.cursor, None, "back in Settings the cursor is stowed");
+        gui.act(row);
+        assert!(in_room(&gui) && gui.active == super::super::YOUTUBE_NAV);
+        assert_eq!(gui.ytdl.draft.keys, Keys::Link, "the field holds the keys");
+        assert_eq!(gui.cursor, None);
+        let rows = draw(&mut gui);
+        assert!(rows[17].starts_with(" ▸ Add YouTube"), "the row lit:\n{}", rows[17]);
+        assert!(rows[2].chars().skip(17).collect::<String>().starts_with("Add from YouTube"), "no way back:\n{}", rows[2]);
     }
 
     /// Hidden, never greyed: on a peer, with uploads off, with no audio
-    /// conversion, with no library, the row is absent and the ones under it
-    /// move up a line — the cursor walks past where it was.
+    /// conversion, with no library, Add YouTube's row is absent — Add
+    /// torrent closing TOOLS, nothing under it — and there is no way in; a room
+    /// whose gate closes under it yields to Files, the Discover room's way,
+    /// its windows and lists going with it.
     #[test]
-    fn the_doorway_is_absent_under_each_gate() {
+    fn the_nav_row_is_absent_under_each_gate() {
         let _en = english();
         type Close = fn(&mut Gui);
         let gates: [(&str, Close); 5] = [
@@ -3791,80 +3789,62 @@ pub(crate) mod tests {
             close(&mut gui);
             let rows = draw(&mut gui);
             let text = rows.join("\n");
-            assert!(!text.contains("Add from YouTube"), "{why}: absent\n{text}");
-            assert!(rows[14].contains("[✓] Ask what to do with torrents"), "{why}: the switch moved up\n{text}");
-            assert!(rows[16].contains("DISPLAY") && rows[17].contains("Keyboard hints"), "{why}\n{text}");
-            gui.cursor = Some(super::super::ROW_TORRENT);
-            key(&mut gui, KeyCode::Down);
-            assert_eq!(gui.cursor, Some(super::super::ROW_ASK), "{why}: ↓ skips the absent row");
-            gui.act(Act::Row(super::super::ROW_YOUTUBE));
-            assert!(!gui.in_settings_room(SettingsRoom::YouTube), "{why}: no way in");
-        }
-        // A cursor resting on it when it goes moves to the row in its place.
-        let mut gui = seated(1);
-        gui.cursor = Some(super::super::ROW_YOUTUBE);
-        gui.app.libraries.clear();
-        draw(&mut gui);
-        assert_eq!(gui.cursor, Some(super::super::ROW_ASK));
-    }
+            let nav = |y: usize| rows[y].chars().take(15).collect::<String>();
+            assert!(!text.contains("Add YouTube"), "{why}: absent\n{text}");
+            assert_eq!((nav(16).trim(), nav(17).trim()), ("Add torrent", ""), "{why}: Add torrent closes TOOLS\n{text}");
+            gui.act(Act::Nav(super::super::YOUTUBE_NAV));
+            assert!(!in_room(&gui) && gui.active == super::super::SETTINGS_NAV, "{why}: no way in");
 
-    /// At 100 × 24 with key hints on the column has 16 rows: the blank above
-    /// DISPLAY gives way and Keyboard hints keeps its line above the bar.
-    #[test]
-    fn the_blank_above_display_gives_way_at_the_floor() {
-        let _en = english();
-        let mut gui = seated(1);
-        gui.config.gui.key_hints = true;
-        gui.ui.key_hints = true;
-        let rows = lines(&buffer(&mut gui, 100, 24));
-        let text = rows.join("\n");
-        assert!(rows[15].contains("[✓] Ask what to do with torrents"), "{text}");
-        assert!(rows[16].contains("DISPLAY"), "no blank above it:\n{text}");
-        assert!(rows[17].contains("Keyboard hints"), "{text}");
-        // Without the YouTube row the sixteen lines fit, blank and all.
-        gui.app.libraries.clear();
-        let rows = lines(&buffer(&mut gui, 100, 24));
-        assert!(rows[15].trim_end().ends_with('│') && rows[16].contains("DISPLAY"), "{}", rows.join("\n"));
-    }
+            let mut gui = room();
+            draw(&mut gui);
+            close(&mut gui);
+            poll(&mut gui);
+            assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::FILES_NAV), "{why}: the room yields to Files");
 
-    /// S1–S4: the description, or one word while there is news — adding
-    /// ACCENT, ! failed GOLD, ✓ added OK for an hour, then the description
-    /// again.
-    #[test]
-    fn the_doorway_says_one_word_while_there_is_news() {
-        let _en = english();
-        let cases: [(&str, &str, &[&str], Vec<Value>); 4] = [
-            ("S1", boards::S1, boards::S1_RUNS, vec![history()]),
-            ("S2", boards::S2, boards::S2_RUNS, vec![job("a1", "adding", "One More Time", "/Music/Daft Punk/Discovery/")]),
-            ("S3", boards::S3, boards::S3_RUNS, {
-                let mut j = job("f1", "failed", "Around the World", "/Music/Daft Punk/Homework/");
-                j["seen"] = false.into();
-                j["endedAt"] = START.into();
-                vec![j]
-            }),
-            ("S4", boards::S4, boards::S4_RUNS, {
-                let mut j = history();
-                j["seen"] = false.into();
-                j["endedAt"] = (START - 10 * 60_000).into();
-                vec![j]
-            }),
-        ];
-        for (id, rows, runs, jobs) in cases {
-            let mut gui = seated(1);
-            seed(&mut gui, jobs);
-            let b = buffer(&mut gui, 100, 30);
-            eprintln!("{id}");
-            assert_frame(&b, (17, 12), 80, rows, runs);
+            // What hung over the room goes with it, none of it left over
+            // Files: the From YouTube list and a row's format list, the
+            // room's own format list, Where new songs land, and a failed
+            // row's Choose a folder in the list's place.
+            for over in ["a row's format list", "the room's format list", "Where new songs land", "Choose a folder"] {
+                let mut gui = room();
+                seed(&mut gui, l1_jobs());
+                draw(&mut gui);
+                match over {
+                    "a row's format list" => {
+                        gui.act(yt(YtAct::List));
+                        gui.act(yt(YtAct::Way("j3".into(), Way::ChangeFormat)));
+                    }
+                    "the room's format list" => {
+                        gui.act(yt(YtAct::Format));
+                    }
+                    "Where new songs land" => {
+                        gui.act(yt(YtAct::Change));
+                    }
+                    _ => {
+                        gui.act(yt(YtAct::List));
+                        gui.act(yt(YtAct::Way("j3".into(), Way::ChooseFolder)));
+                    }
+                }
+                assert!(modal_open(&gui), "{why}: {over} up");
+                close(&mut gui);
+                poll(&mut gui);
+                assert_eq!(gui.active, super::super::FILES_NAV, "{why}: {over}");
+                assert!(
+                    gui.ytdl.list.is_none() && gui.ytdl.formats.is_none() && gui.ytdl.place.is_none() && !modal_open(&gui),
+                    "{why}: {over} let go with the room"
+                );
+                let text = draw(&mut gui).join("\n");
+                for title in ["From YouTube", "Where new songs land", "Choose a folder"] {
+                    assert!(!text.contains(title), "{why}: {over}: nothing over Files\n{text}");
+                }
+            }
         }
-        // The hour over, ✓ added gives the description back.
-        let mut gui = seated(1);
-        let mut j = history();
-        j["seen"] = false.into();
-        j["endedAt"] = (START - 10 * 60_000).into();
-        seed(&mut gui, vec![j]);
-        advance(&gui, 60 * 60_000);
-        let rows = draw(&mut gui);
-        assert!(rows[14].contains("a YouTube link, into a library"), "{}", rows[14]);
+        // A dropped connection closes nothing: the room says it can't reach
+        // the server.
+        let mut gui = room();
+        gui.app.connected = false;
+        poll(&mut gui);
+        assert!(in_room(&gui));
     }
 
     // ── The room ───────────────────────────────────────────────────────────
@@ -3892,10 +3872,11 @@ pub(crate) mod tests {
         ] {
             assert_eq!(gui.ui.hit(at(&rows, text)), Some(yt(act)), "{text}");
         }
-        assert_eq!(gui.ui.hit(Position { x: 17, y: 2 }), Some(yt(YtAct::Back)));
+        assert_eq!(gui.ui.hit(Position { x: 17, y: 2 }), None, "no way back: the title is only a title");
         assert_eq!(gui.ui.hit(Position { x: 40, y: 5 }), Some(yt(YtAct::Field)));
-        // The tips line names the board's keys, in its order.
-        assert_eq!(tips(&gui), "a paste replaces the link · e edit tags · d change · f format · l list · Enter add · Esc back");
+        // The tips line names the board's keys, in its order — no Esc: a
+        // nav room has nothing to go back to.
+        assert_eq!(tips(&gui), "a paste replaces the link · e edit tags · d change · f format · l list · Enter add");
         gui.ytdl.draft.keys = Keys::Link;
         assert_eq!(tips(&gui), "type or paste a link · Enter look it up · Esc give the keys back");
     }
@@ -4104,7 +4085,7 @@ pub(crate) mod tests {
 
         let mut gui = seated(1);
         observe(&mut gui, &connected(Ping { no_mkdir: Some(true), ..ping(1) }));
-        open_room(&mut gui);
+        gui.act(Act::Nav(super::super::YOUTUBE_NAV));
         seed(&mut gui, vec![history()]);
         found(&mut gui, one_more_time(), discovery_new());
         assert_room(&mut gui, boards::C5, boards::C5_RUNS);
@@ -4118,8 +4099,8 @@ pub(crate) mod tests {
         assert!(rows[23].contains("Add to library ▸"), "and Add works again");
     }
 
-    /// D5: the press is out — Adding…, no click, no hover, every key but
-    /// Esc waiting; D3: the server refused it — its words in GOLD over the
+    /// D5: the press is out — Adding…, no click, no hover, the form's keys
+    /// waiting; D3: the server refused it — its words in GOLD over the
     /// primary, Enter trying again; D4: already adding this link to this
     /// folder.
     #[test]
@@ -4139,8 +4120,8 @@ pub(crate) mod tests {
         assert_room(&mut gui, boards::D5, boards::D5_RUNS);
         let rows = draw(&mut gui);
         assert_eq!(gui.ui.hit(at(&rows, "Adding…")), None, "no click");
-        // ◂ back only: every other control stands, neither clicking nor
-        // lighting under the pointer, and the tips name Esc alone.
+        // Every control stands, neither clicking nor lighting under the
+        // pointer, and the tips name no key: the nav is the way on.
         for text in ["e edit tags", "d change", "MP3 ▾", "[X]", "added songs", "youtu.be"] {
             let spot = at(&rows, text);
             gui.ui.pointer = Some(spot);
@@ -4151,8 +4132,8 @@ pub(crate) mod tests {
         }
         gui.ui.pointer = None;
         draw(&mut gui);
-        assert_eq!(gui.ui.hit(Position { x: 17, y: 2 }), Some(yt(YtAct::Back)));
-        assert_eq!(tips(&gui), "Esc back");
+        assert_eq!(gui.ui.hit(Position { x: 17, y: 2 }), None);
+        assert_eq!(tips(&gui), "");
         for act in [YtAct::Edit, YtAct::Change, YtAct::Format, YtAct::List] {
             gui.act(yt(act));
         }
@@ -4525,15 +4506,19 @@ pub(crate) mod tests {
         assert!(gui.ytdl.list.as_ref().unwrap().menu.is_none(), "Esc closes the song's list first");
         key(&mut gui, KeyCode::Esc);
         assert!(gui.ytdl.list.is_none(), "then the list");
-        assert!(gui.in_settings_room(SettingsRoom::YouTube), "the room stays");
+        assert!(in_room(&gui), "the room stays");
         assert!(!gui.ytdl.jobs().unwrap().summary().word().is_some_and(|w| w == Word::Failed));
     }
 
     // ── Keys ───────────────────────────────────────────────────────────────
 
-    /// Esc gives the field's keys back; a second Esc goes back to Settings.
-    /// The room's own capitals never reach the shell (D opens Auto DJ, T
-    /// Stats, A toggles the DJ).
+    /// Esc gives the field's keys back; a second Esc leaves nothing — a
+    /// nav room has no back, the Auto DJ room's rule — and goes to the
+    /// shell, which stows nothing here. The room's own capitals never reach
+    /// the shell (D opens Auto DJ, T Stats, A toggles the DJ); the shell's
+    /// keys do, a digit opening its room — but not while a press is out:
+    /// then every typed key waits, a link pasted as keys too, and the nav's
+    /// rows are the way on.
     #[test]
     fn esc_gives_the_keys_back_and_the_rooms_capitals_stay_home() {
         let _en = english();
@@ -4542,21 +4527,61 @@ pub(crate) mod tests {
         gui.ytdl.draft.keys = Keys::Link;
         key(&mut gui, KeyCode::Esc);
         assert_eq!(gui.ytdl.draft.keys, Keys::None, "the keys given back");
-        assert!(gui.in_settings_room(SettingsRoom::YouTube));
+        assert!(in_room(&gui));
         draw(&mut gui);
         let armed = gui.app.dj_armed();
         for c in ['D', 'T', 'A', 'E', 'U'] {
             shift(&mut gui, c);
-            assert!(gui.in_settings_room(SettingsRoom::YouTube), "{c} stayed in the room");
-            assert_eq!(gui.screen, super::super::Screen::Library, "{c}");
+            assert!(in_room(&gui), "{c} stayed in the room");
+            assert_eq!(gui.screen, Screen::Library, "{c}");
             assert_eq!(gui.app.dj_armed(), armed, "{c}");
             gui.ytdl.draft.keys = Keys::None;
             gui.ytdl.draft.tags_open = false;
             draw(&mut gui);
         }
         key(&mut gui, KeyCode::Esc);
-        assert!(!gui.in_settings_room(SettingsRoom::YouTube), "the second Esc goes back");
-        assert_eq!(gui.active, super::super::SETTINGS_NAV);
+        key(&mut gui, KeyCode::Esc);
+        assert!(in_room(&gui), "the second Esc leaves nothing: a nav room has no back");
+        assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::YOUTUBE_NAV));
+        assert_eq!(gui.settings_room, None, "and walks to no Settings room");
+        key(&mut gui, KeyCode::Char('1'));
+        assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::FILES_NAV), "1 is the nav's");
+
+        // With the press out every typed key waits: the form's letters,
+        // either case, and a link pasted as keys (a terminal with no
+        // bracketed paste) — no `p`, `s`, `/`, `=`, digit or `q` of it
+        // reaches the shell's globals. Esc still leaves nothing; the nav's
+        // rows are the way on.
+        let mut gui = room();
+        found(&mut gui, one_more_time(), discovery_new());
+        draw(&mut gui);
+        key(&mut gui, KeyCode::Enter);
+        assert!(gui.ytdl.draft.starting.is_some());
+        draw(&mut gui);
+        for c in ['e', 'd', 'l'] {
+            key(&mut gui, KeyCode::Char(c));
+        }
+        for c in ['D', 'T', 'A'] {
+            shift(&mut gui, c);
+        }
+        assert!(!gui.ytdl.draft.tags_open && gui.ytdl.place.is_none() && gui.ytdl.list.is_none(), "the form's keys wait");
+        assert_eq!((gui.screen, gui.app.dj_armed()), (Screen::Library, armed), "the capitals too");
+        let transport = |gui: &Gui| (gui.app.queue.shuffle, gui.app.queue.repeat, gui.app.volume);
+        let was = transport(&gui);
+        for c in "https://www.youtube.com/watch?v=q7Zr-3sN9pE".chars() {
+            let quit = super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            assert!(!quit, "{c}: no quit");
+            assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::YOUTUBE_NAV), "{c}: no room");
+        }
+        assert!(!gui.app.editing_query, "no Search");
+        assert_eq!(transport(&gui), was, "no Shuffle, Repeat or volume");
+        assert!(gui.ytdl.draft.starting.is_some() && gui.ytdl.draft.keys == Keys::None, "the press still out, the form quiet");
+        key(&mut gui, KeyCode::Esc);
+        assert!(in_room(&gui), "Esc: nothing to leave");
+        gui.act(Act::Nav(super::super::YOUTUBE_NAV));
+        assert_eq!(gui.ytdl.draft.keys, Keys::None, "the row again mid-press: the field stays quiet");
+        gui.act(Act::Nav(super::super::FILES_NAV));
+        assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::FILES_NAV), "a nav row is the way on");
     }
 
     /// Caps Lock sends the capital with no Shift: the room keeps it just
@@ -4576,10 +4601,10 @@ pub(crate) mod tests {
         let stays = |gui: &mut Gui, c: char, modifiers: KeyModifiers, up: &dyn Fn(&Gui) -> bool, what: &str| {
             super::super::handle_key(gui, KeyEvent::new(KeyCode::Char(c), modifiers));
             assert!(up(gui), "{what}: {c} ({modifiers:?}) kept it up");
-            assert_eq!((gui.screen, gui.active), (super::super::Screen::Library, super::super::SETTINGS_NAV), "{what}: {c}");
+            assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::YOUTUBE_NAV), "{what}: {c}");
             assert_eq!(gui.app.dj_armed(), armed, "{what}: {c}");
         };
-        let room_up = |gui: &Gui| gui.in_settings_room(SettingsRoom::YouTube);
+        let room_up = |gui: &Gui| in_room(gui);
         for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
             stays(&mut gui, 'D', modifiers, &room_up, "the room");
             assert!(super::super::ytdl_where::is_open(&gui), "D is d change");
@@ -4605,7 +4630,7 @@ pub(crate) mod tests {
             draw(&mut gui);
         }
         key(&mut gui, KeyCode::Esc);
-        assert!(gui.in_settings_room(SettingsRoom::YouTube) && !list_open(&gui), "each window closed back to the room");
+        assert!(in_room(&gui) && !list_open(&gui), "each window closed back to the room");
     }
 
     /// A key acts only where its word was drawn: `u` with nothing to undo
@@ -4636,29 +4661,26 @@ pub(crate) mod tests {
         assert!(gui.ytdl.jobs().unwrap().summary().word() == Some(Word::History));
     }
 
-    /// The arrows are the room's: the Settings rows stand hidden behind it,
-    /// so ↑ ↓ walk no cursor there and ← → Space find no row to act on —
-    /// Space stays the transport key; the tags still take ↓ (B3).
+    /// The arrows are the room's: ↑ ↓ ← → walk no cursor and leave
+    /// nothing, Space stays the transport key; the tags still take ↓ (B3).
     #[test]
-    fn the_arrows_never_reach_the_hidden_settings_rows() {
+    fn the_arrows_stay_the_rooms() {
         let _en = english();
         let mut gui = room();
-        let blend = gui.app.crossfade;
         assert_eq!(gui.ytdl.draft.keys, Keys::Link);
         for code in [KeyCode::Down, KeyCode::Up, KeyCode::Esc, KeyCode::Down, KeyCode::Right, KeyCode::Left] {
             key(&mut gui, code);
-            assert_eq!(gui.cursor, None, "{code:?}: no Settings cursor");
+            assert!(in_room(&gui) && gui.cursor.is_none(), "{code:?}: the room stays, no cursor walked");
         }
-        assert_eq!(gui.app.crossfade, blend, "the blend unseen and untouched");
         key(&mut gui, KeyCode::Char(' '));
         assert!(in_room(&gui) && gui.cursor.is_none(), "Space opened no row");
-        // With the press out the arrows wait like the rest.
+        // With the press out the arrows wait like the form's letters.
         found(&mut gui, one_more_time(), discovery_new());
         key(&mut gui, KeyCode::Enter);
         assert!(gui.ytdl.draft.starting.is_some());
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Right);
-        assert_eq!((gui.cursor, gui.app.crossfade), (None, blend));
+        assert!(in_room(&gui) && gui.cursor.is_none());
         // The tags take ↓ where they show.
         let mut gui = room();
         found(&mut gui, one_more_time(), discovery_new());
@@ -4826,7 +4848,7 @@ pub(crate) mod tests {
         let mut host = Pastes::default();
         super::super::frame(&mut terminal, &mut gui, &mut ctx, &mut host).unwrap();
         assert!(host.0.is_empty(), "off, and never turned on");
-        open_room(&mut gui);
+        gui.act(Act::Nav(super::super::YOUTUBE_NAV));
         super::super::frame(&mut terminal, &mut gui, &mut ctx, &mut host).unwrap();
         super::super::frame(&mut terminal, &mut gui, &mut ctx, &mut host).unwrap();
         assert_eq!(host.0, vec![true]);
@@ -4845,7 +4867,7 @@ pub(crate) mod tests {
         let ctx = super::super::tests::quiet_ctx(&gui);
         let mut face = super::super::GuiFace { gui, ctx };
         assert!(!face.takes_paste());
-        open_room(&mut face.gui);
+        face.gui.act(Act::Nav(super::super::YOUTUBE_NAV));
         assert!(face.takes_paste());
     }
 
@@ -4980,7 +5002,7 @@ pub(crate) mod tests {
 
         let mut gui = seated(1);
         observe(&mut gui, &connected(Ping { no_mkdir: Some(true), ..ping(1) }));
-        open_room(&mut gui);
+        gui.act(Act::Nav(super::super::YOUTUBE_NAV));
         found(&mut gui, one_more_time(), discovery_new());
         gui.queue_open = true;
         let rows = draw(&mut gui);
@@ -5188,12 +5210,11 @@ pub(crate) mod tests {
     /// habit): each whole tips line in the footer's 99, and what a composed
     /// one always keeps once its key words gave way; the tall primary
     /// beside `OGG Vorbis ▾` at 47 cells (T3); the window's action row and
-    /// its four dots in the text's 72 (F3, C1); the doorway's label short
-    /// of the description column, its news words in what 47 cells leave
-    /// (S1–S4); the title row's word beside the title at 47 (T3); a list
-    /// row's right-hand words with a crumb's room left (L1), its
-    /// ways on a row of their own (L2); the note's head with the boards'
-    /// song (N2); the tags' labels inside their column's clamp (C1).
+    /// its four dots in the text's 72 (F3, C1); the title row's word beside
+    /// the title at 47 (T3); a list row's right-hand words with a crumb's
+    /// room left (L1), its ways on a row of their own (L2); the note's head
+    /// with the boards' song (N2); the tags' labels inside their column's
+    /// clamp (C1).
     #[test]
     fn every_locales_words_fit_their_cells() {
         for code in LOCALES {
@@ -5216,7 +5237,7 @@ pub(crate) mod tests {
             let ways = ["gui.ytdl.list.try_again", "gui.ytdl.list.change_format", "gui.ytdl.list.choose_folder", "gui.ytdl.list.top", "gui.ytdl.list.check_again", "gui.ytdl.list.add_again", "gui.ytdl.list.dismiss"];
             let enter = rust_i18n::t!("gui.tips.ytdl_enter", locale = code, verb = widest(&ways)).to_string();
             for line in [
-                vec![t("gui.tips.ytdl_paste"), widest(&room_keys), t("gui.tips.ytdl_enter_add"), t("gui.tips.ytdl_esc_back")],
+                vec![t("gui.tips.ytdl_paste"), widest(&room_keys), t("gui.tips.ytdl_enter_add")],
                 vec![t("gui.tips.ytdl_enter_here"), widest(&[&room_keys[..], &["gui.ytdl.key.subfolders"][..]].concat()), t("gui.tips.ytdl_paste"), t("gui.tips.ytdl_close")],
                 vec![t("gui.tips.ytdl_here_dot"), t("gui.tips.ytdl_enter_library"), t("gui.tips.ytdl_close")],
                 vec![t("gui.ytdl.key.format"), t("gui.tips.ytdl_enter_anyway"), t("gui.tips.ytdl_close")],
@@ -5239,15 +5260,10 @@ pub(crate) mod tests {
             let dots: usize = sorts.iter().map(|key| 4 + cells(&t(key))).sum();
             assert!(dots + 3 * 3 <= 72, "{code}: the dots are {} cells", dots + 9);
 
-            let label = format!("{} ▸", t("gui.set.yt_add"));
-            assert!(cells(&label) + 2 <= 27, "{code}: {label} pushes the description column");
             let news = [t("gui.ytdl.word.adding"), format!("! {}", t("gui.ytdl.word.failed")), format!("✓ {}", t("gui.ytdl.word.added"))];
-            for word in &news {
-                assert!(27 + cells(word) <= 47, "{code}: {word} at 47 cells");
-            }
             let title = cells(&t("gui.ytdl.room.title"));
             for word in news.iter().chain([&t("gui.ytdl.word.history")]) {
-                assert!(2 + title + 2 + cells(word) < 47, "{code}: {word} beside the title, one cell in, at 47 cells");
+                assert!(title + 2 + cells(word) < 47, "{code}: {word} beside the title, one cell in, at 47 cells");
             }
             let right = [
                 format!("{} · {} · Opus", t("gui.ytdl.list.adding"), rust_i18n::t!("gui.ytdl.list.minutes", locale = code, count = 59)),
@@ -5293,8 +5309,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// Every language drawn: the doorway's label whole with its description
-    /// at the column (100 × 30); at 47 cells with the queue open the room
+    /// Every language drawn: the nav row's label whole in its 12 cells, a
+    /// click target (100 × 30); at 47 cells with the queue open the room
     /// keeps T3's key words and title-row word whole and its tips line in
     /// the footer's 99; the list's ways and its tips likewise.
     #[test]
@@ -5302,11 +5318,9 @@ pub(crate) mod tests {
         let Some(code) = crate::setup::tests::in_own_process(&LOCALES) else { return };
         let mut gui = seated(1);
         let rows = draw(&mut gui);
-        let label = format!("{} {}", t!("gui.set.yt_add"), super::super::forward_glyph());
-        let y = rows.iter().position(|r| r.replace(' ', "").contains(&label.replace(' ', ""))).unwrap_or_else(|| panic!("{code}: no doorway"));
-        let desc = t!("gui.set.yt_add_desc").to_string();
-        let shown: String = rows[y].chars().skip(17 + 27).collect();
-        assert!(shown.starts_with(desc.chars().next().unwrap()), "{code}: the description at the column: {shown:?}");
+        let label = t!("gui.nav.add_youtube").to_string();
+        assert!(whole(&rows[17..18], &label, (3, 15)), "{code}: {label} whole in x 3–14:\n{}", rows[17]);
+        assert_eq!(gui.ui.hit(Position { x: 3, y: 17 }), Some(Act::Nav(super::super::YOUTUBE_NAV)), "{code}");
 
         let mut gui = room();
         seed(&mut gui, vec![history()]);
@@ -5318,8 +5332,8 @@ pub(crate) mod tests {
             assert!(whole(&rows, &words, (17, 64)), "{code}: {words} whole at 47 cells:\n{}", rows.join("\n"));
         }
         let line = tips(&gui);
-        assert!(width(&line) <= 99 && line.ends_with(&*t!("gui.tips.ytdl_esc_back")), "{code}: {line}");
-        assert!(line.contains(&*t!("gui.tips.ytdl_enter_add")), "{code}: Enter stays: {line}");
+        assert!(width(&line) <= 99 && line.ends_with(&*t!("gui.tips.ytdl_enter_add")), "{code}: Enter stays: {line}");
+        assert!(line.starts_with(&*t!("gui.tips.ytdl_paste")), "{code}: the paste stays: {line}");
 
         let mut landed = job("k2", "failed", "One More Time", "/Music/Daft Punk/Discovery/");
         landed["failure"] = serde_json::json!({ "problem": "exists", "phase": "download", "detail": "One_More_Time.mp3" });
@@ -5409,33 +5423,8 @@ pub(crate) mod tests {
     /// read off the boards' cells (TermMain, TermRoomStates, TermList).
     #[rustfmt::skip]
     mod boards {
-        pub(super) const T1: &str = r#"
-            |PLAYBACK
-            |Blend length   -   off  +  tracks blend as one ends · 0 cuts over
-            |[✓] Gapless                sample-tight boundaries when no blend is set
-            |[ ] Blend skips            manual skips blend for a second
-            |[ ] Pause fade             pause and resume ride a short ramp
-            |[✓] Resume queue           the queue and your place come back on launch
-            |
-            |SERVERS
-            |Manage servers ▸           add, switch, edit · pair a phone
-            |
-            |ADD MUSIC
-            |Add a torrent ▸            a .torrent file or a magnet link, into a library
-            |Add from YouTube ▸         a YouTube link, into a library
-            |[✓] Ask what to do with torrents  when one is opened with mStream, offer to han…
-            |
-            |DISPLAY
-            |[ ] Keyboard hints         show the keys in the footer and on the tooltips
-        "#;
-        pub(super) const T1_RUNS: &[&str] = &[
-            "0:0-7:Dim", "1:0-24:Text", "1:27-64:Dim", "2:0-10:Text", "2:27-70:Dim", "3:0-14:Text", "3:27-57:Dim",
-            "4:0-13:Text", "4:27-60:Dim", "5:0-15:Text", "5:27-70:Dim", "7:0-6:Dim", "8:0-15:Text", "8:27-58:Dim",
-            "10:0-8:Dim", "11:0-14:Text", "11:27-74:Dim", "12:0-17:Bright:B", "12:27-56:Bright", "13:0-31:Text",
-            "13:34-79:Dim", "15:0-6:Dim", "16:0-17:Text", "16:27-73:Dim",
-        ];
         pub(super) const T2: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5460,14 +5449,14 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const T2_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:68-78:Dim", "8:0-22:Dim", "10:0-10:Dim",
             "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:30-30:Dim", "10:32-40:Text", "10:42-44:Dim",
             "10:71-78:Dim", "20:58-79:Accent", "21:0-2:Text", "21:4-4:Dim", "21:58-58:Accent", "21:59-78:Accent:B",
             "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const T3: &str = r#"
-            |◂ Add from YouTube                 added songs
+            |Add from YouTube                   added songs
             |
             |╭─────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8            [X] │
@@ -5492,13 +5481,13 @@ pub(crate) mod tests {
             |                         ╰────────────────────╯
         "#;
         pub(super) const T3_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:35-45:Dim", "2:0-46:Dim", "3:0-0:Dim", "3:2-29:Text", "3:42-44:Dim",
+            "0:0-15:Text:B", "0:35-45:Dim", "2:0-46:Dim", "3:0-0:Dim", "3:2-29:Text", "3:42-44:Dim",
             "3:46-46:Dim", "4:0-46:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:35-45:Dim", "8:0-22:Dim", "10:0-10:Dim",
             "10:12-12:Dim", "10:14-14:Dim", "10:16-24:Text", "10:26-28:Dim", "10:38-45:Dim", "20:25-46:Accent",
             "21:0-2:Text", "21:4-4:Dim", "21:25-25:Accent", "21:26-45:Accent:B", "21:46-46:Accent", "22:25-46:Accent",
         ];
         pub(super) const T4: &str = r#"
-            |◂ Add from YouTube                 added songs
+            |Add from YouTube                   added songs
             |
             |╭─────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8            [X] │
@@ -5517,14 +5506,14 @@ pub(crate) mod tests {
             |                         ╰────────────────────╯
         "#;
         pub(super) const T4_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:35-45:Dim", "2:0-46:Dim", "3:0-0:Dim", "3:2-29:Text", "3:42-44:Dim",
+            "0:0-15:Text:B", "0:35-45:Dim", "2:0-46:Dim", "3:0-0:Dim", "3:2-29:Text", "3:42-44:Dim",
             "3:46-46:Dim", "4:0-46:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:35-45:Dim", "8:0-22:Dim", "10:0-10:Dim",
             "10:12-12:Dim", "10:14-14:Dim", "10:16-24:Text", "10:26-28:Dim", "10:38-45:Dim", "14:25-46:Accent",
             "15:0-2:Text", "15:4-4:Dim", "15:25-25:Accent", "15:26-45:Accent:B", "15:46-46:Accent", "16:25-46:Accent",
         ];
 
         pub(super) const A1: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ ▏Paste a YouTube link                                                        │
@@ -5549,11 +5538,11 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const A1_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Accent", "3:0-0:Accent", "3:2-2:Text", "3:3-22:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Accent", "3:0-0:Accent", "3:2-2:Text", "3:3-22:Dim",
             "3:79-79:Accent", "4:0-79:Accent",
         ];
         pub(super) const A2: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://soundcloud.com/daft-punk/one-more-time▏                          [X] │
@@ -5578,11 +5567,11 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const A2_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Accent", "3:0-0:Accent", "3:2-47:Text", "3:48-48:Text",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Accent", "3:0-0:Accent", "3:2-47:Text", "3:48-48:Text",
             "3:75-77:Dim", "3:79-79:Accent", "4:0-79:Accent", "5:0-67:Gold",
         ];
         pub(super) const A3: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtube.com/playlist?list=PLSdoVPM5WnndSQEXRz704yQkKwx76GvPV▏    [X] │
@@ -5607,11 +5596,11 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const A3_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Accent", "3:0-0:Accent", "3:2-69:Text", "3:70-70:Text",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Accent", "3:0-0:Accent", "3:2-69:Text", "3:70-70:Text",
             "3:75-77:Dim", "3:79-79:Accent", "4:0-79:Accent", "5:0-60:Gold",
         ];
         pub(super) const A4: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://www.youtube.com/watch?v=FGBhQbmPwH8&list=RDFGBhQbmPwH8           [X] │
@@ -5636,14 +5625,14 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const A4_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-63:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-63:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "5:0-33:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:68-78:Dim", "8:0-22:Dim",
             "10:0-10:Dim", "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:30-30:Dim", "10:32-40:Text",
             "10:42-44:Dim", "10:71-78:Dim", "20:58-79:Accent", "21:0-2:Text", "21:4-4:Dim", "21:58-58:Accent",
             "21:59-78:Accent:B", "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const A5: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://www.youtube.com/live/FGBhQbmPwH8                                 [X] │
@@ -5668,14 +5657,14 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const A5_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-41:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-41:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "5:0-71:Gold", "6:0-12:Text:B", "7:0-27:Dim", "7:68-78:Dim", "8:0-22:Dim",
             "10:0-10:Dim", "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:30-30:Dim", "10:32-40:Text",
             "10:42-44:Dim", "10:71-78:Dim", "20:58-79:Accent", "21:0-2:Text", "21:4-4:Dim", "21:58-58:Accent",
             "21:59-78:Accent:B", "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const B1: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5700,11 +5689,11 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const B1_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-9:Dim", "6:11-28:Accent",
         ];
         pub(super) const B2: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5729,11 +5718,11 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const B2_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-9:Dim", "6:11-46:Accent", "6:61-78:Dim",
         ];
         pub(super) const B3: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5758,14 +5747,14 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const B3_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "5:0-27:Dim", "5:69-78:Dim", "6:0-4:Dim", "6:8-20:Text", "7:0-5:Dim",
             "7:8-16:Text", "8:0-4:Dim", "9:0-3:Dim", "12:0-10:Dim", "12:12-16:Text", "12:18-18:Dim", "12:20-28:Text",
             "12:71-78:Dim", "20:58-79:Accent", "21:0-2:Text", "21:4-4:Dim", "21:58-58:Accent", "21:59-78:Accent:B",
             "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const B4: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5790,13 +5779,13 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const B4_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-73:Gold", "7:0-24:Gold", "9:0-4:Accent:B", "9:8-8:Text", "10:0-5:Dim",
             "11:0-4:Dim", "12:0-3:Dim", "13:0-42:Dim", "15:0-10:Dim", "15:12-16:Text", "20:58-79:Accent", "21:0-2:Text",
             "21:4-4:Dim", "21:58-58:Accent", "21:59-78:Accent:B", "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const B5: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5821,11 +5810,11 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const B5_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-70:Gold", "7:0-10:Dim",
         ];
         pub(super) const C1: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5850,14 +5839,14 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const C1_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-4:Accent:B", "6:8-20:Text", "6:21-21:Text", "7:0-5:Dim", "7:8-16:Text",
             "8:0-4:Dim", "8:8-16:Text", "9:0-3:Dim", "9:8-11:Text", "10:0-17:Dim", "12:0-10:Dim", "12:12-16:Text",
             "12:18-18:Dim", "12:20-28:Text", "12:30-30:Dim", "12:32-40:Text", "12:42-44:Dim", "20:58-79:Accent",
             "21:0-2:Text", "21:4-4:Dim", "21:58-58:Accent", "21:59-78:Accent:B", "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const C2: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5882,13 +5871,13 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const C2_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-12:Text:B", "7:0-26:Dim", "7:68-78:Dim", "8:0-56:Dim", "8:73-78:Dim",
             "10:0-10:Dim", "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:71-78:Dim", "20:58-79:Accent",
             "21:0-2:Text", "21:4-4:Dim", "21:58-58:Accent", "21:59-78:Accent:B", "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const C3: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5913,13 +5902,13 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const C3_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-12:Text:B", "7:0-26:Dim", "7:68-78:Dim", "8:0-42:Gold", "10:0-10:Dim",
             "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:71-78:Dim", "20:58-79:Accent", "21:0-2:Text",
             "21:4-4:Dim", "21:58-58:Accent", "21:59-78:Accent:B", "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const C4: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5944,14 +5933,14 @@ pub(crate) mod tests {
             |                                                              ╰────────────────╯
         "#;
         pub(super) const C4_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:68-78:Dim", "8:0-22:Dim", "10:0-10:Dim",
             "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:30-30:Dim", "10:32-40:Text", "10:71-78:Dim",
             "11:0-71:Gold", "12:0-14:Dim", "20:62-79:Accent", "21:0-2:Text", "21:4-4:Dim", "21:62-62:Accent",
             "21:63-78:Accent:B", "21:79-79:Accent", "22:62-79:Accent",
         ];
         pub(super) const C5: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -5976,13 +5965,13 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const C5_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:68-78:Dim", "8:0-22:Dim", "10:0-67:Gold",
             "11:0-34:Dim", "11:38-54:Dim", "11:71-78:Dim", "20:58-79:Dim", "21:0-2:Text", "21:4-4:Dim", "21:58-58:Dim",
             "21:59-78:Dim", "21:79-79:Dim", "22:58-79:Dim",
         ];
         pub(super) const D1: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -6007,12 +5996,12 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const D1_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-77:Gold", "20:58-79:Dim", "21:58-58:Dim", "21:59-78:Dim", "21:79-79:Dim",
             "22:58-79:Dim",
         ];
         pub(super) const D2: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -6037,11 +6026,11 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const D2_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-66:Gold", "7:0-10:Dim",
         ];
         pub(super) const D3: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -6066,14 +6055,14 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const D3_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:68-78:Dim", "8:0-22:Dim", "10:0-10:Dim",
             "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:30-30:Dim", "10:32-40:Text", "10:42-44:Dim",
             "10:71-78:Dim", "19:0-77:Gold", "20:58-79:Accent", "21:0-2:Text", "21:4-4:Dim", "21:58-58:Accent",
             "21:59-78:Accent:B", "21:79-79:Accent", "22:58-79:Accent",
         ];
         pub(super) const D4: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -6098,14 +6087,14 @@ pub(crate) mod tests {
             |                                                          ╰────────────────────╯
         "#;
         pub(super) const D4_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:68-78:Dim", "8:0-22:Dim", "10:0-10:Dim",
             "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:30-30:Dim", "10:32-40:Text", "10:71-78:Dim",
             "19:50-78:Dim", "20:58-79:Dim", "21:0-2:Text", "21:4-4:Dim", "21:58-58:Dim", "21:59-78:Dim", "21:79-79:Dim",
             "22:58-79:Dim",
         ];
         pub(super) const D5: &str = r#"
-            |◂ Add from YouTube                                                  added songs
+            |Add from YouTube                                                    added songs
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ https://youtu.be/FGBhQbmPwH8                                             [X] │
@@ -6130,14 +6119,14 @@ pub(crate) mod tests {
             |                                                                   ╰───────────╯
         "#;
         pub(super) const D5_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
+            "0:0-15:Text:B", "0:68-78:Dim", "2:0-79:Dim", "3:0-0:Dim", "3:2-29:Text", "3:75-77:Dim",
             "3:79-79:Dim", "4:0-79:Dim", "6:0-12:Text:B", "7:0-27:Dim", "7:68-78:Dim", "8:0-22:Dim", "10:0-10:Dim",
             "10:12-16:Text", "10:18-18:Dim", "10:20-28:Text", "10:30-30:Dim", "10:32-40:Text", "10:42-44:Dim",
             "10:71-78:Dim", "20:67-79:Dim", "21:0-2:Text", "21:4-4:Dim", "21:67-67:Dim", "21:68-78:Dim", "21:79-79:Dim",
             "22:67-79:Dim",
         ];
         pub(super) const E1: &str = r#"
-            |◂ Add from YouTube                                                       adding
+            |Add from YouTube                                                         adding
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ ▏Paste a YouTube link                                                        │
@@ -6162,7 +6151,7 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const E1_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:73-78:Accent", "2:0-79:Accent", "3:0-0:Accent", "3:2-2:Text", "3:3-22:Dim",
+            "0:0-15:Text:B", "0:73-78:Accent", "2:0-79:Accent", "3:0-0:Accent", "3:2-2:Text", "3:3-22:Dim",
             "3:79-79:Accent", "4:0-79:Accent",
         ];
         pub(super) const E1_NOTE: &str = r#"
@@ -6172,7 +6161,7 @@ pub(crate) mod tests {
             "0:0-22:Accent",
         ];
         pub(super) const E2: &str = r#"
-            |◂ Add from YouTube                                                      ✓ added
+            |Add from YouTube                                                        ✓ added
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ ▏Paste a YouTube link                                                        │
@@ -6197,7 +6186,7 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const E2_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:72-78:Ok", "2:0-79:Accent", "3:0-0:Accent", "3:2-2:Text", "3:3-22:Dim",
+            "0:0-15:Text:B", "0:72-78:Ok", "2:0-79:Accent", "3:0-0:Accent", "3:2-2:Text", "3:3-22:Dim",
             "3:79-79:Accent", "4:0-79:Accent",
         ];
         pub(super) const E2_NOTE: &str = r#"
@@ -6207,7 +6196,7 @@ pub(crate) mod tests {
             "0:0-20:Ok",
         ];
         pub(super) const E3: &str = r#"
-            |◂ Add from YouTube                                                     ! failed
+            |Add from YouTube                                                       ! failed
             |
             |╭──────────────────────────────────────────────────────────────────────────────╮
             |│ ▏Paste a YouTube link                                                        │
@@ -6232,7 +6221,7 @@ pub(crate) mod tests {
             |
         "#;
         pub(super) const E3_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:71-78:Gold", "2:0-79:Accent", "3:0-0:Accent", "3:2-2:Text", "3:3-22:Dim",
+            "0:0-15:Text:B", "0:71-78:Gold", "2:0-79:Accent", "3:0-0:Accent", "3:2-2:Text", "3:3-22:Dim",
             "3:79-79:Accent", "4:0-79:Accent",
         ];
         pub(super) const E3_NOTE: &str = r#"
@@ -6358,49 +6347,13 @@ pub(crate) mod tests {
             "12:0-46:Accent", "12:47-72:Dim", "12:73-75:Accent",
         ];
         pub(super) const F1_ROOM: &str = r#"
-            |◂ Add from YouTube                      adding
+            |Add from YouTube                        adding
             |
             |╭─────────────────────────────────────────────╮
             |│ Paste a YouTube link                        │
         "#;
         pub(super) const F1_ROOM_RUNS: &[&str] = &[
-            "0:0-0:Dim", "0:2-17:Text:B", "0:40-45:Accent", "2:0-46:Dim", "3:0-0:Dim", "3:2-21:Dim", "3:46-46:Dim",
-        ];
-        pub(super) const S1: &str = r#"
-            |ADD MUSIC
-            |Add a torrent ▸            a .torrent file or a magnet link, into a library
-            |Add from YouTube ▸         a YouTube link, into a library
-            |[✓] Ask what to do with torrents  when one is opened with mStream, offer to han…
-        "#;
-        pub(super) const S1_RUNS: &[&str] = &[
-            "0:0-8:Dim", "1:0-14:Text", "1:27-74:Dim", "2:0-17:Text", "2:27-56:Dim", "3:0-31:Text", "3:34-79:Dim",
-        ];
-        pub(super) const S2: &str = r#"
-            |ADD MUSIC
-            |Add a torrent ▸            a .torrent file or a magnet link, into a library
-            |Add from YouTube ▸         adding
-            |[✓] Ask what to do with torrents  when one is opened with mStream, offer to han…
-        "#;
-        pub(super) const S2_RUNS: &[&str] = &[
-            "0:0-8:Dim", "1:0-14:Text", "1:27-74:Dim", "2:0-17:Text", "2:27-32:Accent", "3:0-31:Text", "3:34-79:Dim",
-        ];
-        pub(super) const S3: &str = r#"
-            |ADD MUSIC
-            |Add a torrent ▸            a .torrent file or a magnet link, into a library
-            |Add from YouTube ▸         ! failed
-            |[✓] Ask what to do with torrents  when one is opened with mStream, offer to han…
-        "#;
-        pub(super) const S3_RUNS: &[&str] = &[
-            "0:0-8:Dim", "1:0-14:Text", "1:27-74:Dim", "2:0-17:Text", "2:27-34:Gold", "3:0-31:Text", "3:34-79:Dim",
-        ];
-        pub(super) const S4: &str = r#"
-            |ADD MUSIC
-            |Add a torrent ▸            a .torrent file or a magnet link, into a library
-            |Add from YouTube ▸         ✓ added
-            |[✓] Ask what to do with torrents  when one is opened with mStream, offer to han…
-        "#;
-        pub(super) const S4_RUNS: &[&str] = &[
-            "0:0-8:Dim", "1:0-14:Text", "1:27-74:Dim", "2:0-17:Text", "2:27-33:Ok", "3:0-31:Text", "3:34-79:Dim",
+            "0:0-15:Text:B", "0:40-45:Accent", "2:0-46:Dim", "3:0-0:Dim", "3:2-21:Dim", "3:46-46:Dim",
         ];
         pub(super) const N1: &str = r#"
             |Adding “One More Time”…

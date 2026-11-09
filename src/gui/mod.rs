@@ -297,8 +297,6 @@ pub(crate) enum Act {
     FormCancel,
     QrClose,
     // ── Add torrent (see gui::torrent) ──────────────────────────────────
-    /// The room's ◂ — back to the Settings rows (Esc's twin).
-    TorBack,
     /// A form row, clicked: the keyboard cursor lands there.
     TorRow(torrent::Row),
     /// The library picker's arrows (and the name, which cycles).
@@ -393,8 +391,6 @@ pub(crate) enum Screen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsRoom {
     Servers,
-    Torrent,
-    YouTube,
 }
 
 /// What a click on a pane row meant: the row itself, or one of the hover
@@ -439,11 +435,18 @@ enum NavId {
     /// 2): drawn third in TOOLS, late in the array — no digit, `G`.
     Discover,
     /// The songs you rated (library-rooms contract, clause 37): drawn in
-    /// the LIBRARY group after Recent, last in the array — no digit.
+    /// the LIBRARY group after Recent, past the digits in the array — no
+    /// digit.
     Rated,
+    /// The Add a torrent room (add-torrent contract, entry point 1) and
+    /// Add from YouTube's (its contract, entry point 1): drawn last in
+    /// TOOLS, after Discover, and last in the array — no digit, no letter.
+    /// Add YouTube rides its room's gates, hidden, never greyed.
+    Torrent,
+    YouTube,
 }
 
-const NAV: [NavId; 14] = [
+const NAV: [NavId; 16] = [
     NavId::Files,
     NavId::Albums,
     NavId::Artists,
@@ -458,6 +461,8 @@ const NAV: [NavId; 14] = [
     NavId::MostPlayed,
     NavId::Discover,
     NavId::Rated,
+    NavId::Torrent,
+    NavId::YouTube,
 ];
 
 impl NavId {
@@ -477,6 +482,8 @@ impl NavId {
             NavId::MostPlayed => t!("gui.nav.most_played").to_string(),
             NavId::Discover => t!("gui.nav.discover").to_string(),
             NavId::Rated => t!("gui.nav.rated").to_string(),
+            NavId::Torrent => t!("gui.nav.add_torrent").to_string(),
+            NavId::YouTube => t!("gui.nav.add_youtube").to_string(),
         }
     }
 }
@@ -495,6 +502,8 @@ const LAST_PLAYED_NAV: usize = 10;
 const MOST_PLAYED_NAV: usize = 11;
 const DISCOVER_NAV: usize = 12;
 const RATED_NAV: usize = 13;
+const TORRENT_NAV: usize = 14;
+const YOUTUBE_NAV: usize = 15;
 
 /// A class's slot in [`SEARCH_CLASSES`] — the chip order.
 fn class_idx(class: SearchClass) -> usize {
@@ -523,15 +532,11 @@ const ROW_PAUSE_FADE: usize = 3;
 /// The queue and the place in it come back on launch (contract clause 39).
 const ROW_RESUME: usize = 4;
 const ROW_MANAGE: usize = 5;
-/// The ADD MUSIC group: the Add-torrent and Add-from-YouTube doorways
-/// (rooms, like Manage servers) and the ask-me switch for torrents
-/// arriving from outside. Add from YouTube shows only under its gates —
-/// hidden, never greyed ([`settings_rows`]).
-const ROW_TORRENT: usize = 6;
-const ROW_YOUTUBE: usize = 7;
-const ROW_ASK: usize = 8;
-const ROW_HINTS: usize = 9;
-const SET_ROWS: usize = 10;
+/// The torrents group: the ask-me switch for torrents arriving from
+/// outside (the Add-torrent room itself is the nav's).
+const ROW_ASK: usize = 6;
+const ROW_HINTS: usize = 7;
+const SET_ROWS: usize = 8;
 
 /// Seconds of blend as a person reads them (the TUI's own spelling).
 fn fmt_blend(seconds: f32) -> String {
@@ -840,8 +845,6 @@ impl Gui {
             // ← on a doorway row would "adjust" into the room; only an
             // activation (Enter, click, →) opens it.
             ROW_MANAGE if delta > 0 => servers::open_room(self),
-            ROW_TORRENT if delta > 0 => torrent::open_room(self),
-            ROW_YOUTUBE if delta > 0 && ytdl::available(self) => ytdl::open_room(self),
             ROW_ASK => {
                 let ask = !self.config.torrent.ask;
                 torrent::set_ask(self, ask);
@@ -1017,6 +1020,11 @@ impl Gui {
                 if i == DISCOVER_NAV && !discover::gate(&self.app) {
                     return false;
                 }
+                // Add from YouTube rides its room's gates (add-from-youtube
+                // clause 1): no row, and no way in while it is absent.
+                if i == YOUTUBE_NAV && !ytdl::available(self) {
+                    return false;
+                }
                 // A peer has no playlists to offer (contract clause 26), no
                 // play counts of its guest's either (library-rooms clause
                 // 23), and no ratings (clause 37): the rows are not drawn,
@@ -1090,6 +1098,15 @@ impl Gui {
                 // the rows fit it (auto-dj contract, clause 50).
                 if i == DJ_NAV {
                     dj::open_room(self);
+                }
+                // The Add rooms likewise: the torrent room stowed, asking
+                // its gate; Add from YouTube with the link field holding the
+                // keys.
+                if i == TORRENT_NAV {
+                    torrent::open_room(self);
+                }
+                if i == YOUTUBE_NAV {
+                    ytdl::open_room(self);
                 }
                 // The album wall: fetch the list on the first visit; a
                 // return finds it standing (and a drill left open resumes
@@ -1711,6 +1728,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
                 NavId::Playlists => playlists::draw(frame, gui, content),
                 NavId::Dj => dj::draw_room(frame, gui, content),
                 NavId::Discover => discover::draw(frame, gui, content),
+                NavId::Torrent => torrent::draw_room(frame, gui, content),
+                NavId::YouTube => ytdl::draw_room(frame, gui, content),
             }
         }
         Screen::NowPlaying => {
@@ -1817,10 +1836,6 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
                 None => t!("gui.tips.servers"),
             }
         }
-    } else if gui.in_settings_room(SettingsRoom::Torrent) {
-        std::borrow::Cow::from(torrent::tips(gui))
-    } else if gui.in_settings_room(SettingsRoom::YouTube) {
-        std::borrow::Cow::from(ytdl::tips(gui))
     } else {
         match gui.active {
             SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
@@ -1854,6 +1869,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
             PLAYLISTS_NAV if gui.app.connected => {
                 std::borrow::Cow::from(playlists::tips(gui))
             }
+            TORRENT_NAV => std::borrow::Cow::from(torrent::tips(gui)),
+            YOUTUBE_NAV => std::borrow::Cow::from(ytdl::tips(gui)),
             _ => t!("gui.tips.base"),
         }
     };
@@ -2003,51 +2020,72 @@ fn draw_capture_banner(frame: &mut Frame, gui: &mut Gui, at: Rect, text: &str) {
     gui.ui.tip_keyed(close, t!("gui.bar.pick_cancel_tip").to_string());
 }
 
+/// The TOOLS group's rooms, top to bottom (not `NAV`'s order: the sonic
+/// room's index is below Auto DJ's).
+const TOOLS: [usize; 5] = [DJ_NAV, SONIC_NAV, DISCOVER_NAV, TORRENT_NAV, YOUTUBE_NAV];
+
+/// Whether the nav draws room `i`: absent is absent, never greyed.
+fn nav_shown(gui: &Gui, i: usize) -> bool {
+    match i {
+        // The sonic room rides the ping's flag: no placeholder row, and
+        // digit 9 goes dead with it (contract §1).
+        SONIC_NAV => gui.app.capabilities.discovery_path,
+        // The Discover room likewise, and not for a peer's guest, who has
+        // no history there (discovery-page clause 1).
+        DISCOVER_NAV => discover::gate(&gui.app),
+        // Add YouTube shows where its room can work (add-from-youtube
+        // clause 1).
+        YOUTUBE_NAV => ytdl::available(gui),
+        // A peer has no playlists, no play counts for its guest
+        // (library-rooms clause 23) and no ratings (clause 37).
+        PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV | RATED_NAV => gui.app.session.peer.is_none(),
+        _ => true,
+    }
+}
+
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    // Files and Search at the top; the LIBRARY group's eight rooms; then
-    // the tools, the record's desktop-rail group: Auto DJ, the
-    // capability-gated sonic room, the Discover room. Sixteen rows, to
-    // Discover's 17 (library-rooms clause 37). The 24-row minimum with the
-    // footer on puts Settings on that same row: there, and only there, the
-    // LIBRARY heading through Discover rise one row into the blank under
-    // Search, so Settings keeps the last row alone (discovery-page clause
-    // 2).
+    // Files and Search at the top; the LIBRARY group's eight rooms, each
+    // on its own line (the rows a peer hides are its last four); then the
+    // tools, the record's desktop-rail group: Auto DJ, the
+    // capability-gated sonic room, the Discover room, Add torrent and the
+    // gated Add YouTube, packed — a hidden room's line goes to the rooms
+    // under it, so the group never shows a hole. With all five, eighteen
+    // rows, to Add YouTube's 19. Where Settings, on the content's last
+    // row, would meet the last of them, the rooms rise a line at a time
+    // and only as far as they must: into the blank under Search, then over
+    // the TOOLS heading, then over the LIBRARY heading — so Settings keeps
+    // the last row alone (discovery-page clause 2).
     let forward = forward_glyph();
     // The Settings row sits on the content's last row, above the bar.
     let set_y = content_rect(area.width, area.height, gui.queue_open, gui.footer()).bottom() - 1;
-    let lift = u16::from(set_y <= 17);
-    put(frame, 1, 5 - lift, &t!("gui.nav.library"), dim());
-    put(frame, 1, 14 - lift, &t!("gui.nav.tools"), dim());
+    let tools: Vec<usize> = TOOLS.into_iter().filter(|&i| nav_shown(gui, i)).collect();
+    // How many lines the rooms rise: the last tool, on 14 + its count
+    // (Add YouTube's 19 with all five), ends above Settings. The LIBRARY
+    // group rises past the blank and, on the third line, its heading; the
+    // tools past the TOOLS heading as well.
+    let rise = (15 + tools.len() as u16).saturating_sub(set_y).min(3);
+    let lift = rise.min(1) + u16::from(rise == 3);
+    if rise < 3 {
+        put(frame, 1, 5 - lift, &t!("gui.nav.library"), dim());
+    }
+    if rise < 2 {
+        put(frame, 1, 14 - lift, &t!("gui.nav.tools"), dim());
+    }
     for (i, id) in NAV.iter().enumerate() {
-        // The sonic room rides the ping's flag: absent is absent — no
-        // placeholder row, and digit 9 goes dead with it (contract §1).
-        if i == SONIC_NAV && !gui.app.capabilities.discovery_path {
+        if !nav_shown(gui, i) {
             continue;
         }
-        // The Discover room likewise, and not for a peer's guest, who has
-        // no history there (discovery-page clause 1).
-        if i == DISCOVER_NAV && !discover::gate(&gui.app) {
-            continue;
-        }
-        // A peer has no playlists, no play counts for its guest
-        // (library-rooms clause 23) and no ratings (clause 37): none of
-        // those rows is drawn.
-        if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV | RATED_NAV)
-            && gui.app.session.peer.is_some()
-        {
-            continue;
-        }
-        let y = match i {
-            FILES_NAV => 2,
-            SEARCH_NAV => 3,
-            ALBUMS_NAV..=RECENT_NAV => 5 + i as u16 - lift,
-            RATED_NAV => 10 - lift,
-            PLAYLISTS_NAV => 11 - lift,
-            LAST_PLAYED_NAV => 12 - lift,
-            MOST_PLAYED_NAV => 13 - lift,
-            DJ_NAV => 15 - lift,
-            SONIC_NAV => 16 - lift,
-            DISCOVER_NAV => 17 - lift,
+        // A tool's line is its place among the tools shown.
+        let tool = tools.iter().position(|&t| t == i);
+        let y = match (i, tool) {
+            (_, Some(n)) => 15 - rise + n as u16,
+            (FILES_NAV, _) => 2,
+            (SEARCH_NAV, _) => 3,
+            (ALBUMS_NAV..=RECENT_NAV, _) => 5 + i as u16 - lift,
+            (RATED_NAV, _) => 10 - lift,
+            (PLAYLISTS_NAV, _) => 11 - lift,
+            (LAST_PLAYED_NAV, _) => 12 - lift,
+            (MOST_PLAYED_NAV, _) => 13 - lift,
             _ => set_y,
         };
         let label = id.label();
@@ -2567,24 +2605,20 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     match gui.settings_room {
         Some(SettingsRoom::Servers) => return servers::draw_room(frame, gui, content),
-        Some(SettingsRoom::Torrent) => return torrent::draw_room(frame, gui, content),
-        Some(SettingsRoom::YouTube) => return ytdl::draw_room(frame, gui, content),
         None => {}
     }
     let (check_on, check_off) = check_glyphs();
-    // A cursor resting on a row that went (Add from YouTube, its gate
-    // closed) moves to the row that took its line.
-    if gui.cursor == Some(ROW_YOUTUBE) && !ytdl::available(gui) {
-        gui.cursor = Some(ROW_ASK);
-    }
-    let lines = settings_lines(gui, content);
+    put(frame, content.x, content.y, &t!("gui.set.playback"), dim());
+    put(frame, content.x, content.y + 7, &t!("gui.set.servers_group"), dim());
+    put(frame, content.x, content.y + 10, &t!("gui.set.torrents_group"), dim());
+    put(frame, content.x, content.y + 13, &t!("gui.set.display_group"), dim());
 
     // The blend row's label pads to a column in cells (a translation may be
     // wider than the English), and its - and + cells are placed off that
     // same width below, so the drawn glyphs and their hit cells agree.
     let blend_name = t!("gui.set.blend").to_string();
     let blend_w = crate::kit::width(&blend_name).max(14);
-    let mut rows: [(String, String); SET_ROWS] = [
+    let rows: [(String, String); SET_ROWS] = [
         (
             format!(
                 "{blend_name}{} -  {:>4}  +",
@@ -2626,14 +2660,6 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             t!("gui.srv.manage_desc").to_string(),
         ),
         (
-            format!("{} {}", t!("gui.set.tor_add"), forward_glyph()),
-            t!("gui.set.tor_add_desc").to_string(),
-        ),
-        (
-            format!("{} {}", t!("gui.set.yt_add"), forward_glyph()),
-            t!("gui.set.yt_add_desc").to_string(),
-        ),
-        (
             format!("{} {}", if gui.config.torrent.ask { check_on } else { check_off }, t!("gui.set.tor_ask")),
             t!("gui.set.tor_ask_desc").to_string(),
         ),
@@ -2643,46 +2669,26 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         ),
     ];
 
-    // While there is news, Add from YouTube's description is one word in
-    // its own token: adding, ! failed, ✓ added (TermList S1–S4).
-    let news = ytdl::settings_word(gui);
-    if let Some((word, _)) = &news {
-        rows[ROW_YOUTUBE].1 = word.clone();
-    }
-
-    for (y, line) in lines {
-        // A line the column has no room for (a pick's banner at the minimum
+    for (i, (label, desc)) in rows.iter().enumerate() {
+        let y = row_y(content.y, i);
+        // A row the column has no line for (a pick's banner at the minimum
         // height) is not drawn, so it cannot land on the bar's seek line.
         if y >= content.bottom() {
             continue;
         }
-        let i = match line {
-            SetLine::Label(key) => {
-                put(frame, content.x, y, &t!(key), dim());
-                continue;
-            }
-            SetLine::Row(i) => i,
-        };
-        let (label, desc) = &rows[i];
         let rect = Rect { x: content.x, y, width: content.width, height: 1 };
         let selected = gui.cursor == Some(i);
         let hover = gui.ui.hovers(rect);
         if selected {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }
-        let (label_style, mut desc_style) = if selected {
+        let (label_style, desc_style) = if selected {
             (sel().add_modifier(Modifier::BOLD), sel())
         } else if hover {
             (bright_bold(), Style::default().fg(th().bright))
         } else {
             (Style::default(), dim())
         };
-        if i == ROW_YOUTUBE
-            && !selected
-            && let Some((_, style)) = &news
-        {
-            desc_style = *style;
-        }
         put(frame, content.x, y, label, label_style);
         // The description takes whatever room the row has left, clipped at
         // the cell edge — with the queue open that is not much, and the
@@ -2706,60 +2712,15 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 }
 
-/// A line of the Settings column: a group's label, or a row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SetLine {
-    Label(&'static str),
-    Row(usize),
-}
-
-/// The Settings rows that show, in order: every row but Add from YouTube,
-/// which shows only where it can work (the phone's gates — hidden, never
-/// greyed). The rows are dynamic for that one alone.
-fn settings_rows(gui: &Gui) -> Vec<usize> {
-    (0..SET_ROWS).filter(|&row| row != ROW_YOUTUBE || ytdl::available(gui)).collect()
-}
-
-/// Where each Settings line draws: the four groups' labels with their
-/// rows, a blank between groups — the one above DISPLAY gives way when the
-/// column has fewer rows than the lines (17 with Add from YouTube: 100×24
-/// with key hints on, or a pick's banner).
-fn settings_lines(gui: &Gui, content: Rect) -> Vec<(u16, SetLine)> {
-    const GROUPS: [(&str, &[usize]); 4] = [
-        ("gui.set.playback", &[ROW_BLEND, ROW_GAPLESS, ROW_BLEND_SKIPS, ROW_PAUSE_FADE, ROW_RESUME]),
-        ("gui.set.servers_group", &[ROW_MANAGE]),
-        ("gui.set.torrents_group", &[ROW_TORRENT, ROW_YOUTUBE, ROW_ASK]),
-        ("gui.set.display_group", &[ROW_HINTS]),
-    ];
-    let rows = settings_rows(gui);
-    let tight = usize::from(content.height) < GROUPS.len() * 2 - 1 + rows.len();
-    let mut lines = Vec::new();
-    let mut y = content.y;
-    for (g, (label, members)) in GROUPS.iter().enumerate() {
-        if g > 0 && !(tight && g == GROUPS.len() - 1) {
-            y += 1;
-        }
-        lines.push((y, SetLine::Label(label)));
-        y += 1;
-        for &row in members.iter().filter(|row| rows.contains(row)) {
-            lines.push((y, SetLine::Row(row)));
-            y += 1;
-        }
-    }
-    lines
-}
-
-/// The Settings cursor one row on (`delta` > 0) or back, over the rows
-/// that show: picked up at the top (↓) or the bottom (↑), clamped at the
-/// ends, and stepping off a row that went to its neighbour.
-fn settings_step(gui: &Gui, delta: i32) -> usize {
-    let rows = settings_rows(gui);
-    let (first, last) = (rows[0], rows[rows.len() - 1]);
-    match gui.cursor {
-        None if delta > 0 => first,
-        None => last,
-        Some(c) if delta > 0 => rows.iter().copied().find(|&r| r > c).unwrap_or(last),
-        Some(c) => rows.iter().rev().copied().find(|&r| r < c).unwrap_or(first),
+/// The sheet's door on each pane's rows (track-actions contract, entry
+/// point 1): the App's pane, by tab, and the row.
+/// Where settings row `i` draws, under its section label.
+fn row_y(top: u16, i: usize) -> u16 {
+    match i {
+        i if i < ROW_MANAGE => top + 1 + i as u16,
+        ROW_MANAGE => top + 8,
+        ROW_ASK => top + 11,
+        _ => top + 14,
     }
 }
 
@@ -2984,8 +2945,12 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             gui.cursor = None;
             return gui.act(Act::EditQuery);
         }
-        KeyCode::Down if settings => gui.cursor = Some(settings_step(gui, 1)),
-        KeyCode::Up if settings => gui.cursor = Some(settings_step(gui, -1)),
+        KeyCode::Down if settings => {
+            gui.cursor = Some(gui.cursor.map_or(0, |c| (c + 1).min(SET_ROWS - 1)));
+        }
+        KeyCode::Up if settings => {
+            gui.cursor = Some(gui.cursor.map_or(SET_ROWS - 1, |c| c.saturating_sub(1)));
+        }
         // The Files list is the App's own pane: arrows, Enter, back and
         // queue-add forward straight to the shared state machine.
         // A walking key picks the cursor up, then walks it; the row verbs
@@ -3927,16 +3892,19 @@ impl Gui {
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
             // Settings scrolls nothing itself; its Manage-servers room's
-            // list and its Add-torrent room's file picker do. The Auto DJ
-            // room's body and genre picker scroll.
-            NavId::Settings => match self.settings_room {
-                Some(SettingsRoom::Servers) => servers::wheel(self, delta),
-                Some(SettingsRoom::Torrent) => torrent::wheel(self, delta),
-                Some(SettingsRoom::YouTube) | None => {}
-            },
+            // list does. The Auto DJ room's body and genre picker scroll,
+            // and the Add-torrent room's file picker; Add from YouTube's
+            // windows took the wheel above, and its room scrolls nothing.
+            NavId::Settings => {
+                if self.in_settings_room(SettingsRoom::Servers) {
+                    servers::wheel(self, delta)
+                }
+            }
             NavId::Dj => {
                 dj::wheel(self, delta);
             }
+            NavId::Torrent => torrent::wheel(self, delta),
+            NavId::YouTube => {}
             NavId::Artists
             | NavId::Genres
             | NavId::Recent
@@ -6015,6 +5983,203 @@ mod tests {
         assert!(text.contains("Sonic path"), "got:\n{text}");
         gui.act(Act::Nav(SONIC_NAV));
         assert_eq!(gui.active, SONIC_NAV);
+    }
+
+    /// A Gui with every room the nav can show: the sonic room, Discover,
+    /// and Add YouTube under its gates (Add torrent always shows) —
+    /// Settings up.
+    fn every_room_gui() -> Gui {
+        let mut gui = ytdl::tests::seated(1);
+        gui.app.capabilities.discovery_path = true;
+        gui.app.capabilities.discovery = true;
+        gui.app.capabilities.discovery_taste = 1;
+        gui
+    }
+
+    fn draw_sized(gui: &mut Gui, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, gui)).unwrap();
+        rows(&terminal)
+    }
+
+    /// The two Add rooms close the TOOLS group, after Discover — with all
+    /// five tools, Add torrent on 18 and Add YouTube on 19. The tools pack:
+    /// a hidden room's line goes to the rooms under it, so the group never
+    /// shows a hole. Where Settings, on the content's last row, would meet
+    /// the last of them, the rooms rise only as far as they must: into the
+    /// blank under Search first, then over the TOOLS heading, then over the
+    /// LIBRARY heading — Settings alone below them at every size from the
+    /// 100 × 24 floor, the footer on or off, whichever rooms show.
+    #[test]
+    fn the_add_rooms_close_tools_and_rise_clear_of_settings() {
+        let _en = crate::setup::tests::in_locale("en");
+        // The tools each case shows: all five; a server with no sonic path
+        // and no Discover; Auto DJ with Add torrent alone; and Discover
+        // without the sonic path, risen into its line.
+        let kinds: [&[&str]; 4] = [
+            &["Auto DJ", "Sonic path", "Discover", "Add torrent", "Add YouTube"],
+            &["Auto DJ", "Add torrent", "Add YouTube"],
+            &["Auto DJ", "Add torrent"],
+            &["Auto DJ", "Discover", "Add torrent", "Add YouTube"],
+        ];
+        // Height, footer → Settings' row, and the lines the rooms rise for
+        // each kind: only where the last tool would reach Settings.
+        let sizes: [(u16, bool, u16, [u16; 4]); 10] = [
+            (24, true, 17, [3, 1, 0, 2]),
+            (24, false, 18, [2, 0, 0, 1]),
+            (25, true, 18, [2, 0, 0, 1]),
+            (25, false, 19, [1, 0, 0, 0]),
+            (26, true, 19, [1, 0, 0, 0]),
+            (26, false, 20, [0, 0, 0, 0]),
+            (27, true, 20, [0, 0, 0, 0]),
+            (27, false, 21, [0, 0, 0, 0]),
+            (30, true, 23, [0, 0, 0, 0]),
+            (30, false, 24, [0, 0, 0, 0]),
+        ];
+        // LIBRARY, Albums, Most played, TOOLS and the first tool's line —
+        // by the lines risen. The other tools follow on the next lines.
+        let lines = |rise: u16| -> [Option<u16>; 5] {
+            match rise {
+                0 => [Some(5), Some(6), Some(13), Some(14), Some(15)],
+                1 => [Some(4), Some(5), Some(12), Some(13), Some(14)],
+                2 => [Some(4), Some(5), Some(12), None, Some(13)],
+                _ => [None, Some(4), Some(11), None, Some(12)],
+            }
+        };
+        let every = ["Auto DJ", "Sonic path", "Discover", "Add torrent", "Add YouTube"];
+        for (k, tools) in kinds.into_iter().enumerate() {
+            for (height, footer, settings, rises) in sizes {
+                let rise = rises[k];
+                let mut gui = every_room_gui();
+                if !tools.contains(&"Sonic path") {
+                    gui.app.capabilities.discovery_path = false;
+                }
+                if !tools.contains(&"Discover") {
+                    gui.app.capabilities.discovery_taste = 0;
+                }
+                if !tools.contains(&"Add YouTube") {
+                    gui.app.libraries.clear();
+                }
+                gui.config.gui.key_hints = footer;
+                gui.ui.key_hints = footer;
+                let rows = draw_sized(&mut gui, 100, height);
+                let all = rows.join("\n");
+                let nav = |y: u16| rows[y as usize].chars().take(15).collect::<String>().replace('▸', "").trim().to_string();
+                let size = format!("100×{height}, footer {footer}, tools {tools:?}");
+                assert_eq!((nav(2).as_str(), nav(3).as_str()), ("Files", "Search"), "{size}:\n{all}");
+                assert_eq!(nav(4).is_empty(), rise == 0, "{size}: the blank under Search gives way first:\n{all}");
+                let [library, albums, most, heading, first] = lines(rise);
+                for (label, want) in [("LIBRARY", library), ("Albums", albums), ("Most played", most), ("TOOLS", heading)] {
+                    assert_eq!((2..settings).find(|&y| nav(y) == label), want, "{size}: {label}:\n{all}");
+                }
+                // The tools shown, packed under Auto DJ; the hidden nowhere.
+                let first = first.unwrap();
+                for (n, label) in tools.iter().enumerate() {
+                    assert_eq!(nav(first + n as u16), *label, "{size}: {label} on r{}:\n{all}", first + n as u16);
+                }
+                for label in every.iter().filter(|label| !tools.contains(label)) {
+                    assert!((0..height).all(|y| nav(y) != *label), "{size}: {label} hidden:\n{all}");
+                }
+                let last = first + tools.len() as u16 - 1;
+                assert!(last < settings, "{size}: the last tool above Settings:\n{all}");
+                assert!((last + 1..settings).all(|y| nav(y).is_empty()), "{size}: nothing between the tools and Settings:\n{all}");
+                assert_eq!(nav(settings), "Settings", "{size}: Settings on the content's last row:\n{all}");
+                assert_eq!(settings + 1, bar::top(Rect::new(0, 0, 100, height), footer), "{size}: the bar right under it");
+                for y in settings..height {
+                    let room = every.iter().find(|label| nav(y).contains(*label));
+                    assert!(room.is_none(), "{size}: {room:?} on Settings' row or under it, r{y}:\n{all}");
+                }
+                // Each Add row is its room's click target where it stands.
+                let at = |label: &str| first + tools.iter().position(|l| *l == label).unwrap() as u16;
+                let hit = |y: u16| gui.ui.hit(ratatui::layout::Position { x: 3, y });
+                assert_eq!(hit(at("Add torrent")), Some(Act::Nav(TORRENT_NAV)), "{size}");
+                if tools.contains(&"Add YouTube") {
+                    assert_eq!(hit(at("Add YouTube")), Some(Act::Nav(YOUTUBE_NAV)), "{size}");
+                }
+            }
+        }
+    }
+
+    /// The Add rows are the last of the array: the rooms with digits keep
+    /// them, and neither Add room has a digit or a letter of its own. Each
+    /// key is pressed from a fresh Settings: Search's query box, open after
+    /// `7`, would take the next as text.
+    #[test]
+    fn the_add_rooms_come_last_and_take_no_key() {
+        assert_eq!((NAV[TORRENT_NAV], NAV[YOUTUBE_NAV]), (NavId::Torrent, NavId::YouTube));
+        assert_eq!(NAV.len(), YOUTUBE_NAV + 1);
+        assert_eq!(NAV[..9], [
+            NavId::Files,
+            NavId::Albums,
+            NavId::Artists,
+            NavId::Genres,
+            NavId::Recent,
+            NavId::Playlists,
+            NavId::Search,
+            NavId::Settings,
+            NavId::Sonic,
+        ], "the digits' rooms");
+        for (i, c) in ('1'..='9').enumerate() {
+            let mut gui = every_room_gui();
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            assert_eq!((gui.screen, gui.active), (Screen::Library, i), "{c} opens {:?}", NAV[i]);
+        }
+        // The shell's letters and signs, each still the room or the act it
+        // was: none opens an Add room.
+        for c in "DGAy/pnsrmhaNPt0 -+=".chars() {
+            let mut gui = every_room_gui();
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            assert!(!matches!(gui.active, TORRENT_NAV | YOUTUBE_NAV), "{c:?} opened {:?}", NAV[gui.active]);
+        }
+        let mut gui = every_room_gui();
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+        assert_eq!(gui.active, DJ_NAV, "D is still Auto DJ's");
+        let mut gui = every_room_gui();
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert_eq!(gui.active, DISCOVER_NAV, "G is still Discover's");
+    }
+
+    /// Clicking each Add row opens its room as the active nav room — from
+    /// Manage servers too, which lets go — and Settings keeps TORRENTS to
+    /// the torrent switch alone: no doorway.
+    #[test]
+    fn the_add_rows_open_their_rooms_and_settings_keep_the_switch_alone() {
+        let _en = crate::setup::tests::in_locale("en");
+        let mut gui = every_room_gui();
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(rows[12].contains("TORRENTS") && rows[13].contains("[✓] Ask what to do with torrents"), "{all}");
+        assert!(rows[15].contains("DISPLAY") && rows[16].contains("Keyboard hints"), "{all}");
+        assert!(!all.contains("Add a torrent") && !all.contains("Add from YouTube") && !all.contains("ADD MUSIC"), "{all}");
+        assert_eq!(gui.ui.hit(ratatui::layout::Position { x: 20, y: 13 }), Some(Act::Row(ROW_ASK)));
+        assert_eq!(gui.ui.hit(ratatui::layout::Position { x: 20, y: 16 }), Some(Act::Row(ROW_HINTS)));
+        for (y, room) in [(18, TORRENT_NAV), (19, YOUTUBE_NAV)] {
+            let mut gui = every_room_gui();
+            servers::open_room(&mut gui);
+            draw(&mut gui);
+            let row = gui.ui.hit(ratatui::layout::Position { x: 4, y }).expect("a click target");
+            assert_eq!(row, Act::Nav(room));
+            gui.act(row);
+            assert_eq!((gui.screen, gui.active, gui.settings_room), (Screen::Library, room, None), "r{y}");
+            let rows = draw(&mut gui);
+            assert!(rows[y as usize].starts_with(&format!(" {} ", forward_glyph())), "the row lit:\n{}", rows[y as usize]);
+        }
+    }
+
+    /// Every language's Add rows fit the nav's 12 cells (x3–x14, or `▸ `
+    /// and the label from x1 while active), and each still says add — the
+    /// word, or the add sign where no word fits — never the bare source,
+    /// which would read as a place to browse.
+    #[test]
+    fn the_add_labels_fit_the_nav_column_in_every_locale() {
+        for code in ["en", "de", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
+            for key in ["gui.nav.add_torrent", "gui.nav.add_youtube"] {
+                let label = t!(key, locale = code);
+                assert!(!label.is_empty() && crate::kit::width(&label) <= 12, "{code}: {key} is {label:?}");
+                let bare = ["torrent", "торрент", "youtube"].contains(&label.to_lowercase().as_str());
+                assert!(!bare, "{code}: {key} is the bare source {label:?}");
+            }
+        }
     }
 
     #[test]

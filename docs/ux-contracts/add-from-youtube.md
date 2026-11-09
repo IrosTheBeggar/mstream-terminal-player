@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Design of record** | For this surface's look and its words: the canvas "Add from YouTube — webapp & desktop" (claude.ai artifact `7Th46vjDNSJPuSAPZhPoqk`), its *Terminal player GUI* page — boards `TermMain` (T1–T4), `TermRoomStates` (A1–E3), `TermFiles` (F1–F6, C1–C4, the door's row 2 at 80 and 47 cells), `TermList` (L1–L4, F1, S1–S4, N1–N4) and `TermWhere` (W0–W5), cell-exact, each frame's Keys and Mouse lines part of the spec — and its notes `termDecisions`, `termQuestions` and `termBuild`, which win over the boards (the user answered the open question 2026-11-03). For the behaviour and the record's words: the mobile app, `mstream_music` @ `origin/master` `1d4e8974` (PR #231) — `lib/singletons/ytdl_hub.dart` (the job hub, #231's `priorEntries` snapshot and send-order guard included), `lib/util/ytdl_{api,errors,filename,formats,guess,layout,link}.dart`, `lib/objects/ytdl_job.dart`, `lib/screens/ytdl/*.dart`, the `ytdl*` keys of `lib/l10n/app_*.arb`. Where the phone has no word: the webapp's port of the same rules, mStream PR #1123 (`claude/ytdl-webapp` @ `190f4325`) — `webapp/alpha/ytdl-core.js`, `webapp/locales/*.json` (`ytdl.*`). |
+| **Design of record** | For this surface's look and its words: the canvas "Add from YouTube — webapp & desktop" (claude.ai artifact `7Th46vjDNSJPuSAPZhPoqk`), its *Terminal player GUI* page — boards `TermMain` (T1–T4), `TermRoomStates` (A1–E3), `TermFiles` (F1–F6, C1–C4, the door's row 2 at 80 and 47 cells), `TermList` (L1–L4, F1, S1–S4, N1–N4) and `TermWhere` (W0–W5), cell-exact, each frame's Keys and Mouse lines part of the spec — and its notes `termDecisions`, `termQuestions` and `termBuild`, which win over the boards (the user answered the open question 2026-11-03). **Amended 2026-11-09**: the owner moved the way in from Settings to the left nav (TOOLS › `Add YouTube`), which supersedes the boards' Settings frames — T1, and S1–S4 — and the `◂` on every room board (see the log). For the behaviour and the record's words: the mobile app, `mstream_music` @ `origin/master` `1d4e8974` (PR #231) — `lib/singletons/ytdl_hub.dart` (the job hub, #231's `priorEntries` snapshot and send-order guard included), `lib/util/ytdl_{api,errors,filename,formats,guess,layout,link}.dart`, `lib/objects/ytdl_job.dart`, `lib/screens/ytdl/*.dart`, the `ytdl*` keys of `lib/l10n/app_*.arb`. Where the phone has no word: the webapp's port of the same rules, mStream PR #1123 (`claude/ytdl-webapp` @ `190f4325`) — `webapp/alpha/ytdl-core.js`, `webapp/locales/*.json` (`ytdl.*`). |
 | **Server API** | **A server with the new job list** (the ping's `ytdl >= 1`, also `features.ytdl` on `GET /api/`; mStream #1123): `GET /api/v1/ytdl/metadata?url=` → `{title, artist, album, year, thumbnail, fileStem, isLive, liveStatus, durationSec, channel}`, a failed lookup a bare 500 · `POST /api/v1/ytdl/ {directory, url, outputCodec, metadata?: {title, artist, album, year}}` → 200 `{message, id, fileName}`; **409 `{error, reason: 'exists', fileName}`** refused before anything downloads; 403 Uploading Disabled; 404 a library or folder; 500 "FFmpeg is not available yet" / "yt-dlp is not installed" · `GET /api/v1/ytdl/downloads` → the caller's jobs, newest first, `{id, pid, url, directory, outputCodec, status: downloading \| complete \| error, startTime, endTime, fileName, filePath, downloadId, error, reason}`, `reason` ∈ exists · too-big · too-long · live · unavailable · null, settled ones kept 24 h · `GET /api/v1/discovery/downloads?plugin=ytdl&limit=&before=` → the account's record of what came in (the list's songs, Show earlier). **Older servers** (no `ytdl`): 6.30–6.33 answer the record route unfiltered (the "full" tier: a global tracker keyed by pid, settled entries kept 30 s, a POST answering `{message}` alone, a name clash failing after the download); before 6.30 the record route is Express's 404 (the "older" tier: an add whose file name is already in the folder re-tags that file). **Both**: `POST /api/v1/file-explorer/mkdir {directory}` (403 for an account that can't make folders — the ping's `noMkdir`), `POST /api/v1/file-explorer {directory}` (a folder's names, for the clash and Choose a folder), the ping's `noUpload`, `transcode`, `noMkdir` and `supportedAudioFiles` (a map of format → on, or a list). |
-| **Already in this repo** | The torrent room's shape — a Settings doorway room, every call a one-shot `Client` on its own thread folded back between draws (`gui/torrent.rs`) — so no `ApiCmd` and no wasm worker change; Keep a copy's window, its band, its borders and its notes (`gui/keep.rs`: `window_rect`, `open_window`, `draw_borders`, `set_note`, `fit_note`), Where copies land's picker grammar and the layout engine it mirrors (`api/types.rs`: `validate_layout`, `layout_folders`, `sanitize_segment`), the kit's tall primary, line editor, `ListView` and `scroll_items`. **Built 2026-11-09, phase A** (the logic): `src/api/ytdl.rs` — the calls, `YtdlCallError` (the status, the server's words, its `reason` and `fileName`, a timeout told from a refusal and from no way there), the shapes, the tier; the ping's `noMkdir`, `supportedAudioFiles` and `ytdl` read leniently (`api/types.rs`); `ServerEntry`'s `ytdl_library`, `ytdl_layout`, `ytdl_layout_kind`, `ytdl_format` and the disposable `ytdl.json` beside `config.toml` (`config.rs`); `src/ytdl/` — the pure rules, a port of the webapp's `ytdl-core.js` and the phone's `ytdl_filename.dart` (links, the tag guess and its clean-up, layouts, presets and bracket traps, formats, yt-dlp's restricted file name, the clash, failures and why Add is off), every word a `Label` (a locale key) — and `src/ytdl/jobs.rs`, the job tracker, sans-I/O over an injected transport, clock and store (the phone's hub for the older tiers, the job id for the new one). **Phase B** (the GUI): `src/gui/ytdl.rs` (the room, the From YouTube list, the format list, the paste seam, the Settings word), `src/gui/ytdl_here.rs` (the Files door and its window, the re-list), `src/gui/ytdl_where.rs` (Where new songs land, Choose a folder); the shell's hooks in `gui/mod.rs` (the dynamic Settings rows, `Host::paste`, `TermEvent::Paste`), `Face::takes_paste` in the window flavour, the panic hook's paste off (`tui/mod.rs`); the `gui.ytdl.*`, `gui.set.yt_add*` and `gui.tips.ytdl_*` strings in the ten locales, `gui.set.torrents_group` now ADD MUSIC. |
-| **Target surface** | The GUI player, both flavours: a room off Settings, and a door on Files. **The classic TUI gets nothing**, and there is no `gui --youtube` seam in v1. |
-| **Status** | Designed 2026-11-03 (the canvas, the brief's decisions, the user's answers); phase A and phase B built 2026-11-09; this contract written from the canvas notes that stood as the contract during the build. The pty smoke against a new-tier server (mStream with its fake yt-dlp) and an older one is still to run (PLAN.md). |
+| **Already in this repo** | The torrent room's shape — every call a one-shot `Client` on its own thread folded back between draws (`gui/torrent.rs`) — so no `ApiCmd` and no wasm worker change; Keep a copy's window, its band, its borders and its notes (`gui/keep.rs`: `window_rect`, `open_window`, `draw_borders`, `set_note`, `fit_note`), Where copies land's picker grammar and the layout engine it mirrors (`api/types.rs`: `validate_layout`, `layout_folders`, `sanitize_segment`), the kit's tall primary, line editor, `ListView` and `scroll_items`. **Built 2026-11-09, phase A** (the logic): `src/api/ytdl.rs` — the calls, `YtdlCallError` (the status, the server's words, its `reason` and `fileName`, a timeout told from a refusal and from no way there), the shapes, the tier; the ping's `noMkdir`, `supportedAudioFiles` and `ytdl` read leniently (`api/types.rs`); `ServerEntry`'s `ytdl_library`, `ytdl_layout`, `ytdl_layout_kind`, `ytdl_format` and the disposable `ytdl.json` beside `config.toml` (`config.rs`); `src/ytdl/` — the pure rules, a port of the webapp's `ytdl-core.js` and the phone's `ytdl_filename.dart` (links, the tag guess and its clean-up, layouts, presets and bracket traps, formats, yt-dlp's restricted file name, the clash, failures and why Add is off), every word a `Label` (a locale key) — and `src/ytdl/jobs.rs`, the job tracker, sans-I/O over an injected transport, clock and store (the phone's hub for the older tiers, the job id for the new one). **Phase B** (the GUI): `src/gui/ytdl.rs` (the room, the From YouTube list, the format list, the paste seam), `src/gui/ytdl_here.rs` (the Files door and its window, the re-list), `src/gui/ytdl_where.rs` (Where new songs land, Choose a folder); the shell's hooks in `gui/mod.rs` (the nav's `NavId::YouTube` row — a Settings doorway until it moved, 2026-11-09 — `Host::paste`, `TermEvent::Paste`), `Face::takes_paste` in the window flavour, the panic hook's paste off (`tui/mod.rs`); the `gui.ytdl.*`, `gui.nav.add_youtube` and `gui.tips.ytdl_*` strings in the ten locales. |
+| **Target surface** | The GUI player, both flavours: a Library nav room under TOOLS (a room off Settings until 2026-11-09), and a door on Files. **The classic TUI gets nothing**, and there is no `gui --youtube` seam in v1. |
+| **Status** | Designed 2026-11-03 (the canvas, the brief's decisions, the user's answers); phase A and phase B built 2026-11-09; this contract written from the canvas notes that stood as the contract during the build; the room moved from Settings into the nav the same day (the owner's call, see the log). The pty smoke (`smoke/gui/scenario_ytdl.py`) passes against a new-tier server (mStream with #1123 and its fake yt-dlp) and an older one (6.32.3), before the move and after it. |
 
 ## Intent
 
@@ -20,17 +20,19 @@ keeps a list of what came in. Nothing is drawn where it cannot work.
 
 ## Entry points
 
-1. **Settings › ADD MUSIC › `Add from YouTube ▸`** — the doorway opens the
-   room in place of the Settings rows, the torrent room's shape (`◂` and
-   Esc walk back). ADD MUSIC is the TORRENTS group renamed: `Add a
-   torrent ▸`, `Add from YouTube ▸`, `[✓] Ask what to do with torrents`.
+1. **The nav row `Add YouTube`** — the left nav's TOOLS group, last, on
+   row 19 under `Add torrent` (TOOLS label 14, Auto DJ 15, Sonic path 16,
+   Discover 17, Add torrent 18, Add YouTube 19; the block rises on short
+   terminals — clause 2). It opens the room as a Library nav room, the
+   Auto DJ room's shape: no way back, the nav column beside it. No digit
+   and no letter. Settings has no doorway (see the log).
 2. **Files, on a folder below a library root** — line one of the browse
    bar carries the door word `add from YouTube` three cells after the
    crumb; it, or `y`, opens a 76-wide window that adds the song right
    there (`[ Add here ]`).
 3. **Nothing else** in v1: no clipboard key, no command-line seam, no TUI.
 
-Both doors stand only under the gate (clause 1).
+The row and the door stand only under the gate (clause 1).
 
 ## States & flows
 
@@ -39,7 +41,7 @@ field has the keys) → a link typed or pasted → **reading** (8 s on, "still
 looking", with a way to type the tags) → **found** (the song, its tags, the
 place) or **failed** (the lookup's own words; the four tags open empty) or
 **timed out** (try again) — a late answer offering its details over tags
-already typed → the **press** (`Adding…`, every key but Esc waiting) → the
+already typed → the **press** (`Adding…`, every typed key waiting) → the
 server answers: started, and the form **resets** for the next link; or
 refused, and the form stays with the server's words above the primary.
 From the press on the job is the tracker's: **adding** → **added** (the
@@ -55,33 +57,51 @@ per server in `config.toml` (library, layout, format); the jobs in
 
 ### The gate
 
-1. **Hidden, never greyed** (the phone's gates). Both doors stand only
-   while the session is connected to **its own server** — never a federated
-   peer, which is read-only (multi-server clause 26) — whose ping says the
-   account may add files (`noUpload` false; a ping that does not say grants
-   nothing), that the server has audio conversion (`transcode`), and that
-   names a library. The door also needs Files on a folder **below** a
-   library root (a root itself takes no song by this door), nothing over
-   it, the header's dropdown shut and the browse bar's filter not taking
-   text (`y` types there). A gate that closes under a window closes it.
-2. **The Settings rows are dynamic** for this one row: with the gate shut,
-   ADD MUSIC holds two rows and everything below moves up a line; a
-   Settings cursor resting on the row when it goes steps to the row that
-   took its line; ↑ ↓ walk the rows that show. With it, the column is 17
-   rows (T1); where the column has fewer (100 × 24 with key hints on, a
-   pick's banner) the blank above DISPLAY gives way.
-3. **The doorway's description is news while there is any**, ONE word in
-   its own token: `adding` (ACCENT) while a job runs, `! failed` (GOLD)
-   while a failure has not been seen in the list, `✓ added` (OK) for an
-   hour after a song came in; otherwise "a YouTube link, into a library"
-   (DIM). Selected, the row keeps the slab's colours (S1–S4).
+1. **Hidden, never greyed** (the phone's gates). The nav row and the
+   Files door stand only while the session is connected to **its own
+   server** — never a federated peer, which is read-only (multi-server
+   clause 26) — whose ping says the account may add files (`noUpload`
+   false; a ping that does not say grants nothing), that the server has
+   audio conversion (`transcode`), and that names a library. The door
+   also needs Files on a folder **below** a library root (a root itself
+   takes no song by this door), nothing over it, the header's dropdown
+   shut and the browse bar's filter not taking text (`y` types there). A
+   gate that closes under a window closes it.
+2. **The row's place**: `NavId::YouTube`, last in `NAV`, after
+   `NavId::Torrent` — rooms past the digits are the pointer's, and a row
+   that comes and goes never renumbers the others. It closes the TOOLS
+   group, which packs the rooms it shows: with all five it stands on 19,
+   two lines higher on a server with no sonic path and no Discover (Auto
+   DJ 15, Add torrent 16, Add YouTube 17); absent, Add torrent closes the
+   group and nothing stands under it (discovery-page clause 2). Where
+   Settings, on the content's last row, would meet the last tool, the
+   rooms rise only as far as they must — into the blank under Search,
+   then over the TOOLS heading, then over the LIBRARY heading — so with
+   all five the row stands on 18 at 100 × 25 with the key hints off or
+   100 × 26 with them on, on 17 at 100 × 24 with them off or 100 × 25
+   with them on, and on 16 at 100 × 24 with them on: never on Settings'
+   row or under it. The
+   label fits the nav's twelve cells in every locale (CJK two a
+   character), and reads `▸ Add YouTube` while the room is up. A gate
+   that closes while the room is up and the session still connected sends
+   the room to Files as its row goes, the Discover room's way; a
+   connection that drops closes nothing — the room says it can't reach
+   the server (clause 14), its row hidden meanwhile, so no row is lit.
+3. **The row carries no state** — no word, no glyph, no count: the jobs'
+   news is the title row's word (clause 22) and the Files door's spot
+   (clause 30). The Settings doorway's one word (S1–S4) went with it (see
+   the log).
 
 ### The room
 
-10. **It opens with the link field holding the keys** (A1; see the log):
-    the caret, then the DIM placeholder "Paste a YouTube link". Typing
-    edits the link; Esc gives the keys back (a room's keys again); Esc
-    once more goes back to Settings. A click on the field takes the keys.
+10. **It opens with the link field holding the keys** (A1; see the log),
+    on every opening from its row — unless a press is still out, which
+    keeps the form quiet (clause 20): the caret, then the DIM placeholder
+    "Paste a YouTube link". Typing edits the link; Esc gives the keys back
+    (a room's keys again); Esc once more leaves nothing — a nav room has
+    no way back, the Auto DJ room's rule — and is the shell's: it sends an
+    armed Sonic path or Discover pick home, as anywhere, and otherwise
+    does nothing; never to Settings. A click on the field takes the keys.
 11. **A paste lands in the link field, whatever has the keys.** While the
     room (or the Files window) is up the terminal is in bracketed paste;
     a paste replaces the link — its first non-blank line, controls and
@@ -153,9 +173,14 @@ per server in `config.toml` (library, layout, format); the jobs in
     click, and the reason it is off stands DIM right-aligned above it —
     "Already adding to this folder" (D4) — or, for a refusal, the GOLD
     lines. Pressed it reads `Adding…` (13 cells), no click, no hover, and
-    every key but Esc waits for the server (D5); ◂ is the one control
-    left — the key words, the title row's word, the link card and `MP3 ▾`
-    stand, neither clicking nor lighting, and the tips read "Esc back".
+    every typed key waits for the server (D5) — letters either case,
+    digits, signs, Space, so a link pasted as keys (a terminal with no
+    bracketed paste, clause 11) never reaches the shell's globals — and ↑
+    ↓ too; every control stands — the key words, the title row's word, the
+    link card and `MP3 ▾` — neither clicking nor lighting, and the tips
+    line names no key. A nav room has no back for Esc to take, so Esc and
+    Tab are the shell's, and the nav's rows are the way on; the row
+    clicked again opens the room with the form still quiet.
 21. **The press**: never twice for one link and folder while one is open
     (the tracker is asked first). A folder the place would make is made
     first; the add is sent **once, ever**. The server's answer:
@@ -175,10 +200,12 @@ per server in `config.toml` (library, layout, format); the jobs in
       sent again: the form goes on as though started and the job is
       looked for (clause 60), its list row `starting…` until it is found,
       `not sure it started` if two minutes find nothing.
-22. **The title row's word** — at the right, ending one cell in: `adding`
-    (ACCENT), `! failed` (GOLD), `✓ added` (OK, an hour), else `added
-    songs` (DIM) once the list has anything; none before. It, or `l`,
-    opens the From YouTube list (E1–E3).
+22. **The title row**: `Add from YouTube` (BOLD) at the room's first
+    cell — no `◂`, the nav column being right there, and a click on it
+    does nothing — and its word at the right, ending one cell in:
+    `adding` (ACCENT), `! failed` (GOLD), `✓ added` (OK, an hour), else
+    `added songs` (DIM) once the list has anything; none before. The
+    word, or `l`, opens the From YouTube list (E1–E3).
 
 ### The Files door and its window
 
@@ -254,8 +281,8 @@ per server in `config.toml` (library, layout, format); the jobs in
     song plays on a
     click, its verbs `[▸] [+] [⋯]` under the pointer, a right click its
     list; the wheel scrolls. Esc closes the song's list first, then the
-    list. What the list has shown is **seen**: the doorway's and the title
-    row's `! failed` and `✓ added` go once the list showed them.
+    list. What the list has shown is **seen**: the title row's `! failed`
+    and `✓ added` go once the list showed them.
 
 ### Where new songs land
 
@@ -287,17 +314,16 @@ per server in `config.toml` (library, layout, format); the jobs in
 ### Following the jobs
 
 60. **The tracker** (`ytdl::jobs::Tracker`): one per server identity and
-    account, made once the session has its facts (the doorway's word reads
-    it), let go when the session moves to another (its calls' answers with
-    it). On a server with the new job
-    list a job is followed by the POST's `id`; on older ones by the
+    account, made once the session has its facts, let go when the session
+    moves to another (its calls' answers with it). On a server with the new
+    job list a job is followed by the POST's `id`; on older ones by the
     phone's rules — the newest entry for the link and folder that no other
-    job holds, that the prior list did not have (#231's snapshot) and that
-    a read sent after the POST shows (#231's send order). It polls `GET
+    job holds, that the prior list did not have (#231's snapshot) and that a
+    read sent after the POST shows (#231's send order). It polls `GET
     /ytdl/downloads` every 3 s while an add is open, one read at a time,
-    backing off to 60 s on failures ("waiting for connection" with no
-    answer at all); settles from the entry, else the server's record,
-    else the folder; and is never fooled by a wall clock set back.
+    backing off to 60 s on failures ("waiting for connection" with no answer
+    at all); settles from the entry, else the server's record, else the
+    folder; and is never fooled by a wall clock set back.
 61. **Kept in `ytdl.json`** beside `config.toml`, per server and account:
     the last 20, a failure kept 7 days; merged on write (another player's
     jobs survive); a corrupt file ignored and replaced, never repaired. A
@@ -314,21 +340,24 @@ per server in `config.toml` (library, layout, format); the jobs in
     clipped with `…` (N3). Once per job.
 71. **Tips name a key only where it works**, composed from what the frame
     drew (T2: "a paste replaces the link · e edit tags · d change · f
-    format · l list · Enter add · Esc back"); past the footer's 99 cells
-    the last key words give way — the paste, Enter and the way out stay.
+    format · l list · Enter add" — no Esc: a nav room has nothing to go
+    back to); past the footer's 99 cells the last key words give way —
+    the paste and Enter stay. While a press is out the line names none
+    (clause 20).
 72. **Key words** (docs/ui-kit.md, Key word): drawn only where their key
     works, the key working only where its word stood, the letter never
     translated, DIM, BRIGHT BOLD under the pointer, a click doing what the
     key does. **The room's capitals are its own**: with Shift or Caps Lock
     `d`, `t` and `a` arrive as `D`, `T` and `A`, the shell's Auto DJ, Stats
-    and DJ toggle — while the room or any of its windows is up a capital
-    of the room's letters never reaches the shell (a drawn word's capital
-    is that word: `D` is `d change`), and the windows keep every key. Try
-    again is `a`, never `r` (Settings' `r` falls through to Repeat).
+    and DJ toggle — while the room or any of its windows is up, the press
+    out or not, a capital of the room's letters never reaches the shell
+    (a drawn word's capital is that word: `D` is `d change`), and the
+    windows keep every key. Try again is `a`, never `r` (the shell's
+    Repeat, which reaches it from this room as from every nav room).
 73. **Glyphs live in code** behind `legacy_conhost` — `▸ ◂ › ▾ ✓ ↓ ◷ •
     ▏ …` and the `! ` of a GOLD line — the locale strings carry words only
     (add-torrent's 2026-09-26 rule).
-74. **No counts** (the canvas's "count-free"): not on the doorway, the
+74. **No counts** (the canvas's "count-free"): not on the nav row, the
     door, the title row's word or the list — a row's minutes and its date
     are times, not tallies.
 75. **The server's words, as they are** — a refusal's `error`, a job's
@@ -350,7 +379,7 @@ es fr it ja pl pt ru zh). The record's `ytdl*` keys were carried over from
 the ten `.arb` files into `locales/*.yml` under `gui.ytdl.*` (`room`,
 `key`, `tag`, `word`, `note`, `link`, `lookup`, `server`, `source`, `help`,
 `blank`, `where`, `sort`, `format`, `file`, `no_mkdir`, `err`, `list`,
-`add`, `here`, `choose`), `gui.set.yt_add*` and `gui.tips.ytdl_*` — each
+`add`, `here`, `choose`), `gui.nav.add_youtube` and `gui.tips.ytdl_*` — each
 language's own words, `{name}` written `%{name}`, the phone's ICU plurals
 unneeded (the pages carry no counts). Glyphs (`▸ ◂ › ▾ ✓ ↓ ◷ • ▏ …` and a
 GOLD line's `! `) are the code's (clause 73). Where the board trims a phone
@@ -367,9 +396,8 @@ joins them. The webapp's words stand only where the phone has none:
 
 | String | Key |
 |---|---|
-| ADD MUSIC (Settings' group, new copy; the key kept — see the log) | `gui.set.torrents_group` |
-| Add from YouTube ▸ · a YouTube link, into a library (the doorway: label and `▸` within the 27-cell column, the description new) | `gui.set.yt_add` · `gui.set.yt_add_desc` |
-| adding · ! failed · ✓ added · added songs (the one word on the doorway, the title row and the door — at most 20 cells at 47, and beside the title; `history` new) | `gui.ytdl.word.*` |
+| Add YouTube (the nav row, new: within the nav's 12 cells, CJK two a character; `+ YouTube`, the add sign for the verb, in de es fr it pl pt ru — open for the owner, see the log) | `gui.nav.add_youtube` |
+| adding · ! failed · ✓ added · added songs (the one word on the title row and the door — at most 20 cells at 47, and beside the title; `history` new) | `gui.ytdl.word.*` |
 | add from YouTube (the Files door, new) | `gui.ytdl.door` |
 | From YouTube · Esc close · it keeps going (the list's borders, new; the footer at most 50 cells) | `gui.ytdl.list.title` · `gui.ytdl.list.esc_going` |
 | Adding “One More Time”… · Added “One More Time” (the note's head, at most 30 cells with the boards' song) · Added “…” · Daft Punk › Discovery (where the note is wider, new) · Couldn't add “…” | `gui.ytdl.note.adding` · `.added` · `.added_in` · `.couldnt` |
@@ -390,7 +418,7 @@ joins them. The webapp's words stand only where the phone has none:
 | Add to library · Add here · Add anyway · Adding… (the primary; tall beside `OGG Vorbis ▾` within 47, bracketed in the window's 72) | `gui.ytdl.add.*` |
 | type or paste a link · Enter look it up · Esc give the keys back | `gui.tips.ytdl_field` |
 | type · ↑ ↓ tags · Enter add · Esc give the keys back | `gui.tips.ytdl_tags` |
-| a paste replaces the link · e edit tags · d change · f format · l list · Enter add · Esc back (composed from what the frame drew, at most the footer's 99) | `gui.tips.ytdl_paste` · `.ytdl_format` · `.ytdl_list_key` · `.ytdl_enter_add` · `.ytdl_esc_back` |
+| a paste replaces the link · e edit tags · d change · f format · l list · Enter add (composed from what the frame drew, at most the footer's 99) | `gui.tips.ytdl_paste` · `.ytdl_format` · `.ytdl_list_key` · `.ytdl_enter_add` |
 | ↑ ↓ rows · Enter play · a add to queue · m more · Esc close · x dismiss · ↑ ↓ walk · Enter picks · Esc close the list (the list's) | `gui.tips.ytdl_rows` · `.ytdl_play` · `.ytdl_queue` · `.ytdl_more` · `.ytdl_close` · `.ytdl_dismiss` · `.ytdl_menu` |
 | a paste fills the link and looks it up · typing works too · Esc close · ↑ ↓ or ← → move the dot · Enter add here (the window's) | `gui.tips.ytdl_here_*` · `.ytdl_enter_here` · `.ytdl_enter_library` · `.ytdl_enter_anyway` |
 | ← → library · ↑ ↓ rows · Enter save · ↑ ↓ pick up the cursor · Enter goes in, or uses this folder when stowed · Esc close (Where new songs land's, Choose a folder's) | `gui.tips.ytdl_where_*` · `.ytdl_choose` |
@@ -412,10 +440,10 @@ joins them. The webapp's words stand only where the phone has none:
 
 | Record | Here |
 |---|---|
-| The phone's Add from YouTube screen (a sheet over a card) | A Settings doorway **room** (Add torrent's shape) — one form, no labels but the tags', the calmer grammar |
+| The phone's Add from YouTube screen (a sheet over a card) | A Library nav **room** under TOOLS, the Auto DJ room's shape, beside Add torrent's (since 2026-11-09; a Settings doorway room before) — one form, no labels but the tags', the calmer grammar |
 | The phone's explorer entry "Add from YouTube here" | The browse bar's **door word**, opening Keep a copy's 76-wide window |
 | Material TextField with a paste button | The kit's 3-row card for the link (`[X]` DIM, DANGER under the pointer) and **bracketed paste** while the room or window is up; the window flavour's paste chord hands the clipboard over whole (`Face::takes_paste`) |
-| The home card's counts, the strip, snackbars | One word on the doorway, the title row and the door; the bar's note line |
+| The home card's counts, the strip, snackbars | One word on the title row and the door — none on the nav row (clause 3); the bar's note line |
 | The jobs sheet (Adding / Needs a look / Added) | The **From YouTube** list window, Copies' shape, two-row items |
 | Where new songs land (a sheet) | Where copies land's picker (keep.rs) with Add from YouTube's presets; libraries' dot OK, the layout's ACCENT |
 | The phone's `ytdl_hub` | `ytdl::jobs::Tracker`, sans-I/O, its calls on the GUI's threads |
@@ -428,37 +456,46 @@ joins them. The webapp's words stand only where the phone has none:
 
 ## What the tests pin
 
-`api::ytdl` against canned servers (17): the lookup's shapes on both
-servers, the add's body and its 409 / 403 / 400 / 404 / 500, an add never
-sent twice, reads asked once more when lost, refused vs no way there, the
-job list and the record's pages, the tier's ingredients, mkdir and the
-listing. `ytdl` (88): the webapp's and the phone's fixtures for links,
-the guess (and the server's own readers it agrees with), layouts and traps,
-formats, yt-dlp's file names, failures and why Add is off, and every label a
-key. `ytdl::jobs` (33): following by id, the older tiers' claim with #231's
-snapshot and send order, a lost answer never taking an earlier add, the
-poll's beat and backoff, retention and the two-player merge. `gui::ytdl`
-(45), `gui::ytdl_here` (17), `gui::ytdl_where` (9): every board frame cell
-for cell with its tokens (T1–T4, A1–E3, F1–F6, C1–C4, the door's spot, L1–L4,
-S1–S4, N1–N4, W0–W5), the gate under each condition, the Settings rows and
-their give-way, a key acting only where its word stands (and nowhere
-behind the mini player), the arrows kept from the hidden Settings rows, the
-capitals kept (Shift and Caps Lock, the room and each window), the paste
-(bracketed on and off with the room, the window's whole paste, none while
-another's surface or the list stands over the form), the press once and its
-answers with ◂ the one way left, the note taken down by a wordless end, the
-re-list with the new row held, Show in folder's Back to the parent, the
-list's cursor on its row, the format list gone with the window, a Save that
-wrote nothing keeping the song's choice, one tracker per server and account
-(a token's reconnect keeping it); and **every language**: the key words open
-with their letter, the words fit their cells (the tips' 99, the tall primary
-beside `OGG Vorbis ▾` at 47, the window's action row and its four dots in
-72, the doorway's column, the title row at 47, the door at 47, the list's
+`api::ytdl` against canned servers (17): the lookup's shapes on both servers,
+the add's body and its 409 / 403 / 400 / 404 / 500, an add never sent twice,
+reads asked once more when lost, refused vs no way there, the job list and
+the record's pages, the tier's ingredients, mkdir and the listing. `ytdl`
+(88): the webapp's and the phone's fixtures for links, the guess (and the
+server's own readers it agrees with), layouts and traps, formats, yt-dlp's
+file names, failures and why Add is off, and every label a key. `ytdl::jobs`
+(33): following by id, the older tiers' claim with #231's snapshot and send
+order, a lost answer never taking an earlier add, the poll's beat and
+backoff, retention and the two-player merge. `gui::ytdl` (44),
+`gui::ytdl_here` (17), `gui::ytdl_where` (9): every board frame cell for cell
+with its tokens (T2–T4, A1–E3, F1–F6, C1–C4, the door's spot, L1–L4, N1–N4,
+W0–W5; the room's drawn with no `◂`), the nav row under each gate (Add
+torrent closing TOOLS, no way in, the room yielding to Files and its windows and
+lists with it, a dropped connection closing nothing), a key acting only
+where its word stands (and nowhere behind the mini player), the arrows kept the room's, Esc giving the keys back and
+then leaving nothing, the capitals kept (Shift and Caps Lock, the room and each
+window, the press out too), the paste (bracketed on and off with the room,
+the window's whole paste, none while another's surface or the list stands
+over the form), the press once and its answers (every typed key waiting, a
+link pasted as keys too, Esc and the nav's rows the shell's), the note
+taken down by a wordless end, the re-list with the new row held, Show in folder's Back to the parent, the list's cursor on its
+row, the format list gone with the window, a Save that wrote nothing keeping
+the song's choice, one tracker per server and account (a token's reconnect
+keeping it); and **every language**: the key words open with their letter,
+the words fit their cells (the tips' 99, the tall primary beside
+`OGG Vorbis ▾` at 47, the window's action row and its four dots in 72, the
+nav row's 12 cells, the title row at 47, the door at 47, the list's
 right-hand words and ways, the note's 30 for both heads, still looking, the
 late answer and why Add is off in two lines), a sentence with no blanks
-wrapped within its room, and the room, the list and the window drawn whole
-in each of the ten — still looking, the late answer, a failed lookup and a
-row that didn't start among them.
+wrapped within its room, and the room, the list and the window drawn whole in
+each of the ten — still looking, the late answer, a failed lookup and a row
+that didn't start among them. The shell's own (`gui`): the TOOLS group's
+give-way at ten sizes from 100 × 24 to 100 × 30, the footer on and off, with
+all five tools, none of the gated ones, Add YouTube without the sonic path
+and Discover, and Discover without the sonic path — packed every time, the
+rise only where the last tool would reach Settings; the Add rows last in
+`NAV`, with no key; each Add row opening its room, from Manage servers too,
+and Settings keeping TORRENTS to the torrent switch; both Add labels within
+12 cells in every locale.
 
 ## Deviations log
 
@@ -488,7 +525,8 @@ row that didn't start among them.
   link's.
 - **2026-11-03 — TORRENTS becomes ADD MUSIC** (add-torrent.md's log too):
   the key `gui.set.torrents_group` is kept, its value new copy in ten
-  languages.
+  languages. *Superseded 2026-11-09, below: the group reads TORRENTS
+  again.*
 - **2026-11-09 — No "You're offline".** The phone has a connectivity
   probe; a call that never connected for want of a way there reads as one
   refused: "Can't reach {server}. Check that it's running, then try
@@ -504,6 +542,7 @@ row that didn't start among them.
 - **2026-11-09 — The ADD MUSIC group reads one Portuguese.** The phone
   settled on Brazilian; `gui.set.tor_add_desc` read European ("ficheiro",
   "ligação") beside it, and now reads the phone's "arquivo", "link".
+  *Superseded the same day, below: the row went with the doorways.*
 - **2026-11-09 — A capital of a drawn word is that word.** The build note
   asks the room to swallow its capitals; one the frame drew acts as its
   lowercase (`D` is `d change`, `E` `e edit tags`), the rest do nothing —
@@ -525,3 +564,38 @@ row that didn't start among them.
 - **2026-11-09 — The German note's head reworded**: `note.adding` reads
   Füge „…“ hinzu… (the phone's „…“ wird hinzugefügt… is 33 cells with the
   boards' song, past the note's 30).
+- **2026-11-09 — Both ways in move to the nav** (the owner's call,
+  replacing the Settings doorways this build first made; add-torrent.md's
+  log too). The left nav's TOOLS group gains `Add torrent` and `Add
+  YouTube` after Discover, last in `NAV` — no digit, no letter (entry
+  point 1, clause 2) — and the group packs the rooms it shows, the
+  owner's second call the same day: with every row on its own line, a
+  server with no sonic path and no Discover (most, the owner's own among
+  them) showed two blank lines between Auto DJ and Add torrent. All five
+  stand on 15–19; where Settings would meet the last tool shown the
+  block rises a line at a time, the blank under Search first, then the
+  TOOLS heading, then the LIBRARY heading (discovery-page clause 2). This
+  supersedes the canvas's Settings frames — T1, and S1–S4's one word in
+  the doorway's description — and the `◂` on every room board: the room
+  is a nav room, the Auto DJ room's shape, its title at the room's first
+  cell, Esc giving the field's keys back and then leaving nothing (clauses
+  10, 22). The row carries no state (clause 3): the owner chose it without
+  a glyph, and the jobs' word stays on the title row and the door. With no
+  way back to keep open, the press keeps the boards' pause without Esc's
+  way out: every typed key still waits — a link pasted as keys, where the
+  terminal sends one so, must never reach the shell's globals (`p`, `s`,
+  `/`, a digit, `q`) — and Esc and Tab are the shell's, the nav's rows the
+  way on (clause 20; docs/ui-kit.md, Key word), where the boards had Esc
+  the one way out. Settings is TORRENTS again over `[✓] Ask what to do
+  with torrents` alone, its rows fixed as before: the dynamic rows and
+  the blank above DISPLAY that gave way went with the row that needed
+  them. `gui.set.yt_add`, `gui.set.yt_add_desc` and
+  `gui.tips.ytdl_esc_back` are gone, `gui.set.torrents_group` reads its
+  old word in each language, and `gui.nav.add_youtube` is new: "Add
+  YouTube", ja YouTube 追加, zh 添加 YouTube. In de es fr it pl pt ru no
+  verb fits the nav's twelve cells beside it (pl `Dodaj YouTube` is 13, de
+  `YouTube hinzufügen` 18), so the GUI's add sign stands for the verb —
+  `+ YouTube`, as `+ New playlist` and Discover's `+ queue all` read —
+  rather than the bare `YouTube`, which beside Discover reads as a place
+  to browse YouTube, not a way to add from it. The owner chose the sign
+  over an abbreviated verb (it `Agg. YouTube`), 2026-11-09.

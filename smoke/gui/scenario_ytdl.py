@@ -7,7 +7,7 @@ import os, json, time
 # library "Music" holding Daft Punk/Discovery/Aerodynamic.mp3. See README.md.
 #
 # MSTREAM_YT_STEPS picks the passes (comma list, default all):
-#   room   — Settings › ADD MUSIC › Add from YouTube ▸: paste, the found tags,
+#   room   — the nav's Add YouTube row under TOOLS: paste, the found tags,
 #            Enter, the title-row word, the From YouTube list, the note
 #   refuse — the same link again (409 before downloading), a live stream,
 #            YouTube's bot check (the details typed by hand, then the add fails)
@@ -57,16 +57,21 @@ def run(Gui):
     print("songs before:", songs(), flush=True)
 
     if "room" in STEPS or "refuse" in STEPS or "caps" in STEPS:
+        # Settings keeps no doorway: TORRENTS holds its switch alone.
         g.click_text("Settings", 10)
-        g.wait_for("ADD MUSIC", 10)
-        g.wait_for("Add from YouTube ▸", 5)
-        g.dump("Settings › ADD MUSIC")
-        # The description, or one word while there is news (clause 3).
-        check(any(g.find(w) for w in ("a YouTube link, into a library", "adding", "! failed", "✓ added")),
-              "the doorway's description")
-        g.click_text("Add from YouTube", 5)
+        g.wait_for("TORRENTS", 10)
+        g.dump("Settings")
+        check(g.find("ADD MUSIC") is None and g.find("Add from YouTube") is None, "no doorway in Settings")
+        # The room is the nav's: Add YouTube closes TOOLS, under Add torrent,
+        # drawn only under its gates (clauses 1, 2).
+        g.wait_for("Add YouTube", 10, "the nav's Add YouTube row")
+        check(g.find("Add torrent") is not None, "Add torrent above it")
+        g.click_text("Add YouTube", 5)
+        g.wait_for("▸ Add YouTube", 5, "the row lit")
         g.pump(1.0)
         g.dump("the room, opened")
+        check(g.find("Add from YouTube") is not None and g.find("◂ Add from YouTube") is None,
+              "the title row, with no way back")
 
     if "room" in STEPS:
         paste(g, ONE_MORE_TIME)
@@ -154,15 +159,17 @@ def run(Gui):
 
     if "caps" in STEPS:
         # Nothing holds the keys: D, T and A are the room's to swallow, never
-        # Auto DJ, Stats or the DJ's toggle (decision 9).
-        # (Closing the list left nothing holding the keys: another Esc would
-        # go back to the Settings rows, where these ARE the global keys.)
-        check(g.find("◂ Add from YouTube") is not None, "the room is up, its field not holding the keys")
+        # Auto DJ, Stats or the DJ's toggle (decision 9). An Esc first gives
+        # the field's keys back if it holds them (a caps-only run), else
+        # leaves nothing: a nav room has no way back (clause 10).
+        g.key("\x1b"); g.pump(0.4)
+        check(g.find("Add from YouTube") is not None and g.find("▸ Add YouTube") is not None,
+              "the room is up after Esc, its field not holding the keys")
         before = g.text()
         for k in "DTA":
             g.key(k); g.pump(0.5)
         g.dump("after D T A")
-        check(g.find("◂ Add from YouTube") is not None and g.find("▸ Settings") is not None, "still in the room after the capitals")
+        check(g.find("Add from YouTube") is not None and g.find("▸ Add YouTube") is not None, "still in the room after the capitals")
         check(g.text()[30:33] == before[30:33], "the transport row untouched (no DJ toggle)")
 
     if "door" in STEPS:

@@ -273,3 +273,10 @@ Gaps in the shared App that this contract adds (verify at implementation):
   2 stays unported and the search-pick decision stands. That room borrows
   this contract's capture grammar (clauses 10–13) and its 403 probe
   (clause 40) for its own seed pick and failure taxonomy.
+- **2026-11-09 — Two rows under Discover** (discovery-page clause 2): Add
+  torrent and Add YouTube close the TOOLS group, so on short terminals
+  the block rises in up to three steps; Sonic path stays on 16 from
+  100×26 with the footer off and stands on 15, 14 or 13 below that. Digit
+  9 and the gate are unchanged. The group packs the rooms it shows (the owner's call, the same day):
+  absent, the sonic row's line goes to Discover and the Add rooms under
+  it.

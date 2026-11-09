@@ -2,11 +2,11 @@
 //! server and account, kept in `ytdl.json` across runs. It owns an add from
 //! the press — the folder it needs first, then the POST, sent once and
 //! never again — and follows each job in `GET /api/v1/ytdl/downloads` until
-//! it settles: the note line's words, the one word in Settings and on the
-//! room's title row, the From YouTube list (adding, needs a look, and the
-//! Added list: the server's record of what came in, merged with this
-//! player's own finished jobs) and "Already adding to this folder". Closing
-//! the room or the window never cancels an add.
+//! it settles: the note line's words, the one word on the room's title
+//! row, the From YouTube list (adding, needs a look, and the Added list:
+//! the server's record of what came in, merged with this player's own
+//! finished jobs) and "Already adding to this folder". Closing the room or
+//! the window never cancels an add.
 //!
 //! A port of the phone's `lib/singletons/ytdl_hub.dart` — claim, settle,
 //! retention, the summary, with #231's snapshot of the entries there before
@@ -753,7 +753,7 @@ fn pid_key(pid: i64, start: Option<i64>) -> String {
 /// Which surface pressed Add: where a refusal is shown while it is up.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Origin {
-    /// Settings › Add from YouTube.
+    /// The room, the nav's Add YouTube.
     Room,
     /// The Files window over this folder (the browse bar's path).
     Folder(String),
@@ -858,8 +858,8 @@ pub(crate) enum JobEvent {
     FormatOff,
 }
 
-/// The one word the jobs leave in Settings and on the room's title row,
-/// the first that holds.
+/// The one word the jobs leave on the room's title row, the first that
+/// holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Word {
     /// `adding` (ACCENT): a job is open.
@@ -868,7 +868,7 @@ pub(crate) enum Word {
     Failed,
     /// `✓ added` (OK): a song added in the last hour the list hasn't shown.
     Added,
-    /// `added songs` (DIM, the title row only): the list has something.
+    /// `added songs` (DIM): the list has something.
     History,
 }
 
