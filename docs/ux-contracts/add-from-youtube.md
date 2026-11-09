@@ -163,7 +163,9 @@ per server in `config.toml` (library, layout, format); the jobs in
       "Adding “One More Time”…" (ACCENT);
     - **refused** — the form stays and the words stand GOLD above the
       primary (D3): a 409's "“One_More_Time.mp3” is already in this
-      folder, so nothing was added." with `f change format`; "The server
+      folder, so nothing was added." with `f change format` — standing for
+      the clash warning it confirms (C4's line goes, one `f change format`
+      left); "The server
       can't convert audio right now. Try again later, or ask its admin."
       (the ping asked again); a library gone, uploads off, the server's
       own words otherwise; Enter tries again;

@@ -1535,7 +1535,9 @@ pub(super) fn form_view(gui: &Gui, form: Form) -> RoomView {
         target,
         new_folder,
         no_mkdir,
-        file_line,
+        // The server's 409 says what the warning guessed: its GOLD lines
+        // over the primary stand alone, one `f change format`.
+        file_line: file_line.filter(|_| !refusal.is_some_and(|f| f.problem == Problem::Exists)),
         above,
         refused_format,
         primary,
@@ -5057,6 +5059,34 @@ pub(crate) mod tests {
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Enter);
         assert!(gui.ytdl.draft.refusal.is_none());
+    }
+
+    /// The clash warned of ahead of time, Add anyway pressed, and the
+    /// server's 409: its GOLD lines over the primary stand alone — the
+    /// warning they confirm goes, one `f change format` left.
+    #[test]
+    fn a_409_stands_for_the_clash_it_confirms() {
+        let _en = english();
+        let mut gui = room();
+        found(&mut gui, one_more_time(), there("/Music/Daft Punk/Discovery/", &["One_More_Time.mp3"]));
+        let rows = draw(&mut gui);
+        assert!(rows.iter().any(|r| r.contains("looks to be in this folder already")), "{}", rows.join("\n"));
+        key(&mut gui, KeyCode::Enter);
+        let mut taken = |call: &Call| match call {
+            Call::Add(_) => Some(Answer::Add(Err(YtdlCallError::Answered {
+                status: 409,
+                words: Some("One_More_Time.mp3 is already in this folder".into()),
+                reason: Some("exists".into()),
+                file_name: Some("One_More_Time.mp3".into()),
+            }))),
+            other => new_server(None)(other),
+        };
+        serve(&mut gui, &mut taken);
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("! “One_More_Time.mp3” is already in this folder, so nothing was added."), "{all}");
+        assert!(!all.contains("looks to be in this folder already"), "{all}");
+        assert_eq!(rows.iter().filter(|r| r.contains("f change format")).count(), 1, "{all}");
     }
 
     /// Show in folder: Files on the song's folder, and once it lists, the
