@@ -332,6 +332,16 @@ pub struct DjLibraryOverrides {
     pub genres: Option<Vec<String>>,
 }
 
+/// A server entry's Add from YouTube choices as one value: what the room
+/// and the Files window start from, and what a Save writes back.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct YtdlPrefs {
+    pub library: Option<String>,
+    pub layout: Option<String>,
+    pub layout_kind: Option<String>,
+    pub format: Option<String>,
+}
+
 /// `[cache]` — where scratch data lives. Today that is only the streaming
 /// spool (the playing track's buffer, one file at a time); a persistent
 /// track cache would live under the same root if one ever grows.
@@ -637,6 +647,23 @@ pub struct ServerEntry {
     pub dj_genre_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dj_genres: Option<Vec<String>>,
+    /// Add from YouTube's Where new songs land for this server: the
+    /// library, the folders a song files into under it, and which of the
+    /// presets that layout is — needed beside it, since "Same as Discover"
+    /// and "Library layout" follow their source and must be told from a
+    /// Custom layout that happens to read the same (`artistAlbum`,
+    /// `artist`, `top`, `discover`, `library`, `custom`). A peer never
+    /// carries them: the feature is the user's own server's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ytdl_library: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ytdl_layout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ytdl_layout_kind: Option<String>,
+    /// The format chosen last; read only while the server still takes it,
+    /// and cleared when it refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ytdl_format: Option<String>,
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -1023,6 +1050,85 @@ pub fn delete_stats_file() -> Result<(), String> {
     }
 }
 
+/// `ytdl.json` — Add from YouTube's jobs, the last ones per server and
+/// account, beside the queue's file and as disposable: a corrupt file, or
+/// one of another version, is ignored, never repaired — the next save
+/// replaces it.
+pub fn ytdl_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("ytdl.json"))
+}
+
+/// The version `ytdl.json` is written at.
+const YTDL_VERSION: u64 = 1;
+
+/// The slot one server and account keep in `ytdl.json`: the server's
+/// identity — never the address it is reached at, which for a tunnel
+/// changes per dial — and the account, since a server lists only the
+/// caller's own jobs, so another account's saved there would read as gone.
+fn ytdl_slot(identity: &str, username: Option<&str>) -> String {
+    format!("{}\n{}", identity.trim_end_matches('/'), username.unwrap_or(""))
+}
+
+/// The file as it stands, or a fresh one when there is none or none this
+/// build reads.
+fn read_ytdl_file() -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let path = ytdl_path()?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+    };
+    match serde_json::from_str(&text) {
+        Ok(serde_json::Value::Object(file))
+            if file.get("version").and_then(serde_json::Value::as_u64) == Some(YTDL_VERSION) =>
+        {
+            Ok(file)
+        }
+        _ => {
+            let mut file = serde_json::Map::new();
+            file.insert("version".into(), YTDL_VERSION.into());
+            Ok(file)
+        }
+    }
+}
+
+/// One server and account's slot: `None` when the file holds none for
+/// them, or one this build cannot read.
+pub fn load_ytdl_slot<T: serde::de::DeserializeOwned>(
+    identity: &str,
+    username: Option<&str>,
+) -> Result<Option<T>, String> {
+    let file = read_ytdl_file()?;
+    let slot = file.get("servers").and_then(|servers| servers.get(ytdl_slot(identity, username)));
+    Ok(slot.and_then(|slot| serde_json::from_value(slot.clone()).ok()))
+}
+
+/// Write one server and account's slot (`None` drops it), merged into the
+/// file as it stands just before: a second player sharing the directory —
+/// a `--torrent` window, another build — keeps its servers' slots, and
+/// whatever else a newer build keeps there.
+pub fn save_ytdl_slot<T: Serialize>(identity: &str, username: Option<&str>, slot: Option<&T>) -> Result<(), String> {
+    let mut file = read_ytdl_file()?;
+    let servers = file.entry("servers").or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !servers.is_object() {
+        *servers = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(servers) = servers.as_object_mut() {
+        let key = ytdl_slot(identity, username);
+        match slot {
+            Some(slot) => {
+                let value = serde_json::to_value(slot).map_err(|e| format!("could not encode the YouTube jobs: {e}"))?;
+                servers.insert(key, value);
+            }
+            None => {
+                servers.remove(&key);
+            }
+        }
+    }
+    let body = serde_json::to_string(&file).map_err(|e| format!("could not encode the YouTube jobs: {e}"))?;
+    write_atomic(&ytdl_path()?, &body, false)
+}
+
 /// Drop the saved queue: a cleared queue must not come back on the next
 /// launch, and neither may one the setting was turned off for.
 pub fn delete_queue_file() -> Result<(), String> {
@@ -1258,6 +1364,36 @@ pub fn save_dj_library(identity: &str, overrides: &DjLibraryOverrides) -> Result
     entry.dj_genre_mode = overrides.genre_mode.clone();
     entry.dj_genres = overrides.genres.clone();
     save(&config)
+}
+
+/// A server's Add from YouTube choices — nothing for a server not in the
+/// file, or a peer.
+pub fn ytdl_prefs(config: &Config, identity: &str) -> YtdlPrefs {
+    config
+        .servers
+        .iter()
+        .find(|e| e.peer.is_none() && same_server(&e.url, identity))
+        .map(|e| YtdlPrefs {
+            library: e.ytdl_library.clone(),
+            layout: e.ytdl_layout.clone(),
+            layout_kind: e.ytdl_layout_kind.clone(),
+            format: e.ytdl_format.clone(),
+        })
+        .unwrap_or_default()
+}
+
+/// Set a server's Add from YouTube choices, in a config the caller then
+/// saves (the GUI's `servers::update_config` loads it fresh first). False
+/// when there is no entry to hold them, or it is a peer's.
+pub fn set_ytdl_prefs(config: &mut Config, identity: &str, prefs: &YtdlPrefs) -> bool {
+    let Some(entry) = config.servers.iter_mut().find(|e| e.peer.is_none() && same_server(&e.url, identity)) else {
+        return false;
+    };
+    entry.ytdl_library = prefs.library.clone();
+    entry.ytdl_layout = prefs.layout.clone();
+    entry.ytdl_layout_kind = prefs.layout_kind.clone();
+    entry.ytdl_format = prefs.format.clone();
+    true
 }
 
 pub fn save(config: &Config) -> Result<(), String> {
@@ -1979,6 +2115,127 @@ mod tests {
         // Only the entry that opted in carries the key at all.
         let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
         assert_eq!(text.matches("self_signed").count(), 1);
+    }
+
+    #[test]
+    fn add_from_youtubes_choices_ride_the_entry_and_a_newer_key_beside_them_survives() {
+        let scratch = Scratch::new("ytdl-prefs");
+        // A newer player's key beside them (`ytdl_quality`), on the entry
+        // and in the file's own order.
+        fs::write(
+            scratch.dir.join(CONFIG_FILE),
+            "version = 1\n\
+             \n\
+             [[server]]\n\
+             url = \"mstream+iroh://endpointabc\"\n\
+             username = \"paul\"\n\
+             ytdl_library = \"Music\"\n\
+             ytdl_layout = \"Discovery/{{ARTIST}}\"\n\
+             ytdl_layout_kind = \"discover\"\n\
+             ytdl_format = \"opus\"\n\
+             ytdl_quality = \"best\"\n\
+             \n\
+             [[server]]\n\
+             url = \"http://office.local:3000\"\n",
+        )
+        .unwrap();
+        let mut config = load().unwrap();
+        let tunnel = "mstream+iroh://endpointabc/";
+        let prefs = ytdl_prefs(&config, tunnel);
+        assert_eq!(
+            prefs,
+            YtdlPrefs {
+                library: Some("Music".into()),
+                layout: Some("Discovery/{{ARTIST}}".into()),
+                layout_kind: Some("discover".into()),
+                format: Some("opus".into()),
+            },
+            "found by identity, a trailing slash or not"
+        );
+        assert_eq!(ytdl_prefs(&config, "http://office.local:3000"), YtdlPrefs::default());
+
+        // The server refused the format: it is cleared, the rest kept.
+        assert!(set_ytdl_prefs(&mut config, tunnel, &YtdlPrefs { format: None, ..prefs.clone() }));
+        save(&config).unwrap();
+        let again = load().unwrap();
+        assert_eq!(ytdl_prefs(&again, tunnel), YtdlPrefs { format: None, ..prefs });
+        assert_eq!(again.servers[0].extra.get("ytdl_quality").and_then(toml::Value::as_str), Some("best"));
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("ytdl_format"), "an unset choice stays out of the file:\n{text}");
+        assert_eq!(text.matches("ytdl_library").count(), 1, "only the entry that has one:\n{text}");
+
+        // Nothing to hold them: a server not saved, or a peer.
+        let mut config = again;
+        config.servers.push(ServerEntry {
+            url: peer_identity("http://office.local:3000", 3),
+            peer: Some(PeerEntry { parent: "http://office.local:3000".into(), id: 3, name: "Nas".into(), missing: false, hidden: false }),
+            ..Default::default()
+        });
+        let any = YtdlPrefs { library: Some("Music".into()), ..YtdlPrefs::default() };
+        assert!(!set_ytdl_prefs(&mut config, &peer_identity("http://office.local:3000", 3), &any));
+        assert!(!set_ytdl_prefs(&mut config, "http://attic.local:3000", &any));
+        assert!(config.servers.iter().all(|e| e.peer.is_none() || e.ytdl_library.is_none()));
+    }
+
+    #[test]
+    fn the_youtube_jobs_keep_a_slot_per_server_and_account_and_merge_on_write() {
+        let scratch = Scratch::new("ytdl-jobs");
+        let attic = "http://attic.local:3000/";
+        assert_eq!(load_ytdl_slot::<serde_json::Value>(attic, Some("paul")).unwrap(), None, "no file yet");
+        save_ytdl_slot(attic, Some("paul"), Some(&serde_json::json!({ "jobs": [{ "id": "a" }] }))).unwrap();
+        assert_eq!(
+            load_ytdl_slot::<serde_json::Value>("http://attic.local:3000", Some("paul")).unwrap(),
+            Some(serde_json::json!({ "jobs": [{ "id": "a" }] })),
+            "the identity, a trailing slash or not"
+        );
+        assert_eq!(load_ytdl_slot::<serde_json::Value>(attic, None).unwrap(), None, "another account's slot");
+        assert_eq!(load_ytdl_slot::<serde_json::Value>(attic, Some("anna")).unwrap(), None);
+
+        // Another player sharing the directory writes its own server, and a
+        // newer build a key of its own; then this one saves again.
+        let path = scratch.dir.join("ytdl.json");
+        let mut file: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        file["servers"]["mstream+iroh://endpointabc\n"] = serde_json::json!({ "jobs": [{ "id": "b" }] });
+        file["pins"] = serde_json::json!(["x"]);
+        fs::write(&path, file.to_string()).unwrap();
+        save_ytdl_slot(attic, Some("paul"), Some(&serde_json::json!({ "jobs": [] }))).unwrap();
+        assert_eq!(
+            load_ytdl_slot::<serde_json::Value>("mstream+iroh://endpointabc", None).unwrap(),
+            Some(serde_json::json!({ "jobs": [{ "id": "b" }] })),
+            "the other writer's slot survived"
+        );
+        let file: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((file["version"].clone(), file["pins"].clone()), (serde_json::json!(1), serde_json::json!(["x"])));
+        assert_eq!(file["servers"]["http://attic.local:3000\npaul"], serde_json::json!({ "jobs": [] }));
+
+        // A slot this build cannot read is none; dropping one leaves the rest.
+        assert_eq!(load_ytdl_slot::<Vec<u32>>(attic, Some("paul")).unwrap(), None);
+        save_ytdl_slot::<serde_json::Value>(attic, Some("paul"), None).unwrap();
+        assert_eq!(load_ytdl_slot::<serde_json::Value>(attic, Some("paul")).unwrap(), None);
+        assert!(load_ytdl_slot::<serde_json::Value>("mstream+iroh://endpointabc", None).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_corrupt_or_newer_youtube_jobs_file_is_ignored_and_replaced() {
+        let scratch = Scratch::new("ytdl-corrupt");
+        let path = scratch.dir.join("ytdl.json");
+        let attic = "http://attic.local:3000";
+        for unreadable in [
+            "{\"version\": 1, \"servers\": {\"http://attic.local:3000\\n\": ".to_string(),
+            serde_json::json!({ "version": 2, "servers": { "http://attic.local:3000\n": { "jobs": [] } } }).to_string(),
+            "[]".to_string(),
+        ] {
+            fs::write(&path, &unreadable).unwrap();
+            assert_eq!(load_ytdl_slot::<serde_json::Value>(attic, None).unwrap(), None, "{unreadable}");
+            // Never repaired: the next save writes a fresh file.
+            save_ytdl_slot(attic, None, Some(&serde_json::json!({ "jobs": ["new"] }))).unwrap();
+            let file: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                file,
+                serde_json::json!({ "version": 1, "servers": { "http://attic.local:3000\n": { "jobs": ["new"] } } }),
+                "{unreadable}"
+            );
+        }
     }
 
     #[test]

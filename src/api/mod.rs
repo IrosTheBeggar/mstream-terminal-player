@@ -12,6 +12,8 @@
 pub mod server_url;
 pub mod types;
 pub mod urls;
+// Add from YouTube's routes, with an error that keeps what its copy needs.
+pub mod ytdl;
 
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
