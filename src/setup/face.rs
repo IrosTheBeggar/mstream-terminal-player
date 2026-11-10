@@ -283,7 +283,7 @@ mod tests {
     /// and draws no figlet under it.
     #[test]
     fn the_hosted_quick_connect_page_is_two_column_at_the_windows_grid() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let (mut face, _jobs, _answers) = WizardFace::opened(true);
         let host = on_a_recording_host(&mut face);
         assert!(face.wizard.done_two_column(), "a hosted page is two columns before any data");
@@ -344,7 +344,7 @@ mod tests {
     /// method goes off and a paste does nothing.
     #[test]
     fn the_window_face_reports_its_fields() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let (mut face, _jobs, _answers) = WizardFace::opened(false);
         face.wizard.screen = Screen::Login;
         face.wizard.field = LoginField::Username;
@@ -372,7 +372,7 @@ mod tests {
     /// what the last frame registered under it.
     #[test]
     fn the_window_faces_input_is_the_wizards() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let key = |code, modifiers| TermEvent::Key(KeyEvent::new(code, modifiers));
         let (mut face, _jobs, _answers) = WizardFace::opened(false);
         face.wizard.screen = Screen::Login;
@@ -398,7 +398,7 @@ mod tests {
     /// rounded corners are on the grid.
     #[test]
     fn every_wizard_modal_tells_the_window_its_footprint() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         // What opens the modal over the page.
         type Open = fn(&mut WizardFace);
         let opens: [(Screen, Open); 4] = [
@@ -434,7 +434,7 @@ mod tests {
     /// asked for at once, and the frame after places the picture again.
     #[test]
     fn a_modal_over_the_wordmark_stands_it_down_and_the_figlet_stands_in() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let (mut face, _jobs, _answers) = WizardFace::opened(false);
         let host = on_a_recording_host(&mut face);
         let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
@@ -503,7 +503,7 @@ mod tests {
     /// first frame.
     #[test]
     fn send_early_puts_the_queued_op_on_the_wire() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let (mut face, jobs, answers) = WizardFace::opened(true);
         face.wizard.queue(Op::LoadDone, "fetching");
         assert!(jobs.try_recv().is_err(), "nothing sent before the host asks");

@@ -277,7 +277,7 @@ mod tests {
     #[test]
     #[ignore = "needs a GPU; run with --ignored --nocapture and look at the PNGs"]
     fn the_controls_drawn_over_a_preset() {
-        let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _locale = crate::setup::tests::LOCALE_LOCK.write().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::var_os("VIZ_OVERLAY_PNG")
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("viz-overlay"));

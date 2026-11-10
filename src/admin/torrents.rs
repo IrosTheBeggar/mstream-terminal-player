@@ -3163,8 +3163,8 @@ mod tests {
 
     /// English strings under assertion: hold the wizard tests' locale lock
     /// (one of them flips the process-global locale) and pin English.
-    fn english() -> std::sync::MutexGuard<'static, ()> {
-        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn english() -> std::sync::RwLockReadGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale("en");
         crate::kit::theme::pin_modern_terminal();
         guard
@@ -4141,17 +4141,25 @@ mod tests {
         assert!(room.seed_listing.is_empty());
         // A folder slower than the wait: the key returns with the listing
         // still out, the modal says so, and the completion lands with it.
+        // The listing is held back by hand — the folder already being
+        // listed, so this Tab starts no thread — and sent once the modal
+        // has said so: a thread free to run could answer inside even a zero
+        // wait on a loaded machine (this thread put off between the spawn
+        // and the wait), which is the fast road above, not this one.
         room.seed_wait = Duration::ZERO;
         for _ in 0.."boc.torrent".len() {
             press(&mut room, KeyCode::Backspace);
         }
         type_text(&mut room, "b");
+        let folder = format!("{}/", dir.display());
+        room.seed_listing.insert(folder.clone());
         press(&mut room, KeyCode::Tab);
         assert!(
             matches!(&room.modal, Modal::SeedPath { asked: Some(_), matches, .. } if matches.is_empty()),
             "asked, not answered"
         );
         assert!(draw(&mut room).contains("listing…"));
+        room.listed_tx.send((folder.clone(), list_local(&folder))).unwrap();
         listed(&mut room);
         let Modal::SeedPath { path, matches, .. } = &room.modal else { panic!("the path modal") };
         assert_eq!(matches, &vec!["boc.torrent".to_string()]);

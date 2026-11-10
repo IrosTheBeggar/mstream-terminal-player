@@ -6,22 +6,21 @@ emit only changed cells, so stream-grep lies about later states) and
 requires: a percentage state, the queued suffix, and completion.
 Usage: check_scan.py STREAM REPLAY_PY
 """
+import os
 import re
-import subprocess
 import sys
 
 stream, replay = sys.argv[1], sys.argv[2]
+sys.dont_write_bytecode = True  # no __pycache__ left in the tree
+sys.path.insert(0, os.path.dirname(os.path.abspath(replay)))
+from replay import frames  # noqa: E402
+
 raw = open(stream, "rb").read()
+cuts = [len(raw) * i // 1000 for i in range(10, 1001, 10)]
+shots = frames(raw, cuts, 40, 100)
 seen = set()
-for i in range(10, 1001, 10):
-    cut = raw[: len(raw) * i // 1000]
-    j = cut.rfind(b"\x1b[?1049l")
-    if 0 < j < len(cut):
-        cut = cut[:j]
-    open(stream + ".cut", "wb").write(cut)
-    out = subprocess.run(
-        ["python3", replay, stream + ".cut", "40", "100"], capture_output=True, text=True
-    ).stdout
+for n in cuts:
+    out = "\n".join(shots[n])
     if re.search(r"[▰▱]+ \d+%", out) and "tracks so far" in out:
         seen.add("pct")
     if "▰" in out and "▱" in out:

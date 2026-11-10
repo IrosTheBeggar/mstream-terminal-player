@@ -17,10 +17,14 @@ on its action row; the choice back with no picker (the echo landed on `d
 change`); and the window closed, nothing playing.
 Usage: check_keep_mouse.py STREAM REPLAY_PY ROWS COLS
 """
-import subprocess
+import os
 import sys
 
 stream, replay, rows, cols = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+sys.dont_write_bytecode = True  # no __pycache__ left in the tree
+sys.path.insert(0, os.path.dirname(os.path.abspath(replay)))
+from replay import frames  # noqa: E402
+
 raw = open(stream, "rb").read()
 NAMES = ["open", "place", "footer", "row", "artist", "album", "picker", "live", "cancel", "again", "closed"]
 MARKS = [f"@@KM:{name}@@".encode() for name in NAMES]
@@ -42,16 +46,11 @@ for name, mark in zip(NAMES, MARKS):
     elif rest.startswith(b"\n"):
         rest = rest[1:]
 clean += rest
+FRAMES = frames(clean, list(marks.values()), int(rows), int(cols))
 
 
 def frame(n):
-    cut = clean[:n]
-    j = cut.rfind(b"\x1b[?1049l")
-    if 0 < j < len(cut):
-        cut = cut[:j]
-    open(stream + ".cut", "wb").write(cut)
-    out = subprocess.run(["python3", replay, stream + ".cut", rows, cols], capture_output=True, text=True).stdout
-    return out.split("\n")
+    return FRAMES[n]
 
 
 def window(lines):

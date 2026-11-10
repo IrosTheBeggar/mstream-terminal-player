@@ -3406,8 +3406,8 @@ pub(crate) mod tests {
     /// The test clock's start: 2026-11-03, midday UTC.
     pub(crate) const START: i64 = 1_793_707_200_000;
 
-    pub(crate) fn english() -> std::sync::MutexGuard<'static, ()> {
-        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    pub(crate) fn english() -> std::sync::RwLockReadGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale("en");
         crate::kit::theme::pin_modern_terminal();
         guard

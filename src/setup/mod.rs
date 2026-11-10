@@ -3801,7 +3801,7 @@ pub(crate) mod tests {
     /// server one, brings it back (performance audit #116).
     #[test]
     fn the_scan_poll_backs_off_once_the_server_is_idle_and_a_commit_rearms_it() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.screen = Screen::Extras;
@@ -3846,7 +3846,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_scan_widget_renders_every_progress_shape() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         let row = |vpath: &str, pct: Option<u32>, scanned: u64| crate::api::types::ScanProgressRow {
@@ -3982,15 +3982,18 @@ pub(crate) mod tests {
         assert_eq!(folders[0].name, "media");
     }
 
-    /// Serialises the tests that assert English strings against a switch
-    /// of the process-global locale. Nothing in the parallel run switches
-    /// it now — a test in another language runs in a process of its own
-    /// ([`in_own_process`]) — so this is the backstop for one that sets the
-    /// locale by hand. Not re-entrant: a test takes it once (through one
-    /// `english()` / `in_locale` guard), and before
+    /// Guards the process-global locale for the tests that assert its
+    /// strings. Nothing in the parallel run switches it now — a test in
+    /// another language runs in a process of its own ([`in_own_process`]) —
+    /// so the tests that read English share it (`read`: every `english()`
+    /// guard, and [`in_locale`]) and run side by side; as a Mutex it ran
+    /// all of them one at a time, the unit suite's longest chain. A test
+    /// that switches the locale by hand takes it whole (`write`) and waits
+    /// them out: the backstop. Not re-entrant: a test takes it once
+    /// (through one `english()` / `in_locale` guard), and before
     /// `config::testing::Scratch`, never after, or the two locks can deadlock
     /// against the tests that take them in that order.
-    pub(crate) static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static LOCALE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
     /// LOCALE_LOCK held with the process-wide locale set to `code` (the
     /// rooms read their labels through `t!` with no locale passed): English
@@ -3999,7 +4002,7 @@ pub(crate) mod tests {
     /// unwind included, so the language never leaks into the next test to
     /// take the lock; the rooms' `english()` guards set English anyway.
     pub(crate) struct LocaleGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: std::sync::RwLockReadGuard<'static, ()>,
     }
 
     impl Drop for LocaleGuard {
@@ -4013,7 +4016,7 @@ pub(crate) mod tests {
             code == "en" || std::env::var_os(OWN_LOCALE).is_some(),
             "{code} in the parallel run would draw every test beside this one in it: use in_own_process",
         );
-        let lock = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale(code);
         crate::kit::theme::pin_modern_terminal();
         LocaleGuard { _lock: lock }
@@ -4028,9 +4031,12 @@ pub(crate) mod tests {
     /// In the normal run this runs the calling test again once per code,
     /// each in a process of its own — this test binary, that test alone,
     /// the code in the environment — checks each passed, and answers None:
-    /// the caller returns. In one of those processes it sets that process's
-    /// code, pins the modern glyphs as [`in_locale`] does, and answers it;
-    /// alone there, the test may switch again.
+    /// the caller returns. The codes run side by side, [`ONE_PROCESS`] at a
+    /// time across every caller: one after another, ten languages made the
+    /// longest of these tests the unit suite's long pole. In one of those
+    /// processes it sets that process's code, pins the modern glyphs as
+    /// [`in_locale`] does, and answers it; alone there, the test may switch
+    /// again.
     pub(crate) fn in_own_process(codes: &[&'static str]) -> Option<&'static str> {
         if let Ok(named) = std::env::var(OWN_LOCALE) {
             let code = codes.iter().copied().find(|code| *code == named);
@@ -4042,16 +4048,62 @@ pub(crate) mod tests {
         // libtest runs each test on a thread named after it, in full.
         let test = std::thread::current().name().filter(|name| *name != "main").expect("a test's thread").to_string();
         let exe = std::env::current_exe().expect("the test binary");
-        for code in codes {
-            let out = std::process::Command::new(&exe)
-                .args(["--exact", &test, "--include-ignored"])
-                .env(OWN_LOCALE, code)
-                .output()
-                .expect("the test binary runs again");
+        let runs: Vec<_> = std::thread::scope(|scope| {
+            let runs: Vec<_> = codes
+                .iter()
+                .map(|code| {
+                    let (exe, test) = (&exe, &test);
+                    scope.spawn(move || {
+                        let _turn = ONE_PROCESS.take();
+                        std::process::Command::new(exe)
+                            .args(["--exact", test, "--include-ignored"])
+                            .env(OWN_LOCALE, code)
+                            .output()
+                            .expect("the test binary runs again")
+                    })
+                })
+                .collect();
+            runs.into_iter().map(|run| run.join().expect("the test binary runs again")).collect()
+        });
+        for (code, out) in codes.iter().zip(runs) {
             let (said, err) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
             assert!(out.status.success() && said.contains("1 passed"), "{test} in {code}:\n{said}{err}");
         }
         None
+    }
+
+    /// The processes [`in_own_process`] has running at once, its callers
+    /// together: one a core, so every-locale tests side by side never bury
+    /// the suite's own threads.
+    static ONE_PROCESS: Turns = Turns::new();
+
+    struct Turns {
+        running: std::sync::Mutex<usize>,
+        freed: std::sync::Condvar,
+    }
+
+    /// A turn of [`Turns`], given back on drop — a panic's unwind included.
+    struct Turn(&'static Turns);
+
+    impl Turns {
+        const fn new() -> Turns {
+            Turns { running: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() }
+        }
+
+        fn take(&'static self) -> Turn {
+            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            let mut running = self.freed.wait_while(running, |n| *n >= cores).unwrap_or_else(|e| e.into_inner());
+            *running += 1;
+            Turn(self)
+        }
+    }
+
+    impl Drop for Turn {
+        fn drop(&mut self) {
+            *self.0.running.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+            self.0.freed.notify_one();
+        }
     }
 
     #[test]
@@ -4394,7 +4446,7 @@ pub(crate) mod tests {
     #[test]
     fn the_chip_and_the_bar_buttons_show_their_whole_cjk_labels_at_100x30() {
         crate::kit::theme::pin_modern_terminal();
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let bars = [
             ("folders.continue_enabled", Act::ContinueFolders, None),
             ("extras.continue", Act::ContinueExtras, Some(("extras.back", Act::BackToFolders))),
@@ -4488,7 +4540,7 @@ pub(crate) mod tests {
     /// buttons start under it, and the list ends inside the column.
     #[test]
     fn the_done_message_shows_whole_at_seventy_columns_in_english() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         for (two_column, scan) in [(true, t!("done.scan_left")), (false, t!("done.scan_above"))] {
             let mut wizard = done_page(two_column);
             let buf = draw_at(&mut wizard, 70, 30);
@@ -4510,7 +4562,7 @@ pub(crate) mod tests {
     /// and the message gives up its tail before the list moves past it.
     #[test]
     fn the_done_list_stays_inside_the_column_at_the_floor() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         for two_column in [true, false] {
             let mut wizard = done_page(two_column);
             wizard.scan = Some(ScanWidget {
@@ -4552,7 +4604,7 @@ pub(crate) mod tests {
     /// one-row list.
     #[test]
     fn the_two_column_done_page_keeps_its_tall_cards_at_80x24() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let mut wizard = done_page(true);
         wizard.note = Some(("A note".to_string(), false));
         let buf = draw_at(&mut wizard, 80, 24);
@@ -4576,7 +4628,7 @@ pub(crate) mod tests {
     /// cannot swap a code just drawn for the apology line.
     #[test]
     fn the_stacked_done_page_keeps_its_code_before_the_scan_status() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let rows: u16 = 29;
         let code_row = "▀".repeat(29);
         let shows_code = |buf: &ratatui::buffer::Buffer| {
@@ -4683,7 +4735,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_standalone_qr_page_drops_the_wizard_chrome() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.standalone = true;
@@ -4872,7 +4924,7 @@ pub(crate) mod tests {
 
     #[test]
     fn validation_marks_problems_and_removes_other_spellings_of_the_same_folder() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.add_folder("/media/music".to_string());
@@ -5282,7 +5334,7 @@ pub(crate) mod tests {
         // The draft lends the frame its listing instead of being copied
         // with it every frame (performance audit #110): the listing is back
         // after a draw, and the scroll the draw keeps lands in the draft.
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale("en");
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
@@ -5479,7 +5531,7 @@ pub(crate) mod tests {
     /// composition draws in the focused field, as marks in a secret one.
     #[test]
     fn the_focused_field_notes_its_caret_and_a_modal_clears_it() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let caret_marks = ["▏", "│"];
         let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
         wizard.screen = Screen::Login;
@@ -5561,7 +5613,7 @@ pub(crate) mod tests {
     /// the hand only when it changes, over what the frame just drew.
     #[test]
     fn the_loop_halves_compose() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let key = |code, modifiers| TermEvent::Key(KeyEvent::new(code, modifiers));
         let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
         assert!(matches!(
@@ -5617,7 +5669,7 @@ pub(crate) mod tests {
     /// dialect the same events are two clicks.
     #[test]
     fn in_apple_terminal_a_cards_click_toggles_it_once() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         for apple in [true, false] {
             let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
             wizard.screen = Screen::Extras;
@@ -5647,7 +5699,7 @@ pub(crate) mod tests {
     /// worker's answer is folded in by the next frame.
     #[test]
     fn the_frame_half_asks_for_an_immediate_redraw_when_progress_is_due() {
-        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let overdue = || Instant::now() - PROGRESS_EVERY - Duration::from_millis(1);
         let wires = wires();
         let mut asked = Vec::new();
