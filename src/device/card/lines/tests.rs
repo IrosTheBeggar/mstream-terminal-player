@@ -493,6 +493,16 @@ fn plays_and_sync_count_the_undated_plays_and_name_the_command_that_sets_the_clo
     assert!(b.server.lock().unwrap().plays.is_empty(), "none sent");
 }
 
+/// The Card view's own words for the plays from before the clock was set
+/// (`plays_old`) promise what happens (clause 61): counted, and not sent.
+/// They said "kept", and nothing keeps them.
+#[test]
+fn the_card_views_words_for_undated_plays_say_counted_not_kept() {
+    let _en = crate::setup::tests::in_locale("en");
+    let words = t!("dev.card.plays_old", n = 2).to_string();
+    assert_eq!(words, "2 from before the player's clock was set: counted, not sent");
+}
+
 /// The files the server lists and can't serve (a dot part past the vpath)
 /// are left out of the sync: the plan says how many and where, once, before
 /// the question (a look that writes nothing says it too); none says
