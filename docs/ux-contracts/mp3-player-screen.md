@@ -1546,6 +1546,13 @@ comes from the cache, or a download, beside them.
       finds it recent (the server's clock disagrees)"). Next sync goes on
       counting them to send.
 
+    **A play that waits on this computer stays until its server has
+    answered it.** The card's marks may pass it meanwhile (its log rotated
+    the play out, or another computer's sync sent it): it goes to its
+    server all the same when that server is next read, which answers a
+    play it already has as a duplicate. Only a sync, or *Send the plays*,
+    that reads another server drops a play the marks have passed.
+
     Details counts what can't be sent:
     - plays from before the player's clock was set (kept on this
       computer);
@@ -2865,3 +2872,11 @@ setting no locale, prints in English.
     (`log_all_formatting`, one new `dev` key in the ten locales, the nine
     translated ones from each locale's `log_all_skip` and `fmt_running`,
     for the native review).
+  - **A waiting play was forgotten when the card's mark passed it.** The
+    marks rise over a seq the log holds no more, as over one another
+    computer's sync settled, and a play waiting here below them was
+    dropped unposted at the next look: the plays of a server out of reach
+    while the player's log rotated, lost. A waiting play stays now; one
+    the marks have passed goes to its server when that server is read (a
+    play already there comes back a duplicate), and is dropped only by a
+    sync from another server, as before.

@@ -49,7 +49,11 @@
 //! sent: it would fail every batch it rode in. Plays of another server, and
 //! those of a post that failed, wait in the outbox for a run that reads
 //! their server. A card for someone else posts none: the plays that waited
-//! from before it was one wait on.
+//! from before it was one wait on. A play that waits is never forgotten
+//! for the card's mark having passed it (its log lost the slot, or another
+//! computer's run settled it): it goes to its server when that is the one
+//! read, which answers a play it has as a duplicate, and is forgotten only
+//! by a run that reads another server.
 //!
 //! **The marks** ([`History::marks`]): each device and epoch's rises over
 //! the plays settled or not sent, to the first that waits. A sync stores
@@ -873,10 +877,11 @@ impl History {
         self.save();
     }
 
-    /// The card's part of the outbox, less what the card's marks pass, and
-    /// the firmware its `device.txt` names now. An outbox that can't be
-    /// read gives an empty part, which is never saved: it would take the
-    /// place of the part on disk.
+    /// The card's part of the outbox, less the settled ids the card's marks
+    /// pass, and the firmware its `device.txt` names now. A play that waits
+    /// stays whatever the marks say: [`History::post`] decides. An outbox
+    /// that can't be read gives an empty part, which is never saved: it
+    /// would take the place of the part on disk.
     fn load(&mut self, card: &dyn CardFs, card_id: u64) {
         let mut owing = match Outbox::load(&*self.store) {
             Ok(mut outbox) => outbox.cards.remove(&card_id).unwrap_or_default(),
@@ -890,11 +895,12 @@ impl History {
         if self.posted_for != card_id {
             self.posted.clear();
         }
-        // Settled as the card's marks say (by a run of this computer's, or
-        // another's): forgotten.
+        // The ids settled as the card's marks say (by a run of this
+        // computer's, or another's) are forgotten. A play still waiting
+        // isn't: a mark passes a seq the log lost as it passes one another
+        // computer's run settled, so nothing says this one was ever posted.
         let posted = &self.posted;
         let above = |d: [u8; 6], e: u64, s: u32| s > mark_of(posted, d, e);
-        owing.plays.retain(|o| above(o.device_id, o.epoch, o.seq));
         owing.done.retain(|id| key_of_id(id).is_some_and(|(d, e, s)| above(d, e, s)));
         let device = card.read("/.player/device.txt", 64 * 1024).ok().flatten();
         let device = DeviceTxt::read(device.as_deref());
@@ -979,6 +985,20 @@ impl History {
         self.owing.plays.iter().filter(ours).map(|o| o.id.clone()).collect()
     }
 
+    /// The plays that waited while the card's mark passed them, of a server
+    /// other than the one `talk` reads: forgotten, as the mark says. One of
+    /// the server read goes with the rest instead, and its answer settles
+    /// it: a play another computer's run posted comes back a duplicate.
+    fn forget_passed(&mut self, talk: &Talk) {
+        let posted = &self.posted;
+        let passed = |o: &Owed| o.seq <= mark_of(posted, o.device_id, o.epoch);
+        let before = self.owing.plays.len();
+        self.owing.plays.retain(|o| o.to.reached(talk) || !passed(o));
+        if self.owing.plays.len() != before {
+            self.save();
+        }
+    }
+
     /// Posts the plays waiting for the server `client` reaches (`talk`), in
     /// batches of [`PLAYS_PER_CALL`], each answer saved as it comes. `stats`:
     /// the server takes plays (its Stats API); `device`: it takes the
@@ -993,7 +1013,11 @@ impl History {
     pub(crate) fn post(&mut self, client: &Client, talk: &Talk, stats: bool, device: bool, now: u64) {
         let mut due = self.due_ids(talk);
         self.tally.due = due.len();
-        if due.is_empty() || self.dry || !self.loaded {
+        if self.dry || !self.loaded || self.gift {
+            return;
+        }
+        self.forget_passed(talk);
+        if due.is_empty() {
             return;
         }
         if !stats {

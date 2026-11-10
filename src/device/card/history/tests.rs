@@ -870,6 +870,69 @@ fn a_card_for_someone_else_sends_no_play_until_it_is_the_listeners_own_again() {
     assert_eq!(mine.marks(), [ack(ONE, EPOCH_1, 7)]);
 }
 
+/// A play that waits isn't forgotten because the card's mark passed it:
+/// the device's log lost its slot to a rotation (a mark passes a seq the
+/// card doesn't hold), or another computer's run settled it. It stays in
+/// the outbox, and a run that reads its server posts it, the answer
+/// settling it: accepted when nobody had posted it, a duplicate when
+/// someone had. One of another server than the one read is forgotten then,
+/// as the mark says.
+#[test]
+fn a_waiting_play_the_mark_passed_goes_to_its_server_and_is_not_forgotten() {
+    for posted_elsewhere in [false, true] {
+        let scratch = Scratch::new("passed");
+        let sim = card(&scratch, Golden::Several, &[]);
+        let root = root_of(&sim);
+        let mine = play_of(&root, "Artist/Album/01 - Title.mp3", ONE, EPOCH_1, 1);
+        let second = play_of(&root, "Second Artist/Album/01 - Song.flac", ONE, EPOCH_1, 2);
+        let log = scratch.0.join("card/.player/plays.jnl");
+        std::fs::write(&log, log_bytes(&[mine, second])).unwrap();
+        let store = Rc::new(MemStore::default());
+        // Mapped, with no server in reach: both wait.
+        let mut first = History::new(store.clone(), false, none());
+        first.look(&sim, Some(&root), 0);
+        first.post(&offline(), &talk(HOME), true, true, NOW);
+        assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 2);
+
+        // The log holds them no more, and the card's mark stands past both.
+        std::fs::remove_file(&log).unwrap();
+        let passed = (CARD_ID, vec![ack(ONE, EPOCH_1, 2)]);
+        let mut later = History::new(store.clone(), false, passed);
+        later.look(&sim, Some(&root), 0);
+        assert_eq!((later.tally.waiting, later.due(&talk(HOME))), (2, 1), "the mark alone forgets none");
+        assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 2);
+
+        // A run that reads the first one's server: it goes, and the other
+        // server's is forgotten.
+        let mut m = Mstream::default();
+        if posted_elsewhere {
+            m.has.insert(mine.id());
+        }
+        let (client, fake) = server(m);
+        later.post(&client, &talk(HOME), true, true, NOW);
+        assert_eq!(posted_ids(&fake), [vec![mine.id()]], "posted to its server");
+        let t = &later.tally;
+        let answers = if posted_elsewhere { (0, 1) } else { (1, 0) };
+        assert_eq!((t.accepted, t.duplicates, t.due, t.waiting, t.failed), (answers.0, answers.1, 0, 0, false));
+        assert!(store.outbox().cards.get(&CARD_ID).is_none_or(|o| o.plays.is_empty()), "none waits on");
+        assert_eq!(later.marks(), [ack(ONE, EPOCH_1, 2)], "the card's marks, as they were");
+
+        // A dry run forgets nothing, nor does a card for someone else.
+        let again = Rc::new(MemStore::default());
+        std::fs::write(&log, log_bytes(&[mine, second])).unwrap();
+        History::new(again.clone(), false, none()).look(&sim, Some(&root), 0);
+        std::fs::remove_file(&log).unwrap();
+        let passed = (CARD_ID, vec![ack(ONE, EPOCH_1, 2)]);
+        let mut dry = History::new(again.clone(), true, passed.clone());
+        dry.look(&sim, Some(&root), 0);
+        dry.post(&client, &talk(OTHER), true, true, NOW);
+        let mut gift = History::new(again.clone(), false, passed).gift(true);
+        gift.look(&sim, Some(&root), 0);
+        gift.post(&client, &talk(OTHER), true, true, NOW);
+        assert_eq!(again.outbox().cards[&CARD_ID].plays.len(), 2, "both wait on");
+    }
+}
+
 /// On a card of several servers: the server read now takes its own rows'
 /// plays and those of its peers' rows, each with the peer's id and the
 /// track's snapshot; the other server's play waits, and holds its device's
