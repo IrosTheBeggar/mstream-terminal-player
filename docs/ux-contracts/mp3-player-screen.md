@@ -1100,7 +1100,9 @@ comes from the cache, or a download, beside them.
       hint);
     - its server not saved here; no server saved on this computer at all
       (clause 3a); signed out, whose plays wait too ("37 plays wait for
-      Home: sign in to send them"); not answering;
+      Home: sign in to send them": the plays that wait for that server,
+      counted off the card and this computer since the server answers
+      nothing; no line when none waits); not answering;
     - written by a newer format (an unknown major: read, never written);
     - a disk check first (a possible cut rename stops every sync until the
       card is checked);
@@ -1382,7 +1384,10 @@ comes from the cache, or a download, beside them.
       unknown-server card's *Fill it from … instead…*). "Make Studio this
       card's server?" with what stays, what leaves at the next sync, and
       the plays that keep waiting for the old server; *◂ Keep Home* and
-      *Make Studio its server*.
+      *Make Studio its server*. The plays' count is the stopped sync's, or
+      the card's last look's when Settings asks; with none known (the old
+      server didn't answer), or none waiting, the gate says nothing of
+      them.
     - **Adopting files** after Set up on a card with music: "Adopt 1,190
       files Home also has?" They are matched by path and size, then a quick
       fingerprint (two 4 KiB reads each), and marked ADOPTED, not VERIFIED;
@@ -2972,6 +2977,18 @@ setting no locale, prints in English.
     the link again, which then sent none. Next sync and Details' *Plays*
     count the plays that wait for the card's server, which is what a sync
     sends.
+  - **Two lines counted the card's marks for its plays** (the same pass).
+    A signed-out server's "37 plays wait for Home: sign in to send them"
+    and the take-over gate's "37 plays not yet sent to Home wait on this
+    computer for Home." both took their number from the card's state
+    file: how many marks it holds, one for each player and epoch that
+    logged plays there. A card one player had played said 1, whatever
+    waited, and one with no mark stored yet said nothing. The sign-in
+    line counts the plays that wait for that server, off the card and
+    this computer's outbox (the server answers nothing then); the gate
+    says the stopped sync's count of the plays that wait for the server
+    the card leaves, or the card's last look's when the Settings sheet
+    asks, and nothing when there is no count.
   - **A waiting play was forgotten when the card's mark passed it.** The
     marks rise over a seq the log holds no more, as over one another
     computer's sync settled, and a play waiting here below them was

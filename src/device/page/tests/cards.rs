@@ -817,7 +817,7 @@ fn the_cards_states_at_rest_say_what_the_card_is_and_the_way_on() {
     assert!(frame.contains("Add the server ▸"), "{frame}");
     let frame = draw(cards::with(ready(), |c| c.server = worker::Server::New(None)));
     assert!(frame.contains("! No server saved on this computer yet"), "{frame}");
-    let frame = draw(cards::with(ready(), |c| c.next = Next::SignIn));
+    let frame = draw(cards::with(ready(), |c| c.next = Next::SignIn { plays: 0 }));
     assert!(frame.contains("! Home needs you to sign in again") && frame.contains("Sign in ▸"), "{frame}");
     let frame = draw(cards::with(ready(), |c| c.next = Next::Unreached { asked: now() - 120, why: "x".into() }));
     assert!(frame.contains("Next sync     Home didn't answer · asked 2 min ago"), "{frame}");
@@ -919,6 +919,136 @@ fn another_server_in_settings_asks_first_and_writes_nothing_until_its_yes() {
     let [worker::Cmd::Apply { key, want }] = applied.as_slice() else { panic!("{applied:?}") };
     assert_eq!((key.as_str(), want.server.as_deref()), ("E:\\", Some("http://127.0.0.1:4000")));
     assert!(page.card.gate.is_none());
+}
+
+/// The marks of two players in a card's state file: their number is how
+/// many players logged plays, and says nothing of how many plays wait.
+fn two_players_marks(c: &mut CardView) {
+    use crate::device::card::contract::msmf::Ack;
+    let ack = |n: u8| Ack { device_id: [0x00, 0x00, 0x5E, 0x00, 0x53, n], epoch: 7, seq: 400 };
+    cards::facts(c).state.as_mut().expect("its settings").plays = vec![ack(1), ack(2)];
+}
+
+/// A signed-out server's card says how many of its plays wait (clause 44):
+/// the worker's count off the card, never the number of marks its state
+/// file holds. Its words are whole in every locale, at the GUI's floor and
+/// on the console's narrower card; with none waiting the row isn't drawn.
+#[test]
+fn a_signed_out_cards_next_row_counts_the_plays_that_wait() {
+    let signed_out = |plays: usize| {
+        cards::with(cards::ready("E:", now()), |c| {
+            c.next = Next::SignIn { plays };
+            two_players_marks(c);
+        })
+    };
+    let codes = crate::setup::LANGS.map(|(code, _)| code);
+    let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+    let words = t!("dev.card.next_signin", n = "1,204", server = "Home").to_string();
+    assert!(!words.contains("dev.") && words.contains("1,204"), "{code}: {words}");
+    let next = t!("dev.card.label_next").to_string();
+    let label = |r: &Row| matches!(r, Row::Value { label: Some(l), .. } if *l == next);
+    let rows_of = |plays: usize, content_w: u16| {
+        let (page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![signed_out(plays)]);
+        let view = page.open_card().expect("the card in view");
+        card::card_layout(&page, &view, content_w)
+    };
+    for card_w in [CARD_W, 68] {
+        let content_w = card_w - inset(card_w) * 2;
+        let w = usize::from(content_w - LABEL_W);
+        let rows = rows_of(1_204, content_w);
+        let at = rows.iter().position(label).expect("the Next sync row");
+        let lines: Vec<String> = rows[at..]
+            .iter()
+            .enumerate()
+            .map_while(|(i, r)| match r {
+                Row::Value { label, left, .. } if (i == 0) == label.is_some() => Some(left.to_string()),
+                _ => None,
+            })
+            .collect();
+        for line in &lines {
+            assert!(kit::width(line) <= w, "{code} in {w} cells: {line:?}");
+        }
+        let bare = |s: &str| s.replace(' ', "");
+        assert_eq!(bare(&lines.concat()), bare(&words), "{code} in {w} cells: whole");
+        // None waiting: no row, whatever the marks say.
+        assert!(!rows_of(0, content_w).iter().any(label), "{code}: no row for none");
+    }
+}
+
+/// The take-over gate says how many of the card's plays wait for the server
+/// it leaves (clause 58): the stopped sync's count, or the card's last
+/// look's when the Settings sheet asks; never the number of marks in its
+/// state file. Its words are whole in every locale, in the GUI's gate and
+/// the console's narrower one; with no count known, nothing is said of
+/// them.
+#[test]
+fn the_take_over_gate_counts_the_plays_that_wait_for_the_server_it_leaves() {
+    let codes = crate::setup::LANGS.map(|(code, _)| code);
+    let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+    let plays_of = |gate: &card::CardGate| match &gate.kind {
+        card::GateKind::Server { plays, .. } => *plays,
+        other => panic!("{code}: {other:?}"),
+    };
+    let bare = |s: &str| s.replace(' ', "");
+    let said = |gate: &card::CardGate, n: &str| {
+        let words = t!("dev.card.gate_server_plays", n = n, old = "Home").to_string();
+        assert!(!words.contains("dev.") && words.contains(n), "{code}: {words}");
+        for width in [usize::from(GATE_W) - 4, 64] {
+            let lines = card::gate_words(gate, width);
+            assert!(lines.iter().all(|l| kit::width(l) <= width), "{code} in {width} cells: {lines:?}");
+            assert!(bare(&lines.concat()).contains(&bare(&words)), "{code} in {width} cells: {lines:?}");
+        }
+    };
+
+    // A sync that stopped for it: the worker's count.
+    let stopped = cards::with(cards::ready("E:", now()), |c| {
+        two_players_marks(c);
+        c.gate = Some(vec![worker::Gate::Server { rows: 4_812, plays: 1_204 }]);
+    });
+    let (page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![stopped]);
+    let gate = page.card.gate.clone().expect("the gate the sync asked");
+    assert_eq!(plays_of(&gate), 1_204, "{code}");
+    said(&gate, "1,204");
+
+    // The Settings sheet's choice of another server: the count of the
+    // card's last look, which asked the server it leaves.
+    let planned = cards::with(cards::ready("E:", now()), |c| {
+        two_players_marks(c);
+        if let Next::Plan(plan) = &mut c.next {
+            plan.plays = 37;
+        }
+    });
+    let (mut page, _ends, inbox, fold) = with_cards(|_| {}, vec![planned]);
+    fold.borrow_mut().servers.push(studio());
+    apply_studio(&mut page, &inbox);
+    let gate = page.card.gate.clone().expect("the gate the sheet asks");
+    assert_eq!(plays_of(&gate), 37, "{code}");
+    said(&gate, "37");
+
+    // A signed-out server's count is the worker's, off the card alone.
+    let signed_out = cards::with(cards::ready("E:", now()), |c| {
+        two_players_marks(c);
+        c.next = Next::SignIn { plays: 5 };
+    });
+    let (mut page, _ends, inbox, fold) = with_cards(|_| {}, vec![signed_out]);
+    fold.borrow_mut().servers.push(studio());
+    apply_studio(&mut page, &inbox);
+    assert_eq!(plays_of(&page.card.gate.clone().expect("the gate")), 5, "{code}");
+
+    // The card's server didn't answer: no count, and no line of plays,
+    // where the marks' number made one.
+    let unreached = cards::with(cards::ready("E:", now()), |c| {
+        two_players_marks(c);
+        c.next = Next::Unreached { asked: now(), why: "x".into() };
+    });
+    let (mut page, _ends, inbox, fold) = with_cards(|_| {}, vec![unreached]);
+    fold.borrow_mut().servers.push(studio());
+    apply_studio(&mut page, &inbox);
+    let gate = page.card.gate.clone().expect("the gate");
+    assert_eq!(plays_of(&gate), 0, "{code}");
+    let words = t!("dev.card.gate_server_plays", n = "2", old = "Home").to_string();
+    let lines = card::gate_words(&gate, usize::from(GATE_W) - 4);
+    assert!(!bare(&lines.concat()).contains(&bare(&words)), "{code}: {lines:?}");
 }
 
 #[test]

@@ -6124,7 +6124,7 @@ mod tests {
             ("card, gpt", c::refused("G:", Fs::Fat32, Table::Gpt), &[]),
             ("card, unknown server", c::with(c::ready("E:", now), |v| v.server = Server::Unknown("Home".into())), &[]),
             ("card, no server", c::with(c::ready("E:", now), |v| v.server = Server::New(None)), &[]),
-            ("card, signed out", c::with(c::ready("E:", now), |v| v.next = Next::SignIn), &[]),
+            ("card, signed out", c::with(c::ready("E:", now), |v| v.next = Next::SignIn { plays: 37 }), &[]),
             ("card, newer", c::with(c::ready("E:", now), |v| {
                 c::facts(v).newer = vec!["manifest.bin".into()];
                 c::facts(v).newer_major = Some(2);

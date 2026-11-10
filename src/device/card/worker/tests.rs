@@ -1035,7 +1035,7 @@ fn a_lapsed_sign_in_is_the_apis_401_and_no_other_word() {
         peers: Vec::new(),
         resume_at: None,
     };
-    assert_eq!(super::planned(&refused, 0), Next::SignIn);
+    assert_eq!(super::planned(&refused, 0), Next::SignIn { plays: 0 });
     // A 403, and words that merely hold "sign", are not.
     for other in [
         crate::api::ApiError::Forbidden("transfer".into()).to_string(),
@@ -1252,6 +1252,57 @@ fn the_plays_sent_are_not_counted_to_send_again() {
         let none = |p: &Planned| p.plays == 0 && p.tally.as_ref().is_some_and(|t| t.new == 1 && t.due == 0);
         f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(none))
     });
+}
+
+/// A server that refuses the saved sign-in is asked nothing of the card,
+/// and the card's look counts the plays that wait for it all the same, off
+/// the card and this computer's outbox: the Card view's "3 plays wait for
+/// Home: sign in to send them" (clause 44) says that count. The card's
+/// state file holds no mark yet, and one player logged the three: the
+/// number of its marks said none waited, and would say one.
+#[test]
+fn a_signed_out_servers_card_counts_the_plays_that_wait_for_it() {
+    let scratch = Scratch::new("worker-signed-out");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let at = 1_791_950_000_000;
+    let plays = [
+        logged(&sim, "Album B/01.mp3", 1, at),
+        logged(&sim, "Album D/02.opus", 2, at + 200_000),
+        logged(&sim, "Album B/01.mp3", 3, at + 400_000),
+    ];
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), plays.concat()).unwrap();
+    drop(sim);
+    fake.lock().unwrap().signed_out = true;
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the sign-in refused, the plays counted", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.next == Next::SignIn { plays: 3 })
+    });
+    let marks = rig.card(&key).facts().and_then(|f| f.state.as_ref()).map(|s| s.plays.len());
+    assert_eq!(marks, Some(0), "no mark stored yet");
+    let lib = fake.lock().unwrap();
+    assert!(!lib.asked.iter().any(|a| a.ends_with("/stats/plays")), "{:?}", lib.asked);
+}
+
+/// The take-over gate's count of plays (clause 58): those that wait on this
+/// computer for a server other than the one the stopped sync read, from
+/// that sync's own tally.
+#[test]
+fn the_take_over_gate_counts_the_plays_that_wait_for_the_server_the_card_leaves() {
+    let tally = Tally { waiting: 5, due: 2, ..Tally::default() };
+    assert_eq!(super::plays_elsewhere(Some(&tally)), 3);
+    assert_eq!(super::plays_elsewhere(None), 0, "a run that never read the card's plays");
+    let guards = [Guard::Server { origin: 0, rows: 12 }];
+    assert_eq!(super::gates(&guards, &[], &[], None, 3), [Gate::Server { rows: 12, plays: 3 }]);
 }
 
 #[test]

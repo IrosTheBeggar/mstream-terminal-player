@@ -482,8 +482,10 @@ pub(crate) enum Next {
     Plan(Box<Planned>),
     /// The server didn't answer.
     Unreached { asked: u64, why: String },
-    /// The saved sign-in was refused.
-    SignIn,
+    /// The saved sign-in was refused. `plays`: the card's plays that wait
+    /// for that server, counted off the card and this computer's outbox
+    /// alone, since the server was asked nothing.
+    SignIn { plays: usize },
     /// What a sync won't do yet, in the sync's words.
     Refused(String),
 }
@@ -620,8 +622,10 @@ pub(crate) enum Gate {
     Half { n: usize, total: usize, by_library: Vec<(String, usize, usize)> },
     /// Files the listener has that the server also has.
     Adopt { n: usize, all: usize },
-    /// The card's server would change.
-    Server { rows: usize },
+    /// The card's server would change. `plays`: the card's plays that wait
+    /// on this computer for a server other than the one the run read, the
+    /// one the card leaves.
+    Server { rows: usize, plays: usize },
     /// A peer reachable only through its parent's proxy.
     Proxy { peer: u32 },
     /// A disk check first: Check again ▸ answers it.
@@ -1216,7 +1220,7 @@ impl Worker {
                         let ask = self.slot(&key).is_some_and(|s| {
                             let unasked = matches!(
                                 s.view.next,
-                                Next::Unasked | Next::SignIn | Next::Unreached { .. }
+                                Next::Unasked | Next::SignIn { .. } | Next::Unreached { .. }
                             );
                             s.view.found.accepted() && unasked
                         });
@@ -1885,7 +1889,8 @@ impl Worker {
                 }
                 sync::Halt::Card(Stop::Unanswered(guards)) => {
                     let (by, libs) = (&finished.by_library, &finished.removal_libs);
-                    slot.view.gate = Some(gates(guards, by, libs, slot.view.facts()));
+                    let elsewhere = plays_elsewhere(synced.plays.as_ref());
+                    slot.view.gate = Some(gates(guards, by, libs, slot.view.facts(), elsewhere));
                     None
                 }
                 sync::Halt::Card(Stop::Guard(Guard::DiskCheck(_))) => {
@@ -1998,12 +2003,23 @@ fn finished_allow(view: &CardView) -> Allow {
     Allow { take_over: view.take_over, ..Allow::default() }
 }
 
-/// A sync's question from its plan's guards.
+/// The card's plays that wait for a server other than the one a run
+/// read: what the outbox holds of the card after the run's post, less
+/// those that wait for the server read. A run stopped because the card's
+/// server would change read the new one: these wait for the one it
+/// leaves. None for a run that never came to the card's plays.
+fn plays_elsewhere(tally: Option<&Tally>) -> usize {
+    tally.map_or(0, |t| t.waiting.saturating_sub(t.due))
+}
+
+/// A sync's question from its plan's guards. `plays`: the card's plays
+/// that wait for a server other than the one the sync read.
 fn gates(
     guards: &[Guard],
     by_library: &[(String, usize)],
     removal_libs: &[String],
     facts: Option<&Facts>,
+    plays: usize,
 ) -> Vec<Gate> {
     guards
         .iter()
@@ -2021,7 +2037,7 @@ fn gates(
                 let all = facts.map_or(paths.len(), |f| f.music.unlisted as usize);
                 Some(Gate::Adopt { n: paths.len(), all: all.max(paths.len()) })
             }
-            Guard::Server { rows, .. } => Some(Gate::Server { rows: *rows }),
+            Guard::Server { rows, .. } => Some(Gate::Server { rows: *rows, plays }),
             Guard::DiskCheck(_) => Some(Gate::DiskCheck),
             Guard::Newer(_) => None,
         })
@@ -2222,8 +2238,15 @@ fn dry_run(
     let (plays, reached) = (home.plays(), link.reached());
     let envs = &mut *envs;
     let (quiet, cards) = (&mut |_| {}, &mut cards);
+    let asked = client.clone();
     let synced = sync::sync(card, space, client, reached, &ask, cards, plays, &fed, envs, quiet);
     let mut next = planned(&synced, now);
+    // A server that refuses the sign-in was asked nothing of the card: the
+    // plays that wait for it are counted off the card and this computer's
+    // outbox, by a look that only reads and asks no server.
+    if let Next::SignIn { plays } = &mut next {
+        *plays = history::plays_of(card, &asked, true, home.plays(), now).0.due;
+    }
     // The stronger gate counts by library, before the sync as after it.
     if let Next::Plan(plan) = &mut next
         && let Some(paths) = strong_paths(&plan.guards)
@@ -2236,7 +2259,7 @@ fn dry_run(
 /// A dry run's answer, as the Card view counts it.
 fn planned(synced: &sync::Synced, now: u64) -> Next {
     match &synced.end {
-        sync::End::Halted(sync::Halt::Server(why)) if signed_out(why) => Next::SignIn,
+        sync::End::Halted(sync::Halt::Server(why)) if signed_out(why) => Next::SignIn { plays: 0 },
         sync::End::Halted(sync::Halt::Server(why)) => {
             Next::Unreached { asked: now, why: why.clone() }
         }

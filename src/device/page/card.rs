@@ -224,7 +224,7 @@ pub(crate) fn primary(card: &CardView) -> Option<CardPrimary> {
         Server::Unknown(_) | Server::New(None) => return Some(CardPrimary::AddServer),
         _ => {}
     }
-    if matches!(card.next, Next::SignIn) || matches!(card.paused(), Some(Pause::SignIn)) {
+    if matches!(card.next, Next::SignIn { .. }) || matches!(card.paused(), Some(Pause::SignIn)) {
         return Some(CardPrimary::SignIn);
     }
     if matches!(card.ended, Some(Ended::Fit(_)) | Some(Ended::Full { .. })) {
@@ -840,12 +840,14 @@ fn next_rows(page: &Page, card: &CardView, w: u16) -> Vec<Row> {
     match &card.next {
         Next::Unasked => Vec::new(),
         Next::Asking => value_rows(label, &scan(None, &t!("dev.card.next_asking", server = server)), w),
-        Next::SignIn => {
-            let plays = card.facts().and_then(|f| f.state.as_ref()).map_or(0, |s| s.plays.len());
-            if plays == 0 {
+        // The plays that wait for it, as the worker counted them off the
+        // card and this computer's outbox: the server answered nothing.
+        Next::SignIn { plays } => {
+            if *plays == 0 {
                 return Vec::new();
             }
-            let words = t!("dev.card.next_signin", n = plays, server = server).to_string();
+            let n = fmt_count(*plays as u64);
+            let words = t!("dev.card.next_signin", n = n, server = server).to_string();
             value_rows(label, &[(words, Style::default())], w)
         }
         Next::Unreached { asked, .. } => {
@@ -1166,7 +1168,7 @@ pub(super) fn card_layout(page: &Page, card: &CardView, content_w: u16) -> Vec<R
                         let lines = [t!("dev.card.no_server_2").to_string()];
                         rows.extend(problem(&label, g.warn, &t!("dev.card.no_server"), &lines, w));
                     }
-                    _ if matches!(card.next, Next::SignIn) || matches!(card.paused(), Some(Pause::SignIn)) => {
+                    _ if matches!(card.next, Next::SignIn { .. }) || matches!(card.paused(), Some(Pause::SignIn)) => {
                         rows.extend(problem(&label, g.warn, &t!("dev.card.signin", server = server), &[], w));
                     }
                     _ => {}
@@ -1465,7 +1467,9 @@ pub(crate) enum GateKind {
     /// The card's server becomes another. `want`: the Settings sheet's
     /// choice, which the yes writes (Apply, clause 48), the next sync
     /// taking the card over; None, a sync that stopped for it, which the
-    /// yes runs again taking it over.
+    /// yes runs again taking it over. `plays`: the card's plays that wait
+    /// on this computer for the server it leaves, as the stopped sync or
+    /// the card's last look counted them; 0 says nothing of them.
     Server { card: String, old: String, new: String, rows: usize, plays: usize, want: Option<Box<Want>> },
 }
 
@@ -1484,6 +1488,30 @@ fn gate_for(card: &CardView, plan: &Planned, allow: Allow) -> Option<CardGate> {
     Some(CardGate { key, kind, allow })
 }
 
+/// The card's plays that wait for its server, as its last look counted
+/// them: the plan's, or a signed-out server's count off the card alone. 0
+/// when the look has no count (the server didn't answer): nothing is said
+/// of them then. Never the number of marks its state file holds, which
+/// counts the players that logged plays, not the plays.
+fn plays_waiting(card: &CardView) -> usize {
+    match &card.next {
+        Next::Plan(plan) => plan.plays,
+        Next::SignIn { plays } => *plays,
+        _ => 0,
+    }
+}
+
+/// The gate's words as [`gate_body`] wraps them, a line each: the tests'
+/// way to read a gate whole.
+#[cfg(test)]
+pub(super) fn gate_words(gate: &CardGate, width: usize) -> Vec<String> {
+    let words = |line: GLine| match line {
+        GLine::Text(text) | GLine::Box(text) => text.to_string(),
+        GLine::Blank => String::new(),
+    };
+    gate_body(gate, width).into_iter().map(words).collect()
+}
+
 /// A gate from the worker's ask, after a sync stopped for it.
 fn gate_of_asked(card: &CardView, asked: &Asked) -> Option<GateKind> {
     let server = server_name(card);
@@ -1494,11 +1522,10 @@ fn gate_of_asked(card: &CardView, asked: &Asked) -> Option<GateKind> {
             GateKind::Half { card: name, server, n: *n, total: *total, libs: by_library.clone(), ticked: false }
         }
         Asked::Adopt { n, all } => GateKind::Adopt { drive: card.drive(), server, n: *n, all: *all },
-        Asked::Server { rows } => {
+        Asked::Server { rows, plays } => {
             let new = card.server.link().map(|l| l.name.clone()).unwrap_or_default();
             let old = card.facts().map(|f| f.nickname.clone()).unwrap_or_default();
-            let plays = card.facts().and_then(|f| f.state.as_ref()).map_or(0, |s| s.plays.len());
-            GateKind::Server { card: name, old, new, rows: *rows, plays, want: None }
+            GateKind::Server { card: name, old, new, rows: *rows, plays: *plays, want: None }
         }
         Asked::Proxy { peer } => GateKind::Proxy { peer: peer_name(card, *peer), id: *peer, server },
         Asked::DiskCheck => return None,
@@ -2061,7 +2088,7 @@ impl Page {
                 old: server_name(&card),
                 new: new.unwrap_or_default(),
                 rows: card.facts().map_or(0, |f| f.tracks),
-                plays: card.facts().and_then(|f| f.state.as_ref()).map_or(0, |s| s.plays.len()),
+                plays: plays_waiting(&card),
                 want: Some(Box::new(sheet.want)),
             };
             self.card.gate = Some(CardGate { key, kind, allow: Allow::default() });

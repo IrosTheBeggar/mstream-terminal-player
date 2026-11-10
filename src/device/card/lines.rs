@@ -401,7 +401,7 @@ fn next_words(card: &CardView) -> String {
         },
         Next::Asking => "not answered yet".to_string(),
         Next::Unreached { why, .. } => format!("{} didn't answer ({why})", server_name(card)),
-        Next::SignIn => format!("{} asks this computer to sign in again", server_name(card)),
+        Next::SignIn { .. } => format!("{} asks this computer to sign in again", server_name(card)),
         Next::Refused(why) => why.clone(),
     }
 }

@@ -128,6 +128,8 @@ pub(crate) struct Library {
     pub(crate) unindexed: HashSet<String>,
     /// `stats/plays` answers 500: a post that fails.
     pub(crate) stats_down: bool,
+    /// The sign-in lapsed: every route answers 401.
+    pub(crate) signed_out: bool,
     /// `/api/`'s transcode block, when not an older server's (no rates
     /// listed, no bulk queue).
     pub(crate) transcode: Option<Value>,
@@ -245,6 +247,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
     let mut lib = fake.lock().unwrap();
     let path = asked.path();
     lib.asked.push(format!("{} {path}", asked.method));
+    if lib.signed_out {
+        return json_reply("401 Unauthorized", r#"{"error":"Authentication Error"}"#);
+    }
     let not_found = || json_reply("404 Not Found", r#"{"error":"Not Found"}"#);
     match (asked.method.as_str(), path.as_str()) {
         ("GET", "/api/") => {
@@ -1439,6 +1444,36 @@ fn another_address_confirmed_as_the_same_server_is_one_source_from_then_on() {
     let keys = (server_url_key(&base), server_url_key(&other));
     assert_eq!((source.url_key, source.confirmed.clone()), (keys.0, vec![keys.1]));
     assert_eq!((source.nickname.as_str(), source.libraries.clone()), ("Home", vec!["Rock".to_string()]));
+}
+
+/// A run that stops because the card's server would change (clause 58's
+/// take-over gate) read the other server: its tally still counts the
+/// card's plays, which wait in the outbox for the server the card leaves,
+/// and none goes to the one read. The gate says that count (the worker's
+/// `plays_elsewhere`).
+#[test]
+fn a_run_stopped_for_another_server_counts_the_plays_that_wait_for_the_cards_own() {
+    let scratch = Scratch::new("other-plays");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    // A server that doesn't say its own id: another address asks first.
+    fake.lock().unwrap().old = true;
+    let served = fake.clone();
+    let other = routed(move |asked| answer(&served, asked));
+    let mut envs = envs();
+    let store = Rc::new(MemStore::default());
+    ran(&sync_plays(&sim, &base, &rock(), &mut envs, Reached::Elsewhere, store.clone()).0);
+    let at = 1_791_950_000_000;
+    let log = [logged(&sim, "Album B/01.mp3", 1, at), logged(&sim, "Album D/02.opus", 2, at + 200_000)];
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), log.concat()).unwrap();
+
+    let asked = sync_plays(&sim, &other, &Ask::default(), &mut envs, Reached::Elsewhere, store.clone()).0;
+    let End::Halted(Halt::Card(Stop::Unanswered(guards))) = &asked.end else { panic!("{:?}", asked.end) };
+    assert!(matches!(guards[..], [Guard::Server { .. }]), "{guards:?}");
+    let t = asked.plays.as_ref().expect("the run's tally");
+    assert_eq!((t.new, t.waiting, t.due, t.accepted), (2, 2, 0, 0), "{t:?}");
+    assert_eq!(play_posts(&fake), 0, "none goes to a server that isn't theirs");
+    assert_eq!(store.outbox().cards.values().map(|o| o.plays.len()).sum::<usize>(), 2);
 }
 
 /// 2.11 with the server's own id (the card transfer's batch of mStream
