@@ -562,13 +562,13 @@ pub(crate) mod fake {
         fields: Vec<(String, String)>,
         /// `@identify` refused with this word (ui, screen, viz).
         identify: Option<String>,
-        /// Its clock (0.12.0's): off from this computer's by this many ms,
+        /// Its clock (0.14.0's): off from this computer's by this many ms,
         /// or unset (None).
         clock: Option<i64>,
         /// Its clock chip takes no time: `@time <ms>` answers `@err 4 time
         /// rtc`.
         rtc_dead: bool,
-        /// How its listener answers `@format`'s question (0.12.0's), and how
+        /// How its listener answers `@format`'s question (0.14.0's), and how
         /// the format goes (`/format=`): none formats.
         format: Option<String>,
         /// The free bytes a count found, said by `@status` from then on.
@@ -753,10 +753,17 @@ pub(crate) mod fake {
             }
         }
 
-        /// Its firmware has the clock, and `@status` its `cid=` and
-        /// `clock=`: 0.12.0's work, its dev builds too.
-        fn clocked(&self) -> bool {
+        /// Its firmware names its card, `cid=` in `@status`: 0.12.0's
+        /// work, its dev builds too.
+        fn names_card(&self) -> bool {
             self.version().and_then(Version::parse).is_some_and(|v| v.core >= (0, 12, 0))
+        }
+
+        /// Its firmware has the clock and the format (`@time`, `@format`,
+        /// `clock=` in `@status`): 0.14.0's work, its dev builds too.
+        /// 0.12.0 and 0.13.0 shipped without them.
+        fn clocked(&self) -> bool {
+            self.version().and_then(Version::parse).is_some_and(|v| v.core >= (0, 14, 0))
         }
 
         /// A field of `@status`: what the board was told to say, else the
@@ -790,16 +797,21 @@ pub(crate) mod fake {
             }
         }
 
-        /// The keys in the firmware's order. `cid=` and `clock=` came in
-        /// 0.12.0, after `state=` and before `bt=`: an older board's line
-        /// has neither, but a `cid=` its script names.
+        /// The keys in the firmware's order. `cid=` came in 0.12.0 and
+        /// `clock=` in 0.14.0, after `state=` and before `bt=`: an older
+        /// board's line has neither, but a key its script names.
         fn status_line(&self) -> String {
             let mut line = "@status".to_string();
             let keys =
                 ["fw", "elf", "card", "size", "free", "tracks", "music", "bat", "state", "cid", "clock", "bt"];
             let scripted = |key: &str| self.fields.iter().any(|(k, _)| k == key);
             for key in keys {
-                if matches!(key, "cid" | "clock") && !self.clocked() && !scripted(key) {
+                let has = match key {
+                    "cid" => self.names_card(),
+                    "clock" => self.clocked(),
+                    _ => true,
+                };
+                if !has && !scripted(key) {
                     continue;
                 }
                 line.push_str(&format!(" {key}={}", self.field(key)));
@@ -829,11 +841,11 @@ pub(crate) mod fake {
     /// Options: `/in=<s>` plugged in that long after the fake begins,
     /// `/out=<s>` unplugged then, `/held=<s>` its port held that long,
     /// `/identify=<why>` `@identify` refused (ui, screen, viz), the clock
-    /// of a board from 0.12.0 on `/clock=unset|ok|<ms>` (unset; in step,
+    /// of a board from 0.14.0 on `/clock=unset|ok|<ms>` (unset; in step,
     /// as without; or off from this computer's by that many ms, `-5000`
     /// behind), `/rtc=dead` (it takes no `@time <ms>`), and how its
-    /// listener answers `@format` (0.12.0's too, and an older board's that
-    /// names the option, with a `/cid=` for the page to offer it; without
+    /// listener answers `@format` (0.14.0's too, and an older board's that
+    /// names the option, for a test of what no shipped board does; without
     /// the option the card is formatted, the question up at once, confirmed
     /// a tenth of the pace on, the format across the pace): `/format=no`
     /// (Cancel at once),
@@ -1411,7 +1423,7 @@ pub(crate) mod fake {
             self.say(answered, "[format] confirmed twice (a computer's @format): restarting to format");
             self.say(answered, "ets Jul 29 2019 12:21:46");
             self.say(answered, "rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)");
-            let version = board.version().unwrap_or("v0.12.0").to_string();
+            let version = board.version().unwrap_or("v0.14.0").to_string();
             let elf = board.elf_or("63ee7a2b");
             let boot = format!("mstream-mp3-player {version} (commit fake000, 2026-10-01), ELF {elf}");
             self.say(answered, &boot);

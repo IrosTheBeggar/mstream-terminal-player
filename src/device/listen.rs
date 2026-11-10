@@ -14,13 +14,13 @@
 //! - `@identify <label>` → "This one" and the label on the board's screen
 //!   for five seconds, `@identify ok`;
 //! - `@time` → the board's clock, `@time <unix-ms>` or `@time unset`, and
-//!   `@time <unix-ms>` sets it, `@time ok` (0.12.0's: older firmware
+//!   `@time <unix-ms>` sets it, `@time ok` (0.14.0's: older firmware
 //!   answers `@err 7 time`);
 //! - `@format` → the question "Format this card?" on the board's screen,
 //!   `@format ok`, nothing more: the listener answers there, `@format no`,
 //!   or `@format 0` and the board restarts to format the card itself,
 //!   `@format <pct>` as it goes and `@format done size=… free=… cluster=…`
-//!   (0.12.0's too: older firmware answers `@err 7 format`).
+//!   (0.14.0's too: older firmware answers `@err 7 format`).
 //!
 //! The board talks all the time — `[stats]` every few seconds, the boot
 //! log after a restart, the console's own replies — and a host line can
@@ -613,7 +613,7 @@ pub(crate) enum BoardTime {
 /// the board's clock is as it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TimeWhy {
-    /// `@err 7 time`: firmware older than 0.12.0, which has no clock verb.
+    /// `@err 7 time`: firmware older than 0.14.0, which has no clock verb.
     Old,
     /// `@err 5 time`: a time outside the range the board takes.
     Range,
@@ -737,7 +737,7 @@ fn set_time(console: &mut Console, ms: u64, waits: Waits, note: Note) -> Result<
 /// (`now`, Unix ms) with `@time <unix-ms>` when it is unset or more than
 /// [`CLOCK_SLACK`] off, as `to` says: only read, set, or set and read
 /// again. Told to stop before the set, it sends none: the clock as read,
-/// nothing sent. A board that has no clock verb (older than 0.12.0)
+/// nothing sent. A board that has no clock verb (older than 0.14.0)
 /// answers `@err 7 time`: [`TimeWhy::Old`].
 pub(crate) fn clock(
     wire: &mut dyn Wire,
@@ -1534,9 +1534,9 @@ pub(crate) mod tests {
 
     #[test]
     fn a_status_line_says_whether_the_boards_clock_is_set() {
-        let line = "@status fw=v0.12.0 card=fat32 state=idle cid=- clock=ok bt=-";
+        let line = "@status fw=v0.14.0 card=fat32 state=idle cid=- clock=ok bt=-";
         assert_eq!(parse_status(line).unwrap().clock, Clock::Ok);
-        let clock = |value: &str| parse_status(&format!("@status fw=v0.12.0 cid=- clock={value}")).unwrap().clock;
+        let clock = |value: &str| parse_status(&format!("@status fw=v0.14.0 cid=- clock={value}")).unwrap().clock;
         assert_eq!(clock("unset"), Clock::Unset);
         assert_eq!(clock("drifting"), Clock::Unset, "any other value is unset, as the firmware says");
         assert_eq!(parse_status(REAL).unwrap().clock, Clock::Unknown, "no key: firmware from before it");
@@ -1554,7 +1554,7 @@ pub(crate) mod tests {
     /// its lines.
     const FORMATTED: &str = "@format 0\r\n[format] confirmed twice (a computer's @format)\r\n\
         ets Jul 29 2019 12:21:46\r\nrst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\r\n\
-        mstream-mp3-player v0.12.0 (commit 1234567, 2026-10-19), ELF 63ee7a2b\r\n\
+        mstream-mp3-player v0.14.0 (commit 1234567, 2026-10-19), ELF 63ee7a2b\r\n\
         @format 10\r\n@format 50\r\n@format 100\r\n\
         @format done size=63864569856 free=63843467264 cluster=32768\r\n";
 

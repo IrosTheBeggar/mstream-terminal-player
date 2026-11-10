@@ -2385,7 +2385,7 @@ mod tests {
     fn a_cards_plays_go_out_backdated_with_its_own_client_block() {
         let client_block = PlayClient {
             name: "mstream-core2".into(),
-            version: Some("0.12.0".into()),
+            version: Some("0.14.0".into()),
             instance_id: Some("0123456789abcdef".into()),
         };
         let play = CardPlay {
@@ -2419,7 +2419,7 @@ mod tests {
         let body = body_of(&req);
         assert_eq!(
             body["client"],
-            serde_json::json!({ "name": "mstream-core2", "version": "0.12.0", "instanceId": "0123456789abcdef" })
+            serde_json::json!({ "name": "mstream-core2", "version": "0.14.0", "instanceId": "0123456789abcdef" })
         );
         let sent = &body["plays"][0];
         assert_eq!(sent["startedAt"], 1_760_000_000_000u64, "the card's own time, not now");
@@ -2464,7 +2464,7 @@ mod tests {
             let body = plays_body(&client_block, &[play.clone(), refused]);
             assert!(matches!(body, Err(ApiError::Config(_))), "it fails the batch whole");
         }
-        assert_eq!(play_version("0.12.0").as_deref(), Some("0.12.0"));
+        assert_eq!(play_version("0.14.0").as_deref(), Some("0.14.0"));
         assert_eq!(play_version(&"😀".repeat(16)).map(|v| v.chars().count()), Some(16), "32 units");
         assert_eq!((play_version(&"😀".repeat(17)), play_version("")), (None, None));
     }

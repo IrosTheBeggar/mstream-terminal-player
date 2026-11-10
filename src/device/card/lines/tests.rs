@@ -101,7 +101,7 @@ fn status_prints_the_card_views_facts_as_key_value_rows() {
     assert_eq!(get("removes"), "Velvet Static/Harbour Songs/04 - Low Tide.flac and 1 more");
     assert_eq!(get("converts"), "only what the player can't play, to Opus 192k");
     assert_eq!(get("removals"), "follow Home");
-    assert_eq!(get("player"), "Core2 0.12.0: mp3,flac,opus (its device.txt)");
+    assert_eq!(get("player"), "Core2 0.14.0: mp3,flac,opus (its device.txt)");
     // Every key fits its column: one space at least before its value.
     assert!(rows.iter().all(|(k, _)| k.len() < KEY_W), "{rows:?}");
     drop(en);

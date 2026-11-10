@@ -3206,7 +3206,7 @@ pub(crate) mod tests {
     #[test]
     fn the_format_asks_the_player_follows_it_to_its_end_and_asks_the_board_again() {
         let _en = crate::setup::tests::in_locale("en");
-        let fake = Fake::new("status:v0.12.0/card=exfat/free=?/tracks=-").with_pace(Duration::from_millis(300));
+        let fake = Fake::new("status:v0.14.0/card=exfat/free=?/tracks=-").with_pace(Duration::from_millis(300));
         let mut r = rig(fake);
         r.settled(1);
         assert_eq!(r.board("FAKE0").format_offer(), Some(crate::device::board::FormatOffer::Foreign));
@@ -3239,16 +3239,23 @@ pub(crate) mod tests {
     fn a_format_declined_refused_or_failed_ends_with_why_and_the_board_heard_again_where_it_may_have_changed() {
         let _en = crate::setup::tests::in_locale("en");
         let words = [
-            "status:v0.12.0/card=exfat/format=no",
-            "status:v0.12.0/card=exfat/format=late",
-            "status:v0.12.0/card=none",
-            "status:v0.12.0/card=exfat/format=second-size",
-            "status:v0.12.0/card=exfat/format=fail-mkfs",
-            "status:v0.11.0/card=exfat",
+            "status:v0.14.0/card=exfat/format=no",
+            "status:v0.14.0/card=exfat/format=late",
+            "status:v0.14.0/card=none",
+            "status:v0.14.0/card=exfat/format=second-size",
+            "status:v0.14.0/card=exfat/format=fail-mkfs",
+            "status:v0.13.0/card=exfat",
         ];
         // A pace past the tests' minute: `late` is the question running out.
         let mut r = rig(Fake::new(&words.join(",")).with_pace(Duration::from_millis(700)));
         r.settled(words.len());
+        // 0.13.0 names its card (`cid=`, 0.12.0's) and has no format: its
+        // status has no `clock=`, so none is offered. Asked all the same,
+        // it says so.
+        let between = r.board("FAKE5");
+        let keys = between.status().map(|s| (s.cid, s.clock));
+        assert_eq!(keys, Some((CardRoot::None, Clock::Unknown)), "{:?}", between.heard);
+        assert!(!between.can_format() && between.format_offer().is_none());
         for i in 0..words.len() {
             r.send(Cmd::Format { port: format!("FAKE{i}") });
         }
@@ -3288,7 +3295,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_write_never_cuts_a_format_and_a_quit_lets_the_board_go_on_by_itself() {
-        let mut r = rig(Fake::new("status:v0.12.0/card=exfat/format=silent"));
+        let mut r = rig(Fake::new("status:v0.14.0/card=exfat/format=silent"));
         r.settled(1);
         r.send(Cmd::Format { port: "FAKE0".into() });
         r.until("the question up", |r| r.board("FAKE0").format == Format::Waiting);
@@ -3314,13 +3321,13 @@ pub(crate) mod tests {
     fn update_all_leaves_a_formatting_board_out_and_no_format_starts_while_it_runs() {
         // No board that needs an update formats while the pin doesn't, so
         // the script says these do.
-        let formats = "status:v0.9.0/cid=-/format=silent";
+        let formats = "status:v0.9.0/format=silent";
         let fake = Fake::new(&format!("{formats},old:v0.7.0,{formats}")).with_pace(Duration::from_millis(60));
         let probe = fake.clone();
         let mut r = rig(fake);
         r.settled(3);
         let needs = |r: &Rig, port: &str| r.board(port).verdict == Verdict::Update;
-        assert!(needs(&r, "FAKE0") && needs(&r, "FAKE1") && needs(&r, "FAKE2") && r.board("FAKE0").can_format());
+        assert!(needs(&r, "FAKE0") && needs(&r, "FAKE1") && needs(&r, "FAKE2"));
         r.send(Cmd::Format { port: "FAKE0".into() });
         r.until("the question up", |r| r.board("FAKE0").format == Format::Waiting);
         // FAKE1 kept in its bootloader until FAKE2's format is answered.
@@ -3411,7 +3418,7 @@ pub(crate) mod tests {
     fn a_write_forgets_how_the_last_format_ended_so_firmware_that_formats_is_offered_it() {
         let _en = crate::setup::tests::in_locale("en");
         let scratch = crate::device::firmware::tests::Scratch::new("desk-format-write");
-        let desc = desc_with_elf("v0.12.0", AppDesc::OURS, &elf_bytes("be894f8b"));
+        let desc = desc_with_elf("v0.14.0", AppDesc::OURS, &elf_bytes("be894f8b"));
         std::fs::write(scratch.0.join("firmware.factory.bin"), merged_in(&desc, Mode::Dio)).unwrap();
         // v0.11.0 has no format: asked, it says so, and the row keeps it.
         let mut r = rig(Fake::new("status:v0.11.0/card=exfat").with_pace(Duration::from_millis(60)));
@@ -3422,7 +3429,7 @@ pub(crate) mod tests {
         // Updated on the same visit to firmware that formats: offered it.
         r.choose("FAKE0", Some(Image::Local(scratch.0.clone())));
         r.send(Cmd::Write { port: "FAKE0".into(), erase: Some(false), image: None });
-        r.written("FAKE0", "v0.12.0 written and heard");
+        r.written("FAKE0", "v0.14.0 written and heard");
         let board = r.board("FAKE0");
         assert_eq!(board.format, Format::Idle, "the old firmware's answer went with it");
         let foreign = Some(crate::device::board::FormatOffer::Foreign);
@@ -3433,7 +3440,7 @@ pub(crate) mod tests {
     #[test]
     fn a_refusal_at_the_second_answer_says_nothing_was_formatted_whatever_its_word() {
         let _en = crate::setup::tests::in_locale("en");
-        let said = |why: FormatWhy| format_end(&why, "COM3", Some("v0.12.0")).unwrap();
+        let said = |why: FormatWhy| format_end(&why, "COM3", Some("v0.14.0")).unwrap();
         let unknown = said(FormatWhy::Refused("brownout".into()));
         assert_eq!(unknown, "Not formatted: COM3 answered brownout; nothing was erased.");
         assert!(said(FormatWhy::Refused("size".into())).starts_with("Not formatted: FAT32 can't take"));
@@ -3473,11 +3480,11 @@ pub(crate) mod tests {
     fn a_listen_sets_the_players_clock_only_when_unset_or_off_and_never_asks_one_without_the_key() {
         let _en = crate::setup::tests::in_locale("en");
         let boards = [
-            "status:v0.12.0/clock=unset",
-            "status:v0.12.0/clock=-90000",
-            "status:v0.12.0",
+            "status:v0.14.0/clock=unset",
+            "status:v0.14.0/clock=-90000",
+            "status:v0.14.0",
             "status:v0.11.0",
-            "status:v0.12.0/clock=unset/rtc=dead",
+            "status:v0.14.0/clock=unset/rtc=dead",
         ];
         let mut r = rig(Fake::new(&boards.join(",")));
         r.settled(5);
@@ -3541,7 +3548,7 @@ pub(crate) mod tests {
     #[test]
     fn a_computer_clock_the_board_cant_take_sends_nothing_and_a_desk_with_no_clock_never_asks() {
         let _en = crate::setup::tests::in_locale("en");
-        let fake = Fake::new("status:v0.12.0/clock=unset");
+        let fake = Fake::new("status:v0.14.0/clock=unset");
         let (trace, shelf) = (fake.trace(), Arc::new(Shelf::new()));
         let unset_here: fn() -> u64 = || 1_000;
         let start = Setup { clock: Some(unset_here), ..setup(shelf.clone()) };
@@ -3555,7 +3562,7 @@ pub(crate) mod tests {
         assert_eq!(host, ["@time", "@time unset"], "asked, nothing sent");
         r.quit();
 
-        let fake = Fake::new("status:v0.12.0/clock=unset");
+        let fake = Fake::new("status:v0.14.0/clock=unset");
         let (trace, shelf) = (fake.trace(), Arc::new(Shelf::new()));
         let start = Setup { clock: None, ..setup(shelf.clone()) };
         let mut r = rig_on(fake, start, shelf, trace);

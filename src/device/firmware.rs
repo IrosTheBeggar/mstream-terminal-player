@@ -63,7 +63,7 @@ pub(crate) const PINNED_DIO_SHA256: Option<&str> =
 pub(crate) const PINNED_ANSWERS_STATUS: bool = true;
 /// Whether a board running the pinned release formats a card at a
 /// computer's ask (`@format`, the firmware repo's docs/HOST-STATUS.md, from
-/// 0.12.0 on): only then does the MP3 Player tab say "Updating lets it."
+/// 0.14.0 on): only then does the MP3 Player tab say "Updating lets it."
 /// under a board that can't (contract clauses 20 and 59), and only then do
 /// the fix lines of a board that can't point at the player. v0.11.0 does
 /// not: it answers `@err 7 format`.
@@ -1811,9 +1811,9 @@ pub(crate) mod tests {
         // the card after an update only when it is true.
         let answers = place(pin(), "v0.9.0") != Place::Older;
         assert_eq!(PINNED_ANSWERS_STATUS, answers, "{} and the status query", pin());
-        // `@format` is 0.12.0's: the page says "Updating lets it." only
+        // `@format` is 0.14.0's: the page says "Updating lets it." only
         // while this is true.
-        let formats = place(pin(), "v0.12.0") != Place::Older;
+        let formats = place(pin(), "v0.14.0") != Place::Older;
         assert_eq!(PINNED_ANSWERS_FORMAT, formats, "{} and the format", pin());
         let target = Target {
             version: pin().into(),

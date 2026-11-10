@@ -228,7 +228,7 @@ comes from the cache, or a download, beside them.
      stop is still said and kept for Details, and a refusal it gave is
      still said; only a silence the stop cut short, or a port that failed
      meanwhile, is said by none.
-   - A board whose `@status` has no `clock=` (before 0.12.0) is never
+   - A board whose `@status` has no `clock=` (before 0.14.0) is never
      asked: absence is how the page tells, never the version. Should one
      answer `@err 7 time` anyway, it is left as it is.
    - Nothing else is written and no reset follows. Neither form of `@time`
@@ -556,7 +556,7 @@ comes from the cache, or a download, beside them.
     NTFS or GPT card name the player as the formatter
     (`dev.card_fix_format`, `dev.card_fix_mbr`: "Fix: format it as FAT32 in
     the player (below). That erases the whole card.") on a board that can
-    format: its status carries `cid=` and `clock=`. On one that can't, no
+    format: its status carries `clock=` (clause 59). On one that can't, no
     line points below at a format that isn't there:
     - while the pinned release formats, clause 59's line takes the fix
       line's place, "v0.11.0 can't format a card. Updating lets it.", with
@@ -1410,16 +1410,19 @@ comes from the cache, or a download, beside them.
       own music card included (the user's pick of 2026-10-19; the
       firmware's refusal of a card it reads, its commit d8e797b, was
       reverted by 93f84fc).
-    - **Only where the firmware can:** `@format` came in 0.12.0 with
-      `@status`'s `cid=` and `clock=`, and is offered only on a board whose
-      status carries them: their presence is how the page tells, never the
-      version (clause 5's rule). A board whose status has neither says,
-      in the SD row where Format would be offered, "v0.11.0 can't format a
-      card." (`fmt_old`), and so does an `@err 7 format` answer. "Updating
-      lets it." (`fmt_old_update`) follows only when the pinned release
-      answers `@format`, which the pin says beside its checksum as it says
-      `PINNED_ANSWERS_STATUS` (a `PINNED_ANSWERS_FORMAT`, part B6), the
-      rule of clause 20's "Updating shows it.". The pin v0.11.0 does not
+    - **Only where the firmware can:** `@format` came in 0.14.0 with
+      `@status`'s `clock=`, and is offered only on a board whose status
+      carries that key: its presence is how the page tells, never the
+      version (clause 5's rule). `cid=` says nothing of it: 0.12.0 and
+      0.13.0 name their card and have no format. A board whose status
+      has no `clock=` says, in the SD row where Format would be offered,
+      "v0.11.0 can't format a card." (`fmt_old`; "v0.13.0 can't format a
+      card." on the last release without it), and so does an `@err 7
+      format` answer. "Updating lets it." (`fmt_old_update`) follows only
+      when the pinned release answers `@format`, which the pin says beside
+      its checksum as it says `PINNED_ANSWERS_STATUS` (a
+      `PINNED_ANSWERS_FORMAT`, part B6), the rule of clause 20's "Updating
+      shows it.". The pin v0.11.0 does not
       answer it, so today the line ends at "can't format a card." under
       today's fix line (clause 20): a v0.11.0 board is up to date with no
       Update (clause 19), and an update to the pin would not let it format.
@@ -1886,7 +1889,7 @@ setting no locale, prints in English.
   grammar: `status:`, `old:`, `silent:`, `chip`, `busy`, `/in=`, `/out=`,
   `/held=`, `/mode=dio`, `/elf=`, `/loop=qio`, `/listing=<s>` — a board
   starting up, answering nothing for that long after each start while it
-  prints `[bt]` and Arduino lines — `/format=` — how a board from 0.12.0
+  prints `[bt]` and Arduino lines — `/format=` — how a board from 0.14.0
   on answers `@format`: formatted by default, `no`, `late`, `silent`, a
   refusal at once, `second-<why>`, `fail-<why>` — and any `@status`
   field),
@@ -2283,9 +2286,10 @@ setting no locale, prints in English.
     set's card 06 §6 proposed `@format check`, `@format cancel` and a
     partition report for part B5; the firmware built `@format` without
     them (HOST-STATUS, "@format"). So: Format is offered by `@status`'s
-    0.12.0 keys, not by a `check` answer; while the player asks, the tab
-    draws no Cancel (card 06's frame has one, with `fmt_cancel_note` and
-    `hint_fmt_cancel`), and the player's own *Cancel*, its tab bar or its
+    0.14.0 key (`clock=`), not by a `check` answer; while the player asks,
+    the tab draws no Cancel (card 06's frame has one, with
+    `fmt_cancel_note` and `hint_fmt_cancel`), and the player's own
+    *Cancel*, its tab bar or its
     minute ends the question; the gate names the card as `@status` reports
     it, where the frame lists its partitions (`gate_fmt_part`); declined
     and timed out are told apart by the firmware's minute, since both
@@ -2502,7 +2506,7 @@ setting no locale, prints in English.
   - **The pin can't format** (`PINNED_ANSWERS_FORMAT` false at v0.11.0, a
     test holding it to the pin), so every board today keeps the `_pc` fix
     lines and "v0.11.0 can't format a card.", and no board shows the
-    Format route until it runs 0.12.0.
+    Format route until it runs 0.14.0.
   - **Not tried on a board:** the whole route on a Core2 (the firmware's
     device check 11, on a spare card): the port staying open across the
     board's restart, the real percent's cadence, the minute's edge.
@@ -2586,7 +2590,7 @@ setting no locale, prints in English.
   - **Words.** The five keys in all ten locales; the nine languages other
     than English were written by the build and wait for the native
     review.
-  - **Not tried on a board:** the set on a 0.12.0 Core2, its log line and
+  - **Not tried on a board:** the set on a 0.14.0 Core2, its log line and
     the fact (the firmware's device check 10); nor the proxy's key against
     a running mStream of the batch.
 - **2026-10-19 — Part B13's review fixes.** The review of B13's terminal
@@ -2648,7 +2652,7 @@ setting no locale, prints in English.
   six digits of tracks; a 1 TB card (1000.2 GB) in 64 KB clusters on
   `E:` or under a FAT32 label's 11 cells, its revision in four digits,
   1,234 plays to send, 99 undated and 1,234 of your own, and firmware
-  0.12.0 listing four codecs.
+  0.14.0 listing four codecs.
   - **The help line (clause 48)** keeps to its two lines in every locale
     at the GUI's floor (70 cells) and on the console's sheet (64), so the
     ellipsis is left for a longer name still. Shorter words for
@@ -2911,6 +2915,24 @@ setting no locale, prints in English.
     player's clock, the tab being the only other. Its JSON is as it was.
     `device card <drive> sync` and `plays` name it beside the count of
     undated plays.
+  - **0.14.0, not 0.12.0.** The firmware's side of the card transfer (the
+    clock and `@time`, the play log, `@format`, `clock=` in `@status`) was
+    to ship in 0.12.0 when these clauses were written. 0.12.0 shipped
+    `cid=` and nothing else of it, 0.13.0 no more; 0.14.0 is the first
+    with the rest. Clauses 5 and 59, the fake's grammar in the translation
+    notes and the entries above that named 0.12.0 as that firmware name
+    0.14.0 now, changed in place on this date, and so do the command
+    line's words ("its firmware is older than 0.14.0") and the README.
+    What the design set's frame drew, a pin of v0.12.0, is left as drawn.
+    The pin is v0.11.0 still, and can't format.
+  - **`cid=` did ship in 0.12.0, and no longer offers the format.**
+    Clause 59 offered Format on a board whose status carries `cid=` or
+    `clock=`, the two keys that were to come with `@format`. `cid=` came
+    alone, in 0.12.0 (clause 20a keeps that), so every board on 0.12.0
+    or 0.13.0 would have been offered a format its firmware answers
+    `@err 7 format` to. The offer goes by `clock=` alone now, the key
+    that did come with it; such a board says "v0.13.0 can't format a
+    card." where the format would be, as v0.11.0 does.
   - **A waiting play was forgotten when the card's mark passed it.** The
     marks rise over a seq the log holds no more, as over one another
     computer's sync settled, and a play waiting here below them was

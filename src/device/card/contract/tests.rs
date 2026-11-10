@@ -807,7 +807,7 @@ fn vectors_device_txt() {
     assert!(file.decodes("OPUS") && file.lists("opus") && file.writes_mpdj() && file.writes_mpwf());
     assert!(file.reads(Format::Msmf, 1) && !file.reads(Format::Mpdj, 1) && file.reads(Format::Mpdj, 2));
     assert!(file.reads(Format::Mpwf, 1) && !file.reads(Format::Mpwf, 2));
-    // 0.12.0 keeps a play log: `history` lists major 1 (2.15).
+    // A firmware that keeps a play log: `history` lists major 1 (2.15).
     assert!(file.logs_plays() && file.history == 1);
     // No file: the defaults, which noFile lists key by key; no play log, and
     // no waveform index.

@@ -2511,7 +2511,7 @@ pub(crate) mod fixtures {
             by_library: vec![("Rock".into(), 2_904), ("Jazz".into(), 1_908)],
             device: crate::device::card::contract::device_txt::DeviceTxt::read(Some(
                 b"contract=1
-firmware=0.12.0
+firmware=0.14.0
 read.mpdj=2
 codecs=mp3,flac,opus
 history=1

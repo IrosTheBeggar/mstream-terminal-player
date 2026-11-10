@@ -4493,8 +4493,8 @@ mod tests {
 
     // ── Formatting (clause 59) ──────────────────────────────────────────────
 
-    /// A board whose firmware formats: 0.12.0's `cid=` and `clock=` in its
-    /// status, its status changed first.
+    /// A board whose firmware formats: 0.14.0's `clock=` in its status,
+    /// beside the `cid=` it has had since 0.12.0, its status changed first.
     fn formats(port: &str, fw: &str, change: impl FnOnce(&mut Status)) -> Board {
         answering_with(port, fw, |s| {
             (s.cid, s.clock) = (CardRoot::None, crate::device::board::Clock::Ok);
@@ -4650,6 +4650,12 @@ mod tests {
         let (_, _, frame) = card_row(|s| s.card = CardKind::Other);
         assert!(frame.contains("! Can't read this card") && frame.contains("Try it in a computer."), "{frame}");
         assert!(frame.contains("v0.8.0 can't format a card."), "{frame}");
+        // 0.12.0 and 0.13.0 name their card (`cid=`) and have no format:
+        // with no `clock=` in its status, such a board says the same.
+        let named = answering_with("COM3", "v0.13.0", |s| (s.card, s.cid) = (CardKind::ExFat, CardRoot::None));
+        let (mut page, _ends) = page_with(|e| e.boards(vec![named]));
+        let frame = window(&mut page);
+        assert!(frame.contains("v0.13.0 can't format a card.") && !frame.contains("Format as FAT32"), "{frame}");
         // A pin that formats: updating lets it, in the fix line's place.
         let gpt = answering_with("COM3", "v0.7.0", |s| s.card = CardKind::Gpt);
         let (mut page, ends) = page_with(|e| e.boards(vec![gpt.clone()]));
@@ -6290,7 +6296,7 @@ mod tests {
         // With the longest port the page names: a Mac's, 16 cells.
         let port = short("/dev/cu.usbmodem14101");
         assert_eq!(kit::width(&port), 16);
-        let mut said: Vec<String> = ends.iter().filter_map(|why| format_end(why, &port, Some("v0.12.0"))).collect();
+        let mut said: Vec<String> = ends.iter().filter_map(|why| format_end(why, &port, Some("v0.14.0"))).collect();
         let took = took_text(Duration::from_secs(134));
         said.push(t!("dev.card.fmt_asked", port = port).to_string());
         said.push(t!("dev.card.fmt_note", port = port, t = took).to_string());

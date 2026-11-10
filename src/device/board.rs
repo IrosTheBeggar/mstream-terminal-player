@@ -153,7 +153,7 @@ pub(crate) enum Clock {
     /// `clock=unset`, and any other value (the firmware's own rule): no time
     /// it believes, so a play is dated 0 until a computer sets it.
     Unset,
-    /// No `clock=`: firmware from before the key (0.12.0's), or a line that
+    /// No `clock=`: firmware from before the key (0.14.0's), or a line that
     /// gave it up to stay within its 255 bytes.
     Unknown,
 }
@@ -427,7 +427,7 @@ pub(crate) enum FormatWhy {
     Declined,
     /// `@format no` past it: nobody answered on the board.
     TimedOut,
-    /// `@err 7 format`: firmware older than 0.12.0, which has no format.
+    /// `@err 7 format`: firmware older than 0.14.0, which has no format.
     Old,
     /// Refused at once, the question never shown (`@err 4 format <why>`):
     /// `ui`, `screen`, `viz`, `busy`, `card`.
@@ -653,14 +653,14 @@ impl Board {
         self.status().is_some()
     }
 
-    /// Its firmware formats a card at a computer's ask (`@format`, 0.12.0):
-    /// its status carries `cid=` or `clock=`, which came with it — their
-    /// presence is how a sender tells, never the version — and it hasn't
-    /// answered `@err 7 format` since.
+    /// Its firmware formats a card at a computer's ask (`@format`, 0.14.0):
+    /// its status carries `clock=`, which came with it — the key's presence
+    /// is how a sender tells, never the version — and it hasn't answered
+    /// `@err 7 format` since. `cid=` says nothing of it: that key is
+    /// 0.12.0's, and 0.12.0 and 0.13.0 name their card and have no format.
     pub fn can_format(&self) -> bool {
         let Some(status) = self.status() else { return false };
-        let new_keys = status.cid != CardRoot::Unknown || status.clock != Clock::Unknown;
-        new_keys && self.format != Format::Ended(FormatWhy::Old)
+        status.clock != Clock::Unknown && self.format != Format::Ended(FormatWhy::Old)
     }
 
     /// Where its card is offered the format, on a board that can format
@@ -1284,12 +1284,18 @@ pub(crate) mod tests {
 
     #[test]
     fn the_format_is_offered_by_the_status_keys_never_the_version_and_is_the_primary_only_with_none_other() {
-        // 0.12.0's keys say the board formats; their absence says it can't.
+        // 0.14.0's `clock=` says the board formats; its absence says it can't.
         assert!(carded("v0.8.0", CardKind::ExFat, true).can_format());
-        assert!(!carded("v0.12.0", CardKind::ExFat, false).can_format(), "never the version");
+        assert!(!carded("v0.14.0", CardKind::ExFat, false).can_format(), "never the version");
         let mut one = status("v0.8.0");
         one.clock = Clock::Unset;
-        assert!(heard(Heard::Status(one)).can_format(), "one key is enough: the other gave way to the budget");
+        assert!(heard(Heard::Status(one)).can_format(), "its key alone: `cid=` gave way to the budget");
+        // `cid=` alone is 0.12.0's line, and 0.13.0's: the card's id came two
+        // releases before the format, and offers none.
+        let mut named = status("v0.13.0");
+        (named.card, named.cid) = (CardKind::ExFat, CardRoot::None);
+        let named = heard(Heard::Status(named));
+        assert!(!named.can_format() && named.format_offer().is_none(), "{:?}", named.heard);
         assert!(!heard(Heard::Old { version: Some("v0.7.0".into()), elf: None }).can_format());
         // Where it is offered: by the card.
         let offer = |card: CardKind| carded("v0.8.0", card, true).format_offer();

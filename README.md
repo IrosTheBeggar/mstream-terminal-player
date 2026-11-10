@@ -813,7 +813,7 @@ what it lets through (`--allow-removals 214`, `--server Work --take-over`, `--ad
 the player's; a card it can't read is listed with why.
 
 A card the player can't read (exFAT, NTFS, a GPT card) is **formatted in the player**, never on
-the computer: with firmware 0.12.0 or later, the board's SD card row offers *Format as FAT32 ▸*
+the computer: with firmware 0.14.0 or later, the board's SD card row offers *Format as FAT32 ▸*
 (`f` where something else comes first; for the player's own music card, in Details only), behind
 a gold warning that says what is lost. The tab only asks: the player shows the question on its
 own screen, *Format…* then its red button held 2 s, restarts and formats the card, and the row
@@ -829,7 +829,7 @@ the running firmware's answers `status:<version>` (answers `@status`), `old:<ver
 then `L`), `silent:<version>` (ours, not running) and `chip` (a board that only shares the USB
 chip). Several boards are words separated by commas, and options after slashes script the rest:
 `status:v0.9.0/free=?,old:v0.7.0,chip/in=3` is three boards, the last plugged in three seconds
-on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). A 0.12.0
+on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). A 0.14.0
 board's `@format` is formatted by default, or `/format=no`, `late`, `silent`, a refusal
 (`viz`, `card`, …, `second-size`), or `fail-write` and its kin. `/mode=dio`
 runs a release's DIO build (its ELF id), `/elf=<hex>` any ELF, and `/loop=qio` is a Core2

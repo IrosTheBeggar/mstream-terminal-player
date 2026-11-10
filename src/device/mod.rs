@@ -840,7 +840,7 @@ mod interrupt {
 /// ([`desk::wall_ms`]). Prints what it found and
 /// did as JSON, the host lines both ways among it. Exit 0 when the clock
 /// is in step or was set (a dry run: read); 1 when the board has no clock
-/// verb (`@err 7 time`: firmware older than 0.12.0), refused the time, or
+/// verb (`@err 7 time`: firmware older than 0.14.0), refused the time, or
 /// didn't answer, or this computer's clock is out of the board's range; 2
 /// for the port, not the board: one that isn't a board's this computer
 /// lists, ports that can't be listed, or one that couldn't be opened
@@ -892,7 +892,7 @@ fn time_on(
         Err(why) => {
             printed["error"] = why.code().into();
             let words = match why {
-                listen::TimeWhy::Old => "no clock verb: firmware older than 0.12.0".to_string(),
+                listen::TimeWhy::Old => "no clock verb: firmware older than 0.14.0".to_string(),
                 listen::TimeWhy::Range => "the board refused the time as out of range".to_string(),
                 listen::TimeWhy::Syntax => "the board couldn't read the time".to_string(),
                 listen::TimeWhy::Rtc => "the board's clock chip didn't take the time".to_string(),
@@ -1032,7 +1032,7 @@ fn format_line(why: &FormatWhy, port: &str) -> String {
     match why {
         FormatWhy::Declined => format!("Not formatted: it was cancelled on {port}'s screen."),
         FormatWhy::TimedOut => "Not formatted: nobody confirmed on the player within a minute.".to_string(),
-        FormatWhy::Old => format!("{port} can't format a card: its firmware is older than 0.12.0."),
+        FormatWhy::Old => format!("{port} can't format a card: its firmware is older than 0.14.0."),
         FormatWhy::NotAsked(why) => {
             let words = [
                 ("ui", "the player is still starting up; try again in a few seconds"),
@@ -1968,11 +1968,11 @@ mod tests {
             (code, printed, String::from_utf8(err).unwrap())
         };
         let boards = [
-            "status:v0.12.0/clock=unset",
-            "status:v0.12.0/clock=-90000",
-            "status:v0.12.0",
-            "status:v0.11.0",
-            "status:v0.12.0/clock=unset/rtc=dead",
+            "status:v0.14.0/clock=unset",
+            "status:v0.14.0/clock=-90000",
+            "status:v0.14.0",
+            "status:v0.13.0",
+            "status:v0.14.0/clock=unset/rtc=dead",
         ];
         let fake = Fake::new(&boards.join(","));
         // A dry run reads it and says, and sets nothing.
@@ -1997,7 +1997,7 @@ mod tests {
         // Older firmware has no clock verb; a chip that takes nothing.
         let (code, old, err) = timed(&fake, "FAKE3", false);
         assert_eq!((code, old["error"].as_str()), (1, Some("old")));
-        assert!(err.contains("older than 0.12.0"), "{err}");
+        assert!(err.contains("older than 0.14.0"), "{err}");
         let (code, dead, _) = timed(&fake, "FAKE4", false);
         assert_eq!((code, dead["error"].as_str()), (1, Some("rtc")));
         // A port no board is on; a board's port another program holds: the
@@ -2010,7 +2010,8 @@ mod tests {
         let trace = fake.trace().lock().unwrap().clone();
         assert!(trace.iter().all(|t| t.starts_with("listen ") || t.starts_with("time ")), "{trace:?}");
         assert_eq!(trace.iter().filter(|t| t.starts_with("time ")).count(), 2, "{trace:?}");
-        // The boards' status lines say so: `cid=` and `clock=` from 0.12.0.
+        // The boards' status lines say so: `clock=` from 0.14.0, where
+        // 0.13.0 has `cid=` (0.12.0's) alone.
         let found = fake.candidates().unwrap();
         let heard = desk::listen_all(&fake, &found, Duration::from_millis(800), listen::tests::QUICK);
         let clocks: Vec<Option<board::Clock>> = heard
@@ -2024,6 +2025,8 @@ mod tests {
         assert_eq!(clocks, [Some(Set), Some(Set), Some(Set), Some(Unknown), Some(Unset)]);
         let Heard::Status(newer) = &heard[2].heard else { panic!("a status") };
         assert_eq!(newer.cid, board::CardRoot::None, "a card no transfer wrote");
+        let Heard::Status(between) = &heard[3].heard else { panic!("a status") };
+        assert_eq!((between.cid, between.clock), (board::CardRoot::None, Unknown), "its card, and no clock yet");
 
         let parsed = Line::try_parse_from(["mstream-player", "time", "COM3", "--dry-run"]).map(|l| l.what);
         let Ok(DeviceCmd::Time(args)) = parsed else { panic!("device time") };
@@ -2055,7 +2058,7 @@ mod tests {
             let code = format_on(fake, port, QUICK, &mut out, &mut err);
             (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
         };
-        let fake = Fake::new("status:v0.12.0/card=exfat/free=?/tracks=-").with_pace(Duration::from_millis(300));
+        let fake = Fake::new("status:v0.14.0/card=exfat/free=?/tracks=-").with_pace(Duration::from_millis(300));
         let (code, out, err) = run(&fake, None);
         assert_eq!(code, 0, "{out}{err}");
         let lines: Vec<&str> = out.lines().collect();
@@ -2077,10 +2080,10 @@ mod tests {
         assert!(lines[0].ends_with("· card 63.8 GB free of 63.9 GB, no tracks"), "{lines:?}");
 
         // The player's no, and its minute: said, and exit 1.
-        let declined = run(&Fake::new("status:v0.12.0/format=no"), None);
+        let declined = run(&Fake::new("status:v0.14.0/format=no"), None);
         assert_eq!(declined.0, 1);
         assert!(declined.1.ends_with("Not formatted: it was cancelled on FAKE0's screen.\n"), "{declined:?}");
-        let late = run(&Fake::new("status:v0.12.0/format=late"), None);
+        let late = run(&Fake::new("status:v0.14.0/format=late"), None);
         assert!(late.1.ends_with("Not formatted: nobody confirmed on the player within a minute.\n"), "{late:?}");
         // Refused at once, at the second answer, and after the restart.
         let refused = |spec: &str| {
@@ -2089,25 +2092,25 @@ mod tests {
             err.trim_end().trim_start_matches("mstream-player: ").to_string()
         };
         // An empty slot is refused here: never asked, and no card said.
-        let empty = Fake::new("status:v0.12.0/card=none");
+        let empty = Fake::new("status:v0.14.0/card=none");
         let (code, out, err) = run(&empty, None);
         assert_eq!((code, out.as_str()), (1, ""), "{err}");
         assert_eq!(err, "mstream-player: Not asked: FAKE0: no card answers in its slot.\n");
         assert!(!empty.trace().lock().unwrap().iter().any(|t| t.starts_with("format")), "not asked");
         let viz = "Not asked: FAKE0: a computer drives its dancer; end that first.";
-        assert_eq!(refused("status:v0.12.0/state=host"), viz);
+        assert_eq!(refused("status:v0.14.0/state=host"), viz);
         let size = "Not formatted: FAKE0: FAT32 can't take the card (under 42 MB, or 2 TB and more). Nothing was erased.";
-        assert_eq!(refused("status:v0.12.0/format=second-size"), size);
+        assert_eq!(refused("status:v0.14.0/format=second-size"), size);
         let write = "Couldn't format the card in FAKE0: the card refused a write.";
-        assert_eq!(refused("status:v0.12.0/card=gpt/format=fail-write"), write);
+        assert_eq!(refused("status:v0.14.0/card=gpt/format=fail-write"), write);
         // Older firmware: the pin has no format; one that can't say its card.
-        let pin = "FAKE0 can't format a card: its firmware is older than 0.12.0.";
+        let pin = "FAKE0 can't format a card: its firmware is older than 0.14.0.";
         assert_eq!(refused("status:v0.11.0/card=exfat"), pin);
         let old = refused("old:v0.8.0");
         assert!(old.starts_with("FAKE0: v0.8.0, update to") && old.ends_with("formats its card."), "{old}");
 
         // Several boards and no --port: named, as flash --yes names them.
-        let two = Fake::new("status:v0.12.0/format=no,status:v0.12.0/card=ntfs");
+        let two = Fake::new("status:v0.14.0/format=no,status:v0.14.0/card=ntfs");
         let (code, out, _) = run(&two, None);
         assert_eq!(code, 1);
         assert!(out.starts_with("Several boards look like a Core2") && out.contains("Pass --port"), "{out}");

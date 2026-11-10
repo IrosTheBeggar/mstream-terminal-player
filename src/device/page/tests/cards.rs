@@ -97,7 +97,7 @@ fn a_card_alone_is_its_view_card_03s_rows_with_no_tab_row() {
     assert!(frame.contains("Card          id 5eedc0de0a1b2c3d · rev. 42 · mStream Player 0.14.0"), "{frame}");
     assert!(frame.contains("Server        Home · signed in on this computer"), "{frame}");
     assert!(frame.contains("Removes       Velvet Static/Harbour Songs/04 - Low Tide.flac and 1 more"), "{frame}");
-    assert!(frame.contains("Player        Core2 0.12.0: mp3,flac,opus · Auto DJ 2 · play log"), "{frame}");
+    assert!(frame.contains("Player        Core2 0.14.0: mp3,flac,opus · Auto DJ 2 · play log"), "{frame}");
     assert!(frame.contains("Sync again"), "{frame}");
 }
 
@@ -186,7 +186,7 @@ fn longest(drive: &str, server: &str, now: u64) -> CardView {
         let facts = cards::facts(v);
         facts.root = Some((0x5EED_C0DE_0A1B_2C3D, 4_821, 7));
         facts.nickname = server.into();
-        let txt = b"contract=1\nfirmware=0.12.0\nread.mpdj=2\ncodecs=mp3,flac,opus,wav\nhistory=1\n";
+        let txt = b"contract=1\nfirmware=0.14.0\nread.mpdj=2\ncodecs=mp3,flac,opus,wav\nhistory=1\n";
         facts.device = crate::device::card::contract::device_txt::DeviceTxt::read(Some(txt));
         if let Next::Plan(plan) = &mut v.next {
             let long = "Velvet Static/Harbour Songs (Deluxe Edition)/04 - Low Tide (Extended Mix).flac".to_string();
