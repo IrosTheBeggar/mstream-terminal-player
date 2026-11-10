@@ -66,6 +66,9 @@ pub(super) struct BarView<'a> {
     pub shuffle: bool,
     pub repeat: bool,
     pub autodj: bool,
+    /// Quick config is up over the bar: the split button's chevron points
+    /// down to it.
+    pub quick_open: bool,
     pub queue_open: bool,
     /// The playing track's cover is decoded and ready: the card skips its
     /// empty slot frame and the screen paints the art over those cells
@@ -185,6 +188,49 @@ pub(super) fn tall_compact(
             crate::kit::tall_frame(frame, s, at, label, 1, tone, Some(act)).width
         }
     }
+}
+
+/// The auto-dj control, split (the record's split button): one rounded
+/// frame with a rule between its halves — the word starts and stops as it
+/// always has, DIM off and OK green on, and the chevron opens quick config
+/// over the bar. Each half brightens under the pointer on its own. Returns
+/// the frame's width.
+fn dj_split(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, on: bool, open: bool) -> u16 {
+    const WORD: &str = " auto-dj ";
+    let word_w = WORD.len() as u16;
+    let width = word_w + 6;
+    let rect = Rect { x, y, width, height: 3 };
+    // The word's half takes the rule's column, the chevron's the rest.
+    let word = Rect { x, y, width: word_w + 2, height: 3 };
+    let chevron = Rect { x: x + word_w + 2, y, width: 4, height: 3 };
+    let (color, bold) = match (on, s.hovers(word)) {
+        (_, true) => (th().bright, true),
+        (true, false) => (th().ok, true),
+        (false, false) => (th().dim, false),
+    };
+    let frame_style = Style::default().fg(color);
+    frame.render_widget(
+        Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(frame_style),
+        rect,
+    );
+    let rule = x + word_w + 1;
+    let (tee_down, bar, tee_up) = if legacy_conhost() { ("+", "|", "+") } else { ("┬", "│", "┴") };
+    put(frame, rule, y, tee_down, frame_style);
+    put(frame, rule, y + 1, bar, frame_style);
+    put(frame, rule, y + 2, tee_up, frame_style);
+    let word_style = if bold { frame_style.add_modifier(Modifier::BOLD) } else { frame_style };
+    put(frame, x + 1, y + 1, WORD, word_style);
+    let glyph = match (legacy_conhost(), open) {
+        (false, false) => "▴",
+        (false, true) => "▾",
+        (true, false) => "^",
+        (true, true) => "v",
+    };
+    let chevron_style = if s.hovers(chevron) || open { bright_bold() } else { dim() };
+    put(frame, rule + 2, y + 1, glyph, chevron_style);
+    s.click(word, Act::AutoDj);
+    s.click(chevron, Act::DjQuick(super::dj::QuickAct::Toggle));
+    width
 }
 
 /// The empty cover slot: a DIM rounded frame holding the cells real pixels
@@ -374,7 +420,7 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
     let shuffle_word = t!("gui.shuffle_word").to_string();
     let repeat_word = t!("gui.repeat_word").to_string();
     let (shuffle, repeat) = if legacy { (shuffle_word.as_str(), repeat_word.as_str()) } else { ("⇄", "↻") };
-    let dj_w = tall_compact(frame, s, DJ_X, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj);
+    let dj_w = dj_split(frame, s, DJ_X, y, v.autodj, v.quick_open);
     let (prev, play, next) = play_glyphs(v.paused);
     let group = [repeat, prev, play, next, shuffle];
     let group_w: u16 = group.iter().map(|l| crate::kit::width(l) as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);

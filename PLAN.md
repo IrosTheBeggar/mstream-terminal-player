@@ -2384,6 +2384,47 @@ a LATER secondary screen (party view), Columns retired.
   and the shell's give-way table at ten sizes for four sets of tools;
   `scenario_ytdl` opens the room from its nav row, and passes on both
   servers after the move.
+- **The Auto DJ room rebuilt ✅ 2026-11-10** — the record's Auto DJ
+  screen was rebuilt (mstream_music `1d4e8974`: one row per setting, a
+  sheet behind each, a split button with quick settings, Recently played,
+  Smart filters, the genre kind, Play from) and the canvas "Auto DJ Panel
+  · GUI" drew it in cells — twenty boards, built as drawn (auto-dj
+  contract, clauses 2, 8, 16, 20, 40–58; decisions 13–19). **The room**:
+  Start / Stop is the status (a 3-row frame the rows' width, the kit's
+  slab on the title row where the room is short); Play from · First song ·
+  Batch; MUST MATCH — Sonic similarity, Smart filters, Genres, Rating,
+  Length; PREFER — Beat matching, Harmonic mixing, Skip words, Artist
+  cooldown; a value in its tone (DIM · OK · GOLD behind `!`), a row the
+  server cannot do DIM in its place with the reason; `Preview picks ▸` on
+  the title row. Nothing scrolls: 23 rows at 100×30, every row whole at
+  100×24, the spare rows coming back in one order. **The sheets**
+  (`src/gui/dj/sheets.rs`): the mood Filters' modal shape with the row's
+  value on the border following a draft; bars a cell a step; Length typed
+  to the second; five stars by halves; Skip words as chips; Genres with
+  Only · Skip and Generated · Tags · Mixed where the server has both;
+  Play from's servers (one ticked) and its folders, behind a window where
+  they outgrow the sheet; Preview's three picks. Smart filters is the
+  mood modal retitled. **The bar**: `│ auto-dj │ ▴ │`, the chevron opening
+  quick config (`src/gui/dj/quick.rs`) — Play from, Sonic with Drift ·
+  Stay close, Smart filters, the room's door — every change at once.
+  **The model**: the toggle's Stop always stops and Start goes to Play
+  from's home (`[player] autodj_home`; the TUI, with no Play from row,
+  starts where it stands); `moods` on a pick and the opener where the
+  server said it has scores; `genreSource` from 6.32.2; the length window
+  to a day with an older file's 20:00 as no maximum (`length_ceiling`);
+  `retrySonic` when a sonic setting changes; Recently played from
+  `stats/recently-played`, each song once, twenty at most, as a fourth
+  First song and a third opener of the empty queue. The shell hands a
+  modal's wheel to the DJ's layers (the old genre picker's never turned).
+  73 locale keys the old room said are gone, 50 arrive in ten languages
+  (the record's ARB words where it has them). Not built: sessions across
+  several servers, the docked sheet, a key for quick config. Tests: 30 in
+  `gui::dj` (the room cell for cell, the floor, the gates, every sheet's
+  draft law, the wheel, ten locales), with the model's, the worker's and
+  the App's beside them; `scenario_dj` rewritten for the new room and
+  passing on the rig (the deviations log has the run, and what it could
+  not show: a server with discovery data, mood scores or both genre
+  kinds).
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

@@ -196,6 +196,13 @@ pub enum ApiCmd {
     /// Every genre in the library the DJ's rule is for — the DJ's server
     /// while armed, reached its own way — for the genre picker.
     Genres { reach: Option<crate::tui::app::Reach> },
+    /// The same library's genres of one kind (the files' tags, the model's,
+    /// or both), with how many of each it has — the Genres sheet's list.
+    DjGenres { reach: Option<crate::tui::app::Reach>, source: GenreSource },
+    /// The songs the account last played on a server, newest first — what
+    /// the opening question and the empty queue offer under Recently
+    /// played. `identity` names the server on the answer.
+    DjRecent { identity: String, reach: Option<crate::tui::app::Reach> },
     /// Walk from one track to another through the embedding space.
     Journey { start: String, end: String, length: u32 },
     /// One random library track for a Sonic Path end. The side travels with
@@ -340,6 +347,8 @@ impl ApiCmd {
             | ApiCmd::AddToPlaylist { reach, .. }
             | ApiCmd::TrackInfo { reach, .. }
             | ApiCmd::Genres { reach }
+            | ApiCmd::DjGenres { reach, .. }
+            | ApiCmd::DjRecent { reach, .. }
             | ApiCmd::PlaylistNames { reach }
             // A connected server's album asks THAT server, through the proxy.
             | ApiCmd::TasteAlbum { reach, .. } => reach.as_ref(),
@@ -438,6 +447,9 @@ pub struct DjServerInfo {
     /// `None` when the server does not say, which holds nothing back.
     pub discovery_ready: Option<bool>,
     pub libraries: Vec<String>,
+    /// The server has mood scores to filter by (`moodFilters`): Smart
+    /// filters can be kept to there.
+    pub mood_filters: bool,
 }
 
 impl DjServerInfo {
@@ -741,6 +753,12 @@ pub enum Event {
     },
     /// Every genre in the library.
     Genres(Vec<Genre>),
+    /// The Genres sheet's list: the genres of the kind asked for, and how
+    /// many of each kind the server has (`None` from one that predates the
+    /// filter, which answered every genre whatever was asked).
+    DjGenres { source: GenreSource, genres: Vec<Genre>, sources: Option<crate::api::types::GenreSources> },
+    /// The songs last played on `identity`, newest first, each once.
+    DjRecent { identity: String, tracks: Vec<Track> },
     /// The genres could not be fetched — the picker's empty state.
     GenresFailed(String),
     /// A journey's stops, in order. `note` explains a short or empty arc —
@@ -1421,6 +1439,37 @@ pub(crate) fn genres_event(result: Result<Vec<crate::api::types::Genre>, ApiErro
     }
 }
 
+/// The Genres sheet's answer, shaped like [`genres_event`].
+pub(crate) fn dj_genres_event(
+    source: GenreSource,
+    result: Result<crate::api::types::GenresResponse, ApiError>,
+) -> Result<Event, ApiError> {
+    match result {
+        Ok(answer) => Ok(Event::DjGenres { source, genres: answer.genres, sources: answer.sources }),
+        Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+        Err(e) => Ok(Event::GenresFailed(e.to_string())),
+    }
+}
+
+/// How many plays Recently played asks for, and how many songs it offers:
+/// the history repeats songs, and the list names each once.
+pub(crate) const DJ_RECENT_ASK: u32 = 60;
+pub const DJ_RECENT_LIMIT: usize = 20;
+
+/// Recently played's answer: the songs newest first, each once, twenty at
+/// most. A failure is an empty list — the row is then left out, which is
+/// all there is to say about it.
+pub(crate) fn dj_recent_event(identity: String, result: Result<Vec<Track>, ApiError>) -> Event {
+    let mut seen = std::collections::HashSet::new();
+    let tracks = result
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !t.filepath.is_empty() && seen.insert(t.filepath.trim_start_matches('/').to_string()))
+        .take(DJ_RECENT_LIMIT)
+        .collect();
+    Event::DjRecent { identity, tracks }
+}
+
 /// A playlist management verb, with the name its failure is worded around.
 pub(crate) enum PlaylistVerb<'a> {
     Create(&'a str),
@@ -1861,6 +1910,10 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         }
         ApiCmd::PlaylistNames { .. } => Ok(playlist_names_event(c.playlists())),
         ApiCmd::Genres { .. } => genres_event(c.genres()),
+        ApiCmd::DjGenres { source, .. } => dj_genres_event(source, crate::api::wait(c.genre_list_async(source))),
+        ApiCmd::DjRecent { identity, .. } => {
+            Ok(dj_recent_event(identity, crate::api::wait(c.recently_played_async(DJ_RECENT_ASK))))
+        }
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
         }
@@ -2524,12 +2577,27 @@ impl DjLearner {
         }
     }
 
+    /// A lane takes back what it let go of: its sonic settings changed, so
+    /// the pool gets another go with them.
+    fn unsuppress(&mut self, identity: &str, epoch: u64) {
+        if let Some(lanes) = self.suppressed.get_mut(identity) {
+            lanes.remove(&epoch);
+        }
+    }
+
     fn all_suppressed(&self, identity: &str, epoch: u64, keys: &[&str]) -> bool {
         self.suppressed
             .get(identity)
             .and_then(|lanes| lanes.get(&epoch))
             .is_some_and(|set| keys.iter().all(|k| set.contains(*k)))
     }
+}
+
+/// The sonic settings changed while a lane was picking without the pool
+/// (the Sonic similarity sheet): the lane asks for it again — the record's
+/// `retrySonic`.
+pub(crate) fn dj_retry_sonic(identity: &str, epoch: u64) {
+    learner().unsuppress(identity, epoch);
 }
 
 /// The key a Joi rejection names — `"<key>" is not allowed`, its quotes
@@ -2765,12 +2833,14 @@ pub(crate) async fn dj_probe(client: &Client) -> Option<DjServerInfo> {
             discovery: info.features.discovery,
             discovery_ready: info.features.discovery_ready,
             libraries: info.user.vpaths,
+            mood_filters: info.features.mood_filters,
         }),
         Err(_) => client.ping_async().await.ok().map(|ping| DjServerInfo {
             version: None,
             discovery: ping.discovery,
             discovery_ready: None,
             libraries: ping.vpaths,
+            mood_filters: ping.mood_filters,
         }),
     }
 }
@@ -4029,6 +4099,58 @@ mod tests {
         learned.suppress("http://s", 7, &SONIC_KEYS);
         assert!(learned.all_suppressed("http://s", preview_lane(7), &SONIC_KEYS));
         assert!(learned.all_suppressed("http://s", 7, &SONIC_KEYS));
+    }
+
+    #[test]
+    fn a_lane_takes_back_the_pool_it_let_go_of() {
+        // The record's retrySonic: the sonic settings changed, so the lane
+        // asks for the pool again — and only that lane.
+        let mut learned = DjLearner::default();
+        learned.suppress("http://s", 7, &SONIC_KEYS);
+        learned.suppress("http://s", preview_lane(7), &SONIC_KEYS);
+        learned.unsuppress("http://s", 7);
+        assert!(!learned.all_suppressed("http://s", 7, &SONIC_KEYS), "another go");
+        assert!(learned.all_suppressed("http://s", preview_lane(7), &SONIC_KEYS), "the preview's lane is its own");
+        learned.unsuppress("http://elsewhere", 7);
+        // What a server REFUSED stays refused: that is not the lane's to take back.
+        assert!(learned.learn("http://s", "limit"));
+        learned.unsuppress("http://s", 7);
+        let mut body = serde_json::json!({"limit": 4});
+        assert_eq!(learned.filter("http://s", 7, &mut body), vec!["limit"]);
+    }
+
+    #[test]
+    fn recently_played_names_each_song_once_newest_first_twenty_at_most() {
+        let song = |path: &str| Track { filepath: path.into(), metadata: Default::default() };
+        let mut plays = vec![song("lib/a.mp3"), song("/lib/a.mp3"), song("lib/b.mp3"), song(""), song("lib/a.mp3")];
+        plays.extend((0..40).map(|i| song(&format!("lib/more-{i}.mp3"))));
+        let Event::DjRecent { identity, tracks } = dj_recent_event("http://s".into(), Ok(plays)) else {
+            panic!("its own event")
+        };
+        assert_eq!(identity, "http://s");
+        assert_eq!(tracks.len(), DJ_RECENT_LIMIT);
+        assert_eq!(tracks[0].filepath, "lib/a.mp3");
+        assert_eq!(tracks[1].filepath, "lib/b.mp3", "one row whether its path came with the leading slash or not");
+        // A failure is an empty list: the row is then left out.
+        let failed = dj_recent_event("http://s".into(), Err(ApiError::Network("down".into())));
+        assert!(matches!(failed, Event::DjRecent { tracks, .. } if tracks.is_empty()));
+    }
+
+    #[test]
+    fn the_genres_sheets_answer_carries_what_the_server_has_of_each_kind() {
+        let answer = crate::api::types::GenresResponse {
+            genres: vec![Genre { name: "Dub".into(), track_count: Some(3) }],
+            sources: Some(crate::api::types::GenreSources { tag: 2, model: 5 }),
+        };
+        let event = dj_genres_event(GenreSource::Model, Ok(answer)).expect("an answer");
+        let Event::DjGenres { source, genres, sources } = event else { panic!("its own event") };
+        assert_eq!(source, GenreSource::Model);
+        assert_eq!(genres.len(), 1);
+        assert!(sources.is_some_and(|s| s.offers_choice()));
+        // A dead session is the session's; anything else is the sheet's to say.
+        assert!(dj_genres_event(GenreSource::Tag, Err(ApiError::Unauthorized)).is_err());
+        let failed = dj_genres_event(GenreSource::Tag, Err(ApiError::Network("down".into()))).expect("said in the sheet");
+        assert!(matches!(failed, Event::GenresFailed(_)));
     }
 
     #[test]

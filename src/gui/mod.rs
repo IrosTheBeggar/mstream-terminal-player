@@ -169,11 +169,17 @@ pub(crate) enum Act {
     /// A queue row: click plays it, its hover [x] removes it.
     QueueRow(usize),
     QueueRemove(usize),
-    /// Auto DJ's empty-queue chooser (contract clause 2) and the empty
-    /// queue's openers (clause 16).
+    /// Auto DJ's opening question (contract clause 2) — its two answers,
+    /// the box, Recently played's list and a song of it — and the empty
+    /// queue's openers (clause 16), its own Recently played list among
+    /// them.
     DjChoose(usize),
     DjRemember,
     DjCancel,
+    DjRecentToggle,
+    DjRecentPick(usize),
+    DjRecentOpen,
+    DjRecentClose,
     /// The [X] on an armed pick's banner: the pick let go (Esc's twin).
     CaptureCancel,
     DjSurprise,
@@ -212,28 +218,19 @@ pub(crate) enum Act {
     /// clause 33): the opener and the strip's words, the modal's stops and
     /// its `[ Done ]`, the strip's `[X]`.
     Mood(moods::MoodAct),
-    /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
-    /// radios, chips, the keyword field, the genre and server pickers —
-    /// starting with its one primary: Start through the toggle (the
-    /// opening question included), Stop wherever the DJ is armed.
+    /// The Auto DJ room (auto-dj contract, clauses 40–58): its one primary
+    /// — Start through the toggle (the opening question included), Stop
+    /// wherever the DJ is armed — a row pressed by the pointer or by the
+    /// keyboard (its sheet, its list or its switch), Preview, First song's
+    /// list, a sheet's controls, and quick config over the bar.
     DjStartStop,
-    DjFocus(dj::Item),
-    DjStep(crate::tui::app::DjRow, i32),
-    DjSet(crate::tui::app::DjRow, u32),
-    DjAnchor(crate::dj::SonicAnchor),
-    DjEmpty(crate::dj::EmptyQueueStart),
-    DjGenreMode(crate::dj::GenreMode),
-    DjGenre(String),
-    DjPickGenres,
-    DjGenresClose,
-    DjKeywordFocus,
-    DjKeywordAdd,
-    DjKeywordRemove(String),
-    DjSource(String),
+    DjRow(dj::Row),
+    DjRowKey(dj::Row),
     DjPreview,
-    DjServerPick,
-    DjServer(usize),
-    DjServerClose,
+    DjFirst(crate::dj::EmptyQueueStart),
+    DjFirstClose,
+    DjSheet(dj::SheetAct),
+    DjQuick(dj::QuickAct),
     // ── Sonic path (see gui::sonic) ─────────────────────────────────────
     /// A setup card's body or a results chip: open the pick-methods menu.
     SonMenu(crate::tui::app::SonicSide),
@@ -338,7 +335,7 @@ pub(crate) enum Act {
 
 /// The lists the shell scrolls, one per viewport — the App's browse panes
 /// as each room shows them, and the shell's own (the queue panel, the
-/// sonic results, the DJ room's body and its genre picker).
+/// sonic results, the DJ's Genres sheet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum List {
     Files,
@@ -349,8 +346,9 @@ pub(crate) enum List {
     PlaylistTracks,
     Queue,
     Sonic,
-    DjRoom,
-    DjGenres,
+    /// The open DJ sheet's list: Genres' genres, Play from's servers and
+    /// folders.
+    DjSheet,
     /// The Discover room's table: its rows live on the App (`App.taste`).
     Discover,
 }
@@ -363,7 +361,7 @@ impl List {
             List::Files => Some(Tab::Files),
             List::Search => Some(Tab::Search),
             List::Library | List::AlbumTracks | List::Playlists | List::PlaylistTracks => Some(Tab::Library),
-            List::Queue | List::Sonic | List::DjRoom | List::DjGenres | List::Discover => None,
+            List::Queue | List::Sonic | List::DjSheet | List::Discover => None,
         }
     }
 }
@@ -622,7 +620,8 @@ pub(crate) struct Gui {
     /// Add from YouTube: the server's facts, the job tracker, the room's
     /// form and the From YouTube list.
     ytdl: ytdl::YtUi,
-    /// The Auto DJ room: its cursor, scroll, inputs and pickers.
+    /// The Auto DJ room: its cursor, the sheet over it, its lists and the
+    /// bar's quick config.
     dj: dj::DjUi,
     /// The Library rooms: the list's scroll and the artist wall's state.
     library: library::LibraryUi,
@@ -662,6 +661,9 @@ impl Gui {
         // No connect screen here: the servers surfaces are this shell's own,
         // and the transport keeps working while a session is down.
         app.connect_screen = false;
+        // Play from is this shell's (the room's sheet, quick config): Start
+        // goes to its home.
+        app.dj_shows_play_from = true;
         let mut ui = Surface::new();
         ui.key_hints = config.gui.key_hints;
         // The Discover room's memories of its own (discovery-page clauses
@@ -726,8 +728,10 @@ impl Gui {
         self.app.note_pending(&effects);
         self.pending.extend(effects);
         // Every App call's batch comes through here: a mood ask the App
-        // just put back takes the room's choice back with it.
+        // just put back takes the room's choice back with it, and an armed
+        // DJ whose queue ran out asks what was played last.
         moods::follow_ask(self);
+        dj::follow(self);
     }
 
     fn forward(&mut self, action: Action) {
@@ -1894,6 +1898,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
             shuffle: gui.app.queue.shuffle,
             repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
             autodj: gui.app.dj_armed(),
+            quick_open: gui.dj.quick.is_some(),
             queue_open: gui.queue_open,
             has_art,
             footer: gui.footer(),
@@ -3611,8 +3616,7 @@ impl Gui {
             List::PlaylistTracks => &mut self.playlists.tracks,
             List::Queue => &mut self.queue_view,
             List::Sonic => &mut self.sonic.results,
-            List::DjRoom => &mut self.dj.body,
-            List::DjGenres => &mut self.dj.genres,
+            List::DjSheet => &mut self.dj.list,
             List::Discover => &mut self.discover.view,
         }
     }
@@ -3643,8 +3647,7 @@ impl Gui {
             List::PlaylistTracks => &self.playlists.tracks,
             List::Queue => &self.queue_view,
             List::Sonic => &self.sonic.results,
-            List::DjRoom => &self.dj.body,
-            List::DjGenres => &self.dj.genres,
+            List::DjSheet => &self.dj.list,
             List::Discover => &self.discover.view,
         }
     }
@@ -3844,6 +3847,14 @@ impl Gui {
         if self.actions.sheet.as_ref().is_some_and(|s| s.links) && keep::links_wheel(self, delta) {
             return;
         }
+        // The DJ's layers scroll their own rows under the wheel, over
+        // whatever screen they stand on: a sheet's list, a Recently played
+        // list. (They are modals, and a modal otherwise swallows the wheel
+        // below — which is how the old genre picker's never turned.)
+        if dj::modal_open(self) {
+            dj::wheel(self, delta);
+            return;
+        }
         // The Admin screen's log scrolls under the wheel; a wheel over the
         // hosted room reached the room through `admin::pointer`.
         if self.screen == Screen::Admin {
@@ -3892,9 +3903,10 @@ impl Gui {
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
             // Settings scrolls nothing itself; its Manage-servers room's
-            // list does. The Auto DJ room's body and genre picker scroll,
-            // and the Add-torrent room's file picker; Add from YouTube's
-            // windows took the wheel above, and its room scrolls nothing.
+            // list does. The Auto DJ room's sheets and lists scroll (its
+            // rows never do), and the Add-torrent room's file picker; Add
+            // from YouTube's windows took the wheel above, and its room
+            // scrolls nothing.
             NavId::Settings => {
                 if self.in_settings_room(SettingsRoom::Servers) {
                     servers::wheel(self, delta)

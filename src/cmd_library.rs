@@ -227,6 +227,10 @@ pub fn dj(args: DjArgs) -> i32 {
                 recent_artists: Vec::new(),
                 opener: false,
                 server_version: None,
+                // A one-shot command keeps to no mood: the room's filter is
+                // the session's, and nothing here asked the server for its
+                // scores.
+                mood_scores: false,
                 settings,
             };
             let mut request = ask.request();

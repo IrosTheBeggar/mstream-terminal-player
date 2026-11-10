@@ -589,3 +589,11 @@ forms (ru 2, 5, 21; pl 1, 2, 5; ja one form).
   the LIBRARY heading — and Rated stands on 10, 9 or 8. The TOOLS group
   packs the rooms it shows (the owner's call, the same day), and the steps come only where the last
   tool shown would reach Settings; LIBRARY keeps its fixed lines.
+- **2026-11-10 — The modal has a third opener: Auto DJ's Smart filters**
+  (clause 32; auto-dj.md, clause 55). The rebuilt Auto DJ room's Smart
+  filters row — and quick config's — open this modal over whatever screen
+  stands, its border reading `Smart filters · {value}` in the value's tone
+  where a room's reads `Filters`; no SORT row; the filter it edits is the
+  DJ's own (`[player.dj]` `mood_*`), session-wide, never a room's. Offered
+  where the DJ's server said it has scores and is not a peer. The rows,
+  the stops, the draft law and `[ Done ]` are this contract's, unchanged.

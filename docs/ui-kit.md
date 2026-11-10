@@ -213,7 +213,13 @@ the accent slab, hover BRIGHT + BOLD. A click on a row picks it and
 closes the list; Enter picks the cursor; Esc, the key again, or a click
 anywhere else closes and keeps — the whole screen registers that close
 under the rows. No title bar, no `[X]`. Consumers: the GUI header's
-server switcher, the stats page's period.
+server switcher, the stats page's period, the Auto DJ room's First song
+row — a row whose chevron is `▾`, the list hung under the row with its
+right edge one cell past the chevron — and, hung from a modal's row and
+from a text button, the two Recently played lists (songs, not values: no
+`•`, a title and its artist DIM; at most twenty, as many as the place
+affords showing at once — ↑ ↓ and the wheel walk the cursor and the
+window follows it).
 
 ### Context list
 The verbs a thing has beyond its one hover verb, hung from the thing
@@ -295,15 +301,50 @@ caret that only sometimes blinks is worse than one that always does. The
 wizard, the admin rooms and the web shell still draw the steady `▏`;
 they can adopt the clock the same way.
 
-**A settings room's rows** (the Auto DJ room, from its canvas's E′ board,
-2026-09-23): the label at the left, indented two cells for a sub-row, and
-every control at one value column — a bar in the volume widget's grammar
-(`- ▰▰▰▰▰▱▱▱▱▱ +  55% or closer`: `-` / `+` step, a cell sets), the `(•)`
-choices side by side, a value in words dim — with a blank row between
-settings and no description beside a row. The row under the pointer, else
-the keyboard cursor's, explains itself in a **help line** under the body:
-a dim rule and two wrapped lines. Descriptions belong there, whole, not
-clipped at the cell edge beside every row.
+**A settings room's rows: one row per setting, one sheet behind each**
+(the Auto DJ room, from the canvas "Auto DJ Panel · GUI", 2026-11-10;
+auto-dj contract clauses 40–58. Before: the E′ board of 2026-09-23 — every
+control on the page at one value column, and a help line under the body).
+The room is a column of rows at ONE width (47 cells — no wider in a wider
+room) under DIM UPPERCASE group headers: a row is its **name** at the
+left, its **value** ending two cells before the row's last, and a chevron
+on the last — `▸` where it opens a sheet, `▾` where a list hangs under
+it. The value says the setting's state in the row's own words and wears
+its tone: DIM at rest ("Any", "Off"), **OK** while the setting is doing
+something, **GOLD behind `!`** where it wants attention. The keyboard's
+hand is the accent slab the row's width; the pointer makes the name and
+the chevron BRIGHT + BOLD; a click or Enter opens. The one setting that is
+a plain yes or no keeps its `[✓]` on the row and its explanation DIM under
+it (Harmonic mixing) — a switch needs no sheet.
+- **A row the server cannot do stays in its place**, DIM whole: its
+  reason ("Needs server 6.25+", "Discovery off", "Not on peers") stands
+  where the value would, ending at the values' column, with no chevron
+  and no click; the keyboard walks past it. Where a locale's reason is
+  longer than the value's cells, the name gives its cells up — the reason
+  is always whole. Rows never move.
+- **The room never scrolls.** Its rows stand whole from the floor up
+  (100×24); spare rows come back in a fixed order as the window grows —
+  the blank rows between groups, a hint line, the tall button, the blank
+  rows around the title.
+- **The sheet** is the kit modal (66 cells; over the room, or the band the
+  mood Filters use where the room is short): the row's name on the top
+  border and the value after it, in its tone, **following the draft**;
+  `[✓] On` first where the setting has a switch, and what the switch
+  gates DIM and unclickable while it is off; one DIM help line; the foot
+  `[ Done ]` at the right, with a DIM `clear` three cells to its left only
+  while something is set. No `[X]`. A sheet edits a **draft**: Done, Enter
+  and Esc all close it and apply the draft whole; a sheet closed as it
+  was opened writes nothing. Tab and the arrows walk its stops, Space
+  presses the one under the hand.
+- **A bar in a sheet** is the volume widget's (`- ▰▰▰▰▰▱▱▱▱▱ +  4 songs`):
+  **a cell a step** — the bar is as many cells as the setting has steps
+  (25 songs, 20 BPM), or a whole number of steps a cell where that would
+  not fit (the match's 30–80 % at two points a cell). `-` `+` and ← →
+  step, a click on a cell sets.
+- **A typed value in a sheet** (Length's two bounds): the name, `-`, the
+  text ending at one column with the caret after it, `+`; the field types
+  at its end, so ← → are its steps; a text that does not read shows GOLD
+  and Done leaves the stored value alone.
 
 ### Path input + completion
 Suggestions under the input, max 6 visible — the list WINDOWS around the
@@ -397,15 +438,16 @@ radio, is **the group's fourth stop**: choice semantics, so ticked it is
 ticked from the start and keeps its own tick whatever the choice, so ↓
 onto the radio above lands on it while ticked, ↑ unticks it, ↓ ticks it
 again and a click toggles it.) **Choices side by side**
-(`(•) music   ( ) copies`, the Auto DJ room's rows and Where copies
+(`(•) music   ( ) copies`, the Auto DJ sheets' rows and Where copies
 land's libraries — no label there, the hand showing on the chosen name
 ACCENT BOLD): one row, three cells between, the chosen `(•)` OK and
 its name BOLD, ← → choose and a click chooses; where they would not all
 fit the row starts at the chosen one behind `…` (that cell a click that
 steps back), and only a choice with room for its dot, a space and a
 cell of its name is drawn — the last clipped at the last cell, the rest
-← →'s alone, never over the border (the Auto DJ room's `draw_choice`
-rule). (Logged exceptions in the mood filter modal, library-rooms
+← →'s alone, never over the border (Where copies land's rule; the
+Auto DJ sheets stand theirs at fixed columns of the 66 cells, measured
+to hold every locale's words). (Logged exceptions in the mood filter modal, library-rooms
 clause 32 and its 2026-10-31 log: its **mood scales** are radio rows that
 may stand with **none chosen** — pressing the chosen value lets it go —
 and wear `(•)` OK with the label OK BOLD, green meaning "a mood is on";
@@ -434,8 +476,10 @@ a stowed cursor SHOWS it where the list keeps it and moves nothing; the
 next press moves it. A list with a resting place of its own picks up
 there — the App's panes rest on the first row past `..`, on the row a
 click last acted on, on the trail's row after Back; the queue on the
-playing row — and a list with none (the Settings rows, the Auto DJ room,
-the sonic setup) picks up at the top on ↓ and at the bottom on ↑. Typing
+playing row — and a list with none (the Settings rows, the sonic setup)
+picks up at the top on ↓ and at the bottom on ↑; the Auto DJ room picks
+up on Start / Stop on ↓ (Preview is the row above it) and on its last
+row on ↑. Typing
 into the bar's filter or the search box picks the cursor up too — the
 narrowing IS walking the list — so type, Enter, Enter opens the first
 match. **Esc stows it**, before Esc means anything else in the room
@@ -807,7 +851,12 @@ GUI's window) the room's field is its field.
 five rows at the bottom, the tips line under them only while keyboard hints
 are on. The gold rule is the seek bar (times at its ends, the played part
 gold). Beneath it, three rows of compact tall frames: auto-dj a few
-columns in from the left edge in its state colour, then ONE group centred
+columns in from the left edge in its state colour — a **split button**
+since 2026-11-10, one rounded frame with a rule between its halves
+(`│ auto-dj │ ▴ │`): the word is the toggle, the chevron opens **quick
+config**, a 42-cell popover standing on the bar from the rule's column
+(the DJ's server, sonic and its anchor, Smart filters, and a door to the
+room; a choice there applies at once), `▾` while it is up — then ONE group centred
 in the span before
 the card — repeat, prev, play, next, shuffle: prev and next rounded in
 the text colour BOLD, play THICK in GOLD (`tall_frame_bordered`, the seek

@@ -1477,7 +1477,7 @@ pub(crate) mod stats;
 mod track;
 pub use track::{PlaylistNames, RatingWrite};
 #[allow(unused_imports)] // the browser shell has no room yet
-pub use autodj::DjEdit;
+pub use autodj::{DjEdit, DjGate};
 pub(crate) mod entries;
 mod nav;
 mod session;
@@ -1901,6 +1901,12 @@ pub struct GenrePicker {
     pub loading: bool,
     /// Why the list could not be fetched, when it could not.
     pub failed: Option<String>,
+    /// How many genres of each kind the server has — `None` until it says,
+    /// and from one that predates the choice (the Genres sheet then offers
+    /// no kinds).
+    pub sources: Option<crate::api::types::GenreSources>,
+    /// The kind the list in hand was asked under.
+    pub shown: Option<GenreSource>,
 }
 
 /// The next track, as announced to the engine for a crossfade — plus
@@ -2125,6 +2131,18 @@ pub struct App {
     pub dj_keyword: Option<String>,
     /// The server an opening question is about, until it is answered.
     dj_target: Option<String>,
+    /// Play from's home: where Start arms the DJ, whichever server is
+    /// browsed — the one chosen in the room, and whichever the DJ last ran
+    /// on. `None` until then: the session's stands in.
+    pub dj_home: Option<String>,
+    /// Whether this shell shows Play from (the GUI's room and its quick
+    /// config). Only then does Start go to the home: a shell with no such
+    /// row — the TUI's tab — arms the server it stands on, as it always
+    /// has, and that one becomes the home.
+    pub dj_shows_play_from: bool,
+    /// The songs last played on a server, for Recently played: whose they
+    /// are, and the list once it has answered (`None` while it is out).
+    pub dj_recent: Option<(String, Option<Vec<Track>>)>,
     /// The old `autodj` mode was on: arm on the session's server at start.
     dj_migrate: bool,
     /// How Auto DJ chooses (clause 51).
@@ -2414,6 +2432,9 @@ impl App {
             dj_chooser: None,
             dj_keyword: None,
             dj_target: None,
+            dj_home: None,
+            dj_shows_play_from: false,
+            dj_recent: None,
             dj_migrate: false,
             dj: dj::Settings::default(),
             dj_panel: DjPanel::default(),
@@ -2522,6 +2543,7 @@ impl App {
         self.queue.repeat = Repeat::from_label(&prefs.repeat);
         self.queue.shuffle = prefs.shuffle;
         self.dj_server = prefs.autodj_server.clone().filter(|s| !s.trim().is_empty());
+        self.dj_home = prefs.autodj_home.clone().filter(|s| !s.trim().is_empty());
         self.dj_migrate = self.dj_server.is_none() && !prefs.autodj.is_empty() && prefs.autodj != "off";
         // The same clamp as the engine's, so the file and the behavior
         // agree; anything unreadable costs the blend and nothing else.
@@ -2547,6 +2569,7 @@ impl App {
             repeat: self.queue.repeat.label().to_string(),
             shuffle: self.queue.shuffle,
             autodj_server: self.dj_server.clone(),
+            autodj_home: self.dj_home.clone(),
             crossfade_seconds: self.crossfade,
             gapless: self.gapless,
             blend_skips: self.blend_skips,
@@ -6463,6 +6486,8 @@ impl App {
             | Event::Journey { .. }
             | Event::Genres(_)
             | Event::GenresFailed(_)
+            | Event::DjGenres { .. }
+            | Event::DjRecent { .. }
             | Event::AutoDjPick { .. }
             | Event::DjProbed { .. }) => self.consume_dj(event),
             // A random pick lands on the sonic end that asked for it, the
