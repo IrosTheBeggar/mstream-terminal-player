@@ -2933,6 +2933,13 @@ setting no locale, prints in English.
     `@err 7 format` to. The offer goes by `clock=` alone now, the key
     that did come with it; such a board says "v0.13.0 can't format a
     card." where the format would be, as v0.11.0 does.
+  - **Next sync counted plays already sent** (found while there, not one
+    of the review's). *Send the plays* settles them on this computer and
+    leaves the card's marks to a sync, so the card's log holds them as new
+    until one runs: the look after counted them to send again and offered
+    the link again, which then sent none. Next sync and Details' *Plays*
+    count the plays that wait for the card's server, which is what a sync
+    sends.
   - **A waiting play was forgotten when the card's mark passed it.** The
     marks rise over a seq the log holds no more, as over one another
     computer's sync settled, and a play waiting here below them was

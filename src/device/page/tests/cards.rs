@@ -191,7 +191,7 @@ fn longest(drive: &str, server: &str, now: u64) -> CardView {
         if let Next::Plan(plan) = &mut v.next {
             let long = "Velvet Static/Harbour Songs (Deluxe Edition)/04 - Low Tide (Extended Mix).flac".to_string();
             plan.removals = std::iter::once(long).chain((0..1_234).map(|i| format!("x/{i}.flac"))).collect();
-            let tally = crate::device::card::history::Tally { owed: 1_234, clock: 99, own: 1_234, ..Default::default() };
+            let tally = crate::device::card::history::Tally { due: 1_234, clock: 99, own: 1_234, ..Default::default() };
             plan.tally = Some(tally);
         }
     })
@@ -259,6 +259,7 @@ fn every_locales_facts_keep_to_their_line_with_the_longest_values() {
             for whole in [server_f, plays, player] {
                 assert!(!whole.1.contains('…'), "{code}: {whole:?}");
             }
+            assert!(plays.1.contains("1,234") && plays.1.contains("99"), "{code}: the counts it has: {plays:?}");
             assert!(server_f.1.starts_with(server), "{code}: {server_f:?}");
             assert!(player.1.contains("mp3,flac,opus,wav"), "{code}: {player:?}");
         }

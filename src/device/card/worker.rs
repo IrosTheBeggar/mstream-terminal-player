@@ -2243,8 +2243,12 @@ fn planned(synced: &sync::Synced, now: u64) -> Next {
         sync::End::Halted(halt) if synced.summary.is_none() => Next::Refused(halt.to_string()),
         _ => {
             let Some(s) = &synced.summary else { return Next::Unasked };
+            // The plays a sync would send: those waiting for this server.
+            // Not every new play that maps: the ones *Send the plays*
+            // settled are new until a sync stores the card's marks, and
+            // would be counted to send again.
             let tally = synced.plays.clone();
-            let plays = tally.as_ref().map_or(0, |t| t.owed.max(t.due));
+            let plays = tally.as_ref().map_or(0, |t| t.due);
             Next::Plan(Box::new(Planned {
                 asked: now,
                 new: s.fetches,

@@ -1333,7 +1333,7 @@ fn details_rows(card: &CardView, w: u16) -> Vec<Row> {
             } else {
                 t!(
                     "dev.card.fact_plays_v",
-                    n = fmt_count(tally.owed.max(tally.due) as u64),
+                    n = fmt_count(tally.due as u64),
                     old = fmt_count(tally.clock as u64),
                     mine = fmt_count(tally.own as u64)
                 )

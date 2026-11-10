@@ -10,7 +10,6 @@ use std::sync::mpsc::Receiver;
 use super::*;
 use crate::device::card::contract::mppl::{KIND_PLAY, Slot as Play};
 use crate::device::card::engine::fatsim::FatSim;
-use crate::device::card::history::tests::MemStore;
 use crate::device::card::sync::tests::{
     Fake, SERIAL, Scratch, card, logged, no_peers, server, sync_now, with_hidden, with_waves,
 };
@@ -51,12 +50,28 @@ impl Volumes for Shelf {
     }
 }
 
-/// This computer, in memory: its cards.json, a fixed clock, and ids that
-/// never repeat from one session to the next.
+/// This computer, in memory: its cards.json, its plays' outbox (one for
+/// every job, as `card-plays.json` is), a fixed clock, and ids that never
+/// repeat from one session to the next.
 #[derive(Default)]
 pub(crate) struct Here {
     cards: Mutex<Cards>,
     seed: std::sync::atomic::AtomicU64,
+    outbox: Arc<Mutex<Option<String>>>,
+}
+
+/// The outbox every job of a [`Here`] reads and writes.
+struct Outbox(Arc<Mutex<Option<String>>>);
+
+impl history::Store for Outbox {
+    fn load(&self) -> Result<Option<String>, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
+    fn save(&self, text: &str) -> Result<(), String> {
+        *self.0.lock().unwrap() = Some(text.to_string());
+        Ok(())
+    }
 }
 
 /// Each session's clock and ids from `seed`: a fixed time.
@@ -85,7 +100,7 @@ impl Home for Here {
     }
 
     fn plays(&self) -> Rc<dyn history::Store> {
-        Rc::new(MemStore::default())
+        Rc::new(Outbox(self.outbox.clone()))
     }
 
     fn federation(&self, _cards: Vec<PathBuf>) -> Result<Federation, String> {
@@ -1169,6 +1184,43 @@ fn the_plays_of_a_card_for_someone_else_are_sent_nowhere() {
     assert!(!rig.fold.notes.iter().any(|n| matches!(n, Note::PlaysSent { .. })), "{:?}", rig.fold.notes);
     let lib = fake.lock().unwrap();
     assert!(lib.plays.is_empty() && !lib.asked.iter().any(|a| a.ends_with("/stats/plays")), "{:?}", lib.plays);
+}
+
+/// *Send the plays* settles them on this computer, and the card's marks
+/// wait for a sync: until then its log's plays are new at every look. The
+/// look after counts none to send, where it counted them all again and
+/// offered to send them.
+#[test]
+fn the_plays_sent_are_not_counted_to_send_again() {
+    let scratch = Scratch::new("worker-sent");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&sim, "Album B/01.mp3", 1, 1_791_850_000_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    drop(sim);
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("a play to send", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(|p| p.plays == 1))
+    });
+    rig.send(Cmd::Plays { key: key.clone() });
+    let sent = Note::PlaysSent { n: 1, server: "Home".into() };
+    rig.until("the play sent", |f| f.notes.contains(&sent));
+    assert_eq!(fake.lock().unwrap().plays.len(), 1);
+    let wanted = key.clone();
+    rig.until("the look after counts none to send", |f| {
+        // New still (no sync has stored the card's mark), and settled.
+        let none = |p: &Planned| p.plays == 0 && p.tally.as_ref().is_some_and(|t| t.new == 1 && t.due == 0);
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(none))
+    });
 }
 
 #[test]
