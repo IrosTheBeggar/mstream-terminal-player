@@ -2988,4 +2988,6 @@ setting no locale, prints in English.
     too long already was. For a fault the software can't know of, a batch
     refused whole goes one play at a time, and the play refused alone is
     dropped; when the server takes no call at all the fault may be the
-    request's, and nothing is dropped.
+    request's, and nothing is dropped but a play 30 days old, as the
+    other waits end: a play refused with nothing beside it to prove the
+    request held its device's marks for good otherwise.

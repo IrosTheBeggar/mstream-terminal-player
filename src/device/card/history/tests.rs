@@ -1281,8 +1281,9 @@ fn a_play_the_server_would_refuse_settles_unsent_and_the_rest_go() {
 /// batch then goes alone: the one refused alone settles as a play not sent
 /// does, the rest as the server answers them. When the server takes no
 /// call at all the fault may be the request's: nothing settles, and every
-/// play waits. A start past 2^53 − 1, which the schema refuses, is known
-/// ahead and never sent.
+/// play waits, 30 days from its start at most (past that it settles
+/// unsent, so it never holds its device's mark for good). A start past
+/// 2^53 − 1, which the schema refuses, is known ahead and never sent.
 #[test]
 fn a_batch_the_server_refuses_goes_one_by_one_and_only_the_play_refused_alone_settles() {
     let scratch = Scratch::new("singly");
@@ -1322,9 +1323,16 @@ fn a_batch_the_server_refuses_goes_one_by_one_and_only_the_play_refused_alone_se
     assert_eq!(calls(&fake), [5, 5, 1, 1, 1, 1, 1]);
     assert_eq!(history.marks(), []);
     assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 5, "every play waits");
+    // Not for good: 30 days from their start, they settle unsent.
+    let mut late = History::new(store.clone(), false, none());
+    late.look(&sim, Some(&root), 0);
+    late.post(&client, &talk(HOME), true, true, NOW + 31 * DAY);
+    let t = &late.tally;
+    assert_eq!((t.accepted, t.refused, t.due, t.waiting, t.failed), (0, 5, 0, 0, false), "{t:?}");
+    assert_eq!(late.marks(), [ack(ONE, EPOCH_1, 7)]);
 
     // One play alone, refused: nothing was taken beside it to tell its
-    // fault from the request's, so it waits too.
+    // fault from the request's, so it waits too, and as long at most.
     let alone = Scratch::new("singly-alone");
     let empty = card(&alone, Golden::One, &[]);
     let root_alone = root_of(&empty);
@@ -1333,11 +1341,20 @@ fn a_batch_the_server_refuses_goes_one_by_one_and_only_the_play_refused_alone_se
     let mut m = Mstream::default();
     m.refuses.insert(lone.id());
     let (client, fake) = server(m);
-    let mut history = History::new(Rc::new(MemStore::default()), false, none());
-    history.look(&empty, Some(&root_alone), 0);
-    history.post(&client, &talk(HOME), true, true, NOW);
-    let t = &history.tally;
-    assert_eq!((t.refused, t.waiting, t.failed, calls(&fake)), (0, 1, true, vec![1, 1]), "{t:?}");
+    let kept = Rc::new(MemStore::default());
+    let post_at = |now: u64| {
+        let mut history = History::new(kept.clone(), false, none());
+        history.look(&empty, Some(&root_alone), 0);
+        history.post(&client, &talk(HOME), true, true, now);
+        let t = &history.tally;
+        ((t.refused, t.waiting, t.failed), history.marks())
+    };
+    assert_eq!(post_at(NOW), ((0, 1, true), vec![]));
+    assert_eq!(calls(&fake), [1, 1]);
+    let start = lone.started_at / 1000;
+    assert_eq!(post_at(start + 29 * DAY), ((0, 1, true), vec![]), "29 days old: it waits");
+    assert_eq!(post_at(start + 31 * DAY), ((1, 0, false), vec![ack(ONE, EPOCH_1, 1)]), "31 days old");
+    assert!(kept.outbox().cards[&CARD_ID].done.contains(&lone.id()), "settled, on disk");
 
     // A start no JSON number holds exactly: refused by the schema, known
     // ahead, and never in a request.

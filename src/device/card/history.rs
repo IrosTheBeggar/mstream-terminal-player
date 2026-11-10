@@ -54,13 +54,16 @@
 //! sent: it would fail every batch it rode in. One it refuses that this
 //! software didn't know to hold back fails its batch all the same: the
 //! batch's plays then go one by one, and the play refused alone settles so
-//! too. Plays of another server, and those of a post that failed, wait in
-//! the outbox for a run that reads their server. A card for someone else
-//! posts none: the plays that waited from before it was one wait on. A
-//! play that waits is never forgotten for the card's mark having passed it
-//! (its log lost the slot, or another computer's run settled it): it goes
-//! to its server when that is the one read, which answers a play it has as
-//! a duplicate, and is forgotten only by a run that reads another server.
+//! too, once the server has taken another call of the post. With none taken
+//! the fault may be the request's: the play waits like the others a server
+//! turns away, 30 days from its start at most. Plays of another server, and
+//! those of a post that failed, wait in the outbox for a run that reads
+//! their server. A card for someone else posts none: the plays that waited
+//! from before it was one wait on. A play that waits is never forgotten for
+//! the card's mark having passed it (its log lost the slot, or another
+//! computer's run settled it): it goes to its server when that is the one
+//! read, which answers a play it has as a duplicate, and is forgotten only
+//! by a run that reads another server.
 //!
 //! **The marks** ([`History::marks`]): each device and epoch's rises over
 //! the plays settled or not sent, to the first that waits. A sync stores
@@ -1176,9 +1179,16 @@ impl History {
             // Refused alone by a server that takes the others: the play's
             // own fault, and it settles as a play not sent does. With no
             // call taken the fault may be the request's (the client block,
-            // a schema this software doesn't know): nothing settles on it.
-            let unproven = !taken && !refused.is_empty();
-            for id in refused.into_iter().filter(|_| taken) {
+            // a schema this software doesn't know): the play waits, its
+            // wait ([`WAIT_MS`]) at most, as the others a server turns
+            // away, so it never holds its device's mark for good.
+            let old = |id: &String| {
+                let owed = self.owing.plays.iter().find(|o| &o.id == id);
+                owed.is_some_and(|o| past_wait(o, now_ms))
+            };
+            let (gone, unproven): (Vec<String>, Vec<String>) =
+                refused.into_iter().partition(|id| taken || old(id));
+            for id in gone {
                 self.tally.notes.push(format!("a play the server refuses alone settles unsent: {id}"));
                 self.tally.refused += settled.insert(id) as usize;
             }
@@ -1201,7 +1211,7 @@ impl History {
                 self.note(true, format!("the plays weren't posted: {e}"));
                 break;
             }
-            if unproven {
+            if !unproven.is_empty() {
                 let why = "the server refuses every call (400), whatever plays it holds";
                 self.note(true, format!("the plays weren't posted: {why}"));
                 break;
