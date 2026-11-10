@@ -80,7 +80,7 @@ fn a_card_alone_is_its_view_card_03s_rows_with_no_tab_row() {
     assert_eq!(page.hint(), "Enter sync · o settings · p send plays · e eject · d details · Esc library");
     // Two removals ask nothing: Enter is the sync.
     press(&mut page, KeyCode::Enter);
-    let key = "E:\\".to_string();
+    let key = "E:\\#1A2B-3C4D".to_string();
     assert_eq!(sent(&inbox), [worker::Cmd::Sync { key: key.clone(), allow: Box::default() }]);
     // Its links' keys.
     for (code, cmd) in [
@@ -384,7 +384,7 @@ fn the_card_put_in_takes_the_view_only_from_the_empty_card() {
     let frame = window(&mut page);
     assert!(frame.contains("Card in E:") && frame.contains("▱▱▱▱▱▱▱▱▱▱ reading the card…"), "{frame}");
     // Taken out: the empty card again.
-    fold.borrow_mut().apply(worker::Event::Gone { key: "E:\\".into() });
+    fold.borrow_mut().apply(worker::Event::Gone { key: "E:\\#1A2B-3C4D".into() });
     page.pump();
     assert!(window(&mut page).contains("Nothing plugged in"));
 }
@@ -417,7 +417,7 @@ fn a_new_card_offers_set_up_and_its_sheet_sets_it_up() {
     press(&mut page, KeyCode::Enter);
     let sent = sent(&inbox);
     let [worker::Cmd::SetUp { key, want }] = sent.as_slice() else { panic!("{sent:?}") };
-    assert_eq!((key.as_str(), want.name.as_str()), ("F:\\", "Gym"));
+    assert_eq!((key.as_str(), want.name.as_str()), ("F:\\#1A2B-3C4D", "Gym"));
     assert_eq!(want.server.as_deref(), Some("http://127.0.0.1:3000"), "the session's server");
 }
 
@@ -441,7 +441,7 @@ fn removals_past_fifty_ask_first_and_half_the_card_waits_for_its_box() {
     assert_eq!(page.hint(), "y remove and sync · Enter or Esc not now");
     press(&mut page, KeyCode::Esc);
     assert!(page.card.gate.is_none());
-    assert_eq!(sent(&inbox), [worker::Cmd::Dismiss { key: "E:\\".into() }]);
+    assert_eq!(sent(&inbox), [worker::Cmd::Dismiss { key: "E:\\#1A2B-3C4D".into() }]);
     press(&mut page, KeyCode::Enter);
     press(&mut page, KeyCode::Char('y'));
     let sent_now = sent(&inbox);
@@ -501,7 +501,7 @@ fn a_sync_draws_its_progress_and_x_stops_it_at_the_next_save() {
     assert!(frame.contains("▸ Details   Stop at the next save"), "{frame}");
     assert_eq!(page.hint(), "←→ switch · x stop at the next save · d details · Esc library");
     press(&mut page, KeyCode::Char('x'));
-    assert_eq!(sent(&inbox), [worker::Cmd::Stop { key: "E:\\".into() }]);
+    assert_eq!(sent(&inbox), [worker::Cmd::Stop { key: "E:\\#1A2B-3C4D".into() }]);
     // Stopping: the words say so in the link's place.
     let mut card = fold.borrow().cards[0].clone();
     card.run.as_mut().unwrap().stopping = true;
@@ -542,7 +542,7 @@ fn a_card_that_lacks_its_waveforms_says_so_and_enter_syncs_it() {
     assert!(frame.contains("Next sync     waveforms to add "), "{frame}");
     assert!(frame.contains("Sync ▸"), "{frame}");
     press(&mut page, KeyCode::Enter);
-    assert_eq!(sent(&inbox), [worker::Cmd::Sync { key: "E:\\".to_string(), allow: Box::default() }]);
+    assert_eq!(sent(&inbox), [worker::Cmd::Sync { key: "E:\\#1A2B-3C4D".to_string(), allow: Box::default() }]);
 
     // Beside the rest of a plan, last.
     let view = cards::with(cards::ready("E:", now()), |c| {
@@ -696,7 +696,7 @@ fn during_a_firmware_write_a_card_is_looked_at_only_and_x_still_stops_its_sync()
     press(&mut page, KeyCode::Enter);
     assert!(sent(&inbox).is_empty() && page.card.sheet.is_none(), "nothing starts during a write");
     press(&mut page, KeyCode::Char('x'));
-    assert_eq!(sent(&inbox), [worker::Cmd::Stop { key: "E:\\".into() }], "the stop touches no board");
+    assert_eq!(sent(&inbox), [worker::Cmd::Stop { key: "E:\\#1A2B-3C4D".into() }], "the stop touches no board");
 }
 
 #[test]
@@ -745,10 +745,10 @@ fn a_volume_the_player_cant_use_says_why_and_h_hides_it() {
     // Eject ▸, the route's first step: Enter, and e (clause 12's key).
     for code in [KeyCode::Enter, KeyCode::Char('e')] {
         press(&mut page, code);
-        assert_eq!(sent(&inbox), [worker::Cmd::Eject { key: "G:\\".into() }], "{code:?}");
+        assert_eq!(sent(&inbox), [worker::Cmd::Eject { key: "G:\\#1A2B-3C4D".into() }], "{code:?}");
     }
     press(&mut page, KeyCode::Char('h'));
-    assert_eq!(sent(&inbox), [worker::Cmd::Hide { key: "G:\\".into() }]);
+    assert_eq!(sent(&inbox), [worker::Cmd::Hide { key: "G:\\#1A2B-3C4D".into() }]);
     // With a board plugged in, the route names its port.
     let gpt = cards::refused("G:", Fs::Fat32, Table::Gpt);
     let (mut page, _ends, _inbox, _fold) = with_cards(Ends::up_to_date, vec![gpt]);
@@ -917,7 +917,7 @@ fn another_server_in_settings_asks_first_and_writes_nothing_until_its_yes() {
     press(&mut page, KeyCode::Char('y'));
     let applied = sent(&inbox);
     let [worker::Cmd::Apply { key, want }] = applied.as_slice() else { panic!("{applied:?}") };
-    assert_eq!((key.as_str(), want.server.as_deref()), ("E:\\", Some("http://127.0.0.1:4000")));
+    assert_eq!((key.as_str(), want.server.as_deref()), ("E:\\#1A2B-3C4D", Some("http://127.0.0.1:4000")));
     assert!(page.card.gate.is_none());
 }
 
@@ -1082,7 +1082,7 @@ fn leave_them_all_as_mine_syncs_without_adopting_and_a_peer_left_out_is_kept_out
     let frame = window(&mut page);
     assert!(frame.contains("Copy from #4 through Home?"), "{frame}");
     press(&mut page, KeyCode::Esc);
-    assert_eq!(sent(&inbox), [worker::Cmd::LeaveOut { key: "E:\\".into(), peer: 4 }]);
+    assert_eq!(sent(&inbox), [worker::Cmd::LeaveOut { key: "E:\\#1A2B-3C4D".into(), peer: 4 }]);
 }
 
 #[test]
@@ -1092,19 +1092,19 @@ fn a_card_taken_out_with_its_view_open_moves_the_view_right_else_left() {
         with_cards(Ends::up_to_date, vec![cards::ready("E:", now()), cards::ready("F:", now())]);
     // COM3, E:, F: on the row; E: in view.
     press(&mut page, KeyCode::Right);
-    assert_eq!(page.card_open.as_deref(), Some("E:\\"));
-    fold.borrow_mut().apply(worker::Event::Gone { key: "E:\\".into() });
+    assert_eq!(page.card_open.as_deref(), Some("E:\\#1A2B-3C4D"));
+    fold.borrow_mut().apply(worker::Event::Gone { key: "E:\\#1A2B-3C4D".into() });
     page.pump();
-    assert_eq!(page.card_open.as_deref(), Some("F:\\"), "the next to its right");
+    assert_eq!(page.card_open.as_deref(), Some("F:\\#1A2B-3C4D"), "the next to its right");
     // E: put back beside it; F: taken out: to its left, E:.
     fold.borrow_mut().apply(worker::Event::Card(Box::new(cards::ready("E:", now()))));
     page.pump();
-    assert_eq!(page.card_open.as_deref(), Some("F:\\"), "a card put in takes no view");
-    fold.borrow_mut().apply(worker::Event::Gone { key: "F:\\".into() });
+    assert_eq!(page.card_open.as_deref(), Some("F:\\#1A2B-3C4D"), "a card put in takes no view");
+    fold.borrow_mut().apply(worker::Event::Gone { key: "F:\\#1A2B-3C4D".into() });
     page.pump();
-    assert_eq!(page.card_open.as_deref(), Some("E:\\"), "none to its right: to its left");
+    assert_eq!(page.card_open.as_deref(), Some("E:\\#1A2B-3C4D"), "none to its right: to its left");
     // The last card out: the board to its left.
-    fold.borrow_mut().apply(worker::Event::Gone { key: "E:\\".into() });
+    fold.borrow_mut().apply(worker::Event::Gone { key: "E:\\#1A2B-3C4D".into() });
     page.pump();
     assert_eq!(page.card_open, None);
     assert!(window(&mut page).contains("M5Stack Core2"), "the board's view");
@@ -1155,4 +1155,26 @@ fn details_log_says_the_files_left_out_then_their_places_in_every_locale() {
     let frame = text_of(&hosted_at(&mut page, 100, 48, tall));
     assert!(frame.contains("1,312 hidden files left out: the server can't serve them"), "{frame}");
     assert!(frame.contains("  Metal/.38 Special/"), "{frame}");
+}
+
+/// Clause 53: a card taken out during its sync is its own subject until it
+/// is back. Its tab opens no settings, and asks the worker for no plays, no
+/// eject and no sync again; its hint offers none of them.
+#[test]
+fn a_card_taken_out_asks_nothing_of_the_worker_until_it_is_back() {
+    let _en = english();
+    let out = cards::with(cards::ready("E:", now()), |c| {
+        c.out = true;
+        c.ended = Some(worker::Ended::Out { at: 1_204, of: 4_812 });
+    });
+    let (mut page, _ends, inbox, _fold) = with_cards(|_| {}, vec![out]);
+    let _ = window(&mut page);
+    for code in ['o', 'p', 'e'] {
+        press(&mut page, KeyCode::Char(code));
+    }
+    press(&mut page, KeyCode::Enter);
+    page.card_act(Act::CardSyncAgain);
+    assert!(sent(&inbox).is_empty() && page.card.sheet.is_none(), "{:?}", sent(&inbox));
+    let hint = page.hint();
+    assert!(!hint.contains("settings") && !hint.contains("plays") && !hint.contains("eject"), "{hint}");
 }

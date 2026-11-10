@@ -797,9 +797,17 @@ pub(crate) enum Event {
     Idle,
 }
 
-/// A volume's key: where it is mounted.
+/// A card's key: where it is mounted, and its serial. A slot is one card,
+/// never merely a reader: another card in that reader is its own subject
+/// (clause 53), with a key of its own, so nothing asked of a card taken out
+/// (a command from its tab, a late answer of its job) ever lands on the one
+/// put in after it.
 pub(crate) fn key_of(found: &Found) -> String {
-    found.volume.path.display().to_string()
+    let path = found.volume.path.display().to_string();
+    match &found.volume.serial {
+        Some(serial) => format!("{path}#{serial}"),
+        None => path,
+    }
 }
 
 /// `E:` on Windows; the mount point's last part elsewhere.
@@ -1222,7 +1230,7 @@ impl Worker {
                                 s.view.next,
                                 Next::Unasked | Next::SignIn { .. } | Next::Unreached { .. }
                             );
-                            s.view.found.accepted() && unasked
+                            s.view.found.accepted() && !s.view.out && unasked
                         });
                         if ask {
                             self.look(&key);
@@ -1366,6 +1374,10 @@ impl Worker {
     {
         let running = self.running.as_ref().is_some_and(|r| r.key == key);
         let Some(slot) = self.slot(key) else { return };
+        // A card taken out is asked nothing until it is back (clause 53).
+        if slot.view.out {
+            return;
+        }
         if slot.view.busy.is_some() || running || !slot.view.found.accepted() {
             if job == Job::Look {
                 slot.look_again = true;
@@ -1420,6 +1432,12 @@ impl Worker {
     fn fit(&mut self, key: &str, want: Want, seq: u64) {
         let servers = self.servers.clone();
         let Some(slot) = self.slot(key) else { return };
+        if slot.view.out {
+            // Taken out: nothing to work out a fit on (clause 53).
+            slot.view.fit = Some((seq, Next::Unasked));
+            self.told(key);
+            return;
+        }
         let Some(facts) = slot.view.facts().cloned() else { return };
         let current = slot.view.server.link().map(|l| l.id.clone());
         let take_over = want.server.is_some() && want.server != current;
@@ -1474,6 +1492,9 @@ impl Worker {
         let servers = self.servers.clone();
         let current = self.slot(key).and_then(|s| s.view.server.link().map(|l| l.id.clone()));
         if let Some(slot) = self.slot(key) {
+            if slot.view.out {
+                return;
+            }
             // Another server chosen: the next sync takes the card over.
             slot.view.take_over = want.server.is_some() && want.server != current;
         }
@@ -1501,7 +1522,7 @@ impl Worker {
     fn eject(&mut self, key: &str) {
         let running = self.running.as_ref().is_some_and(|r| r.key == key);
         let Some(slot) = self.slot(key) else { return };
-        if running || slot.view.busy.is_some() {
+        if running || slot.view.busy.is_some() || slot.view.out {
             return;
         }
         slot.view.busy = Some(Job::Eject);

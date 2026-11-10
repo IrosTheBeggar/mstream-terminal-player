@@ -226,14 +226,7 @@ fn with_card(scratch: &Scratch) -> (Rig, String, Fake, FatSim) {
 fn second_card(rig: &mut Rig, name: &str) -> (String, Scratch) {
     let other = Scratch::new(name);
     let root = other.0.join("card");
-    let second = FatSim::new(&root, SERIAL + 1);
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures");
-    let golden = fixtures.join("card/golden/device.txt");
-    std::fs::create_dir_all(root.join(".player")).unwrap();
-    std::fs::copy(golden, root.join(".player/device.txt")).unwrap();
-    let ask = setup::Ask { label: "Gym".into(), new_identity: false };
-    let mut cards = Cards::default();
-    setup::set_up(&second, &ask, &mut envs_from(0xB0B), &mut cards, &mut |_| {}).unwrap();
+    gym_at(&root, SERIAL + 1);
     let found = volume_at(&root, Fs::Fat32, SERIAL + 1);
     let key = key_of(&found);
     rig.shelf.put(found, SERIAL + 1);
@@ -242,6 +235,38 @@ fn second_card(rig: &mut Rig, name: &str) -> (String, Scratch) {
         f.cards.iter().any(|c| c.key == wanted && planned(c).is_some())
     });
     (key, other)
+}
+
+/// A set-up card named Gym (another id) in the folder `root`, at `serial`.
+fn gym_at(root: &std::path::Path, serial: u32) {
+    let second = FatSim::new(root, serial);
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures");
+    let golden = fixtures.join("card/golden/device.txt");
+    std::fs::create_dir_all(root.join(".player")).unwrap();
+    std::fs::copy(golden, root.join(".player/device.txt")).unwrap();
+    let ask = setup::Ask { label: "Gym".into(), new_identity: false };
+    let mut cards = Cards::default();
+    setup::set_up(&second, &ask, &mut envs_from(0xB0B), &mut cards, &mut |_| {}).unwrap();
+}
+
+/// The worker's inbox handled as its loop handles it, until `done` holds of
+/// the worker, for at most 30 s.
+fn handle_until(worker: &mut Worker, inbox: &Receiver<In>, what: &str, done: impl Fn(&Worker) -> bool) {
+    let t0 = Instant::now();
+    while !done(worker) {
+        assert!(t0.elapsed() < Duration::from_secs(30), "waited for {what}");
+        match inbox.recv_timeout(Duration::from_millis(20)) {
+            Ok(In::Cmd(cmd)) => worker.cmd(cmd),
+            Ok(In::Job(key, job)) => worker.done(&key, job),
+            Ok(In::RunEvent(key, event)) => worker.progress(&key, event),
+            Err(_) => {}
+        }
+    }
+}
+
+/// A slot's card, as the worker holds it.
+fn view_of(worker: &Worker, key: &str) -> Option<CardView> {
+    worker.slots.iter().find(|s| s.view.key == key).map(|s| s.view.clone())
 }
 
 /// A run under way on the card, as an event tells it: its run past
@@ -1360,4 +1385,102 @@ fn the_plays_a_new_identity_a_dismissed_gate_and_the_quit() {
     assert_eq!(sent(&rx), [Cmd::ShowHidden]);
     let setup = Setup::system();
     assert_eq!(setup.every, EVERY);
+}
+
+/// Clause 53: a card taken out during its sync, and another card put in that
+/// reader. The other is listed, its own subject, with a key of its own; the
+/// tab of the one taken out applies no settings, sends no plays, ejects
+/// nothing and works out no fit, before its run's end or after it, and
+/// nothing of it reaches the card put in.
+#[test]
+fn another_card_in_the_reader_of_one_taken_out_mid_sync_is_its_own_subject() {
+    let scratch = Scratch::new("worker-swap");
+    drop(card(&scratch));
+    let root = scratch.0.join("card");
+    let found_x = volume_at(&root, Fs::Fat32, SERIAL);
+    let x = key_of(&found_x);
+    let shelf = Arc::new(Shelf::default());
+    shelf.put(found_x.clone(), SERIAL);
+    let (me, inbox) = channel();
+    let (out, events) = channel();
+    let setup = Setup { volumes: shelf.clone(), home: Arc::new(Here::default()), every: EVERY };
+    let mut worker = Worker::new(setup, me, out);
+    let mut view = CardView::new(found_x);
+    view.run = Some(Run { phase: Phase::Copying, files: 9, done_files: 4, ..Run::default() });
+    worker.slots.push(Slot {
+        view,
+        look_again: false,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    });
+    worker.running = Some(Running { key: x.clone(), stop: Arc::new(AtomicBool::new(false)) });
+
+    // Taken out mid-sync, then Gym put in that reader.
+    shelf.take(&x);
+    worker.watch();
+    std::fs::rename(&root, scratch.0.join("card-taken-out")).unwrap();
+    gym_at(&root, SERIAL + 1);
+    let found_y = volume_at(&root, Fs::Fat32, SERIAL + 1);
+    let y = key_of(&found_y);
+    shelf.put(found_y, SERIAL + 1);
+    worker.watch();
+    assert_ne!(x, y, "one reader, two cards, two keys");
+    assert!(view_of(&worker, &x).is_some_and(|v| v.out), "its tab kept, marked out");
+    assert!(view_of(&worker, &y).is_some_and(|v| !v.out), "the card put in is listed");
+    let gone: Vec<Event> = events.try_iter().filter(|e| matches!(e, Event::Gone { .. })).collect();
+    assert!(gone.is_empty(), "{gone:?}");
+    handle_until(&mut worker, &inbox, "Gym read", |w| {
+        view_of(w, &y).is_some_and(|v| v.facts().is_some() && v.busy.is_none())
+    });
+    let before = without_lock(&FatSim::new(&root, SERIAL + 1));
+
+    // The taken-out tab's asks, while its run ends and after.
+    let mut want = Want::of(&Facts::default(), None);
+    (want.name, want.removal) = ("Taken out".into(), Removal::Never);
+    let asks = |want: &Want| {
+        vec![
+            Cmd::Apply { key: x.clone(), want: Box::new(want.clone()) },
+            Cmd::Plays { key: x.clone() },
+            Cmd::Eject { key: x.clone() },
+            Cmd::Fit { key: x.clone(), want: Box::new(want.clone()), seq: 3 },
+            Cmd::Sync { key: x.clone(), allow: Box::default() },
+        ]
+    };
+    for cmd in asks(&want) {
+        worker.cmd(cmd);
+    }
+    let pulled = sync::Synced {
+        summary: None,
+        end: sync::End::Halted(sync::Halt::Card(Stop::Pulled)),
+        notes: Vec::new(),
+        plays: None,
+        peers: Vec::new(),
+        resume_at: None,
+    };
+    let finished = Finished {
+        synced: Some(pulled),
+        why: None,
+        by_library: Vec::new(),
+        removal_libs: Vec::new(),
+        stopped: false,
+    };
+    worker.done(&x, JobDone::Synced(Box::new(finished)));
+    for cmd in asks(&want) {
+        worker.cmd(cmd);
+    }
+    let t0 = Instant::now();
+    handle_until(&mut worker, &inbox, "a moment", |_| t0.elapsed() > Duration::from_millis(300));
+    let taken = view_of(&worker, &x).unwrap();
+    assert!(taken.out && taken.busy.is_none() && taken.run.is_none(), "{taken:#?}");
+    assert!(matches!(taken.ended, Some(Ended::Out { at: 4, of: 9 })), "{:?}", taken.ended);
+    assert_eq!(taken.fit, Some((3, Next::Unasked)));
+    assert!(shelf.ejected.lock().unwrap().is_empty());
+    let gym = view_of(&worker, &y).unwrap();
+    assert!(gym.busy.is_none() && gym.run.is_none(), "{gym:#?}");
+    assert_eq!(without_lock(&FatSim::new(&root, SERIAL + 1)), before, "nothing reached Gym");
+    let state = std::fs::read_to_string(root.join(".mstream/state.json")).unwrap();
+    assert!(state.contains("Gym") && !state.contains("Taken out"), "{state}");
 }

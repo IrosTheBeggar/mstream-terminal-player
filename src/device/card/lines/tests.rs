@@ -117,9 +117,9 @@ fn status_prints_the_card_views_facts_as_key_value_rows() {
 fn a_drive_is_its_letter_its_path_or_its_cards_name_when_one_card_has_it() {
     let cards = vec![f::ready("E:", now()), f::new_card("G:")];
     for asked in ["E", "e:", "E:\\", "E:/", "Car music", "car MUSIC"] {
-        assert_eq!(pick(&cards, asked), Ok("E:\\".to_string()), "{asked}");
+        assert_eq!(pick(&cards, asked), Ok(cards[0].key.clone()), "{asked}");
     }
-    assert_eq!(pick(&cards, "g:"), Ok("G:\\".to_string()));
+    assert_eq!(pick(&cards, "g:"), Ok(cards[1].key.clone()));
     let missing = pick(&cards, "H:").unwrap_err();
     assert!(missing.contains("isn't a card in a reader here (these are: E:, G:)"), "{missing}");
     let twins = vec![f::ready("E:", now()), f::ready("F:", now())];

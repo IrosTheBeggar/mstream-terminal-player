@@ -490,14 +490,17 @@ impl Page {
                     self.log_scroll = 0;
                 }
             }
+            // A card taken out is its own until it is back (clause 53): its
+            // settings, its plays and its sync wait for it.
             Act::CardSettings if !locked => {
-                if let Some(card) = card.filter(|c| c.facts().is_some_and(|f| f.set_up()) && c.run.is_none()) {
+                let may = |c: &CardView| c.facts().is_some_and(|f| f.set_up()) && c.run.is_none() && !c.out;
+                if let Some(card) = card.filter(may) {
                     self.open_card_sheet(&card, false);
                 }
             }
             // The plays wait for no sync: during one they are its own to send.
             Act::CardPlays if !locked => {
-                if card.is_some_and(|c| c.run.is_none()) {
+                if card.is_some_and(|c| c.run.is_none() && !c.out) {
                     self.send_card(worker::Cmd::Plays { key });
                 }
             }
@@ -532,7 +535,7 @@ impl Page {
             Act::CardDontWait => self.send_card(worker::Cmd::DontWait { key }),
             Act::CardGiveUp => self.send_card(worker::Cmd::GiveUp { key }),
             Act::CardSyncAgain if !locked => {
-                if let Some(card) = card {
+                if let Some(card) = card.filter(|c| !c.out) {
                     self.sync_asked(&card);
                 }
             }
@@ -611,13 +614,14 @@ impl Page {
             parts.push((p.hint(), 0));
         }
         let set_up = card.facts().is_some_and(|f| f.set_up());
-        if set_up && card.run.is_none() {
+        if set_up && card.run.is_none() && !card.out {
             parts.push((t!("dev.card.hint_settings").to_string(), 2));
         }
-        if plan_of(card).is_some_and(|p| p.plays > 0) {
+        if plan_of(card).is_some_and(|p| p.plays > 0) && !card.out {
             parts.push((t!("dev.card.hint_plays").to_string(), 4));
         }
-        if card.found.accepted() && primary(card) != Some(CardPrimary::Eject) && card.run.is_none() {
+        let still = card.run.is_none() && !card.out;
+        if card.found.accepted() && primary(card) != Some(CardPrimary::Eject) && still {
             parts.push((t!("dev.card.hint_eject").to_string(), 1));
         }
         if card.read == Read::Refused {
@@ -1359,7 +1363,8 @@ fn details_rows(card: &CardView, w: u16) -> Vec<Row> {
         }
     }
     rows.push(Row::Log);
-    if card.run.is_none() && card.facts().is_some_and(|f| f.set_up()) && card.found.accepted() {
+    let here = card.run.is_none() && !card.out && card.found.accepted();
+    if here && card.facts().is_some_and(|f| f.set_up()) {
         rows.push(Row::Blank);
         let text = t!("dev.card.link_sync_again").to_string();
         rows.push(Row::Link { wide: true, text, act: Act::CardSyncAgain, note: None });

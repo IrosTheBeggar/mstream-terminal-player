@@ -489,7 +489,10 @@ fn pick(cards: &[CardView], drive: &str) -> Result<String, String> {
     let bare = |s: &str| s.trim().trim_end_matches(['\\', '/']).trim_end_matches(':').to_lowercase();
     let asked = bare(drive);
     let listed: Vec<&CardView> = cards.iter().filter(|c| !c.out).collect();
-    let by_place = listed.iter().find(|c| bare(&c.key) == asked || bare(&c.drive()) == asked);
+    let place = |c: &CardView| bare(&c.found.volume.path.to_string_lossy());
+    let by_place = listed.iter().find(|c| {
+        c.key == drive.trim() || place(c) == asked || bare(&c.drive()) == asked
+    });
     if let Some(card) = by_place {
         return Ok(card.key.clone());
     }
