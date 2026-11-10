@@ -1564,7 +1564,14 @@ impl Desk {
 
     /// Queue Update all's board at its place, with the pin in its own mode,
     /// passing over the ones that no longer need it (unplugged, written
-    /// meanwhile); done past the last.
+    /// meanwhile) and one whose format is under way; done past the last. A
+    /// format is never cut for a write, Update all's no more than the
+    /// board's own: its board restarts to format whatever this side does,
+    /// and a write begun then would reset it with its card half made. No
+    /// command brings a formatting board to its turn (Update all takes none
+    /// with something under way, [`Board::needs_update`], and no format
+    /// starts while a write waits or runs, [`Desk::light`]): the turn holds
+    /// the rule itself, so it doesn't rest on those two.
     fn all_turn(&mut self) {
         loop {
             let Some(run) = &self.all else { return };
@@ -1577,9 +1584,11 @@ impl Desk {
                 return;
             };
             let at = run.at;
+            let formatting = |slot: &Slot| slot.job.as_ref().is_some_and(|j| j.kind == JobKind::Format);
             let ready = self.find(&port).filter(|i| {
                 let slot = &self.slots[*i];
                 slot.present
+                    && !formatting(slot)
                     && matches!(slot.board.verdict, Verdict::Update | Verdict::DevUpdate)
                     && slot.board.pending().is_none_or(|next| next.image.is_pin())
             });
@@ -1592,7 +1601,9 @@ impl Desk {
                     return;
                 }
                 None => {
-                    self.log(Some(&port), t!("dev.log_all_skip", port = port).to_string(), LogKind::Fact);
+                    let busy = self.find(&port).is_some_and(|i| formatting(&self.slots[i]));
+                    let key = if busy { "dev.log_all_formatting" } else { "dev.log_all_skip" };
+                    self.log(Some(&port), t!(key, port = port).to_string(), LogKind::Fact);
                     if let Some(run) = &mut self.all {
                         run.passed.push(port);
                         run.at += 1;
@@ -3290,6 +3301,110 @@ pub(crate) mod tests {
         let r = r.quit();
         assert_eq!(r.board("FAKE0").format, Format::Ended(FormatWhy::Abandoned), "let go, not answered");
         assert!(!r.trace().iter().any(|t| t.starts_with("open")), "nothing written: {:?}", r.trace());
+    }
+
+    /// A format is never cut for a write, Update all's no more than the
+    /// board's own (clauses 28, 59). The page's commands never bring the
+    /// two together: a board whose card is being formatted has something
+    /// under way, so Update all doesn't take it, and no format starts while
+    /// a write waits or runs. The board formatting when Update all is asked
+    /// is left as it is, the others are written, and a format asked of one
+    /// of them meanwhile is refused.
+    #[test]
+    fn update_all_leaves_a_formatting_board_out_and_no_format_starts_while_it_runs() {
+        // No board that needs an update formats while the pin doesn't, so
+        // the script says these do.
+        let formats = "status:v0.9.0/cid=-/format=silent";
+        let fake = Fake::new(&format!("{formats},old:v0.7.0,{formats}")).with_pace(Duration::from_millis(60));
+        let probe = fake.clone();
+        let mut r = rig(fake);
+        r.settled(3);
+        let needs = |r: &Rig, port: &str| r.board(port).verdict == Verdict::Update;
+        assert!(needs(&r, "FAKE0") && needs(&r, "FAKE1") && needs(&r, "FAKE2") && r.board("FAKE0").can_format());
+        r.send(Cmd::Format { port: "FAKE0".into() });
+        r.until("the question up", |r| r.board("FAKE0").format == Format::Waiting);
+        // FAKE1 kept in its bootloader until FAKE2's format is answered.
+        let held = probe.hold();
+        r.send(Cmd::UpdateAll { ports: (0..3).map(|i| format!("FAKE{i}")).collect() });
+        r.until("FAKE1's write under way", |r| matches!(r.board("FAKE1").work, Work::Writing { .. }));
+        r.send(Cmd::Format { port: "FAKE2".into() });
+        r.until("the format refused", |r| !r.refused().is_empty());
+        assert_eq!(r.refused(), [(Some("FAKE2".into()), Refusal::OneAtATime { busy: "FAKE1".into() })]);
+        drop(held);
+        r.until("Update all done", |r| r.all().iter().any(|a| matches!(a, All::Done { .. })));
+        let Some(All::Done { ports, passed, .. }) = r.all().last().cloned() else { panic!("done") };
+        let written = vec!["FAKE1".to_string(), "FAKE2".to_string()];
+        assert_eq!((ports, passed), (written, Vec::new()), "the formatting board was never one of them");
+        // Its format went on by itself: never let go for a write, its board
+        // never reset or written.
+        let board = r.board("FAKE0");
+        let cut = [Format::Ended(FormatWhy::Abandoned), Format::Ended(FormatWhy::Lost)];
+        assert!(!cut.contains(&board.format), "{:?}", board.format);
+        assert_eq!(board.written, None);
+        assert_eq!(probe.version_on("FAKE0").as_deref(), Some("v0.9.0"), "untouched");
+        assert_eq!(probe.version_on("FAKE1").as_deref(), Some(pin()));
+        assert_eq!(probe.version_on("FAKE2").as_deref(), Some(pin()));
+        let opens = r.trace().iter().filter(|t| t.starts_with("open")).count();
+        assert_eq!(opens, 2, "the two written, each reset once: {:?}", r.trace());
+        r.quit();
+    }
+
+    /// The rule at Update all's turn itself, which no command reaches (the
+    /// test above): a board whose format is under way when its turn comes
+    /// is passed over and said so, its format's listen never stopped, and
+    /// the next board is queued. A desk made by hand, at that turn.
+    #[test]
+    fn update_alls_turn_passes_over_a_board_whose_format_is_under_way() {
+        let _en = crate::setup::tests::in_locale("en");
+        let fake = Fake::new("status:v0.9.0,old:v0.7.0");
+        let found = fake.candidates().expect("the fake's boards");
+        let (events_tx, events) = channel();
+        let (notes_tx, notes) = channel();
+        let behind = |candidate: &Candidate, job: Option<Job>| {
+            let mut board = Board::new(candidate.clone());
+            board.verdict = Verdict::Update;
+            Slot { board, job, present: true, queued: None }
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let format = Job { kind: JobKind::Format, id: 1, stop: stop.clone() };
+        let ports = vec!["FAKE0".to_string(), "FAKE1".to_string()];
+        let mut desk = Desk {
+            engine: Arc::new(fake),
+            supply: Arc::new(Shelf::new()),
+            preset: None,
+            flags_mode: None,
+            page_image: Image::Pin(Mode::Qio),
+            scope: None,
+            timing: QUICK,
+            clock: None,
+            events: events_tx,
+            notes_tx,
+            notes,
+            target: pin_target(),
+            images: HashMap::new(),
+            listed: None,
+            listing: false,
+            slots: vec![behind(&found[0], Some(format)), behind(&found[1], None)],
+            others: Vec::new(),
+            watched: true,
+            last_scan: None,
+            list_failed: false,
+            all: Some(AllRun { ports: ports.clone(), at: 0, passed: Vec::new(), since: Instant::now() }),
+            next_id: 1,
+            quitting: false,
+        };
+        desk.all_turn();
+        assert!(!stop.load(Ordering::Relaxed), "the format's listen goes on");
+        let formatting = &desk.slots[0];
+        assert!(formatting.queued.is_none(), "no write waits for its board");
+        assert!(formatting.job.as_ref().is_some_and(|j| j.kind == JobKind::Format));
+        assert!(desk.slots[1].queued.is_some(), "the next board's write is queued");
+        let run = desk.all.as_ref().expect("the run goes on");
+        assert_eq!((run.at, run.passed.clone()), (1, vec!["FAKE0".to_string()]));
+        let told: Vec<Event> = events.try_iter().collect();
+        let said = "update all: FAKE0 is formatting its card — passed over";
+        assert!(told.iter().any(|e| matches!(e, Event::Log { text, .. } if text == said)), "{told:?}");
+        assert!(told.contains(&Event::All(All::Running { ports, at: 1 })), "{told:?}");
     }
 
     #[test]

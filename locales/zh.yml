@@ -2605,6 +2605,7 @@ dev:
   log_identify: "正在 %{port} 的屏幕上显示“This one · %{label}”"
   log_all: "全部更新，逐个进行：%{list}"
   log_all_skip: "全部更新：%{port} 已不再需要 — 跳过"
+  log_all_formatting: "全部更新：%{port} 正在格式化存储卡 — 跳过"
   log_all_stopped: "全部更新在 %{port} 处停止；其余未开始"
   log_all_done: "全部更新：已写入 %{n} 块"
   log_guard: "%{port}：其引导程序显示 %{found}，不是较旧的 mStream 固件 — 保持原样"

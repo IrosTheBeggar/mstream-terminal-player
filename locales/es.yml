@@ -2605,6 +2605,7 @@ dev:
   log_identify: "mostrando «This one · %{label}» en la pantalla de %{port}"
   log_all: "actualizar todos, uno tras otro: %{list}"
   log_all_skip: "actualizar todos: %{port} ya no lo necesita — se omite"
+  log_all_formatting: "actualizar todos: %{port} está formateando su tarjeta — se omite"
   log_all_stopped: "actualizar todos se detuvo en %{port}; los demás no se empezaron"
   log_all_done: "actualizar todos: %{n} escritos"
   log_guard: "%{port}: su bootloader muestra %{found}, no un firmware de mStream más antiguo — se deja como estaba"

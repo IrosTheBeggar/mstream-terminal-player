@@ -2605,6 +2605,7 @@ dev:
   log_identify: "%{port} の画面に「This one · %{label}」を表示中"
   log_all: "すべて更新、1 台ずつ: %{list}"
   log_all_skip: "すべて更新: %{port} はもう不要です — スキップ"
+  log_all_formatting: "すべて更新: %{port} はカードをフォーマット中です — スキップ"
   log_all_stopped: "すべて更新は %{port} で停止しました。残りは開始していません"
   log_all_done: "すべて更新: %{n} 台を書き込みました"
   log_guard: "%{port}: ブートローダーには %{found} とあり、古い mStream ファームウェアではありません — そのままにしました"

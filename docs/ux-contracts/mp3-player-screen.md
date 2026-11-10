@@ -725,8 +725,14 @@ comes from the cache, or a download, beside them.
     each in its own mode. It
     only updates: never an install, an erase or a step back, and a board
     whose bootloader shows anything but an older release of ours is left
-    as it was. A board unplugged before its turn is passed over; the first
-    failure stops it, and the next board is not started. As it goes, each
+    as it was. A board unplugged before its turn is passed over. A board
+    whose card is being formatted is never written, since a write never
+    cuts a format (clause 59): Update all doesn't take a board with
+    something under way, no format starts while it runs (clause 26), and a
+    board found formatting at its turn all the same is passed over, which
+    the log says ("update all: COM3 is formatting its card — passed over",
+    `log_all_formatting`). The first failure stops it, and the next board
+    is not started. As it goes, each
     board's result is the busy line ("COM3 written and checked in 44 s"),
     and at its end "2 players updated in 1 min 31 s, one after the other.
     Nothing on their SD cards changed." — or, stopped, the board that
@@ -2847,3 +2853,15 @@ setting no locale, prints in English.
     30 days and no more than those 5 minutes ahead waits for the server's
     clock to be set right, and the log says the clocks disagree; an older
     one, or one truly ahead, settles as before.
+  - **Update all and a format** (clause 28). The board's own write is
+    refused while its card is being formatted (clause 59); Update all's
+    turn had no such rule, and would stop the format's listen and write
+    the board, resetting it with its card half made. The review read it
+    as reachable once the pin formats. It isn't, by two rules far from
+    the turn: a board that formats has something under way, so Update all
+    doesn't take it, and no format starts while a write waits or runs.
+    The turn itself passes a formatting board over now, so the rule no
+    longer rests on those two, with a log line of its own
+    (`log_all_formatting`, one new `dev` key in the ten locales, the nine
+    translated ones from each locale's `log_all_skip` and `fmt_running`,
+    for the native review).

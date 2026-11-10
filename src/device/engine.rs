@@ -832,9 +832,11 @@ pub(crate) mod fake {
     /// of a board from 0.12.0 on `/clock=unset|ok|<ms>` (unset; in step,
     /// as without; or off from this computer's by that many ms, `-5000`
     /// behind), `/rtc=dead` (it takes no `@time <ms>`), and how its
-    /// listener answers `@format` (0.12.0's too; without the option the
-    /// card is formatted, the question up at once, confirmed a tenth of the
-    /// pace on, the format across the pace): `/format=no` (Cancel at once),
+    /// listener answers `@format` (0.12.0's too, and an older board's that
+    /// names the option, with a `/cid=` for the page to offer it; without
+    /// the option the card is formatted, the question up at once, confirmed
+    /// a tenth of the pace on, the format across the pace): `/format=no`
+    /// (Cancel at once),
     /// `late` (Cancel a pace on: a test's minute is shorter), `silent` (the
     /// question up, then nothing), `ui|screen|viz|busy|card` (refused at
     /// once), `second-card|size|busy` (refused at the second answer, no
@@ -1302,7 +1304,8 @@ pub(crate) mod fake {
                     "status" => self.answer(&board.status_line()),
                     "count" => self.count(&board),
                     "time" if board.clocked() => self.time(&board, arg.trim()),
-                    "format" if board.clocked() => self.format(&board),
+                    // An older board formats only where its script says how.
+                    "format" if board.clocked() || board.format.is_some() => self.format(&board),
                     "identify" => {
                         let label = arg.trim();
                         if label.is_empty() {
