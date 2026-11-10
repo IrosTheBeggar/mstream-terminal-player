@@ -37,26 +37,28 @@
 //! is the one read now (2.11's test; a peer's go to its parent, with the
 //! peer's id and a snapshot of the track) go in batches of 200, each answer
 //! saved as it comes: accepted, duplicates and rejected alike are settled,
-//! but a rejection that may pass. A server in a scan answers that it
-//! doesn't know a track its scan hasn't reached: such a play settles only
-//! when a whole listing this run read, trusted for deletions, lacks its
-//! path ([`History::listing`]); else it waits, 30 days from its start at
-//! most, and while an untrusted listing lacks its path it isn't even sent.
-//! And a server whose clock is off refuses a start its own clock finds
-//! ahead or too old: the play waits while this computer's clock finds the
-//! start recent, and settles when it is old or truly ahead.
+//! but a rejection that may pass:
+//! - a server in a scan answers that it doesn't know a track its scan
+//!   hasn't reached: such a play settles only when a whole listing this
+//!   run read, trusted for deletions, lacks its path
+//!   ([`History::listing`]); else it waits, and while an untrusted listing
+//!   lacks its path it isn't even sent;
+//! - a server whose clock is off refuses a start its own clock finds ahead
+//!   or too old: the play waits while this computer's clock finds the
+//!   start recent, and settles when it is truly ahead;
+//! - either waits 30 days from its start at most ([`WAIT_MS`]).
+//!
 //! A play the server's schema refuses is never sent and settles as one not
 //! sent: it would fail every batch it rode in. One it refuses that this
 //! software didn't know to hold back fails its batch all the same: the
 //! batch's plays then go one by one, and the play refused alone settles so
-//! too. Plays of another server, and
-//! those of a post that failed, wait in the outbox for a run that reads
-//! their server. A card for someone else posts none: the plays that waited
-//! from before it was one wait on. A play that waits is never forgotten
-//! for the card's mark having passed it (its log lost the slot, or another
-//! computer's run settled it): it goes to its server when that is the one
-//! read, which answers a play it has as a duplicate, and is forgotten only
-//! by a run that reads another server.
+//! too. Plays of another server, and those of a post that failed, wait in
+//! the outbox for a run that reads their server. A card for someone else
+//! posts none: the plays that waited from before it was one wait on. A
+//! play that waits is never forgotten for the card's mark having passed it
+//! (its log lost the slot, or another computer's run settled it): it goes
+//! to its server when that is the one read, which answers a play it has as
+//! a duplicate, and is forgotten only by a run that reads another server.
 //!
 //! **The marks** ([`History::marks`]): each device and epoch's rises over
 //! the plays settled or not sent, to the first that waits. A sync stores
