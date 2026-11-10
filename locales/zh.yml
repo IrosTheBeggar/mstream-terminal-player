@@ -2361,7 +2361,7 @@ dev:
     next_asked: "%{when}询问"
     next_signin: "%{n} 次播放在等待 %{server}：登录后发送"
     conv_assumed: "按 %{port} 上的 %{player}（%{version}）推定：还没有 device.txt"
-    conv_gift: "给别人用：没有Auto DJ 索引，不发送播放记录"
+    conv_gift: "给别人用：没有Auto DJ 索引和氛围评分，不发送播放记录"
     btn_sync: "同步"
     btn_setup: "设置"
     btn_setup_as: "设置为第 %{i} 张卡"

@@ -6,17 +6,19 @@
 //! canonical order, the strings (STRS: the names, and each record's run of
 //! tag fields), the path-hash index (HIDX) and, for the software, the
 //! ledger (ORIG, with its server paths in OSTR): what each file on the card
-//! is on its server. The same files and values give the same bytes from
-//! both producers ([`write`]), and [`read`] checks every structure the
-//! device's streaming builder relies on (2.4.3), in the player's order
-//! (`lib/core/CardTags.cpp`'s walker), so a file in the wrong order, a
-//! folder that is its own parent or a wrong firstRecord is absent here for
-//! the same reason it is on the device.
+//! is on its server. Minor 1 adds each record's mood tail ([`moods`]): the
+//! track's mStream mood scores, in rows of 80 bytes. The same files and
+//! values give the same bytes from both producers ([`write`]), and [`read`]
+//! checks every structure the device's streaming builder relies on (2.4.3),
+//! in the player's order (`lib/core/CardTags.cpp`'s walker), so a file in
+//! the wrong order, a folder that is its own parent or a wrong firstRecord
+//! is absent here for the same reason it is on the device.
 
 use std::collections::{HashMap, HashSet};
 
 use super::container::{self, Container, FileMeta, FormatSpec, Header, SectionOut, SectionSpec};
 use super::container::{MPTG, REQUIRED, STRS, StrCursor, Strs};
+use super::moods::{self, Tail};
 use super::order::{MAX_REL_PATH, compare_folder_paths, compare_names, split_last, valid_name, valid_rel_path};
 use super::prim::{MUSIC_HASH, bytes16_at, child_hash, fourcc, path_hash, u16_at, u32_at, u64_at};
 use super::text::{ALBUM, ALBUM_ARTIST, ARTIST, RUN_FIELDS, Run, SEPARATOR, cut_utf8, field_max};
@@ -31,7 +33,13 @@ pub(crate) const OSTR: u32 = fourcc(b"OSTR");
 pub(crate) const MAJOR: u16 = 1;
 pub(crate) const HEADER_BYTES: u32 = 72;
 pub(crate) const FOLD_STRIDE: u32 = 16;
+/// The smallest RECS stride a reader accepts, whatever the minor: a record's
+/// 72 bytes. It stays 72 (2.4.5): raised, it would make every card written
+/// before the mood tail absent.
 pub(crate) const RECS_STRIDE: u32 = 72;
+/// RECS rows with the mood tail (minor 1, 2.6.4): a stride under it means no
+/// record has one.
+pub(crate) const RECS_MOODS_STRIDE: u32 = 80;
 pub(crate) const HIDX_STRIDE: u32 = 12;
 pub(crate) const ORIG_STRIDE: u32 = 80;
 /// Folder 0's parent.
@@ -155,6 +163,10 @@ pub(crate) struct Record {
     pub(crate) pic_type: u8,
     pub(crate) pic_mime: u8,
     pub(crate) pic_coding: u8,
+    /// The mood tail (bytes 72-79, minor 1: [`moods`]), [`moods::NO_ROW`]
+    /// when the record has none: no server row, a row of under 80 bytes, or
+    /// a tail a reader refuses ([`moods::read_tail`]).
+    pub(crate) moods: Tail,
 }
 
 impl Record {
@@ -187,9 +199,15 @@ impl Record {
         b
     }
 
-    /// A record from its row's first 72 bytes, and the row's folder index,
-    /// name offset and run offset.
+    /// A record from its row's first 72 bytes and, from a row of 80 bytes or
+    /// more, its mood tail; and the row's folder index, name offset and run
+    /// offset. The one place a record's tail is read: a reader goes by the
+    /// row's length alone, never by the minor (2.6.4).
     fn decode(b: &[u8]) -> (Record, u32, u32, u32) {
+        let tail = match b.len() >= RECS_MOODS_STRIDE as usize {
+            true => moods::read_tail(&b[moods::TAIL_AT..RECS_MOODS_STRIDE as usize]),
+            false => None,
+        };
         let r = Record {
             size: u32_at(b, 12),
             fat_time: u32_at(b, 16),
@@ -214,6 +232,7 @@ impl Record {
             pic_type: b[68],
             pic_mime: b[69],
             pic_coding: b[70],
+            moods: tail.unwrap_or(moods::NO_ROW),
         };
         (r, u32_at(b, 0), u32_at(b, 4), u32_at(b, 8))
     }
@@ -250,6 +269,11 @@ impl Record {
             3 => 0,
             c => c,
         }
+    }
+
+    /// The record carries mood scores: a tail, which a reader takes.
+    pub(crate) fn has_moods(&self) -> bool {
+        self.moods != moods::NO_ROW
     }
 }
 
@@ -377,27 +401,20 @@ pub(crate) struct Tags {
 
 impl Tags {
     /// What [`write`] makes this file from again: the same header values,
-    /// the records, and the folders whose flags say more than that they are
-    /// a record's ancestor (OWNED, THUMB). The minor is this writer's, 0: a
-    /// newer minor's additions are dropped, and its next run derives them
-    /// again (2.4.5). That is its longer header and rows, its run fields
-    /// past the twelve, its sections, and every flag bit v1 doesn't define
-    /// (a writer sets only the bits it defines): in FOLD's and RECS's
-    /// `flags`, in `known` past readRules 1's and in ORIG's `originFlags`.
-    /// An unknown enum value is kept, since every reader reads it as 2.4.5's
-    /// table says. Records read under another parserVersion or readRules are
-    /// read again from the card file instead (2.6.1).
+    /// the records, their mood tails among them, and the folders whose flags
+    /// say more than that they are a record's ancestor (OWNED, THUMB). The
+    /// minor is the one the records make ([`minor_of`]): 1 with a mood tail,
+    /// else 0. What a newer minor adds besides is dropped, and its next run
+    /// derives it again (2.4.5): its longer header and rows past the tail,
+    /// its run fields past the twelve, its sections, and every flag bit v1
+    /// doesn't define (a writer sets only the bits it defines): in FOLD's and
+    /// RECS's `flags`, in `known` past readRules 1's and in ORIG's
+    /// `originFlags`. An unknown enum value is kept, since every reader
+    /// reads it as 2.4.5's table says. Records read under another
+    /// parserVersion or readRules are read again from the card file instead
+    /// (2.6.1).
     pub(crate) fn to_input(&self) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
-        let meta = Meta {
-            source: self.source,
-            parser_version: self.parser_version,
-            read_rules: self.read_rules,
-            generation: self.header.generation,
-            card_id: self.header.card_id,
-            minor: 0,
-            producer: self.producer.clone(),
-        };
-        let records = self
+        let records: Vec<RecordIn> = self
             .records
             .iter()
             .map(|e| {
@@ -409,6 +426,15 @@ impl Tags {
                 RecordIn { path: e.path.clone(), rec, run: e.run.clone(), ledger }
             })
             .collect();
+        let meta = Meta {
+            source: self.source,
+            parser_version: self.parser_version,
+            read_rules: self.read_rules,
+            generation: self.header.generation,
+            card_id: self.header.card_id,
+            minor: minor_of(&records),
+            producer: self.producer.clone(),
+        };
         let folders = self
             .folders
             .iter()
@@ -497,13 +523,16 @@ pub(crate) fn read(bytes: &[u8], uses: Uses) -> Result<Tags, Why> {
     if sdata.is_empty() {
         return Err(Why::String);
     }
+    // What of each row is read: its 72 bytes, and the mood tail after them
+    // in rows of 80 or more (2.6.4); a longer row's rest is a later minor's.
+    let row_len = if recs.stride >= RECS_MOODS_STRIDE { RECS_MOODS_STRIDE } else { RECS_STRIDE } as usize;
 
     // STRS is read as two runs at once (2.4.4): the producer and the folder
     // names, then from the first record's name on, the records' names and
     // runs.
     let mut first: Option<(Record, u32, u32, u32)> = None;
     let split = if record_count > 0 {
-        let row = Record::decode(c.row(&recs, 0, RECS_STRIDE as usize));
+        let row = Record::decode(c.row(&recs, 0, row_len));
         if row.2 == 0 {
             return Err(Why::Name);
         }
@@ -592,7 +621,7 @@ pub(crate) fn read(bytes: &[u8], uses: Uses) -> Result<Tags, Why> {
             // The next record, in order after this one: its folder, then its
             // name.
             if next_record < record_count {
-                let row = c.row(&recs, next_record, RECS_STRIDE as usize);
+                let row = c.row(&recs, next_record, row_len);
                 let (rec, folder, name_at, strings) = Record::decode(row);
                 if folder >= folder_count {
                     return Err(Why::RecsFolder);
@@ -793,11 +822,20 @@ pub(crate) struct RecordIn {
     pub(crate) ledger: Option<Ledger>,
 }
 
+/// The minor a tags file of `records` is written in (2.4.5): 1 when a record
+/// has a mood tail, its RECS rows then 80 bytes, else 0 with rows of 72, so
+/// a card with no moods stays byte for byte what an older writer made.
+pub(crate) fn minor_of(records: &[RecordIn]) -> u16 {
+    u16::from(records.iter().any(|r| r.rec.has_moods()))
+}
+
 /// Writes a tags file in 2.6.8's order, whatever order the records and
 /// folders come in: FOLD in pre-order from `/music`, siblings by their
 /// names' bytes; RECS by folder, then name; HIDX by (hash, record); STRS
 /// the producer, the folder names, then each record's name and run; ORIG
-/// and OSTR a row a record, for source 2 or 3 with records.
+/// and OSTR a row a record, for source 2 or 3 with records. RECS rows are
+/// 80 bytes, each record's mood tail after its 72 (8 zero bytes where it has
+/// none), when any record has one; else 72.
 ///
 /// Refused: a source that isn't 1-3; a record path that isn't a relative
 /// path of names within 255 bytes with `/music/`, or one given twice, or a
@@ -805,7 +843,9 @@ pub(crate) struct RecordIn {
 /// record's ancestor; a run that breaks 2.3.6; a ledger row in a source 1
 /// file; a producer or a server path with a NUL in it; a flag bit v1
 /// doesn't define (FOLD's or RECS's `flags`, `known` past readRules 1's,
-/// `originFlags`: 2.4.5).
+/// `originFlags`: 2.4.5); a mood tail a reader would refuse, or one in a
+/// source 1 file (the device's own stays at 72: 2.6.4); a minor the records
+/// don't make ([`minor_of`]: mood tails under minor 0, say).
 pub(crate) fn write(meta: &Meta, records: &[RecordIn], folders: &[FolderIn]) -> Result<Vec<u8>, WriteError> {
     if !(SOURCE_DEVICE..=SOURCE_SYNC_AGENT).contains(&meta.source) {
         return Err(WriteError("source"));
@@ -861,6 +901,17 @@ pub(crate) fn write(meta: &Meta, records: &[RecordIn], folders: &[FolderIn]) -> 
     if meta.source == SOURCE_DEVICE && records.iter().any(|r| r.ledger.is_some()) {
         return Err(WriteError("a ledger row in a source 1 file"));
     }
+    if records.iter().any(|r| r.rec.has_moods() && moods::read_tail(&r.rec.moods).is_none()) {
+        return Err(WriteError("a mood tail a reader refuses"));
+    }
+    let minor = minor_of(records);
+    let tails = minor != 0;
+    if tails && meta.source == SOURCE_DEVICE {
+        return Err(WriteError("a mood tail in a source 1 file"));
+    }
+    if meta.minor != minor {
+        return Err(WriteError(if tails { "mood tails under a minor other than 1" } else { "a minor with no mood tail" }));
+    }
     let nul = |s: &str| s.contains('\0');
     if nul(&meta.producer) || records.iter().any(|r| r.ledger.as_ref().is_some_and(|l| nul(&l.server_path))) {
         return Err(WriteError("a string with a NUL"));
@@ -894,7 +945,8 @@ pub(crate) fn write(meta: &Meta, records: &[RecordIn], folders: &[FolderIn]) -> 
             fold.extend_from_slice(&v.to_le_bytes());
         }
     }
-    let mut rows = Vec::with_capacity(order.len() * RECS_STRIDE as usize);
+    let stride = if tails { RECS_MOODS_STRIDE } else { RECS_STRIDE };
+    let mut rows = Vec::with_capacity(order.len() * stride as usize);
     let mut hidx: Vec<(u64, u32)> = Vec::with_capacity(order.len());
     let mut albums: HashSet<&[u8]> = HashSet::new();
     let mut artists: HashSet<&[u8]> = HashSet::new();
@@ -903,6 +955,9 @@ pub(crate) fn write(meta: &Meta, records: &[RecordIn], folders: &[FolderIn]) -> 
         let run = r.run.encode();
         let strings = if run.is_empty() { 0 } else { strs.raw(&run) };
         rows.extend_from_slice(&r.rec.encode(*folder, name, strings));
+        if tails {
+            rows.extend_from_slice(&r.rec.moods);
+        }
         hidx.push((path_hash(&r.path), k as u32));
         if !r.run.get(ALBUM).is_empty() {
             albums.insert(r.run.get(ALBUM));
@@ -945,7 +1000,7 @@ pub(crate) fn write(meta: &Meta, records: &[RecordIn], folders: &[FolderIn]) -> 
     let n = records;
     let mut sections = vec![
         SectionOut { kind: FOLD, flags: REQUIRED, count: folders, stride: FOLD_STRIDE, data: &fold },
-        SectionOut { kind: RECS, flags: REQUIRED, count: n, stride: RECS_STRIDE, data: &rows },
+        SectionOut { kind: RECS, flags: REQUIRED, count: n, stride, data: &rows },
         SectionOut { kind: STRS, flags: REQUIRED, count: 0, stride: 0, data: strs.bytes() },
     ];
     if n > 0 {
@@ -955,7 +1010,7 @@ pub(crate) fn write(meta: &Meta, records: &[RecordIn], folders: &[FolderIn]) -> 
         sections.push(SectionOut { kind: ORIG, flags: 0, count: n, stride: ORIG_STRIDE, data: &orig });
         sections.push(SectionOut { kind: OSTR, flags: 0, count: 0, stride: 0, data: ostr.bytes() });
     }
-    let (minor, generation, card_id) = (meta.minor, meta.generation, meta.card_id);
+    let (generation, card_id) = (meta.generation, meta.card_id);
     let file = FileMeta { magic: MPTG, major: MAJOR, minor, generation, card_id };
     container::write(&file, &th, HEADER_BYTES, &sections)
 }

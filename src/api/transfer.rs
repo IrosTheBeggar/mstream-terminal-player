@@ -1,8 +1,9 @@
 //! The SD-card transfer's half of the mStream client (the transfer plan's
 //! part A6): the paged sync manifest with its ETag, full metadata in chunks
-//! under the server's body cap, embeddings eight paths at a time, the
-//! recursive listing a peer offers where it serves no manifest, covers in
-//! their three sizes, a track's peaks, and backdated plays from a card's log.
+//! under the server's body cap, embeddings eight paths at a time, mood
+//! scores in chunks as the metadata, the recursive listing a peer offers
+//! where it serves no manifest, covers in their three sizes, a track's peaks,
+//! and backdated plays from a card's log.
 //! The files' bytes are [`fetch`]'s.
 //!
 //! For a federation peer (B9): the parent's peers with their iroh
@@ -50,6 +51,13 @@ pub const BATCH_BODY_BUDGET: usize = 512 * 1024;
 pub const BATCH_MAX_PATHS: usize = 2000;
 /// `discovery/local/embeddings` takes 1-8 paths (mStream's `discovery.js`).
 pub const EMBEDDINGS_PER_CALL: usize = 8;
+/// `db/mood-scores` takes 1-2000 paths a call (mStream's
+/// `MOOD_SCORES_MAX_PATHS`, its `db.js`): about 0.2-0.35 MB of answer.
+pub const MOOD_SCORES_MAX_PATHS: usize = 2000;
+/// mStream's mood heads in its `MOOD_COLUMNS` order (`src/db/mood-sync.js`):
+/// a [`MoodRow`]'s, whatever order an answer names them in.
+pub const MOOD_HEADS: [&str; 8] =
+    ["danceable", "happy", "sad", "relaxed", "aggressive", "party", "acoustic", "instrumental"];
 /// Its 404 for a path it cannot resolve or this user cannot see.
 const TRACK_NOT_FOUND: &str = "Track not found";
 /// `stats/plays` takes 1-200 plays a call (its `MAX_BATCH`).
@@ -607,6 +615,47 @@ fn floats(text: &str, dim: u32) -> Option<Vec<f32>> {
     Some(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
 }
 
+/// One track's mood scores, in [`MOOD_HEADS`] order: each head's double as
+/// the server stores it (0 and 1 sent as integers, nothing rounded), `None`
+/// for a NULL head, which is never 0.
+pub type MoodRow = [Option<f64>; 8];
+
+/// `POST /api/v1/db/mood-scores`'s answer as it comes: the model and the
+/// pin, the heads naming each array's slots, and a value a path asked for.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct MoodReply {
+    model: Option<EmbeddingModel>,
+    #[serde(rename = "moodVersion", deserialize_with = "textual")]
+    mood_version: Option<String>,
+    heads: Vec<String>,
+    tracks: HashMap<String, serde_json::Value>,
+}
+
+/// The mood scores of a list of paths, read in chunks
+/// ([`Client::mood_scores_async`]): what a card's records carry so the
+/// player can filter by mood offline (the firmware repo's
+/// docs/MOOD-FILTERS.md 5.1-5.3).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MoodScores {
+    /// The server's configured discovery model, whose heads made the
+    /// scores; `None` when it names none.
+    pub model: Option<EmbeddingModel>,
+    /// The active mood-head pin; `None` while the server's `analyzeMoods`
+    /// is off.
+    pub mood_version: Option<String>,
+    /// The heads as the server named them, in its order: every one of
+    /// [`MOOD_HEADS`], and any it adds later.
+    pub heads: Vec<String>,
+    /// A key for each path the answer gave a value a client can take: its
+    /// row, or `None` for no scores to give — a track not analysed yet, a
+    /// path this user can't see or that isn't there, every path while the
+    /// server has none (alike on purpose). A path the answer left out, or
+    /// whose value isn't an array as long as `heads`, has no key: its caller
+    /// keeps what it had.
+    pub tracks: HashMap<String, Option<MoodRow>>,
+}
+
 /// What `GET /api/v1/db/waveform` says of a track, as a card's sync goes on
 /// from it ([`Client::waveform_peaks_async`]). The player's own call latches
 /// on a 503 for the session ([`Client::waveform_async`]), which a sync of a
@@ -1131,6 +1180,94 @@ impl Client {
 
     pub fn embeddings(&self, paths: &[String]) -> Result<Option<Embeddings>, ApiError> {
         wait(self.embeddings_async(paths))
+    }
+
+    /// The mood scores of `paths` (`POST /api/v1/db/mood-scores`), in as
+    /// many calls as the body cap and the route's own cap need
+    /// ([`BATCH_BODY_BUDGET`], [`MOOD_SCORES_MAX_PATHS`]); a 413 halves a
+    /// chunk, as [`Client::metadata_batch_async`]'s does. Ask only a server
+    /// whose `/api/` says `moodScores`. An empty path, which the route
+    /// refuses with its whole call, is never sent, and has no key.
+    ///
+    /// `None` is no scores from this server at all: a 403 (a key or a user
+    /// the route refuses) or a 404 (no such route, or no such peer behind a
+    /// parent's proxy), at any chunk, and never split. Rows are read by
+    /// their head's name ([`MoodScores::tracks`] says which have a key). An
+    /// answer that lacks one of [`MOOD_HEADS`], or whose model, pin or
+    /// heads move from one chunk to the next, is an error: scores of two
+    /// versions can't stand side by side, so a sync keeps what it had.
+    pub async fn mood_scores_async(
+        &self,
+        paths: &[String],
+    ) -> Result<Option<MoodScores>, ApiError> {
+        self.mood_scores_within(paths, BATCH_BODY_BUDGET, MOOD_SCORES_MAX_PATHS).await
+    }
+
+    async fn mood_scores_within(
+        &self,
+        paths: &[String],
+        budget: usize,
+        most: usize,
+    ) -> Result<Option<MoodScores>, ApiError> {
+        const PATH: &str = "api/v1/db/mood-scores";
+        let wrong = |message: String| ApiError::Decode { endpoint: PATH.to_string(), message };
+        let asked: Vec<String> = paths.iter().filter(|p| !p.is_empty()).cloned().collect();
+        let mut out = MoodScores::default();
+        // The first chunk's model, pin and heads, and where each of the
+        // eight is in its rows.
+        let mut first: Option<(Option<EmbeddingModel>, Option<String>, Vec<String>)> = None;
+        let mut slots = [0usize; 8];
+        let mut queue: VecDeque<&[String]> = chunks(&asked, budget, most).into();
+        while let Some(chunk) = queue.pop_front() {
+            let body = serde_json::json!({ "filepaths": chunk });
+            let reply = self.exchange(Method::POST, PATH, Some(&body), &[]).await?;
+            match reply.status {
+                StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => return Ok(None),
+                StatusCode::PAYLOAD_TOO_LARGE if chunk.len() > 1 => {
+                    let (front, back) = chunk.split_at(chunk.len() / 2);
+                    queue.push_front(back);
+                    queue.push_front(front);
+                    continue;
+                }
+                _ => {}
+            }
+            let answer: MoodReply = decode(&reply, PATH)?;
+            let version = (answer.model, answer.mood_version, answer.heads);
+            match &first {
+                None => {
+                    for (slot, name) in slots.iter_mut().zip(MOOD_HEADS) {
+                        let at = version.2.iter().position(|h| h == name);
+                        *slot = at.ok_or_else(|| wrong(format!("the answer names no `{name}` head")))?;
+                    }
+                    first = Some(version);
+                }
+                Some(was) if *was != version => {
+                    let what = "the mood model, its pin or its heads changed while they were read";
+                    return Err(wrong(what.to_string()));
+                }
+                Some(_) => {}
+            }
+            let width = first.as_ref().map_or(0, |f| f.2.len());
+            for path in chunk {
+                let row = match answer.tracks.get(path) {
+                    Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::Array(values)) if values.len() == width => {
+                        Some(slots.map(|at| real(&values[at]).ok().flatten()))
+                    }
+                    // Left out, or no row a client can read: kept as it was.
+                    _ => continue,
+                };
+                out.tracks.insert(path.clone(), row);
+            }
+        }
+        if let Some((model, mood_version, heads)) = first {
+            (out.model, out.mood_version, out.heads) = (model, mood_version, heads);
+        }
+        Ok(Some(out))
+    }
+
+    pub fn mood_scores(&self, paths: &[String]) -> Result<Option<MoodScores>, ApiError> {
+        wait(self.mood_scores_async(paths))
     }
 
     /// A track's peaks as a card's sync asks them (`GET /api/v1/db/waveform`;
@@ -1856,6 +1993,173 @@ mod tests {
         assert_eq!(bodies[3], serde_json::json!([paths[3]]));
         assert_eq!(bodies[4], serde_json::json!([paths[4]]));
         assert!(meter.load(Ordering::Relaxed) > 500, "every answer's body was counted");
+    }
+
+    /// A mood scores answer: its model and pin as JSON, `heads`, and
+    /// `tracks` as written.
+    fn mood_answer(model: &str, pin: &str, heads: &[&str], tracks: &str) -> Vec<u8> {
+        let heads = serde_json::json!(heads);
+        json("200 OK", &format!(r#"{{"model":{model},"moodVersion":{pin},"heads":{heads},"tracks":{{{tracks}}}}}"#))
+    }
+
+    /// One from today's server, analysis on.
+    fn moods(heads: &[&str], tracks: &str) -> Vec<u8> {
+        mood_answer(r#"{"id":"effnet-discogs","version":"1"}"#, r#""1""#, heads, tracks)
+    }
+
+    #[test]
+    fn mood_scores_arrive_in_chunks_under_the_body_cap_as_the_server_stores_them() {
+        let paths: Vec<String> = (0..5).map(|i| format!("lib/Folder {i}/track {i}.flac")).collect();
+        let mut asked = paths.clone();
+        asked.insert(2, String::new());
+        let (base, seen) = canned(vec![
+            // 0 and 1 as integers, a NULL head, nothing rounded.
+            moods(&MOOD_HEADS, &format!(
+                r#""{}":[0.81,0.29,0,0.7,0.1234,1,0.57,0.58],"{}":[0.81,0.29,null,0.7,0.1234,1,0.57,0.58]"#,
+                paths[0], paths[1]
+            )),
+            json("413 Payload Too Large", r#"{"error":"request entity too large"}"#),
+            moods(&MOOD_HEADS, &format!(r#""{}":[null,null,null,null,null,null,null,null]"#, paths[2])),
+            moods(&MOOD_HEADS, &format!(r#""{}":null"#, paths[3])),
+            // The fifth left out of its answer.
+            moods(&MOOD_HEADS, ""),
+        ]);
+        let meter = Arc::new(AtomicU64::new(0));
+        let client = Client::new(&base).unwrap().with_meter(Some(meter.clone()));
+        let got = wait(client.mood_scores_within(&asked, 70, 100)).unwrap().expect("scores");
+        assert_eq!(got.model, Some(EmbeddingModel { id: Some("effnet-discogs".into()), version: Some("1".into()) }));
+        assert_eq!((got.mood_version.as_deref(), got.heads.len()), (Some("1"), 8));
+        let scored = [Some(0.81), Some(0.29), Some(0.0), Some(0.7), Some(0.1234), Some(1.0), Some(0.57), Some(0.58)];
+        assert_eq!(got.tracks[&paths[0]], Some(scored));
+        assert_eq!(got.tracks[&paths[0]].unwrap()[1].map(f64::to_bits), Some(0.29f64.to_bits()), "as parsed");
+        let mut null_head = scored;
+        null_head[2] = None;
+        assert_eq!(got.tracks[&paths[1]], Some(null_head), "a NULL head is never 0");
+        assert_eq!(got.tracks[&paths[2]], Some([None; 8]), "a row of NULLs is no row's opposite");
+        assert_eq!(got.tracks[&paths[3]], None, "no row, or out of sight: no scores to give");
+        assert!(!got.tracks.contains_key(&paths[4]) && !got.tracks.contains_key(""), "no key: kept");
+        assert_eq!(got.tracks.len(), 4);
+
+        let mut bodies = Vec::new();
+        for _ in 0..5 {
+            let request = recv(&seen);
+            assert!(request.starts_with("POST /api/v1/db/mood-scores HTTP/1.1\r\n"), "{request}");
+            bodies.push(body_of(&request));
+        }
+        assert_eq!(bodies[0], serde_json::json!({ "filepaths": [paths[0], paths[1]] }), "the empty path never");
+        assert_eq!(bodies[1], serde_json::json!({ "filepaths": [paths[2], paths[3]] }));
+        assert_eq!(bodies[2], serde_json::json!({ "filepaths": [paths[2]] }), "halved after the 413");
+        assert_eq!(bodies[3], serde_json::json!({ "filepaths": [paths[3]] }));
+        assert_eq!(bodies[4], serde_json::json!({ "filepaths": [paths[4]] }));
+        for body in &bodies {
+            assert!(body["filepaths"].to_string().len() <= 70, "{body}");
+        }
+        assert!(meter.load(Ordering::Relaxed) > 500, "every answer's body was counted");
+
+        // Never past the route's 2000 paths, however light they are.
+        let many: Vec<String> = (0..4500).map(|i| format!("lib/{i}.mp3")).collect();
+        let cut = chunks(&many, BATCH_BODY_BUDGET, MOOD_SCORES_MAX_PATHS);
+        assert_eq!(cut.iter().map(|c| c.len()).collect::<Vec<_>>(), [2000, 2000, 500]);
+    }
+
+    #[test]
+    fn mood_scores_are_none_on_a_403_or_a_404_and_never_split() {
+        let paths: Vec<String> = (0..3).map(|i| format!("lib/{i}.mp3")).collect();
+        let (base, seen) = canned(vec![
+            json("403 Forbidden", r#"{"error":"Access Denied"}"#),
+            // A first chunk answered, the second refused: no scores at all.
+            moods(&MOOD_HEADS, &format!(r#""{}":null,"{}":null"#, paths[0], paths[1])),
+            reply("404 Not Found", &[("Content-Type", "text/html")], b"<pre>Cannot POST</pre>"),
+            json("404 Not Found", r#"{"error":"Peer not found"}"#),
+        ]);
+        let client = Client::new(&base).unwrap();
+        assert_eq!(wait(client.mood_scores_within(&paths, BATCH_BODY_BUDGET, 2)).unwrap(), None);
+        assert_eq!(wait(client.mood_scores_within(&paths, BATCH_BODY_BUDGET, 2)).unwrap(), None);
+        let peer = Client::new(&base).unwrap().with_peer(Some(4));
+        assert_eq!(peer.mood_scores(&paths).unwrap(), None);
+        // The 403's chunk was not halved: the next request is the next
+        // call's first chunk, whole.
+        let asked: Vec<serde_json::Value> = (0..4).map(|_| body_of(&recv(&seen))["filepaths"].clone()).collect();
+        assert_eq!(asked[0], serde_json::json!([paths[0], paths[1]]));
+        assert_eq!(asked[1], serde_json::json!([paths[0], paths[1]]));
+        assert_eq!(asked[2], serde_json::json!([paths[2]]));
+        assert_eq!(asked[3], serde_json::json!(paths), "a peer's, through the parent's proxy");
+    }
+
+    #[test]
+    fn an_odd_mood_row_has_no_key_and_an_odd_score_is_no_score() {
+        let tracks = [
+            r#""lib/seven.mp3":[0.1,0.2,0.3,0.4,0.5,0.6,0.7]"#,
+            r#""lib/nine.mp3":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]"#,
+            r#""lib/text.mp3":"0.5""#,
+            r#""lib/object.mp3":{"danceable":0.5}"#,
+            r#""lib/number.mp3":0.5"#,
+            r#""lib/odd.mp3":[true,"0.5",1,0,null,"x",0.5,1e-4]"#,
+            r#""lib/null.mp3":null"#,
+        ];
+        let paths: Vec<String> =
+            tracks.iter().map(|t| t.split('"').nth(1).expect("a path").to_string()).collect();
+        let (base, _seen) = canned(vec![moods(&MOOD_HEADS, &tracks.join(","))]);
+        let got = Client::new(&base).unwrap().mood_scores(&paths).unwrap().expect("scores");
+        let mut keys: Vec<&str> = got.tracks.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["lib/null.mp3", "lib/odd.mp3"], "none for a row whose length isn't the heads'");
+        let odd = [None, Some(0.5), Some(1.0), Some(0.0), None, None, Some(0.5), Some(0.0001)];
+        assert_eq!(got.tracks["lib/odd.mp3"], Some(odd), "the module's numbers, integers too");
+        assert_eq!(got.tracks["lib/null.mp3"], None);
+    }
+
+    #[test]
+    fn mood_heads_are_read_by_name_and_may_not_move_between_chunks() {
+        // Named in another order, with one the client doesn't know.
+        let heads = ["instrumental", "acoustic", "party", "aggressive", "relaxed", "sad", "happy", "danceable", "x"];
+        let row = r#""lib/a.mp3":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]"#;
+        let mut lacking = MOOD_HEADS.to_vec();
+        lacking.retain(|h| *h != "sad");
+        let mut turned = MOOD_HEADS.to_vec();
+        turned.swap(1, 2);
+        let model = r#"{"id":"effnet-discogs","version":"1"}"#;
+        let (a, b) = (r#""lib/a.mp3":null"#, r#""lib/b.mp3":null"#);
+        let (base, _seen) = canned(vec![
+            moods(&heads, row),
+            // `analyzeMoods` off: no pin, every path null; and no model
+            // named.
+            mood_answer("null", "null", &MOOD_HEADS, a),
+            moods(&lacking, r#""lib/a.mp3":[0,0,0,0,0,0,0]"#),
+            // The pin, the heads' order, the model: each moving mid-read.
+            moods(&MOOD_HEADS, a),
+            mood_answer(model, r#""2""#, &MOOD_HEADS, b),
+            moods(&MOOD_HEADS, a),
+            moods(&turned, b),
+            moods(&MOOD_HEADS, a),
+            mood_answer(r#"{"id":"effnet-discogs","version":"2"}"#, r#""1""#, &MOOD_HEADS, b),
+        ]);
+        let client = Client::new(&base).unwrap();
+        let one = vec!["lib/a.mp3".to_string()];
+        let two = vec!["lib/a.mp3".to_string(), "lib/b.mp3".to_string()];
+        let got = client.mood_scores(&one).unwrap().expect("scores");
+        let want = [Some(0.8), Some(0.7), Some(0.6), Some(0.5), Some(0.4), Some(0.3), Some(0.2), Some(0.1)];
+        assert_eq!(got.tracks["lib/a.mp3"], Some(want), "danceable to instrumental, by name");
+        assert_eq!(got.heads.len(), 9);
+        let off = client.mood_scores(&one).unwrap().expect("an answer");
+        assert_eq!((off.model, off.mood_version, off.tracks["lib/a.mp3"]), (None, None, None));
+        assert!(matches!(client.mood_scores(&one), Err(ApiError::Decode { .. })), "no sad head");
+        for what in ["the pin", "the heads", "the model"] {
+            let moved = wait(client.mood_scores_within(&two, BATCH_BODY_BUDGET, 1));
+            assert!(matches!(moved, Err(ApiError::Decode { .. })), "{what}: {moved:?}");
+        }
+    }
+
+    #[test]
+    fn the_mood_scores_flag_is_a_version_fact() {
+        let features = |block: &str| {
+            let api = format!(r#"{{"server":"6.32.0","features":{block}}}"#);
+            serde_json::from_str::<LayeredInfo>(&api).expect("an answer").features
+        };
+        assert_eq!(features(r#"{"moodScores":1,"stats":2}"#).mood_scores, Some(1));
+        assert_eq!(features(r#"{"stats":2}"#).mood_scores, None, "an older server: never asked");
+        let odd = features(r#"{"moodScores":"yes","stats":2}"#);
+        assert_eq!((odd.mood_scores, odd.stats), (None, Some(2)), "an odd value costs its field alone");
     }
 
     fn vector_b64(values: &[f32]) -> String {

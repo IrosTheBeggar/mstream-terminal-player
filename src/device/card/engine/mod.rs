@@ -12,8 +12,9 @@
 //! ([`Outcome`]). The bytes come through a [`Fetcher`]; what the server's
 //! side of a sync adds — the plays of the card's log, a conversion's checks,
 //! a converted file's cover and tags put back, the thumbnails, the Auto DJ
-//! and waveform indexes — through [`Hooks`], each a no-op until its part fills
-//! it (the waveform index's keeps what its old file's slots hold).
+//! and waveform indexes, the mood tails — through [`Hooks`], each a no-op
+//! until its part fills it (the waveform index's keeps what its old file's
+//! slots hold, the mood tails' what the records hold).
 //!
 //! **A run, step by step** (2.12.1; the transfer plan's 2.3):
 //! - [`Session::open`]: 2.4.5's check (a newer major stops it before any
@@ -55,7 +56,7 @@ pub(crate) mod fatsim;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 pub(crate) use self::bind::Expect;
@@ -67,6 +68,7 @@ use self::settle::Settled;
 use self::survey::{Music, Survey};
 use super::contract::WriteError;
 use super::contract::device_txt::DeviceTxt;
+use super::contract::moods::Tail;
 use super::contract::mptg::{Ledger, RecordIn};
 use super::contract::mpth::Pixels;
 use super::contract::msmf::Ack;
@@ -570,9 +572,26 @@ impl From<Index> for Waves {
     }
 }
 
+/// The final commit's mood tails (METADATA.md 2.6.4; the player's
+/// docs/MOOD-FILTERS.md 5.2), laid over its records once the index steps
+/// are done with them and before the commit is weighed: equal scores make
+/// no commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Moods {
+    /// Each record's tail as the run holds it: carried (a file fetched again
+    /// over its row keeps the row's), or none for a file new to the card.
+    Keep,
+    /// No record keeps one (a card for someone else): rows of 72 at minor 0
+    /// again.
+    Clear,
+    /// These records' tails, by path (8 zero bytes clear one); a record not
+    /// named keeps its own.
+    Overlay(HashMap<String, Tail>),
+}
+
 /// What other parts add to a run, each a no-op here ([`NoHooks`]): B15's
-/// plays, B1's conversion checks, retags, covers and Auto DJ index. The
-/// waveform index's is as a fetch that got no answer.
+/// plays, B1's conversion checks, retags, covers, Auto DJ index and mood
+/// tails (kept). The waveform index's is as a fetch that got no answer.
 pub(crate) trait Hooks {
     /// Step 5, once the card is listed: the new plays of the card's log,
     /// mapped through the tags file of the root that counts before a
@@ -623,6 +642,11 @@ pub(crate) trait Hooks {
     /// no server to ask (a copied card's new identity) loses no shape.
     fn waves(&mut self, commit: &Commit<'_>, _events: &mut dyn FnMut(Event)) -> Waves {
         commit.waves_index(&Shapes::new()).map_or(Waves::Same, Waves::from)
+    }
+    /// Step 11, beside the waveform index: the final commit's mood tails. A
+    /// checkpoint asks for none, and carries the tails as the run holds them.
+    fn moods(&mut self, _commit: &Commit<'_>) -> Moods {
+        Moods::Keep
     }
     /// The plays a commit acknowledges (2.5.6), from the root's before:
     /// each raised to the software's mark, never lowered. Only a commit the

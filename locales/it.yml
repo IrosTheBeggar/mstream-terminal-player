@@ -2361,7 +2361,7 @@ dev:
     next_asked: "chiesto %{when}"
     next_signin: "%{n} ascolti attendono %{server}: accedi per inviarli"
     conv_assumed: "ipotizzato per il %{player} su %{port} (%{version}): ancora nessun device.txt"
-    conv_gift: "per qualcun altro: niente indice Auto DJ, ascolti non inviati"
+    conv_gift: "per qualcun altro: niente indice Auto DJ né punteggi d'atmosfera, ascolti non inviati"
     btn_sync: "Sincronizza"
     btn_setup: "Prepara"
     btn_setup_as: "Prepara come scheda %{i}"

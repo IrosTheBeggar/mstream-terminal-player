@@ -10,6 +10,7 @@ use crate::device::card::engine::Guard;
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::sync::tests::{
     Fake, SERIAL, Scratch, Wave, card as set_up_card, envs, peaks_of, server, sync_now, with_hidden,
+    with_moods,
 };
 use crate::device::card::volume::{Fs, Table};
 use crate::device::card::worker::fixtures as f;
@@ -455,6 +456,25 @@ fn a_sync_adds_the_waveforms_a_card_lacks_and_says_how_far_it_has_come() {
         }
     };
     assert!(said.contains("next sync   nothing new on Home\n"), "{said}");
+}
+
+/// The mood scores (clause 51b): a sync from a server that serves them asks
+/// once and prints the line Details' log has of them, as it prints the
+/// run's other notes.
+#[test]
+fn a_sync_says_the_mood_scores_it_brought() {
+    let scratch = Scratch::new("lines-moods");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    with_moods(&b.server);
+    let yes = Flags { yes: true, ..Flags::default() };
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Sync, &yes, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    let line = "\n  mood scores for 5 of the card's 5 tracks from the server\n";
+    assert!(said.contains(line), "{said}");
+    assert_eq!(b.server.lock().unwrap().mood_calls.len(), 1, "one call");
 }
 
 #[test]

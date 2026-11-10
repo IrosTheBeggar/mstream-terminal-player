@@ -216,7 +216,8 @@ pub struct CardArgs {
     /// setup: write its Auto DJ index
     #[arg(long = "autodj", value_parser = ["on", "off"])]
     auto_dj: Option<String>,
-    /// setup: a card for you, or for someone else (no Auto DJ index, plays not sent)
+    /// setup: a card for you, or for someone else (no Auto DJ index or mood scores,
+    /// plays not sent)
     #[arg(long = "for", value_parser = ["me", "someone-else"])]
     for_whom: Option<String>,
     /// setup: what this computer takes from each peer a day, in MB
@@ -396,6 +397,11 @@ pub struct CardSyncArgs {
     // sync has one otherwise: no setting holds this, on the card or anywhere.
     #[arg(long, value_name = "BOOL")]
     waves: Option<bool>,
+    // false: no mood scores asked for, each record's as the card has it, for
+    // the real-card checks. A sync asks a server that serves them otherwise:
+    // no setting holds this either.
+    #[arg(long, value_name = "BOOL")]
+    moods: Option<bool>,
     // The server's name on this card ("Home"); never an address.
     #[arg(long)]
     nickname: Option<String>,
@@ -535,6 +541,7 @@ impl CardSyncArgs {
             },
             stop: None,
             no_waves: self.waves == Some(false),
+            no_moods: self.moods == Some(false),
         })
     }
 }
@@ -1768,6 +1775,15 @@ mod tests {
         assert!(flags(&["card", "E:", "setup", "--convert", "some"]).is_err());
         assert!(flags(&["card", "E:", "format"]).is_err(), "formatting is device format's (B6)");
         assert!(flags(&["card", "E:"]).is_err(), "an action, always");
+        // --for says what a card for someone else goes without, as the Card
+        // view's Converts row does (clause 51b).
+        let mut line = Line::command();
+        let card = line.find_subcommand_mut("card").expect("device card");
+        let gift = card.get_arguments().find(|a| a.get_long() == Some("for"));
+        let gift = gift.and_then(|a| a.get_help()).map(ToString::to_string);
+        let words = "setup: a card for you, or for someone else \
+                     (no Auto DJ index or mood scores, plays not sent)";
+        assert_eq!(gift.as_deref(), Some(words));
     }
 
     /// The card probe answers to its name and stays out of the help, as the
@@ -1822,6 +1838,16 @@ mod tests {
         ] {
             let Ok(DeviceCmd::CardSync(args)) = parse(flags) else { panic!("{flags:?}") };
             assert_eq!(args.ask().expect("a sync").no_waves, no_waves, "{flags:?}");
+        }
+        // The mood scores: asked for unless told, the same way.
+        for (flags, no_moods) in [
+            (&["card-sync", "E:"][..], false),
+            (&["card-sync", "E:", "--moods", "true"][..], false),
+            (&["card-sync", "E:", "--moods", "false"][..], true),
+        ] {
+            let Ok(DeviceCmd::CardSync(args)) = parse(flags) else { panic!("{flags:?}") };
+            let ask = args.ask().expect("a sync");
+            assert_eq!((ask.no_moods, ask.no_waves), (no_moods, false), "{flags:?}");
         }
         // A federation peer's: which peers and libraries, the run's say on an
         // older server's proxy, the day's budget.

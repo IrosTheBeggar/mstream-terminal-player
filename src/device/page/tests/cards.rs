@@ -591,6 +591,60 @@ fn a_sync_asking_for_its_waveforms_says_how_far_it_has_come() {
     assert!(frame.contains("100% asking Home for waveforms… 384 of 384"), "{frame}");
 }
 
+/// A card for someone else says under its Converts rule, dim, what it goes
+/// without (clauses 44, 51b): no Auto DJ index or mood scores, no plays
+/// sent. Its words are whole in every locale, in two lines of the value
+/// column at most, at the GUI's floor and on the console's narrower card.
+#[test]
+fn a_card_for_someone_else_says_under_converts_what_it_goes_without() {
+    let gift = || {
+        cards::with(cards::ready("E:", now()), |c| {
+            cards::facts(c).state.as_mut().expect("its settings").settings.for_someone_else = true;
+        })
+    };
+    for (code, _) in crate::setup::LANGS {
+        let _in = crate::setup::tests::in_locale(code);
+        let words = t!("dev.card.conv_gift").to_string();
+        assert!(!words.contains("dev."), "{code}: no words");
+        let converts = t!("dev.card.label_converts").to_string();
+        let (page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![gift()]);
+        let view = page.open_card().expect("the card in view");
+        for card_w in [CARD_W, 68] {
+            let content_w = card_w - inset(card_w) * 2;
+            let w = usize::from(content_w - LABEL_W);
+            let rows = card::card_layout(&page, &view, content_w);
+            let label = |r: &Row| matches!(r, Row::Value { label: Some(l), .. } if *l == converts);
+            let at = rows.iter().position(label).expect("the Converts row");
+            let under: Vec<String> = rows[at + 1..]
+                .iter()
+                .map_while(|r| match r {
+                    Row::Value { label: None, left, .. } => Some(left),
+                    _ => None,
+                })
+                .filter(|left| left.spans.iter().any(|s| s.style == dim()))
+                .map(ToString::to_string)
+                .collect();
+            assert!((1..=2).contains(&under.len()), "{code} in {w} cells: {under:?}");
+            for line in &under {
+                assert!(kit::width(line) <= w, "{code} in {w} cells: {line:?}");
+            }
+            let bare = |s: &str| s.replace(' ', "");
+            assert_eq!(bare(&under.concat()), bare(&words), "{code} in {w} cells: whole");
+        }
+    }
+    let _en = english();
+    let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![gift()]);
+    let frame = window(&mut page);
+    let lines = [
+        "│  Converts      only what the player can't play, to Opus 192k ",
+        "│                for someone else: no Auto DJ index or mood scores, plays ",
+        "│                not sent ",
+    ];
+    for line in lines {
+        assert!(frame.contains(line), "{line:?}:\n{frame}");
+    }
+}
+
 #[test]
 fn during_a_firmware_write_a_card_is_looked_at_only_and_x_still_stops_its_sync() {
     let _en = english();

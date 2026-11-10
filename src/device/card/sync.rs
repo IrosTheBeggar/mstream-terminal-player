@@ -36,8 +36,10 @@
 //!    and its own BPM and key put back before the card takes it ([`Retag`]),
 //!    each album's thumbnail ([`covers`](super::covers)), the Auto DJ
 //!    index from mStream's embeddings when the card's player reads MPDJ v2
-//!    and the card isn't made for someone else, and the waveform index from
-//!    mStream's peaks when the player reads MPWF v1 ([`waves`]).
+//!    and the card isn't made for someone else, the waveform index from
+//!    mStream's peaks when the player reads MPWF v1 ([`waves`]), and each
+//!    record's mood scores from the server's own when it serves them and the
+//!    card isn't made for someone else ([`moods`]).
 //! 6. The settings, stored at the run's end before it lets the card go
 //!    ([`Hooks::state`]): the selection, the conversion, the source's
 //!    nickname and keys, the manifest's schedule, which art each thumbnail
@@ -86,7 +88,8 @@ use super::covers::{self, Covers, folders, most_common};
 use super::dry::DryCard;
 use super::engine::{
     Album, Answers, AutoDj, Commit, Cover, Env, Event, Expect, Failed, Fetched, Fetcher, Footprint,
-    Guard, Have, Hooks, Knobs, Origin, Outcome, Plan, Report, Session, Stop, WantedFile, Waves,
+    Guard, Have, Hooks, Knobs, Moods, Origin, Outcome, Plan, Report, Session, Stop, WantedFile,
+    Waves,
 };
 use super::history::{self, History, Tally};
 use super::names::{self, Bytes};
@@ -117,6 +120,7 @@ const WHOLE_EVERY_RUNS: u32 = 10;
 /// The first bytes of an `.ogg` that say whether it is Opus.
 const OGG_HEAD: u64 = 512;
 
+mod moods;
 mod peers;
 mod sets;
 mod waves;
@@ -204,6 +208,11 @@ pub(crate) struct Ask {
     /// real-card checks: a listener's sync always has one, there being no
     /// setting for it.
     pub(crate) no_waves: bool,
+    /// No mood scores: none is asked for, and each record's tail stays as the
+    /// card has it. The hidden command's `--moods false`, for the real-card
+    /// checks: a listener's sync always asks a server that serves them, there
+    /// being no setting for it.
+    pub(crate) no_moods: bool,
 }
 
 /// Why a run the listener stopped parked ([`Outcome::parked`]).
@@ -1006,6 +1015,11 @@ fn prepare(
             (false, true) => Some("the card has no room for it"),
         },
         waves_lack: None,
+        moods: moods::Rule {
+            someone_else: settings.for_someone_else,
+            left_out: ask.no_moods,
+            served: info.features.mood_scores.is_some_and(|n| n >= 1),
+        },
         stop: ask.stop.clone(),
         store: None,
         history: None,
@@ -1263,10 +1277,11 @@ struct SyncHooks {
     /// not for someone else.
     dj: bool,
     dj_off: Option<&'static str>,
-    /// The key of the files the root's index was built from.
+    /// The key of the files of the root the run began from: those its Auto
+    /// DJ index was built from, and its mood tails asked for.
     old_fingerprint: Option<u64>,
-    /// A whole read: the embeddings are read again even when the files
-    /// are the same, the server's analysis having moved on.
+    /// A whole read: the embeddings and the mood scores are read again even
+    /// when the files are the same, the server's analysis having moved on.
     refresh: bool,
     /// A waveform index is wanted: the card's player reads MPWF v1 and the
     /// card has room for it. A card for someone else gets one too: it holds
@@ -1276,7 +1291,11 @@ struct SyncHooks {
     /// What the final commit's fetch says the card lacks ([`State::waves_none`],
     /// [`State::waves_no_ffmpeg`]). None: it didn't get there.
     waves_lack: Option<Lack>,
-    /// The listener's stop: the waveforms' fetch keeps what came.
+    /// What the final commit's mood step goes by ([`moods`]): a card for
+    /// someone else gets no scores, whatever its Auto DJ setting says.
+    moods: moods::Rule,
+    /// The listener's stop: the waveforms' fetch keeps what came, and the mood
+    /// step asks nothing.
     stop: Option<Arc<AtomicBool>>,
     /// The settings the run's end stores; set for a run, not for a plan.
     store: Option<Store>,
@@ -1333,6 +1352,19 @@ impl SyncHooks {
     fn held(&self, origin: usize) -> bool {
         self.lists.get(origin).and_then(|(_, gate)| gate.as_ref()).is_some_and(|g| !g.open())
     }
+
+    /// The commit's files are those of the root the run began from, as
+    /// [`fingerprint`] keys them ([`files_of`]).
+    fn same_files(&self, files: &[FileIn]) -> bool {
+        self.old_fingerprint == Some(fingerprint(files))
+    }
+}
+
+/// A commit's files as the Auto DJ index keys them: its records with a
+/// canonical hash ([`FileIn::of`]).
+fn files_of(commit: &Commit<'_>) -> Vec<FileIn> {
+    let of = |r: &RecordIn| FileIn::of(&r.path, &r.rec, &r.run, r.ledger.as_ref());
+    commit.records.iter().filter_map(of).collect()
 }
 
 impl Hooks for SyncHooks {
@@ -1445,10 +1477,8 @@ impl Hooks for SyncHooks {
             }
             return AutoDj::None;
         }
-        let of = |r: &RecordIn| FileIn::of(&r.path, &r.rec, &r.run, r.ledger.as_ref());
-        let files: Vec<FileIn> = commit.records.iter().filter_map(of).collect();
-        let same_files = self.old_fingerprint == Some(fingerprint(&files));
-        if commit.old.is_some() && !self.refresh && same_files {
+        let files = files_of(commit);
+        if commit.old.is_some() && !self.refresh && self.same_files(&files) {
             return AutoDj::Same;
         }
         // Each origin's rows' vectors from its own server (a peer's through
@@ -1561,6 +1591,18 @@ impl Hooks for SyncHooks {
         self.notes.extend(came.note);
         self.waves_lack = Some(came.lack);
         came.waves
+    }
+
+    /// The tails the server's own scores come to ([`moods`]): whatever came
+    /// of asking, never a failed run. The files' key is weighed only for a
+    /// commit with a tail to keep.
+    fn moods(&mut self, commit: &Commit<'_>) -> Moods {
+        let stopped = self.stop.as_ref().is_some_and(|stop| stop.load(Ordering::SeqCst));
+        let scored = commit.records.iter().any(|r| r.rec.has_moods());
+        let same = scored && !self.refresh && self.same_files(&files_of(commit));
+        let came = moods::tails(&self.client, commit, self.moods.step(stopped, scored, same));
+        self.notes.extend(came.note);
+        came.moods
     }
 
     /// The plays the run settled, acknowledged in each commit it makes.

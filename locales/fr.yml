@@ -2361,7 +2361,7 @@ dev:
     next_asked: "demandé %{when}"
     next_signin: "%{n} écoutes attendent %{server} : connectez-vous pour les envoyer"
     conv_assumed: "supposé pour le %{player} sur %{port} (%{version}) : pas encore de device.txt"
-    conv_gift: "pour quelqu'un d'autre : pas d'index Auto DJ, écoutes non envoyées"
+    conv_gift: "pour quelqu'un d'autre : pas d'index Auto DJ ni de scores d'ambiance, écoutes non envoyées"
     btn_sync: "Synchroniser"
     btn_setup: "Préparer"
     btn_setup_as: "Préparer comme carte %{i}"
