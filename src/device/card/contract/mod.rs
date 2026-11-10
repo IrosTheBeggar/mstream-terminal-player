@@ -55,6 +55,16 @@ pub(crate) mod prim;
 pub(crate) mod server;
 pub(crate) mod text;
 
+/// The most entries a reader reserves room for up front, whatever its
+/// header's count says: a damaged or crafted file names counts its bytes
+/// can't hold, and a vector past this grows as its rows are read.
+pub(crate) const RESERVE_MAX: usize = 65_536;
+
+/// Room to reserve for `count` entries a header names ([`RESERVE_MAX`]).
+pub(crate) fn reserve(count: u32) -> usize {
+    (count as usize).min(RESERVE_MAX)
+}
+
 #[cfg(test)]
 mod tests;
 

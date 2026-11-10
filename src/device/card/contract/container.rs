@@ -156,7 +156,7 @@ impl<'a> Container<'a> {
         }
 
         let mut known: Vec<Option<Section>> = vec![None; spec.sections.len()];
-        let mut types: Vec<u32> = Vec::with_capacity(header.section_count as usize);
+        let mut types: Vec<u32> = Vec::with_capacity(super::reserve(header.section_count));
         let mut end = dir_end as u64;
         for i in 0..header.section_count {
             let s = dir_entry(bytes, &header, i);

@@ -580,8 +580,8 @@ pub(crate) fn read(bytes: &[u8], uses: Uses) -> Result<Tags, Why> {
         look = Some(Look { folder, rec, name, strings });
     }
 
-    let mut folders: Vec<Folder> = Vec::with_capacity(folder_count as usize);
-    let mut records: Vec<Entry> = Vec::with_capacity(record_count as usize);
+    let mut folders: Vec<Folder> = Vec::with_capacity(super::reserve(folder_count));
+    let mut records: Vec<Entry> = Vec::with_capacity(super::reserve(record_count));
     let mut stack: Vec<Level> = Vec::new();
     let (mut next_folder, mut cur_folder, mut next_record) = (0u32, None::<u32>, 1u32);
     loop {
@@ -730,7 +730,7 @@ pub(crate) fn read(bytes: &[u8], uses: Uses) -> Result<Tags, Why> {
     }
     if let Some(h) = hidx {
         let mut prev: Option<(u64, u32)> = None;
-        let mut entries: Vec<(u64, u32)> = Vec::with_capacity(h.count as usize);
+        let mut entries: Vec<(u64, u32)> = Vec::with_capacity(super::reserve(h.count));
         for i in 0..h.count {
             let e = c.row(&h, i, HIDX_STRIDE as usize);
             let pair = (u64_at(e, 0), u32_at(e, 8));

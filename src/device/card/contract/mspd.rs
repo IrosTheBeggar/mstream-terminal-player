@@ -105,7 +105,7 @@ impl Plan {
         if ss.byte() != Some(0) {
             return Err(Why::String);
         }
-        let mut ops: Vec<Op> = Vec::with_capacity(pend.count as usize);
+        let mut ops: Vec<Op> = Vec::with_capacity(super::reserve(pend.count));
         let mut prev: Option<(u8, String)> = None;
         for i in 0..pend.count {
             let e = c.row(&pend, i, PEND_STRIDE as usize);

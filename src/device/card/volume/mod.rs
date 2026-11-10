@@ -464,8 +464,10 @@ impl CardFs for Mounted {
         if file.metadata()?.len() > max as u64 {
             return Ok(None);
         }
+        // A byte past `max` says the file grew past it since its size was
+        // read; `usize::MAX` (no cap) never wraps to a read of nothing.
         let mut bytes = Vec::new();
-        file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+        file.take((max as u64).saturating_add(1)).read_to_end(&mut bytes)?;
         Ok((bytes.len() <= max).then_some(bytes))
     }
 
@@ -1614,6 +1616,19 @@ mod tests {
             assert_eq!(p.seq, c["seq"].as_u64().unwrap_or(0), "{note}");
             assert_eq!(p.twice, c["diskCheck"].as_bool().expect("diskCheck"), "{note}");
         }
+    }
+
+    #[test]
+    fn a_read_with_no_cap_reads_the_whole_file() {
+        let root = std::env::temp_dir().join(format!("mstream-card-read-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".mstream")).unwrap();
+        std::fs::write(root.join(".mstream/manifest.bin"), b"a whole root").unwrap();
+        let card = Mounted { root: root.clone(), clock: Clock::Offset(0) };
+        let whole = card.read("/.mstream/manifest.bin", usize::MAX);
+        let capped = card.read("/.mstream/manifest.bin", 4);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(whole.unwrap().as_deref(), Some(b"a whole root".as_slice()));
+        assert_eq!(capped.unwrap(), None, "past its cap: none");
     }
 
     #[test]

@@ -3046,3 +3046,9 @@ fn thumbnails_from_images() {
     let near = r.abs_diff(16 >> 3) <= 1 && g.abs_diff(160 >> 2) <= 2 && b.abs_diff(240 >> 3) <= 1;
     assert!(near, "{r} {g} {b}");
 }
+
+#[test]
+fn a_reader_reserves_no_more_than_its_cap_whatever_a_header_says() {
+    assert_eq!(super::reserve(12), 12);
+    assert_eq!(super::reserve(u32::MAX), super::RESERVE_MAX);
+}
