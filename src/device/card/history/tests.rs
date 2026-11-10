@@ -579,6 +579,70 @@ fn plays_of_another_server_wait_for_it() {
     assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 7)]);
 }
 
+/// A card for someone else (its settings): its new plays are counted and go
+/// nowhere, whatever they map to. Nothing is owed, nothing is in any
+/// request, and no mark or ACKS passes them. The plays that waited from
+/// before the card was marked wait on, unposted. Made the listener's own
+/// again, the card sends what its log still holds.
+#[test]
+fn a_card_for_someone_else_sends_no_play_until_it_is_the_listeners_own_again() {
+    let scratch = Scratch::new("gift");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let root = root_of(&sim);
+    let store = Rc::new(MemStore::default());
+    let (client, fake) = server(Mstream::default());
+    let mut gift = History::new(store.clone(), false, none()).gift(true);
+    gift.look(&sim, Some(&root), 0);
+    let t = &gift.tally;
+    assert_eq!((t.new, t.gift, t.owed), (7, 7, 0), "{t:?}");
+    assert_eq!((t.own, t.changed, t.clock, t.server), (0, 0, 0, 0), "one reason for them all: {t:?}");
+    assert_eq!(t.json()["unsent"]["gift"], 7);
+    assert_eq!(t.held(), ["7 plays not sent: the card is for someone else"]);
+    gift.post(&client, &talk(HOME), true, true);
+    assert_eq!((gift.tally.due, gift.due(&talk(HOME)), gift.tally.waiting), (0, 0, 0));
+    assert!(fake.lock().unwrap().posts.is_empty(), "nothing in any request");
+    assert_eq!(gift.marks(), [], "no mark passes a play of its log");
+    assert_eq!(gift.acks(&[]), [], "and no ACKS has the player trim one");
+    assert_eq!(gift.unstored(), None);
+    assert!(store.outbox().cards.is_empty(), "nothing owed");
+
+    // Plays mapped before the card was marked, their post failed: they
+    // wait on while it is marked, and none goes.
+    let mut before = History::new(store.clone(), false, none());
+    before.look(&sim, Some(&root), 0);
+    before.post(&offline(), &talk(HOME), true, true);
+    assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 5);
+    let mut marked = History::new(store.clone(), false, none()).gift(true);
+    marked.look(&sim, Some(&root), 0);
+    marked.post(&client, &talk(HOME), true, true);
+    let t = &marked.tally;
+    assert_eq!((t.gift, t.owed, t.due, t.waiting, t.failed), (7, 0, 0, 5, false), "{t:?}");
+    assert!(fake.lock().unwrap().posts.is_empty(), "nothing in any request");
+    assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 5, "they wait on");
+    assert_eq!((marked.marks(), marked.acks(&[])), (vec![], vec![]));
+
+    // The plays command reads the mark off the card's own settings, and
+    // asks no server: one out of reach fails nothing.
+    let state = json!({"format": "mstream-card-state", "version": 1, "seq": 2, "cardId": id_hex(CARD_ID),
+        "label": "Gift", "autoDj": {"on": true, "forSomeoneElse": true}});
+    let state_file = scratch.0.join("card/.mstream/state.json");
+    std::fs::write(&state_file, state.to_string()).unwrap();
+    let (tally, marks) = plays_of(&sim, &offline(), false, store.clone());
+    assert_eq!((tally.gift, tally.due, tally.waiting, tally.failed), (7, 0, 5, false), "{tally:?}");
+    assert_eq!(marks, []);
+    std::fs::remove_file(&state_file).unwrap();
+
+    // The listener's own again: what its log still holds is mapped, and
+    // goes with what waited.
+    let mut mine = History::new(store.clone(), false, none());
+    mine.look(&sim, Some(&root), 0);
+    mine.post(&client, &talk(HOME), true, true);
+    let t = &mine.tally;
+    assert_eq!((t.gift, t.owed, t.accepted, t.waiting), (0, 5, 5, 0), "{t:?}");
+    assert_eq!(posted_ids(&fake).concat().len(), 5);
+    assert_eq!(mine.marks(), [ack(ONE, EPOCH_1, 7)]);
+}
+
 /// On a card of several servers: the server read now takes its own rows'
 /// plays and those of its peers' rows, each with the peer's id and the
 /// track's snapshot; the other server's play waits, and holds its device's

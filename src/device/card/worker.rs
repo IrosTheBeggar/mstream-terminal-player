@@ -771,6 +771,9 @@ pub(crate) enum Note {
     Ejected { card: String },
     EjectFailed { card: String, why: String },
     PlaysSent { n: usize, server: String },
+    /// *Send the plays* on a card for someone else: none is sent (clause
+    /// 61).
+    PlaysGift,
     Failed { why: String },
 }
 
@@ -1732,14 +1735,25 @@ impl Worker {
             JobDone::Plays(result) => {
                 let link = self.slot(key).and_then(|s| s.view.server.link().cloned());
                 let server = link.map(|l| l.name).unwrap_or_default();
+                let state = self.slot(key).and_then(|s| s.view.facts()?.state.clone());
+                let gift = state.is_some_and(|s| s.settings.for_someone_else);
                 if let Some(slot) = self.slot(key) {
                     slot.view.busy = None;
                     slot.look_again = true;
                 }
                 match result {
                     Ok(tally) => {
-                        let n = tally.accepted + tally.duplicates;
-                        self.tell(Event::Note(Note::PlaysSent { n, server }));
+                        // Why some went nowhere, in the card's log.
+                        for line in tally.held() {
+                            let item = LogItem::Said(line);
+                            self.tell(Event::Log { key: key.to_string(), item });
+                        }
+                        if gift || tally.gift > 0 {
+                            self.tell(Event::Note(Note::PlaysGift));
+                        } else {
+                            let n = tally.accepted + tally.duplicates;
+                            self.tell(Event::Note(Note::PlaysSent { n, server }));
+                        }
                     }
                     Err(why) => self.tell(Event::Note(Note::Failed { why })),
                 }

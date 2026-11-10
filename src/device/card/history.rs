@@ -21,6 +21,10 @@
 //!   and counted ([`Unsent`]: the listener's own file, a file that changed,
 //!   a play from before the clock was ever set, a row whose server the card
 //!   can't tell);
+//! - on a card for someone else (its settings' word, [`History::gift()`]),
+//!   none mapped at all: each is counted ([`Unsent::Gift`]) and its mark
+//!   stays below it, so nothing of that card's log reaches an account, and
+//!   a card made the listener's own again maps what its log still holds;
 //! - the plays to send saved in the outbox ([`Outbox`], `card-plays.json`
 //!   in the config folder, written whole) before the run writes anything:
 //!   a checkpoint deletes the tags file they map through. A sync whose
@@ -36,7 +40,8 @@
 //! A play the server's schema refuses is never sent and settles as one not
 //! sent: it would fail every batch it rode in. Plays of another server, and
 //! those of a post that failed, wait in the outbox for a run that reads
-//! their server.
+//! their server. A card for someone else posts none: the plays that waited
+//! from before it was one wait on.
 //!
 //! **The marks** ([`History::marks`]): each device and epoch's rises over
 //! the plays settled or not sent, to the first that waits. A sync stores
@@ -315,7 +320,8 @@ pub(crate) fn key_of_id(id: &str) -> Option<mppl::Key> {
 // ── Resolving (2.20.6) ──────────────────────────────────────────────────────
 
 /// Why a new play isn't sent; it is counted (2.20.6, item 8), and it settles
-/// as it is: the mark passes it.
+/// as it is: the mark passes it. All but a gift card's, which no mark
+/// passes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Unsent {
     /// No ledger row has its path: the listener's own file.
@@ -328,6 +334,11 @@ pub(crate) enum Unsent {
     Clock,
     /// Its row's server can't be told (an SRVS entry that breaks a rule).
     Server,
+    /// The card is for someone else (its settings): whatever the play maps
+    /// to, it is nobody's here. A look's word, never [`resolve`]'s. It
+    /// doesn't settle: the card's log keeps it, unacknowledged, for a card
+    /// made the listener's own again.
+    Gift,
 }
 
 /// The posted mark of a device and epoch among `marks`; 0 for none.
@@ -552,6 +563,9 @@ pub(crate) struct Tally {
     pub(crate) changed: usize,
     pub(crate) clock: usize,
     pub(crate) server: usize,
+    /// The new plays of a card for someone else: counted, sent nowhere, and
+    /// no mark passes them.
+    pub(crate) gift: usize,
     /// Paths the server moved, found again by their audio hash.
     pub(crate) remapped: usize,
     /// The server's answers.
@@ -582,7 +596,7 @@ impl Tally {
             "new": self.new,
             "owed": self.owed,
             "unsent": {"own": self.own, "changed": self.changed, "clock": self.clock,
-                       "server": self.server},
+                       "server": self.server, "gift": self.gift},
             "remapped": self.remapped,
             "posted": {"accepted": self.accepted, "duplicates": self.duplicates,
                        "rejected": self.rejected},
@@ -593,6 +607,22 @@ impl Tally {
             "notes": self.notes,
         })
     }
+
+    /// Why plays the card holds went nowhere though its server was read, a
+    /// line each: the listener's to read, in Details' log and on the
+    /// command line (the run's own words).
+    pub(crate) fn held(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.gift > 0 {
+            lines.push(format!("{} not sent: the card is for someone else", plays(self.gift)));
+        }
+        lines
+    }
+}
+
+/// `1 play`, `3 plays`.
+fn plays(n: usize) -> String {
+    if n == 1 { "1 play".to_string() } else { format!("{n} plays") }
 }
 
 /// One card's plays through a run: looked at once, then remapped and
@@ -601,6 +631,9 @@ pub(crate) struct History {
     store: Rc<dyn Store>,
     /// Read and resolve only: nothing saved, nothing posted.
     dry: bool,
+    /// The card is for someone else, as its settings say ([`History::gift()`]):
+    /// no play of its log is mapped, and none is posted.
+    gift: bool,
     /// The card's state file's marks, and the card id that file names: the
     /// marks are taken only for that card's root.
     posted: Vec<Ack>,
@@ -631,6 +664,7 @@ impl History {
         History {
             store,
             dry,
+            gift: false,
             posted: posted.1,
             posted_for: posted.0,
             card_id: 0,
@@ -643,6 +677,18 @@ impl History {
             unsent: HashSet::new(),
             tally: Tally::default(),
         }
+    }
+
+    /// The card is for someone else (its settings' `forSomeoneElse`, as the
+    /// run leaves them): its plays are sent to nobody's account. Each new
+    /// one is counted ([`Unsent::Gift`]) and none is mapped, so none joins
+    /// the plays to send; nothing is posted, the plays that waited from
+    /// before the card was marked among them; and no mark rises over a play
+    /// of its log, so no ACKS has the player trim one. Once the card is the
+    /// listener's own again, a look maps what its log still holds.
+    pub(crate) fn gift(mut self, gift: bool) -> History {
+        self.gift = gift;
+        self
     }
 
     fn note(&mut self, failed: bool, note: String) {
@@ -727,6 +773,8 @@ impl History {
         let servers = root.manifest.server_table();
         for (slot, fate) in resolve(&log, tags, &servers, skew, &self.posted) {
             self.tally.new += 1;
+            // A card for someone else: whatever the play maps to.
+            let fate = if self.gift { Err(Unsent::Gift) } else { fate };
             let owed = match fate {
                 Ok(owed) => owed,
                 Err(why) => {
@@ -735,8 +783,12 @@ impl History {
                         Unsent::Changed => &mut self.tally.changed,
                         Unsent::Clock => &mut self.tally.clock,
                         Unsent::Server => &mut self.tally.server,
+                        Unsent::Gift => &mut self.tally.gift,
                     } += 1;
-                    self.unsent.insert(slot.id());
+                    // A gift card's play settles nothing: its mark waits.
+                    if why != Unsent::Gift {
+                        self.unsent.insert(slot.id());
+                    }
                     continue;
                 }
             };
@@ -820,18 +872,25 @@ impl History {
         }
     }
 
-    /// The plays waiting for the server `talk` reads.
+    /// The plays a post to the server `talk` reads would send: those
+    /// waiting for it; none on a card for someone else.
     pub(crate) fn due(&self, talk: &Talk) -> usize {
-        self.owing.plays.iter().filter(|o| o.to.reached(talk)).count()
+        self.due_ids(talk).len()
+    }
+
+    fn due_ids(&self, talk: &Talk) -> Vec<String> {
+        let ours = |o: &&Owed| !self.gift && o.to.reached(talk);
+        self.owing.plays.iter().filter(ours).map(|o| o.id.clone()).collect()
     }
 
     /// Posts the plays waiting for the server `client` reaches (`talk`), in
     /// batches of [`PLAYS_PER_CALL`], each answer saved as it comes. `stats`:
     /// the server takes plays (its Stats API); `device`: it takes the
-    /// `device` source. A post that fails leaves the rest waiting.
+    /// `device` source. A post that fails leaves the rest waiting. A card
+    /// for someone else posts none ([`History::gift()`]): what waited from
+    /// before it was marked waits on.
     pub(crate) fn post(&mut self, client: &Client, talk: &Talk, stats: bool, device: bool) {
-        let mut due: Vec<String> =
-            self.owing.plays.iter().filter(|o| o.to.reached(talk)).map(|o| o.id.clone()).collect();
+        let mut due = self.due_ids(talk);
         self.tally.due = due.len();
         if due.is_empty() || self.dry || !self.loaded {
             return;
@@ -1033,6 +1092,7 @@ pub(crate) fn plays_of(
     let state = State::of(&seen.state).filter(|s| s.card_id == root.manifest.header.card_id);
     if let Some(state) = &state {
         (history.posted, history.posted_for) = (state.plays.clone(), state.card_id);
+        history.gift = state.settings.for_someone_else;
     }
     let skew = match root.tags.as_ref().map(|tags| listed_skew(card, tags)) {
         Ok(Err(e)) => {
@@ -1043,6 +1103,11 @@ pub(crate) fn plays_of(
         Err(_) => 0,
     };
     history.look(card, Some(root), skew);
+    // A card for someone else: its plays are counted, and no server is
+    // asked anything.
+    if history.gift {
+        return (history.tally.clone(), history.marks());
+    }
     let url_key = server_url_key(&client.server());
     let confirmed = state.as_ref().map_or_else(Vec::new, |s| s.settings.keys(url_key));
     let mut talk = Talk { url_key, instance: NO_INSTANCE, confirmed, peer: None };

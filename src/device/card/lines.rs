@@ -1290,12 +1290,23 @@ fn ended(card: &CardView, io: &mut Io) -> i32 {
 
 // ── plays and eject ─────────────────────────────────────────────────────────
 
-/// `plays` (clause 61): the card's plays sent to its server, no sync.
+/// A card for someone else's line: `plays` sends none of it (clause 61).
+fn gift_words(drive: &str) -> String {
+    format!("{drive} is a card for someone else: its plays aren't sent.")
+}
+
+/// `plays` (clause 61): the card's plays sent to its server, no sync. A
+/// card for someone else sends none, and its server is asked nothing.
 fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
     let Some(card) = session.card(key).cloned() else { return 2 };
     if !card.facts().is_some_and(|f| f.set_up()) || card.server.link().is_none() {
         io.warn(&format!("{}: {}", card.drive(), state_words(&card).join(" · ")));
         return 1;
+    }
+    let state = card.facts().and_then(|f| f.state.as_ref());
+    if state.is_some_and(|s| s.settings.for_someone_else) {
+        io.say(&gift_words(&card.drive()));
+        return 0;
     }
     let server = server_name(&card);
     let n = match &card.next {
@@ -1313,7 +1324,7 @@ fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
     if !go_on(flags, io, "send them") {
         return 1;
     }
-    let from = session.fold.notes.len();
+    let (from, logs) = (session.fold.notes.len(), session.fold.logs.len());
     session.link.send(Cmd::Plays { key: key.to_string() });
     let (t0, mut began) = (Instant::now(), false);
     while !job_done(session, key, &mut began) {
@@ -1322,10 +1333,20 @@ fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
             return 1;
         }
     }
+    // Why some went nowhere, in the job's own words.
+    for (k, item) in session.fold.logs.iter().skip(logs) {
+        if k == key && let Some(line) = log_line(item) {
+            let _ = writeln!(io.out, "  {line}");
+        }
+    }
     for note in notes_since(session, from) {
         match note {
             Note::PlaysSent { n, server } => {
                 io.say(&format!("{} plays sent to {server}.", fmt_count(n as u64)));
+                return 0;
+            }
+            Note::PlaysGift => {
+                io.say(&gift_words(&card.drive()));
                 return 0;
             }
             Note::Failed { why } => {

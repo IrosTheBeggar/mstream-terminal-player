@@ -9,8 +9,8 @@ use super::*;
 use crate::device::card::engine::Guard;
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::sync::tests::{
-    Fake, SERIAL, Scratch, Wave, card as set_up_card, envs, peaks_of, server, sync_now, with_hidden,
-    with_moods,
+    Fake, SERIAL, Scratch, Wave, card as set_up_card, envs, logged, peaks_of, rock, server, sync_now,
+    with_hidden, with_moods,
 };
 use crate::device::card::volume::{Fs, Table};
 use crate::device::card::worker::fixtures as f;
@@ -367,6 +367,57 @@ fn setup_names_a_new_card_and_a_set_up_cards_flags_change_its_settings() {
     let code = b.run(Some(&key), What::Setup, &flags, None, &mut term);
     assert_eq!(code, 1, "{}", term.said());
     assert!(term.said().contains("a name, never an address"), "{}", term.said());
+}
+
+/// `plays` on a card for someone else (clause 61, `--for someone-else`):
+/// none is sent and the line says why, where the same card, the listener's
+/// own, plans one and sends it.
+#[test]
+fn plays_on_a_card_for_someone_else_sends_none_and_says_why() {
+    let scratch = Scratch::new("lines-gift");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    let base = b.home.base.clone().expect("the fake server's address");
+    let synced = sync_now(&b.sim, &base, &rock(), &mut envs()).0;
+    assert!(matches!(synced.end, crate::device::card::sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&b.sim, "Album B/01.mp3", 1, 1_791_950_000_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    let yes = Flags { yes: true, ..Flags::default() };
+    let posts = || b.server.lock().unwrap().plays.len();
+
+    // The listener's own: a play to send, and off a terminal the plan alone.
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Plays, &Flags::default(), None, &mut term);
+    assert_eq!(code, 1, "{}", term.said());
+    assert!(term.said().contains("Send 1 plays from "), "{}", term.said());
+
+    // For someone else: none goes, with --yes or without.
+    let mut term = Term::new();
+    let gift = Flags { for_someone_else: Some(true), ..yes.clone() };
+    assert_eq!(b.run(Some(&key), What::Setup, &gift, None, &mut term), 0, "{}", term.said());
+    for flags in [&yes, &Flags::default()] {
+        let mut term = Term::new();
+        let code = b.run(Some(&key), What::Plays, flags, None, &mut term);
+        let said = term.said();
+        assert_eq!(code, 0, "{said}");
+        assert!(said.contains(" is a card for someone else: its plays aren't sent."), "{said}");
+        assert!(!said.contains("plays sent to") && !said.contains("Send "), "{said}");
+    }
+    let mut term = Term::new();
+    assert_eq!(b.run(Some(&key), What::Status, &Flags::default(), None, &mut term), 0);
+    let said = term.said();
+    assert!(said.contains("for         someone else\n") && !said.contains("plays to send"), "{said}");
+    assert_eq!(posts(), 0, "nothing posted");
+
+    // The listener's own again: the play its log still holds goes.
+    let mut term = Term::new();
+    let mine = Flags { for_someone_else: Some(false), ..yes.clone() };
+    assert_eq!(b.run(Some(&key), What::Setup, &mine, None, &mut term), 0, "{}", term.said());
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Plays, &yes, None, &mut term);
+    assert_eq!(code, 0, "{}", term.said());
+    assert!(term.said().contains("1 plays sent to Home."), "{}", term.said());
+    assert_eq!(posts(), 1);
 }
 
 /// The files the server lists and can't serve (a dot part past the vpath)

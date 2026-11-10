@@ -414,6 +414,7 @@ impl Page {
             Note::PlaysSent { n, server } => {
                 (t!("dev.card.done_plays", n = fmt_count(n as u64), server = server).to_string(), false, false)
             }
+            Note::PlaysGift => (t!("dev.card.plays_gift").to_string(), false, false),
             Note::Failed { why } => (why, true, true),
         };
         self.say(text, gold, (!stays).then_some(now + NOTE_FOR));
@@ -1324,13 +1325,21 @@ fn details_rows(card: &CardView, w: u16) -> Vec<Row> {
             rows.push(fact(t!("dev.card.fact_removes").to_string(), words));
         }
         if let Some(tally) = plan_of(card).and_then(|p| p.tally.as_ref()) {
-            let words = t!(
-                "dev.card.fact_plays_v",
-                n = fmt_count(tally.owed.max(tally.due) as u64),
-                old = fmt_count(tally.clock as u64),
-                mine = fmt_count(tally.own as u64)
-            );
-            rows.push(fact(t!("dev.card.label_plays").to_string(), words.to_string()));
+            // A card for someone else sends none (clause 61): said in place
+            // of the counts, which would all be none.
+            let gift = facts.state.as_ref().is_some_and(|s| s.settings.for_someone_else);
+            let words = if gift || tally.gift > 0 {
+                t!("dev.card.plays_gift").to_string()
+            } else {
+                t!(
+                    "dev.card.fact_plays_v",
+                    n = fmt_count(tally.owed.max(tally.due) as u64),
+                    old = fmt_count(tally.clock as u64),
+                    mine = fmt_count(tally.own as u64)
+                )
+                .to_string()
+            };
+            rows.push(fact(t!("dev.card.label_plays").to_string(), words));
         }
         let d = &facts.device;
         if d.present {

@@ -12,7 +12,7 @@ use crate::device::card::contract::mppl::{KIND_PLAY, Slot as Play};
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::history::tests::MemStore;
 use crate::device::card::sync::tests::{
-    Fake, SERIAL, Scratch, card, no_peers, server, sync_now, with_hidden, with_waves,
+    Fake, SERIAL, Scratch, card, logged, no_peers, server, sync_now, with_hidden, with_waves,
 };
 use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
 
@@ -1121,6 +1121,54 @@ fn a_server_that_doesnt_answer_pauses_the_sync_until_its_retry_or_stop_for_now()
     rig.until("asked again", |f| {
         f.cards.iter().any(|c| c.key == wanted && matches!(c.next, Next::Unreached { .. }))
     });
+}
+
+/// *Send the plays* on a card for someone else (clause 61): its look counts
+/// none to send, the note says none is sent, the card's log says how many
+/// and why, and the server is asked for nothing of them.
+#[test]
+fn the_plays_of_a_card_for_someone_else_are_sent_nowhere() {
+    let scratch = Scratch::new("worker-gift");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&sim, "Album B/01.mp3", 1, 1_791_950_000_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    drop(sim);
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("a play to send", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(|p| p.plays == 1))
+    });
+
+    // The sheet's For row, applied: the card is for someone else.
+    let card = rig.card(&key).clone();
+    let mut want = Want::of(card.facts().expect("its facts"), card.server.link());
+    want.for_someone_else = true;
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(want) });
+    let wanted = key.clone();
+    rig.until("the mark read and none to send", |f| {
+        let marked = |c: &CardView| {
+            let state = c.facts().and_then(|f| f.state.as_ref());
+            state.is_some_and(|s| s.settings.for_someone_else)
+        };
+        let none = |p: &Planned| p.plays == 0 && p.tally.as_ref().is_some_and(|t| t.gift == 1);
+        f.cards.iter().any(|c| c.key == wanted && marked(c) && planned(c).is_some_and(none))
+    });
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("the note", |f| f.notes.contains(&Note::PlaysGift));
+    let why = LogItem::Said("1 play not sent: the card is for someone else".into());
+    assert!(rig.fold.logs.iter().any(|(k, item)| *k == key && *item == why), "{:?}", rig.fold.logs);
+    assert!(!rig.fold.notes.iter().any(|n| matches!(n, Note::PlaysSent { .. })), "{:?}", rig.fold.notes);
+    let lib = fake.lock().unwrap();
+    assert!(lib.plays.is_empty() && !lib.asked.iter().any(|a| a.ends_with("/stats/plays")), "{:?}", lib.plays);
 }
 
 #[test]

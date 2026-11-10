@@ -1499,7 +1499,22 @@ comes from the cache, or a download, beside them.
     (`/.player/plays.jnl`) and maps each through the ledger. It posts them
     to the server that filled that track; a peer's go to its parent with
     the peer's id. Plays never go to another server, nor from a card for
-    someone else. Details counts what can't be sent:
+    someone else:
+    - **A card for someone else sends none**, by its settings' *For* as a
+      sync leaves them. Its new plays are counted and mapped to nothing.
+      None is posted, by a sync or by *Send the plays*, nor any that
+      waited on this computer from before the card was marked. Next sync
+      counts no plays to send; Details' *Plays* says "not sent: a card for
+      someone else" (`plays_gift`) in place of its counts, the busy line
+      says the same when `p` is pressed, and the log says how many. `device
+      card <drive> plays` says "E: is a card for someone else: its plays
+      aren't sent." and exits 0, its server asked nothing.
+    - **Its log keeps them.** No sync acknowledges a play of such a card,
+      so the player trims none on the software's word. A card made the
+      listener's own again (*For: me*) sends what its log still holds, and
+      what waited.
+
+    Details counts what can't be sent:
     - plays from before the player's clock was set (kept on this
       computer);
     - plays of the listener's own files (counted);
@@ -2762,3 +2777,22 @@ setting no locale, prints in English.
     `mood.no_data`, the phone app's): Stimmungswerte, puntuaciones de ánimo,
     scores d'ambiance, punteggi d'atmosfera, ムードスコア, oceny nastroju,
     pontuações de clima, оценки настроения, 氛围评分.
+- **2026-11-10 — The landing review: the play history and the device
+  commands.** What the review of the card transfer found against clause 61
+  and the command line, and how each was settled.
+  - **A card for someone else sent its plays.** The settings' *For* was
+    read for the Auto DJ index and the mood scores alone: a gift card's
+    plays went to the owner's account, and on to whatever that account
+    forwards them to, where clause 61, `--for`'s help and `conv_gift` all
+    said they don't. None is mapped or posted now while the card is
+    marked, the plays that waited from before among them, and a look
+    counts none to send. `plays_gift`, in the set since the picks and
+    drawn nowhere, is Details' *Plays* fact on such a card and `p`'s busy
+    line; the command line says it in its own words.
+  - **Chosen: the card's log keeps a gift card's plays.** They could have
+    settled as the listener's own files do (counted, the mark passing
+    them, the player free to trim). They are held instead, with no ACKS:
+    a card marked by mistake loses nothing, and *For: me* brings them
+    back. The other side of it: a card that was truly someone else's and
+    is made the listener's own sends that someone's plays, as far as its
+    log still holds them. The clause says so.

@@ -829,6 +829,109 @@ fn a_syncs_commit_acknowledges_the_plays_it_posted_and_makes_none_for_them() {
     assert_eq!(fake.lock().unwrap().has.len(), 3, "each play credited once");
 }
 
+/// The device and epoch the plays of these tests are logged by.
+pub(crate) const DEVICE: [u8; 6] = [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01];
+pub(crate) const EPOCH: u64 = 0x1122_3344_5566_7788;
+
+/// A play of the card's file whose path ends with `path`, as the player logs
+/// it: its row's hash, size and stamp from the card's own tags file.
+pub(crate) fn logged(card: &FatSim, path: &str, seq: u32, started_at: u64) -> Vec<u8> {
+    let seen = look(card);
+    let records = &seen.root.as_ref().unwrap().tags.as_ref().unwrap().records;
+    let row = records.iter().find(|e| e.path.ends_with(path)).unwrap_or_else(|| panic!("{path} on the card"));
+    let slot = Slot {
+        kind: KIND_PLAY,
+        outcome: 1,
+        source: 2,
+        seq,
+        epoch: EPOCH,
+        device_id: DEVICE,
+        started_at,
+        boot_seq: 1,
+        uptime_ms: seq * 1000,
+        played_ms: 181_000,
+        path_hash: row.hash,
+        size: row.rec.size,
+        fat_time: row.rec.fat_time,
+        ..Slot::default()
+    };
+    slot.encode().to_vec()
+}
+
+/// One more track on the fake server, in Rock, under a new revision: the
+/// next sync has a file to fetch, and so a commit to make.
+fn one_more_track(fake: &Fake, id: i64) {
+    let mut lib = fake.lock().unwrap();
+    let mut more = lib.tracks[0].clone();
+    (more.path, more.id) = (format!("Rock/Artist A/Album B/{id:02}.mp3"), id);
+    lib.tracks.push(more);
+    lib.revision = format!("1:{id}:179000000000{id}:{}", id - 1);
+}
+
+/// How many times the fake's `stats/plays` was asked.
+fn play_posts(fake: &Fake) -> usize {
+    fake.lock().unwrap().asked.iter().filter(|a| a.ends_with("/stats/plays")).count()
+}
+
+/// A card for someone else (clause 61), by the settings the run leaves: its
+/// plays are counted and sent to nobody. No request carries one, the commit
+/// the run makes acknowledges none and the state file's marks stay where
+/// they were, at the sync that marks the card and at the next, which has no
+/// flag. Made the listener's own again, the card sends what its log still
+/// holds.
+#[test]
+fn a_card_for_someone_else_posts_no_play_and_acknowledges_none() {
+    let scratch = Scratch::new("gift-plays");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    let store = Rc::new(MemStore::default());
+    let mut again = |ask: &Ask| sync_plays(&sim, &base, ask, &mut envs, Reached::Elsewhere, store.clone()).0;
+    ran(&again(&rock()));
+    let at = 1_791_950_000_000;
+    let log = [logged(&sim, "Album B/01.mp3", 1, at), logged(&sim, "Album D/02.opus", 2, at + 200_000)];
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), log.concat()).unwrap();
+    let for_whom = |gift: bool| Ask {
+        change: Change { for_someone_else: Some(gift), ..Change::default() },
+        ..Ask::default()
+    };
+
+    one_more_track(&fake, 6);
+    let marked = again(&for_whom(true));
+    assert_eq!(ran(&marked).written, 1, "{:?}", marked.notes);
+    let t = marked.plays.as_ref().unwrap();
+    assert_eq!((t.new, t.gift, t.owed, t.due, t.accepted, t.waiting), (2, 2, 0, 0, 0, 0), "{t:?}");
+    let said = "2 plays not sent: the card is for someone else";
+    assert!(marked.notes.iter().any(|n| n == said), "{:?}", marked.notes);
+    assert_eq!(play_posts(&fake), 0, "no request carries a play");
+    let seen = look(&sim);
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, [], "the commit acknowledges none");
+    let state = State::of(&seen.state).unwrap();
+    assert_eq!((state.plays.clone(), state.settings.for_someone_else), (vec![], true));
+    assert!(store.outbox().cards.is_empty(), "none owed");
+
+    // The next sync has no flag: the card's settings say it.
+    one_more_track(&fake, 7);
+    let still = again(&Ask::default());
+    assert_eq!(ran(&still).written, 1, "{:?}", still.notes);
+    assert_eq!(still.plays.as_ref().map(|t| (t.gift, t.owed, t.due)), Some((2, 0, 0)));
+    assert_eq!(play_posts(&fake), 0);
+    let seen = look(&sim);
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, []);
+    assert_eq!(State::of(&seen.state).unwrap().plays, []);
+
+    // The listener's own again: the log still holds them, and they go.
+    let mine = again(&for_whom(false));
+    ran(&mine);
+    let t = mine.plays.as_ref().unwrap();
+    assert_eq!((t.gift, t.owed, t.accepted, t.waiting), (0, 2, 2, 0), "{t:?}");
+    let posted: Vec<Value> = fake.lock().unwrap().plays.clone();
+    let paths: Vec<&str> = posted.iter().map(|p| p["filePath"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["Rock/Artist A/Album B/01.mp3", "Rock/Artist C/Album D/02.opus"]);
+    let mark = vec![Ack { device_id: DEVICE, epoch: EPOCH, seq: 2 }];
+    assert_eq!(State::of(&look(&sim).state).unwrap().plays, mark);
+}
+
 /// A run's plays to send that no outbox holds (its saves fail) and the
 /// server doesn't settle (its post fails): the sync stops before it plans,
 /// the card as it was, since its checkpoint would replace the rows they map

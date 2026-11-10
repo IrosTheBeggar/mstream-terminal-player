@@ -588,6 +588,46 @@ fn a_sync_asking_for_its_waveforms_says_how_far_it_has_come() {
     assert!(frame.contains("100% asking Home for waveforms… 384 of 384"), "{frame}");
 }
 
+/// A card for someone else sends no plays (clause 61): Details' Plays fact
+/// says so in place of the counts, whole in every locale at the GUI's floor
+/// and on the console's narrower card, and *Send the plays* says it on the
+/// busy line.
+#[test]
+fn a_card_for_someone_elses_plays_fact_says_they_are_not_sent() {
+    let gift = || {
+        cards::with(cards::ready("E:", now()), |c| {
+            cards::facts(c).state.as_mut().expect("its settings").settings.for_someone_else = true;
+            if let Next::Plan(plan) = &mut c.next {
+                let tally = crate::device::card::history::Tally { new: 3, gift: 3, ..Default::default() };
+                (plan.plays, plan.tally) = (0, Some(tally));
+            }
+        })
+    };
+    let codes = crate::setup::LANGS.map(|(code, _)| code);
+    let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+    let words = t!("dev.card.plays_gift").to_string();
+    assert!(!words.contains("dev."), "{code}: no words");
+    let plays = t!("dev.card.label_plays").to_string();
+    let (mut page, _ends, _inbox, fold) = with_cards(|_| {}, vec![gift()]);
+    assert!(page.note.is_none(), "{code}: no note before it is asked");
+    // *Send the plays* (`p`) on it: the worker's note, on the busy line.
+    fold.borrow_mut().apply(worker::Event::Note(worker::Note::PlaysGift));
+    page.pump();
+    assert_eq!(page.note.as_ref().map(|n| n.text.as_str()), Some(words.as_str()), "{code}: the busy line");
+    press(&mut page, KeyCode::Char('d'));
+    let view = page.open_card().expect("the card in view");
+    for card_w in [CARD_W, 68] {
+        let content_w = card_w - inset(card_w) * 2;
+        let w = usize::from(content_w - LABEL_W);
+        let fact = card::card_layout(&page, &view, content_w).into_iter().find_map(|row| match row {
+            Row::Fact { label, value, .. } if label == plays => Some(value),
+            _ => None,
+        });
+        assert_eq!(fact.as_deref(), Some(words.as_str()), "{code}: the Plays fact, no counts");
+        assert!(kit::width(&words) <= w, "{code} in {w} cells: {words}");
+    }
+}
+
 /// A card for someone else says under its Converts rule, dim, what it goes
 /// without (clauses 44, 51b): no Auto DJ index or mood scores, no plays
 /// sent. Its words are whole in every locale, in two lines of the value

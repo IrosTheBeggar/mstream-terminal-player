@@ -10,9 +10,11 @@
 //! 2. The card's settings (`state.json`: [`Settings`]), the run's changes to
 //!    them, and the session that binds the card (the engine's steps 1-4),
 //!    whose listing maps the new plays of the card's log through its ledger
-//!    into this computer's outbox ([`History`]). A card with no state file
-//!    isn't one the transfer set up: `card-setup` first; a card that is a
-//!    copy of another stops until it has an identity of its own (2.10).
+//!    into this computer's outbox ([`History`]); none of a card for someone
+//!    else, whose plays are counted and sent to nobody. A card with no
+//!    state file isn't one the transfer set up: `card-setup` first; a card
+//!    that is a copy of another stops until it has an identity of its own
+//!    (2.10).
 //! 3. The selection, through `ignoreVPaths`: the paged manifest, sent the
 //!    revision the last whole read ended with (If-None-Match). A 304 means
 //!    "probably unchanged", so the card's ledger stands for the listing
@@ -458,9 +460,11 @@ fn run(
     let serial = card.serial().map_err(|_| (None, Halt::Card(Stop::Pulled)))?;
     let expect = Expect { serial, ..Expect::default() };
     let knobs = knobs_of(&state.settings);
-    // The card's plays, mapped once the session has listed the card.
+    // The card's plays, mapped once the session has listed the card: none
+    // of a card for someone else, as the run's settings leave it.
     let posted = (state.card_id, state.plays.clone());
-    let history = History::new(had.plays.clone(), ask.dry_run, posted);
+    let gift = state.settings.for_someone_else;
+    let history = History::new(had.plays.clone(), ask.dry_run, posted).gift(gift);
     let history = had.history.insert(history);
     let opened = Session::open(card, &expect, knobs, &ask.answers, envs(), history, events);
     let mut session = opened.map_err(|stop| (None, Halt::Card(stop)))?;
@@ -804,8 +808,10 @@ fn prepare(
     let revision = wanted.card.origins[0].revision.clone();
     let totals = totals(&entries);
     events(Event::Listed);
-    // The card's plays for this server, their paths as it has them now.
+    // The card's plays for this server, their paths as it has them now; and
+    // a line for those that went nowhere though it was read.
     history.post(client, &reads, info.features.stats.is_some(), info.instance_id.is_some());
+    notes.extend(history.tally.held());
     // Plays to send that no outbox holds would be lost with the rows this
     // run replaces (2.20.6, item 5): no run until one does.
     if let Some(why) = history.unstored() {
