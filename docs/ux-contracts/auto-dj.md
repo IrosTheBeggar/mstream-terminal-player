@@ -737,3 +737,15 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   Entry point 4 is unchanged: "Start a sonic session" belongs to the
   record's per-song Discover screen, and the GUI's Discover room is the
   history-seeded page, which does not carry it.
+- **2026-11-09 — TOOLS holds five rooms** (entry point 2): Add torrent and
+  Add YouTube leave Settings and join the group after Discover, nav rooms
+  in this room's shape — no `◂`, Esc letting go of whatever holds the
+  keys and then leaving nothing, never to Settings (add-torrent.md and
+  add-from-youtube.md, entry point 1). Auto DJ stays on row 15; where
+  Settings would meet the block it rises a line at a time
+  (discovery-page clause 2) — with all five tools to 14, then 13, then 12
+  at 100×24 with the footer on — and the TOOLS label gives way where
+  Settings is on 18 or 17 (100×24, and 100×25 with the footer on). The
+  group packs the rooms it shows (the owner's call, the same day), so the
+  rise comes only where the last tool shown would reach Settings. The row
+  keeps its `•` and its `D`.

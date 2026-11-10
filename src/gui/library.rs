@@ -1487,9 +1487,9 @@ mod tests {
         assert!(16 < bar, "the bar from r{bar}: {all}");
         // The modal's own tips line while it is up.
         assert_eq!(rows[23].trim(), rust_i18n::t!("gui.tips.moods"), "{all}");
-        // The nav risen a row into the blank under Search: Rated at r9,
-        // Settings alone on r17.
-        assert_eq!(x_of(&rows[9], "Rated"), 3, "{all}");
+        // TOOLS holds Auto DJ and Add torrent alone here, packed on r15 and
+        // r16, clear of Settings alone on r17: nothing rises, Rated on r10.
+        assert_eq!(x_of(&rows[10], "Rated"), 3, "{all}");
         assert_eq!(x_of(&rows[17], "Settings"), 3, "{all}");
     }
 }

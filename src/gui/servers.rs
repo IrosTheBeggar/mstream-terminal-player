@@ -2694,6 +2694,10 @@ mod tests {
             dj_genre_filter: None,
             dj_genre_mode: None,
             dj_genres: None,
+            ytdl_library: None,
+            ytdl_layout: None,
+            ytdl_layout_kind: None,
+            ytdl_format: None,
             extra: Default::default(),
         });
         super::super::refresh_book(&mut gui);

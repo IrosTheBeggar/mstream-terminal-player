@@ -50,7 +50,7 @@ Two regimes, deliberately different:
 | GROUND | the painted background (fixed tiers only) | `#12131c` | 233 | terminal's own |
 | ACCENT | actions, name chips, focus borders, selection bg | `#7aabdf` | 110 | `LightBlue` |
 | BRIGHT | hover states, the active rename chip and caret | `#8fd6e8` | 117 | `Cyan` |
-| DIM | hints, labels, idle borders, text buttons, table headers | `#69718f` | 60 | `DarkGray` |
+| DIM | hints, labels, idle borders, text buttons, table headers | `#7a82a0` | 60 | `DarkGray` |
 | GOLD | the bottom rule, warnings/errors, the warning modal | `#e5c07b` | 179 | `Yellow` |
 | OK | checked boxes, progress, success | `#98c379` | 114 | `Green` |
 | DANGER | destructive hover (the row [X]); never decoration | `#e06c75` | 167 | `Red` |
@@ -177,7 +177,13 @@ them stands from the left, three cells apart; beside a modal primary
 they share its row, and take the row above where the two would come
 closer than three cells. No tooltip (self-evident). Like a text button
 it hides rather than going grey. First consumer: Keep a copy's window
-(discovery-page clauses 105–110).
+(discovery-page clauses 105–110). (Two logged exceptions, both Add from
+YouTube's: its Files door — `y` opens its window under every word its
+spot shows, with no letter on screen, the door word a door rather than a
+key word; add-from-youtube clause 30 and its 2026-11-03 log — and its
+room's press: a nav room has no back for Esc to take, so while the press
+is out every typed key waits and Esc is the shell's, the nav's rows the
+way on; clause 20 and its 2026-11-09 log.)
 
 ### Tabs
 One row, under the screen's state line (or first, on a page with none): the ACTIVE tab is a 1-row filled
@@ -271,7 +277,11 @@ is idle until focused — a click or its own key focuses it, the border
 turns LightBlue and the caret appears — and while focused it takes every
 key: the tips line speaks for the field alone, Enter submits, Esc gives
 the keys back to the screen. Unfocused it never steals a letter, so the
-room's single-key actions keep working around it.
+room's single-key actions keep working around it. (A logged exception:
+Add from YouTube's room and Files window open with their link field
+holding the keys — a paste is the way in — and give them back once a song
+is found or on Esc; add-from-youtube clauses 10 and 31 and its 2026-11-03
+log.)
 **The caret blinks in the GUI player** (2026-09-23): the `Surface` keeps a
 blink clock — `caret_touch()` on every key and click, `caret()` answers
 the phase as a field draws (half a second on, half off, `CARET_BLINK`,
@@ -405,7 +415,10 @@ marks them. A **resting radio** — the Sort's Match while no mood is set —
 is DIM, glyph and label, with no click, no hover, no hand stop and no
 tooltip, the minimal-text waiver of the disabled control's tip; the
 group's other radio shows pressed, and the resting one wakes, still
-chosen if it was, when what it ranks by exists.)
+chosen if it was, when what it ranks by exists.) (Another: the Add from
+YouTube Files window's subfolders, `(•) Right here   ( ) Album …` —
+add-from-youtube clause 32 and its 2026-11-09 log — wear the Radio
+group's ACCENT `(•)`, a layout's dot, not the side-by-side OK.)
 
 ### List cursor
 **Selection is the KEYBOARD cursor, nothing more** — in every list of
@@ -427,9 +440,13 @@ into the bar's filter or the search box picks the cursor up too — the
 narrowing IS walking the list — so type, Enter, Enter opens the first
 match. **Esc stows it**, before Esc means anything else in the room
 (Back, handing the queue's keys back); a row click stows it; a room
-opens with it stowed. **The row verbs want the cursor up**: Enter, `a`,
-`N`, `P`, `d`, `<` `>`, `e`, `x` do nothing while it is stowed (`m` falls
-to the playing track), so no key ever acts on a row nobody can see.
+opens with it stowed. (Logged exceptions, add-from-youtube: its room
+opens with the link field holding the keys — the 2026-11-03 log — and
+Files' cursor is seated lit and held on the row an add made or the song
+Show in folder went to, clauses 34 and 42.) **The row verbs want the
+cursor up**: Enter, `a`, `N`, `P`, `d`, `<` `>`, `e`, `x` do nothing while
+it is stowed (`m` falls to the playing track), so no key ever acts on a
+row nobody can see.
 Keyboard-selected row: bg ACCENT fg ON-ACCENT; hover only brightens. The
 tips line, when it is on, names how to pick the cursor up while it is
 stowed and the row verbs only once it is up. `ListView { scroll, reveal,
@@ -734,12 +751,16 @@ Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Rated, Playlists, Last
 played, Most played), then a TOOLS group (Auto DJ, whose row wears a `•`
 in the ok colour while the DJ is armed, the capability-gated Sonic path,
-and Discover on row 17, gated by the server's `discoveryTaste` —
-docs/ux-contracts/discovery-page.md), Settings on the column's last row;
-sixteen rows since 2026-10-31 (Rated, library-rooms clause 37) — at the
-24-row minimum with the footer on, the LIBRARY heading through Discover
-rise one row into the blank under Search, so Discover and Settings are
-never on one row. Now Playing is the TUI's full-screen view,
+Discover on row 17, gated by the server's `discoveryTaste` —
+docs/ux-contracts/discovery-page.md — then Add torrent and the gated Add
+YouTube on 18 and 19, docs/ux-contracts/add-torrent.md and
+add-from-youtube.md), Settings on the column's last row; eighteen rows
+since 2026-11-09 with every room, the TOOLS group packing the rooms it
+shows (a hidden tool leaves no blank line) — where Settings would meet
+the last of them the rooms rise only as far as they must, into
+the blank under Search, then over the TOOLS heading, then over the
+LIBRARY heading (library-rooms clause 37), so no room is ever on
+Settings' row. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);

@@ -2319,6 +2319,71 @@ a LATER secondary screen (party view), Columns retired.
   lock lasts from the gate's yes until the board's write has ended; leaving
   keeps a page that saw a board aside until its worker says every port is
   free. The standalone `device flash` is the same page at 72×24.
+- **Add from YouTube ✅ 2026-11-09** (built; the smoke still to run) —
+  designed first (the canvas "Add from YouTube — webapp & desktop", its
+  terminal page's five boards and its notes, the user's answers of
+  2026-11-03), the contract written beside the build
+  (`docs/ux-contracts/add-from-youtube.md`; the record is the mobile
+  app's Add from YouTube, `mstream_music` `1d4e8974`, with the webapp's
+  port of its rules in mStream #1123 where the phone has no word). The
+  decisions, all logged: two doors — Settings' TORRENTS group becomes ADD
+  MUSIC and gains `Add from YouTube ▸`, a room in Add torrent's shape; an
+  own-server folder below a library root gains the browse bar's door word
+  `add from YouTube` (`y`, no letter drawn — the one open question, kept
+  as drawn), a 76-wide window in Keep a copy's shape with `[ Add here ]`
+  — both hidden, never greyed (a peer, uploads off, no audio conversion,
+  no library); the link field holds the keys on open and bracketed paste
+  is on while the room or the window is up, so a paste always lands
+  there (Windows' console types it: the field keeps the keys); the calmer
+  grammar (one accent primary Enter presses, DIM key words acting only
+  where drawn, GOLD `! ` lines, no counts); the jobs in a From YouTube
+  list opened from one word on the room's title row; Try again is `a`
+  and the room keeps its key words' capitals (Shift or Caps Lock `D` `T`
+  `A` would open Auto DJ, Stats or toggle the DJ). Phase A, the logic:
+  `api/ytdl.rs` (the calls on their own threads — no `ApiCmd`, nothing
+  for the wasm worker — and `YtdlCallError` keeping the server's words),
+  the ping's `ytdl`, `noMkdir` and `supportedAudioFiles`, `ServerEntry`'s
+  `ytdl_*` keys and the disposable `ytdl.json`; `src/ytdl/`, the rules
+  (a port of the webapp's `ytdl-core.js` and the phone's restricted file
+  names, every word a locale key); `src/ytdl/jobs.rs`, the job tracker,
+  sans-I/O: the job id on a server with the new job list, the phone's
+  claim on the two older tiers (PR #231's snapshot and send order). Phase
+  B, the GUI: `gui/ytdl.rs` (the room, the list, the format list, the
+  paste seam, the doorway's news word), `gui/ytdl_here.rs` (the door, its
+  window, the folder listed again with the new row held under the
+  cursor), `gui/ytdl_where.rs` (Where new songs land, Choose a folder);
+  the Settings rows dynamic for the first time (the blank above DISPLAY
+  gives way under 17 rows), `Host::paste` and `TermEvent::Paste`,
+  `Face::takes_paste` for the window flavour, the panic hook's paste off;
+  `gui.ytdl.*` carried from the phone's ten `.arb` files (cut where the
+  board cuts), ADD MUSIC and the tips new in ten languages. Tests:
+  `api::ytdl` 17, `ytdl` 88, `ytdl::jobs` 33, `gui::ytdl` 39,
+  `gui::ytdl_here` 16, `gui::ytdl_where` 8 — every board frame cell for
+  cell with its tokens, and every language's words in their cells and
+  drawn whole. The pty smoke (`smoke/gui/scenario_ytdl.py`) passes
+  against mStream with #1123 and its fake yt-dlp, and against 6.32.3;
+  the DIM colour's move to `#7a82a0` is its own commit. **Both rooms move to the
+  nav, 2026-11-09** (the owner's call, the same day): Add torrent and Add
+  from YouTube leave Settings for the left nav's TOOLS group — `Add
+  torrent` and `Add YouTube` after Discover, last in `NAV` with no digit
+  and no letter, the group packing the rooms it shows (rows 18 and 19
+  with all five; no blank lines where the sonic path or Discover is
+  absent), Add YouTube under the room's gates and
+  with no state on its row — superseding the doorway above, ADD MUSIC and
+  the dynamic Settings rows: Settings is TORRENTS over the ask-me switch
+  again. Both are nav rooms in the Auto DJ room's shape (no `◂`; Esc lets
+  go of what holds the keys, then leaves nothing), an arriving torrent
+  opens its room the nav's own way, the YouTube press still holds every
+  typed key (Esc and Tab the shell's, the nav's rows the way on), and
+  where Settings would meet the last tool on short terminals the rooms
+  rise in steps — the blank under Search, the TOOLS heading, the LIBRARY
+  heading (discovery-page clause 2, library-rooms clause 37). Where no
+  verb fits the twelve cells (de es fr it pl pt ru) the rows read `+
+  Torrent` / `+ YouTube`, the add sign for "Add" — the owner's choice.
+  Tests now: `gui::ytdl` 44, `gui::ytdl_here` 17, `gui::ytdl_where` 9,
+  and the shell's give-way table at ten sizes for four sets of tools;
+  `scenario_ytdl` opens the room from its nav row, and passes on both
+  servers after the move.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

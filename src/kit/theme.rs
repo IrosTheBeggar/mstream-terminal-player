@@ -222,7 +222,7 @@ fn palette(tier: Tier) -> Theme {
         Tier::Truecolor => Theme {
             accent: Color::Rgb(0x7a, 0xab, 0xdf),
             bright: Color::Rgb(0x8f, 0xd6, 0xe8),
-            dim: Color::Rgb(0x69, 0x71, 0x8f),
+            dim: Color::Rgb(0x7a, 0x82, 0xa0),
             gold: Color::Rgb(0xe5, 0xc0, 0x7b),
             ok: Color::Rgb(0x98, 0xc3, 0x79),
             danger: Color::Rgb(0xe0, 0x6c, 0x75),

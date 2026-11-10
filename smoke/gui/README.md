@@ -118,12 +118,48 @@ url = "http://127.0.0.1:3041"
   on a clean run: the DJ's log speaks only for a dropped key, a learned
   rejection, a degraded constraint, a deferred pick or a failed fetch.
 
+- `ytdl` — Add from YouTube (add-from-youtube contract) on its own rig, not
+  the two-server one: ONE server with mStream's scripted yt-dlp. Boot it from
+  an mStream checkout with `MSTREAM_YTDLP_BIN=<checkout>/test/helpers/fake-yt-dlp.mjs`,
+  `MSTREAM_FAKE_YTDLP_SCRIPT=<a JSON script>` and `MSTREAM_FAKE_YTDLP_FIXTURE=<an mp3>`
+  set, `"transcode": {"ffmpegDirectory": "<checkout>/bin/ffmpeg"}` in its
+  config, and a library `"Music"` holding `Daft Punk/Discovery/Aerodynamic.mp3`
+  (`MSTREAM_YT_MUSIC` names that folder on disk if it isn't
+  `$MSTREAM_RIG_DIR/music/Music`). The script's `details` name four ids:
+  `FGBhQbmPwH8` ("Daft Punk - One More Time (Official Video)", channel Daft
+  Punk), `liveStream1` (`is_live: true`, "Lofi radio - beats to relax"),
+  `botCheck001` (`fail`: "Sign in to confirm you're not a bot. …" — the fake
+  adds yt-dlp's `ERROR: [youtube] <id>:` itself) and `harderBettr` ("Daft
+  Punk - Harder, Better, Faster, Stronger"); `"download": {"slowMs": 4000}`
+  keeps `adding` on screen. Seed `gui-config/config.toml` with that server
+  alone, and between runs delete `gui-config/ytdl.json` and every song but
+  Aerodynamic (the title row's `✓ added` lasts an hour; a song left behind is
+  a clash). The passes (`MSTREAM_YT_STEPS`, default all): `room` — Settings
+  with no doorway (TORRENTS over its switch alone), then the nav's `Add
+  YouTube` row under TOOLS, lit `▸ Add YouTube`, the title with no `◂`, a
+  bracketed paste, the cleaned tags, Enter, the title row's `adding` → `✓
+  added`, the note, the file on disk, Esc then `l` for the From YouTube
+  list; `refuse` — the same link again (warned of, then the 409 standing
+  alone), a live stream's warning, the bot check's failed lookup with a
+  title typed and the add failing in the server's words (`Try again ·
+  Dismiss`); `caps` — an Esc leaves nothing (a nav room has no way back),
+  then `D` `T` `A` with nothing holding the keys stay in the room; `door`
+  — no door at a library root, the door word on Discovery, `y`, a paste,
+  `[ Add here ]`, the door's spot, the re-list with the new song under the
+  cursor. With `MSTREAM_YT_OLDER=1`
+  against a server before mStream #1123 (6.30–6.33: no `ytdl` on the ping),
+  `refuse` checks the older tier instead: the clash fails after the download
+  (`Change format and retry · Dismiss`) and a live stream has no warning
+  ahead of time.
+
 ```sh
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py mixed
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py dj
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py library
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py actions
+MSTREAM_RIG_DIR=/path/to/yt-rig python3 -u smoke/gui/ptygui.py ytdl
+MSTREAM_RIG_DIR=/path/to/old-yt-rig MSTREAM_YT_OLDER=1 python3 -u smoke/gui/ptygui.py ytdl
 ```
 
 The worker-level leg of the same rig is the ignored test in `src/tui/worker.rs`:

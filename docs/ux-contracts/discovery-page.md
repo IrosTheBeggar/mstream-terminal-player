@@ -27,9 +27,11 @@ cannot play, and a later Explore room draws them.
 
 1. **The nav row `Discover`** — the TOOLS group's third room, row **17**
    under Sonic path (TOOLS label 14, Auto DJ 15, Sonic path 16, Discover
-   17 since 2026-10-31, the Rated row above them; at 100×24 with the key
-   hints on the block rises a row and Discover stands on **16**; Settings
-   stays on the content's last row — clause 2). No digit —
+   17 since 2026-10-31, the Rated row above them; Add torrent 18 and Add
+   YouTube 19 under it since 2026-11-09; the group packs the rooms it
+   shows, so Discover stands on 16 without the sonic path; on short
+   terminals the block rises and Discover stands a line, two or three
+   higher, Settings alone on the content's last row — clause 2). No digit —
    the digits end at 9 (library-rooms entry point 1) and never renumber
    (the sonic-path log, 2026-08-31) — so **`G`** from the Library
    screen. Drawn only while the ping carries the gate and the session is
@@ -115,14 +117,29 @@ answer and the visit (the session generation, clause 31).
    yields to Files, as a peer's hidden rooms do. With no session up the
    room shows the offline text every browse room shows.
 2. **Its place.** `NavId::Discover` is index 12 of `NAV` — the last
-   until Rated took index 13 (2026-10-31, library-rooms clause 37): rooms
-   past the digits are the pointer's. The TOOLS group reads TOOLS (row
-   14) · Auto DJ (15) · Sonic path (16) · **Discover (17)**, and Settings
-   stays on the content's last row — 17 at 100×24 with the key hints on,
-   18 with them off. At that floor alone the LIBRARY heading through
-   Discover rise one row into the blank under Search (Discover 16), so
-   Discover and Settings never share a row. With Sonic path absent its row
-   stays empty; rows never close up.
+   until Rated took index 13 (2026-10-31, library-rooms clause 37), then
+   Add torrent and Add YouTube 14 and 15 (2026-11-09): rooms past the
+   digits are the pointer's, and a room that comes and goes never
+   renumbers the others. The TOOLS group reads TOOLS (row 14) · Auto DJ
+   (15) · Sonic path (16) · **Discover (17)** · Add torrent (18) · Add
+   YouTube (19) with all five, and it packs the rooms it shows: with
+   Sonic path (or Discover, or Add YouTube) absent the rooms under it
+   take its line, so the group never shows a hole — Discover on 16
+   without the sonic path (since 2026-11-09, the owner's call; before,
+   its row stood empty and rows never closed up). The LIBRARY group keeps
+   each row on its own line: the rows a peer hides are its last four.
+   Settings stays on the content's last row — 17 at 100×24 with the key
+   hints on, 18 with them off, a row lower for each row the terminal
+   grows. Where Settings would meet the last tool shown (on 14 + their
+   count), the rooms rise only as far as they must, each step taken only
+   when needed: first into the blank under Search, then over the TOOLS
+   heading, then over the LIBRARY heading. With all five that is Settings
+   on 19 (100×25, or 100×26 with the hints on; Discover 16), 18 (100×24,
+   or 100×25 with the hints on; Discover 15) and 17 (100×24 with the
+   hints on; Discover 14); with Auto DJ, Add torrent and Add YouTube
+   alone, only the blank under Search goes, at 100×24 with the hints on.
+   Settings stands alone from its row down to the bar at every size,
+   whichever rooms show.
 3. **`G` opens it** wherever the Library screen takes keys; the hosted
    screens' key tables (Now Playing, Stats, Admin) are not touched — this
    is a room, not a screen (plan §4.3). `G` does nothing while the row is
@@ -2234,7 +2251,7 @@ Data is never translated: titles, artists, album and server names.
 
 | Record (plan · canvas) | Here |
 |---|---|
-| A TOOLS room "under Sonic path" (§2.9; canvas row 17) | `NavId::Discover` last in `NAV`; `draw_nav` gates it like the sonic row and hides it for a peer like the play lists; rows TOOLS 14 · Auto DJ 15 · Sonic 16 · Discover 17 · Settings on the content's last row (since 2026-10-31, the Rated row above them; 13 · 14 · 15 · 16 before, and the block a row higher at the 24-row floor with the footer on); `G` in the Library screen's global table, recorded in `gui.tips.base`; `render`'s match over `NAV` and `Gui::wheel` get their arms |
+| A TOOLS room "under Sonic path" (§2.9; canvas row 17) | `NavId::Discover`, index 12 of `NAV` (last until 2026-10-31); `draw_nav` gates it like the sonic row and hides it for a peer like the play lists; rows TOOLS 14 · Auto DJ 15 · Sonic 16 · Discover 17 · Add torrent 18 · Add YouTube 19 · Settings on the content's last row (since 2026-11-09; since 2026-10-31 the Rated row above them; 13 · 14 · 15 · 16 before that; on short terminals the block rising in clause 2's steps); `G` in the Library screen's global table, recorded in `gui.tips.base`; `render`'s match over `NAV` and `Gui::wheel` get their arms |
 | The room's own rows | **Its own row model** (`App.taste`), the sonic room's precedent: `List::Discover` maps to no pane (`List::tab()` → `None`), and the verbs call App methods that build the queue rows themselves — play from here, play now, add next, add to the end, play / queue / shuffle all — stamping `self.origin()` on Library rows and the peer origin on Connected servers rows (`TasteState::peer_lines`, the rows that play now). The TUI's `Tab::Discover` pane is never written |
 | A federation row | Flat (`artist`, `title`, `album`, `year`, `duration`, `filepath` = the **peer's** path, `peer: {id, name}`), not the `{filepath, metadata}` envelope: the App builds the queue row's `Track` metadata from those fields, which is also the play report's snapshot |
 | Two calls (§3.1) | `ApiCmd::Taste { seq, generation, half, body }` → `Event::Taste { seq, generation, half, answer }` — one command, a half on it (the D7 habit: a destination on the command, not a second command); arms in `worker::answer`, `web/api_worker.rs` and `App::apply_event` (the prefs command and the "another pick" `random-songs` command left on 2026-10-14) |
@@ -2324,9 +2341,11 @@ locales and e2e leg come with the drawing.
 Render tests at TestBackend 100×30 and 100×24, footer on and off,
 injecting `Event::Taste`: the row's gate (absent without either flag,
 absent in a peer session, gone with a ping that drops it, the room
-yielding to Files); TOOLS at 14, Auto DJ 15, Sonic 16, Discover 17 (16
-under the floor's lift, 2026-10-31), and Discover and Settings never on
-one row; `G` opens it; the tabs row's
+yielding to Files); TOOLS at 14, Auto DJ 15, Sonic 16, Discover 17 (with
+Add torrent closing the group, 16 at 100×24 with the footer off and 15
+with it on, the blank under Search given way at both and the TOOLS
+heading too with the footer on, 2026-11-09),
+and Discover and Settings never on one row; `G` opens it; the tabs row's
 tagline per `seedSource` and the widened fact; **no count, no meter, no
 percentage and no "never played" on the page** — the answered tabs, the
 queue-open view, the first ask's skeletons, the fallback card, scan
@@ -2456,7 +2475,10 @@ album asked with its peer's reach and falling back to its matched rows.
 The locale parity test. Expect legs
 (`test/e2e/legs/gui-discover.exp`, `MSTREAM_GUI_DEMO=1`; and
 `gui-discover-room.exp` against the fake's taste route: the window
-dropdown, more options, the header's words, a row; first-paint gates, drain-not-sleep). `cargo test --features desktop`; `cargo check --target
+dropdown, more options, the header's words, a row; first-paint gates, drain-not-sleep —
+since TOOLS packs its rooms (2026-11-09) the Discover row repaints Add
+torrent's line, so the legs gate on the ping frame's "connected to" and
+run.sh replays that frame to see the row). `cargo test --features desktop`; `cargo check --target
 wasm32-unknown-unknown`.
 **Keep a copy's drawing (2026-10-20)**, render tests in `src/gui/keep.rs`
 over the canvas's sample (Stage Peer B's Borrowed Tapes and Peer
@@ -3982,3 +4004,16 @@ counts, and K, K2, W and KM's semantics, are unchanged.
   stand a row lower while a mood is set. The Rated row above the TOOLS
   group moves Discover to row 17 (16 at the floor, under the lift that
   keeps Settings alone on its row; clause 2).
+- **2026-11-09 — Two rooms under Discover; the block rises in steps**
+  (clause 2; add-torrent.md and add-from-youtube.md, entry point 1). Add
+  torrent and Add YouTube leave Settings and close the TOOLS group on rows
+  18 and 19, so the block meets Settings at three sizes, not one, and the
+  floor's single lift into the blank under Search becomes three steps,
+  each taken only when needed: the blank, then the TOOLS heading, then
+  the LIBRARY heading. Discover stays on 17 from 100×26 with the footer
+  off and stands on 16, 15 or 14 below that; `G`, the gate and index 12
+  are unchanged. The group also packs the rooms it shows (the owner's call, the same day): a hidden
+  Sonic path or Discover gives its line to the tools under it, where a
+  server with neither (most) had shown two blank lines between Auto DJ
+  and Add torrent — the old "rows never close up" ends for TOOLS, and the
+  rise reads the last tool shown, not the size alone.

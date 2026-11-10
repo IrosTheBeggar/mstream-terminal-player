@@ -482,8 +482,9 @@ opens in its own window instead (see [Two flavours](#two-flavours)).
   it. The keys work too: `←` `→` presets, `t` tuning, `f` fullscreen, Esc
   closes the innermost thing and then the window.
 - **Rooms**: Files, Search, then Albums (a wall of covers), Artists, Genres,
-  Recent, Playlists, Last played and Most played, then the tools — Auto DJ
-  and Sonic path — and Settings. Digits `1`–`9` and `D` reach them; the
+  Recent, Rated, Playlists, Last played and Most played, then the tools —
+  Auto DJ, Sonic path, Discover, Add torrent and Add YouTube — and
+  Settings. Digits `1`–`9`, `D` and `G` reach them; the
   browse bar above a listing filters it and plays, queues or shuffles the
   whole list. A row's hover verbs play it now, add it next, queue it, or
   open its sheet (rating, add to playlist, song info); a right click opens
@@ -498,6 +499,12 @@ opens in its own window instead (see [Two flavours](#two-flavours)).
 - **Play reporting** is on in both shells: what you play is posted to your
   server's play history, so Last played and Most played show your own
   listening.
+- **Add from YouTube**, on your own server where your account can add
+  files: the nav's Add YouTube room takes a pasted link, reads the
+  video's tags (tidied, every change undoable and every tag editable),
+  shows the folder the song goes to and asks the server to add it; on a
+  folder in Files, the browse bar's `add from YouTube` (or `y`) adds it
+  right there. A list follows each add to the end and keeps what came in.
 - **Settings**: crossfade, gapless, resume the queue at launch, torrents,
   and **keyboard hints** (off by default — the footer names the keys when
   it is on). The GUI speaks the ten locales the wizard does, from your

@@ -1470,6 +1470,13 @@ pub fn wrap_tip(text: &str) -> Vec<String> {
     wrap_at(text, TIP_WRAP, true)
 }
 
+/// [`wrap_words`] for a sentence that must show whole in `width` cells —
+/// a warning, a failure — whatever its language: a word wider than the
+/// room hard-breaks between graphemes, as a tooltip's does.
+pub fn wrap_whole(text: &str, width: usize) -> Vec<String> {
+    wrap_at(text, width, true)
+}
+
 fn wrap_at(text: &str, width: usize, hard_break: bool) -> Vec<String> {
     use unicode_segmentation::UnicodeSegmentation;
     let mut lines = Vec::new();

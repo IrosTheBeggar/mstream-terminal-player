@@ -861,6 +861,7 @@ pub(crate) fn queue_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if super::playlists::modal_open(gui)
         || super::sonic::modal_open(gui)
         || (gui.screen == super::Screen::Library && gui.active == super::DISCOVER_NAV && super::discover::modal_open(gui))
+        || super::ytdl::modal_open(gui)
     {
         return None;
     }

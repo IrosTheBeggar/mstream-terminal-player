@@ -65,10 +65,15 @@ proc click {x y} {
 }
 spawn {*}$argv
 exec stty rows 30 columns 100 < $spawn_out(slave,name)
+# The ping's frame: the status line's "connected to" is a first paint
+# there, where the Discover row is not — since TOOLS packs its rooms
+# (2026-11-09) the row takes Add torrent's line, and the diff renderer
+# skips the cells the two words share (README law 1). run.sh replays the
+# room leg's stream to see the row itself.
 expect {
-    "Discover" {}
+    "connected to" {}
     eof { puts "DIED-EARLY"; exit 6 }
-    timeout { fail "NO-DISCOVER-ROW" 2 }
+    timeout { fail "NO-SESSION" 2 }
 }
 drain 1
 # The queue panel folds: the room takes its 80 cells.

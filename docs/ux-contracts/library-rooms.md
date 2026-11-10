@@ -318,7 +318,9 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     shown. The rows do not show the match. The order shown is the choice
     while a mood is set, the own order otherwise.
 37. **Rated**: one more LIBRARY row after Recent, `Rated` (the phone's
-    `browserRated`), without a digit — the fourteenth room, last in `NAV`.
+    `browserRated`), without a digit — the fourteenth room, index 13 of
+    `NAV`: past the digits, the last until Add torrent and Add YouTube
+    took 14 and 15 (2026-11-09).
     Recent's shape: the Library pane under the bar, track rows with their
     length, the bar's verbs (clause 1), `n items`, no letter strip and no
     drill, asked on every visit — ratings change.
@@ -329,12 +331,29 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     its `Act::Nav` go nowhere. **The nav at 30 rows**: Files 2 · Search 3 ·
     LIBRARY 5 · Albums 6 · Artists 7 · Genres 8 · Recent 9 · Rated 10 ·
     Playlists 11 · Last played 12 · Most played 13 · TOOLS 14 · Auto DJ
-    15 · Sonic path 16 · Discover 17 · Settings on the content's last row.
-    At 100×24 with the footer on that last row is 17: there, and only
-    there, the LIBRARY heading through Discover rise one row into the
-    blank under Search (LIBRARY 4 … Rated 9 … Discover 16), so Settings
-    keeps r17 alone. At 24 rows with the footer off, and at 30, nothing
-    moves.
+    15 · Sonic path 16 · Discover 17 · Add torrent 18 · Add YouTube 19
+    (since 2026-11-09) · Settings on the content's last row. Each LIBRARY
+    row keeps its own line whether or not it shows (a peer hides the last
+    four); the TOOLS group packs the rooms it shows, so a hidden tool's
+    line goes to the tools under it (discovery-page clause 2). Where that
+    last row would meet the last tool shown, the rooms give way a line at
+    a time, each step only when needed (Files and Search never move) —
+    with all five tools:
+    - Settings on 19 (100×25, or 100×26 with the footer on): the blank
+      under Search goes — LIBRARY 4 … Rated 9 … Most played 12 · TOOLS 13
+      · Auto DJ 14 … Add YouTube 18.
+    - Settings on 18 (100×24, or 100×25 with the footer on): the TOOLS
+      heading goes too — LIBRARY 4 … Most played 12 · Auto DJ 13 … Add
+      YouTube 17.
+    - Settings on 17 (100×24 with the footer on): the LIBRARY heading goes
+      too — Albums 4 … Rated 8 … Most played 11 · Auto DJ 12 … Add YouTube
+      16.
+
+    With fewer tools the steps come later — Auto DJ, Add torrent and Add
+    YouTube alone end on 17, so only the blank under Search goes, at
+    100×24 with the footer on — and Settings keeps its row alone, the bar
+    right under it, at every size; from 100×26 with the footer off
+    nothing moves.
 38. **Empty, and the counts**: an empty answer under a mood filter reads
     `(nothing here)`, as the text filter's miss does — never "(no albums
     in the library)" or "Nothing here yet", which would call the library
@@ -430,9 +449,10 @@ winning; the room is inert under it, Ctrl-C still quitting; the strip takes
 r4, its `[X]` lets everything go, and the letter strip goes under it; an
 empty answer reads `(nothing here)` with the opener and strip standing; a
 peer or a server without scores gets no opener, strip or key, its choice
-kept; Rated sits at r10 after Recent (r9 under the floor's lift), lists the
-rated songs, asks on every visit and hides for a peer; under Match a
-filtered list lands best first. In every locale the modal fits its 66
+kept; Rated sits at r10 after Recent (r8 at 100×24 with the footer on,
+the nav given way three lines — clause 37), lists the rated songs, asks
+on every visit and hides for a peer; under Match a filtered list lands
+best first. In every locale the modal fits its 66
 cells, the board's strip its 46, line one keeps two cells between its
 halves (a four-digit album count under a pager up to four digits,
 five-digit lists), Rated fits the nav's
@@ -560,3 +580,12 @@ forms (ru 2, 5, 21; pl 1, 2, 5; ja one form).
   stored filter was sent to a peer's lists; what is sent is now always
   gated. The key-hint tail ` · o mood` keeps the kit's hint law with no
   tooltip; it is the one piece the user may veto.
+- **2026-11-09 — Eighteen rows: Add torrent and Add YouTube close TOOLS**
+  (clause 37; add-torrent.md and add-from-youtube.md, entry point 1). The
+  two rooms leave Settings for the nav after Discover, rows 18 and 19,
+  last in `NAV` with no digit and no letter. The block now meets Settings
+  at three sizes, not one, so the floor's one lift becomes three steps,
+  each taken only when needed — the blank under Search, the TOOLS heading,
+  the LIBRARY heading — and Rated stands on 10, 9 or 8. The TOOLS group
+  packs the rooms it shows (the owner's call, the same day), and the steps come only where the last
+  tool shown would reach Settings; LIBRARY keeps its fixed lines.

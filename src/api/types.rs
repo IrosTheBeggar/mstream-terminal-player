@@ -55,6 +55,47 @@ fn transcode_or_off<'de, D: Deserializer<'de>>(d: D) -> Result<Option<TranscodeI
     }
 }
 
+/// `supportedAudioFiles`: the server's map of format to on/off, read as
+/// the formats it marks `true` — or a list of formats as it is, which a
+/// rig's `/api/` has answered (the webapp's `enabledFormats`). Anything
+/// else is unknown, never a failed ping: a strict map here would fail
+/// Connected over the list.
+fn formats_or_none<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Object(map) => {
+            Some(map.into_iter().filter(|(_, on)| on.as_bool() == Some(true)).map(|(format, _)| format).collect())
+        }
+        serde_json::Value::Array(list) => {
+            Some(list.into_iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+        }
+        _ => None,
+    })
+}
+
+/// A flag the server may not send: `true`/`false`, or a SQLite `0`/`1`;
+/// anything else is unknown (`None`), never a failed ping.
+fn flag_or_none<'de, D: Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Bool(b) => Some(b),
+        serde_json::Value::Number(n) => n.as_i64().map(|n| n != 0),
+        _ => None,
+    })
+}
+
+/// A feature's generation: a whole number, 0 when absent. Anything else
+/// reads as 0 too — a numeric string as its number — so a typo'd server
+/// value costs the feature, never the ping and with it Connected.
+fn generation<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().filter(|f| f.is_finite() && *f >= 0.0).map(|f| f as u64))
+            .map_or(0, |g| u32::try_from(g).unwrap_or(u32::MAX)),
+        serde_json::Value::String(s) => s.trim().parse().unwrap_or(0),
+        _ => 0,
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginResponse {
     pub token: String,
@@ -90,6 +131,22 @@ pub struct Ping {
     /// flag here, grants nothing ([`Capabilities::uploads`]).
     #[serde(rename = "noUpload")]
     pub no_upload: Option<bool>,
+    /// Making folders is off for this caller (the server's switch OR the
+    /// user's right); `None` when the server does not say. Add from
+    /// YouTube then offers Choose a folder instead of a new one — it never
+    /// hides the feature.
+    #[serde(rename = "noMkdir", deserialize_with = "flag_or_none")]
+    pub no_mkdir: Option<bool>,
+    /// The formats the server takes in, from `supportedAudioFiles` (see
+    /// [`formats_or_none`]); `None` when it said nothing this reads.
+    #[serde(rename = "supportedAudioFiles", deserialize_with = "formats_or_none")]
+    pub supported_formats: Option<Vec<String>>,
+    /// Youtube DL's generation (mStream #1123): 1 = the caller's jobs by
+    /// id, a 409 before anything downloads, reasons and `fileStem`. An
+    /// integer like `stats`, gated `>= 1`; an older server omits it (0),
+    /// and the record probe tells its two tiers apart.
+    #[serde(deserialize_with = "generation")]
+    pub ytdl: u32,
 
     // Discovery features. All are off by default in mStream, and an older
     // server omits the field entirely — which `#[serde(default)]` turns into
@@ -179,6 +236,12 @@ pub struct LayeredFeatures {
     /// As [`Ping::mood_filters`].
     #[serde(rename = "moodFilters", deserialize_with = "null_default")]
     pub mood_filters: bool,
+    /// As [`Ping::supported_formats`]: server-wide, so under `features`.
+    #[serde(rename = "supportedAudioFiles", deserialize_with = "formats_or_none")]
+    pub supported_formats: Option<Vec<String>>,
+    /// As [`Ping::ytdl`].
+    #[serde(deserialize_with = "generation")]
+    pub ytdl: u32,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -189,6 +252,9 @@ pub struct LayeredUser {
     pub no_file_modify: bool,
     #[serde(rename = "noUpload")]
     pub no_upload: Option<bool>,
+    /// As [`Ping::no_mkdir`]: the caller's, so under `user`.
+    #[serde(rename = "noMkdir", deserialize_with = "flag_or_none")]
+    pub no_mkdir: Option<bool>,
     #[serde(rename = "federationDiscovery")]
     pub federation_discovery: bool,
     #[serde(rename = "federationBrowse")]
@@ -204,6 +270,9 @@ impl From<LayeredInfo> for Ping {
             transcode: info.features.transcode,
             no_file_modify: info.user.no_file_modify,
             no_upload: info.user.no_upload,
+            no_mkdir: info.user.no_mkdir,
+            supported_formats: info.features.supported_formats,
+            ytdl: info.features.ytdl,
             discovery: info.features.discovery,
             // The layered payload carries no `discoveryPath`: on any build
             // that serves `/api/` it equals `discovery` (the server says so).
@@ -2205,6 +2274,64 @@ mod tests {
         let ping = Ping::from(guest);
         assert_eq!(ping.vpaths, vec!["demo".to_string()]);
         assert!(ping.transcode.is_none());
+    }
+
+    #[test]
+    fn add_from_youtubes_facts_read_in_either_form_and_an_odd_one_fails_nothing() {
+        // The rig fixture above sends `supportedAudioFiles` as a list: read
+        // as it is, and the rest of the payload with it.
+        let raw = r#"{ "features": { "supportedAudioFiles": ["mp3"], "ytdl": 1 },
+                       "user": { "vpaths": ["demo"], "noMkdir": true } }"#;
+        let ping = Ping::from(serde_json::from_str::<LayeredInfo>(raw).unwrap());
+        assert_eq!(ping.supported_formats, Some(vec!["mp3".to_string()]));
+        assert_eq!((ping.ytdl, ping.no_mkdir), (1, Some(true)));
+        assert_eq!(ping.vpaths, vec!["demo".to_string()]);
+
+        // The ping flattens them (mStream #1123): the map's on keys only.
+        let p: Ping = serde_json::from_str(
+            r#"{"vpaths":["Music"],"noMkdir":false,"noUpload":false,"ytdl":1,
+                "supportedAudioFiles":{"mp3":true,"flac":true,"wav":true,"ogg":true,"aac":true,
+                "m4a":true,"m4b":true,"opus":true,"m3u":false}}"#,
+        )
+        .unwrap();
+        let mut formats = p.supported_formats.clone().unwrap();
+        formats.sort();
+        assert_eq!(formats, ["aac", "flac", "m4a", "m4b", "mp3", "ogg", "opus", "wav"]);
+        assert_eq!((p.ytdl, p.no_mkdir), (1, Some(false)));
+
+        // An older server says none of it: generation 0, nothing known.
+        let old: Ping = serde_json::from_str(r#"{"vpaths":["Music"],"noUpload":false}"#).unwrap();
+        assert_eq!((old.ytdl, old.no_mkdir, old.supported_formats), (0, None, None));
+
+        // A typo'd value costs the one fact, never the ping.
+        for (raw, ytdl) in [
+            (r#"{"ytdl":"1","supportedAudioFiles":"mp3","vpaths":["Music"]}"#, 1),
+            (r#"{"ytdl":true,"supportedAudioFiles":null,"vpaths":["Music"]}"#, 0),
+            (r#"{"ytdl":-2,"supportedAudioFiles":[1,"mp3"],"vpaths":["Music"]}"#, 0),
+            (r#"{"ytdl":2.0,"vpaths":["Music"]}"#, 2),
+        ] {
+            let p: Ping = serde_json::from_str(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(p.ytdl, ytdl, "{raw}");
+            assert_eq!(p.vpaths, vec!["Music".to_string()], "{raw}");
+        }
+        // `noMkdir` is new to this player's reading too: a SQLite flag or a
+        // typo there costs the one fact, never Connected.
+        for (raw, no_mkdir) in [
+            (r#"{"vpaths":["Music"],"noMkdir":1}"#, Some(true)),
+            (r#"{"vpaths":["Music"],"noMkdir":0}"#, Some(false)),
+            (r#"{"vpaths":["Music"],"noMkdir":"yes"}"#, None),
+            (r#"{"vpaths":["Music"],"noMkdir":null}"#, None),
+        ] {
+            let p: Ping = serde_json::from_str(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!((p.no_mkdir, p.vpaths.len()), (no_mkdir, 1), "{raw}");
+        }
+        let layered = r#"{ "features": {}, "user": { "vpaths": ["demo"], "noMkdir": 0 } }"#;
+        let p = Ping::from(serde_json::from_str::<LayeredInfo>(layered).unwrap_or_else(|e| panic!("{e}")));
+        assert_eq!((p.no_mkdir, p.vpaths.len()), (Some(false), 1));
+        let listed: Ping = serde_json::from_str(r#"{"supportedAudioFiles":[1,"mp3"]}"#).unwrap();
+        assert_eq!(listed.supported_formats, Some(vec!["mp3".to_string()]), "only the strings of a list");
+        let unknown: Ping = serde_json::from_str(r#"{"supportedAudioFiles":"mp3"}"#).unwrap();
+        assert_eq!(unknown.supported_formats, None);
     }
 
     #[test]

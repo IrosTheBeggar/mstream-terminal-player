@@ -180,3 +180,9 @@ drawing, the keys, and the three verbs composed from public App pieces
   (clause 5). The lists' counts moved from x63 to x62, a cell in from the
   content's last like the pager and the verbs, measured in cells; the
   counts read their plural forms, where `1 albums` and `1 items` stood.
+- **2026-11-09 — The count gives way first for Add from YouTube's door**
+  (docs/ux-contracts/add-from-youtube.md, clause 30 and its 2026-11-03
+  log): on Files at 47 cells line one drops the count before the door
+  word `add from YouTube`, then clips the crumb from the left, then drops
+  the word (`y` still opens the window) — clause 3's "never dropped for
+  another control" yields to the way in.

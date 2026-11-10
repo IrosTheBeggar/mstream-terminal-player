@@ -3616,25 +3616,34 @@ mod tests {
     #[test]
     fn the_row_sits_at_17_under_sonic_and_never_meets_settings() {
         let _en = english();
-        // Sixteen rows to Discover's 17 since Rated joined LIBRARY. At 24
-        // rows with the footer on, Settings takes 17 itself: the LIBRARY
-        // heading through Discover rise one row into the blank under Search
-        // there, and only there (library-rooms clause 37).
-        for (height, footer, settings) in [(30u16, false, 24u16), (30, true, 23), (24, false, 18), (24, true, 17)] {
+        // The Add rooms joined TOOLS after Discover (2026-11-09); here Add
+        // torrent closes the group on 18, as no library lets Add YouTube
+        // show. Where Settings would meet the last tool the rooms rise, a
+        // line at a time and only as far as they must: into the blank under
+        // Search (Settings on 18), then over the TOOLS heading (17: 24 rows
+        // with the footer on) — Discover with them.
+        let cases: [(u16, bool, u16, Option<u16>, u16, Option<u16>, u16); 4] = [
+            // height, footer, Settings, LIBRARY, Rated, TOOLS, Auto DJ
+            (30, false, 24, Some(5), 10, Some(14), 15),
+            (30, true, 23, Some(5), 10, Some(14), 15),
+            (24, false, 18, Some(4), 9, Some(13), 14),
+            (24, true, 17, Some(4), 9, None, 13),
+        ];
+        for (height, footer, settings, library, rated, tools, dj) in cases {
             let mut gui = session_gui();
             gui.config.gui.key_hints = footer;
             gui.ui.key_hints = footer;
             let rows = draw_sized(&mut gui, 100, height);
             let nav = |y: u16| rows[y as usize].chars().take(15).collect::<String>();
-            let lift = u16::from(settings == 17);
             let all = rows.join("\n");
+            let headed = |word: &str| (0..height).find(|&y| nav(y).contains(word));
             assert!(nav(3).contains("Search"), "{height}/{footer}: Search stays at 3:\n{all}");
-            assert!(nav(5 - lift).contains("LIBRARY"), "{height}/{footer}: LIBRARY at {}:\n{all}", 5 - lift);
-            assert!(nav(10 - lift).contains("Rated"), "{height}/{footer}: Rated at {}:\n{all}", 10 - lift);
-            assert!(nav(14 - lift).contains("TOOLS"), "{height}/{footer}: TOOLS at {}:\n{all}", 14 - lift);
-            assert!(nav(15 - lift).contains("Auto DJ"), "{height}/{footer}: Auto DJ at {}", 15 - lift);
-            assert!(nav(16 - lift).contains("Sonic path"), "{height}/{footer}: Sonic at {}", 16 - lift);
-            let discover = 17 - lift;
+            assert_eq!(headed("LIBRARY"), library, "{height}/{footer}: LIBRARY:\n{all}");
+            assert!(nav(rated).contains("Rated"), "{height}/{footer}: Rated at {rated}:\n{all}");
+            assert_eq!(headed("TOOLS"), tools, "{height}/{footer}: TOOLS:\n{all}");
+            assert!(nav(dj).contains("Auto DJ"), "{height}/{footer}: Auto DJ at {dj}");
+            assert!(nav(dj + 1).contains("Sonic path"), "{height}/{footer}: Sonic at {}", dj + 1);
+            let discover = dj + 2;
             assert!(nav(discover).contains("Discover"), "{height}/{footer}: Discover at {discover}:\n{all}");
             assert!(nav(settings).contains("Settings"), "{height}/{footer}: Settings at {settings}:\n{all}");
             assert!(

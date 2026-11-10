@@ -977,6 +977,9 @@ pub(crate) fn install_panic_hook() {
             return;
         }
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        // The GUI's Add from YouTube room turns bracketed paste on; off
+        // again is harmless where it never was.
+        let _ = execute!(std::io::stdout(), ratatui::crossterm::event::DisableBracketedPaste);
         pop_window_title();
         // Still on the alternate screen while the player holds it, and
         // kitty keeps this process's pictures there until the window

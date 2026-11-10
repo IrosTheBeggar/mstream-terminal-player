@@ -5,8 +5,8 @@
 | **Design of record** | `mstream_music` @ `origin/master` (`0f8b23f`, merged 2026-08-28) — `lib/screens/add_torrent_screen.dart` (the "smart" panel), `lib/native/torrent_channel.dart` + `MainActivity` (both directions of the OS hand-off), the intent chooser in `lib/main.dart`, the two settings rows in `lib/screens/settings_screen.dart`, `lib/util/torrent_meta.dart`. The screen is itself a port of the webapp's standalone panel (`webapp/alpha/m.js setupAddTorrentPanel`; `webapp/torrent/` is the reduced mobile-web sibling) — where the two disagree, this contract says so. |
 | **Server API** | `GET /api/v1/torrent/preflight?path=` (active · clientType · displayName · noUpload · userAllowed · reason) · `GET /api/v1/torrent/path-templates` · `POST /api/v1/torrent/auto-detect` (multipart) · `POST /api/v1/torrent/seed-existing` (multipart) · `POST /api/v1/torrent/add` (multipart: vpath · subPath · directoryName · renameRoot · exactly one of magnet / torrentFile) |
 | **Already in this repo** | nothing before this slice — no torrent client surface existed; all five client calls, the multipart body and the metadata parser are new (`src/api/mod.rs`, `src/gui/torrent_meta.rs`). The kit brought the modal, the line editor, the wizard's path-completion machinery and the servers room's thread-and-reply pattern |
-| **Target surface** | the GUI player — a room off Settings, plus `mstream-player gui --torrent <file-or-magnet>` for torrents arriving from the OS (`src/gui/torrent.rs`) |
-| **Status** | contract extracted 2026-08-31; the five open questions settled and the room implemented 2026-09-01 (decisions in the deviations log) |
+| **Target surface** | the GUI player — a Library nav room under TOOLS (a room off Settings until 2026-11-09), plus `mstream-player gui --torrent <file-or-magnet>` for torrents arriving from the OS (`src/gui/torrent.rs`) |
+| **Status** | contract extracted 2026-08-31; the five open questions settled and the room implemented 2026-09-01 (decisions in the deviations log); the room moved from Settings into the nav 2026-11-09 (decision 5 amended) |
 
 ## Intent
 
@@ -21,12 +21,28 @@ files and `magnet:` links is what makes the receiving half exist.
 
 ## Entry points
 
-1. **In-app navigation** — the screen on its own. *Here: the Settings
-   room's `Add a torrent ▸` doorway, the Manage-servers shape.*
+1. **In-app navigation** — the screen on its own. *Here: the nav row
+   `Add torrent`, the TOOLS group's after Discover (row 18 with all five
+   tools; the group packs the rooms it shows, so it stands higher where
+   the sonic path or Discover is absent, and on short terminals it rises
+   with the block — discovery-page clause 2), drawn
+   whenever the Library is: no ping flag exists, the room is the gate. A
+   Library nav room, the Auto DJ room's shape: the title row the name in
+   BOLD at the room's first cell and the gate's standing at the right, no
+   `◂`; ↓ picks up the cursor, Esc stows it, and Esc once more leaves
+   nothing — never to Settings. Each opening stows the cursor and asks
+   the gate where this server has not answered it. (Since 2026-11-09; the
+   Settings room's `Add a torrent ▸` doorway, the Manage-servers shape,
+   before.)*
 2. **Opened WITH a torrent** — the OS delivers a `.torrent` (file manager,
    browser download, share) or a `magnet:` link to the app. *Here: the
    `--torrent` seam, which the installers' file associations will
-   launch.* What happens next is the **ask-me setting**'s call:
+   launch; whichever way the torrent comes into the screen — straight in
+   with asking off, the chooser's Add, our own file coming back — it
+   opens the nav room the nav's own way: the Library screen brought back
+   from Now Playing, Stats, Admin or the MP3 Player screen, Manage servers
+   let go, then the form filled.* What happens next is the **ask-me
+   setting**'s call:
    - *ask* (default): a chooser — "add it here, or hand it on?" — with a
      don't-ask-again checkbox (checking it is what flips the setting;
      the Settings switch is the way back).
@@ -145,7 +161,17 @@ from all ten `.arb` files into `locales/*.yml` (`gui.tor.*`, `gui.set.*`);
 the strings new to this surface — the gate's standing, the picker, the
 hand-off's outcomes, the two webapp seed-check sentences, the tips —
 were written here in the same ten languages. The parser, sanitizer and
-validator wordings above quote the record's English.
+validator wordings above quote the record's English. Since 2026-11-09 the
+nav row's `gui.nav.add_torrent` is new — "Add torrent", ja トレント追加, zh
+添加种子, and the GUI's add sign for the verb in de es fr it pl pt
+(`+ Torrent`) and ru (`+ Торрент`), where no verb fits the nav's twelve
+cells (fr `Ajout torrent` and pl `Dodaj torrent` are 13) and the bare
+source would read as a section, not an act (Italian's Settings heading
+is that same `TORRENT`) — the owner's choice over an abbreviated verb,
+2026-11-09 (add-from-youtube.md's log) — and the doorway's
+`gui.set.tor_add` and `gui.set.tor_add_desc` and the room's
+`gui.tor.back_tip` are gone; the room's tips (`gui.tips.tor_room`) end at
+"t type a path".
 
 ## Out of scope here
 
@@ -164,7 +190,7 @@ validator wordings above quote the record's English.
 | OS registration (manifest) | The **Phase-8 installers'** job: macOS document types + `magnet:` URL scheme on the .app, Windows file association, Linux `.desktop` MimeType — all launching the seam above. The app ships the seam; the installers ship the claim. |
 | Android "open by default" settings screen | **Not ported** — no OS screen to open from a terminal app; the row returns with the installers (deviations) |
 | Hand-off chooser (ACTION_VIEW) | `open` / `xdg-open` / `start` on the file, **staged** into the player's own temp folder — which doubles as the loop guard: an arrival from that folder is our own file coming back, i.e. this player is the default app, and the room says so instead of offering the hand-off again |
-| Preflight banner | The sonic room's pattern inverted: the doorway shows when connected (no ping flag exists); the room itself banners the server's reason in gold, and the primary is disabled with the reason on its tip |
+| Preflight banner | The sonic room's pattern inverted: the nav row always stands (no ping flag exists; the Settings doorway did the same); the room itself banners the server's reason in gold, and the primary is disabled with the reason on its tip |
 | Chooser + match-picker sheets | Kit modals (the sonic menu's shape) |
 | Snackbars | The note line |
 | Material TextFields, 56 px each | **1-row fields** (label column + value, the caret marking the focused one — the Settings rows' grammar). The kit's 3-row input cards would need 24 rows for the form alone; at the 100×24 floor the whole room — gate, source, metadata, destination, options, the tall primary — fits its 14 content rows exactly, and breathes at 18 |
@@ -183,7 +209,11 @@ validator wordings above quote the record's English.
    is exactly when you learn the torrent isn't for the server).
 5. **Where the room lives** — a Settings doorway plus the `--torrent`
    seam; the nav digits are spent, and arriving from outside is the
-   record's main road anyway.
+   record's main road anyway. **Amended 2026-11-09** (the owner's call):
+   the room is a Library nav room, `Add torrent` in the TOOLS group after
+   Discover — past the digits, the pointer's, with no letter of its own —
+   and the `--torrent` seam stays; Settings keeps TORRENTS and the ask-me
+   switch alone.
 
 ## Deviations log
 
@@ -229,3 +259,28 @@ validator wordings above quote the record's English.
   console gate as every other glyph; the locale strings carry words only
   (docs/ui-kit.md, Glyphs). The same for the DJ room's bullet and the
   rating's star.
+- **2026-11-09 — The TORRENTS group becomes ADD MUSIC.** Add from YouTube
+  (docs/ux-contracts/add-from-youtube.md) shares it: `Add a torrent ▸`,
+  `Add from YouTube ▸` — shown only under its own gates — and `[✓] Ask
+  what to do with torrents`. The key `gui.set.torrents_group` is kept,
+  its value new in the ten languages; the Portuguese row's description
+  reads the phone's Brazilian ("um arquivo .torrent ou um link magnet")
+  beside its new neighbour. *Superseded the same day, below: the group
+  reads TORRENTS again, the doorways gone.*
+- **2026-11-09 — The room moves to the nav** (the owner's call; decision
+  5 amended, entry point 1; add-from-youtube.md's log too). `Add torrent`
+  and `Add YouTube` join the TOOLS group after Discover — rows 18 and 19
+  with all five tools, higher where the group's gated rooms are absent,
+  as it packs the rooms it shows — last in `NAV`, no digit, no letter.
+  The Settings doorway, its
+  description, the room's `◂` and its tip "Back to Settings — Esc" are
+  retired, and the tips line loses "· Esc back": a nav room has no way
+  back, so Esc stows the cursor and a second leaves nothing. Settings
+  keeps TORRENTS — each language's word from before ADD MUSIC — over `[✓]
+  Ask what to do with torrents` alone. An arrival (`--torrent`, the
+  chooser's Add, our own file coming back) takes the nav's own way in:
+  the Library screen back from wherever it was, Manage servers let go,
+  then the form filled. The row shows wherever the doorway did — always
+  — and opening it asks the gate as before. Where no verb fits the row's
+  twelve cells (de es fr it pl pt ru) it reads `+ Torrent`, the GUI's add
+  sign for the verb — the owner's choice (Wording).

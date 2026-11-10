@@ -130,7 +130,7 @@ pub(crate) fn window_rect(area: Rect, room: Rect, w: u16, h: u16) -> (Rect, Opti
 /// room's outlives it — the room drew without the pointer); its frame then
 /// drawn inside. The overlay registered is returned: what a pixel cover
 /// inside the window asks about ([`Slot`]'s one-frame mosaic).
-fn open_window(frame: &mut Frame, gui: &mut Gui, area: Rect, rect: Rect, band: Option<Rect>) -> (Rect, Rect) {
+pub(crate) fn open_window(frame: &mut Frame, gui: &mut Gui, area: Rect, rect: Rect, band: Option<Rect>) -> (Rect, Rect) {
     gui.ui.clear_registries();
     gui.ui.click(area, Act::Guard);
     let own = band.unwrap_or(rect);
@@ -278,7 +278,7 @@ pub(crate) fn ell(words: &str) -> String {
     if legacy_conhost() { words.replace('…', "...") } else { words.to_string() }
 }
 
-fn tick() -> &'static str {
+pub(crate) fn tick() -> &'static str {
     if legacy_conhost() { "+" } else { "✓" }
 }
 
@@ -286,7 +286,7 @@ fn cross() -> &'static str {
     if legacy_conhost() { "x" } else { "×" }
 }
 
-fn crumb_sep() -> &'static str {
+pub(crate) fn crumb_sep() -> &'static str {
     if legacy_conhost() { " > " } else { " › " }
 }
 
@@ -1360,7 +1360,7 @@ pub(crate) fn modal_box(frame: &mut Frame, rect: Rect) -> Rect {
 /// A wide glyph of the room's just left of `rect` spans `rect`'s left
 /// border, and a terminal never draws the cell a wide glyph spans: a blank
 /// in its place on each of `rect`'s rows.
-fn clear_spill(frame: &mut Frame, rect: Rect) {
+pub(crate) fn clear_spill(frame: &mut Frame, rect: Rect) {
     let Some(x) = rect.x.checked_sub(1) else { return };
     let buffer = frame.buffer_mut();
     for y in rect.top()..rect.bottom() {
@@ -1416,7 +1416,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect, room: Rect) {
 /// the bottom border, DIM, ending one `─` before the corner — "Esc close"
 /// a text button doing what Esc does (`close`), its tail ("· the copy
 /// keeps going") plain. Keep a copy's, and Where copies land's.
-fn draw_borders(frame: &mut Frame, gui: &mut Gui, rect: Rect, title: &str, footer: &str, close: Act) {
+pub(crate) fn draw_borders(frame: &mut Frame, gui: &mut Gui, rect: Rect, title: &str, footer: &str, close: Act) {
     border_title(frame, rect, title);
     let bottom = rect.bottom().saturating_sub(1);
     let end = rect.right().saturating_sub(3);
@@ -4212,7 +4212,7 @@ pub(crate) fn links_act(gui: &mut Gui, act: &DiscAct) {
 // ── Status notes (clause 118) ───────────────────────────────────────────────
 
 /// The note's cells at the window's width: the bar's note slot.
-fn note_room(gui: &Gui) -> usize {
+pub(crate) fn note_room(gui: &Gui) -> usize {
     usize::from(super::bar::note_width(gui.last_width.max(super::MIN_W)))
 }
 
@@ -4331,7 +4331,7 @@ pub(crate) fn news_note(job: &PluginJob, room: usize) -> Option<(String, Message
 
 /// A copy note on the status line — the App's message, so the next note
 /// replaces it as every App message does; the shell's own note gives way.
-fn set_note(gui: &mut Gui, (text, kind): (String, MessageKind)) {
+pub(crate) fn set_note(gui: &mut Gui, (text, kind): (String, MessageKind)) {
     gui.note = None;
     gui.app.message = Some(crate::tui::app::Message { text, kind });
 }
