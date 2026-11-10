@@ -732,6 +732,24 @@ fn finished(card: &FatSim) -> Finished {
 
 // ── The simulated card ──────────────────────────────────────────────────────
 
+/// A large file that isn't the stream its name says (zeros named `.mp3`):
+/// its tags are read through a buffer, never a card read a byte.
+#[test]
+fn a_large_file_that_isnt_its_stream_reads_its_tags_in_large_reads() {
+    let scratch = Scratch::new("tags-reads");
+    set_up(&scratch.0);
+    let card = FatSim::new(&scratch.0, SERIAL);
+    let bytes = vec![0u8; 4 << 20];
+    let mut server = Canned::default();
+    server.add("Lib/Zeros/01.mp3", bytes.clone());
+    let wanted = WantedCard { origins: vec![home()], files: vec![track("Lib/Zeros/01.mp3", &bytes, 101)] };
+    let before = card.reads();
+    let outcome = sync(&card, &wanted, &mut server, 1).expect("it runs");
+    assert_eq!((outcome.written, outcome.verified), (1, Ok(())));
+    let reads = card.reads() - before;
+    assert!(reads < 5_000, "{reads} reads of the card");
+}
+
 #[test]
 fn the_simulated_card_matches_names_and_renames_as_fat_does() {
     let dir = Scratch::new("sim");

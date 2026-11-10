@@ -72,6 +72,8 @@ pub(crate) struct FatSim {
     log: RefCell<Vec<String>>,
     /// Each write of a file's bytes: its card path and how many.
     sizes: RefCell<Vec<(String, usize)>>,
+    /// The reads of an open file's bytes, each call one.
+    reads: Cell<usize>,
     quiet: Cell<bool>,
     /// A file with a bad sector, and what of it can't be read.
     bad: RefCell<Option<(String, Bad)>>,
@@ -106,6 +108,7 @@ impl FatSim {
             state: RefCell::new(state),
             log: RefCell::new(Vec::new()),
             sizes: RefCell::new(Vec::new()),
+            reads: Cell::new(0),
             quiet: Cell::new(false),
             bad: RefCell::new(None),
             refuse: RefCell::new(None),
@@ -187,6 +190,11 @@ impl FatSim {
     /// The writes so far, each as "op path".
     pub(crate) fn log(&self) -> Vec<String> {
         self.log.borrow().clone()
+    }
+
+    /// The reads of open files' bytes so far, each call one.
+    pub(crate) fn reads(&self) -> usize {
+        self.reads.get()
     }
 
     /// How many bytes each write of a file's bytes took, in turn, of the
@@ -373,6 +381,7 @@ impl SimFile<'_> {
 impl Read for SimFile<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.live()?;
+        self.sim.reads.set(self.sim.reads.get() + 1);
         self.file.read(buf)
     }
 }

@@ -575,7 +575,11 @@ impl<'r, 'c> Runner<'r, 'c> {
         let name = rel.rsplit('/').next().unwrap_or(rel);
         let ext = name.rsplit_once('.').map_or("", |(_, e)| e).to_string();
         let card = self.s.bound.alive()?;
-        let read = |mut f: Box<dyn CardFile + '_>| tags::read_from(&mut *f, &ext);
+        // Buffered: lofty reads what isn't its stream (zeros, another
+        // format) a byte a call, and a card file's every call is the card's.
+        let read = |mut f: Box<dyn CardFile + '_>| {
+            tags::read_from(std::io::BufReader::with_capacity(TAGS_BUFFER, &mut *f), &ext)
+        };
         let read = card.open(&path).and_then(read);
         let reading = read.map_err(|e| self.failed(e))?;
         let qfp = card_qfp(card, &path, item.size).map_err(|e| self.failed(e))?;
@@ -1734,6 +1738,9 @@ fn pend_order(mut ops: Vec<Op>) -> Vec<Op> {
 /// small writes (the user's 1 TB card: 4.7 MB/s, 239 writes a second). A
 /// whole number of clusters on any FAT card, each piece starting on one.
 pub(crate) const CARD_WRITE: usize = 4 << 20;
+
+/// The buffer a card file's tags are read through.
+const TAGS_BUFFER: usize = 64 << 10;
 
 /// The stage file a fetch writes into: the MD5 of what passes, its count,
 /// and a write the card refused, told apart from the source's own failure.
