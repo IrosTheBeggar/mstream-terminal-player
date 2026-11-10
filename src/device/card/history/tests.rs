@@ -829,6 +829,46 @@ fn the_plays_alone_settle_a_play_the_server_doesnt_know_on_a_trusted_listing_tha
     assert_eq!((marks, waiting, posted), (vec![ack(ONE, EPOCH_1, 2)], 1, 4), "kept back");
 }
 
+/// What a look and a post have to tell the listener ([`Tally::said`]): the
+/// run's notes in their order, a server that takes no plays among them,
+/// after a card for someone else's count. The lines of the plays that wait
+/// are among the notes, and are said once.
+#[test]
+fn the_tally_says_its_notes_with_the_lines_of_the_plays_that_went_nowhere() {
+    let scratch = Scratch::new("said");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let root = root_of(&sim);
+    let looked = |gift: bool| {
+        let mut history = History::new(Rc::new(MemStore::default()), false, none()).gift(gift);
+        history.look(&sim, Some(&root), 0);
+        history
+    };
+    // A server with no Stats API: a note, and no play turned away.
+    let (client, _fake) = server(Mstream { no_stats: true, ..Mstream::default() });
+    let mut history = looked(false);
+    history.post(&client, &talk(HOME), false, true, NOW);
+    assert_eq!(history.tally.said(), ["the server takes no plays (it has no Stats API): they wait"]);
+    assert!(history.tally.held().is_empty() && !history.tally.failed);
+
+    // A play that waits: its line is a note already, and is said once.
+    let mut m = Mstream::default();
+    m.reject.insert(id(ONE, EPOCH_1, 3), "unknown-track");
+    let (client, _fake) = server(m);
+    let mut history = looked(false);
+    history.post(&client, &talk(HOME), true, true, NOW);
+    let said = history.tally.said();
+    assert_eq!((said.len(), &said), (1, &history.tally.held()), "{said:?}");
+
+    // A post that failed says so, where only a failed job did.
+    let mut history = looked(false);
+    history.post(&offline(), &talk(HOME), true, true, NOW);
+    let said = history.tally.said();
+    assert!(said.len() == 1 && said[0].starts_with("the plays weren't posted: "), "{said:?}");
+
+    // A card for someone else's count comes first.
+    assert_eq!(looked(true).tally.said(), ["7 plays not sent: the card is for someone else"]);
+}
+
 /// The plays alone read a server's whole manifest for the paths it moved,
 /// and only when a post follows: a server that takes no plays (no Stats
 /// API) is asked for none, and the plays wait.

@@ -474,6 +474,29 @@ fn plays_says_which_wait_for_a_server_that_doesnt_know_their_tracks() {
     assert!(said.contains("1 plays sent to Home.") && !said.contains("waits"), "{said}");
 }
 
+/// `plays` to a server that takes none (no Stats API): the job's own words
+/// say why none went, beside the count of none sent.
+#[test]
+fn plays_says_a_server_takes_none_when_it_has_no_stats_api() {
+    let scratch = Scratch::new("lines-no-stats");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    let base = b.home.base.clone().expect("the fake server's address");
+    let synced = sync_now(&b.sim, &base, &rock(), &mut envs()).0;
+    assert!(matches!(synced.end, crate::device::card::sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&b.sim, "Album B/01.mp3", 1, 1_791_850_000_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    b.server.lock().unwrap().no_stats = true;
+    let yes = Flags { yes: true, ..Flags::default() };
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Plays, &yes, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    let why = "  the server takes no plays (it has no Stats API): they wait\n";
+    assert!(said.contains(why) && said.contains("0 plays sent to Home."), "{said}");
+    assert!(b.server.lock().unwrap().plays.is_empty());
+}
+
 /// The plays from before the player's clock was set are counted and never
 /// sent (clause 61): `plays` and `sync` say how many the card holds, and
 /// name `device time`, the command line's way to set the clock. A card

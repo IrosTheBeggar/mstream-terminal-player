@@ -130,6 +130,8 @@ pub(crate) struct Library {
     pub(crate) stats_down: bool,
     /// The sign-in lapsed: every route answers 401.
     pub(crate) signed_out: bool,
+    /// No Stats API: `/api/` names none, and nothing takes plays.
+    pub(crate) no_stats: bool,
     /// `/api/`'s transcode block, when not an older server's (no rates
     /// listed, no bulk queue).
     pub(crate) transcode: Option<Value>,
@@ -262,6 +264,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             });
             if !lib.old {
                 body["instanceId"] = json!(lib.instance.unwrap_or(ID));
+            }
+            if lib.no_stats {
+                body["features"].as_object_mut().expect("its features").remove("stats");
             }
             if let Some(proxy) = &lib.proxy_says {
                 body["features"]["federationProxy"] = proxy.clone();
@@ -1178,9 +1183,13 @@ fn a_sync_whose_plays_no_outbox_holds_stops_before_it_plans() {
     assert_eq!(stopped.plays.as_ref().map(|t| (t.owed, t.failed)), Some((1, true)));
 
     // The outbox takes them: the run goes on, and they wait for the server.
+    // The run's notes say the post failed, as they say what else it
+    // passed by.
     store.saves_left.set(None);
     let waited = again(&Ask::default());
     ran(&waited);
+    let unposted = |n: &String| n.starts_with("the plays weren't posted: ");
+    assert!(waited.notes.iter().any(unposted), "{:?}", waited.notes);
     assert_eq!(store.outbox().cards.values().map(|o| o.plays.len()).sum::<usize>(), 1);
     assert_eq!(State::of(&look(&sim).state).unwrap().plays, []);
     fake.lock().unwrap().stats_down = false;

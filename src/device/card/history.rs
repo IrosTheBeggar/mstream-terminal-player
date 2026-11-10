@@ -656,13 +656,10 @@ impl Tally {
     }
 
     /// Why plays the card holds went nowhere though its server was read, a
-    /// line each: the listener's to read, in Details' log and on the
-    /// command line (the run's own words).
+    /// line each (the run's own words): a card for someone else, a server
+    /// that turned them away for a reason that may pass.
     pub(crate) fn held(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if self.gift > 0 {
-            lines.push(format!("{} not sent: the card is for someone else", plays(self.gift)));
-        }
+        let mut lines = self.gift_line();
         if self.unknown > 0 {
             lines.push(unknown_line(self.unknown));
         }
@@ -670,6 +667,25 @@ impl Tally {
             lines.push(mistimed_line(self.mistimed));
         }
         lines
+    }
+
+    /// Everything the look and the post have to tell the listener, a line
+    /// each: a card for someone else's count, then the run's notes in the
+    /// order they came (the plays that wait and why, a server that takes
+    /// none, a play its schema refuses, a card with no ledger yet, a post
+    /// that failed). For Details' log and the command line, where a run's
+    /// other notes go: a job that succeeds says them too, not only one
+    /// that fails.
+    pub(crate) fn said(&self) -> Vec<String> {
+        let mut lines = self.gift_line();
+        lines.extend(self.notes.iter().cloned());
+        lines
+    }
+
+    /// The line of a card for someone else's plays, when it has new ones.
+    fn gift_line(&self) -> Vec<String> {
+        let line = || format!("{} not sent: the card is for someone else", plays(self.gift));
+        (self.gift > 0).then(line).into_iter().collect()
     }
 }
 

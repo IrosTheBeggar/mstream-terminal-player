@@ -1293,6 +1293,38 @@ fn a_signed_out_servers_card_counts_the_plays_that_wait_for_it() {
     assert!(!lib.asked.iter().any(|a| a.ends_with("/stats/plays")), "{:?}", lib.asked);
 }
 
+/// What the plays' look and post have to say reaches the card's log when
+/// the job succeeds, as a sync's notes do: a server with no Stats API takes
+/// none, and *Send the plays* says so where it said "0 plays sent" alone.
+#[test]
+fn send_the_plays_says_why_none_went_to_a_server_that_takes_none() {
+    let scratch = Scratch::new("worker-no-stats");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&sim, "Album B/01.mp3", 1, 1_791_850_000_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    drop(sim);
+    fake.lock().unwrap().no_stats = true;
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("a play to send", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(|p| p.plays == 1))
+    });
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("none sent", |f| f.notes.iter().any(|n| matches!(n, Note::PlaysSent { n: 0, .. })));
+    let why = LogItem::Said("the server takes no plays (it has no Stats API): they wait".into());
+    assert!(rig.fold.logs.iter().any(|(k, item)| *k == key && *item == why), "{:?}", rig.fold.logs);
+    assert!(fake.lock().unwrap().plays.is_empty());
+}
+
 /// The take-over gate's count of plays (clause 58): those that wait on this
 /// computer for a server other than the one the stopped sync read, from
 /// that sync's own tally.

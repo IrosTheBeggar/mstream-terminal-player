@@ -827,9 +827,11 @@ fn prepare(
     let totals = totals(&entries);
     events(Event::Listed);
     // The card's plays for this server, their paths as it has them now; and
-    // a line for those that went nowhere though it was read.
+    // what the look and the post have to say of them: those that went
+    // nowhere though the server was read, a server that takes none, a post
+    // that failed.
     history.post(client, &reads, info.features.stats.is_some(), info.instance_id.is_some(), now);
-    notes.extend(history.tally.held());
+    notes.extend(history.tally.said());
     // Plays to send that no outbox holds would be lost with the rows this
     // run replaces (2.20.6, item 5): no run until one does.
     if let Some(why) = history.unstored() {

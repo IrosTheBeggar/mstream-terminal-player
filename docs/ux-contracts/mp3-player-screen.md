@@ -1568,6 +1568,11 @@ comes from the cache, or a download, beside them.
       waits: the server refuses its time, though this computer's clock
       finds it recent (the server's clock disagrees)"). Next sync goes on
       counting them to send.
+    - Whatever else the run has to say of the plays is said there too,
+      when it went well as when it failed: a server that takes none ("the
+      server takes no plays (it has no Stats API): they wait"), a play the
+      server's schema refuses, a card with no ledger to map them through
+      yet, a post that failed.
 
     **A play that waits on this computer stays until its server has
     answered it.** The card's marks may pass it meanwhile (its log rotated
@@ -2989,6 +2994,13 @@ setting no locale, prints in English.
     says the stopped sync's count of the plays that wait for the server
     the card leaves, or the card's last look's when the Settings sheet
     asks, and nothing when there is no count.
+  - **What a look and a post said of the plays reached nobody when the
+    job went well** (the same pass). A post that failed during a sync, a
+    server with no Stats API, a play its schema refuses, a card with no
+    ledger yet: each was a note in the plays' tally, and only *Send the
+    plays* failing outright showed them. They go where the lines of the
+    plays that wait go: a sync's notes and the plays job's lines, in
+    Details' log and on the command line, in the run's own words.
   - **A waiting play was forgotten when the card's mark passed it.** The
     marks rise over a seq the log holds no more, as over one another
     computer's sync settled, and a play waiting here below them was

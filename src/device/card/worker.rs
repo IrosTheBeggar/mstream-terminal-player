@@ -1747,8 +1747,9 @@ impl Worker {
                 }
                 match result {
                     Ok(tally) => {
-                        // Why some went nowhere, in the card's log.
-                        for line in tally.held() {
+                        // What the look and the post said, in the card's
+                        // log: why some went nowhere, and the rest.
+                        for line in tally.said() {
                             let item = LogItem::Said(line);
                             self.tell(Event::Log { key: key.to_string(), item });
                         }
