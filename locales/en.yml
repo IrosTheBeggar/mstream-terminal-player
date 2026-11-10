@@ -3129,7 +3129,7 @@ dev:
     fit_added: "(%{lib} added)"
     fit_cap: "%{n} tracks: the player holds %{max} on one card"
     fit_cap_2: "Above that the player shows no library at all: choose less, or spread the music over %{n} cards."
-    plays_old: "%{n} from before the player's clock was set: kept, not sent"
+    plays_old: "%{n} from before the player's clock was set: counted, not sent"
     plays_mine: "%{n} of your own files: counted, not sent"
     plays_lost: "%{n} lost when the log was full"
     plays_gift: "not sent: a card for someone else"

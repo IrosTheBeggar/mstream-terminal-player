@@ -681,6 +681,7 @@ mstream-player device card E: setup --name Car --yes     # make a new card one t
 mstream-player device card E: sync                # print the plan; --yes runs it
 mstream-player device card E: eject               # let the card go
 mstream-player device format --port COM3          # format the board's card as FAT32: the player asks first
+mstream-player device time COM3                   # set the player's clock when it is unset or off: its plays are dated by it
 ```
 
 The [mStream MP3 player](https://github.com/IrosTheBeggar/mstream-mp3-player) is an M5Stack
@@ -793,7 +794,9 @@ plays to send`, as that server answered it), and *Sync ▸* fills it — convert
 player can't play, writing the covers, the Auto DJ index and each track's waveform for the
 progress bar, all of which the firmware reads, laying each track's mood scores for the
 player's mood filters (none on a card for someone else), and sending the player's plays
-back to the server they came from. A sync saves as it goes: `x` stops it
+back to the server they came from (none from a card for someone else, and none made before
+the player's clock was ever set: the tab sets it whenever it sees the player on USB, and
+`device time <port>` does from a terminal). A sync saves as it goes: `x` stops it
 at the next save, a card taken out goes on from there in any reader, and it runs on while
 you listen, the MP3 Player tab wearing its percentage. **Settings…** (`o`) holds the card's
 choices on two tabs, Music (its server and libraries) and Writing (what is converted and to

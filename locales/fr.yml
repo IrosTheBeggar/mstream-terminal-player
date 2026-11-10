@@ -3129,7 +3129,7 @@ dev:
     fit_added: "(%{lib} ajoutée)"
     fit_cap: "%{n} titres : le lecteur en tient %{max} sur une carte"
     fit_cap_2: "Au-delà, le lecteur n'affiche plus aucune bibliothèque : choisissez moins, ou répartissez la musique sur %{n} cartes."
-    plays_old: "%{n} d'avant le réglage de l'horloge du lecteur : gardées, non envoyées"
+    plays_old: "%{n} d'avant le réglage de l'horloge du lecteur : comptées, non envoyées"
     plays_mine: "%{n} de vos propres fichiers : comptées, non envoyées"
     plays_lost: "%{n} perdues quand le journal était plein"
     plays_gift: "non envoyées : une carte pour quelqu'un d'autre"

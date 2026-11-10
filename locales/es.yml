@@ -3129,7 +3129,7 @@ dev:
     fit_added: "(%{lib} añadida)"
     fit_cap: "%{n} pistas: el reproductor admite %{max} en una tarjeta"
     fit_cap_2: "Por encima de eso el reproductor no muestra ninguna biblioteca: elige menos, o reparte la música en %{n} tarjetas."
-    plays_old: "%{n} de antes de poner en hora el reproductor: guardadas, no enviadas"
+    plays_old: "%{n} de antes de poner en hora el reproductor: contadas, no enviadas"
     plays_mine: "%{n} de tus propios archivos: contadas, no enviadas"
     plays_lost: "%{n} perdidas cuando el registro estaba lleno"
     plays_gift: "no enviadas: una tarjeta para otra persona"

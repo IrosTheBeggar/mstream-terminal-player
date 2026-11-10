@@ -3129,7 +3129,7 @@ dev:
     fit_added: "(%{lib} aggiunta)"
     fit_cap: "%{n} brani: il lettore ne gestisce %{max} su una scheda"
     fit_cap_2: "Oltre, il lettore non mostra nessuna libreria: scegli meno, o distribuisci la musica su %{n} schede."
-    plays_old: "%{n} di prima che l'orologio del lettore fosse impostato: tenuti, non inviati"
+    plays_old: "%{n} di prima che l'orologio del lettore fosse impostato: contati, non inviati"
     plays_mine: "%{n} dei tuoi file: contati, non inviati"
     plays_lost: "%{n} persi quando il registro era pieno"
     plays_gift: "non inviati: una scheda per qualcun altro"

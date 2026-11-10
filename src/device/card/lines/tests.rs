@@ -453,6 +453,46 @@ fn plays_says_which_wait_for_a_server_that_doesnt_know_their_tracks() {
     assert!(said.contains("1 plays sent to Home.") && !said.contains("waits"), "{said}");
 }
 
+/// The plays from before the player's clock was set are counted and never
+/// sent (clause 61): `plays` and `sync` say how many the card holds, and
+/// name `device time`, the command line's way to set the clock. A card
+/// with none says neither line.
+#[test]
+fn plays_and_sync_count_the_undated_plays_and_name_the_command_that_sets_the_clock() {
+    let scratch = Scratch::new("lines-undated");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    let base = b.home.base.clone().expect("the fake server's address");
+    let synced = sync_now(&b.sim, &base, &rock(), &mut envs()).0;
+    assert!(matches!(synced.end, crate::device::card::sync::End::Ran(_)), "{:?}", synced.end);
+    let count = "from before the player's clock was set: counted, not sent.";
+    let how = "  device time <port> sets the clock of a player on USB (device list names its port).\n";
+    let run = |what: What| {
+        let mut term = Term::new();
+        let code = b.run(Some(&key), what, &Flags::default(), None, &mut term);
+        (code, term.said())
+    };
+    // Every play dated: neither line.
+    let dated = logged(&b.sim, "Album B/01.mp3", 1, 1_791_850_000_000);
+    let plays_file = scratch.0.join("card/.player/plays.jnl");
+    std::fs::write(&plays_file, &dated).unwrap();
+    for what in [What::Plays, What::Sync] {
+        let (_, said) = run(what);
+        assert!(!said.contains(count) && !said.contains("device time"), "{said}");
+    }
+    // Two with no start, and none after them in their boot to date them by.
+    let undated = [logged(&b.sim, "Album B/01.mp3", 1, 0), logged(&b.sim, "Album B/02.flac", 2, 0)];
+    std::fs::write(&plays_file, undated.concat()).unwrap();
+    let (code, plays) = run(What::Plays);
+    assert_eq!(code, 0, "{plays}");
+    let two = format!("  2 plays are {count}\n{how}");
+    assert!(plays.contains(&two) && plays.contains("No plays to send to Home."), "{plays}");
+    let (code, sync) = run(What::Sync);
+    assert_eq!(code, 1, "the plan alone, off a terminal: {sync}");
+    assert!(sync.contains(&two), "{sync}");
+    assert!(b.server.lock().unwrap().plays.is_empty(), "none sent");
+}
+
 /// The files the server lists and can't serve (a dot part past the vpath)
 /// are left out of the sync: the plan says how many and where, once, before
 /// the question (a look that writes nothing says it too); none says

@@ -3129,7 +3129,7 @@ dev:
     fit_added: "(dodano %{lib})"
     fit_cap: "utworów: %{n} · odtwarzacz obsłuży %{max} na jednej karcie"
     fit_cap_2: "Powyżej tego odtwarzacz nie pokaże żadnej biblioteki: wybierz mniej albo rozłóż muzykę na %{n} karty."
-    plays_old: "%{n} sprzed ustawienia zegara odtwarzacza: zachowane, niewysłane"
+    plays_old: "%{n} sprzed ustawienia zegara odtwarzacza: liczone, niewysłane"
     plays_mine: "%{n} z twoich własnych plików: liczone, niewysłane"
     plays_lost: "%{n} utracone, gdy dziennik był pełny"
     plays_gift: "niewysłane: karta dla kogoś innego"

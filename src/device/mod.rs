@@ -4,7 +4,9 @@
 //! device flash` installs or updates the firmware; `mstream-player device
 //! releases` lists the firmware's releases as GitHub has them;
 //! `mstream-player device format` asks the board's player to format its
-//! card, which it confirms on its own screen and does itself. No mStream
+//! card, which it confirms on its own screen and does itself;
+//! `mstream-player device time` reads the board's clock and sets it to
+//! this computer's, the clock its plays are dated by. No mStream
 //! session is involved: the board is a USB serial port, and the firmware is
 //! a file — a release of IrosTheBeggar/mstream-mp3-player, in its QIO or
 //! its DIO build, or a build of it.
@@ -99,6 +101,11 @@ enum DeviceCmd {
     /// asks on its own screen (Format..., then its red button held 2 s) and formats the card
     /// itself. Prints the card, the player's answer, the progress and the result
     Format(FormatArgs),
+    /// Read the clock of the Core2 on a serial port and set it to this computer's when it is
+    /// unset or more than 2 s off, over USB without a restart: the player dates its plays by it,
+    /// and a play from before its clock was ever set is never sent to the server. The MP3 Player
+    /// tab does the same whenever it sees the board. Prints what it found and did as JSON
+    Time(TimeArgs),
     // The hidden card commands below stay, as JSON, for the real-card checks
     // and scripts that read every field: `device cards` and `device card`
     // are the listener's, in plain lines, on the GUI's transfer worker
@@ -135,15 +142,6 @@ enum DeviceCmd {
     // maps them and saves and posts nothing.
     #[command(hide = true)]
     CardPlays(CardPlaysArgs),
-    // Reads the clock of the board on a port with a bare `@time`, over the
-    // running firmware's host lines and with no reset, and sets it to this
-    // computer's (`@time <unix-ms>`) when it is unset or more than 2 s off;
-    // `--dry-run` reads it and says whether it would. Prints what it found
-    // and did as JSON. For the board checks (the firmware's HOST-STATUS,
-    // step 10): the MP3 Player tab setting the clock when it sees the board
-    // waits for its UX contract.
-    #[command(hide = true)]
-    Time(TimeArgs),
 }
 
 /// What `device card` does to the card.
@@ -307,12 +305,16 @@ impl CardArgs {
     }
 }
 
+// `device time`: a bare `@time` over the running firmware's host lines, with
+// no reset, and `@time <unix-ms>` when the clock is unset or more than 2 s
+// off (the firmware's HOST-STATUS, step 10; the tab's listen does the same,
+// contract clause 5). In the help since the review of the play history: a
+// listener who never opens the tab had no other way to set the clock.
 #[derive(Args, Clone)]
 pub struct TimeArgs {
-    // The board's serial port (`COM3`, `/dev/ttyACM0`): one of the ports
-    // `device list` names.
+    /// The board's serial port (COM3, /dev/ttyACM0): one of the ports `device list` names
     port: String,
-    // Read the clock and print, and set nothing.
+    /// Read the clock and print it, and set nothing
     #[arg(long)]
     dry_run: bool,
 }
@@ -835,7 +837,7 @@ fn unix_ms(at: std::time::SystemTime) -> u64 {
     at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-/// `device time <port> [--dry-run]`, undocumented: the clock of the board
+/// `device time <port> [--dry-run]`: the clock of the board
 /// on `port`, one of the boards the engine lists, read and set as
 /// [`listen::clock`] does, then read again once set (`after`, for the
 /// device checks: the page's listen doesn't), through the port opened as
@@ -2028,10 +2030,17 @@ mod tests {
         let Ok(DeviceCmd::Time(args)) = parsed else { panic!("device time") };
         assert_eq!((args.port.as_str(), args.dry_run), ("COM3", true));
         assert!(Line::try_parse_from(["mstream-player", "time"]).is_err(), "a port, always");
+        // In the help, with what it is for: a listener of the command line
+        // alone sets the player's clock with it.
         use clap::CommandFactory;
         let help = Line::command().render_help().to_string();
         assert!(help.contains("releases"), "{help}");
-        assert!(!help.lines().any(|l| l.trim_start().starts_with("time")), "{help}");
+        let line = help.lines().find(|l| l.trim_start().starts_with("time "));
+        assert!(line.is_some_and(|l| l.contains("clock")), "{help}");
+        let mut command = Line::command();
+        let own = command.find_subcommand_mut("time").expect("device time").render_help().to_string();
+        let own = own.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(own.contains("<PORT>") && own.contains("--dry-run") && own.contains("`device list` names"), "{own}");
     }
 
     /// `device format` (clause 66): the board asked over USB with no reset,

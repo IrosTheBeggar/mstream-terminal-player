@@ -3129,7 +3129,7 @@ dev:
     fit_added: "(%{lib} hinzugefügt)"
     fit_cap: "%{n} Titel: der Player fasst %{max} auf einer Karte"
     fit_cap_2: "Darüber zeigt der Player gar keine Bibliothek: weniger auswählen oder die Musik auf %{n} Karten verteilen."
-    plays_old: "%{n} von vor dem Stellen der Player-Uhr: behalten, nicht gesendet"
+    plays_old: "%{n} von vor dem Stellen der Player-Uhr: gezählt, nicht gesendet"
     plays_mine: "%{n} deiner eigenen Dateien: gezählt, nicht gesendet"
     plays_lost: "%{n} verloren, als das Protokoll voll war"
     plays_gift: "nicht gesendet: eine Karte für jemand anderen"

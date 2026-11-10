@@ -994,6 +994,9 @@ fn sync(session: &mut Session, key: &str, flags: &Flags, servers: &[ServerLink],
     let name = card.name().unwrap_or_else(|| card.drive());
     let server = server_name(&card);
     io.say(&format!("Sync {} ({name}) from {server}: {}.", card.drive(), plan_words(&plan, &server)));
+    for line in undated_lines(&plan) {
+        io.say(&line);
+    }
     if plan.conversions > 0 {
         let c = facts.state.as_ref().map(|s| s.settings.conversion);
         let codec = c.map(|c| codec_words(c.codec, c.bitrate)).unwrap_or_default();
@@ -1290,6 +1293,23 @@ fn ended(card: &CardView, io: &mut Io) -> i32 {
 
 // ── plays and eject ─────────────────────────────────────────────────────────
 
+/// The plays from before the player's clock was set, which are counted and
+/// never sent (clause 61): how many the card holds, and the command that
+/// sets the clock, for a listener who never opens the MP3 Player tab, which
+/// sets it by itself. None: no line.
+fn undated_lines(plan: &Planned) -> Vec<String> {
+    let n = plan.tally.as_ref().map_or(0, |t| t.clock);
+    let plays = match n {
+        0 => return Vec::new(),
+        1 => "1 play is".to_string(),
+        n => format!("{} plays are", fmt_count(n as u64)),
+    };
+    vec![
+        format!("  {plays} from before the player's clock was set: counted, not sent."),
+        "  device time <port> sets the clock of a player on USB (device list names its port).".to_string(),
+    ]
+}
+
 /// A card for someone else's line: `plays` sends none of it (clause 61).
 fn gift_words(drive: &str) -> String {
     format!("{drive} is a card for someone else: its plays aren't sent.")
@@ -1310,7 +1330,12 @@ fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
     }
     let server = server_name(&card);
     let n = match &card.next {
-        Next::Plan(plan) => plan.plays,
+        Next::Plan(plan) => {
+            for line in undated_lines(plan) {
+                io.say(&line);
+            }
+            plan.plays
+        }
         _ => {
             io.warn(&format!("{}: can't send its plays now: {}", card.drive(), next_words(&card)));
             return 1;

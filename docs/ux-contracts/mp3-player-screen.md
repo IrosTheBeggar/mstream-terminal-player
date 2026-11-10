@@ -5,7 +5,7 @@
 | **Design of record** | mStream `docs/designs/mp3-tab`, alternate **A · One card** (card 02) and its several-boards frames (card 05), with the grafts the set's README recommends — chosen by Paul on 2026-10-09 ("Go with alternate A, build it"); and for the Advanced options, alternate **A · An options sheet** (card 07) with the grafts of cards 08 and 09 the set's README recommends — chosen by Paul on 2026-10-10 ("Go with alternate A, build it"). This repo's page draws it: `src/device/page.rs` over the desk worker (`src/device/desk.rs`, `board.rs`, `listen.rs`), the same page `mstream-player device flash` opens and the GUI's MP3 Player tab hosts whole. The GUI adds only the tab, the way back, and the rules that keep a write from being left and a board from being left in its bootloader. |
 | **Design of record, the SD card transfer** | **The card-transfer design set (twelfth set), alternates per the user's picks of 2026-10-19.** **Provisional, with no commit pinned:** it is in no repo yet and will live in mStream `docs/designs/card-transfer`; its commit is pinned here once it lands there, in a commit of its own touching this header (the README's re-extraction rule). Until then the citations below ("card 07 §7, choice 6" and the like) can't be followed from a repo. It draws the placement chosen on 2026-10-18 (Q2, one tab row per subject) whole in its card 02, with the Card view's states (card 03), the sync (card 04), the card's Settings (card 05, alternate **A**, two tabs), the gates and formatting in the Core2 (card 06, the player's second step as alternate **B**, the hold), and play history, sets and the command line (card 07, whose section 7 holds the twelve choices and the picks). This repo's page is to draw it beside the board card (`src/device/page/card.rs`), over a transfer worker that lives at the GUI level (`src/device/card/worker.rs`; part B4). |
 | **Server API** | **For a board, none.** No mStream session is involved: each board is a USB serial port, asked over it with no reset (the firmware repo's `docs/HOST-STATUS.md`: `@status` with `cid=` and `clock=`, `@count`, `@identify`, `@time`, `@format`, and the console's `L` for firmware older than them), and the firmware written is the release this player pins — or, for one write, what the Advanced options sheet chose: the pin's other build, another release (GitHub's releases API, asked only when the sheet lists them), or a local build. **For a card in a reader, its own server**: the one the card names (its URL key and nickname in `/.mstream/state.json`), reached through this computer's saved sign-in for it, never necessarily the GUI's session; a peer's library through its parent (the multi-server contract). The calls: `GET /api/` (the server's `instanceId`, mStream B11, and `features.federationProxy`, whether its peer stream proxy forwards the copy header); `POST /api/v1/sync/manifest` (paged, ETag/304) and `POST /api/v1/db/metadata/batch`; `GET /media/…` with Range, and `GET /transcode/…`; `/album-art/…` and `discovery/local/embeddings`; `POST /api/v1/stats/plays`; for peers, `federation/peers`, `…/peers/:id/access` and `file-explorer/recursive`, and the key's limits where the server offers them (mStream B10); beside the server on this computer, `admin/directories` and `admin/transcode`, to read its folders from disk (part A9). |
-| **Already in this repo** | The page, live as its own command on the admin hub's terminal session; the GUI's Stats tab, which showed how a hub page lives under the top bar (the stats-screen contract), and the hub's `HostedRoom`, whose per-frame call this screen uses. The kit's gold warning modal (the libraries room's remove gate), its tab row (the Discovery room), its scan widget and its tall buttons. For the SD card transfer: the card contract's kit, names, tag reader and Auto DJ writer (`src/device/card/{contract,names.rs,tags.rs,autodj.rs}`); cards in readers held to the drive-safety rule (`card/volume/`); set-up, the card's state file and this computer's `cards.json` (`setup.rs`, `state.rs`, `cards.rs`); the sync engine with its plan, covers, dry run, the peers' budget and sets (`engine/`, `sync.rs`, `plan.rs`, `covers.rs`, `dry.rs`, `budget.rs`, `span.rs`); the play log read and posted (`history.rs`); the transfer client (`src/api/transfer.rs`); `cid=`, `clock=` and `@time` in `listen.rs`; the hidden commands that drive them for the real-card and board checks (`device card-probe`, `card-setup`, `card-sync`, `card-set`, `card-plays`, `time`). The play outbox and `report_plays_async` (the play-reporting contract), and `session_reach`/`reach_client` (`src/gui/stats.rs`). |
+| **Already in this repo** | The page, live as its own command on the admin hub's terminal session; the GUI's Stats tab, which showed how a hub page lives under the top bar (the stats-screen contract), and the hub's `HostedRoom`, whose per-frame call this screen uses. The kit's gold warning modal (the libraries room's remove gate), its tab row (the Discovery room), its scan widget and its tall buttons. For the SD card transfer: the card contract's kit, names, tag reader and Auto DJ writer (`src/device/card/{contract,names.rs,tags.rs,autodj.rs}`); cards in readers held to the drive-safety rule (`card/volume/`); set-up, the card's state file and this computer's `cards.json` (`setup.rs`, `state.rs`, `cards.rs`); the sync engine with its plan, covers, dry run, the peers' budget and sets (`engine/`, `sync.rs`, `plan.rs`, `covers.rs`, `dry.rs`, `budget.rs`, `span.rs`); the play log read and posted (`history.rs`); the transfer client (`src/api/transfer.rs`); `cid=`, `clock=` and `@time` in `listen.rs`; the hidden commands that drive them for the real-card checks (`device card-probe`, `card-setup`, `card-sync`, `card-set`, `card-plays`), and `device time` for a board's clock (clause 66a). The play outbox and `report_plays_async` (the play-reporting contract), and `session_reach`/`reach_client` (`src/gui/stats.rs`). |
 | **Status** | Implemented 2026-10-04 (the tenth set's alternate A: the step line, the question, the erase box); **redrawn as alternate A of the eleventh set 2026-10-10** — this document first, then the page, the tab and the command line (Deviations log); **Advanced options (card 07) 2026-10-10** — the worker and the command line first, then this document's clauses 33–43, then the sheet; **the SD card transfer (the twelfth set) 2026-10-19** — this document's clauses 3a, 20a, 25a and 44–67 with the user's picks (Deviations log); the card's engine, set-up, sync, sets, peers and plays are built behind hidden commands (parts A2–A9, A12, A13, B1, B2, B7, B9, B15); the transfer worker, the Card view and the public commands (B4), the Format route with `device format` (B6), and the tab's half of the clock (clause 5, B13), are built (Deviations log). |
 
 ## Intent
@@ -38,8 +38,8 @@ terminal gets it too.
    room of the Library, `0` for Now Playing, `V` for the visualizer — but
    never while the page writes (clause 9).
 4. **`mstream-player device flash`**, on its own (clause 31), and its line
-   mode `--yes` (clause 32); **`device list`** and **`device format`**
-   (clauses 32, 66).
+   mode `--yes` (clause 32); **`device list`**, **`device format`** and
+   **`device time`** (clauses 32, 66, 66a).
 5. **`mstream-player device cards`** and **`device card <drive>
    status|setup|sync|plays|eject [--yes]`**, the cards' line mode (clauses
    64–67).
@@ -220,9 +220,9 @@ comes from the cache, or a download, beside them.
      answer, word for word.
    - The page's listens do this, the tab's and `device flash`'s alike;
      `device flash --yes`'s lines, `device list` and `device format` only
-     listen. The hidden `device time` reads and sets one board's clock the
-     same way, and reads it once more after a set (its `after`), for the
-     device checks.
+     listen. `device time` reads and sets one board's clock the same way
+     (clause 66a), and reads it once more after a set (its `after`), for
+     the device checks.
    - A listen told to stop (the tab left, a write asked for) sends no
      `@time <unix-ms>`. A set the board answered `@time ok` before the
      stop is still said and kept for Details, and a refusal it gave is
@@ -1554,8 +1554,13 @@ comes from the cache, or a download, beside them.
     that reads another server drops a play the marks have passed.
 
     Details counts what can't be sent:
-    - plays from before the player's clock was set (kept on this
-      computer);
+    - plays from before the player's clock was set (counted, never sent:
+      the card's contract dates a play only by a later one of the same
+      boot, and with none it has no start to send; nothing keeps it for
+      later). The tab sets the player's clock whenever it sees the board
+      (clause 5), and `device time` does from the command line (clause
+      66a); `device card <drive> sync` and `plays` say how many such plays
+      the card holds, and name that command;
     - plays of the listener's own files (counted);
     - plays the log overwrote (counted).
 
@@ -1624,6 +1629,18 @@ comes from the cache, or a download, beside them.
     59's three answers that are not the player's no), and with several
     boards and no `--port`, a refusal naming them as `device flash --yes`'s
     does; 2 no board.
+66a. **`device time <port> [--dry-run]`** reads the clock of the board
+    on `<port>` (one `device list` names) and sets it as the tab's listen
+    does (clause 5): a bare `@time`, then one `@time <unix-ms>` when the
+    clock is unset or more than 2 s off, with no reset. `--dry-run` reads
+    and sets nothing. It prints what it found and did as JSON (the board's
+    time or `unset`, how far off it was, what was sent, the time read back,
+    the host lines both ways). Exit 0 in step or set; 1 when the board has
+    no clock verb (older firmware), refused the time or didn't answer, or
+    this computer's clock is outside the board's range; 2 for a port that
+    isn't a board's, or one that couldn't be opened. It is the command
+    line's way to a dated play log: a listener who never opens the tab
+    sets the player's clock with it.
 67. **The command line keeps parity** (clause 43's rule for cards): every
     choice the Card view, its Settings and its gates make, the flags make,
     and the reverse. A gate's flag says what it lets through, never merely
@@ -2865,13 +2882,27 @@ setting no locale, prints in English.
     turn had no such rule, and would stop the format's listen and write
     the board, resetting it with its card half made. The review read it
     as reachable once the pin formats. It isn't, by two rules far from
-    the turn: a board that formats has something under way, so Update all
-    doesn't take it, and no format starts while a write waits or runs.
+    the turn: a board whose card is being formatted has something under
+    way, so Update all doesn't take it, and no format starts while a
+    write waits or runs.
     The turn itself passes a formatting board over now, so the rule no
     longer rests on those two, with a log line of its own
     (`log_all_formatting`, one new `dev` key in the ten locales, the nine
     translated ones from each locale's `log_all_skip` and `fmt_running`,
     for the native review).
+  - **Undated plays were said to be kept.** Clause 61 and `plays_old`
+    said the plays from before the player's clock was set are "kept on
+    this computer"; nothing keeps them. The card contract (the firmware
+    repo's docs/METADATA.md 2.20.6, items 7, 8 and 10) has them counted
+    and not sent, the mark passing them, and that stands: the clause and
+    `plays_old` say so now, in the ten locales ("counted, not sent", each
+    locale's word from its `plays_mine`).
+  - **`device time` is in the help** (clause 66a, new). It was one of the
+    hidden JSON commands (the B4 entry above lists it among them), which
+    left a listener of the command line alone with no way to set the
+    player's clock, the tab being the only other. Its JSON is as it was.
+    `device card <drive> sync` and `plays` name it beside the count of
+    undated plays.
   - **A waiting play was forgotten when the card's mark passed it.** The
     marks rise over a seq the log holds no more, as over one another
     computer's sync settled, and a play waiting here below them was

@@ -3129,7 +3129,7 @@ dev:
     fit_added: "(%{lib} adicionada)"
     fit_cap: "%{n} faixas: o leitor aguenta %{max} num cartão"
     fit_cap_2: "Acima disso o leitor não mostra nenhuma biblioteca: escolha menos, ou divida a música por %{n} cartões."
-    plays_old: "%{n} de antes de o relógio do leitor ser acertado: guardadas, não enviadas"
+    plays_old: "%{n} de antes de o relógio do leitor ser acertado: contadas, não enviadas"
     plays_mine: "%{n} dos seus próprios ficheiros: contadas, não enviadas"
     plays_lost: "%{n} perdidas quando o registo estava cheio"
     plays_gift: "não enviadas: um cartão para outra pessoa"
