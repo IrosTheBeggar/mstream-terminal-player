@@ -1760,7 +1760,12 @@ which the set did not draw either (clause 5): `log_clock_range`,
 `log_clock_rtc`, `log_clock_ours`, `log_clock_silent` and
 `log_clock_failed`, 5 keys. The waveforms (clause 51a) add `next_waves` and
 `sync_waves`, 2 keys. The mood scores (clause 51b) add none and change one,
-`conv_gift`: their lines in Details' log are the run's, in English.
+`conv_gift`: their lines in Details' log are the run's, in English. The
+landing review of 2026-11-10 adds one `dev` key, `log_all_formatting`
+(clause 28), changes one, `plays_old` (clause 61: counted, not kept), and
+draws `plays_gift` for the first time (Details' *Plays* fact and the busy
+line of a card for someone else); the lines of the plays that wait are the
+run's, in English.
 Not keys: the invented names, paths, sizes and versions; the command
 line's lines (plain English, like `device list`'s); the firmware's own
 strings for its dialogs (its repo's lib/core UiStrings, ten languages).
@@ -1775,6 +1780,9 @@ and the caret.
 | `dev.card.next_waves` · `sync_waves` | waveforms to add · asking %{server} for waveforms… %{i} of %{n} |
 | `dev.card.conv_needed` | only what the player can't play, to %{codec} |
 | `dev.card.conv_gift` (changed) | for someone else: no Auto DJ index or mood scores, plays not sent |
+| `dev.card.plays_gift` | not sent: a card for someone else |
+| `dev.card.plays_old` (changed) | %{n} from before the player's clock was set: counted, not sent |
+| `dev.log_all_formatting` | update all: %{port} is formatting its card — passed over |
 | `dev.card.btn_sync` · `btn_setup` · `btn_eject` | Sync · Set up · Eject |
 | `dev.card.link_settings` · `link_stop` | Settings… · Stop at the next save |
 | `dev.card.board_is` | This is %{card} · synced %{when} from %{server} |
