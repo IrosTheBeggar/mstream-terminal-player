@@ -3,17 +3,19 @@ import os, shutil
 # 2026-11-10): the room from the nav — one row a setting, the server's
 # reasons standing where a value would — Start on an empty queue through
 # the First song question and Recently played, a batch landing with its
-# badges, Preview's sheet, the Batch, Length and Genres sheets each ending
-# in the row's value, First song's list, quick config over the bar, Play
-# from moving the DJ to the proxied peer (Rig A via B) with the next turn
-# picked from there, Stop, and the bar's button starting the DJ on Play
-# from's home. The rig's servers have no discovery data and no mood scores,
-# so those two rows are greyed and the picks stay random (∞, never ≈).
+# badges, Preview's sheet, the Batch, Length, Genres and Skip words sheets
+# each ending in the row's value, First song's list, quick config over the
+# bar, Play from moving the DJ to the proxied peer (Rig A via B) with the
+# next turn picked from there, Stop, and the bar's button starting the DJ
+# on Play from's home. The rig's servers have no discovery data and no mood
+# scores, so those two rows are greyed and the picks stay random (∞, never
+# ≈).
 R = os.environ.get("MSTREAM_RIG_DIR", os.path.expanduser("~/mstream-rig"))
 BIN = os.environ.get("MSTREAM_PLAYER_BIN", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "target", "debug", "mstream-player"))
 
 # The room's columns on the 120-cell pty: between the nav's rule and the
-# queue panel's. A sheet stands over them and a little past.
+# queue panel's. The rows stand centred in them — 56 cells from column 22
+# here — and a sheet stands over them and a little past.
 ROOM = (17, 86)
 
 def badges(g):
@@ -203,6 +205,25 @@ def run(Gui):
     g.wait_for("─ Genres · Any", 5, "the sheet cleared")
     done(g)
     row_reads(g, "Genres", "Any ▸")
+
+    # Skip words: the kit's text input with `+` beside it — a word typed, a
+    # click on the plus adding it, the row naming it; then cleared.
+    press_row(g, "Skip words")
+    g.wait_for("│ + │", 5, "Skip words' card and its plus")
+    for ch in "live":
+        g.key(ch)
+    plus = g.find("│ + │")
+    g.click(plus[0], plus[1] + 2)
+    g.wait_for("─ Skip words · live", 5, "the word the plus added, on the border")
+    g.dump("Skip words' sheet, a word added by the plus")
+    done(g)
+    row_reads(g, "Skip words", "live ▸")
+    press_row(g, "Skip words")
+    g.wait_for("│ + │", 5)
+    clear(g)
+    g.wait_for("─ Skip words · Off", 5, "the sheet cleared")
+    done(g)
+    row_reads(g, "Skip words", "Off ▸")
 
     # First song: a list under its row, a click applies.
     press_row(g, "First song")

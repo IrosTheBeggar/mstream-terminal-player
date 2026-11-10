@@ -305,8 +305,10 @@ they can adopt the clock the same way.
 (the Auto DJ room, from the canvas "Auto DJ Panel · GUI", 2026-11-10;
 auto-dj contract clauses 40–58. Before: the E′ board of 2026-09-23 — every
 control on the page at one value column, and a help line under the body).
-The room is a column of rows at ONE width (47 cells — no wider in a wider
-room) under DIM UPPERCASE group headers: a row is its **name** at the
+The room is a column of rows at ONE width — the room's own at a hundred
+columns (47 cells), up to a fifth more in a wider room, and past that the
+whole block (title row, button, headers, rows) centred in the room rather
+than left at its edge — under DIM UPPERCASE group headers: a row is its **name** at the
 left, its **value** ending two cells before the row's last, and a chevron
 on the last — `▸` where it opens a sheet, `▾` where a list hangs under
 it. The value says the setting's state in the row's own words and wears
@@ -345,6 +347,11 @@ it (Harmonic mixing) — a switch needs no sheet.
   text ending at one column with the caret after it, `+`; the field types
   at its end, so ← → are its steps; a text that does not read shows GOLD
   and Done leaves the stored value alone.
+- **A text line in a sheet** (Skip words) is the Text input card itself,
+  holding the keyboard from the start, with a tall `+` frame a cell to
+  its right for the pointer: DIM and inert with nothing typed, the accent
+  (BRIGHT under the pointer) once a word is on the line, a click adding
+  it as Enter does. The `+` is the pointer's alone, as a bar's ends are.
 
 ### Path input + completion
 Suggestions under the input, max 6 visible — the list WINDOWS around the

@@ -303,7 +303,10 @@ the request, the lane, the degrades — is clauses 1–36, unchanged.)*
     scroll. The reasons: `Needs server {version}+` (clause 50) ·
     `Discovery off` · `Still scanning` · `No mood data` · `Not on peers`.
     A reason never loses its words: where a name and its reason do not
-    both fit, the name gives way.
+    both fit, the name gives way. **The block** — the title row, the
+    button, the headers and the rows, as one — is the room's width up to
+    56 cells, a fifth past the canvas's 47, and past that it stands
+    centred in the room rather than at its left.
 42. **Play from** — the server the picks come from, and its folders.
     Drawn only where there is something to choose: more than one
     selectable server saved, or more than one library on the server. Its
@@ -368,8 +371,10 @@ the request, the lane, the degrades — is clauses 1–36, unchanged.)*
     "No genres found on this server." · "No genres match "{query}"." ·
     "Could not load genres". Gated `Needs server 6.7.1+`.
 49. **Skip words** (the keyword filter, clause 26) — the words, or `Off`.
-    Its sheet: a line that takes every letter typed (hint: e.g. "live" or
-    "remix"), Enter adding the word; the words, each with its `[X]`; at
+    Its sheet: the kit's text input — a 3-row card that takes every letter
+    typed (hint: e.g. "live" or "remix") — with `+` framed beside it;
+    Enter, or a click on the `+` once a word is on the line, adds the
+    word; the words stand under the card, each with its `[X]`; at
     most 50, each once whatever its case; a word still on the line when
     the sheet closes counts. No words is the filter off. Client-side, so
     it is never gated.
@@ -574,7 +579,7 @@ App's `dj.*` notes are unchanged.
 | The capability learner | On the api worker, keyed by server identity (the `Tunnels` registry's shape), shared by both shells; the App builds the full request and never sees a dropped key except in the log |
 | The lane epoch | An `App` counter stamped on every `ApiCmd::AutoDj`; `Event::AutoDjPick` carries it back and a stale reply is dropped in `consume_dj` — the record's `_djSessionEpoch` |
 | **The rebuilt screen (2026-11-10)** | *the rows below supersede the room's rows above* |
-| One row per setting, a card of rows per group | Rows at the room's own width — 47 cells, no wider in a wider room — under DIM UPPERCASE headers MUST MATCH and PREFER; a name, its value ending two cells before the last, `▸` or `▾` on the last. The keyboard's hand is the accent slab the row's width; the pointer brightens the name and the chevron; ↑ ↓ walk Preview, Start / Stop and the rows the server can do; Enter or a click opens |
+| One row per setting, a card of rows per group | Rows at the room's own width — 47 cells at a hundred columns, up to 56 where the room is wider, and past that the block centred in the room — under DIM UPPERCASE headers MUST MATCH and PREFER; a name, its value ending two cells before the last, `▸` or `▾` on the last. The keyboard's hand is the accent slab the row's width; the pointer brightens the name and the chevron; ↑ ↓ walk Preview, Start / Stop and the rows the server can do; Enter or a click opens |
 | The value's colour (secondary · primary · warning) | DIM · OK · GOLD behind `!` |
 | A greyed row with a reason, the chevron's room kept | DIM whole, the reason ending at the values' column, no chevron, no click |
 | Start, and the lit Stop — the Auto DJ button's on look, never red | The room's one primary, a 3-row Rounded frame the rows' width: "Start ▸" in the accent, "Stop" in the OK colour; the kit's one-row slab on the title row where the room is short (clause 54) |
@@ -582,7 +587,8 @@ App's `dj.*` notes are unchanged.
 | Sliders (the match, the tolerance, the batch) | Bars in the volume widget's grammar, a cell a step: 25 cells a song (Batch), 20 a BPM (Beat matching), 20 an artist (cooldown), 25 at two points a cell (Sonic, 30–80); `-` `+` and ← → step; a click on a cell sets |
 | Timer wheels (hours · minutes · seconds) for the two bounds | A typed length per bound, read to the second, with `-` `+` stepping fifteen seconds; ← → step too, so the field types at its end |
 | Segmented buttons (Only \| Skip · Generated \| Tags \| Mixed · Drift \| Stay close · Strict \| Standard \| Loose) | The kit's side-by-side radios in the sheet's columns |
-| Chips with a remove (the skip words) | Words with `[X]`, three cells apart, wrapping to four rows; ↓ from the line reaches them, ← → walk, `x` removes |
+| The skip words' text field, with its add button | The kit's Text input card (three rows, 56 cells, the accent while it has the keyboard) and a tall `+` frame a cell to its right: DIM and inert with nothing typed, the accent with a word on the line, a click adding it as Enter does |
+| Chips with a remove (the skip words) | Words with `[X]`, three cells apart, wrapping to four rows, right under the card; ↓ from the line reaches them, ← → walk, `x` removes |
 | The First song sheet (four rows, a tap applies) | The kit's Dropdown under the row |
 | The star row of the Rating sheet | Five stars a cell apart: a click sets one whole, a second click on it halves it; ← → by halves |
 | Play from: a tick per server, folder switches under each ticked one | One sheet: the servers as one-ticked choices, a peer under its parent behind `└`; the folders of the rows' server as checkboxes under its name. A server just ticked shows no folders — they are its own to say, once it is the rows' server |
@@ -699,7 +705,11 @@ Play from's window where the servers outgrow the sheet, and the wheel
 through the shell — a sheet's list turning, a Recently played list
 walking (both fail with the shell's hand-over taken out); and, in all ten
 locales, the floor drawn whole, every help line in its sheet, every tips
-line in its row, and every reason whole. The TUI: `A` with no Play from
+line in its row, and every reason whole; Skip words' card and its `+`
+(DIM and inert, then lit, a click adding the word), the sheet at its
+tallest whole at the floor; the block filling a room of up to 56 cells
+and centred in a wider one, its clicks and First song's list with it.
+The TUI: `A` with no Play from
 on screen starting the DJ where it stands, and the tab's first row saying
 where Enter starts it in either shell.
 
@@ -1066,3 +1076,13 @@ the way the boards drew them, and stay easy to turn:
   walk stays Ask → Random → Pick, and its chooser asks; Smart filters and
   the genre kind have no row there — what the room set goes with the
   TUI's picks too.
+- **2026-11-10 — Two changes on seeing it in the window** (the owner's
+  calls, the same day, on the windowed build): **Skip words' line is the
+  kit's text input** — a 3-row card — **with a `+` beside it**, so there
+  is a way to add a word by a click; the canvas drew a bare line and
+  Enter alone (clause 49). And **the block is centred and may grow**: the
+  canvas drew one width, 47 cells, at the room's left, which left a wide
+  window lopsided — the rows now take up to a fifth more (56) and the
+  block stands in the middle of whatever is left (clause 41). At a
+  hundred columns with the queue open the room is the canvas's still,
+  cell for cell.

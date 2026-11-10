@@ -2397,10 +2397,14 @@ a LATER secondary screen (party view), Columns retired.
   cooldown; a value in its tone (DIM · OK · GOLD behind `!`), a row the
   server cannot do DIM in its place with the reason; `Preview picks ▸` on
   the title row. Nothing scrolls: 23 rows at 100×30, every row whole at
-  100×24, the spare rows coming back in one order. **The sheets**
+  100×24, the spare rows coming back in one order. In a wider room the
+  block grows to 56 cells and then stands centred (the owner's call on
+  seeing it in the window). **The sheets**
   (`src/gui/dj/sheets.rs`): the mood Filters' modal shape with the row's
   value on the border following a draft; bars a cell a step; Length typed
-  to the second; five stars by halves; Skip words as chips; Genres with
+  to the second; five stars by halves; Skip words as chips under the
+  kit's text input, a `+` beside it for the pointer (the owner's call
+  too); Genres with
   Only · Skip and Generated · Tags · Mixed where the server has both;
   Play from's servers (one ticked) and its folders, behind a window where
   they outgrow the sheet; Preview's three picks. Smart filters is the

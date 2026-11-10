@@ -117,7 +117,8 @@ url = "http://127.0.0.1:3041"
   Preview's sheet lists three picks and queues none; Batch's sheet sets "1
   song" by a click on its bar's first cell, the border following the draft
   and the row waiting for Done; Length takes a typed `1:30` ("1:30+") and its
-  `clear`; Genres lists B's own genres, one ticked then cleared; First song's
+  `clear`; Genres lists B's own genres, one ticked then cleared; Skip words
+  takes a typed word by a click on the `+` beside its card; First song's
   list applies on a pick; the bar's chevron opens quick config over the bar
   and Esc puts it away; Play from's sheet moves the DJ to Rig A (the peer
   through B) — the rating row says "Not on peers" — and the next turn is

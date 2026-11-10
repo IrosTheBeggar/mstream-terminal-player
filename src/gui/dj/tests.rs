@@ -274,6 +274,63 @@ fn the_room_is_one_row_a_setting_on_its_twenty_three_rows() {
     assert!(room(&rows, 8).starts_with("First song") && room(&rows, 23).starts_with("Artist cooldown"));
 }
 
+/// A wider room: the rows take up to a fifth more than the canvas's 47
+/// cells, and past that the block stands centred — the title, the button,
+/// the headers and the rows as one (the owner's call, 2026-11-10).
+#[test]
+fn the_block_grows_a_fifth_and_then_stands_centred() {
+    let _en = english();
+    let mut gui = room_gui();
+    two_libraries(&mut gui);
+    // 100 columns with the queue open: the room is the canvas's 47 cells,
+    // and the block fills it — nothing has moved.
+    let rows = draw(&mut gui);
+    assert_eq!(find(&rows, "Auto DJ  ").map(|(x, _)| x), Some(17));
+    assert_eq!(cells(&rows[4], 17, 64), format!("╭{}╮", "─".repeat(45)));
+    // 106 columns: a room of 53 cells, and the block is all of it.
+    let rows = draw_sized(&mut gui, 106, 30);
+    assert_eq!(cells(&rows[4], 17, 70), format!("╭{}╮", "─".repeat(51)), "{}", rows.join("\n"));
+    let batch = cells(&rows[row_of(&rows, "Batch") as usize], 17, 70);
+    assert!(batch.starts_with("Batch") && batch.ends_with("4 songs ▸"), "{batch:?}");
+    // 140 columns: a room of 87 cells. The block stops at 56 — a fifth past
+    // 47 — and stands in the middle, 15 cells in and 16 from the far edge.
+    let rows = draw_sized(&mut gui, 140, 30);
+    let all = rows.join("\n");
+    let x = 17 + 15;
+    assert_eq!(cells(&rows[4], x, x + 56), format!("╭{}╮", "─".repeat(54)), "{all}");
+    assert_eq!(cells(&rows[4], 17, x).trim(), "", "nothing at the room's left: {all}");
+    let title = cells(&rows[2], x, x + 56);
+    assert!(title.starts_with("Auto DJ") && title.ends_with("Preview picks ▸"), "{title:?}");
+    for (label, tail) in [("Play from", "host:3000 ▸"), ("Sonic similarity", "55% ▸"), ("Artist cooldown", "3 artists ▸")] {
+        let row = cells(&rows[row_of(&rows, label) as usize], x, x + 56);
+        assert!(row.starts_with(label) && row.ends_with(tail), "{row:?}");
+    }
+    assert_eq!(cells(&rows[row_of(&rows, "MUST MATCH") as usize], x, x + 10), "MUST MATCH");
+    // A row takes its click across its own cells, and no further.
+    let (y, left) = (row_of(&rows, "Batch"), x as u16);
+    assert_eq!(gui.ui.hit(Position { x: left, y }), Some(Act::DjRow(Row::Batch)));
+    assert_eq!(gui.ui.hit(Position { x: left + 55, y }), Some(Act::DjRow(Row::Batch)));
+    assert_eq!(gui.ui.hit(Position { x: left - 1, y }), None);
+    assert_eq!(gui.ui.hit(Position { x: left + 56, y }), None);
+    // First song's list hangs from the row where it stands now: its last
+    // cell one past the row's.
+    gui.act(Act::DjRow(Row::FirstSong));
+    let rows = draw_sized(&mut gui, 140, 30);
+    let (lx, ly) = find(&rows, "╭───────────────────╮").expect("the list");
+    assert_eq!((lx + 21, ly), (left + 57, row_of(&rows, "First song") + 1), "{}", rows.join("\n"));
+    key(&mut gui, KeyCode::Esc);
+    // The queue folded at 100 columns leaves a room of 80: the same 56,
+    // twelve cells in.
+    gui.queue_open = false;
+    let rows = draw(&mut gui);
+    assert_eq!(cells(&rows[4], 29, 85), format!("╭{}╮", "─".repeat(54)), "{}", rows.join("\n"));
+    // And the floor, 100×24 with the queue open, is the canvas's still.
+    gui.queue_open = true;
+    let rows = draw_sized(&mut gui, 100, 24);
+    let top = cells(&rows[2], 17, 64);
+    assert!(top.starts_with("Auto DJ") && top.ends_with(" Start ▸ "), "{top:?}");
+}
+
 #[test]
 fn the_floor_keeps_every_row_at_a_hundred_by_twenty_four() {
     let _en = english();
@@ -960,13 +1017,40 @@ fn skip_words_are_typed_in_and_let_go_by_their_x() {
     let _en = english();
     let mut gui = room_gui();
     gui.act(Act::DjRowKey(Row::SkipWords));
-    let all = sheet_text(&mut gui);
+    let rows = draw(&mut gui);
+    let all = rows.join("\n");
     assert!(all.contains("─ Skip words · Off ─") && all.contains("e.g. \"live\" or \"remix\""), "{all}");
     assert!(all.contains("Skip picks whose title, artist, album, or filepath contains"));
+    // The line is the kit's text input — a 3-row card, the hint inside —
+    // with `+` framed beside it: 56 cells, a gap, five, the sheet's 62.
+    let (cx, cy) = find(&rows, &format!("╭{}╮ ╭───╮", "─".repeat(54))).expect("the card and the plus");
+    assert_eq!(cx, 19, "from the sheet's first column of text");
+    assert_eq!(cells(&rows[cy as usize + 1], 19, 81), format!("│ ▏{:<52}│ │ + │", "e.g. \"live\" or \"remix\""));
+    assert_eq!(cells(&rows[cy as usize + 2], 19, 81), format!("╰{}╯ ╰───╯", "─".repeat(54)));
+    // The card has the keyboard: its border is the accent. With nothing
+    // typed the plus rests — DIM, and no click.
+    assert_eq!(fg_at(&mut gui, cx, cy), th().accent);
+    assert_eq!(fg_at(&mut gui, cx + 59, cy + 1), th().dim);
+    assert_eq!(gui.ui.hit(Position { x: cx + 59, y: cy + 1 }), Some(Act::Guard));
     // Every letter is the line's; Enter adds the word and clears for the
     // next; the same word again is one word.
     type_text(&mut gui, "live");
-    key(&mut gui, KeyCode::Enter);
+    // A word on the line lights the plus, and a click on it adds the word
+    // as Enter does — the line cleared, the keyboard still its own.
+    assert_eq!(fg_at(&mut gui, cx + 59, cy + 1), th().accent);
+    let rows = draw(&mut gui);
+    assert_eq!(
+        gui.ui.hit(Position { x: cx + 59, y: cy + 1 }),
+        Some(Act::DjSheet(super::SheetAct::AddWord)),
+        "{}",
+        rows.join("\n")
+    );
+    gui.act(Act::DjSheet(super::SheetAct::AddWord));
+    let all = sheet_text(&mut gui);
+    assert!(all.contains("Skip words · live ─") && all.contains("live [X]"), "{all}");
+    type_text(&mut gui, "x");
+    key(&mut gui, KeyCode::Backspace);
+    assert!(sheet_text(&mut gui).contains("│ ▏e.g."), "the line is empty again, and typed into");
     type_text(&mut gui, "LIVE");
     key(&mut gui, KeyCode::Enter);
     type_text(&mut gui, "radio edit");
@@ -975,7 +1059,10 @@ fn skip_words_are_typed_in_and_let_go_by_their_x() {
     assert!(all.contains("Skip words · live · radio edit") && all.contains("live [X]   radio edit [X]"), "{all}");
     assert!(all.contains("clear"));
     assert!(!gui.app.dj.keyword_filter, "a draft");
-    // ↓ to the words, → to the second, x lets it go.
+    // ↓ to the words, → to the second, x lets it go. (The click on the
+    // plus stowed the hand, as a pointer's press does: the first ↓ only
+    // shows it, on the line.)
+    key(&mut gui, KeyCode::Down);
     key(&mut gui, KeyCode::Down);
     key(&mut gui, KeyCode::Right);
     key(&mut gui, KeyCode::Char('x'));
@@ -997,6 +1084,21 @@ fn skip_words_are_typed_in_and_let_go_by_their_x() {
     let rows = draw(&mut gui);
     click(&mut gui, &rows, "[ Done ]");
     assert!(gui.app.dj.keywords.is_empty() && !gui.app.dj.keyword_filter);
+    // At the floor the sheet at its tallest — the card, four rows of words,
+    // the help — still stands whole over the room.
+    gui.act(Act::DjRowKey(Row::SkipWords));
+    for n in 0..24 {
+        type_text(&mut gui, &format!("a longer word {n:02}"));
+        key(&mut gui, KeyCode::Enter);
+    }
+    let rows = draw_sized(&mut gui, 100, 24);
+    let all = rows.join("\n");
+    let (_, top) = find(&rows, "─ Skip words · ").expect("the sheet's border");
+    let (_, foot) = find(&rows, "[ Done ]").expect("the sheet's foot");
+    assert_eq!(foot - top, 12, "the card's three rows, four of words, the help's two and the foot: {all}");
+    assert!(top >= 2 && foot + 1 <= 18, "inside the room's rows: {all}");
+    assert!(all.contains("╭───╮") && all.contains("│ + │") && all.contains("Skip picks whose title"), "{all}");
+    key(&mut gui, KeyCode::Esc);
 }
 
 /// The Genres sheet's list lands.

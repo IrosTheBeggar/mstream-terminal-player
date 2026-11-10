@@ -41,8 +41,11 @@ pub(crate) use sheets::{Sheet, SheetAct, border_title_value};
 
 /// The rows' cells across: a name, its value ending two cells before the
 /// last, the chevron on the last — the room's width at a hundred columns
-/// with the queue open, and no wider in a wider room.
+/// with the queue open, as the canvas drew it. In a wider room the rows
+/// take up to a fifth more, and past that the block stands centred in the
+/// room rather than at its left (the owner's call, 2026-11-10).
 const ROW_W: u16 = 47;
+const ROW_W_MAX: u16 = ROW_W + ROW_W / 5;
 /// The opening question's cells across (the sheets' width).
 const CHOOSER_W: u16 = 66;
 
@@ -535,8 +538,11 @@ fn down_glyph() -> &'static str {
 /// what the DJ prefers. A nav room has no way back — the nav column is
 /// right there.
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    let w = content.width.min(ROW_W);
-    let (x, right, bottom) = (content.x, content.x + w, content.bottom());
+    // The block: the room's width up to the rows' most, centred in what
+    // is left over.
+    let w = content.width.min(ROW_W_MAX);
+    let x = content.x + (content.width - w) / 2;
+    let (right, bottom) = (x + w, content.bottom());
     let play_from = shows_play_from(gui);
     let lay = layout(content.height, play_from);
     let mut y = content.y;

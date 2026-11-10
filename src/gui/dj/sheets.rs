@@ -40,6 +40,8 @@ const COL3: u16 = 46;
 const GENRE_ROWS: u16 = 11;
 /// The most rows of words Skip words shows.
 const CHIP_ROWS: usize = 4;
+/// The cells Skip words' `+` takes beside its card, a cell clear of it.
+const ADD_W: u16 = 5;
 /// The most characters a skip word or a typed length takes.
 const WORD_MAX: usize = 40;
 const LENGTH_MAX: usize = 8;
@@ -194,6 +196,8 @@ pub(crate) enum SheetAct {
     Star(u32),
     /// A genre's row: ticked or let go.
     Genre(String),
+    /// Skip words' `+`: the word on the line added, as Enter adds it.
+    AddWord,
 }
 
 // ── Opening and closing ─────────────────────────────────────────────────────
@@ -670,7 +674,8 @@ fn body_rows(open: &Open, gui: &Gui, area: Rect) -> u16 {
         Draft::Tempo { .. } => 3 + tail,
         Draft::Sonic { .. } => 5 + tail,
         Draft::Length { .. } => 4 + tail,
-        Draft::SkipWords { words, .. } => 2 + chip_rows(words).len() as u16 + tail,
+        // The line's card is three rows; the words stand right under it.
+        Draft::SkipWords { words, .. } => 3 + chip_rows(words).len() as u16 + tail,
         Draft::Genres { .. } => {
             let kinds = kinds_offered(gui);
             1 + u16::from(kinds) + 2 + genre_list_rows(area.height, kinds) + 2
@@ -894,16 +899,16 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             y += 4;
         }
         Draft::SkipWords { words, input } => {
-            draw_word_line(frame, gui, x0, y, input, open.hand == Stop::Field(0));
+            draw_word_card(frame, gui, x0, y, input, open.hand == Stop::Field(0));
             for (r, row) in chip_rows(words).iter().enumerate() {
                 for &(i, cx) in row {
-                    draw_chip(frame, gui, x0 + cx, y + 2 + r as u16, &words[i], i, hand(Stop::Chip(i)));
+                    draw_chip(frame, gui, x0 + cx, y + 3 + r as u16, &words[i], i, hand(Stop::Chip(i)));
                 }
             }
             if words.len() >= dj::KEYWORDS_MAX {
                 note = Some(t!("gui.dj.max", count = dj::KEYWORDS_MAX).to_string());
             }
-            y += 2 + chip_rows(words).len() as u16;
+            y += 3 + chip_rows(words).len() as u16;
         }
         Draft::Genres { .. } => {
             note = draw_genres(frame, gui, rect, &open);
@@ -979,24 +984,45 @@ fn draw_length(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, te
     }
 }
 
-/// Skip words' line: the kit's field with the keyboard in it — the hint
-/// while empty.
-fn draw_word_line(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, input: &Input, held: bool) {
-    let field = Rect { x, y, width: TEXT_W, height: 1 };
-    gui.ui.click(field, Act::DjSheet(SheetAct::Press(Stop::Field(0))));
-    let value = input.value();
-    if value.is_empty() && gui.ui.composition().is_empty() {
-        put(frame, x + 1, y, &super::super::bar::clip(&t!("gui.dj.keyword_hint"), TEXT_W as usize - 1), dim());
-        if held {
-            if gui.ui.caret() {
-                put(frame, x, y, if legacy_conhost() { "_" } else { "▏" }, accent());
-            }
-            gui.ui.note_caret(Position { x, y });
-        }
-    } else if held {
-        super::super::text_field(frame, &mut gui.ui, x, y, value, input.cursor(), TEXT_W, Style::default());
+/// Skip words' line: the kit's text input — a 3-row card, its border the
+/// accent while the line has the keyboard, BRIGHT under the pointer and DIM
+/// at rest, the hint inside while it is empty — and `+` framed beside it
+/// for the pointer: lit while there is a word on the line, a click there
+/// adds it as Enter does. (The owner's call, 2026-11-10: the line was a
+/// bare row, and Enter the only way to add.)
+fn draw_word_card(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, input: &Input, held: bool) {
+    let card = Rect { x, y, width: TEXT_W - ADD_W - 1, height: 3 };
+    let tone = if held {
+        th().accent
+    } else if gui.ui.hovers(card) {
+        th().bright
     } else {
-        put(frame, x, y, &super::super::bar::clip(value, TEXT_W as usize), Style::default());
+        th().dim
+    };
+    crate::kit::frame_at(frame, card, tone);
+    gui.ui.click(card, Act::DjSheet(SheetAct::Press(Stop::Field(0))));
+    let (fx, fy) = (card.x + 2, card.y + 1);
+    let room = card.width.saturating_sub(4);
+    let value = input.value();
+    let hint = t!("gui.dj.keyword_hint");
+    if held {
+        super::super::text_field(frame, &mut gui.ui, fx, fy, value, input.cursor(), room, Style::default());
+        if value.is_empty() && gui.ui.composition().is_empty() {
+            put(frame, fx + 1, fy, &super::super::bar::clip(&hint, room.saturating_sub(1) as usize), dim());
+        }
+    } else if value.is_empty() {
+        put(frame, fx, fy, &super::super::bar::clip(&hint, room as usize), dim());
+    } else {
+        put(frame, fx, fy, &super::super::bar::clip(value, room as usize), Style::default());
+    }
+    // `+`: the card's height, a cell clear of it. With nothing typed it
+    // rests — DIM, no click — as a tall control with nothing to do does.
+    let at = Rect { x: card.right() + 1, y, width: ADD_W, height: 3 };
+    if value.trim().is_empty() {
+        crate::kit::tall_frame(frame, &mut gui.ui, at, "+", 1, |_| (th().dim, false), None);
+    } else {
+        let tone = |hovered: bool| (if hovered { th().bright } else { th().accent }, true);
+        crate::kit::tall_frame(frame, &mut gui.ui, at, "+", 1, tone, Some(Act::DjSheet(SheetAct::AddWord)));
     }
 }
 
@@ -1562,6 +1588,11 @@ pub(crate) fn act(gui: &mut Gui, act: SheetAct) {
         SheetAct::Genre(name) => {
             open.hand = Stop::List;
             toggle_genre(&mut open.draft, &name);
+        }
+        // The line keeps the keyboard, cleared for the next word.
+        SheetAct::AddWord => {
+            open.hand = Stop::Field(0);
+            add_word(&mut open.draft);
         }
     }
     settle(&mut open, gui);
