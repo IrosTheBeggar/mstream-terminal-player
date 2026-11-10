@@ -80,10 +80,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::autodj::{self, FileIn, Index, IndexIn, Model, NoIndex, Selection, Work};
+use super::autodj::{self, BuildError, FileIn, Index, IndexIn, Model, NoIndex, Selection, Work};
 use super::cards::Cards;
 use super::contract::MAX_FILE;
 use super::contract::device_txt::DeviceTxt;
+use super::contract::mpdj::Table;
 use super::contract::mptg::{Entry, Ledger, RecordIn};
 use super::contract::msmf::Ack;
 use super::contract::order::{compare_file_paths, split_last};
@@ -114,7 +115,7 @@ use super::state::{
 };
 use super::tags::{self, Restore};
 use super::volume::{self, CardFs, CardWrite, Mounted, Private, STATE_VERSION, Space};
-use crate::api::transfer::{MANIFEST_PAGE_MAX, Manifest, ManifestEntry, Metadata};
+use crate::api::transfer::{Embeddings, MANIFEST_PAGE_MAX, Manifest, ManifestEntry, Metadata};
 use crate::api::types::{LayeredInfo, TranscodeInfo};
 use crate::api::urls::{TransferBitrate, TransferCodec};
 use crate::api::{Client, wait};
@@ -759,10 +760,13 @@ fn prepare(
         Some(_) => source.revision.clone(),
         None => String::new(),
     };
-    let old_fingerprint = root.tags.as_ref().ok().map(|tags| {
+    let old_files: Option<Vec<FileIn>> = root.tags.as_ref().ok().map(|tags| {
         let of = |e: &Entry| FileIn::of(&e.path, &e.rec, &e.run, e.ledger.as_ref());
-        fingerprint(&tags.records.iter().filter_map(of).collect::<Vec<_>>())
+        tags.records.iter().filter_map(of).collect()
     });
+    let old_fingerprint = old_files.as_deref().map(fingerprint);
+    let old_hashes: HashMap<String, [u8; 16]> =
+        old_files.into_iter().flatten().map(|f| (f.path, f.hash)).collect();
     // A root that isn't a run's end (a cut or parked run's checkpoint), a
     // run's plan still on the card, or a ledger that can't be read: the
     // card's rows don't stand for the selection a 304 would say is the
@@ -1100,6 +1104,7 @@ fn prepare(
             _ => None,
         },
         old_fingerprint,
+        old_hashes,
         refresh: listed == Listed::Whole || some_peer_read(&summary.peers),
         waves: waves != WaveFit::Off,
         waves_off: match (ask.no_waves, device.writes_mpwf()) {
@@ -1401,6 +1406,9 @@ struct SyncHooks {
     /// The key of the files of the root the run began from: those its Auto
     /// DJ index was built from, and its mood tails asked for.
     old_fingerprint: Option<u64>,
+    /// Those files' canonical hashes, by card path: what tells the card's
+    /// index still holds for a commit's files ([`SyncHooks::index_holds`]).
+    old_hashes: HashMap<String, [u8; 16]>,
     /// A whole read: the embeddings and the mood scores are read again even
     /// when the files are the same, the server's analysis having moved on.
     refresh: bool,
@@ -1479,6 +1487,139 @@ impl SyncHooks {
     fn same_files(&self, files: &[FileIn]) -> bool {
         self.old_fingerprint == Some(fingerprint(files))
     }
+
+    /// The card's index (`old`) still holds for the commit's `files`: they
+    /// are the files it was built from, or every card path it maps (DJPH) is
+    /// a file of the commit whose recording is the one it had then. Files
+    /// the commit adds have no neighbours in it, as a file with no vector
+    /// has none; nothing it says is wrong.
+    fn index_holds(&self, old: &[u8], files: &[FileIn]) -> bool {
+        if self.same_files(files) {
+            return true;
+        }
+        let Ok(table) = Table::open(old) else { return false };
+        let unchanged: HashSet<u64> = (files.iter())
+            .filter(|f| self.old_hashes.get(&f.path) == Some(&f.hash))
+            .map(|f| path_hash(&f.path))
+            .collect();
+        table.paths().iter().all(|(hash, _)| unchanged.contains(hash))
+    }
+
+    /// The listener's stop is set.
+    fn stopped(&self) -> bool {
+        self.stop.as_ref().is_some_and(|stop| stop.load(Ordering::SeqCst))
+    }
+
+    /// An origin's vectors (`paths`), [`DJ_CHUNK`] paths a call, each call
+    /// tried [`DJ_TRIES`] times; None when the listener's stop came first.
+    /// A peer whose day is spent as they come is asked no more: what came
+    /// is its answer.
+    fn embeddings_of(&self, client: &Client, gate: Option<&Gate>, paths: &[String]) -> Option<Asked> {
+        let mut all: Option<Embeddings> = None;
+        for chunk in paths.chunks(DJ_CHUNK) {
+            if self.stopped() {
+                return None;
+            }
+            if gate.is_some_and(|g| !g.open()) {
+                break;
+            }
+            let mut tries = 0;
+            let found = loop {
+                tries += 1;
+                match client.embeddings(chunk) {
+                    Err(_) if tries < DJ_TRIES => {
+                        for _ in 0..tries * 10 {
+                            if self.stopped() {
+                                return None;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                    found => break found,
+                }
+            };
+            let found = match found {
+                Ok(Some(found)) => found,
+                Ok(None) => return Some(Asked::Off),
+                Err(e) => return Some(Asked::Failed(e.to_string())),
+            };
+            match all.as_mut() {
+                None => all = Some(found),
+                // One index has one model: a re-index under way is no answer.
+                Some(was) if was.model != found.model || was.dim != found.dim => {
+                    return Some(Asked::Failed("the embedding model changed while it was read".into()));
+                }
+                Some(was) => was.tracks.extend(found.tracks),
+            }
+        }
+        Some(Asked::Found(all.unwrap_or_default()))
+    }
+
+    /// The card's index named again when it still holds for the commit's
+    /// files, and a note why no new one was made; else none.
+    fn kept_or_none(&mut self, holds: bool, why: String) -> AutoDj {
+        match holds {
+            true => {
+                self.notes.push(format!("the card's Auto DJ index stays as it was: {why}"));
+                AutoDj::Same
+            }
+            false => {
+                self.notes.push(format!("no Auto DJ index: {why}"));
+                AutoDj::None
+            }
+        }
+    }
+}
+
+/// Paths of an origin's asked for in one go, between two looks at the
+/// listener's stop: eight calls.
+const DJ_CHUNK: usize = 8 * crate::api::transfer::EMBEDDINGS_PER_CALL;
+/// Tries of one chunk of the embeddings.
+const DJ_TRIES: u32 = 3;
+
+/// What an origin's server said of its vectors.
+enum Asked {
+    Found(Embeddings),
+    /// Its discovery is off (a 403).
+    Off,
+    /// They didn't come, and why.
+    Failed(String),
+}
+
+/// The vectors of one origin's answer an index may hold, by canonical hash
+/// (`hash_of` its card paths' and `hashes` all of them): each all finite and
+/// of `dim` floats — the run's, set by the first origin's answer: the dim it
+/// names, else its vectors' most common length. And how many it had that
+/// can't be (a value not finite, another length): their files have no
+/// neighbours.
+fn usable_vectors(
+    found: Embeddings,
+    hash_of: &HashMap<&str, [u8; 16]>,
+    hashes: &HashSet<[u8; 16]>,
+    dim: &mut Option<usize>,
+) -> (Vec<([u8; 16], Vec<f32>)>, usize) {
+    let named = found.dim as usize;
+    let mut lengths: HashMap<usize, usize> = HashMap::new();
+    for v in found.tracks.iter().filter_map(|t| t.vector.as_ref()) {
+        *lengths.entry(v.len()).or_default() += 1;
+    }
+    let common = lengths.iter().max_by_key(|&(len, n)| (*n, *len)).map(|(&len, _)| len);
+    let want = *dim.get_or_insert(if named > 0 { named } else { common.unwrap_or(0) });
+    // An answer that names another dim than the run's has none of its.
+    let want = if named > 0 && named != want { 0 } else { want };
+    let (mut out, mut unusable) = (Vec::new(), 0);
+    for t in found.tracks {
+        // By the path asked for, else by the hash it came keyed by, when
+        // that is a file's of the commit.
+        let by_hash = t.audio_hash.as_deref().and_then(hex16).filter(|h| hashes.contains(h));
+        let hash = hash_of.get(t.file_path.as_str()).copied().or(by_hash);
+        let (Some(v), Some(h)) = (t.vector, hash) else { continue };
+        match want > 0 && v.len() == want && v.iter().all(|x| x.is_finite()) {
+            true => out.push((h, v)),
+            false => unusable += 1,
+        }
+    }
+    (out, unusable)
 }
 
 /// A commit's files as the Auto DJ index keys them: its records with a
@@ -1602,6 +1743,9 @@ impl Hooks for SyncHooks {
         if commit.old.is_some() && !self.refresh && self.same_files(&files) {
             return AutoDj::Same;
         }
+        // What a step that can't finish (a stop, vectors that don't come)
+        // leaves: the card's index while it holds for these files, else none.
+        let holds = commit.old.is_some_and(|old| self.index_holds(old, &files));
         // Each origin's rows' vectors from its own server (a peer's through
         // the browse proxy, its quota counting them), all of one model: the
         // server's own, else the first peer's. A peer that is held is asked
@@ -1609,6 +1753,7 @@ impl Hooks for SyncHooks {
         let mut model: Option<Model> = None;
         let mut vectors = HashMap::new();
         let mut why_none: Option<String> = None;
+        let (mut dim, mut unusable) = (None, 0);
         for (o, server) in commit.origins.iter().enumerate() {
             let Some(server) = *server else { continue };
             let Some((client, gate)) = self.lists.get(o).cloned() else { continue };
@@ -1626,15 +1771,23 @@ impl Hooks for SyncHooks {
                 continue;
             }
             let whose = if o == 0 { "the server".to_string() } else { format!("peer origin {o}") };
-            let paths: Vec<String> = hash_of.keys().map(|p| p.to_string()).collect();
-            let found = match client.embeddings(&paths) {
-                Ok(Some(found)) => found,
-                Ok(None) => {
+            let mut paths: Vec<String> = hash_of.keys().map(|p| p.to_string()).collect();
+            paths.sort();
+            let found = match self.embeddings_of(&client, gate.as_ref(), &paths) {
+                None => return self.kept_or_none(holds, "stopped at the listener's word".into()),
+                Some(Asked::Found(found)) => found,
+                Some(Asked::Off) => {
                     why_none.get_or_insert(format!("{whose}'s discovery is off"));
                     continue;
                 }
-                Err(e) => {
-                    why_none.get_or_insert(format!("{whose}'s embeddings didn't come: {e}"));
+                // Not the index's fault: the card's stays while it holds;
+                // else the others' rows are indexed without these.
+                Some(Asked::Failed(e)) => {
+                    let why = format!("{whose}'s embeddings didn't come: {e}");
+                    if holds {
+                        return self.kept_or_none(true, why);
+                    }
+                    why_none.get_or_insert(why);
                     continue;
                 }
             };
@@ -1654,16 +1807,15 @@ impl Hooks for SyncHooks {
                 Some(_) => {}
                 None => model = Some(theirs),
             }
-            // By the path asked for, else by the hash it came keyed by, when
-            // that is a file's of the commit.
             let hashes: HashSet<[u8; 16]> = hash_of.values().copied().collect();
-            for t in found.tracks {
-                let by_hash = t.audio_hash.as_deref().and_then(hex16).filter(|h| hashes.contains(h));
-                let hash = hash_of.get(t.file_path.as_str()).copied().or(by_hash);
-                if let (Some(v), Some(h)) = (t.vector, hash) {
-                    vectors.insert(h, v);
-                }
-            }
+            let (usable, bad) = usable_vectors(found, &hash_of, &hashes, &mut dim);
+            vectors.extend(usable);
+            unusable += bad;
+        }
+        // A vector the index can't hold is left out, never the index.
+        if unusable > 0 {
+            let n = unusable;
+            self.notes.push(format!("{n} tracks have no Auto DJ neighbours: their embeddings aren't usable"));
         }
         let Some(model) = model else {
             let why = why_none.unwrap_or_else(|| "no file on the card has an embedding yet".into());
@@ -1680,7 +1832,10 @@ impl Hooks for SyncHooks {
             files,
             vectors,
         };
-        match autodj::index(commit.device, &input, commit.old, &Work::default()) {
+        // The listener's stop reaches the lists; how far they came says so.
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let work = Work { stop: self.stop.as_deref(), done: Some(&done), ..Work::default() };
+        match autodj::index(commit.device, &input, commit.old, &work) {
             Ok(Index::New { file, .. }) => AutoDj::New(file),
             Ok(Index::Same) => AutoDj::Same,
             Ok(Index::None(why)) => {
@@ -1691,6 +1846,11 @@ impl Hooks for SyncHooks {
                 };
                 self.notes.push(format!("no Auto DJ index: {why}"));
                 AutoDj::None
+            }
+            Err(BuildError::Stopped) => {
+                let (done, rows) = (done.into_inner(), autodj::row_count(&input));
+                let why = format!("stopped at the listener's word, {done} of {rows} tracks' lists made");
+                self.kept_or_none(holds, why)
             }
             Err(e) => {
                 self.notes.push(format!("no Auto DJ index: {e}"));

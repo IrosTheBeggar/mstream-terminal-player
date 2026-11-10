@@ -149,6 +149,15 @@ pub(crate) struct Library {
     pub(crate) transcode: Option<Value>,
     /// Each `/transcode` request's query, as it came.
     pub(crate) transcodes: Vec<String>,
+    /// What the embeddings route says in place of an answer (`500 Internal
+    /// Server Error`), and how many times it was asked.
+    pub(crate) embeddings_say: Option<&'static str>,
+    pub(crate) embedding_calls: usize,
+    /// Paths whose vector has a value that isn't finite.
+    pub(crate) bad_vectors: HashSet<String>,
+    /// Set as the embeddings route is asked: the listener's stop, during
+    /// the Auto DJ step.
+    pub(crate) stop_at_embeddings: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Its bulk queue is full for good: every `/transcode` is a 503 in the
     /// queue's words, to ask again in a second; from the second, this stop
     /// is set (the listener's, during a wait for the queue).
@@ -352,10 +361,19 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             json_reply("200 OK", &Value::Object(out).to_string())
         }
         ("POST", "/api/v1/discovery/local/embeddings") => {
+            lib.embedding_calls += 1;
+            if let Some(stop) = &lib.stop_at_embeddings {
+                stop.store(true, Ordering::SeqCst);
+            }
+            if let Some(words) = lib.embeddings_say {
+                return json_reply(words, r#"{"error":"a made-up refusal"}"#);
+            }
             let paths: Vec<String> = serde_json::from_value(asked.json()["filePaths"].clone()).unwrap_or_default();
+            let nan = base64::engine::general_purpose::STANDARD.encode([f32::NAN.to_le_bytes(); 8].concat());
+            let embedding = |p: &String| if lib.bad_vectors.contains(p) { nan.clone() } else { vector(p) };
             let tracks: Vec<Value> = paths
                 .iter()
-                .map(|p| json!({"filePath": p, "audioHash": null, "notAnalyzed": false, "embedding": vector(p)}))
+                .map(|p| json!({"filePath": p, "audioHash": null, "notAnalyzed": false, "embedding": embedding(p)}))
                 .collect();
             let body = json!({"model": {"id": "effnet-discogs", "version": "1"}, "dim": 8, "tracks": tracks});
             json_reply("200 OK", &body.to_string())
@@ -929,6 +947,123 @@ fn one_more_track(fake: &Fake, id: i64) {
     (more.path, more.id) = (format!("Rock/Artist A/Album B/{id:02}.mp3"), id);
     lib.tracks.push(more);
     lib.revision = format!("1:{id}:179000000000{id}:{}", id - 1);
+}
+
+/// A new recording on the fake server, in Rock, under a new revision: a
+/// row the card's Auto DJ index doesn't have.
+fn a_new_recording(fake: &Fake, id: i64) {
+    one_more_track(fake, id);
+    let mut lib = fake.lock().unwrap();
+    lib.tracks.last_mut().unwrap().bytes = corpus("cbr.mp3");
+}
+
+/// The card's root's Auto DJ index entry.
+fn autodj_named(sim: &FatSim) -> Option<crate::device::card::contract::msmf::Comp> {
+    look(sim).root.unwrap().manifest.autodj
+}
+
+#[test]
+fn a_vector_the_index_cant_hold_is_left_out_and_counted_never_the_index() {
+    let scratch = Scratch::new("dj-nan");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    fake.lock().unwrap().bad_vectors.insert("Rock/Artist A/Album B/02.flac".into());
+    let synced = sync_now(&sim, &base, &rock(), &mut envs()).0;
+    assert_eq!(ran(&synced).verified, Ok(()));
+    assert!(autodj_named(&sim).is_some(), "an index of the others: {:?}", synced.notes);
+    let said = synced.notes.iter().any(|n| n.starts_with("1 tracks have no Auto DJ neighbours"));
+    assert!(said, "{:?}", synced.notes);
+}
+
+#[test]
+fn an_answers_vectors_are_of_its_dim_or_its_most_common_length_and_finite() {
+    use crate::api::transfer::Embedding;
+    let paths = ["a", "b", "c", "d", "e"];
+    let hash_of: HashMap<&str, [u8; 16]> = paths.iter().enumerate().map(|(i, p)| (*p, [i as u8 + 1; 16])).collect();
+    let hashes: HashSet<[u8; 16]> = hash_of.values().copied().collect();
+    let row = |path: &str, v: Vec<f32>| Embedding { file_path: path.into(), vector: Some(v), ..Embedding::default() };
+    let tracks = vec![
+        row("a", vec![0.5; 4]),
+        row("b", vec![0.5; 3]),
+        row("c", vec![0.5, f32::INFINITY, 0.5, 0.5]),
+        row("d", vec![0.5; 4]),
+        Embedding { file_path: "e".into(), not_analyzed: true, ..Embedding::default() },
+    ];
+    // No dim named: the most common length, 4; the odd one and the one not
+    // finite are counted, the one not analysed isn't.
+    let mut dim = None;
+    let found = Embeddings { tracks: tracks.clone(), ..Embeddings::default() };
+    let (usable, bad) = usable_vectors(found, &hash_of, &hashes, &mut dim);
+    let mut rows: Vec<[u8; 16]> = usable.iter().map(|(h, _)| *h).collect();
+    rows.sort();
+    assert_eq!((rows, bad, dim), (vec![[1; 16], [4; 16]], 2, Some(4)));
+    // A dim named is the run's; another origin's answer of another is none.
+    let mut dim = None;
+    let found = Embeddings { dim: 3, tracks: tracks.clone(), ..Embeddings::default() };
+    let (usable, bad) = usable_vectors(found, &hash_of, &hashes, &mut dim);
+    assert_eq!((usable.len(), bad, dim), (1, 3, Some(3)));
+    let found = Embeddings { dim: 4, tracks, ..Embeddings::default() };
+    let (usable, bad) = usable_vectors(found, &hash_of, &hashes, &mut dim);
+    assert_eq!((usable.len(), bad), (0, 4));
+}
+
+#[test]
+fn vectors_that_dont_come_keep_the_cards_index_while_it_holds_for_the_files() {
+    let scratch = Scratch::new("dj-down");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    let index = autodj_named(&sim);
+    assert!(index.is_some());
+
+    // A recording more, and the vectors don't come: each chunk tried three
+    // times, then the card's index stays (the new file has no neighbours).
+    a_new_recording(&fake, 6);
+    {
+        let mut lib = fake.lock().unwrap();
+        (lib.embeddings_say, lib.embedding_calls) = (Some("500 Internal Server Error"), 0);
+    }
+    let synced = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!((ran(&synced).written, ran(&synced).verified.clone()), (1, Ok(())));
+    assert_eq!(autodj_named(&sim), index, "named again: {:?}", synced.notes);
+    assert!(synced.notes.iter().any(|n| n.contains("stays as it was")), "{:?}", synced.notes);
+    assert_eq!(fake.lock().unwrap().embedding_calls, 3);
+
+    // A file it maps is another recording now: it no longer holds.
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks[0].bytes = corpus("cbr.mp3");
+        lib.revision = "1:7:1790000000007:6".into();
+    }
+    let synced = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(ran(&synced).written, 1, "{:?}", ran(&synced).report);
+    assert_eq!(autodj_named(&sim), None);
+    let said = synced.notes.iter().any(|n| n.starts_with("no Auto DJ index: the server's embeddings didn't come"));
+    assert!(said, "{:?}", synced.notes);
+}
+
+#[test]
+fn a_stop_in_the_auto_dj_step_keeps_the_cards_index() {
+    let scratch = Scratch::new("dj-stop");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    let index = autodj_named(&sim);
+    assert!(index.is_some());
+
+    // Stopped as the vectors are asked for: the lists aren't made, and the
+    // card's index stays, whatever came.
+    a_new_recording(&fake, 6);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    fake.lock().unwrap().stop_at_embeddings = Some(stop.clone());
+    let synced = sync_now(&sim, &base, &Ask { stop: Some(stop), ..Ask::default() }, &mut envs).0;
+    let outcome = ran(&synced);
+    assert_eq!((outcome.parked.clone(), outcome.written), (None, 1), "{:?}", outcome.report);
+    assert_eq!(autodj_named(&sim), index, "{:?}", synced.notes);
+    let said = synced.notes.iter().any(|n| n.contains("stays as it was: stopped at the listener's word"));
+    assert!(said, "{:?}", synced.notes);
 }
 
 /// How many times the fake's `stats/plays` was asked.
