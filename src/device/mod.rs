@@ -714,8 +714,7 @@ pub fn run(args: DeviceArgs) -> i32 {
         DeviceCmd::Time(args) => {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             let engine = engine::from_env();
-            let now = || unix_ms(std::time::SystemTime::now());
-            time_on(&*engine, &args.port, args.dry_run, &now, listen::Waits::REAL, &mut out, &mut err)
+            time_on(&*engine, &args.port, args.dry_run, &desk::wall_ms, listen::Waits::REAL, &mut out, &mut err)
         }
         DeviceCmd::CardSync(args) => match args.ask() {
             Ok(ask) => {
@@ -832,17 +831,13 @@ mod interrupt {
     pub(super) fn catch() {}
 }
 
-/// A time as Unix ms, as `@time` takes it; 0 before 1970.
-fn unix_ms(at: std::time::SystemTime) -> u64 {
-    at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
-}
-
 /// `device time <port> [--dry-run]`: the clock of the board
 /// on `port`, one of the boards the engine lists, read and set as
 /// [`listen::clock`] does, then read again once set (`after`, for the
 /// device checks: the page's listen doesn't), through the port opened as
 /// every listen opens it (DTR and RTS held low: no reset, the music plays
-/// on). `now`: this computer's clock in Unix ms. Prints what it found and
+/// on). `now`: this computer's clock in Unix ms, the page's own
+/// ([`desk::wall_ms`]). Prints what it found and
 /// did as JSON, the host lines both ways among it. Exit 0 when the clock
 /// is in step or was set (a dry run: read); 1 when the board has no clock
 /// verb (`@err 7 time`: firmware older than 0.12.0), refused the time, or
@@ -1966,10 +1961,9 @@ mod tests {
     /// refused; it stays out of the help.
     #[test]
     fn device_time_reads_a_boards_clock_and_sets_it_only_when_unset_or_off() {
-        let now = || unix_ms(std::time::SystemTime::now());
         let timed = |fake: &Fake, port: &str, dry_run: bool| {
             let (mut out, mut err) = (Vec::new(), Vec::new());
-            let code = time_on(fake, port, dry_run, &now, listen::tests::QUICK, &mut out, &mut err);
+            let code = time_on(fake, port, dry_run, &desk::wall_ms, listen::tests::QUICK, &mut out, &mut err);
             let printed: serde_json::Value = serde_json::from_slice(&out).unwrap_or_default();
             (code, printed, String::from_utf8(err).unwrap())
         };
