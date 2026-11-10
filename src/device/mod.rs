@@ -94,8 +94,8 @@ enum DeviceCmd {
     /// player can't use it. Reads only, and asks each card's server once
     Cards,
     /// One card in a reader: `status` prints its facts; `setup`, `sync` and `plays` print their
-    /// plan and stop without --yes; `eject` lets it go. Each gate is a flag naming what it lets
-    /// through
+    /// plan, then ask on a terminal (go on? [y/N]) and stop anywhere else, unless --yes says to
+    /// go on; `eject` lets it go. Each gate is a flag naming what it lets through
     Card(CardArgs),
     /// Ask the Core2 on USB to format its SD card as FAT32, which erases all of it: the player
     /// asks on its own screen (Format..., then its red button held 2 s) and formats the card
@@ -1737,6 +1737,11 @@ mod tests {
         use card::lines::What;
         let help = Line::command().render_help().to_string();
         assert!(help.contains("  cards ") && help.contains("  card "), "{help}");
+        // Without --yes they ask on a terminal, and stop only off one
+        // (clause 65): the help says so.
+        let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("then ask on a terminal (go on? [y/N]) and stop anywhere else"), "{help}");
+        assert!(!flat.contains("stop without --yes"), "{help}");
         let parse = |args: &[&str]| Line::try_parse_from(["mstream-player"].iter().chain(args)).map(|l| l.what);
         assert!(matches!(parse(&["cards"]), Ok(DeviceCmd::Cards)));
         let flags = |args: &[&str]| match parse(args) {

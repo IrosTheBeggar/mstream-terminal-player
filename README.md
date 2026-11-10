@@ -678,7 +678,7 @@ mstream-player device flash --yes --all           # update every board that runs
 mstream-player device cards                       # the SD cards in this computer's card readers
 mstream-player device card E: status              # one card's facts, as key-value lines
 mstream-player device card E: setup --name Car --yes     # make a new card one the player syncs
-mstream-player device card E: sync                # print the plan; --yes runs it
+mstream-player device card E: sync                # print the plan and ask to go on; --yes runs it unasked
 mstream-player device card E: eject               # let the card go
 mstream-player device format --port COM3          # format the board's card as FAT32: the player asks first
 mstream-player device time COM3                   # set the player's clock when it is unset or off: its plays are dated by it

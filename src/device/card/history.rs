@@ -1378,8 +1378,11 @@ pub(crate) fn plays_of(
         return (history.tally.clone(), history.marks());
     }
     // The paths it moved since, found again before any play goes: a play
-    // of a path it doesn't know is rejected, and settles lost.
-    if info.features.sync {
+    // of a path it doesn't know is rejected, and waits. Only for a server
+    // that takes plays: its whole manifest is a long read to make for a
+    // post that won't be.
+    let stats = info.features.stats.is_some();
+    if stats && info.features.sync {
         match client.manifest(&[], MANIFEST_PAGE_MAX, None, &mut |_| {}) {
             Ok(Manifest::Listed(listing)) => history.remap(&talk, &listing.entries, None),
             Ok(Manifest::NotModified) => {}
@@ -1389,7 +1392,7 @@ pub(crate) fn plays_of(
             }
         }
     }
-    history.post(client, &talk, info.features.stats.is_some(), info.instance_id.is_some(), now);
+    history.post(client, &talk, stats, info.instance_id.is_some(), now);
     (history.tally.clone(), history.marks())
 }
 

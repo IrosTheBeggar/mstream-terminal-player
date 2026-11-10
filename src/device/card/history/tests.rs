@@ -243,8 +243,9 @@ struct Mstream {
     instance: Option<&'static str>,
     /// No Stats API: nothing to post to.
     no_stats: bool,
-    /// The manifest's entries.
+    /// The manifest's entries, and how many times it was asked for.
     entries: Vec<Value>,
+    listed: usize,
     /// Each `stats/plays` body, as it came.
     posts: Vec<Value>,
 }
@@ -266,6 +267,7 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             json_reply("200 OK", &body.to_string())
         }
         ("POST", "/api/v1/sync/manifest") => {
+            m.listed += 1;
             let body = json!({"revision": "1:1", "scanning": false, "next": null, "entries": m.entries});
             json_reply("200 OK", &body.to_string())
         }
@@ -788,6 +790,28 @@ fn the_plays_alone_never_settle_a_play_the_server_doesnt_know() {
     assert!(tally.held()[0].starts_with("1 play waits: the server doesn't know its track"), "{:?}", tally.held());
     assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 1);
     assert_eq!(posted_ids(&fake).concat().len(), 5, "sent with the rest");
+}
+
+/// The plays alone read a server's whole manifest for the paths it moved,
+/// and only when a post follows: a server that takes no plays (no Stats
+/// API) is asked for none, and the plays wait.
+#[test]
+fn the_plays_alone_list_only_a_server_that_takes_plays() {
+    let scratch = Scratch::new("no-stats");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let (client, fake) = server(Mstream { no_stats: true, ..Mstream::default() });
+    let (tally, marks) = plays_of(&sim, &client, false, Rc::new(MemStore::default()), NOW);
+    assert_eq!((tally.due, tally.waiting, tally.failed, marks), (5, 5, false, vec![]), "{tally:?}");
+    assert!(tally.notes.iter().any(|n| n.contains("no Stats API")), "{:?}", tally.notes);
+    let asked = |fake: &Fake| {
+        let m = fake.lock().unwrap();
+        (m.listed, m.posts.len())
+    };
+    assert_eq!(asked(&fake), (0, 0), "no listing read for a post that isn't made");
+
+    let (client, fake) = server(Mstream::default());
+    let (tally, _) = plays_of(&sim, &client, false, Rc::new(MemStore::default()), NOW);
+    assert_eq!((tally.accepted, asked(&fake)), (5, (1, 1)), "{tally:?}");
 }
 
 /// The server read now isn't the one that filled the rows: nothing goes,

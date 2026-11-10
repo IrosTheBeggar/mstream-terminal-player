@@ -9,10 +9,11 @@
 //! view's words (`dev.card_size`, `dev.card_free`, `dev.card.fact_drive_kb`),
 //! which the command line, setting no locale, prints in English.
 //!
-//! Exit codes: 0 done; 1 refused (a gate its flag didn't let through, no
-//! `--yes`, nothing to sync from) or failed; 2 the volumes can't be listed,
-//! or no card answers to `<drive>`; 3 paused or stopped — run it again
-//! later, it goes on from the last save.
+//! Exit codes: 0 done; 1 refused (a gate its flag didn't let through, the
+//! question answered no or, off a terminal, no `--yes`, nothing to sync
+//! from) or failed; 2 the volumes can't be listed, or no card answers to
+//! `<drive>`; 3 paused or stopped — run it again later, it goes on from
+//! the last save.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
