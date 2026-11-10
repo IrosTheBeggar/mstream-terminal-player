@@ -20,25 +20,45 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::api::urls::{TransferBitrate, TransferCodec};
 
 /// The most of ffmpeg's own words a failure keeps.
 const WORDS: usize = 4 * 1024;
+/// What any conversion may take, besides what its length or size adds
+/// ([`ceiling`]).
+const CEILING_BASE: Duration = Duration::from_secs(5 * 60);
+/// A source of no known length is taken as this many bytes a second of
+/// audio (about a FLAC's): its size says how long it plays.
+const BYTES_A_SECOND: u64 = 128 * 1024;
+
+/// The longest a conversion of a source of `expected_ms` (its length, when
+/// known) or else `size` bytes may run before it is given up: a few minutes,
+/// and twice the time it plays — an ffmpeg that hangs on a damaged file
+/// never holds a run for good.
+pub(crate) fn ceiling(expected_ms: Option<u64>, size: u64) -> Duration {
+    let plays = match expected_ms {
+        Some(ms) => Duration::from_millis(ms),
+        None => Duration::from_secs(size / BYTES_A_SECOND),
+    };
+    CEILING_BASE.saturating_add(plays.saturating_mul(2))
+}
 
 /// A conversion on this computer.
 pub(crate) trait Convert: Send + Sync {
     /// `from` made into `to` as `codec` at `bitrate`; Err why. A `stop`
-    /// set ends it, and it fails.
+    /// set ends it, and so does running longer than `within`
+    /// ([`ceiling`]): it fails.
     fn convert(
         &self,
         from: &Path,
         to: &Path,
         codec: TransferCodec,
         bitrate: TransferBitrate,
+        within: Duration,
         stop: &AtomicBool,
     ) -> Result<(), String>;
     /// Where it was found, as one stable word: `server` (mStream's own
@@ -125,6 +145,7 @@ impl Convert for Ffmpeg {
         to: &Path,
         codec: TransferCodec,
         bitrate: TransferBitrate,
+        within: Duration,
         stop: &AtomicBool,
     ) -> Result<(), String> {
         let mut command = Command::new(&self.bin);
@@ -147,18 +168,7 @@ impl Convert for Ffmpeg {
                 String::from_utf8_lossy(&out).trim().to_string()
             })
         });
-        let status = loop {
-            if stop.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("stopped".into());
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(e) => return Err(format!("ffmpeg: {e}")),
-            }
-        };
+        let status = wait_for(&mut child, within, stop)?;
         let words = words.and_then(|w| w.join().ok()).unwrap_or_default();
         match status.success() {
             true => Ok(()),
@@ -171,6 +181,31 @@ impl Convert for Ffmpeg {
 
     fn found(&self) -> &'static str {
         self.found
+    }
+}
+
+/// `child`'s end: killed, and Err why, once `stop` is set or it ran past
+/// `within`.
+fn wait_for(child: &mut Child, within: Duration, stop: &AtomicBool) -> Result<ExitStatus, String> {
+    let started = Instant::now();
+    loop {
+        let why = if stop.load(Ordering::SeqCst) {
+            Some("stopped".to_string())
+        } else if started.elapsed() > within {
+            Some(format!("ffmpeg ran past {} s, and was stopped", within.as_secs()))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(why);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(format!("ffmpeg: {e}")),
+        }
     }
 }
 
@@ -231,9 +266,53 @@ mod tests {
         let missing = Ffmpeg { bin: root.join("gone").join(exe()), found: "path" };
         let stop = AtomicBool::new(false);
         let (opus, k192) = (TransferCodec::Opus, TransferBitrate::K192);
-        let tried = missing.convert(&root.join("x"), &root.join("y"), opus, k192, &stop);
+        let tried = missing.convert(&root.join("x"), &root.join("y"), opus, k192, ceiling(None, 0), &stop);
         assert!(tried.unwrap_err().contains("didn't start"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A process that runs half a minute unless killed.
+    fn long_child() -> Child {
+        #[cfg(windows)]
+        let mut command = {
+            let mut c = Command::new("ping");
+            c.args(["-n", "30", "127.0.0.1"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut c = Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        command.spawn().expect("a process to wait for")
+    }
+
+    #[test]
+    fn a_local_ffmpeg_is_killed_past_its_ceiling_or_at_the_listeners_stop() {
+        // A few minutes, and twice what it plays: by its length, else its size.
+        assert_eq!(ceiling(Some(181_500), 1 << 30), Duration::from_secs(300 + 363));
+        assert_eq!(ceiling(None, 30 * BYTES_A_SECOND), Duration::from_secs(300 + 60));
+        assert!(ceiling(Some(u64::MAX), 0) >= Duration::from_millis(u64::MAX), "never wraps");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        let why = wait_for(&mut long_child(), Duration::from_millis(300), &stop).unwrap_err();
+        assert!(why.contains("ran past"), "{why}");
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        // The listener's stop, set as it runs.
+        let setter = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                stop.store(true, Ordering::SeqCst);
+            })
+        };
+        let started = Instant::now();
+        let why = wait_for(&mut long_child(), Duration::from_secs(60), &stop).unwrap_err();
+        setter.join().unwrap();
+        assert_eq!(why, "stopped");
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
     }
 
     /// A real ffmpeg, when this computer has one on its PATH: a second of
@@ -264,7 +343,8 @@ mod tests {
         let (from, to) = (dir.join("in.wav"), dir.join("out.opus"));
         std::fs::write(&from, wav).unwrap();
         let stop = AtomicBool::new(false);
-        ffmpeg.convert(&from, &to, TransferCodec::Opus, TransferBitrate::K96, &stop).expect("converted");
+        let within = ceiling(Some(1000), 0);
+        ffmpeg.convert(&from, &to, TransferCodec::Opus, TransferBitrate::K96, within, &stop).expect("converted");
         let at = super::super::length::FileAt::open(&to).unwrap();
         let heard = super::super::length::heard(TransferCodec::Opus, &at).unwrap();
         assert!(heard.ms.abs_diff(1000) <= 30, "{heard:?}");

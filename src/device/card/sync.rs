@@ -1057,13 +1057,18 @@ fn prepare(
         .filter(|f| f.origin == 0 && f.original() && !fetcher.reads(f))
         .collect();
     let network = fetcher.network();
+    // The listener's stop reaches every wait of a source's: a file it cuts
+    // short is skipped as "stopped", which the run's own stop
+    // ([`Stopping`]) turns into a wait, never a failure of the file.
     for peer in network.peers.iter_mut() {
         peer.finish_with(Box::new(retag()));
         peer.lengths(lengths(peer.origin()));
+        peer.listen(ask.stop.clone());
     }
     if let Some(own) = network.own.as_mut() {
         own.finish_with(Box::new(retag()));
         own.lengths(lengths(0));
+        own.listen(ask.stop.clone());
         let ahead: Vec<&WantedFile> = order
             .iter()
             .filter(|i| converted(i))

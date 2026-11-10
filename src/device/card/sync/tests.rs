@@ -149,6 +149,10 @@ pub(crate) struct Library {
     pub(crate) transcode: Option<Value>,
     /// Each `/transcode` request's query, as it came.
     pub(crate) transcodes: Vec<String>,
+    /// Its bulk queue is full for good: every `/transcode` is a 503 in the
+    /// queue's words, to ask again in a second; from the second, this stop
+    /// is set (the listener's, during a wait for the queue).
+    pub(crate) queue_full: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Older than the card transfer's batch of mStream changes: no
     /// `instanceId` in `/api/`.
     pub(crate) old: bool,
@@ -407,6 +411,13 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
         ("GET", p) if p.starts_with("/transcode/") => {
             let rel = p["/transcode/".len()..].to_string();
             lib.transcodes.push(asked.target.split_once('?').map_or("", |(_, q)| q).to_string());
+            if let Some(stop) = lib.queue_full.as_ref() {
+                if lib.transcodes.len() >= 2 {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                let words = br#"{"error":"too many bulk transcodes queued - retry later"}"#;
+                return reply("503 Service Unavailable", &[("Retry-After", "1")], words);
+            }
             let Some(bytes) = lib.converted.get(&rel).cloned() else { return not_found() };
             let codec = asked.query("codec").unwrap_or("");
             let kind = if codec == "opus" { "audio/ogg" } else { "audio/mpeg" };
@@ -1894,6 +1905,36 @@ fn a_stop_before_the_run_writes_nothing_and_one_under_way_parks_at_a_checkpoint(
     let ended = (outcome.parked.clone(), outcome.verified.clone(), outcome.records);
     assert_eq!(ended, (None, Ok(()), 4));
     assert!(look(&sim).pending.is_none());
+}
+
+/// A stop while a conversion waits for the server's full queue ends the
+/// wait: the run parks at a checkpoint, the file in its plan, and nothing of
+/// it is remembered as a file that failed.
+#[test]
+fn a_stop_while_a_conversion_waits_for_a_full_queue_parks_and_fails_no_file() {
+    let scratch = Scratch::new("queued");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.transcode = Some(json!({"defaultCodec": "opus", "defaultBitrate": "96k", "bulk": {"concurrency": 1}}));
+        lib.queue_full = Some(stop.clone());
+    }
+    let ask = Ask { stop: Some(stop.clone()), ..rock() };
+    let parked = sync_saying(&sim, &base, &ask, &mut |_| {});
+    let outcome = ran(&parked);
+    assert_eq!(outcome.parked.as_deref(), Some(STOPPED), "{:?}", outcome.report);
+    assert!(outcome.missed.is_empty() && outcome.report.failed.is_empty(), "{:?}", outcome.report);
+    assert!(look(&sim).pending.is_some(), "the conversion stays in the plan on the card");
+    assert!(home_source(&sim).failing.is_empty(), "a stop is no file's failure");
+
+    // The queue has room again: the next run goes on and finishes.
+    fake.lock().unwrap().queue_full = None;
+    let again = sync_saying(&sim, &base, &Ask { stop: None, ..rock() }, &mut |_| {});
+    let outcome = ran(&again);
+    assert_eq!((outcome.parked.clone(), outcome.verified.clone(), outcome.records), (None, Ok(()), 4));
+    assert!(home_source(&sim).failing.is_empty());
 }
 
 #[test]

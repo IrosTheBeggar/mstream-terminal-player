@@ -24,9 +24,16 @@
 //! queue ([`Http::bulk`]) is asked `?bulk=1` (out of its cache, behind its
 //! cap), at most as many at once as it runs; a full queue's 503 is waited
 //! out for as long as it says, as often as it says it, and never fails the
-//! file. Only the queue's, in its words: the server restarting answers 503
-//! with a Retry-After too, as a proxy in front of it may, and fails the file
-//! as any refusal does.
+//! file: after 30 minutes of it for one file ([`BUSY_MAX`]) the run stops,
+//! and says why. Only the queue's, in its words: the server restarting
+//! answers 503 with a Retry-After too, as a proxy in front of it may, and
+//! fails the file as any refusal does.
+//!
+//! **The listener's stop** ([`Http::listen`]) ends every wait of the
+//! source's — for a conversion's turn, for a full queue, for a conversion
+//! made ahead, between tries — and the file is skipped as "stopped", which
+//! the sync's own stop makes a wait: the file stays in the plan for the next
+//! run, and is no failure of its.
 //!
 //! **Ahead of the card** ([`Http::prefetch`]): the run's files of the
 //! server's own bytes download up to three at once in the engine's order,
@@ -77,6 +84,11 @@ const AHEAD: usize = 2;
 /// Two whole conversions this close to each other are the server's answer
 /// for the file, whatever the manifest says of its length.
 const AGREE_MS: u64 = 50;
+/// The longest a full bulk queue is waited out for one file, all its waits
+/// together: then the run stops, and says why (the next run asks again).
+const BUSY_MAX: Duration = Duration::from_secs(30 * 60);
+/// How often a wait on another thread looks at the listener's stop.
+const LOOK: Duration = Duration::from_millis(100);
 
 /// The conversions running in this process ([`TRANSCODES`] at most).
 static RUNNING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
@@ -86,15 +98,15 @@ struct Turn;
 
 impl Turn {
     /// Waits for a turn, while `limit` or more run (at most
-    /// [`TRANSCODES`]); None when `stop` is set first.
-    fn take(stop: &AtomicBool, limit: usize) -> Option<Turn> {
+    /// [`TRANSCODES`]); None once `stopped` says so first.
+    fn take(stopped: &dyn Fn() -> bool, limit: usize) -> Option<Turn> {
         let (lock, cv) = &RUNNING;
         let mut running = lock.lock().unwrap_or_else(|e| e.into_inner());
         while *running >= limit.clamp(1, TRANSCODES) {
-            if stop.load(Ordering::Relaxed) {
+            if stopped() {
                 return None;
             }
-            let wait = cv.wait_timeout(running, Duration::from_millis(100));
+            let wait = cv.wait_timeout(running, LOOK);
             running = wait.unwrap_or_else(|e| e.into_inner()).0;
         }
         *running += 1;
@@ -200,13 +212,9 @@ fn pause_while(seconds: u64, stopped: &dyn Fn() -> bool) {
     }
 }
 
-/// A future run on the shared runtime, given up when `stop` is set (the
-/// request is dropped, and the server kills its ffmpeg).
-fn until<T>(fut: impl std::future::Future<Output = T>, stop: &AtomicBool) -> Option<T> {
-    until_with(fut, &|| stop.load(Ordering::Relaxed))
-}
-
-/// [`until`], given up once `stopped` says so (asked every 100 ms).
+/// A future run on the shared runtime, given up once `stopped` says so
+/// (asked every 100 ms): the request is dropped, and the server kills its
+/// ffmpeg.
 pub(crate) fn until_with<T>(
     fut: impl std::future::Future<Output = T>,
     stopped: &dyn Fn() -> bool,
@@ -226,44 +234,64 @@ pub(crate) fn until_with<T>(
 }
 
 /// How a run's conversions go: at most `limit` at a time (a bulk queue's
-/// cap, else [`TRANSCODES`]), and what the player plays.
+/// cap, else [`TRANSCODES`]), what the player plays, and the longest a full
+/// bulk queue is waited out for one file ([`BUSY_MAX`]).
 #[derive(Clone, Copy, Debug)]
 struct Pace {
     limit: usize,
     max_channels: u32,
+    busy_max: Duration,
 }
 
 /// Makes one conversion: see the module's note. A conversion that fails
-/// leaves no file.
-fn make(client: &Client, job: &Job, pace: Pace, stop: &AtomicBool) -> Result<Made, Failed> {
-    let made = make_once(client, job, pace, stop);
+/// leaves no file; one `stopped` cuts short is a skip ("stopped"), the
+/// file the next run's.
+fn make(client: &Client, job: &Job, pace: Pace, stopped: &dyn Fn() -> bool) -> Result<Made, Failed> {
+    let made = make_once(client, job, pace, stopped);
     if made.is_err() {
         let _ = fs::remove_file(&job.dest);
     }
     made
 }
 
-fn make_once(client: &Client, job: &Job, pace: Pace, stop: &AtomicBool) -> Result<Made, Failed> {
-    let Some(_turn) = Turn::take(stop, pace.limit) else { return Err(skip("stopped")) };
+fn make_once(
+    client: &Client,
+    job: &Job,
+    pace: Pace,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Made, Failed> {
+    let Some(_turn) = Turn::take(stopped, pace.limit) else { return Err(skip("stopped")) };
     let mut whole_before: Option<u64> = None;
     let mut why = String::new();
+    // The full queue's waits for this file, all its tries together.
+    let mut busy = Duration::ZERO;
     for attempt in 1..=TRIES {
         if attempt > 1 {
-            pause(attempt as u64 - 1, stop);
+            pause_while(attempt as u64 - 1, stopped);
         }
-        if stop.load(Ordering::Relaxed) {
+        if stopped() {
             return Err(skip("stopped"));
         }
         let fetch = Fetch::converted(&job.server_path, job.codec, job.bitrate).cap(FAT32_MAX);
         let fetch = if job.bulk { fetch.bulk() } else { fetch };
         let fetched = loop {
-            let fetched = until(client.download_async(&fetch, &job.dest, &mut |_, _| {}), stop);
+            let fetched = until_with(client.download_async(&fetch, &job.dest, &mut |_, _| {}), stopped);
             // The server's bulk queue is full (its words, not any 503's):
             // asked again when it says, for as long as it says so, and no
-            // try is spent.
+            // try is spent — up to [`Pace::busy_max`] in all, then the run
+            // stops: a queue that never empties is no file's fault.
             match &fetched {
-                Some(Err(f)) if job.bulk && !stop.load(Ordering::Relaxed) => match f.error {
-                    FetchError::Busy(wait) => pause(busy_wait(wait), stop),
+                Some(Err(f)) if job.bulk && !stopped() => match f.error {
+                    FetchError::Busy(wait) => {
+                        let wait = busy_wait(wait);
+                        if busy + Duration::from_secs(wait) > pace.busy_max {
+                            let minutes = pace.busy_max.as_secs().div_ceil(60);
+                            let why = format!("the server's conversion queue stayed full for {minutes} minutes");
+                            return Err(stop(why));
+                        }
+                        busy += Duration::from_secs(wait);
+                        pause_while(wait, stopped);
+                    }
                     _ => break fetched,
                 },
                 _ => break fetched,
@@ -369,7 +397,18 @@ struct Shared {
     pace: Pace,
     line: Mutex<Line>,
     cv: Condvar,
-    stop: Arc<AtomicBool>,
+    /// Set when the run's conversions end (the pipeline dropped), under
+    /// `line`'s lock: a worker waiting on it can't miss it.
+    stop: AtomicBool,
+    /// The listener's stop: nothing more starts, a conversion under way is
+    /// given up, and the engine's wait for one ends ("stopped").
+    listener: Arc<AtomicBool>,
+}
+
+impl Shared {
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst) || self.listener.load(Ordering::SeqCst)
+    }
 }
 
 /// A run's conversions, made in its order on two threads.
@@ -380,11 +419,11 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn new(client: Arc<Client>, jobs: Vec<Job>, pace: Pace, stop: Arc<AtomicBool>) -> Pipeline {
+    fn new(client: Arc<Client>, jobs: Vec<Job>, pace: Pace, listener: Arc<AtomicBool>) -> Pipeline {
         let key = |(i, j): (usize, &Job)| ((j.server_path.clone(), container_of(j.codec)), i);
         let at = jobs.iter().enumerate().map(key).collect();
-        let (line, cv) = (Mutex::new(Line::default()), Condvar::new());
-        let shared = Arc::new(Shared { client, jobs, pace, line, cv, stop });
+        let (line, cv, stop) = (Mutex::new(Line::default()), Condvar::new(), AtomicBool::new(false));
+        let shared = Arc::new(Shared { client, jobs, pace, line, cv, stop, listener });
         let workers = (0..TRANSCODES)
             .map(|_| {
                 let shared = shared.clone();
@@ -416,21 +455,26 @@ impl Pipeline {
             }
             line.passed.insert(k);
         }
+        // Timed: the listener's stop is no notice of this lock's.
         loop {
             if let Some(result) = line.done.remove(&i) {
                 return Some(result);
             }
-            if s.stop.load(Ordering::Relaxed) {
+            if s.stopped() {
                 return Some(Err(skip("stopped")));
             }
-            line = s.cv.wait(line).unwrap_or_else(|e| e.into_inner());
+            line = s.cv.wait_timeout(line, LOOK).unwrap_or_else(|e| e.into_inner()).0;
         }
     }
 }
 
 impl Drop for Pipeline {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
+        // Under the lock the workers wait on: none misses it.
+        {
+            let _line = self.shared.line.lock().unwrap_or_else(|e| e.into_inner());
+            self.shared.stop.store(true, Ordering::SeqCst);
+        }
         self.shared.cv.notify_all();
         for worker in self.workers.drain(..) {
             let _ = worker.join();
@@ -443,18 +487,22 @@ fn work(s: &Shared) {
         let i = {
             let mut line = s.line.lock().unwrap_or_else(|e| e.into_inner());
             loop {
-                if s.stop.load(Ordering::Relaxed) || line.next >= s.jobs.len() {
+                if s.stopped() || line.next >= s.jobs.len() {
                     return;
                 }
                 if line.next <= line.on + AHEAD {
                     break;
                 }
-                line = s.cv.wait(line).unwrap_or_else(|e| e.into_inner());
+                line = s.cv.wait_timeout(line, LOOK).unwrap_or_else(|e| e.into_inner()).0;
             }
             line.next += 1;
             line.next - 1
         };
-        let result = make(&s.client, &s.jobs[i], s.pace, &s.stop);
+        // A conversion that panicked is a failed one: the engine's wait for
+        // it ends.
+        let made = std::panic::AssertUnwindSafe(|| make(&s.client, &s.jobs[i], s.pace, &|| s.stopped()));
+        let failed = |_| Err(skip("the conversion's worker failed"));
+        let result = std::panic::catch_unwind(made).unwrap_or_else(failed);
         let mut line = s.line.lock().unwrap_or_else(|e| e.into_inner());
         line.done.insert(i, result);
         s.cv.notify_all();
@@ -645,7 +693,7 @@ impl Ahead {
     }
 
     fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+        self.stop.load(Ordering::SeqCst)
     }
 
     fn listener_stopped(&self) -> bool {
@@ -753,7 +801,11 @@ impl Prefetch {
 
 impl Drop for Prefetch {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
+        // Under the lock the workers wait on: none misses it.
+        {
+            let _lane = self.shared.lane();
+            self.shared.stop.store(true, Ordering::SeqCst);
+        }
         self.shared.cv.notify_all();
         for worker in self.workers.drain(..) {
             let _ = worker.join();
@@ -978,7 +1030,11 @@ pub(crate) struct Http {
     /// Each conversion's expected length, by its source's server path.
     lengths: HashMap<String, u64>,
     finish: Box<dyn Finish>,
+    /// The listener's stop ([`Http::listen`]): the waits for a conversion
+    /// end at it, and the file is the next run's.
     stop: Arc<AtomicBool>,
+    /// The longest a full bulk queue is waited out for one file.
+    busy_max: Duration,
     // Dropped before the scratch folder their files are in.
     pipeline: Option<Pipeline>,
     prefetch: Option<Prefetch>,
@@ -1000,6 +1056,7 @@ impl Http {
             lengths: HashMap::new(),
             finish: Box::new(AsMade),
             stop: Arc::new(AtomicBool::new(false)),
+            busy_max: BUSY_MAX,
             pipeline: None,
             prefetch: None,
             room: Room::RUN,
@@ -1024,7 +1081,17 @@ impl Http {
 
     fn pace(&self) -> Pace {
         let limit = self.bulk.map_or(TRANSCODES, |n| (n as usize).clamp(1, TRANSCODES));
-        Pace { limit, max_channels: self.max_channels }
+        Pace { limit, max_channels: self.max_channels, busy_max: self.busy_max }
+    }
+
+    /// The listener's stop: once set, a wait for a conversion's turn, for a
+    /// full queue or for a conversion made ahead ends, and its file is
+    /// skipped as "stopped" (the run's own stop keeps it in the plan). Set
+    /// before [`Http::ahead`].
+    pub(crate) fn listen(&mut self, stop: Option<Arc<AtomicBool>>) {
+        if let Some(stop) = stop {
+            self.stop = stop;
+        }
     }
 
     /// What a conversion dropped, put back before the card takes it.
@@ -1049,7 +1116,7 @@ impl Http {
             .collect();
         self.pipeline = None;
         if !jobs.is_empty() {
-            let stop = Arc::new(AtomicBool::new(false));
+            let stop = self.stop.clone();
             self.pipeline = Some(Pipeline::new(self.client.clone(), jobs, self.pace(), stop));
         }
     }
@@ -1103,7 +1170,7 @@ impl Http {
             }
         }
         let (client, stop) = (&self.client, &self.stop);
-        let stopped = || stop.load(Ordering::Relaxed);
+        let stopped = || stop.load(Ordering::SeqCst);
         let mut once = |fetch: &Fetch<'_>, into: &mut dyn Write, held: u64| {
             Some(client.stream(fetch, into, held, &mut |_, _| {}))
         };
@@ -1125,7 +1192,8 @@ impl Http {
                 let job = self.job(file, &format!("now-{}", self.made)).ok_or_else(|| {
                     skip(format!("no conversion to a {}k {container} file", file.kbps))
                 })?;
-                make(&self.client, &job, self.pace(), &self.stop)?
+                let stop = &self.stop;
+                make(&self.client, &job, self.pace(), &|| stop.load(Ordering::SeqCst))?
             }
         };
         let poured = self.finish.finish(file, &made.dest).map_err(skip).and_then(|()| {
@@ -1191,7 +1259,8 @@ impl Fetcher for Http {
 
 impl Drop for Http {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        // Never the listener's stop set here: the conversions' and the
+        // downloads' own end with them.
         self.pipeline = None;
         self.prefetch = None;
     }
@@ -1304,6 +1373,91 @@ mod tests {
         assert!(!failed.stop && failed.why.contains("503"), "the file fails, the run not: {failed:?}");
         assert!(seen.recv_timeout(Duration::from_secs(5)).is_ok());
         assert!(seen.recv_timeout(Duration::from_millis(300)).is_err(), "asked once, not waited out");
+    }
+
+    /// A server whose bulk queue is full for good: each `/transcode` is a
+    /// 503 in the queue's words, to ask again in a second. Each request's
+    /// target is handed back as it comes.
+    fn full_for_good() -> (String, mpsc::Receiver<String>) {
+        let (tx, seen) = mpsc::channel::<String>();
+        let tx = Mutex::new(tx);
+        let base = routed(move |asked| {
+            let _ = tx.lock().unwrap().send(asked.target.clone());
+            let words: &[u8] = br#"{"error":"too many bulk transcodes queued - retry later"}"#;
+            reply("503 Service Unavailable", &[("Retry-After", "1")], words)
+        });
+        (base, seen)
+    }
+
+    /// Sets `stop` after `ms` milliseconds.
+    fn stop_after(stop: &Arc<AtomicBool>, ms: u64) -> JoinHandle<()> {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(ms));
+            stop.store(true, Ordering::SeqCst);
+        })
+    }
+
+    #[test]
+    fn a_queue_full_for_good_stops_the_run_after_its_longest_wait() {
+        let (base, seen) = full_for_good();
+        let mut http = Http::new(Arc::new(Client::new(&base).unwrap()), 0, 2).unwrap();
+        http.bulk(Some(1));
+        http.busy_max = Duration::from_secs(2);
+        let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
+        let started = std::time::Instant::now();
+        let failed = http.fetch(&file, &mut Vec::new()).unwrap_err();
+        assert!(failed.stop && failed.why.contains("queue stayed full for 1 minutes"), "{failed:?}");
+        assert_eq!(seen.try_iter().count(), 3, "asked, waited a second twice, then stopped");
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn the_listeners_stop_ends_the_wait_for_a_full_queue_and_skips_the_file() {
+        let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
+        // Made now, at the engine's turn: stopped once the queue was found
+        // full, in its wait (a turn of this process's may be waited for
+        // first, as other tests convert too).
+        let (base, seen) = full_for_good();
+        let mut http = Http::new(Arc::new(Client::new(&base).unwrap()), 0, 2).unwrap();
+        http.bulk(Some(1));
+        let stop = Arc::new(AtomicBool::new(false));
+        http.listen(Some(stop.clone()));
+        let setter = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let asked = seen.recv_timeout(Duration::from_secs(30));
+                std::thread::sleep(Duration::from_millis(300));
+                stop.store(true, Ordering::SeqCst);
+                (asked.is_ok(), std::time::Instant::now())
+            })
+        };
+        let failed = http.fetch(&file, &mut Vec::new()).unwrap_err();
+        let ended = std::time::Instant::now();
+        let (asked, stopped_at) = setter.join().unwrap();
+        assert!(asked, "the queue was asked");
+        assert_eq!(failed, skip("stopped"), "a skip the run's own stop makes a wait of");
+        assert!(ended.saturating_duration_since(stopped_at) < Duration::from_secs(5), "ended soon after");
+        // Made ahead: the engine's wait for it ends, and the worker's.
+        let (base, seen) = full_for_good();
+        let client = Arc::new(Client::new(&base).unwrap());
+        let mut http = Http::new(client, 0, 2).unwrap();
+        http.bulk(Some(1));
+        let stop = Arc::new(AtomicBool::new(false));
+        http.listen(Some(stop.clone()));
+        http.ahead(&[&file]);
+        assert!(seen.recv_timeout(Duration::from_secs(30)).is_ok(), "asked ahead");
+        let setter = stop_after(&stop, 500);
+        let started = std::time::Instant::now();
+        let failed = http.fetch(&file, &mut Vec::new()).unwrap_err();
+        setter.join().unwrap();
+        assert_eq!(failed, skip("stopped"));
+        drop(http);
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        // A turn waited for: it ends at the stop too.
+        let held = Turn::take(&|| false, 1).expect("a turn");
+        assert!(Turn::take(&|| true, 1).is_none(), "a second, stopped, isn't waited for");
+        drop(held);
     }
 
     /// A server of conversions whose first request, whichever it is, gets

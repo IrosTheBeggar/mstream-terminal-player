@@ -308,6 +308,7 @@ impl Convert for MadeUp {
         to: &Path,
         _: TransferCodec,
         _: TransferBitrate,
+        _: std::time::Duration,
         _: &std::sync::atomic::AtomicBool,
     ) -> Result<(), String> {
         let size = std::fs::metadata(from).map_err(|e| e.to_string())?.len();

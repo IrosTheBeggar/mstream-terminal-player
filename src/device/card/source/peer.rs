@@ -505,6 +505,9 @@ pub(crate) struct Peer {
     finish: Box<dyn Finish>,
     /// Each conversion's expected length, by its source's server path.
     lengths: HashMap<String, u64>,
+    /// The listener's stop ([`Peer::listen`]): a wait for a turn, for the
+    /// peer's streams or between tries ends at it, and so does a local
+    /// ffmpeg; the file is the next run's.
     stop: Arc<AtomicBool>,
     made: u64,
     /// The conversions this run whose source is more than what was left of
@@ -553,6 +556,15 @@ impl Peer {
     /// The length each conversion must come to, by its source's server path.
     pub(crate) fn lengths(&mut self, lengths: HashMap<String, u64>) {
         self.lengths = lengths;
+    }
+
+    /// The listener's stop: once set, the peer's waits end, a local ffmpeg
+    /// is killed, and the file is skipped as "stopped" (the run's own stop
+    /// keeps it in the plan).
+    pub(crate) fn listen(&mut self, stop: Option<Arc<AtomicBool>>) {
+        if let Some(stop) = stop {
+            self.stop = stop;
+        }
     }
 
     /// What is left of the peer's day now; None: no cap.
@@ -790,7 +802,11 @@ impl Peer {
         let to = self.scratch.0.join(format!("made-{}.{}", self.made, codec.extension()));
         let fetched = self.source(file, &from);
         let made = fetched.and_then(|()| {
-            convert.convert(&from, &to, codec, bitrate, &self.stop).map_err(skip)
+            // Never longer than its length, or its size, says it may take.
+            let expected = self.lengths.get(&file.ledger.server_path).copied();
+            let size = fs::metadata(&from).map_or(0, |m| m.len());
+            let within = super::ffmpeg::ceiling(expected, size);
+            convert.convert(&from, &to, codec, bitrate, within, &self.stop).map_err(skip)
         });
         let _ = fs::remove_file(&from);
         let poured = made.and_then(|()| {
@@ -871,7 +887,8 @@ fn expecting(fetch: Fetch<'_>, size: Option<u64>) -> Fetch<'_> {
 
 impl Drop for Peer {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        // Never the listener's stop set here: nothing of the peer's runs on
+        // past it.
         let _ = self.s.spend.sync();
     }
 }
