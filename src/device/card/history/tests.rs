@@ -231,6 +231,11 @@ struct Mstream {
     has: HashSet<String>,
     /// Ids it rejects, and why.
     reject: HashMap<String, &'static str>,
+    /// Ids its schema refuses: a call that holds one is refused whole (a
+    /// 400), as its validator refuses a batch for one play's field.
+    refuses: HashSet<String>,
+    /// It refuses every call so: the request's shape is the fault.
+    refuses_all: bool,
     /// Older than the card transfer's batch: no `instanceId`, and a batch
     /// with a `device` source refused whole (a 400).
     old: bool,
@@ -269,6 +274,10 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             m.posts.push(body.clone());
             let plays = body["plays"].as_array().cloned().unwrap_or_default();
             if m.old && plays.iter().any(|p| p["source"] == "device") {
+                return json_reply("400 Bad Request", r#"{"error":"Validation Error"}"#);
+            }
+            let refused = |p: &Value| m.refuses.contains(p["id"].as_str().unwrap_or_default());
+            if m.refuses_all || plays.iter().any(refused) {
                 return json_reply("400 Bad Request", r#"{"error":"Validation Error"}"#);
             }
             let (mut accepted, mut duplicates, mut rejected) = (Vec::new(), Vec::new(), Vec::new());
@@ -1149,6 +1158,83 @@ fn a_play_the_server_would_refuse_settles_unsent_and_the_rest_go() {
     assert_eq!((ids.len(), ids[0].len(), ids[0].contains(&far)), (1, 4, false));
     assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 7)]);
     assert!(store.outbox().cards[&CARD_ID].done.contains(&far), "settled, on disk");
+}
+
+/// A play the server's schema refuses in a way this software doesn't know
+/// fails its batch whole (a 400), and again as `other`. Each play of the
+/// batch then goes alone: the one refused alone settles as a play not sent
+/// does, the rest as the server answers them. When the server takes no
+/// call at all the fault may be the request's: nothing settles, and every
+/// play waits. A start past 2^53 − 1, which the schema refuses, is known
+/// ahead and never sent.
+#[test]
+fn a_batch_the_server_refuses_goes_one_by_one_and_only_the_play_refused_alone_settles() {
+    let scratch = Scratch::new("singly");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let root = root_of(&sim);
+    let odd = id(ONE, EPOCH_1, 3);
+    let calls = |fake: &Fake| -> Vec<usize> { posted_ids(fake).iter().map(Vec::len).collect() };
+
+    let store = Rc::new(MemStore::default());
+    let mut m = Mstream::default();
+    m.refuses.insert(odd.clone());
+    let (client, fake) = server(m);
+    let mut history = History::new(store.clone(), false, none());
+    history.look(&sim, Some(&root), 0);
+    history.post(&client, &talk(HOME), true, true, NOW);
+    let t = &history.tally;
+    let counts = (t.accepted, t.refused, t.rejected, t.due, t.waiting, t.failed);
+    assert_eq!(counts, (4, 1, 0, 0, 0, false), "{t:?}");
+    let said = format!("a play the server refuses alone settles unsent: {odd}");
+    assert!(t.notes.contains(&said), "{:?}", t.notes);
+    assert_eq!(calls(&fake), [5, 5, 1, 1, 1, 1, 1], "the batch, again as `other`, then each alone");
+    assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 7)]);
+    assert!(store.outbox().cards[&CARD_ID].done.contains(&odd), "settled, on disk");
+    assert_eq!(fake.lock().unwrap().has.len(), 4, "each of the others credited once");
+
+    // A server that refuses every call, whatever it holds: nothing proves
+    // the fault is a play's, and none settles.
+    let store = Rc::new(MemStore::default());
+    let (client, fake) = server(Mstream { refuses_all: true, ..Mstream::default() });
+    let mut history = History::new(store.clone(), false, none());
+    history.look(&sim, Some(&root), 0);
+    history.post(&client, &talk(HOME), true, true, NOW);
+    let t = &history.tally;
+    let counts = (t.accepted, t.refused, t.due, t.waiting, t.failed);
+    assert_eq!(counts, (0, 0, 5, 5, true), "{t:?}");
+    assert!(t.notes.iter().any(|n| n.contains("weren't posted") && n.contains("every call")), "{:?}", t.notes);
+    assert_eq!(calls(&fake), [5, 5, 1, 1, 1, 1, 1]);
+    assert_eq!(history.marks(), []);
+    assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 5, "every play waits");
+
+    // One play alone, refused: nothing was taken beside it to tell its
+    // fault from the request's, so it waits too.
+    let alone = Scratch::new("singly-alone");
+    let empty = card(&alone, Golden::One, &[]);
+    let root_alone = root_of(&empty);
+    let lone = play_of(&root_alone, "A/x.mp3", ONE, EPOCH_1, 1);
+    std::fs::write(alone.0.join("card/.player/plays.jnl"), log_bytes(&[lone])).unwrap();
+    let mut m = Mstream::default();
+    m.refuses.insert(lone.id());
+    let (client, fake) = server(m);
+    let mut history = History::new(Rc::new(MemStore::default()), false, none());
+    history.look(&empty, Some(&root_alone), 0);
+    history.post(&client, &talk(HOME), true, true, NOW);
+    let t = &history.tally;
+    assert_eq!((t.refused, t.waiting, t.failed, calls(&fake)), (0, 1, true, vec![1, 1]), "{t:?}");
+
+    // A start no JSON number holds exactly: refused by the schema, known
+    // ahead, and never in a request.
+    let (client, fake) = server(Mstream::default());
+    let mut history = History::new(Rc::new(MemStore::default()), false, none());
+    history.look(&sim, Some(&root), 0);
+    let far = history.owing.plays[0].id.clone();
+    history.owing.plays[0].started_at = 1 << 53;
+    history.post(&client, &talk(HOME), true, true, NOW);
+    let t = &history.tally;
+    assert_eq!((t.accepted, t.refused, t.waiting, t.failed), (4, 1, 0, false), "{t:?}");
+    assert!(t.notes.iter().any(|n| n.contains("would refuse") && n.contains("2^53")), "{:?}", t.notes);
+    assert_eq!((calls(&fake), posted_ids(&fake)[0].contains(&far)), (vec![4], false));
 }
 
 /// Plays an earlier look mapped wait in the outbox, and go once their

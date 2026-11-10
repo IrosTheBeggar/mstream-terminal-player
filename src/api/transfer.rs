@@ -62,6 +62,10 @@ pub const MOOD_HEADS: [&str; 8] =
 const TRACK_NOT_FOUND: &str = "Track not found";
 /// `stats/plays` takes 1-200 plays a call (its `MAX_BATCH`).
 pub const PLAYS_PER_CALL: usize = 200;
+/// The largest whole number its schema takes: past JavaScript's
+/// `Number.MAX_SAFE_INTEGER` (2^53 − 1) a JSON number is no longer exact,
+/// and its validator refuses it as unsafe.
+pub const SAFE_INTEGER_MAX: u64 = (1 << 53) - 1;
 /// A listing call's ceiling. A manifest page of 5,000 entries is a few MB,
 /// longer than the client's 20 s over a relay or a slow uplink.
 const LISTING_TIMEOUT: Duration = Duration::from_secs(120);
@@ -830,6 +834,12 @@ pub fn play_fault(play: &CardPlay) -> Option<String> {
     }
     if play.peer_id.is_some_and(|p| p < 1) {
         return Some(format!("play {}: a peer id below 1", play.id));
+    }
+    // Its times and lengths: a start a broken clock gave, say.
+    let track = play.track.as_ref().and_then(|t| t.duration_ms);
+    let numbers = [Some(play.started_at), play.ended_at, Some(play.played_ms), play.duration_ms, track];
+    if numbers.into_iter().flatten().any(|n| n > SAFE_INTEGER_MAX) {
+        return Some(format!("play {}: a time or a length past 2^53 - 1", play.id));
     }
     None
 }
@@ -2437,7 +2447,19 @@ mod tests {
         let pathless = CardPlay { file_path: String::new(), ..play.clone() };
         let far = CardPlay { file_path: "é".repeat(2049), ..play.clone() };
         let peerless = CardPlay { peer_id: Some(0), ..play.clone() };
-        for refused in [pathless, far, peerless] {
+        // A number past 2^53 − 1 is one its validator calls unsafe: a start,
+        // an end, a length, the snapshot's too.
+        let past = SAFE_INTEGER_MAX + 1;
+        let late = CardPlay { started_at: past, ..play.clone() };
+        let ended = CardPlay { ended_at: Some(u64::MAX), ..play.clone() };
+        let long = CardPlay { played_ms: past, ..play.clone() };
+        let longer = CardPlay { duration_ms: Some(past), ..play.clone() };
+        let snapshot = PlayTrack { duration_ms: Some(past), ..Default::default() };
+        let snapped = CardPlay { track: Some(snapshot), ..play.clone() };
+        let safe = CardPlay { started_at: SAFE_INTEGER_MAX, ended_at: Some(SAFE_INTEGER_MAX), ..play.clone() };
+        assert_eq!((SAFE_INTEGER_MAX, play_fault(&safe)), (9_007_199_254_740_991, None), "the last it takes");
+        assert!(play_fault(&late).is_some_and(|why| why.contains("2^53")), "{:?}", play_fault(&late));
+        for refused in [pathless, far, peerless, late, ended, long, longer, snapped] {
             assert!(play_fault(&refused).is_some(), "{refused:?}");
             let body = plays_body(&client_block, &[play.clone(), refused]);
             assert!(matches!(body, Err(ApiError::Config(_))), "it fails the batch whole");

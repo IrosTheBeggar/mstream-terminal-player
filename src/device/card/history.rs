@@ -46,7 +46,10 @@
 //! ahead or too old: the play waits while this computer's clock finds the
 //! start recent, and settles when it is old or truly ahead.
 //! A play the server's schema refuses is never sent and settles as one not
-//! sent: it would fail every batch it rode in. Plays of another server, and
+//! sent: it would fail every batch it rode in. One it refuses that this
+//! software didn't know to hold back fails its batch all the same: the
+//! batch's plays then go one by one, and the play refused alone settles so
+//! too. Plays of another server, and
 //! those of a post that failed, wait in the outbox for a run that reads
 //! their server. A card for someone else posts none: the plays that waited
 //! from before it was one wait on. A play that waits is never forgotten
@@ -600,7 +603,8 @@ pub(crate) struct Tally {
     pub(crate) duplicates: usize,
     pub(crate) rejected: usize,
     /// Plays the server's schema refuses (a path too long, say): never
-    /// sent, they settle as the plays not sent do.
+    /// sent, or sent and refused alone; they settle as the plays not sent
+    /// do.
     pub(crate) refused: usize,
     /// Plays for the server read that wait all the same: it doesn't know
     /// their tracks, and no listing says they are gone (not sent while an
@@ -684,6 +688,11 @@ fn mistimed_line(n: usize) -> String {
     let (time, finds) = if n == 1 { ("its time", "finds it") } else { ("their times", "finds them") };
     let why = format!("the server refuses {time}, though this computer's clock {finds} recent");
     format!("{}: {why} (the server's clock disagrees)", waits(n))
+}
+
+/// The server refused the call whole: its schema found a fault in it.
+fn bad_request(e: &ApiError) -> bool {
+    matches!(e, ApiError::Server { status: 400, .. })
 }
 
 /// The play started more than [`WAIT_MS`] ago, by a clock at `now_ms`.
@@ -1065,34 +1074,64 @@ impl History {
             instance_id: Some(format!("{:016x}", self.card_id)),
         };
         let mut device = device;
+        // The server took a call of this post: the request's shape is one
+        // it takes, so a call it refuses after is refused for its plays.
+        let mut taken = false;
         for ids in due.chunks(PLAYS_PER_CALL) {
-            let plays = |device: bool| -> Vec<CardPlay> {
+            let send = |ids: &[String], device: bool| {
                 let owed = |id: &String| self.owing.plays.iter().find(|o| &o.id == id);
-                ids.iter().filter_map(owed).map(|o| o.play(device)).collect()
+                let plays: Vec<CardPlay> = ids.iter().filter_map(owed).map(|o| o.play(device)).collect();
+                client.report_card_plays(&block, &plays)
             };
-            let mut answer = client.report_card_plays(&block, &plays(device));
+            let mut answer = send(ids, device);
             // A server older than the `device` source refuses the batch
             // whole: the rest go as `other`.
-            if device && matches!(answer, Err(ApiError::Server { status: 400, .. })) {
+            if device && answer.as_ref().is_err_and(bad_request) {
                 device = false;
-                answer = client.report_card_plays(&block, &plays(false));
+                answer = send(ids, false);
             }
-            let answer = match answer {
-                Ok(answer) => answer,
-                Err(e) => {
-                    self.note(true, format!("the plays weren't posted: {e}"));
-                    break;
+            // Refused whole still: a play in it is one the server's schema
+            // refuses and [`play_fault`] doesn't know. Each goes alone, and
+            // the one refused alone is the one.
+            let (mut answers, mut refused, mut failed) = (Vec::new(), Vec::new(), None);
+            match answer {
+                Ok(answer) => answers.push(answer),
+                Err(e) if !bad_request(&e) => failed = Some(e),
+                Err(_) if ids.len() == 1 => refused.push(ids[0].clone()),
+                Err(_) => {
+                    for id in ids {
+                        match send(std::slice::from_ref(id), device) {
+                            Ok(answer) => answers.push(answer),
+                            Err(e) if bad_request(&e) => refused.push(id.clone()),
+                            Err(e) => {
+                                failed = Some(e);
+                                break;
+                            }
+                        }
+                    }
                 }
-            };
+            }
+            taken |= !answers.is_empty();
             let asked: HashSet<&String> = ids.iter().collect();
             let mut settled: HashSet<String> = HashSet::new();
-            for id in answer.accepted.iter().filter(|id| asked.contains(id)) {
+            let accepted = answers.iter().flat_map(|a| &a.accepted);
+            for id in accepted.filter(|id| asked.contains(id)) {
                 self.tally.accepted += settled.insert(id.clone()) as usize;
             }
-            for id in answer.duplicates.iter().filter(|id| asked.contains(id)) {
+            let duplicates = answers.iter().flat_map(|a| &a.duplicates);
+            for id in duplicates.filter(|id| asked.contains(id)) {
                 self.tally.duplicates += settled.insert(id.clone()) as usize;
             }
-            for r in answer.rejected.iter().filter(|r| asked.contains(&r.id)) {
+            // Refused alone by a server that takes the others: the play's
+            // own fault, and it settles as a play not sent does. With no
+            // call taken the fault may be the request's (the client block,
+            // a schema this software doesn't know): nothing settles on it.
+            let unproven = !taken && !refused.is_empty();
+            for id in refused.into_iter().filter(|_| taken) {
+                self.tally.notes.push(format!("a play the server refuses alone settles unsent: {id}"));
+                self.tally.refused += settled.insert(id) as usize;
+            }
+            for r in answers.iter().flat_map(|a| &a.rejected).filter(|r| asked.contains(&r.id)) {
                 match self.passing(r, now_ms) {
                     Some(Passing::Unknown) => {
                         unknown.insert(r.id.clone());
@@ -1107,6 +1146,15 @@ impl History {
             self.owing.done.extend(settled);
             self.tally.due = self.due(talk);
             self.save();
+            if let Some(e) = failed {
+                self.note(true, format!("the plays weren't posted: {e}"));
+                break;
+            }
+            if unproven {
+                let why = "the server refuses every call (400), whatever plays it holds";
+                self.note(true, format!("the plays weren't posted: {why}"));
+                break;
+            }
         }
         if !unknown.is_empty() {
             self.tally.unknown += unknown.len();

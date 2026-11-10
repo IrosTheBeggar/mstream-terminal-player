@@ -2880,3 +2880,12 @@ setting no locale, prints in English.
     the marks have passed goes to its server when that server is read (a
     play already there comes back a duplicate), and is dropped only by a
     sync from another server, as before.
+  - **One play the server's schema refuses held every play behind it.**
+    Its validator refuses a whole batch (a 400) for one play's field, and
+    the batch was sent again whole at every sync. Known ahead now: a time
+    or a length past 2^53 − 1, which no JSON number holds exactly (a start
+    from a broken clock), is never sent and is dropped alone, as a path
+    too long already was. For a fault the software can't know of, a batch
+    refused whole goes one play at a time, and the play refused alone is
+    dropped; when the server takes no call at all the fault may be the
+    request's, and nothing is dropped.
