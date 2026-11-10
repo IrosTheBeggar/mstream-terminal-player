@@ -243,8 +243,10 @@ struct Mstream {
     instance: Option<&'static str>,
     /// No Stats API: nothing to post to.
     no_stats: bool,
-    /// The manifest's entries, and how many times it was asked for.
+    /// The manifest's entries, whether it says a scan is running, and how
+    /// many times it was asked for.
     entries: Vec<Value>,
+    scanning: bool,
     listed: usize,
     /// Each `stats/plays` body, as it came.
     posts: Vec<Value>,
@@ -268,7 +270,7 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
         }
         ("POST", "/api/v1/sync/manifest") => {
             m.listed += 1;
-            let body = json!({"revision": "1:1", "scanning": false, "next": null, "entries": m.entries});
+            let body = json!({"revision": "1:1", "scanning": m.scanning, "next": null, "entries": m.entries});
             json_reply("200 OK", &body.to_string())
         }
         ("POST", "/api/v1/stats/plays") => {
@@ -593,7 +595,7 @@ fn a_post_that_fails_keeps_every_play_and_a_rejected_one_settles() {
 /// A play the server answers `unknown-track` for: its track may be one a
 /// scan hasn't reached, so the answer settles it only when a whole listing
 /// this run read, trusted for deletions, covers its path and lacks it. With
-/// no listing (a 304, the plays alone), one that holds the path, or one of
+/// no listing (a 304), one that holds the path, or one of
 /// other libraries, the play waits and holds its mark, and goes again at
 /// the next run. While an untrusted listing lacks its path it isn't even
 /// sent. Past 30 days from its start it goes whatever the listing, and the
@@ -770,26 +772,61 @@ fn a_time_the_server_refuses_waits_while_this_computers_clock_finds_it_recent() 
     settles(&run(start - 400 * DAY).0, "a year ahead");
 }
 
-/// The plays alone (`device card <drive> plays`, *Send the plays*) never
-/// settle a play the server doesn't know: the listing they read is for the
-/// paths the server moved, and though it lacks the play's path with no scan
-/// running, the play waits for a sync. The tally says so.
+/// The plays alone (`device card <drive> plays`, *Send the plays*) read the
+/// server's whole listing, every library's, for the paths it moved, and it
+/// says of a play the server doesn't know what a sync's says. With no scan
+/// running, a listing that lacks the play's path settles it: the file is
+/// gone from the server. One that holds the path leaves it waiting; and
+/// while a scan runs, a listing that lacks the path keeps the play from
+/// being sent at all.
 #[test]
-fn the_plays_alone_never_settle_a_play_the_server_doesnt_know() {
+fn the_plays_alone_settle_a_play_the_server_doesnt_know_on_a_trusted_listing_that_lacks_it() {
     let scratch = Scratch::new("unknown-alone");
     let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
-    let mut m = Mstream::default();
-    m.reject.insert(id(ONE, EPOCH_1, 3), "unknown-track");
-    let (client, fake) = server(m);
-    assert!(fake.lock().unwrap().entries.is_empty(), "its manifest lists none of the card's files");
-    let store = Rc::new(MemStore::default());
-    let (tally, marks) = plays_of(&sim, &client, false, store.clone(), NOW);
-    let counts = (tally.accepted, tally.rejected, tally.unknown, tally.waiting, tally.failed);
-    assert_eq!(counts, (4, 0, 1, 1, false), "{tally:?}");
-    assert_eq!(marks, [ack(ONE, EPOCH_1, 2)], "the play waits, and holds its mark");
+    let third = id(ONE, EPOCH_1, 3);
+    // The five plays' server paths, as a post names them, and the third's.
+    let sent: Vec<(String, String)> = {
+        let (client, fake) = server(Mstream::default());
+        plays_of(&sim, &client, false, Rc::new(MemStore::default()), NOW);
+        let body = fake.lock().unwrap().posts[0].clone();
+        let text = |p: &Value, key: &str| p[key].as_str().unwrap().to_string();
+        body["plays"].as_array().unwrap().iter().map(|p| (text(p, "id"), text(p, "filePath"))).collect()
+    };
+    assert_eq!(sent.len(), 5);
+    let listing = |with_third: bool| -> Vec<Value> {
+        let listed = sent.iter().filter(|(id, _)| with_third || *id != third);
+        listed.enumerate().map(|(i, (_, path))| json!({"filepath": path, "id": i + 1})).collect()
+    };
+    let run = |entries: Vec<Value>, scanning: bool| {
+        let mut m = Mstream { entries, scanning, ..Mstream::default() };
+        m.reject.insert(third.clone(), "unknown-track");
+        let (client, fake) = server(m);
+        let store = Rc::new(MemStore::default());
+        let (tally, marks) = plays_of(&sim, &client, false, store.clone(), NOW);
+        let waiting = store.outbox().cards.get(&CARD_ID).map_or(0, |o| o.plays.len());
+        (tally, marks, waiting, posted_ids(&fake).concat().len())
+    };
+    let counts = |t: &Tally| (t.accepted, t.rejected, t.unknown, t.waiting, t.failed);
+
+    // No scan running, and the listing lacks its path: gone from the
+    // server, as a sync would find, and settled.
+    let (tally, marks, waiting, posted) = run(listing(false), false);
+    assert_eq!(counts(&tally), (4, 1, 0, 0, false), "{tally:?}");
+    assert_eq!((marks, waiting, posted), (vec![ack(ONE, EPOCH_1, 7)], 0, 5), "sent with the rest");
+    assert!(tally.held().is_empty(), "{:?}", tally.held());
+
+    // The listing holds its path: the server's two answers disagree, and
+    // the play waits and holds its mark.
+    let (tally, marks, waiting, posted) = run(listing(true), false);
+    assert_eq!(counts(&tally), (4, 0, 1, 1, false), "{tally:?}");
+    assert_eq!((marks, waiting, posted), (vec![ack(ONE, EPOCH_1, 2)], 1, 5));
     assert!(tally.held()[0].starts_with("1 play waits: the server doesn't know its track"), "{:?}", tally.held());
-    assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 1);
-    assert_eq!(posted_ids(&fake).concat().len(), 5, "sent with the rest");
+
+    // A scan under way, its listing short of the path: not sent, and it
+    // waits for a listing that can be trusted.
+    let (tally, marks, waiting, posted) = run(listing(false), true);
+    assert_eq!(counts(&tally), (4, 0, 1, 1, false), "{tally:?}");
+    assert_eq!((marks, waiting, posted), (vec![ack(ONE, EPOCH_1, 2)], 1, 4), "kept back");
 }
 
 /// The plays alone read a server's whole manifest for the paths it moved,

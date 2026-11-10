@@ -444,8 +444,14 @@ fn plays_says_which_wait_for_a_server_that_doesnt_know_their_tracks() {
     assert!(matches!(synced.end, crate::device::card::sync::End::Ran(_)), "{:?}", synced.end);
     let play = logged(&b.sim, "Album B/01.mp3", 1, 1_791_850_000_000);
     std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
-    // The server's scan hasn't reached the track.
-    b.server.lock().unwrap().unindexed.insert("Rock/Artist A/Album B/01.mp3".into());
+    // The server's scan hasn't reached the track, and its listing says a
+    // scan is running: the listing the command reads lacks the path, and
+    // says nothing of the file being gone.
+    {
+        let mut lib = b.server.lock().unwrap();
+        lib.unindexed.insert("Rock/Artist A/Album B/01.mp3".into());
+        lib.scanning = true;
+    }
     let yes = Flags { yes: true, ..Flags::default() };
     let mut term = Term::new();
     let code = b.run(Some(&key), What::Plays, &yes, None, &mut term);
@@ -456,7 +462,11 @@ fn plays_says_which_wait_for_a_server_that_doesnt_know_their_tracks() {
     assert!(said.contains(waits), "{said}");
     assert!(said.contains("0 plays sent to Home."), "{said}");
 
-    b.server.lock().unwrap().unindexed.clear();
+    {
+        let mut lib = b.server.lock().unwrap();
+        lib.unindexed.clear();
+        lib.scanning = false;
+    }
     let mut term = Term::new();
     let code = b.run(Some(&key), What::Plays, &yes, None, &mut term);
     let said = term.said();

@@ -1015,7 +1015,7 @@ impl History {
     /// it lacks is gone from the server (`trusted`: no scan was running
     /// and nothing moved while it was read, the listing's
     /// `deletions_trusted`). The post goes by it. A run that read no
-    /// listing (a 304, the plays alone) says nothing of any path.
+    /// listing (a 304) says nothing of any path.
     pub(crate) fn listing(
         &mut self,
         talk: &Talk,
@@ -1364,10 +1364,12 @@ pub(crate) fn listed_skew(card: &dyn CardFs, tags: &Tags) -> io::Result<i32> {
 /// or posted either. `now`: Unix seconds, by this computer's clock. What it
 /// came to, and the marks after it.
 ///
-/// A play the server doesn't know is never settled here: the listing this
-/// reads is for the paths the server moved ([`History::remap`]), and says
-/// nothing of a file being gone, which a sync's does ([`History::listing`]).
-/// The play waits, and the tally says so.
+/// The listing this reads for the paths the server moved
+/// ([`History::remap`]) is the server's whole one, every library's, and
+/// says of a play the server doesn't know what a sync's says
+/// ([`History::listing`]): its file is gone when no scan was running and
+/// the listing lacks its path, and the play settles; otherwise it waits,
+/// and the tally says so.
 pub(crate) fn plays_of(
     card: &dyn CardFs,
     client: &Client,
@@ -1429,13 +1431,18 @@ pub(crate) fn plays_of(
         return (history.tally.clone(), history.marks());
     }
     // The paths it moved since, found again before any play goes: a play
-    // of a path it doesn't know is rejected, and waits. Only for a server
+    // of a path it doesn't know is rejected, and what this listing says
+    // of its path decides whether it settles or waits. Only for a server
     // that takes plays: its whole manifest is a long read to make for a
     // post that won't be.
     let stats = info.features.stats.is_some();
     if stats && info.features.sync {
         match client.manifest(&[], MANIFEST_PAGE_MAX, None, &mut |_| {}) {
-            Ok(Manifest::Listed(listing)) => history.remap(&talk, &listing.entries, None),
+            Ok(Manifest::Listed(listing)) => {
+                history.remap(&talk, &listing.entries, None);
+                let trusted = listing.deletions_trusted();
+                history.listing(&talk, &listing.entries, None, trusted);
+            }
             Ok(Manifest::NotModified) => {}
             Err(e) => {
                 history.note(true, format!("the server's listing: {e}"));

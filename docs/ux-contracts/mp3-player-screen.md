@@ -1547,8 +1547,8 @@ comes from the cache, or a download, beside them.
       sync: after a list that stood (a 304), one that holds the track, or
       one of other libraries. While a scan's list lacks its track it isn't
       sent at all.
-    - *Send the plays* reads no list that says a file is gone, and never
-      drops such a play.
+    - *Send the plays* reads the server's whole list too, every library's,
+      and goes by it the same way.
     - A server also turns a play away for its time (`bad-time`: a start
       ahead of its clock, or older than it keeps). When this computer's
       clock finds the start recent, no more than 5 minutes ahead, the
@@ -2906,13 +2906,14 @@ setting no locale, prints in English.
     mark, and a scan's listing that lacks its path keeps it from being
     sent. The wait is bounded, 30 days from the play's start, so the plays
     of a file truly gone can't pile up behind a server that never lists
-    whole. *Send the plays* settles none: the listing it reads is for the
-    paths the server moved. The lines that say so are the run's own, in
-    English, as its other notes in Details' log are. The card contract
-    (the firmware repo's docs/METADATA.md 2.20.6, item 10 and the lines
-    under its post table) says a rejection settles a play; this is the
-    software reading "rejected" more narrowly, and is still to be written
-    there.
+    whole. *Send the plays* goes by the same rule: the listing it reads
+    for the paths the server moved is the server's whole one (it was first
+    held to settle none, as though that listing said less than a sync's).
+    The lines that say so are the run's own, in English, as its other
+    notes in Details' log are. The card contract (the firmware repo's
+    docs/METADATA.md 2.20.6, item 10 and the lines under its post table)
+    says a rejection settles a play; this is the software reading
+    "rejected" more narrowly, and is still to be written there.
   - **A server whose clock was behind lost recent plays.** It refuses a
     start more than 5 minutes ahead of its own clock, with the word it
     has for one older than it keeps (`bad-time`), and that settled the
