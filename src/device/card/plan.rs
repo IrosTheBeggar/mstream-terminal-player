@@ -34,7 +34,7 @@
 //! shows no library at all. A run that adds no file needs nothing but a
 //! waveform index the card lacks.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::contract::device_txt::DeviceTxt;
 use super::contract::mptg::{BPM_ANALYSED, CONTAINER_MP3, CONTAINER_OPUS, Ledger};
@@ -220,6 +220,12 @@ pub(crate) enum Skip {
     NoTranscode,
     /// It, or its conversion, is 4 GiB or more: past FAT32's largest file.
     TooBig,
+    /// It failed [`GIVE_UP_RUNS`](super::state::GIVE_UP_RUNS) runs in a row
+    /// as the listing says it now: passed over until it changes.
+    Failing,
+    /// An `.ogg` whose first bytes didn't come, asked twice: its codec isn't
+    /// known, and it is never converted on a guess. Passed over this run.
+    Unread,
 }
 
 impl Skip {
@@ -229,6 +235,8 @@ impl Skip {
             Skip::NoCodec => "no-codec",
             Skip::NoTranscode => "no-transcode",
             Skip::TooBig => "too-big",
+            Skip::Failing => "keeps-failing",
+            Skip::Unread => "unread",
         }
     }
 }
@@ -480,6 +488,37 @@ impl Kept {
             && file
     }
 
+    /// The bytes, kbps and size of a wanted file the row stands for: the
+    /// row's conversion, or the server's bytes of `server_size`.
+    fn reused(&self, server_size: u64) -> (Bytes, u16, u64) {
+        match self.ledger.converted_to {
+            0 => (self.bytes(), 0, server_size),
+            _ => (self.bytes(), self.ledger.convert_kbps, self.size),
+        }
+    }
+
+    /// The wanted file the row stands for as it is, of `origin`: its ledger
+    /// fields, its conversion, its length, and mStream's analysis it recorded
+    /// (after a 304, or for a file passed over).
+    fn wanted(&self, origin: usize) -> (WantedFile, Extra) {
+        let k = self;
+        let original = k.ledger.converted_to == 0;
+        let (bpm10, camelot) = if k.analysed { (k.bpm10, k.camelot) } else { (0, 0) };
+        let ledger =
+            Ledger { origin_flags: 0, converted_to: 0, convert_kbps: 0, server: 0, ..k.ledger.clone() };
+        let file = WantedFile {
+            origin,
+            ledger,
+            bytes: k.bytes(),
+            kbps: if original { 0 } else { k.ledger.convert_kbps },
+            size: if original { k.ledger.server_size } else { k.size },
+            bpm10,
+            camelot,
+        };
+        let duration_ms = (k.duration_ms > 0).then_some(k.duration_ms as u64);
+        (file, Extra { duration_ms, ..Extra::default() })
+    }
+
     /// What the row's file is on the card.
     fn bytes(&self) -> Bytes {
         match self.ledger.converted_to {
@@ -528,25 +567,33 @@ pub(crate) fn wanted_of(
         let extra = Extra::of(&entry.metadata, full);
         let reuse = kept.get(path).filter(|k| same_plan && k.unchanged(entry));
         let (bytes, kbps, size) = match reuse {
-            Some(k) if k.ledger.converted_to == 0 => (k.bytes(), 0, ledger.server_size),
-            Some(k) => (k.bytes(), k.ledger.convert_kbps, k.size),
+            Some(k) => k.reused(ledger.server_size),
             None => {
                 let facts = Facts::of(entry, full, ogg.get(path).copied());
                 match decide(&facts, device, conversion, transcode) {
                     Decision::Original { ogg_opus } => {
                         (Bytes::Original { ogg_opus }, 0, ledger.server_size)
                     }
-                    Decision::Convert(codec, bitrate) => {
+                    Decision::Convert(codec, bitrate)
+                        if names::fits_fat32(estimate(extra.duration_ms, &facts, bitrate.kbps())) =>
+                    {
                         let size = estimate(extra.duration_ms, &facts, bitrate.kbps());
-                        if !names::fits_fat32(size) {
-                            out.skipped.push((path.clone(), Skip::TooBig));
-                            continue;
-                        }
                         (Bytes::Converted(container(codec)), bitrate.kbps() as u16, size)
                     }
-                    Decision::Skip(why) => {
+                    decision => {
+                        let why = match decision {
+                            Decision::Skip(why) => why,
+                            _ => Skip::TooBig,
+                        };
                         out.skipped.push((path.clone(), why));
-                        continue;
+                        // A file the card has unchanged keeps its copy: only a
+                        // player that plays nothing a conversion makes has no
+                        // use for it (a server whose ffmpeg is starting, say,
+                        // takes nothing off the card).
+                        match kept.get(path).filter(|k| why != Skip::NoCodec && k.unchanged(entry)) {
+                            Some(k) => k.reused(ledger.server_size),
+                            None => continue,
+                        }
                     }
                 }
             }
@@ -565,23 +612,40 @@ pub(crate) fn wanted_of_ledger(origin: Origin, rows: &[Kept]) -> Wanted {
     let card = WantedCard { origins: vec![origin], files: Vec::new() };
     let mut out = Wanted { card, ..Wanted::default() };
     for k in rows.iter().filter(|k| !k.ledger.server_path.is_empty()) {
-        let original = k.ledger.converted_to == 0;
-        let (bpm10, camelot) = if k.analysed { (k.bpm10, k.camelot) } else { (0, 0) };
-        let ledger =
-            Ledger { origin_flags: 0, converted_to: 0, convert_kbps: 0, server: 0, ..k.ledger.clone() };
-        out.card.files.push(WantedFile {
-            origin: 0,
-            ledger,
-            bytes: k.bytes(),
-            kbps: if original { 0 } else { k.ledger.convert_kbps },
-            size: if original { k.ledger.server_size } else { k.size },
-            bpm10,
-            camelot,
-        });
-        let duration_ms = (k.duration_ms > 0).then_some(k.duration_ms as u64);
-        out.extras.push(Extra { duration_ms, ..Extra::default() });
+        let (file, extra) = k.wanted(0);
+        out.card.files.push(file);
+        out.extras.push(extra);
     }
     out
+}
+
+/// The files of origin 0 at `paths` passed over this run for `why`, each
+/// listed as skipped: off the wanted card, but for a row of the card that
+/// has one, which stays as it is (its file kept, never deleted for a file
+/// the run didn't fetch).
+pub(crate) fn pass_over(
+    wanted: &mut Wanted,
+    paths: &HashSet<String>,
+    why: Skip,
+    kept: &HashMap<String, Kept>,
+) {
+    let (mut files, mut extras) = (Vec::new(), Vec::new());
+    let taken = std::mem::take(&mut wanted.card.files).into_iter().zip(std::mem::take(&mut wanted.extras));
+    for (file, extra) in taken {
+        let path = &file.ledger.server_path;
+        if file.origin != 0 || !paths.contains(path) {
+            files.push(file);
+            extras.push(extra);
+            continue;
+        }
+        wanted.skipped.push((path.clone(), why));
+        if let Some(k) = kept.get(path) {
+            let (row, extra) = k.wanted(0);
+            files.push(row);
+            extras.push(extra);
+        }
+    }
+    (wanted.card.files, wanted.extras) = (files, extras);
 }
 
 /// A row of the card stands for the entry: unchanged, under the same plan.

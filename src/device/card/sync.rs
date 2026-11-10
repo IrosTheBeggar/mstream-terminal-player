@@ -522,7 +522,20 @@ fn run(
     let (url_key, listed, plan_key) = (p.url_key, p.listed, p.plan_key);
     let span = p.span.take();
     hooks.span_cluster = span.as_ref().map(|s| s.cluster);
-    hooks.store = Some(Store { state, url_key, listed, now, plan_key, revision, span });
+    let (files, given_up, withheld) =
+        (std::mem::take(&mut p.files), std::mem::take(&mut p.given_up), p.withheld);
+    hooks.store = Some(Store {
+        state,
+        url_key,
+        listed,
+        now,
+        plan_key,
+        revision,
+        span,
+        files,
+        given_up,
+        withheld,
+    });
     hooks.history = had.history.take();
     let mut fetcher = Stopping { inner: &mut p.fetcher, stop: ask.stop.clone() };
     let ran = session.run(p.plan, &mut fetcher, &mut hooks, events);
@@ -566,6 +579,15 @@ struct Store {
     revision: Option<String>,
     /// The card's set: what the card says of itself in it at the end.
     span: Option<sets::SetEnd>,
+    /// The server's own files of the selection: each one's `modified` and
+    /// size as listed (0: none), by server path, for those the run misses.
+    files: HashMap<String, (u64, u64)>,
+    /// Its files passed over for failing run after run ([`Skip::Failing`]).
+    given_up: Vec<state::Failing>,
+    /// The run's listing doesn't stand for the server's selection though
+    /// every file goes in: one it couldn't decide (no conversion now, an
+    /// `.ogg` unread) or a scan running. Its revision isn't stored.
+    withheld: bool,
 }
 
 /// A peer's pull past this many bytes through a relay is worth a warning
@@ -586,6 +608,10 @@ struct Prepared {
     url_key: u64,
     plan_key: u64,
     span: Option<sets::SetEnd>,
+    /// What the run's end stores of the files it misses ([`Store`]).
+    files: HashMap<String, (u64, u64)>,
+    given_up: Vec<state::Failing>,
+    withheld: bool,
 }
 
 /// The card's server this one is (2.11), by its key or a key confirmed as
@@ -613,6 +639,7 @@ fn prepare(
     events: &mut dyn FnMut(Event),
 ) -> Result<Prepared, Halted> {
     let refused = |why: String| (None, Halt::Refused(why));
+    let pending = session.pending();
     let Some(root) = session.root() else {
         return Err(refused("the card has no commit: run `device card-setup` on it first".into()));
     };
@@ -735,11 +762,17 @@ fn prepare(
         let of = |e: &Entry| FileIn::of(&e.path, &e.rec, &e.run, e.ledger.as_ref());
         fingerprint(&tags.records.iter().filter_map(of).collect::<Vec<_>>())
     });
+    // A root that isn't a run's end (a cut or parked run's checkpoint), a
+    // run's plan still on the card, or a ledger that can't be read: the
+    // card's rows don't stand for the selection a 304 would say is the
+    // same, so the listing is read whole (2.12.8: the plan's rest).
+    let unsettled = pending || !root.manifest.is_final() || root.tags.is_err();
     let whole = ask.whole
         || known.is_empty()
+        || unsettled
         || !joined.is_empty()
         || source.plan_key != plan_key
-        || now.saturating_sub(source.full_read) >= WHOLE_EVERY_SECS
+        || whole_due(source.full_read, now)
         || source.runs.saturating_add(1) >= WHOLE_EVERY_RUNS
         || span.as_ref().is_some_and(sets::SetRun::whole);
     // What the card holds, for its set, read while its root is at hand.
@@ -765,6 +798,7 @@ fn prepare(
     // The files the server can't serve are left out of the selection first,
     // whatever reads the rest ([`plan::leave_hidden_out`]).
     let mut hidden = plan::Hidden::default();
+    let mut withheld = false;
     let (listed, mut wanted, entries) = match answer {
         Manifest::NotModified => {
             // A row of one (a disk-mode sync's from before the rule) is left
@@ -798,10 +832,11 @@ fn prepare(
             // not the other cards' (B7).
             let cut = span.as_mut().and_then(|s| s.cut(&listing.entries, &held));
             let ours = cut.as_deref().unwrap_or(&listing.entries);
-            let mut ogg = HashMap::new();
+            let (mut ogg, mut unread) = (HashMap::new(), HashSet::new());
             for e in oggs_to_sniff(ours, &kept, same_plan) {
-                if let Ok(read) = client.read_range(&e.filepath, 0, OGG_HEAD) {
-                    ogg.insert(e.filepath.clone(), ogg_is_opus(&read.bytes));
+                match sniff(|| client.read_range(&e.filepath, 0, OGG_HEAD).map(|r| r.bytes)) {
+                    Some(opus) => drop(ogg.insert(e.filepath.clone(), opus)),
+                    None => drop(unread.insert(e.filepath.clone())),
                 }
             }
             let need = needing_metadata(ours, &kept, same_plan);
@@ -809,7 +844,7 @@ fn prepare(
                 true => HashMap::new(),
                 false => client.metadata_batch(&need).map_err(server_halt)?,
             };
-            let wanted = wanted_of(
+            let mut wanted = wanted_of(
                 origin,
                 ours,
                 &metadata,
@@ -820,10 +855,36 @@ fn prepare(
                 &conversion,
                 transcode,
             );
+            // An `.ogg` unread twice waits for the next run; a file that
+            // failed run after run, as listed still, is passed over.
+            plan::pass_over(&mut wanted, &unread, Skip::Unread, &kept);
+            let given_up = |f: &WantedFile| {
+                let l = &f.ledger;
+                let failed = |b: &state::Failing| b.is(&l.server_path, l.server_modified, l.server_size);
+                source.failing.iter().any(|b| b.given_up() && failed(b))
+            };
+            let passed: HashSet<String> =
+                wanted.card.files.iter().filter(|f| given_up(f)).map(|f| f.ledger.server_path.clone()).collect();
+            plan::pass_over(&mut wanted, &passed, Skip::Failing, &kept);
+            // What the listing can't stand for: the next run reads it whole.
+            let undecided = |(_, why): &(String, Skip)| matches!(why, Skip::NoTranscode | Skip::Unread);
+            withheld = !listing.deletions_trusted() || wanted.skipped.iter().any(undecided);
             (Listed::Whole, wanted, listing.entries)
         }
     };
+    // A listing that doesn't stand for the selection names no revision: the
+    // root's stays "" (unknown), another server's isn't stored.
+    if withheld {
+        wanted.card.origins[0].revision.clear();
+    }
     let revision = wanted.card.origins[0].revision.clone();
+    let files: HashMap<String, (u64, u64)> = (wanted.card.files.iter())
+        .map(|f| (f.ledger.server_path.clone(), (f.ledger.server_modified, f.ledger.server_size)))
+        .collect();
+    let given_up: Vec<state::Failing> = (source.failing.iter())
+        .filter(|b| b.given_up() && wanted.skipped.iter().any(|(p, w)| *w == Skip::Failing && *p == b.path))
+        .cloned()
+        .collect();
     let totals = totals(&entries);
     events(Event::Listed);
     // The card's plays for this server, their paths as it has them now; and
@@ -1056,7 +1117,21 @@ fn prepare(
     };
     let hooks = Some(hooks);
     let span = span.as_ref().and_then(sets::SetRun::end);
-    Ok(Prepared { plan, fetcher, hooks, summary, listed, revision, ours, url_key, plan_key, span })
+    Ok(Prepared {
+        plan,
+        fetcher,
+        hooks,
+        summary,
+        listed,
+        revision,
+        ours,
+        url_key,
+        plan_key,
+        span,
+        files,
+        given_up,
+        withheld,
+    })
 }
 
 /// What the fit counts of the waveform index: none when the card's player
@@ -1114,6 +1189,20 @@ fn totals(entries: &[ManifestEntry]) -> Vec<(String, usize, u64)> {
         }
     }
     totals
+}
+
+/// The manifest's last whole read is 7 days old, or later than now: a time
+/// this computer's clock was ahead for is no reason to trust a 304 for long.
+fn whole_due(full_read: u64, now: u64) -> bool {
+    full_read > now || now - full_read >= WHOLE_EVERY_SECS
+}
+
+/// What an `.ogg`'s first bytes say of its codec (Opus or not), asked a
+/// second time when the first ask fails; None when neither came: its file
+/// is passed over this run, never converted on a guess ([`Skip::Unread`]).
+pub(super) fn sniff<E>(mut read: impl FnMut() -> Result<Vec<u8>, E>) -> Option<bool> {
+    let head = read().or_else(|_| read()).ok()?;
+    Some(ogg_is_opus(&head))
 }
 
 /// The listener's stop is set.
@@ -1660,13 +1749,45 @@ impl Hooks for SyncHooks {
         let settings = &mut store.state.settings;
         if outcome.parked.is_none() && store.listed != Listed::Unread {
             let source = settings.source(store.url_key);
-            if store.listed == Listed::Whole {
-                (source.full_read, source.runs, source.plan_key) = (store.now, 0, store.plan_key);
-                if let Some(revision) = &store.revision {
-                    source.revision = revision.clone();
+            // The server's files the run missed (failed, spared, a name
+            // the card had): each one's runs in a row, as listed now. One
+            // passed over stays passed over until it changes.
+            let missed: Vec<state::Failing> = (outcome.missed.iter())
+                .filter(|(origin, _)| *origin == 0)
+                .filter_map(|(_, path)| {
+                    let &(modified, size) = store.files.get(path)?;
+                    let before = source.failing.iter().find(|b| b.is(path, modified, size));
+                    let tries = before.map_or(1, |b| b.tries.saturating_add(1));
+                    Some(state::Failing { path: path.clone(), modified, size, tries })
+                })
+                .collect();
+            let clean = missed.is_empty() && !store.withheld;
+            let mut failing = missed;
+            match store.listed {
+                Listed::Whole => failing.extend(store.given_up.iter().cloned()),
+                // A 304 lists none of them: those it didn't miss stay.
+                _ => {
+                    let kept = source.failing.iter().filter(|b| !failing.iter().any(|f| f.path == b.path));
+                    failing.extend(kept.cloned().collect::<Vec<_>>());
                 }
-            } else {
+            }
+            failing.sort_by(|a, b| a.path.cmp(&b.path));
+            source.failing = failing;
+            // A run that missed a file, or whose listing doesn't stand for
+            // the selection, leaves the schedule as it was and no revision
+            // of a server the root doesn't hold it for: the next run reads
+            // the manifest whole (the root's says "" already, the engine's).
+            if store.listed == Listed::Whole && clean {
+                (source.full_read, source.runs, source.plan_key) = (store.now, 0, store.plan_key);
+            } else if store.listed != Listed::Whole {
                 source.runs = source.runs.saturating_add(1);
+            }
+            if let Some(revision) = &store.revision {
+                match clean {
+                    true if store.listed == Listed::Whole => source.revision = revision.clone(),
+                    true => {}
+                    false => source.revision.clear(),
+                }
             }
         }
         // The art each thumbnail was made from, once the thumbnail step ran:

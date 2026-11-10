@@ -21,7 +21,8 @@
 //! and the sync's settings ([`Settings`]), written once a sync has stored
 //! them: `sources` (each server the card is filled from, by its URL's key
 //! and the nickname this computer shows for it, with its libraries and
-//! what the sync keeps of its manifest; and each federation peer, by its
+//! what the sync keeps of its manifest, the files of it that keep failing
+//! among them ([`Failing`]); and each federation peer, by its
 //! parent's key and its id there, with its iroh identity: [`PeerSource`]),
 //! `layout`, `conversion`, `covers`,
 //! `autoDj`, `removal`, and `art` (which art each album's thumbnail was made
@@ -371,8 +372,55 @@ pub(crate) struct Source {
     /// again every 7 days or 10th run (2.10.2).
     pub(crate) full_read: u64,
     pub(crate) runs: u32,
+    /// Its files the last runs failed to put on the card, as the listing
+    /// said them then (`failing`): one that failed [`GIVE_UP_RUNS`] runs in a
+    /// row is passed over until it changes, so it no longer holds back the
+    /// revision every run reads the manifest whole for.
+    pub(crate) failing: Vec<Failing>,
     /// The object as read: the members this software doesn't know stay.
     raw: Kept,
+}
+
+/// The runs in a row a file of a server fails in before the sync passes it
+/// over, its revision stored again ([`Source::failing`]).
+pub(crate) const GIVE_UP_RUNS: u32 = 3;
+
+/// A file of a server that failed: its server path, `modified` and size as
+/// the listing gave them (0: none), and the runs in a row it failed in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Failing {
+    pub(crate) path: String,
+    pub(crate) modified: u64,
+    pub(crate) size: u64,
+    pub(crate) tries: u32,
+}
+
+impl Failing {
+    fn object(&self) -> Value {
+        let mut object = Map::new();
+        object.insert("path".into(), self.path.as_str().into());
+        object.insert("modified".into(), self.modified.into());
+        object.insert("size".into(), self.size.into());
+        object.insert("tries".into(), self.tries.into());
+        Value::Object(object)
+    }
+
+    fn read(value: &Value) -> Option<Failing> {
+        let path = value.get("path")?.as_str()?.to_string();
+        let number = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let tries = u32::try_from(number("tries")).unwrap_or(u32::MAX);
+        Some(Failing { path, modified: number("modified"), size: number("size"), tries })
+    }
+
+    /// The file as the listing says it now is the one that failed.
+    pub(crate) fn is(&self, path: &str, modified: u64, size: u64) -> bool {
+        self.path == path && self.modified == modified && self.size == size
+    }
+
+    /// It failed often enough to be passed over.
+    pub(crate) fn given_up(&self) -> bool {
+        self.tries >= GIVE_UP_RUNS
+    }
 }
 
 /// A federation peer the card is filled from (2.5.5; the transfer plan's
@@ -572,6 +620,9 @@ impl Settings {
                 plan_key: text("planKey").and_then(from_hex).unwrap_or(0),
                 full_read: number("fullRead"),
                 runs: u32::try_from(number("runs")).unwrap_or(u32::MAX),
+                failing: (raw.get("failing").and_then(Value::as_array).into_iter().flatten())
+                    .filter_map(Failing::read)
+                    .collect(),
                 raw: Kept(raw.clone()),
             });
         }
@@ -754,6 +805,10 @@ impl Source {
         set("planKey", hex(self.plan_key).into());
         set("fullRead", self.full_read.into());
         set("runs", self.runs.into());
+        match self.failing.is_empty() {
+            true => drop(object.remove("failing")),
+            false => set("failing", self.failing.iter().map(Failing::object).collect()),
+        }
         Value::Object(object)
     }
 }
@@ -1032,6 +1087,8 @@ mod tests {
         home.nickname = "Home".into();
         home.libraries = vec!["Rock".into(), "Jazz".into()];
         (home.full_read, home.runs, home.plan_key) = (1_791_900_000, 3, 0x42);
+        let bad = Failing { path: "Rock/A/01.flac".into(), modified: 1_790_000_000_123, size: 0, tries: 2 };
+        home.failing = vec![bad];
         let peer = s.peer_source(&[0xED90_1EA3_EE76_3AC7], 3);
         (peer.endpoint, peer.nickname, peer.proxy_copies) = ("ab12".into(), "Attic".into(), true);
         peer.libraries = vec!["Folk".into()];
@@ -1048,6 +1105,12 @@ mod tests {
         assert_eq!((moved.peers.len(), moved.peers[0].parent_key), (1, 0x99));
         assert_eq!(moved.peer_source(&[0x99], 4).libraries.len(), 0, "another peer, a new source");
         assert!(text.contains("\"0xB1F7E69FBD466B59\":\"0x0123456789ABCDEF\""), "{text}");
+        assert_eq!(again.settings.sources[0].failing[0].tries, 2, "{text}");
+        // No file failing: no member, the one read gone too.
+        let mut mended = again.clone();
+        mended.settings.sources[0].failing.clear();
+        let mended = String::from_utf8(mended.text(3)).unwrap();
+        assert!(!mended.contains("failing"), "{mended}");
         // Another address of the same server is the same source once confirmed.
         let mut s = again.settings.clone();
         s.sources[0].confirmed.push(0x77);

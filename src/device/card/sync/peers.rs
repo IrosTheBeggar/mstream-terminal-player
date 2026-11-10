@@ -29,7 +29,7 @@
 //! Whatever a peer comes to is said in its [`PeerSummary`]: read, or why
 //! not, its way, what is left of its day and the days its files take.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -442,13 +442,14 @@ fn side(
         rows.iter().map(|k| (k.ledger.server_path.clone(), k.clone())).collect();
     let source = settings.peer_source(&keys, id);
     let same_plan = source.plan_key == plan_key;
-    let mut ogg = HashMap::new();
+    let (mut ogg, mut unread) = (HashMap::new(), HashSet::new());
     for e in oggs_to_sniff(&listing.entries, &kept, same_plan) {
         if spend.left() == Some(0) {
             break;
         }
-        if let Ok(read) = bytes.read_range(&e.filepath, 0, OGG_HEAD) {
-            ogg.insert(e.filepath.clone(), ogg_is_opus(&read.bytes));
+        match super::sniff(|| bytes.read_range(&e.filepath, 0, OGG_HEAD).map(|r| r.bytes)) {
+            Some(opus) => drop(ogg.insert(e.filepath.clone(), opus)),
+            None => drop(unread.insert(e.filepath.clone())),
         }
     }
     // The listing spent what was left: it waits, the card's rows of it as
@@ -466,7 +467,7 @@ fn side(
         whole: (!scanning).then(|| listing.entries.iter().filter_map(audio).collect()),
     };
     let conversion = settings.conversion;
-    let wanted = wanted_of(
+    let mut wanted = wanted_of(
         origin_of,
         &listing.entries,
         &listing.metadata,
@@ -477,6 +478,8 @@ fn side(
         &conversion,
         transcode.as_ref(),
     );
+    // An `.ogg` unread twice waits for the next run, its row as it is.
+    plan::pass_over(&mut wanted, &unread, Skip::Unread, &kept);
     // Read: its selection, its plan's settings, and its identity and name
     // as its parent lists them, the card's from now on.
     let source = settings.peer_source(&keys, id);

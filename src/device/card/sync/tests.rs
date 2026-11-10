@@ -109,6 +109,15 @@ pub(crate) struct Library {
     pub(crate) short_once: HashSet<String>,
     /// Files whose `/media` GET answers 401: the sign-in revoked mid-run.
     pub(crate) refused: HashSet<String>,
+    /// Files whose `/media` GET answers 500: a file that fails, the run
+    /// going on.
+    pub(crate) broken: HashSet<String>,
+    /// Files whose `/media` GET with a Range answers 500: a sniff of their
+    /// first bytes that fails.
+    pub(crate) unranged: HashSet<String>,
+    /// `/api/` names no transcode block: the server converts nothing (its
+    /// ffmpeg still starting, say).
+    pub(crate) no_transcode: bool,
     /// Rock's folder on this computer: the session is an admin's, which
     /// may ask `admin/directories`.
     pub(crate) disk: Option<PathBuf>,
@@ -268,6 +277,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             if lib.no_stats {
                 body["features"].as_object_mut().expect("its features").remove("stats");
             }
+            if lib.no_transcode {
+                body["features"].as_object_mut().expect("its features").remove("transcode");
+            }
             if let Some(proxy) = &lib.proxy_says {
                 body["features"]["federationProxy"] = proxy.clone();
             }
@@ -371,6 +383,10 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             let rel = &p["/media/".len()..];
             if asked.method == "GET" && lib.refused.contains(rel) {
                 return json_reply("401 Unauthorized", r#"{"error":"Authentication Error"}"#);
+            }
+            let ranged = asked.header("range").is_some();
+            if asked.method == "GET" && (lib.broken.contains(rel) || (ranged && lib.unranged.contains(rel))) {
+                return json_reply("500 Internal Server Error", r#"{"error":"Server Error"}"#);
             }
             let bytes = lib.tracks.iter().find(|t| t.path == rel).map(|t| t.bytes.clone());
             match bytes.or_else(|| lib.images.get(rel).cloned()) {
@@ -1651,11 +1667,138 @@ fn a_run_the_server_stops_parks_and_the_next_takes_it_up() {
 
     fake.lock().unwrap().refused.clear();
     let again = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    // Its checkpoint names no revision, and its plan is on the card: the
+    // listing is read whole, never a 304 that forgets the plan's rest.
+    assert_eq!(again.summary.as_ref().unwrap().listed, Listed::Whole);
     let outcome = ran(&again);
     assert_eq!((outcome.parked.clone(), outcome.verified.clone(), outcome.records), (None, Ok(()), 4));
     let seen = look(&sim);
     assert!(seen.pending.is_none());
     assert_eq!(State::of(&seen.state).unwrap().settings.sources[0].full_read, 1_791_900_000);
+}
+
+/// The card's own server's settings as its state file holds them now.
+fn home_source(sim: &FatSim) -> state::Source {
+    State::of(&look(sim).state).unwrap().settings.sources[0].clone()
+}
+
+/// The root's serverRevision.
+fn root_revision(sim: &FatSim) -> String {
+    look(sim).root.unwrap().manifest.server_revision
+}
+
+#[test]
+fn a_file_that_failed_is_found_again_until_it_failed_three_runs_in_a_row() {
+    let scratch = Scratch::new("failing");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let bad = "Rock/Artist A/Album B/01.mp3";
+    fake.lock().unwrap().broken.insert(bad.into());
+    let mut envs = envs();
+    // Each run misses it: no revision is stored, nor the schedule, so the
+    // next run reads the manifest whole and asks for it again (a 304 would
+    // have the ledger, which lacks it, stand for the selection).
+    for tries in 1..=3 {
+        let ask = if tries == 1 { rock() } else { Ask::default() };
+        let synced = sync_now(&sim, &base, &ask, &mut envs).0;
+        assert_eq!(synced.summary.as_ref().unwrap().listed, Listed::Whole, "run {tries}");
+        let outcome = ran(&synced);
+        assert_eq!(outcome.missed, [(0, bad.to_string())], "run {tries}");
+        assert_eq!(root_revision(&sim), "", "run {tries}");
+        let source = home_source(&sim);
+        assert_eq!((source.full_read, source.failing.len()), (0, 1), "run {tries}");
+        assert_eq!((source.failing[0].path.as_str(), source.failing[0].tries), (bad, tries));
+    }
+    // The fourth passes it over, as listed: the revision is the card's again.
+    let given_up = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let summary = given_up.summary.as_ref().unwrap();
+    assert_eq!(summary.skipped, [(bad.to_string(), Skip::Failing)]);
+    assert!(ran(&given_up).missed.is_empty());
+    assert_ne!(root_revision(&sim), "");
+    let source = home_source(&sim);
+    assert_eq!((source.full_read, source.failing.len()), (1_791_900_000, 1));
+    let quiet = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(quiet.summary.as_ref().unwrap().listed, Listed::NotModified);
+
+    // Changed on the server, it is asked for again, and goes in.
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.broken.clear();
+        let track = lib.tracks.iter_mut().find(|t| t.path == bad).unwrap();
+        track.bytes = corpus("cbr.mp3");
+        lib.revision = "1:5:1790000000005:5".into();
+    }
+    let mended = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let outcome = ran(&mended);
+    assert_eq!((outcome.written, outcome.records, outcome.missed.len()), (1, 4, 0));
+    assert!(home_source(&sim).failing.is_empty());
+}
+
+#[test]
+fn a_server_that_cant_convert_now_leaves_the_cards_conversions_where_they_are() {
+    let scratch = Scratch::new("no-transcode");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    let converted = scratch.0.join("card/music/Artist C/Album D/01.opus");
+    assert!(converted.exists());
+
+    // A whole read under a changed setting (no row stands for its entry by
+    // the plan) while its ffmpeg is still starting: the WAV can't be
+    // converted, and the card's conversion of it stays, the listing's
+    // revision not stored (the next run reads it whole).
+    fake.lock().unwrap().no_transcode = true;
+    let change = Change { bitrate: Some(TransferBitrate::K128), ..Change::default() };
+    let whole = Ask { whole: true, change, ..Ask::default() };
+    let synced = sync_now(&sim, &base, &whole, &mut envs).0;
+    let summary = synced.summary.as_ref().unwrap();
+    let wav = "Rock/Artist C/Album D/01.wav".to_string();
+    assert_eq!(summary.skipped, [(wav, Skip::NoTranscode)]);
+    assert!(summary.removals.is_empty(), "{summary:?}");
+    let outcome = ran(&synced);
+    assert_eq!((outcome.deleted, outcome.records, outcome.verified.clone()), (0, 4, Ok(())));
+    assert!(converted.exists());
+    assert_eq!(root_revision(&sim), "");
+    fake.lock().unwrap().no_transcode = false;
+    let again = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(again.summary.as_ref().unwrap().listed, Listed::Whole);
+    assert!(again.summary.as_ref().unwrap().skipped.is_empty());
+    assert_ne!(root_revision(&sim), "");
+}
+
+#[test]
+fn an_ogg_whose_first_bytes_dont_come_is_passed_over_never_converted_on_a_guess() {
+    let scratch = Scratch::new("unsniffed");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let ogg = "Rock/Artist C/Album D/03.ogg";
+    {
+        let mut lib = fake.lock().unwrap();
+        let like = lib.tracks[3].clone();
+        lib.tracks.push(Track { path: ogg.into(), id: 6, bytes: opus_bytes(1000, 2, true), ..like });
+        lib.revision = "1:6:1790000000006:5".into();
+        lib.unranged.insert(ogg.into());
+    }
+    let synced = sync_now(&sim, &base, &rock(), &mut envs()).0;
+    let summary = synced.summary.as_ref().unwrap();
+    assert_eq!(summary.skipped, [(ogg.to_string(), Skip::Unread)]);
+    let lib = fake.lock().unwrap();
+    let asked = lib.asked.iter().filter(|a| a.ends_with(ogg)).count();
+    assert_eq!(asked, 2, "asked twice: {:?}", lib.asked);
+    assert!(lib.transcodes.iter().all(|q| !q.contains("03.ogg")));
+    drop(lib);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.records, outcome.verified.clone()), (4, Ok(())));
+    assert_eq!(root_revision(&sim), "", "the next run asks again");
+}
+
+#[test]
+fn a_whole_read_is_due_after_seven_days_or_when_the_last_was_in_the_future() {
+    let now = 1_791_900_000;
+    assert!(!whole_due(now - 60, now));
+    assert!(whole_due(now - WHOLE_EVERY_SECS, now));
+    assert!(whole_due(now + 3600, now), "this computer's clock was ahead then");
 }
 
 /// One sync of `card` from `base` whose events go to `said` as they come.
