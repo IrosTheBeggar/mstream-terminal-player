@@ -17,8 +17,12 @@
 //! dropped, what came goes beside the old rows that still hold, 7.3's table
 //! answers, and one note says so. The next run asks for the rest. One
 //! recording's 503 says nothing of the next's: the route says it only on a miss,
-//! and nothing latches ([`Peaks`]). Nor does a 404 for one path of a recording
-//! say anything of its other paths ([`Asking::one`]).
+//! and nothing latches ([`Peaks`]); but its Retry-After is waited out a few
+//! times a run at most ([`FFMPEG_WAITS`]), and a server that has answered
+//! "no ffmpeg" [`Pace::no_ffmpeg`] times with no bars yet is asked no more:
+//! the run counts as one that found no ffmpeg ([`Lack::Ffmpeg`]). Nor does a
+//! 404 for one path of a recording say anything of its other paths
+//! ([`Asking::one`]).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -45,6 +49,9 @@ const LIMITED_WAIT: Duration = Duration::from_secs(5);
 const LONGEST_WAIT: Duration = Duration::from_secs(300);
 /// How often a wait looks at the stop.
 const BEAT: Duration = Duration::from_millis(100);
+/// A "no ffmpeg" 503's Retry-After is waited out this many times a run;
+/// past them such an answer is taken at once, for the next run to ask again.
+const FFMPEG_WAITS: usize = 3;
 
 /// How a run's fetch goes.
 #[derive(Clone, Copy, Debug)]
@@ -53,9 +60,13 @@ pub(super) struct Pace {
     pub(super) budget: Duration,
     /// An answer this slow was a decode.
     pub(super) decode: Duration,
+    /// "No ffmpeg" answers, with no bars come yet, that end the asking
+    /// ([`Cut::NoFfmpeg`]).
+    pub(super) no_ffmpeg: usize,
 }
 
-const PACE: Pace = Pace { budget: Duration::from_secs(30 * 60), decode: Duration::from_secs(2) };
+pub(super) const PACE: Pace =
+    Pace { budget: Duration::from_secs(30 * 60), decode: Duration::from_secs(2), no_ffmpeg: 20 };
 
 /// The runs in a row that came to [`Lack::Ffmpeg`] before a look stops offering
 /// the card its waveforms: a server bringing its ffmpeg up has it by then, and
@@ -75,6 +86,9 @@ pub(super) enum Cut {
     Limited,
     /// The budget is spent.
     Budget,
+    /// The server answered "no ffmpeg" [`Pace::no_ffmpeg`] times, and no
+    /// bars came.
+    NoFfmpeg,
 }
 
 /// What a fetch brought.
@@ -85,8 +99,22 @@ pub(super) struct Fetched {
     /// Those of them the server had no ffmpeg to make: no shape yet. The others
     /// with no bars have none to give.
     pub(super) no_ffmpeg: usize,
+    /// Why it stopped asking, when it did.
+    pub(super) cut: Option<Cut>,
     /// What it passed by, in a line.
     pub(super) note: Option<String>,
+}
+
+impl Fetched {
+    /// What a card it leaves with no row lacks.
+    pub(super) fn lack(&self) -> Lack {
+        match (self.whole, self.no_ffmpeg, &self.cut) {
+            (false, _, Some(Cut::NoFfmpeg)) => Lack::Ffmpeg,
+            (false, _, _) => Lack::Unknown,
+            (true, 0, _) => Lack::Peaks,
+            (true, _, _) => Lack::Ffmpeg,
+        }
+    }
 }
 
 /// What a run's asking says a card it leaves with no row lacks.
@@ -128,12 +156,8 @@ pub(super) fn index(
     match commit.waves_index(&fetched.shapes) {
         Ok(Index::None(NoIndex::NoRows)) => {
             let none = "no waveform index: the server has no peaks for the card's files";
+            let lack = fetched.lack();
             let note = fetched.note.or_else(|| (!asks.is_empty()).then(|| none.to_string()));
-            let lack = match (fetched.whole, fetched.no_ffmpeg) {
-                (false, _) => Lack::Unknown,
-                (true, 0) => Lack::Peaks,
-                (true, _) => Lack::Ffmpeg,
-            };
             Came { waves: Waves::None, note, lack }
         }
         Ok(index) => Came { waves: Waves::from(index), note: fetched.note, lack: Lack::Unknown },
@@ -159,7 +183,7 @@ pub(super) fn fetch(
     let mut shapes = Shapes::new();
     let (mut done, mut no_ffmpeg) = (0, 0);
     if of == 0 {
-        return Fetched { shapes, whole: true, no_ffmpeg, note: None };
+        return Fetched { shapes, whole: true, no_ffmpeg, cut: None, note: None };
     }
     let asking = Asking {
         client,
@@ -171,6 +195,9 @@ pub(super) fn fetch(
         width: AtomicUsize::new(AT_ONCE),
         cut: Mutex::new(None),
         not_before: Mutex::new(Instant::now()),
+        ffmpeg_waits: AtomicUsize::new(FFMPEG_WAITS),
+        no_ffmpeg: AtomicUsize::new(0),
+        bars: AtomicBool::new(false),
     };
     events(Event::Waves { done, of });
     let (tx, answers) = channel();
@@ -194,7 +221,8 @@ pub(super) fn fetch(
     });
     let cut = asking.cut.into_inner().unwrap_or_else(|e| e.into_inner());
     let note = note_of(cut.as_ref(), done, shapes.len(), no_ffmpeg, of);
-    Fetched { shapes, whole: done == of, no_ffmpeg, note }
+    let cut = cut.filter(|_| done < of);
+    Fetched { shapes, whole: done == of, no_ffmpeg, cut, note }
 }
 
 /// What a fetch passed by, in a line: why it stopped asking, unless every one
@@ -213,6 +241,7 @@ pub(super) fn note_of(
         Some(Cut::Lost(why)) => format!("the server stopped answering ({why})"),
         Some(Cut::Limited) => "the server asks to be left alone for now".to_string(),
         Some(Cut::Budget) => "a run gives them half an hour".to_string(),
+        Some(Cut::NoFfmpeg) => "the server has no ffmpeg to make them".to_string(),
         None if no_ffmpeg > 0 => {
             let words = "the server has no ffmpeg to make";
             return Some(format!("waveforms: {words} {no_ffmpeg} of the {of} asked for: no shape yet"));
@@ -237,6 +266,11 @@ struct Asking<'a> {
     cut: Mutex<Option<Cut>>,
     /// Nothing is asked before this: the server's Retry-After.
     not_before: Mutex<Instant>,
+    /// The "no ffmpeg" Retry-Afters still to wait out this run.
+    ffmpeg_waits: AtomicUsize,
+    /// The "no ffmpeg" answers so far, and whether any bars came.
+    no_ffmpeg: AtomicUsize,
+    bars: AtomicBool,
 }
 
 impl Asking<'_> {
@@ -287,14 +321,37 @@ impl Asking<'_> {
             match asked {
                 Ok(Peaks::Limited(_)) if last => self.cut_for(Cut::Limited),
                 Ok(Peaks::Limited(after)) => self.later(after.unwrap_or(LIMITED_WAIT)),
-                Ok(Peaks::NoFfmpeg(Some(after))) if !last => self.later(after),
-                Ok(peaks) => return Some(peaks),
+                Ok(Peaks::NoFfmpeg(Some(after))) if !last && self.waits_for_ffmpeg() => self.later(after),
+                Ok(peaks) => {
+                    self.answered(&peaks);
+                    return Some(peaks);
+                }
                 Err(ApiError::Unauthorized) => self.cut_for(Cut::SignIn),
                 Err(e) if last => self.cut_for(Cut::Lost(e.to_string())),
                 Err(_) => mine = Instant::now() + Duration::from_secs(u64::from(attempt)),
             }
         }
         None
+    }
+
+    /// A "no ffmpeg" 503's Retry-After is still one to wait out this run.
+    fn waits_for_ffmpeg(&self) -> bool {
+        self.ffmpeg_waits.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
+    }
+
+    /// An answer taken: enough "no ffmpeg" ones with no bars yet end the
+    /// asking.
+    fn answered(&self, peaks: &Peaks) {
+        match peaks {
+            Peaks::Bars(_) => self.bars.store(true, Ordering::SeqCst),
+            Peaks::NoFfmpeg(_) => {
+                let n = self.no_ffmpeg.fetch_add(1, Ordering::SeqCst) + 1;
+                if n >= self.pace.no_ffmpeg && !self.bars.load(Ordering::SeqCst) {
+                    self.cut_for(Cut::NoFfmpeg);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Nothing more is to be asked, for the first reason that came.

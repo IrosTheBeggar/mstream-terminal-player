@@ -10,7 +10,9 @@ use std::time::Instant;
 use super::*;
 use crate::device::card::contract::mpwf::{self, Table, bars_from};
 use crate::device::card::contract::prim::path_hash;
-use crate::device::card::sync::waves::{Cut as WaveCut, NO_FFMPEG_RUNS, Pace, fetch, note_of as wave_note};
+use crate::device::card::sync::waves::{
+    Cut as WaveCut, Lack, NO_FFMPEG_RUNS, PACE, Pace, fetch, note_of as wave_note,
+};
 use crate::device::card::waves::Ask as WaveAsk;
 
 /// Rock's tracks, as the card's records put them in order.
@@ -541,7 +543,7 @@ fn past_its_budget_a_fetch_keeps_what_came_and_says_so() {
         say(&fake, path, vec![late]);
     }
     let client = Client::new(&base).unwrap();
-    let pace = Pace { budget: Duration::from_millis(1500), decode: Duration::from_secs(60) };
+    let pace = Pace { budget: Duration::from_millis(1500), decode: Duration::from_secs(60), ..PACE };
     let mut told = Vec::new();
     let t0 = Instant::now();
     let fetched = fetch(&client, &asks_of(&paths), None, pace, &mut |e| told.push(e));
@@ -565,7 +567,7 @@ fn a_stop_or_the_budget_past_the_last_answer_cuts_nothing() {
     // The stop as the last answer is told: the worker's next look comes after.
     say(&fake, ONE, vec![Wave::Peaks(peaks_of(ONE))]);
     let stop = AtomicBool::new(false);
-    let pace = Pace { budget: Duration::from_secs(60), decode: Duration::from_secs(60) };
+    let pace = Pace { budget: Duration::from_secs(60), decode: Duration::from_secs(60), ..PACE };
     let mut said = |e: Event| {
         if matches!(e, Event::Waves { done: 1, .. }) {
             stop.store(true, Ordering::SeqCst);
@@ -580,7 +582,7 @@ fn a_stop_or_the_budget_past_the_last_answer_cuts_nothing() {
     // enough for a look to come first drops it, and rightly says so.
     let late = Wave::Slow(Duration::from_millis(170), Box::new(Wave::Peaks(peaks_of(ONE))));
     say(&fake, ONE, vec![late]);
-    let pace = Pace { budget: Duration::from_millis(140), decode: Duration::from_secs(60) };
+    let pace = Pace { budget: Duration::from_millis(140), decode: Duration::from_secs(60), ..PACE };
     let fetched = fetch(&client, &asks_of(&paths), None, pace, &mut |_| {});
     assert_eq!(fetched.note.is_some(), !fetched.whole, "{:?}", fetched.note);
 
@@ -592,6 +594,40 @@ fn a_stop_or_the_budget_past_the_last_answer_cuts_nothing() {
     assert!(note.contains("3 of 4 came"), "{note}");
     let note = wave_note(Some(&WaveCut::Budget), 4, 3, 1, 4).expect("one with no ffmpeg");
     assert!(note.contains("no ffmpeg to make 1 of the 4"), "{note}");
+}
+
+/// A server with no ffmpeg answers a miss with a 503 and a Retry-After: a run
+/// waits it out a few times, then takes it at once, and once it has said so
+/// for enough recordings with no bars come, asks no more. The run counts as
+/// one that found no ffmpeg.
+#[test]
+fn a_server_with_no_ffmpeg_is_waited_out_a_few_times_then_asked_no_more() {
+    let (base, fake) = server();
+    let paths: Vec<String> = (0..40).map(|i| format!("Rock/made-up/{i:02}.mp3")).collect();
+    for path in &paths {
+        say(&fake, path, vec![Wave::After("503 Service Unavailable", 1)]);
+    }
+    let client = Client::new(&base).unwrap();
+    let t0 = Instant::now();
+    let fetched = fetch(&client, &asks_of(&paths), None, PACE, &mut |_| {});
+    assert!(t0.elapsed() < Duration::from_secs(15), "{:?}", t0.elapsed());
+    let asked = asked_since(&fake).len();
+    assert!((PACE.no_ffmpeg..=PACE.no_ffmpeg + 6).contains(&asked), "{asked} asks");
+    assert_eq!((fetched.cut.clone(), fetched.whole, fetched.shapes.len()), (Some(WaveCut::NoFfmpeg), false, 0));
+    assert_eq!(fetched.lack(), Lack::Ffmpeg, "a run that found no ffmpeg");
+    let note = fetched.note.expect("a note");
+    assert!(note.contains("came: the server has no ffmpeg to make them"), "{note}");
+
+    // Bars came first: a server that has some is asked for every one.
+    say(&fake, &paths[0], vec![Wave::Peaks(peaks_of(&paths[0]))]);
+    for path in &paths[1..] {
+        let slow = Wave::Slow(Duration::from_millis(300), Box::new(Wave::Says("503 Service Unavailable")));
+        say(&fake, path, vec![slow]);
+    }
+    let paths = &paths[..24];
+    let fetched = fetch(&client, &asks_of(paths), None, PACE, &mut |_| {});
+    assert_eq!((fetched.cut.clone(), fetched.whole, fetched.no_ffmpeg), (None, true, 23));
+    assert_eq!(asked_since(&fake).len(), 24);
 }
 
 #[test]
@@ -610,7 +646,7 @@ fn three_ask_at_once_and_two_once_an_answer_was_a_decode() {
         say(&fake, path, vec![wave]);
     }
     let client = Client::new(&base).unwrap();
-    let pace = Pace { budget: Duration::from_secs(60), decode: Duration::from_millis(50) };
+    let pace = Pace { budget: Duration::from_secs(60), decode: Duration::from_millis(50), ..PACE };
     let t0 = Instant::now();
     let fetched = fetch(&client, &asks_of(&paths), None, pace, &mut |_| {});
     assert!(t0.elapsed() < Duration::from_secs(5), "three were in flight at once");
@@ -626,7 +662,7 @@ fn nothing_to_ask_asks_nothing_and_says_nothing() {
     let (base, fake) = server();
     let client = Client::new(&base).unwrap();
     let mut told = Vec::new();
-    let pace = Pace { budget: Duration::from_secs(60), decode: Duration::from_secs(2) };
+    let pace = Pace { budget: Duration::from_secs(60), decode: Duration::from_secs(2), ..PACE };
     let fetched = fetch(&client, &[], None, pace, &mut |e| told.push(e));
     assert!(fetched.whole && fetched.shapes.is_empty() && fetched.note.is_none());
     assert!(told.is_empty(), "{told:?}");
