@@ -296,7 +296,7 @@ impl SetRun {
                 return Err("the card's size isn't known: no set is made".into());
             };
             let sizes = wanted.card.files.iter().map(|f| (f.ledger.server_path.as_str(), f.size));
-            let parts = span::split(&span::groups(sizes, self.cluster), room, room);
+            let parts = span::split(&span::groups(sizes, self.cluster), room, room)?;
             self.set = Some(self.made(parts, room, libraries));
             self.created = true;
         }
@@ -519,13 +519,14 @@ pub(super) fn plan(
 }
 
 /// What a card of no set that doesn't fit would be as a set (the fit's
-/// offer): its selection split over cards of its room.
+/// offer): its selection split over cards of its room; none when no set
+/// can be made of it ([`span::split`]).
 pub(super) fn spread(wanted: &Wanted, held: &Rows, space: Option<Space>) -> Vec<Part> {
     let Some(space) = space else { return Vec::new() };
     let cluster = cluster_of(Some(space));
     let room = plan::usable_room(&space, held.ours.bytes);
     let sizes = wanted.card.files.iter().map(|f| (f.ledger.server_path.as_str(), f.size));
-    span::split(&span::groups(sizes, cluster), room, room)
+    span::split(&span::groups(sizes, cluster), room, room).unwrap_or_default()
 }
 
 impl SetEnd {

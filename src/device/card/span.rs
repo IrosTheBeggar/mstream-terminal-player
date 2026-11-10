@@ -232,9 +232,9 @@ impl Slot {
             card_id,
             label: o.get("label").and_then(Value::as_str).unwrap_or_default().to_string(),
             from: Key::read(o.get("from")?)?,
-            room: number(o, "room"),
-            bytes: number(o, "bytes"),
-            tracks: number(o, "tracks"),
+            room: count(o, "room", COUNT_MAX)?,
+            bytes: count(o, "bytes", COUNT_MAX)?,
+            tracks: count(o, "tracks", COUNT_MAX)?,
             seq: count(o, "seq", COUNT_MAX)?,
             holds,
             others: number(o, "others"),
@@ -377,8 +377,8 @@ impl Set {
                 let next = &mut self.cards[*to];
                 next.from = from.clone();
                 if next.card_id.is_none() {
-                    let (bytes, tracks) = (next.bytes + load.bytes, next.tracks + load.tracks);
-                    (next.bytes, next.tracks) = (bytes, tracks);
+                    let more = Load { bytes: next.bytes, tracks: next.tracks }.add(*load);
+                    (next.bytes, next.tracks) = (more.bytes, more.tracks);
                 }
             }
             Offer::AddCard { at, from, load } => {
@@ -442,8 +442,11 @@ pub(crate) struct Load {
 }
 
 impl Load {
+    /// Never past the most a number holds: a table's sizes are read from a
+    /// file this computer didn't write alone.
     fn add(self, other: Load) -> Load {
-        Load { bytes: self.bytes + other.bytes, tracks: self.tracks + other.tracks }
+        let bytes = self.bytes.saturating_add(other.bytes);
+        Load { bytes, tracks: self.tracks.saturating_add(other.tracks) }
     }
 
     fn within(self, room: Load) -> bool {
@@ -488,8 +491,8 @@ fn total(groups: &[Group]) -> Load {
 /// How many of `groups`, from the first, a card filled to `room` takes:
 /// whole artists while they fit; an artist no card holds, its albums from
 /// wherever it begins, as many as fit; one a card holds goes whole to the
-/// next card. One group at least: an album bigger than a card goes alone,
-/// never split.
+/// next card. One group at least: an album past the fill (but within the
+/// card's room, [`split`]) goes alone, never split.
 fn fill(groups: &[Group], room: Load) -> usize {
     let (mut used, mut at) = (Load::default(), 0);
     while at < groups.len() {
@@ -531,20 +534,40 @@ pub(crate) struct Part {
     pub(crate) load: Load,
 }
 
+/// The most cards a set is split over.
+pub(crate) const MAX_PARTS: usize = 64;
+
 /// The selection's `groups` over as many cards as it needs, A to Z (see the
 /// module's note): the first card of `first` usable bytes, each other of
-/// `others`. The first card's range begins at the least key.
-pub(crate) fn split(groups: &[Group], first: u64, others: u64) -> Vec<Part> {
+/// `others`. The first card's range begins at the least key. Err why not:
+/// an album larger than a card's usable room (a card that small, or full of
+/// the listener's own files, would take one album each), or more than
+/// [`MAX_PARTS`] cards.
+pub(crate) fn split(groups: &[Group], first: u64, others: u64) -> Result<Vec<Part>, String> {
+    let mb = |bytes: u64| bytes.div_ceil(1_000_000);
+    let room = first.min(others);
+    if let Some(largest) = groups.iter().map(|g| g.load.bytes).max()
+        && largest > room
+    {
+        let (room, largest) = (mb(room), mb(largest));
+        return Err(format!(
+            "a card has room for {room} MB, and the selection's largest album takes {largest} MB: \
+             no set is made"
+        ));
+    }
     let mut parts: Vec<Part> = Vec::new();
     let mut at = 0;
     loop {
+        if parts.len() == MAX_PARTS {
+            return Err(format!("the selection takes more than {MAX_PARTS} cards of this size: no set is made"));
+        }
         let room = target(if parts.is_empty() { first } else { others });
         let n = fill(&groups[at..], room);
         let from = if parts.is_empty() { Key::default() } else { edge(groups, at) };
         parts.push(Part { from, load: total(&groups[at..at + n]) });
         at += n;
         if at >= groups.len() {
-            return parts;
+            return Ok(parts);
         }
     }
 }

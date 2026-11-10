@@ -48,7 +48,7 @@ fn a_split_fills_each_card_a_to_z_with_whole_artists_to_about_90_percent() {
         group("D", "1", 200, 1),
         group("E", "1", 600, 5),
     ];
-    let parts = split(&groups, ROOM, ROOM);
+    let parts = split(&groups, ROOM, ROOM).unwrap();
     let froms: Vec<&Key> = parts.iter().map(|p| &p.from).collect();
     // A and B take the first card, C would make it 1,200: C goes whole to
     // the next, which D fills to 700; E to the third.
@@ -58,11 +58,11 @@ fn a_split_fills_each_card_a_to_z_with_whole_artists_to_about_90_percent() {
     // Each edge is an artist's first key: its albums to come land with it.
     assert!(parts.iter().all(|p| p.from.album.is_empty()));
     // A bigger first card takes more; the cap on tracks counts as bytes do.
-    assert_eq!(split(&groups, 2 * ROOM, ROOM).len(), 2);
+    assert_eq!(split(&groups, 2 * ROOM, ROOM).unwrap().len(), 2);
     let many = [group("A", "1", 1, 10_000), group("B", "1", 1, 10_000)];
-    assert_eq!(split(&many, 100 * ROOM, 100 * ROOM).len(), 2, "18,000 tracks a card");
+    assert_eq!(split(&many, 100 * ROOM, 100 * ROOM).unwrap().len(), 2, "18,000 tracks a card");
     // Nothing to split: one card, empty.
-    let none = split(&[], ROOM, ROOM);
+    let none = split(&[], ROOM, ROOM).unwrap();
     assert_eq!(none, [Part { from: Key::default(), load: Load::default() }]);
 }
 
@@ -74,16 +74,39 @@ fn an_artist_no_card_holds_splits_at_its_albums_and_an_album_never() {
         group("B", "1", 500, 1),
         group("B", "2", 400, 1),
         group("B", "3", 500, 1),
-        group("C", "1", 1200, 1),
+        group("C", "1", 950, 1),
         group("D", "1", 100, 1),
     ];
-    let parts = split(&groups, ROOM, ROOM);
+    let parts = split(&groups, ROOM, ROOM).unwrap();
     let froms: Vec<&Key> = parts.iter().map(|p| &p.from).collect();
     // B begins where A left room (300 + 500), goes on at its second album;
-    // C, one album bigger than a card, goes alone and whole; D after it.
+    // C, one album past a card's fill, goes alone and whole; D after it.
     assert_eq!(froms, [&Key::default(), &key("B", "2"), &key("C", ""), &key("D", "")]);
     let bytes: Vec<u64> = parts.iter().map(|p| p.load.bytes / 1000).collect();
-    assert_eq!(bytes, [800, 900, 1200, 100]);
+    assert_eq!(bytes, [800, 900, 950, 100]);
+}
+
+#[test]
+fn no_set_is_made_of_cards_too_small_for_an_album_or_of_too_many_cards() {
+    // An album larger than a card's room: a card of no room (one of 256 MB,
+    // or full of the listener's own files) would take one album each.
+    let groups = [group("A", "1", 300, 1), group("B", "1", 1200, 1)];
+    let why = split(&groups, ROOM, ROOM).unwrap_err();
+    assert!(why.contains("room for 1 MB") && why.contains("takes 2 MB"), "{why}");
+    assert!(split(&groups, 0, 0).is_err(), "no room at all");
+    assert!(split(&groups, 2 * ROOM, ROOM).is_err(), "every card takes it");
+    // More cards than a set has.
+    let groups: Vec<Group> = (0..=MAX_PARTS).map(|i| group(&format!("{i:03}"), "1", 800, 1)).collect();
+    let why = split(&groups, ROOM, ROOM).unwrap_err();
+    assert!(why.contains(&format!("more than {MAX_PARTS} cards")), "{why}");
+    assert_eq!(split(&groups[1..], ROOM, ROOM).unwrap().len(), MAX_PARTS);
+    // A table's sizes past any card's are no table's; added, they never wrap.
+    let mut table = three().value(None);
+    assert!(Set::read(&table).is_some());
+    table["cards"][0]["bytes"] = json!(u64::MAX);
+    assert!(Set::read(&table).is_none());
+    let full = Load { bytes: u64::MAX - 1, tracks: u64::MAX };
+    assert_eq!(full.add(Load { bytes: 5, tracks: 5 }), Load { bytes: u64::MAX, tracks: u64::MAX });
 }
 
 /// A set of three cards: from the least key, from C, from E; card 2 not set
